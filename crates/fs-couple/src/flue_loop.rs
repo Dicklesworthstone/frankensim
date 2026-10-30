@@ -1011,13 +1011,14 @@ impl FlueVoice {
     /// speed enters the jet as the slit law's does. The held note's pressure must lie
     /// inside the law's validity (x+, Chen's low-Re term, laminarity); the attack
     /// and release pass through the same quasi-steady law and are not covered by it.
-    /// The jet transfers are refused: their exit profiles assume Poiseuille or
-    /// uniform flow. This law's core speed reaches only the island's card, through
-    /// [`FlueVoice::with_card_centreline_speed`] (pexfp.135.5).
+    /// The Nolle/Price transfer is refused: its exit profiles assume Poiseuille or
+    /// uniform flow. The forced jet, attached after this, is matched to this law's exit
+    /// ([`forced_jet::JetExit::developing`]); otherwise its core speed reaches only the
+    /// island's card, through [`FlueVoice::with_card_centreline_speed`] (pexfp.135.5).
     ///
     /// # Errors
-    /// Invalid geometry or gas, repeated/late attachment, another windway or a jet
-    /// transfer, a poisoned voice, or a held pressure outside the law's validity or
+    /// Invalid geometry or gas, repeated/late attachment, another windway, an attached
+    /// jet transfer, a poisoned voice, or a held pressure outside the law's validity or
     /// the admitted jet-speed domain.
     pub fn with_developing_windway(mut self, length_m: f64, held_pressure_pa: f64)
         -> Result<Self, FlueError>
@@ -1026,8 +1027,11 @@ impl FlueVoice {
             || self.developing_windway.is_some() || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "developing windway requires one cold attachment and no other windway" });
         }
-        if self.forced.is_some() || self.nolle.is_some() {
-            return Err(FlueError::Invalid { what: "developing windway refuses the jet transfers, whose exit profile it does not supply" });
+        if self.nolle.is_some() {
+            return Err(FlueError::Invalid { what: "developing windway refuses the Nolle/Price transfer, whose exit profile it does not supply" });
+        }
+        if self.forced.is_some() {
+            return Err(FlueError::Invalid { what: "developing windway must be attached before the forced jet, whose exit it sets" });
         }
         if self.card_centreline.is_some() {
             return Err(FlueError::Invalid { what: "windway must be attached before the card centreline speed, whose exit it sets" });
@@ -1183,25 +1187,26 @@ impl FlueVoice {
     /// displacement gain) by the forced Bickley jet's causal response ([`forced_jet`]) before any
     /// accepted sample. The labium displacement becomes `sum_k g_k v_(n-k)` of the exit transverse
     /// velocity (mouth velocity plus onset seed). The tanh cut, source, mouth loop, windway and
-    /// wind line are unchanged. A slit windway, attached first, gives the Poiseuille exit; no
-    /// windway gives a uniform lip jet. `reference_pressure_pa` (the held blowing pressure) sets
-    /// the Reynolds number of the integration. The slowest admitted jet and the history budget
-    /// bound the retained exit velocities. The unsteady windway is refused: its jet starts from
-    /// rest and decays toward zero speed after a release, where this frozen-time response would
-    /// need unbounded history.
+    /// wind line are unchanged. A slit windway, attached first, gives the Poiseuille exit; a
+    /// developing windway gives its exit at the reference pressure
+    /// ([`forced_jet::JetExit::developing`]); no windway gives a uniform lip jet.
+    /// `reference_pressure_pa` (the held blowing pressure) sets the Reynolds number of the
+    /// integration. The slowest admitted jet and the history budget bound the retained exit
+    /// velocities. The unsteady windway is refused: its jet starts from rest and decays toward
+    /// zero speed after a release, where this frozen-time response would need unbounded history.
     ///
     /// # Errors
     /// Late or repeated attachment, a poisoned voice, an attached Nolle/Price transfer or
-    /// unsteady windway, a non-positive reference pressure or one whose jet is below the declared
-    /// minimum speed, a history longer than the budget at that minimum, or the integrator's own
-    /// refusal.
+    /// unsteady windway, a non-positive reference pressure, one outside the developing
+    /// windway's validity or one whose jet is below the declared minimum speed, a history
+    /// longer than the budget at that minimum, or the integrator's own refusal.
     pub fn with_forced_jet(mut self, spec: forced_jet::ForcedJetSpec, reference_pressure_pa: f64)
         -> Result<Self, FlueError>
     {
         if self.poisoned || self.samples != 0 || self.nolle.is_some() || self.forced.is_some()
-            || self.unsteady_windway.is_some() || self.developing_windway.is_some() {
+            || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid {
-                what: "forced jet requires one cold attachment and no other jet transfer or unsteady or developing windway",
+                what: "forced jet requires one cold attachment and no other jet transfer or unsteady windway",
             });
         }
         if self.card_centreline.is_some() {
@@ -1214,7 +1219,18 @@ impl FlueVoice {
         if reference_bulk < self.minimum_jet_speed_m_s {
             return Err(FlueError::Invalid { what: "forced jet reference pressure gives a jet below the declared minimum speed" });
         }
-        let kernel = forced_jet::ForcedJetKernel::new(spec, self.viscous_windway.is_some(),
+        let exit = if let Some((law, _)) = &self.developing_windway {
+            // The response is integrated at the reference pressure, so the exit is held there.
+            let held = law.held(self.geometry.flue_width_m, self.geometry.flue_height_m,
+                reference_pressure_pa).map_err(FlueError::Physics)?;
+            held.validity().map_err(|what| FlueError::Invalid { what })?;
+            forced_jet::JetExit::developing(&held, self.geometry.flue_height_m)
+        } else if self.viscous_windway.is_some() {
+            forced_jet::JetExit::POISEUILLE
+        } else {
+            forced_jet::JetExit::UNIFORM
+        };
+        let kernel = forced_jet::ForcedJetKernel::new(spec, exit,
             self.geometry.flue_height_m, self.geometry.cut_up_m, self.nu, reference_bulk,
             self.minimum_jet_speed_m_s, self.max_jet_history_samples, self.dt)
             .map_err(|what| FlueError::Invalid { what })?;
@@ -2487,15 +2503,60 @@ mod forced_jet_tests {
         let v = bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096)
             .with_unsteady_windway(0.015, 8, 8).unwrap();
         assert!(v.with_forced_jet(PLUMBING, 100.0).is_err());
-        // The developing windway supplies no exit profile to the forced jet, in either order.
+        // The developing windway sets the forced jet's exit, so it is attached first.
         let v = voice(gas(101_325.0), geometry(CUT_UP_M));
-        assert!(v.with_developing_windway(0.015, 100.0).is_err());
-        let v = bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096)
-            .with_developing_windway(0.015, 100.0).unwrap();
-        assert!(v.with_forced_jet(PLUMBING, 100.0).is_err());
+        assert!(matches!(v.with_developing_windway(0.015, 100.0),
+            Err(FlueError::Invalid { what }) if what.contains("before the forced jet")));
         // A 60 um cut-up on a 1 mm flue is 0.08 b, inside the first 0.25 b grid cell.
         let v = bare_voice(gas(101_325.0), geometry(6e-5), 48_000, 4096);
         assert!(v.with_forced_jet(PLUMBING, 100.0).is_err());
+    }
+
+    #[test]
+    fn g3_forced_jet_takes_the_developing_exits_core_speed_and_momentum_flux() {
+        // A planted exit whose core speed differs from both the bulk and the Poiseuille centre:
+        // a 5 mm slit at 100 Pa holds u_c/U near 1.27. A forced jet that ignored the profile
+        // would take the uniform (1, 0.75 h) or Poiseuille (1.5, 0.4 h) exit.
+        let (air, g) = (gas(101_325.0), geometry(CUT_UP_M));
+        let held = DevelopingSlit::from_gas(&air, 0.005).unwrap()
+            .held(g.flue_width_m, g.flue_height_m, 100.0).unwrap();
+        held.validity().unwrap();
+        assert!(!held.developed);
+        let ratio = held.core_speed_m_s / held.bulk_speed_m_s;
+        assert!(ratio > 1.1 && ratio < 1.4, "planted core over bulk {ratio}");
+        let mut v = bare_voice(air, g, 48_000, 4096).with_developing_windway(0.005, 100.0)
+            .unwrap().with_forced_jet(PLUMBING, 100.0).unwrap();
+        let kernel = v.forced_jet().unwrap();
+        assert_eq!(kernel.centre_over_bulk(), ratio);
+        // b carries the momentum flux rho u_c^2 (h - 2 delta* (1 + 1/2.5)) at the core speed.
+        let b = 0.75 * (g.flue_height_m - 2.8 * held.displacement_thickness_m);
+        assert!((kernel.half_width_m() - b).abs() <= 1e-12 * b);
+        assert!(kernel.half_width_m() > 0.45 * g.flue_height_m
+            && kernel.half_width_m() < 0.6 * g.flue_height_m);
+        let station = g.cut_up_m / b;
+        assert!((kernel.step_response().station() - station).abs() <= 1e-12 * station);
+        let reynolds = held.core_speed_m_s * b / v.nu;
+        assert!((kernel.reynolds() - reynolds).abs() <= 1e-12 * reynolds);
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        let mut out = [0.0; 257];
+        v.step_block(&mut out).unwrap();
+        assert!(out.iter().all(|p| p.is_finite()) && out.iter().any(|p| *p != 0.0));
+        assert_work(&v);
+        // A slit whose layers have met before the exit is the Poiseuille exit, exactly.
+        let developed = DevelopingSlit::from_gas(&air, 0.03).unwrap()
+            .held(g.flue_width_m, g.flue_height_m, 100.0).unwrap();
+        assert!(developed.developed);
+        let v = bare_voice(air, g, 48_000, 4096).with_developing_windway(0.03, 100.0)
+            .unwrap().with_forced_jet(PLUMBING, 100.0).unwrap();
+        assert_eq!(v.forced_jet().unwrap().centre_over_bulk(),
+            forced_jet::POISEUILLE_CENTRE_OVER_BULK);
+        assert_eq!(v.forced_jet().unwrap().half_width_m(),
+            forced_jet::POISEUILLE_HALF_WIDTH_OVER_HEIGHT * g.flue_height_m);
+        // The exit is held at the reference pressure, inside the law's validity: at 3 kPa the
+        // 5 mm slit's x+ falls below 4e-4.
+        let v = bare_voice(air, g, 48_000, 4096).with_developing_windway(0.005, 100.0).unwrap();
+        assert!(matches!(v.with_forced_jet(PLUMBING, 3000.0),
+            Err(FlueError::Invalid { what }) if what.contains("x+")));
     }
 
     #[test]

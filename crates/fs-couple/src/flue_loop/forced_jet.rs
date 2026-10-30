@@ -12,6 +12,12 @@
 //! The exit profile is the Bickley jet with the exit's momentum flux and centre speed:
 //! - A slit windway's Poiseuille exit gives `b = 0.4 h` and `U0 = 1.5 U`.
 //! - No windway (a lip jet of uniform speed) gives `b = 0.75 h` and `U0 = U`.
+//! - A developing slit ([`JetExit::developing`]) gives `U0` its inviscid core speed and `b` the
+//!   momentum flux of the core and its two wall layers, between those two.
+//!
+//! This is Verge's matching as Segoufin states it (thesis, Univ. Paris 6, 2000, sec. 5.2
+//! p. 69): the centre speed from Bernoulli and `b` from the momentum conserved between the
+//! exit and the jet.
 //!
 //! The station is `cut-up / b`. The step response is integrated once, at the Reynolds number
 //! `U0 b / nu` of the reference (held) pressure. At variable speed its clock is
@@ -30,7 +36,11 @@
 //! Not claimed:
 //! - The base jet's own spreading over the cut-up.
 //! - The labium's hydrodynamic back-reaction.
-//! - The Reynolds number of attack and release.
+//! - The Reynolds number of attack and release, and a developing exit's profile there: it is
+//!   held at the reference pressure.
+//! - The exit's shape beyond its centre speed and momentum flux. A developing exit is flatter
+//!   than a Bickley jet: de la Cuadra (thesis, Stanford, 2005) fits Nolle profiles with
+//!   n = 2-4 1 mm past a 1 mm flue.
 //! - Memory beyond the window, where the response is held.
 
 use std::sync::{Mutex, PoisonError};
@@ -40,6 +50,8 @@ use fs_aeroac::forced_jet::{
     FRONT_MARGIN, ForcedJetResolution, JetStepResponse, bickley_step_response,
 };
 
+use crate::bernoulli_aperture::developing::DevelopingSlitState;
+
 /// Bickley half-width over flue height of a Poiseuille slit exit (its momentum flux at 1.5 x
 /// the bulk speed).
 pub const POISEUILLE_HALF_WIDTH_OVER_HEIGHT: f64 = 0.4;
@@ -47,6 +59,50 @@ pub const POISEUILLE_HALF_WIDTH_OVER_HEIGHT: f64 = 0.4;
 pub const POISEUILLE_CENTRE_OVER_BULK: f64 = 1.5;
 /// Bickley half-width over flue height of a uniform exit (its momentum flux at the bulk speed).
 pub const UNIFORM_HALF_WIDTH_OVER_HEIGHT: f64 = 0.75;
+/// Shape factor `delta*/theta` of a developing slit's wall layers: the parabolic layer, which is
+/// the Poiseuille profile once the two layers meet. Van Zon's linear layer (3, Segoufin 2000
+/// app. A) would move the tin whistle's `b` by at most 3.4 %.
+pub const DEVELOPING_LAYER_SHAPE_FACTOR: f64 = 2.5;
+
+/// The windway exit the Bickley jet is matched to: its centre speed over the bulk speed, and the
+/// half-width over flue height that carries the exit's momentum flux at that centre speed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JetExit {
+    /// Centre over bulk speed `U0/U`.
+    pub centre_over_bulk: f64,
+    /// Bickley half-width over flue height `b/h`.
+    pub half_width_over_height: f64,
+}
+
+impl JetExit {
+    /// A lip jet of uniform speed (no windway).
+    pub const UNIFORM: Self = Self {
+        centre_over_bulk: 1.0,
+        half_width_over_height: UNIFORM_HALF_WIDTH_OVER_HEIGHT,
+    };
+    /// A fully developed slit's Poiseuille exit.
+    pub const POISEUILLE: Self = Self {
+        centre_over_bulk: POISEUILLE_CENTRE_OVER_BULK,
+        half_width_over_height: POISEUILLE_HALF_WIDTH_OVER_HEIGHT,
+    };
+
+    /// A developing slit's exit at its held state. The centre leaves at the inviscid core speed
+    /// `u_c`, and each wall layer displaces `delta* = (h/2)(1 - U/u_c)` of Shah's bulk speed `U`.
+    /// The momentum flux `rho u_c^2 (h - 2 delta* - 2 theta)`, with `theta = delta*/H`, gives
+    /// `b = 0.75 (h - 2 delta* (1 + 1/H))`. An exit whose layers have met is the Poiseuille exit.
+    #[must_use]
+    pub fn developing(state: &DevelopingSlitState, flue_height_m: f64) -> Self {
+        if state.developed {
+            return Self::POISEUILLE;
+        }
+        let layers = 2.0 * state.displacement_thickness_m
+            * (1.0 + 1.0 / DEVELOPING_LAYER_SHAPE_FACTOR) / flue_height_m;
+        Self {
+            centre_over_bulk: state.core_speed_m_s / state.bulk_speed_m_s,
+            half_width_over_height: UNIFORM_HALF_WIDTH_OVER_HEIGHT * (1.0 - layers),
+        }
+    }
+}
 /// Half-height of the resolved vortical band [b]; the exact exterior closes it.
 pub const BAND_HALF_HEIGHT: f64 = 8.0;
 /// Centreline Courant number of the integration.
@@ -138,8 +194,8 @@ fn refusal(error: AeroacError) -> &'static str {
 }
 
 impl ForcedJetKernel {
-    /// Integrate the step response for this flue. `slit` selects the Poiseuille exit;
-    /// `reference_bulk_m_s` is the bulk speed at the held pressure, which sets the Reynolds
+    /// Integrate the step response for this flue. `exit` is the windway exit the jet is matched
+    /// to; `reference_bulk_m_s` is the bulk speed at the held pressure, which sets the Reynolds
     /// number; `minimum_bulk_m_s` sizes the retained input history, which may not exceed
     /// `max_taps` samples.
     ///
@@ -149,7 +205,7 @@ impl ForcedJetKernel {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         spec: ForcedJetSpec,
-        slit: bool,
+        exit: JetExit,
         flue_height_m: f64,
         cut_up_m: f64,
         kinematic_viscosity_m2_s: f64,
@@ -158,18 +214,12 @@ impl ForcedJetKernel {
         max_taps: usize,
         sample_period_s: f64,
     ) -> Result<Self, &'static str> {
-        let (width_ratio, centre_over_bulk) = if slit {
-            (
-                POISEUILLE_HALF_WIDTH_OVER_HEIGHT,
-                POISEUILLE_CENTRE_OVER_BULK,
-            )
-        } else {
-            (UNIFORM_HALF_WIDTH_OVER_HEIGHT, 1.0)
-        };
+        let (width_ratio, centre_over_bulk) = (exit.half_width_over_height, exit.centre_over_bulk);
         let half_width_m = width_ratio * flue_height_m;
         let inputs = [
             spec.spacing,
             spec.window,
+            centre_over_bulk,
             half_width_m,
             cut_up_m,
             kinematic_viscosity_m2_s,

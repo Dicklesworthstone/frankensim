@@ -5,7 +5,7 @@ use super::*;
 fn kernel(rate: u32) -> ForcedJetKernel {
     ForcedJetKernel::new(
         ForcedJetSpec { spacing: 0.5, window: 8.0 },
-        false, 0.001, 0.00225, 1.5e-5, 12.0, 1.0, 4096,
+        JetExit::UNIFORM, 0.001, 0.00225, 1.5e-5, 12.0, 1.0, 4096,
         1.0 / f64::from(rate),
     ).unwrap()
 }
@@ -158,7 +158,7 @@ fn g1_a_jet_below_the_minimum_reads_rest_until_its_ring_ends_then_freezes() {
     let mut short = kernel(48_000);
     let mut long = ForcedJetKernel::new(
         ForcedJetSpec { spacing: 0.5, window: 8.0 },
-        false, 0.001, 0.00225, 1.5e-5, 12.0, 0.25, 4096, 1.0 / 48_000.0,
+        JetExit::UNIFORM, 0.001, 0.00225, 1.5e-5, 12.0, 0.25, 4096, 1.0 / 48_000.0,
     ).unwrap();
     let n = short.ring.len();
     assert!(long.ring.len() > 2 * n);

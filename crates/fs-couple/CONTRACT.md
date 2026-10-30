@@ -1645,8 +1645,10 @@ above which plane Poiseuille flow sustains turbulence, Kashyap et al. 2020). The
 sidecar records `x+`, `Re_Dh`, `Re_L`, the core
 speed, displacement thickness and these measures at the held pressure. The
 attack and release pass through the same quasi-steady law and are not covered.
-The jet transfers refuse it (their exit profiles assume Poiseuille or uniform
-flow; pexfp.135.5 owns the core speed). A converging windway declared as its
+The Nolle/Price transfer refuses it (its exit profiles assume Poiseuille or
+uniform flow). The forced Bickley jet is matched to its exit at the held pressure
+(see OPT-IN FORCED JET); otherwise pexfp.135.5 owns the core speed. A
+converging windway declared as its
 exit-height slit most likely overstates the loss.
 
 `jet_speed card-centreline` (opt-in, pexfp.135.5) after the `jet` record feeds the
@@ -3600,8 +3602,15 @@ None.
   the station `cut-up / b` and the Reynolds number of the held pressure
   (the gesture's highest blowing pressure, including a declared source's
   pressure path). The exit is the Poiseuille slit (`b = 0.4 h`, `U0 =
-  1.5 U`) behind a slit windway attached first; otherwise it is a uniform
-  lip jet (`b = 0.75 h`, `U0 = U`). At variable speed, accepted velocity
+  1.5 U`) behind a slit windway attached first. Behind a developing windway
+  attached first it is that exit at the held pressure: `U0` the inviscid
+  core `sqrt(2P/rho)` and `b = 0.75 (h - 2 delta* (1 + 1/H))`, the momentum
+  flux of the core and its two parabolic wall layers (`H = 2.5`), or the
+  Poiseuille exit where the layers have met; a held pressure outside that
+  law's validity is refused. This is Verge's matching as Segoufin states it
+  (thesis 2000, sec. 5.2): Bernoulli centre speed, momentum conserved between
+  exit and jet. Without a windway it is a uniform lip jet (`b = 0.75 h`,
+  `U0 = U`). At variable speed, accepted velocity
   intervals retain their own advances of `tau = integral U0/b dt`; a new
   speed never retroactively retimes the history. The explicit fixed-Re
   extension is `dz/dt = (U0(t)/b) A z + B v`, with held interval speed and
