@@ -313,7 +313,7 @@ pub struct CoupledTermination {
 /// semidefinite Hermitian part (an active coupled load refuses). Exact
 /// reciprocity is not required: a collocation radiation matrix is reciprocal
 /// only to its discretization error.
-fn admit_coupled(coupled: &CoupledTermination, omega: f64) -> Result<(), DuctError> {
+pub(crate) fn admit_coupled(coupled: &CoupledTermination, omega: f64) -> Result<(), DuctError> {
     let n = coupled.labels.len();
     if n == 0
         || n > MAX_NETWORK_PORTS

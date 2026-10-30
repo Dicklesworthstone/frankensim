@@ -1740,10 +1740,10 @@ apply to each junction and original propagation block. No loss is clipped.
 Independent tests cover finite-line open/closed/vent responses, integrated
 molecular volume work, compact gas-spring limits, three-rung wall refinement,
 long attenuating chimneys, source sensitivity and explicit-load admission.
-Scope remains frozen homogeneous gas, compact junctions, plane-wave chimneys
-and independent scalar exterior mouths. Partial venting retains the existing
-admittance-mixture model; resolved pad motion and exterior mutual radiation
-matrices are not inferred. Original diffusion accuracy and geometry limits
+The scalar response API retains compact junctions, plane-wave chimneys and
+independent exterior mouth loads. Partial venting retains the existing
+admittance-mixture model; resolved pad motion and exterior radiation data are
+not inferred. The field and coupled-matrix APIs extend this path as below. Original diffusion accuracy and geometry limits
 remain separate from molecular-rate data quality.
 
 ### Molecular propagation through primitive gas fields
@@ -1773,3 +1773,39 @@ ladders, and check source sensitivity, uniform identity, local chimney work,
 cache reuse, coverage, caps and cancellation. Scope is frozen, no-mean-flow,
 rigid-wall plane-wave acoustics; no gas transport, condensation, evolving
 reservoir transfer, resolved pads or three-dimensional qualification is added.
+
+### Molecular multi-aperture exterior feedback
+
+`MolecularDuct::prepare_exterior_ports` exposes authored open/vented mouths,
+followed by the terminal/bell, as one frequency-prepared scattering operator.
+The inlet is port zero. `MolecularPortScattering::response` closes the exterior
+ports with the existing frequency-specific `network::CoupledTermination` in
+physical pressure/outward-volume-flow coordinates: p = Z_rad U. Self and mutual
+entries participate in the loaded solve. The matrix is never inverted,
+symmetrized or clipped; singular, rank-deficient and zero passive loads are
+admissible. A rigid infinite terminal remains on the scalar response route.
+The original network owner checks the complete Hermitian part. Exact frequency,
+complete unique labels and an explicit source identity bind the input. Matrix
+label permutations preserve physics and observations retain prepared order.
+
+Original decaying bore/chimney blocks and homogeneous sealed-stub coordinates
+remain authoritative. Consecutive bore spans are reduced before aperture
+composition, so the dense closure has at most 33 unknowns (inlet plus 32 exterior
+ports), independently of axial and diffusion resolution. Existing block and
+condition limits and bounded cancellation apply. Component scattering retains
+reciprocity; closed-system reciprocity also depends on the supplied exterior
+matrix. BEM collocation reciprocity error is preserved rather than repaired.
+Physical vent flow carries sigma once; recovery of a legacy full-radius scalar
+mouth load Z requires Z/sigma on the corresponding physical matrix diagonal.
+This retains the original compact vent-admittance mixture.
+
+The solution reports all mouth pressures/flows, total exterior work and raw
+input-minus-exterior dissipation, including bore/chimney molecular and wall
+heat. Individual mouths can receive work under mutual coupling; only summed
+exterior work must be passive. Focused tests cover independent finite-line
+pressure/flow closure, scalar/vent recovery, reciprocal lossless power balance,
+sealed-stub poles, opaque chimneys, rank-deficient loads and admission limits.
+The `molecular_exterior` example consumes explicit gas/relaxation declarations
+and a physical three-mouth impedance matrix file and reports solved pressures,
+flows and powers. It adds no default exterior medium, BEM kernel, nonlinear
+oscillation loop, radiation fit, resolved pads or time-domain realization.

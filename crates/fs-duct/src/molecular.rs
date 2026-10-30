@@ -26,8 +26,9 @@
 //! molecular law. Compact tone-hole chimneys consume the same reservoirs and
 //! wall spectra; each open mouth requires an explicit pressure/flow load.
 //! Their original inner/series/mutual corrections and vent-admittance mixture
-//! remain a compact model, without resolved pads or exterior cross-loading.
-//! Exterior radiation is an explicit load, never inferred from the bore gas.
+//! remain a compact model without resolved pads. Scalar mouth loads or a
+//! complete exterior impedance matrix close the same propagation operator.
+//! Exterior radiation is explicit, never inferred from the bore gas.
 
 use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain, TwoPort};
 use crate::{ConeSlices, Duct, DuctError, LossModel, Segment, SegmentWave};
@@ -40,6 +41,8 @@ use std::collections::BTreeMap;
 mod holes;
 pub use holes::{MolecularHoleFlow, MolecularHoleSite, MolecularResponse};
 mod field;
+mod exterior;
+pub use exterior::{MolecularExteriorResponse, MolecularPortScattering};
 
 /// Original constitutive or propagation refusal, without a fallback gas law.
 #[derive(Debug)]

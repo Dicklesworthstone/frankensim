@@ -72,7 +72,7 @@ fn bound(value: f64, limit: f64) -> Result<(), DuctError> {
         Ok(())
     }
 }
-fn feedback(a: C64, b: C64) -> (C64, f64) {
+pub(crate) fn feedback(a: C64, b: C64) -> (C64, f64) {
     let product = a * b;
     let d = C64::ONE - product;
     (d, (1.0 + product.abs()) / d.abs())

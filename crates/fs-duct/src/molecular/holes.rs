@@ -1,4 +1,4 @@
-//! Molecular finite chimneys in the existing compact, independent-mouth model.
+//! Molecular finite chimneys with the original compact junction corrections.
 use super::*;
 use crate::{HoleState, OpenHoleSite};
 
@@ -130,6 +130,48 @@ pub(super) struct PreparedHole {
 }
 
 impl ToneHole {
+    /// Compact junction with its physical open mouth exposed. Closed-fraction
+    /// compliance uses the same homogeneous branch coordinates as scalar loads.
+    pub(super) fn exposed_parts(
+        &self,
+        wave: &SegmentWave,
+        density: f64,
+        omega: f64,
+        reference: f64,
+        options: ComposeOptions,
+    ) -> Result<(TwoPort, Vec<C64>, Option<TwoPort>), DuctError> {
+        let site = self.site;
+        let sigma = site.open_fraction;
+        let ports = if sigma > 0.0 { 3 } else { 2 };
+        let (n, d) = if sigma < 1.0 {
+            let closed = Branch::prepare(site.hole_radius_m, site.chimney_height_m, wave, reference, None)?;
+            (closed.n, closed.d.scale(1.0 - sigma))
+        } else {
+            (C64::ONE, C64::ZERO)
+        };
+        let denominator = n.scale(ports as f64) + d;
+        let condition = (ports as f64 * n.abs() + d.abs()) / denominator.abs();
+        if !condition.is_finite() || condition > options.maximum_condition {
+            return Err(DuctError::Singular);
+        }
+        let coefficient = n.scale(2.0) / denominator;
+        let mut junction = vec![coefficient; ports * ports];
+        for i in 0..ports { junction[i * ports + i] = junction[i * ports + i] - C64::ONE; }
+        let area = core::f64::consts::PI * site.bore_radius_m * site.bore_radius_m;
+        let half = C64::new(0.0, -0.5 * omega * density * self.series_length_m / area);
+        let series = TwoPort::from_abcd([C64::ONE, half, C64::ZERO, C64::ONE], reference)?;
+        let branch = if sigma > 0.0 {
+            let mut weighted = *wave;
+            weighted.specific_impedance = wave.specific_impedance.scale(1.0 / sigma);
+            weighted.characteristic_impedance = wave.characteristic_impedance.scale(1.0 / sigma);
+            Some(TwoPort::from_wave(
+                &Segment::Cylinder { radius: site.hole_radius_m, length: site.open_chimney_length_m },
+                &weighted, reference,
+            )?)
+        } else { None };
+        Ok((series, junction, branch))
+    }
+
     pub fn new(
         segment: &Segment,
         point: usize,
@@ -281,7 +323,7 @@ impl MolecularDuct {
 
     /// Solved terminal and branch flows/work from one molecular scattering
     /// chain. Per-mouth scalar loads retain the independent-opening model;
-    /// a coupled exterior radiation matrix requires an exposed-port network.
+    /// use `prepare_exterior_ports` for a coupled exterior radiation matrix.
     pub fn response_with_holes(
         &self,
         omega: f64,
