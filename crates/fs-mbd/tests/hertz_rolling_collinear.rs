@@ -395,6 +395,65 @@ fn insufficient_static_capacity_causes_physical_reversal_at_the_stop() {
     assert!(static_required.abs() > 0.0004 * f.patch.normal_load_n());
     assert!(r.report.phases[1].shear_displacement_m < 0.0);
     assert!(r.report.phases[1].surface_heat_j > 0.0);
+
+    // Continue through the outgoing negative phase's first POSITIVE-time zero.
+    // Its initial zero is departure, not arrest. This exercises the analytic
+    // extremum used to exclude that zero, then the eventual static branch.
+    let [[a, b], [_b, c]] = f.response();
+    let gamma = f.tau * f.patch.normal_load_n() / R;
+    let lambda = gamma * c;
+    let force = 0.0002 * f.patch.normal_load_n();
+    let path = |u: f64, r0: f64, force: f64, t: f64| {
+        let equilibrium = b * force / lambda;
+        let difference = r0 - equilibrium;
+        let integral = equilibrium * t + difference * (-(-lambda * t).exp_m1()) / lambda;
+        (
+            u + a * force * t - b * gamma * integral,
+            equilibrium + difference * (-lambda * t).exp(),
+        )
+    };
+    let mut lo = 0.0;
+    let mut hi = 0.5;
+    for _ in 0..100 {
+        let mid = 0.5 * (lo + hi);
+        if path(0.0003, -0.009, -force, mid).0 > 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let first_stop = 0.5 * (lo + hi);
+    let rolling_at_stop = path(0.0003, -0.009, -force, first_stop).1;
+    lo = 0.1;
+    hi = 5.0;
+    assert!(path(0.0, rolling_at_stop, force, lo).0 < 0.0);
+    assert!(path(0.0, rolling_at_stop, force, hi).0 > 0.0);
+    for _ in 0..100 {
+        let mid = 0.5 * (lo + hi);
+        if path(0.0, rolling_at_stop, force, mid).0 < 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let outgoing_stop = 0.5 * (lo + hi);
+    let complete = f.run(5.0);
+    audit(&f, &complete);
+    assert_eq!(complete.report.phases.len(), 3);
+    close(complete.report.phases[0].duration_s, first_stop, 2e-11);
+    close(complete.report.phases[1].duration_s, outgoing_stop, 2e-10);
+    assert!(complete.report.phases[1].reached_stop);
+    assert_eq!(
+        complete.report.phases[1].mode,
+        RigidHertzRollingCollinearMode::SlidingNegative
+    );
+    assert_eq!(
+        complete.report.phases[2].mode,
+        RigidHertzRollingCollinearMode::Sticking
+    );
+    assert!(complete.history.is_stopped());
+    assert!(complete.report.phases[2].bulk_heat_j > 0.0);
+    assert_eq!(complete.report.phases[2].surface_heat_j, 0.0);
 }
 
 #[test]

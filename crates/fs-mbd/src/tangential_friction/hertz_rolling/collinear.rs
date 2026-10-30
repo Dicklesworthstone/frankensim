@@ -27,6 +27,7 @@ use crate::tangential_friction::{
 };
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_exec::CancelGate;
+use fs_math::det;
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::rolling_loss::viscoelastic::path::{
     ExponentialPathError, ExponentialRatePath, ViscoelasticSpherePathStep,
@@ -758,9 +759,9 @@ impl<'a> PreparedRigidHertzRollingCollinear<'a> {
             }
             let ratio = initial / (-limiting);
             let logarithm = if ratio.is_finite() {
-                ratio.ln_1p()
+                positive_log1p(ratio)
             } else {
-                initial.ln() - (-limiting).ln()
+                det::ln(initial) - det::ln(-limiting)
             };
             lo = finite(logarithm / (self.gamma * c))?;
             if lo <= 0.0 || lo >= horizon {
@@ -818,4 +819,15 @@ struct StopRoot {
     time: f64,
     iterations: usize,
     bracket: f64,
+}
+
+/// Positive log(1+x) without platform libm or loss of a weak departure. The
+/// quotient compensates the rounded addition before the deterministic log.
+fn positive_log1p(x: f64) -> f64 {
+    let y = 1.0 + x;
+    if y == 1.0 {
+        x
+    } else {
+        det::ln(y) * (x / (y - 1.0))
+    }
 }

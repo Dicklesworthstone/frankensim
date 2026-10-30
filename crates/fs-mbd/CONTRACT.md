@@ -2238,3 +2238,9 @@ for true arrest, post-stop rolling, reversal, split continuation, tiny motion
 and atomic source/domain/inertia refusals. Two additional `hertz_friction`
 regressions verify high-static translation/spin and zero-kinetic free motion;
 existing pair and island covariance/recoil/work tests remain active.
+
+Restart extremum bracketing uses the original deterministic logarithm with a
+compensated positive `log(1+x)` evaluation, retaining weak departures without
+platform libm. The reversal regression continues through the second physical
+arrest and subsequent sticking, checking both stopping times against an
+independent scalar exponential/bisection reference and continued bulk loss.
