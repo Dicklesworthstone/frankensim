@@ -25,9 +25,12 @@ pub fn shared_pole_relocation_scratch_bytes(
     // Up to four numerator QR shapes and one transformed sigma column.
     let projection = samples.saturating_mul(local + 1).saturating_mul(16);
     // Original/copy/equilibrated QR/fixed-sigma fallback storage can coexist.
+    // Original and fallback RHS vectors plus the QR solve's transformed copy
+    // stay live independently of the matrix column count.
     let values = rows
         .saturating_mul(columns)
         .saturating_mul(4)
+        .saturating_add(rows.saturating_mul(4))
         .saturating_add(columns.saturating_mul(columns).saturating_mul(8))
         .saturating_add(projection);
     usize::try_from(values.saturating_mul(8)).ok()

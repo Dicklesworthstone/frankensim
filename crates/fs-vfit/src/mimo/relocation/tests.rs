@@ -67,3 +67,33 @@ fn shared_scratch_bound_scales_with_response_count_and_refuses_overflow() {
     assert!(8 * dense_rows * dense_columns > 30 * bytes);
     assert!(shared_pole_relocation_scratch_bytes(usize::MAX, usize::MAX, &options).is_none());
 }
+
+#[test]
+fn shared_scratch_bound_covers_live_fixed_sigma_fallback_vectors() {
+    for (samples, responses, order) in [(65usize, 561usize, 3usize), (513, 561, 7)] {
+        let options = FitOptions {
+            fit_d: true,
+            fit_e: false,
+            ..FitOptions::new(order)
+        };
+        // Every reciprocal response of a 33-port array loses its local
+        // numerator rows before the common denominator is solved.
+        let projected_rows = (2 * samples - order - 1) * responses + 1;
+        let columns = order + 1;
+        let saved_rows = projected_rows - 1;
+        // The original A/RHS and saved sample rows remain live while the
+        // fallback owns its A/RHS and QR's copies of both. This independent
+        // payload inventory excludes small scale/tau vectors, so it is a
+        // lower bound even before allocator bookkeeping.
+        let matrices = projected_rows * columns
+            + saved_rows * columns
+            + 2 * saved_rows * (columns - 1);
+        let right_hand_sides = projected_rows + 2 * saved_rows;
+        let minimum_bytes = 8 * (matrices + right_hand_sides);
+        let bound = shared_pole_relocation_scratch_bytes(samples, responses, &options).unwrap();
+        assert!(
+            bound >= minimum_bytes,
+            "{samples} samples at order {order}: {bound} < {minimum_bytes}"
+        );
+    }
+}

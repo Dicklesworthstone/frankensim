@@ -452,15 +452,13 @@ fn authored_full_chimney_inventory_bakes_and_observes_only_real_exterior_opening
 #[test]
 fn actual_exterior_and_complete_internal_state_budgets_still_refuse() {
     let text = authored_chimneys();
-    // Keep only one seal: nine actual openings still exceed the eight-row owner.
+    // Keep only one seal: nine actual openings now fit the complete exterior
+    // inventory. Source admission remains separate from fit/state budgets.
     let mut radiating = text.replace("dg_terminal_channels 8 0", "dg_terminal_channels 1 0");
     for port in 3..=9 {
         radiating = radiating.replace(&format!("dg_terminal_closed {port}\n"), "");
     }
-    assert!(
-        matches!(read(&radiating), Err(DgSourceError::Input { what, .. })
-        if what == "unsealed DG openings exceed the exterior radiation aperture budget")
-    );
+    assert!(read(&radiating).is_ok());
     assert!(read(&text.replace("1e-11 1024", "1e-11 400")).is_err());
     assert!(read(&text.replace("dg_side_openings 9", "dg_side_openings 33")).is_err());
     let gate = CancelGate::new_clock_free();
