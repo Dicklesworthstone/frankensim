@@ -595,3 +595,166 @@ fn both_characteristic_patches_keep_separate_breath_and_escape_in_the_same_trial
         assert!(mass_residual.abs() < 5e-12 * mass);
     }
 }
+
+
+const FIRST_ESCAPE: &str = "reservoir_observation aperture 0 baffled 0.06 0 0\n";
+const SECOND_ESCAPE: &str = "reservoir_observation aperture 1 baffled -0.08 0 0\n";
+
+fn multiple_escape_source(gas: bool) -> String {
+    source(gas)
+        .replace("reservoir_aperture 1 high reference 3",
+            "reservoir_apertures 2\nreservoir_aperture 1 low reference 1\nreservoir_cell 6 0 1\nreservoir_aperture 1 high reference 3")
+        .replace("observation baffled 0 0 0.2 8 32 2000\n",
+            &format!("observation baffled 0 0 0.2 8 32 2000\n{FIRST_ESCAPE}{SECOND_ESCAPE}"))
+}
+
+#[test]
+fn multiple_escape_surfaces_sum_each_signed_tile_once_at_its_original_distance() {
+    let text = multiple_escape_source(false);
+    let mut observed = read(&text, 1).into_renderer();
+    let mut baseline = read(&text.replace(FIRST_ESCAPE, "").replace(SECOND_ESCAPE, ""), 1)
+        .into_renderer();
+    assert_eq!(observed.reservoir_observation_count(), 2);
+    assert!(observed.reservoir_observation().is_none());
+    assert!(observed.reservoir_observation_aperture().is_none());
+    assert!(observed.reservoir_receiver().is_none());
+    let mut bore = observed.baffled_receiver().unwrap().clone();
+    let mut first = observed.reservoir_receiver_at(0).unwrap().clone();
+    let mut second = observed.reservoir_receiver_at(1).unwrap().clone();
+    let mut averaged = second.clone();
+    assert_eq!(first.input_count(), 1);
+    assert_eq!(second.input_count(), 3);
+    let mut peaks = [0.0_f64; 2];
+    let mut averaging_error = 0.0_f64;
+    let mut signed = [false; 2];
+    for _ in 0..256 {
+        let mut output = [0.0];
+        let mut old = [0.0];
+        observed.block(&mut output).unwrap();
+        baseline.block(&mut old).unwrap();
+        let frame = observed.last_frame().unwrap();
+        let terminals: Vec<_> = frame.terminals.iter().map(|port| port.outward_flow_m3_s).collect();
+        let flows = |aperture| frame.reservoir_flows.iter()
+            .filter(|tile| tile.aperture == aperture)
+            .map(|tile| tile.outward_volume_flow_m3_s).collect::<Vec<_>>();
+        let q0 = flows(0);
+        let q1 = flows(1);
+        assert_eq!(q0.len(), 1);
+        assert_eq!(q1.len(), 3);
+        for q in q0.iter().chain(&q1) {
+            signed[0] |= *q < 0.0;
+            signed[1] |= *q > 0.0;
+        }
+        let p0 = first.step_trace(&q0).unwrap();
+        let p1 = second.step_trace(&q1).unwrap();
+        let bore_pa = bore.step_trace(&terminals).unwrap();
+        assert_eq!(output[0], (bore_pa + p0) + p1);
+        assert_eq!(old[0], bore_pa);
+        let merged = q1.iter().sum::<f64>() / q1.len() as f64;
+        let wrong = averaged.step_trace(&vec![merged; q1.len()]).unwrap();
+        averaging_error = averaging_error.max((p1 - wrong).abs());
+        peaks[0] = peaks[0].max(p0.abs());
+        peaks[1] = peaks[1].max(p1.abs());
+        assert_eq!(observed.system().zone().state_hash(), baseline.system().zone().state_hash());
+        assert_eq!(observed.system().load().state(), baseline.system().load().state());
+    }
+    assert!(peaks.into_iter().all(|peak| peak > 1e-9));
+    assert!(signed.into_iter().all(|present| present), "both outward and inward flow must remain signed");
+    assert!(averaging_error > 1e-12, "spatially resolved flow cannot be replaced by an equal-flow piston");
+
+    let farther = text.replace(SECOND_ESCAPE,
+        "reservoir_observation aperture 1 baffled -0.16 0 0\n");
+    let near = read(&text, 16).into_renderer();
+    let far = read(&farther, 16).into_renderer();
+    assert!(far.reservoir_receiver_at(1).unwrap().delay_samples.0
+        > near.reservoir_receiver_at(1).unwrap().delay_samples.0);
+    assert_eq!(far.reservoir_receiver_at(0).unwrap().delay_samples,
+        near.reservoir_receiver_at(0).unwrap().delay_samples);
+}
+
+#[test]
+fn multiple_escape_material_paths_keep_one_latency_and_projected_callback_history() {
+    let text = multiple_escape_source(true)
+        .replace("clock 96000 1", "clock 48000 1")
+        .replace("output 256 20", "output 128 20")
+        .replace("hold 64 20", "hold 32 20")
+        .replace("hold 128 -20", "hold 64 -20")
+        .replace("hold 256 0", "hold 128 0");
+    let first = read(&text, 37);
+    let bore = first.renderer().observer_gas().unwrap();
+    for (aperture, paths) in [(0, 1), (1, 3)] {
+        let report = first.renderer().reservoir_observer_gas_at(aperture).unwrap();
+        assert_eq!(report.gas, bore.gas);
+        assert_eq!(report.law, bore.law);
+        assert_eq!(report.additional_latency_samples, bore.additional_latency_samples);
+        assert_eq!(report.filters.len(), paths);
+    }
+    assert!(first.renderer().reservoir_observer_gas().is_none());
+    let run = |file: ResolvedDgFilePerformance, block| {
+        let mut pressure = vec![0.0; file.info().samples as usize];
+        let mut renderer = file.into_renderer();
+        for chunk in pressure.chunks_mut(block) { renderer.block(chunk).unwrap(); }
+        (pressure, renderer)
+    };
+    let (a, whole) = run(first, 37);
+    let (b, parts) = run(read(&text, 7), 7);
+    assert_eq!(a, b);
+    assert!(a.iter().any(|value| value.abs() > 1e-10));
+    assert_eq!(whole.system().accepted_steps(), 256);
+    assert_eq!(whole.system().zone().state_hash(), parts.system().zone().state_hash());
+    assert_eq!(whole.system().load().state(), parts.system().load().state());
+
+    let changed = text.replace("gas dry-air 300 100000", "gas dry-air 310 100000")
+        .replace("dg_exterior 300 100000 0", "dg_exterior 310 100000 0");
+    let warmer = read(&changed, 7);
+    for aperture in 0..2 {
+        assert_ne!(warmer.renderer().reservoir_observer_gas_at(aperture).unwrap().gas,
+            whole.reservoir_observer_gas_at(aperture).unwrap().gas);
+        assert_eq!(warmer.renderer().reservoir_observer_gas_at(aperture).unwrap().gas,
+            warmer.renderer().observer_gas().unwrap().gas);
+    }
+    let (warm_pressure, warm) = run(warmer, 7);
+    assert_ne!(a, warm_pressure);
+    assert_eq!(warm.system().zone().law().dx_m, whole.system().zone().law().dx_m);
+}
+
+#[test]
+fn multiple_escape_selection_refuses_duplicates_overlap_and_ambiguous_feedback() {
+    let text = multiple_escape_source(false);
+    let dx = read(&text, 1).renderer().system().zone().law().dx_m;
+    // Place the low-face tile onto the first high-face tile, including a
+    // non-axis-aligned case. This tests actual tile area, not source labels.
+    let overlap = |angle: f64| {
+        let x = -0.08 + 1.5 * dx;
+        let y = 3.5 * dx;
+        let origin_x = x - (angle.cos() * 1.5 + angle.sin() * 6.5) * dx;
+        let origin_y = y - (angle.sin() * 1.5 - angle.cos() * 6.5) * dx;
+        text.replace(FIRST_ESCAPE, &format!(
+            "reservoir_observation aperture 0 baffled {origin_x:.17e} {origin_y:.17e} {angle:.17e}\n"))
+    };
+    for invalid in [
+        text.replace(SECOND_ESCAPE, FIRST_ESCAPE),
+        text.replace(SECOND_ESCAPE, "reservoir_observation aperture 2 baffled -0.08 0 0\n"),
+        text.replace(SECOND_ESCAPE, &format!("{SECOND_ESCAPE}reservoir_feedback -20 20 16 16\n")),
+        text.replace(SECOND_ESCAPE, &format!("{SECOND_ESCAPE}reservoir_feedback aperture 2 -20 20 16 16\n")),
+        overlap(0.0), overlap(0.47),
+    ] {
+        assert!(ResolvedDgFilePerformance::from_bytes(invalid.as_bytes(), 1,
+            Arc::new(CancelGate::new_clock_free())).is_err());
+    }
+
+    let feedback = text
+        .replace("clock 96000 1", "clock 8000 12")
+        .replace("output 256 20", "output 64 20")
+        .replace("hold 64 20", "hold 16 2")
+        .replace("hold 128 -20", "hold 32 -2")
+        .replace("hold 256 0", "hold 64 0")
+        .replace("coupling 64 9216", "coupling 256 442368")
+        .replace(SECOND_ESCAPE, &format!("{SECOND_ESCAPE}reservoir_feedback aperture 1 -20 20 16 16\n"));
+    let mut renderer = read(&feedback, 1).into_renderer();
+    assert_eq!(renderer.reservoir_observation_count(), 2);
+    assert_eq!(renderer.system().reservoir_radiation_aperture(), Some(1));
+    renderer.block(&mut [0.0]).unwrap();
+    assert_eq!(renderer.last_frame().unwrap().reservoir_exchanges.len(), 2);
+    assert!(renderer.last_frame().unwrap().reservoir_radiation.is_some());
+}

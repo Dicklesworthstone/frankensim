@@ -459,7 +459,7 @@ fn selected_escape_observer_replays_original_rayleigh_without_mixing_breath_tile
     let mut wrong_owner = [*observed.last_frame().unwrap().reservoir_flows.iter()
         .find(|flow| flow.aperture == 1).unwrap()];
     wrong_owner[0].aperture = 0;
-    let observer = observed.reservoir.as_mut().unwrap();
+    let observer = observed.reservoirs.first_mut().unwrap();
     let before = observer.flows.clone();
     assert!(observer.accumulate(&wrong_owner, 1.0).is_err());
     assert_eq!(observer.flows, before);

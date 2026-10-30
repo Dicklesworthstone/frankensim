@@ -467,21 +467,31 @@ pub(super) fn resolved_provenance(
         }).collect::<Vec<_>>().join(",");
         format!(",\"reservoir_apertures\":[{openings}]")
     };
-    let reservoir_observation = renderer.reservoir_observation().map_or_else(String::new, |input| {
-        // The old helper describes the bore component, while the complete
-        // microphone now also contains the separately resolved escape surface.
+    let reservoir_observation = if renderer.reservoir_observation_count() == 0 {
+        String::new()
+    } else {
+        // The bore helper describes one component of the complete microphone.
         observer = observer.replacen("\"observation_scope\":", "\"bore_observation_scope\":", 1);
-        let microphone = renderer.reservoir_receiver().expect("bound reservoir receiver");
-        let material = super::duct_metadata::observer_gas_provenance(renderer.reservoir_observer_gas());
-        let aperture = renderer.reservoir_observation_aperture().expect("bound observed aperture");
-        let tiles = system.zone().last_reservoir_flows().iter()
-            .filter(|flow| flow.aperture == aperture).map(|flow|
-            format!("[{},{},{}]", flow.cell[0], flow.cell[1], flow.cell[2])).collect::<Vec<_>>().join(",");
-        format!(",\"observation_scope\":\"signed pressure sum of original DG outlets and individual resolved reservoir tiles in one explicit rigid baffle and material exterior; observation adds no reaction or flow/noise source; no free-field body or room scattering\",\"reservoir_observation\":{{\"aperture\":{aperture},\"kind\":\"original-tile-continuum-flow-Rayleigh\",\"origin_m\":[{:e},{:e}],\"angle_rad\":{:e},\"grid_cells\":[{tiles}],\"tile_area_m2\":{:e},\"flow_account\":\"per-tile outward continuum volume flow; fluid/ghost face midpoint and original time trapezoid, distinct from streamed mass\",\"placement\":\"cyclic tangential axes, second reversed on low faces, rotated into common baffle\",\"kernel_support_observation_samples\":[{},{}],\"filter_delay_observation_samples\":{:e},\"observer_gas\":{material},\"radiation_feedback_added\":{}}}",
-            input.origin_m[0], input.origin_m[1], input.angle_rad, law.dx_m.powi(2),
-            microphone.delay_samples.0, microphone.delay_samples.1, microphone.filter_delay_samples(),
-            system.reservoir_radiation().is_some())
-    });
+        let records = (0..system.zone().reservoir_aperture_count()).filter_map(|aperture| {
+            let input = renderer.reservoir_observation_at(aperture)?;
+            let microphone = renderer.reservoir_receiver_at(aperture).expect("bound reservoir receiver");
+            let material = super::duct_metadata::observer_gas_provenance(renderer.reservoir_observer_gas_at(aperture));
+            let tiles = system.zone().last_reservoir_flows().iter()
+                .filter(|flow| flow.aperture == aperture).map(|flow|
+                format!("[{},{},{}]", flow.cell[0], flow.cell[1], flow.cell[2])).collect::<Vec<_>>().join(",");
+            Some(format!("{{\"aperture\":{aperture},\"kind\":\"original-tile-continuum-flow-Rayleigh\",\"origin_m\":[{:e},{:e}],\"angle_rad\":{:e},\"grid_cells\":[{tiles}],\"tile_area_m2\":{:e},\"flow_account\":\"per-tile outward continuum volume flow; fluid/ghost face midpoint and original time trapezoid, distinct from streamed mass\",\"placement\":\"cyclic tangential axes, second reversed on low faces, rotated into common baffle\",\"kernel_support_observation_samples\":[{},{}],\"filter_delay_observation_samples\":{:e},\"observer_gas\":{material},\"radiation_feedback_added\":{}}}",
+                input.origin_m[0], input.origin_m[1], input.angle_rad, law.dx_m.powi(2),
+                microphone.delay_samples.0, microphone.delay_samples.1, microphone.filter_delay_samples(),
+                system.reservoir_radiation_aperture() == Some(aperture)))
+
+        }).collect::<Vec<_>>();
+        let surfaces = if records.len() == 1 {
+            format!(",\"reservoir_observation\":{}", records[0])
+        } else {
+            format!(",\"reservoir_observations\":[{}]", records.join(","))
+        };
+        format!(",\"observation_scope\":\"signed pressure sum of original DG outlets and individual resolved reservoir tiles in one explicit rigid baffle and material exterior; observation adds no reaction or flow/noise source; no free-field body or room scattering\"{surfaces}")
+    };
     let reservoir_feedback = system.reservoir_radiation().map_or_else(String::new, |input| {
         let aperture = system.reservoir_radiation_aperture().expect("bound reaction aperture");
         format!(",\"reservoir_feedback\":{{\"aperture\":{aperture},\"kind\":\"same-interval-original-joint-DG-mouth-radiation\",\"origin_m\":[{:e},{:e}],\"mouth_quadrature\":[{},{}],\"ghost_pressure_bracket_pa\":[{:e},{:e}],\"flow_coordinates\":[\"into bore\",\"outward through resolved reservoir\"],\"scope\":\"independent original flows; full computed self and mutual exterior response; pressure and acoustic work use the original cached conservative FV predictors over the complete physical interval; endpoint tile traces remain observation-only; pressure and work checked before fluid, bore and radiation publish; uniform pressure projection on the original reservoir ghost boundary; no transparent-boundary or free-field qualification\"}}",

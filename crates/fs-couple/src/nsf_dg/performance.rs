@@ -52,7 +52,7 @@ pub struct NsfDgPerformance<L: Lattice3<27>> {
     observation: ApertureObservation,
     receiver: Option<BaffledPressure>,
     observer_gas: Option<GasPropagationReport>,
-    reservoir: Option<reservoir::ReservoirPressure>,
+    reservoirs: Vec<reservoir::ReservoirPressure>,
     terminal_flows: Vec<f64>,
     sample_rate_hz: u32,
     maximum_block: usize,
@@ -221,7 +221,7 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         } else { Vec::new() };
         Ok(Self {
             system, boundary, observation, receiver,
-            observer_gas: None, reservoir: None, terminal_flows, sample_rate_hz, maximum_block, gate,
+            observer_gas: None, reservoirs: Vec::new(), terminal_flows, sample_rate_hz, maximum_block, gate,
             last: None, clock, projected_observer, output_samples, output_cursor: 0, poisoned: false,
         })
     }
@@ -247,25 +247,51 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         } else { self.system.load().baffled_receiver_with_gas(
             self.sample_rate_hz, location, propagation, &self.gate)
         }.map_err(RenderError::Voice)?;
-        let mut reservoir_receiver = self.reservoir.as_ref().map(|reservoir| {
+        // One supplied preparation budget covers the bore and every selected
+        // escape. Adding apertures cannot multiply the material-path allowance.
+        let mut remaining = propagation.limits;
+        let mut charge = |report: &GasPropagationReport| -> Result<_, RenderError> {
+            let taps = report.filters.iter().try_fold(0usize,
+                |sum, filter| sum.checked_add(filter.taps))
+                .ok_or_else(|| sizing("resolved observer filter count overflow"))?;
+            remaining.max_unique_paths = remaining.max_unique_paths.checked_sub(report.filters.len())
+                .ok_or_else(|| sizing("resolved observer exceeds its shared gas path allowance"))?;
+            remaining.max_filter_taps = remaining.max_filter_taps.checked_sub(taps)
+                .ok_or_else(|| sizing("resolved observer exceeds its shared gas filter allowance"))?;
+            remaining.max_kernel_terms = remaining.max_kernel_terms.checked_sub(report.kernel_terms)
+                .ok_or_else(|| sizing("resolved observer exceeds its shared gas kernel allowance"))?;
+            Ok(remaining)
+        };
+        let mut allowance = charge(&report)?;
+        let mut reservoir_receivers = Vec::with_capacity(self.reservoirs.len());
+        for reservoir in &self.reservoirs {
             let gas = self.system.load().radiation_record().expect("original exterior").gas_record().state();
-            BaffledTilePressure::new_gas_differentiating(&reservoir.surface,
-                self.sample_rate_hz, location.position_m, gas, propagation,
+            let mut bounded = propagation.clone();
+            bounded.limits = allowance;
+            let (receiver, report) = BaffledTilePressure::new_gas_differentiating(&reservoir.surface,
+                self.sample_rate_hz, location.position_m, gas, &bounded,
                 TilePressureLimits::surface_reference(), &mut || self.gate.is_requested())
-                .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))
-        }).transpose()?;
-        if let Some((escape, escape_report)) = &mut reservoir_receiver {
-            let latency = report.additional_latency_samples.max(escape_report.additional_latency_samples);
+                .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
+            allowance = charge(&report)?;
+            reservoir_receivers.push((receiver, report));
+        }
+        if !reservoir_receivers.is_empty() {
+            // Align numerical padding once across ALL original paths. Physical
+            // distance, attenuation and phase stay in each source's own kernel.
+            let latency = reservoir_receivers.iter().fold(report.additional_latency_samples,
+                |latency, (_, escape)| latency.max(escape.additional_latency_samples));
             receiver.align_gas_latency(&mut report, latency)
                 .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
-            escape.align_gas_latency(escape_report, latency)
-                .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
+            for (escape, escape_report) in &mut reservoir_receivers {
+                escape.align_gas_latency(escape_report, latency)
+                    .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
+            }
         }
+        reservoir::admit_storage(reservoir_receivers.iter().map(|(receiver, _)| receiver))?;
         if self.gate.is_requested() { return Err(sizing("resolved material observation cancelled")); }
         self.receiver = Some(receiver);
         self.observer_gas = Some(report);
-        if let Some((receiver, report)) = reservoir_receiver {
-            let reservoir = self.reservoir.as_mut().expect("original escape aperture");
+        for (reservoir, (receiver, report)) in self.reservoirs.iter_mut().zip(reservoir_receivers) {
             reservoir.receiver = receiver;
             reservoir.gas = Some(report);
         }
@@ -308,7 +334,7 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         // subsequent observer fails. Source and output indices coincide here.
         self.output_cursor += 1;
         let frame = self.last.as_ref().expect("accepted original resolved interval");
-        if let Some(reservoir) = &mut self.reservoir {
+        for reservoir in &mut self.reservoirs {
             reservoir.flows.fill(0.0);
             reservoir.accumulate(&frame.reservoir_flows, 1.0)?;
         }
@@ -330,14 +356,14 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         let (mut cursor, end) = clock.output_bounds(self.output_cursor).map_err(sizing)?;
         let mut pressure = 0.0;
         self.terminal_flows.fill(0.0);
-        if let Some(reservoir) = &mut self.reservoir { reservoir.flows.fill(0.0); }
+        for reservoir in &mut self.reservoirs { reservoir.flows.fill(0.0); }
         while cursor < end {
             while self.last.is_none() || clock.source_end(self.system.accepted_steps()) <= cursor {
                 self.advance_source()?;
             }
             let (weight, next) = clock.overlap(cursor, end, self.system.accepted_steps()).map_err(sizing)?;
             let frame = self.last.as_ref().expect("accepted covering physical interval");
-            if let Some(reservoir) = &mut self.reservoir {
+            for reservoir in &mut self.reservoirs {
                 reservoir.accumulate(&frame.reservoir_flows, weight)?;
             }
             pressure += weight * frame.inlet_pressure_pa;
@@ -360,7 +386,7 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             receiver.step_trace(&self.terminal_flows)
                 .map_err(|e| RenderError::Voice(AcousticRealizeError::Nonlinear(e)))?
         } else { inlet_pressure };
-        if let Some(reservoir) = &mut self.reservoir {
+        for reservoir in &mut self.reservoirs {
             pressure += reservoir.receiver.step_trace_with_cancel(
                 &reservoir.flows, &mut || self.gate.is_requested())
                 .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;

@@ -476,8 +476,13 @@ impl ResolvedDgFilePerformance {
             _ => return Err(bad(row.line, "observation requires inlet-pressure or baffled X Y Z RINGS ANGLES FMAX")),
         };
         row.end()?;
-        let reservoir_observation = if rows.next_is("reservoir_observation") {
+        let mut reservoir_observations = Vec::new();
+        while rows.next_is("reservoir_observation") {
+            poll(&gate)?;
             let mut row = rows.row("reservoir_observation")?;
+            if reservoir_observations.len() == MAX_NSF_RESERVOIR_APERTURES {
+                return Err(bad(row.line, "reservoir observations exceed the original aperture budget"));
+            }
             let kind = row.word()?;
             let (aperture, kind) = if kind == "aperture" {
                 (row.number::<usize>()?, row.word()?)
@@ -491,14 +496,28 @@ impl ResolvedDgFilePerformance {
                 return Err(bad(row.line,
                     "reservoir_observation requires a declared aperture and baffled OX OY ANGLE_RAD"));
             }
+            if reservoir_observations.iter().any(|(selected, _)| *selected == aperture) {
+                return Err(bad(row.line, "each original reservoir can reach the microphone only once"));
+            }
             let input = ReservoirObservation { origin_m: [row.scalar()?, row.scalar()?], angle_rad: row.scalar()? };
             row.end()?;
-            Some((aperture, input))
-        } else { None };
+            reservoir_observations.push((aperture, input));
+        }
         let reservoir_feedback = if rows.next_is("reservoir_feedback") {
             let mut row = rows.row("reservoir_feedback")?;
-            let (aperture, placement) = reservoir_observation.ok_or_else(|| bad(row.line,
-                "reservoir_feedback requires the explicit reservoir_observation placement"))?;
+            let (aperture, placement) = if row.fields.clone().next() == Some("aperture") {
+                row.word()?;
+                let aperture = row.number::<usize>()?;
+                reservoir_observations.iter().find(|(selected, _)| *selected == aperture)
+                    .copied().ok_or_else(|| bad(row.line,
+                        "reservoir_feedback must select an observed original aperture"))?
+            } else {
+                let [(aperture, placement)] = reservoir_observations.as_slice() else {
+                    return Err(bad(row.line,
+                        "reservoir_feedback with multiple observations requires aperture INDEX"));
+                };
+                (*aperture, *placement)
+            };
             let ApertureObservation::TubeBaffled(receiver) = observation else {
                 return Err(bad(row.line, "reservoir_feedback requires the common baffled exterior"));
             };
@@ -685,7 +704,7 @@ impl ResolvedDgFilePerformance {
         }
         let mut renderer = NsfDgPerformance::new_resampled_with_drives(system, observation, sample_rate_hz,
             boundary, samples as u64, maximum_block, Arc::clone(&gate)).map_err(ResolvedDgInputError::Render)?;
-        if let Some((aperture, input)) = reservoir_observation {
+        for (aperture, input) in reservoir_observations {
             renderer = renderer.with_reservoir_observation_at(aperture, input)
                 .map_err(ResolvedDgInputError::Render)?;
         }

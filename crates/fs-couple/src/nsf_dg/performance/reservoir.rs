@@ -10,6 +10,7 @@ use crate::pcm_wav::baffled::tiles::{BaffledTilePressure, FlowSurfaceSample, Til
 use fs_lbm::lattice3::Lattice3;
 use fs_lbm::nsf3::NsfReservoirFlow;
 use fs_math::det;
+use std::collections::BTreeMap;
 
 /// Explicit rigid placement of the original reservoir face in the shared
 /// infinite baffle, facing its +z half space. Tangential coordinates are the
@@ -56,6 +57,84 @@ impl ReservoirPressure {
     }
 }
 
+// All apertures share one original grid spacing. Equal-size rotated squares
+// overlap only if their centres lie within sqrt(2)*dx. Spatial bins restrict
+// this cold geometry check to neighbours instead of all pairs of flow tiles.
+fn disjoint_surfaces(
+    existing: &[ReservoirPressure], surface: &[FlowSurfaceSample],
+    input: ReservoirObservation, dx: f64, cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), RenderError> {
+    if existing.is_empty() { return Ok(()); }
+    let span = core::f64::consts::SQRT_2 * dx;
+    let key = |position: [f64; 3]| -> Result<(i64, i64), RenderError> {
+        let x = (position[0] / span).floor();
+        let y = (position[1] / span).floor();
+        if !x.is_finite() || !y.is_finite() || x.abs().max(y.abs()) >= (1_u64 << 52) as f64 {
+            return Err(sizing("reservoir placement exceeds its representable tile geometry"));
+        }
+        Ok((x as i64, y as i64))
+    };
+    let mut bins: BTreeMap<(i64, i64), Vec<([f64; 3], [f64; 2])>> = BTreeMap::new();
+    for observer in existing {
+        let orientation = [det::cos(observer.input.angle_rad), det::sin(observer.input.angle_rad)];
+        for tile in &observer.surface {
+            if cancelled() { return Err(sizing("reservoir geometry admission cancelled")); }
+            bins.entry(key(tile.position_m)?).or_default().push((tile.position_m, orientation));
+        }
+    }
+    let orientation = [det::cos(input.angle_rad), det::sin(input.angle_rad)];
+    for tile in surface {
+        if cancelled() { return Err(sizing("reservoir geometry admission cancelled")); }
+        let (x, y) = key(tile.position_m)?;
+        for i in x - 1..=x + 1 {
+            for j in y - 1..=y + 1 {
+                if let Some(candidates) = bins.get(&(i, j)) {
+                    for &(position, other) in candidates {
+                        let delta = [tile.position_m[0] - position[0], tile.position_m[1] - position[1]];
+                        let relative_cosine = orientation[0] * other[0] + orientation[1] * other[1];
+                        let relative_sine = orientation[0] * other[1] - orientation[1] * other[0];
+                        let extent = 0.5 * dx * (1.0 + relative_cosine.abs() + relative_sine.abs());
+                        // Separating axes of both actual squares. Touching tile
+                        // edges are allowed; roundoff cannot invent finite area.
+                        let tolerance = 64.0 * f64::EPSILON * extent;
+                        let overlaps = [orientation, other].into_iter().all(|axis| {
+                            let along = (delta[0] * axis[0] + delta[1] * axis[1]).abs();
+                            let across = (-delta[0] * axis[1] + delta[1] * axis[0]).abs();
+                            along < extent - tolerance && across < extent - tolerance
+                        });
+                        if overlaps {
+                            return Err(sizing("observed reservoir surfaces must be disjoint in the common baffle"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn admit_storage<'a>(
+    receivers: impl IntoIterator<Item = &'a BaffledTilePressure>,
+) -> Result<(), RenderError> {
+    let limits = TilePressureLimits::surface_reference();
+    let (mut tiles, mut histories, mut kernels) = (0usize, 0usize, 0usize);
+    for receiver in receivers {
+        let (history, kernel) = receiver.retained_values();
+        tiles = tiles.checked_add(receiver.input_count())
+            .ok_or_else(|| sizing("resolved observation tile count overflow"))?;
+        histories = histories.checked_add(history)
+            .ok_or_else(|| sizing("resolved observation history count overflow"))?;
+        kernels = kernels.checked_add(kernel)
+            .ok_or_else(|| sizing("resolved observation kernel count overflow"))?;
+    }
+    if tiles > limits.maximum_tiles || histories > limits.maximum_history_values
+        || kernels > limits.maximum_kernel_values
+    {
+        return Err(sizing("observed reservoir apertures exceed their shared tile/storage allowance"));
+    }
+    Ok(())
+}
+
 impl<L: Lattice3<27>> NsfDgPerformance<L> {
     /// Add the escape aperture's original per-tile flow to the same microphone
     /// as the bore outlets. Physical pressure is signed superposition with
@@ -80,14 +159,18 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         self.with_reservoir_observation_at(0, input)
     }
 
-    /// Observe one explicitly selected original escape surface. Independently
-    /// prescribed breath tiles are retained by the fluid, not mixed into it.
+    /// Add one explicitly selected original escape surface. Repeated calls
+    /// preserve disjoint source identities, tile flows and propagation paths;
+    /// an original aperture may appear only once. All observed surfaces share
+    /// the existing aggregate tile/storage allowance and exterior material.
+    /// Independently prescribed breath tiles are not selected implicitly.
+    /// This does not add reaction to apertures without an original joint load.
     pub fn with_reservoir_observation_at(
         mut self, aperture: usize, input: ReservoirObservation,
     ) -> Result<Self, RenderError> {
         if self.poisoned
             || self.system.accepted_steps() != 0
-            || self.reservoir.is_some()
+            || self.reservoirs.iter().any(|observer| observer.aperture == aperture)
             || self.observer_gas.is_some()
             || self.gate.is_requested()
             || !input
@@ -97,12 +180,12 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                 .all(|x| x.is_finite())
         {
             return Err(sizing(
-                "reservoir observation needs one cold finite placement before gas preparation",
+                "reservoir observation needs a unique cold finite placement before gas preparation",
             ));
         }
         if self.system.reservoir_radiation().is_some_and(|reaction|
-            self.system.reservoir_radiation_aperture() != Some(aperture)
-                || reaction.origin_m != input.origin_m || input.angle_rad != 0.0)
+            self.system.reservoir_radiation_aperture() == Some(aperture)
+                && (reaction.origin_m != input.origin_m || input.angle_rad != 0.0))
         {
             return Err(sizing(
                 "reservoir observation must retain the original joint radiation placement",
@@ -134,7 +217,8 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         }
         let accepted = zone.last_reservoir_flows_at(aperture);
         let limits = TilePressureLimits::surface_reference();
-        if accepted.is_empty() || accepted.len() > limits.maximum_tiles {
+        let existing_tiles = self.reservoirs.iter().map(|observer| observer.surface.len()).sum::<usize>();
+        if accepted.is_empty() || accepted.len() > limits.maximum_tiles.saturating_sub(existing_tiles) {
             return Err(sizing(
                 "reservoir radiation exceeds its original per-tile input budget",
             ));
@@ -185,6 +269,7 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                 area_m2: dx * dx,
             });
         }
+        disjoint_surfaces(&self.reservoirs, &surface, input, dx, &mut || self.gate.is_requested())?;
         let receiver = BaffledTilePressure::new_differentiating(
             &surface,
             self.sample_rate_hz,
@@ -194,7 +279,9 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             &mut || self.gate.is_requested(),
         )
         .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
-        self.reservoir = Some(ReservoirPressure {
+        admit_storage(self.reservoirs.iter().map(|observer| &observer.receiver)
+            .chain(std::iter::once(&receiver)))?;
+        self.reservoirs.push(ReservoirPressure {
             aperture,
             input,
             surface,
@@ -206,22 +293,40 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         Ok(self)
     }
 
-    /// Explicit placement of the original aperture, if selected.
-    pub fn reservoir_observation(&self) -> Option<ReservoirObservation> {
-        self.reservoir.as_ref().map(|observer| observer.input)
+    /// Number of explicitly observed original escape apertures.
+    pub fn reservoir_observation_count(&self) -> usize { self.reservoirs.len() }
+
+    /// Explicit placement for an original aperture identity.
+    pub fn reservoir_observation_at(&self, aperture: usize) -> Option<ReservoirObservation> {
+        self.reservoirs.iter().find(|observer| observer.aperture == aperture).map(|observer| observer.input)
     }
-    /// Stable original owner of the observed escape opening.
-    pub fn reservoir_observation_aperture(&self) -> Option<usize> {
-        self.reservoir.as_ref().map(|observer| observer.aperture)
+    /// Actual shared Rayleigh bank for one original aperture identity.
+    pub fn reservoir_receiver_at(&self, aperture: usize) -> Option<&BaffledTilePressure> {
+        self.reservoirs.iter().find(|observer| observer.aperture == aperture).map(|observer| &observer.receiver)
     }
-    /// Actual shared Rayleigh receiver bank and its separate physical paths.
-    pub fn reservoir_receiver(&self) -> Option<&BaffledTilePressure> {
-        self.reservoir.as_ref().map(|observer| &observer.receiver)
-    }
-    /// Same material propagation law, applied on the original escape paths.
-    pub fn reservoir_observer_gas(&self) -> Option<&GasPropagationReport> {
-        self.reservoir
-            .as_ref()
+    /// Same material law and common numerical padding on a selected aperture.
+    pub fn reservoir_observer_gas_at(&self, aperture: usize) -> Option<&GasPropagationReport> {
+        self.reservoirs.iter().find(|observer| observer.aperture == aperture)
             .and_then(|observer| observer.gas.as_ref())
+    }
+    /// Singular compatibility view; multiple selections require explicit identity.
+    pub fn reservoir_observation(&self) -> Option<ReservoirObservation> {
+        let [observer] = self.reservoirs.as_slice() else { return None; };
+        Some(observer.input)
+    }
+    /// Singular compatibility view of the original observed aperture.
+    pub fn reservoir_observation_aperture(&self) -> Option<usize> {
+        let [observer] = self.reservoirs.as_slice() else { return None; };
+        Some(observer.aperture)
+    }
+    /// Singular compatibility view of the actual receiver.
+    pub fn reservoir_receiver(&self) -> Option<&BaffledTilePressure> {
+        let [observer] = self.reservoirs.as_slice() else { return None; };
+        Some(&observer.receiver)
+    }
+    /// Singular compatibility view of the original exterior propagation report.
+    pub fn reservoir_observer_gas(&self) -> Option<&GasPropagationReport> {
+        let [observer] = self.reservoirs.as_slice() else { return None; };
+        observer.gas.as_ref()
     }
 }

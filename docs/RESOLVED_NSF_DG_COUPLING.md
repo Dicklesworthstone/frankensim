@@ -205,16 +205,25 @@ coexist with both the bore and a finite upstream/cork-side DG load, with zero
 added axial series effort. Warm breath uses the original gas energy and transport
 laws; the separate escape opening can remain bound to the exterior reference.
 
-`reservoir_observation aperture 1 baffled OX OY ANGLE_RAD` selects only escape
-tiles for the microphone. A following `reservoir_feedback` row selects that same
-opening for the live exterior reaction. The source and passive escape indices
-must differ. All held breath and trial escape states enter the same original
+`reservoir_observation aperture 1 baffled OX OY ANGLE_RAD` selects that
+opening's original escape tiles for the microphone. Repeat this record for
+every explicitly observed aperture. Each original aperture may occur once;
+its independently placed tiles must be disjoint from other observed surfaces
+and the bore outlets. Unselected breath openings do not acquire a receiver.
+
+With several observations, `reservoir_feedback aperture INDEX ...` selects
+exactly one observed opening for the existing live exterior reaction. The
+unindexed feedback form remains valid when only one opening is observed.
+The source and passive reaction indices must differ. All held breath and trial escape states enter the same original
 NSF transaction with both acoustic loads. No participant publishes before the
 existing pressure/work gates pass.
 
 Typed callers use `step_with_reservoir_aperture`,
 `with_reservoir_radiation_at` and `with_reservoir_observation_at`. Singular
-selection methods require exactly one declared opening. Accepted
+selection methods require exactly one declared opening. Observation accessors
+have indexed forms (`reservoir_observation_at`, `reservoir_receiver_at`,
+`reservoir_observer_gas_at`) and `reservoir_observation_count`; their singular
+compatibility views return no value when several openings are observed. Accepted
 `NsfDgFrame::reservoir_exchanges` retains each owner's original interval account;
 `mass_out_kg` and `total_energy_out_j` are positive outward. Their sums recover
 the aggregate streamed mass and the negative of `flow.open_energy_j`.
@@ -768,7 +777,11 @@ material atmosphere → PCM path with data-owned geometry and source histories.
 `reservoir_observation baffled OX OY ANGLE_RAD`, immediately after `observation`
 and before `observer_gas`, includes the original transverse reservoir aperture
 in the same emitted pressure. `NsfDgPerformance::with_reservoir_observation`
-is the equivalent typed selection. Every actual fluid face tile has its own
+is the equivalent typed selection for a single declared opening. For multiple
+openings, repeat `reservoir_observation aperture INDEX baffled OX OY ANGLE_RAD`
+or call `with_reservoir_observation_at` once per selected identity, before
+`observer_gas`. The pressure sum follows the declared observation order.
+Every actual fluid face tile has its own
 signed volume-flow input; the receiver does not substitute bore flow, infer a
 uniform mouth piston, or divide compressible mass flux by reference density.
 The source owner averages fluid/ghost velocity at that physical face and uses
@@ -792,16 +805,24 @@ receivers with at most 128 inputs each, retaining every tile's signed flow, area
 position and physical delay. It never averages tiles into one piston. The
 explicit reference allowance admits at most 120,000 tiles, with aggregate
 retained history and kernel limits of 256 MiB each; material preparation budgets
-also apply across the whole surface. Reaching a budget refuses construction.
+also apply across all selected surfaces, together with the bore's material
+paths. Adding an aperture cannot multiply the shared tile, storage or gas-filter
+allowance. Reaching a budget refuses construction.
 Larger banks reuse the original linear pressure differentiator per piece.
 All pieces preview before any observer history accepts a sample.
 
 The shared differentiating Rayleigh kernel observes every tile after the same
 conservative physical-to-output clock projection as the bore. A selected
-`observer_gas` law reaches both sets of paths, with only numerical padding
-aligned before their pressure sum. The native sidecar identifies original
-cell coordinates, placement, flow convention, path material and latency.
-`resolved-dg-side-aperture.performance` selects this complete observation.
+`observer_gas` law reaches every selected path, with only numerical padding
+aligned once to their common maximum before the pressure sum. Physical flight
+times and gas phase remain distinct. The native sidecar identifies original
+cell coordinates, placement, flow convention, path material and latency;
+multiple selections appear in `reservoir_observations`, while a single
+selection retains the existing `reservoir_observation` record.
+`resolved-dg-side-aperture.performance` selects a single escape;
+`resolved-dg-multiple-escapes.performance` observes two independently placed
+openings with different original tile counts. These are numerical composition
+fixtures, not measured instrument geometry.
 
 Without the optional `reservoir_feedback` row below, this is one-way
 observation of a prescribed-reservoir opening. Observation alone adds no
@@ -818,6 +839,16 @@ selects the same-interval exterior feedback:
 ```text
 reservoir_feedback PRESSURE_LO_PA PRESSURE_HI_PA QUAD_NX QUAD_NY
 ```
+
+When more than one opening is observed, name the original reaction owner:
+
+```text
+reservoir_feedback aperture INDEX PRESSURE_LO_PA PRESSURE_HI_PA QUAD_NX QUAD_NY
+```
+
+This remains one original joint mouth/bore reaction. Other selected escapes
+contribute their prescribed-boundary flows to observation without acquiring a
+second reaction law or mutual coupling between all reservoirs.
 
 The pressure bounds are ghost-pressure offsets relative to the original source
 reference, in Pa. The two positive quadrature counts refine the existing
