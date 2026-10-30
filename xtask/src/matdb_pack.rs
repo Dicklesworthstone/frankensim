@@ -700,7 +700,7 @@ struct ComponentMeta {
 
 /// Compile a strict source manifest twice and publish one verified new artifact.
 pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String> {
-    let (manifest_path, output_path, material_state) = match parse_cli(root, args) {
+    let (manifest_path, output_path, material_state, source_inputs_path) = match parse_cli(root, args) {
         Ok(paths) => paths,
         Err(error) => {
             print_refusal_decisions(&error, Some(cli_input_hash(args)));
@@ -770,6 +770,11 @@ pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String>
         return Err(error.to_string());
     }
 
+    // Export only inputs belonging to the accepted original source envelope.
+    // Preparation precedes publication so a changed input cannot leave a new pack.
+    let source_inputs = source_inputs_path.as_ref().map(|_| {
+        source_inputs_json(&manifest_path, first_source)
+    }).transpose().map_err(|error| error.to_string())?;
     let compiler_id = first.pack.compiler_id().to_string();
     let pack_hash = first.pack.content_hash();
     write_new_verified(&output_path, &first.bytes, &first.pack).map_err(|error| {
@@ -783,6 +788,12 @@ pub(super) fn cmd_matdb_pack(root: &Path, args: &[String]) -> Result<(), String>
         );
         error.to_string()
     })?;
+    if let (Some(path), Some(inputs)) = (&source_inputs_path, &source_inputs) {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)
+            .map_err(|error| format!("cannot create original source-input export: {error}"))?;
+        file.write_all(inputs.as_bytes()).and_then(|()| file.sync_all())
+            .map_err(|error| format!("cannot write original source-input export: {error}"))?;
+    }
     first.decisions.push(Decision {
         subject: "output".to_string(),
         verdict: "admit",
@@ -861,10 +872,11 @@ fn bind_material_state(
 fn parse_cli(
     root: &Path,
     args: &[String],
-) -> Result<(PathBuf, PathBuf, Option<MaterialStateId>), CompileError> {
+) -> Result<(PathBuf, PathBuf, Option<MaterialStateId>, Option<PathBuf>), CompileError> {
     let mut manifest = None;
     let mut output = None;
     let mut material_state = None;
+    let mut source_inputs = None;
     let mut index = 0;
     while index < args.len() {
         let option = &args[index];
@@ -926,11 +938,12 @@ fn parse_cli(
         let slot = match option.as_str() {
             "--manifest" => &mut manifest,
             "--out" => &mut output,
+            "--source-inputs" => &mut source_inputs,
             _ => {
                 return Err(CompileError::new(
                     "invalid_cli",
                     "arguments",
-                    format!("unknown option {option:?}; expected --manifest, --out, or --material-state"),
+                    format!("unknown option {option:?}; expected --manifest, --out, --material-state, or --source-inputs"),
                 ));
             }
         };
@@ -960,7 +973,55 @@ fn parse_cli(
             "manifest and output paths must differ",
         ));
     }
-    Ok((manifest, output, material_state))
+    if source_inputs.as_ref().is_some_and(|path| path == &manifest || path == &output) {
+        return Err(CompileError::new("invalid_cli", "arguments",
+            "source-input export, manifest and pack output paths must differ"));
+    }
+    Ok((manifest, output, material_state, source_inputs))
+}
+
+/// Exact editable UTF-8 inputs for the existing portable experiment boundary.
+/// Parsing, confined dependency discovery and source identity stay in this owner.
+fn source_inputs_json(manifest_path: &Path, expected: ContentHash) -> Result<String, CompileError> {
+    let manifest_bytes = read_bounded_regular(manifest_path, MAX_MANIFEST_BYTES, "manifest")?;
+    let text = std::str::from_utf8(&manifest_bytes).map_err(|_| {
+        CompileError::new("invalid_manifest_encoding", "manifest", "manifest must remain valid UTF-8")
+    })?;
+    let manifest = parse_manifest(text)?;
+    let mut sources = load_sources(manifest_path, &manifest)?;
+    if source_envelope_hash(&manifest, &sources) != expected {
+        return Err(CompileError::new("input_changed_before_source_export", "sources",
+            "original source inputs no longer match the compiled material envelope"));
+    }
+    // These decoded limits match the existing Lab attachment transport.
+    // One manifest and one generated pack also consume attachment slots.
+    let total = sources.iter().try_fold(manifest_bytes.len(), |sum, source| {
+        sum.checked_add(source.bytes.len())
+    }).ok_or_else(|| CompileError::new("resource_limit", "sources", "source byte count overflowed"))?;
+    if sources.len() + 2 > 32 || total > 32 * 1_048_576
+        || sources.iter().any(|source| source.bytes.len() > 8 * 1_048_576)
+    {
+        return Err(CompileError::new("resource_limit", "sources",
+            "editable sources exceed the portable input count or byte limits"));
+    }
+    sources.sort_by(|left, right| left.spec.relative_path.cmp(&right.spec.relative_path));
+    let mut json = format!("{{\"format\":\"frankensim-material-source-inputs-v1\",\"manifest\":\"{}\",\"sources\":[",
+        super::json_escape(text));
+    for (index, source) in sources.iter().enumerate() {
+        let path = source.spec.relative_path.to_str().ok_or_else(|| {
+            CompileError::new("invalid_source_path", "sources", "source path must remain UTF-8")
+        })?;
+        if index != 0 { json.push(','); }
+        json.push_str(&format!("{{\"path\":\"{}\",\"text\":\"{}\"}}",
+            super::json_escape(path), super::json_escape(&source.text)));
+        // Bound JSON escaping independently from the decoded attachment budget.
+        if json.len() + 3 > 48 * 1_048_576 {
+            return Err(CompileError::new("resource_limit", "sources",
+                "encoded source-input export exceeds 48 MiB"));
+        }
+    }
+    json.push_str("]}\n");
+    Ok(json)
 }
 
 fn resolve_cli_path(root: &Path, raw: &str) -> PathBuf {
@@ -8812,6 +8873,51 @@ mod tests {
         ] {
             assert_eq!(profile.compiler_id(), expected);
         }
+    }
+
+    #[test]
+    fn editable_inputs_retain_original_bytes_and_match_the_compiled_material_envelope() {
+        let manifest_text = manifest(MATERIAL_PROFILE, true)
+            .replacen("citation\t", "citation\tµ ", 1).replace('\n', "\r\n");
+        let source_text = SOURCE.replace('\n', "\r\n");
+        let (manifest_path, directory) = write_fixture(&manifest_text, &source_text);
+        let compiled = compile_manifest(&manifest_path).expect("source compiles");
+        let source_hash = compiled.pack.source_artifact();
+        let inputs = source_inputs_json(&manifest_path, source_hash).expect("original source export");
+        assert!(inputs.starts_with("{\"format\":\"frankensim-material-source-inputs-v1\""));
+        assert!(inputs.contains("\"path\":\"source.tsv\""));
+        assert!(inputs.contains("µ"));
+        assert!(inputs.contains("\\r\\n"));
+        assert!(!inputs.contains(&directory.display().to_string()));
+        let state = MaterialStateId { chemistry: "authored-composite".into(),
+            phase: "solid".into(), process: "original-specimen".into(), revision: 0 };
+        let card = bind_material_state(compiled, Some(&state)).expect("explicit identity");
+        assert_eq!(source_inputs_json(&manifest_path, card.pack.source_artifact()).unwrap(), inputs);
+        // A later edit cannot be exported as the input of an earlier compiled pack.
+        fs::write(directory.join("source.tsv"), source_text + "\n").expect("source edit");
+        assert_eq!(source_inputs_json(&manifest_path, source_hash).unwrap_err().code,
+            "input_changed_before_source_export");
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_text.as_bytes());
+    }
+
+    #[test]
+    fn source_input_export_paths_are_explicit_and_cannot_replace_the_manifest_or_pack() {
+        let root = Path::new("/original-project");
+        let args = ["--manifest", "manifest.tsv", "--out", "new.pack",
+            "--source-inputs", "original-inputs.json"].map(str::to_string);
+        let (manifest, pack, state, inputs) = parse_cli(root, &args).expect("distinct paths");
+        assert_eq!(manifest, root.join("manifest.tsv"));
+        assert_eq!(pack, root.join("new.pack"));
+        assert!(state.is_none());
+        assert_eq!(inputs, Some(root.join("original-inputs.json")));
+        for target in ["manifest.tsv", "new.pack"] {
+            let mut conflicting = args.clone();
+            conflicting[5] = target.to_string();
+            assert_eq!(parse_cli(root, &conflicting).unwrap_err().code, "invalid_cli");
+        }
+        let mut duplicate = args.to_vec();
+        duplicate.extend(["--source-inputs".to_string(), "other.json".to_string()]);
+        assert_eq!(parse_cli(root, &duplicate).unwrap_err().code, "invalid_cli");
     }
 
     #[test]

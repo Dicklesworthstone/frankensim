@@ -132,9 +132,10 @@ class MaterialPreparation(unittest.TestCase):
         source_dir.mkdir()
         manifest = source_dir / "whole string.manifest.tsv"
         source_pack = REPO / "data/matdb/seed-v1/cello-g-strings-whole-lampis-2024"
-        manifest.write_bytes((source_pack / "manifest.tsv").read_bytes())
+        manifest.write_bytes((source_pack / "manifest.tsv").read_bytes()
+                             .replace(b"citation\t", "citation\tµ ".encode()).replace(b"\n", b"\r\n"))
         table = source_dir / "properties.tsv"
-        table.write_bytes((source_pack / "properties.tsv").read_bytes())
+        table.write_bytes((source_pack / "properties.tsv").read_bytes().replace(b"\n", b"\r\n"))
         before = (manifest.read_bytes(), table.read_bytes())
         compiler, renderer = root / "source compiler", root / "native renderer"
         emitted = b"compiler transport witness\x00\xff"
@@ -143,14 +144,23 @@ class MaterialPreparation(unittest.TestCase):
         def native_call(command, **kwargs):
             calls.append(command)
             if command[0] == str(compiler):
+                source_args = command[-2:] if portable else []
+                if portable:
+                    self.assertEqual(source_args[0], "--source-inputs")
+                    self.assertEqual(Path(source_args[1]).parent.parent, output)
                 self.assertEqual(command, [str(compiler), "matdb-pack", "--manifest",
                                            str(manifest), "--out", str(output / "strings/whole.source"),
-                                           *(["--material-state", *identity] if identity else [])])
+                                           *(["--material-state", *identity] if identity else []), *source_args])
                 self.assertEqual(kwargs, {"check": True})
                 self.assertEqual((manifest.read_bytes(), table.read_bytes()), before)
                 # This witness is only an executable boundary. The real Rust
                 # compiler owns manifest decoding and normalized pack semantics.
                 Path(command[command.index("--out") + 1]).write_bytes(emitted)
+                if portable:
+                    Path(source_args[1]).write_text(json.dumps({
+                        "format": "frankensim-material-source-inputs-v1",
+                        "manifest": before[0].decode("utf-8"),
+                        "sources": [{"path": "properties.tsv", "text": before[1].decode("utf-8")}]}))
             else:
                 self.assertEqual(command, [str(renderer), str(output / "performance.material-strings"),
                                            str(output / "render.wav")])
@@ -167,24 +177,86 @@ class MaterialPreparation(unittest.TestCase):
                     ("prepared", ["--prepare-only"], []),
                     ("rendered", ["--renderer", str(renderer), "--lab-experiment"], []),
                     ("card-prepared", ["--prepare-only"], card_identity),
-                    ("card-rendered", ["--renderer", str(renderer), "--lab-experiment"], card_identity)):
+                    ("card-rendered", ["--renderer", str(renderer), "--lab-experiment"], card_identity),
+                    ("native-only", ["--renderer", str(renderer)], [])):
                 output = root / name
+                portable = "--lab-experiment" in mode or "--prepare-only" in mode
                 self.assertEqual(R.main(["--performance", str(source), "--out", str(output),
                     "--pack-compiler", str(compiler),
                     "--pack-manifest", f"strings/whole.source={manifest}",
                     "--pack", f"body.fsmatpk={body}",
                     *(["--pack-material-state", "strings/whole.source", *identity] if identity else []),
                     *mode]), 0)
+                if not portable:
+                    self.assertFalse((output / "experiment.native.json").exists())
+                    continue
                 packet = json.loads((output / "experiment.native.json").read_text())
                 self.assertEqual(base64.b64decode(packet["source"]), original.encode())
                 self.assertEqual({item["path"]: base64.b64decode(item["bytes"])
                                   for item in packet["attachments"]},
-                                 {"strings/whole.source": emitted, "body.fsmatpk": body.read_bytes()})
+                                 {"body.fsmatpk": body.read_bytes(),
+                                  "material-sources-0/manifest.tsv": before[0],
+                                  "material-sources-0/properties.tsv": before[1]})
+                binding = {"packPath": "strings/whole.source",
+                           "manifestPath": "material-sources-0/manifest.tsv"}
+                if identity:
+                    binding["materialState"] = dict(zip(("chemistry", "phase", "process", "revision"),
+                                                        [*identity[:3], int(identity[3])]))
+                self.assertEqual(packet["materialManifests"], [binding])
                 self.assertEqual(packet["renderer"], "strings")
-        self.assertEqual(len(calls), 6)  # four compiles and two renders; exact identities and bytes above
+        self.assertEqual(len(calls), 8)  # five compiles, three renders; native-only calls retain their old arguments
         self.assertEqual((manifest.read_bytes(), table.read_bytes()), before)
         self.assertEqual(source.read_text(), original)
         self.assertEqual(stale.read_bytes(), b"stale pack must never win an explicit compilation")
+
+    def test_editable_material_export_preserves_nested_source_paths_and_avoids_existing_names(self):
+        root = Path(tempfile.mkdtemp())
+        source = root / "performance.material-strings"
+        source.write_bytes(b"frankensim-material-strings-v3\r\n")
+        original = {"wire.fsmatpk": b"native compiled pack", "material-sources-0": b"other original pack"}
+        for name, data in original.items():
+            (root / name).write_bytes(data)
+        inputs = {"wire.fsmatpk": {"manifest": "original µ manifest\r\n", "sources": [
+            {"path": "manifest.tsv", "text": "original source named manifest.tsv\r\n"},
+            {"path": "tables/wire.tsv", "text": "original µ source table\r\n"}]}}
+        packet = json.loads(R.write_lab_experiment(source, root, list(original), {}, None, False,
+                                                   material_inputs=inputs).read_text())
+        files = {item["path"]: base64.b64decode(item["bytes"]) for item in packet["attachments"]}
+        prefix = "material-sources-0-input/"
+        self.assertEqual(files, {"material-sources-0": original["material-sources-0"],
+            prefix + "manifest.tsv": b"original source named manifest.tsv\r\n",
+            prefix + "tables/wire.tsv": "original µ source table\r\n".encode(),
+            prefix + "manifest-input.tsv": "original µ manifest\r\n".encode()})
+        self.assertEqual(packet["materialManifests"], [{"packPath": "wire.fsmatpk",
+            "manifestPath": prefix + "manifest-input.tsv"}])
+        self.assertEqual((root / "wire.fsmatpk").read_bytes(), original["wire.fsmatpk"])
+
+    def test_editable_material_export_counts_generated_packs_and_refuses_unportable_inputs(self):
+        root = Path(tempfile.mkdtemp())
+        source = root / "performance.material-strings"
+        source.write_bytes(b"frankensim-material-strings-v3\n")
+        (root / "wire.fsmatpk").write_bytes(b"native compiled pack")
+        input_for = lambda path: {"wire.fsmatpk": {"manifest": "original manifest",
+            "sources": [{"path": path, "text": "original source"}]}}
+        for path in ("../outside.tsv", "/outside.tsv", "with space.tsv", "nested/./source.tsv"):
+            with self.assertRaises(ValueError):
+                R.write_lab_experiment(source, root, ["wire.fsmatpk"], {}, None, False,
+                                       material_inputs=input_for(path))
+        large = b"x" * (8 * 1024 * 1024)
+        # Actual byte budgets, without writing large fixture files to disk.
+        small_source = source.read_bytes()
+        names = ["wire.fsmatpk", "body.fsmatpk", "bow.fsmatpk", "contact.fsmatpk"]
+        with mock.patch.object(R.Path, "read_bytes",
+                               side_effect=lambda path=None: large) as reader:
+            reader.side_effect = [*(large for _ in names), small_source]
+            with self.assertRaisesRegex(ValueError, "byte limits"):
+                R.write_lab_experiment(source, root, names, {}, None, False,
+                                       material_inputs=input_for("properties.tsv"))
+        many = {"wire.fsmatpk": {"manifest": "original manifest", "sources":
+            [{"path": f"table-{i}.tsv", "text": "source"} for i in range(31)]}}
+        with self.assertRaisesRegex(ValueError, "source-file"):
+            R.write_lab_experiment(source, root, ["wire.fsmatpk"], {}, None, False, material_inputs=many)
+        self.assertFalse((root / "experiment.native.json").exists())
 
     def test_manifest_bindings_refuse_conflicts_missing_sources_and_failed_compilation(self):
         root = Path(tempfile.mkdtemp())

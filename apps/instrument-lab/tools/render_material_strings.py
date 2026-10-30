@@ -5,7 +5,8 @@ All mechanics, material admission, gas resolution and PCM encoding stay in the
 native material_strings executable. This launcher stages its original inputs;
 it neither estimates missing properties nor tunes a string after substitution.
 Explicit --pack-manifest bindings invoke the existing Rust matdb-pack compiler;
-its output enters the same source packet as a precompiled --pack replacement.
+its output enters the native solve, while portable Lab experiments retain the
+original editable manifests and source tables for recompilation.
 Contact profiles reach that same native solve. Optional native decimation changes
 only the observed audio clock, retaining the authored mechanical resolution.
 The output directory must be new. Python's standard library suffices for native
@@ -22,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from decimal import Decimal
 from pathlib import Path
 
@@ -171,7 +173,8 @@ def material_state_bindings(bindings: list[list[str]], manifests: list[str]) -> 
 
 def stage_packs(texts: list[str], root: Path, replacements: list[str], output: Path,
                 manifests: list[str] | None = None, compiler: str | None = None,
-                material_states: list[list[str]] | None = None) -> list[str]:
+                material_states: list[list[str]] | None = None,
+                source_inputs: dict | None = None) -> list[str]:
     # These are the existing binary pack formats, copied byte for byte.
     # Rust remains the material decoder and property/domain authority.
     states = material_state_bindings(material_states or [], manifests or [])
@@ -199,7 +202,8 @@ def stage_packs(texts: list[str], root: Path, replacements: list[str], output: P
     for name in sorted(required):
         if name not in available and name not in compiled:
             raise ValueError(f"missing material pack {name}; supply --pack-root, --pack {name}=PATH or --pack-manifest {name}=MANIFEST")
-    for name in sorted(required):
+    input_dir = Path(tempfile.mkdtemp(prefix="material-inputs-", dir=output)) if compiled and source_inputs is not None else None
+    for index, name in enumerate(sorted(required)):
         destination = output / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         if name in compiled:
@@ -209,10 +213,25 @@ def stage_packs(texts: list[str], root: Path, replacements: list[str], output: P
             # identity, dimensions, uncertainty and validity from the manifest.
             # A failed compilation stops here; never use a stale available pack.
             state_args = ["--material-state", *states[name]] if name in states else []
+            input_path = input_dir / f"{index}.json" if input_dir else None
+            input_args = ["--source-inputs", str(input_path)] if input_path else []
             subprocess.run([compiler, "matdb-pack", "--manifest", str(compiled[name]),
-                            "--out", str(destination), *state_args], check=True)
+                            "--out", str(destination), *state_args, *input_args], check=True)
             if not destination.is_file() or destination.stat().st_size == 0:
                 raise ValueError(f"material compiler did not create a nonempty pack: {name}")
+            if input_path is not None:
+                with input_path.open("rb") as stream:
+                    raw = stream.read(48 * 1024 * 1024 + 1)
+                if len(raw) > 48 * 1024 * 1024:
+                    raise ValueError("material source-input export exceeds 48 MiB")
+                inputs = json.loads(raw)
+                if not isinstance(inputs, dict) or inputs.get("format") != "frankensim-material-source-inputs-v1":
+                    raise ValueError("compiler did not return original material source inputs")
+                if name in states:
+                    chemistry, phase, process, revision = states[name]
+                    inputs["materialState"] = {"chemistry": chemistry, "phase": phase,
+                                               "process": process, "revision": int(revision)}
+                source_inputs[name] = inputs
         else:
             with destination.open("xb") as stream, available[name].open("rb") as source:
                 shutil.copyfileobj(source, stream)
@@ -221,17 +240,69 @@ def stage_packs(texts: list[str], root: Path, replacements: list[str], output: P
 
 def write_lab_experiment(source: Path, output: Path, attachments: list[str], profiles: dict,
                          gas_sources: dict | None, decimate: bool,
-                         coating_strain_guard: list[int] | None = None) -> Path:
+                         coating_strain_guard: list[int] | None = None,
+                         material_inputs: dict | None = None) -> Path:
     """Export the existing native HTTP packet; material/physics decoding stays in Rust.
 
     The lab's shared packet reader checks its transport bounds when opening this
     file. Prepared source bytes and all referenced source paths remain intact.
     """
     encoded = lambda data: base64.b64encode(data).decode("ascii")
+    material_inputs = material_inputs or {}
+    original = {name: (output / name).read_bytes() for name in attachments}
+    if len(original) != len(attachments) or not material_inputs.keys() <= original.keys():
+        raise ValueError("portable material inputs must bind distinct staged pack paths")
+    names = {"input.performance", "output.wav", "output.provenance.json"}
+    def admit_path(name):
+        if (not isinstance(name, str) or not name or len(name.encode("utf-8")) > 512
+                or name.startswith("-") or "\\" in name or ":" in name
+                or any(ord(char) <= 32 or ord(char) == 127 for char in name)
+                or any(not part or part.startswith(".") for part in name.split("/"))
+                or any(name == prior or name.startswith(prior + "/")
+                       or prior.startswith(name + "/") for prior in names)):
+            raise ValueError("portable source paths must be confined, distinct and free of whitespace")
+        names.add(name)
+        return name
+    for name in original:
+        admit_path(name)
+    files = {name: data for name, data in original.items() if name not in material_inputs}
+    bindings = []
+    for index, (target, inputs) in enumerate(material_inputs.items()):
+        # Only the canonical compiler discovers dependencies and interprets the
+        # manifest. Relative source paths and exact UTF-8 bytes remain unchanged.
+        prefix = f"material-sources-{index}"
+        while any(prefix == name or prefix.startswith(name + "/")
+                  or name.startswith(prefix + "/") for name in names):
+            prefix += "-input"
+        if not isinstance(inputs, dict):
+            raise ValueError("invalid canonical material source-input export")
+        source_files = inputs.get("sources")
+        if not isinstance(inputs.get("manifest"), str) or not isinstance(source_files, list) or not source_files:
+            raise ValueError("incomplete canonical material source-input export")
+        for item in source_files:
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                raise ValueError("invalid canonical material source file")
+            relative = item.get("path")
+            if not isinstance(relative, str) or relative.startswith("/"):
+                raise ValueError("invalid canonical material source path")
+            files[admit_path(prefix + "/" + relative)] = item["text"].encode("utf-8")
+        manifest_name = prefix + "/manifest.tsv"
+        while any(manifest_name == name or manifest_name.startswith(name + "/")
+                  or name.startswith(manifest_name + "/") for name in names):
+            manifest_name = manifest_name.removesuffix(".tsv") + "-input.tsv"
+        files[admit_path(manifest_name)] = inputs["manifest"].encode("utf-8")
+        bindings.append({"packPath": target, "manifestPath": manifest_name,
+                         **({"materialState": inputs["materialState"]} if "materialState" in inputs else {})})
+    sizes = [len(data) for data in files.values()] + [len(original[name]) for name in material_inputs]
+    source_bytes = source.read_bytes()
+    if (len(files) + len(bindings) > 32 or any(not size or size > 8 * 1024 * 1024 for size in sizes)
+            or sum(sizes) > 32 * 1024 * 1024 or not source_bytes or len(source_bytes) > 1024 * 1024):
+        raise ValueError("portable experiment exceeds the existing source-file or byte limits")
     packet = {"format": "frankensim-native-wind-input-v1", "renderer": "strings",
-              "source": encoded(source.read_bytes()), "decimate": decimate,
-              "attachments": [{"path": name, "bytes": encoded((output / name).read_bytes())}
-                              for name in attachments]}
+              "source": encoded(source_bytes), "decimate": decimate,
+              "attachments": [{"path": name, "bytes": encoded(data)} for name, data in files.items()]}
+    if bindings:
+        packet["materialManifests"] = bindings
     if profiles:
         packet["stringProfiles"] = profiles
     if gas_sources is not None:
@@ -240,8 +311,11 @@ def write_lab_experiment(source: Path, output: Path, attachments: list[str], pro
         packet["coatingStrainGuard"] = {"maximumBytes": coating_strain_guard[0],
                                         "maximumWork": coating_strain_guard[1]}
     path = output / "experiment.native.json"
+    serialized = json.dumps(packet, separators=(",", ":"), ensure_ascii=False)
+    if len(serialized.encode("utf-8")) > 4 * ((33 * 1024 * 1024 + 2) // 3) + 65536:
+        raise ValueError("portable experiment exceeds the existing complete request limit")
     with path.open("x", encoding="utf-8") as stream:
-        json.dump(packet, stream, separators=(",", ":"), ensure_ascii=False)
+        stream.write(serialized)
     return path
 
 
@@ -417,9 +491,10 @@ def main(argv=None) -> int:
         attachments.append("contact-thermal.profile")
     # Thermal cells refer to the SAME assembly packs. Do not introduce an
     # independent thermal pack loader or bypass the native card-identity check.
+    material_inputs = {} if export_experiment else None
     attachments += stage_packs([text, profile, (stop_profile or b"").decode("utf-8")],
                               args.pack_root or args.performance.parent, args.pack, output,
-                              args.pack_manifest, compiler, args.pack_material_state)
+                              args.pack_manifest, compiler, args.pack_material_state, material_inputs)
     source = output / "performance.material-strings"
     source.write_text(text)
     gas_components = []
@@ -439,7 +514,7 @@ def main(argv=None) -> int:
         gas_sources = {"components": gas_components, "waterSpecies": None if args.gas_water == "none" else args.gas_water,
                        "phase": args.gas_phase} if gas_components else None
         packet = write_lab_experiment(source, output, attachments, profiles, gas_sources, args.decimate,
-                                      args.coating_strain_guard)
+                                      args.coating_strain_guard, material_inputs)
         print(packet)
     if args.prepare_only:
         return 0

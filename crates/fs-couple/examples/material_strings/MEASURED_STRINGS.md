@@ -84,19 +84,36 @@ Each binding invokes `xtask matdb-pack --manifest ... --out ...`. The canonical
 compiler resolves the manifest's source files, units, uncertainty, validity,
 identity and attribution; Python does not interpret those properties. Replacing
 a manifest or editing its declared source data compiles a fresh pack at the
-same referenced path. The resulting pack bytes enter both the portable
-experiment and the native render. Use `--renderer PATH --lab-experiment` in
-place of `--prepare-only` to compile, render and save the same experiment.
+same referenced path. The resulting pack bytes enter the native render.
+With `--prepare-only` or `--lab-experiment`, the compiler also exports its exact
+original inputs through `--source-inputs`. The portable experiment retains
+those manifests and source tables, together with the existing Lab
+`materialManifests` bindings, instead of freezing each generated binary into
+an attachment. Precompiled replacements remain byte-for-byte attachments.
+Use `--renderer PATH --lab-experiment` in place of `--prepare-only` to compile,
+render and save the same experiment.
+
+Open that packet in the local Instrument Lab server configured with
+`--material-compiler /absolute/path/xtask`. **Compile original material sources**
+is already populated. **Edit text…** on the original table, apply the edit,
+and render again; the same canonical compiler rebuilds the referenced pack.
+The launcher does not interpret physical source records or infer dependencies.
+The native compiler discovers only declared files, preserves their relative
+paths, and binds the exported inputs to the accepted compiled source envelope.
+Both raw sources and generated packs share the Lab's existing count and byte
+limits. A source-input export that cannot be retained refuses rather than
+silently reverting to a precompiled portable experiment.
 
 For a source that must retain a canonical material identity, add
 `--pack-material-state REFERENCED_PATH CHEMISTRY PHASE PROCESS REVISION`
 for that manifest target. The launcher forwards these explicit identity fields
 to the same compiler's `--material-state` option. Its verified material-card
-bytes then reach the native performer and the saved Lab experiment unchanged.
+bytes reach the native performer; the saved Lab binding retains those exact
+identity fields so subsequent source edits use the same material-card identity.
 This matters when an ordered bow/string or finger/string contact names the
 original material identities. It does not infer a contact pair or change any
 material property. Identity fields must describe the actual source state;
-revision is an unsigned 32-bit integer. Without this option the compiler keeps
+revision admission remains with the native compiler. Without this option the compiler keeps
 its original property, interface, model or species envelope. The compiler
 refuses applying a material-card identity to a non-material source.
 
