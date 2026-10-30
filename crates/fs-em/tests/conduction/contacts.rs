@@ -12,7 +12,7 @@ use fs_qty::{
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 
-fn mesh(depth: f64) -> TriComplex2 {
+pub(super) fn mesh(depth: f64) -> TriComplex2 {
     TriComplex2::from_indexed_triangles(
         "synthetic matching material contact",
         vec![
@@ -91,7 +91,7 @@ fn pressure_point(pressure: f64) -> QueryPoint {
         .unwrap()
 }
 
-fn interface(
+pub(super) fn interface(
     left: &ResolvedConductorState,
     right: &ResolvedConductorState,
     pressure: f64,
@@ -109,7 +109,7 @@ fn interface(
     .unwrap()
 }
 
-fn binding(source: ResolvedElectricalInterface) -> ConductionContact {
+pub(super) fn binding(source: ResolvedElectricalInterface) -> ConductionContact {
     ConductionContact {
         first_vertices: [1, 2],
         second_vertices: [4, 7],

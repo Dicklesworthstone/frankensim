@@ -15360,9 +15360,30 @@ The conduction-enthalpy regressions use independent two-layer thermal balances
 and midpoint RC/RLC equations, covering material-only source changes, both
 polarities, continuing charge/flux, local heating and refusal/retry. Bounds are
 fixed geometry/topology, scalar memoryless conduction and fixed ideal graph
-R/L/C. The nonlinear wrapper accepts bulk-conductor problems; electrical
-interface fields require their prepared contact owner and refuse on this path.
-The existing contact-capable circuit keeps its original source and heat routing.
+R/L/C. `step_response_contact_circuit_candidate` also retains the original
+prepared contact owner inside every nonlinear bulk trial. Actual endpoint
+temperatures and phase fractions refresh the same ordered interface sources;
+native surface voltage jumps and exact interface Joule heat feed the original
+two receiving thermal cells with the authored heat fraction. Interface heat,
+bulk E.J and graph-resistor heat enter the same finite-enthalpy residual once.
+Independent RLC/two-cell calorimetry regressions cover bulk and interface data
+changes, both polarities, accepted history, source-domain and missing-owner
+refusal, common work exhaustion and late cancellation/replay. Omitting a
+required prepared contact owner refuses; fixed-context bulk-only stepping
+cannot silently freeze a contact or discard its heat.
+
+`PreparedHeatNetwork::step_conduction_response_contact_circuit_candidate`
+passes the complete original material heat assembly into that same continuing
+circuit residual. Thermal-interface resistance, source-integrated layer fluxes
+and enclosure radiosity refresh at every shared endpoint, with their original
+samples retained in the generic candidate report. Closed-enclosure radiation
+is internal exchange; its numerical net receives the existing combined-energy
+check. Original E/J-dependent thermal boundary response or applicability refuses
+instead of freezing the initial field slice. The focused circuit/heat regression
+compares continuing charge/flux, two-sided electrical-contact heat, thermal
+contact transfer and radiative exchange against independent energy and RLC
+equations, including data-only emissivity and thermal-interface substitutions.
+
 This adds no displacement current, moving material, hysteresis, nonlinear
 storage or reversible field-caloric coupling. The first-order coupled thermal
 scheme and bounded Picard closure retain their refinement/convergence limits.

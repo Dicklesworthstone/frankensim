@@ -36,7 +36,12 @@ fn pressure_quantity() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
 }
 
-pub(super) fn interface(cards: &[MaterialCard; 2], r0: f64, beta: f64, upper: f64) -> InterfaceSystemCard {
+pub(super) fn interface(
+    cards: &[MaterialCard; 2],
+    r0: f64,
+    beta: f64,
+    upper: f64,
+) -> InterfaceSystemCard {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {

@@ -3,8 +3,12 @@
 //! material refresh. Its original interface and radiosity owners supply heat;
 //! the original spatial electrical solve alone supplies Joule dissipation.
 
+use super::circuit::response::{
+    ConductionResponseCircuit, ConductionResponseCircuitEnthalpyCandidate,
+};
 use super::response::ConductionResponseEnthalpyCandidate;
 use super::*;
+use crate::circuit_enthalpy::ResistorCell;
 use crate::circuit_enthalpy::contacts::heat::{
     HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, closed_balance,
 };
@@ -19,6 +23,102 @@ fn heat_error(error: HeatNetworkError) -> Error {
 }
 
 impl PreparedHeatNetwork<'_, '_> {
+    /// Advance the original nonlinear spatial circuit with this complete
+    /// material heat assembly. Electrical charge/flux, bulk E/J response,
+    /// original electrical-contact loss, thermal-contact conduction and
+    /// enclosure radiation see the SAME endpoint enthalpies and source claims.
+    /// Every field trial starts from the accepted circuit history, and every
+    /// heat trial starts from the accepted finite caloric history.
+    ///
+    /// Original thermal surfaces and layer laws are evaluated by this prepared
+    /// network; their samples remain in the returned report. Bulk and contact
+    /// Joule heat enter once through the native circuit field. Other fixed graph
+    /// resistors require explicit receiving cells in `graph_resistors`; this
+    /// route does not silently omit material graph-resistor/contact bindings.
+    /// All boundaries must be independent of E/J in response and applicability.
+    /// Closed-enclosure radiation is internal exchange and its numerical net is
+    /// checked against the original combined-energy allowance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_conduction_response_contact_circuit_candidate<'t>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &ConductionResponseCircuit,
+        ports: &[f64],
+        graph_resistors: &[ResistorCell],
+        contacts: &[contacts::ConductionContactThermal<'_>],
+        regions: &[ConductionRegion],
+        volume_tolerance_m3: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<ConductionResponseCircuitEnthalpyCandidate<'t, HeatNetworkSample>, Error> {
+        let cancel = RefCell::new(|| cx.checkpoint().is_err());
+        check(&cancel)?;
+        let bulk = self.thermal_material_network().map_err(heat_error)?;
+        let layout = ConductionThermalNetwork {
+            cells: bulk.cells,
+            links: bulk.links,
+            regions,
+            volume_tolerance_m3,
+        };
+        if regions.len() != circuit.sources().len() || regions.len() > assembly.max_cells {
+            return Err(invalid(
+                "one bounded heat route per original circuit triangle required",
+            ));
+        }
+        let mut field_axes = Vec::new();
+        for region in regions {
+            check(&cancel)?;
+            let source = circuit
+                .sources()
+                .get(region.triangle)
+                .ok_or_else(|| invalid("thermal route names an absent circuit conductor"))?;
+            for (axis, _) in source.axes() {
+                field_axes.push((region.cell, axis.as_str()));
+            }
+        }
+        self.admit_field_independent_boundaries(cx, &field_axes)
+            .map_err(heat_error)?;
+        let next = layout.step_response_circuit_resolved_candidate(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            graph_resistors,
+            contacts,
+            assembly,
+            field_controls,
+            response,
+            controls,
+            initial_energy_increments_j,
+            |trial| {
+                let coefficients = self.resolve(cx, trial).map_err(heat_error)?;
+                if !coefficients.contacts.is_empty() || !coefficients.bulk.resistors.is_empty() {
+                    return Err(invalid(
+                        "spatial response circuit cannot omit other source-bound electrical work",
+                    ));
+                }
+                Ok(coefficients.bulk)
+            },
+            |sample| &sample.material,
+            &cancel,
+        )?;
+        let report = next.report();
+        closed_balance(
+            target_s - thermal.time_s(),
+            report.total_energy_residual_j,
+            &report.source,
+            controls.total_energy_tolerance_j,
+        )
+        .map_err(heat_error)?;
+        check(&cancel)?;
+        Ok(next)
+    }
+
     /// Close nonlinear material current, thermal contacts and radiation together.
     ///
     /// Each trial resolves the original source sigma/rho(T, phase, |E|, |J|)

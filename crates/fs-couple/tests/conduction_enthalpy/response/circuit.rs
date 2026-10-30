@@ -5,6 +5,9 @@ use fs_couple::circuit_enthalpy::conduction::circuit::{
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
 
+#[path = "circuit/contacts.rs"]
+mod contacts;
+
 const C: f64 = 0.5;
 const L: f64 = 0.05;
 
