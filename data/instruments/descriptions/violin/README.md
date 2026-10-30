@@ -95,6 +95,13 @@ bulk alloy unless its construction assumptions actually apply. Original source
 identities and queries are retained in the native log. The string is **not
 retuned** after substitution, and the sound is not peak-normalized.
 
+The strings' tension loss eta_F stays a stated unknown, entered as 0 (`unknowns.tsv`,
+`u-string-loss-spectrum`). The one violin row of
+[`tension-loss.tsv`](../../../../crates/fs-couple/examples/material_strings/tension-loss.tsv),
+Galluzzo, Woodhouse and Mansour 2017, measured a plain steel monofilament E. The
+Dominant E here is wound steel (Pickering 1985, the table's note 1), and eta_F is
+the loss of a construction, so that row is not applied.
+
 ## Resolve the finite bow contact width
 
 `cannone-ribbon-10mm.material-strings` selects a **rigid, uniformly loaded
