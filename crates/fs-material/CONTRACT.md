@@ -4737,3 +4737,53 @@ behavior, and actual compiled FSRI gypsum/mineral-wool/plywood sources. The
 source integration independently constructs 0.1 W conduction and exercises
 50 J transfer on the original thermal timeline with energy and sensible-entropy
 closure. Existing two-layer parity and the 64-layer limit are included.
+
+## Regional liquid/dense-water/steam caloric paths
+
+`phase::water::regional::RegionalWater` prepares one fixed-pressure original
+IF97 path across Regions 1, 3 and 2, including Region 4 liquid/vapor coexistence
+when present. Its admitted temperature window lies within 273.16..=1073.15 K
+and its pressure within 0<p<=100 MPa; the exact critical singular state remains
+unsupported. Only source pieces, saturation and junctions intersecting the
+requested window are prepared. Cold compressed feedwater, high-temperature
+boiling and superheated or supercritical steam can consequently share one
+caloric owner. Low-pressure vapor-only windows and exact saturation endpoint
+windows retain their original source admission.
+
+Preparation retains bounded fixed arrays of original source pieces and events,
+with no heap allocation or coefficient/reference changes. Each single-phase
+regional junction carries the original signed h, u, s and v differences and
+temperature/pressure residuals. Callers separately budget enthalpy, entropy,
+volume and boundary-temperature matching. A source matching defect is not
+latent heat, a new phase, an entropy-production model, or a global equation of
+state reconciliation. Original IF97 fits can produce positive gaps or negative
+overlaps in h and s independently.
+
+Temperature, h and raw-s queries share the prepared path. Caloric inverses
+use original Cp or Cp/T in safeguarded Newton/bisection, bounded density
+solves and a total outer-iteration budget shared across candidate pieces.
+A generic caloric query refuses an unrepresented gap or multiple original
+roots. Fixed-mass heat continuation retains the initial state and chooses the
+first admissible root in the heating/cooling direction; it still refuses a
+gap rather than inventing storage at a regional boundary. Exact zero heat
+retains the state without an inverse. Numerical work and residuals remain
+observable. Gibbs evaluations contribute outer iterations; the reported
+source-evaluation counter counts the nested dense pressure/stiffness work.
+
+Heat deposition evolves H and independently audits Q=Delta U+p_requested*Delta V.
+Stable original-source differences are accumulated separately as sensible,
+physical latent, and regional matching contributions in both enthalpy and
+entropy. Reports retain phase mass and volume, endpoint pressure-closure
+defects, stable differences and independent represented-endpoint residuals.
+Supercritical states have no vapor quality or fictitious phase inventory, even
+when their source routing reaches Region 2. Invalid budgets, exhausted work,
+unrepresentable nonzero heat or phase mass, unsupported/ambiguous states,
+chart mismatch and early/late cancellation produce no partial result.
+
+Six focused native tests cover 20/25 MPa heating and cooling across both source
+junctions; independent h/s gap and overlap behavior; Cp and Cp/T quadrature;
+window-scoped preparation, low-pressure vapor and exact latent endpoints;
+subdivision, tiny heat/quality and zero-heat identity; and source, matching,
+work, energy and cancellation refusal. This equilibrium pressure owner does
+not supply a whole-path Cp stability certificate for `ThermalLaw`, ice,
+resolved phase kinetics, spatial two-phase flow, or vessel mechanics.

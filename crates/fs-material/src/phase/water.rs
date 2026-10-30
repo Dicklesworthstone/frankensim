@@ -27,6 +27,9 @@ pub mod dense;
 /// Pressure-controlled Region 3 heating, supercritical fluid and high-temperature boiling.
 pub mod pressure;
 
+/// Original-source caloric paths spanning liquid, dense water and steam regions.
+pub mod regional;
+
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::bounds::{
     If97HeatCapacityBound, If97HeatCapacityBoundError, If97HeatCapacityBoundSolve,
