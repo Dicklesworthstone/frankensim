@@ -12512,6 +12512,35 @@ and dense dimensions are explicitly bounded (at most 64 sites); local material
 probes are shared across the joint Jacobian rather than replaced by independent
 site mechanics.
 
+## Nonlinear spatial current with complete material heat exchange
+
+`PreparedHeatNetwork::step_conduction_response_candidate` closes the original
+scalar conductivity/resistivity response in temperature, phase and local E/J
+inside the same finite-cell enthalpy residual as sourced thermal contacts,
+optional source-integrated k(T) layers and total-emissivity radiosity. Voltage,
+distributed current-density and equipotential total-current drives retain their
+native spatial solves; every inner field solve consumes the shared trial budget.
+Native per-triangle E.J enters the mapped original cells once. The source-generic
+candidate retains complete heat samples and publishes the field, material-source
+and caloric histories together after the original energy and source gates pass.
+
+Contact and emissivity response AND source applicability must be independent of
+local E/J, since these thermal boundaries own no resolved interface electric
+field. This admission applies to the new nonlinear consumer; older prescribed
+context heat paths retain their existing semantics. Caloric storage and thermal
+conductivity retain the original field-independence admission. Closed-enclosure
+radiation is internal exchange; its numerical net power is excluded by the
+original combined-energy gate rather than treated as external supplied heat.
+
+Fixed geometry and view factors, original whole-volume source routes, independent
+caloric laws, bounded memoryless scalar response and first-order endpoint
+coupling remain the limits. This adds no moving phase boundary, interface
+electrical-field model, unconditional convergence or measured-material claim.
+Three focused `conduction_enthalpy::response::heat` regressions cover independent
+two-body Fourier/contact/radiation and nonlinear-current balances, current
+reversal, data-only electrical/interface/emissivity changes, continued history,
+exact no-surface-path parity and budget/cancellation/source-support refusal.
+
 
 ## Source-resolved Hertz islands on shared finite thermal cells — v0
 

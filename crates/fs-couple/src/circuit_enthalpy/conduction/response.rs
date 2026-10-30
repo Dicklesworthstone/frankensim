@@ -56,21 +56,19 @@ impl ThermalDriver for ResponseCandidate {
 /// Consume the accepted enthalpy history and its source/field state together.
 /// Failed stencils, source-domain queries, budgets and cancellation publish none
 /// of either candidate; the original histories remain available for retry.
-pub struct ConductionResponseEnthalpyCandidate<'t> {
+pub struct ConductionResponseEnthalpyCandidate<'t, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     problem: PlanarConductionResponse,
-    report: CircuitEnthalpyReport<MaterialNetworkSample, ConductionResponseThermalStep>,
+    report: CircuitEnthalpyReport<S, ConductionResponseThermalStep>,
 }
-impl<'t> ConductionResponseEnthalpyCandidate<'t> {
+impl<'t, S> ConductionResponseEnthalpyCandidate<'t, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn problem(&self) -> &PlanarConductionResponse {
         &self.problem
     }
-    pub fn report(
-        &self,
-    ) -> &CircuitEnthalpyReport<MaterialNetworkSample, ConductionResponseThermalStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<S, ConductionResponseThermalStep> {
         &self.report
     }
     pub fn into_parts(
@@ -78,7 +76,7 @@ impl<'t> ConductionResponseEnthalpyCandidate<'t> {
     ) -> (
         DepositionSimulation<'t>,
         PlanarConductionResponse,
-        CircuitEnthalpyReport<MaterialNetworkSample, ConductionResponseThermalStep>,
+        CircuitEnthalpyReport<S, ConductionResponseThermalStep>,
     ) {
         (self.thermal, self.problem, self.report)
     }
@@ -124,6 +122,57 @@ impl ConductionThermalNetwork<'_> {
     ) -> Result<ConductionResponseEnthalpyCandidate<'t>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
+        let network = MaterialNetwork {
+            cells: self.cells,
+            resistors: &[],
+            links: self.links,
+        };
+        let prepared = network
+            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_response_resolved_candidate(
+            thermal,
+            target_s,
+            problem,
+            drive,
+            assembly,
+            field_controls,
+            response,
+            controls,
+            initial_energy_increments_j,
+            |state| {
+                prepared
+                    .resolve(state, || (*cancel.borrow_mut())())
+                    .map_err(material)
+            },
+            |sample| sample,
+            &cancel,
+        )
+    }
+
+    // Both bulk-only and complete material heat assemblies enter the SAME
+    // spatial constitutive and enthalpy residual, including the final fresh
+    // solve. Retain the caller's source samples rather than discard its surface
+    // physics or introduce a second thermal timeline.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_response_resolved_candidate<'t, S>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &PlanarConductionResponse,
+        drive: ConductionDrive<'_>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve_sources: impl Fn(
+            &DepositionSimulation<'_>,
+        ) -> Result<CircuitThermalCoefficients<S>, Error>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<ConductionResponseEnthalpyCandidate<'t, S>, Error> {
+        check(cancel)?;
         // Validate the authored limit BEFORE the outer budget narrows it. The
         // native response owner validates every remaining constitutive control.
         if !(1..=MAX_RESPONSE_ITERATIONS).contains(&response.maximum_iterations) {
@@ -137,25 +186,16 @@ impl ConductionThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
         )?;
-        let routes = self.admit_mesh_routes(thermal, problem.mesh(), &cancel)?;
-        let network = MaterialNetwork {
-            cells: self.cells,
-            resistors: &[],
-            links: self.links,
-        };
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        self.admit_response_caloric(problem, &cancel)?;
+        let routes = self.admit_mesh_routes(thermal, problem.mesh(), cancel)?;
+        self.admit_response_caloric(problem, cancel)?;
         let resolve = |state: &DepositionSimulation<'_>| {
-            let coefficients = prepared
-                .resolve(state, || (*cancel.borrow_mut())())
-                .map_err(material)?;
-            self.admit_response_heat(&coefficients.source, &cancel)?;
+            let coefficients = resolve_sources(state)?;
+            self.admit_response_heat(sample(&coefficients.source), cancel)?;
             Ok::<_, Error>(coefficients)
         };
         let accepted = resolve(thermal)?;
-        let initial = self.response_materials_at(problem, &accepted.source, &routes, &cancel)?;
+        let initial =
+            self.response_materials_at(problem, sample(&accepted.source), &routes, cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b) || !same_material(a.material(), b.material())
         }) {
@@ -169,10 +209,14 @@ impl ConductionThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |state, remaining| {
-                check(&cancel)?;
+                check(cancel)?;
                 let coefficients = resolve(state)?;
-                let sources =
-                    self.response_materials_at(problem, &coefficients.source, &routes, &cancel)?;
+                let sources = self.response_materials_at(
+                    problem,
+                    sample(&coefficients.source),
+                    &routes,
+                    cancel,
+                )?;
                 let bounded = ConductionResponseControls {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
@@ -259,7 +303,7 @@ impl ConductionThermalNetwork<'_> {
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel)?;
         Ok(ConductionResponseEnthalpyCandidate {
             thermal,
             problem,

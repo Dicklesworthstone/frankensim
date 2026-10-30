@@ -6,7 +6,9 @@ use fs_couple::circuit_enthalpy::{
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
 
+#[path = "circuit/storage.rs"]
 mod storage;
+#[path = "circuit/thermal.rs"]
 mod thermal;
 
 mod material_load {

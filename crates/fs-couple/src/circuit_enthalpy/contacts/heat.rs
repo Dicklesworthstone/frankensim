@@ -227,6 +227,55 @@ impl PreparedHeatNetwork<'_, '_> {
         Ok(electrical.bulk)
     }
 
+    // Nonlinear spatial electrical consumers solve local E/J, but neither a
+    // uniform radiating cell nor a thermal-contact law owns an interface field.
+    // Do not retain an initially valid zero-field slice after that field moves.
+    // This admission is opt-in for those consumers; existing prescribed-context
+    // heat consumers retain their own coordinate-ownership contracts.
+    pub(crate) fn admit_field_independent_boundaries(
+        &self, cx: &Cx<'_>,
+        field_axes: &[(fs_thermal::enthalpy::CellId, &str)],
+    ) -> Result<(), HeatNetworkError> {
+        use fs_material::conductor::response::ConductorMagnitude;
+        let invalid = HeatNetworkError::Invalid;
+        let electrical = |dims| [ConductorMagnitude::ElectricField.quantity().dims(),
+            ConductorMagnitude::CurrentDensity.quantity().dims()].contains(&dims);
+        let admit = |claim: &fs_matdb::PropertyClaim, context: &fs_matdb::QueryPoint,
+            cells: &[fs_thermal::enthalpy::CellId]| {
+            let owned = |axis: &str| field_axes.iter()
+                .any(|(cell, name)| cells.contains(cell) && *name == axis);
+            if claim.value.axes().any(|(axis, dims)| owned(axis) || electrical(dims))
+                || claim.validity.bounds().keys().any(|axis| owned(axis)
+                    || [claim.validity.axis_quantities().get(axis), context.axis_quantities().get(axis)]
+                        .into_iter().flatten().any(|q| electrical(q.dims()))) {
+                return Err(invalid("thermal contacts and emissivity require field-independent response and applicability"));
+            }
+            Ok(())
+        };
+        for contact in &self.thermal_contacts {
+            check(cx)?;
+            let ClaimSelection::Pinned(id) = contact.selection else {
+                return Err(invalid("prepared thermal interface lost its original source pin"));
+            };
+            let claim = contact.point.interface.claims().claim(id)
+                .ok_or(invalid("prepared thermal interface source is absent"))?;
+            admit(claim, contact.point.context, &contact.sides.map(|side| side.cell))?;
+        }
+        for surface in &self.radiating_cells {
+            check(cx)?;
+            let MaterialPropertySelection::PinnedByProperty(pins) = &surface.selection else {
+                return Err(invalid("prepared emissivity lost its original source pins"));
+            };
+            for (_, id) in pins {
+                check(cx)?;
+                let claim = surface.material.material.claims().claim(*id)
+                    .ok_or(invalid("prepared emissivity source is absent"))?;
+                admit(claim, surface.material.context, &[surface.cell])?;
+            }
+        }
+        check(cx)
+    }
+
     /// Original bulk heat routes for consumers composing additional physics.
     pub fn resistor_destinations(&self) -> Vec<super::ResistorCell> {
         self.electrical.resistor_destinations()

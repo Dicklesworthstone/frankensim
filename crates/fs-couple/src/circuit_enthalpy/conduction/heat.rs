@@ -3,10 +3,12 @@
 //! material refresh. Its original interface and radiosity owners supply heat;
 //! the original spatial electrical solve alone supplies Joule dissipation.
 
+use super::response::ConductionResponseEnthalpyCandidate;
 use super::*;
 use crate::circuit_enthalpy::contacts::heat::{
     HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, closed_balance,
 };
+use fs_em::conduction::response::{ConductionResponseControls, PlanarConductionResponse};
 use fs_exec::Cx;
 
 fn heat_error(error: HeatNetworkError) -> Error {
@@ -17,6 +19,107 @@ fn heat_error(error: HeatNetworkError) -> Error {
 }
 
 impl PreparedHeatNetwork<'_, '_> {
+    /// Close nonlinear material current, thermal contacts and radiation together.
+    ///
+    /// Each trial resolves the original source sigma/rho(T, phase, |E|, |J|)
+    /// through its native spatial field owner and re-evaluates this complete heat
+    /// assembly at the SAME endpoint enthalpies. Native local E.J is deposited
+    /// once. Interfaces, emissivity and optional source-integrated layer fluxes
+    /// retain their original owners, selected claims and receiving cells.
+    ///
+    /// Voltage, distributed current density and equipotential total-current
+    /// boundaries keep their original meanings. Every native field iteration,
+    /// including discarded thermal trials and final fresh admission, consumes
+    /// the common `maximum_circuit_trials` budget. Constitutive defects and
+    /// iteration error are never heat. Returned field and caloric histories
+    /// must be published together; refusal/cancellation publishes neither.
+    ///
+    /// Caloric storage, thermal transport, interface resistance and emissivity
+    /// must be independent of E/J in both response and source applicability.
+    /// No interface electric field or field-dependent radiating temperature is
+    /// inferred. Geometry, trace areas/view factors, fixed external conditions
+    /// and confined phase-chart densities retain the original heat/field limits.
+    /// This is first-order endpoint coupling, not a uniqueness, unconditional
+    /// stability, phase-motion or measured-material validation claim.
+    /// Closed-enclosure radiation is internal exchange; external heat is
+    /// `non_electrical_heat_j - dt * source.radiation_net_power_w()`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_conduction_response_candidate<'t>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &PlanarConductionResponse,
+        drive: ConductionDrive<'_>,
+        regions: &[ConductionRegion],
+        volume_tolerance_m3: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<ConductionResponseEnthalpyCandidate<'t, HeatNetworkSample>, Error> {
+        let cancel = RefCell::new(|| cx.checkpoint().is_err());
+        check(&cancel)?;
+        let bulk = self.thermal_material_network().map_err(heat_error)?;
+        let layout = ConductionThermalNetwork {
+            cells: bulk.cells,
+            links: bulk.links,
+            regions,
+            volume_tolerance_m3,
+        };
+        if regions.len() != problem.mesh().faces().len() || regions.len() > assembly.max_cells {
+            return Err(invalid(
+                "one bounded heat route per original electrical triangle required",
+            ));
+        }
+        let mut field_axes = Vec::new();
+        for region in regions {
+            check(&cancel)?;
+            let source = problem
+                .sources()
+                .get(region.triangle)
+                .ok_or_else(|| invalid("thermal route names an absent spatial conductor"))?;
+            for (axis, _) in source.axes() {
+                field_axes.push((region.cell, axis.as_str()));
+            }
+        }
+        self.admit_field_independent_boundaries(cx, &field_axes)
+            .map_err(heat_error)?;
+        let next = layout.step_response_resolved_candidate(
+            thermal,
+            target_s,
+            problem,
+            drive,
+            assembly,
+            field_controls,
+            response,
+            controls,
+            initial_energy_increments_j,
+            |trial| {
+                let coefficients = self.resolve(cx, trial).map_err(heat_error)?;
+                if !coefficients.contacts.is_empty() || !coefficients.bulk.resistors.is_empty() {
+                    return Err(invalid(
+                        "spatial current cannot silently omit graph electrical work",
+                    ));
+                }
+                Ok(coefficients.bulk)
+            },
+            |sample| &sample.material,
+            &cancel,
+        )?;
+        let report = next.report();
+        closed_balance(
+            target_s - thermal.time_s(),
+            report.total_energy_residual_j,
+            &report.source,
+            controls.total_energy_tolerance_j,
+        )
+        .map_err(heat_error)?;
+        check(&cancel)?;
+        Ok(next)
+    }
+
     /// Joint spatial current, material-temperature/phase feedback, thermal
     /// contact resistance and closed-enclosure radiation.
     ///

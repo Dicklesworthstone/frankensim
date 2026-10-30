@@ -1,7 +1,7 @@
 //! Source-only changes to thermal contacts and emissivity reach the real field.
 use super::*;
 #[path = "../../../fs-conduction/tests/radiation_material/common.rs"]
-mod radiative;
+pub(super) mod radiative;
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as RD, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY as RP,
     EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity,
@@ -83,7 +83,7 @@ fn emissive_material(
     (card, curve)
 }
 
-fn interface(cards: &[MaterialCard; 2], resistance: f64) -> InterfaceSystemCard {
+pub(super) fn interface(cards: &[MaterialCard; 2], resistance: f64) -> InterfaceSystemCard {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {

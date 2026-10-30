@@ -250,7 +250,7 @@ fn initial_circuit(
     let selection = MaterialPropertySelection::SingleClaimOnly;
     let (kind, element, law) = if magnetic {
         let value =
-            ResolvedInductor::resolve(&cards[2], &point(300.0), selection, 1.0, 1.0, 1).unwrap();
+            ResolvedInductor::resolve(&cards[2], &point(300.0), selection.clone(), 1.0, 1.0, 1).unwrap();
         let law = ThermalFieldStorage::inductor(&cards[2], &value, "T", [250.0, 500.0]).unwrap();
         (
             Branch::Inductor { henries: f64::NAN },
@@ -259,7 +259,7 @@ fn initial_circuit(
         )
     } else {
         let value =
-            ResolvedCapacitor::resolve(&cards[2], &point(300.0), selection, 1.0, 1.0).unwrap();
+            ResolvedCapacitor::resolve(&cards[2], &point(300.0), selection.clone(), 1.0, 1.0).unwrap();
         let law = ThermalFieldStorage::capacitor(&cards[2], &value, "T", [250.0, 500.0]).unwrap();
         (
             Branch::Capacitor { farads: f64::NAN },
