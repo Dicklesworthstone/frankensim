@@ -5309,3 +5309,9 @@ These are local temporal estimates and computed reference-geometry results,
 not global or spatial accuracy certificates. Spatial refinement, source ranges,
 the explicit mixed-cell conductivity closure, and the fixed-pressure/no-flow
 limits of the original slab remain independent requirements.
+
+## Complete concentric rod thermoelastic potential
+
+`ConcentricRodThermoelasticLaw` extends the original axial thermoelastic material law with the native annular bending, shear and torsional potential. It exposes the same potential, entropy and mechanical heat-capacity derivatives for all six small-strain coordinates. The derivatives come from the pinned material sources, with integrated thermal expansion and the original section moments; there is no independent coefficient table or material-name dispatch.
+
+The admitted chart has fixed reference geometry, scalar reference density and expansion, and scalar or globally affine Young and shear moduli. Source domains, finite results and the original strain envelope are checked. More general temperature laws and phase-dependent geometry are not inferred. The `fs-couple` rod enthalpy regressions compare all components against independent formulas and temperature differentiation, including parity with the native rod energy. These new native tests await execution after the unchanged runtime dependency exceeded the authoring environment's resources.

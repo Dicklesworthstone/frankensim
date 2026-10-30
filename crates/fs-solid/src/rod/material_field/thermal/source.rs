@@ -20,6 +20,9 @@ use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
 use crate::rod::MAX_MATERIAL_ROD_SEGMENTS;
 use crate::rod::material_field::reference::RodReferenceGeometry;
 
+/// The same pinned rod description lowered to complete layer thermodynamics.
+mod thermoelastic;
+
 /// One spatial layer, its immutable card and complete stress-free state.
 #[derive(Clone, Debug)]
 pub struct RodLayerSource<'a> {
@@ -214,6 +217,9 @@ impl<'a> RodMaterialSource<'a> {
     /// Fixed reference mass [kg], not current density times unchanged volume.
     #[must_use]
     pub const fn reference_mass_kg(&self) -> f64 { self.reference_mass_kg }
+    /// Original small-strain envelope, shared by force and caloric consumers.
+    #[must_use]
+    pub const fn linear_strain_limit(&self) -> f64 { self.linear_strain_limit }
 }
 
 fn point_at_temperature(reference: &QueryPoint, temperature: f64) -> Result<QueryPoint, SpatialRodError> {

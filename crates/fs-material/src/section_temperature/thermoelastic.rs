@@ -18,6 +18,9 @@
 //! Thermodynamic convention: Abeyaratne, *Continuum Mechanics*, Vol. II, §8.4,
 //! <https://web.mit.edu/abeyaratne/Volumes/RCA_Vol_II.pdf>.
 
+/// Complete axial, bending, shear and torsional potentials of the same layers.
+pub mod rod;
+
 use fs_matdb::{InterpolationPolicy, PropertyValue};
 
 use super::{ConcentricSectionTemperatureLaw, invalid};

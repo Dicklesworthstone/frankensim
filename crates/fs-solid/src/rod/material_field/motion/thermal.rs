@@ -13,7 +13,37 @@ use super::{PreparedRodMotion, RodMotionPose, SpatialRodError, admit_section, ch
 use crate::rod::material_field::SpatialMaterialRod;
 use crate::rod::material_field::thermal::source::RodMaterialSource;
 
+/// Actual-pose native strain and section energy, excluding separate links/loads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RodSegmentStrainState {
+    /// Axial, shear, shear; intrinsic geometry removed, thermal strain retained.
+    pub gamma: [f64; 3],
+    /// Twist and two bending curvatures [rad/m], relative to reference geometry.
+    pub curvature: [f64; 3],
+    pub strain_energy_j: f64,
+}
+
 impl<I> PreparedRodMotion<I> {
+    /// Observe each original section at one admitted pose through the SAME
+    /// kinematic and energy owners used by analytical forces and motion.
+    pub fn segment_strain_states(
+        &self,
+        pose: &RodMotionPose,
+        gate: &CancelGate,
+    ) -> Result<Vec<RodSegmentStrainState>, SpatialRodError> {
+        let rod = self.rod_at_pose(pose, gate)?;
+        let mut states = Vec::with_capacity(self.source.sections.len());
+        for segment in 0..self.source.sections.len() {
+            checkpoint(gate)?;
+            let (gamma, curvature) = self.source.strains_for(&rod, segment)?;
+            states.push(RodSegmentStrainState {
+                gamma,
+                curvature,
+                strain_energy_j: self.source.segment_energy_for(&rod, segment)?,
+            });
+        }
+        Ok(states)
+    }
     /// Current section temperatures in segment/layer order [K].
     /// A mechanical source without an explicit `T` coordinate refuses; this
     /// operation does not invent a reference or ambient body temperature.

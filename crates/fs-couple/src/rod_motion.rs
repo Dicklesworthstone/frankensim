@@ -358,6 +358,9 @@ pub use environment::RodFluidRefresh;
 pub mod thermal;
 pub use thermal::RodThermalRefresh;
 
+/// Reciprocal source-bound section thermodynamics on the finite heat timeline.
+pub mod enthalpy;
+
 /// A force AT the material node and a pure couple held in the WORLD frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RodNodalWrench {

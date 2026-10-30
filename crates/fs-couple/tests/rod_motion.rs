@@ -22,6 +22,9 @@ mod environment;
 #[path = "rod_motion/thermal.rs"]
 mod thermal;
 
+#[path = "rod_motion/enthalpy.rs"]
+mod enthalpy;
+
 fn section(scale:f64)->ConcentricShearSection {
     let mut claims=ClaimSet::new();let mut requirements=Vec::new();
     for (name,value,dims) in [("density",1000.0,Density::DIMS),
