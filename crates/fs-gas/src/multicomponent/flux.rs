@@ -1,6 +1,6 @@
 use super::{
-    Cell, Error, MAX_COMPONENTS, MAX_NORMAL_COMPONENTS, MixtureGas, NormalCell, Primitive, poll,
-    positive,
+    Cell, Error, MAX_COMPONENTS, MAX_SPATIAL_COMPONENTS, MixtureGas, NormalCell, Primitive,
+    SpatialCell, poll, positive,
 };
 
 /// Wave-speed receipt accompanying an allocation-free species/energy face flux.
@@ -58,29 +58,28 @@ impl MixtureGas {
         out: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Face, Error> {
-        self.interface_components(left, pl, right, pr, out, false, cancelled)
+        self.interface_components::<0>(left, pl, right, pr, out, cancelled)
     }
 
-    // Both axial and planar consumers use these same wave speeds, star states
-    // and bounded HLL fallback. The extra momentum is transported by the SAME
-    // waves, and its kinetic energy participates in every source-domain gate.
+    // Axial, planar and volumetric consumers use these same wave speeds, star
+    // states and bounded HLL fallback. Every transverse momentum is transported
+    // by the SAME waves, with its kinetic energy in every source-domain gate.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn interface_components(
+    pub(super) fn interface_components<const TANGENTS: usize>(
         &self,
         left: &[f64],
         pl: Primitive,
         right: &[f64],
         pr: Primitive,
         out: &mut [f64],
-        transverse: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Face, Error> {
         poll(cancelled)?;
         let n = self.species_count();
-        let m = n + 2 + usize::from(transverse);
+        let m = n + 2 + TANGENTS;
         let energy = m - 1;
-        let mut fl = [0.0; MAX_NORMAL_COMPONENTS];
-        let mut fr = [0.0; MAX_NORMAL_COMPONENTS];
+        let mut fl = [0.0; MAX_SPATIAL_COMPONENTS];
+        let mut fr = [0.0; MAX_SPATIAL_COMPONENTS];
         physical(left, pl, &mut fl[..m], n, energy);
         physical(right, pr, &mut fr[..m], n, energy);
         let sl = (pl.velocity - pl.sound_speed).min(pr.velocity - pr.sound_speed);
@@ -110,16 +109,16 @@ impl MixtureGas {
         let contact = (pr.pressure - pl.pressure + al * pl.velocity - ar * pr.velocity) / (al - ar);
         let pstar = pl.pressure + al * (contact - pl.velocity);
         if contact.is_finite() && sl < contact && contact < sr && positive(pstar) {
-            let mut ls = [0.0; MAX_NORMAL_COMPONENTS];
-            let mut rs = [0.0; MAX_NORMAL_COMPONENTS];
+            let mut ls = [0.0; MAX_SPATIAL_COMPONENTS];
+            let mut rs = [0.0; MAX_SPATIAL_COMPONENTS];
             let star = |q: &[f64], p: Primitive, s: f64, target: &mut [f64]| {
                 let factor = (s - p.velocity) / (s - contact);
                 for i in 0..n {
                     target[i] = q[i] * factor;
                 }
                 target[n] = p.density * factor * contact;
-                if transverse {
-                    target[n + 1] = q[n + 1] * factor;
+                for k in n + 1..energy {
+                    target[k] = q[k] * factor;
                 }
                 target[energy] = ((s - p.velocity) * q[energy] - p.pressure * p.velocity
                     + pstar * contact)
@@ -127,8 +126,8 @@ impl MixtureGas {
             };
             star(left, pl, sl, &mut ls[..m]);
             star(right, pr, sr, &mut rs[..m]);
-            if self.admissible_face(&ls[..m], transverse)
-                && self.admissible_face(&rs[..m], transverse)
+            if self.admissible_face::<TANGENTS>(&ls[..m])
+                && self.admissible_face::<TANGENTS>(&rs[..m])
             {
                 let (q, qs, f, s) = if contact >= 0.0 {
                     (left, &ls[..m], &fl[..m], sl)
@@ -141,7 +140,7 @@ impl MixtureGas {
                 return checked(out, speed, false);
             }
         }
-        let mut middle = [0.0; MAX_NORMAL_COMPONENTS];
+        let mut middle = [0.0; MAX_SPATIAL_COMPONENTS];
         for expansion in 0..=8 {
             poll(cancelled)?;
             let (l, r) = if expansion == 0 {
@@ -156,7 +155,7 @@ impl MixtureGas {
             for k in 0..m {
                 middle[k] = (r * right[k] - l * left[k] + fl[k] - fr[k]) / (r - l);
             }
-            if self.admissible_face(&middle[..m], transverse) {
+            if self.admissible_face::<TANGENTS>(&middle[..m]) {
                 for k in 0..m {
                     out[k] = (r * fl[k] - l * fr[k] + l * r * (right[k] - left[k])) / (r - l);
                 }
@@ -168,17 +167,26 @@ impl MixtureGas {
         ))
     }
 
-    fn admissible_face(&self, q: &[f64], transverse: bool) -> bool {
-        if !transverse {
+    fn admissible_face<const TANGENTS: usize>(&self, q: &[f64]) -> bool {
+        if TANGENTS == 0 {
             return self.admissible(q);
         }
         let n = self.species_count();
-        self.admissible_normal_cell(NormalCell {
-            partial_densities: &q[..n],
-            normal_momentum: q[n],
-            transverse_momentum: q[n + 1],
-            energy: q[n + 2],
-        })
+        if TANGENTS == 1 {
+            self.admissible_normal_cell(NormalCell {
+                partial_densities: &q[..n],
+                normal_momentum: q[n],
+                transverse_momentum: q[n + 1],
+                energy: q[n + 2],
+            })
+        } else {
+            self.admissible_spatial_cell(SpatialCell {
+                partial_densities: &q[..n],
+                normal_momentum: q[n],
+                transverse_momentum: [q[n + 1], q[n + 2]],
+                energy: q[n + 3],
+            })
+        }
     }
 }
 fn physical(q: &[f64], p: Primitive, out: &mut [f64], n: usize, energy: usize) {
@@ -186,8 +194,8 @@ fn physical(q: &[f64], p: Primitive, out: &mut [f64], n: usize, energy: usize) {
         out[i] = q[i] * p.velocity;
     }
     out[n] = q[n] * p.velocity + p.pressure;
-    if energy == n + 2 {
-        out[n + 1] = q[n + 1] * p.velocity;
+    for k in n + 1..energy {
+        out[k] = q[k] * p.velocity;
     }
     out[energy] = (q[energy] + p.pressure) * p.velocity;
 }

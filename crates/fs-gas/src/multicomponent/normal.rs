@@ -1,13 +1,16 @@
-//! Planar traces of the original evolving-species caloric and Riemann owners.
+//! Planar and spatial traces of the original evolving-species caloric owners.
 //!
-//! Spatial consumers rotate the two momentum components into an orthonormal
-//! face frame. Every species, both momenta and full referenced total energy
+//! Spatial consumers rotate momentum into an orthonormal face frame.
+//! Every species, every momentum and full referenced total energy
 //! then use one shared HLLC/HLL solve. In particular, transverse shear mixing
 //! contributes to the HLL state's heat before the source-domain admission.
 
 use super::{
     Cell, Error, FaceFlux, MAX_COMPONENTS, MAX_NORMAL_COMPONENTS, MixtureGas, Primitive, poll,
 };
+
+mod spatial;
+pub use spatial::{SpatialCell, SpatialPrimitive};
 
 /// Borrowed conservative trace in a face's normal/tangent frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,7 +122,7 @@ impl MixtureGas {
         let mut r = [0.0; MAX_NORMAL_COMPONENTS];
         write_cell(left, &mut l[..n + 3]);
         write_cell(right, &mut r[..n + 3]);
-        self.interface_components(&l[..n + 3], pl, &r[..n + 3], pr, out, true, &mut cancelled)
+        self.interface_components::<1>(&l[..n + 3], pl, &r[..n + 3], pr, out, &mut cancelled)
     }
 
     /// Source-admit reconstructed traces and reuse their computed thermodynamics
@@ -141,7 +144,7 @@ impl MixtureGas {
         let pl = self.normal_conserved_into(left, &mut l[..n + 3])?;
         poll(&mut cancelled)?;
         let pr = self.normal_conserved_into(right, &mut r[..n + 3])?;
-        self.interface_components(&l[..n + 3], pl, &r[..n + 3], pr, out, true, &mut cancelled)
+        self.interface_components::<1>(&l[..n + 3], pl, &r[..n + 3], pr, out, &mut cancelled)
     }
 
     /// Original caloric shock/rarefaction wall pressure at a stationary slip

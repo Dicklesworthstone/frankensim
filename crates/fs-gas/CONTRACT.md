@@ -1302,3 +1302,29 @@ rotation and energy-datum invariance, and exercise late cancellation/replay,
 source/path mismatch and complete cell/report rollback. This chemical-source
 adapter alone supplies no spatial transport, molecular diffusion, ignition or
 flame validation, and no global splitting-order or entropy certificate.
+
+## Three-dimensional original-mixture Riemann and wall closures
+
+`multicomponent::SpatialCell` and `SpatialPrimitive` extend the original
+mixture owner to an orthonormal normal/two-tangent face frame. Canonical
+species, all three momenta and full species-referenced total energy use the
+same const-generic HLLC/HLL implementation as axial and planar consumers.
+Star and HLL source admission includes both transverse kinetic contributions;
+mixing their shear energy cannot escape the original caloric interval. The
+original planar arithmetic and source-owned shock/rarefaction wall pressure
+are retained. Reconstructed primitives retain source-computed temperature,
+heat capacity and sound speed without another energy inversion.
+
+Successful face calls use bounded stack scratch and caller output. Source and
+precision refusals never clip temperature or renormalize species. Stationary
+adiabatic slip walls have exactly zero species, tangential momentum and energy
+flux and use the incident cell's original composition and calorics. Eight
+focused tests cover bitwise planar reduction, material contacts with both
+shears, tangential rotation/normal reversal/Galilean covariance, combined-shear
+source refusal, variable-Cp and formation-gauge retention, original wall
+pressure, precision/cancellation and the full 128-species bound.
+
+This remains the Estimated conservative engineering lane. No moving
+unequal-caloric interface pressure-equilibrium property, fully discrete
+entropy/invariant-domain theorem, chemistry, spatial convergence or molecular
+shock-thickness validation follows from a successful face evaluation.

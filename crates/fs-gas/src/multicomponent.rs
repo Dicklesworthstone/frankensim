@@ -40,7 +40,7 @@ pub use crate::dynamics::{
 pub use eos::MixtureGas;
 pub use evolve::{MixtureEuler1d, StepReport, Totals};
 pub use flux::FaceFlux;
-pub use normal::{NormalCell, NormalPrimitive};
+pub use normal::{NormalCell, NormalPrimitive, SpatialCell, SpatialPrimitive};
 
 use fs_thermochem::{ThermochemErrorV1, kinetics::KineticsErrorV1};
 
@@ -48,6 +48,7 @@ use fs_thermochem::{ThermochemErrorV1, kinetics::KineticsErrorV1};
 pub const MAX_SPECIES: usize = 128;
 const MAX_COMPONENTS: usize = MAX_SPECIES + 2;
 const MAX_NORMAL_COMPONENTS: usize = MAX_SPECIES + 3;
+const MAX_SPATIAL_COMPONENTS: usize = MAX_SPECIES + 4;
 
 /// Owned conservative cell average, in canonical source-species order.
 #[derive(Clone, Debug, PartialEq)]
