@@ -116,6 +116,112 @@ class MaterialPreparation(unittest.TestCase):
                 R.stage_packs(["string wire.fsmatpk 0.3"], packs, bindings, output)
 
 
+    def test_source_manifests_reach_measured_packets_and_native_render_without_rewriting_setup(self):
+        root = Path(tempfile.mkdtemp()).resolve()
+        original = (EXAMPLES / "measured-cello-g.material-strings").read_text()
+        # A native source path has no required filename extension.
+        original = original.replace("cello-g-whole.fsmatpk", "strings/whole.source")
+        source = root / "source.material-strings"
+        source.write_text(original)
+        (root / "strings").mkdir()
+        stale = root / "strings/whole.source"
+        stale.write_bytes(b"stale pack must never win an explicit compilation")
+        body = root / "replacement body.fsmatpk"
+        body.write_bytes(b"original body source bytes\x00\xff")
+        source_dir = root / "source tables (original)"
+        source_dir.mkdir()
+        manifest = source_dir / "whole string.manifest.tsv"
+        source_pack = REPO / "data/matdb/seed-v1/cello-g-strings-whole-lampis-2024"
+        manifest.write_bytes((source_pack / "manifest.tsv").read_bytes())
+        table = source_dir / "properties.tsv"
+        table.write_bytes((source_pack / "properties.tsv").read_bytes())
+        before = (manifest.read_bytes(), table.read_bytes())
+        compiler, renderer = root / "source compiler", root / "native renderer"
+        emitted = b"compiler transport witness\x00\xff"
+        calls = []
+
+        def native_call(command, **kwargs):
+            calls.append(command)
+            if command[0] == str(compiler):
+                self.assertEqual(command, [str(compiler), "matdb-pack", "--manifest",
+                                           str(manifest), "--out", str(output / "strings/whole.source")])
+                self.assertEqual(kwargs, {"check": True})
+                self.assertEqual((manifest.read_bytes(), table.read_bytes()), before)
+                # This witness is only an executable boundary. The real Rust
+                # compiler owns manifest decoding and normalized pack semantics.
+                Path(command[-1]).write_bytes(emitted)
+            else:
+                self.assertEqual(command, [str(renderer), str(output / "performance.material-strings"),
+                                           str(output / "render.wav")])
+                self.assertEqual(Path(command[1]).read_text(), original)
+                self.assertEqual((output / "strings/whole.source").read_bytes(), emitted)
+                self.assertEqual((output / "body.fsmatpk").read_bytes(), body.read_bytes())
+                Path(command[2]).write_bytes(b"native renderer transport witness")
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(R.shutil, "which", side_effect=lambda name: name), \
+             mock.patch.object(R.subprocess, "run", side_effect=native_call):
+            for name, mode in (("prepared", ["--prepare-only"]),
+                               ("rendered", ["--renderer", str(renderer), "--lab-experiment"])):
+                output = root / name
+                self.assertEqual(R.main(["--performance", str(source), "--out", str(output),
+                    "--pack-compiler", str(compiler),
+                    "--pack-manifest", f"strings/whole.source={manifest}",
+                    "--pack", f"body.fsmatpk={body}", *mode]), 0)
+                packet = json.loads((output / "experiment.native.json").read_text())
+                self.assertEqual(base64.b64decode(packet["source"]), original.encode())
+                self.assertEqual({item["path"]: base64.b64decode(item["bytes"])
+                                  for item in packet["attachments"]},
+                                 {"strings/whole.source": emitted, "body.fsmatpk": body.read_bytes()})
+                self.assertEqual(packet["renderer"], "strings")
+        self.assertEqual(len(calls), 3)  # one compile per experiment, then one native render
+        self.assertEqual((manifest.read_bytes(), table.read_bytes()), before)
+        self.assertEqual(source.read_text(), original)
+        self.assertEqual(stale.read_bytes(), b"stale pack must never win an explicit compilation")
+
+    def test_manifest_bindings_refuse_conflicts_missing_sources_and_failed_compilation(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "wire.fsmatpk").write_bytes(b"stale wire")
+        output = root / "new"
+        output.mkdir()
+        manifest = root / "source.tsv"
+        manifest.write_bytes(b"original manifest")
+        binding = f"wire.fsmatpk={manifest}"
+        cases = [
+            (["string wire.fsmatpk"], [binding], [binding]),
+            (["string wire.fsmatpk"], [], [binding, binding]),
+            (["string wire.fsmatpk"], [], [f"unused.fsmatpk={manifest}"]),
+            (["string ../wire.fsmatpk"], [], [f"../wire.fsmatpk={manifest}"]),
+            (["string wire.fsmatpk"], [], ["wire.fsmatpk="]),
+            (["string wire.fsmatpk", "body missing.fsmatpk"], [], [binding]),
+        ]
+        with mock.patch.object(R.subprocess, "run", side_effect=AssertionError("compiler before binding admission")):
+            for texts, packs, manifests in cases:
+                with self.assertRaises(ValueError):
+                    R.stage_packs(texts, root, packs, output, manifests, "xtask")
+        self.assertEqual(list(output.iterdir()), [])
+        failure = R.subprocess.CalledProcessError(1, ["xtask", "matdb-pack"])
+        with mock.patch.object(R.subprocess, "run", side_effect=failure):
+            with self.assertRaises(R.subprocess.CalledProcessError):
+                R.stage_packs(["string wire.fsmatpk"], root, [], output, [binding], "xtask")
+        self.assertFalse((output / "wire.fsmatpk").exists())
+        self.assertEqual((root / "wire.fsmatpk").read_bytes(), b"stale wire")
+        with mock.patch.object(R.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            with self.assertRaisesRegex(ValueError, "did not create a nonempty pack"):
+                R.stage_packs(["string wire.fsmatpk"], root, [], output, [binding], "xtask")
+
+    def test_manifest_compiler_options_refuse_before_source_io(self):
+        for options in (["--pack-manifest", "wire.fsmatpk=source.tsv"],
+                        ["--pack-compiler", "missing-xtask"],
+                        ["--pack-compiler", "missing-xtask", "--pack-manifest", "wire.fsmatpk=source.tsv"]):
+            with mock.patch.object(R.shutil, "which", return_value=None), \
+                 mock.patch.object(R.Path, "read_text", side_effect=AssertionError("source I/O before refusal")), \
+                 mock.patch.object(R.Path, "mkdir", side_effect=AssertionError("directory before refusal")), \
+                 mock.patch.object(R.subprocess, "run", side_effect=AssertionError("compiler before refusal")):
+                with self.assertRaises(SystemExit):
+                    R.main(["--prepare-only", "--performance", "unread.material-strings",
+                            "--out", "uncreated", *options])
+
     def test_material_stop_model_sources_and_explicit_native_paths_reach_the_complete_experiment(self):
         root = Path(tempfile.mkdtemp())
         original = (EXAMPLES / "pluck.material-strings").read_text()

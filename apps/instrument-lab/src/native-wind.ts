@@ -23,6 +23,7 @@ import solidReedDgSource from "../../../crates/fs-couple/examples/material_modal
 import hereditarySolidReedSource from "../../../crates/fs-couple/examples/material_modal_valve/solid-hereditary-dg.performance?raw";
 import surfaceSolidReedSource from "../../../crates/fs-couple/examples/material_modal_valve/solid-surface-dg.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
+import measuredStringSource from "../../../crates/fs-couple/examples/material_strings/measured-cello-g.material-strings?raw";
 import nonlinearPreloadStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-preload.material-strings?raw";
 import stoppedNonlinearStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-stopped-preload.material-strings?raw";
 import tensorBodyStringSource from "../../../crates/fs-couple/examples/material_strings/tensor-body.material-strings?raw";
@@ -247,6 +248,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: one material-derived string, body and cavity, with a physical preload and bow gesture. Attach wire.fsmatpk and body.fsmatpk using the source-pack instructions linked below, or open your own complete material-string performance.",
     help: "The string performer accepts the same full material cards as the reed and wall solvers, along with legacy claim packs. Replace an attached source at its declared path to change the solved material without browser coefficients. Optional profiles add body geometry, fingers/frets and contact heat. This is a numerical integration fixture, not a measured violin, cello or bass.",
+  },
+  {
+    name: "material_strings/measured-cello-g.material-strings",
+    label: "Strings — measured cello G coefficients on a laboratory plate",
+    renderer: "strings",
+    source: measuredStringSource,
+    decimate: false,
+    intro: "Starter: published whole-string mass and bending-stiffness estimates drive a manufactured laboratory plate. Attach cello-g-whole.fsmatpk and body.fsmatpk using the measured-string source recipe, or prepare a complete experiment directly from its original manifests.",
+    help: "The measured setup and property selectors describe one published string on a laboratory receiver. Its temperature_known=0 stays independent of body and gas temperature. No intrinsic loss law or reference-fluid inertial correction is inferred; sampled gas resistance remains. A replacement measured source must supply matching length, radius, fixed tension and explicit selectors. This fixture does not establish complete cello acoustics or measured recording accuracy.",
   },
   {
     name: "material_strings/nonlinear-preload.material-strings",
@@ -937,6 +947,7 @@ export function createNativeWindPanel(): HTMLElement {
       el("p", {}, "Open experiment loads a complete native source packet, including its original material files, gas associations and specimen profiles. Save experiment keeps the current configuration in that same format; neither action renders sound. The material-string launcher can prepare these packets directly from a physical assembly."),
       el("p", {}, canonical,
         " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/tree/main/crates/fs-couple/examples/material_strings", target: "_blank", rel: "noopener"}, "String source-pack instructions"),
+        " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/blob/main/crates/fs-couple/examples/material_strings/MEASURED_STRINGS.md", target: "_blank", rel: "noopener"}, "Measured string source recipe"),
         " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/tree/main/crates/fs-couple/examples/finite_gas_string", target: "_blank", rel: "noopener"}, "Heated string source-pack instructions"),
         " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-and-string-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),
     atmosphere.element,

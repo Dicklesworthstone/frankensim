@@ -64,6 +64,37 @@ as described in [the native comparison guide](../../../../apps/instrument-lab/NA
 The packet retains the original whole-string and plate packs. A material or
 support edit is admitted by the same Rust owner when rendering.
 
+### Prepare directly from original source manifests
+
+The launcher can invoke the existing Rust material compiler for each declared
+source. Build the ordinary `xtask` executable once (`cargo build -p xtask`), then
+prepare this experiment without manually producing intermediate packs:
+
+```bash
+python3 apps/instrument-lab/tools/render_material_strings.py \
+  --prepare-only \
+  --performance crates/fs-couple/examples/material_strings/measured-cello-g.material-strings \
+  --pack-compiler target/debug/xtask \
+  --pack-manifest cello-g-whole.fsmatpk=data/matdb/seed-v1/cello-g-strings-whole-lampis-2024/manifest.tsv \
+  --pack-manifest body.fsmatpk=crates/fs-couple/examples/material_strings/body-manifest.tsv \
+  --out "$case_dir/from-original-sources"
+```
+
+Each binding invokes `xtask matdb-pack --manifest ... --out ...`. The canonical
+compiler resolves the manifest's source files, units, uncertainty, validity,
+identity and attribution; Python does not interpret those properties. Replacing
+a manifest or editing its declared source data compiles a fresh pack at the
+same referenced path. The resulting pack bytes enter both the portable
+experiment and the native render. Use `--renderer PATH --lab-experiment` in
+place of `--prepare-only` to compile, render and save the same experiment.
+
+Precompiled `--pack` bindings and manifest bindings can be combined, but each
+referenced path has exactly one explicit binding. Compilation failure stops
+the experiment; a previously compiled pack is never substituted for a failed
+source. This path changes no string setup, selectors, body, gas or gesture.
+Different measured spans, diameters or tensions still require the corresponding
+explicit setup and are checked by the native measured-string owner.
+
 ## Explicit property and state selection
 
 The section record is one line:

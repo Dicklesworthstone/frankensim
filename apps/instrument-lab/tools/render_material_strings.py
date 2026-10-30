@@ -4,6 +4,8 @@
 All mechanics, material admission, gas resolution and PCM encoding stay in the
 native material_strings executable. This launcher stages its original inputs;
 it neither estimates missing properties nor tunes a string after substitution.
+Explicit --pack-manifest bindings invoke the existing Rust matdb-pack compiler;
+its output enters the same source packet as a precompiled --pack replacement.
 Contact profiles reach that same native solve. Optional native decimation changes
 only the observed audio clock, retaining the authored mechanical resolution.
 The output directory must be new. Python's standard library suffices for native
@@ -142,32 +144,50 @@ def assembly_geometry(text: str, report: str) -> str:
     return "\n".join(lines) + "\nschedule\n" + schedule
 
 
-def stage_packs(texts: list[str], root: Path, replacements: list[str], output: Path) -> list[str]:
+def stage_packs(texts: list[str], root: Path, replacements: list[str], output: Path,
+                manifests: list[str] | None = None, compiler: str | None = None) -> list[str]:
     # These are the existing binary pack formats, copied byte for byte.
     # Rust remains the material decoder and property/domain authority.
     suffixes = (".fsmatpk", ".fsintpk", ".fsmodelpk")
     available = {str(p.relative_to(root)): p for suffix in suffixes for p in root.rglob("*" + suffix)}
     tokens = {token for text in texts for line in text.splitlines() if not line.startswith("#") for token in line.split()}
-    replaced = set()
-    for binding in replacements:
-        name, sep, source = binding.partition("=")
-        # An explicit binding may use any native-referenced filename. The Rust
-        # consumer selects and decodes the actual bulk/interface/model format.
-        if not sep or not name or name not in tokens or name in replaced:
-            raise ValueError(f"--pack must name one distinct referenced path: {binding!r}")
-        path = Path(name)
-        if path.is_absolute() or any(p in (".", "..") for p in name.split("/")):
-            raise ValueError("material pack paths must stay relative to the performance directory")
-        available[name] = Path(source).expanduser().resolve()
-        replaced.add(name)
-    required = {t for t in tokens if t.endswith(suffixes)} | replaced
+    if manifests and compiler is None:
+        raise ValueError("--pack-manifest requires --pack-compiler")
+    bound = set()
+    compiled = {}
+    for option, bindings, sources in (("--pack", replacements, available),
+                                      ("--pack-manifest", manifests or [], compiled)):
+        for binding in bindings:
+            name, sep, source = binding.partition("=")
+            # Explicit bindings may use any native-referenced filename. Rust
+            # compiles and decodes the actual bulk/interface/model source.
+            if not sep or not name or not source or name not in tokens or name in bound:
+                raise ValueError(f"{option} must name one distinct referenced path: {binding!r}")
+            path = Path(name)
+            if path.is_absolute() or any(p in ("", ".", "..") for p in name.split("/")):
+                raise ValueError("material pack paths must stay relative to the performance directory")
+            sources[name] = Path(source).expanduser().resolve()
+            bound.add(name)
+    required = {t for t in tokens if t.endswith(suffixes)} | bound
     for name in sorted(required):
-        if name not in available:
-            raise ValueError(f"missing material pack {name}; supply --pack-root or --pack {name}=PATH")
+        if name not in available and name not in compiled:
+            raise ValueError(f"missing material pack {name}; supply --pack-root, --pack {name}=PATH or --pack-manifest {name}=MANIFEST")
+    for name in sorted(required):
         destination = output / name
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with destination.open("xb") as stream, available[name].open("rb") as source:
-            shutil.copyfileobj(source, stream)
+        if name in compiled:
+            if destination.exists():
+                raise FileExistsError(destination)
+            # The existing compiler resolves sibling source tables, source
+            # identity, dimensions, uncertainty and validity from the manifest.
+            # A failed compilation stops here; never use a stale available pack.
+            subprocess.run([compiler, "matdb-pack", "--manifest", str(compiled[name]),
+                            "--out", str(destination)], check=True)
+            if not destination.is_file() or destination.stat().st_size == 0:
+                raise ValueError(f"material compiler did not create a nonempty pack: {name}")
+        else:
+            with destination.open("xb") as stream, available[name].open("rb") as source:
+                shutil.copyfileobj(source, stream)
     return sorted(required)
 
 
@@ -235,6 +255,9 @@ def main(argv=None) -> int:
     parser.add_argument("--out", type=Path, required=True, help="new directory for staged sources, native output and log")
     parser.add_argument("--pack-root", type=Path)
     parser.add_argument("--pack", action="append", default=[], metavar="REFERENCED_PATH=SOURCE_PACK")
+    parser.add_argument("--pack-manifest", action="append", default=[], metavar="REFERENCED_PATH=MANIFEST",
+                        help="compile this original source manifest into its referenced pack with the existing Rust material compiler")
+    parser.add_argument("--pack-compiler", help="path to the existing xtask executable; required with --pack-manifest")
     parser.add_argument("--body-profile", type=Path)
     parser.add_argument("--stop-profile", type=Path, help="original finger/fret/bow-surface contact profile")
     parser.add_argument("--contact-thermal", type=Path, help="original finite contact-heat profile; thermal properties come from the same assembly packs")
@@ -269,6 +292,12 @@ def main(argv=None) -> int:
     parser.add_argument("--observer", help="actual receiver description, required when exporting to the lab")
     parser.add_argument("--recipe", default=str(Path(__file__).resolve()))
     args = parser.parse_args(argv)
+    if bool(args.pack_manifest) != bool(args.pack_compiler):
+        parser.error("--pack-manifest and --pack-compiler must be supplied together")
+    compiler = shutil.which(args.pack_compiler) if args.pack_compiler else None
+    if args.pack_compiler and compiler is None:
+        parser.error("--pack-compiler must name an available xtask executable")
+    compiler = str(Path(compiler).resolve()) if compiler else None
     try:
         response_arguments = loaded_response_arguments(
             args.loaded_response_only, args.body_response_force, args.body_response_strain)
@@ -354,7 +383,8 @@ def main(argv=None) -> int:
     # Thermal cells refer to the SAME assembly packs. Do not introduce an
     # independent thermal pack loader or bypass the native card-identity check.
     attachments += stage_packs([text, profile, (stop_profile or b"").decode("utf-8")],
-                              args.pack_root or args.performance.parent, args.pack, output)
+                              args.pack_root or args.performance.parent, args.pack, output,
+                              args.pack_manifest, compiler)
     source = output / "performance.material-strings"
     source.write_text(text)
     gas_components = []
