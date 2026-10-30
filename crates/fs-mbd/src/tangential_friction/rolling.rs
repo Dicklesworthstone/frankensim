@@ -86,6 +86,15 @@ impl RigidRollingHistory {
     pub const fn checkpoint(&self) -> Option<&RollingLossCheckpoint> {
         self.checkpoint.as_ref()
     }
+
+    /// Internal composition retains the original admitted source and history;
+    /// it cannot synthesize a checkpoint from separate numerical observables.
+    pub(super) fn from_native_step(step: &RollingLossStep) -> Self {
+        Self {
+            state: step.next_state.clone(),
+            checkpoint: Some(step.checkpoint.clone()),
+        }
+    }
 }
 
 /// Explicit accuracy/work limits and independent native-mechanics tolerances.

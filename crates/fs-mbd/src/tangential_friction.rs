@@ -11,6 +11,9 @@ pub mod rolling;
 /// Joint Hertz sliding/spin friction with full two-body recoil.
 pub mod hertz;
 
+/// Simultaneous Hertz shear/spin and material-derived rolling on one native pair.
+pub mod hertz_rolling;
+
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::tangential::nonsmooth::{
     NonsmoothAudit, NonsmoothContact, NonsmoothContactResult, NonsmoothControls,

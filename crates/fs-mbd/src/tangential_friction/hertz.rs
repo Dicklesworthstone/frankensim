@@ -104,19 +104,19 @@ pub struct RigidHertzCandidate {
 pub struct PreparedRigidHertzPair {
     binding: RigidContactBinding,
     frame: TangentFrame,
-    before: [RigidBodyState; 2],
-    pair_properties: [MassProperties; 2],
-    arms: [Vec3; 2],
-    axes: [Vec3; 3],
-    points_before: [PointKinematics; 2],
+    pub(super) before: [RigidBodyState; 2],
+    pub(super) pair_properties: [MassProperties; 2],
+    pub(super) arms: [Vec3; 2],
+    pub(super) axes: [Vec3; 3],
+    pub(super) points_before: [PointKinematics; 2],
     normal_force_n: f64,
     radius: f64,
     dt_s: f64,
     controls: RigidHertzControls,
     mobility: [[f64; 3]; 3],
-    input: HertzWrenchInput,
+    pub(super) input: HertzWrenchInput,
     rate_before: [f64; 3],
-    totals_before: (f64, Vec3, Vec3),
+    pub(super) totals_before: (f64, Vec3, Vec3),
 }
 
 /// Every refusal leaves the caller's body slice byte-for-byte unchanged.
@@ -370,22 +370,14 @@ impl PreparedRigidHertzPair {
         let couple = axes[2].scale(resolved.spin_moment_nm);
         let impulse = force.scale(dt_s);
         let angular_impulse = couple.scale(dt_s);
-        let mut after = before;
-        for (i, sign) in [(0, 1.0), (1, -1.0)] {
-            poll(gate)?;
-            let forced = before[i]
-                .apply_impulse_at_body_point(pair_properties[i], arms[i], impulse.scale(sign))?
-                .state_after;
-            let body_couple = forced
-                .pose()
-                .orientation()
-                .rotate_world_to_body(angular_impulse.scale(sign));
-            after[i] = RigidBodyState::new(
-                forced.pose(),
-                forced.linear_momentum_world(),
-                forced.angular_momentum_body().add(body_couple),
-            )?;
-        }
+        let after = apply_pair_wrench(
+            before,
+            pair_properties,
+            arms,
+            impulse,
+            angular_impulse,
+            gate,
+        )?;
         let points_after = points(after, pair_properties, arms)?;
         let relative_before = relative_point(points_before);
         let relative_after = relative_point(points_after);
@@ -518,7 +510,7 @@ impl PreparedRigidHertzPair {
     }
 }
 
-fn points(
+pub(super) fn points(
     bodies: [RigidBodyState; 2],
     properties: [MassProperties; 2],
     arms: [Vec3; 2],
@@ -528,12 +520,12 @@ fn points(
         bodies[1].point_kinematics(properties[1], arms[1])?,
     ])
 }
-fn relative_point(points: [PointKinematics; 2]) -> Vec3 {
+pub(super) fn relative_point(points: [PointKinematics; 2]) -> Vec3 {
     points[0]
         .point_velocity_world
         .sub(points[1].point_velocity_world)
 }
-fn relative_spin(points: [PointKinematics; 2]) -> Vec3 {
+pub(super) fn relative_spin(points: [PointKinematics; 2]) -> Vec3 {
     points[0]
         .angular_velocity_world
         .sub(points[1].angular_velocity_world)
@@ -565,11 +557,23 @@ fn response(
     axes: [Vec3; 3],
     radius: f64,
 ) -> Result<[[f64; 3]; 3], RigidHertzError> {
-    let mut factor = [[0.0; 12]; 3];
+    scaled_response(bodies, properties, arms, axes, [0.0, 0.0, radius])
+}
+
+/// Shared native Gram construction for two point-force axes followed by free
+/// couple axes. Each couple uses its physical work-coordinate radius.
+pub(super) fn scaled_response<const N: usize>(
+    bodies: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    arms: [Vec3; 2],
+    axes: [Vec3; N],
+    radii: [f64; N],
+) -> Result<[[f64; N]; N], RigidHertzError> {
+    let mut factor = [[0.0; 12]; N];
     for (body, sign) in [(0, 1.0), (1, -1.0)] {
         let inverse_mass_root = properties[body].mass().sqrt().recip();
         let orientation = bodies[body].pose().orientation();
-        for axis in 0..3 {
+        for axis in 0..N {
             let direction = orientation.rotate_world_to_body(axes[axis]);
             let translation = if axis < 2 {
                 components(axes[axis].scale(sign * inverse_mass_root))
@@ -579,7 +583,7 @@ fn response(
             let rotation = if axis < 2 {
                 arms[body].cross(direction).scale(sign)
             } else {
-                direction.scale(sign * radius)
+                direction.scale(sign * radii[axis])
             };
             let rotation = components(properties[body].angular_mobility_factor(rotation));
             for j in 0..3 {
@@ -588,12 +592,41 @@ fn response(
             }
         }
     }
-    let mut result = [[0.0; 3]; 3];
-    for i in 0..3 {
+    let mut result = [[0.0; N]; N];
+    for i in 0..N {
         for j in 0..=i {
             result[i][j] = finite(factor[i].iter().zip(&factor[j]).map(|(a, b)| a * b).sum())?;
             result[j][i] = result[i][j];
         }
     }
     Ok(result)
+}
+
+/// One native equal/opposite point impulse plus one free angular impulse.
+/// Both contact consumers use this exact original pair-only publication path.
+pub(super) fn apply_pair_wrench(
+    before: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    arms: [Vec3; 2],
+    impulse: Vec3,
+    angular_impulse: Vec3,
+    gate: &CancelGate,
+) -> Result<[RigidBodyState; 2], RigidHertzError> {
+    let mut after = before;
+    for (i, sign) in [(0, 1.0), (1, -1.0)] {
+        poll(gate)?;
+        let forced = before[i]
+            .apply_impulse_at_body_point(properties[i], arms[i], impulse.scale(sign))?
+            .state_after;
+        let body_couple = forced
+            .pose()
+            .orientation()
+            .rotate_world_to_body(angular_impulse.scale(sign));
+        after[i] = RigidBodyState::new(
+            forced.pose(),
+            forced.linear_momentum_world(),
+            forced.angular_momentum_body().add(body_couple),
+        )?;
+    }
+    Ok(after)
 }

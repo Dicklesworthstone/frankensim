@@ -1584,3 +1584,55 @@ independent constrained mechanics, sliding-to-rolling impulse balance,
 automatic landing, discovery of an inactive wall during existing support,
 moving-conveyor/elevator work, simultaneous corner support, world-coordinate
 and plane-order consistency, and atomic failure/retry.
+
+### Joint native Hertz shear/spin and sphere bulk rolling loss
+
+`tangential_friction::hertz_rolling` resolves five work-conjugate coordinates
+`[du_x,du_y,a*dtheta_spin,R*dtheta_roll_x,R*dtheta_roll_y]` with the full native
+pair response from actual masses, full inertia tensors, poses and arms.
+`PreparedRigidHertzRollingPair` retains only the original pair, source-bound
+rolling history, geometry and fixed interval. Its two-dimensional viscous block
+is eliminated analytically before the original three-dimensional Hertz solve.
+No independent force/spin cap, diagonal effective inertia, fitted damping,
+velocity cutoff or numerical compliance is introduced.
+
+The original material coefficient gives `M_roll=-A*N*R*omega_roll`. With
+`d=A*N/(R*dt)` and `B=I+d*Crr`, the original Hertz problem receives
+`f_h-Chr*d*B^-1*f_r` and `Chh-Chr*d*B^-1*Crh`. Rolling is then recovered and
+one combined point/couple impulse updates the two native candidates. The
+viscous coupling stays active at zero initial rolling because shear traction
+can generate rolling during the interval. Static support, insufficient-traction
+sliding, relative spin and both rolling axes share this one physical response.
+
+Actual endpoint momenta independently determine work and heat. Original Hertz
+surface loss and original sphere bulk loss remain separate; only bulk loss
+enters the rolling checkpoint's cumulative heat, through one original native
+advance per accepted phase. No elimination residual becomes heat.
+`advance_at_temperature` uses the unchanged source card at actual trial
+temperature and preserves its original before/midpoint/endpoint applicability,
+frequency, patch and work-coordinate lineage. Repeated admitted coefficient
+trials never accumulate another candidate's history or body state.
+
+Positive-load phases refuse initial or induced normal motion because this owner
+supplies no normal reaction. Endpoint assisting shear/spin/rolling work requires
+interval refinement. The exact released-load and zero-viscosity/friction limits
+remain explicit. Source, effort, work, compatibility, momentum, energy and final
+cancellation gates precede simultaneous body/history publication. Poses, normal
+evolution, partial-slip memory and heat storage remain separate owners; the
+existing conservative partial-slip work-overlap refusal is unchanged.
+
+This couples the unchanged symmetric Hertz traction law and original
+normal-pressure deformation-loss law under an explicit normal/shear decoupling
+approximation. It omits traction/normal-field feedback, including perturbations
+of friction integrals by the rolling pressure asymmetry. It is not a complete
+first-order mixed-contact continuum solution. Passivity and conservation claims
+refer to these two named models inside their retained validity limits.
+
+Seven new native groups cover independent planar static/sliding and induced-roll
+references; original Hertz and unconstrained-viscous limits; mixed motion with
+independent spatial pressure quadrature; world/gauge/index covariance; endpoint
+source/geometry/event admission; and loaded checkpoint, late audit, budget and
+cancellation retry. All seven, the ten existing Hertz groups and the seven
+existing pure-rolling groups pass against the current original-source
+full-inertia implementation. These analytical synthetic fixtures are separate
+from measured validation and a full Cargo/DSR workspace gate.
