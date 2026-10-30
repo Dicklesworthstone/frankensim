@@ -6,6 +6,9 @@
 use super::*;
 use fs_math::det;
 
+/// Storage-preserving Maxwell rate updates, retaining all accepted histories.
+pub mod rates;
+
 /// Complete replacement of one original physical connection law.
 /// Its work-conjugate column and source port identity remain unchanged.
 #[derive(Clone, Copy, Debug, PartialEq)]
