@@ -4,6 +4,9 @@
 //! flux, then evaluates material data at its actual midpoint E/J. Iterating a
 //! constitutive law never advances electrical time or deposits trial heat.
 
+/// Source-backed R/C/L and reversible field heat inside the nonlinear solve.
+pub mod thermal;
+
 use super::*;
 use fs_em::conduction::response::{
     ConductionResponseControls, ConductionResponseError, ConductionResponseReport,
@@ -14,7 +17,9 @@ use std::sync::Arc;
 
 /// One continuing circuit with an original nonlinear spatial material law.
 /// The retained native operator is private: ordinary linear circuit steps must
-/// not bypass the response closure. Other graph R/L/C are fixed ideal elements.
+/// not bypass the response closure. Other graph elements may be explicit ideal
+/// data or original source-backed R/C/L. Their thermal refresh uses the shared
+/// field/circuit/enthalpy entry point, including reversible field entropy.
 pub struct ConductionResponseCircuit {
     circuit: ConductionCircuit,
     sources: Arc<[ScalarConductorResponse]>,
@@ -218,9 +223,11 @@ impl ConductionResponseCircuit {
         let cancel = RefCell::new(cancelled);
         let problem = self.response(&cancel)?;
         self.trial(
+            &self.circuit,
             &problem,
             problem.conductors().to_vec(),
             problem.contacts().to_vec(),
+            self.circuit.material_resistors.clone(),
             target_s,
             ports,
             assembly,
@@ -235,9 +242,11 @@ impl ConductionResponseCircuit {
     #[allow(clippy::too_many_arguments)]
     fn trial(
         &self,
+        driver: &ConductionCircuit,
         problem: &PlanarConductionResponse,
         sources: Vec<ResolvedConductorState>,
         contact_sources: Vec<fs_em::conduction::ConductionContact>,
+        material_resistors: Vec<MaterialResistor>,
         target_s: f64,
         ports: &[f64],
         assembly: WeightedAssemblyLimits,
@@ -267,9 +276,9 @@ impl ConductionResponseCircuit {
             response,
             &mut || (*cancel.borrow_mut())(),
             |native, _| {
-                self.circuit.trial_field(
+                driver.trial_field(
                     native,
-                    Vec::new(),
+                    material_resistors.clone(),
                     target_s,
                     ports,
                     field,
@@ -281,7 +290,7 @@ impl ConductionResponseCircuit {
         )?;
         let (problem, report) = candidate.into_parts();
         let (problem, sources) = problem.into_frozen_parts();
-        let native = trial.finish(&self.circuit, problem);
+        let native = trial.finish(driver, problem);
         let ConductionResponseReport {
             evaluated,
             field_solves,
@@ -431,6 +440,64 @@ impl ConductionThermalNetwork<'_> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn step_response_circuit_bound<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &ConductionResponseCircuit,
+        ports: &[f64],
+        graph_resistors: &[ResistorCell],
+        material_resistors: &[CellResistor],
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
+        field_bindings: Option<&[FieldThermalBinding]>,
+        assembly: WeightedAssemblyLimits,
+        field: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ConductionResponseCircuitEnthalpyCandidate<'t, FieldThermalSource>, Error> {
+        let cancel = RefCell::new(cancelled);
+        check(&cancel)?;
+        let network = MaterialNetwork {
+            cells: self.cells,
+            resistors: material_resistors,
+            links: self.links,
+        };
+        let bases = circuit
+            .circuit
+            .material_resistors
+            .iter()
+            .map(|r| (r.branch, r.conductor.source_basis()))
+            .collect::<Vec<_>>();
+        let prepared = network
+            .prepare_with_bases(thermal, &bases, || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_response_circuit_resolved_bound(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            graph_resistors,
+            material_resistors,
+            contact_bindings,
+            field_bindings,
+            assembly,
+            field,
+            response,
+            controls,
+            initial_energy_increments_j,
+            |state| {
+                prepared
+                    .resolve(state, || (*cancel.borrow_mut())())
+                    .map_err(material)
+            },
+            |source| source,
+            &cancel,
+        )
+    }
+
     // Original plain and complete heat networks enter this SAME continuing
     // circuit/material/enthalpy residual. Source observations remain typed and
     // retained; no contact or radiation owner is flattened into fitted heat.
@@ -457,16 +524,62 @@ impl ConductionThermalNetwork<'_> {
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<ConductionResponseCircuitEnthalpyCandidate<'t, S>, Error> {
+        self.step_response_circuit_resolved_bound(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            graph_resistors,
+            &[],
+            contact_bindings,
+            None,
+            assembly,
+            field,
+            response,
+            controls,
+            initial_energy_increments_j,
+            resolve_sources,
+            sample,
+            cancel,
+        )
+        .map(ConductionResponseCircuitEnthalpyCandidate::without_thermal_fields)
+    }
+
+    // One constitutive/thermal residual retains the original typed heat
+    // observations, including callers that resolve contacts and radiation.
+    #[allow(clippy::too_many_arguments)]
+    fn step_response_circuit_resolved_bound<'t, S>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &ConductionResponseCircuit,
+        ports: &[f64],
+        graph_resistors: &[ResistorCell],
+        material_resistors: &[CellResistor],
+        contact_bindings: &[contacts::ConductionContactThermal<'_>],
+        field_bindings: Option<&[FieldThermalBinding]>,
+        assembly: WeightedAssemblyLimits,
+        field: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve_sources: impl Fn(
+            &DepositionSimulation<'_>,
+        ) -> Result<CircuitThermalCoefficients<S>, Error>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<ConductionResponseCircuitEnthalpyCandidate<'t, FieldThermalSource<S>>, Error> {
         check(cancel)?;
         if !(1..=MAX_RESPONSE_ITERATIONS).contains(&response.maximum_iterations)
             || circuit.time_s().to_bits() != thermal.time_s().to_bits()
+            || material_resistors.len() != circuit.circuit.material_resistors.len()
         {
             return Err(invalid(
-                "matching circuit/thermal clocks and bounded response iterations required",
+                "matching clocks, bounded response and complete material graph-resistor bindings required",
             ));
         }
         let problem = circuit.response(cancel)?;
-        self.admit_mesh_step(
+        let dt = self.admit_mesh_step(
             thermal,
             target_s,
             problem.mesh(),
@@ -477,12 +590,38 @@ impl ConductionThermalNetwork<'_> {
         let routes = self.admit_mesh_routes(thermal, problem.mesh(), cancel)?;
         let graph_routes = graph_heat_routes(thermal, &circuit.circuit, graph_resistors, cancel)?;
         self.admit_response_caloric(&problem, cancel)?;
+        let network = MaterialNetwork {
+            cells: self.cells,
+            resistors: material_resistors,
+            links: self.links,
+        };
+        for binding in material_resistors {
+            check(cancel)?;
+            if routes.contains(&binding.destination.cell) {
+                return Err(invalid(
+                    "a whole-cell material resistor cannot reuse the spatial conductor's volume",
+                ));
+            }
+        }
         let resolve = |state: &DepositionSimulation<'_>| {
             let coefficients = resolve_sources(state)?;
             self.admit_response_heat(sample(&coefficients.source), cancel)?;
             Ok::<_, Error>(coefficients)
         };
         let accepted = resolve(thermal)?;
+        for original in &circuit.circuit.material_resistors {
+            check(cancel)?;
+            let next = accepted
+                .resistors
+                .iter()
+                .find(|r| r.branch == original.branch)
+                .ok_or_else(|| invalid("accepted material-resistor branch is absent"))?;
+            if !same_conductor(&original.conductor, &next.conductor) {
+                return Err(invalid(
+                    "accepted graph-resistor geometry and sources must match the actual thermal state",
+                ));
+            }
+        }
         let contacts = contacts::PreparedContacts::new_for_contacts(
             self,
             problem.mesh(),
@@ -502,13 +641,25 @@ impl ConductionThermalNetwork<'_> {
                 "accepted response-circuit sources must match the actual thermal state",
             ));
         }
+        let fields = field_bindings
+            .map(|bindings| {
+                PreparedFieldThermal::new(
+                    &network,
+                    thermal,
+                    circuit.circuit.field_view(),
+                    bindings,
+                    cancel,
+                )
+                .map_err(super::thermal::field_thermal_error)
+            })
+            .transpose()?;
         let (thermal, circuit, report) = cell_driver_candidate(
             thermal,
             target_s,
             controls,
             initial_energy_increments_j,
             |state, remaining| {
-                let coefficients = resolve(state)?;
+                let mut coefficients = resolve(state)?;
                 let sources = self.response_materials_at(
                     &problem,
                     sample(&coefficients.source),
@@ -524,11 +675,31 @@ impl ConductionThermalNetwork<'_> {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
                 };
+                let refreshed = fields
+                    .as_ref()
+                    .map(|fields| {
+                        let (storage, samples) = fields
+                            .refresh(state, cancel)
+                            .map_err(super::thermal::field_thermal_error)?;
+                        let rebound =
+                            circuit
+                                .circuit
+                                .rebind_storage_candidate(storage, ports, || {
+                                    (*cancel.borrow_mut())()
+                                })?;
+                        Ok::<_, Error>((rebound, samples))
+                    })
+                    .transpose()?;
+                let driver = refreshed
+                    .as_ref()
+                    .map_or(&circuit.circuit, |(rebound, _)| rebound.circuit());
                 let candidate = circuit
                     .trial(
+                        driver,
                         &problem,
                         sources,
                         contact_sources,
+                        coefficients.resistors,
                         target_s,
                         ports,
                         assembly,
@@ -547,11 +718,33 @@ impl ConductionThermalNetwork<'_> {
                         other => other,
                     })?;
                 let circuit_trials = candidate.step.field_solves;
+                let source = if let (Some(fields), Some((rebound, samples))) = (&fields, refreshed)
+                {
+                    fields
+                        .account(
+                            samples,
+                            candidate.circuit.circuit.field_view(),
+                            rebound.parameter_work_j(),
+                            dt,
+                            coefficients.source,
+                            &mut coefficients.sources_w,
+                            controls.total_energy_tolerance_j,
+                            cancel,
+                        )
+                        .map_err(super::thermal::field_thermal_error)?
+                } else {
+                    FieldThermalSource {
+                        network: coefficients.source,
+                        fields: Vec::new(),
+                        field_internal_energy_j: [0.0; 2],
+                        reversible_heat_j: 0.0,
+                    }
+                };
                 Ok(DrivenCoefficients {
                     circuit: candidate,
                     sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
-                    source: coefficients.source,
+                    source,
                     circuit_trials,
                 })
             },

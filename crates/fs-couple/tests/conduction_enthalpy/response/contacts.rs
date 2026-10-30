@@ -1,4 +1,6 @@
 //! G1/G3/G4: nonlinear spatial material, contact sources and finite heat.
+#[path = "contacts/field_storage.rs"]
+mod field_storage;
 use super::super::contacts::{binding, contact_mesh, interface, interface_context};
 use super::*;
 use fs_couple::circuit_enthalpy::conduction::circuit::{
