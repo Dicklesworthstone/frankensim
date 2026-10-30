@@ -6919,6 +6919,33 @@ example regressions check finite-energy temperature, fixed reference mass,
 data-only heat-capacity changes reaching actual microphone pressure,
 deterministic replay and refusal without a sound comparison.
 
+### Source-oriented conduction on the same compatible solid state
+
+`solid_enthalpy::spatial::SpatialSolidEnthalpy::try_new_with_conductivity`
+binds thermal symmetry independently of elastic and expansion symmetry, by
+original native material index. `SpatialConductivitySource::OrientedOrthotropic`
+selects three exact principal conductivity keys and claims from that material's
+original card, declared continuous temperature interval and complete typed
+fixed context. It requires a nonzero physical principal frame, a finite proper
+column rotation and the exact destination mesh frame. The scalar constructor
+and scalar source role remain available; an orthotropic entry does not query
+a scalar conductivity property or average its principal values.
+
+The original conduction owner receives `K(T) = R diag(k_i(T)) R^T` and its
+exact piecewise source derivative, retaining every source knot and receipt.
+Its existing heterogeneous enthalpy/Newton assembly therefore carries the full
+off-diagonal tensor into nodal heat, source material response, integrated
+thermal strain and native stress. The admitted frame and pinned principal
+selections remain inspectable through `conductivity_source`. Native mass,
+caloric charts, boundaries, radiation and the stationary one-way mechanical
+scope are unchanged; no second heat integrator or deformed transport is added.
+
+`tests/spatial_solid_enthalpy/conductivity.rs` specifies independent nonlinear
+P1 heat/energy/stress and mirrored-tetrahedron orientation oracles, exact
+source-condition/pin retention, scalar/equal-principal reduction and invalid
+frame/source/context refusal. Native execution is required to qualify these
+numerical assertions; metadata compilation alone does not establish them.
+
 ### Native radiative heat on the same compatible solid state
 
 `solid_enthalpy::spatial::SpatialSolidEnthalpy::advance_with_radiation` takes

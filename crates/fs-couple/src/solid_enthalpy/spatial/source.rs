@@ -1,20 +1,19 @@
 //! Source selection, continuous support and native constitutive lowering.
 
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_conduction::material::{ConductivityModel, ConductivityTable};
+use fs_conduction::material::ConductivityModel;
 use fs_conduction::transient::enthalpy::heterogeneous::ReferenceEnthalpyMaterial;
 use fs_exec::Cx;
 use fs_matdb::{ClaimSelection, QueryPoint};
 use fs_material::phase::EquilibriumPhaseState;
 use fs_material::state_point::{
-    DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
-    ScalarPropertyRequirement, resolve_material_state_point,
+    DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
 };
 use fs_solid::linear3::TetElasticMaterial;
 
 use super::{
-    SpatialMaterialSource, SpatialSolidEnthalpyError as Error, ThermalExpansionSource, poll,
-    same_measure,
+    SpatialConductivitySource, SpatialMaterialSource, SpatialSolidEnthalpyError as Error,
+    ThermalExpansionSource, conductivity, poll, same_measure,
 };
 
 pub(super) struct BoundSource<'a> {
@@ -22,6 +21,7 @@ pub(super) struct BoundSource<'a> {
     pub reference_elastic: ResolvedMaterialStatePoint,
     pub reference_density_kg_m3: f64,
     pub conductivity: ConductivityModel,
+    pub conductivity_source: SpatialConductivitySource,
     reference_phase: EquilibriumPhaseState,
     reference_point: QueryPoint,
 }
@@ -29,6 +29,7 @@ pub(super) struct BoundSource<'a> {
 impl<'a> BoundSource<'a> {
     pub fn try_new(
         mut source: SpatialMaterialSource<'a>,
+        conductivity_source: SpatialConductivitySource,
         native: ReferenceEnthalpyMaterial<'_>,
         mesh_frame: ContentHash,
         maximum_strain: f64,
@@ -126,46 +127,14 @@ impl<'a> BoundSource<'a> {
         let lower = at_temperature(&reference_point, low)?;
         let upper = at_temperature(&reference_point, high)?;
         let queries = [lower.clone(), upper.clone()];
-        let table = match source.conductivity_selection {
-            ClaimSelection::Policy(policy) => ConductivityTable::from_claims_at_query_points(
-                source.point.material.claims(),
-                &source.conductivity,
-                "T",
-                &queries,
-                policy,
-            )?,
-            ClaimSelection::Pinned(pin) => ConductivityTable::from_claims_pinned_at_query_points(
-                source.point.material.claims(),
-                &source.conductivity,
-                "T",
-                &queries,
-                pin,
-            )?,
-        };
-        // The conductivity table proves continuous support and retains every
-        // knot. Admit its exact selected source axes as well: a fixed-looking
-        // query must not silently freeze an unsupported dynamic coordinate.
-        let conductivity_pin = table
-            .receipts()
-            .first()
-            .ok_or(Error::Invalid("source conductivity receipts required"))?
-            .selected;
-        let requirements = [ScalarPropertyRequirement::try_with_key(
-            &source.conductivity,
-            ScalarAdmissibility::StrictlyPositive,
-        )?];
-        let conductivity = resolve_material_state_point(
-            source.point.material,
+        let (conductivity, conductivity_source) = conductivity::prepare(
+            &mut source,
             &reference_point,
-            &requirements,
-            MaterialPropertySelection::PinnedByProperty(vec![(
-                source.conductivity.name().to_owned(),
-                conductivity_pin,
-            )]),
+            &queries,
+            conductivity_source,
+            mesh_frame,
+            cx,
         )?;
-        for property in conductivity.properties() {
-            source.point.admit_static(property)?;
-        }
         let mut grid = vec![low, high, reference_phase.temperature_k()];
         for property in elastic
             .properties()
@@ -213,7 +182,8 @@ impl<'a> BoundSource<'a> {
             source,
             reference_elastic: elastic,
             reference_density_kg_m3: native.reference_density_kg_m3,
-            conductivity: ConductivityModel::isotropic(table),
+            conductivity,
+            conductivity_source,
             reference_phase,
             reference_point,
         };

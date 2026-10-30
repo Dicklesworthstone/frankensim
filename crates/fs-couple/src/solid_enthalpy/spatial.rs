@@ -20,7 +20,10 @@
 
 /// Native nodal heat and continuing pressure-driven modal motion.
 pub mod motion;
+mod conductivity;
 mod source;
+
+pub use conductivity::SpatialConductivitySource;
 
 use fs_blake3::ContentHash;
 use fs_conduction::bc::ThermalBoundary;
@@ -186,8 +189,36 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<Self, SpatialSolidEnthalpyError> {
+        let conductivity = vec![SpatialConductivitySource::Isotropic; sources.len()];
+        Self::try_new_with_conductivity(
+            thermal,
+            sources,
+            conductivity,
+            budget,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Bind explicit thermal symmetry per ORIGINAL native material index.
+    /// Orthotropic entries replace only the scalar conductivity role: each
+    /// principal k_i(T) is pinned on the same card and complete query context,
+    /// then the native heat owner uses K = R diag(k_i) R^T and its derivative.
+    /// Thermal, elastic and expansion principal frames remain independent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_conductivity(
+        thermal: &'a HeterogeneousEnthalpyBackwardEuler<'m, 'c>,
+        sources: Vec<SpatialMaterialSource<'a>>,
+        conductivity_sources: Vec<SpatialConductivitySource>,
+        budget: TetAssemblyBudget,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, SpatialSolidEnthalpyError> {
         poll(cx)?;
         if sources.len() != thermal.material_count()
+            || conductivity_sources.len() != sources.len()
             || sources.is_empty()
             || u32::try_from(sources.len() - 1).is_err()
             || mesh_frame == ContentHash([0; 32])
@@ -233,7 +264,11 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         }
         let mut bound = Vec::with_capacity(sources.len());
         let mut conductivities = Vec::with_capacity(sources.len());
-        for (index, source) in sources.into_iter().enumerate() {
+        for (index, (source, conductivity_source)) in sources
+            .into_iter()
+            .zip(conductivity_sources)
+            .enumerate()
+        {
             poll(cx)?;
             let reference =
                 thermal
@@ -243,6 +278,7 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
                     ))?;
             let entry = BoundSource::try_new(
                 source,
+                conductivity_source,
                 reference,
                 mesh_frame,
                 maximum_absolute_mandel_strain,
@@ -284,6 +320,11 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
     /// Exact source-bound conductivity table passed into native heat assembly.
     pub const fn conductivity(&self) -> &ElementMaterials {
         &self.conductivity
+    }
+    /// Admitted frame and pinned principal selections, by original material
+    /// index. The native conductivity receipts retain the exact source queries.
+    pub fn conductivity_source(&self, material_index: usize) -> Option<&SpatialConductivitySource> {
+        self.sources.get(material_index).map(|s| &s.conductivity_source)
     }
     /// Native load geometry on precisely the same reference mesh.
     pub fn geometry(&self, cx: &Cx<'_>) -> Result<TetLoadGeometry3<'_>, SpatialSolidEnthalpyError> {

@@ -38,6 +38,8 @@ use fs_solver::NewtonKrylovConfig;
 const NODES: [[f64; 3]; 4] = [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
 const FREE: [usize; 6] = [0, 1, 2, 4, 5, 8];
 
+#[path = "spatial_solid_enthalpy/conductivity.rs"]
+mod conductivity;
 #[path = "spatial_solid_enthalpy/motion.rs"]
 mod motion;
 #[path = "spatial_solid_enthalpy/radiation.rs"]
