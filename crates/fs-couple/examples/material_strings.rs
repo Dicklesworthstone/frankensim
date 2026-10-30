@@ -28,6 +28,8 @@ mod axial_bearings;
 mod translational_bridges;
 #[path = "material_strings/bending_memory.rs"]
 mod bending_memory;
+#[path = "material_strings/longitudinal_memory.rs"]
+mod longitudinal_memory;
 #[path = "material_strings/torsion_memory.rs"]
 mod torsion_memory;
 #[path = "material_strings/fibers.rs"]
@@ -155,6 +157,9 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     }
     if !body && let LongitudinalMaterialLoss::KelvinVoigt { viscosity_property } = &spec.longitudinal_loss {
         requirements.push(Requirement::try_new(viscosity_property.as_str(),DynViscosity::DIMS,Admit::Finite)?);
+    }
+    if !body && let Some(memory) = &spec.longitudinal_memory {
+        memory.add_requirements(&mut requirements)?;
     }
     if !body && let Some(memory)=&spec.bending_memory {
         memory.add_requirements(name,&spec.strings,&mut requirements)?;
@@ -312,6 +317,7 @@ impl input::Spec {
             additional_body_modes)?;
         let memory = self.string_memory_states()?
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
+            .and_then(|n| n.checked_add(self.longitudinal_memory.as_ref().map_or(0, |memory| memory.max_states)))
             .and_then(|n| n.checked_add(profile.as_ref().map_or(0, |body| body.material_memory_states_for(&self))))
             .and_then(|n| n.checked_add(self.bow_fibers.as_ref()
                 .and_then(|fibers| fibers.memory.as_ref()).map_or(0, |memory| memory.max_states)))
@@ -443,6 +449,10 @@ impl input::Spec {
                 Some(memory) => memory.bind(bank, gate)?,
                 None => bank,
             }
+        };
+        let bank = match &self.longitudinal_memory {
+            Some(memory) => memory.bind(bank, &self, gate)?,
+            None => bank,
         };
         // The original body basis survives fluid, torsion and material-history
         // binding. Compute its air reaction once, before bows or preload run.

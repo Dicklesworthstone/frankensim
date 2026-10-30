@@ -8,13 +8,15 @@
 
 use super::{MaterialStatePointError, ResolvedMaterialStatePoint, affine_temperature_slope,
     pinned_temperature_line};
-use fs_matdb::MaterialCard;
-use fs_qty::{Dims, DynViscosity, Pressure, QuantitySpec, Temperature};
+use fs_matdb::{MaterialCard, QueryPoint};
+use fs_qty::{Dims, DynViscosity, Pressure, QuantitySpec, Temperature, Time};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 pub const SHEAR_LAYER_MODULUS_PROPERTY: &str = "shear_modulus";
 pub const SHEAR_LAYER_YIELD_PROPERTY: &str = "shear_yield_stress";
 pub const PLASTIC_SHEAR_VISCOSITY_PROPERTY: &str = "plastic_shear_viscosity";
+/// Bounded source histories per retained material layer, independent of mesh.
+pub const MAX_SHEAR_RELAXATION_ARMS: usize = 64;
 
 fn invalid(quantity: &'static str) -> MaterialStatePointError {
     MaterialStatePointError::InvalidDerived { quantity }
@@ -39,6 +41,8 @@ pub struct ResolvedShearLayer {
     plastic_resistance_n_s_m: f64,
     temperature_kelvin: f64,
     omega_band_rad_s: (f64, f64),
+    relaxation_properties: Vec<(String, String)>,
+    relaxation: Vec<(f64, f64)>,
 }
 impl ResolvedShearLayer {
     /// Require positive G and eta_plastic, nonnegative shear yield stress, and
@@ -128,7 +132,85 @@ impl ResolvedShearLayer {
             "shear-layer small-strain slip limit is unrepresentable")?;
         Ok(Self { resolved, area_m2, thickness_m, maximum_elastic_shear_strain,
             maximum_elastic_slip_m, stiffness_n_m, yield_force_n,
-            plastic_resistance_n_s_m, temperature_kelvin, omega_band_rad_s: band })
+            plastic_resistance_n_s_m, temperature_kelvin, omega_band_rad_s: band,
+            relaxation_properties: Vec::new(), relaxation: Vec::new() })
+    }
+
+    /// Bind Maxwell shear arms from the SAME original resolved material. Each
+    /// pair names (DeltaG [Pa], tau [s]); `shear_modulus` remains G_infinity.
+    /// Every arm shares the original physical area/thickness and temperature.
+    /// Source applicability must cover DC and the consumer's actual band;
+    /// no oscillatory modulus fit, missing coefficient or relaxation is inferred.
+    pub fn with_relaxation(mut self, properties: Vec<(String, String)>)
+        -> Result<Self, MaterialStatePointError> {
+        if properties.len() > MAX_SHEAR_RELAXATION_ARMS || !self.relaxation_properties.is_empty() {
+            return Err(invalid("shear relaxation needs a bounded one-time source binding"));
+        }
+        let temperature_axis = self.resolved.query_point().iter().find(|(axis, _)| {
+            self.resolved.axis_quantities().get(axis).copied().is_some_and(|quantity|
+                quantity.semantic_type().is_some_and(|ty|
+                    ty.kind() == QuantityKind::AbsoluteTemperature && ty.form() == ValueForm::Static))
+                || axis == "T"
+        }).map(|(axis, _)| axis.as_str()).expect("admitted unique temperature");
+        let mut band = self.omega_band_rad_s;
+        let mut relaxation = Vec::with_capacity(properties.len());
+        for (index, (modulus, time)) in properties.iter().enumerate() {
+            if modulus == SHEAR_LAYER_MODULUS_PROPERTY
+                || properties[..index].contains(&(modulus.clone(), time.clone())) {
+                return Err(invalid("shear relaxation cannot repeat an arm or count equilibrium modulus twice"));
+            }
+            let mut values = [0.0; 2];
+            for (slot, (name, dims)) in [(modulus, Pressure::DIMS), (time, Time::DIMS)].iter().enumerate() {
+                let property = self.resolved.property(name).ok_or_else(||
+                    MaterialStatePointError::InvalidRequirement { property: (*name).clone(),
+                        reason: "missing selected shear relaxation source property" })?;
+                if property.requirement().quantity() != QuantitySpec::dimensional(*dims)
+                    || !property.is_constant_at_fixed_temperature() {
+                    return Err(invalid("shear memory needs typed, fixed-state or temperature-only coefficients"));
+                }
+                values[slot] = positive(property.value_si(), "shear memory modulus and time must be positive")?;
+                let validity = &property.answer().evidence.model.validity;
+                if validity.bound(temperature_axis).is_none() {
+                    return Err(invalid("shear memory requires explicit temperature applicability"));
+                }
+                for axis in validity.bounds().keys() {
+                    if axis == temperature_axis { continue; }
+                    let quantity = self.resolved.axis_quantities().get(axis).copied();
+                    let frequency = quantity.and_then(QuantitySpec::semantic_type).is_some_and(|ty|
+                        ty.form() == ValueForm::Static && matches!(ty.kind(), QuantityKind::Frequency(_)));
+                    let legacy = axis == "omega" && quantity.is_none_or(|q|
+                        q == QuantitySpec::dimensional(fs_qty::Frequency::DIMS));
+                    if !frequency && !legacy {
+                        return Err(invalid("shear memory cannot freeze another constitutive state coordinate"));
+                    }
+                }
+                let (lo, hi) = property.angular_frequency_band_rad_s()?
+                    .ok_or_else(|| invalid("shear memory requires a declared frequency band"))?;
+                if lo != 0.0 || hi <= 0.0 {
+                    return Err(invalid("shear memory must include static storage and positive bandwidth"));
+                }
+                band = (band.0.max(lo), band.1.min(hi));
+            }
+            let stiffness = positive(self.area_m2/self.thickness_m*values[0],
+                "shear memory stiffness is unrepresentable")?;
+            relaxation.push((stiffness, values[1]));
+        }
+        self.relaxation = relaxation;
+        self.relaxation_properties = properties;
+        self.omega_band_rad_s = band;
+        Ok(self)
+    }
+    /// Original source roles in stable constitutive-history order.
+    pub fn relaxation_properties(&self) -> &[(String, String)] { &self.relaxation_properties }
+    /// Physical (A*DeltaG/h [N/m], tau [s]) for each original source arm.
+    pub fn relaxation(&self) -> &[(f64, f64)] { &self.relaxation }
+    /// Re-evaluate the original complete source without losing a memory arm,
+    /// changing geometry or substituting a property selection policy.
+    pub fn at_query_point(&self, card: &MaterialCard, query: &QueryPoint)
+        -> Result<Self, MaterialStatePointError> {
+        Self::new(self.resolved.at_query_point(card, query)?, self.area_m2,
+            self.thickness_m, self.maximum_elastic_shear_strain)?
+            .with_relaxation(self.relaxation_properties.clone())
     }
     /// Complete original material identity, coefficients, state and usage receipts.
     #[must_use]
@@ -188,6 +270,20 @@ impl ResolvedShearLayer {
             .map_err(|_| invalid("shear thermal path start violates its original schema"))?;
         let upper = self.resolved.query().with(temperature_axis, hi)
             .map_err(|_| invalid("shear thermal path end violates its original schema"))?;
+        // The shared film thermal owner accounts affine equilibrium entropy.
+        // Maxwell arms store their own strain; an unaccounted d(DeltaG)/dT
+        // would omit their entropy. Permit temperature-dependent tau, whose
+        // change alters dissipation without changing the elastic potential.
+        for (name, _) in &self.relaxation_properties {
+            let arm = self.resolved.property(name).expect("bound shear memory property");
+            let claim = card.claims().claim(arm.answer().receipt.selected)
+                .ok_or_else(|| invalid("shear memory thermal source claim is absent"))?;
+            let values = pinned_temperature_line(card, &claim.key, temperature_axis,
+                &lower, &upper, arm.answer().receipt.selected)?;
+            if values.iter().any(|(_, value)| *value != arm.value_si()) {
+                return Err(invalid("thermal shear memory requires temperature-independent arm moduli"));
+            }
+        }
         let knots = pinned_temperature_line(card, &claim.key, temperature_axis, &lower,
             &upper, property.answer().receipt.selected)?;
         if knots.iter().any(|(_, g)| !g.is_finite() || *g <= 0.0) {
@@ -328,8 +424,11 @@ mod tests {
             (SHEAR_LAYER_MODULUS_PROPERTY, Pressure::DIMS, 1e6),
             (SHEAR_LAYER_YIELD_PROPERTY, Pressure::DIMS, 1000.0),
             (PLASTIC_SHEAR_VISCOSITY_PROPERTY, DynViscosity::DIMS, 2000.0),
+            ("memory_modulus", Pressure::DIMS, 5e5),
+            ("memory_time", Time::DIMS, 0.01),
+            ("thermal_memory_modulus", Pressure::DIMS, 1e6),
         ] {
-            let modulus = name == SHEAR_LAYER_MODULUS_PROPERTY;
+            let modulus = name == SHEAR_LAYER_MODULUS_PROPERTY || name == "thermal_memory_modulus";
             claims.insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
                 value: if modulus { PropertyValue::Curve {
@@ -380,6 +479,39 @@ mod tests {
             assert!(layer.thermal_stiffness_slope_n_m_k(&constant_card, axis,
                 (280.0, 320.0)).is_err());
         }
+    }
+
+    #[test]
+    fn g1_shear_memory_retains_original_material_geometry_and_thermal_roles() {
+        let (card, original) = thermal_layer(vec![(280.0, 1.2e6), (320.0, 0.8e6)], "T");
+        let names = vec![("memory_modulus".into(), "memory_time".into())];
+        let layer = original.clone().with_relaxation(names.clone()).unwrap();
+        assert_eq!(layer.resolved(), original.resolved());
+        assert_eq!(layer.relaxation_properties(), names);
+        assert!((layer.relaxation()[0].0/1e5-1.0).abs() < 1e-14);
+        assert_eq!(layer.relaxation()[0].1, 0.01);
+        assert_eq!(layer.stiffness_n_m(), original.stiffness_n_m());
+        let warmer = layer.at_query_point(&card,
+            &layer.resolved().query().with("T", 310.0).unwrap()).unwrap();
+        assert_eq!(warmer.temperature_kelvin(), 310.0);
+        assert_eq!(warmer.relaxation_properties(), layer.relaxation_properties());
+        assert_eq!(warmer.relaxation(), layer.relaxation());
+        assert!(warmer.stiffness_n_m() < layer.stiffness_n_m());
+        assert!(layer.thermal_stiffness_slope_n_m_k(&card, "T", (280.0, 320.0)).is_ok());
+        let half = ResolvedShearLayer::new(original.resolved().clone(),
+            original.area_m2()/2.0, original.thickness_m(), 0.05).unwrap()
+            .with_relaxation(names).unwrap();
+        assert_eq!(half.relaxation()[0], (0.5*layer.relaxation()[0].0, 0.01));
+        for names in [
+            vec![("missing".into(), "memory_time".into())],
+            vec![("memory_modulus".into(), "memory_modulus".into())],
+            vec![(SHEAR_LAYER_MODULUS_PROPERTY.into(), "memory_time".into())],
+            vec![("memory_modulus".into(), "memory_time".into()); 2],
+        ] { assert!(original.clone().with_relaxation(names).is_err()); }
+        let variable = original.with_relaxation(
+            vec![("thermal_memory_modulus".into(), "memory_time".into())]).unwrap();
+        assert!(variable.thermal_stiffness_slope_n_m_k(&card, "T", (280.0, 320.0)).is_err(),
+            "a changing arm modulus cannot omit its mechanical entropy");
     }
 
     #[test]

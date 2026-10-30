@@ -102,6 +102,9 @@ pub struct LayerThermalFrame<S> {
     pub deposited_heat_j: f64,
     /// Original physical plastic loss removed from the combined loss account.
     pub routed_plastic_heat_j: f64,
+    /// Maxwell-arm relaxation heat, transferred to the SAME original film
+    /// cells. It may be positive below plastic yield or at held total slip.
+    pub routed_relaxation_heat_j: f64,
     /// Physical series-drive dashpot loss deposited into its named cells.
     /// Already included in the mechanical report, so removed once from the
     /// combined external loss account. Never includes stored spring energy.
@@ -298,13 +301,7 @@ impl LayerThermalCell<'_> {
         let query = query
             .with(self.temperature_axis, phase.temperature_k())
             .map_err(|_| invalid("layer temperature coordinate refused its original schema"))?;
-        let resolved = source.resolved().at_query_point(self.material, &query)?;
-        let refreshed = ResolvedShearLayer::new(
-            resolved,
-            source.area_m2(),
-            source.thickness_m(),
-            source.maximum_elastic_shear_strain(),
-        )?;
+        let refreshed = source.at_query_point(self.material, &query)?;
         if refreshed.temperature_kelvin().to_bits() != phase.temperature_k().to_bits()
             || refreshed
                 .resolved()
@@ -568,7 +565,12 @@ impl MultiFrictionModalSystem {
                     "thermal binding requires an existing material layer",
                 ))?;
             let (admitted, _) = binding.at(original, thermal)?;
-            if admitted.source != original.source {
+            // Refresh pins the already selected claims. Compare two pinned
+            // evaluations so selection-policy receipts cannot masquerade as a
+            // changed physical state; a stale temperature still fails exactly.
+            let original_pinned = original.source.at_query_point(binding.material,
+                &original.source.resolved().query())?;
+            if admitted.source != original_pinned {
                 return Err(LayerThermalError::Invalid(
                     "initial layer source must match its accepted thermal cell",
                 ));
@@ -649,7 +651,9 @@ impl MultiFrictionModalSystem {
                         internal_change_j = number(internal_change_j
                             + current.internal_energy_j - initial.internal_energy_j)?;
                         reversible_heat_j = number(reversible_heat_j + reversible)?;
-                        physical_heat.push((staged.dissipated_j,
+                        let relaxation = layer.law.step_dissipation(&layer.state,
+                            &staged.state, dt).map_err(ModalFrictionError::from)?.relaxation_j;
+                        physical_heat.push((number(staged.dissipated_j-relaxation)?, relaxation,
                             number(staged.dissipated_j + reversible)?));
                     }
                     let mut series_loss = Vec::with_capacity(series_heat.len());
@@ -700,8 +704,8 @@ impl MultiFrictionModalSystem {
                             checkpoint,
                         )?,
                     )?;
-                    let (mut deposited_heat_j, mut plastic_heat_j) = (0.0, 0.0);
-                    for (binding, (plastic_j, heat_j)) in bindings.iter().zip(physical_heat) {
+                    let (mut deposited_heat_j, mut plastic_heat_j, mut relaxation_heat_j) = (0.0, 0.0, 0.0);
+                    for (binding, (plastic_j, relaxation_j, heat_j)) in bindings.iter().zip(physical_heat) {
                         checkpoint()?;
                         if plastic_j < 0.0 {
                             return Err(LayerThermalError::Invalid(
@@ -709,6 +713,7 @@ impl MultiFrictionModalSystem {
                             ));
                         }
                         plastic_heat_j = number(plastic_heat_j + plastic_j)?;
+                        relaxation_heat_j = number(relaxation_heat_j + relaxation_j)?;
                         let delivered = deposit_heat(&mut sources_w, binding.cell,
                             heat_j, dt, controls.total_energy_tolerance_j)?;
                         deposited_heat_j = number(deposited_heat_j + delivered)?;
@@ -727,7 +732,7 @@ impl MultiFrictionModalSystem {
                             deposited_heat_j = number(deposited_heat_j + delivered)?;
                         }
                     }
-                    if number(deposited_heat_j - plastic_heat_j - reversible_heat_j - series_heat_j
+                    if number(deposited_heat_j - plastic_heat_j - relaxation_heat_j - reversible_heat_j - series_heat_j
                         - dry_heat_j - interface_residual_j)?.abs()
                         > controls.total_energy_tolerance_j
                     {
@@ -744,6 +749,7 @@ impl MultiFrictionModalSystem {
                             payload,
                             deposited_heat_j,
                             plastic_heat_j,
+                            relaxation_heat_j,
                             external_heat_j,
                             reversible_heat_j,
                             coefficient_work_j,
@@ -811,7 +817,7 @@ impl MultiFrictionModalSystem {
         }
         let (
             next,
-            (frame, layers, source, deposited_heat_j, plastic_heat_j, external_heat_j,
+            (frame, layers, source, deposited_heat_j, plastic_heat_j, relaxation_heat_j, external_heat_j,
                 reversible_heat_j, coefficient_work_j, entropy_energy_j, internal_change_j, series_heat_j,
                 dry_heat_j, dry_contacts, dry_sources),
             thermal_audit,
@@ -822,7 +828,7 @@ impl MultiFrictionModalSystem {
         )?;
         let total = number(
             frame.energy_residual_j + thermal_audit.stored_energy_change_j
-                - plastic_heat_j
+                - plastic_heat_j - relaxation_heat_j
                 - series_heat_j - dry_heat_j - external_heat_j + coefficient_work_j + entropy_energy_j,
         )?;
         if total.abs() > controls.total_energy_tolerance_j {
@@ -852,6 +858,7 @@ impl MultiFrictionModalSystem {
             maximum_cell_residual_j,
             deposited_heat_j,
             routed_plastic_heat_j: plastic_heat_j,
+            routed_relaxation_heat_j: relaxation_heat_j,
             routed_series_drive_heat_j: series_heat_j,
             routed_dry_heat_j: dry_heat_j,
             dry_contacts,

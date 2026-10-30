@@ -17,6 +17,8 @@ pub struct Declaration {
     pub area_m2: f64,
     pub thickness_m: f64,
     pub maximum_elastic_shear_strain: f64,
+    /// Ordered source (DeltaG, tau) roles; equilibrium G remains shear_modulus.
+    pub relaxation: Vec<(String, String)>,
 }
 #[derive(Clone, Debug)]
 pub struct Inputs {
@@ -45,8 +47,17 @@ impl Inputs {
                 || !d.maximum_elastic_shear_strain.is_finite()
                 || d.maximum_elastic_shear_strain <= 0.0
                 || d.maximum_elastic_shear_strain > 0.1
+                || d.relaxation.len() > fs_material::state_point::MAX_SHEAR_RELAXATION_ARMS
             {
                 return Err("shear layers need distinct tracks, relative pack paths, positive area/thickness and an elastic shear limit in (0,0.1]".into());
+            }
+            for (index, (modulus, time)) in d.relaxation.iter().enumerate() {
+                if modulus == SHEAR_LAYER_MODULUS_PROPERTY
+                    || d.relaxation[..index].contains(&(modulus.clone(), time.clone())) {
+                    return Err("shear memory cannot repeat equilibrium stiffness or a source arm".into());
+                }
+                Requirement::try_new(modulus, Pressure::DIMS, Admit::StrictlyPositive)?;
+                Requirement::try_new(time, fs_qty::Time::DIMS, Admit::StrictlyPositive)?;
             }
         }
         Ok(Self { declarations })
@@ -108,15 +119,27 @@ impl Inputs {
                 .iter()
                 .find(|d| d.track == track.id)
                 .ok_or("missing material shear-layer declaration")?;
+            let mut complete = requirements.clone();
+            for (modulus, time) in &declaration.relaxation {
+                for (name, dims) in [(modulus, Pressure::DIMS), (time, fs_qty::Time::DIMS)] {
+                    let requirement = Requirement::try_new(name, dims, Admit::StrictlyPositive)?;
+                    if let Some(previous) = complete.iter().find(|p| p.name() == requirement.name()) {
+                        if previous != &requirement { return Err("incompatible shear memory source roles".into()); }
+                    } else { complete.push(requirement); }
+                }
+            }
             let state =
-                resolve_properties(&declaration.pack, catalog, loader, spec, &requirements)?;
+                resolve_properties(&declaration.pack, catalog, loader, spec, &complete)?;
             let cells = spec.bow_ribbon.map_or(1, |(_, cells)| cells);
             let source = ResolvedShearLayer::new(
                 state,
                 declaration.area_m2 / cells as f64,
                 declaration.thickness_m,
                 declaration.maximum_elastic_shear_strain,
-            )?;
+            )?.with_relaxation(declaration.relaxation.clone())?;
+            if source.relaxation().iter().any(|(_, tau)| 1.0/f64::from(spec.rate)/tau > 2.0) {
+                return Err("shear memory is unresolved at the declared physical sample rate".into());
+            }
             source.require_angular_frequency_rad_s(core::f64::consts::PI * f64::from(spec.rate))?;
             if spec.bow_ribbon.is_some() {
                 for cell in 0..cells {

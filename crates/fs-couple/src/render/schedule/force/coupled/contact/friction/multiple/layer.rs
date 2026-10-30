@@ -14,7 +14,7 @@ pub mod thermal;
 
 use super::*;
 use fs_material::state_point::ResolvedShearLayer;
-use fs_tribo::layer_contact::{ThirdBodyLayerContact, ThirdBodyLayerState};
+use fs_tribo::layer_contact::{ThirdBodyLayerContact, ThirdBodyLayerState, ThirdBodyLayerRelaxationArm};
 use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput};
 
 /// Share the original source-to-law admission with the two-axis modal owner.
@@ -38,8 +38,10 @@ pub struct ShearLayerFrame {
     pub stored_energy_j: f64,
     /// Change of reversible layer energy during this accepted sample [J].
     pub stored_change_j: f64,
-    /// Nonnegative yield plus plastic-viscosity loss [J].
+    /// Nonnegative yield, plastic-viscosity and Maxwell relaxation loss [J].
     pub dissipated_j: f64,
+    /// Actual sub-yield/over-yield Maxwell-arm heat, included in dissipated_j.
+    pub relaxation_dissipated_j: f64,
     /// Constitutive storage + loss - constitutive traction work [J].
     pub closure_residual_j: f64,
 }
@@ -59,7 +61,8 @@ impl MaterialShearLayer {
             source.plastic_resistance_n_s_m(),
             source.temperature_kelvin(),
             source.maximum_elastic_slip_m(),
-        )?;
+        )?.with_relaxation(source.relaxation().iter().map(|&(stiffness_n_m, relaxation_time_s)|
+            ThirdBodyLayerRelaxationArm { stiffness_n_m, relaxation_time_s }).collect())?;
         let state = law.initial_state();
         Ok(Self {
             source,
@@ -184,6 +187,8 @@ impl MaterialShearLayer {
             stored_energy_j: self.law.stored_energy_j(&step.state),
             stored_change_j: step.stored_change_j,
             dissipated_j: step.dissipated_j,
+            relaxation_dissipated_j: self.law.step_dissipation(&self.state,
+                &step.state, dt)?.relaxation_j,
             closure_residual_j: step.closure_residual_j,
         };
         self.staged = Some(step);

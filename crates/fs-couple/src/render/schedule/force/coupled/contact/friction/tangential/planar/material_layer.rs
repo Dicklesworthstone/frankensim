@@ -146,6 +146,8 @@ pub struct PlanarLayerThermalFrame<P> {
     pub deposited_heat_j: f64,
     /// Native nonnegative plastic loss, transferred internally exactly once.
     pub plastic_heat_j: f64,
+    /// Original Maxwell-arm heat, including sub-yield stress relaxation.
+    pub relaxation_heat_j: f64,
     /// Signed caloric exchange; never classified as frictional dissipation.
     pub reversible_heat_j: f64,
     /// psi(T_new,e_old) - psi(T_old,e_old).
@@ -167,6 +169,7 @@ struct Staged<P> {
     source: P,
     deposited_heat_j: f64,
     plastic_heat_j: f64,
+    relaxation_heat_j: f64,
     reversible_heat_j: f64,
     coefficient_work_j: f64,
     entropy_energy_change_j: f64,
@@ -398,8 +401,10 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
                     let reversible_heat_j = number(-coefficient_work_j - entropy_energy_change_j)?;
                     let internal_energy_change_j =
                         number(current.internal_energy_j - initial.internal_energy_j)?;
-                    let plastic_heat_j = mechanical.frame.friction_dissipation_j;
-                    let physical_heat_j = number(plastic_heat_j + reversible_heat_j)?;
+                    let relaxation_heat_j = layer.law.step_dissipation(&layer.state,
+                        &mechanical.state, dt)?.relaxation_j;
+                    let plastic_heat_j = number(mechanical.frame.friction_dissipation_j-relaxation_heat_j)?;
+                    let physical_heat_j = number(mechanical.frame.friction_dissipation_j + reversible_heat_j)?;
                     let StepCoefficients {
                         mut sources_w,
                         conductances_w_k,
@@ -436,6 +441,7 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
                             source: payload,
                             deposited_heat_j,
                             plastic_heat_j,
+                            relaxation_heat_j,
                             reversible_heat_j,
                             coefficient_work_j,
                             entropy_energy_change_j,
@@ -484,6 +490,7 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
         let reconstructed_residual_j = number(
             staged.mechanical.frame.energy_residual_j + thermal_audit.stored_energy_change_j
                 - staged.plastic_heat_j
+                - staged.relaxation_heat_j
                 - staged.external_heat_j
                 + staged.coefficient_work_j
                 + staged.entropy_energy_change_j,
@@ -527,6 +534,7 @@ impl<'a> PlanarMaterialLayerSystem<'a> {
             maximum_cell_residual_j,
             deposited_heat_j: staged.deposited_heat_j,
             plastic_heat_j: staged.plastic_heat_j,
+            relaxation_heat_j: staged.relaxation_heat_j,
             reversible_heat_j: staged.reversible_heat_j,
             coefficient_free_energy_change_j: staged.coefficient_work_j,
             mechanical_entropy_energy_change_j: staged.entropy_energy_change_j,
