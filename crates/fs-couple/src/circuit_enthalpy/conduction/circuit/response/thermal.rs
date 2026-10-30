@@ -12,8 +12,8 @@ use crate::material_circuit::storage::lower;
 
 /// Nonlinear spatial response, source-backed field storage and one finite heat
 /// history. The physical energy account uses U = psi + T s at both endpoints.
-pub type ConductionResponseFieldThermalCandidate<'t> =
-    FieldThermalCandidate<'t, ConductionResponseCircuit, ConductionResponseCircuitStep>;
+pub type ConductionResponseFieldThermalCandidate<'t, S = MaterialNetworkSample> =
+    FieldThermalCandidate<'t, ConductionResponseCircuit, ConductionResponseCircuitStep, S>;
 
 impl ConductionResponseCircuit {
     /// Bind source-derived R/C/L to the same native circuit as the nonlinear
@@ -80,6 +80,25 @@ impl ConductionResponseCircuit {
 }
 
 impl<'t, S> ConductionResponseCircuitEnthalpyCandidate<'t, FieldThermalSource<S>> {
+    // Plain and complete heat networks close physical field U through the
+    // original energy owner. Internal enclosure roundoff is never external heat.
+    pub(in crate::circuit_enthalpy::conduction) fn close_field_report(
+        self,
+        internal_heat_j: f64,
+        tolerance_j: f64,
+    ) -> Result<ConductionResponseFieldThermalCandidate<'t, S>, Error> {
+        let (thermal, circuit, coupled) = self.into_parts();
+        let supplied = coupled.electrical.circuit.native.supplied;
+        let report = field_storage::close_report_with_internal_heat(
+            coupled,
+            supplied,
+            internal_heat_j,
+            tolerance_j,
+        )
+        .map_err(super::super::thermal::field_thermal_error)?;
+        Ok(FieldThermalCandidate::new(thermal, circuit, report))
+    }
+
     pub(super) fn without_thermal_fields(
         self,
     ) -> ConductionResponseCircuitEnthalpyCandidate<'t, S> {
@@ -144,7 +163,7 @@ impl ConductionThermalNetwork<'_> {
             .iter()
             .map(|r| r.destination)
             .collect::<Vec<_>>();
-        let (thermal, circuit, coupled) = self
+        let next = self
             .step_response_circuit_bound(
                 thermal,
                 target_s,
@@ -161,14 +180,10 @@ impl ConductionThermalNetwork<'_> {
                 initial_energy_increments_j,
                 &mut cancelled,
             )?
-            .into_parts();
-        let supplied = coupled.electrical.circuit.native.supplied;
-        let report =
-            field_storage::close_report(coupled, supplied, controls.total_energy_tolerance_j)
-                .map_err(super::super::thermal::field_thermal_error)?;
+            .close_field_report(0.0, controls.total_energy_tolerance_j)?;
         if cancelled() {
             return Err(CircuitEnthalpyError::Cancelled);
         }
-        Ok(FieldThermalCandidate::new(thermal, circuit, report))
+        Ok(next)
     }
 }

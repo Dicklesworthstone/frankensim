@@ -548,7 +548,7 @@ impl ConductionThermalNetwork<'_> {
     // One constitutive/thermal residual retains the original typed heat
     // observations, including callers that resolve contacts and radiation.
     #[allow(clippy::too_many_arguments)]
-    fn step_response_circuit_resolved_bound<'t, S>(
+    pub(in crate::circuit_enthalpy::conduction) fn step_response_circuit_resolved_bound<'t, S>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,

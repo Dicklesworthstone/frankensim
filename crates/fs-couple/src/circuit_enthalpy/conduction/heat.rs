@@ -5,13 +5,14 @@
 
 use super::circuit::response::{
     ConductionResponseCircuit, ConductionResponseCircuitEnthalpyCandidate,
+    thermal::ConductionResponseFieldThermalCandidate,
 };
 use super::response::ConductionResponseEnthalpyCandidate;
 use super::*;
-use crate::circuit_enthalpy::ResistorCell;
 use crate::circuit_enthalpy::contacts::heat::{
     HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, closed_balance,
 };
+use crate::circuit_enthalpy::{ResistorCell, field_storage::FieldThermalBinding};
 use fs_em::conduction::response::{ConductionResponseControls, PlanarConductionResponse};
 use fs_exec::Cx;
 
@@ -23,6 +24,109 @@ fn heat_error(error: HeatNetworkError) -> Error {
 }
 
 impl PreparedHeatNetwork<'_, '_> {
+    /// Advance nonlinear spatial current, native electrical contacts and sourced
+    /// R(T)/C(T)/L(T) with this complete heat assembly at ONE finite endpoint.
+    ///
+    /// Bulk and surface Joule heat, reversible field-entropy transfer, original
+    /// thermal contacts, source-integrated layers and closed-enclosure radiosity
+    /// all enter the existing circuit/enthalpy residual once. Each constitutive
+    /// trial starts from the same accepted charge/flux. The returned source
+    /// sample retains every original thermal/interface/radiation calculation.
+    ///
+    /// Graph resistors come from this assembly's original material bindings;
+    /// the explicit spatial contact bindings retain their native two-sided heat
+    /// owner. Series graph electrical contacts refuse because this spatial
+    /// circuit has no owner for their work. Every field branch needs an original
+    /// whole-volume caloric binding, with the existing affine field law,
+    /// constant-density solid chart and positive capacity/coordinate envelope.
+    ///
+    /// Physical field U = psi + T s and caloric storage close the original
+    /// external supply. Closed radiation's signed numerical net remains visible
+    /// in the heat sample and is excluded from external_heat_j; it is never
+    /// redistributed into cells. E/J/B/H-dependent thermal boundaries refuse
+    /// without a resolved interface field. Geometry and enclosure view factors
+    /// remain fixed. Coupling is first order and requires timestep refinement;
+    /// no phase motion, hysteresis, dielectric relaxation or fitted loss is added.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_conduction_response_field_circuit_candidate<'t>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &ConductionResponseCircuit,
+        ports: &[f64],
+        contacts: &[contacts::ConductionContactThermal<'_>],
+        fields: &[FieldThermalBinding],
+        regions: &[ConductionRegion],
+        volume_tolerance_m3: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        response: ConductionResponseControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<ConductionResponseFieldThermalCandidate<'t, HeatNetworkSample>, Error> {
+        let cancel = RefCell::new(|| cx.checkpoint().is_err());
+        check(&cancel)?;
+        let bulk = self.field_material_network().map_err(heat_error)?;
+        let layout = ConductionThermalNetwork {
+            cells: bulk.cells,
+            links: bulk.links,
+            regions,
+            volume_tolerance_m3,
+        };
+        if regions.len() != circuit.sources().len() || regions.len() > assembly.max_cells {
+            return Err(invalid(
+                "one bounded heat route per original circuit triangle required",
+            ));
+        }
+        let mut field_axes = Vec::new();
+        for region in regions {
+            check(&cancel)?;
+            let source = circuit
+                .sources()
+                .get(region.triangle)
+                .ok_or_else(|| invalid("thermal route names an absent circuit conductor"))?;
+            for (axis, _) in source.axes() {
+                field_axes.push((region.cell, axis.as_str()));
+            }
+        }
+        self.admit_field_independent_boundaries(cx, &field_axes)
+            .map_err(heat_error)?;
+        let destinations = self.resistor_destinations();
+        let next = layout.step_response_circuit_resolved_bound(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            &destinations,
+            bulk.resistors,
+            contacts,
+            Some(fields),
+            assembly,
+            field_controls,
+            response,
+            controls,
+            initial_energy_increments_j,
+            |trial| {
+                let coefficients = self.resolve(cx, trial).map_err(heat_error)?;
+                if !coefficients.contacts.is_empty() {
+                    return Err(invalid(
+                        "spatial field-storage circuit cannot omit series electrical-contact work",
+                    ));
+                }
+                Ok(coefficients.bulk)
+            },
+            |sample| &sample.material,
+            &cancel,
+        )?;
+        let internal_heat_j = finite(
+            (target_s - thermal.time_s()) * next.report().source.network.radiation_net_power_w(),
+        )?;
+        let next = next.close_field_report(internal_heat_j, controls.total_energy_tolerance_j)?;
+        check(&cancel)?;
+        Ok(next)
+    }
+
     /// Advance the original nonlinear spatial circuit with this complete
     /// material heat assembly. Electrical charge/flux, bulk E/J response,
     /// original electrical-contact loss, thermal-contact conduction and

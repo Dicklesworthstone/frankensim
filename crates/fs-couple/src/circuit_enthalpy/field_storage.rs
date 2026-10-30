@@ -551,7 +551,7 @@ pub(super) fn close_report<D, S>(
 
 // Internal exchanges may have a small nonzero numerical net. Never relabel it
 // as supplied heat or redistribute it into the cells to force a zero residual.
-fn close_report_with_internal_heat<D, S>(
+pub(super) fn close_report_with_internal_heat<D, S>(
     coupled: CircuitEnthalpyReport<FieldThermalSource<S>, D>,
     electrical_work_j: f64,
     internal_heat_j: f64,

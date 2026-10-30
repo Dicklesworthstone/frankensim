@@ -1,5 +1,7 @@
 //! Nonlinear spatial/contact response, sourced R/C/L and physical field U.
 //! Coefficients are manufactured numerical fixtures, not measured materials.
+#[path = "field_storage/heat.rs"]
+mod heat;
 use super::*;
 use fs_couple::circuit_enthalpy::{
     ResistorCell,
@@ -121,6 +123,15 @@ fn history<'a>(
     field: &'a ResolvedHeatCapacityCurve,
     source_w: f64,
 ) -> DepositionSimulation<'a> {
+    history_with_links(curves, field, source_w, &[])
+}
+
+fn history_with_links<'a>(
+    curves: &'a [ResolvedHeatCapacityCurve; 2],
+    field: &'a ResolvedHeatCapacityCurve,
+    source_w: f64,
+    additional_links: &[ThermalLink],
+) -> DepositionSimulation<'a> {
     let mut events = Vec::new();
     for (i, id) in [CellId(30), CellId(10), FIELD_CELL].into_iter().enumerate() {
         events.push(TimedEvent {
@@ -159,6 +170,10 @@ fn history<'a>(
             conductance_w_k: 999.0,
         }),
     });
+    events.extend(additional_links.iter().map(|link| TimedEvent {
+        time_s: 0.0,
+        event: Event::Contact(link.clone()),
+    }));
     DepositionSimulation::new(
         events,
         &[
@@ -168,8 +183,8 @@ fn history<'a>(
         ],
         DepositionBudget {
             max_cells: 3,
-            max_links: 1,
-            max_events: 4,
+            max_links: 1 + additional_links.len(),
+            max_events: 4 + additional_links.len(),
             max_substeps: 100,
         },
     )
