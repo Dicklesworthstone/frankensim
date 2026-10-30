@@ -2819,8 +2819,11 @@ parsing completed; native execution remains unverified in this environment.
 
 `elastic::thermal::AffineIsotropicThermoelastic` retains the original material
 card, selected elastic and expansion claims, full query semantics and declared
-positive temperature interval. It admits positive affine Young's modulus,
-constant Poisson ratio in (-1, 1/2), and constant instantaneous linear expansion.
+positive temperature interval. It admits independently affine Young's modulus,
+Poisson ratio and instantaneous linear expansion, with E positive and nu in
+(-1, 1/2) throughout. The original pinned source integrator supplies free strain.
+Bulk and shear stiffness retain their exact rational dependence on E and nu;
+both thermal derivatives contribute to storage, including when expansion is zero.
 Dimensionally equal semantic coefficient kinds are not interchangeable with
 the native dimension-only elastic schema. External coordinates and selected
 claims stay pinned through every refresh.
@@ -2833,20 +2836,25 @@ capacity -T*d2Psi/dT2. Total and elastic strain components must stay inside the
 declared small-strain envelope. The stress-free reference is the retained
 expansion source, not an inferred density or material-name temperature.
 
-The full-interval conservative lower capacity bound is intended to be added
-to the actual caloric inventory by a coupled physical consumer. This adapter
+The full-interval conservative lower capacity bound uses outward-rounded
+nonnegative arithmetic and the complete six-component Mandel envelope. It
+includes stiffness curvature and the instantaneous expansion slope, and is
+intended to be added to the actual caloric inventory by a coupled consumer. This adapter
 does not create heat storage, infer current density, evolve temperature, solve
 mechanical equilibrium, supply plasticity or claim finite-deformation validity.
 A consumer must separately retain its reference mass, admit the actual caloric
 chart and check positive combined capacity.
 
-Two focused regression definitions cover independent isotropic invariants,
+Focused regression definitions cover independent isotropic invariants,
 pure shear work, fixed-total-strain thermal derivatives, signed modulus slopes
-and expansion, exact relaxed/constant-source limits, capacity bounds and
-source/schema/domain refusals. All three changed Rust files passed syntax
-parsing. Independent finite-difference reference calculations and bounded
-physics/API reviews completed. Native compilation, Cargo tests and rustfmt
-remain unexecuted in this environment.
+and expansion, simultaneous affine E/nu/alpha changes, exact relaxed/constant-source
+limits, capacity bounds and source/schema/domain refusals. Variable nu with zero
+expansion retains its nonzero stiffness-curvature capacity. Source paths with
+kinks or nonlinear coefficients, anisotropy, phase changes and finite strain
+remain outside this law. Pinned rustfmt parsing, focused diff checks and bounded
+physics/API review completed; native compilation and tests for the extension
+remain unexecuted because this worker exhausted shared memory/storage in its
+unchanged runtime dependency.
 
 ## Source-defined bilinear cohesive interfaces
 

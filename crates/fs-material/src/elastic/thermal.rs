@@ -1,9 +1,10 @@
 //! Reversible thermal potential of the original isotropic elastic law.
 //!
-//! At fixed total Mandel strain, e=epsilon-alpha*(T-Tr)*I and
-//! Psi=V e:C(T):e/2. For affine E(T), fixed nu and constant instantaneous
-//! expansion alpha, S=V alpha tr(sigma)-(E'/E)Psi and U=Psi+T S.
-//! C_epsilon=T V [2(E'/E)alpha tr(sigma)-3 E alpha^2/(1-2nu)].
+//! At fixed total Mandel strain, e=epsilon-integral(alpha(T) dT)*I and
+//! Psi=V e:C(T):e/2. The selected E(T), nu(T) and instantaneous alpha(T)
+//! are independently affine. Bulk and shear stiffness remain their exact
+//! rational functions of those sources, including first and second thermal
+//! derivatives. S=-dPsi/dT, U=Psi+T S and C_epsilon=-T d2Psi/dT2.
 //! The temperature derivative is at fixed TOTAL strain, not along a solved
 //! equilibrium path. The native elastic response and original source paths
 //! remain authoritative; this is not a new mechanical or thermal integrator.
@@ -14,7 +15,8 @@ use crate::field_storage::{FieldStorageError, admit_source_temperature_refresh,
     thermal::affine_source_path};
 use crate::state_point::{ResolvedMaterialStatePoint, MaterialStatePointError,
     YOUNG_MODULUS_PROPERTY, POISSON_RATIO_PROPERTY,
-    LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY};
+    LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection,
+    integrate_isotropic_thermal_expansion};
 use fs_matdb::MaterialCard;
 use fs_qty::{Dims, Pressure, QuantitySpec};
 
@@ -68,7 +70,11 @@ pub struct AffineIsotropicThermoelastic {
     youngs_slope_pa_k:f64,
     maximum_youngs_pa:f64,
     poisson:f64,
+    poisson_slope_per_k:f64,
+    poisson_endpoints:[f64;2],
     expansion_per_k:f64,
+    expansion_slope_per_k2:f64,
+    maximum_absolute_expansion_per_k:f64,
     maximum_absolute_mandel_strain:f64,
 }
 
@@ -79,9 +85,11 @@ pub struct ResolvedThermoelastic {
     pub expansion:ResolvedMaterialStatePoint,
     material:IsotropicElastic,
     temperature_k:f64,
-    reference_temperature_k:f64,
     youngs_slope_pa_k:f64,
+    poisson_slope_per_k:f64,
     expansion_per_k:f64,
+    expansion_slope_per_k2:f64,
+    free_linear_strain:f64,
     maximum_absolute_mandel_strain:f64,
 }
 
@@ -101,7 +109,10 @@ impl AffineIsotropicThermoelastic {
     /// Admit the complete source interval, retaining every original claim and
     /// fixed external coordinate. The expansion reference is the original
     /// stress-free state; current elasticity may start at another temperature.
-    /// E must be positive affine, nu fixed in (-1,1/2), and alpha constant.
+    /// E, nu and instantaneous alpha may each be affine over the whole
+    /// interval; E stays positive and nu stays in (-1,1/2). Expansion is
+    /// integrated by the original pinned source owner. A slope discontinuity
+    /// is refused: this smooth potential does not invent a transition entropy.
     pub fn new(card:&MaterialCard,elastic:&ResolvedMaterialStatePoint,
         expansion_reference:&ResolvedMaterialStatePoint,temperature_range_k:[f64;2],
         maximum_absolute_mandel_strain:f64) -> Result<Self,ThermoelasticError> {
@@ -118,17 +129,23 @@ impl AffineIsotropicThermoelastic {
         IsotropicElastic::new(e,poisson,maximum_absolute_mandel_strain)?;
         let (reference_temperature_k,youngs_slope_pa_k,ends)=affine_source_path(
             card,&reference,YOUNG_MODULUS_PROPERTY,"T",temperature_range_k,true).map_err(field)?;
-        let (_,nu_slope,_)=affine_source_path(card,&reference,POISSON_RATIO_PROPERTY,
+        let (_,poisson_slope_per_k,poisson_endpoints)=affine_source_path(card,&reference,POISSON_RATIO_PROPERTY,
             "T",temperature_range_k,false).map_err(field)?;
-        let (_,alpha_slope,_)=affine_source_path(card,expansion_reference,
+        let (_,expansion_slope_per_k2,alpha_endpoints)=affine_source_path(card,expansion_reference,
             LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,"T",temperature_range_k,false).map_err(field)?;
-        if nu_slope!=0.0 || alpha_slope!=0.0 {
-            return Err(ThermoelasticError::Invalid("this potential requires constant Poisson ratio and instantaneous thermal expansion"));
+        for (slope,endpoints) in [(youngs_slope_pa_k,ends),
+            (poisson_slope_per_k,poisson_endpoints),(expansion_slope_per_k2,alpha_endpoints)] {
+            if slope==0.0 && endpoints[0]!=endpoints[1] {
+                return Err(ThermoelasticError::Invalid("nonconstant thermoelastic source derivative underflows"));
+            }
         }
         let law=Self {card:card.clone(),elastic_reference:reference,
             expansion_reference:expansion_reference.clone(),temperature_range_k,
             reference_temperature_k,youngs_slope_pa_k,maximum_youngs_pa:ends[0].max(ends[1]),
-            poisson,expansion_per_k:alpha,maximum_absolute_mandel_strain};
+            poisson,poisson_slope_per_k,poisson_endpoints,expansion_per_k:alpha,
+            expansion_slope_per_k2,
+            maximum_absolute_expansion_per_k:alpha_endpoints[0].abs().max(alpha_endpoints[1].abs()),
+            maximum_absolute_mandel_strain};
         for t in temperature_range_k {law.at_temperature(t)?;}
         Ok(law)
     }
@@ -146,18 +163,35 @@ impl AffineIsotropicThermoelastic {
         let elastic=self.elastic_reference.at_query_point(&self.card,&point)?;
         let expansion=self.expansion_reference.at_query_point(&self.card,&point)?;
         let e=value(&elastic,YOUNG_MODULUS_PROPERTY,Pressure::DIMS)?;
-        let expected=finite(self.youngs_slope_pa_k.mul_add(t-self.reference_temperature_k,
-            value(&self.elastic_reference,YOUNG_MODULUS_PROPERTY,Pressure::DIMS)?))?;
-        if (e-expected).abs()>512.0*f64::EPSILON*e.abs().max(expected.abs())
-            || value(&elastic,POISSON_RATIO_PROPERTY,Dims([0;6]))?.to_bits()!=self.poisson.to_bits()
-            || value(&expansion,LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
-                Dims([0,0,0,-1,0,0]))?.to_bits()!=self.expansion_per_k.to_bits() {
-            return Err(ThermoelasticError::Invalid("thermoelastic sources left their admitted affine/fixed paths"));
+        let poisson=value(&elastic,POISSON_RATIO_PROPERTY,Dims([0;6]))?;
+        let alpha=value(&expansion,LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+            Dims([0,0,0,-1,0,0]))?;
+        let delta=t-self.reference_temperature_k;
+        for (actual,reference,slope,scale) in [
+            (e,value(&self.elastic_reference,YOUNG_MODULUS_PROPERTY,Pressure::DIMS)?,
+                self.youngs_slope_pa_k,self.maximum_youngs_pa),
+            (poisson,self.poisson,self.poisson_slope_per_k,
+                self.poisson_endpoints[0].abs().max(self.poisson_endpoints[1].abs())),
+            (alpha,self.expansion_per_k,self.expansion_slope_per_k2,
+                self.maximum_absolute_expansion_per_k),
+        ] {
+            let expected=finite(slope.mul_add(delta,reference))?;
+            if (actual-expected).abs()>512.0*f64::EPSILON*scale.max(actual.abs()).max(expected.abs()) {
+                return Err(ThermoelasticError::Invalid("thermoelastic sources left their admitted affine paths"));
+            }
         }
-        let material=IsotropicElastic::new(e,self.poisson,self.maximum_absolute_mandel_strain)?;
+        let selected=self.expansion_reference.property(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
+            .ok_or(ThermoelasticError::Invalid("original expansion claim is missing"))?
+            .answer().receipt.selected;
+        let integrated=integrate_isotropic_thermal_expansion(&self.card,
+            &self.expansion_reference.query(),&point,MaterialPropertySelection::PinnedByProperty(
+                vec![(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY.to_owned(),selected)]))?;
+        let material=IsotropicElastic::new(e,poisson,self.maximum_absolute_mandel_strain)?;
         Ok(ResolvedThermoelastic {elastic,expansion,material,temperature_k:t,
-            reference_temperature_k:self.reference_temperature_k,youngs_slope_pa_k:self.youngs_slope_pa_k,
-            expansion_per_k:self.expansion_per_k,maximum_absolute_mandel_strain:self.maximum_absolute_mandel_strain})
+            youngs_slope_pa_k:self.youngs_slope_pa_k,poisson_slope_per_k:self.poisson_slope_per_k,
+            expansion_per_k:alpha,expansion_slope_per_k2:self.expansion_slope_per_k2,
+            free_linear_strain:integrated.free_linear_strain(),
+            maximum_absolute_mandel_strain:self.maximum_absolute_mandel_strain})
     }
 
     /// Match the actual native source fields; a different card, selection,
@@ -186,25 +220,66 @@ impl AffineIsotropicThermoelastic {
         if !volume_m3.is_finite() || volume_m3<=0.0 {
             return Err(ThermoelasticError::Invalid("positive finite reference volume is required"));
         }
-        if self.expansion_per_k==0.0 {return Ok(0.0);}
-        let span=(self.temperature_range_k[0]-self.reference_temperature_k).abs()
-            .max((self.temperature_range_k[1]-self.reference_temperature_k).abs());
-        let elastic_trace_bound=finite(3.0*(self.maximum_absolute_mandel_strain
-            +self.expansion_per_k.abs()*span))?;
-        let magnitude=finite(self.temperature_range_k[1]*volume_m3/(1.0-2.0*self.poisson)
-            *(2.0*self.youngs_slope_pa_k.abs()*self.expansion_per_k.abs()*elastic_trace_bound
-                +3.0*self.maximum_youngs_pa*self.expansion_per_k*self.expansion_per_k))?;
-        if magnitude<=0.0 {
-            return Err(ThermoelasticError::Invalid("nonzero thermoelastic capacity bound is unrepresentable"));
+        // Positive arithmetic is rounded outward. Denominator minima are
+        // rounded downward before reciprocation; an unrepresentable bound
+        // refuses instead of admitting an unproved positive total capacity.
+        let nu_low=self.poisson_endpoints[0].min(self.poisson_endpoints[1]);
+        let nu_high=self.poisson_endpoints[0].max(self.poisson_endpoints[1]);
+        let d=(1.0-2.0*nu_high).next_down();
+        let q=(1.0+nu_low).next_down();
+        if d<=0.0 || q<=0.0 {
+            return Err(ThermoelasticError::Invalid("thermoelastic capacity denominator is unrepresentable"));
         }
-        finite(-magnitude*(1.0+4096.0*f64::EPSILON))
+        let inv_d=upper_div(1.0,d)?;
+        let inv_q=upper_div(1.0,q)?;
+        let e=self.maximum_youngs_pa.next_up();
+        let et=self.youngs_slope_pa_k.abs();
+        let nut=self.poisson_slope_per_k.abs();
+        let bulk=upper_div(upper_mul(e,inv_d)?,3.0)?;
+        let bulk_first=upper_add(upper_div(upper_mul(et,inv_d)?,3.0)?,
+            upper_mul(2.0,upper_mul(nut,upper_mul(bulk,inv_d)?)?)?)?;
+        let bulk_second=upper_mul(4.0,upper_mul(nut,upper_mul(bulk_first,inv_d)?)?)?;
+        let shear=upper_div(upper_mul(e,inv_q)?,2.0)?;
+        let shear_first=upper_add(upper_div(upper_mul(et,inv_q)?,2.0)?,
+            upper_mul(nut,upper_mul(shear,inv_q)?)?)?;
+        let shear_second=upper_mul(2.0,upper_mul(nut,upper_mul(shear_first,inv_q)?)?)?;
+        let alpha=self.maximum_absolute_expansion_per_k;
+        let alpha_first=self.expansion_slope_per_k2.abs();
+        let span=finite((self.temperature_range_k[0]-self.reference_temperature_k).abs()
+            .max((self.temperature_range_k[1]-self.reference_temperature_k).abs()).next_up())?;
+        let strain=self.maximum_absolute_mandel_strain;
+        let trace=upper_mul(3.0,upper_add(strain,upper_mul(alpha,span)?)?)?;
+        // The limit is on SIX MANDEL components, whose squared norm is the
+        // tensor Frobenius norm. Isotropic free strain does not change dev(e).
+        let deviator_squared=upper_mul(6.0,upper_mul(strain,strain)?)?;
+        let linear=upper_mul(upper_add(upper_mul(6.0,upper_mul(bulk_first,alpha)?)?,
+            upper_mul(3.0,upper_mul(bulk,alpha_first)?)?)?,trace)?;
+        let expansion=upper_mul(9.0,upper_mul(bulk,upper_mul(alpha,alpha)?)?)?;
+        let volumetric=upper_div(upper_mul(bulk_second,upper_mul(trace,trace)?)?,2.0)?;
+        let distortional=upper_mul(shear_second,deviator_squared)?;
+        let magnitude=upper_mul(upper_mul(self.temperature_range_k[1],volume_m3)?,
+            upper_add(upper_add(linear,expansion)?,upper_add(volumetric,distortional)?)?)?;
+        // nu(T) produces stiffness curvature even when thermal expansion is zero.
+        Ok(-magnitude)
     }
+}
+
+// Bounds use only nonnegative operands. Preserve exact zero while rounding
+// positive underflow upward; infinity is an explicit admission failure.
+fn upper_add(a:f64,b:f64)->Result<f64,ThermoelasticError> {
+    if a==0.0 && b==0.0 {Ok(0.0)} else {finite((a+b).next_up())}
+}
+fn upper_mul(a:f64,b:f64)->Result<f64,ThermoelasticError> {
+    if a==0.0 || b==0.0 {Ok(0.0)} else {finite((a*b).next_up())}
+}
+fn upper_div(a:f64,b:f64)->Result<f64,ThermoelasticError> {
+    if a==0.0 {Ok(0.0)} else {finite((a/b).next_up())}
 }
 
 impl ResolvedThermoelastic {
     pub fn temperature_k(&self)->f64 {self.temperature_k}
     pub fn free_strain(&self)->Result<f64,ThermoelasticError> {
-        finite(self.expansion_per_k*(self.temperature_k-self.reference_temperature_k))
+        Ok(self.free_linear_strain)
     }
     pub fn state(&self,total_strain_mandel:[f64;6],volume_m3:f64)
         -> Result<ThermoelasticState,ThermoelasticError> {
@@ -228,17 +303,30 @@ impl ResolvedThermoelastic {
         for s in &mut stress_mandel_pa[3..] {*s*=root_two;}
         let free_energy_j=finite(0.5*volume_m3*elastic_strain_mandel.iter()
             .zip(stress_mandel_pa).map(|(e,s)|e*s).sum::<f64>())?;
-        let trace=finite(stress_mandel_pa[..3].iter().sum())?;
-        let ratio=finite(self.youngs_slope_pa_k/self.material.youngs)?;
-        if self.youngs_slope_pa_k!=0.0 && ratio==0.0 {
-            return Err(ThermoelasticError::Invalid("thermoelastic derivative ratio underflows"));
+        let trace=finite(elastic_strain_mandel[..3].iter().sum())?;
+        let mean=trace/3.0;
+        let deviator_squared=finite(elastic_strain_mandel.iter().enumerate()
+            .map(|(k,e)|if k<3 {(e-mean).powi(2)}else{e*e}).sum())?;
+        let e=self.material.youngs;
+        let nu=self.material.poisson;
+        let d=1.0-2.0*nu; let q=1.0+nu;
+        let bulk=finite(e/(3.0*d))?;
+        let bulk_first=finite((self.youngs_slope_pa_k+2.0*e*self.poisson_slope_per_k/d)/(3.0*d))?;
+        let shear_first=finite((self.youngs_slope_pa_k-e*self.poisson_slope_per_k/q)/(2.0*q))?;
+        if bulk_first==0.0 && shear_first==0.0
+            && (self.youngs_slope_pa_k!=0.0 || self.poisson_slope_per_k!=0.0) {
+            return Err(ThermoelasticError::Invalid("nonconstant thermoelastic stiffness derivatives underflow"));
         }
-        let entropy_j_k=finite(volume_m3*self.expansion_per_k*trace-ratio*free_energy_j)?;
+        let bulk_second=finite(4.0*self.poisson_slope_per_k*bulk_first/d)?;
+        let shear_second=finite(-2.0*self.poisson_slope_per_k*shear_first/q)?;
+        let alpha=self.expansion_per_k;
+        let entropy_j_k=finite(volume_m3*(3.0*bulk*alpha*trace
+            -0.5*bulk_first*trace*trace-shear_first*deviator_squared))?;
         let internal_energy_j=finite(self.temperature_k.mul_add(entropy_j_k,free_energy_j))?;
         let heat_capacity_j_k=finite(self.temperature_k*volume_m3
-            *(2.0*ratio*self.expansion_per_k*trace
-                -3.0*self.material.youngs*self.expansion_per_k*self.expansion_per_k
-                    /(1.0-2.0*self.material.poisson)))?;
+            *((6.0*bulk_first*alpha+3.0*bulk*self.expansion_slope_per_k2)*trace
+                -9.0*bulk*alpha*alpha-0.5*bulk_second*trace*trace
+                -shear_second*deviator_squared))?;
         if stress_mandel_pa.iter().any(|v|!v.is_finite()) || free_energy_j<0.0 {
             return Err(ThermoelasticError::Invalid("native thermoelastic response is unrepresentable"));
         }

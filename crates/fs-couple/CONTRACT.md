@@ -10746,7 +10746,8 @@ Native compilation, Cargo tests and rustfmt remain unexecuted in this environmen
 `SolidEnthalpy` binding, native compatible equilibrium/stress, actual assembled
 nodal loads and finite thermal state. One declared source interval per reference
 tetrahedron uses the source-backed affine isotropic thermoelastic potential:
-E(T), fixed Poisson ratio and constant instantaneous expansion. The same
+independently affine E(T), Poisson ratio and instantaneous expansion, with
+source-integrated free strain and both bulk/shear thermal derivatives. The same
 source/card/eigenstrain and delivered reference mass remain pinned. It admits
 a fully solid constant-density interval within the original complete caloric
 chart, preserving later latent/liquid segments. Any latent segment intersecting
@@ -11181,8 +11182,8 @@ late source/identity failures, cancellation and replay without partial state.
 `solid_enthalpy::thermoelastic::dynamic` launches the original sparse
 average-acceleration tetrahedral trajectory from admitted loaded equilibrium
 and supplied nodal velocity. Later states evolve actual inertia. It retains the
-existing source-pinned affine E(T), fixed Poisson ratio, constant instantaneous
-expansion potential, finite caloric charts, stationary supports, fixed reference
+existing source-pinned independently affine E(T), nu(T) and instantaneous
+alpha(T) potential, finite caloric charts, stationary supports, fixed reference
 mass and positive total-capacity/strain/source admissions.
 
 Each cell receives reversible `Q = W_stress - delta(U_elastic)`, with
@@ -11209,6 +11210,14 @@ Fixtures are authored, not measured-material validation. Endpoint coupling
 generally has first-order path error and needs time refinement; no exact entropy
 conservation, finite-strain/phase dynamics, moving supports, downstream contact
 recoupling or arbitrary initial free-body state is claimed.
+
+The affine-coefficient extension uses this same quasistatic and inertial
+assembly. Its focused `varying_coefficients` regressions compare free/clamped
+finite heating and heterogeneous compatible stress/displacement with independent
+Lamé-coordinate energy and thermal roots, then exercise an actual inertial step.
+The full-interval combined-capacity gate includes nu-induced stiffness curvature
+even at zero expansion. These added regressions passed source/parser and diff
+checks; native execution of the extension remains unverified in this worker.
 
 ## Moving finite-network friction heat and local modal feedback
 

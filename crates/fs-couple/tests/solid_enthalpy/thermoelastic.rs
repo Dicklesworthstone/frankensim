@@ -283,3 +283,6 @@ fn g4_complete_phase_chart_is_retained_and_failed_coupling_publishes_no_history(
 
 #[path = "thermoelastic/dynamic.rs"]
 mod dynamic;
+
+#[path = "thermoelastic/varying_coefficients.rs"]
+mod varying_coefficients;
