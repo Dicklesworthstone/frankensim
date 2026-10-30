@@ -11,7 +11,7 @@ pub(super) mod evolve;
 mod face;
 mod law;
 
-pub use face::{PlanarTransport, TransportFaceReport};
+pub use face::{PlanarTransport, SpatialTransport, TransportFaceReport};
 #[cfg(feature = "material")]
 pub(crate) use law::validate_binary;
 pub use law::{

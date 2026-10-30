@@ -2,6 +2,8 @@ use super::*;
 use crate::multicomponent::dissipation::{evolve, face as kernel};
 use crate::multicomponent::{NormalCell, NormalPrimitive};
 
+mod spatial;
+
 fn prepared(formation: f64) -> PlanarTransport<ConstantTransport> {
     let g = MixtureGas::new(
         bank(vec![

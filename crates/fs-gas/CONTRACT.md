@@ -1434,6 +1434,45 @@ axial/network regressions remain authoritative for their geometry and balances.
 This face owner supplies no Soret/Dufour closure, no-slip or molecular reservoir
 boundary, nonideal transport, spatial accuracy or combustion validation.
 
+### Shared original-mixture molecular faces in three dimensions
+
+`multicomponent::dissipation::SpatialTransport` extends the same prepared
+source and const-generic molecular kernel to all three momentum components.
+The original axial and planar owners retain their public interfaces and use
+that same kernel with zero or one transverse component; no diffusion solver,
+species conversion, caloric reference or constitutive law is duplicated.
+Three-dimensional conservative inputs remove all kinetic components through
+the original source inversion. Primitive inputs use the original complete
+three-momentum admission without repeating the temperature solve.
+
+Each face supplies its positive normal separation and both tangential rows of
+the velocity gradient in the original orthonormal face frame. The Newtonian
+traction includes both transverse dilatations in the normal component and
+both normal/tangential derivatives in each shear component. All three stress
+work terms accompany original referenced species enthalpy diffusion and
+Fourier heat in one total-energy flux. Stationary impermeable adiabatic slip
+walls retain both transverse dilatations in the normal viscous load while
+returning exactly zero species, shear and energy transfer. A field owner must
+still supply physical gradients, divergence, time integration and complete
+boundary exchanges.
+
+The prepared binary matrix and Maxwell--Stefan numerical heap capacities are
+unchanged by the extra momentum direction. Successful kernels allocate no
+additional scratch; caller-supplied law allocations keep their own contract.
+The reported engineering diffusivity estimate includes the complete
+three-dimensional Newtonian row couplings and must be combined with all
+spatial inverse lengths by the field owner. It is not a spectral,
+invariant-domain or fully discrete entropy certificate.
+
+Six focused regressions independently reconstruct binary species/Fourier/full
+stress-work fluxes, compare conservative and primitive inputs, rotate both
+tangent axes and the complete derivative tensor, check Galilean and formation
+reference covariance, retain the planar reduction bit for bit, and verify
+slip-wall loads, a resolved `1e-180` trace species, an exact absent species,
+source/axis/gradient/caloric refusal and final cancellation/replay. They do
+not establish spatial convergence, physically resolved shock/flame thickness,
+Soret/Dufour effects, no-slip walls or experimental combustion validity.
+
 ### Three-momentum chemistry on the same prepared cell source
 
 `CellChemistry::advance_spatial` extends the same prepared axial/planar owner
