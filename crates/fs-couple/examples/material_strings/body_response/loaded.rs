@@ -8,6 +8,37 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::o
 };
 use fs_couple::shear_shell::coating::strain::ShellCoatingStrainReport;
 
+/// Column identity for normalized unit drives, or actual SI values for one
+/// complete coherent physical load. Numeric response transport is shared.
+#[derive(Clone, Copy)]
+enum RowKind {
+    Unit(usize),
+    Physical,
+}
+
+fn coherent_forces(ports: usize, authored: &[(usize, C64)]) -> Result<Vec<C64>> {
+    if ports == 0 || authored.is_empty() || authored.len() > MAX_COHERENT_FORCE_RECORDS {
+        return Err("coherent response requires an original bridge and 1..=64 physical force records".into());
+    }
+    let mut forces = vec![C64::ZERO; ports];
+    for &(bridge, force) in authored {
+        let total = forces.get_mut(bridge)
+            .ok_or("coherent force names a bridge absent from this body")?;
+        if !force.re.is_finite() || !force.im.is_finite() {
+            return Err("coherent bridge forces must have finite real and imaginary newtons".into());
+        }
+        // Authored order is the deterministic summation order, including
+        // duplicate actuators. Never normalize or discard a cancelling port.
+        total.re += force.re;
+        total.im += force.im;
+        if !total.re.is_finite() || !total.im.is_finite() {
+            return Err("coherent bridge force accumulation overflow".into());
+        }
+    }
+    Ok(forces)
+}
+
+
 impl Options {
     /// Observe the same microphone declaration selected for playback, using
     /// its original frequency producer instead of a sampled FIR realization.
@@ -56,10 +87,21 @@ impl Options {
         } else {
             return Err("loaded body-response requires a curved or assembled shell".into());
         };
-        if ports.is_empty() || self.bridge.is_some_and(|bridge| bridge >= ports.len()) {
+        let unit_bridge = match &self.excitation {
+            Excitation::Unit(bridge) => Some(*bridge),
+            _ => None,
+        };
+        if ports.is_empty() || unit_bridge.is_some_and(|bridge| bridge >= ports.len()) {
             return Err("body-response bridge index is absent from this body".into());
         }
-        let drives = self.bridge.map_or(ports.len(), |_| 1);
+        // Validate every physical input and complete its source-bound vector
+        // before preparing receivers, strain maps or an output file.
+        let coherent = match &self.excitation {
+            Excitation::Coherent(authored) => Some(coherent_forces(ports.len(), authored)?),
+            _ => None,
+        };
+        let units = if coherent.is_some() { strain::Units::Physical } else { strain::Units::PerNewton };
+        let drives = if matches!(&self.excitation, Excitation::All) { ports.len() } else { 1 };
         let evaluations = self.points.checked_mul(drives)
             .ok_or("coating strain evaluation count overflow")?;
         let mut strain = self.strain.map(|options| options.prepare(
@@ -83,15 +125,23 @@ impl Options {
         }).transpose()?;
         let prepared = receiver.as_ref().map(|receiver| receiver.prepare(gate)).transpose()?;
         let mut text = String::new();
-        writeln!(text, "# frankensim-loaded-body-response-v{}", if strain.is_some() { 3 } else { 2 })?;
+        writeln!(text, "# frankensim-loaded-body-response-v{}", if coherent.is_some() { 4 } else if strain.is_some() { 3 } else { 2 })?;
         writeln!(
             text,
             "# scope: continuous linear response of the actual coupled performer with bow/contact traction released"
         )?;
-        writeln!(
-            text,
-            "# peak phasors: exp(-i omega t); each row applies 1 N only at its drive_bridge; all bridge velocities retain their physical order"
-        )?;
+        if let Some(forces) = &coherent {
+            writeln!(text, "# peak phasors: exp(-i omega t); each row solves the complete coherent physical force vector; actual SI values without force normalization")?;
+            writeln!(text, "# duplicate actuators sum in authored order before solving; bridge velocities and summed forces retain original source order")?;
+            for (bridge, force) in forces.iter().enumerate() {
+                writeln!(text, "# physical_peak_force_N bridge={bridge} real_N={:.17e} imaginary_N={:.17e}", force.re, force.im)?;
+            }
+        } else {
+            writeln!(
+                text,
+                "# peak phasors: exp(-i omega t); each row applies 1 N only at its drive_bridge; all bridge velocities retain their physical order"
+            )?;
+        }
         writeln!(
             text,
             "# loading: retained strings, bridge connections, selected cavity, material memory and admitted exterior reaction"
@@ -136,24 +186,9 @@ impl Options {
                 )?;
             }
         }
-        if let Some(observer) = &strain { strain::metadata(&mut text, observer)?; }
-        write!(text, "frequency_hz\tdrive_bridge")?;
-        for port in 0..ports.len() {
-            write!(
-                text,
-                "\tbridge{port}_mobility_re_m_s_per_N\tbridge{port}_mobility_im_m_s_per_N"
-            )?;
-        }
-        write!(
-            text,
-            "\tshell_exterior_volume_re_m3_s_per_N\tshell_exterior_volume_im_m3_s_per_N\tshell_cavity_volume_re_m3_s_per_N\tshell_cavity_volume_im_m3_s_per_N\tnative_pressure_re_Pa_per_N\tnative_pressure_im_Pa_per_N\treceiver_pressure_re_Pa_per_N\treceiver_pressure_im_Pa_per_N\texternal_power_W_per_N2\tcomponent_loss_W_per_N2\tconnection_loss_W_per_N2\tcoating_loss_W_per_N2\tother_material_loss_W_per_N2\tradiation_loss_W_per_N2\ttotal_loss_W_per_N2\tmean_stored_energy_J_per_N2\tcoating_mean_stored_energy_J_per_N2\tpower_residual_W_per_N2\tsolve_relative_residual"
-        )?;
-        if prepared.is_some() {
-            for axis in ["x", "y", "z"] {
-                write!(text, "\treceiver_gradient_{axis}_re_Pa_per_m_per_N\treceiver_gradient_{axis}_im_Pa_per_m_per_N")?;
-            }
-        }
-        if let Some(observer) = &strain { strain::header(&mut text, observer.film_count())?; }
+        if let Some(observer) = &strain { strain::metadata(&mut text, observer, units)?; }
+        append_header(&mut text, ports.len(), prepared.is_some(), units)?;
+        if let Some(observer) = &strain { strain::header(&mut text, observer.film_count(), units)?; }
         writeln!(text)?;
         if text.len() > 8 * 1_048_576 {
             return Err("loaded response source metadata exceeds 8 MiB".into());
@@ -163,7 +198,9 @@ impl Options {
             let frequency = self.frequency_hz(point);
             let omega = core::f64::consts::TAU * frequency;
             if let Some(receiver) = &prepared {
-                let values = if let Some(bridge) = self.bridge {
+                let values = if let Some(forces) = &coherent {
+                    vec![receiver.bridge_forces_harmonic_response(omega, forces, per_frequency, gate)?]
+                } else if let Some(bridge) = unit_bridge {
                     vec![receiver.bridge_harmonic_response(omega, bridge, C64::from_re(1.0), per_frequency, gate)?]
                 } else {
                     receiver.bridge_harmonic_matrix(omega, per_frequency, gate)?
@@ -172,11 +209,15 @@ impl Options {
                     let strain_report = if let Some(observer) = &mut strain {
                         Some(observer.evaluate(value.body.body_displacement_m_sqrt_kg()?, gate)?)
                     } else { None };
-                    append_row(&mut text, frequency, self.bridge.unwrap_or(column), &value.body,
+                    let kind = if coherent.is_some() { RowKind::Physical }
+                        else { RowKind::Unit(unit_bridge.unwrap_or(column)) };
+                    append_row(&mut text, frequency, kind, &value.body,
                         value.receiver_pressure_pa, Some(&value.receiver_gradient_pa_per_m), strain_report.as_ref())?;
                 }
             } else {
-                let values = if let Some(bridge) = self.bridge {
+                let values = if let Some(forces) = &coherent {
+                    vec![bank.material_shell_bridge_forces_harmonic_response(omega, forces, per_frequency, gate)?]
+                } else if let Some(bridge) = unit_bridge {
                     vec![bank.material_shell_bridge_harmonic_response(omega, bridge, C64::from_re(1.0), per_frequency, gate)?]
                 } else {
                     bank.material_shell_bridge_harmonic_matrix(omega, per_frequency, gate)?
@@ -185,7 +226,9 @@ impl Options {
                     let strain_report = if let Some(observer) = &mut strain {
                         Some(observer.evaluate(value.body_displacement_m_sqrt_kg()?, gate)?)
                     } else { None };
-                    append_row(&mut text, frequency, self.bridge.unwrap_or(column), value,
+                    let kind = if coherent.is_some() { RowKind::Physical }
+                        else { RowKind::Unit(unit_bridge.unwrap_or(column)) };
+                    append_row(&mut text, frequency, kind, value,
                         value.released.observer_pressure_pa, None, strain_report.as_ref())?;
                 }
             }
@@ -195,19 +238,54 @@ impl Options {
             .create_new(true)
             .open(&self.output)?
             .write_all(text.as_bytes())?;
-        eprintln!(
-            "loaded_body_response={:?}; frequencies={}; drive_columns={drives}; exterior_receiver={}; normalization_peak_force_N=1; scope=linear_released_coupled_response",
-            self.output, self.points, prepared.is_some()
-        );
+        if let Some(forces) = &coherent {
+            eprintln!("loaded_body_response={:?}; frequencies={}; coherent_peak_forces_N={forces:?}; exterior_receiver={}; scope=linear_released_coupled_physical_response",
+                self.output, self.points, prepared.is_some());
+        } else {
+            eprintln!(
+                "loaded_body_response={:?}; frequencies={}; drive_columns={drives}; exterior_receiver={}; normalization_peak_force_N=1; scope=linear_released_coupled_response",
+                self.output, self.points, prepared.is_some()
+            );
+        }
         Ok(())
     }
 }
 
-fn append_row(text: &mut String, frequency: f64, bridge: usize,
+fn append_header(text: &mut String, ports: usize, receiver: bool, units: strain::Units) -> Result<()> {
+    let physical = units == strain::Units::Physical;
+    let linear = if physical { "" } else { "_per_N" };
+    let quadratic = if physical { "" } else { "_per_N2" };
+    write!(text, "frequency_hz")?;
+    if !physical { write!(text, "\tdrive_bridge")?; }
+    let motion = if physical { "velocity" } else { "mobility" };
+    for port in 0..ports {
+        write!(text, "\tbridge{port}_{motion}_re_m_s{linear}\tbridge{port}_{motion}_im_m_s{linear}")?;
+    }
+    for (name, unit) in [("shell_exterior_volume", "m3_s"), ("shell_cavity_volume", "m3_s"),
+        ("native_pressure", "Pa"), ("receiver_pressure", "Pa")] {
+        write!(text, "\t{name}_re_{unit}{linear}\t{name}_im_{unit}{linear}")?;
+    }
+    for (name, unit) in [("external_power", "W"), ("component_loss", "W"),
+        ("connection_loss", "W"), ("coating_loss", "W"), ("other_material_loss", "W"),
+        ("radiation_loss", "W"), ("total_loss", "W"), ("mean_stored_energy", "J"),
+        ("coating_mean_stored_energy", "J"), ("power_residual", "W")] {
+        write!(text, "\t{name}_{unit}{quadratic}")?;
+    }
+    write!(text, "\tsolve_relative_residual")?;
+    if receiver {
+        for axis in ["x", "y", "z"] {
+            write!(text, "\treceiver_gradient_{axis}_re_Pa_per_m{linear}\treceiver_gradient_{axis}_im_Pa_per_m{linear}")?;
+        }
+    }
+    Ok(())
+}
+
+fn append_row(text: &mut String, frequency: f64, kind: RowKind,
     value: &ShellBridgeHarmonicResponse, receiver_pressure: C64, gradient: Option<&[C64; 3]>,
     strain_report: Option<&ShellCoatingStrainReport<'_>>) -> Result<()> {
     let dynamics = &value.released.dynamics;
-    write!(text, "{frequency:.17e}\t{bridge}")?;
+    write!(text, "{frequency:.17e}")?;
+    if let RowKind::Unit(bridge) = kind { write!(text, "\t{bridge}")?; }
     for port in &value.bridge_velocity_m_s {
         write!(text, "\t{:.17e}\t{:.17e}", port.re, port.im)?;
     }
@@ -234,4 +312,71 @@ fn append_row(text: &mut String, frequency: f64, bridge: usize,
         return Err("loaded response exceeds 8 MiB; reduce its point count".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coherent_inputs_sum_complex_actuators_in_authored_source_order() {
+        let forces = coherent_forces(3, &[
+            (2, C64::new(1.0, 2.0)), (0, C64::new(-3.0, 4.0)),
+            (2, C64::new(-0.5, -2.0)),
+        ]).unwrap();
+        assert_eq!(forces, vec![C64::new(-3.0, 4.0), C64::ZERO, C64::new(0.5, 0.0)]);
+        let first = coherent_forces(1, &[
+            (0, C64::from_re(1e16)), (0, C64::from_re(-1e16)), (0, C64::from_re(1.0)),
+        ]).unwrap();
+        let second = coherent_forces(1, &[
+            (0, C64::from_re(1e16)), (0, C64::from_re(1.0)), (0, C64::from_re(-1e16)),
+        ]).unwrap();
+        assert_eq!(first[0], C64::from_re(1.0));
+        assert_eq!(second[0], C64::ZERO);
+        assert_eq!(coherent_forces(2, &[
+            (1, C64::new(2.0, -3.0)), (1, C64::new(-2.0, 3.0)),
+        ]).unwrap(), vec![C64::ZERO; 2]);
+    }
+
+    #[test]
+    fn coherent_inputs_refuse_missing_source_ports_nonfinite_values_and_sum_overflow() {
+        assert!(coherent_forces(0, &[(0, C64::ZERO)]).is_err());
+        assert!(coherent_forces(2, &[]).is_err());
+        assert!(coherent_forces(2, &[(2, C64::ZERO)]).is_err());
+        assert!(coherent_forces(2, &vec![(0, C64::ZERO); MAX_COHERENT_FORCE_RECORDS + 1]).is_err());
+        for force in [C64::new(f64::NAN, 0.0), C64::new(0.0, f64::INFINITY)] {
+            assert!(coherent_forces(2, &[(0, force)]).is_err());
+        }
+        for force in [C64::new(f64::MAX, 0.0), C64::new(0.0, f64::MAX)] {
+            assert!(coherent_forces(2, &[(0, force), (0, force)]).is_err());
+        }
+    }
+
+    #[test]
+    fn physical_and_unit_force_headers_distinguish_actual_motion_power_and_strain_scale() {
+        let mut unit = String::new();
+        append_header(&mut unit, 1, true, strain::Units::PerNewton).unwrap();
+        strain::header(&mut unit, 1, strain::Units::PerNewton).unwrap();
+        assert_eq!(unit.split('\t').count(), 44);
+        assert!(unit.starts_with("frequency_hz\tdrive_bridge\tbridge0_mobility_re_m_s_per_N"));
+        assert!(unit.contains("\treceiver_pressure_re_Pa_per_N\t"));
+        assert!(unit.contains("\tcoating_loss_W_per_N2\t"));
+        assert!(unit.contains("\treceiver_gradient_x_re_Pa_per_m_per_N\t"));
+        assert!(unit.contains("\tcoating_strain_sufficient_peak_force_N\t"));
+
+        let mut physical = String::new();
+        append_header(&mut physical, 1, true, strain::Units::Physical).unwrap();
+        strain::header(&mut physical, 1, strain::Units::Physical).unwrap();
+        assert_eq!(physical.split('\t').count(), 43);
+        assert!(physical.starts_with("frequency_hz\tbridge0_velocity_re_m_s\t"));
+        assert!(physical.contains("\treceiver_pressure_re_Pa\t"));
+        assert!(physical.contains("\tcoating_loss_W\t"));
+        assert!(physical.contains("\tcoating_mean_stored_energy_J\t"));
+        assert!(physical.contains("\treceiver_gradient_x_re_Pa_per_m\t"));
+        assert!(physical.contains("\tcoating_strain_sufficient_common_amplitude_scale\t"));
+        assert!(physical.contains("\tfilm0_strain_sufficient_amplitude_scale\t"));
+        for normalized in ["drive_bridge", "mobility", "_per_N", "_at_1N", "peak_force_N"] {
+            assert!(!physical.contains(normalized), "{normalized}");
+        }
+    }
 }

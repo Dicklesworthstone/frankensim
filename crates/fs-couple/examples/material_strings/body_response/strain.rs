@@ -5,6 +5,14 @@ use fs_couple::shear_shell::coating::strain::{
     PreparedShellCoatingStrain, ShellCoatingStrainBudget, ShellCoatingStrainReport,
 };
 
+/// The same numeric bound is either a unit-force transfer or the strain of
+/// the complete authored physical load. Its sufficient scale follows that input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Units {
+    PerNewton,
+    Physical,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Options {
     pub maximum_bytes: usize,
@@ -52,12 +60,15 @@ pub(super) fn additional_columns(films: usize) -> Result<usize> {
         .ok_or_else(|| "coating strain report shape overflow".into())
 }
 
-pub(super) fn metadata(text: &mut String, observer: &PreparedShellCoatingStrain<'_>) -> Result<()> {
+pub(super) fn metadata(text: &mut String, observer: &PreparedShellCoatingStrain<'_>, units: Units) -> Result<()> {
     writeln!(text, "# coating strain: peak full-tensor Frobenius bound on the original retained MITC harmonic increment; complete coated triangles and both film faces")?;
     writeln!(text, "# strain model: original elastic bubble condensation; plane-stress zz from film Poisson ratio; tensor shear=engineering shear/2; no shear-energy correction applied to strain")?;
     writeln!(text, "# strain scope: authored constitutive envelope, not a measured failure threshold; excludes unmodeled static/preload/cure strain, transients, missing modes, continuum and 3D interlaminar recovery; floating-point bounds retain the original owner's roundoff scope")?;
     writeln!(text, "# strain bound above limit means compliance is unresolved by this sufficient bound; the ruling Bernstein control need not be a physical maximum location")?;
-    writeln!(text, "# sufficient force: independent 1 N drive in each row; scales the complete coherent response at that frequency; inf means no finite cap from these film bounds, not unlimited instrument strength")?;
+    match units {
+        Units::PerNewton => writeln!(text, "# sufficient force: independent 1 N drive in each row; scales the complete coherent response at that frequency; inf means no finite cap from these film bounds, not unlimited instrument strength")?,
+        Units::Physical => writeln!(text, "# sufficient amplitude scale: dimensionless common multiplier of every authored complex bridge force, preserving relative phase; bounds and limit ratios describe the actual summed load; inf means no finite cap from these film bounds, not unlimited instrument strength")?,
+    }
     writeln!(text, "# coating strain resources: {:?}", observer.resources())?;
     for (index, film) in observer.film_sources().enumerate() {
         let source = film.source;
@@ -71,12 +82,22 @@ pub(super) fn metadata(text: &mut String, observer: &PreparedShellCoatingStrain<
     Ok(())
 }
 
-pub(super) fn header(text: &mut String, films: usize) -> Result<()> {
-    write!(text, "\tcoating_strain_max_limit_ratio_at_1N\tcoating_strain_sufficient_peak_force_N\tcoating_strain_bound_within_envelope_at_1N")?;
+pub(super) fn header(text: &mut String, films: usize, units: Units) -> Result<()> {
+    let physical = units == Units::Physical;
+    if physical {
+        write!(text, "\tcoating_strain_max_limit_ratio\tcoating_strain_sufficient_common_amplitude_scale\tcoating_strain_bound_within_envelope")?;
+    } else {
+        write!(text, "\tcoating_strain_max_limit_ratio_at_1N\tcoating_strain_sufficient_peak_force_N\tcoating_strain_bound_within_envelope_at_1N")?;
+    }
+    let suffix = if physical { "" } else { "_per_N" };
     for film in 0..films {
-        write!(text, "\tfilm{film}_strain_frobenius_bound_per_N\tfilm{film}_strain_limit_ratio_at_1N\tfilm{film}_strain_sufficient_peak_force_N")?;
+        if physical {
+            write!(text, "\tfilm{film}_strain_frobenius_bound\tfilm{film}_strain_limit_ratio\tfilm{film}_strain_sufficient_amplitude_scale")?;
+        } else {
+            write!(text, "\tfilm{film}_strain_frobenius_bound_per_N\tfilm{film}_strain_limit_ratio_at_1N\tfilm{film}_strain_sufficient_peak_force_N")?;
+        }
         for component in ["xx", "yy", "zz", "xy", "yz", "zx"] {
-            write!(text, "\tfilm{film}_strain_{component}_amplitude_bound_per_N")?;
+            write!(text, "\tfilm{film}_strain_{component}_amplitude_bound{suffix}")?;
         }
         write!(text, "\tfilm{film}_strain_ruling_element\tfilm{film}_strain_ruling_control\tfilm{film}_strain_ruling_z_face")?;
     }

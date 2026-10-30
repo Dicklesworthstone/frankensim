@@ -1,6 +1,7 @@
-//! Read-only structural response of the same source-bound shell image.
-//! This linear transfer is normalized to a unit peak bridge force; WAV rendering
-//! continues through the complete string/body/cavity/bow owner.
+//! Read-only harmonic response of the same source-bound shell image.
+//! Structural output retains a unit peak force. Loaded output also admits
+//! coherent physical bridge loads; WAV rendering continues through the
+//! complete string/body/cavity/bow owner.
 use super::{Result, input, poll};
 use fs_couple::shear_shell::coating::harmonic::{
     ShellCoatingHarmonicOptions, ShellCoatingHarmonicResponse,
@@ -14,6 +15,20 @@ mod loaded;
 #[path = "body_response/strain.rs"]
 mod strain;
 
+/// Harmonic loading in original bridge declaration order.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Excitation {
+    /// One original bridge, normalized to a 1 N real peak force.
+    Unit(usize),
+    /// Every separately normalized unit-force column.
+    All,
+    /// Authored (bridge, peak force in newtons) records, with exp(-i omega t).
+    /// Ordered duplicates remain independent coherent loads until source binding.
+    Coherent(Vec<(usize, C64)>),
+}
+
+const MAX_COHERENT_FORCE_RECORDS: usize = 64;
+
 pub(super) struct Options {
     analysis_only: bool,
     loaded: bool,
@@ -21,8 +36,8 @@ pub(super) struct Options {
     minimum_hz: f64,
     maximum_hz: f64,
     points: usize,
-    /// None requests every unit-force column of the loaded bridge matrix.
-    bridge: Option<usize>,
+    /// Unit transfer, complete transfer matrix, or a physical coherent drive.
+    excitation: Excitation,
     /// Explicit additional resource allowance for a prepared local observer.
     strain: Option<strain::Options>,
 }
@@ -32,8 +47,31 @@ impl Options {
         let mut retained = args.iter().take(2).cloned().collect::<Vec<_>>();
         let mut selected = None;
         let mut strain = None;
+        let mut forces = Vec::new();
+        let number = |value: &OsString| -> Result<f64> {
+            Ok(value
+                .to_str()
+                .ok_or("body-response numbers must be UTF-8")?
+                .parse()?)
+        };
         let mut index = 2;
         while index < args.len() {
+            if args[index] == "--body-response-force" {
+                if forces.len() == MAX_COHERENT_FORCE_RECORDS {
+                    return Err("coherent body response admits at most 64 force records".into());
+                }
+                let values = args.get(index + 1..index + 4)
+                    .ok_or("--body-response-force needs BRIDGE_INDEX REAL_N IMAG_N")?;
+                let bridge = values[0].to_str().ok_or("invalid body-response force bridge")?
+                    .parse::<usize>()?;
+                let force = C64::new(number(&values[1])?, number(&values[2])?);
+                if bridge >= 8 || !force.re.is_finite() || !force.im.is_finite() {
+                    return Err("body-response force needs a bridge index in 0..8 and finite real/imaginary peak newtons".into());
+                }
+                forces.push((bridge, force));
+                index += 4;
+                continue;
+            }
             if args[index] == "--body-response-strain" {
                 if strain.is_some() {
                     return Err("select --body-response-strain only once".into());
@@ -58,13 +96,7 @@ impl Options {
             }
             let values = args
                 .get(index + 1..index + 6)
-                .ok_or("body-response needs NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX")?;
-            let number = |value: &OsString| -> Result<f64> {
-                Ok(value
-                    .to_str()
-                    .ok_or("body-response numbers must be UTF-8")?
-                    .parse()?)
-            };
+                .ok_or("body-response needs NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX|all|coherent")?;
             let minimum_hz = number(&values[1])?;
             let maximum_hz = number(&values[2])?;
             let points: usize = values[3]
@@ -73,22 +105,23 @@ impl Options {
                 .parse()?;
             let loaded = args[index] == "--loaded-body-response"
                 || args[index] == "--loaded-body-response-only";
-            let bridge = if values[4] == "all" {
+            let excitation = if values[4] == "all" || values[4] == "coherent" {
                 if !loaded {
-                    return Err("bridge selection 'all' requires a loaded body-response command".into());
+                    return Err("bridge selections 'all' and 'coherent' require a loaded body-response command".into());
                 }
-                None
+                if values[4] == "all" { Excitation::All }
+                else { Excitation::Coherent(Vec::new()) }
             } else {
-                Some(values[4].to_str().ok_or("invalid body-response bridge index")?.parse::<usize>()?)
+                Excitation::Unit(values[4].to_str().ok_or("invalid body-response bridge index")?.parse::<usize>()?)
             };
             if !minimum_hz.is_finite()
                 || !maximum_hz.is_finite()
                 || minimum_hz <= 0.0
                 || maximum_hz <= minimum_hz
                 || !(2..=1024).contains(&points)
-                || bridge.is_some_and(|bridge| bridge >= 8)
+                || matches!(&excitation, Excitation::Unit(bridge) if *bridge >= 8)
             {
-                return Err("body-response requires finite 0 < MIN_HZ < MAX_HZ, 2..=1024 points and a bridge index in 0..8 (or 'all' for a loaded response)".into());
+                return Err("body-response requires finite 0 < MIN_HZ < MAX_HZ, 2..=1024 points and a bridge index in 0..8 (or 'all'/'coherent' for a loaded response)".into());
             }
             selected = Some(Self {
                 analysis_only: args[index] == "--body-response-only"
@@ -98,7 +131,7 @@ impl Options {
                 minimum_hz,
                 maximum_hz,
                 points,
-                bridge,
+                excitation,
                 strain: None,
             });
             index += 6;
@@ -106,6 +139,16 @@ impl Options {
         if let Some(strain) = strain {
             selected.as_mut().ok_or("--body-response-strain requires a body-response command")?
                 .strain = Some(strain);
+        }
+        match selected.as_mut().map(|option| &mut option.excitation) {
+            Some(Excitation::Coherent(records)) if !forces.is_empty() => *records = forces,
+            Some(Excitation::Coherent(_)) => {
+                return Err("coherent body response requires at least one --body-response-force record".into());
+            }
+            _ if !forces.is_empty() => {
+                return Err("--body-response-force requires a loaded body-response command with selector 'coherent'".into());
+            }
+            _ => {}
         }
         Ok((retained, selected))
     }
@@ -139,7 +182,10 @@ impl Options {
         if self.loaded {
             return Err("loaded body-response requires the actual coupled performer".into());
         }
-        let bridge = self.bridge.ok_or("the unloaded structural response requires one bridge")?;
+        let bridge = match &self.excitation {
+            Excitation::Unit(bridge) => *bridge,
+            _ => return Err("the unloaded structural response requires one unit-force bridge".into()),
+        };
         let (ports, memory) = if let Some(image) = shell {
             (image.force_ports(), image.coating_relaxation())
         } else if let Some(image) = assembly {
@@ -216,7 +262,7 @@ impl Options {
             }
         }
         if let Some(observer) = &strain {
-            strain::metadata(&mut text, observer)?;
+            strain::metadata(&mut text, observer, strain::Units::PerNewton)?;
         }
         if text.len() > 8 * 1_048_576 {
             return Err("body-response source metadata exceeds 8 MiB".into());
@@ -239,7 +285,7 @@ impl Options {
             text,
             "\ttotal_loss_W_per_N2\tpower_residual_W_per_N2\tsolve_relative_residual"
         )?;
-        if let Some(observer) = &strain { strain::header(&mut text, observer.film_count())?; }
+        if let Some(observer) = &strain { strain::header(&mut text, observer.film_count(), strain::Units::PerNewton)?; }
         writeln!(text)?;
         for point in 0..self.points {
             poll(gate)?;
@@ -318,7 +364,9 @@ mod tests {
             "--self-contained",
         ]);
         let (retained, option) = Options::extract(&args).unwrap();
-        assert!(option.unwrap().analysis_only());
+        let option = option.unwrap();
+        assert!(option.analysis_only());
+        assert_eq!(option.excitation, Excitation::Unit(0));
         assert_eq!(
             retained,
             words(&[
@@ -411,7 +459,7 @@ mod tests {
             let (retained, option) = Options::extract(&args).unwrap();
             let option = option.unwrap();
             assert!(option.loaded());
-            assert_eq!(option.bridge, None);
+            assert_eq!(option.excitation, Excitation::All);
             assert_eq!(retained, words(&["renderer", "performance", "--body-profile", "body.profile"]));
         }
         for command in ["--body-response", "--body-response-only"] {
@@ -465,5 +513,94 @@ mod tests {
             "renderer", "performance", "--loaded-body-response-only", "new.tsv", "101", "2000", "8", "all",
             "--body-response-strain", "1024", "1000", "--body-response-strain", "1024", "1000",
         ])).is_err());
+    }
+
+
+    #[test]
+    fn coherent_forces_preserve_authored_order_phase_and_source_options() {
+        for command in ["--loaded-body-response", "--loaded-body-response-only"] {
+            for before in [false, true] {
+                let mut args = words(&["renderer", "performance"]);
+                let response = words(&[command, "coherent.tsv", "101", "2000", "32", "coherent"]);
+                let forces = words(&[
+                    "--body-response-force", "2", "0.5", "-0.25",
+                    "--body-response-force", "0", "-1", "0",
+                    "--body-response-force", "2", "0", "0.75",
+                ]);
+                if before { args.extend(forces); args.extend(response); }
+                else { args.extend(response); args.extend(forces); }
+                args.extend(words(&[
+                    "--body-response-strain", "1048576", "100000000",
+                    "--body-profile", "body.profile",
+                ]));
+                let (retained, selected) = Options::extract(&args).unwrap();
+                let selected = selected.unwrap();
+                assert!(selected.loaded());
+                assert_eq!(selected.analysis_only(), command.ends_with("-only"));
+                assert_eq!(selected.excitation, Excitation::Coherent(vec![
+                    (2, C64::new(0.5, -0.25)),
+                    (0, C64::new(-1.0, 0.0)),
+                    (2, C64::new(0.0, 0.75)),
+                ]));
+                assert_eq!(selected.strain, Some(strain::Options {
+                    maximum_bytes: 1_048_576, maximum_work: 100_000_000,
+                }));
+                assert_eq!(retained, words(&[
+                    "renderer", "performance", "--body-profile", "body.profile",
+                ]));
+            }
+        }
+    }
+
+    #[test]
+    fn coherent_records_require_the_explicit_loaded_selector() {
+        let force = ["--body-response-force", "0", "1", "0"];
+        let mut args = words(&["renderer", "performance"]);
+        args.extend(words(&force));
+        assert!(Options::extract(&args).is_err());
+        for command in ["--body-response", "--body-response-only",
+            "--loaded-body-response", "--loaded-body-response-only"] {
+            for selector in ["0", "all", "coherent"] {
+                if command.starts_with("--loaded-") && selector == "coherent" { continue; }
+                let mut args = words(&[
+                    "renderer", "performance", command, "new.tsv", "101", "2000", "8", selector,
+                ]);
+                args.extend(words(&force));
+                assert!(Options::extract(&args).is_err(), "{command} {selector}");
+            }
+        }
+        for command in ["--loaded-body-response", "--loaded-body-response-only"] {
+            assert!(Options::extract(&words(&[
+                "renderer", "performance", command, "new.tsv", "101", "2000", "8", "coherent",
+            ])).is_err());
+        }
+    }
+
+    #[test]
+    fn coherent_force_rows_are_complete_finite_and_bounded_before_source_binding() {
+        let first = [
+            "renderer", "performance", "--loaded-body-response-only", "new.tsv",
+            "101", "2000", "8", "coherent",
+        ];
+        for values in [vec![], vec!["0"], vec!["0", "1"],
+            vec!["-1", "1", "0"], vec!["8", "1", "0"],
+            vec!["0", "NaN", "0"], vec!["0", "inf", "0"], vec!["0", "-inf", "0"],
+            vec!["0", "1", "NaN"], vec!["0", "1", "inf"], vec!["0", "1", "-inf"]] {
+            let mut args = words(&first);
+            args.push(OsString::from("--body-response-force"));
+            args.extend(words(&values));
+            assert!(Options::extract(&args).is_err(), "{values:?}");
+        }
+        let mut args = words(&first);
+        for _ in 0..MAX_COHERENT_FORCE_RECORDS {
+            args.extend(words(&["--body-response-force", "7", "0", "0"]));
+        }
+        let (_, selected) = Options::extract(&args).unwrap();
+        let Excitation::Coherent(records) = selected.unwrap().excitation else { panic!("coherent") };
+        assert_eq!(records, vec![(7, C64::ZERO); MAX_COHERENT_FORCE_RECORDS]);
+        // Source binding owns actual bridge existence and coherent summation.
+        // Explicit zero loads remain valid for cancellation/zero-response cases.
+        args.extend(words(&["--body-response-force", "0", "1", "0"]));
+        assert!(Options::extract(&args).is_err());
     }
 }

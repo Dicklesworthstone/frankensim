@@ -695,7 +695,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     let (args, source_options)=if response_only { native_input::SourceOptions::extract_after(&args,2)? }
         else { native_input::SourceOptions::extract(&args)? };
     if args.len()<positional_count {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-response|--loaded-body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX] [options], or material_strings PERFORMANCE --body-response-only|--loaded-body-response-only NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX --body-profile PROFILE [source options]".into());
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-response|--loaded-body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_SELECTION] [options], or material_strings PERFORMANCE --body-response-only|--loaded-body-response-only NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_SELECTION --body-profile PROFILE [source options]; loaded selections: BRIDGE_INDEX, all, or coherent with repeated --body-response-force BRIDGE REAL_N IMAG_N".into());
     }
     if gas_options.record.is_some() {
         return Err("material-string gas records belong in the performance file".into());
