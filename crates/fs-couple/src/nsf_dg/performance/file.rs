@@ -284,15 +284,22 @@ impl ResolvedDgFilePerformance {
         let maximum_relative_perturbation = row.scalar()?;
         row.end()?;
         if axis >= 3 || periodic[axis] { return Err(bad(rows.line, "characteristic axis must be a nonperiodic physical axis")); }
-        let patch_record = if rows.next_is("coupled_patch") { Some(("coupled_patch", high)) }
-            else if rows.next_is("source_patch") { Some(("source_patch", !high)) }
+        let patch_record = if rows.next_is("coupled_patch") { Some(("coupled_patch", high, false)) }
+            else if rows.next_is("source_patch") { Some(("source_patch", !high, false)) }
+            else if rows.next_is("coupled_patch_m") { Some(("coupled_patch_m", high, true)) }
+            else if rows.next_is("source_patch_m") { Some(("source_patch_m", !high, true)) }
             else { None };
-        let characteristic_patch = if let Some((record, patch_high)) = patch_record {
+        let characteristic_patch = if let Some((record, patch_high, physical)) = patch_record {
             let mut row = rows.row(record)?;
-            let start0 = row.number()?;
-            let end0 = row.number()?;
-            let start1 = row.number()?;
-            let end1 = row.number()?;
+            let (start, end) = if physical {
+                let bounds = [row.scalar()?, row.scalar()?, row.scalar()?, row.scalar()?];
+                geometry::face_rectangle(dims, axis, dx_m, bounds, &gate)
+                    .map_err(|what| bad(row.line, what))?
+            } else {
+                let start0 = row.number()?; let end0 = row.number()?;
+                let start1 = row.number()?; let end1 = row.number()?;
+                ([start0, start1], [end0, end1])
+            };
             let background = match row.word()? {
                 "pressure" => NsfBoundaryDrive::PressureOffset(row.scalar()?),
                 "pressure-temperature" => NsfBoundaryDrive::PressureTemperature {
@@ -306,13 +313,16 @@ impl ResolvedDgFilePerformance {
                 return Err(bad(row.line, "patch controls require finite pressure and positive inflow temperature"));
             }
             row.end()?;
-            Some((patch_high, NsfCharacteristicPatch { start: [start0, start1], end: [end0, end1] }, background))
+            Some((patch_high, NsfCharacteristicPatch { start, end }, background))
         } else { None };
-        if rows.next_is("coupled_patch") || rows.next_is("source_patch") {
+        if ["coupled_patch", "source_patch", "coupled_patch_m", "source_patch_m"]
+            .iter().any(|key| rows.next_is(key))
+        {
             return Err(bad(rows.line, "one original characteristic patch must select either the source or coupled face"));
         }
-        let reservoir_aperture = if rows.next_is("reservoir_aperture") {
-            let mut row = rows.row("reservoir_aperture")?;
+        let physical_reservoir = rows.next_is("reservoir_aperture_m");
+        let reservoir_aperture = if physical_reservoir || rows.next_is("reservoir_aperture") {
+            let mut row = rows.row(if physical_reservoir { "reservoir_aperture_m" } else { "reservoir_aperture" })?;
             let axis: usize = row.number()?;
             let high = match row.word()? {
                 "low" => false, "high" => true,
@@ -323,19 +333,41 @@ impl ResolvedDgFilePerformance {
                 velocity_m_s: [row.scalar()?, row.scalar()?, row.scalar()?],
                 temperature_k: row.scalar()?,
             };
-            let count: usize = row.number()?;
-            row.end()?;
-            if axis >= 3 || count == 0 || count > cells {
-                return Err(bad(rows.line, "reservoir aperture requires a physical axis and bounded nonempty cell list"));
-            }
-            let mut selected = Vec::with_capacity(count);
-            for n in 0..count {
-                if n % 256 == 0 { poll(&gate)?; }
-                let mut row = rows.row("reservoir_cell")?;
-                let index = row.index(dims)?;
+            let selected = if physical_reservoir {
+                let bounds = [row.scalar()?, row.scalar()?, row.scalar()?, row.scalar()?];
+                let (start, end) = geometry::face_rectangle(dims, axis, dx_m, bounds, &gate)
+                    .map_err(|what| bad(row.line, what))?;
                 row.end()?;
-                selected.push([index % dims[0], (index / dims[0]) % dims[1], index / (dims[0] * dims[1])]);
-            }
+                let count = (end[0] - start[0]).checked_mul(end[1] - start[1])
+                    .filter(|&n| n <= cells).ok_or_else(|| bad(rows.line, "physical reservoir exceeds the original cell budget"))?;
+                let axes: Vec<_> = (0..3).filter(|&a| a != axis).collect();
+                let mut selected = Vec::with_capacity(count);
+                for b in start[1]..end[1] {
+                    for a in start[0]..end[0] {
+                        if selected.len() % 256 == 0 { poll(&gate)?; }
+                        let mut cell = [0; 3];
+                        cell[axis] = if high { dims[axis] - 1 } else { 0 };
+                        cell[axes[0]] = a; cell[axes[1]] = b;
+                        selected.push(cell);
+                    }
+                }
+                selected
+            } else {
+                let count: usize = row.number()?;
+                row.end()?;
+                if axis >= 3 || count == 0 || count > cells {
+                    return Err(bad(rows.line, "reservoir aperture requires a physical axis and bounded nonempty cell list"));
+                }
+                let mut selected = Vec::with_capacity(count);
+                for n in 0..count {
+                    if n % 256 == 0 { poll(&gate)?; }
+                    let mut row = rows.row("reservoir_cell")?;
+                    let index = row.index(dims)?;
+                    row.end()?;
+                    selected.push([index % dims[0], (index / dims[0]) % dims[1], index / (dims[0] * dims[1])]);
+                }
+                selected
+            };
             Some(NsfReservoirAperture { axis, high, cells: selected, state })
         } else { None };
         let mut row = rows.row("initial")?;

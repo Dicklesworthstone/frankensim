@@ -15,6 +15,43 @@ use fs_rep_frep::{BoolOp, BoolStyle, FrepBuilder};
 const MAX_SHAPES: usize = 256;
 const MAX_CELL_EVALUATIONS: usize = 16_777_216;
 
+/// Sample one physical face rectangle on the two increasing Cartesian axes
+/// other than `axis`, exactly as the original characteristic-patch owner.
+/// Bounds are half-open in metres from the grid's low wall. Face tiles are
+/// selected by their centers, so each represented edge is within dx/2 of its
+/// authored position. This is a staircase aperture, not subcell quadrature.
+pub(super) fn face_rectangle(
+    dims: [usize; 3], axis: usize, dx_m: f64, bounds: [f64; 4], gate: &CancelGate,
+) -> Result<([usize; 2], [usize; 2]), &'static str> {
+    admit_work(dims, dx_m, 1, MAX_CELL_EVALUATIONS)?;
+    if axis >= 3 { return Err("physical aperture requires a Cartesian normal axis"); }
+    let mut start = [0; 2];
+    let mut end = [0; 2];
+    let mut tangent = 0;
+    for (a, count) in dims.into_iter().enumerate() {
+        if a == axis { continue; }
+        let low = bounds[2 * tangent];
+        let high = bounds[2 * tangent + 1];
+        if !low.is_finite() || !high.is_finite() || low < 0.0
+            || high > count as f64 * dx_m || low >= high
+        {
+            return Err("physical aperture bounds must have positive finite spans inside the grid face");
+        }
+        let mut first = None;
+        for i in 0..count {
+            if i % 256 == 0 && gate.is_requested() { return Err("physical aperture construction cancelled"); }
+            let center = (i as f64 + 0.5) * dx_m;
+            if center >= low && center < high {
+                first.get_or_insert(i);
+                end[tangent] = i + 1;
+            }
+        }
+        start[tangent] = first.ok_or("physical aperture selects no face tiles; refine the grid or correct its bounds")?;
+        tangent += 1;
+    }
+    Ok((start, end))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Primitive {
     pub add: bool,
@@ -150,6 +187,45 @@ mod tests {
             },
             clip: None,
         }
+    }
+
+    #[test]
+    fn g3_physical_face_rectangles_keep_area_axes_and_half_open_edges_under_refinement() {
+        let gate = CancelGate::new_clock_free();
+        for axis in 0..3 {
+            let bounds = [0.375, 0.875, 0.125, 0.625];
+            let (a, b) = face_rectangle([8; 3], axis, 0.25, bounds, &gate).unwrap();
+            assert_eq!((a, b), ([1, 0], [3, 2]));
+            let (c, d) = face_rectangle([16; 3], axis, 0.125, bounds, &gate).unwrap();
+            assert_eq!((c, d), ([3, 1], [7, 5]));
+            let area = |start: [usize; 2], end: [usize; 2], dx: f64|
+                (end[0] - start[0]) as f64 * (end[1] - start[1]) as f64 * dx * dx;
+            assert_eq!(area(a, b, 0.25), 0.25);
+            assert_eq!(area(c, d, 0.125), 0.25);
+            for (start, end, dx) in [(a, b, 0.25), (c, d, 0.125)] {
+                for j in 0..2 {
+                    assert!((start[j] as f64 * dx - bounds[2*j]).abs() <= 0.5 * dx);
+                    assert!((end[j] as f64 * dx - bounds[2*j+1]).abs() <= 0.5 * dx);
+                }
+            }
+        }
+        // Axis 1 uses x,z in increasing Cartesian order, not cyclic z,x.
+        assert_eq!(face_rectangle([12, 8, 6], 1, 0.25,
+            [2.0, 2.5, 1.0, 1.25], &gate).unwrap(), ([8, 4], [10, 5]));
+    }
+
+    #[test]
+    fn g0_g4_physical_apertures_refuse_lost_resolution_domain_and_cancellation() {
+        let gate = CancelGate::new_clock_free();
+        for bounds in [[0.2, 0.3, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0],
+            [-0.1, 1.0, 0.0, 1.0], [0.0, 5.0, 0.0, 1.0],
+            [f64::NAN, 1.0, 0.0, 1.0]]
+        {
+            assert!(face_rectangle([4; 3], 0, 1.0, bounds, &gate).is_err());
+        }
+        assert!(face_rectangle([4; 3], 3, 1.0, [0.0, 1.0, 0.0, 1.0], &gate).is_err());
+        gate.request();
+        assert!(face_rectangle([4; 3], 0, 1.0, [0.0, 1.0, 0.0, 1.0], &gate).is_err());
     }
 
     #[test]

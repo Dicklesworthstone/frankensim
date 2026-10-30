@@ -7,35 +7,8 @@ fluid_limits 1440 250 600 0.2 1 17 1
 bulk_viscosity 0.73 manufactured-SI-slit-edge-Cramer2012-N2-ratio-not-mixture-validation
 wall adiabatic
 characteristic 0 high 0.05
-coupled_patch 0 6 0 5 pressure 0
-reservoir_aperture 1 high 1.1612254519912633 0 0 0 300 27
-reservoir_cell 10 11 1
-reservoir_cell 11 11 1
-reservoir_cell 12 11 1
-reservoir_cell 13 11 1
-reservoir_cell 14 11 1
-reservoir_cell 15 11 1
-reservoir_cell 16 11 1
-reservoir_cell 17 11 1
-reservoir_cell 18 11 1
-reservoir_cell 10 11 2
-reservoir_cell 11 11 2
-reservoir_cell 12 11 2
-reservoir_cell 13 11 2
-reservoir_cell 14 11 2
-reservoir_cell 15 11 2
-reservoir_cell 16 11 2
-reservoir_cell 17 11 2
-reservoir_cell 18 11 2
-reservoir_cell 10 11 3
-reservoir_cell 11 11 3
-reservoir_cell 12 11 3
-reservoir_cell 13 11 3
-reservoir_cell 14 11 3
-reservoir_cell 15 11 3
-reservoir_cell 16 11 3
-reservoir_cell 17 11 3
-reservoir_cell 18 11 3
+coupled_patch_m 0 0.003 0 0.0025 pressure 0
+reservoir_aperture_m 1 high 1.1612254519912633 0 0 0 300 0.005 0.0095 0.0005 0.002
 initial rest
 solid_geometry 3 4320
 solid_box add 0.001 0 0 0.004 0.006 0.0025

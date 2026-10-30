@@ -801,3 +801,60 @@ selection, original interval overlap, source-backed temperature/composition
 substitutions at fixed geometry, exact-step radiation, native schema refusal,
 PCM partition identity and provenance clocks. These are numerical/interface
 regressions; they do not establish measured instrument fidelity.
+
+## Physical geometry for grid refinement
+
+Native resolved input can keep both solids and openings in metres while the
+Cartesian grid is refined. Replace the indexed `solids` block with:
+
+```text
+solid_geometry SHAPES MAX_CELL_EVALUATIONS
+solid_box add|subtract X0 Y0 Z0 X1 Y1 Z1
+solid_wedge add|subtract X0 Y0 Z0 X1 Y1 Z1 NX NY NZ OFFSET_M
+```
+
+Rows compose in declaration order, starting with an addition. A wedge is the
+original FRep box intersected with its normalized-normal half-space; the offset
+is a distance in metres. All bounds must be inside the grid. The complete
+shape-count times cell-count work must fit the declared allowance. A primitive
+that selects no cell centers refuses, so a thin windway or edge cannot silently
+disappear.
+
+The existing source and bore aperture records also accept physical bounds:
+
+```text
+source_patch_m A0 A1 B0 B1 pressure PA
+coupled_patch_m A0 A1 B0 B1 characteristic M_S
+reservoir_aperture_m AXIS low|high RHO VX VY VZ T A0 A1 B0 B1
+```
+
+Only one characteristic patch is allowed. Its remainder can use the same
+`pressure`, `pressure-temperature`, or `characteristic` controls as the indexed
+form. A and B are the two **increasing Cartesian axes other than the normal**:
+for normal y they are x,z. Bounds are half-open and select original face-tile
+centers. The physical reservoir record generates its original cell list and
+does not take subsequent `reservoir_cell` rows. Low/high retains the original
+normal orientation and flux sign.
+
+The resulting solids use the existing halfway bounce-back walls; openings use
+the original face quadrature. Each represented aperture edge is within half a
+cell width of its declared position. This is not subcell geometry or a
+convergence certificate. Keep the SI geometry fixed, refine the grid and clocks,
+and retain the existing collar, gas, cell-work and matching DG inlet-area checks.
+`crates/fs-couple/examples/resolved-dg-si-slit-edge.performance` gives the
+complete manufactured slit/edge input with physical solids and apertures.
+
+### Steady gas in open bore branches
+
+The shared `DgSourceInput` now accepts `dg_gas_network mole SPECIES_COUNT ID...`
+after side/terminal declarations and before `dg_radiation`. Its
+`gas_inlet`, `gas_bore`, `gas_cell`, `gas_side` and `gas_solve` records declare
+one source-backed stationary mass/species/enthalpy problem. The complete grammar
+is documented on `DgSourceInput::read`.
+
+Each side discharge reduces downstream main-bore flow. Finite chimneys own
+thermal cells from their actual geometry; flush openings have no invented
+thermal volume. The solved regional states feed the original DG viscothermal
+and molecular operators. Closed chimneys retain their separately declared gas.
+This route uses prescribed steady flow, not an inferred mean acoustic flow,
+transient NSF heat/species transport, or a predicted pressure drop.
