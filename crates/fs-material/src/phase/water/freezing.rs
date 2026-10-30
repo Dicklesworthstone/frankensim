@@ -15,6 +15,10 @@
 
 /// Whole-path bounded heat-transfer integration on the shared thermal timeline.
 pub mod thermal;
+/// Independently sourced phase conductivity with explicit mixture morphology.
+pub mod transport;
+/// Spatial freezing in a plane reference slab on the existing thermal owner.
+pub mod spatial;
 
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::ice::{

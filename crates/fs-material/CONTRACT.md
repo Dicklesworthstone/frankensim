@@ -5055,3 +5055,50 @@ and passes original energy/entropy acceptance; material substitution changes
 the endpoint. This establishes algebraic convergence at that step, separately
 from time-discretization accuracy. Scope, source, event, identity, overflow and
 cancellation refusals preserve the initial timeline.
+
+
+## Source-backed spatial water freezing
+
+`phase::water::freezing::transport` binds the unchanged original freezing chart
+to independent liquid IAPWS SR6-08(2011) and empirical freshwater-ice Yen (1981)
+conductivity. This composition deliberately admits standard atmospheric
+pressure (101325 Pa) only, with the complete caloric temperature window inside
+the transport source domains. Absent phases are not extrapolated. Melting
+transport values are prepared once; sensible-phase queries retain original
+source admission. Partially frozen cells require the caller to select series
+or parallel layers. These directional closures use physical phase VOLUME
+fractions from distinct source densities, never mass fractions or an inferred
+isotropic mixture. The ice correlation supplies no pressure response or
+experimental uncertainty envelope. Transport does not alter h, u, s or fusion
+enthalpy.
+
+`freezing::spatial::FreezingSlab` assembles a stationary one-dimensional plane
+reference mesh on the existing `fs-thermal` timeline and geometric conduction
+observer. Initial source density fixes conserved reference mass. Both faces
+may have explicit temperature reservoirs with finite areal resistance;
+otherwise they are insulated, as are all lateral faces. Scheduled reservoir
+temperature changes use the original event owner. State-dependent internal and
+half-cell boundary conductances are refreshed on every actual CFL-limited
+substep. The latent plateau remains the exact original h-to-phase relation;
+no apparent-Cp regularization or separate latent source is introduced.
+
+Accepted advances independently check original-source Delta H = Q and
+Delta U + p*Delta V = Q against the supplied joule tolerance. The original
+thermal and reservoir entropy accounts accompany the separate temporal
+entropy defect. Cell profiles expose actual enthalpy, temperature, phase mass
+and volume fractions; inventory reports distinct phase masses and free volumes.
+The reported equivalent frozen REFERENCE length is thickness times frozen mass
+fraction, not a mechanically resolved interface or physical ice thickness.
+Reference heat-transfer geometry remains frozen while free expansion and
+pressure work are reported separately. This conduction model does not solve
+convection, stress, rigid-vessel pressure, nucleation, supercooling, front
+kinetics or a deforming boundary. It has no unconditional spatial/time accuracy
+claim. Source-backed mesh/time refinement and the shared owner's independent
+Stefan reference are numerical implementation evidence, not experimental
+validation of every freezing specimen.
+
+The runnable `water_freezing_front` example computes an advancing phase field
+inside a 10 mm water layer and reports the resolved profile, phase inventories,
+heat, internal energy, pressure work and entropy. Focused tests also cover
+adiabatic equilibrium, a bath reversal, source/chart binding, energy balance,
+work limits and cancellation without altering accepted state.
