@@ -9,8 +9,11 @@ require reflecting, stationary, adiabatic ends with zero mass/energy transport.
 An explicit global axis fixes orientation; held exterior absolute pressure is
 subtracted once from the structural load, never from the gas flux. The caller
 supplies the most recent report; a mismatch with current extensive state refuses.
-The optional `experimental-compressible` feature adds the original Cartesian
-Euler owner's latest per-face wall impulse, with orthonormal frame embedding.
+The optional `experimental-compressible` feature adds the original 2-D and 3-D
+Cartesian Euler owners' latest per-face wall impulses, with orthonormal frame
+embedding. `WallPressureImpulse::from_euler3d` retains all six boundary sides
+and both tangential face coordinates. A nonuniform volumetric pressure footprint
+therefore retains both transverse moments instead of becoming an averaged load.
 
 Cold surface preparation reuses `fs-plate::ShellPressurePort` and retains sparse
 original-node P1 pressure rows. Each explicitly selected planar patch belongs
@@ -26,6 +29,30 @@ closure, resolve within-step load variation, model fracture or validate material
 shock response. G1 source-Hugoniot reflection and independent fluid/support
 momentum, G0/G3 affine surface work/moment and native modal impulse-consumer
 tests accompany explicit boundary/geometry/refusal and cancellation checks.
+The 3-D tests independently reconstruct all-six-wall fluid/support momentum,
+rotated per-face resultants and both moments, and affine P1 virtual work with
+exterior pressure. They also check retained loads after cancelled source steps
+and refusal of periodic/open faces, bad embeddings and invalid face indices.
+
+`WallTractionImpulse::from_molecular_euler2d` and `from_molecular_euler3d`
+consume the source-owned molecular Euler operators' complete accepted loads,
+including both molecular halves and the middle advective step. They never
+substitute the borrowed Euler owner's partial report. The gas-side normal
+traction is signed `p-tau_nn`; tensile viscous loads remain negative rather
+than being clipped or represented as absolute pressure. `WallPressureImpulse`
+retains its positive Euler-pressure meaning. Both types share one private
+normal-load account and the same original P1 projection kernel, exposed as
+`project` for pressure and `project_tractions` for signed traction. No temporary
+pressure-vector allocation or extra force distribution is introduced.
+
+The molecular adapters still require stationary adiabatic slip walls with zero
+mass, energy and tangential momentum transfer. Explicit exterior pressure is
+subtracted over the same accepted interval. Actual transport-law tests exercise
+a tensile 2-D wall load through nodal force and affine virtual work, and a full
+3-D six-wall momentum balance with retained loads after late cancellation.
+Both cases differ from their Euler-only middle-stage impulses. They transfer
+normal traction only; moving walls, tangential no-slip stress and reciprocal
+fluid/solid energy closure remain separate capabilities.
 
 ## Constitutive feedback through public material equations
 

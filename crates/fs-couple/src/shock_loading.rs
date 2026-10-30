@@ -1,8 +1,9 @@
 //! Reflected shock loading on stationary, explicitly matched structural surfaces.
 //!
-//! The original Euler step owns wall pressure and its time integral. This
-//! adapter consumes that accepted impulse instead of sampling an endpoint
-//! pressure or replacing the shock with a linear acoustic wave. The original
+//! The original gas owner supplies its accepted wall impulse. The Euler path
+//! retains pressure; the molecular path includes viscous normal stress from
+//! both molecular half steps. Neither samples endpoint pressure or replaces
+//! the shock with a linear acoustic wave. The original
 //! shell pressure port owns the spatial P1 load and its conjugate volume row.
 //! Cold preparation compresses those rows; interval projection visits only
 //! retained nodes. No gas or structural state is advanced by this adapter.
@@ -64,6 +65,24 @@ pub enum End {
 /// accepted interval; it is never subtracted from the gas owner's flux.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WallPressureImpulse {
+    inner: WallImpulse,
+}
+
+/// Signed normal traction from a complete accepted molecular/Euler interval.
+///
+/// The gas contribution is the integral of `p - tau_nn`, not absolute pressure.
+/// It may be tensile. Tangential slip-wall traction, wall work and heat must
+/// remain zero; only the original combined molecular owner can construct it.
+#[cfg(feature = "experimental-compressible")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WallTractionImpulse {
+    inner: WallImpulse,
+}
+
+/// Common stationary normal-load account. Only the pressure wrapper imposes
+/// positive gas pressure; molecular normal stress is signed without clipping.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WallImpulse {
     duration_s: f64,
     end_time_s: f64,
     area_m2: f64,
@@ -164,28 +183,144 @@ impl WallPressureImpulse {
         gas_impulse_n_s: f64,
         exterior_pressure_pa: f64,
     ) -> Result<Self, Error> {
+        if !positive(gas_impulse_n_s) {
+            return Err(Error::Invalid(
+                "reflected gas pressure impulse must be finite and positive",
+            ));
+        }
+        Ok(Self {
+            inner: WallImpulse::new(
+                duration_s,
+                end_time_s,
+                area_m2,
+                normal,
+                gas_impulse_n_s,
+                exterior_pressure_pa,
+            )?,
+        })
+    }
+
+    /// Actual accepted duration [s].
+    pub const fn duration_s(&self) -> f64 {
+        self.inner.duration_s
+    }
+    /// Accepted gas clock at the end of the interval [s].
+    pub const fn end_time_s(&self) -> f64 {
+        self.inner.end_time_s
+    }
+    /// Physical gas face area [m²].
+    pub const fn area_m2(&self) -> f64 {
+        self.inner.area_m2
+    }
+    /// Positive unit normal from the gas into the support.
+    pub const fn outward_normal(&self) -> [f64; 3] {
+        self.inner.normal
+    }
+    /// Original wall pressure integrated over both accepted RK stages [Pa s].
+    pub const fn gas_pressure_impulse_pa_s(&self) -> f64 {
+        self.inner.gas_pa_s
+    }
+    /// Opposing held exterior absolute pressure times accepted duration [Pa s].
+    pub const fn exterior_pressure_impulse_pa_s(&self) -> f64 {
+        self.inner.exterior_pa_s
+    }
+    /// Signed gas-minus-exterior pressure-time integral [Pa s].
+    pub fn net_pressure_impulse_pa_s(&self) -> f64 {
+        self.inner.net_pa_s()
+    }
+    /// Actual interval-mean reflected gas pressure [Pa].
+    pub fn mean_gas_pressure_pa(&self) -> f64 {
+        self.inner.gas_pa_s / self.inner.duration_s
+    }
+}
+
+#[cfg(feature = "experimental-compressible")]
+impl WallTractionImpulse {
+    fn new(
+        duration_s: f64,
+        end_time_s: f64,
+        area_m2: f64,
+        normal: [f64; 3],
+        gas_impulse_n_s: f64,
+        exterior_pressure_pa: f64,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            inner: WallImpulse::new(
+                duration_s,
+                end_time_s,
+                area_m2,
+                normal,
+                gas_impulse_n_s,
+                exterior_pressure_pa,
+            )?,
+        })
+    }
+    /// Complete accepted molecular/Euler duration [s].
+    pub const fn duration_s(&self) -> f64 {
+        self.inner.duration_s
+    }
+    /// Complete accepted source clock at the end of the interval [s].
+    pub const fn end_time_s(&self) -> f64 {
+        self.inner.end_time_s
+    }
+    /// Original physical gas face area [m²].
+    pub const fn area_m2(&self) -> f64 {
+        self.inner.area_m2
+    }
+    /// Unit normal from the gas into the support, even for tensile traction.
+    pub const fn outward_normal(&self) -> [f64; 3] {
+        self.inner.normal
+    }
+    /// Signed integral of gas `p - tau_nn` over the full split interval [Pa s].
+    pub const fn gas_traction_impulse_pa_s(&self) -> f64 {
+        self.inner.gas_pa_s
+    }
+    /// Held opposing exterior absolute pressure times accepted duration [Pa s].
+    pub const fn exterior_pressure_impulse_pa_s(&self) -> f64 {
+        self.inner.exterior_pa_s
+    }
+    /// Signed gas normal traction minus exterior pressure, integrated [Pa s].
+    pub fn net_traction_impulse_pa_s(&self) -> f64 {
+        self.inner.net_pa_s()
+    }
+    /// Interval-mean gas normal traction [Pa]; this is not absolute pressure.
+    pub fn mean_gas_traction_pa(&self) -> f64 {
+        self.inner.gas_pa_s / self.inner.duration_s
+    }
+}
+
+impl WallImpulse {
+    fn new(
+        duration_s: f64,
+        end_time_s: f64,
+        area_m2: f64,
+        normal: [f64; 3],
+        gas_impulse_n_s: f64,
+        exterior_pressure_pa: f64,
+    ) -> Result<Self, Error> {
         if !positive(duration_s)
             || !end_time_s.is_finite()
             || end_time_s < duration_s
             || !positive(area_m2)
-            || !positive(gas_impulse_n_s)
+            || !gas_impulse_n_s.is_finite()
             || !unit(normal)
             || !exterior_pressure_pa.is_finite()
             || exterior_pressure_pa < 0.0
         {
             return Err(Error::Invalid(
-                "finite positive wall interval, area, pressure and unit frame required",
+                "finite wall interval, area, normal load and unit frame required",
             ));
         }
         let gas_pa_s = gas_impulse_n_s / area_m2;
         let exterior_pa_s = exterior_pressure_pa * duration_s;
-        if !positive(gas_pa_s)
+        if !gas_pa_s.is_finite()
+            || (gas_impulse_n_s != 0.0 && gas_pa_s == 0.0)
             || !exterior_pa_s.is_finite()
             || (exterior_pressure_pa > 0.0 && exterior_pa_s == 0.0)
             || !(gas_pa_s - exterior_pa_s).is_finite()
         {
             return Err(Error::Invalid(
-                "wall pressure-time integral is unrepresentable",
+                "wall normal-traction integral is unrepresentable",
             ));
         }
         Ok(Self {
@@ -198,37 +333,8 @@ impl WallPressureImpulse {
         })
     }
 
-    /// Actual accepted duration [s].
-    pub const fn duration_s(&self) -> f64 {
-        self.duration_s
-    }
-    /// Accepted gas clock at the end of the interval [s].
-    pub const fn end_time_s(&self) -> f64 {
-        self.end_time_s
-    }
-    /// Physical gas face area [m²].
-    pub const fn area_m2(&self) -> f64 {
-        self.area_m2
-    }
-    /// Positive unit normal from the gas into the support.
-    pub const fn outward_normal(&self) -> [f64; 3] {
-        self.normal
-    }
-    /// Original wall pressure integrated over both accepted RK stages [Pa s].
-    pub const fn gas_pressure_impulse_pa_s(&self) -> f64 {
-        self.gas_pa_s
-    }
-    /// Opposing held exterior absolute pressure times accepted duration [Pa s].
-    pub const fn exterior_pressure_impulse_pa_s(&self) -> f64 {
-        self.exterior_pa_s
-    }
-    /// Signed gas-minus-exterior pressure-time integral [Pa s].
-    pub fn net_pressure_impulse_pa_s(&self) -> f64 {
+    fn net_pa_s(self) -> f64 {
         self.gas_pa_s - self.exterior_pa_s
-    }
-    /// Actual interval-mean reflected gas pressure [Pa].
-    pub fn mean_gas_pressure_pa(&self) -> f64 {
-        self.gas_pa_s / self.duration_s
     }
 }
 
@@ -363,6 +469,36 @@ impl ShockLoadSurface {
         &self,
         impulses: &[WallPressureImpulse],
         origin_m: [f64; 3],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ShockLoad, Error> {
+        self.project_impulses(
+            impulses.iter().map(|value| value.inner),
+            origin_m,
+            cancelled,
+        )
+    }
+
+    /// Project complete signed molecular wall tractions through the same
+    /// original P1 rows. Tensile normal stress is retained; no positive-pressure
+    /// clamp or second viscous force is applied. No interface is moved.
+    #[cfg(feature = "experimental-compressible")]
+    pub fn project_tractions(
+        &self,
+        impulses: &[WallTractionImpulse],
+        origin_m: [f64; 3],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ShockLoad, Error> {
+        self.project_impulses(
+            impulses.iter().map(|value| value.inner),
+            origin_m,
+            cancelled,
+        )
+    }
+
+    fn project_impulses(
+        &self,
+        mut impulses: impl ExactSizeIterator<Item = WallImpulse>,
+        origin_m: [f64; 3],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ShockLoad, Error> {
         poll(&mut cancelled)?;
@@ -371,11 +507,17 @@ impl ShockLoadSurface {
                 "one wall impulse per patch and finite moment origin required",
             ));
         }
-        let first = impulses[0];
+        let first = impulses
+            .next()
+            .ok_or(Error::Invalid("empty wall impulse list"))?;
         let mut nodal_impulses = vec![[0.0; 3]; self.positions.len()];
         let mut gas_impulse = [0.0; 3];
         let mut exterior_impulse = [0.0; 3];
-        for (patch, impulse) in self.patches.iter().zip(impulses) {
+        for (patch, impulse) in self
+            .patches
+            .iter()
+            .zip(std::iter::once(first).chain(impulses))
+        {
             poll(&mut cancelled)?;
             if impulse.duration_s != first.duration_s
                 || impulse.end_time_s != first.end_time_s
@@ -397,7 +539,7 @@ impl ShockLoadSurface {
                     poll(&mut cancelled)?;
                 }
                 for axis in 0..3 {
-                    nodal_impulses[node][axis] += row[axis] * impulse.net_pressure_impulse_pa_s();
+                    nodal_impulses[node][axis] += row[axis] * impulse.net_pa_s();
                 }
             }
         }
