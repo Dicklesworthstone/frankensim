@@ -1538,3 +1538,33 @@ retain a uniform inert fraction to 2.23e-16 and an independent weighted
 composition constraint to 4.45e-16 while closing every species and energy
 balance. These verify compatible reconstruction; they do not establish a
 fully discrete composition-maximum principle or entropy theorem.
+
+
+## Quasistatic moving compact gas volumes
+
+\`multicomponent::network::moving\` adds the first explicit moving-boundary
+thermodynamic owner for species-bearing compact gas storage. A
+\`Plenum::quasistatic_adiabatic_to\` candidate preserves every canonical species
+mass while changing physical volume. It solves the original fixed-composition
+NASA-9 ideal-gas isentrope, \`Delta s(T,p)=0\` with \`p=rho R_mix T\`, through
+the same borrowed caloric source used by the wall/characteristic owners.
+Safeguarded Newton/bisection is bounded by the existing caloric-domain work and
+temperature limits; unsupported compression/expansion refuses rather than
+clipping temperature or pressure.
+
+The receipt reports source temperature/pressure endpoints, mechanical boundary
+work on the gas, physical internal-energy change, extensive entropy defect,
+per-species mass residual and the referenced-versus-absolute energy-gauge
+residual. Because the closed species inventories are unchanged, formation
+references cancel from work exactly in the continuum. Boundary work is not
+reclassified as heat and no \`p*Delta V\` endpoint approximation is used.
+
+This operation is deliberately clock-free and quasistatic. It is a conservative
+thermodynamic endpoint for a future piston/cylinder or moving-network driver,
+not a finite-speed moving-wall Riemann solver. Piston inertia, prescribed motion,
+shock generation, branch-flow splitting, heat leakage and moving geometry/GCL
+remain explicit separate owners. Three focused tests cover an independent
+constant-Cp isentrope and reversible round trip, variable calorics with +/-1e18
+formation-energy gauges, and source-domain/cancellation atomicity. Native
+Rust/Cargo execution is unavailable in the current executor, so these tests are
+committed as source evidence rather than claimed runtime evidence.

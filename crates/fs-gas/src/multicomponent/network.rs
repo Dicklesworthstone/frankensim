@@ -3,9 +3,12 @@
 //! Each branch and compact volume retains the same original species bank and
 //! per-species energy references, while its actual composition evolves. One
 //! characteristic port flux supplies opposite exchanges to its two owners.
-//! Plenums are rigid, adiabatic and perfectly mixed with no resolved momentum;
-//! incoming kinetic energy remains in their internal-energy balance. Their
-//! stationary supports receive each port's separately reported axial impulse.
+//! Network plenums are rigid, adiabatic and perfectly mixed during a network
+//! transport step. The explicit `moving` owner can instead construct a
+//! quasistatic adiabatic volume-change candidate between accepted network steps;
+//! it accounts boundary work without disguising it as heat or a pressure source.
+//! Incoming kinetic energy remains in plenum internal-energy balance. Stationary
+//! supports receive each port's separately reported axial impulse.
 //!
 //! This estimated inviscid model does not resolve three-dimensional junction
 //! mixing, molecular diffusion, wall losses or chemical reaction. All branches
@@ -24,6 +27,9 @@ use fs_qty::Time;
 
 mod coupled;
 mod step;
+
+/// Reversible adiabatic compact-volume changes with explicit boundary work.
+pub mod moving;
 
 /// Controllable, conservative valve links between finite rigid plenums.
 pub mod valve;
