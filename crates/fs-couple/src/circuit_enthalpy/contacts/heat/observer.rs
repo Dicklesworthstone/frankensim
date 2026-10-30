@@ -15,6 +15,7 @@ pub struct MaterialHeatObserver<'p, 'n, 'a, 'scope> {
     cx: &'p Cx<'scope>,
     sample: Option<Arc<HeatNetworkSample>>,
     source_epoch: Option<(f64, f64)>,
+    source_conductances_w_k: BTreeMap<CellId, f64>,
     closed_radiation_net_j: f64,
     maximum_closed_radiation_defect_j: f64,
 }
@@ -54,9 +55,11 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
     /// is deliberately not supported: resistor/contact/basis bindings refuse.
     ///
     /// Sources use the original explicit timeline, NOT the circuit driver's
-    /// implicit residual. Conduction's CFL does not bound nonlinear radiation;
-    /// callers must select and refine max_dt_s for the source stiffness. The
-    /// existing solid's outer thermoplastic iteration remains unchanged.
+    /// implicit residual. The same native timestep owner combines conduction
+    /// with a conservative frozen-emissivity radiation rate. This is not a
+    /// temporal-error or temperature-dependent-emissivity derivative bound;
+    /// callers must still refine max_dt_s. The existing solid's outer
+    /// thermoplastic iteration remains unchanged.
     ///
     /// The first returned observer retains source results and the bounded net
     /// radiation defect; the second retains the caller's original history.
@@ -79,6 +82,7 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
         }
         Ok(CoupledObservers::new(MaterialHeatObserver {
             prepared: self, cx, sample: None, source_epoch: None,
+            source_conductances_w_k: BTreeMap::new(),
             closed_radiation_net_j: 0.0, maximum_closed_radiation_defect_j,
         }, inner))
     }
@@ -90,6 +94,7 @@ impl DepositionObserver for MaterialHeatObserver<'_, '_, '_, '_> {
     fn begin(&mut self) -> Result<(), Self::Error> {
         check(self.cx)?;
         self.source_epoch = None;
+        self.source_conductances_w_k.clear();
         self.closed_radiation_net_j = 0.0;
         Ok(())
     }
@@ -102,7 +107,11 @@ impl DepositionObserver for MaterialHeatObserver<'_, '_, '_, '_> {
         if !net.is_finite() {
             return Err(HeatNetworkError::Invalid("nonfinite internal radiation balance"));
         }
+        let bounds = evaluated.bulk.source.radiation.as_ref()
+            .map(|radiation| radiation.conductance_bounds_w_k(&mut *checkpoint))
+            .transpose()?.unwrap_or_default();
         self.source_epoch = Some((thermal.time_s(), net));
+        self.source_conductances_w_k = bounds;
         Ok(evaluated.bulk.sources_w)
     }
 
@@ -114,12 +123,27 @@ impl DepositionObserver for MaterialHeatObserver<'_, '_, '_, '_> {
         Ok(self.resolve_checked(thermal, checkpoint)?.bulk.conductances_w_k)
     }
 
+    fn limit_timestep_s(
+        &mut self, thermal: &DepositionSimulation<'_>, proposed_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Self::Error> {
+        checkpoint()?;
+        if self.source_epoch.map(|(time, _)| time) != Some(thermal.time_s()) {
+            return Err(HeatNetworkError::Invalid(
+                "radiation timestep lacks its current source epoch"));
+        }
+        Ok(thermal.limit_timestep_for_additional_conductances(
+            proposed_s, &self.source_conductances_w_k, checkpoint,
+        )?)
+    }
+
     fn event(&mut self, _: &Event, thermal: &DepositionSimulation<'_>)
         -> Result<(), Self::Error> {
         let sample = self.prepared.resolve(self.cx, thermal)?.bulk.source;
         check(self.cx)?;
         self.sample = Some(Arc::new(sample));
         self.source_epoch = None;
+        self.source_conductances_w_k.clear();
         Ok(())
     }
 
@@ -143,6 +167,7 @@ impl DepositionObserver for MaterialHeatObserver<'_, '_, '_, '_> {
         self.sample = Some(Arc::new(sample));
         self.closed_radiation_net_j = defect;
         self.source_epoch = None;
+        self.source_conductances_w_k.clear();
         Ok(())
     }
 }

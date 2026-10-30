@@ -124,6 +124,76 @@ impl RadiationCellSources {
     /// retain its roundoff rather than secretly redistributing or clipping heat.
     pub fn net_heat_w(&self)->f64 { self.sources_w.values().copied().sum() }
 
+    /// Conservative outgoing-rate scale for this frozen emissivity snapshot.
+    ///
+    /// The original gray-diffuse equations give
+    /// P = F [I-(I-E)F]^-1 E and q_i = A_i epsilon_i (b_i-(P b)_i),
+    /// where b_i = sigma T_i^4. For exactly closed rows, P is nonnegative
+    /// with unit row sums, so each outgoing secant sum is at most
+    /// 4 sigma A_i epsilon_i Tmax^3. Multiple surfaces of one cell add.
+    /// The same net-radiation equations are described by the MOOSE heat-transfer
+    /// theory: <https://mooseframework.inl.gov/modules/heat_transfer/>.
+    ///
+    /// Actual admitted row defects are retained, not normalized. For row sum s,
+    /// m = epsilon + (1-epsilon)(1-s) must be positive. Then the nonnegative
+    /// inverse obeys [I-(I-E)F]^-1 E 1 <= c 1, c=max(epsilon/m).
+    /// Multiplying each surface bound by max(1,s*c) also bounds its positive
+    /// diagonal loss and off-diagonal row scale. A nonpositive margin refuses
+    /// when this sufficient reflection bound cannot be established.
+    ///
+    /// Pass these rates to the native thermal additional-conductance limiter;
+    /// they are NOT physical heat links or additional source powers. The
+    /// original radiation source and its closed-energy gate still own heat.
+    /// This coefficient-frozen estimate is not a temporal-error bound, a bound
+    /// on d(epsilon)/dT, or a maximum-principle/passivity claim for defective
+    /// view factors or independent forcing. All temperatures and emissivities
+    /// must be refreshed on each accepted explicit substep.
+    pub fn conductance_bounds_w_k(
+        &self,
+        mut check: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, RadiationCellError> {
+        check()?;
+        let invalid = RadiationCellError::Invalid;
+        let mut maximum_temperature = 0.0_f64;
+        let mut amplification = 0.0_f64;
+        for (sample, surface) in self.surfaces.iter().zip(self.enclosure.surfaces()) {
+            check()?;
+            maximum_temperature = maximum_temperature.max(sample.phase.temperature_k());
+            let epsilon = surface.emissivity().value();
+            let row_sum = self.radiosity.view_factor_row_sums[sample.surface];
+            // This form preserves epsilon for an exactly closed row even when
+            // 1-epsilon rounds to one for a strongly reflecting surface.
+            let margin = epsilon + (1.0 - epsilon) * (1.0 - row_sum);
+            let ratio = epsilon / margin;
+            if !margin.is_finite() || margin <= 0.0 || !ratio.is_finite() || ratio <= 0.0 {
+                return Err(invalid("radiation timestep needs a positive bounded reflection margin"));
+            }
+            amplification = amplification.max(ratio);
+        }
+        let emission_slope = ((4.0 * crate::STEFAN_BOLTZMANN_W_M2_K4
+            * maximum_temperature) * maximum_temperature) * maximum_temperature;
+        if !emission_slope.is_finite() || emission_slope <= 0.0 {
+            return Err(invalid("radiation temperature-rate scale is unrepresentable"));
+        }
+        let mut bounds = BTreeMap::new();
+        for (sample, surface) in self.surfaces.iter().zip(self.enclosure.surfaces()) {
+            check()?;
+            let row_scale = self.radiosity.view_factor_row_sums[sample.surface] * amplification;
+            let conductance = ((surface.area_m2() * surface.emissivity().value())
+                * emission_slope) * row_scale.max(1.0);
+            if !row_scale.is_finite() || !conductance.is_finite() || conductance <= 0.0 {
+                return Err(invalid("radiation conductance bound is unrepresentable"));
+            }
+            let sum = bounds.entry(sample.cell).or_insert(0.0);
+            *sum += conductance;
+            if !sum.is_finite() {
+                return Err(invalid("combined radiative surface bound is unrepresentable"));
+            }
+        }
+        check()?;
+        Ok(bounds)
+    }
+
     /// Add radiation to another physical owner's source map, preserving its
     /// independent sources. All additions are checked before modifying the map.
     /// Use once per trial; never also deposit the returned surface heats.

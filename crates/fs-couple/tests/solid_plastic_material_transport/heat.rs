@@ -118,6 +118,14 @@ impl DepositionObserver for Manual<'_, '_, '_, '_> {
         -> Result<BTreeMap<u64, f64>, Self::Error> {
         check()?; Ok(self.prepared.resolve(self.cx, t)?.bulk.conductances_w_k)
     }
+    fn limit_timestep_s(&mut self, t: &DepositionSimulation<'_>, proposed_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<f64, Self::Error> {
+        check()?;
+        let source = self.prepared.resolve(self.cx, t)?.bulk.source;
+        let Some(radiation) = source.radiation else { return Ok(proposed_s); };
+        let bounds = radiation.conductance_bounds_w_k(&mut *check)?;
+        Ok(t.limit_timestep_for_additional_conductances(proposed_s, &bounds, check)?)
+    }
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> { Ok(()) }
     fn step(&mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>, _: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<(), Self::Error> { check()?; Ok(()) }

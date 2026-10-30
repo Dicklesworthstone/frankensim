@@ -1,6 +1,8 @@
 //! Same material assembly through real electrical, contact and radiation owners.
 #[path = "material_heat_network/layers.rs"]
 mod layers;
+#[path = "material_heat_network/observer.rs"]
+mod observer;
 #[path = "material_heat_network/directional.rs"]
 mod directional;
 #[path = "../../fs-conduction/tests/radiation_material/common.rs"]

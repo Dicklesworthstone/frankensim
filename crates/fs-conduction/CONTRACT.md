@@ -1,5 +1,29 @@
 # CONTRACT: fs-conduction
 
+## Radiation rate bounds on the shared thermal timeline
+
+`RadiationCellSources::conductance_bounds_w_k` supplies conservative per-cell
+rate scales from the same resolved gray-diffuse surfaces, material emissivities
+and caloric temperatures as the actual radiation powers. It adds no heat links,
+source powers, radiation solve or thermal state. For exactly closed view-factor
+rows, each surface contributes at most `4 sigma A epsilon Tmax^3`; disjoint
+surfaces on one cell add. Self-view and same-cell exchange do not increase that
+bound. The derivation uses the original nonnegative net-radiation operator.
+
+Admitted view-factor row defects are retained. A positive reflected-row margin
+and an explicit amplification factor bound their contribution; a missing or
+unrepresentable bound refuses. Geometry is never renormalized, and the original
+radiosity/power and closed-energy gates remain authoritative. The estimate is
+for frozen emissivity and does not certify passivity of defective geometry,
+temperature-dependent emissivity derivatives, or temporal accuracy.
+
+`fs-couple::MaterialHeatObserver` supplies these rates to the original thermal
+additional-conductance limiter. Conduction, caloric mass/slope and radiation
+therefore restrict the SAME accepted explicit substep. Source/event epochs and
+rollback are preserved. Focused finite-plate regressions compare the native
+trajectory with an independently evaluated explicit recurrence, vary only
+emissivity, and check work-budget refusal. Source/time refinement remains needed.
+
 ## Source-paired spatial sensible-enthalpy transport
 
 `transient::enthalpy::material::MaterialEnthalpyTransport::from_isotropic_card`
