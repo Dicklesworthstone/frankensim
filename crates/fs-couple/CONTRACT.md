@@ -1,5 +1,39 @@
 # CONTRACT: fs-couple
 
+## Sourced directional arrest coupled to finite heat
+
+`friction_heat::directional::trajectory::apply_source_directional_trajectory_heat`
+joins the original source-owned continuous directional relaxation, full-tensor
+rigid-body impulse owner and existing `FrictionHeatStep` residual. The native
+trajectory provides integrated impulse, curved net displacement, unsigned path,
+finite-arrest time and physical traction-slip work as separate quantities.
+Average force times net displacement is not substituted for curved work.
+
+Each thermal trial starts from the same accepted source and two body states.
+Original pinned principal claims are queried at the solved finite surface
+temperatures, optional common interface temperature, load/actual-area pressure,
+phase-average unsigned speed and each accepted source path plus actual travel.
+The same original caloric objects and located contact face are required. The
+common zero-capacity interface derives signed heat into the existing finite
+cells from their geometry/conductivity; no heat fraction or parallel store is
+created. Physical friction enters once, while hot-to-cold exchange continues
+after sliding has stopped.
+
+Exactly the selected two bodies, source history and original thermal timeline
+publish together after native impulse/momentum/work checks, finite-cell/interface
+residuals, independent Delta(K+H)-Q_external admission and cancellation. Source,
+domain, numerical and budget refusals leave all accepted owners unchanged.
+Transport payloads remain attached to the accepted candidate.
+
+This is a fixed-geometry, held-normal-load phase with constant sampled coefficients
+inside its native curve. Endpoint thermal storage and phase-average coefficient
+sampling require time refinement, including the timing of heat released before
+arrest. Source regularity and physical branch selection remain necessary;
+nonlinear convergence does not establish unique source roots or spatial thermal
+accuracy. G1/G3/G4 tests cover independent finite-cell balances through arrest and
+rest, temperature-dependent stopping, full-tensor/frame-covariant curved travel,
+original query receipts and atomic refusal/retry.
+
 ## Spatial shock loads on original structural pressure surfaces
 
 The opt-in `experimental-shock-loading` feature supplies `shock_loading`.

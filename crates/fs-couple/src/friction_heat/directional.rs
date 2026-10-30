@@ -14,6 +14,10 @@
 //! with the trajectory owner. Endpoint thermal coupling needs time refinement;
 //! neither nonlinear convergence nor a source-motion root proves uniqueness.
 
+/// Continuous directional trajectories, including finite arrest, in the same
+/// original material/finite-enthalpy transaction.
+pub mod trajectory;
+
 use super::{
     FrictionHeatInput, FrictionHeatReport, FrictionHeatRoute, FrictionHeatStep,
     FrictionHeatTolerances,

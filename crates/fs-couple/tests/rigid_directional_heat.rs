@@ -33,6 +33,9 @@ use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::{InputAuthority, TangentialLaw, TangentialSolveConfig};
 use std::collections::BTreeMap;
 
+#[path = "rigid_directional_heat/trajectory.rs"]
+mod trajectory;
+
 const CELLS: [CellId; 2] = [CellId(30), CellId(10)];
 const CAPACITY: [f64; 2] = [0.02, 0.06];
 const CONDUCTIVITY: [f64; 2] = [1.0, 3.0];
