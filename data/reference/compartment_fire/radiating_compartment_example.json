@@ -1,0 +1,280 @@
+{
+  "scope": "Authored two-layer optical coupling reference; original NASA air calorics, implicit finite-wall/radiation feedback and first-order gas/source composition. Not measured air absorption or fire validation.",
+  "verification": "Three original-source native executions exited successfully and passed species, clock and combined physical-energy checks. An ordinary Cargo release build independently reproduced the spectral maximum-dt=0.1 s CSV exactly. These retained runs do not claim full-workspace or DSR verification.",
+  "parameters": {
+    "initial_gas_temperatures_k": [
+      550,
+      900
+    ],
+    "initial_wall_temperatures_k": [
+      300,
+      350
+    ],
+    "room_floor_area_m2": 2,
+    "room_height_m": 2,
+    "initial_interface_height_m": 1,
+    "initial_pressure_pa": 101325,
+    "wall_area_m2": [
+      2,
+      2
+    ],
+    "wall_thickness_m": 0.02,
+    "wall_cells": 4,
+    "wall_density_kg_m3": 500,
+    "wall_cp_j_kg_k": 1000,
+    "wall_conductivity_w_m_k": 1,
+    "face_emissivities": [
+      0.7,
+      0.9
+    ],
+    "contact_htc_w_m2_k": 8,
+    "convective_contacts": [
+      "floor to lower gas",
+      "ceiling to upper gas"
+    ],
+    "absorption_m_inv": [
+      0.2,
+      0.7
+    ],
+    "absorption_source": "Authored numerical fixture, not N2/O2 spectroscopy",
+    "optical_geometry": "Reciprocal normal chord between parallel plates; segment lengths regenerated from actual accepted layer depths",
+    "spectral_wavelength_window_m": [
+      1e-07,
+      0.001
+    ],
+    "spectral_bands": "One constant-opacity band using the same supplied coefficients as gray mode",
+    "external_heat_w": 0,
+    "room_volume_m3": 4,
+    "wall_temperature_domain_k": [
+      200,
+      1200
+    ],
+    "wall_caloric_law": "T_K = 300 + h_J_kg / 1000",
+    "face_emissivity_uncertainty": "Unstated",
+    "face_emissivity_temperature_domain_k": [
+      200,
+      1200
+    ],
+    "external_convection_htc_w_m2_k": 0,
+    "external_radiation_w": 0,
+    "soot_populations": 0
+  },
+  "runs": [
+    {
+      "mode": "gray",
+      "maximum_dt_s": 0.1,
+      "end_s": 10,
+      "final": {
+        "mode": "gray",
+        "time_s": 10.0,
+        "lower_temperature_k": 489.336353128,
+        "upper_temperature_k": 553.012435004,
+        "pressure_pa": 76204.542545326,
+        "interface_height_m": 1.182988556483,
+        "wall0_inner_face_k": 323.601962511,
+        "wall1_inner_face_k": 380.199205218,
+        "gas_lower_heat_w": -3509.031735004,
+        "gas_upper_heat_w": -9300.39244638,
+        "combined_energy_residual_j": -2.984050661325e-05,
+        "maximum_endpoint_power_residual_w": 7.338124578382e-05,
+        "maximum_endpoint_temperature_residual_k": 9.063035122381e-08,
+        "outer_iterations": 2,
+        "wall_evaluations": 10,
+        "radiation_evaluations": 6,
+        "wavelength_evaluations": 0
+      },
+      "summary": {
+        "mode": "gray",
+        "end_s": 10.0,
+        "max_dt_s": 0.1,
+        "steps": 101,
+        "halvings": 0,
+        "max_combined_energy_residual_j": 2.984050661325e-05,
+        "max_endpoint_power_residual_w": 7.338124578382e-05,
+        "max_endpoint_temperature_residual_k": 9.063035122381e-08,
+        "wall_evaluations": 1616,
+        "radiation_evaluations": 1010,
+        "wavelength_evaluations": 0
+      },
+      "command": "cargo run --release -p fs-airflow --features compartment-fire --example radiating_compartment -- gray 10 0.1",
+      "exit_code": 0
+    },
+    {
+      "mode": "spectral",
+      "maximum_dt_s": 0.1,
+      "end_s": 10,
+      "final": {
+        "mode": "spectral",
+        "time_s": 10.0,
+        "lower_temperature_k": 489.336360861,
+        "upper_temperature_k": 553.01246179,
+        "pressure_pa": 76204.544765415,
+        "interface_height_m": 1.182988540712,
+        "wall0_inner_face_k": 323.601959182,
+        "wall1_inner_face_k": 380.199204469,
+        "gas_lower_heat_w": -3509.031260438,
+        "gas_upper_heat_w": -9300.392157344,
+        "combined_energy_residual_j": -3.388710319996e-05,
+        "maximum_endpoint_power_residual_w": 7.337270062635e-05,
+        "maximum_endpoint_temperature_residual_k": 9.061989203474e-08,
+        "outer_iterations": 2,
+        "wall_evaluations": 10,
+        "radiation_evaluations": 6,
+        "wavelength_evaluations": 1728
+      },
+      "summary": {
+        "mode": "spectral",
+        "end_s": 10.0,
+        "max_dt_s": 0.1,
+        "steps": 101,
+        "halvings": 0,
+        "max_combined_energy_residual_j": 3.388710319996e-05,
+        "max_endpoint_power_residual_w": 7.337270062635e-05,
+        "max_endpoint_temperature_residual_k": 9.061989203474e-08,
+        "wall_evaluations": 1616,
+        "radiation_evaluations": 1010,
+        "wavelength_evaluations": 332160
+      },
+      "command": "cargo run --release -p fs-airflow --features compartment-fire --example radiating_compartment -- spectral 10 0.1",
+      "exit_code": 0
+    },
+    {
+      "mode": "spectral",
+      "maximum_dt_s": 0.05,
+      "end_s": 10,
+      "final": {
+        "mode": "spectral",
+        "time_s": 10.0,
+        "lower_temperature_k": 489.393112232,
+        "upper_temperature_k": 553.680766594,
+        "pressure_pa": 76247.392331867,
+        "interface_height_m": 1.182460876374,
+        "wall0_inner_face_k": 323.609350739,
+        "wall1_inner_face_k": 380.226252746,
+        "gas_lower_heat_w": -3503.902429137,
+        "gas_upper_heat_w": -9355.243689139,
+        "combined_energy_residual_j": -7.009878754616e-05,
+        "maximum_endpoint_power_residual_w": 7.48004936213e-05,
+        "maximum_endpoint_temperature_residual_k": 9.238328857464e-08,
+        "outer_iterations": 2,
+        "wall_evaluations": 10,
+        "radiation_evaluations": 6,
+        "wavelength_evaluations": 1728
+      },
+      "summary": {
+        "mode": "spectral",
+        "end_s": 10.0,
+        "max_dt_s": 0.05,
+        "steps": 200,
+        "halvings": 0,
+        "max_combined_energy_residual_j": 7.009878754616e-05,
+        "max_endpoint_power_residual_w": 8.082434214884e-05,
+        "max_endpoint_temperature_residual_k": 9.982306892198e-08,
+        "wall_evaluations": 3196,
+        "radiation_evaluations": 1994,
+        "wavelength_evaluations": 657792
+      },
+      "command": "cargo run --release -p fs-airflow --features compartment-fire --example radiating_compartment -- spectral 10 0.05",
+      "exit_code": 0
+    }
+  ],
+  "time_refinement_fine_minus_coarse": {
+    "lower_temperature_k": 0.05675137100001848,
+    "upper_temperature_k": 0.6683048040000585,
+    "pressure_pa": 42.84756645199377,
+    "interface_height_m": -0.0005276643379998891,
+    "wall0_inner_face_k": 0.007391557000005378,
+    "wall1_inner_face_k": 0.027048277000005783
+  },
+  "spectral_minus_gray_at_dt01": {
+    "lower_temperature_k": 7.733000018106395e-06,
+    "upper_temperature_k": 2.678599992123054e-05,
+    "pressure_pa": 0.002220089008915238,
+    "interface_height_m": -1.5771000061448603e-08,
+    "wall0_inner_face_k": -3.3290000374108786e-06,
+    "wall1_inner_face_k": -7.489999802601233e-07
+  },
+  "refinement_scope": "One timestep halving on the same four-cell walls, not a time-order or mesh-independence claim.",
+  "example": "crates/fs-airflow/examples/radiating_compartment.rs",
+  "documentation": "crates/fs-airflow/examples/radiating_compartment/README.md",
+  "sources": {
+    "gas": {
+      "owner": "crates/fs-airflow/examples/compartment_fire/air.rs",
+      "calorics": "Original NASA9 low-temperature N2/O2 coefficients; McBride, Zehe and Gordon, NASA TP-2002-211556",
+      "coefficient_source": "https://github.com/Cantera/cantera/blob/v3.2.0/data/airNASA9.yaml",
+      "git_blob": "5975d1303819332c1bd77a783d9873b66f65c952",
+      "temperature_domain_k": [
+        200,
+        1000
+      ],
+      "mole_fractions": {
+        "N2": 0.79,
+        "O2": 0.21
+      },
+      "coefficient_adjustments": "None; one original temperature region, no fit or extrapolation"
+    },
+    "wall_radiation_adapter": "crates/fs-airflow/src/compartment/radiation/walls.rs",
+    "wall": "crates/fs-airflow/src/compartment/wall.rs",
+    "gray_radiation": "crates/fs-airflow/src/compartment/radiation.rs",
+    "spectral_radiation": "crates/fs-airflow/src/compartment/radiation/spectral.rs",
+    "wall_and_optical_properties": "Explicitly authored numerical inputs, with no measured uncertainty or spectroscopy claim"
+  },
+  "numerical_controls": {
+    "enclosure_wall": {
+      "maximum_iterations": 32,
+      "maximum_backtracks": 24,
+      "maximum_radiation_evaluations": 4096,
+      "maximum_wall_evaluations": 16384,
+      "power_difference_w": 0.01,
+      "endpoint_power_tolerance_w": 0.0001,
+      "endpoint_temperature_tolerance_k": 1e-07,
+      "combined_energy_tolerance_j": 0.0001,
+      "original_wall_controls": "WallSolve::default()"
+    },
+    "gray": "RadiationSolve::default()",
+    "spectral": {
+      "heat_tolerance_w": 1e-06,
+      "radiosity_tolerance_w_m2": 1e-06,
+      "remaining_controls": "SpectralSolve::default()"
+    },
+    "network": {
+      "minimum_step_s": 1e-06,
+      "remaining_controls": "NetworkControl::default()"
+    },
+    "example": {
+      "maximum_requested_steps": 50000,
+      "maximum_accepted_steps": 50000,
+      "end_time_domain_s": [
+        0.001,
+        300
+      ],
+      "maximum_timestep_domain_s": [
+        0.001,
+        0.5
+      ],
+      "whole_run_combined_energy_tolerance_j": 0.05,
+      "per_layer_species_mass_tolerance_kg": 1e-10,
+      "accepted_clock_gate": "Exact equality between original gas and all wall clocks"
+    }
+  },
+  "accounting": {
+    "combined_energy_residual_definition": "U_gas_physical(t) + sum(E_wall(t)) - U_gas_physical(0) - sum(E_wall(0)); external heat is zero",
+    "gas_heat_power_definition": "Signed total power into each gas layer from all wall convection and participating enclosure radiation",
+    "addition_api": "EnclosureWallReport::add_gas_heat adds the total once; do not additionally add the enclosed radiation report gas powers or individual wall convective powers",
+    "acceptance": "Publish returned Wall1d candidates only after ZoneNetwork::step_with_sources accepts its whole gas/source step",
+    "summary_residuals": "Maximum absolute residual across all accepted intervals; final contains the final emitted CSV row",
+    "work": "Counts include trial and endpoint checks inside each accepted wall/radiation solve; these three runs have zero rejected network steps"
+  },
+  "accuracy_scope": {
+    "time_integration": "Wall storage and radiation are implicitly coupled at returned wall faces. Gas temperatures, geometry, absorption and convective contacts remain frozen at the accepted gas state during each source interval, retaining first-order gas/source composition.",
+    "gray_spectral_comparison": "A finite-window gray-limit reference with identical constant opacity and gray emissivity; small differences do not establish improved nongray physical accuracy.",
+    "spectral_errors": "Nonlinear endpoint residuals, spectral quadrature estimates and finite-window omissions are distinct.",
+    "geometry": "One authored reciprocal normal chord; not exact hemispherical transport or generated finite-room view factors.",
+    "data": "Authored gas absorption, emissivity, wall and convection inputs; no measured absorption, soot-yield or reaction data inferred.",
+    "conservation": "Small combined-energy defects verify the booked exchanges to tolerance, not time accuracy, an entropy theorem or unconditional nonlinear convergence.",
+    "physical_validation": false,
+    "spectroscopic_validation": false,
+    "mesh_independence_established": false,
+    "convergence_order_established": false
+  }
+}

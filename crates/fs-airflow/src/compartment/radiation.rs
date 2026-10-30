@@ -32,6 +32,9 @@ pub mod soot;
 /// Wavelength-resolved band/soot transfer through these same reciprocal paths.
 pub mod spectral;
 
+/// Participating radiation coupled to original finite-wall endpoints.
+pub mod walls;
+
 /// Maximum surface axis for the bounded dense reflection solve.
 pub const MAX_RADIATION_SURFACES: usize = 64;
 /// Maximum authored reciprocal chords per enclosure.

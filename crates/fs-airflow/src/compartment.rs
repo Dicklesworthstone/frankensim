@@ -196,6 +196,8 @@ pub enum NetworkError {
     Fire(fire::PrescribedFireError),
     /// Participating gas/surface radiation refused its geometry or solve.
     Radiation(radiation::RadiationError),
+    /// Coupled participating radiation and finite-wall endpoints refused.
+    RadiatingWalls(radiation::walls::EnclosureWallError),
     /// Condensed-fuel release refused its original gas source or transfer balance.
     Pyrolysis(pyrolysis::VolatileGasError),
     /// An original fan source, operating point or applicability gate refused.
@@ -262,6 +264,14 @@ impl From<radiation::RadiationError> for NetworkError {
         match e {
             radiation::RadiationError::Cancelled => Self::Cancelled,
             other => Self::Radiation(other),
+        }
+    }
+}
+impl From<radiation::walls::EnclosureWallError> for NetworkError {
+    fn from(e: radiation::walls::EnclosureWallError) -> Self {
+        match e {
+            radiation::walls::EnclosureWallError::Cancelled => Self::Cancelled,
+            other => Self::RadiatingWalls(other),
         }
     }
 }

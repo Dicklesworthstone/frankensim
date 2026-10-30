@@ -1170,6 +1170,48 @@ results are in `data/reference/compartment_fire/spectral_soot_example.json`;
 both models conserve energy but predict different layer/wall heat distributions.
 
 
+### Implicit participating radiation and finite wall storage
+
+`radiation::walls` couples the original gray or wavelength-dependent enclosure
+to original `Wall1d::candidate_with_exchange` candidates. Its nonlinear unknowns
+are signed surface radiation powers. Each trial advances the finite walls with
+those powers and evaluates the existing optical owner at their resulting face
+temperatures. The emissivity callback must return the original material receipt
+for the actual queried temperature. A previous power vector is only a numerical
+initial guess, never a separately applied source.
+
+The prepared workspace reuses original wall, radiation, spectral and LU owners.
+A Jacobian column perturbs one wall and the shared optical solve, avoiding a
+complete wall-bank advance for every column. Explicit controls bound nonlinear
+iterations, wall/optical work, face-temperature and power mismatches, and energy
+residuals. Workspaces can be reused after cancellation or rejected candidates;
+the complete solve is not claimed allocation-free or unconditionally convergent.
+
+An accepted candidate uses the identical radiation power vector for fresh wall
+candidates and the original gas account. Radiation is evaluated again at the
+returned wall faces to check the nonlinear residual; the report retains those
+differences instead of redistributing them into gas energy. Its `add_gas_heat`
+adds radiation plus the opposite wall convection exactly once. A network source
+provider installs the returned walls only alongside an accepted gas candidate.
+Area, layer presence, wall/room clocks and convection-temperature ownership are
+checked. Typed errors preserve cancellation through `NetworkError`.
+
+Gas temperatures, optical coefficients and paths stay frozen within an interval.
+Callers regenerate geometry and optical data from accepted gas states. This is
+implicit wall/radiation feedback with first-order gas coupling, not a fully
+implicit reacting-gas solve, a global second-order method or an entropy theorem.
+All existing optical/source assumptions and omitted-spectrum qualifications
+remain in force.
+
+Five test groups cover an independent stiff black-plate solution, equilibrium,
+selective spectral bands, actual NASA gas/wall storage with forced network retry,
+and bounded-work, cancellation and source-accounting behavior. The registered
+`radiating_compartment` example evolves two hot gas layers and two finite plates.
+Its three actual gray/spectral/refinement runs and conservative storage accounts
+are retained in `data/reference/compartment_fire/radiating_compartment_example.json`.
+The authored constant-band optics exercise the finite-window gray limit; they
+are not a molecular absorption dataset or an experimental validation case.
+
 ### Conservative solid-to-gas volatile transfer
 
 `compartment::pyrolysis::VolatileMixture` binds an explicit volatile mass
