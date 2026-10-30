@@ -6,31 +6,59 @@
 //! Each retained quadrature arm instead has a scalar physical inertia or
 //! compliance, and preserves its original momentum or compression volume.
 use super::*;
-use crate::dg::gas_update::{DgGasMaterialUpdate, energy, poll, scaled};
+use crate::dg::gas_update::{DgGasMaterialUpdate, conserved_map, energy, poll, scaled};
 
-fn conserved_map(
-    old_root: &[f64],
-    new_root: &[f64],
-    new_inverse: &[f64],
-    local: usize,
-) -> Result<Vec<f64>, DuctError> {
-    let mut map = vec![0.0; local * local];
-    // Transport-only changes must not manufacture roundoff parameter work.
-    if old_root == new_root {
-        for i in 0..local { map[i * local + i] = 1.0; }
-    } else {
-        for i in 0..local {
-            for j in 0..local {
-                map[i * local + j] = (0..local)
-                    .map(|k| new_inverse[i * local + k] * old_root[k * local + j])
-                    .sum();
+impl SpatialViscothermal {
+    /// The molecular owner replaces thermal channels but retains these exact
+    /// native viscosity coordinates. Match physical sections, never pole rates.
+    pub(in crate::dg) fn transfer_molecular_viscous_momenta(
+        &self,
+        replacement: &Self,
+        field_dofs: usize,
+        before: &[f64],
+        after: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DuctError> {
+        let old: Vec<_> = self
+            .channels
+            .iter()
+            .filter(|channel| channel.field_start >= field_dofs)
+            .collect();
+        let new: Vec<_> = replacement
+            .channels
+            .iter()
+            .filter(|channel| channel.field_start >= field_dofs)
+            .collect();
+        if old.len() != new.len() {
+            return Err(invalid("molecular refresh changed viscous channel support"));
+        }
+        for (old, new) in old.into_iter().zip(new) {
+            poll(cancelled)?;
+            if old.point_m.to_bits() != new.point_m.to_bits()
+                || old.radius_m.to_bits() != new.radius_m.to_bits()
+                || old.field_start != new.field_start
+                || old.memory_start != new.memory_start
+                || old.terms.len() != new.terms.len()
+                || old.memory_start + old.terms.len() > before.len()
+                || new.memory_start + new.terms.len() > after.len()
+            {
+                return Err(invalid(
+                    "molecular refresh changed a physical viscous section",
+                ));
+            }
+            let factor = old.storage_root / new.storage_root;
+            if !factor.is_finite() || factor <= 0.0 {
+                return Err(invalid(
+                    "molecular viscous momentum scale is unrepresentable",
+                ));
+            }
+            for arm in 0..old.terms.len() {
+                let index = old.memory_start + arm;
+                after[index] = scaled(before[index], factor)?;
             }
         }
+        Ok(())
     }
-    if map.iter().any(|value| !value.is_finite()) {
-        return Err(invalid("spatial gas conserved-coordinate map is unrepresentable"));
-    }
-    Ok(map)
 }
 
 impl DgDuct {
@@ -74,10 +102,14 @@ impl DgDuct {
     ) -> Result<DgGasMaterialUpdate, GasFieldDuctError> {
         poll(cancelled)?;
         if self.molecular.is_some() {
-            return Err(invalid("live gas updates require a molecular history-transfer law").into());
+            return Err(
+                invalid("live gas updates require a molecular history-transfer law").into(),
+            );
         }
         let Some(ViscothermalMemory::Spatial(old_memory)) = &self.viscothermal else {
-            return Err(invalid("spatial gas refresh requires its native spatial diffusion owner").into());
+            return Err(
+                invalid("spatial gas refresh requires its native spatial diffusion owner").into(),
+            );
         };
         let m = self.field_dofs;
         let n = self.total_dofs();
@@ -93,7 +125,10 @@ impl DgDuct {
             || maximum_absolute_parameter_work_j < 0.0
             || !state.cumulative_parameter_work_j.is_finite()
         {
-            return Err(invalid("spatial gas refresh needs its original finite state, length and work budget").into());
+            return Err(invalid(
+                "spatial gas refresh needs its original finite state, length and work budget",
+            )
+            .into());
         }
         let energy_before_j = state.stored_energy_j();
         let acoustic_energy_before_j = energy(&state.tilde[..prefix]);
@@ -106,12 +141,16 @@ impl DgDuct {
         };
         // Reuse both original physical owners, including field/geometry span
         // subdivision, exact mass quadrature, matched endpoints and side ports.
-        let mut candidate = Self::new_with_gas_field(
-            &self.geometry, field, self.mesh, self.inlet, self.outlet,
-        )?.with_side_ports(&self.side_ports)?.with_spatial_viscothermal(resolution)?;
+        let mut candidate =
+            Self::new_with_gas_field(&self.geometry, field, self.mesh, self.inlet, self.outlet)?
+                .with_side_ports(&self.side_ports)?
+                .with_spatial_viscothermal(resolution)?;
         poll(cancelled)?;
         if candidate.total_dofs() != prefix || candidate.elements.len() != self.elements.len() {
-            return Err(invalid("spatial gas refresh cannot change the original basis or memory support").into());
+            return Err(invalid(
+                "spatial gas refresh cannot change the original basis or memory support",
+            )
+            .into());
         }
         let local = self.mesh.order + 1;
         let mut next = state.clone();
@@ -151,13 +190,17 @@ impl DgDuct {
                 || old.memory_start != new.memory_start
                 || old.terms.len() != new.terms.len()
             {
-                return Err(invalid("replacement changed physical diffusion section identity").into());
+                return Err(
+                    invalid("replacement changed physical diffusion section identity").into(),
+                );
             }
             // Fixed Jacobi weights cancel. This preserves scalar arm momentum
             // or compression and gives exactly one for transport-only changes.
             let factor = old.storage_root / new.storage_root;
             if !factor.is_finite() || factor <= 0.0 {
-                return Err(invalid("replacement diffusion storage scale is unrepresentable").into());
+                return Err(
+                    invalid("replacement diffusion storage scale is unrepresentable").into(),
+                );
             }
             for arm in 0..old.terms.len() {
                 let index = old.memory_start + arm;
@@ -178,11 +221,14 @@ impl DgDuct {
                 let base = element * local;
                 for i in 0..local {
                     for j in prefix..n {
-                        let value: f64 = (0..local).map(|k| {
-                            map[i * local + k] * self.l_tilde[(base + k) * n + j]
-                        }).sum();
+                        let value: f64 = (0..local)
+                            .map(|k| map[i * local + k] * self.l_tilde[(base + k) * n + j])
+                            .sum();
                         if !value.is_finite() {
-                            return Err(invalid("replacement pressure/wall coupling is unrepresentable").into());
+                            return Err(invalid(
+                                "replacement pressure/wall coupling is unrepresentable",
+                            )
+                            .into());
                         }
                         operator[(base + i) * n + j] = value;
                         operator[j * n + base + i] = -value;
@@ -194,17 +240,25 @@ impl DgDuct {
             candidate.compliant_wall = Some(wall);
             candidate.memory_dofs = self.memory_dofs;
             candidate.l_tilde = operator;
-            for (_, port) in &mut candidate.ports { port.resize(n, 0.0); }
+            for (_, port) in &mut candidate.ports {
+                port.resize(n, 0.0);
+            }
         } else if prefix != n {
             return Err(invalid("unidentified coordinates after spatial gas memory").into());
         }
         candidate.operator_identity = hash_operator(
-            candidate.mesh, candidate.inlet, candidate.outlet,
-            &candidate.elements, &candidate.l_tilde, &candidate.ports,
+            candidate.mesh,
+            candidate.inlet,
+            candidate.outlet,
+            &candidate.elements,
+            &candidate.l_tilde,
+            &candidate.ports,
         );
         let mut parameter_work_j = 0.0;
         for i in 0..prefix {
-            if i % local == 0 { poll(cancelled)?; }
+            if i % local == 0 {
+                poll(cancelled)?;
+            }
             let before = state.tilde[i];
             let after = next.tilde[i];
             parameter_work_j += 0.5 * (after - before) * (after + before);
@@ -227,16 +281,24 @@ impl DgDuct {
             || (parameter_work_j != 0.0 && accumulated == state.cumulative_parameter_work_j)
             || (state.cumulative_parameter_work_j != 0.0 && accumulated == parameter_work_j)
         {
-            return Err(invalid("spatial gas parameter work exceeds its budget or finite resolution").into());
+            return Err(invalid(
+                "spatial gas parameter work exceeds its budget or finite resolution",
+            )
+            .into());
         }
-        if candidate.compliant_wall.is_some() { candidate.compliant_wall_state(&next)?; }
+        if candidate.compliant_wall.is_some() {
+            candidate.compliant_wall_state(&next)?;
+        }
         next.cumulative_parameter_work_j = accumulated;
         poll(cancelled)?;
         let _old_duct = core::mem::replace(self, candidate);
         let _old_state = core::mem::replace(state, next);
         Ok(DgGasMaterialUpdate {
-            energy_before_j, energy_after_j,
-            acoustic_energy_before_j, acoustic_energy_after_j, parameter_work_j,
+            energy_before_j,
+            energy_after_j,
+            acoustic_energy_before_j,
+            acoustic_energy_after_j,
+            parameter_work_j,
         })
     }
 }

@@ -47,6 +47,37 @@ pub(super) fn energy(values: &[f64]) -> f64 {
     0.5 * values.iter().map(|x| x * x).sum::<f64>()
 }
 
+/// Transfer a weak physical coordinate through its original, generally
+/// noncommuting symmetric mass roots: x_new=M_new^(-1/2) M_old^(1/2) x_old.
+pub(super) fn conserved_map(
+    old_root: &[f64],
+    new_root: &[f64],
+    new_inverse: &[f64],
+    local: usize,
+) -> Result<Vec<f64>, DuctError> {
+    let mut map = vec![0.0; local * local];
+    // Transport-only changes must not manufacture roundoff parameter work.
+    if old_root == new_root {
+        for i in 0..local {
+            map[i * local + i] = 1.0;
+        }
+    } else {
+        for i in 0..local {
+            for j in 0..local {
+                map[i * local + j] = (0..local)
+                    .map(|k| new_inverse[i * local + k] * old_root[k * local + j])
+                    .sum();
+            }
+        }
+    }
+    if map.iter().any(|value| !value.is_finite()) {
+        return Err(invalid(
+            "spatial gas conserved-coordinate map is unrepresentable",
+        ));
+    }
+    Ok(map)
+}
+
 impl DgDuct {
     /// Refresh a live spatially uniform numerical gas, at the SAME geometry.
     ///
@@ -139,7 +170,8 @@ impl DgDuct {
         crate::validate_gas(&gas)?;
         let m = self.field_dofs;
         let n = self.total_dofs();
-        if self.molecular.is_some() || self.viscothermal.is_some()
+        if self.molecular.is_some()
+            || self.viscothermal.is_some()
             || self
                 .gas_field
                 .as_ref()

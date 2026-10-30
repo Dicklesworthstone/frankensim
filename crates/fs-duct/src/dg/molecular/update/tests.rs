@@ -8,7 +8,7 @@ use fs_material::visco::GeneralizedMaxwell;
 use fs_phs::WallPin;
 use fs_thermochem::SpeciesId;
 
-fn declaration(active: bool) -> RelaxationAbsorption {
+pub(super) fn declaration(active: bool) -> RelaxationAbsorption {
     RelaxationAbsorption::new(
         ["analytic-field-a", "analytic-field-b"]
             .into_iter()
@@ -162,7 +162,7 @@ fn physical_invariants(duct: &DgDuct, state: &DgState) -> Vec<f64> {
     result
 }
 
-fn excited(duct: &DgDuct) -> DgState {
+pub(super) fn excited(duct: &DgDuct) -> DgState {
     let mut state = duct.project_initial_state(|x| 10.0 + 3.0 * x, |x| 1e-7 * (1.0 - x));
     let step = duct.propagator(2e-6, 1e-13).unwrap();
     for _ in 0..12 {

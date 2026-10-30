@@ -62,8 +62,31 @@ fn molecular_load(source: &AxialGasField) -> DgPortLoad {
 
 #[test]
 fn molecular_refresh_keeps_the_complete_branch_and_mutual_terminal_transaction() {
+    complete_molecular_transaction(false);
+}
+
+#[test]
+fn spatial_molecular_refresh_keeps_the_complete_branch_and_mutual_terminal_transaction() {
+    complete_molecular_transaction(true);
+}
+
+fn complete_molecular_transaction(spatial: bool) {
     let before = field(300.0, 101_325.0, 0.05);
-    let after = field(420.0, 101_325.0, 0.05);
+    let after = if spatial {
+        let mut primitives = before.primitive_states().to_vec();
+        primitives.last_mut().unwrap().temperature_k = 420.0;
+        AxialGasField::new(
+            before.stations_m().to_vec(),
+            before.static_pressure_pa(),
+            primitives,
+            before.model().clone(),
+            fs_matdb::QueryPoint::new(),
+            before.phase(),
+        )
+        .unwrap()
+    } else {
+        field(420.0, 101_325.0, 0.05)
+    };
     let mut live = molecular_load(&before);
     for _ in 0..20 {
         live.preview_step(1e-9).unwrap().accept();
@@ -86,14 +109,35 @@ fn molecular_refresh_keeps_the_complete_branch_and_mutual_terminal_transaction()
     );
     let mut original_duct = accepted.duct().clone();
     let mut original_state = accepted.state().clone();
-    let native = original_duct
-        .rebind_uniform_molecular_gas_field(&mut original_state, &after, 0.02, 1.0, &mut || false)
-        .unwrap();
+    let native = if spatial {
+        original_duct.rebind_spatial_molecular_gas_field(
+            &mut original_state,
+            &after,
+            0.02,
+            1.0,
+            &mut || false,
+        )
+    } else {
+        original_duct.rebind_uniform_molecular_gas_field(
+            &mut original_state,
+            &after,
+            0.02,
+            1.0,
+            &mut || false,
+        )
+    }
+    .unwrap();
     let report = live
         .rebind_gas_field_controlled(
             &after,
-            DgGasRefresh::UniformMolecularDiffusion {
-                maximum_relative_error: 0.02,
+            if spatial {
+                DgGasRefresh::SpatialMolecularDiffusion {
+                    maximum_relative_error: 0.02,
+                }
+            } else {
+                DgGasRefresh::UniformMolecularDiffusion {
+                    maximum_relative_error: 0.02,
+                }
             },
             1.0,
             &mut || false,

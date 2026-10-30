@@ -114,8 +114,9 @@ impl DgDuct {
     /// Attach one declared molecular law to the complete original gas field.
     /// Each point resolves its actual primitive temperature, composition and
     /// material sources. No inlet state, average cp, or average rate is used.
-    /// This is cold, frozen-background construction; species/heat transport and
-    /// live reservoir transfer remain separate, unsupported operations.
+    /// This is cold, frozen-background construction. Continuing fields use
+    /// `rebind_spatial_molecular_gas_field` for the original spatial histories;
+    /// background heat/species transport remains a separate physical owner.
     pub fn with_molecular_relaxation_field(
         self,
         law: RelaxationAbsorption,

@@ -13197,3 +13197,20 @@ finite-conductivity walls or narrow-gap linearized Navier–Stokes.
 Six focused new native cases passed against actual FE/sparse/modal/material
 source owners: four boundary-layer cases and two source-gas integration cases.
 The complete Cargo workspace was not built in this environment.
+
+### Spatial molecular gas changes in continuing port networks
+
+`DgGasRefresh::SpatialMolecularDiffusion` routes the existing main/selected-branch
+transaction through `DgDuct::rebind_spatial_molecular_gas_field`. The original
+DG owner preserves local thermal/molecular entropy and weak compression/momentum
+on unchanged spatial quadrature, while the complete port transaction retains
+branch/rational-terminal histories and charges the aggregate absolute parameter
+work. Existing common-pressure junction/exterior checks and all-or-nothing
+publication remain in force. The background may change temperature and pressure
+but must retain station positions and complete species fractions. This adds no
+transport law, interpolation of histories or new exterior gas assumption.
+
+Four new native physical-transfer tests and five existing uniform-transfer
+regressions passed using actual DG/material owners. The added complete branch,
+channel and mutual-terminal integration test is present but was not executed
+because the full coupling dependency graph is unavailable in this checkout.

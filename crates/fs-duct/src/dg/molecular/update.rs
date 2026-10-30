@@ -15,6 +15,8 @@ use super::super::gas_update::{energy, scaled};
 use super::*;
 use fs_material::relaxation::RelaxingMedium;
 
+mod spatial;
+
 impl DgDuct {
     /// Change a continuing uniform molecular gas without discarding its thermal
     /// or internal-temperature histories.

@@ -27,6 +27,13 @@ pub enum DgGasRefresh {
         /// New-gas complex and loss admission on the original angular band.
         maximum_relative_error: f64,
     },
+    /// Nonuniform molecular/thermal gas on the original weak basis and wall
+    /// quadrature. Preserves local reservoir entropy, weak compression and
+    /// momentum at unchanged primitive stations and species fractions.
+    SpatialMolecularDiffusion {
+        /// Every local gas must pass the original complex and loss band.
+        maximum_relative_error: f64,
+    },
 }
 
 /// One accepted source-gas intervention in the complete represented load.
@@ -170,6 +177,17 @@ pub(crate) fn prepare_dg_gas(
             maximum_relative_error,
         } => candidate
             .rebind_uniform_molecular_gas_field(
+                &mut state,
+                field,
+                maximum_relative_error,
+                maximum_absolute_parameter_work_j,
+                cancelled,
+            )
+            .map_err(field_error),
+        DgGasRefresh::SpatialMolecularDiffusion {
+            maximum_relative_error,
+        } => candidate
+            .rebind_spatial_molecular_gas_field(
                 &mut state,
                 field,
                 maximum_relative_error,
