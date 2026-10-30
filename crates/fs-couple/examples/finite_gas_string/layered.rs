@@ -175,6 +175,7 @@ pub(super) fn simulate(
         pressure_pa: Vec::with_capacity(spec.samples), records: Vec::with_capacity(spec.samples),
         layer_temperatures: Vec::with_capacity(spec.samples),
         gas_flow: reservoir.as_ref().map(|parcel| flow::History::new(&gas, parcel, spec.samples)),
+        electrical_feedback: None,
     };
     if let (Some(nozzle), Some(parcel)) = (&spec.nozzle, &reservoir) {
         history.description.push_str(&format!(

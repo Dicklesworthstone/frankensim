@@ -242,6 +242,7 @@ struct History {
     records: Vec<[f64; 27]>,
     layer_temperatures: Vec<Vec<f64>>,
     gas_flow: Option<flow::History>,
+    electrical_feedback: Option<Vec<[f64; 3]>>,
 }
 
 fn simulate(
@@ -273,8 +274,13 @@ fn simulate(
     let prestress = if spec.thermoelastic.is_some() {
         "fixed supports, sourced thermal expansion and affine stiffness with reversible heat"
     } else { "fixed tension and constant elastic modulus" };
+    let electrical_scope = if spec.electrical_feedback.is_some() {
+        "first-order frozen mechanics with solved endpoint Joule heat"
+    } else {
+        "first-order frozen-law samples"
+    };
     let mut description = format!(
-        "material_card={}, caloric_curve={}, solid_mass_kg={solid_mass_kg:e}, gas_mass_kg={gas_mass_kg:e}, gas_volume_m3={:e}, initial_mechanical_internal_energy_j={initial_mechanical_j:e}; fully solid, fixed geometry/density, {prestress}, temperature-dependent loss/resistivity/conduction; first-order frozen-law samples; finite gas is a thermal inventory, not a chamber; diagnostic compact pressure supplies no radiation loading; source identity is not measured validation{}",
+        "material_card={}, caloric_curve={}, solid_mass_kg={solid_mass_kg:e}, gas_mass_kg={gas_mass_kg:e}, gas_volume_m3={:e}, initial_mechanical_internal_energy_j={initial_mechanical_j:e}; fully solid, fixed geometry/density, {prestress}, temperature-dependent loss/resistivity/conduction; {electrical_scope}; finite gas is a thermal inventory, not a chamber; diagnostic compact pressure supplies no radiation loading; source identity is not measured validation{}",
         card.content_hash().to_hex(),
         live.thermal().phase_curve_identity().to_hex(),
         gas.volume_m3(),
@@ -319,6 +325,8 @@ fn simulate(
     };
     let mut records = Vec::with_capacity(spec.samples);
     let mut pressure_pa = Vec::with_capacity(spec.samples);
+    let mut electrical_feedback = spec.electrical_feedback.map(|_| Vec::with_capacity(spec.samples));
+    let (mut electrical_source_work, mut electrical_source_residual) = (0.0, 0.0);
     let (mut material_heat, mut drag_heat, mut exchange_heat, mut joule_heat) =
         (0.0, 0.0, 0.0, 0.0);
     let (mut solid_heat, mut gas_heat, mut work, mut other_loss, mut allowance) =
@@ -338,13 +346,24 @@ fn simulate(
             }],
         )?;
         let epoch = live.mechanical().epoch();
-        let (frame, electrical, flux) =
+        let (frame, electrical, flux, source) =
             if let (Some(nozzle), Some(parcel)) = (&spec.nozzle, reservoir.as_mut()) {
-                let (report, electrical) = if let Some(drive) = spec.drive {
-                    let report = live.step_with_drive_and_isochoric_gas_nozzle_conduction(
-                        cx, epoch, &forces, drive, &mut gas, parcel, heat, controls,
-                        spec.exchange, &layers, nozzle.geometry, nozzle.controls(spec.gas_solve),
-                    )?;
+                let (report, electrical, source) = if let Some(drive) = spec.drive {
+                    let (report, source) = if let Some(feedback) = spec.electrical_feedback {
+                        let report = live.step_with_implicit_drive_and_isochoric_gas_nozzle_conduction(
+                            cx, epoch, &forces, drive, &mut gas, parcel, heat, controls,
+                            spec.exchange, &layers, nozzle.geometry, nozzle.controls(spec.gas_solve),
+                            feedback,
+                        )?;
+                        let source = (report.source_work_j, report.source_residual_j,
+                            report.trials, report.energy_tolerance_j);
+                        (report.electrical, Some(source))
+                    } else {
+                        (live.step_with_drive_and_isochoric_gas_nozzle_conduction(
+                            cx, epoch, &forces, drive, &mut gas, parcel, heat, controls,
+                            spec.exchange, &layers, nozzle.geometry, nozzle.controls(spec.gas_solve),
+                        )?, None)
+                    };
                     let electrical = [
                         report.joule_heat_j,
                         report.current_a,
@@ -352,7 +371,7 @@ fn simulate(
                         report.conductor_before.resistance_ohm(),
                         report.conductor_after.resistance_ohm(),
                     ];
-                    (report.coupled, electrical)
+                    (report.coupled, electrical, source)
                 } else {
                     (
                         live.step_with_isochoric_gas_nozzle_conduction(
@@ -360,6 +379,7 @@ fn simulate(
                             spec.exchange, &layers, nozzle.geometry, nozzle.controls(spec.gas_solve),
                         )?,
                         [0.0; 5],
+                        None,
                     )
                 };
                 let sign = match report.direction {
@@ -372,19 +392,22 @@ fn simulate(
                     sign * report.transfer.transferred_enthalpy_j,
                     report.energy_tolerance_j,
                 );
-                (report.thermal, electrical, Some(flux))
+                (report.thermal, electrical, Some(flux), source)
             } else if let Some(drive) = spec.drive {
-                let report = live.step_with_drive_and_isochoric_gas_conduction(
-                    cx,
-                    epoch,
-                    &forces,
-                    drive,
-                    &mut gas,
-                    heat,
-                    controls,
-                    spec.exchange,
-                    &layers,
-                )?;
+                let (report, source) = if let Some(feedback) = spec.electrical_feedback {
+                    let report = live.step_with_implicit_drive_and_isochoric_gas_conduction(
+                        cx, epoch, &forces, drive, &mut gas, heat, controls,
+                        spec.exchange, &layers, feedback,
+                    )?;
+                    let source = (report.source_work_j, report.source_residual_j,
+                        report.trials, report.energy_tolerance_j);
+                    (report.electrical, Some(source))
+                } else {
+                    (live.step_with_drive_and_isochoric_gas_conduction(
+                        cx, epoch, &forces, drive, &mut gas, heat, controls,
+                        spec.exchange, &layers,
+                    )?, None)
+                };
                 let electrical = [
                     report.joule_heat_j,
                     report.current_a,
@@ -392,7 +415,7 @@ fn simulate(
                     report.conductor_before.resistance_ohm(),
                     report.conductor_after.resistance_ohm(),
                 ];
-                (report.coupled, electrical, None)
+                (report.coupled, electrical, None, source)
             } else {
                 (
                     live.step_with_isochoric_gas_conduction(
@@ -407,6 +430,7 @@ fn simulate(
                     )?,
                     [0.0; 5],
                     None,
+                    None,
                 )
             };
         let [supplied_joule, current, final_current, resistance, final_resistance] = electrical;
@@ -416,12 +440,16 @@ fn simulate(
         drag_heat += coupled.drag_heat_j;
         exchange_heat += frame.solid_to_gas_heat_j;
         joule_heat += supplied_joule;
+        electrical_source_work += source.as_ref().map_or(supplied_joule, |source| source.0);
         solid_heat += heat.string_heat_j;
         gas_heat += heat.gas_heat_j;
         work += vibration.acoustic.input_work_j;
         other_loss +=
             vibration.dissipation.authored_loss_j + vibration.dissipation.roundoff_residual_j;
-        allowance += flux.as_ref().map_or(coupled.energy_tolerance_j, |flux| flux.3);
+        allowance += source.as_ref().map_or_else(
+            || flux.as_ref().map_or(coupled.energy_tolerance_j, |flux| flux.3),
+            |source| source.3,
+        );
         reversible_heat += coupled.string.reversible_heat_j;
         axial_change += coupled.string.axial_free_energy_change_j;
         entropy_energy_change += coupled.string.mechanical_entropy_energy_change_j;
@@ -443,7 +471,7 @@ fn simulate(
                     0.0,
                 )
             };
-        let defect = stored_change + other_loss - work - joule_heat - solid_heat - gas_heat;
+        let defect = stored_change + other_loss - work - electrical_source_work - solid_heat - gas_heat;
         let tolerance = allowance
             + 64.0
                 * f64::EPSILON
@@ -451,7 +479,7 @@ fn simulate(
                 * (stored_change.abs()
                     + other_loss.abs()
                     + work.abs()
-                    + joule_heat.abs()
+                    + electrical_source_work.abs()
                     + solid_heat.abs()
                     + gas_heat.abs()
                     + initial_mechanical_j.abs()
@@ -502,6 +530,14 @@ fn simulate(
         if let (Some(history), Some(parcel), Some(flux)) = (&mut gas_flow, &reservoir, flux) {
             history.record(&gas, parcel, flux.0, flux.1, flux.2)?;
         }
+        if let (Some(feedback), Some(source)) = (&mut electrical_feedback, source) {
+            electrical_source_residual += source.1;
+            let row = [electrical_source_work, electrical_source_residual, source.2 as f64];
+            if row.iter().any(|value| !value.is_finite()) {
+                return Err("nonfinite electrical feedback observation".into());
+            }
+            feedback.push(row);
+        }
         records.push(record);
         pressure_pa.push(pressure);
     }
@@ -512,6 +548,7 @@ fn simulate(
         records,
         layer_temperatures: Vec::new(),
         gas_flow,
+        electrical_feedback,
     })
 }
 
@@ -587,6 +624,9 @@ fn run(args: &[String]) -> Result<()> {
             write!(output, ",\"gas_mole_fraction_{escaped}\",\"reservoir_mole_fraction_{escaped}\"")?;
         }
     }
+    if history.electrical_feedback.is_some() {
+        write!(output, ",cumulative_electrical_source_work_j,cumulative_electrical_source_residual_j,electrical_feedback_trials")?;
+    }
     writeln!(output)?;
     for (sample, record) in history.records.iter().enumerate() {
         for (i, value) in record.iter().enumerate() {
@@ -600,6 +640,9 @@ fn run(args: &[String]) -> Result<()> {
         }
         if let Some(gas_flow) = &history.gas_flow {
             for value in &gas_flow.records[sample] { write!(output, ",{value:.17e}")?; }
+        }
+        if let Some(feedback) = &history.electrical_feedback {
+            for value in feedback[sample] { write!(output, ",{value:.17e}")?; }
         }
         writeln!(output)?;
     }

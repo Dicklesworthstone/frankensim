@@ -1,0 +1,13 @@
+frankensim-finite-gas-string-v1
+audio 16000 3200 0.01
+string 0.65 0.00025 20 4
+release 0.4 0.001 16
+listener 1
+solid 300 280 400 1 0.001 1
+gas 0.000001 200 600 0.0000001 128 1
+nozzle nitrogen-reservoir.gas 0.000002 0.0000000001 1 0.00000000000001 0.000000001 0.05
+conduction 0.001 0.002 0.000125
+exchange 0.00001 0.000000000001 0.000000001 64
+drive current 0.1
+electrical_feedback 0.000005 0.000000000001 64
+heat 0 0

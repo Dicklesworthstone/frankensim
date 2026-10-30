@@ -2,6 +2,7 @@
 
 use fs_couple::cavity_phs::piston::thermal::HeatExchangeSolve;
 use fs_couple::acoustic_realize::thermoelastic::ThermoelasticStringSolve;
+use fs_couple::acoustic_realize::finite_gas::electrical::feedback::FiniteGasElectricalFeedbackSolve;
 use fs_material::conductor::OhmicDrive;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use fs_couple::acoustic_realize::concentric::ConcentricStringThermalSolve;
@@ -91,6 +92,7 @@ pub struct Spec {
     pub solid_distance_m: f64,
     pub exchange: HeatExchangeSolve,
     pub drive: Option<OhmicDrive>,
+    pub electrical_feedback: Option<FiniteGasElectricalFeedbackSolve>,
     pub solid_power_w: f64,
     pub gas_power_w: f64,
     pub thermoelastic: Option<Thermoelastic>,
@@ -204,6 +206,16 @@ pub fn parse(text: &str) -> super::Result<Spec> {
         Some("voltage") => Some(OhmicDrive::Voltage(f.value("voltage")?)),
         _ => return Err("drive requires none, current A or voltage V".into()),
     };
+    let electrical_feedback = if f.0.clone().next() == Some("electrical_feedback") {
+        f.keyword("electrical_feedback")?;
+        Some(FiniteGasElectricalFeedbackSolve {
+            maximum_joule_work_j: f.value("maximum Joule work")?,
+            source_tolerance_j: f.value("electrical source tolerance")?,
+            maximum_iterations: f.value("electrical feedback iterations")?,
+        })
+    } else {
+        None
+    };
     f.keyword("heat")?;
     let (solid_power_w, gas_power_w) = (f.value("solid power")?, f.value("gas power")?);
     let (thermoelastic, bonded) = match f.0.next() {
@@ -289,6 +301,7 @@ pub fn parse(text: &str) -> super::Result<Spec> {
         solid_distance_m,
         exchange,
         drive,
+        electrical_feedback,
         solid_power_w,
         gas_power_w,
         thermoelastic,
@@ -301,6 +314,12 @@ pub fn parse(text: &str) -> super::Result<Spec> {
 impl Spec {
     pub fn validate(&self) -> super::Result<()> {
         self.gas_solve.validate()?;
+        if let Some(feedback) = self.electrical_feedback {
+            feedback.validate()?;
+            if self.drive.is_none() || self.bonded.is_some() {
+                return Err("electrical_feedback requires a uniform current/voltage-driven string; bonded strings use their own endpoint thermal solver".into());
+            }
+        }
         if let Some(nozzle) = &self.nozzle {
             if nozzle.reservoir_record.is_empty() || nozzle.reservoir_record.len() > 512
                 || !std::path::Path::new(&nozzle.reservoir_record).components()

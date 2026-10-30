@@ -80,6 +80,47 @@ The binary can also be run as `cargo run -p fs-couple --example
 finite_gas_string -- ...` with the same arguments. Use the workspace's native
 build execution policy when building either target.
 
+## Solve electrical feedback during heat and gas flow
+
+Uniform strings can close the electrical source and thermal endpoint together.
+Add `electrical_feedback MAX_JOULE_WORK_J SOURCE_TOLERANCE_J MAX_ITERATIONS`
+immediately after `drive` and before `heat`. The source work then uses the
+accepted resistance and current: `W = dt * I_end² * R_end`. Each trial deposits
+`J` into the original solid/gas conduction solve and checks `J - W` against the
+declared tolerance. A voltage drive obtains `I_end = V / R_end`; a current
+drive retains the prescribed signed current. Every trial restarts from the same
+accepted state, so iterations do not advance motion, accumulate extra heat or
+consume reservoir gas.
+
+`feedback-flow.string` uses the same manufactured solid and nitrogen packs as
+`heated.string`, with a finite reservoir and endpoint electrical feedback:
+
+```bash
+cp "$demo/feedback-flow.string" "$demo/nitrogen-reservoir.gas" "$run_dir/"
+cargo run --release -p fs-couple --bin finite_gas_string -- \
+  "$run_dir/feedback-flow.string" "$run_dir/string.pack" "$run_dir/feedback-flow.wav" \
+  --gas-record crates/fs-couple/examples/self_heating_vibration/nitrogen.gas \
+  --gas-component "$run_dir/nitrogen.species" "$run_dir/nitrogen.nasa9" "$run_dir/nitrogen.transport" \
+  --gas-water none --gas-phase frozen > "$run_dir/feedback-flow.csv"
+```
+
+The row bounds trial Joule work to `[0, MAX_JOULE_WORK_J]`. Both energy values
+must be positive and finite, with source tolerance no larger than the work
+bound; iterations must be 1–128. Every trial must also satisfy the original
+material, temperature and conduction domains. An insufficient bracket or an
+unsupported upper endpoint refuses the complete run. The same option works
+without `nozzle` and with the uniform `thermoelastic` record. It requires a
+current or voltage drive; zero current or zero voltage is a valid idle source.
+`drive none` refuses the option. Bonded strings already have their own endpoint
+Newton solve and reject this separate uniform control record.
+
+After electrical/thermal convergence, an optional nozzle transfers gas once.
+The final observer and all three owners publish together. This remains a
+first-order mechanical split and heat-then-flow model; solving electrical
+feedback does not make the flow split simultaneous or add circuit dynamics.
+Omitting the row retains the original uniform initial-resistance quadrature
+and output fields.
+
 ## Heating a string with fixed supports
 
 `expanding.string` uses the same electrical, gas and conduction path, with an
@@ -170,7 +211,8 @@ mass-weighted layer temperature in bonded mode; appended
 cells, from core outward. Initial and endpoint electrical columns retain their
 time meanings. Bonded Joule heating uses the accepted endpoint current and
 resistance, so its per-sample work is `endpoint_current_a² * endpoint_resistance_ohm * dt`.
-The original uniform path keeps its initial-state electrical quadrature.
+The uniform path keeps initial-state electrical quadrature unless
+`electrical_feedback` selects the solved endpoint source.
 The joint accepted-state energy balance includes every layer and the finite gas.
 
 ## Pressure-driven gas exchange from data
@@ -261,8 +303,9 @@ The string, local parcel, reservoir and observer publish together only after
 thermal, flow, electrical and energy admission. A late refusal returns no
 partial trajectory. Electrical source work enters solid heat once; conductive
 heat and transported enthalpy cancel internally in the combined energy account.
-Uniform strings retain their original initial-state Joule quadrature; bonded
-strings retain endpoint Joule quadrature. This remains first-order heat-then-flow
+Uniform strings use initial-state Joule quadrature unless `electrical_feedback`
+selects the solved endpoint source. Bonded strings retain endpoint Joule
+quadrature. This remains first-order heat-then-flow
 composition of well-mixed, fixed-volume inventories. It adds no resolved jet
 momentum, spatial mixing, chamber resonance or radiation load.
 
@@ -284,6 +327,7 @@ records are refused. All physical values use SI units.
 | `conduction` | exchange area [m²], gas layer distance [m], solid layer distance [m] |
 | `exchange` | maximum absolute transfer per sample [J], source residual tolerance [J], energy tolerance [J], maximum iterations |
 | `drive` | `none`, `current A`, or `voltage V` |
+| `electrical_feedback` (optional, uniform driven strings) | maximum trial Joule work [J], endpoint source residual tolerance [J], maximum iterations |
 | `heat` | signed external solid power [W], signed external gas power [W] |
 | `thermoelastic` (optional alternative) | reference stress-free length [m], reference temperature [K], linear strain limit, maximum absolute reversible heat per sample [J], energy residual tolerance [J], maximum iterations |
 
@@ -330,10 +374,12 @@ probe even when the initial state is supported.
 ## Useful comparisons
 
 Copy the scenario and change `drive current 0.1` to `drive none` to compare the
-same mechanical release without Joule heating. `drive voltage 0.3` instead
+same mechanical release without Joule heating; remove `electrical_feedback`
+when making that comparison. `drive voltage 0.3` instead
 exercises the changing current of a fixed-voltage source as resistance evolves.
-Drive values are held over the run. The uniform path evaluates electrical work
-from initial resistance; the bonded path uses accepted endpoint resistance.
+Drive values are held over the run. The uniform path normally evaluates electrical
+work from initial resistance; `electrical_feedback` selects the accepted endpoint.
+The bonded path uses accepted endpoint resistance through its native thermal solve.
 Both report initial and endpoint electrical response.
 
 Increase the first `gas` value from `0.000001` to `0.0001` m³ to enlarge the
@@ -361,6 +407,14 @@ entropy-energy change. With `drive none`, the four electrical response columns
 and Joule heat are zero. The three reversible-storage columns are zero for the
 original fixed-tension model.
 
+With `electrical_feedback`, three fields are appended after any layer and gas-flow
+columns: `cumulative_electrical_source_work_j` sums the actual endpoint
+`dt * I_end² * R_end`; `cumulative_electrical_source_residual_j` sums deposited
+Joule heat minus that source work; `electrical_feedback_trials` is the number of
+source proposals for the current sample. The original `joule_heat_j` column
+continues to report cumulative deposited heat. A small admitted source residual
+is retained explicitly; it is not deposited again or hidden by adjusting energy.
+
 Stored energy is measured directly from accepted modal states, source-resolved
 axial storage and mechanical entropy, solid specific enthalpy, and gas specific
 internal energy. Thermoelastic mechanical internal energy is kinetic energy
@@ -368,8 +422,11 @@ plus axial/transverse free energy plus `T*S`, with `S = -d(Psi)/dT` at fixed
 modal coordinates and support length. Its change is relative to the
 initial loaded string and initial thermal states. Material dissipation, drag
 and conductive transfer are internal exchanges; they cancel from the combined
-balance. The cumulative defect compares the three actual storage changes plus
-declared other losses with mechanical work, Joule work and prescribed heat.
+balance. The cumulative defect compares actual storage changes plus declared
+other losses with mechanical work, electrical source work and prescribed heat.
+Feedback-enabled runs use actual endpoint source work and the complete returned
+source/thermal/flow allowance once. Their deposited heat remains a separate
+observation. Gas flow includes both extensive inventories in this same audit.
 Numerical residuals are not deposited as physical heat.
 
 The WAV maps the specified `full_scale_pa` to PCM16 full scale and reports any
@@ -377,7 +434,7 @@ clipping. It performs no peak normalization. The CSV retains the physical
 pressure before PCM scaling or clipping, so amplitude comparisons across runs
 remain meaningful.
 
-This is a first-order, frozen-law-per-sample, small-displacement string model
+This is a first-order, frozen-mechanics-per-sample, small-displacement string model
 with fixed geometry/density and either one uniform temperature or one temperature
 per declared bonded annulus. The original
 fixed-tension path keeps Young's modulus constant. The fixed-support path
@@ -400,6 +457,10 @@ The nozzle regressions decode canonical source-pack bytes and both gas records,
 check species inventories and an independent NASA caloric integral, compare
 mixture data reaching pressure/drag, and cover closed-path parity, outward flow,
 invalid inputs and missing/mismatched finite reservoirs.
+Electrical feedback tests independently calculate source-card resistance and
+endpoint current/voltage work, retain deposited heat and actual supply separately,
+and exercise the same thermal, fixed-support and gas-flow routes. They also cover
+zero-drive parity, invalid controls, bracket/source exits and cancellation.
 Run them through the example target:
 
 ```bash

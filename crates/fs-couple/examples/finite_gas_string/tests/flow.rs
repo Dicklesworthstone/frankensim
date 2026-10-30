@@ -15,7 +15,7 @@ fn scenario() -> input::Spec {
     spec
 }
 
-fn uniform_scenario(thermoelastic: bool) -> input::Spec {
+pub(super) fn uniform_scenario(thermoelastic: bool) -> input::Spec {
     let text = if thermoelastic {
         include_str!("../expanding.string")
     } else {
@@ -50,7 +50,7 @@ fn simulate_scenario(
     }
 }
 
-fn inventories(
+pub(super) fn inventories(
     spec: &input::Spec,
     feed: &str,
 ) -> Result<(IsochoricGasParcel, Option<ClosedGasParcel>)> {
