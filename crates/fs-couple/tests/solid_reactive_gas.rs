@@ -31,6 +31,9 @@ mod coupled;
 #[path = "solid_reactive_gas/network.rs"]
 mod network;
 
+#[path = "solid_reactive_gas/exchange.rs"]
+mod exchange;
+
 #[test]
 fn kinetic_caloric_and_transport_data_drive_spatial_heat_deformation_and_stress() {
     with_cx(|cx, _| {

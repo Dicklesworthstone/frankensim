@@ -10,6 +10,9 @@ use crate::cavity_phs::piston::reactive::{
 };
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 
+/// Conservative inter-compartment flow with the same reacting spatial wall.
+pub mod exchange;
+
 /// One closed, well-mixed, fixed-volume compartment. Identity labels the
 /// physical inventory, not a material name. Different compartments may use
 /// different gas catalogs, compositions, volumes and chemical mechanisms.
@@ -18,6 +21,9 @@ pub struct SolidGasCompartment<'a> {
     pub id: u64,
     pub gas: &'a IsochoricGasParcel,
     pub external_heat_j: f64,
+    /// Empty for an adiabatic reservoir; the complete network must contain at
+    /// least one wall patch. Such a reservoir still exchanges species/enthalpy
+    /// when the original nozzle-network owner is selected.
     pub contacts: &'a [SolidGasContact],
     /// None freezes composition. Some solves the original implicit mechanism
     /// at this compartment's actual endpoint energy in every thermal trial.

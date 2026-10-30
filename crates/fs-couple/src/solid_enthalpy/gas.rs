@@ -542,9 +542,8 @@ impl<'m> SolidEnthalpy<'m> {
         if controls.maximum_cells == 0
             || thermal.cells().len() > controls.maximum_cells
             || gases.is_empty()
-            || gases
-                .iter()
-                .any(|gas| gas.contacts.is_empty() || !gas.external_heat_j.is_finite())
+            || patch_count == 0
+            || gases.iter().any(|gas| !gas.external_heat_j.is_finite())
             || gases.windows(2).any(|pair| pair[0].id >= pair[1].id)
             || patch_count > controls.maximum_contacts
             || initial_energy_increments_j.len()

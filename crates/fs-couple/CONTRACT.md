@@ -15695,3 +15695,31 @@ convergence remains separate from exponential/source integration budgets.
 Expansion, phase transfer, gas/body conduction, an independently heated upstream
 tract and simultaneous finite-gas/wall playback require their own joint
 transactions and are not supplied by this route.
+
+
+### Conservative gas plumbing through one reacting spatial material wall
+
+`solid_enthalpy::gas::network::exchange` composes the original snapshot
+nozzle transport with the existing joint gas/reaction/spatial-wall residual.
+All nozzles sample the accepted gas network before inventories change.
+Species and upstream enthalpy transfer once; every chemical/thermal trial
+starts from the identical reconstructed inventories. Finite adiabatic
+reservoirs may omit wall patches, while the complete network requires at
+least one patch. The complete heat-network entry retains original material
+contacts, integrated layers and closed surface radiation.
+
+The enclosing energy account combines native datum-cancelled transport and
+joint reaction/heat balances across their identical intermediate state.
+Transferred enthalpy and chemical formation energy are never credited again
+as heat. Final total gas mass is independently measured. All gas inventories,
+thermal history and source-resolved structural fields return together;
+source, flow, withdrawal, temperature, numerical, work or cancellation
+refusal publishes no partial state.
+
+This is first-order transfer -> joint reaction/heat splitting over one
+interval, not simultaneous implicit flow. Accepted wall/chemical pressure
+changes affect the next interval's rates; time refinement and event splitting
+remain required. Gases remain homogeneous and fixed-volume. Wall geometry
+and sequential thermoelastic interpretation retain their existing limits.
+Jet thrust, spatial flames, moving boundaries, pressure traction and
+reciprocal thermoelastic heat are not claimed.
