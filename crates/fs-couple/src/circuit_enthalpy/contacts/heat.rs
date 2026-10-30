@@ -22,6 +22,8 @@ mod observer;
 mod layers;
 pub use observer::MaterialHeatObserver;
 pub mod solid;
+/// Thermoelectric conversion with the same complete material heat assembly.
+pub mod thermoelectric;
 
 /// A single declarative assembly, with optional physical heat-transfer paths.
 /// Empty electrical contacts are valid; bulk resistor bindings remain required.

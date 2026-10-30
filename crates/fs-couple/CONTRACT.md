@@ -5458,6 +5458,29 @@ and out-of-support atomic refusal. These numerical fixtures are not measured
 material validation. Physical convention reference:
 https://doc.comsol.com/6.4/doc/com.comsol.help.heat/heat_ug_theory.07.087.html .
 
+`PreparedHeatNetwork::step_thermoelectric_candidate` feeds the complete original
+heat assembly into that same Kelvin/circuit/enthalpy kernel. Pinned bulk and
+electrical-contact resistances, thermal contact resistance, source-integrated
+layer fluxes and enclosure radiosity all see the same proposed temperatures.
+The native circuit alone supplies bulk/interface Joule heat, and the existing
+Kelvin span supplies reversible junction/bulk transfer. The generic retained
+source payload contains the complete heat sample rather than a second material
+evaluation. Closed radiative net is removed from external heat before the same
+total-energy gate; no radiative roundoff is redistributed or used as supply.
+
+Kelvin legs retain their original ideal-junction temperature traces. Electrical
+contacts may load ordinary resistor branches; thermal contacts and integrated
+layers may occupy separate heat-sink/junction-loading links. Direct replacement
+of a Kelvin edge or a contact on its resistor branch refuses because its
+interface temperature traces and thermoelectric jump law are unresolved.
+Distinct physical face temperatures require explicit thermal cells; an Ohmic or
+Fourier resistance does not establish an interfacial Seebeck coefficient.
+Radiation may act directly on leg/junction cells. Focused G1/G3/G4 regressions
+cover actual generator loading, current reversal, source-only interface and
+emissivity changes, integrated layer flux, closed energy, original-path reduction
+and atomic refusal. These remain manufactured numerical fixtures, with the
+original first-order, fixed-geometry and single-solid-leg limitations.
+
 ### Nozzle flow through finite electrical and thermal networks
 
 `cavity_phs::piston::exchange::network` stages one original pressure-driven

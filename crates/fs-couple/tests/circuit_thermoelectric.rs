@@ -22,6 +22,8 @@ use fs_thermal::enthalpy::*;
 mod motion_tests;
 #[path = "circuit_thermoelectric/graph.rs"]
 mod graph_tests;
+#[path = "circuit_thermoelectric/heat.rs"]
+mod heat_tests;
 
 fn source(s: f64, resistance: f64, k: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     source_value(PropertyValue::Scalar { value: s, dims: SEEBECK_DIMS },
@@ -57,20 +59,25 @@ fn fixture(s1: f64, s2: f64, r2: f64, k: f64) -> ([MaterialCard; 4], [ResolvedHe
     ([a, b, c, d], [ca, cb, cc, cd])
 }
 fn initial(curves: &[ResolvedHeatCapacityCurve; 4], temperatures: [f64; 4]) -> DepositionSimulation<'_> {
+    initial_with_links(curves, temperatures, &[])
+}
+fn initial_with_links<'a>(curves: &'a [ResolvedHeatCapacityCurve; 4], temperatures: [f64; 4],
+    extra: &[[u64; 2]]) -> DepositionSimulation<'a> {
     let mut events = (0..4).map(|i| TimedEvent { time_s: 0.0, event: Event::Birth(DepositedCell {
         id: CellId(i as u64), segment_id: i as u64, body_id: i as u64, material_id: MaterialId(i as u64),
         mass_kg: 1.0, specific_h_j_kg: 10.0 * (temperatures[i] - 200.0),
         geometry: CellGeometry { start_m: [i as f64, 0.0, 0.0], end_m: [i as f64 + 1.0, 0.0, 0.0],
             volume_m3: 1.0, surface_area_m2: 6.0 }, boundary: boundary(),
     }) }).collect::<Vec<_>>();
-    for (id, [a, b]) in [[0, 2], [2, 1], [1, 3], [3, 0]].into_iter().enumerate() {
+    for (id, [a, b]) in [[0, 2], [2, 1], [1, 3], [3, 0]].into_iter()
+        .chain(extra.iter().copied()).enumerate() {
         events.push(TimedEvent { time_s: 0.0, event: Event::Contact(ThermalLink {
             id: id as u64, a: CellId(a), b: CellId(b), area_m2: 1.0, conductance_w_k: 999.0,
         }) });
     }
     let laws = (0..4).map(|i| (MaterialId(i as u64), curves[i].curve() as &dyn ThermalLaw)).collect::<Vec<_>>();
     DepositionSimulation::new(events, &laws, DepositionBudget {
-        max_cells: 4, max_links: 4, max_events: 8, max_substeps: 100,
+        max_cells: 4, max_links: 4 + extra.len(), max_events: 8 + extra.len(), max_substeps: 100,
     }).unwrap().advance_to(0.0, StepConfig { max_dt_s: 0.1, energy_tolerance_j: 1e-7 }, || Ok(())).unwrap().0
 }
 fn cells<'a>(cards: &'a [MaterialCard; 4], curves: &'a [ResolvedHeatCapacityCurve; 4],

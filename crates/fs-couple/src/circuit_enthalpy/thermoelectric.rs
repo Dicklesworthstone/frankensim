@@ -13,12 +13,14 @@ pub mod motion;
 pub mod entropy;
 
 use super::{CircuitEnthalpyError, CircuitEnthalpyInput,
-    CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
+    CircuitEnthalpyReport, CircuitEnthalpySolve,
     DrivenCoefficients, ThermalDriver, coupled_driver_candidate_entropy_option};
 use super::entropy::CircuitEntropyAudit;
 use super::material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample};
+use super::contacts::{ContactHeatCells, ContactThermalCoefficients};
 use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate,
     MaterialCircuitError, MaterialResistor};
+use crate::material_circuit::contacts::SeriesElectricalContact;
 use fs_material::conductor::ElectricalPropertyBasis;
 use fs_material::state_point::MaterialPropertySelection;
 use fs_material::thermoelectric::{ABSOLUTE_SEEBECK_PROPERTY, ResolvedSeebeckSpan,
@@ -51,6 +53,8 @@ pub struct ThermoelectricLeg {
 pub enum ThermoelectricNetworkError {
     /// Original common caloric/electrical/conductive material owner.
     Network(MaterialNetworkError),
+    /// Original complete thermal/contact/radiation material assembly.
+    Heat(super::contacts::heat::HeatNetworkError),
     /// Original reversible thermoelectric source owner.
     Seebeck(ThermoelectricError),
     /// Unsupported leg topology, phase or geometry.
@@ -82,9 +86,9 @@ pub struct ThermoelectricLegSample {
 /// Common material payload plus reversible transfers. Joule heat remains in
 /// the native circuit report, not in a second thermoelectric heat model.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ThermoelectricSample {
+pub struct ThermoelectricSample<S = MaterialNetworkSample> {
     /// Original density/caloric/electrical/conduction material evaluations.
-    pub network: MaterialNetworkSample,
+    pub network: S,
     /// Leg records in original input order.
     pub legs: Vec<ThermoelectricLegSample>,
     /// Internal Seebeck-port work supplied to electrical storage/loss [J].
@@ -95,10 +99,10 @@ pub struct ThermoelectricSample {
 
 /// Both native histories, with internal cross-domain transfer removed from
 /// external supply accounting. Numerical convergence is not a time-error bound.
-pub struct ThermoelectricReport {
+pub struct ThermoelectricReport<S = MaterialNetworkSample> {
     /// Existing circuit and thermal reports; its `non_electrical_heat_j` includes
     /// reversible junction/bulk transfer and its native port supply includes Seebeck work.
-    pub coupled: CircuitEnthalpyReport<ThermoelectricSample>,
+    pub coupled: CircuitEnthalpyReport<ThermoelectricSample<S>>,
     /// Work supplied through the remaining authored electrical ports [J].
     pub external_electrical_work_j: f64,
     /// Authored thermal boundary/source heat, excluding Joule AND Kelvin transfer [J].
@@ -107,25 +111,25 @@ pub struct ThermoelectricReport {
     pub total_energy_residual_j: f64,
 }
 /// Atomic electrical/thermal endpoint; neither accepted input is changed.
-pub struct ThermoelectricCandidate<'m> {
+pub struct ThermoelectricCandidate<'m, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'m>,
     circuit: MaterialCircuit,
-    report: ThermoelectricReport,
+    report: ThermoelectricReport<S>,
 }
-impl<'m> ThermoelectricCandidate<'m> {
+impl<'m, S> ThermoelectricCandidate<'m, S> {
     /// Proposed thermal history with original event semantics.
     pub const fn thermal(&self) -> &DepositionSimulation<'m> { &self.thermal }
     /// Proposed conserved charges and flux linkages.
     pub const fn circuit(&self) -> &MaterialCircuit { &self.circuit }
     /// Complete sources and independent energy account.
-    pub const fn report(&self) -> &ThermoelectricReport { &self.report }
+    pub const fn report(&self) -> &ThermoelectricReport<S> { &self.report }
     /// Publish both histories together with their original native evidence.
-    pub fn into_parts(self) -> (DepositionSimulation<'m>, MaterialCircuit, ThermoelectricReport) {
+    pub fn into_parts(self) -> (DepositionSimulation<'m>, MaterialCircuit, ThermoelectricReport<S>) {
         (self.thermal, self.circuit, self.report)
     }
 }
 
-type Error = CircuitEnthalpyError<ThermoelectricNetworkError>;
+pub(super) type Error = CircuitEnthalpyError<ThermoelectricNetworkError>;
 fn invalid(message: &'static str) -> Error { CircuitEnthalpyError::Invalid(message) }
 fn network(error: MaterialNetworkError) -> Error {
     match error {
@@ -148,9 +152,8 @@ fn admit(
 ) -> Result<Vec<(usize, usize)>, Error> {
     let graph = circuit.graph();
     if legs.is_empty() || legs.len() > material.resistors.len()
-        || material.resistors.len() != circuit.resistors().len()
-        || !circuit.contacts().is_empty() {
-        return Err(invalid("bounded thermoelectric legs need bulk-only material resistor branches"));
+        || material.resistors.len() != circuit.resistors().len() {
+        return Err(invalid("bounded thermoelectric legs need complete material resistor bindings"));
     }
     let mut sources = BTreeSet::new();
     let mut resistors = BTreeSet::new();
@@ -206,11 +209,11 @@ fn admit(
 
 fn span(
     material: &MaterialNetwork<'_>, state: &DepositionSimulation<'_>,
-    coefficients: &CircuitThermalCoefficients<MaterialNetworkSample>,
+    coefficients: &MaterialNetworkSample,
     leg: &ThermoelectricLeg, cell_index: usize, selection: MaterialPropertySelection,
 ) -> Result<ResolvedSeebeckSpan, Error> {
     let binding = &material.cells[cell_index];
-    let phase = coefficients.source.cells.iter().find(|s| s.cell == binding.cell)
+    let phase = coefficients.cells.iter().find(|s| s.cell == binding.cell)
         .ok_or(invalid("thermoelectric material phase sample is absent"))?.phase;
     let temperatures = [state.temperature_k(leg.terminals[0])?, state.temperature_k(leg.terminals[1])?];
     let knots = binding.curve.knots();
@@ -264,11 +267,22 @@ pub fn step_candidate<'m>(
 fn finish_candidate<'m>(
     thermal: DepositionSimulation<'m>, circuit: MaterialCircuit,
     coupled: CircuitEnthalpyReport<ThermoelectricSample>, controls: CircuitEnthalpySolve,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<ThermoelectricCandidate<'m>, Error> {
+    finish_candidate_with_internal_heat(thermal, circuit, coupled, 0.0, controls, cancelled)
+}
+
+// A complete heat assembly may contain closed internal radiation. Exclude its
+// original signed net from external supply under the SAME energy tolerance.
+pub(super) fn finish_candidate_with_internal_heat<'m, S>(
+    thermal: DepositionSimulation<'m>, circuit: MaterialCircuit,
+    coupled: CircuitEnthalpyReport<ThermoelectricSample<S>>, internal_heat_j: f64,
+    controls: CircuitEnthalpySolve, mut cancelled: impl FnMut() -> bool,
+) -> Result<ThermoelectricCandidate<'m, S>, Error> {
     let external_electrical_work_j = finite(coupled.electrical.native.supplied
         - coupled.source.reversible_electrical_work_j)?;
-    let external_heat_j = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
+    let external_heat_j = finite(coupled.non_electrical_heat_j
+        - coupled.source.reversible_heat_j - internal_heat_j)?;
     let total_energy_residual_j = finite(coupled.electrical.stored_after_j
         - coupled.electrical.stored_before_j + coupled.thermal.stored_energy_change_j
         - external_electrical_work_j - external_heat_j)?;
@@ -283,7 +297,7 @@ fn finish_candidate<'m>(
 // Both native candidates expose the SAME Kirchhoff source-port ordering. The
 // moving driver merely appends its mechanical port; it cannot author Seebeck
 // current, loss, or a second thermal/electrical update.
-trait ThermoelectricDriver: ThermalDriver {
+pub(super) trait ThermoelectricDriver: ThermalDriver {
     fn native(&self) -> &StepRecord;
 }
 impl ThermoelectricDriver for MaterialCircuitCandidate {
@@ -319,18 +333,49 @@ fn coupled_candidate_entropy_option<'m, D: ThermoelectricDriver>(
 ) -> Result<(DepositionSimulation<'m>, D::Model,
     CircuitEnthalpyReport<ThermoelectricSample, D::Step>, Option<CircuitEntropyAudit>), Error> {
     let cancel = RefCell::new(cancelled);
+    if (*cancel.borrow_mut())() { return Err(CircuitEnthalpyError::Cancelled); }
+    let prepared = material.prepare_with_bases(thermal, electrical_bases,
+        || (*cancel.borrow_mut())()).map_err(network)?;
+    coupled_resolved_candidate(material, thermal, target_s, circuit, ports, legs,
+        &[], controls, guess_j,
+        |state, cancelled| Ok(ContactThermalCoefficients {
+            bulk: prepared.resolve(state, cancelled).map_err(network)?, contacts: Vec::new(),
+        }), |source| source,
+        |resistors, contacts, inputs, dt, cancelled| {
+            if !contacts.is_empty() {
+                return Err(invalid("bulk thermoelectric driver cannot discard electrical contacts"));
+            }
+            Ok(advance(resistors, inputs, dt, cancelled)?)
+        }, with_entropy, || (*cancel.borrow_mut())())
+}
+
+// Shared Kelvin/circuit/enthalpy kernel. The transport owner supplies complete
+// proposed coefficients and retained source payload; it never advances time.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(super) fn coupled_resolved_candidate<'m, S, D: ThermoelectricDriver>(
+    material: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+    circuit: &MaterialCircuit, ports: &[f64], legs: &[ThermoelectricLeg],
+    contact_cells: &[ContactHeatCells], controls: CircuitEnthalpySolve, guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>, &mut dyn FnMut() -> bool)
+        -> Result<ContactThermalCoefficients<S>, Error>,
+    bulk_source: impl Fn(&S) -> &MaterialNetworkSample,
+    advance: impl Fn(Vec<MaterialResistor>, Vec<SeriesElectricalContact>, &[f64], f64,
+        &mut dyn FnMut() -> bool) -> Result<D, Error>,
+    with_entropy: bool, cancelled: impl FnMut() -> bool,
+) -> Result<(DepositionSimulation<'m>, D::Model,
+    CircuitEnthalpyReport<ThermoelectricSample<S>, D::Step>, Option<CircuitEntropyAudit>), Error> {
+    let cancel = RefCell::new(cancelled);
     let check = || -> Result<(), Error> {
         if (*cancel.borrow_mut())() { Err(CircuitEnthalpyError::Cancelled) } else { Ok(()) }
     };
     check()?;
     let routing = admit(thermal, material, circuit, ports, legs)?;
-    let prepared = material.prepare_with_bases(thermal, electrical_bases,
-        || (*cancel.borrow_mut())()).map_err(network)?;
-    let initial = prepared.resolve(thermal, || (*cancel.borrow_mut())()).map_err(network)?;
+    let initial = resolve(thermal, &mut || (*cancel.borrow_mut())())?;
     let mut pins = Vec::with_capacity(legs.len());
     for (leg, &(_, cell_index)) in legs.iter().zip(&routing) {
         check()?;
-        let source = span(material, thermal, &initial, leg, cell_index, leg.selection.clone())?;
+        let source = span(material, thermal, bulk_source(&initial.bulk.source),
+            leg, cell_index, leg.selection.clone())?;
         let selected = source.material()[0].property(ABSOLUTE_SEEBECK_PROPERTY)
             .ok_or(invalid("admitted Seebeck claim is absent"))?.answer().receipt.selected;
         pins.push(MaterialPropertySelection::PinnedByProperty(vec![
@@ -340,8 +385,9 @@ fn coupled_candidate_entropy_option<'m, D: ThermoelectricDriver>(
     let destinations = material.resistors.iter().map(|r| r.destination).collect::<Vec<_>>();
     coupled_driver_candidate_entropy_option(
         thermal, target_s, CircuitEnthalpyInput { circuit, ports, destinations: &destinations },
-        &[], controls, guess_j, |state, _remaining| {
-            let mut coefficients = prepared.resolve(state, || (*cancel.borrow_mut())()).map_err(network)?;
+        contact_cells, controls, guess_j, |state, _remaining| {
+            let resolved = resolve(state, &mut || (*cancel.borrow_mut())())?;
+            let mut coefficients = resolved.bulk;
             // This material owner supplies only transport; authored independent
             // powers remain on original cell boundaries. Future source additions
             // must provide their classification rather than silently disappear.
@@ -352,12 +398,13 @@ fn coupled_candidate_entropy_option<'m, D: ThermoelectricDriver>(
             let mut spans = Vec::with_capacity(legs.len());
             for ((leg, &(port, cell_index)), pin) in legs.iter().zip(&routing).zip(&pins) {
                 check()?;
-                let source = span(material, state, &coefficients, leg, cell_index, pin.clone())?;
+                let source = span(material, state, bulk_source(&coefficients.source),
+                    leg, cell_index, pin.clone())?;
                 inputs[port] = source.transfer(0.0).map_err(|e|
                     CircuitEnthalpyError::Source(ThermoelectricNetworkError::Seebeck(e)))?.voltage_drop_v;
                 spans.push(source);
             }
-            let electrical = advance(coefficients.resistors, &inputs, dt,
+            let electrical = advance(coefficients.resistors, resolved.contacts, &inputs, dt,
                 &mut || (*cancel.borrow_mut())())?;
             let mut samples = Vec::with_capacity(legs.len());
             let mut heat_w = 0.0;
