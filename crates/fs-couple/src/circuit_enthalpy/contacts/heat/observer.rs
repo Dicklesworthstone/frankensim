@@ -74,12 +74,7 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
             || maximum_closed_radiation_defect_j < 0.0 {
             return Err(HeatNetworkError::Invalid("finite nonnegative radiation energy allowance required"));
         }
-        let electrical = self.network.electrical;
-        if !electrical.bulk.resistors.is_empty() || !electrical.contacts.is_empty()
-            || !electrical.electrical_bases.is_empty() {
-            return Err(HeatNetworkError::Invalid(
-                "thermal observation cannot discard electrical storage/work; use the circuit owner"));
-        }
+        self.admit_thermal_only()?;
         Ok(CoupledObservers::new(MaterialHeatObserver {
             prepared: self, cx, sample: None, source_epoch: None,
             source_conductances_w_k: BTreeMap::new(),

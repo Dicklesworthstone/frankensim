@@ -188,6 +188,50 @@ source trials. Uniform cells, fixed geometry/mass, prescribed relative flow
 and native first-order endpoint coupling remain the model limits; advection,
 fluid momentum, pressure work and moving phase fronts need their own owners.
 
+### Complete material heat on the native explicit timeline
+
+`SourceConvectionHeatNetwork::observe_with_links` composes the complete prepared
+heat assembly with an existing `DepositionObserver`. Original thermal cells
+retain their mass, caloric laws, scheduled events and enthalpy history. One
+starting-state evaluation supplies material conduction, contact/layer resistance,
+closed radiation, prescribed-reservoir powers and finite-fluid link conductances.
+Finite-fluid transfer stays reciprocal internal exchange on native links;
+prescribed convection contributes external heat once. No additional thermal
+advance or circuit is introduced.
+
+The same native timestep owner combines its link restriction with the summed
+per-cell prescribed-convection hA and frozen-emissivity radiation bounds.
+The observer retains the original source actually applied at the start of the
+last accepted substep separately from a fresh accepted-endpoint sample. Events
+invalidate pending and endpoint data before the next complete active-set
+evaluation. Splitting an advance at an actual event boundary preserves native
+histories and the generated-coefficient sequence.
+
+Thermal-only admission is shared with `PreparedHeatNetwork::observe`: graph
+resistors, electrical contacts and circuit-basis bindings refuse rather than
+discard electrical work. Competing link owners, source-domain failures,
+cancellation and work exhaustion discard the thermal/observer candidate.
+Callbacks must be repeatable; cloning must deeply copy mutable physical history.
+External effects or shared mutable callback state cannot be rolled back.
+Signed prescribed heat and the bounded closed-radiation numerical net remain
+separate observations of the original native energy account.
+
+Integrated conduction layers can coexist with disjoint finite-fluid links via
+`with_integrated_conduction_and_link_conductances`. Their original
+identity/geometry checks remain; an isotropic integrated layer cannot replace
+an explicitly directional conductivity binding.
+
+The material-substitution regression in
+`tests/material_cell_convection/film_source/heat_network/finite_links/observer.rs`
+compares native trajectories against independently written flat-plate and
+explicit heat-balance equations. It covers finite coolant storage, a prescribed
+reservoir, a scheduled heat source, event continuation, source provenance,
+ownership conflicts and candidate rollback. Nonzero enclosure radiation has
+its own finite-cell regression in fs-couple. These remain uniform-cell,
+coefficient-frozen explicit steps: refine the timestep for temporal accuracy.
+Flow speed, pressure and composition keep their original authored/provider
+ownership; this adapter adds no fluid advection, momentum or pressure-work law.
+
 ### Reciprocal material convection on finite thermal links
 
 `source::links::evaluate_source_link_convection` resolves the original fluid

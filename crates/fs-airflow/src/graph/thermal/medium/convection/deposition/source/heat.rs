@@ -1,8 +1,11 @@
-//! Source-resolved fluid cooling on the complete material/circuit heat solve.
+//! Source-resolved fluid cooling on the complete material heat assembly.
 //!
 //! Convection, bulk and contact Joule heat, conduction and enclosure radiation
-//! all see one proposed enthalpy endpoint. The original thermal and circuit
-//! drivers remain the only state and time-integration owners.
+//! use the same thermal state. The original thermal and circuit drivers remain
+//! the only state and time-integration owners.
+
+/// Complete heat transfer on the original explicit thermal timeline.
+pub mod observer;
 
 use super::super::ConvectionSourceError;
 use super::links::{ResolvedLinkConvection, SourceConvectiveLink, evaluate_source_link_convection};
@@ -10,7 +13,7 @@ use super::{
     ResolvedCellConvectionSources, SourceCellConvectionError, SourceConvectiveCell,
     evaluate_source_cell_convection,
 };
-use fs_conduction::transient::deposition::DepositionSimulation;
+use fs_conduction::transient::deposition::{DepositionError, DepositionSimulation};
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyCandidate, CircuitEnthalpyError, CircuitEnthalpyInput, CircuitEnthalpySolve,
     CircuitThermalCoefficients,
@@ -37,6 +40,11 @@ pub enum ConvectionHeatError<E> {
     },
     Cancelled,
 }
+impl<E> From<DepositionError> for ConvectionHeatError<E> {
+    fn from(error: DepositionError) -> Self {
+        HeatNetworkError::from(error).into()
+    }
+}
 impl<E> From<HeatNetworkError> for ConvectionHeatError<E> {
     fn from(error: HeatNetworkError) -> Self {
         match error {
@@ -62,7 +70,7 @@ impl<E: core::fmt::Debug> core::fmt::Display for ConvectionHeatError<E> {
 }
 impl<E: core::fmt::Debug> std::error::Error for ConvectionHeatError<E> {}
 
-/// Every heat-transfer source at the same accepted endpoint.
+/// Every heat-transfer source evaluated at one actual thermal state.
 #[derive(Debug)]
 pub struct ConvectionHeatSample<F, L = F> {
     pub heat: HeatNetworkSample,

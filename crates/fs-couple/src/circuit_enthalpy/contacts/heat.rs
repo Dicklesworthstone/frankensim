@@ -299,6 +299,14 @@ impl PreparedHeatNetwork<'_, '_> {
         Ok(electrical.bulk)
     }
 
+    /// Admit a thermal-only consumer without discarding any electrical work
+    /// owner. Resistor, electrical-contact and circuit-basis bindings all refuse.
+    /// This checks ownership only; actual source/topology admission still occurs
+    /// through the original complete resolver at each physical trial.
+    pub fn admit_thermal_only(&self) -> Result<(), HeatNetworkError> {
+        self.thermal_material_network().map(|_| ())
+    }
+
     // Spatial electrical/magnetic consumers solve local E/J/B/H, but neither a
     // uniform radiating cell nor a thermal-contact law owns an interface field.
     // Do not retain an initially valid zero-field slice after that field moves.

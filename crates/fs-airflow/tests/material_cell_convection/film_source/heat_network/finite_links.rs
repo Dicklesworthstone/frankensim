@@ -1,6 +1,8 @@
 //! One source supplies a finite coolant's heat capacity and transport.
 //! Its native thermal cell and the original RC circuit close one energy balance.
 use super::*;
+#[path = "finite_links/observer.rs"]
+mod observer;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::{
     SourceConvectiveLink, evaluate_source_link_convection,
 };

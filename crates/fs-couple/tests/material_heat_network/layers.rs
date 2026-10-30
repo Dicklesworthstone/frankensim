@@ -1,5 +1,6 @@
 //! The existing integrated material flux must reach the actual circuit history.
 use super::*;
+use std::collections::BTreeMap;
 use fs_material::phase::SolidLiquidPhase;
 use fs_material::thermal::conduction::{
     LayerConductionConfig,
@@ -17,6 +18,7 @@ fn layer_controls() -> LayerConductionConfig {
 
 fn with_layers<R>(
     scale: f64,
+    additional_link: bool,
     run: impl FnOnce(
         &Cx<'_>,
         &CancelGate,
@@ -121,6 +123,14 @@ fn with_layers<R>(
             conductance_w_k: 999.0,
         }),
     });
+    if additional_link {
+        events.push(TimedEvent {
+            time_s: 0.0,
+            event: Event::Contact(ThermalLink {
+                id: 8, a: ids[0], b: ids[1], area_m2: 0.1, conductance_w_k: 0.0,
+            }),
+        });
+    }
     let thermal = DepositionSimulation::new(
         events,
         &[
@@ -129,8 +139,8 @@ fn with_layers<R>(
         ],
         DepositionBudget {
             max_cells: 2,
-            max_links: 1,
-            max_events: 3,
+            max_links: if additional_link { 2 } else { 1 },
+            max_events: if additional_link { 4 } else { 3 },
             max_substeps: 1000,
         },
     )
@@ -145,7 +155,13 @@ fn with_layers<R>(
     )
     .unwrap()
     .0;
-    let resolved = electrical.resolve(&thermal, || false).unwrap();
+    let resolved = if additional_link {
+        let values = BTreeMap::from([(8, 0.25)]);
+        electrical.prepare_with_link_conductances(&thermal, &values, || false)
+            .unwrap().resolve_with_link_conductances(&thermal, &values, || false).unwrap()
+    } else {
+        electrical.resolve(&thermal, || false).unwrap()
+    };
     let circuit = MaterialCircuit::new(
         CircuitGraph {
             node_count: 3,
@@ -207,7 +223,7 @@ fn with_layers<R>(
 
 #[test]
 fn integrated_source_curve_changes_native_heat_and_retains_the_joint_circuit_balance() {
-    with_layers(1.0, |cx, _, assembly, layers, mut thermal, mut circuit| {
+    with_layers(1.0, false, |cx, _, assembly, layers, mut thermal, mut circuit| {
         let prepared = assembly
             .prepare(cx, &thermal)
             .unwrap()
@@ -260,6 +276,7 @@ fn data_only_layer_conductivity_change_reaches_temperature_and_electrical_histor
     let run = |scale| {
         with_layers(
             scale,
+            false,
             |cx, _, assembly, layers, mut thermal, mut circuit| {
                 let prepared = assembly
                     .prepare(cx, &thermal)
@@ -298,7 +315,7 @@ fn data_only_layer_conductivity_change_reaches_temperature_and_electrical_histor
 
 #[test]
 fn layer_geometry_context_contact_ownership_and_cancellation_refuse() {
-    with_layers(1.0, |cx, gate, assembly, layers, thermal, circuit| {
+    with_layers(1.0, false, |cx, gate, assembly, layers, thermal, circuit| {
         let original = layers.bindings().next().unwrap();
         let mismatched = PreparedLayerConduction::new(
             &thermal,
@@ -425,5 +442,52 @@ fn layer_geometry_context_contact_ownership_and_cancellation_refuse() {
         ));
         assert_eq!(thermal.cells(), &accepted);
         assert_eq!(circuit.charges_c(), &[0.5]);
+    });
+}
+
+#[test]
+fn integrated_layers_keep_disjoint_link_laws_and_directional_ownership() {
+    with_layers(1.0, true, |cx, _, assembly, layers, thermal, _| {
+        let additional = BTreeMap::from([(8, 0.25)]);
+        // The scalar-layer API alone must not drop the additional finite link.
+        assert!(assembly.prepare_with_link_conductances(cx, &thermal, &additional)
+            .unwrap().with_integrated_conduction(cx, &thermal, layers, layer_controls()).is_err());
+        let prepared = assembly.prepare_with_link_conductances(cx, &thermal, &additional)
+            .unwrap().with_integrated_conduction_and_link_conductances(
+                cx, &thermal, layers, layer_controls(), &additional,
+            ).unwrap();
+        assert!(prepared.resolve(cx, &thermal).is_err());
+        for g in [0.25, 0.75] {
+            let resolved = prepared.resolve_with_link_conductances(
+                cx, &thermal, &BTreeMap::from([(8, g)]),
+            ).unwrap();
+            // Integral of this fixture's linear k(T), independent of the split.
+            let integrated_g = 0.1 * (1.1 + 1.4) / 2.0;
+            near(resolved.bulk.conductances_w_k[&7], integrated_g);
+            assert_eq!(resolved.bulk.conductances_w_k[&8], g);
+            let sample = &resolved.bulk.source.integrated_conduction[0];
+            near(sample.response.conductance_w_k, integrated_g);
+            near(sample.applied_power_a_to_b_w, integrated_g * (320.0 - 380.0));
+            near(resolved.bulk.source.material.links[0].conductance_w_k, integrated_g);
+        }
+
+        // Preserve the directional commit's ownership refusal while restoring
+        // the additional-link API. These source roles are in the same cards.
+        let side = DirectionalConductionSide {
+            principal_properties: ["k_principal_1", "k_principal_2", "k_principal_3"]
+                .map(|name| PropertyKey::new(name, THERMAL_CONDUCTIVITY_DIMS)),
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            direction_in_material_axes: [1.0, 0.0, 0.0],
+            material_frame: fs_blake3::ContentHash([19; 32]),
+        };
+        let directions = [DirectionalConductionLink { link: 7, sides: [side.clone(), side] }];
+        let directional = assembly.prepare_with_directional_conduction_and_link_conductances(
+            cx, &thermal, &directions, &additional,
+        ).unwrap();
+        assert!(matches!(directional.with_integrated_conduction_and_link_conductances(
+            cx, &thermal, layers, layer_controls(), &additional,
+        ), Err(HeatNetworkError::Invalid(
+            "an isotropic integrated layer cannot replace an explicitly directional conductivity link",
+        ))));
     });
 }
