@@ -15,8 +15,10 @@
 //! the reported integral of H dB is exact for this piecewise-linear model,
 //! including pinning and saturation crossings; endpoint trapezoids are not.
 //! Independent branch states retain remanence and minor-loop memory. Parameters
-//! are explicit caller fits, not sourced authority inferred from a material name,
-//! permeability or a reversible B-H curve. Temperature, stress and model
+//! are explicit fits, not authority inferred from a material name, permeability
+//! or a reversible B-H curve. The source child resolves those same fitted
+//! coefficients from original cards; the raw constructor retains caller data.
+//! Temperature, stress and model
 //! parameters remain fixed. No eddy/excess loss, dynamic hysteresis, vector
 //! rotation or permanent-magnet damage law is supplied. Do not add a core-loss
 //! map for the same hysteretic heat. This law is opt-in and is deliberately not
@@ -27,6 +29,8 @@ use std::sync::Arc;
 
 /// Isotropic three-dimensional internal polarization and rotating-field memory.
 pub mod vector;
+/// Original material-card coefficients for the same magnetic memory owner.
+pub mod source;
 
 /// One polarization contribution; the sum of saturation values is the total
 /// saturation polarization. No normalization or hidden branch weight is used.
@@ -361,6 +365,7 @@ fn branch_response(branch: &HysteresisBranch, old: f64, h: f64) -> (f64, f64) {
 #[derive(Clone, Debug, PartialEq)]
 pub struct UniformHystereticCore {
     law: ScalarHysteresis,
+    source: Option<source::ResolvedScalarHysteresis>,
     linkage_per_t: f64,
     current_per_field: f64,
     volume_m3: f64,
@@ -402,6 +407,7 @@ impl UniformHystereticCore {
         }
         let result = Self {
             law,
+            source: None,
             linkage_per_t: turns * area_m2,
             current_per_field: path_length_m / turns,
             volume_m3: area_m2 * path_length_m,

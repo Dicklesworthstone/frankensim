@@ -19,6 +19,8 @@ use fs_material::{
 use fs_qty::{Density, QuantitySpec, Temperature};
 use fs_thermal::enthalpy::*;
 
+mod source;
+
 fn near(a: f64, b: f64, tol: f64) {
     assert!((a - b).abs() <= tol, "{a:.15e} != {b:.15e}, tol {tol:e}");
 }

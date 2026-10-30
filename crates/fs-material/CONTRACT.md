@@ -5485,3 +5485,28 @@ refusal, original IF97 derivative identities, source refresh/domain boundaries,
 adiabatic-modulus semantics, both liquid viscosity bases, exact source vocabulary
 and unrepresentable coefficients. This is local small-signal nondispersive bulk
 acoustics, without attenuation, shear waves, phase selection or cavitation claims.
+
+
+## Source-bound hysteretic magnetic cores
+
+`field_storage::hysteresis::source::ResolvedScalarHysteresis` assigns explicit
+original property keys to background permeability, fitted field limit and each
+play branch's reversible slope, pinning field and saturation polarization.
+Branch count/order are data; shared coefficients retain shared keys. The native
+1024-branch limit and shared distinct-property budget apply. The complete card,
+selected claims, quantities, evidence and original query survive lowering into
+`UniformHystereticCore::from_source`. The existing play update, monotone inverse,
+remanence, terminal work and physical pinning-heat owner remain unchanged.
+
+This rung admits constant fitted parameters inside their declared domains.
+Temperature-dependent fits and unowned dynamic field/frequency/stress/rate
+applicability refuse. Heating additionally requires explicit temperature support
+for every selected coefficient; a caller interval cannot widen it. Refresh
+requeries the same claims, preserves geometry and constitutive memory, and
+returns a candidate. It neither changes coefficients nor resets stored energy.
+This supplies no thermal magnetic entropy law, vector/core spatial field model,
+eddy/excess loss, Curie extrapolation or measured authority for synthetic fits.
+
+Three focused G0/G1/G3 regressions cover independent two-branch work/remanence,
+geometry reduction, data-defined branch sharing, source-domain/quantity refusal
+and memory-preserving temperature continuation.

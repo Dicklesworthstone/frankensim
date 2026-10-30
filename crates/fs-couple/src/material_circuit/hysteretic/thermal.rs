@@ -1,7 +1,9 @@
 //! Finite core pinning heat and winding I^2 R on the native enthalpy timeline.
 //!
-//! The immutable core fit keeps its parameters throughout an EXPLICIT caller-
-//! admitted temperature interval; no magnetic temperature law is inferred.
+//! The immutable core fit keeps its parameters throughout an admitted
+//! temperature interval. A source-bound core requires the SAME original card,
+//! complete query and explicit temperature coverage for every fitted coefficient;
+//! authored cores retain their explicit caller-admitted model interval.
 //! Caloric storage, winding resistivity/conductivity and optional cooling links
 //! come from one prepared MaterialNetwork with pinned sources. Every thermal
 //! trial restarts the same accepted circuit and internal magnetic memory.
@@ -18,7 +20,8 @@ use crate::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, ThermalDriver, cell_driver_candidate,
     material::{
-        MaterialNetwork, MaterialNetworkError, MaterialNetworkSample, PreparedMaterialNetwork,
+        MaterialCell, MaterialNetwork, MaterialNetworkError, MaterialNetworkSample,
+        PreparedMaterialNetwork,
     },
 };
 use fs_material::conductor::ElectricalPropertyBasis;
@@ -82,14 +85,18 @@ pub struct ThermalHystereticCircuit<'n, 'a> {
     core_cell: CellId,
     core_density_kg_m3: f64,
     core_temperature_interval_k: [f64; 2],
+    core_binding: Option<&'n MaterialCell<'a>>,
 }
 impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
     /// Bind the core to a distinct whole fixed-volume solid caloric cell.
     /// Its mass/density must reproduce UniformHystereticCore::volume_m3.
     /// Graph resistor geometry and heat routes stay with MaterialNetwork.
-    /// Caloric/electrical cards are sourced; the magnetic fit remains explicit
-    /// caller data, not authority inferred from those material names. Its fixed
-    /// parameters are admitted ONLY inside core_temperature_interval_k.
+    /// Source-bound magnetic cores must retain this exact caloric card and
+    /// complete initial query. Every fitted coefficient must explicitly support
+    /// the requested temperature interval; each trial rechecks those SAME
+    /// sources and publishes the accepted source query with magnetic memory.
+    /// Source-constant parameters introduce no reversible thermal field work.
+    /// An authored core keeps its explicit caller interval and authority.
     #[allow(clippy::too_many_arguments)]
     pub fn bind(
         circuit: HystereticCircuit,
@@ -152,6 +159,39 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                 "accepted circuit resistor sources must match the actual thermal endpoint",
             ));
         }
+        let core_binding = if let Some(source) = circuit.core().source() {
+            let cell = thermal
+                .cells()
+                .get(&core_cell)
+                .ok_or_else(|| invalid("source-bound core cell is inactive"))?;
+            let phase = binding
+                .curve
+                .state_at_specific_enthalpy(cell.specific_h_j_kg)
+                .map_err(MaterialNetworkError::Phase)
+                .map_err(material)?;
+            let query = binding
+                .point
+                .at(phase)
+                .map_err(MaterialNetworkError::Material)
+                .map_err(material)?;
+            if source.material().card_identity() != binding.point.material.content_hash()
+                || source.material().query() != query
+            {
+                return Err(invalid(
+                    "magnetic fit and caloric core require the same original card and complete accepted query",
+                ));
+            }
+            source
+                .admit_temperature_interval(
+                    binding.point.temperature_axis,
+                    core_temperature_interval_k,
+                )
+                .map_err(HystereticCircuitError::from)
+                .map_err(magnetic)?;
+            Some(binding)
+        } else {
+            None
+        };
         let destinations = network
             .resistors
             .iter()
@@ -164,8 +204,9 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             core_cell,
             core_density_kg_m3: density,
             core_temperature_interval_k,
+            core_binding,
         };
-        result.admit_core(thermal)?;
+        let _ = result.admit_core(thermal)?;
         if cancelled() {
             return Err(CircuitEnthalpyError::Cancelled);
         }
@@ -182,7 +223,10 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         self.core_temperature_interval_k
     }
 
-    fn admit_core(&self, thermal: &DepositionSimulation<'_>) -> Result<(), Error> {
+    fn admit_core(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<Option<fs_material::field_storage::hysteresis::UniformHystereticCore>, Error> {
         let cell = thermal
             .cells()
             .get(&self.core_cell)
@@ -200,7 +244,25 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                 "core must retain its actual fixed solid volume and admitted temperature interval",
             ));
         }
-        Ok(())
+        self.core_binding
+            .map(|binding| {
+                let phase = binding
+                    .curve
+                    .state_at_specific_enthalpy(cell.specific_h_j_kg)
+                    .map_err(MaterialNetworkError::Phase)
+                    .map_err(material)?;
+                let query = binding
+                    .point
+                    .at(phase)
+                    .map_err(MaterialNetworkError::Material)
+                    .map_err(material)?;
+                self.circuit
+                    .core()
+                    .at_source_query(&query)
+                    .map_err(HystereticCircuitError::from)
+                    .map_err(magnetic)
+            })
+            .transpose()
     }
 
     /// Joint magnetic, native circuit and finite caloric proposal. Neither input
@@ -238,7 +300,14 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                 "accepted native circuit and thermal clocks must agree",
             ));
         }
-        self.admit_core(thermal)?;
+        if self
+            .admit_core(thermal)?
+            .is_some_and(|core| core != *self.circuit.core())
+        {
+            return Err(invalid(
+                "accepted magnetic source query must match the actual thermal state",
+            ));
+        }
         let mut initial = self
             .prepared
             .resolve(thermal, || (*cancel.borrow_mut())())
@@ -256,7 +325,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             initial_energy_increments_j,
             |state, remaining| {
                 check()?;
-                self.admit_core(state)?;
+                let core = self.admit_core(state)?;
                 let coefficients = self
                     .prepared
                     .resolve(state, || (*cancel.borrow_mut())())
@@ -267,8 +336,13 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                 if inner.maximum_circuit_trials < 4 {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
-                let circuit = self
-                    .circuit
+                // Recheck and retain the actual trial source context while all
+                // magnetic memory remains at the one accepted beginning state.
+                let mut beginning = self.circuit.clone();
+                if let Some(core) = core {
+                    beginning.core = core;
+                }
+                let circuit = beginning
                     .step_candidate(
                         target_s,
                         coefficients.resistors,
@@ -327,6 +401,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                 core_cell: self.core_cell,
                 core_density_kg_m3: self.core_density_kg_m3,
                 core_temperature_interval_k: self.core_temperature_interval_k,
+                core_binding: self.core_binding,
             },
             report,
         })
