@@ -2161,7 +2161,7 @@ adds this source model without changing existing Lambertian/point streams.
 
 The model does not solve lamp illumination or a multi-element lens train and
 does not include aberrations, diffraction, wavelength-dependent focal length,
-physical prism refraction or frost. Its thin-lens/paraxial law and uniform pupil/gobo ray-power
+physical prism refraction. Its thin-lens/paraxial law and uniform pupil/gobo ray-power
 assumption are declared approximations, with unknown physical-model error.
 Finite input and radiance representability are checked at admission; numerical
 agreement with the ideal model does not certify a manufactured fixture.
@@ -2206,6 +2206,43 @@ splitter and finite-source filtering while preserving existing unsplit streams.
 The headless example accepts `--projector-focus 5 --projector-split 3 4` for
 three beams on a 4-degree ring with 90% total splitter transmission, with either
 `--paths` or `--total-csv` and the existing worker/progressive execution.
+
+### Passive paraxial projector diffusion
+
+`ThinLensProjector::with_diffuser` accepts `ParaxialBoxDiffuser`, declaring
+positive optical X/Y half angles below pi/2, a scattered fraction `alpha` and
+an absolute transmission `tau`, both in [0,1]. Scattered rays add independent
+uniform slope offsets in `[-tan(half_angle),tan(half_angle)]`; the remaining
+fraction keeps the original outgoing slope. This is an ideal achromatic
+exit-pupil ray-power model, not a reciprocal surface BSDF or measured frost.
+
+With the original backprojected coordinate `g`, the source mask becomes
+`tau*((1-alpha)*M(g)+alpha*average(M(g+s*delta)))`. The rectangular average
+integrates the represented piecewise-constant gobo, including its opaque
+exterior. The existing outgoing cosine Jacobian remains in force. Thus total
+lumens are `clear_flux*mean(M)*splitter_transmission*tau`; widening the beam or
+changing its scattered fraction does not restore absorbed power. At focus
+distance `q`, diffuser half widths on the receiving plane are `q*tan(half_angle)`.
+Pupil defocus and splitter translations compose with this redistribution.
+Replacing the diffuser replaces its optical state rather than compounding loss.
+
+A private positive-sum rectangular range tree integrates the gobo without
+subtracting large nearly equal prefix sums. Its optional immutable cache is
+shared by clones, capped at `4*MAX_GOBO_TEXELS` doubles including power-of-two
+padding, and allocated fallibly only for active diffusion. Each evaluation
+uses bounded logarithmic range queries with no heap allocation or extra random
+draw. The clear and identity-diffuser paths retain the existing arithmetic.
+Source admission includes broadened angular support in its radiance bound.
+Unrepresentable positive contributions refuse; numerical rounding is not certified.
+
+Source hits and surface, probe, and volume connections evaluate this same law
+through the existing finite-emitter estimator and native materials/media. Path
+semantics version 12 adds diffusion; cancellation, progressive ordering and
+IID sampling-error interpretation are retained. The headless example accepts
+`--projector-focus 5 --projector-frost 1.5 3 0.8 0.9` in either path mode,
+including filters, splitters, physical cameras and heterogeneous haze. Physical
+diffuser calibration, wavelength-dependent scattering, diffraction and the
+paraxial/model discrepancy remain unknown; total error retains `NoClaim`.
 
 ### Receiver-dependent point-fixture sampling
 

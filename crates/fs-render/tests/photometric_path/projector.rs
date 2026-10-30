@@ -5,6 +5,9 @@
 #[path = "projector/splitter.rs"]
 mod splitter;
 
+#[path = "projector/diffuser.rs"]
+mod diffuser;
+
 use super::*;
 use fs_exec::RunId;
 use fs_render::instances::{GeometryInstance, SharedGeometry};

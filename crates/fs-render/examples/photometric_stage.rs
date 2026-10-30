@@ -14,6 +14,9 @@
 //! Append `--projector-split 3 4` to that option for three projected beams on
 //! a 4-degree ring, with 90% total splitter transmission. This is a declared
 //! paraxial exit light field, not a solved refractive prism.
+//! Append `--projector-frost 1.5 3 0.8 0.9` for X/Y diffuser half angles of
+//! 1.5/3 degrees, an 80% scattered fraction and 90% passive transmission.
+//! This is uniform slope-space redistribution at the exit pupil.
 //! Append `--point-connections 4` to sample at most four point-fixture
 //! connections per path vertex; direct calculation-grid lux remains exact.
 //! Append `--camera-lens 50 24 2.8 12` to `--paths` for a 50 mm focal length,
@@ -34,7 +37,8 @@ use fs_render::charts::TriMesh;
 use fs_render::instances::RigidTransform;
 use fs_render::photometry::area::{
     EmissionSidedness, GoboTransmission, MAX_PROJECTOR_BEAMS, ParaxialBeamSplitter,
-    PhotometricAreaEmitter, PhotometricEmitters, ProjectorBeam, ThinLensProjector,
+    ParaxialBoxDiffuser, PhotometricAreaEmitter, PhotometricEmitters, ProjectorBeam,
+    ThinLensProjector,
 };
 use fs_render::photometry::image::LuminanceJob;
 use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction, ScatterSettings};
@@ -59,7 +63,7 @@ use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbso
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--haze-phase CSV] [--panels] [--projector-focus METRES] [--projector-split BEAMS ANGLE_DEG] [--point-connections K] [--workers N] [--camera-lens FOCAL_MM SENSOR_HEIGHT_MM F_NUMBER FOCUS_M]; options except haze phase require a path mode; splitting requires a projector; camera lens requires --paths";
+    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--haze-phase CSV] [--panels] [--projector-focus METRES] [--projector-split BEAMS ANGLE_DEG] [--projector-frost HALF_X_DEG HALF_Y_DEG SCATTERED_FRACTION TRANSMISSION] [--point-connections K] [--workers N] [--camera-lens FOCAL_MM SENSOR_HEIGHT_MM F_NUMBER FOCUS_M]; options except haze phase require a path mode; splitting and frost require a projector; camera lens requires --paths";
     let (mode, option_start) = match args.first().map(String::as_str) {
         Some(mode @ ("--csv" | "--paths" | "--total-csv")) => (mode, 1),
         _ => ("", 0),
@@ -68,6 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut panels = false;
     let mut projector_focus_m = None;
     let mut projector_split = None;
+    let mut projector_diffuser = None;
     let mut point_connections = None;
     let mut camera_lens = None;
     let mut haze_phase = None;
@@ -108,6 +113,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 projector_split = Some((count, angle));
             }
+            "--projector-frost" if projector_diffuser.is_none() => {
+                let half_x = extra.next().ok_or(USAGE)?.parse::<f64>()?.to_radians();
+                let half_y = extra.next().ok_or(USAGE)?.parse::<f64>()?.to_radians();
+                let fraction = extra.next().ok_or(USAGE)?.parse::<f64>()?;
+                let transmission = extra.next().ok_or(USAGE)?.parse::<f64>()?;
+                projector_diffuser = Some(ParaxialBoxDiffuser::try_new(
+                    [half_x, half_y],
+                    fraction,
+                    transmission,
+                )?);
+            }
             "--camera-lens" if camera_lens.is_none() => {
                 let focal_m = extra.next().ok_or(USAGE)?.parse::<f64>()? * 0.001;
                 let sensor_height_m = extra.next().ok_or(USAGE)?.parse::<f64>()? * 0.001;
@@ -140,7 +156,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if camera_lens.is_some() && !paths {
         return Err(USAGE.into());
     }
-    if projector_split.is_some() && projector_focus_m.is_none() {
+    if (projector_split.is_some() || projector_diffuser.is_some()) && projector_focus_m.is_none() {
         return Err(USAGE.into());
     }
     let execution = workers
@@ -169,6 +185,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             panels,
             projector_focus_m,
             projector_split,
+            projector_diffuser,
             point_connections,
             camera_lens,
             haze_phase.unwrap_or(PhaseFunction::HenyeyGreenstein { g: 0.7 }),
@@ -212,6 +229,7 @@ fn run(
     panels: bool,
     projector_focus_m: Option<f64>,
     projector_split: Option<(usize, f64)>,
+    projector_diffuser: Option<ParaxialBoxDiffuser>,
     point_connections: Option<u32>,
     camera_lens: Option<(CameraProjection, Aperture, f64)>,
     phase: PhaseFunction,
@@ -349,6 +367,7 @@ fn run(
             panels,
             projector_focus_m,
             projector_split,
+            projector_diffuser,
             point_connections,
             phase,
             execution,
@@ -407,6 +426,7 @@ fn run_paths(
     panels: bool,
     projector_focus_m: Option<f64>,
     projector_split: Option<(usize, f64)>,
+    projector_diffuser: Option<ParaxialBoxDiffuser>,
     point_connections: Option<u32>,
     phase: PhaseFunction,
     execution: Option<&RenderExecutionConfig>,
@@ -511,6 +531,15 @@ fn run_paths(
                     angle.to_degrees(),
                 );
             }
+        }
+        if let Some(diffuser) = projector_diffuser {
+            projector = projector.with_diffuser(diffuser)?;
+            eprintln!(
+                "projector_diffuser=paraxial_box; half_angles_rad={:?}; scattered_fraction={}; transmission={}; diffuser_model_error=unknown",
+                diffuser.half_angles_rad(),
+                diffuser.scattered_fraction(),
+                diffuser.transmission(),
+            );
         }
         let emitter = PhotometricAreaEmitter::try_new(
             index,

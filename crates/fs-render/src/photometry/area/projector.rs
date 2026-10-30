@@ -40,6 +40,9 @@ use crate::photometry::source::SourceError;
 
 mod beam_splitter;
 pub use beam_splitter::{MAX_PROJECTOR_BEAMS, ParaxialBeamSplitter, ProjectorBeam};
+mod diffuser;
+pub use diffuser::ParaxialBoxDiffuser;
+use diffuser::PreparedDiffuser;
 
 /// Maximum admitted samples in one passive gobo transmission map.
 pub const MAX_GOBO_TEXELS: usize = 1_048_576;
@@ -204,6 +207,7 @@ pub struct ThinLensProjector {
     radiance_factor: f64,
     gobo: GoboTransmission,
     beam_splitter: Option<ParaxialBeamSplitter>,
+    diffuser: Option<PreparedDiffuser>,
     transmitted_fraction: f64,
 }
 
@@ -254,6 +258,7 @@ impl ThinLensProjector {
             transmitted_fraction: gobo.mean_transmission(),
             gobo,
             beam_splitter: None,
+            diffuser: None,
         })
     }
 
@@ -266,13 +271,16 @@ impl ThinLensProjector {
         mut self,
         splitter: ParaxialBeamSplitter,
     ) -> Result<Self, SourceError> {
-        let transmission = self.gobo.mean_transmission() * splitter.transmitted_fraction();
+        let mut transmission = self.gobo.mean_transmission() * splitter.transmitted_fraction();
         if !transmission.is_finite()
             || (self.gobo.mean_transmission() > 0.0
                 && splitter.transmitted_fraction() > 0.0
                 && transmission == 0.0)
         {
             return Err(SourceError::NumericalRange);
+        }
+        if let Some(diffuser) = &self.diffuser {
+            transmission = diffuser::product(transmission, diffuser.law.transmission())?;
         }
         self.transmitted_fraction = transmission;
         self.beam_splitter = Some(splitter);
@@ -285,7 +293,38 @@ impl ThinLensProjector {
         self.beam_splitter.as_ref()
     }
 
-    /// Surviving fraction of clear-output flux after the gobo and splitter.
+    /// Replace outgoing slope redistribution with an ideal passive diffuser.
+    ///
+    /// Gobo, focus, splitter and clear-output calibration are retained. The
+    /// scattered fraction changes the angular distribution; only the absolute
+    /// transmission changes total flux. A shared positive-sum range tree is
+    /// prepared for nonzero scattering, with at most `4*MAX_GOBO_TEXELS` f64
+    /// storage slots including power-of-two padding (32 MiB at the current cap).
+    /// Too much padding or unavailable storage refuses. Source evaluation has
+    /// no allocation or additional random draws. Replacing the diffuser does
+    /// not compound its previous loss.
+    pub fn with_diffuser(mut self, diffuser: ParaxialBoxDiffuser) -> Result<Self, SourceError> {
+        let splitter = self
+            .beam_splitter
+            .as_ref()
+            .map_or(1.0, |value| value.transmitted_fraction());
+        let transmission = diffuser::product(
+            diffuser::product(self.gobo.mean_transmission(), splitter)?,
+            diffuser.transmission(),
+        )?;
+        let prepared = PreparedDiffuser::try_new(diffuser, &self.gobo, self.gobo_distance_m)?;
+        self.transmitted_fraction = transmission;
+        self.diffuser = Some(prepared);
+        Ok(self)
+    }
+
+    /// Declared diffuser state, or the original exit-pupil light field.
+    #[must_use]
+    pub fn diffuser(&self) -> Option<&ParaxialBoxDiffuser> {
+        self.diffuser.as_ref().map(|prepared| &prepared.law)
+    }
+
+    /// Surviving fraction of clear-output flux after gobo, splitter and diffuser.
     #[must_use]
     pub const fn transmitted_fraction(&self) -> f64 {
         self.transmitted_fraction
@@ -348,6 +387,11 @@ impl ThinLensProjector {
         if !pupil_x.is_finite() || !pupil_y.is_finite() {
             return Err(SourceError::NumericalRange);
         }
+        if let Some(diffuser) = &self.diffuser
+            && !diffuser.is_identity()
+        {
+            return self.diffused_luminance(diffuser, [pupil_x, pupil_y], direction);
+        }
         if let Some(splitter) = &self.beam_splitter {
             return self.split_luminance(splitter, [pupil_x, pupil_y], direction);
         }
@@ -363,6 +407,60 @@ impl ThinLensProjector {
         let transmission = self
             .gobo
             .transmission_at(x / direction.z, y / direction.z)?;
+        if transmission == 0.0 {
+            return Ok(0.0);
+        }
+        let cosine_squared = direction.z * direction.z;
+        let value = self.radiance_factor * transmission / cosine_squared / cosine_squared;
+        if !value.is_finite() || value <= 0.0 {
+            return Err(SourceError::NumericalRange);
+        }
+        Ok(value)
+    }
+
+    fn diffused_luminance(
+        &self,
+        diffuser: &PreparedDiffuser,
+        pupil: [f64; 2],
+        direction: Vec3,
+    ) -> Result<f64, SourceError> {
+        let mask_at = |offset: [f64; 2]| -> Result<f64, SourceError> {
+            let x = pupil[0] * direction.z
+                - self.gobo_distance_m * (direction.x - offset[0] * direction.z);
+            let y = pupil[1] * direction.z
+                - self.gobo_distance_m * (direction.y - offset[1] * direction.z);
+            if !x.is_finite() || !y.is_finite() {
+                return Err(SourceError::NumericalRange);
+            }
+            // Retain possible boundary mass even when a very narrow kernel's
+            // expanded support rounds back onto the original gobo boundary.
+            let half = [self.gobo.width_m(), self.gobo.height_m()].map(|size| 0.5 * size);
+            let bound_x = ((half[0] + diffuser.half_width_m[0]).next_up() * direction.z).next_up();
+            let bound_y = ((half[1] + diffuser.half_width_m[1]).next_up() * direction.z).next_up();
+            if x < -bound_x || x > bound_x || y < -bound_y || y > bound_y {
+                return Ok(0.0);
+            }
+            diffuser.mask(&self.gobo, x / direction.z, y / direction.z)
+        };
+        let transmission = if let Some(splitter) = &self.beam_splitter {
+            let (mut sum, mut correction) = (0.0_f64, 0.0_f64);
+            for beam in splitter.beams() {
+                if beam.throughput() == 0.0 {
+                    continue;
+                }
+                let value = diffuser::product(beam.throughput(), mask_at(beam.slope_offset())?)?;
+                let next = sum + value;
+                correction += if sum >= value {
+                    (sum - next) + value
+                } else {
+                    (value - next) + sum
+                };
+                sum = next;
+            }
+            sum + correction
+        } else {
+            mask_at([0.0; 2])?
+        };
         if transmission == 0.0 {
             return Ok(0.0);
         }
@@ -451,6 +549,18 @@ impl ThinLensProjector {
                 *maximum = (*maximum + offset).next_up();
             }
             maximum_transmission *= splitter.transmitted_fraction();
+        }
+        if let Some(diffuser) = &self.diffuser {
+            if diffuser.law.scattered_fraction() > 0.0 {
+                for (maximum, spread) in maximum_slope
+                    .iter_mut()
+                    .zip(diffuser.law.half_slope_widths())
+                {
+                    *maximum = (*maximum + spread).next_up();
+                }
+            }
+            maximum_transmission =
+                diffuser::product(maximum_transmission, diffuser.law.transmission())?;
         }
         let inverse_cosine_squared =
             1.0 + maximum_slope[0] * maximum_slope[0] + maximum_slope[1] * maximum_slope[1];

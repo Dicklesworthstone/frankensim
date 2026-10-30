@@ -9,8 +9,8 @@ use super::source::{PhotometricSource, SPECTRAL_BINS, SourceError, SourceSpectru
 
 mod projector;
 pub use projector::{
-    GoboTransmission, MAX_GOBO_TEXELS, MAX_PROJECTOR_BEAMS, ParaxialBeamSplitter, ProjectorBeam,
-    ThinLensProjector,
+    GoboTransmission, MAX_GOBO_TEXELS, MAX_PROJECTOR_BEAMS, ParaxialBeamSplitter,
+    ParaxialBoxDiffuser, ProjectorBeam, ThinLensProjector,
 };
 
 /// Which geometric sides emit the supplied total luminous flux.
