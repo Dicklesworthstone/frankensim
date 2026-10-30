@@ -17,6 +17,9 @@ use super::{CohesiveContactConfig, CohesiveContactError, norm_inf, positive, val
 use fs_la::prepared_lu::{LuWorkspace, LuWorkspaceError};
 use fs_material::cohesive::CohesivePoint;
 
+/// Joint damaged-area friction with all cross-site mechanical responses.
+pub mod frictional_damage;
+
 /// Explicit dense-solve ceiling: at most 192 simultaneous jump coordinates.
 pub const MAX_COHESIVE_PATCH_POINTS: usize = 64;
 

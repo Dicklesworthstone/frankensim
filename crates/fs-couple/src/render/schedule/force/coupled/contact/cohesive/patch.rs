@@ -16,6 +16,9 @@ use crate::cohesive_contact::patch::{
     CohesivePatchConfig, CohesivePatchError, CohesivePatchLoadLine, MAX_COHESIVE_PATCH_POINTS,
 };
 
+/// Joint progressive-damage friction with actual-body work and atomic history.
+pub mod frictional_damage;
+
 /// One original bonded area and its work-conjugate local motion on all modes.
 /// Geometry, quadrature weight and bonding are explicit caller declarations.
 #[derive(Debug)]
@@ -100,6 +103,7 @@ pub struct CohesivePatchModalConfig {
 pub enum CohesivePatchModalError {
     Network(ModalCouplingError),
     Contact(CohesivePatchError),
+    Friction(crate::cohesive_contact::patch::frictional_damage::DamageFrictionPatchError),
     Source(MaterialStatePointError),
     Material {
         point: usize,
@@ -128,6 +132,7 @@ impl std::error::Error for CohesivePatchModalError {
         match self {
             Self::Network(e) => Some(e),
             Self::Contact(e) => Some(e),
+            Self::Friction(e) => Some(e),
             Self::Source(e) => Some(e),
             Self::Material { source, .. } => Some(source),
             _ => None,
@@ -149,6 +154,11 @@ impl From<MaterialStatePointError> for CohesivePatchModalError {
         Self::Source(value)
     }
 }
+impl From<crate::cohesive_contact::patch::frictional_damage::DamageFrictionPatchError> for CohesivePatchModalError {
+    fn from(value: crate::cohesive_contact::patch::frictional_damage::DamageFrictionPatchError) -> Self {
+        Self::Friction(value)
+    }
+}
 
 /// One accepted site's physical response; all energy values include its area.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -163,6 +173,7 @@ pub struct CohesivePatchPointFrame {
     pub cohesive_energy_j: f64,
     pub fracture_dissipation_j: f64,
     pub viscous_dissipation_j: f64,
+    pub damage_friction: Option<super::frictional_damage::DamageFrictionFrame>,
     pub cohesive_work_j: f64,
     pub compatibility_residual_m: [f64; 3],
     pub compatibility_tolerance_m: f64,
@@ -183,11 +194,14 @@ pub struct CohesivePatchModalFrame {
     /// Intrinsic fracture is not silently assigned to heat.
     pub fracture_dissipation_j: f64,
     pub viscous_dissipation_j: f64,
+    /// Sum of the damaged-area sliding losses, without an inferred heat sink.
+    pub friction_dissipation_j: f64,
     pub cohesive_work_j: f64,
     pub energy_residual_j: f64,
     pub energy_tolerance_j: f64,
     pub failed_points: usize,
     pub iterations: usize,
+    pub kinetic_switches: usize,
     /// Includes all final actual-motion constitutive checks.
     pub material_evaluations: usize,
 }
@@ -211,6 +225,7 @@ pub struct CohesivePatchModalSystem<'a> {
     observations: Vec<CohesivePatchPointFrame>,
     staged_observations: Vec<CohesivePatchPointFrame>,
     last: Option<CohesivePatchModalFrame>,
+    damage_friction: Option<frictional_damage::DamageFrictionPatchBinding<'a>>,
 }
 impl<'a> CohesivePatchModalSystem<'a> {
     /// Bond the current sample-zero configuration at zero local jump everywhere.
@@ -281,6 +296,7 @@ impl<'a> CohesivePatchModalSystem<'a> {
             observations: vec![CohesivePatchPointFrame::default(); n],
             staged_observations: vec![CohesivePatchPointFrame::default(); n],
             last: None,
+            damage_friction: None,
         };
         limit(
             "initial energy including cohesive patch",
@@ -364,6 +380,9 @@ impl<'a> CohesivePatchModalSystem<'a> {
         prescribed_rate: &[[f64; 3]],
         gate: Option<&CancelGate>,
     ) -> Result<&CohesivePatchModalFrame, CohesivePatchModalError> {
+        if self.damage_friction.is_some() {
+            return self.step_damage_friction(external, prescribed_rate, gate);
+        }
         poll(gate)?;
         if prescribed_rate.len() != self.points.len() {
             return Err(invalid("prescribed cohesive velocities must match all sites").into());
@@ -493,6 +512,7 @@ impl<'a> CohesivePatchModalSystem<'a> {
                 cohesive_energy_j: point_energy,
                 fracture_dissipation_j: point_fracture,
                 viscous_dissipation_j: point_viscous,
+                damage_friction: None,
                 cohesive_work_j: point_work,
                 compatibility_residual_m: compatibility_residual,
                 compatibility_tolerance_m: solved.compatibility_tolerance_m[p],
@@ -538,11 +558,13 @@ impl<'a> CohesivePatchModalSystem<'a> {
             network_dissipation_j: network_loss,
             fracture_dissipation_j: fracture,
             viscous_dissipation_j: viscous,
+            friction_dissipation_j: 0.0,
             cohesive_work_j: cohesive_work,
             energy_residual_j: residual,
             energy_tolerance_j: tolerance,
             failed_points,
             iterations: solved.iterations,
+            kinetic_switches: 0,
             material_evaluations: solved.material_evaluations + self.points.len(),
         };
         self.network.validate_staged_material_points(gate)?;

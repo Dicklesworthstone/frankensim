@@ -30,6 +30,8 @@ use fs_material::cohesive::{CohesiveError, CohesivePoint, CohesiveRateStep};
 use fs_material::state_point::MaterialStatePointError;
 use fs_tribo::TriboError;
 
+pub(crate) mod local;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DamageFrictionRegime {
     /// No damaged-area compression anywhere on the accepted path. Surviving
@@ -291,24 +293,7 @@ impl<'a> DamageFrictionLoadLine<'a> {
         receiving: [&MaterialStateId; 2],
         activation: ReclosureActivation,
     ) -> Result<DamageFrictionState<'a>, DamageFrictionError> {
-        self.cohesive
-            .require_surface_materials(receiving[0], receiving[1])?;
-        self.friction.require_surface_materials(receiving)?;
-        if !core::ptr::eq(point.law(), self.cohesive.law()) {
-            return Err(DamageFrictionError::StateMismatch);
-        }
-        let occupancy = if point.jump_m()[0] >= 0.0 || point.damage() == 0.0 {
-            DamageFrictionRegime::Inactive
-        } else if activation == ReclosureActivation::Sliding {
-            DamageFrictionRegime::Sliding
-        } else {
-            DamageFrictionRegime::Sticking
-        };
-        Ok(DamageFrictionState {
-            identity: self.identity,
-            point,
-            occupancy,
-        })
+        self.local_law().adopt(point, receiving, activation)
     }
 
     pub fn trial(
@@ -417,113 +402,8 @@ impl<'a> DamageFrictionLoadLine<'a> {
         applied: [f64; 3],
         regime: DamageFrictionRegime,
     ) -> Result<DamageFrictionAudit<'a>, DamageFrictionError> {
-        self.require_state(previous)?;
-        let old = previous.point.jump_m();
-        let delta = core::array::from_fn(|i| jump[i] - old[i]);
-        for i in 0..3 {
-            finite(jump[i])?;
-            finite(applied[i])?;
-            if delta[i].abs() > self.config.contact.maximum_jump_increment_m {
-                return Err(DamageFrictionError::Range("actual jump increment"));
-            }
-            if applied[i].abs() > self.config.contact.maximum_force_n {
-                return Err(DamageFrictionError::Range("actual total force"));
-            }
-        }
-        let (material, mean, pressure) = previous
-            .point
-            .trial_over_time_with_damage_weighted_compression(
-                jump,
-                dt_s,
-                self.config.contact.material_energy_tolerance_j_m2,
-            )?;
-        let pressure = finite(self.area * pressure)?;
-        let mut expected = mean.map(|x| self.area * x);
-        let slip = delta[1].hypot(delta[2]);
-        let mut friction = [0.0; 2];
-        let loss = match regime {
-            DamageFrictionRegime::Inactive => {
-                if pressure != 0.0 {
-                    return Err(DamageFrictionError::Range(
-                        "inactive path carries damaged compression",
-                    ));
-                }
-                0.0
-            }
-            DamageFrictionRegime::Sticking => {
-                if slip > self.jump_tolerance(old, jump, jump)? {
-                    return Err(DamageFrictionError::Range("actual sticking slip"));
-                }
-                friction = [applied[1] - expected[1], applied[2] - expected[2]];
-                let magnitude = norm2(friction);
-                let cap = finite(self.capture_mu(previous) * pressure)?;
-                if magnitude > cap + self.force_tolerance(magnitude, cap)? {
-                    return Err(DamageFrictionError::Range(
-                        "actual sticking reaction exceeds capture cone",
-                    ));
-                }
-                0.0
-            }
-            DamageFrictionRegime::Sliding => {
-                if slip == 0.0 {
-                    return Err(DamageFrictionError::Range("sliding requires actual slip"));
-                }
-                let cap = finite(self.kinetic_mu * pressure)?;
-                friction = [cap * (delta[1] / slip), cap * (delta[2] / slip)];
-                finite(cap * slip)?
-            }
-        };
-        for i in 0..2 {
-            expected[i + 1] = finite(expected[i + 1] + friction[i])?;
-        }
-        let mut force_residual = [0.0; 3];
-        let mut force_tolerance = [0.0; 3];
-        for i in 0..3 {
-            force_residual[i] = finite(applied[i] - expected[i])?;
-            force_tolerance[i] = self.force_tolerance(applied[i], expected[i])?;
-            if force_residual[i].abs() > force_tolerance[i] {
-                return Err(DamageFrictionError::ForceMismatch {
-                    component: i,
-                    residual_n: force_residual[i],
-                    tolerance_n: force_tolerance[i],
-                });
-            }
-        }
-        let work = finite(dot3(applied, delta))?;
-        let material_work = finite(self.area * material.total_work_j_m2())?;
-        let defect = finite(work - material_work - loss)?;
-        let tolerance = finite(
-            self.config.work_absolute_tolerance_j
-                + self.config.work_relative_tolerance
-                    * work.abs().max(material_work.abs()).max(loss),
-        )?;
-        if defect.abs() > tolerance {
-            return Err(DamageFrictionError::WorkMismatch {
-                residual_j: defect,
-                tolerance_j: tolerance,
-            });
-        }
-        let occupancy = if jump[0] >= 0.0 || material.equilibrium.point.damage() == 0.0 {
-            DamageFrictionRegime::Inactive
-        } else {
-            regime
-        };
-        Ok(DamageFrictionAudit {
-            state: DamageFrictionState {
-                identity: self.identity,
-                point: material.equilibrium.point,
-                occupancy,
-            },
-            material,
-            regime,
-            damaged_compression_force_n: pressure,
-            friction_force_n: friction,
-            expected_force_n: expected,
-            force_residual_n: force_residual,
-            force_tolerance_n: force_tolerance,
-            friction_dissipation_j: loss,
-            work_residual_j: defect,
-        })
+        self.local_law()
+            .audit(previous, jump, dt_s, applied, regime)
     }
 
     fn candidate(
@@ -610,24 +490,25 @@ impl<'a> DamageFrictionLoadLine<'a> {
             pressure: finite(self.area * pressure)?,
         })
     }
-    fn require_state(&self, s: DamageFrictionState<'a>) -> Result<(), DamageFrictionError> {
-        if s.identity != self.identity || !core::ptr::eq(s.point.law(), self.cohesive.law()) {
-            return Err(DamageFrictionError::StateMismatch);
+    fn local_law(&self) -> local::LocalDamageFriction<'a> {
+        local::LocalDamageFriction {
+            cohesive: self.cohesive,
+            friction: self.friction,
+            area: self.area,
+            config: self.config,
+            identity: self.identity,
+            static_mu: self.static_mu,
+            kinetic_mu: self.kinetic_mu,
         }
-        Ok(())
+    }
+    fn require_state(&self, s: DamageFrictionState<'a>) -> Result<(), DamageFrictionError> {
+        self.local_law().require_state(s)
     }
     fn capture_mu(&self, s: DamageFrictionState<'a>) -> f64 {
-        if s.occupancy == DamageFrictionRegime::Sliding {
-            self.kinetic_mu
-        } else {
-            self.static_mu
-        }
+        self.local_law().capture_mu(s)
     }
     fn force_tolerance(&self, a: f64, b: f64) -> Result<f64, DamageFrictionError> {
-        finite(
-            self.config.force_absolute_tolerance_n
-                + self.config.force_relative_tolerance * a.abs().max(b.abs()),
-        )
+        self.local_law().force_tolerance(a, b)
     }
     fn jump_tolerance(
         &self,
@@ -635,14 +516,9 @@ impl<'a> DamageFrictionLoadLine<'a> {
         free: [f64; 3],
         jump: [f64; 3],
     ) -> Result<f64, DamageFrictionError> {
-        let scale = (0..3)
-            .map(|i| (free[i] - old[i]).abs().max((jump[i] - old[i]).abs()))
-            .fold(0.0, f64::max);
-        finite(
-            self.config.contact.jump_absolute_tolerance_m
-                + self.config.contact.jump_relative_tolerance * scale,
-        )
+        self.local_law().jump_tolerance(old, free, jump)
     }
+
     fn spend(
         &self,
         n: &mut usize,

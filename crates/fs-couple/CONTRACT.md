@@ -12433,3 +12433,35 @@ after all checks and the final gate; late refusal and cancellation permit an
 identical retry. Normal indentation/capacity is held during a step. Material
 memory, acoustic back-reaction, and constant-loss connections with distinct
 damping columns require other propagation owners and are refused here.
+
+
+## Joint finite-patch damage and friction
+
+`cohesive_contact::patch::frictional_damage` solves all three traction components
+at all admitted quadrature sites in one load-line residual using the complete
+cross-site compliance. The Coulomb disk uses each site's original irreversible
+damage and compressive pressure; site areas enter physical force and work once.
+The shared local constitutive owner preserves original material identity,
+opening/shear history, viscosity, and the analytic damaged-compression integral.
+The projection scale conditions the residual and introduces no elastic friction
+storage. Rank-deficient compliance is admitted for coincident quadrature or
+fewer independent body coordinates; numerical least-squares regularization
+does not modify the accepted compliance or constitutive equations.
+
+The native cohesive-patch owner can enable this law on the original network.
+It re-audits material/friction work against actual body displacements, preserves
+per-site endpoint kinetic occupancy even after zero net slip, and exposes both
+site and aggregate friction diagnostics. Original forces, torque, component
+budgets, energy tolerances, and source identities remain mandatory. All point
+histories, body states, diagnostics, and the clock publish jointly; late energy
+refusal, cancellation, and point/iteration/branch budget exhaustion leave the
+accepted patch retryable.
+
+This is a bounded local branch solve with fixed frames, source queries and
+quadrature during a step, and a straight constitutive path. It supports
+progressive peeling, compressed-edge sliding, complete failure and frictional
+reclosure without healing history. It does not resolve intrastep friction
+events or establish global uniqueness across softening branches. Workspaces
+and dense dimensions are explicitly bounded (at most 64 sites); local material
+probes are shared across the joint Jacobian rather than replaced by independent
+site mechanics.
