@@ -9840,11 +9840,11 @@ endpoint conditions. Every signed contact is evaluated even when the net heat
 is zero, so a hot gas can heat a cold gas through an unchanged-temperature body.
 
 The body's original chart supplies
-`H_end - H_start = Q_body,external - Q_net - W_wall`. The accepted report retains
+`H_end - H_start = Q_body,external + H_wall - Q_net - W_wall`. The accepted report retains
 the applied heat coordinate, actual gas contact sum and signed wall work as
 separate accounts; their difference is a bounded source residual, not an
 additional heat source. The physical body-energy gate uses actual storage,
-actual contact heat and the original native wall-material work. The
+actual contact heat, original wall heat and native wall-material work. The
 enclosing gas/acoustic/body account independently closes original external
 heat/work, native storage and exported losses. Original transport driving-force,
 chemical entropy and species gates remain active.
@@ -9859,7 +9859,7 @@ reported contact heat has already been applied.
 This remains a uniform-body, fixed-geometry, negligible-solid-pV-work model
 with effective conduction layers and the existing first-order transport split.
 It does not supply spatial solid gradients, thermal deformation, aperture
-updates or general acoustic-loss partition. Explicit uniform elastic wall
+updates or general acoustic-loss partition. Explicit uniform material-wall
 feedback and selected molecular source heating use the original owners
 described below. The G1/G4
 regressions cover opposite nonzero contacts with zero net heat against an
@@ -9867,47 +9867,57 @@ independent constant-capacity solution, reacting transport with continuing warm
 passive and paired-aperture owners, and atomic refusal/cancellation/retry. They
 are formatter/source checked; native execution remains unverified.
 
-## Finite-body temperature feedback into original elastic acoustic walls
+## Finite-body temperature feedback and original acoustic-wall self-heating
 
 Each shared-body thermal port may select `SharedFiniteGasAcousticWallSolve`
-to refresh its original uniform elastic wall at the solved body temperature.
-The original material query bundle, selected claims, card identity and all
-non-temperature coordinates stay pinned. Native `LocalMaterialWall` and
-`MaterialWallDg::rebind_controlled` rebuild the existing coefficients while
-retaining displacement, conjugate momentum, acoustic history and the native
-propagator clock. No replacement wall-motion or material solver is introduced.
+to refresh its original uniform isotropic wall at the solved body temperature.
+Elastic, Young-viscosity Kelvin--Voigt and source-pair Maxwell laws retain the
+complete original material bundle, selected claims, card identity and every
+non-temperature condition. Native `MaterialWallDg::rebind_controlled` retains
+displacement, conjugate momentum and acoustic history. Each Maxwell arm keeps
+its physical spring extension and viscous offset under the original source
+correspondence; no arm is recreated, reset or matched by coefficient value.
+A relaxation-time-only change affects subsequent loss without instantaneous
+parameter work.
 
-The outer coordinate is now total energy out of the body:
-`S = sum(Q_i) + W_wall`. Every trial restarts the original gas/acoustic
-snapshot, evaluates all gas contacts, then updates the selected candidate
-walls at that same body endpoint. Signed native parameter work enters the
-body residual once: `delta H + sum(Q_i) + W_wall - Q_body,external = 0`.
-It is not gas-contact heat, molecular heat or gas-to-wave work. Positive wall
-work draws from the body; negative work returns to its finite enthalpy store.
+The optional `dissipation_heat` budget selects the original solid Kelvin/Maxwell
+source for deposition into this same finite body. After original-owner and
+transport admission, the native source integral is evaluated once from each
+accepted initial state under its actual held ports. Every body/contact/work
+trial reuses it. Gas boundary-layer, molecular, terminal and numerical losses
+are excluded. With no selection, wall damping retains its exported meaning.
 
-Reports expose each original material receipt and native wall update, total
-wall parameter work, and independently measured final acoustic storage after
-rebinding. The retained transport report explicitly describes the preceding
-gas/acoustic substage. The enclosing energy gate uses the final storage;
-discarded trials and failed final gates publish no partial body, gas or wall
-state. With no selected walls the prior arithmetic and storage report remain
-unchanged.
+The outer energy-out coordinate remains `S = sum(Q_i) + W_wall`, while body
+storage obeys `delta H = Q_body,external + H_wall - S`. Signed material work
+and irreversible source heat have separate accounts. Positive wall work draws
+from the body; negative work returns to it. Each endpoint resolves the original
+wall at that same body temperature through the existing native transfer.
 
-This adapter admits original uniform isotropic elastic walls only. It checks
-initial material/body temperature, all-solid initial and candidate phase,
-constant material and chart density, fixed geometry/thickness/restraint, and
-a shared body inventory containing the sum of selected native thin-wall
-volumes and masses. Each wall has an explicit absolute parameter-work cap.
-Anisotropic or hereditary walls, regional bindings, competing owners,
-insufficient inventory, phase change and density changes refuse. Thermal
-expansion, phase transfer and a thermoelastic entropy model remain outside
-this bounded energy-accounting path. The original first-order split and
-source applicability limits still apply.
+Reports retain each material receipt, native intervention and deposited wall
+heat, together with total wall heat/work and independently measured final
+acoustic storage. The transport report remains the preceding gas/acoustic
+substage, which exports `D-M`. The enclosing report exports `D-M-H_wall`.
+Each original owner's source heat is checked against its own native decrement
+minus internal molecular heat and its explicit energy allowance. Remainders
+are never clipped. The final enclosing energy gate uses actual post-rebind
+storage and the reduced export, so the internal heat transfer cancels once.
 
-Heating/cooling, continuing-history, source-pin and atomic refusal/retry
-regressions accompany the implementation. Parser/formatter and bounded source
-checks are available; native compilation and runtime execution remain
-unverified.
+Initial material/body temperature, all-solid phase, constant chart/material
+density, fixed geometry/thickness/restraint and sufficient shared-body wall
+inventory remain required. Each wall has an explicit parameter-work cap and
+opted-in heat has an explicit complete-state integration budget. Source-arm
+activation/removal, authored spectra without property identities, generated
+normal-plane memory, anisotropy, regional thermal bindings, phase change and
+density changes refuse. Thermal expansion and a thermoelastic entropy model
+remain outside this bounded path. The original frozen-sample, first-order
+split and source domains still apply.
+
+Failures and cancellation publish no partial body, gas, wall or history state.
+Zero internal source heat preserves the previous body arithmetic. Authored
+regressions cover signed work, self-heating, retained Maxwell memory, changing
+subsequent response, source pins, opt-out and atomic refusal/retry. Formatter,
+parser and bounded source checks are distinct from native runtime validation;
+native compilation and execution remain unverified.
 
 ## Molecular acoustic heat in reacting thermal gas assemblies
 
@@ -9933,7 +9943,7 @@ exported remainder D-M as distinct quantities. The gas/acoustic boundary heat
 contains only external heat and body contact heat. Its balance therefore uses
 `delta U_gas + delta E_acoustic + (D-M) - Q_boundary - W_external`.
 The enclosing finite-body account adds body storage once and cancels each
-body contact. Other wall, boundary, viscous and numerical losses keep their
+body contact. Unselected wall, boundary, viscous and numerical losses keep their
 existing exported meaning; an aggregate energy deficit is never converted
 into molecular heat or clipped to a nonnegative remainder.
 

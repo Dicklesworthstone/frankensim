@@ -1,5 +1,7 @@
 //! Finite body enthalpy pays the original vibrating wall's elastic material work.
 //! These authored laws are regression fixtures, not measured material data.
+mod memory;
+
 use super::*;
 use fs_couple::bernoulli_aperture::wall::material::{
     AxialConstraint, FiniteGasDgBinding, FiniteGasDgNode, LocalMaterialWall, WallMaterialLoss,
@@ -268,6 +270,7 @@ fn wall_ports<'a>(
     port.layers.area_m2 = area_m2;
     port.wall = Some(SharedFiniteGasAcousticWallSolve {
         maximum_absolute_parameter_work_j: 1e-4,
+        dissipation_heat: None,
     });
     ports
 }
@@ -541,6 +544,7 @@ fn g3_refreshed_wall_continues_with_shared_reacting_gas_and_none_retains_native_
     let frozen_ports = shared_ports(&card, &key, &context, [20, 30]);
     ports.get_mut(&30).unwrap().wall = Some(SharedFiniteGasAcousticWallSolve {
         maximum_absolute_parameter_work_j: 1e-4,
+        dissipation_heat: None,
     });
     let mut reactions = bindings(&law);
     reactions.insert(
@@ -745,6 +749,7 @@ fn g4_wall_work_source_inventory_and_late_cancellation_refuse_atomically() {
         let mut ports = shared_ports(&card, &key, &context, [10, 20]);
         ports.get_mut(&wrong_owner).unwrap().wall = Some(SharedFiniteGasAcousticWallSolve {
             maximum_absolute_parameter_work_j: 1e-4,
+            dissipation_heat: None,
         });
         assert!(
             advance_shared_thermal_reacting_finite_gas_acoustic_transport_with_paths(

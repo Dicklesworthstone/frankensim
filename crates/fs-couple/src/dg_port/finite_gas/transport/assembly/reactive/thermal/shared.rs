@@ -33,9 +33,10 @@ pub struct SharedFiniteGasAcousticThermalPort<'a> {
     pub layers: MaterialConductionLayers<'a>,
     /// Signed heat into this gas, independently bracketed from the body's net.
     pub exchange: HeatExchangeSolve,
-    /// Optional endpoint material refresh of this original uniform elastic wall.
+    /// Optional endpoint material refresh of this original uniform material wall.
     /// Its signed mechanical storage change is paid by the shared body, separately
-    /// from contact heat. None preserves the existing frozen-wall path.
+    /// from contact heat. Its native solid dissipation may explicitly heat the
+    /// same body. None preserves the existing frozen-wall path.
     pub wall: Option<SharedFiniteGasAcousticWallSolve>,
 }
 
@@ -98,6 +99,13 @@ pub struct SharedThermalReactiveFiniteGasAcousticTransportStep {
     /// Signed work INTO the acoustic/wall owners, paid once by the shared body.
     /// This is separate from gas-to-wave work and from all supplied heat.
     pub wall_parameter_work_j: f64,
+    /// Original Kelvin/Maxwell source heat deposited once into the shared body.
+    /// This internal transfer is separate from molecular heat deposited in gas.
+    pub wall_heat_j: f64,
+    /// Native exported loss after both molecular-gas and selected wall-body
+    /// transfers: transport.exported_acoustic_dissipation_j - wall_heat_j.
+    /// Numerical, terminal and unselected losses retain their original meaning.
+    pub final_exported_acoustic_dissipation_j: f64,
     /// Actual final native storage minus accepted initial storage, including wall
     /// refresh. With no selected wall this is the transport substage's value.
     pub final_acoustic_storage_change_j: f64,
@@ -110,7 +118,7 @@ pub struct SharedThermalReactiveFiniteGasAcousticTransportStep {
     /// Applied heat coordinate into the body: -(outer energy out - wall work).
     /// The wall work remains separate; the source residual bounds contact closure.
     pub body_boundary_heat_j: f64,
-    /// Actual body storage + sum(Q_i) + wall work - prescribed body heat [J].
+    /// Actual body storage + sum(Q_i) + wall work - wall heat - external heat [J].
     pub body_energy_residual_j: f64,
     /// Outer energy-out coordinate minus sum(Q_i) and native wall material work.
     pub source_residual_j: f64,
@@ -524,9 +532,11 @@ impl FiniteGasTransportEvolution for SharedEvolution<'_, '_, '_> {
 /// Only after ALL contacts have been evaluated can the net-body residual accept;
 /// opposite hot/cold transfers survive even with zero net heat and unchanged body
 /// temperature. Initial conductivity claims remain pinned through all trials.
-/// Selected original uniform elastic walls then resolve that same body endpoint
-/// and transfer their native displacement/momentum histories at fixed geometry.
-/// Their signed material work joins contact heat in the outer body residual.
+/// Selected original uniform isotropic walls then resolve that same body endpoint
+/// and transfer native displacement/momentum and Maxwell histories at fixed
+/// geometry. Their signed material work joins contact heat in the body residual.
+/// An opted-in physical Kelvin/Maxwell source heats that body once, integrated
+/// on the original complete frozen sample before any endpoint trials.
 ///
 /// All prescribed heat and native external work are independently summed. The
 /// one body storage cancels internal gas transfers and wall material work in the enclosing
@@ -540,8 +550,9 @@ impl FiniteGasTransportEvolution for SharedEvolution<'_, '_, '_> {
 /// constant-density body containing its modeled wall inventory. It is not spatial
 /// solid conduction, aperture updates, thermal expansion, resolved gas
 /// motion or general acoustic-loss partition. An explicitly selected molecular
-/// wall input deposits only its original source integral in gas; other losses
-/// remain exported. The original first-order transport/acoustic split, source
+/// wall input deposits only its original source integral in gas. Selected solid
+/// dissipation enters the shared body; every other loss remains exported.
+/// The original first-order transport/acoustic split, source
 /// domains and local chemical entropy gate remain; convergence is
 /// not time accuracy, uniqueness or a whole-system entropy theorem.
 #[allow(clippy::too_many_arguments)]
@@ -592,6 +603,22 @@ pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_path
         &initial_evolution,
         cancelled,
     )?;
+    let wall_heat = wall::prepare_heat(nodes, inputs, ports, cancelled)?;
+    // Preserve the pre-existing arithmetic when the internal source is zero.
+    let body_heat = if wall_heat.total_j == 0.0 {
+        body.internal_heat_j
+    } else {
+        let total = body.internal_heat_j + wall_heat.total_j;
+        if !total.is_finite()
+            || total == body.internal_heat_j
+            || (body.internal_heat_j != 0.0 && total == wall_heat.total_j)
+        {
+            return Err(Error::Invalid(
+                "wall source heat or prescribed body heat disappears in the enthalpy input",
+            ));
+        }
+        total
+    };
     let mut external_gas = Sum::default();
     for (&id, input) in inputs {
         poll(cancelled)?;
@@ -605,13 +632,13 @@ pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_path
         controls.body_exchange.source_tolerance_j,
         controls.body_exchange.maximum_iterations,
         |energy_out, body_trials, cancelled| {
-            let body_energy = body.internal_heat_j - energy_out;
+            let body_energy = body_heat - energy_out;
             let dh = body_energy / body.mass_kg;
             let h1 = h0 + dh;
             if ![body_energy, dh, h1].iter().all(|x| x.is_finite())
                 || (body_energy != 0.0 && (dh == 0.0 || h1 == h0))
-                || (energy_out != 0.0 && body_energy == body.internal_heat_j)
-                || (body.internal_heat_j != 0.0 && body_energy == -energy_out)
+                || (energy_out != 0.0 && body_energy == body_heat)
+                || (body_heat != 0.0 && body_energy == -energy_out)
             {
                 return Err(Error::Invalid(
                     "shared-body net energy disappears in its conserved enthalpy coordinate",
@@ -631,8 +658,37 @@ pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_path
             };
             let (next_parcels, mut next_nodes, transport) =
                 snapshot.candidate(&evolution, cancelled)?.into_parts();
+            for (&id, &heat) in &wall_heat.by_wall {
+                poll(cancelled)?;
+                let acoustic = transport.acoustics.get(&id).ok_or(Error::Invalid(
+                    "wall heat lost its original acoustic substage account",
+                ))?;
+                let [_, loss, _, molecular] =
+                    FiniteGasAcousticNode::accounts::<SharedFiniteGasAcousticThermalSource>(acoustic);
+                let remaining = (loss - molecular) - heat;
+                let input = inputs.get(&id).ok_or(Error::Invalid(
+                    "wall heat lost its original acoustic input",
+                ))?;
+                let allowance = FiniteGasAcousticNode::transport_input(input, true)
+                    .map_err(Error::Invalid)?
+                    .acoustic.as_ref().ok_or(Error::Invalid(
+                        "wall heat requires its original native energy allowance",
+                    ))?.energy_tolerance_j;
+                if !remaining.is_finite() || (heat > 0.0 && remaining < -allowance) {
+                    return Err(Error::Energy { residual_j: remaining, tolerance_j: allowance });
+                }
+            }
+            let exported_loss = if wall_heat.total_j == 0.0 {
+                transport.exported_acoustic_dissipation_j
+            } else {
+                let remaining = transport.exported_acoustic_dissipation_j - wall_heat.total_j;
+                if !remaining.is_finite() || remaining == transport.exported_acoustic_dissipation_j {
+                    return Err(Error::Invalid("wall heat disappears in the exported energy account"));
+                }
+                remaining
+            };
             let (wall_updates, wall_work, final_acoustic_storage) = if refresh_walls {
-                let update = wall::apply(nodes, &mut next_nodes, ports, body, state, cancelled)?;
+                let update = wall::apply(nodes, &mut next_nodes, ports, body, state, &wall_heat, cancelled)?;
                 (
                     update.steps,
                     update.parameter_work_j,
@@ -646,6 +702,8 @@ pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_path
                 transport,
                 wall_updates,
                 wall_parameter_work_j: wall_work,
+                wall_heat_j: wall_heat.total_j,
+                final_exported_acoustic_dissipation_j: exported_loss,
                 final_acoustic_storage_change_j: final_acoustic_storage,
                 body_state: state,
                 body_storage_change_j: stored,
@@ -673,7 +731,7 @@ pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_path
             let (source_residual, body_residual, boundary_heat) = if wall_work == 0.0 {
                 (
                     energy_out - transferred.value,
-                    (stored + transferred.value) - body.internal_heat_j,
+                    (stored + transferred.value) - body_heat,
                     -energy_out,
                 )
             } else {
@@ -688,7 +746,7 @@ pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_path
                 }
                 (
                     (energy_out - transferred.value) - wall_work,
-                    ((stored + transferred.value) + wall_work) - body.internal_heat_j,
+                    ((stored + transferred.value) + wall_work) - body_heat,
                     -heat_out,
                 )
             };
@@ -727,7 +785,7 @@ pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_path
     for term in [
         step.transport.gas_storage_change_j,
         step.final_acoustic_storage_change_j,
-        step.transport.exported_acoustic_dissipation_j,
+        step.final_exported_acoustic_dissipation_j,
         step.body_storage_change_j,
         -step.external_gas_heat_j,
         -step.external_body_heat_j,

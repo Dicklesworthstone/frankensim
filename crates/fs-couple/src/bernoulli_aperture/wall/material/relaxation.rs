@@ -135,6 +135,54 @@ impl WallRelaxation {
     #[must_use]
     pub const fn band_hz(&self) -> [f64; 2] { self.band_hz }
 
+    /// Resolve the SAME source-pair spectrum at a refreshed complete material
+    /// snapshot. The thermal owner pins every original query requirement before
+    /// calling this method; no authored coefficients or generated normal-plane
+    /// mode can supply the identity of a source-pair internal variable.
+    ///
+    /// Keep every property role, selected claim, declared band and temporal
+    /// allowance. Existing history correspondence admits the new coefficients,
+    /// including exact-zero arms, before native wall transfer can change state.
+    pub(super) fn at_material_pinned(
+        &self,
+        original: &ResolvedMaterialStatePoint,
+        replacement: &ResolvedMaterialStatePoint,
+    ) -> Result<Self, AcousticRealizeError> {
+        if self.source_identity != Some(original.identity())
+            || self.normal_history.is_some()
+            || original.card_identity() != replacement.card_identity()
+            || original.axis_quantities() != replacement.axis_quantities()
+        {
+            return Err(invalid(
+                "thermal Maxwell feedback requires the original source-pair material and query conventions",
+            ));
+        }
+        let arms = self.source_arms.as_ref().ok_or_else(|| {
+            invalid("thermal Maxwell feedback requires original modulus/time property identities")
+        })?;
+        for name in ["density", "young_modulus", "poisson_ratio"] {
+            let selected = |point: &ResolvedMaterialStatePoint| {
+                point.property(name).map(|property| property.answer().receipt.selected)
+            };
+            if selected(original).is_none() || selected(original) != selected(replacement) {
+                return Err(invalid(
+                    "thermal Maxwell feedback must retain the original base material claims",
+                ));
+            }
+        }
+        let properties = arms.iter().map(|arm| {
+            (arm.modulus_property.clone(), arm.time_property.clone())
+        }).collect::<Vec<_>>();
+        let next = Self::from_state_point(
+            replacement, &properties, self.band_hz,
+            self.max_dt_over_tau, self.max_angular_step,
+        )?;
+        // This checks the original property-pair claims and refuses a change
+        // in active history support, rather than matching by current numbers.
+        self.history_correspondence(&next)?;
+        Ok(next)
+    }
+
     /// Exact source lineage on the same material card is checked by the wall
     /// owner. Here every declared arm must survive, even a zero arm; only the
     /// positive histories produce native storage-transfer entries.

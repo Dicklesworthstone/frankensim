@@ -1,12 +1,13 @@
-//! Finite thermal storage pays the original fixed-geometry wall material work.
+//! Finite thermal storage receives original wall loss and pays material work.
 //!
 //! The native wall owner alone transfers displacement, momentum and acoustic
 //! histories. This adapter resolves its same material at the shared body's
 //! endpoint and admits the finite thermal inventory that supplies that work.
 
 use super::{
-    EquilibriumPhaseState, Error, FiniteGasAcousticNode, ResolvedMaterialStatePoint,
-    SharedFiniteGasAcousticThermalPort, Sum, UniformEnthalpyStepInput, poll, positive,
+    EquilibriumPhaseState, Error, FiniteGasAcousticInput, FiniteGasAcousticNode,
+    FiniteGasTransportNode, ResolvedMaterialStatePoint, SharedFiniteGasAcousticThermalPort, Sum,
+    UniformEnthalpyStepInput, poll, positive,
 };
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::wall::material::{
@@ -14,15 +15,21 @@ use crate::bernoulli_aperture::wall::material::{
 };
 use fs_duct::dg::DgWallMaterialUpdate;
 use fs_material::state_point::DENSITY_PROPERTY;
+use fs_phs::linear_exact::DenseExponentialBudget;
 use std::collections::BTreeMap;
 
-/// Bind an original uniform isotropic elastic wall to this thermal body.
+/// Bind an original uniform isotropic wall to this thermal body.
 /// Geometry, density, mass, restraint and source claims remain fixed. The native
-/// displacement/momentum transfer supplies the signed work charged to the body.
+/// displacement/momentum/history transfer supplies signed material work. Elastic,
+/// Kelvin viscosity and source-pair Maxwell memory retain their original laws.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SharedFiniteGasAcousticWallSolve {
     /// Absolute allowance for this original wall's signed material work [J].
     pub maximum_absolute_parameter_work_j: f64,
+    /// Opt in to physical Kelvin/Maxwell heat from the original native sample.
+    /// The explicit complete-state source-integration budget is additional to
+    /// propagation admission. None keeps the loss exported from this boundary.
+    pub dissipation_heat: Option<DenseExponentialBudget>,
 }
 
 /// The actual endpoint material and native zero-duration wall intervention.
@@ -30,6 +37,9 @@ pub struct SharedFiniteGasAcousticWallSolve {
 pub struct SharedFiniteGasAcousticWallStep {
     pub material: ResolvedMaterialStatePoint,
     pub native: DgWallMaterialUpdate,
+    /// Original solid-only source integral deposited in the finite body [J].
+    /// Gas boundary-layer, molecular, terminal and numerical loss are excluded.
+    pub dissipated_heat_j: f64,
 }
 
 fn native_error(parcel: u64, error: AcousticRealizeError) -> Error {
@@ -103,7 +113,7 @@ pub(super) fn admit(
             ));
         }
         let wall = uniform(nodes, id)?;
-        // The same helper checks initial temperature, card, isotropic/elastic
+        // The same helper checks initial temperature, card, isotropic source
         // model, complete pinned query bundle and fixed material density.
         let original = wall
             .wall()
@@ -155,6 +165,65 @@ pub(super) fn admit(
     Ok(selected)
 }
 
+/// Each source is integrated once, before discarded body/contact/work trials.
+/// No public caller can supply an arbitrary deposited wall heat.
+pub(super) struct PreparedHeat {
+    pub by_wall: BTreeMap<u64, f64>,
+    pub total_j: f64,
+}
+
+pub(super) fn prepare_heat(
+    nodes: &BTreeMap<u64, FiniteGasAcousticNode>,
+    inputs: &BTreeMap<u64, FiniteGasAcousticInput>,
+    ports: &BTreeMap<u64, SharedFiniteGasAcousticThermalPort<'_>>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PreparedHeat, Error> {
+    let mut by_wall = BTreeMap::new();
+    let mut heat = Sum::default();
+    for (&id, port) in ports {
+        let Some(budget) = port.wall.and_then(|controls| controls.dissipation_heat) else {
+            continue;
+        };
+        poll(cancelled)?;
+        let wall = uniform(nodes, id)?;
+        let Some(FiniteGasAcousticNode::Wall(node)) = nodes.get(&id) else {
+            return Err(Error::Invalid("wall heat lost its admitted original owner"));
+        };
+        let input = inputs.get(&id).ok_or(Error::Invalid(
+            "wall heat requires the original acoustic input",
+        ))?;
+        let input = FiniteGasAcousticNode::transport_input(input, true).map_err(Error::Invalid)?;
+        let convert = |error: fs_duct::DuctError| {
+            native_error(
+                id,
+                match error {
+                    fs_duct::DuctError::Cancelled { .. } => AcousticRealizeError::Cancelled,
+                    error => AcousticRealizeError::Nonlinear(error.to_string()),
+                },
+            )
+        };
+        let channel = wall
+            .duct()
+            .prepare_compliant_wall_heat(&node.propagator, budget, cancelled)
+            .map_err(convert)?;
+        let value = channel
+            .integrated_heat_j(&node.state, &input.ports, cancelled)
+            .map_err(convert)?;
+        if !value.is_finite() || value < 0.0 {
+            return Err(Error::Invalid(
+                "original wall source heat must be finite and nonnegative",
+            ));
+        }
+        heat.add(value)?;
+        by_wall.insert(id, value);
+    }
+    poll(cancelled)?;
+    Ok(PreparedHeat {
+        by_wall,
+        total_j: heat.value,
+    })
+}
+
 pub(super) struct Updates {
     pub steps: BTreeMap<u64, SharedFiniteGasAcousticWallStep>,
     pub parameter_work_j: f64,
@@ -169,6 +238,7 @@ pub(super) fn apply(
     ports: &BTreeMap<u64, SharedFiniteGasAcousticThermalPort<'_>>,
     body: UniformEnthalpyStepInput<'_>,
     state: EquilibriumPhaseState,
+    heat: &PreparedHeat,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Updates, Error> {
     poll(cancelled)?;
@@ -215,7 +285,14 @@ pub(super) fn apply(
             )
             .map_err(|error| native_error(id, error))?;
         work.add(native.parameter_work_j)?;
-        steps.insert(id, SharedFiniteGasAcousticWallStep { material, native });
+        steps.insert(
+            id,
+            SharedFiniteGasAcousticWallStep {
+                material,
+                native,
+                dissipated_heat_j: heat.by_wall.get(&id).copied().unwrap_or(0.0),
+            },
+        );
     }
     // Measure the published endpoint independently of the parameter-work sum.
     let mut storage = Sum::default();
