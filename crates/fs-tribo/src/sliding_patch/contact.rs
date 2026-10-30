@@ -102,6 +102,19 @@ pub struct HertzWrenchInput {
     pub scaled_compliance_m_per_n: Matrix,
 }
 
+/// Physical phase supplied by the mechanical owner, not inferred from a
+/// midpoint displacement that may already include an unresolved reversal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HertzWrenchPhase {
+    /// The original static set may support a stationary accepted contact.
+    /// Also retains the original displacement-only solver's admission policy.
+    StaticAdmissible,
+    /// The accepted shear/spin motion is nonzero. The larger static set cannot
+    /// capture this moving phase; only the original kinetic capacity is used.
+    /// This does not itself locate an endpoint stopping event.
+    Kinetic,
+}
+
 /// Branch selected from the same joint translational/torsional friction surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HertzWrenchMode {
@@ -109,7 +122,8 @@ pub enum HertzWrenchMode {
     Sticking,
     /// Nonzero relative motion selects the integrated kinetic surface.
     Sliding,
-    /// Both static and kinetic traction capacities are zero.
+    /// The admitted phase has zero traction capacity. A kinetic phase may have
+    /// zero kinetic coefficient while its original static coefficient is positive.
     Frictionless,
 }
 
@@ -264,6 +278,36 @@ impl HertzWrenchContact {
     #[must_use]
     pub const fn parameters(&self) -> HertzWrenchParameters {
         self.parameters
+    }
+
+    /// Resolve a mechanically identified phase without changing the original
+    /// source parameters. A kinetic phase uses its original kinetic support for
+    /// both feasibility and sliding; this prevents the larger static surface
+    /// from selecting a zero-midpoint reflected velocity before physical arrest.
+    /// A zero-midpoint result still requires the mechanical owner's endpoint
+    /// and event checks. No stopping time or physical trajectory is inferred.
+    pub fn advance_phase(
+        &self,
+        input: &HertzWrenchInput,
+        phase: HertzWrenchPhase,
+        config: HertzWrenchConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<HertzWrenchStep, HertzWrenchError> {
+        self.phase_law(phase).advance(input, config, cancelled)
+    }
+
+    fn phase_law(&self, phase: HertzWrenchPhase) -> Self {
+        match phase {
+            HertzWrenchPhase::StaticAdmissible => *self,
+            HertzWrenchPhase::Kinetic => Self {
+                parameters: HertzWrenchParameters {
+                    static_mu: self.parameters.kinetic_mu,
+                    ..self.parameters
+                },
+                static_patch: self.kinetic_patch,
+                kinetic_patch: self.kinetic_patch,
+            },
+        }
     }
 
     /// Solve one held-effort candidate with all three physical cross responses.

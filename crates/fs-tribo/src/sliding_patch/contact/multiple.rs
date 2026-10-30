@@ -31,7 +31,7 @@ use crate::contact_response::{ContactResponseError, PositiveFactor};
 
 use super::{
     HertzWrenchConfig, HertzWrenchContact, HertzWrenchError, HertzWrenchInput, HertzWrenchMode,
-    HertzWrenchStep, Matrix, Problem, SPIN_RADIUS, Vector, admit_matrix, dot,
+    HertzWrenchPhase, HertzWrenchStep, Matrix, Problem, SPIN_RADIUS, Vector, admit_matrix, dot,
 };
 
 /// Explicit matrix, iteration, native support and physical closure budgets.
@@ -204,6 +204,35 @@ impl PreparedHertzContacts {
     #[must_use]
     pub const fn config(&self) -> MultipleHertzConfig {
         self.config
+    }
+
+    /// Resolve mixed accepted phases in the unchanged original contact order.
+    /// Moving patches retain kinetic capacity while stationary patches retain
+    /// their full original static sets. Neither a larger static coefficient nor
+    /// another patch's motion can authorize premature capture of a moving patch.
+    /// Original law objects remain unchanged; endpoint event ownership remains
+    /// with the mechanical caller.
+    pub fn advance_phases(
+        &self,
+        sites: &[HertzContactInput<'_>],
+        phases: &[HertzWrenchPhase],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MultipleHertzStep, MultipleHertzError> {
+        poll(&mut cancelled)?;
+        if sites.len() != self.count || phases.len() != self.count {
+            return Err(MultipleHertzError::Invalid("contact phase count"));
+        }
+        let mut laws = Vec::with_capacity(self.count);
+        for (site, &phase) in sites.iter().zip(phases) {
+            poll(&mut cancelled)?;
+            laws.push(site.law.phase_law(phase));
+        }
+        let inputs: Vec<_> = sites
+            .iter()
+            .zip(&laws)
+            .map(|(site, law)| HertzContactInput { law, ..*site })
+            .collect();
+        self.advance(&inputs, cancelled)
     }
 
     /// Resolve the original laws from one common released mechanical state.

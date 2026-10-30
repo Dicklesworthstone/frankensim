@@ -972,3 +972,25 @@ manufactured static traction with nonzero bulk loss, dependent static load
 redistribution, induced rolling, zero-damping/load and prescribed-motion limits,
 canonical permutations, original-matrix numerical refusals and cancellation
 retry. The original nine `hertz_wrench_multiple` groups also pass unchanged.
+
+
+## Accepted Hertz moving phases — v0
+
+`HertzWrenchPhase` lets the mechanical owner distinguish an already moving
+contact from one eligible for the original static hull. `advance_phase` and
+the simultaneous `advance_phases` entries retain each original law, but use
+its kinetic capacity throughout a declared moving phase. Stationary patches
+can still carry their own larger static reactions in the same shared solve.
+The combined five-coordinate rolling reduction preserves that per-patch
+selection and its original full-response work audits. Zero kinetic capacity
+preserves free motion even when the original static capacity is positive.
+
+This prevents a larger static hull from choosing zero midpoint displacement
+before physical arrest. The original displacement-only entries are unchanged.
+A feasible zero-midpoint kinetic reaction still does not establish an endpoint
+stop; the dynamics owner must locate or admit that event and any subsequent
+static phase. These entries provide no trajectory, source refresh or stopping
+clock. Four focused G1/G3 groups in `tests/hertz_phases.rs` check exact moving
+translation and spin, unequal shared moving/static capacities, zero kinetic
+traction and combined rolling recovery; original source parameters remain
+unchanged on success, refusal and retry.

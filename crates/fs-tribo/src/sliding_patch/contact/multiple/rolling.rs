@@ -25,6 +25,7 @@
 
 use core::fmt;
 
+use super::super::HertzWrenchPhase;
 use fs_math::det;
 
 use crate::contact_response::{ContactResponseError, PositiveFactor};
@@ -308,6 +309,32 @@ impl PreparedHertzRollingContacts {
     #[must_use]
     pub const fn config(&self) -> MultipleHertzRollingConfig {
         self.config
+    }
+
+    /// Preserve each accepted Hertz phase while eliminating all original
+    /// rolling moments together. Rolling-induced free motion does not erase
+    /// the mechanical owner's distinction between moving and stationary patches.
+    pub fn advance_phases(
+        &self,
+        sites: &[HertzRollingContactInput<'_>],
+        phases: &[HertzWrenchPhase],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MultipleHertzRollingStep, MultipleHertzRollingError> {
+        poll(&mut cancelled)?;
+        if sites.len() != self.count || phases.len() != self.count {
+            return Err(invalid("joint contact phase count"));
+        }
+        let mut laws = Vec::with_capacity(self.count);
+        for (site, &phase) in sites.iter().zip(phases) {
+            poll(&mut cancelled)?;
+            laws.push(site.law.phase_law(phase));
+        }
+        let inputs: Vec<_> = sites
+            .iter()
+            .zip(&laws)
+            .map(|(site, law)| HertzRollingContactInput { law, ..*site })
+            .collect();
+        self.advance(&inputs, cancelled)
     }
 
     /// Reuse the same accepted full response and rolling coefficients for each
