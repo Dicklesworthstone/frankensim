@@ -13482,34 +13482,50 @@ fn trace_path_with_emitters(
         }
         #[cfg(feature = "volumes")]
         if let Some(medium) = medium
-            && medium_stack.len() == 0
-            && dielectric_boundary.is_none()
             && has_volume_source_nee
         {
-            let direct = volume_emission::direct_contribution(
-                scene,
-                cx,
-                ray_time,
-                s,
-                depth,
-                medium,
-                hit.point,
-                volume_emission::Receiver::Surface {
+            let receiver = match (&prim.material, dielectric_boundary) {
+                (Material::Dielectric { surface, .. }, Some(boundary))
+                    if boundary.incident.is_none() || boundary.transmitted.is_none() =>
+                {
+                    surface
+                        .roughness_alpha()
+                        .map(|alpha| volume_emission::Receiver::Dielectric {
+                            frame,
+                            outgoing: ray.dir.scale(-1.0),
+                            boundary,
+                            alpha,
+                        })
+                }
+                (_, None) if medium_stack.len() == 0 => Some(volume_emission::Receiver::Surface {
                     material: &prim.material,
                     frame,
                     outgoing: ray.dir.scale(-1.0),
                     brushed: brushed_frame.as_ref(),
-                },
-                &lambdas,
-                &rng,
-                #[cfg(feature = "photometry")]
-                fixtures,
-            )?;
-            for lane in 0..PACKET {
-                let contribution = throughput[lane] * direct[lane];
-                radiance[lane] += contribution;
-                if let Some(contributions) = &mut contribution_radiance {
-                    contributions.record(direct_contribution_class(depth), lane, contribution);
+                }),
+                _ => None,
+            };
+            if let Some(receiver) = receiver {
+                let direct = volume_emission::direct_contribution(
+                    scene,
+                    cx,
+                    ray_time,
+                    s,
+                    depth,
+                    medium,
+                    hit.point,
+                    receiver,
+                    &lambdas,
+                    &rng,
+                    #[cfg(feature = "photometry")]
+                    fixtures,
+                )?;
+                for lane in 0..PACKET {
+                    let contribution = throughput[lane] * direct[lane];
+                    radiance[lane] += contribution;
+                    if let Some(contributions) = &mut contribution_radiance {
+                        contributions.record(direct_contribution_class(depth), lane, contribution);
+                    }
                 }
             }
         }
@@ -14426,6 +14442,16 @@ fn trace_path_with_emitters(
                             continuation.delta,
                             lambdas[lane],
                         )?;
+                        #[cfg(feature = "volumes")]
+                        let child_previous_bsdf = PreviousBsdf {
+                            volume_emission_competitor: has_volume_source_nee
+                                && !continuation.delta
+                                && match continuation.event {
+                                    DielectricEvent::Reflection => boundary.incident.is_none(),
+                                    DielectricEvent::Transmission => boundary.transmitted.is_none(),
+                                },
+                            ..child_previous_bsdf
+                        };
                         let mut child_medium_stack = medium_stack;
                         if continuation.event == DielectricEvent::Transmission {
                             apply_medium_transition(&mut child_medium_stack, boundary.transition)?;
@@ -14516,6 +14542,16 @@ fn trace_path_with_emitters(
                     sampled.delta,
                     lambdas[proposal_lane],
                 )?;
+                #[cfg(feature = "volumes")]
+                let next_previous_bsdf = PreviousBsdf {
+                    volume_emission_competitor: has_volume_source_nee
+                        && !sampled.delta
+                        && match sampled.event {
+                            DielectricEvent::Reflection => boundary.incident.is_none(),
+                            DielectricEvent::Transmission => boundary.transmitted.is_none(),
+                        },
+                    ..next_previous_bsdf
+                };
                 if sampled.event == DielectricEvent::Transmission {
                     apply_medium_transition(&mut medium_stack, boundary.transition)?;
                 }

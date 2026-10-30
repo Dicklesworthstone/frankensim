@@ -16,9 +16,10 @@ pub use execution::{
 };
 
 /// Bit-affecting physical free-flight, phase and survival-aware MIS semantics.
-// v3 adds directional LTE-source NEE with complementary source-integral MIS.
+// v4 extends directional LTE-source NEE to rough interfaces on their ambient
+// side, with each wavelength's actual Fresnel/microfacet proposal in MIS.
 // Cold/vacuum transport and its sampling streams remain unchanged.
-pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 3;
+pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 4;
 
 /// Progressive film bound to one immutable participating-medium snapshot.
 ///

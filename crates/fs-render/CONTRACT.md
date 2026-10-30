@@ -531,7 +531,8 @@ differentiable lift). Pure Rust throughout.
   Ordinary rough-interface NEE uses the correct ambient or glass side, and
   rough Fresnel events have an independent random dimension from free flight.
   Thermal sources embedded in glass remain explicitly unsupported. Scattering
-  semantics v3 adds volume-source sampling while preserving cold/vacuum streams.
+  semantics v4 adds ambient-side rough-interface source sampling while
+  preserving cold/vacuum streams.
   Focused regressions cover independent single-scatter source integrals,
   thermal spectra, surface shadow extinction, spectral furnace conservation,
   phase normalization/moments, exact progressive replay and bounded refusals.
@@ -583,18 +584,25 @@ differentiable lift). Pure Rust throughout.
   marginalize radius into the complete solid-angle PDF, including cells behind
   occluders, while source radiance is integrated only up to the first surface.
   This removes the point estimator's inverse-square near-field singularity
-  without a distance clamp. Ambient opaque and phase vertices sample this source
-  alongside existing lights. Complementary balance/power MIS weights the source
-  integral before the stochastic free-flight outcome; surface-light survival
+  without a distance clamp. Ambient opaque and phase vertices, and the ambient
+  side of rough dielectric interfaces, sample this source alongside existing
+  lights. Rough reflection and transmission use the actual wavelength-dependent
+  Fresnel, visible-normal density and radiance eta factors. Dispersive suffixes
+  retain each lane's own competing density; an interior-facing connection never
+  integrates the displaced ambient grid. Complementary balance/power MIS weights
+  the source integral before the stochastic free-flight outcome; surface-light survival
   PDFs retain their separate meaning. Terminal vertices receive full direct
-  weight. Camera, dielectric and BSDF-only paths retain full source-integral
-  support. `ScatteringGrid::transport` shares its exact LTE cell integral with
-  free flights: absorption creates radiation, total extinction attenuates it.
+  weight. Camera, smooth/null-index dielectric and BSDF-only paths retain full
+  source-integral support without a continuous competitor.
+  `ScatteringGrid::transport` shares its exact LTE cell integral with free
+  flights: absorption creates radiation, total extinction attenuates it.
   A disjoint counter stream preserves existing flight/phase/light identities.
   Physical exposures select the matching source distribution with each accepted
   snapshot, and serial/tiled/progressive entries all use the same estimator.
-  Independent cube densities, hot-box irradiance and single-scattering integrals
-  cover normalization, visibility, source energy and replay.
+  Independent cube densities, hot-box irradiance, rough-interface Fresnel/eta
+  limits and single-scattering integrals cover normalization, visibility, source
+  energy and replay. This does not add refractive multi-interface source
+  connectors or participating fields inside a glass body.
 
 ## Invariants
 

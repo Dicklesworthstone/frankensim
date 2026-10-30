@@ -23,6 +23,8 @@ mod dielectric;
 mod emitter;
 #[path = "absorbing_transport/exposure.rs"]
 mod exposure;
+#[path = "absorbing_transport/rough_emitter.rs"]
+mod rough_emitter;
 #[path = "absorbing_transport/scattering.rs"]
 mod scattering;
 
