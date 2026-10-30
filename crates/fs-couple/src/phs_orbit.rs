@@ -19,11 +19,17 @@ use fs_phs::PortHamiltonian;
 
 const MAX_INPUT_HARMONICS: usize = 256;
 
+/// Why a periodic regime was not produced.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhsOrbitError {
-    Invalid { what: &'static str },
+    /// An argument or input row was malformed (non-finite, non-positive or out of range).
+    Invalid {
+        /// The violated requirement.
+        what: &'static str,
+    },
     /// The original storage callback produced a non-finite effort at an AFT sample.
     SourceRefused,
+    /// fs-orbit's harmonic-balance solve refused.
     Orbit(OrbitError),
 }
 impl core::fmt::Display for PhsOrbitError {
@@ -46,6 +52,11 @@ pub struct PeriodicPortInput {
     coefficients: Vec<Vec<C64>>,
 }
 impl PeriodicPortInput {
+    /// Validate a port input: a positive finite fundamental, at most 256 ports, and
+    /// equal-width finite Fourier rows (at most 256 harmonics) with real DC terms.
+    ///
+    /// # Errors
+    /// [`PhsOrbitError::Invalid`] naming the violated requirement.
     pub fn new(omega_rad_s: f64, coefficients: Vec<Vec<C64>>) -> Result<Self, PhsOrbitError> {
         if !omega_rad_s.is_finite() || omega_rad_s <= 0.0 || coefficients.len() > 256 {
             return Err(bad("positive finite frequency and at most 256 ports required"));
@@ -60,8 +71,11 @@ impl PeriodicPortInput {
         }
         Ok(Self { omega_rad_s, coefficients })
     }
+    /// Fundamental angular frequency [rad/s].
     pub fn omega_rad_s(&self) -> f64 { self.omega_rad_s }
+    /// Number of driven ports (Fourier rows).
     pub fn port_count(&self) -> usize { self.coefficients.len() }
+    /// Retained harmonics per port, excluding the DC term.
     pub fn harmonic_count(&self) -> usize {
         self.coefficients.first().map_or(0, |row| row.len().saturating_sub(1))
     }
@@ -244,11 +258,17 @@ pub fn solve_backbone_harmonic_balance(
 /// a small residual as converged evidence.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhsOrbitAudit {
+    /// Quadrature samples over one period.
     pub samples: usize,
+    /// Cycle mean of the original Hamiltonian [J].
     pub mean_stored_energy_j: f64,
+    /// Smallest stored energy at the quadrature samples [J].
     pub minimum_stored_energy_j: f64,
+    /// Largest stored energy at the quadrature samples [J].
     pub maximum_stored_energy_j: f64,
+    /// Cycle mean of the power the port input supplies [W].
     pub mean_supplied_power_w: f64,
+    /// Cycle mean of the native resistive dissipation [W].
     pub mean_resistance_loss_w: f64,
     /// supply - native R loss; a periodic exact solution should approach zero.
     pub cycle_power_residual_w: f64,
@@ -313,7 +333,7 @@ pub fn audit_forced_orbit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_phs::{PortHamiltonian, QuadraticStorage, RelaxationBranch, Storage};
+    use fs_phs::{PortHamiltonian, RelaxationBranch, Storage};
 
     fn hb(n: usize) -> HbBudget {
         HbBudget { harmonics:n, max_newton:60, tolerance:1e-11, deflate_equilibrium:false }

@@ -14,7 +14,7 @@ fn read(text: &str) -> Result<DgSourceInput, DgSourceError> {
         kind, line + 1, &mut fields,
         &mut || {
             let (line, text) = lines.next().ok_or_else(|| bad(0, "missing source row"))?;
-            Ok((line + 1, text.split_ascii_whitespace()))
+            Ok::<_, DgSourceError>((line + 1, text.split_ascii_whitespace()))
         },
         &ambient(), None, &mut Vec::new(), &CancelGate::new_clock_free(),
     )?;
@@ -116,7 +116,7 @@ fn read_receipted(
         kind, line + 1, &mut fields,
         &mut || {
             let (line, text) = lines.next().ok_or_else(|| bad(0, "missing source row"))?;
-            Ok((line + 1, text.split_ascii_whitespace()))
+            Ok::<_, DgSourceError>((line + 1, text.split_ascii_whitespace()))
         },
         &ambient(), sources, &mut records, &CancelGate::new_clock_free(),
     )?;

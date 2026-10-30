@@ -97,7 +97,8 @@ pub mod piano_vertical;
 pub mod pickup;
 /// Source-bound reciprocal longitudinal piezoelectric sensors and actuators.
 pub mod piezoelectric;
-/// Finite-amplitude periodic regimes of complete nonlinear pHS ODEs via fs-orbit.\npub mod phs_orbit;
+/// Finite-amplitude periodic regimes of complete nonlinear pHS ODEs via fs-orbit.
+pub mod phs_orbit;
 /// Material-driven biased magnetostrictive coil/core motion on the shared stepper.
 pub mod magnetostrictive;
 /// Full source-derived viscous tensors on the shared DKT and modal runtime.
