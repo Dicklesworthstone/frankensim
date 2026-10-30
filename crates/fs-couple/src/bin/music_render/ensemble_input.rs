@@ -23,6 +23,9 @@ use fs_couple::flue_loop::network::performance::file::{
 };
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::pcm_wav::observation::ensemble::{PressureEnsemble, PressureEnsembleConfig};
+use fs_couple::nsf_dg::performance::file::{
+    ResolvedDgFilePerformance, RESOLVED_DG_PERFORMANCE_SCHEMA, MAX_RESOLVED_PERFORMANCE_BYTES,
+};
 use fs_couple::render::plate::file::{PlatePerformance, PLATE_PERFORMANCE_SCHEMA};
 use fs_couple::render::schedule::{ScheduledRenderer, force::file::ModalPerformance};
 use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA, MAX_REED_PERFORMANCE_BYTES};
@@ -37,10 +40,10 @@ const MAX_CONTROLS: usize = 262_144;
 const MAX_SAMPLES: u64 = 600 * RATE as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Modal, Plate, Bow, Reed, Valve, Flue, Lip, Voice }
+enum Kind { Modal, Plate, Bow, Reed, Valve, Flue, Lip, Voice, Resolved }
 impl Kind {
     fn label(self) -> &'static str {
-        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow", Self::Reed => "reed", Self::Valve => "valve", Self::Flue => "flue", Self::Lip => "lip", Self::Voice => "voice" }
+        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow", Self::Reed => "reed", Self::Valve => "valve", Self::Flue => "flue", Self::Lip => "lip", Self::Voice => "voice", Self::Resolved => "resolved" }
     }
 }
 struct Input { kind: Kind, path: PathBuf }
@@ -60,11 +63,11 @@ fn options(args: &[String]) -> Result<Options, String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--modal" | "--plate" | "--bow" | "--reed" | "--valve" | "--flue" | "--lip" | "--voice" => {
+            "--modal" | "--plate" | "--bow" | "--reed" | "--valve" | "--flue" | "--lip" | "--voice" | "--resolved" => {
                 if inputs.len() == MAX_PARTS { return Err("ensemble exceeds the 16-part budget".into()); }
                 let path = iter.next().filter(|s| !s.starts_with("--"))
                     .ok_or_else(|| format!("{arg} requires a source performance path"))?;
-                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, "--bow" => Kind::Bow, "--reed" => Kind::Reed, "--valve" => Kind::Valve, "--flue" => Kind::Flue, "--lip" => Kind::Lip, _ => Kind::Voice },
+                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, "--bow" => Kind::Bow, "--reed" => Kind::Reed, "--valve" => Kind::Valve, "--flue" => Kind::Flue, "--lip" => Kind::Lip, "--voice" => Kind::Voice, _ => Kind::Resolved },
                     path: PathBuf::from(path) });
             }
             "--block" => {
@@ -85,7 +88,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             }
             value if value.starts_with('-') => return Err(format!("unsupported ensemble option {value:?}")),
             value => {
-                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow/--reed/--valve/--flue/--lip/--voice".into()); }
+                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow/--reed/--valve/--flue/--lip/--voice/--resolved".into()); }
                 output = Some(PathBuf::from(value));
             }
         }
@@ -106,7 +109,9 @@ struct SourceInfo {
     // multirate microphone. The physical mechanics are reported separately.
     rate: u32,
     samples: u64,
-    mechanics_rate: u32,
+    // A resolved fluid's material/mesh-derived rate need not be an integer.
+    // Its exact dt is also retained in the original source description below.
+    mechanics_rate: f64,
     mechanics_samples: u64,
     // Existing receiver's numerical latency on the producer clock. This never
     // includes its physical source-to-listener travel time.
@@ -196,6 +201,7 @@ fn load_with_gas_sources(
         Kind::Bow => MAX_BOWED_PERFORMANCE_BYTES, Kind::Reed => MAX_REED_PERFORMANCE_BYTES,
         Kind::Flue => MAX_FLUE_PERFORMANCE_BYTES,
         Kind::Lip => MAX_LIP_PERFORMANCE_BYTES, Kind::Voice => MAX_VOICE_PERFORMANCE_BYTES,
+        Kind::Resolved => MAX_RESOLVED_PERFORMANCE_BYTES,
         _ => MAX_PART_BYTES,
     };
     let mut bytes = Vec::new();
@@ -226,7 +232,7 @@ fn load_with_gas_sources(
             let info = SourceInfo {
                 kind: input.kind, schema: LIP_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples,
+                mechanics_rate: f64::from(i.sample_rate_hz), mechanics_samples: i.samples,
                 source_filter_delay_samples: p.filter_delay_samples(),
                 components: 1, modes: description.transverse_mode_count() + 1,
                 controls: description.control_event_count(), exterior_json, listener,
@@ -246,7 +252,7 @@ fn load_with_gas_sources(
                 kind: input.kind, schema: VOICE_PERFORMANCE_SCHEMA,
                 hash: fs_blake3::hash_domain("org.frankensim.fs-couple.voice-performance.v1", &bytes),
                 rate: i.output_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                mechanics_rate: i.mechanics_rate_hz, mechanics_samples,
+                mechanics_rate: f64::from(i.mechanics_rate_hz), mechanics_samples,
                 source_filter_delay_samples: p.filter_delay_samples(),
                 components: 1, modes: if i.two_mass { 2 } else { 1 },
                 controls: description.subglottal.len(), exterior_json, listener,
@@ -265,7 +271,7 @@ fn load_with_gas_sources(
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: i.schema, hash: i.input_hash, rate: i.sample_rate_hz,
                 samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
+                mechanics_rate: f64::from(i.sample_rate_hz), mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
                 components: i.voices, modes: i.modes, controls: 0, exterior_json: gas_json, listener,
             })
         }
@@ -279,7 +285,7 @@ fn load_with_gas_sources(
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: BOWED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
+                mechanics_rate: f64::from(i.sample_rate_hz), mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
                 components: 1, modes: i.string_modes + 1, controls: i.compiled_controls, exterior_json: gas_json, listener,
             })
         }
@@ -293,7 +299,7 @@ fn load_with_gas_sources(
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: PLATE_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
+                mechanics_rate: f64::from(i.sample_rate_hz), mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
                 components: 1, modes: i.retained_modes, controls: 0, exterior_json: gas_json, listener,
             })
         }
@@ -321,7 +327,7 @@ fn load_with_gas_sources(
                 (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                     kind: input.kind, schema: FLUE_PERFORMANCE_SCHEMA, hash: i.input_hash,
                     rate: i.sample_rate_hz, samples: i.samples,
-                    mechanics_rate: i.mechanics_rate_hz, mechanics_samples,
+                    mechanics_rate: f64::from(i.mechanics_rate_hz), mechanics_samples,
                     source_filter_delay_samples, source_full_scale_pa: i.full_scale_pa,
                     components: 1, modes: 0, controls: i.compiled_controls, exterior_json, listener,
                 })
@@ -353,7 +359,7 @@ fn load_with_gas_sources(
                 (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                     kind: input.kind, schema: FLUE_DG_PERFORMANCE_SCHEMA, hash: i.input_hash,
                     rate: i.sample_rate_hz, samples: i.samples,
-                    mechanics_rate: i.mechanics_rate_hz, mechanics_samples: i.samples,
+                    mechanics_rate: f64::from(i.mechanics_rate_hz), mechanics_samples: i.samples,
                     source_filter_delay_samples, source_full_scale_pa: i.full_scale_pa,
                     components: 1, modes: 0, controls: i.compiled_controls, exterior_json, listener,
                 })
@@ -392,7 +398,7 @@ fn load_with_gas_sources(
                 (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                     kind: input.kind, schema: MATERIAL_MODAL_DG_VALVE_SCHEMA, hash: i.input_hash,
                     rate: i.output_rate_hz, samples: i.samples,
-                    mechanics_rate: i.mechanics_rate_hz, mechanics_samples: i.samples,
+                    mechanics_rate: f64::from(i.mechanics_rate_hz), mechanics_samples: i.samples,
                     source_filter_delay_samples, source_full_scale_pa: i.full_scale_pa,
                     components: i.blades, modes: i.modes, controls, exterior_json, listener,
                 })
@@ -422,7 +428,7 @@ fn load_with_gas_sources(
                 (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                     kind: input.kind, schema: MATERIAL_MODAL_VALVE_SCHEMA, hash: i.input_hash,
                     rate: i.output_rate_hz, samples: i.samples,
-                    mechanics_rate: i.mechanics_rate_hz, mechanics_samples, source_filter_delay_samples,
+                    mechanics_rate: f64::from(i.mechanics_rate_hz), mechanics_samples, source_filter_delay_samples,
                     source_full_scale_pa: i.full_scale_pa, components: i.blades, modes: i.modes,
                     controls, exterior_json, listener,
                 })
@@ -452,7 +458,7 @@ fn load_with_gas_sources(
             (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: PLATE_VALVE_PERFORMANCE_SCHEMA, hash:i.input_hash,
                 rate:i.sample_rate_hz,samples:i.samples,source_full_scale_pa:i.full_scale_pa,
-                mechanics_rate:i.sample_rate_hz,mechanics_samples:i.samples,source_filter_delay_samples,
+                mechanics_rate:f64::from(i.sample_rate_hz),mechanics_samples:i.samples,source_filter_delay_samples,
                 components:1,modes:1,controls:i.compiled_controls+i.force_controls,exterior_json,listener,
             })
             }
@@ -469,8 +475,41 @@ fn load_with_gas_sources(
             (Box::new(p) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: REED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
+                mechanics_rate: f64::from(i.sample_rate_hz), mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
                 components: 1, modes: 0, controls: i.compiled_controls, exterior_json, listener,
+            })
+        }
+        Kind::Resolved => {
+            let p = ResolvedDgFilePerformance::from_bytes_with_sources(
+                &bytes, block, std::sync::Arc::new(CancelGate::new()), sources,
+                super::plate_input::section_pack_loader(parent),
+            ).map_err(|e| e.to_string())?;
+            let i = p.info();
+            let renderer = p.renderer();
+            let system = renderer.system();
+            let microphone = renderer.baffled_receiver();
+            let listener = if microphone.is_some() {
+                let exterior = system.load().radiation_record()
+                    .ok_or("resolved microphone lacks its original computed radiation source")?
+                    .gas_record().state();
+                Listener::Gas(ListenerMedium::of(exterior))
+            } else {
+                Listener::Unconstrained("internal resolved DG inlet trace; no exterior microphone")
+            };
+            let source_filter_delay_samples = microphone.map_or(0.0, |m| m.filter_delay_samples());
+            let mechanics_rate = system.zone().law().dt_s.recip();
+            let mechanics_samples = i.physical_intervals.checked_mul(system.limits().substeps as u64)
+                .ok_or("resolved physical-step count overflow")?;
+            let scope = if microphone.is_some() {
+                "resolved fluid and live DG terminal flows through the original material-gas exterior receiver"
+            } else { "internal resolved DG interval-mean pressure; not an exterior microphone" };
+            let exterior_json = format!(",{},\"observation_scope\":{}",
+                super::wind_input::resolved_provenance(&p), json_string(scope));
+            (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
+                kind: input.kind, schema: RESOLVED_DG_PERFORMANCE_SCHEMA, hash: i.input_hash,
+                rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
+                mechanics_rate, mechanics_samples, source_filter_delay_samples,
+                components: 1, modes: 0, controls: i.boundary_segments, exterior_json, listener,
             })
         }
     };

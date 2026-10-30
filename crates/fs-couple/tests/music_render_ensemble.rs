@@ -17,6 +17,8 @@ mod gas_sources;
 
 #[path = "music_render_ensemble/flue.rs"]
 mod flue;
+#[path = "music_render_ensemble/resolved.rs"]
+mod resolved;
 
 const STRIKER: &str = include_str!("../examples/free-striker-192k.performance");
 const PLATE: &str = include_str!("../examples/plate-mesh.performance");

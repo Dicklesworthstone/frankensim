@@ -400,7 +400,7 @@ struct Loaded {
     observation_json:Option<String>,
 }
 
-fn resolved_provenance(
+pub(super) fn resolved_provenance(
     p: &fs_couple::nsf_dg::performance::file::ResolvedDgFilePerformance,
 ) -> String {
     let info = p.info();

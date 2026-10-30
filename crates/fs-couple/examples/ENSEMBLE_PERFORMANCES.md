@@ -19,7 +19,8 @@ force footprint and modal reduction all come from the existing source loaders.
 No new oscillator, collision law, integrator or material-name preset is added.
 
 Repeat `--modal FILE`, `--plate FILE`, `--bow FILE`, `--reed FILE`,
-`--valve FILE`, `--flue FILE`, `--lip FILE` and `--voice FILE` in the desired summation order. Every
+`--valve FILE`, `--flue FILE`, `--lip FILE`, `--voice FILE` and `--resolved FILE`
+in the desired summation order. Every
 supported modal performance version retains its existing bilateral, normal
 contact, friction, force-port and preload semantics. Sources are independent:
 this is acoustic superposition, **not mechanical coupling between files**.
@@ -80,6 +81,42 @@ The source jet's exploration-only status and every existing physical-model
 limitation remain in the shared source receipt; composing a phrase does not
 qualify a measured flute.
 
+## Resolved fluid sources alongside structural and acoustic sources
+
+`--resolved FILE` accepts the same `frankensim-resolved-dg-performance-v1`
+description as `music_render resolved`. It advances the original resolved
+fluid, physical boundary controls, live DG duct and material wall history.
+The original microphone, exterior gas propagation and acoustic radiation load
+remain attached throughout playback. For example, the two existing resolved
+fixtures have matching observation windows and exterior gas:
+
+```sh
+cargo run --release -p fs-couple --bin music_render -- \
+  ensemble /tmp/two-resolved-sources.wav --full-scale-pa 20 --decimate \
+  --resolved crates/fs-couple/examples/resolved-dg.performance \
+  --resolved crates/fs-couple/examples/resolved-dg-pressure.performance --block 37
+```
+
+Other source kinds can share the mix when their declared observation durations
+and listener gas agree. Material source files resolve relative to each resolved
+performance; thermochemical gas packs use the same explicit registry as the
+other ensemble sources. Missing packs and incompatible listener media refuse
+before either output is created.
+
+The resolved fluid's physical time step comes from its mesh and material gas.
+It is not rounded to the ensemble's clock. Its original conservative temporal
+projection supplies pressure on the file's observation clock, followed by the
+existing explicit decimator if requested. Metadata retains the exact physical
+step, actual physical-step count, observation clock and receiver/filter delays.
+The reported physical sample rate can therefore be nonintegral. The physical
+prefix can lead its observation window by less than one coupled interval,
+as in standalone playback; temporal projection still requires refinement.
+
+A file selecting `observation inlet-pressure` contributes its explicitly
+internal diagnostic pressure and has no declared exterior microphone. Resolving
+the fluid and mixing its pressure does not add measured-source qualification,
+room acoustics or mechanical coupling between independent performance files.
+
 ## Clocks, latency and duration
 
 The output is 48000 Hz. Every source must already use this rate, or explicitly
@@ -128,8 +165,8 @@ and provenance files are never overwritten.
 
 The command admits at most 16 files of 4 MiB each, 128 source components,
 8192 retained modes, 262144 compiled outer controls and 600 output seconds.
-Every individual loader's own stricter budget remains enforced (bow, lip and
-voice and flue files are limited to 1 MiB). Bow controls are counted inside their hosted scheduler, not
+Every individual loader's own stricter budget remains enforced (bow, lip,
+voice, flue and resolved files are limited to 1 MiB). Bow controls are counted inside their hosted scheduler, not
 misreported as an empty outer schedule. Reduction and
 source-state memory are unchanged; pressure/PCM staging is callback-sized.
 These are workload bounds, not a real-time throughput claim.
@@ -161,5 +198,6 @@ These tests compare real physical trajectories, source-clock controls, separate
 filtering and indexed latency alignment against the mixed path, including actual
 contact-plus-mesh WAV output, continuous graph/DG flue phrases and wall-material
 substitution, flue/lip/voice microphone-delay alignment, arbitrary
-source-backed gas changes, and incompatible listener-medium refusals. Native execution
+source-backed gas changes, resolved-fluid clock and pressure preservation,
+and incompatible listener-medium refusals. Native execution
 is still required; source review is not compilation or physical validation.

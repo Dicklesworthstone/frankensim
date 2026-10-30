@@ -38,6 +38,9 @@
 //! Repeated `--flue FILE` composes the existing network or DG flue source with
 //! its complete material/gas inputs and continuous physical gesture history;
 //! the selected native microphone or explicitly internal trace is preserved.
+//! Repeated `--resolved FILE` includes the original resolved NSF fluid and live
+//! material DG bore. Its physical time step remains mesh/gas-derived; only its
+//! pressure observation is aligned and decimated for the ensemble.
 //!
 //! `music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--self-contained]`
 //! renders authored reed primitives, segmented ducts and pressure phrases.
