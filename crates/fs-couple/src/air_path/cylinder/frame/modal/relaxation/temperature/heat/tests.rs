@@ -177,3 +177,5 @@ fn missing_or_duplicate_layer_inventory_is_not_replaced_by_arbitrary_heat_fracti
 }
 
 mod shared;
+
+mod electrical;
