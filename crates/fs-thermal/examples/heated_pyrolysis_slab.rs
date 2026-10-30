@@ -8,6 +8,8 @@
 //! 0.01 m² by 6 mm, initially 300.15 K, one irradiated/convecting face, insulated
 //! back and sides. The char case changes the residue yield to 0.2 and char Cp
 //! to 1200 J/(kg K) to exercise retained residue; it is NOT a wood property set.
+//! In receding mode its explicitly authored char density is 300 kg/m³ and its
+//! conductivity is 0.08 W/(m K), with volume-fraction parallel mixing.
 //!
 //! Effective escaping volatile enthalpy closes the supplied constant heat of
 //! pyrolysis exactly. It is not an MMA gas caloric model and must not be passed
@@ -19,15 +21,17 @@
 //! requested interval. The original thermal graph supplies interior conduction;
 //! the reactive owner solves local temperature and finite-rate mass loss. This
 //! is first order. The optional receding mode uses the original implicit
-//! conduction/reaction owner and conservative noncharring slab rezoning at the
-//! supplied density, with a fixed back face and actual front-half-cell resistance.
+//! conduction/reaction owner and conservative component/enthalpy rezoning with
+//! additive virgin/char volumes, a fixed back and actual half-cell resistance.
 //! The default fixed mode preserves the original invocation and fixed-geometry
 //! explicit conduction. Neither mode supplies a flame, pore-gas transport,
-//! porosity-dependent conductivity or experimental validation. Receding geometry
-//! does not admit the separately authored char-residue scenario.
+//! pore transport or experimental validation. The char sensitivity is separate
+//! from the original noncharring NIST/MaCFP material data.
 
 use fs_thermal::enthalpy::pyrolysis::implicit::{ImplicitSolve, ImplicitWorkspace};
-use fs_thermal::enthalpy::pyrolysis::slab::{RecedingSlab, SlabGeometry, SlabSolve};
+use fs_thermal::enthalpy::pyrolysis::slab::{
+    CharProperties, ConductivityMixing, RecedingSlab, SlabGeometry, SlabSolve,
+};
 use fs_thermal::enthalpy::pyrolysis::{
     Arrhenius, CondensedCaloric, PyrolysisControls, PyrolysisMaterial, PyrolysisSimulation,
 };
@@ -166,7 +170,7 @@ fn front_heat(
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() > 6 || args.first().is_some_and(|arg| arg == "--help") {
-        let usage = "usage: heated_pyrolysis_slab [noncharring|authored-char] [end_s=60] [max_dt_s=0.01] [cells=48] [incident_W_m2=50000] [fixed|receding]\nDefault fixed mode retains explicit conduction and fixed geometry. Receding mode uses implicit conduction/reaction, constant-density noncharring shrinkage and conservative rezoning; authored-char is refused. Both are authored heating scenarios using retained NIST/MaCFP scalar inputs, not experimental validation.";
+        let usage = "usage: heated_pyrolysis_slab [noncharring|authored-char] [end_s=60] [max_dt_s=0.01] [cells=48] [incident_W_m2=50000] [fixed|receding]\nDefault fixed mode retains explicit conduction and fixed geometry. Receding mode uses implicit conduction/reaction, additive condensed-phase volumes and conservative component/enthalpy rezoning. Authored char uses 20% yield, density 300 kg/m3, conductivity 0.08 W/(m K) and volume-fraction parallel mixing. These are authored heating scenarios using retained NIST/MaCFP virgin scalar inputs, not wood data or experimental validation.";
         if args.len() == 1 {
             println!("{usage}");
             return Ok(());
@@ -182,9 +186,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let geometry_mode = args.get(5).map(String::as_str).unwrap_or("fixed");
     if !["fixed", "receding"].contains(&geometry_mode) {
         return Err("geometry mode must be fixed or receding".into());
-    }
-    if geometry_mode == "receding" && char_yield != 0.0 {
-        return Err("receding mode admits only the noncharring material; authored-char requires fixed geometry".into());
     }
     let number = |index: usize, default: f64| -> Result<f64, Box<dyn Error>> {
         let value = args
@@ -297,16 +298,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         || Ok(()),
     )?;
     let mut solid = if geometry_mode == "receding" {
-        Solid::Receding(RecedingSlab::new(
-            original,
-            SlabGeometry {
-                area_m2: AREA,
-                density_kg_m3: DENSITY,
-                conductivity_w_m_k: CONDUCTIVITY,
-                source: "retained MaCFP NIST PMMA2021 density and conductivity; authored constant-density noncharring shrinking-slab assumption",
-            },
-            || Ok(()),
-        )?)
+        let geometry = SlabGeometry {
+            area_m2: AREA,
+            density_kg_m3: DENSITY,
+            conductivity_w_m_k: CONDUCTIVITY,
+            source: "retained MaCFP NIST PMMA2021 virgin density/conductivity; authored incompressible moving-slab closure",
+        };
+        Solid::Receding(if char_yield > 0.0 {
+            RecedingSlab::with_char(
+                original,
+                geometry,
+                CharProperties {
+                    density_kg_m3: 300.0,
+                    conductivity_w_m_k: 0.08,
+                    conductivity_mixing: ConductivityMixing::Parallel,
+                    source: "authored char sensitivity; additive phase volumes and parallel conduction; not NIST/MaCFP char or wood data",
+                },
+                || Ok(()),
+            )?
+        } else {
+            RecedingSlab::new(original, geometry, || Ok(()))?
+        })
     } else {
         Solid::Fixed(original)
     };

@@ -65,7 +65,8 @@ extent are solved together. No independent heat-of-pyrolysis debit is added.
 The non-charring case uses the scalar NIST inputs above. The second case is an
 **authored char sensitivity**, changing residue yield to 20% and char heat
 capacity to 1200 J/(kg K). It is not a wood material fit. Conductivity remains
-explicitly fixed in both cases, with no inferred porosity/char mixing rule.
+explicitly fixed in the default fixed-geometry cases. The moving char extension
+below supplies separate char density and an explicit conductivity mixture.
 
 To retain the supplied constant reaction enthalpy, this demonstrator declares
 an effective outgoing enthalpy:
@@ -151,10 +152,60 @@ heat or a certified error bound.
 The [retained receding results](receding_slab_example_results.json) contain
 commands, source identity, actual endpoint accounts and 30-second checkpoints.
 The original five-argument fixed invocation remains operational.
-`authored-char` with `receding` refuses: this homogeneous shrinking owner does
-not infer char density, pores, swelling or residue mechanics. Both the boundary
-composition and geometry update remain first order; no experimental validation
-is established by these numerical checks.
+Both the boundary composition and geometry update remain first order; no
+experimental validation is established by these numerical checks.
+
+## Moving charring slab
+
+The same consumer now admits `authored-char receding` through
+`RecedingSlab::with_char`. The authored residue has density 300 kg/m³ and
+conductivity 0.08 W/(m K), with volume-fraction parallel mixing. Its 20% mass
+yield and 1200 J/(kg K) calorics are unchanged. These additional values are
+explicit numerical inputs, not NIST/MaCFP char data or a wood material fit.
+
+```bash
+cargo run --release -p fs-thermal --example heated_pyrolysis_slab -- \
+  authored-char 60 0.02 48 50000 receding
+cargo run --release -p fs-thermal --example heated_pyrolysis_slab -- \
+  authored-char 60 0.02 96 50000 receding
+```
+
+The moving geometry retains both condensed components:
+
+```text
+area * thickness = virgin_mass / 1100 + char_mass / 300
+char_mass = (0.2 / 0.8) * emitted_volatile_mass
+```
+
+Conservative remapping transfers virgin mass, char mass and enthalpy separately.
+The same current component conductivity determines both interior heat links
+and the front half-cell resistance. The source-bound release enthalpy is used
+once. The back stays fixed; no gas-volume change or pressure work is inferred.
+
+All five following optimized runs completed the requested 60 s:
+
+| Cells | Maximum dt (s) | Released volatile (g) | Retained char (g) | Front face (K) | Final thickness (mm) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 12 | 0.02 | 0.711763881 | 0.177940970 | 692.737384 | 5.978431398 |
+| 12 | 0.01 | 0.711477417 | 0.177869354 | 692.736776 | 5.978440078 |
+| 24 | 0.02 | 0.883546101 | 0.220886525 | 688.507464 | 5.973225876 |
+| 48 | 0.02 | 0.933597655 | 0.233399414 | 687.607269 | 5.971709162 |
+| 96 | 0.02 | 0.945721884 | 0.236430471 | 687.574951 | 5.971341761 |
+
+Halving the timestep at 12 cells changes emitted mass by −0.04025% and face
+temperature by −0.000608 K. The adjacent 12→24, 24→48 and 48→96 refinements
+change emitted mass by +24.13472%, +5.66485% and +1.29866% of the respective
+coarser results. The last face-temperature difference is −0.032318 K.
+Resolution sensitivity decreases substantially, but the remaining 1.30%
+fuel-release difference is not a certified spatial error or validation result.
+
+All cases used zero geometry retries. Across these five runs the largest
+absolute whole-run mass residual was 3.886e-16 kg and energy residual was
+1.157e-6 J. These balances verify implementation accounting; they do not
+remove the single-step material, instantaneous volatile escape, source-fit
+or first-order coupling approximations. The library also supports a separately
+declared series conductivity arrangement and additive-volume swelling; these
+particular heating runs select the parallel shrinking case.
 
 ## Published FDS kinetic comparison
 
@@ -205,6 +256,6 @@ actual configurations, ten-second trajectory checkpoints, conservation outputs a
 kinetic comparisons. Verification used native Cargo on the original thermal
 source and focused supporting crates because DSR/RCH were unavailable. The
 original fixed-geometry increment passed 164 thermal tests; with implicit and
-receding extensions the native suite passes 178, with one existing performance
+receding and charring extensions the native suite passes 183, with one existing performance
 test ignored. This is not a full workspace/DSR pass. Calibration data are not relabeled as
 validation; Dalmarnock data are not used.
