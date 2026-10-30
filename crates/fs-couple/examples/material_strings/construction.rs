@@ -10,7 +10,7 @@ use fs_couple::string_specimen::with_uniform_circular_thermal_extension;
 // Use the exact material card and current coordinates of each physical layer.
 // The shared owner integrates alpha(T) across every knot and checks the whole
 // path; an endpoint coefficient times delta-T is not a thermal support law.
-fn expansion(name: &str, material: &ResolvedMaterialStatePoint, catalog: &Catalog,
+pub(super) fn expansion(name: &str, material: &ResolvedMaterialStatePoint, catalog: &Catalog,
     reference: f64) -> Result<IntegratedIsotropicThermalExpansion>
 {
     let mut current = QueryPoint::new();

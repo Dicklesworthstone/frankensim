@@ -3,10 +3,14 @@ use super::*;
 use fs_material::section::axial::YOUNG_VISCOSITY_PROPERTY;
 
 fn fiber_pack(rho: f64, omit_axial_loss: bool) -> NormalizedPack {
+    fiber_elastic_pack(rho, 3e9, omit_axial_loss)
+}
+
+fn fiber_elastic_pack(rho: f64, young: f64, omit_axial_loss: bool) -> NormalizedPack {
     let mut claims = ClaimSet::new();
     for (key, dims, value) in [
         ("density", Density::DIMS, rho),
-        ("young_modulus", Pressure::DIMS, 3e9),
+        ("young_modulus", Pressure::DIMS, young),
         (ETA, DynViscosity::DIMS, 50.0),
         (YOUNG_VISCOSITY_PROPERTY, DynViscosity::DIMS, 50.0),
     ] {
@@ -324,7 +328,7 @@ fn contact_ready(
     cx: &Cx<'_>, gate: &CancelGate, tension: f64, profile: &str,
 ) -> Ready {
     let mut spec = contact_spec();
-    spec.bow_fibers.as_mut().unwrap().tension_n = tension;
+    spec.bow_fibers.as_mut().unwrap().prestress = StringPrestress::FixedTension(tension);
     spec.compile_with_profiles(
         cx, gate, None, Some(crate::stops::Profile::parse(profile.as_bytes()).unwrap()),
         |name| Ok(if name == "fiber.fsmatpk" {
@@ -937,4 +941,154 @@ fn fiber_control_ticks_activate_targets_for_the_following_mechanical_endpoint() 
             }
         }
     });
+}
+
+fn support_spec(support: &str) -> input::Spec {
+    input::Spec::parse(include_str!("../fiber-ribbon.material-strings")
+        .replace("48000 4096", "48000 64")
+        .replace("180 40 0.4", &format!("180 {support} 0.4")).as_bytes()).unwrap()
+}
+
+fn compile_fiber_source(spec: &input::Spec, source: NormalizedPack, gate: &CancelGate)
+    -> Result<(fs_couple::fiber_ribbon::TensionedFiberRibbon, Catalog)>
+{
+    let mut catalog = Catalog::new();
+    let model = spec.bow_fibers.as_ref().unwrap().compile(
+        spec, &mut catalog, &mut |_| Ok(source.clone().into()), gate)?;
+    Ok((model, catalog))
+}
+
+#[test]
+fn fixed_fiber_extension_uses_material_stiffness_and_physical_count_not_ribbon_cells() {
+    let gate = CancelGate::new_clock_free();
+    let base = support_spec("fixed-extension 0.594 0.05");
+    for (count, cells, young) in [(180, 3, 3e9), (360, 3, 3e9), (180, 5, 3e9), (180, 3, 6e9)] {
+        let mut spec = base.clone();
+        spec.bow_fibers.as_mut().unwrap().fiber_count = count;
+        spec.bow_ribbon.as_mut().unwrap().1 = cells;
+        let (model, catalog) = compile_fiber_source(&spec, fiber_elastic_pack(1300.0, young, false), &gate).unwrap();
+        let area = core::f64::consts::PI * 0.00004_f64.powi(2);
+        let strain = (0.6 - 0.594) / 0.594;
+        let expected = count as f64 * young * area * strain;
+        assert!((model.geometry().tension_n - expected).abs() < 1e-12 * expected);
+        let mass = count as f64 * 1300.0 * area * 0.6;
+        assert!((model.mass_kg() - mass).abs() < 1e-12 * mass);
+        let k = core::f64::consts::PI / 0.6;
+        let axial = (young / 1300.0).sqrt() * k;
+        let normal = (young / 1300.0 * (strain * k*k + 0.00004_f64.powi(2) / 4.0 * k.powi(4))).sqrt();
+        assert!((model.cell_model().modes()[0].angular_frequency_rad_s - axial).abs() < 1e-10);
+        assert!((model.cell_model().modes()[2].angular_frequency_rad_s - normal).abs() < 1e-10);
+        assert_eq!(model.axial_material().elastic().layers()[0].material.card_identity(),
+            catalog["fiber.fsmatpk"].card.content_hash());
+        assert_eq!(spec.bow_fibers.as_ref().unwrap().prestress,
+            StringPrestress::FixedExtension { stress_free_length_m: 0.594, linear_strain_limit: 0.05 });
+    }
+    // The original numerical field remains an independent, maintained TOTAL force.
+    for young in [3e9, 6e9] {
+        let (model, _) = compile_fiber_source(&support_spec("40"),
+            fiber_elastic_pack(1300.0, young, false), &gate).unwrap();
+        assert_eq!(model.geometry().tension_n, 40.0);
+    }
+}
+
+fn thermal_fiber_pack(factor: f64) -> NormalizedPack {
+    use fs_material::state_point::{LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY as ALPHA,
+        INVERSE_TEMPERATURE_DIMS};
+    let mut claims = fiber_pack(1300.0, false).claims().clone();
+    let provenance = Provenance {
+        source: "manufactured piecewise fiber expansion; not measured horsehair".into(),
+        license: "CC0-1.0".into(), artifact: Some(fs_blake3::ContentHash([27; 32])),
+    };
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: "manufactured fiber".into(), method: "analytic piecewise alpha(T)".into(),
+        artifact: fs_blake3::ContentHash([27; 32]), caveats: "not measured material data".into(),
+        provenance: provenance.clone(),
+    }).unwrap();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(ALPHA, INVERSE_TEMPERATURE_DIMS),
+        value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: fs_qty::Temperature::DIMS,
+            knots: [(280.0,1e-5),(290.0,1e-5),(295.0,3e-5),(300.0,1e-5),(320.0,1e-5)]
+                .map(|(t, alpha)| (t, factor * alpha)).to_vec(), dims: INVERSE_TEMPERATURE_DIMS },
+        validity: ValidityDomain::unconstrained().with("T",280.0,320.0).with("omega",0.0,200_000.0),
+        uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![observation], provenance,
+    }).unwrap();
+    let pack = NormalizedPack::new("thermal-fiber", "manufactured-test-v1",
+        fs_blake3::ContentHash([27;32]), "manufactured redistribution permitted",
+        claims, vec![], vec![]).unwrap();
+    NormalizedPack::from_bytes(&pack.to_bytes()).unwrap()
+}
+
+#[test]
+fn source_fiber_expansion_changes_contact_load_and_sound_in_the_original_joint_owner() {
+    scoped(|cx, gate| {
+        let text = include_str!("../fiber-contact.material-strings")
+            .replace("48000 4096", "48000 64")
+            .replace("state 293.15", "state 300")
+            .replace("180 40 0.4", "180 thermal-extension 0.594 0.05 290 0.4");
+        let make = |factor| input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(
+            cx, gate, None, Some(crate::stops::Profile::parse(
+                include_str!("../fiber-contact.stops").as_bytes()).unwrap()),
+            |name| Ok(if name == "fiber.fsmatpk" { thermal_fiber_pack(factor) }
+                else { pack(name, 7800.0, 200_000.0, None) })).unwrap();
+        let mut low = make(1.0);
+        let mut high = make(20.0);
+        assert_eq!(low.spec.bytes, high.spec.bytes);
+        assert_ne!(low.catalog["fiber.fsmatpk"].pack.content_hash(),
+            high.catalog["fiber.fsmatpk"].pack.content_hash());
+        for (run, factor) in [(&low, 1.0), (&high, 20.0)] {
+            let model = run.performance.bank().source().fiber_ribbon().unwrap().model();
+            let ea = 3e9 * core::f64::consts::PI * 0.00004_f64.powi(2);
+            // The crossed alpha knot contributes 0.0002; endpoint alpha*dT
+            // would give 0.0001 and therefore the wrong installed preload.
+            let expected = 180.0 * ea * ((0.6 - 0.594) / 0.594 - factor * 0.0002);
+            assert!((model.geometry().tension_n - expected).abs() < 1e-11);
+            assert_eq!(run.spec.bow_fibers.as_ref().unwrap().thermal_reference_kelvin, Some(290.0));
+            assert_eq!(model.axial_material().elastic().layers()[0].material.card_identity(),
+                run.catalog["fiber.fsmatpk"].card.content_hash());
+        }
+        let first = low.performance.bank().source().fiber_ribbon().unwrap().component_start();
+        for (a, b) in low.performance.bank().system().components()[..first].iter()
+            .zip(&high.performance.bank().system().components()[..first]) {
+            assert_eq!(a.modes(), b.modes(), "only the fiber expansion source changed");
+        }
+        let (mut load_change, mut pressure_change) = (0.0, 0.0);
+        for _ in 0..64 {
+            let (mut a, mut b) = ([0.0], [0.0]);
+            low.performance.block(&mut a).unwrap();
+            high.performance.block(&mut b).unwrap();
+            pressure_change += (a[0] - b[0]).abs();
+            let a = low.performance.bank().system().last_frame().unwrap();
+            let b = high.performance.bank().system().last_frame().unwrap();
+            load_change += a.ports.iter().zip(&b.ports)
+                .map(|(a, b)| (a.normal_force_n - b.normal_force_n).abs()).sum::<f64>();
+            assert!(a.energy_residual_j.abs() <= a.energy_tolerance_j);
+            assert!(b.energy_residual_j.abs() <= b.energy_tolerance_j);
+        }
+        assert!(load_change > 1e-10 && pressure_change > 1e-12);
+    });
+}
+
+#[test]
+fn fiber_supports_refuse_missing_expansion_slack_strain_and_uninitialized_memory() {
+    let raw = include_str!("../fiber-ribbon.material-strings");
+    for support in ["fixed-extension 0.6 0.05", "fixed-extension 0.61 0.05",
+        "fixed-extension 0.594 0.001", "fixed-extension 0.594 1",
+        "thermal-extension 0.594 0.05 0", "thermal-extension NaN 0.05 290"] {
+        assert!(input::Spec::parse(raw.replace("180 40 0.4", &format!("180 {support} 0.4")).as_bytes()).is_err(), "{support}");
+    }
+    let fixed = raw.replace("180 40 0.4", "180 fixed-extension 0.594 0.05 0.4")
+        .replace("forces retain", "bow_fiber_memory 24 young_modulus 0\nforces retain");
+    assert!(input::Spec::parse(fixed.as_bytes()).is_err(),
+        "a maintained-force spectrum does not initialize fixed-extension preload history");
+    let gate = CancelGate::new_clock_free();
+    let mut thermal = support_spec("thermal-extension 0.594 0.05 290");
+    thermal.temperature = 300.0;
+    assert!(compile_fiber_source(&thermal, fiber_pack(1300.0, false), &gate).is_err());
+    assert!(compile_fiber_source(&thermal, thermal_fiber_pack(100.0), &gate).is_err(),
+        "thermal slack cannot become a clamped positive tension");
+    assert!(compile_fiber_source(&thermal, thermal_fiber_pack(1000.0), &gate).is_err(),
+        "the shared owner must admit thermal and elastic strain separately");
+    thermal.bow_fibers.as_mut().unwrap().thermal_reference_kelvin = Some(270.0);
+    assert!(compile_fiber_source(&thermal, thermal_fiber_pack(1.0), &gate).is_err());
 }

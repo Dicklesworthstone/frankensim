@@ -11,6 +11,10 @@ use fs_material::section::relaxation::{
 };
 use fs_material::section::{
     ConcentricElasticSection, ConcentricMaterialLayer, axial::YOUNG_VISCOSITY_PROPERTY,
+    thermal::ConcentricThermoelasticSection,
+};
+use fs_couple::material_assembly::concentric::{
+    with_concentric_section, with_concentric_thermal_extension,
 };
 use fs_qty::Time;
 
@@ -60,7 +64,11 @@ pub struct Input {
     pub radius_m: f64,
     pub length_m: f64,
     pub fiber_count: usize,
-    pub tension_n: f64,
+    /// FixedTension is the TOTAL bundle force. FixedExtension applies the same
+    /// support spacing to each original fiber before summing their forces.
+    pub prestress: StringPrestress,
+    /// Stress-free reference temperature for the explicit thermal-extension form.
+    pub thermal_reference_kelvin: Option<f64>,
     pub station_fraction: f64,
     pub axial_modes: usize,
     pub transverse_modes: usize,
@@ -85,8 +93,12 @@ impl Input {
                     .into(),
             );
         }
+        self.validate_support()?;
         if let Some(memory) = &self.memory {
             memory.requirements()?;
+            if !matches!(self.prestress, StringPrestress::FixedTension(_)) {
+                return Err("fixed-extension fiber preload requires an initialized hereditary strain history; use an explicit maintained force with fiber memory".into());
+            }
             if self.strain.is_some() {
                 return Err("fiber relaxation requires linear strain; nonlinear material-history transport is not available".into());
             }
@@ -158,6 +170,71 @@ impl Input {
             .ok_or_else(|| "fiber mode count overflow".into())
     }
 
+    /// Admit the authored boundary condition before any material-pack I/O.
+    /// Thermal expansion may make an initially shorter support spacing taut;
+    /// the source-bound section, not this syntax check, decides its resultant.
+    fn validate_support(&self) -> Result<()> {
+        if !self.length_m.is_finite() || self.length_m <= 0.0 {
+            return Err("fiber support spacing must be finite and positive".into());
+        }
+        match self.prestress {
+            StringPrestress::FixedTension(tension) => {
+                if !tension.is_finite() || tension <= 0.0 || self.thermal_reference_kelvin.is_some() {
+                    return Err("maintained fiber tension must be positive and cannot also prescribe thermal extension".into());
+                }
+            }
+            StringPrestress::FixedExtension { stress_free_length_m, linear_strain_limit } => {
+                if !stress_free_length_m.is_finite() || stress_free_length_m <= 0.0
+                    || !linear_strain_limit.is_finite()
+                    || !(0.0 < linear_strain_limit && linear_strain_limit < 1.0)
+                {
+                    return Err("fiber extension needs a positive stress-free length and a strain limit in (0,1)".into());
+                }
+                let strain = (self.length_m - stress_free_length_m) / stress_free_length_m;
+                if !strain.is_finite() || strain.abs() > linear_strain_limit
+                    || (self.thermal_reference_kelvin.is_none() && strain <= 0.0)
+                    || self.thermal_reference_kelvin.is_some_and(|t| !t.is_finite() || t <= 0.0)
+                {
+                    return Err("fiber support extension or reference temperature is inadmissible".into());
+                }
+            }
+            _ => return Err("fiber supports require maintained total tension or explicit fixed extension".into()),
+        }
+        Ok(())
+    }
+
+    // The original section/support owner computes ONE physical fiber's force.
+    // Numerical ribbon cells do not enter this boundary condition. The model
+    // later partitions the original bundle force, mass and stiffness together.
+    fn support_tension_n(&self, section: &ConcentricElasticSection, catalog: &Catalog) -> Result<f64> {
+        self.validate_support()?;
+        if let StringPrestress::FixedTension(tension) = self.prestress {
+            return Ok(tension);
+        }
+        let input = PrestressedString {
+            length_m: self.length_m, tension_n: 0.0, lin_density_kg_m: 1.0,
+            axial_stiffness_n: 1.0, width_m: 1.0, n_modes: self.transverse_modes,
+            damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0,
+            kelvin_voigt_bending: None, relaxation_bending: None,
+            polarization_detune: 0.0, moving_end: false, tension_loss_factor: None,
+        };
+        let fiber = if let Some(reference) = self.thermal_reference_kelvin {
+            let StringPrestress::FixedExtension { stress_free_length_m, linear_strain_limit } = self.prestress else {
+                return Err("thermal fiber supports require a fixed-extension prescription".into());
+            };
+            let path = construction::expansion(&self.pack, &section.layers()[0].material, catalog, reference)?;
+            let thermal = ConcentricThermoelasticSection::try_new(section.clone(), vec![path])?;
+            with_concentric_thermal_extension(input, &thermal, stress_free_length_m, linear_strain_limit)?.0
+        } else {
+            with_concentric_section(input, section, self.prestress)?
+        };
+        let total = fiber.tension_n * self.fiber_count as f64;
+        if !total.is_finite() || total <= 0.0 {
+            return Err("source-derived total fiber tension is unrepresentable".into());
+        }
+        Ok(total)
+    }
+
     pub fn compile(
         &self,
         spec: &input::Spec,
@@ -215,6 +292,7 @@ impl Input {
         let (width_m, cells) = spec
             .bow_ribbon
             .ok_or("bow_fibers requires a physical ribbon")?;
+        let tension_n = self.support_tension_n(&section, catalog)?;
         let memory = self
             .memory
             .as_ref()
@@ -229,7 +307,7 @@ impl Input {
                 length_m: self.length_m,
                 width_m,
                 fiber_count: self.fiber_count,
-                tension_n: self.tension_n,
+                tension_n,
             },
             FiberRibbonResolution {
                 cells,

@@ -907,9 +907,24 @@ impl Spec {
         let bow_fibers = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_fibers") {
             let mut row = r.row("bow_fibers")?;
-            let mut input = fibers::Input { pack: row.path()?, radius_m: row.positive()?,
-                length_m: row.positive()?, fiber_count: row.count(1 << 24)?,
-                tension_n: row.positive()?, station_fraction: row.scalar()?,
+            let pack = row.path()?;
+            let radius_m = row.positive()?;
+            let length_m = row.positive()?;
+            let fiber_count = row.count(1 << 24)?;
+            let (prestress, thermal_reference_kelvin) = match row.words.clone().next() {
+                Some("fixed-extension") | Some("thermal-extension") => {
+                    let thermal = row.word()? == "thermal-extension";
+                    let support = StringPrestress::FixedExtension {
+                        stress_free_length_m: row.positive()?,
+                        linear_strain_limit: row.positive()?,
+                    };
+                    let reference = if thermal { Some(row.positive()?) } else { None };
+                    (support, reference)
+                }
+                _ => (StringPrestress::FixedTension(row.positive()?), None),
+            };
+            let mut input = fibers::Input { pack, radius_m, length_m, fiber_count,
+                prestress, thermal_reference_kelvin, station_fraction: row.scalar()?,
                 axial_modes: row.count(MAX_MODES)?, transverse_modes: row.count(MAX_MODES)?,
                 memory: None, strain: None, motion: None, support_program: None, normal_program: None,
             };

@@ -298,6 +298,48 @@ The optional record follows `bow_ribbon WIDTH_M CELLS`:
 bow_fibers PACK RADIUS_M LENGTH_M FIBER_COUNT TOTAL_TENSION_N CONTACT_FRACTION AXIAL_MODES NORMAL_MODES
 ```
 
+The numeric tension field specifies the maintained force of the **entire physical
+bundle**, independently of its material stiffness. To keep the same tightened
+support spacing while changing fiber material, replace that field with one of
+these explicit boundary conditions:
+
+```text
+bow_fibers PACK RADIUS_M LENGTH_M FIBER_COUNT fixed-extension L0_M STRAIN_LIMIT CONTACT_FRACTION AXIAL_MODES NORMAL_MODES
+bow_fibers PACK RADIUS_M LENGTH_M FIBER_COUNT thermal-extension L0_M STRAIN_LIMIT REFERENCE_K CONTACT_FRACTION AXIAL_MODES NORMAL_MODES
+```
+
+`LENGTH_M` is the current distance between the rigid fiber supports. `L0_M`
+is each fiber's stress-free length at the current material state for
+`fixed-extension`, or at `REFERENCE_K` for `thermal-extension`. The original
+section/support owner computes each fiber's tensile force from the same
+resolved `young_modulus` and cross-section used for its waves, then multiplies
+by the physical fiber count exactly once. Refining ribbon cells only partitions
+that bundle. No nominal force field is silently overridden and no pitch is
+retuned. The original source pack, query, support prescription and reference
+temperature remain retained by the native input and material catalog.
+
+The thermal form requires the fiber pack's
+`linear_thermal_expansion_coefficient` over the complete path from
+`REFERENCE_K` to the material `state` temperature. The shared material owner
+integrates every crossed temperature knot; endpoint alpha times temperature
+change is not substituted. It checks total, thermal and elastic strains against
+`STRAIN_LIMIT` in `(0,1)` and refuses missing data, unsupported paths and a
+slack or compressed resultant. This is frozen-state, small-strain initialization
+with explicitly supplied current geometry: it does not predict bow-stick
+expansion, changing support separation, live thermal evolution or Poisson
+contraction. `STRAIN_LIMIT` is an admission assumption, not a measured yield
+limit. Optional `bow_fiber_strain` retains its separate additional-motion limits.
+
+For example, the existing manufactured `fiber-contact.material-strings`
+fixture can replace `180 40 0.4` with
+`180 fixed-extension 0.594 0.05 0.4`, using its unchanged fiber pack and
+`fiber-contact.stops`. With the supplied 0.6 m span, 40 micrometre radius and
+3 GPa modulus, that boundary condition gives about 27.42 N for 180 fibers.
+Changing the fiber modulus now changes installed tension as well as EA/EI.
+With the normal-contact profile, the resulting fiber deflection changes the
+solved bow load, traction and the existing string/body pressure output.
+The plain prescribed-load ribbon does not infer this normal-contact geometry.
+
 An independently characterized isotropic Young relaxation spectrum can be
 attached immediately after `bow_fibers`:
 
@@ -316,7 +358,10 @@ emitted pressure. No spectrum is estimated from the requested sound.
 `MAX_STATES` bounds the complete ribbon history (cells × retained modes ×
 positive material arms), with a ceiling of 256; it does not cap or discard modes.
 The source must explicitly support the transient frequency range and the
-physical clock must resolve the selected relaxation times. Kelvin–Voigt
+physical clock must resolve the selected relaxation times. Fiber memory currently
+requires the numeric maintained-force support form; fixed-extension and thermal
+preloads refuse because the original owner does not initialize their hereditary
+prestrain histories. Kelvin–Voigt
 viscosities remain explicitly sourced parallel mechanisms; they are not inferred
 from the relaxation spectrum. This linear-strain law cannot yet be combined
 with `bow_fiber_strain`, whose nonlinear strain history requires a different
