@@ -20,21 +20,22 @@ use super::{FlueError, FlueResonator, FlueVoice};
 use crate::acoustic_realize::AcousticRealizeError;
 #[cfg(test)]
 use crate::flue_loop::FlueControl;
-use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
+#[cfg(test)]
+use crate::pcm_wav::baffled::RayleighMedium;
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::baffled::openings::RectangularOutletReceiver;
+use crate::pcm_wav::baffled::openings::duct::{
+    DuctOpening, DuctPressure, DuctRadiationSpec, DuctReconstruction, DuctView,
+};
+use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::GestureCompileError;
 use controls::ScheduledFlueControl;
-use fs_scenario::gesture::GestureSchedule;
 use fs_material::gas::GasState;
-#[cfg(test)]
-use crate::pcm_wav::baffled::RayleighMedium;
+use fs_scenario::gesture::GestureSchedule;
 #[cfg(test)]
 use fs_vfit::waveguide::network::NetworkNode;
-use crate::pcm_wav::baffled::openings::duct::{
-    DuctPressure, DuctView, DuctOpening, DuctReconstruction, DuctRadiationSpec,
-};
 
 /// Finite physical output and explicit observation/compilation limits.
 #[derive(Clone, Copy, Debug)]
@@ -109,6 +110,7 @@ struct MouthPressure {
     input: FlueMouthRadiation,
     inlet_node: usize,
     receiver: BaffledPressure,
+    observer_gas: Option<GasPropagationReport>,
     trace: Vec<f64>,
     filled: usize,
 }
@@ -311,10 +313,15 @@ impl FlueOutletPerformance {
     /// the free-field geometry of an orchestral flute. Mouth and outlet openings
     /// must not overlap. Geometry is frozen; the admitted pressure/angle controls
     /// change excitation without changing either observed surface.
-    pub fn with_mouth_radiation(mut self, input: FlueMouthRadiation)
-        -> Result<Self, GestureCompileError>
-    {
-        if self.poisoned || self.voice.samples_rendered() != 0 || self.mouth.is_some() {
+    pub fn with_mouth_radiation(
+        mut self,
+        input: FlueMouthRadiation,
+    ) -> Result<Self, GestureCompileError> {
+        if self.poisoned
+            || self.voice.samples_rendered() != 0
+            || self.mouth.is_some()
+            || self.receiver.observer_gas().is_some()
+        {
             return Err(invalid("mouth observation requires a fresh performance and exactly one source mouth"));
         }
         let network = self.voice.network().expect("admitted physical flue graph");
@@ -348,8 +355,78 @@ impl FlueOutletPerformance {
                 BaffledPressure::rectangular_outlet_multirate_differentiating(size,
                     mechanics_rate_hz, output_rate_hz, geometry, exterior.into()),
         }.map_err(|e| GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(e))))?;
-        self.mouth = Some(MouthPressure { input, inlet_node, receiver,
+        self.mouth = Some(MouthPressure { input, inlet_node, receiver, observer_gas: None,
             trace: vec![0.0; self.mechanics_per_output], filled: 0 });
+        Ok(self)
+    }
+
+    /// Carry the explicit exterior gas law through the mouth and every terminal
+    /// path. Attach all openings first. Each original surface retains its own
+    /// distance, phase and absorption; a shared numerical padding keeps the
+    /// separately prepared mouth and terminal pressures on the same time origin.
+    /// This changes observation only, leaving the jet and bore state untouched.
+    /// Omission retains the original lossless propagation and arithmetic.
+    pub fn with_observer_gas(
+        mut self,
+        propagation: &GasPropagation,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<Self, GestureCompileError> {
+        if self.poisoned
+            || self.voice.samples_rendered() != 0
+            || self.receiver.observer_gas().is_some()
+        {
+            return Err(invalid("flue gas observation requires one cold attachment"));
+        }
+        let observation_error = |error| {
+            GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Nonlinear(error)))
+        };
+        let mut receiver = self
+            .receiver
+            .with_observer_gas(propagation, &mut || gate.is_requested())
+            .map_err(observation_error)?;
+        let mut mouth_receiver = if let Some(mouth) = &self.mouth {
+            Some(
+                BaffledPressure::rectangular_outlet_multirate_gas_differentiating(
+                    mouth.input.size_m(&self.voice.geometry),
+                    self.mechanics_rate_hz,
+                    self.config.sample_rate_hz,
+                    RectangularOutletReceiver {
+                        center_m: mouth.input.center_m,
+                        position_m: self.config.receiver.position_m,
+                        cells: mouth.input.cells,
+                        maximum_frequency_hz: self.config.receiver.maximum_frequency_hz,
+                    },
+                    receiver.exterior_gas(),
+                    propagation,
+                    &mut || gate.is_requested(),
+                )
+                .map_err(observation_error)?,
+            )
+        } else {
+            None
+        };
+        if let Some((mouth, report)) = &mut mouth_receiver {
+            let latency = receiver
+                .observer_gas()
+                .expect("prepared terminal gas report")
+                .additional_latency_samples
+                .max(report.additional_latency_samples);
+            receiver
+                .align_gas_latency(latency)
+                .map_err(observation_error)?;
+            mouth
+                .align_gas_latency(report, latency)
+                .map_err(observation_error)?;
+        }
+        if gate.is_requested() {
+            return Err(invalid("flue material observation cancelled"));
+        }
+        self.receiver = receiver;
+        if let Some((receiver, report)) = mouth_receiver {
+            let mouth = self.mouth.as_mut().expect("original physical mouth");
+            mouth.receiver = receiver;
+            mouth.observer_gas = Some(report);
+        }
         Ok(self)
     }
 
@@ -403,6 +480,16 @@ impl FlueOutletPerformance {
     /// Actual rectangular mouth receiver, absent when only terminals are selected.
     #[must_use]
     pub fn mouth_receiver(&self) -> Option<&BaffledPressure> { self.mouth.as_ref().map(|m| &m.receiver) }
+    /// Source gas propagation and path reports for all terminal/tone-hole mouths.
+    pub fn observer_gas(&self) -> Option<&GasPropagationReport> {
+        self.receiver.observer_gas()
+    }
+    /// The same exterior law and common numerical padding on the source mouth.
+    pub fn mouth_observer_gas(&self) -> Option<&GasPropagationReport> {
+        self.mouth
+            .as_ref()
+            .and_then(|mouth| mouth.observer_gas.as_ref())
+    }
     /// Original mouth geometry placement and surface resolution.
     #[must_use]
     pub fn mouth_radiation(&self) -> Option<FlueMouthRadiation> { self.mouth.as_ref().map(|m| m.input) }

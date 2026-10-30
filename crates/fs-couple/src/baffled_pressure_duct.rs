@@ -1,9 +1,11 @@
 //! Source-independent binding of physical duct ports to the shared receiver.
 //! Jets and single/paired valves provide accepted node flows; this owns only
 //! geometry admission and complete mechanics-to-audio observation packets.
-use super::{BaffledPressure, CircularOpening, CircularOutletReceiver, RayleighMedium,
-    MAX_RAYLEIGH_INPUTS};
+use super::{
+    BaffledPressure, CircularOpening, CircularOutletReceiver, MAX_RAYLEIGH_INPUTS, RayleighMedium,
+};
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec};
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use fs_material::gas::GasState;
 
 /// Borrow the realized geometry and its matching ordered regional gas states.
@@ -71,7 +73,9 @@ pub struct DuctRadiationSpec {
 pub struct DuctPressure {
     source: DuctRadiationSpec,
     exterior: GasState,
+    geometry: Vec<CircularOpening>,
     receiver: BaffledPressure,
+    observer_gas: Option<GasPropagationReport>,
     trace: Vec<f64>,
     ratio: usize,
     filled: usize,
@@ -134,7 +138,70 @@ impl DuctPressure {
                     &geometry, mechanics_rate_hz, output_rate_hz, source.receiver, medium),
         }?;
         let trace = vec![0.0; source.openings.len() * ratio]; // <= 128 * 16
-        Ok(Self { source, exterior, receiver, trace, ratio, filled: 0, observed: 0 })
+        Ok(Self {
+            source,
+            exterior,
+            geometry,
+            receiver,
+            observer_gas: None,
+            trace,
+            ratio,
+            filled: 0,
+            observed: 0,
+        })
+    }
+
+    /// Apply one explicit material propagation law to every admitted opening.
+    /// Original geometry, signed port ordering, exterior and source/output clocks
+    /// are retained. Absorption and dispersion act on each surface path before
+    /// pressure is summed. The mechanical source and its terminal loads do not
+    /// change. A cold differentiating receiver is required; a finite-difference
+    /// receiver is never silently replaced by a different reconstruction.
+    pub fn with_observer_gas(
+        mut self,
+        propagation: &GasPropagation,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, String> {
+        if self.observed != 0 || self.observer_gas.is_some() {
+            return Err("duct gas observation requires one cold attachment".into());
+        }
+        let DuctReconstruction::Differentiating {
+            mechanics_rate_hz,
+            output_rate_hz,
+        } = self.source.reconstruction
+        else {
+            return Err(
+                "duct gas observation requires explicit differentiating reconstruction".into(),
+            );
+        };
+        let (receiver, report) = BaffledPressure::circular_openings_multirate_gas_differentiating(
+            &self.geometry,
+            mechanics_rate_hz,
+            output_rate_hz,
+            self.source.receiver,
+            &self.exterior,
+            propagation,
+            cancelled,
+        )?;
+        if cancelled() {
+            return Err("duct material observation cancelled".into());
+        }
+        self.receiver = receiver;
+        self.observer_gas = Some(report);
+        Ok(self)
+    }
+
+    /// Align independently prepared apertures without changing their physical
+    /// relative flight times or dispersion. Only common numerical padding moves.
+    pub(crate) fn align_gas_latency(&mut self, latency: usize) -> Result<(), String> {
+        if self.observed != 0 {
+            return Err("duct gas latency alignment requires a cold receiver".into());
+        }
+        let report = self
+            .observer_gas
+            .as_mut()
+            .ok_or("duct gas latency alignment requires material propagation")?;
+        self.receiver.align_gas_latency(report, latency)
     }
 
     /// Original port ordering, chosen environment and reconstruction controls.
@@ -143,6 +210,10 @@ impl DuctPressure {
     pub const fn exterior_gas(&self) -> &GasState { &self.exterior }
     /// Shared kernel/history diagnostics; reading does not advance a clock.
     pub const fn receiver(&self) -> &BaffledPressure { &self.receiver }
+    /// Original material and path-filter accounts, absent for default propagation.
+    pub fn observer_gas(&self) -> Option<&GasPropagationReport> {
+        self.observer_gas.as_ref()
+    }
     /// Complete physical frames needed for one output frame.
     pub const fn mechanics_per_output(&self) -> usize { self.ratio }
     /// Successfully ingested physical samples, including the pending packet.

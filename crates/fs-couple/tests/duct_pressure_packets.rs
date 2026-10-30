@@ -1,9 +1,11 @@
 //! Actual shared receiver and caller-owned accepted port flows, not a new solver.
 use fs_couple::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
+use fs_couple::pcm_wav::baffled::gas::{GasPropagation, GasPropagationLimits};
+use fs_couple::pcm_wav::baffled::openings::{
+    CircularOpening,
+    duct::{DuctOpening, DuctPressure, DuctRadiationSpec, DuctReconstruction, DuctView},
+};
 use fs_couple::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
-use fs_couple::pcm_wav::baffled::openings::{CircularOpening, duct::{
-    DuctOpening, DuctPressure, DuctRadiationSpec, DuctReconstruction, DuctView,
-}};
 use fs_material::gas::{GasSpec, GasState};
 
 fn gas(t: f64) -> GasState {
@@ -99,4 +101,106 @@ fn incomplete_gas_address_and_environment_data_never_fall_back() {
     assert!(receiver(s).is_err());
     let mut s = spec(); s.openings.truncate(1);
     assert!(DuctPressure::new(&[DuctView { graph: &graph(), gases: &[] }],s).is_err());
+}
+
+#[test]
+fn material_paths_retain_original_ports_exterior_and_multirate_packets() {
+    let s = spec();
+    let law = GasPropagation::classical(GasPropagationLimits::surface_reference());
+    let mut actual = receiver(s.clone())
+        .unwrap()
+        .with_observer_gas(&law, &mut || false)
+        .unwrap();
+    let exterior = s.exterior.unwrap();
+    let report = actual.observer_gas().unwrap();
+    assert_eq!(report.gas, exterior);
+    assert_eq!(report.surface_filter_indices.len(), 2 * 4 * 16);
+    assert!(
+        report.filters.len() > 1,
+        "different surface distances must remain distinct"
+    );
+    let shortest = report
+        .filters
+        .iter()
+        .map(|r| r.range_m)
+        .fold(f64::INFINITY, f64::min);
+    let longest = report.filters.iter().map(|r| r.range_m).fold(0.0, f64::max);
+    assert!(longest - shortest > 0.005);
+    let openings: Vec<_> = s
+        .openings
+        .iter()
+        .map(|p| CircularOpening {
+            center_m: p.center_m,
+            radius_m: 0.006,
+        })
+        .collect();
+    let (mut reference, _) = BaffledPressure::circular_openings_multirate_gas_differentiating(
+        &openings,
+        192_000,
+        48_000,
+        s.receiver,
+        &exterior,
+        &law,
+        &mut || false,
+    )
+    .unwrap();
+    let mut trace = [0.0; 8];
+    let mut copy = None::<DuctPressure>;
+    for n in 0..2400 {
+        let q = flows(n);
+        trace[2 * (n % 4)..2 * (n % 4) + 2].copy_from_slice(&q);
+        let pressure = actual
+            .push_frame(|network, node| {
+                assert_eq!(node, 1);
+                Some(q[network])
+            })
+            .unwrap();
+        if let Some(c) = &mut copy {
+            assert_eq!(
+                pressure,
+                c.push_frame(|network, _| Some(q[network])).unwrap()
+            );
+        } else if n == 201 {
+            copy = Some(actual.clone());
+        }
+        if n % 4 == 3 {
+            assert_eq!(pressure, Some(reference.step_trace(&trace).unwrap()));
+        } else {
+            assert_eq!(pressure, None);
+        }
+    }
+    assert_eq!(actual.source(), &s);
+    assert_eq!(actual.mechanical_samples(), 2400);
+    assert!(actual.with_observer_gas(&law, &mut || false).is_err());
+}
+
+#[test]
+fn material_observation_refuses_late_repeated_cancelled_or_implicit_reconstruction() {
+    let law = GasPropagation::classical(GasPropagationLimits::surface_reference());
+    let mut warm = receiver(spec()).unwrap();
+    warm.push_frame(|_, _| Some(0.0)).unwrap();
+    assert!(warm.with_observer_gas(&law, &mut || false).is_err());
+    let cold = receiver(spec()).unwrap();
+    assert!(cold.clone().with_observer_gas(&law, &mut || true).is_err());
+    assert_eq!(cold.mechanical_samples(), 0);
+    let selected = cold.with_observer_gas(&law, &mut || false).unwrap();
+    assert!(selected.with_observer_gas(&law, &mut || false).is_err());
+    let mut s = spec();
+    s.reconstruction = DuctReconstruction::FiniteDifference {
+        sample_rate_hz: 48_000,
+    };
+    assert!(
+        receiver(s)
+            .unwrap()
+            .with_observer_gas(&law, &mut || false)
+            .is_err()
+    );
+    let mut bounded = law;
+    bounded.limits.max_unique_paths = 1;
+    assert!(
+        receiver(spec())
+            .unwrap()
+            .with_observer_gas(&bounded, &mut || false)
+            .is_err()
+    );
 }

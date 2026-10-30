@@ -996,7 +996,14 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
     let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();
     let phase_error: f64 = details.iter().map(|s|s.phase_error_bound_rad).sum();
     let input_hash = i.input_hash.to_hex();
-    let gas_sources = super::thermochemical::provenance(p.gas_records());
+    let mut gas_sources = super::thermochemical::provenance(p.gas_records());
+    if let Some(report) = renderer.observer_gas() {
+        gas_sources.push_str(&format!(
+            ",\"observer_gas\":{},\"mouth_observer_gas\":{}",
+            super::duct_metadata::observer_gas_provenance(Some(report)),
+            super::duct_metadata::observer_gas_provenance(renderer.mouth_observer_gas())
+        ));
+    }
     let receiver = renderer.config().receiver;
     let duct_json = flue_duct_provenance(renderer);
     let wall_json = flue_wall_provenance(p);
@@ -1400,4 +1407,3 @@ mod tests {
         assert!(load(physical.as_bytes(), 37, ObservationPolicy::Acceptance).is_ok());
     }
 }
-

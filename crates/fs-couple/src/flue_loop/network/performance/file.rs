@@ -17,11 +17,19 @@
 //! history; it does not replace radiation. Memoryless reflections, driven
 //! moving apertures and mutual-radiation ports refuse this local closure.
 //! AREA_RATIO is in (0,1], MAXIMUM_MACH in (0,0.3]; SOURCE_TOKEN is mandatory.
+//!
+//! Optional `observer_gas LAW MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS`
+//! immediately after `receiver` selects `stokes-kirchhoff` or `lossless`.
+//! `observer_gas molecular MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS LAW`
+//! instead appends the shared material relaxation grammar. The exact exterior
+//! source record binds that law, including its composition. Every terminal and
+//! optional mouth path uses it before their signed pressure sum. Omitting the
+//! row preserves the original lossless observer; bore and source physics stay
+//! unchanged by this observation-only selection.
 
 use super::{FlueMouthRadiation, FlueOutletConfig, FlueOutletPerformance, FlueRadiationInput};
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
-use crate::bernoulli_aperture::viscothermal::ViscothermalSectionSpec;
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::bernoulli_aperture::radiation::environment::multiport::input::{
     MimoRadiationInput, MimoRadiationInputError, MimoRadiationRecord,
@@ -29,20 +37,22 @@ use crate::bernoulli_aperture::radiation::environment::multiport::input::{
 use crate::bernoulli_aperture::radiation::environment::multiport::source::{
     ComputedBaffledInput, ComputedBaffledRecord, MimoSourceInput, MimoSourceRecord,
 };
+use crate::bernoulli_aperture::viscothermal::ViscothermalSectionSpec;
+use crate::flue_loop::network::{FlueNetworkSpec, FlueSourcePaths};
 use crate::flue_loop::window_radiation::{WindowFlux, WindowRadiationLoad, cut_up_piston};
 use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice};
-use crate::flue_loop::network::{FlueNetworkSpec, FlueSourcePaths};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
-use crate::pcm_wav::baffled::openings::duct::{
-    DuctOpening, DuctRadiationSpec, DuctReconstruction,
-};
+use crate::pcm_wav::baffled::gas::GasPropagation;
+use crate::pcm_wav::baffled::openings::duct::{DuctOpening, DuctRadiationSpec, DuctReconstruction};
 use crate::render::schedule::GestureCompileError;
 use fs_aeroac::jetcard::{JetCard, mint_tonal_interim_card};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::CancelGate;
 use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::gas::GasState;
-use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
+use fs_material::gas_species::input::{
+    GasInputError, GasRecord, ThermochemicalSources, read_gas_record,
+};
 use fs_scenario::gesture::{GestureSchedule, GestureTarget, GestureValue};
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 
@@ -366,12 +376,14 @@ impl FlueFilePerformance {
     /// calling the artifact loader.
     /// Walls, moving boundaries, mouth laws, controls and receiver clocks remain
     /// in their original owners. Omitting the MIMO selector never calls its loader.
-    pub fn from_bytes_with_all_sources(bytes: &[u8], max_block: usize, gate: &CancelGate,
+    pub fn from_bytes_with_all_sources(
+        bytes: &[u8],
+        max_block: usize,
+        gate: &CancelGate,
         sources: Option<&ThermochemicalSources<'_>>,
         mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
-        mut load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>)
-        -> Result<Self, FlueInputError>
-    {
+        mut load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>,
+    ) -> Result<Self, FlueInputError> {
         poll(gate)?;
         if bytes.len() > MAX_FLUE_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(0, "flue source exceeds its byte or callback budget"));
@@ -493,6 +505,19 @@ impl FlueFilePerformance {
         if receiver.maximum_frequency_hz > policy.maximum_frequency_hz {
             return Err(bad(rows.line, "fractional phase band must cover the receiver's declared band"));
         }
+        let observer_gas = if rows.next_is("observer_gas") {
+            let mut row = rows.row("observer_gas")?;
+            Some(
+                GasPropagation::read_record_for_gas(&mut row.fields, &exterior_record).map_err(
+                    |source| FlueInputError::Gas {
+                        line: row.line,
+                        source: GasInputError::Material(source),
+                    },
+                )?,
+            )
+        } else {
+            None
+        };
         let (outlet_node, additional_outlets) = duct.read_outlets(&mut rows)?;
         let aperture_size_m = read_mouth_aperture(&mut rows)?;
         let mouth_radiation = if rows.next_is("mouth_radiation") {
@@ -652,6 +677,11 @@ impl FlueFilePerformance {
         }
         if mouth_reaction {
             renderer = renderer.with_mouth_reaction(gate).map_err(FlueInputError::Performance)?;
+        }
+        if let Some(propagation) = observer_gas {
+            renderer = renderer
+                .with_observer_gas(&propagation, gate)
+                .map_err(FlueInputError::Performance)?;
         }
         poll(gate)?;
         let info = FluePerformanceInfo { input_hash: hash_domain("org.frankensim.fs-couple.flue-performance.v1",bytes),
