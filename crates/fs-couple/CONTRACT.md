@@ -12690,3 +12690,38 @@ original connections, numerical-accuracy refusal and exact retry.
 ## Continuing ambient-fluid changes on native rod trajectories
 
 `RodMotion::rebind_submerged_fluid_candidate` updates an already bound material-fluid environment at the accepted clock without changing pose, linear momentum, centroid spin, mass, inertia, supports, or step count. The candidate reevaluates the native response at the actual moving pose. `RodFluidRefresh` reports both coherent transport snapshots and the change in hydrostatic potential relative to the original reference geometry; that change is external parameter work, with zero instantaneous impulse and no invented heat. It does not represent the thermodynamic cost of replacing a finite reservoir. Subsequent native kicks include gravity and buoyancy forces and their actual rotating attachment couples in the external linear and angular impulse accounts; conservative potential work is not counted again as applied-wrench work. Failed admission or cancellation returns no changed trajectory. Focused environment tests cover data-driven sinking, neutral buoyancy and floating; analytic piecewise acceleration across a density change; eccentric strands with different mass and displacement centroids; gas-pressure changes; stationary reactions; and rejected or cancelled refreshes.
+
+
+## Simultaneous adhesive events on complete elastic networks
+
+`contact::adhesive_events::linear_network::multiple` resolves up to eight
+independent scalar junctions on the same complete mass-normalized network.
+Every original mode, modal damping term, rank-one spring/damper connection and
+rest extension remains in the shared matrix-free cell propagator. The scalar
+owner uses that same physical propagator and resistance quadrature.
+
+All sticking reactions solve one normalized Gram system; its orthogonal
+projection constrains only the active contact coordinates. Sliding uses each
+held kinetic capacity. Dense-polynomial roots locate the earliest stop or
+release across every junction, including hidden intervening stops. Events
+within the declared time resolution are applied together. Zero-velocity
+continuation retains the largest feasible sticking set; equally sized
+admissible alternatives refuse, rather than depending on contact ordering.
+Dependent or unresolved contact columns are refused without regularization.
+
+Per-junction slip, friction loss, impulse and impulse time moment remain
+separate from original modal/link damping and external work. Work uncertainty
+includes event timing, constraint projection, propagation and normalized-Gram
+conditioning; it must fit the original energy gate. These are numerical
+estimates, not interval event certificates. Active-set factors are cached,
+workspaces are preallocated, and aggregate contact, cell, operator, root and
+phase-trial budgets bound computation. Accepted state and phases belong to the
+outer physical transaction; refusal and cancellation preserve identical retry.
+
+The lane holds source capacities, local work columns, coefficients and external
+loads during each step. It does not supply vector Coulomb cones, redundant
+contact force distributions, changing normal geometry, nonlinear material
+memory, or acoustic back-reaction. G1/G3/G4 tests exercise analytic nonorthogonal
+stops and release, independent dense-ODE work, simultaneous/hidden events,
+contact-unit and time-partition covariance, conditioning and ambiguity refusal,
+limits, cancellation and deterministic retry.

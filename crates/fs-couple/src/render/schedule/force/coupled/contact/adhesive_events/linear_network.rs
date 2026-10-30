@@ -28,6 +28,10 @@ mod flow;
 #[path = "linear_network/roots.rs"]
 mod roots;
 
+/// Joint stopping and release at several independent scalar junctions.
+#[path = "linear_network/multiple.rs"]
+pub mod multiple;
+
 const ORDER: usize = 24;
 pub const MAX_LINEAR_NETWORK_EVENTS: usize = 64;
 
@@ -137,10 +141,10 @@ pub struct LinearNetworkEventFlow {
     tangent: Vec<f64>,
     norm_b2: f64,
     norm_b1: f64,
-    projection_norm: f64,
     stiffness_norm: f64,
     damping_norm: f64,
     config: LinearNetworkEventConfig,
+    contacts: multiple::Contacts,
     q: Vec<f64>,
     v: Vec<f64>,
     q_coeff: Vec<f64>,
@@ -204,7 +208,9 @@ impl LinearNetworkEventFlow {
             .and_then(|v| v.checked_add(4 * (ORDER + 1)))
             .ok_or(Error::Budget("workspace extent"))?;
         if entries
-            .checked_mul(8)
+            .checked_add(n)
+            .and_then(|entries| entries.checked_mul(8))
+            .and_then(|bytes| bytes.checked_add(core::mem::size_of::<multiple::Contacts>()))
             .ok_or(Error::Budget("workspace bytes"))?
             > config.maximum_workspace_bytes
         {
@@ -215,10 +221,6 @@ impl LinearNetworkEventFlow {
             return Err(Error::Invalid("nonzero contact column"));
         }
         let norm_b1 = finite(tangent_column.iter().map(|b| b.abs()).sum())?;
-        let projection_norm = tangent_column
-            .iter()
-            .map(|b| (1.0 - b * b / norm_b2).abs() + b.abs() * (norm_b1 - b.abs()) / norm_b2)
-            .fold(0.0, f64::max);
         let (stiffness_norm, damping_norm) = {
             let mut stiffness_rows = modal_stiffness.clone();
             let mut damping_rows = modal_damping.clone();
@@ -237,6 +239,7 @@ impl LinearNetworkEventFlow {
             )
         };
         let l = links.len();
+        let contacts = multiple::Contacts::new(vec![tangent_column.clone()], 128.0 * f64::EPSILON)?;
         Ok(Self {
             stiffness: modal_stiffness,
             damping: modal_damping,
@@ -244,10 +247,10 @@ impl LinearNetworkEventFlow {
             tangent: tangent_column,
             norm_b2,
             norm_b1,
-            projection_norm,
             stiffness_norm,
             damping_norm,
             config,
+            contacts,
             q: vec![0.0; n],
             v: vec![0.0; n],
             q_coeff: vec![0.0; n * (ORDER + 1)],

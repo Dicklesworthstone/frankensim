@@ -1,4 +1,5 @@
 //! Matrix-free entire flow and independent physical resistance integrals.
+use super::multiple::ContactAccount;
 use super::{
     Error, LinearNetworkEventFlow, LinearNetworkEventStep, LinearNetworkPhase, ORDER, apply, dot,
     finite, poll,
@@ -15,6 +16,21 @@ impl LinearNetworkEventFlow {
         remaining: f64,
         gate: &CancelGate,
     ) -> Result<(), Error> {
+        self.contacts.phases[0] = phase;
+        self.contacts.kinetic_capacity[0] = kinetic;
+        self.contacts.factor()?;
+        self.prepare_contacts_cell(external, remaining, gate)?;
+        self.velocity_coeff = self.contacts.velocity_coeff[0];
+        self.reaction_coeff = self.contacts.reaction_coeff[0];
+        Ok(())
+    }
+
+    pub(super) fn prepare_contacts_cell(
+        &mut self,
+        external: &[f64],
+        remaining: f64,
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
         let n = self.q.len();
         let dynamic_scale = det::sqrt(self.stiffness_norm).max(self.damping_norm);
         let scale = if dynamic_scale == 0.0 {
@@ -22,11 +38,7 @@ impl LinearNetworkEventFlow {
         } else {
             dynamic_scale
         };
-        let projection = if phase == LinearNetworkPhase::Sticking {
-            self.projection_norm
-        } else {
-            1.0
-        };
+        let projection = self.contacts.projection_norm();
         let rate =
             finite(scale.max(projection * (self.stiffness_norm / scale + self.damping_norm)))?;
         let h = if dynamic_scale == 0.0 {
@@ -42,8 +54,12 @@ impl LinearNetworkEventFlow {
         self.cell_h = h;
         self.q_coeff[..n].copy_from_slice(&self.q);
         self.v_coeff[..n].copy_from_slice(&self.v);
-        self.velocity_coeff.fill(0.0);
-        self.reaction_coeff.fill(0.0);
+        for row in &mut self.contacts.velocity_coeff {
+            row.fill(0.0);
+        }
+        for row in &mut self.contacts.reaction_coeff {
+            row.fill(0.0);
+        }
         let mut forcing_norm: f64 = 0.0;
         for j in 0..=ORDER {
             poll(gate)?;
@@ -62,16 +78,7 @@ impl LinearNetworkEventFlow {
             if self.operator_evaluations > self.config.maximum_operator_evaluations {
                 return Err(Error::Budget("operator evaluations"));
             }
-            self.velocity_coeff[j] = dot(&self.tangent, v)?;
-            self.reaction_coeff[j] = finite(dot(&self.tangent, &self.accel)? / self.norm_b2)?;
-            let reaction = match phase {
-                LinearNetworkPhase::Sticking => self.reaction_coeff[j],
-                LinearNetworkPhase::Sliding { direction } if j == 0 => direction as f64 * kinetic,
-                _ => 0.0,
-            };
-            for i in 0..n {
-                self.accel[i] = finite(self.accel[i] - self.tangent[i] * reaction)?;
-            }
+            self.contacts.coefficient(v, &mut self.accel, j)?;
             if j == 0 {
                 forcing_norm = self.accel.iter().map(|a| a.abs()).fold(0.0, f64::max);
             }
@@ -110,7 +117,11 @@ impl LinearNetworkEventFlow {
         if dynamic_scale == 0.0 || stationary {
             tail = 0.0;
         }
-        let arithmetic = 32.0 * f64::EPSILON * (n + self.links.len() + ORDER) as f64;
+        let arithmetic = finite(
+            32.0 * f64::EPSILON
+                * (n + self.links.len() + ORDER) as f64
+                * self.contacts.roundoff_gain(),
+        )?;
         self.cell_state_error = finite((3.0 * tail + arithmetic) * (norm + h * forcing_norm))?;
         Ok(())
     }
@@ -138,6 +149,30 @@ impl LinearNetworkEventFlow {
         kinetic: f64,
         external: &[f64],
         step: &mut LinearNetworkEventStep,
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        debug_assert_eq!(self.contacts.phases[0], phase);
+        debug_assert_eq!(self.contacts.kinetic_capacity[0], kinetic);
+        let mut account = ContactAccount::default();
+        self.integrate_contacts_cell(z, time, external, &mut account, gate)?;
+        step.modal_damping_dissipation_j =
+            finite(step.modal_damping_dissipation_j + account.modal_loss)?;
+        step.friction_dissipation_j =
+            finite(step.friction_dissipation_j + account.friction_loss[0])?;
+        step.accumulated_slip_m = finite(step.accumulated_slip_m + account.slip[0])?;
+        step.contact_impulse_n_s = finite(step.contact_impulse_n_s + account.impulse[0])?;
+        step.contact_time_moment_n_s2 = finite(step.contact_time_moment_n_s2 + account.moment[0])?;
+        step.numerical_work_uncertainty_j =
+            finite(step.numerical_work_uncertainty_j + account.uncertainty)?;
+        Ok(())
+    }
+
+    pub(super) fn integrate_contacts_cell(
+        &mut self,
+        z: f64,
+        time: f64,
+        external: &[f64],
+        account: &mut ContactAccount,
         gate: &CancelGate,
     ) -> Result<(), Error> {
         let n = self.q.len();
@@ -207,42 +242,41 @@ impl LinearNetworkEventFlow {
                 cell_link_loss = finite(cell_link_loss + loss)?;
             }
         }
-        step.modal_damping_dissipation_j =
-            finite(step.modal_damping_dissipation_j + cell_modal_loss)?;
-        let mut integral = 0.0;
-        let mut impulse = 0.0;
-        let mut moment = 0.0;
-        for j in (0..=ORDER).rev() {
-            integral = integral * z + self.velocity_coeff[j] / (j + 1) as f64;
-            impulse = impulse * z + self.reaction_coeff[j] / (j + 1) as f64;
-            moment = moment * z + self.reaction_coeff[j] / (j + 2) as f64;
-        }
-        let displacement = finite(duration * integral)?;
-        let (j, m) = match phase {
-            LinearNetworkPhase::Sticking => (
-                finite(duration * impulse)?,
-                finite(self.cell_h * self.cell_h * z * z * moment)?,
-            ),
-            LinearNetworkPhase::Sliding { direction } => {
-                let slip = finite(direction as f64 * displacement)?;
-                // A chosen polynomial segment has no interior stop. Negative
-                // signed travel means that event isolation is unresolved.
-                if slip < -self.norm_b1 * self.cell_state_error / self.cell_scale {
-                    return Err(Error::EventUnresolved);
-                }
-                let physical_slip = slip.max(0.0);
-                step.accumulated_slip_m = finite(step.accumulated_slip_m + physical_slip)?;
-                step.friction_dissipation_j =
-                    finite(step.friction_dissipation_j + kinetic * physical_slip)?;
-                (
-                    finite(direction as f64 * kinetic * duration)?,
-                    finite(direction as f64 * kinetic * 0.5 * duration * duration)?,
-                )
+        account.modal_loss = finite(account.modal_loss + cell_modal_loss)?;
+        for contact in 0..self.contacts.count() {
+            let mut integral = 0.0;
+            let mut impulse = 0.0;
+            let mut moment = 0.0;
+            for j in (0..=ORDER).rev() {
+                integral = integral * z + self.contacts.velocity_coeff[contact][j] / (j + 1) as f64;
+                impulse = impulse * z + self.contacts.reaction_coeff[contact][j] / (j + 1) as f64;
+                moment = moment * z + self.contacts.reaction_coeff[contact][j] / (j + 2) as f64;
             }
-            LinearNetworkPhase::Fresh => return Err(Error::PhaseMismatch),
-        };
-        step.contact_impulse_n_s = finite(step.contact_impulse_n_s + j)?;
-        step.contact_time_moment_n_s2 = finite(step.contact_time_moment_n_s2 + time * j + m)?;
+            let displacement = finite(duration * integral)?;
+            match self.contacts.phases[contact] {
+                LinearNetworkPhase::Sticking => {}
+                LinearNetworkPhase::Sliding { direction } => {
+                    let slip = finite(direction as f64 * displacement)?;
+                    // No accepted polynomial segment contains an interior stop.
+                    if slip
+                        < -self.contacts.norm1[contact] * self.cell_state_error / self.cell_scale
+                    {
+                        return Err(Error::EventUnresolved);
+                    }
+                    let physical_slip = slip.max(0.0);
+                    account.slip[contact] = finite(account.slip[contact] + physical_slip)?;
+                    account.friction_loss[contact] = finite(
+                        account.friction_loss[contact]
+                            + self.contacts.kinetic_capacity[contact] * physical_slip,
+                    )?;
+                }
+                LinearNetworkPhase::Fresh => return Err(Error::PhaseMismatch),
+            }
+            let j = finite(duration * impulse)?;
+            let m = finite(self.cell_h * self.cell_h * z * z * moment)?;
+            account.impulse[contact] = finite(account.impulse[contact] + j)?;
+            account.moment[contact] = finite(account.moment[contact] + time * j + m)?;
+        }
         self.evaluate(z)?;
         let qmax = self
             .q
@@ -267,31 +301,22 @@ impl LinearNetworkEventFlow {
         }
         let mut qerr = self.cell_state_error / self.cell_scale;
         let mut verr = self.cell_state_error;
-        if phase == LinearNetworkPhase::Sticking {
-            let drift = finite(
-                self.tangent
-                    .iter()
-                    .zip(self.node_q.iter().zip(&self.q))
-                    .map(|(b, (next, old))| b * (next - old))
-                    .sum(),
-            )?;
-            let correction = finite(drift / self.norm_b2)?;
-            let velocity = dot(&self.tangent, &self.node_v)? / self.norm_b2;
-            for i in 0..n {
-                let dq = self.tangent[i] * correction;
-                let dv = self.tangent[i] * velocity;
-                self.node_q[i] = finite(self.node_q[i] - dq)?;
-                self.node_v[i] = finite(self.node_v[i] - dv)?;
-                qerr = qerr.max(dq.abs());
-                verr = verr.max(dv.abs());
-            }
-        }
+        let (dq, _) = self.contacts.project(&mut self.node_q, Some(&self.q))?;
+        let (dv, _) = self.contacts.project(&mut self.node_v, None)?;
+        qerr = qerr.max(dq);
+        verr = verr.max(dv);
         let energy_error = n as f64
             * (qerr * (self.stiffness_norm * qmax + rest_bound)
                 + verr * vmax
                 + 0.5 * (self.stiffness_norm * qerr * qerr + verr * verr));
-        let work_error =
-            external.iter().map(|f| f.abs()).sum::<f64>() * qerr + kinetic * self.norm_b1 * qerr;
+        // A static constraint has no kinetic work. Its numerical position /
+        // velocity projection is already included above, independently of an
+        // unused kinetic coefficient that cannot affect this physical segment.
+        let friction_scale = (0..self.contacts.count())
+            .filter(|i| matches!(self.contacts.phases[*i], LinearNetworkPhase::Sliding { .. }))
+            .map(|i| self.contacts.kinetic_capacity[i] * self.contacts.norm1[i])
+            .sum::<f64>();
+        let work_error = (external.iter().map(|f| f.abs()).sum::<f64>() + friction_scale) * qerr;
         let resistance_error =
             duration * self.damping_norm * n as f64 * (2.0 * vmax * verr + verr * verr)
                 + 256.0 * f64::EPSILON * (cell_modal_loss + cell_link_loss)
@@ -300,9 +325,8 @@ impl LinearNetworkEventFlow {
                     * self.damping_norm
                     * n as f64
                     * (vmax + self.cell_h * self.cell_rate * vmax).powi(2);
-        step.numerical_work_uncertainty_j = finite(
-            step.numerical_work_uncertainty_j + energy_error + work_error + resistance_error,
-        )?;
+        account.uncertainty =
+            finite(account.uncertainty + energy_error + work_error + resistance_error)?;
         self.q.copy_from_slice(&self.node_q);
         self.v.copy_from_slice(&self.node_v);
         self.check_state()?;
