@@ -1431,8 +1431,9 @@ Fourier/full-tensor/enthalpy flux, primitive/conservative agreement, tangential
 frame and formation-gauge covariance, exact axial reduction, slip-wall loads,
 exact-zero species, source/axis refusal and final cancellation/replay. Original
 axial/network regressions remain authoritative for their geometry and balances.
-This face owner supplies no Soret/Dufour closure, no-slip or molecular reservoir
-boundary, nonideal transport, spatial accuracy or combustion validation.
+This face owner supplies no Soret/Dufour closure, independent no-slip wall,
+nonideal transport, spatial accuracy or combustion validation. Explicit held
+reservoir faces use the source-owned boundary energy convention below.
 
 ### Shared original-mixture molecular faces in three dimensions
 
@@ -1472,6 +1473,26 @@ slip-wall loads, a resolved `1e-180` trace species, an exact absent species,
 source/axis/gradient/caloric refusal and final cancellation/replay. They do
 not establish spatial convergence, physically resolved shock/flame thickness,
 Soret/Dufour effects, no-slip walls or experimental combustion validity.
+
+### Original-source energy effort at physical reservoir faces
+
+Both planar and spatial face owners expose `reservoir_face_from_primitives`
+for an explicitly selected exterior trace at a physical boundary. The original
+source admits both traces. Maxwell--Stefan, traction and Fourier transport
+retain the shared two-trace midpoint approximation, while species energy uses
+the bath's referenced enthalpies and stress work uses the bath's velocity.
+A stationary bath therefore receives zero mechanical work even with nonzero
+viscous traction. The supplied distance is cell-center to physical boundary,
+not the spacing between two cells. The existing three-dimensional gradient
+layout and all interior-face source conventions remain unchanged.
+
+The kernel does not evolve the exterior reservoir. The field owner must retain
+that state, its geometry and signed boundary transfers consistently with its
+advective boundary condition. A focused regression checks both exterior-side
+orientations, original unequal-Cp bath enthalpy with large formation datums,
+all three work components, unchanged species/traction fluxes, and zero work at
+a stationary bath in both dimensions. Spatial accuracy and finite-reservoir
+storage require their respective field and coupling owners.
 
 ### Three-momentum chemistry on the same prepared cell source
 

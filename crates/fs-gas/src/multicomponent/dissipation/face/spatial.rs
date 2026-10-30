@@ -70,6 +70,7 @@ impl<L: TransportLaw> SpatialTransport<L> {
             right,
             distance,
             tangential_velocity_gradient,
+            None,
             controls,
             out,
             &mut cancelled,
@@ -96,6 +97,44 @@ impl<L: TransportLaw> SpatialTransport<L> {
             right,
             distance,
             tangential_velocity_gradient,
+            None,
+            controls,
+            out,
+            &mut cancelled,
+        )
+    }
+
+    /// The same source-defined physical-face reservoir closure as the planar
+    /// owner, retaining both transverse work terms. `boundary_on_left` selects
+    /// the prescribed source trace; its temperature supplies species enthalpies
+    /// and its velocity supplies mechanical work. Transport coefficients remain
+    /// the shared two-trace midpoint approximation. Distance is cell-center to
+    /// boundary; no independent source or heat is added.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reservoir_face_from_primitives(
+        &mut self,
+        left: SpatialPrimitive<'_>,
+        right: SpatialPrimitive<'_>,
+        distance: f64,
+        tangential_velocity_gradient: [[f64; 3]; 2],
+        boundary_on_left: bool,
+        controls: MaxwellStefanSolveV1,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TransportFaceReport, DissipationError> {
+        let left = primitive_trace(&self.prepared.gas, left, &mut cancelled)?;
+        let right = primitive_trace(&self.prepared.gas, right, &mut cancelled)?;
+        let effort = if boundary_on_left {
+            left.effort()
+        } else {
+            right.effort()
+        };
+        self.interior(
+            left,
+            right,
+            distance,
+            tangential_velocity_gradient,
+            Some(effort),
             controls,
             out,
             &mut cancelled,
@@ -151,6 +190,7 @@ impl<L: TransportLaw> SpatialTransport<L> {
         right: VectorTrace<'_, 2>,
         distance: f64,
         tangential_velocity_gradient: [[f64; 3]; 2],
+        boundary_effort: Option<EnergyEffort<2>>,
         controls: MaxwellStefanSolveV1,
         out: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
@@ -166,6 +206,7 @@ impl<L: TransportLaw> SpatialTransport<L> {
             distance,
             distance,
             tangential_velocity_gradient,
+            boundary_effort,
             prepared.mass_ratio,
             &mut prepared.binary,
             out,

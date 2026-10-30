@@ -154,6 +154,59 @@ impl<L: TransportLaw> PlanarTransport<L> {
         )
     }
 
+    /// Held exterior state at a physical reservoir face. `boundary_on_left`
+    /// selects which of the two admitted traces is that prescribed state.
+    /// Species diffusion, traction and Fourier coefficients retain the shared
+    /// two-trace midpoint approximation. Species energy uses the selected
+    /// bath's original referenced enthalpies and stress work uses its velocity:
+    /// a stationary bath never receives fictitious mechanical work from a
+    /// cell-center midpoint velocity. Distance is cell-center to boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reservoir_face_from_primitives(
+        &mut self,
+        left: NormalPrimitive<'_>,
+        right: NormalPrimitive<'_>,
+        distance: f64,
+        tangential_velocity_gradient: [f64; 2],
+        boundary_on_left: bool,
+        controls: MaxwellStefanSolveV1,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TransportFaceReport, DissipationError> {
+        let left = primitive_trace(&self.gas, left, &mut cancelled)?;
+        let right = primitive_trace(&self.gas, right, &mut cancelled)?;
+        let left_velocity = [left.transverse_velocity];
+        let right_velocity = [right.transverse_velocity];
+        let left = left.with_transverse(left_velocity);
+        let right = right.with_transverse(right_velocity);
+        let effort = if boundary_on_left {
+            left.effort()
+        } else {
+            right.effort()
+        };
+        interior_components(
+            &self.gas,
+            &mut self.law,
+            &self.diffusion,
+            &mut self.workspace,
+            left,
+            right,
+            distance,
+            distance,
+            [[
+                tangential_velocity_gradient[0],
+                tangential_velocity_gradient[1],
+                0.0,
+            ]],
+            Some(effort),
+            self.mass_ratio,
+            &mut self.binary,
+            out,
+            controls,
+            &mut cancelled,
+        )
+    }
+
     /// Stationary adiabatic impermeable slip wall. Its normal traction includes
     /// `d_n u_n` and `d_t u_t`; species, shear traction and total-energy flux are
     /// exactly zero. Derivatives use the globally oriented face axes, including
@@ -246,6 +299,24 @@ struct VectorTrace<'a, const TRANSVERSE: usize> {
     transverse_velocity: [f64; TRANSVERSE],
     cv_density: f64,
 }
+
+/// Original source-admitted energy effort at a physical boundary.
+#[derive(Clone, Copy)]
+struct EnergyEffort<const TRANSVERSE: usize> {
+    temperature: f64,
+    normal_velocity: f64,
+    transverse_velocity: [f64; TRANSVERSE],
+}
+impl<const TRANSVERSE: usize> VectorTrace<'_, TRANSVERSE> {
+    fn effort(&self) -> EnergyEffort<TRANSVERSE> {
+        EnergyEffort {
+            temperature: self.primitive.temperature,
+            normal_velocity: self.primitive.velocity,
+            transverse_velocity: self.transverse_velocity,
+        }
+    }
+}
+
 impl<'a> Trace<'a> {
     fn with_transverse<const TRANSVERSE: usize>(
         self,
@@ -322,6 +393,7 @@ pub(super) fn interior<const PLANAR: bool, L: TransportLaw>(
             wl,
             wr,
             [[tangential_gradient[0], tangential_gradient[1], 0.0]],
+            None,
             mass_ratio,
             binary,
             out,
@@ -339,6 +411,7 @@ pub(super) fn interior<const PLANAR: bool, L: TransportLaw>(
             wl,
             wr,
             [],
+            None,
             mass_ratio,
             binary,
             out,
@@ -359,6 +432,7 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     wl: f64,
     wr: f64,
     tangential_gradient: [[f64; 3]; TRANSVERSE],
+    boundary_effort: Option<EnergyEffort<TRANSVERSE>>,
     mass_ratio: f64,
     binary: &mut [f64],
     out: &mut [f64],
@@ -383,7 +457,11 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     let left_weight = 1.0 - right_weight;
     let t = left_weight * pl.temperature + right_weight * pr.temperature;
     let p = left_weight * pl.pressure + right_weight * pr.pressure;
-    let velocity = left_weight * pl.velocity + right_weight * pr.velocity;
+    let velocity = boundary_effort.map_or_else(
+        || left_weight * pl.velocity + right_weight * pr.velocity,
+        |effort| effort.normal_velocity,
+    );
+    let enthalpy_temperature = boundary_effort.map_or(t, |effort| effort.temperature);
     let grad_t = (pr.temperature - pl.temperature) / distance;
     let grad_u = (pr.velocity - pl.velocity) / distance;
     let mut xl = [0.0; MAX_SPECIES];
@@ -444,9 +522,14 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
             (right.transverse_velocity[axis] - left.transverse_velocity[axis]) / distance;
         let shear = mu * (transverse_gradient + gradient[0]);
         out[n + 1 + axis] = -shear;
-        shear_work += (left_weight * left.transverse_velocity[axis]
-            + right_weight * right.transverse_velocity[axis])
-            * shear;
+        let work_velocity = boundary_effort.map_or_else(
+            || {
+                left_weight * left.transverse_velocity[axis]
+                    + right_weight * right.transverse_velocity[axis]
+            },
+            |effort| effort.transverse_velocity[axis],
+        );
+        shear_work += work_velocity * shear;
     }
     out[n] = -stress;
     let mut enthalpy_flux = [0.0; MAX_SPECIES];
@@ -458,11 +541,11 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
         let h_referenced = (model
             .molar_internal_energy_change(
                 Temperature::new(gas.domain().minimum_temperature),
-                Temperature::new(t),
+                Temperature::new(enthalpy_temperature),
             )
             .map_err(FlowError::from)?
             .value()
-            + R * t)
+            + R * enthalpy_temperature)
             / model.molar_mass().value();
         enthalpy_flux[k] = h_referenced * out[k];
     }

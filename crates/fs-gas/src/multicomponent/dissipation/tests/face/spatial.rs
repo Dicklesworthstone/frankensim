@@ -1,6 +1,8 @@
 use super::*;
 use crate::multicomponent::{SpatialCell, SpatialPrimitive};
 
+mod reservoir;
+
 fn prepared3(formation: f64) -> SpatialTransport<ConstantTransport> {
     let planar = prepared(formation);
     SpatialTransport::new(planar.gas().clone(), planar.law().clone(), || false).unwrap()
