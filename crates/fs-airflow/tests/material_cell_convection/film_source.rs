@@ -5,6 +5,8 @@ use super::*;
 mod observer;
 #[path = "film_source/links.rs"]
 mod links;
+#[path = "film_source/heat_network.rs"]
+mod heat_network;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::*;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

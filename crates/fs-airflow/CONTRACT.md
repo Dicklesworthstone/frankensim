@@ -132,6 +132,33 @@ independent finite-body updates with simultaneous native spatial conduction,
 event-clipped exposure changes, retained endpoint sources, interval heat accounts,
 late source-support refusal and cancellation.
 
+### Material fluid cooling in the complete circuit/heat network
+
+`source::heat::SourceConvectionHeatNetwork` resolves the existing prepared heat
+network and source-backed fluid convection at the SAME trial enthalpy endpoint.
+Its circuit entry calls the original contact-aware circuit/enthalpy driver.
+Bulk and interface electrical losses, nonlinear conduction, source-integrated
+layers, thermal contacts, enclosure radiation and fluid cooling therefore share
+the original finite caloric cells. Changing a fluid property law can change
+cooling, body temperature, material resistance and actual capacitor/current
+evolution; no component-name dispatch or separate thermal step is introduced.
+
+The fluid resolver retains its source models, fixed pressure/composition and
+claim selections across trials. Reservoir or film property temperature comes
+from the existing convection owner; exposed area and contact coverage stay
+with the thermal owner. Duplicate authored ambient coefficients refuse.
+All accepted bulk/interface/radiative and fluid source records remain available.
+Convection is external heat from prescribed reservoirs; the closed enclosure's
+signed net radiative defect is excluded from external supply by an additional
+combined gate using the original total-energy tolerance.
+
+This retains the native generally first-order endpoint coupling, source domains
+and uniform-cell limits. Time refinement remains necessary. It does not evolve
+reservoir inventory, flow, mass exchange, pressure work or moving geometry.
+`tests/material_cell_convection/film_source/heat_network.rs` supplies an
+independent temperature-dependent RC/film-cooling reference, fluid source
+substitution, current/storage/energy checks and transactional refusals.
+
 ### Reciprocal material convection on finite thermal links
 
 `source::links::evaluate_source_link_convection` resolves the original fluid

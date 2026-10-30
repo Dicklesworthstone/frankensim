@@ -5,6 +5,8 @@
 //! and reservoir temperature while heat and Rayleigh forcing retain the full
 //! wall/reservoir difference. No additional thermal store or solver is created.
 
+/// Material fluid cooling in the complete shared heat/circuit solve.
+pub mod heat;
 /// Source-backed convection on the existing explicit thermal timeline.
 pub mod observer;
 /// Reciprocal convection on the original finite-cell thermal links.
