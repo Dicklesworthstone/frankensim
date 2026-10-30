@@ -4882,3 +4882,44 @@ and entropy. A six-cell FSRI gypsum/mineral-wool/plywood wall retains real sourc
 receipts, and a material substitution changes its transient from the same initial
 temperature field. Binding/domain/budget/cancellation refusals preserve the
 original timeline.
+
+## Pressure-controlled ice/liquid freezing and thawing
+
+`phase::water::freezing::FreezingWater` combines original IAPWS Ice Ih,
+the released pressure-dependent Ih melting curve, and original IF97 Region 1
+liquid properties. This is an ambient-pressure equilibrium owner: the melting
+temperature must be in 273.15..=273.16 K, where the two source charts overlap.
+Pressure cannot exceed p_melt(273.15 K), and original liquid source admission
+also applies near the triple point and boiling boundary. The immutable
+temperature window brackets melting, with ice no colder than 50 K and a
+stable Region 1 liquid upper endpoint. A latent-only window is supported.
+High-pressure freezing, supercooled liquid, other ice polymorphs, vapor,
+nucleation and resolved interfaces are outside this owner.
+
+The prepared pair retains original h, u, s, specific volumes and the actual
+melting inverse diagnostics. Both Gibbs mismatch and the pressure-local fusion
+entropy defect L/Tm-(s_liquid-s_ice) have explicit independent admission budgets.
+Neither property reference is shifted. The defect is a source-consistency
+diagnostic, not modeled entropy production.
+
+Temperature states and explicit liquid mass fractions share one source owner.
+Enthalpy inversion uses physical lever-rule storage on the fusion plateau and
+safeguarded Newton/bisection with analytic Cp on each sensible branch. Exact
+source knots and complete phase depletion are retained; temperature alone at
+melting is ambiguous. Liquid/ice mass fractions and volume fractions remain
+distinct because the phases have different densities.
+
+Fixed-mass heat steps evolve H and independently close Delta U+p*Delta V.
+Stable original-source increments and direct endpoint subtraction must both
+fit the unchanged caller joule budget. Reports separate sensible and fusion
+enthalpy while retaining actual phase masses, physical expansion/contraction,
+boundary work, raw source entropy and the pressure-local integral of dh/T.
+Latent enthalpy is counted once. The external pressure load permits expansion;
+this is not a sealed rigid-vessel pressure model.
+
+Six native tests pass: released normal-pressure melting and original-source
+identity/Clapeyron consistency; complete freezing/thawing and expansion;
+independent Cp/CpT quadrature; subdivided, latent-only, small and zero heat;
+source overlap, matching and work refusal; and chart identity, numerical
+representation and early/late cancellation. The tests compile the exact
+original production sources against the new ice thermochemistry library.

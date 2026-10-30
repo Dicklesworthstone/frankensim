@@ -30,6 +30,9 @@ pub mod pressure;
 /// Original-source caloric paths spanning liquid, dense water and steam regions.
 pub mod regional;
 
+/// Original Ice Ih/liquid calorimetry with physical freezing and thawing.
+pub mod freezing;
+
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::bounds::{
     If97HeatCapacityBound, If97HeatCapacityBoundError, If97HeatCapacityBoundSolve,
