@@ -138,13 +138,26 @@ pub(super) struct BoundaryFlux {
     pub internal_out: [f64; 2],
     pub prescribed_out: f64,
     pub patch_total_out: [f64; 2],
-    /// Localized reservoir moments from this original FV predictor evaluation.
-    /// Pressure sums use identical tile areas; work rates use avg(p*u), not
-    /// the product of separately interpolated pressure and velocity.
-    pub reservoir_pressure_sum_pa: f64,
-    pub reservoir_acoustic_pressure_sum_pa: f64,
-    pub reservoir_pressure_power_w: f64,
-    pub reservoir_acoustic_pressure_power_w: f64,
+    /// Cached original FV moments, separately owned by each localized aperture.
+    pub reservoir: [ReservoirFlux; super::MAX_NSF_RESERVOIR_APERTURES],
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ReservoirFlux {
+    pub pressure_sum_pa: f64,
+    pub acoustic_pressure_sum_pa: f64,
+    pub pressure_power_w: f64,
+    pub acoustic_pressure_power_w: f64,
+    /// Signed original conservative FV flux in lattice energy units.
+    pub total_energy_out_lu: f64,
+}
+
+impl ReservoirFlux {
+    pub(super) fn is_finite(&self) -> bool {
+        [self.pressure_sum_pa, self.acoustic_pressure_sum_pa, self.pressure_power_w,
+            self.acoustic_pressure_power_w, self.total_energy_out_lu]
+            .iter().all(|value| value.is_finite())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -70,7 +70,8 @@ pub use material::{NsfGasMedium, ThermochemicalNsfGas};
 mod sgs;
 pub use sgs::{NsfSgsConfig, NsfSgsTransport};
 mod open;
-pub use open::{NsfOpenState, NsfReservoirAperture, NsfReservoirExchange, NsfReservoirFlow};
+pub use open::{MAX_NSF_RESERVOIR_APERTURES, NsfOpenState, NsfReservoirAperture,
+    NsfReservoirExchange, NsfReservoirFlow};
 mod open_boundary;
 use open_boundary::{BoundaryFlux, CharacteristicPatchBinding, IncomingPopulations, OpenFaces};
 pub use open_boundary::{
@@ -566,10 +567,10 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     characteristic_patch: [Option<CharacteristicPatchBinding>; 2],
     open_faces: Option<OpenFaces>,
     reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
-    reservoir_aperture: Option<open::BoundReservoirAperture>,
+    reservoir_apertures: Vec<open::BoundReservoirAperture>,
     last_reservoir_mass_out_kg: Option<f64>,
     last_reservoir_flows: Vec<NsfReservoirFlow>,
-    last_reservoir_exchange: Option<NsfReservoirExchange>,
+    last_reservoir_exchanges: Vec<NsfReservoirExchange>,
     open_out: BoundaryFlux,
     last_boundary_exchange: Option<[NsfBoundaryExchange; 2]>,
     last_patch_exchange: [Option<NsfBoundaryExchange>; 2],
@@ -768,10 +769,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             characteristic_patch: [None; 2],
             open_faces: None,
             reservoir_faces: [[None; 2]; 3],
-            reservoir_aperture: None,
+            reservoir_apertures: Vec::new(),
             last_reservoir_mass_out_kg: None,
             last_reservoir_flows: Vec::new(),
-            last_reservoir_exchange: None,
+            last_reservoir_exchanges: Vec::new(),
             open_out: BoundaryFlux::default(),
             last_boundary_exchange: None,
             last_patch_exchange: [None; 2],
@@ -896,7 +897,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 "a wall velocity must be finite and tangential to the wall",
             ));
         }
-        if self.reservoir_aperture.is_some() && velocity != [0.0; 3] {
+        if !self.reservoir_apertures.is_empty() && velocity != [0.0; 3] {
             return Err(NsfError::Input(
                 "a localized reservoir aperture requires stationary domain walls",
             ));
@@ -1281,8 +1282,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             open.patch_total_out[1] += total;
                         }
                     } else if self.open_at(i, a, 1).is_some() {
-                        open.prescribed_out += wall_flux(i, a, 1)?;
-                        self.accumulate_reservoir_work(i, a, 1, rho, u, theta, &mut open);
+                        let flux = wall_flux(i, a, 1)?;
+                        open.prescribed_out += flux;
+                        self.accumulate_reservoir_work(i, a, 1, rho, u, theta, flux, &mut open);
                     } else {
                         out += wall_flux(i, a, 1)?;
                     }
@@ -1297,17 +1299,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             open.patch_total_out[0] -= total;
                         }
                     } else if self.open_at(i, a, -1).is_some() {
-                        open.prescribed_out -= wall_flux(i, a, -1)?;
-                        self.accumulate_reservoir_work(i, a, -1, rho, u, theta, &mut open);
+                        let flux = wall_flux(i, a, -1)?;
+                        open.prescribed_out -= flux;
+                        self.accumulate_reservoir_work(i, a, -1, rho, u, theta, -flux, &mut open);
                     } else {
                         out -= wall_flux(i, a, -1)?;
                     }
                 }
             }
         }
-        if ![open.reservoir_pressure_sum_pa, open.reservoir_acoustic_pressure_sum_pa,
-            open.reservoir_pressure_power_w, open.reservoir_acoustic_pressure_power_w]
-            .iter().all(|value| value.is_finite())
+        if open.reservoir.iter().any(|flux| !flux.is_finite())
         {
             return Err(NsfError::Input("reservoir finite-volume pressure moments overflowed"));
         }
@@ -1430,8 +1431,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let incoming = self.open_incoming_populations(&post, &rho0, &u0);
         let boundary_links = self.open_link_exchange(&post, incoming.as_ref());
         let mut next = self.stream(&post, incoming.as_ref());
-        let reservoir_mass_out_kg = self.reservoir_link_mass_out_kg(&post, &next);
-        if reservoir_mass_out_kg.is_some_and(|mass| !mass.is_finite()) {
+        let reservoir_mass_by_aperture = self.reservoir_link_mass_out_kg(&post, &next);
+        let reservoir_mass_out_kg = match self.reservoir_apertures.len() {
+            0 => None,
+            1 => Some(reservoir_mass_by_aperture[0]),
+            count => Some(reservoir_mass_by_aperture[..count].iter().sum()),
+        };
+        if reservoir_mass_by_aperture.iter().any(|mass| !mass.is_finite())
+            || reservoir_mass_out_kg.is_some_and(|mass| !mass.is_finite()) {
             return Err(NsfError::Input("reservoir aperture mass exchange overflowed"));
         }
         if have_sources {
@@ -1632,7 +1639,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // side reservoir has the original total-energy flux, so remove that
         // exact supply too, retaining the unresolved kinetic-transport split.
         // Do not change arithmetic for existing aperture-free grids.
-        let viscous = if self.reservoir_aperture.is_some() {
+        let viscous = if !self.reservoir_apertures.is_empty() {
             viscous - prescribed_in
         } else {
             viscous
@@ -1642,7 +1649,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         } else {
             viscous - source_in
         };
-        let (viscous, unresolved) = if source_carries_mechanics || self.reservoir_aperture.is_some() {
+        let (viscous, unresolved) = if source_carries_mechanics || !self.reservoir_apertures.is_empty() {
             (0.0, remainder)
         } else {
             (remainder, 0.0)
@@ -1692,7 +1699,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         if reservoir_flows.iter().any(|flow| !flow.is_finite()) {
             return Err(NsfError::Input("reservoir aperture continuum exchange overflowed"));
         }
-        let reservoir_exchange = self.finish_reservoir_exchange(open1, &reservoir_flows)?;
+        let reservoir_exchanges = self.finish_reservoir_exchanges(
+            open1, &reservoir_flows, &reservoir_mass_by_aperture)?;
         self.f = next;
         self.e = e1;
         self.material = material_new;
@@ -1710,7 +1718,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.last_patch_exchange = patch_exchange;
         self.last_reservoir_mass_out_kg = reservoir_mass_out_kg;
         self.last_reservoir_flows = reservoir_flows;
-        self.last_reservoir_exchange = reservoir_exchange;
+        self.last_reservoir_exchanges = reservoir_exchanges;
         self.steps += 1;
         self.cumulative.viscous_heating_j += ledger.viscous_heating_j;
         self.cumulative.unresolved_internal_exchange_j += ledger.unresolved_internal_exchange_j;
@@ -1890,7 +1898,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             }
         }
-        if let Some(aperture) = &self.reservoir_aperture {
+        for (owner, aperture) in self.reservoir_apertures.iter().enumerate() {
+            // Preserve the historical one-aperture hash exactly. Multiple owners
+            // additionally bind their ordered topology so identities cannot alias.
+            if self.reservoir_apertures.len() > 1 {
+                feed(4.0); feed(owner as f64); feed(aperture.source.axis as f64);
+                feed(f64::from(u8::from(aperture.source.high)));
+                feed(aperture.source.cells.len() as f64);
+                let mut cells = aperture.source.cells.clone();
+                cells.sort_unstable();
+                for cell in cells { for coordinate in cell { feed(coordinate as f64); } }
+            }
             feed(2.0);
             let state = aperture.source.state;
             feed(state.density_kg_m3);
