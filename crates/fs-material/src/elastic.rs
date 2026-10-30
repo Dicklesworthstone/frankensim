@@ -9,6 +9,9 @@ use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 /// Source-derived reversible thermal response of the original isotropic law.
 pub mod thermal;
 
+/// Wave and hydrostatic response from the original admitted elastic tensor.
+pub mod acoustic;
+
 /// Isotropic linear elasticity (E, ν).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IsotropicElastic {

@@ -39,6 +39,8 @@ pub mod fiber;
 pub mod field_storage;
 /// Shared gas/liquid transport for material-driven flow and heat consumers.
 pub mod fluid_transport;
+/// Shared checked adiabatic acoustic response for gases and liquids.
+pub mod fluid_acoustics;
 pub mod gas;
 /// Prescribed axial temperature/composition fields on the shared gas laws.
 pub mod gas_field;

@@ -5073,3 +5073,19 @@ roughness, normal-only equality, mode/domain refusal, cancellation, exact late
 swept-sphere refusal and deterministic retry. The six new and 44 prior focused
 native fluid cases pass. These are source-selected native tests, not the
 unavailable repository DSR quality verdict.
+
+## Shared physical acoustic scaling
+
+`lattice3::AcousticScalingPlan::from_material` consumes both checked
+`FluidAcoustics` and `FluidTransport` from the same original material. Density
+must match bitwise across the two views; the existing scaling kernel then uses
+physical `c` and `nu = mu/rho` to determine `dt`, relaxation and Mach limits.
+`from_gas` delegates to this admission, refusing stale public gas fields.
+Source-resolved liquids use their own acoustic response without ideal-gas
+inference or a numerical sound-speed default.
+
+Three focused regressions cover source-only liquid substitutions changing
+physical timestep and relaxation, accepted-gas bit parity and stale-state
+refusal, and inconsistent acoustic/transport density. This mapping does not
+extend the original low-Mach lattice solver to shock, cavitation or multiphase
+physics, nor certify its spatial or temporal discretization error.

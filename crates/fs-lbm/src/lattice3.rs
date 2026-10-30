@@ -727,23 +727,48 @@ pub fn acoustic_scaling(
 }
 
 impl AcousticScalingPlan {
-    /// Derive nu=mu/rho and c from the caller's material gas state.
+    /// Use the same checked material state for physical diffusion and sound.
+    /// Gas and liquid sources share this path; no ideal-gas law is applied to
+    /// liquids and no numerical sound speed or viscosity is defaulted.
+    pub fn from_material<M>(
+        material: &M,
+        dx_m: f64,
+        maximum_speed_m_s: f64,
+        maximum_mach: f64,
+    ) -> Result<Self, ScalingError3>
+    where
+        M: fs_material::fluid_acoustics::FluidAcoustics
+            + fs_material::fluid_transport::FluidTransport
+            + ?Sized,
+    {
+        let acoustic = material
+            .acoustic_state()
+            .map_err(|_| ScalingError3::Input("material acoustic state"))?;
+        let transport = material
+            .transport_state()
+            .map_err(|_| ScalingError3::Input("material transport state"))?;
+        if acoustic.density_kg_m3().to_bits() != transport.density_kg_m3().to_bits() {
+            return Err(ScalingError3::Input(
+                "material acoustic/transport density mismatch",
+            ));
+        }
+        acoustic_scaling(
+            transport.kinematic_viscosity_m2_s(),
+            acoustic.sound_speed_m_s(),
+            dx_m,
+            maximum_speed_m_s,
+            maximum_mach,
+        )
+    }
+
+    /// Derive nu=mu/rho and c from the caller's coherent material gas state.
     pub fn from_gas(
         gas: &fs_material::gas::GasState,
         dx_m: f64,
         maximum_speed_m_s: f64,
         maximum_mach: f64,
     ) -> Result<Self, ScalingError3> {
-        if !gas.density.is_finite() || gas.density <= 0.0 {
-            return Err(ScalingError3::Input("gas density"));
-        }
-        acoustic_scaling(
-            gas.dynamic_viscosity / gas.density,
-            gas.sound_speed,
-            dx_m,
-            maximum_speed_m_s,
-            maximum_mach,
-        )
+        Self::from_material(gas, dx_m, maximum_speed_m_s, maximum_mach)
     }
 }
 

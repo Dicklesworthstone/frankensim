@@ -403,6 +403,26 @@ impl TetElasticMaterial {
         &self.stiffness_mandel_pa
     }
 
+    /// Derive elastic wave and pressure response from this exact native state.
+    ///
+    /// Source-resolved isotropy, oriented orthotropy and full tensors all use
+    /// the same stiffness, density and identity as mechanical assembly. The
+    /// caller supplies a strain ceiling as for stress recovery; it cannot
+    /// extend the source law's admitted domain. Static elastic data does not
+    /// acquire measured ultrasonic or adiabatic authority through this query.
+    pub fn acoustic_response(
+        &self,
+        maximum_absolute_mandel_strain: f64,
+    ) -> Result<fs_material::elastic::acoustic::ElasticAcousticState, fs_material::MaterialError>
+    {
+        fs_material::elastic::acoustic::ElasticAcousticState::try_new_mandel(
+            self.stiffness_mandel_pa,
+            self.density_kg_m3,
+            ContentHash(self.material_state_identity),
+            maximum_absolute_mandel_strain,
+        )
+    }
+
     fn validate(&self) -> Result<(), TetElasticError> {
         if !(self.density_kg_m3.is_finite() && self.density_kg_m3 > 0.0) {
             return Err(TetElasticError::InvalidMaterial {
@@ -3326,6 +3346,25 @@ mod tests {
             *state.identity().as_bytes()
         );
         assert_ne!(state.identity(), state.resolved().identity());
+        let acoustic = material.acoustic_response(0.001).unwrap();
+        assert_eq!(acoustic.material_state_identity(), state.identity());
+        assert_eq!(
+            acoustic.stiffness_mandel_pa(),
+            material.stiffness_mandel_pa()
+        );
+        assert_eq!(acoustic.density_kg_m3(), material.density_kg_m3);
+        assert!((acoustic.bulk_modulus_pa() / 40e9 - 1.0).abs() < 1e-14);
+        let waves = acoustic.directional_waves([1.0, 2.0, 3.0]).unwrap();
+        for (mode, modulus) in waves.modes.iter().zip([24e9, 24e9, 72e9]) {
+            assert!(
+                (mode.phase_speed_m_s.powi(2) * material.density_kg_m3 / modulus - 1.0).abs()
+                    < 1e-14
+            );
+        }
+        let hydrostatic = acoustic.hydrostatic_response(1e6).unwrap();
+        assert!((hydrostatic.volumetric_strain / (-1e6 / 40e9) - 1.0).abs() < 1e-14);
+        assert!((hydrostatic.stored_energy_density_j_m3 - 12.5).abs() < 1e-12);
+        assert!(acoustic.hydrostatic_response(1e9).is_err());
         let nodes = [
             [0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0],
@@ -5749,6 +5788,19 @@ mod tests {
             assembly.stiffness.to_dense()
         );
         assert_eq!(card_assembly.total_mass_kg, assembly.total_mass_kg);
+        let acoustic = from_card.material().acoustic_response(0.002).unwrap();
+        let direct = fs_material::elastic::acoustic::ElasticAcousticState::try_new_mandel(
+            *from_card.material().stiffness_mandel_pa(),
+            from_card.material().density_kg_m3,
+            ContentHash(from_card.material().material_state_identity),
+            0.002,
+        )
+        .unwrap();
+        assert_eq!(acoustic, direct);
+        assert_eq!(
+            acoustic.directional_waves([1.0, -2.0, 3.0]).unwrap(),
+            direct.directional_waves([1.0, -2.0, 3.0]).unwrap()
+        );
         let epsilon = [
             [0.001, 0.0002, -0.0003],
             [0.0002, -0.0008, 0.0004],

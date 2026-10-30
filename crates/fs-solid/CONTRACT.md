@@ -133,6 +133,17 @@ operator level, but material-card resolution of engineering/crystal constants
 and texture/orientation fields remains a separate evidence-bearing admission
 step; absence of that data is not permission to assume isotropy.
 
+`linear3::TetElasticMaterial::acoustic_response` exposes the shared
+`fs-material::elastic::acoustic` law using the exact native Mandel stiffness,
+density and material identity. Source-resolved isotropy, oriented orthotropy and
+full tensors therefore derive directional wave speeds/impedances and hydrostatic
+compressibility/strain from the same coefficients as assembled mechanics. The
+caller declares an explicit strain ceiling, as for stress recovery, without
+extending source validity. This is a frozen small-strain model query; static
+moduli do not become measured ultrasonic data. Native regressions connect
+source-selected bulk/shear constants and oriented full-tensor states to these
+derived responses while preserving original identities.
+
 The shared `linear3::source` adapter resolves isotropic or oriented
 orthotropic elastic constants and independently selected isotropic or three-axis
 integrated expansion. Both `fs-mbd-material` and spatial

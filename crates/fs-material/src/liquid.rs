@@ -37,6 +37,94 @@ pub const VOLUMETRIC_EXPANSION_PROPERTY: &str = "volumetric_thermal_expansion_co
 /// Isobaric volumetric-expansion dimensions [1/K].
 pub const VOLUMETRIC_EXPANSION_DIMS: Dims = Dims([0, 0, 0, -1, 0, 0]);
 
+/// Exact source keys assigned to density, heat capacity, conductivity and viscosity.
+/// Source vocabulary is preserved; selecting roles never rewrites material claims.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidPropertyRequirements {
+    properties: [ScalarPropertyRequirement; 4],
+    viscosity_basis: crate::liquid_temperature::LiquidViscosityBasis,
+}
+
+impl LiquidPropertyRequirements {
+    /// Assign four distinct source keys to their physical liquid transport roles.
+    /// Conductivity requires its static semantic type; the other roles require
+    /// dimension-only scalars. Numerical admissibility remains source-explicit.
+    pub fn try_new(
+        density: ScalarPropertyRequirement,
+        specific_heat: ScalarPropertyRequirement,
+        thermal_conductivity: ScalarPropertyRequirement,
+        viscosity: ScalarPropertyRequirement,
+        viscosity_basis: crate::liquid_temperature::LiquidViscosityBasis,
+    ) -> Result<Self, MaterialStatePointError> {
+        let viscosity_dims = match viscosity_basis {
+            crate::liquid_temperature::LiquidViscosityBasis::Dynamic => DYNAMIC_VISCOSITY_DIMS,
+            crate::liquid_temperature::LiquidViscosityBasis::Kinematic => KINEMATIC_VISCOSITY_DIMS,
+        };
+        let properties = [density, specific_heat, thermal_conductivity, viscosity];
+        let quantities = [
+            QuantitySpec::dimensional(Density::DIMS),
+            QuantitySpec::dimensional(SPECIFIC_HEAT_CAPACITY_DIMS),
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::ThermalConductivity,
+                ValueForm::Static,
+            )),
+            QuantitySpec::dimensional(viscosity_dims),
+        ];
+        for (index, (property, quantity)) in properties.iter().zip(quantities).enumerate() {
+            if property.quantity() != quantity
+                || property.hardness_test().is_some()
+                || property.elastic_component().is_some()
+                || property.strain_component().is_some()
+                || property.stress_component().is_some()
+                || properties[..index]
+                    .iter()
+                    .any(|prior| prior.name() == property.name())
+            {
+                return Err(MaterialStatePointError::InvalidRequirement {
+                    property: property.name().to_owned(),
+                    reason: "liquid transport requires distinct exact scalar keys of the declared physical quantities",
+                });
+            }
+        }
+        Ok(Self {
+            properties,
+            viscosity_basis,
+        })
+    }
+
+    /// Canonical source names with explicitly selected dynamic or kinematic viscosity.
+    pub fn canonical(
+        viscosity_basis: crate::liquid_temperature::LiquidViscosityBasis,
+    ) -> Result<Self, MaterialStatePointError> {
+        let (name, dims) = match viscosity_basis {
+            crate::liquid_temperature::LiquidViscosityBasis::Dynamic => {
+                (DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS)
+            }
+            crate::liquid_temperature::LiquidViscosityBasis::Kinematic => {
+                (KINEMATIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_DIMS)
+            }
+        };
+        let [density, specific_heat, conductivity, viscosity] = liquid_requirements(name, dims)?;
+        Self::try_new(
+            density,
+            specific_heat,
+            conductivity,
+            viscosity,
+            viscosity_basis,
+        )
+    }
+
+    /// Original requirements in density, heat capacity, conductivity, viscosity order.
+    pub const fn properties(&self) -> &[ScalarPropertyRequirement; 4] {
+        &self.properties
+    }
+
+    /// Original source viscosity basis; there is no fallback to another claim.
+    pub const fn viscosity_basis(&self) -> crate::liquid_temperature::LiquidViscosityBasis {
+        self.viscosity_basis
+    }
+}
+
 /// One source-resolved liquid transport state at its complete query point.
 ///
 /// The retained material bundle contains every selected property-use
@@ -46,7 +134,7 @@ pub const VOLUMETRIC_EXPANSION_DIMS: Dims = Dims([0, 0, 0, -1, 0, 0]);
 pub struct ResolvedLiquidState {
     material: ResolvedMaterialStatePoint,
     density_expansion: Option<ResolvedLiquidExpansion>,
-    viscosity_is_kinematic: bool,
+    requirements: LiquidPropertyRequirements,
     density_kg_m3: f64,
     specific_heat_j_kg_k: f64,
     thermal_conductivity_w_m_k: f64,
@@ -71,18 +159,21 @@ impl ResolvedLiquidState {
         material: ResolvedMaterialStatePoint,
         viscosity_basis: crate::liquid_temperature::LiquidViscosityBasis,
     ) -> Result<Self, MaterialStatePointError> {
-        let (name, dims, kinematic) = match viscosity_basis {
-            crate::liquid_temperature::LiquidViscosityBasis::Dynamic => {
-                (DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS, false)
-            }
-            crate::liquid_temperature::LiquidViscosityBasis::Kinematic => {
-                (KINEMATIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_DIMS, true)
-            }
-        };
-        for required in liquid_requirements(name, dims)? {
+        Self::try_from_material_with_requirements(
+            material,
+            &LiquidPropertyRequirements::canonical(viscosity_basis)?,
+        )
+    }
+
+    /// Adopt the retained bundle with explicit original source keys and roles.
+    pub fn try_from_material_with_requirements(
+        material: ResolvedMaterialStatePoint,
+        requirements: &LiquidPropertyRequirements,
+    ) -> Result<Self, MaterialStatePointError> {
+        for required in requirements.properties() {
             if material
                 .property(required.name())
-                .is_none_or(|property| property.requirement() != &required)
+                .is_none_or(|property| property.requirement() != required)
             {
                 return Err(MaterialStatePointError::InvalidRequirement {
                     property: required.name().to_owned(),
@@ -90,7 +181,7 @@ impl ResolvedLiquidState {
                 });
             }
         }
-        liquid_from_resolved_material(material, kinematic)
+        liquid_from_resolved_material(material, requirements)
     }
 
     /// Refresh every transport property at a new complete physical query while
@@ -113,7 +204,7 @@ impl ResolvedLiquidState {
     ) -> Result<Self, MaterialStatePointError> {
         let mut updated = liquid_from_resolved_material(
             self.material.at_query_point(card, point)?,
-            self.viscosity_is_kinematic,
+            &self.requirements,
         )?;
         if let Some(expansion) = &self.density_expansion {
             updated.density_expansion =
@@ -126,6 +217,11 @@ impl ResolvedLiquidState {
     #[must_use]
     pub const fn material(&self) -> &ResolvedMaterialStatePoint {
         &self.material
+    }
+
+    /// Exact original source keys, physical roles and viscosity basis.
+    pub const fn requirements(&self) -> &LiquidPropertyRequirements {
+        &self.requirements
     }
 
     /// Density [kg/m³].
@@ -199,13 +295,13 @@ pub fn resolve_liquid_state(
     point: &QueryPoint,
     selection: MaterialPropertySelection,
 ) -> Result<ResolvedLiquidState, MaterialStatePointError> {
-    resolve_liquid_state_with_viscosity(
+    resolve_liquid_state_with_requirements(
         card,
         point,
+        &LiquidPropertyRequirements::canonical(
+            crate::liquid_temperature::LiquidViscosityBasis::Dynamic,
+        )?,
         selection,
-        DYNAMIC_VISCOSITY_PROPERTY,
-        DYNAMIC_VISCOSITY_DIMS,
-        false,
     )
 }
 
@@ -225,13 +321,13 @@ pub fn resolve_liquid_state_from_kinematic(
     point: &QueryPoint,
     selection: MaterialPropertySelection,
 ) -> Result<ResolvedLiquidState, MaterialStatePointError> {
-    resolve_liquid_state_with_viscosity(
+    resolve_liquid_state_with_requirements(
         card,
         point,
+        &LiquidPropertyRequirements::canonical(
+            crate::liquid_temperature::LiquidViscosityBasis::Kinematic,
+        )?,
         selection,
-        KINEMATIC_VISCOSITY_PROPERTY,
-        KINEMATIC_VISCOSITY_DIMS,
-        true,
     )
 }
 
@@ -253,31 +349,23 @@ pub fn resolve_liquid_state_with_expansion(
     viscosity_basis: crate::liquid_temperature::LiquidViscosityBasis,
     selection: MaterialPropertySelection,
 ) -> Result<ResolvedLiquidState, MaterialStatePointError> {
-    let (name, dims, kinematic) = match viscosity_basis {
-        crate::liquid_temperature::LiquidViscosityBasis::Dynamic => {
-            (DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS, false)
-        }
-        crate::liquid_temperature::LiquidViscosityBasis::Kinematic => {
-            (KINEMATIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_DIMS, true)
-        }
-    };
-    let mut requirements = liquid_requirements(name, dims)?.to_vec();
+    let liquid = LiquidPropertyRequirements::canonical(viscosity_basis)?;
+    let mut requirements = liquid.properties().to_vec();
     requirements.push(expansion_requirement()?);
     let material = resolve_material_state_point(card, point, &requirements, selection)?;
-    liquid_from_resolved_material(material, kinematic)
+    liquid_from_resolved_material(material, &liquid)
 }
 
-fn resolve_liquid_state_with_viscosity(
+/// Resolve transport using explicitly selected original source keys.
+/// All claims are queried together and retained without aliases or source mutation.
+pub fn resolve_liquid_state_with_requirements(
     card: &MaterialCard,
     point: &QueryPoint,
+    requirements: &LiquidPropertyRequirements,
     selection: MaterialPropertySelection,
-    viscosity_property: &str,
-    viscosity_dims: Dims,
-    viscosity_is_kinematic: bool,
 ) -> Result<ResolvedLiquidState, MaterialStatePointError> {
-    let requirements = liquid_requirements(viscosity_property, viscosity_dims)?;
-    let material = resolve_material_state_point(card, point, &requirements, selection)?;
-    liquid_from_resolved_material(material, viscosity_is_kinematic)
+    let material = resolve_material_state_point(card, point, requirements.properties(), selection)?;
+    liquid_from_resolved_material(material, requirements)
 }
 
 fn liquid_requirements(
@@ -315,24 +403,21 @@ fn liquid_requirements(
 // four required complete keys have already passed the same consumer checks.
 fn liquid_from_resolved_material(
     material: ResolvedMaterialStatePoint,
-    viscosity_is_kinematic: bool,
+    requirements: &LiquidPropertyRequirements,
 ) -> Result<ResolvedLiquidState, MaterialStatePointError> {
     let volumetric_expansion_per_k = sourced_expansion(&material)?;
-    let viscosity_property = if viscosity_is_kinematic {
-        KINEMATIC_VISCOSITY_PROPERTY
-    } else {
-        DYNAMIC_VISCOSITY_PROPERTY
-    };
+    let viscosity_is_kinematic = requirements.viscosity_basis()
+        == crate::liquid_temperature::LiquidViscosityBasis::Kinematic;
     let value = |name| {
         material
             .property(name)
             .expect("required liquid property was resolved")
             .value_si()
     };
-    let density_kg_m3 = value(DENSITY_PROPERTY);
-    let specific_heat_j_kg_k = value(SPECIFIC_HEAT_CAPACITY_PROPERTY);
-    let thermal_conductivity_w_m_k = value(THERMAL_CONDUCTIVITY_PROPERTY);
-    let source_viscosity = value(viscosity_property);
+    let density_kg_m3 = value(requirements.properties()[0].name());
+    let specific_heat_j_kg_k = value(requirements.properties()[1].name());
+    let thermal_conductivity_w_m_k = value(requirements.properties()[2].name());
+    let source_viscosity = value(requirements.properties()[3].name());
     let dynamic_viscosity_pa_s = if viscosity_is_kinematic {
         dynamic_viscosity_from_kinematic(density_kg_m3, source_viscosity)?
     } else {
@@ -347,7 +432,7 @@ fn liquid_from_resolved_material(
     Ok(ResolvedLiquidState {
         material,
         density_expansion: None,
-        viscosity_is_kinematic,
+        requirements: requirements.clone(),
         density_kg_m3,
         specific_heat_j_kg_k,
         thermal_conductivity_w_m_k,

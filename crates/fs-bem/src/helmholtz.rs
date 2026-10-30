@@ -271,6 +271,22 @@ impl From<&GasState> for Medium {
 }
 
 impl Medium {
+    /// Copy a checked gas or liquid acoustic state into the radiation medium.
+    /// The source retains its original EOS, complete query and usage receipts;
+    /// this numerical view introduces no gas law or atmosphere default.
+    ///
+    /// # Errors
+    /// Refuses invalid or incoherent material acoustic states.
+    pub fn from_material<M: fs_material::fluid_acoustics::FluidAcoustics + ?Sized>(
+        material: &M,
+    ) -> Result<Self, fs_material::MaterialError> {
+        let state = material.acoustic_state()?;
+        Ok(Self {
+            density: state.density_kg_m3(),
+            sound_speed: state.sound_speed_m_s(),
+        })
+    }
+
     /// Dry USSA-1976 air at the declared room state of 293.15 K and 101325 Pa.
     /// Parameterized studies should construct their own [`GasState`] for their
     /// actual temperature, pressure, and gas identity instead of using this
@@ -2203,6 +2219,46 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn g3_checked_material_acoustics_preserve_gas_and_reject_stale_state() {
+        let mut gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100_000.0).unwrap();
+        let medium = Medium::from_material(&gas).unwrap();
+        assert_eq!(medium.density.to_bits(), gas.density.to_bits());
+        assert_eq!(medium.sound_speed.to_bits(), gas.sound_speed.to_bits());
+        gas.sound_speed *= 1.01;
+        assert!(Medium::from_material(&gas).is_err());
+    }
+
+    #[test]
+    fn g1_g3_material_acoustics_drive_liquid_radiation_without_a_gas_law() {
+        use fs_material::fluid_acoustics::FluidAcousticState;
+        // Manufactured liquid coefficients, not measured material data.
+        let liquid = FluidAcousticState::from_adiabatic_bulk_modulus(1000.0, 2.25e9).unwrap();
+        let medium = Medium::from_material(&liquid).unwrap();
+        assert_eq!(medium.sound_speed, 1500.0);
+        let surface = SpherePanels::icosphere(1.0, 2).unwrap();
+        let velocity = uniform_velocity(surface.centroids().len());
+        let k = 0.2;
+        let solution =
+            solve_radiation(&surface, k, medium, &velocity, Formulation::BurtonMiller).unwrap();
+        let expected =
+            C64::new(k * k, -k).scale(medium.density * medium.sound_speed / (1.0 + k * k));
+        assert!((mean_impedance(&solution, &surface) - expected).abs() / expected.abs() < 0.04);
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100_000.0).unwrap();
+        let gas_medium = Medium::from_material(&gas).unwrap();
+        let reference = solve_radiation(
+            &surface,
+            k,
+            gas_medium,
+            &velocity,
+            Formulation::BurtonMiller,
+        )
+        .unwrap();
+        let ratio =
+            medium.density * medium.sound_speed / (gas_medium.density * gas_medium.sound_speed);
+        assert!((solution.radiated_power / reference.radiated_power / ratio - 1.0).abs() < 1e-10);
+    }
+
     fn rho_c() -> f64 {
         let medium = Medium::air();
         medium.density * medium.sound_speed
@@ -4006,4 +4062,3 @@ mod tests {
         );
     }
 }
-

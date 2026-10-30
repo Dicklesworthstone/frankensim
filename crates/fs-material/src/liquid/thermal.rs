@@ -16,11 +16,15 @@ use fs_qty::Temperature;
 
 use super::ResolvedLiquidState;
 use crate::liquid_temperature::validate_temperature;
-use crate::state_point::{DENSITY_PROPERTY, MaterialStatePointError, ResolvedMaterialStatePoint};
+use crate::state_point::{MaterialStatePointError, ResolvedMaterialStatePoint};
+
+#[cfg(test)]
+use crate::state_point::DENSITY_PROPERTY;
 
 #[derive(Clone, Debug, PartialEq)]
 struct DensityExpansionPath {
     context: QueryPoint,
+    density_property: String,
     source: PropertyLineSlice,
     slopes_kg_m3_k: Vec<f64>,
 }
@@ -112,9 +116,10 @@ impl ResolvedLiquidState {
                 "liquid density expansion needs an increasing positive temperature interval",
             ));
         }
+        let density_property = self.requirements.properties()[0].name().to_owned();
         let property = self
             .material
-            .property(DENSITY_PROPERTY)
+            .property(&density_property)
             .expect("liquid resolution retains its density requirement");
         let selected = property.answer().receipt.selected;
         let claim = card
@@ -158,7 +163,7 @@ impl ResolvedLiquidState {
                 ClaimSelection::Pinned(selected),
             )
             .map_err(|source| MaterialStatePointError::Support {
-                property: DENSITY_PROPERTY.to_owned(),
+                property: density_property.clone(),
                 source: Box::new(source),
             })?;
         if source.knots.len() < 2
@@ -174,6 +179,7 @@ impl ResolvedLiquidState {
         self.density_expansion = Some(sample(
             Arc::new(DensityExpansionPath {
                 context,
+                density_property,
                 source,
                 slopes_kg_m3_k,
             }),
@@ -217,7 +223,7 @@ fn sample(
         ));
     }
     let density_property = material
-        .property(DENSITY_PROPERTY)
+        .property(&path.density_property)
         .expect("liquid resolution retains its density requirement");
     if density_property.answer().receipt.selected != knots[0].1.receipt.selected {
         return Err(invalid(
@@ -297,7 +303,7 @@ fn native_slopes(
                         .claims()
                         .query_pinned_typed(&claim.key, &query, span[0].1.receipt.selected)
                         .map_err(|source| MaterialStatePointError::Query {
-                            property: DENSITY_PROPERTY.to_owned(),
+                            property: claim.key.name().to_owned(),
                             source,
                         })?;
                     let EvaluationDecision::LinearInsideTriangle { triangle } =

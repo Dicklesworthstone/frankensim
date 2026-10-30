@@ -9,6 +9,31 @@ Ambition tags: elastic/hyperelastic/J2/RC-fiber laws + calibration [S];
 multi-case identifiability authority schema [F]. Ogden and tension-only
 HGO/GOH are [S] constitutive laws; specimen/tissue calibration is separate.
 
+## Elastic wave and hydrostatic response
+
+`elastic::acoustic::ElasticAcousticState` derives wave and pressure properties
+from the original positive-definite Mandel stiffness, inertial density and
+material-state identity. Isotropic and orthotropic constructors use the existing
+elastic laws and their strain ceilings. Full tensors, including normal/shear
+coupling, use the same orthonormal basis and transformations as native mechanics;
+no material-name table or assumed isotropy is introduced.
+
+Hydrostatic compliance solves `C s = I`, giving compressibility `I:s`, bulk
+modulus `1/(I:s)`, pressure strain `-p s` and stored energy `p^2(I:s)/2`.
+Directional modes solve the Christoffel problem `Gamma a = rho c^2 a` through
+the existing `fs-la` spectral owner and return phase speed, polarization and
+wave-normal traction/velocity impedance `rho c`. The original identity survives.
+Exact symmetry, positive definiteness, finite representability, solve residuals
+and the declared hydrostatic strain ceiling are checked; invalid states refuse
+without repairing source data. Degenerate polarizations identify a subspace.
+
+These are frozen, unstressed, small-strain model predictions. Static or
+isothermal source moduli do not establish measured adiabatic or high-frequency
+ultrasonic response. There is no attenuation, dispersion, group-velocity,
+prestress, finite-strain or thermoelastic-relaxation claim. Focused tests cover
+analytic isotropic and orthotropic modes, oblique anisotropy, full-tensor frame
+covariance, hydrostatic strain/work, density scaling and invalid inputs.
+
 ## Source-bound axial modulus references
 
 `axial_reference::ResolvedAxialModulusReference` resolves density and an
@@ -5409,3 +5434,33 @@ inertia/frequency, source-only heat changes, rotation/reindexing invariance and
 source/domain/cancellation refusal; native execution remains unverified in the
 memory-limited authoring worker. This is frozen-state, fixed-geometry, small-strain
 dynamics; no thermal evolution, prestress, bending or acoustic radiation is inferred.
+
+## Shared fluid acoustic response
+
+`fluid_acoustics::FluidAcoustics` admits one immutable acoustic snapshot with
+positive finite density, adiabatic sound speed, bulk modulus `K_s = rho c²`,
+compressibility `1/K_s` and plane-wave impedance `rho c`. Gas adapters reuse the
+original complete gas coherence check. Original IF97 Gibbs, dense and unified
+regional states supply their own density and sound speed; no ideal-gas cp/cv
+substitution is made for a liquid or dense fluid.
+
+`ResolvedFluidAcousticState` retains the complete material query, original source
+claims and every usage receipt. The caller explicitly selects a sound-speed or
+adiabatic-modulus role and exact scalar property keys. Pressure semantics,
+isothermal-modulus inference, tensor components and missing source properties
+are not silently converted. Refresh pins the same original claims and refuses
+unsupported state changes atomically. A numerical snapshot alone confers no
+material-source authority.
+
+`ResolvedAcousticLiquidState` resolves density, heat capacity, conductivity,
+viscosity and acoustics at the same query. `LiquidPropertyRequirements` assigns
+exact original source names to transport roles without aliases or claim mutation.
+The dynamic/kinematic basis is explicit; kinematic viscosity converts with the
+current density. Transport and acoustics must agree on the exact density bits.
+Existing optional liquid expansion remains an independent source derivative.
+
+Seven focused material regressions cover gas pressure scaling and stale-state
+refusal, original IF97 derivative identities, source refresh/domain boundaries,
+adiabatic-modulus semantics, both liquid viscosity bases, exact source vocabulary
+and unrepresentable coefficients. This is local small-signal nondispersive bulk
+acoustics, without attenuation, shear waves, phase selection or cavitation claims.

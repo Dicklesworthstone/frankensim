@@ -1142,3 +1142,18 @@ inventories, nonuniform exteriors, a rational time-domain load, or experimental
 source accuracy. The original centroid/disc Burton–Miller and triangle-CBIE
 accuracy limits remain. No passivity repair or BEM discretization-error bound
 is introduced, and receiver near-field convergence still requires refinement.
+
+## Source-bound gas and liquid acoustic media
+
+`helmholtz::Medium::from_material` consumes the shared checked
+`fs_material::fluid_acoustics::FluidAcoustics` view. Gas and liquid density and
+sound speed come from their original material state without another EOS or an
+air default. The original owner retains source identities and query receipts;
+`Medium` is the numerical radiation input. The existing raw `Medium` and
+infallible gas copy remain low-level numerical entry points.
+
+Focused G1/G3 regressions check coherent-gas bit preservation and stale-state
+refusal, manufactured-liquid pulsating-sphere impedance against its analytic
+value, and radiated-power scaling with `rho c` at fixed wavenumber. This does not
+add liquid attenuation, cavitation or an experimental accuracy claim; existing
+boundary-integral discretization and wavelength limits remain.
