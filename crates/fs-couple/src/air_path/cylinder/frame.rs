@@ -476,3 +476,6 @@ mod tests;
 
 /// Prepared native stepping and source-pinned, fixed-inertia viscosity feedback.
 pub mod viscosity;
+
+/// Exact loaded-inertia coordinates and original fluid memory for shared assemblies.
+pub mod modal;
