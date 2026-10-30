@@ -102,6 +102,32 @@ impl FreeExpansionGeometrySample {
     }
 }
 
+/// Geometry and its exact temperature derivative along the admitted source path.
+/// These are derived quantities; source receipts remain on the prepared path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeExpansionGeometryTangent {
+    geometry: FreeExpansionGeometrySample,
+    principal_stretch_derivatives_per_k: [f64; 3],
+    relative_volume_derivative_per_k: f64,
+}
+
+impl FreeExpansionGeometryTangent {
+    #[must_use]
+    pub const fn geometry(&self) -> FreeExpansionGeometrySample {
+        self.geometry
+    }
+    /// `ds_i/dT` in the same principal-axis order as the geometry [1/K].
+    #[must_use]
+    pub const fn principal_stretch_derivatives_per_k(&self) -> [f64; 3] {
+        self.principal_stretch_derivatives_per_k
+    }
+    /// Derivative of `V(T)/V(T_ref)`, with the reference held fixed [1/K].
+    #[must_use]
+    pub const fn relative_volume_derivative_per_k(&self) -> f64 {
+        self.relative_volume_derivative_per_k
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct StrainKnot {
     temperature: f64,
@@ -259,6 +285,60 @@ impl PreparedFreeExpansion {
         &self,
         temperature_k: f64,
     ) -> Result<FreeExpansionGeometrySample, ThermalTransportError> {
+        self.sample_with_index(temperature_k)
+            .map(|(sample, _)| sample)
+    }
+
+    /// Derive geometry and its thermal tangent in one binary search, without
+    /// allocation or source queries. Interior knots use the right interval;
+    /// the final endpoint uses the left interval. The normalized source-strain
+    /// slope, rather than an inferred expansion coefficient, supplies `ds/dT`.
+    /// An unrepresentable derivative refuses even if geometry alone is valid.
+    pub fn at_temperature_with_tangent(
+        &self,
+        temperature_k: f64,
+    ) -> Result<FreeExpansionGeometryTangent, ThermalTransportError> {
+        let (geometry, index) = self.sample_with_index(temperature_k)?;
+        let segment = if self.knots[index].temperature == temperature_k {
+            index.min(self.knots.len() - 2)
+        } else {
+            index - 1
+        };
+        let [left, right] = [self.knots[segment], self.knots[segment + 1]];
+        let width = right.temperature - left.temperature;
+        let mut derivatives = [0.0; 3];
+        let mut relative = [0.0; 3];
+        for i in 0..3 {
+            let change = right.strains[i] - left.strains[i];
+            derivatives[i] = (change / width) / self.reference_lengths[i];
+            relative[i] = derivatives[i] / geometry.principal_stretches[i];
+            if !derivatives[i].is_finite()
+                || !relative[i].is_finite()
+                || (change != 0.0 && (derivatives[i] == 0.0 || relative[i] == 0.0))
+            {
+                return Err(ThermalTransportError::Invalid(
+                    "free expansion stretch derivative is unrepresentable",
+                ));
+            }
+        }
+        let relative_sum = relative.into_iter().sum::<f64>();
+        let volume_derivative = geometry.relative_volume * relative_sum;
+        if !volume_derivative.is_finite() || (relative_sum != 0.0 && volume_derivative == 0.0) {
+            return Err(ThermalTransportError::Invalid(
+                "free expansion volume derivative is unrepresentable",
+            ));
+        }
+        Ok(FreeExpansionGeometryTangent {
+            geometry,
+            principal_stretch_derivatives_per_k: derivatives,
+            relative_volume_derivative_per_k: volume_derivative,
+        })
+    }
+
+    fn sample_with_index(
+        &self,
+        temperature_k: f64,
+    ) -> Result<(FreeExpansionGeometrySample, usize), ThermalTransportError> {
         let span = self.temperature_span_k();
         if !temperature_k.is_finite() || temperature_k < span[0] || temperature_k > span[1] {
             return Err(ThermalTransportError::Invalid(
@@ -279,12 +359,13 @@ impl PreparedFreeExpansion {
                 lower.strains[i] + weight * (upper.strains[i] - lower.strains[i])
             })
         };
-        checked_geometry(
+        let sample = checked_geometry(
             self.identity,
             temperature_k,
             strains,
             self.reference_lengths,
-        )
+        )?;
+        Ok((sample, index))
     }
 
     #[must_use]

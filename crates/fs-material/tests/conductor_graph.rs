@@ -1,5 +1,8 @@
 //! Native source resolution and conductor physics through the public law graph.
 //! Manufactured property tables verify integration; no measured-material claim.
+#[path = "conductor_graph/expansion.rs"]
+mod expansion;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

@@ -16,6 +16,7 @@ use crate::state_point::{
     MaterialStatePointError, ScalarAdmissibility, is_fixed_external_coordinate,
     pinned_temperature_line,
 };
+use crate::thermal::transport::expansion::PreparedFreeExpansion;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{LawId, MaterialCard};
 use fs_qty::{Dims, Temperature};
@@ -44,6 +45,7 @@ pub struct MaterialOhmicNode {
     source_line: Vec<(f64, f64)>,
     length_m: f64,
     area_m2: f64,
+    free_expansion: Option<(PreparedFreeExpansion, usize)>,
     declaration: NodeDeclaration,
 }
 
@@ -54,8 +56,9 @@ impl MaterialOhmicNode {
     /// scalar/curve laws and fixed-context slices of sampled surfaces, keeping
     /// every cell breakpoint and refusing holes or discrete-only spans.
     ///
-    /// This is memoryless scalar DC transport. It does not supply contacts,
-    /// thermal expansion, skin effect, field-dependent conductivity, phase
+    /// This is memoryless scalar DC transport. Free expansion can be attached
+    /// with [`Self::with_free_expansion`]. It does not supply contacts,
+    /// skin effect, field-dependent conductivity, phase
     /// evolution or measured authority beyond the original material card.
     /// At an interior source knot the tangent uses the right interval; the
     /// final endpoint uses the left interval. This is declared piecewise smooth.
@@ -227,8 +230,87 @@ impl MaterialOhmicNode {
             source_line,
             length_m,
             area_m2,
+            free_expansion: None,
             declaration,
         })
+    }
+
+    /// Couple the original conductor to sourced, unconstrained free expansion.
+    /// The existing length and area are reference geometry. Current flows along
+    /// the selected principal axis (0, 1 or 2); the other two stretches change
+    /// cross-sectional area. Isotropic expansion uses the same rule on any axis.
+    /// Resistance and Joule power still belong to the native conductor.
+    ///
+    /// The strain path must share the exact card, temperature interval, original
+    /// reference query and fixed conditions. Both electrical and geometric
+    /// derivatives enter the graph tangent. Strain receipts stay on the path;
+    /// the complete electrical bundle keeps its original selected claims.
+    ///
+    /// This declares free, quasistatic, stress-free geometry at fixed mass. It
+    /// does not infer mechanical work, thermal boundary areas, mass from the
+    /// deformed volume, or a replacement for a source density. A thermal owner
+    /// must retain compatible fixed-mass caloric storage; constrained or
+    /// externally loaded deformation requires a mechanical owner instead.
+    pub fn with_free_expansion(
+        mut self,
+        expansion: PreparedFreeExpansion,
+        longitudinal_axis: usize,
+    ) -> Result<Self, ConductorError> {
+        let context = self.response.original().material().query();
+        let lower = context
+            .clone()
+            .with(&self.temperature_axis, self.temperature_range_k[0])
+            .map_err(|_| invalid("Ohmic expansion lower coordinate is invalid"))?;
+        let upper = context
+            .clone()
+            .with(&self.temperature_axis, self.temperature_range_k[1])
+            .map_err(|_| invalid("Ohmic expansion upper coordinate is invalid"))?;
+        if self.free_expansion.is_some()
+            || longitudinal_axis >= 3
+            || expansion.material_card_identity()
+                != self.response.original().material().card_identity()
+            || expansion.temperature_axis() != self.temperature_axis
+            || expansion.reference_query_point() != &context
+            || expansion.query_endpoints() != [&lower, &upper]
+        {
+            return Err(invalid(
+                "Ohmic free expansion needs one principal axis and the same original source path",
+            ));
+        }
+        for source in expansion.source_lines() {
+            let selected = source.knots[0].1.receipt.selected;
+            let claim = self
+                .response
+                .card()
+                .claims()
+                .claim(selected)
+                .ok_or_else(|| invalid("Ohmic expansion source claim is absent"))?;
+            if self
+                .response
+                .original()
+                .material()
+                .property_by_key(&claim.key)
+                .is_some_and(|property| property.answer().receipt.selected != selected)
+            {
+                return Err(invalid(
+                    "Ohmic expansion cannot change an original bundle claim",
+                ));
+            }
+        }
+        self.free_expansion = Some((expansion, longitudinal_axis));
+        let expansion = &self.free_expansion.as_ref().expect("just bound").0;
+        // No fitted geometry law: admit the union of the actual source knots.
+        // Runtime checks also cover representability between those knots.
+        for temperature in self
+            .source_line
+            .iter()
+            .map(|&(t, _)| t)
+            .chain(expansion.temperatures_k())
+        {
+            let (conductor, geometry_slope) = self.resolve_with_geometry_slope(temperature)?;
+            self.resistance_temperature_slope(&conductor, temperature, geometry_slope)?;
+        }
+        Ok(self)
     }
 
     /// Original material, selected electrical source key and complete bundle.
@@ -243,13 +325,20 @@ impl MaterialOhmicNode {
     pub const fn temperature_range_k(&self) -> [f64; 2] {
         self.temperature_range_k
     }
-    /// Fixed physical conductor length [m].
+    /// Physical conductor length at its original reference temperature [m].
     pub const fn length_m(&self) -> f64 {
         self.length_m
     }
-    /// Fixed physical conductor area [m²].
+    /// Physical conductor area at its original reference temperature [m²].
     pub const fn area_m2(&self) -> f64 {
         self.area_m2
+    }
+
+    /// Original free-expansion path and longitudinal principal-axis index.
+    pub fn free_expansion(&self) -> Option<(&PreparedFreeExpansion, usize)> {
+        self.free_expansion
+            .as_ref()
+            .map(|(source, axis)| (source, *axis))
     }
 
     /// Resolve a native conductor and all original receipts at an absolute
@@ -258,6 +347,14 @@ impl MaterialOhmicNode {
         &self,
         temperature_k: f64,
     ) -> Result<ResolvedConductor, ConductorError> {
+        self.resolve_with_geometry_slope(temperature_k)
+            .map(|(conductor, _)| conductor)
+    }
+
+    fn resolve_with_geometry_slope(
+        &self,
+        temperature_k: f64,
+    ) -> Result<(ResolvedConductor, f64), ConductorError> {
         if !temperature_k.is_finite()
             || !(self.temperature_range_k[0]..=self.temperature_range_k[1]).contains(&temperature_k)
         {
@@ -265,6 +362,29 @@ impl MaterialOhmicNode {
                 "Ohmic graph temperature outside its admitted source interval",
             ));
         }
+        let (length_m, area_m2, geometry_slope) = match &self.free_expansion {
+            None => (self.length_m, self.area_m2, 0.0),
+            Some((source, axis)) => {
+                let tangent = source
+                    .at_temperature_with_tangent(temperature_k)
+                    .map_err(|_| {
+                        invalid("Ohmic free expansion geometry or derivative is unrepresentable")
+                    })?;
+                let stretches = tangent.geometry().principal_stretches();
+                let derivatives = tangent.principal_stretch_derivatives_per_k();
+                let across = [(*axis + 1) % 3, (*axis + 2) % 3];
+                let relative: [f64; 3] = std::array::from_fn(|i| derivatives[i] / stretches[i]);
+                // The physical area cannot depend on which transverse axis is
+                // listed first when intermediate products have extreme scales.
+                let mut area_factors = [self.area_m2, stretches[across[0]], stretches[across[1]]];
+                area_factors.sort_unstable_by(f64::total_cmp);
+                (
+                    self.length_m * stretches[*axis],
+                    (area_factors[0] * area_factors[2]) * area_factors[1],
+                    relative[*axis] - relative[across[0]] - relative[across[1]],
+                )
+            }
+        };
         let query = self
             .response
             .original()
@@ -272,9 +392,48 @@ impl MaterialOhmicNode {
             .query()
             .with(&self.temperature_axis, temperature_k)
             .map_err(|_| invalid("Ohmic graph temperature coordinate is invalid"))?;
-        self.response
+        let conductor = self
+            .response
             .at_query_point(&query)?
-            .into_uniform_conductor(self.length_m, self.area_m2)
+            .into_uniform_conductor(length_m, area_m2)?;
+        Ok((conductor, geometry_slope))
+    }
+
+    fn resistance_temperature_slope(
+        &self,
+        conductor: &ResolvedConductor,
+        temperature: f64,
+        geometry_relative_slope: f64,
+    ) -> Result<f64, ConductorError> {
+        let segment = self
+            .source_line
+            .partition_point(|&(t, _)| t <= temperature)
+            .saturating_sub(1)
+            .min(self.source_line.len() - 2);
+        let [left, right] = [self.source_line[segment], self.source_line[segment + 1]];
+        let source_slope = (right.1 - left.1) / (right.0 - left.0);
+        let relative = source_slope / conductor.source_property().value_si();
+        let material_slope = conductor.resistance_ohm()
+            * relative
+            * match conductor.source_basis() {
+                ElectricalPropertyBasis::Resistivity => 1.0,
+                ElectricalPropertyBasis::Conductivity => -1.0,
+            };
+        let geometry_slope = conductor.resistance_ohm() * geometry_relative_slope;
+        let slope = material_slope + geometry_slope;
+        if !relative.is_finite()
+            || !material_slope.is_finite()
+            || !geometry_slope.is_finite()
+            || !slope.is_finite()
+            || (source_slope != 0.0 && (relative == 0.0 || material_slope == 0.0))
+            || (geometry_relative_slope != 0.0 && geometry_slope == 0.0)
+        {
+            return Err(ConductorError::InvalidDerived {
+                quantity: "Ohmic material and geometric resistance derivatives",
+            });
+        }
+        // A genuine cancellation of material and geometric response is valid.
+        Ok(slope)
     }
 
     fn response_at(
@@ -296,29 +455,19 @@ impl MaterialOhmicNode {
             return Err(graph_error("Ohmic graph inputs must be finite"));
         }
         let temperature = self.reference_temperature_k + inputs[0];
-        let conductor = self.resolve_at_temperature_k(temperature).map_err(|_| {
-            graph_error("Ohmic material temperature or source bundle outside original support")
-        })?;
+        let (conductor, geometry_slope) =
+            self.resolve_with_geometry_slope(temperature).map_err(|_| {
+                graph_error("Ohmic material temperature or source bundle outside original support")
+            })?;
         let current = inputs[1];
         let resistance = conductor.resistance_ohm();
         let voltage = current * resistance;
         let heat = conductor
             .joule_power_w(current)
             .map_err(|_| graph_error("Ohmic material Joule power is unrepresentable"))?;
-        let segment = self
-            .source_line
-            .partition_point(|&(t, _)| t <= temperature)
-            .saturating_sub(1)
-            .min(self.source_line.len() - 2);
-        let [left, right] = [self.source_line[segment], self.source_line[segment + 1]];
-        let source_slope = (right.1 - left.1) / (right.0 - left.0);
-        let relative = source_slope / conductor.source_property().value_si();
-        let resistance_slope = resistance
-            * relative
-            * match conductor.source_basis() {
-                ElectricalPropertyBasis::Resistivity => 1.0,
-                ElectricalPropertyBasis::Conductivity => -1.0,
-            };
+        let resistance_slope = self
+            .resistance_temperature_slope(&conductor, temperature, geometry_slope)
+            .map_err(|_| graph_error("Ohmic resistance derivative is unrepresentable"))?;
         let voltage_slope = current * resistance_slope;
         let tangent = [
             voltage_slope,
@@ -328,9 +477,6 @@ impl MaterialOhmicNode {
         ];
         if !voltage.is_finite()
             || (current != 0.0 && voltage == 0.0)
-            || !relative.is_finite()
-            || !resistance_slope.is_finite()
-            || (source_slope != 0.0 && (relative == 0.0 || resistance_slope == 0.0))
             || tangent.iter().any(|v| !v.is_finite())
         {
             return Err(graph_error(

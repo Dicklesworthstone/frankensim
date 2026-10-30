@@ -4845,7 +4845,36 @@ typed liquid temperature. Runtime qualification is reported separately.
 
 ## Source-bound Ohmic constitutive graph
 
-`conductor::graph::MaterialOhmicNode` exposes the original scalar conductor as a public constitutive-law node with temperature-change and signed-current inputs, and signed-voltage and nonnegative-Joule-power outputs. It preserves the selected electrical property key and basis, original material bundle and claims, and continuously supported temperature slice, including fixed-context sampled surfaces. Conductivity is queried before conversion to resistance. Its piecewise-consistent tangent differentiates the native resistance and Joule-power equations; interior knots use the right interval and the final endpoint uses the left interval. Construction admits positive, representable native transport across every electrical source knot and refuses unsupported spans, unowned response coordinates, and phase-fraction evolution. This is fixed-geometry, memoryless scalar DC transport; thermal storage, time, contacts, skin effects, expansion, and phase evolution remain with their existing physical owners.
+`conductor::graph::MaterialOhmicNode` exposes the original scalar conductor as a public constitutive-law node with temperature-change and signed-current inputs, and signed-voltage and nonnegative-Joule-power outputs. It preserves the selected electrical property key and basis, original material bundle and claims, and continuously supported temperature slice, including fixed-context sampled surfaces. Conductivity is queried before conversion to resistance. Its piecewise-consistent tangent differentiates the native resistance and Joule-power equations; interior knots use the right interval and the final endpoint uses the left interval. Construction admits positive, representable native transport across every electrical source knot and refuses unsupported spans, unowned response coordinates, and phase-fraction evolution. The default uses fixed geometry and memoryless scalar DC transport; sourced free expansion can be bound as described below. Thermal storage, time, contacts, skin effects and phase evolution remain with their existing physical owners.
+
+### Source-defined expansion in electrical and thermal feedback
+
+`PreparedFreeExpansion::at_temperature_with_tangent` derives normalized
+principal stretches, their exact piecewise temperature derivatives and the
+volume derivative from original source segments. It uses the right interval
+at interior knots and the left interval at the final endpoint, with one binary
+search and no runtime allocation or source query for this geometric evaluation.
+
+`MaterialOhmicNode::with_free_expansion` requires the exact original material
+card, reference query, full temperature interval and an explicit current axis.
+It derives L=L0*s_parallel and A=A0*s_transverse1*s_transverse2 at the same
+temperature as the original electrical property. The graph tangent composes
+electrical resistivity/conductivity and all three geometric derivatives.
+If an expansion property already belongs to the original conductor bundle,
+its selected claim must remain identical. Physical cancellation of material
+and geometric temperature derivatives is admitted.
+
+The existing graph/enthalpy solver thus closes strain data, geometry,
+resistance/current, Joule heat and fixed-mass temperature on one endpoint.
+Five material regressions cover normalized tangents, all current axes, both
+electrical source bases, derivative cancellation, fixed geometry and source
+pin/refusal behavior. One coupled regression compares three strain tables over
+two continuing steps against an independent finite-capacity quadratic and
+terminal-work balance. Both focused test targets pass `cargo check`; execution
+remains pending. This is unconstrained, quasistatic, stress-free expansion.
+Source density claims, reference thermal geometry and fixed-mass caloric
+storage retain their original owners. No mechanical work, moving thermal
+boundary areas or constrained deformation is inferred from the new binding.
 
 ## Spatial heat storage inside sourced layers (2026-10-29)
 

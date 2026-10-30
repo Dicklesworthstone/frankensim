@@ -1,4 +1,6 @@
 //! Real material transport and native finite thermal storage, including latent heat.
+#[path = "enthalpy/expansion.rs"]
+mod expansion;
 
 use super::*;
 use fs_couple::circuit_enthalpy::contacts::heat::MaterialHeatNetwork;
