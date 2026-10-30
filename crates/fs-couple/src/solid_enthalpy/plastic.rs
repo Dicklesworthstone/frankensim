@@ -21,6 +21,8 @@ pub mod contact;
 pub mod electrical;
 /// Inertial motion, plastic heating and reciprocal thermal feedback together.
 pub mod dynamics;
+/// Finite source gas, actual loaded plastic history and reciprocal cell heat.
+pub mod gas;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -98,6 +100,8 @@ pub struct ThermoplasticConfig {
 #[derive(Clone, Debug)]
 struct BoundCell<'a> {
     source: ThermoplasticSource<'a>,
+    /// Immutable birth reference for later source-pinned interface bindings.
+    reference_h_j_kg: f64,
     /// Expected inventory/identity, not an independently evolved thermal owner.
     accepted: DepositedCell,
     volume_m3: f64,
@@ -175,6 +179,7 @@ impl<'a> ThermoplasticSolid<'a> {
             materials.push(source.reference().clone());
             cells.push(BoundCell {
                 source,
+                reference_h_j_kg: cell.specific_h_j_kg,
                 accepted: cell.clone(),
                 volume_m3,
             });

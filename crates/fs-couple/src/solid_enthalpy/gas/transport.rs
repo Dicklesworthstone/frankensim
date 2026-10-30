@@ -4,7 +4,7 @@ use super::*;
 // The original residual consumes coefficients and retains one source payload.
 // A complete heat sample remains intact; its material snapshot is borrowed by
 // the gas patches rather than cloned into a competing report field.
-pub(super) trait GasTransportSample {
+pub(in crate::solid_enthalpy) trait GasTransportSample {
     fn material(&self) -> &MaterialNetworkSample;
     fn radiation_net_power_w(&self) -> f64 {
         0.0
@@ -24,16 +24,16 @@ impl GasTransportSample for HeatNetworkSample {
     }
 }
 
-pub(super) struct GasTransportState<S> {
+pub(in crate::solid_enthalpy) struct GasTransportState<S> {
     pub sources_w: BTreeMap<CellId, f64>,
     pub conductances_w_k: BTreeMap<u64, f64>,
     pub sample: Option<S>,
 }
-pub(super) trait GasHeatTransport {
+pub(in crate::solid_enthalpy) trait GasHeatTransport {
     type Sample: GasTransportSample;
     fn resolve(
         &self,
-        solid: &SolidEnthalpy<'_>,
+        solid: &StructuralGasProblem<'_, '_>,
         thermal: &DepositionSimulation<'_>,
         cx: &Cx<'_>,
     ) -> Result<GasTransportState<Self::Sample>, SolidGasError>;
@@ -43,7 +43,7 @@ impl GasHeatTransport for Option<&PreparedMaterialNetwork<'_, '_>> {
     type Sample = MaterialNetworkSample;
     fn resolve(
         &self,
-        solid: &SolidEnthalpy<'_>,
+        solid: &StructuralGasProblem<'_, '_>,
         thermal: &DepositionSimulation<'_>,
         cx: &Cx<'_>,
     ) -> Result<GasTransportState<Self::Sample>, SolidGasError> {
@@ -60,19 +60,19 @@ impl GasHeatTransport for &PreparedHeatNetwork<'_, '_> {
     type Sample = HeatNetworkSample;
     fn resolve(
         &self,
-        solid: &SolidEnthalpy<'_>,
+        solid: &StructuralGasProblem<'_, '_>,
         thermal: &DepositionSimulation<'_>,
         cx: &Cx<'_>,
     ) -> Result<GasTransportState<Self::Sample>, SolidGasError> {
         // No graph circuit is being advanced. Even a zero-current electrical
         // binding must not silently disappear from this composition.
         let network = self.thermal_material_network()?;
-        for bound in &solid.cells {
+        for bound in solid.sources {
             cx.checkpoint().map_err(|_| SolidGasError::Cancelled)?;
             let cell = network
                 .cells
                 .iter()
-                .find(|cell| cell.cell == bound.source.cell)
+                .find(|cell| cell.cell == bound.cell)
                 .ok_or(SolidGasError::Invalid(
                     "structural cell lacks its original heat-network binding",
                 ))?;
@@ -83,21 +83,20 @@ impl GasHeatTransport for &PreparedHeatNetwork<'_, '_> {
                     "heat-network structural cell is inactive",
                 ))?;
             if cell.material_id != accepted.material_id
-                || !std::ptr::eq(cell.curve, bound.source.curve)
-                || cell.point.material.content_hash() != bound.source.point.material.content_hash()
-                || cell.point.temperature_axis != bound.source.point.temperature_axis
-                || cell.point.liquid_fraction_axis != bound.source.point.liquid_fraction_axis
+                || !std::ptr::eq(cell.curve, bound.curve)
+                || cell.point.material.content_hash() != bound.point.material.content_hash()
+                || cell.point.temperature_axis != bound.point.temperature_axis
+                || cell.point.liquid_fraction_axis != bound.point.liquid_fraction_axis
             {
                 return Err(SolidGasError::Invalid(
                     "heat and solid must retain the same cell material and caloric owner",
                 ));
             }
             let phase = bound
-                .source
                 .curve
                 .state_at_specific_enthalpy(accepted.specific_h_j_kg)
                 .map_err(SolidEnthalpyError::from)?;
-            if cell.point.at(phase)? != bound.source.point.at(phase)? {
+            if cell.point.at(phase)? != bound.point.at(phase)? {
                 return Err(SolidGasError::Invalid(
                     "heat and solid must retain the same complete physical conditions",
                 ));
@@ -118,7 +117,7 @@ impl GasHeatTransport for &PreparedHeatNetwork<'_, '_> {
     }
 }
 
-impl SolidEnthalpy<'_> {
+impl StructuralGasProblem<'_, '_> {
     pub(super) fn resolve_gas_transport(
         &self,
         transport: Option<&PreparedMaterialNetwork<'_, '_>>,
@@ -143,19 +142,19 @@ impl SolidEnthalpy<'_> {
         source: &MaterialNetworkSample,
         cx: &Cx<'_>,
     ) -> Result<(), SolidGasError> {
-        for bound in &self.cells {
+        for bound in self.sources {
             cx.checkpoint().map_err(|_| SolidGasError::Cancelled)?;
             let sample = source
                 .cells
-                .binary_search_by_key(&bound.source.cell, |sample| sample.cell)
+                .binary_search_by_key(&bound.cell, |sample| sample.cell)
                 .ok()
                 .map(|index| &source.cells[index])
                 .ok_or(SolidGasError::Invalid(
                     "structural cell lacks its original transport source",
                 ))?;
             if let Some(material) = &sample.conductivity {
-                let expected = bound.source.point.at(sample.phase)?;
-                if material.card_identity() != bound.source.point.material.content_hash()
+                let expected = bound.point.at(sample.phase)?;
+                if material.card_identity() != bound.point.material.content_hash()
                     || material.query() != expected
                 {
                     return Err(SolidGasError::Invalid(
