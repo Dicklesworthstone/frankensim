@@ -13,6 +13,9 @@
 //! event. Actual finite constraint work is retained, and the native global
 //! passivity, momentum and endpoint gates remain authoritative.
 
+/// Spherical point closures and weld reactions sharing this impact solve.
+pub mod bilateral;
+
 use super::{
     ArticulatedContactError, ArticulatedContactSystem, ArticulatedFrictionalContact,
     ArticulatedFrictionalContactResult, EventResponse, FrictionalContactConfig, LinkContactPoint,
