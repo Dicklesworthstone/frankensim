@@ -98,10 +98,10 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
     }
 }
 
-// Independent positivity of (caloric + elastic) and (caloric + field) would
-// spend the same caloric capacity twice. Intersect the original conservative
-// envelope floors BEFORE any solve; this may be conservative but never relaxes
-// either physical owner's domain. Source-frame layers have disjoint cells.
+// Independent positivity of (caloric + elastic) and each (caloric + field)
+ // would spend the same caloric capacity repeatedly. Sum every co-located field
+ // contribution first, then intersect that total with the original conservative
+ // thermoelastic floor BEFORE any solve. Source-frame layers have disjoint cells.
 pub(super) fn admit(
     owner: &FrameThermoelasticSystem<'_, '_>,
     source: &MaterialNetwork<'_>,
@@ -119,14 +119,22 @@ pub(super) fn admit(
             mechanical_floors.insert(receiver.binding.cell, floor);
         }
     }
+    let mut field_floors = BTreeMap::<CellId, f64>::new();
     for field in fields {
         check(gate)?;
-        if let Some(&mechanical_floor) = mechanical_floors.get(&field.cell) {
-            let field_floor = field.law.minimum_heat_capacity_j_k(field.maximum_abs_coordinate)
-                .map_err(|e| FrameThermalError::from(MaterialCircuitError::Storage(e)))?;
-            if finite(mechanical_floor + field_floor)? <= 0.0 {
-                return Err(invalid("combined caloric, elastic and field heat capacity must stay positive"));
-            }
+        let field_floor = field.law.minimum_heat_capacity_j_k(field.maximum_abs_coordinate)
+            .map_err(|e| FrameThermalError::from(MaterialCircuitError::Storage(e)))?;
+        let total = field_floors.entry(field.cell).or_insert(0.0);
+        *total = finite(*total + field_floor)?;
+    }
+    for (cell, field_floor) in field_floors {
+        check(gate)?;
+        if let Some(&mechanical_floor) = mechanical_floors.get(&cell)
+            && finite(mechanical_floor + field_floor)? <= 0.0
+        {
+            return Err(invalid(
+                "combined caloric, elastic and all co-located field heat capacities must stay positive",
+            ));
         }
     }
     check(gate)

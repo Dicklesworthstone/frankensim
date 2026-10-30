@@ -315,7 +315,7 @@ fn shared_cell_capacity_cannot_be_spent_once_by_each_physics_subsystem() {
         // Fixture independently checked that both pairwise capacity gates pass,
         // while the actual three-contribution envelope fails.
         assert!(matches!(owner, Err(CircuitEnthalpyError::Invalid(
-            "combined caloric, elastic and field heat capacity must stay positive"))));
+            "combined caloric, elastic and all co-located field heat capacities must stay positive"))));
         assert_eq!(thermal.time_s(), 0.0);
         near(thermal.temperature_k(A).unwrap(), 300.0, 1e-12);
     });
