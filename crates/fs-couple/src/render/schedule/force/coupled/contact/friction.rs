@@ -259,6 +259,7 @@ impl FrictionModalSystem {
         mut self, budget: super::super::PreparedModalBudget, gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_prepared_linear_propagation(budget, gate)?;
+        self.validate_material_history_band()?;
         self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
@@ -272,6 +273,7 @@ impl FrictionModalSystem {
         mut self, constant_loss: &[super::super::ConstantLossConnection], gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_constant_loss_connections(constant_loss, gate)?;
+        self.validate_material_history_band()?;
         self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
@@ -291,6 +293,7 @@ impl FrictionModalSystem {
         gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_material_relaxation(branches, initial_memory, gate)?;
+        self.validate_material_history_band()?;
         self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         limit("complete initial material/nonlinear energy", self.total_energy_j()?,
             self.network.config.maximum_total_energy_j)?;
@@ -306,6 +309,7 @@ impl FrictionModalSystem {
         gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_additional_material_relaxation(branches, initial_memory, gate)?;
+        self.validate_material_history_band()?;
         self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         limit("complete initial material/nonlinear energy", self.total_energy_j()?,
             self.network.config.maximum_total_energy_j)?;
@@ -354,6 +358,7 @@ impl FrictionModalSystem {
         source_modes: &[usize], maximum_poles: usize, gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_radiation_load(model, source_modes, maximum_poles, gate)?;
+        self.validate_material_history_band()?;
         self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
@@ -392,11 +397,17 @@ impl FrictionModalSystem {
     /// Accepted components, with their existing basis, budgets and state.
     #[must_use]
     pub fn components(&self) -> &[ModalAcousticTimeModel] { self.network.components() }
-    /// Original complete linear-network stiffness bound, including all springs.
-    /// Independent friction/nonlinear trajectories need their own refinement.
+    /// Current linear-network stiffness bound plus all admitted hereditary
+    /// instantaneous-stiffness envelopes. Arbitrary conservative nonlinear
+    /// potentials and friction harmonics still need their own refinement.
     #[must_use]
-    pub const fn linear_frequency_upper_bound_rad_s(&self) -> f64 {
-        self.network.linear_frequency_upper_bound_rad_s()
+    pub fn linear_frequency_upper_bound_rad_s(&self) -> f64 {
+        let base=self.network.linear_frequency_upper_bound_rad_s();
+        let extra=self.nonlinear.as_ref().map_or(0.0,|state|state.history_stiffness_bound_per_s2());
+        // The history envelope is additional physical stiffness, not a new
+        // oscillator or material loss. Read the CURRENT operator on each call
+        // so later cold bindings cannot leave source admission on a stale band.
+        if extra==0.0 {base} else {fs_math::det::sqrt(base*base+extra)}
     }
     /// Flattened external-force dimension, component then mode order.
     #[must_use]

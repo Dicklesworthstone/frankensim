@@ -7,6 +7,8 @@ use fs_material::section::relaxation::LayerRelaxationProperties;
 #[derive(Clone, Debug)]
 pub struct Input {
     pub max_states: usize,
+    /// Include mean and transverse geometric strain in every source arm.
+    pub finite_strain: bool,
     pub properties: LayerRelaxationProperties,
 }
 impl Input {
@@ -61,7 +63,7 @@ impl Input {
                     "measured whole strings do not supply axial material history".into()),
             };
             states = layers.checked_mul(self.properties.branches.len())
-                .and_then(|n| n.checked_mul(resolution.axial_modes.len()))
+                .and_then(|n| n.checked_mul(resolution.axial_modes.len()+usize::from(self.finite_strain)))
                 .and_then(|n| n.checked_add(states)).ok_or("axial history count overflow")?;
         }
         if states > self.max_states {
@@ -73,13 +75,25 @@ impl Input {
         -> Result<ReciprocalStringBank>
     {
         self.preflight(spec)?;
-        let selections = spec.strings.iter().enumerate().map(|(string, wire)| {
+        let selections = self.selections(spec);
+        Ok(if self.finite_strain {
+            bank.with_material_finite_strain_longitudinal_relaxation(selections,None,self.max_states,gate)?
+        } else {bank.with_material_longitudinal_relaxation(selections,None,self.max_states,gate)?})
+    }
+    pub fn bind_after_preload(&self, performance:MultiBowPerformance,spec:&input::Spec,gate:&CancelGate)
+        -> Result<MultiBowPerformance> {
+        self.preflight(spec)?;
+        if !self.finite_strain {return Err("only complete strain history binds after preload".into());}
+        Ok(performance.with_material_finite_strain_longitudinal_relaxation(
+            self.selections(spec),None,self.max_states,gate)?)
+    }
+    fn selections(&self,spec:&input::Spec)->Vec<LongitudinalRelaxationSelection> {
+        spec.strings.iter().enumerate().map(|(string, wire)| {
             let layers = match &wire.section {
                 input::WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
                 _ => 1, // Wound sections already refused by preflight.
             };
             LongitudinalRelaxationSelection { string, layers: vec![self.properties.clone(); layers] }
-        }).collect();
-        Ok(bank.with_material_longitudinal_relaxation(selections, None, self.max_states, gate)?)
+        }).collect()
     }
 }

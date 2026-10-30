@@ -576,6 +576,8 @@ impl Spec {
         let longitudinal_memory = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("longitudinal-memory") {
             let mut row = r.row("longitudinal-memory")?;
+            let finite_strain=row.words.clone().next()==Some("finite-strain");
+            if finite_strain {row.word()?;}
             let max_states = row.count(256)?;
             let equilibrium_modulus = row.word()?.to_string();
             let count = row.count(8)?;
@@ -584,7 +586,7 @@ impl Spec {
                 branches.push((row.word()?.to_string(), row.word()?.to_string()));
             }
             row.end()?;
-            let memory = longitudinal_memory::Input { max_states,
+            let memory = longitudinal_memory::Input { max_states, finite_strain,
                 properties: fs_material::section::relaxation::LayerRelaxationProperties {
                     equilibrium_modulus, branches,
                 },

@@ -70,7 +70,7 @@ impl MultiFrictionModalSystem {
                 .map(|drive| drive.spring_energy_j(drive.stretch_m())).sum();
             Some(finite(layer_energy + series_energy)?)
         } else { None };
-        let state = self.core.nonlinear.take()
+        let mut state = self.core.nonlinear.take()
             .ok_or_else(|| invalid("nonlinear trial requires retained constitutive storage"))?;
         let result = (|| {
             let mut trial = MultipleTrial { inner: &mut *self, drives,

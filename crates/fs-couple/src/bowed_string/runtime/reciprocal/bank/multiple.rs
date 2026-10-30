@@ -122,6 +122,34 @@ impl ReciprocalStringBank {
     }
 }
 impl MultiBowStringBank {
+    /// Bind complete material strain histories after optional static preload.
+    /// The relaxed initial history uses that actual solved displacement; all
+    /// bow, stop, surface and original mechanical state remain in their owner.
+    pub fn with_material_finite_strain_longitudinal_relaxation(mut self,
+        selections:Vec<super::nonlinear::longitudinal::relaxation::LongitudinalRelaxationSelection>,
+        initial_memory:Option<Vec<f64>>,max_memory_states:usize,gate:&CancelGate)
+        -> Result<Self,crate::render::plate::impact::ImpactError> {
+        use super::nonlinear::longitudinal::relaxation::finite_strain;
+        use crate::render::plate::impact::ImpactError;
+        let (image,bindings)=finite_strain::bindings(&self.source.bank,&self.cards,
+            self.system.original_core(),selections,initial_memory,max_memory_states,gate)?;
+        if !bindings.is_empty() {
+            self.system=self.system.with_mapped_material_histories(bindings,max_memory_states,gate)
+                .map_err(|e|ImpactError::Owner(e.to_string()))?;
+        }
+        finite_strain::retain_source(&mut self.source.bank,image);
+        finite_strain::validate_sources(&self.source.bank,self.system.original_core(),gate)?;
+        // Fibers were assembled before the force/preload program. Their
+        // original source spectrum must also admit the expanded string band.
+        if let Some(memory)=self.source.fiber_ribbon.as_ref()
+            .and_then(|ribbon|ribbon.model().material_relaxation()) {
+            memory.validate_band(self.system.linear_frequency_upper_bound_rad_s(),
+                self.system.sample_period_s()).map_err(|e|ImpactError::Owner(e.to_string()))?;
+        }
+        if gate.is_requested() {return Err(ImpactError::Cancelled);}
+        Ok(self)
+    }
+
     /// Original material/geometry bindings and every contact in drive order.
     #[must_use]
     pub const fn source(&self) -> &MultiBowStringBankSource { &self.source }

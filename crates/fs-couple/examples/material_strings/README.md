@@ -1931,6 +1931,49 @@ elastically. A separately selected axial Kelvin–Voigt viscosity is a distinct
 parallel physical mechanism and must not count the same relaxation twice.
 Numerical and measured-instrument convergence remain separate obligations.
 
+To apply the same source spectra to the **complete retained strain**, use:
+
+```text
+longitudinal-memory finite-strain MAX_STATES EQUILIBRIUM_MODULUS_PROPERTY ARMS DELTA_E_PROPERTY TAU_PROPERTY ...
+```
+
+This selection retains one mean relaxed-strain state plus every selected cosine
+strain state for each nonzero layer/arm. The history budget therefore includes
+`axial_modes + 1` states per arm. Mean geometric stretch and both transverse
+planes now produce hereditary stress even when axial modal velocity is zero.
+The source's equilibrium modulus remains the original elastic backbone;
+each positive modulus increment supplies additional Maxwell storage.
+
+For each arm, `psi = Delta_E*A*integral((epsilon-z)^2)/2` and
+`z_dot = (epsilon-z)/tau`, with the existing
+`epsilon = u_x + (y_x^2+z_x^2)/2`. The joint constitutive/contact solve uses
+arithmetic endpoint strain means for the material midpoint update and the
+strain gradient at midpoint displacement for exact discrete mechanical work.
+Physical relaxation loss, stored material stress, both transverse/axial
+reactions and endpoint acceleration pressure are accounted together. Repeated
+nonlinear or thermal trials restart accepted memory; publication commits once.
+The input initializes each arm relaxed at the actual initial displacement.
+
+This requires source validity from DC (including mean strain) through the
+complete coupled small-signal instantaneous band, and `dt/tau <= 2` for every
+source arm. The additional-stiffness bound includes the declared slope/strain
+envelope and initial retained stress, so a bent static preload cannot bypass
+admission through an axial-only frequency check. The common mechanical owner
+retains and sums these bounds with its current linear operator; original body,
+bridge, axial bearing, viscosity and material-memory checks receive that same
+expanded band. A later cold linear binding cannot leave a stale frequency
+report, and the longitudinal source does not add its increment twice.
+Explicit zero increments
+preserve the original elastic trajectory.
+The numeric-first record above keeps its original linear axial approximation.
+The two selections cannot bind the same axial memory twice. The example binds
+full-strain history after its force/static preparation, so every arm starts
+relaxed at the actual preloaded geometry. The public single/multi-bank API
+likewise requires static equilibrium before binding history; a later static
+reset or topology/gas remap that cannot preserve these histories refuses.
+Maintained reference preload, frozen source
+temperature, moderate-slope geometry and retained-mode limitations remain.
+
 `nonlinear-cylinder-bow.material-strings` combines a bonded string's two
 transverse planes and material torsion with causal cylinder-gas memory, the
 shared material plate, its cavity and an actual bow gesture. With the existing

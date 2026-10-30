@@ -1,10 +1,11 @@
-//! Linear axial hereditary stress on the original retained longitudinal modes.
+//! Source-defined axial and full retained-strain hereditary material stress.
 //!
 //! A bonded layer contributes `Delta E * A * k_n^2 / mu_solid` to the
 //! mass-normalized axial stiffness. Its relaxation time and independent history
 //! survive; bending's area moment and transverse fluid-added mass never enter
 //! this projection. The existing section owner admits the original uniaxial
-//! Young-modulus spectra; the existing shared Maxwell owner advances them.
+//! Young-modulus spectra. Linear selection uses the existing Maxwell branches;
+//! full-strain selection stages histories inside the original joint solve.
 use super::*;
 use crate::bowed_string::runtime::reciprocal::bank::{
     ReciprocalStringError, invalid as bank_invalid,
@@ -14,6 +15,7 @@ use crate::render::schedule::force::coupled::ModalCouplingError;
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::section::relaxation::{ConcentricPronySection, LayerRelaxationProperties};
 use fs_phs::RelaxationBranch;
+pub(in crate::bowed_string::runtime::reciprocal::bank) mod finite_strain;
 
 /// One spectrum per original physical layer, for one retained axial member.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +50,9 @@ pub struct StringBankLongitudinalRelaxation {
     channels: Vec<LongitudinalMemoryChannel>,
     basis: Vec<(usize, Vec<ModalAcousticMode>)>,
     max_memory_states: usize,
+    finite_strain: bool,
+    /// Added tangent upper bound, including transverse strain and retained stress.
+    finite_strain_stiffness_bound_per_s2: f64,
 }
 impl StringBankLongitudinalRelaxation {
     pub fn selections(&self) -> &[LongitudinalRelaxationSelection] { &self.selections }
@@ -57,11 +62,27 @@ impl StringBankLongitudinalRelaxation {
     pub fn sections(&self) -> &[ConcentricPronySection] { &self.sections }
     pub fn channels(&self) -> &[LongitudinalMemoryChannel] { &self.channels }
     pub const fn max_memory_states(&self) -> usize { self.max_memory_states }
+    /// Full retained strain histories include a mean-strain channel in each
+    /// active layer/arm. channels() retains the original axial small-signal
+    /// projections; accepted nonlinear histories are exposed by the time owner.
+    pub const fn is_finite_strain(&self) -> bool { self.finite_strain }
+    /// Additional source stiffness envelope [1/s^2], already included by the
+    /// shared mechanical owner. Zero for the original linear branch selection.
+    pub const fn finite_strain_stiffness_bound_per_s2(&self)->f64 {
+        self.finite_strain_stiffness_bound_per_s2
+    }
 
     fn bind(bank: &ReciprocalStringBank, selections: Vec<LongitudinalRelaxationSelection>,
         max_memory_states: usize, gate: &CancelGate) -> Result<Self, ImpactError>
     {
-        let axial = bank.source.longitudinal_waves.as_ref()
+        Self::bind_source(&bank.source, &bank.cards, &bank.system, selections, max_memory_states, gate)
+    }
+
+    fn bind_source(source: &MaterialStringBankSource, cards: &[crate::bowed_string::BowedStringCard],
+        system: &FrictionModalSystem, selections: Vec<LongitudinalRelaxationSelection>,
+        max_memory_states: usize, gate: &CancelGate) -> Result<Self, ImpactError>
+    {
+        let axial = source.longitudinal_waves.as_ref()
             .ok_or_else(|| invalid("axial memory requires retained original longitudinal waves"))?;
         if selections.is_empty() || selections.len() > axial.strings.len()
             || !(1..=256).contains(&max_memory_states) {
@@ -72,7 +93,7 @@ impl StringBankLongitudinalRelaxation {
         let mut basis = Vec::with_capacity(selections.len());
         for (index, selection) in selections.iter().enumerate() {
             if gate.is_requested() { return Err(ImpactError::Cancelled); }
-            let member = bank.source.strings.get(selection.string)
+            let member = source.strings.get(selection.string)
                 .ok_or_else(|| invalid("axial memory names an absent original string"))?;
             let law = &axial.strings[selection.string];
             if selections[..index].iter().any(|s| s.string == selection.string) {
@@ -90,7 +111,7 @@ impl StringBankLongitudinalRelaxation {
                 || !same(section.elastic().axial_stiffness_n(), law.axial_rigidity_n) {
                 return Err(invalid("axial memory must preserve its original solid inertia and equilibrium rigidity"));
             }
-            let component = &bank.system.components()[law.axial_component];
+            let component = &system.components()[law.axial_component];
             if component.modes().len() != law.model.axial_modes().len() {
                 return Err(invalid("axial memory lost its complete original sine basis"));
             }
@@ -110,7 +131,7 @@ impl StringBankLongitudinalRelaxation {
                         return Err(invalid("axial material-memory rigidity is unrepresentable"));
                     }
                     for (mode, &sine_index) in law.model.axial_modes().iter().enumerate() {
-                        let k = sine_index as f64 * core::f64::consts::PI / bank.cards[selection.string].length_m;
+                        let k = sine_index as f64 * core::f64::consts::PI / cards[selection.string].length_m;
                         let coupling = scale * k;
                         if !coupling.is_finite() || coupling <= 0.0 {
                             return Err(invalid("axial strain projection lost a positive source channel"));
@@ -123,13 +144,17 @@ impl StringBankLongitudinalRelaxation {
             }
             sections.push(section);
         }
-        Ok(Self { selections, sections, channels, basis, max_memory_states })
+        Ok(Self { selections, sections, channels, basis, max_memory_states, finite_strain:false,
+            finite_strain_stiffness_bound_per_s2:0.0 })
     }
 
     pub(in crate::bowed_string::runtime::reciprocal::bank) fn validate_band(&self,
         high: f64, dt: f64) -> Result<(), ReciprocalStringError>
     {
+        // The shared owner ALREADY includes every admitted history envelope in
+        // this band. Never add this source's stiffness again on revalidation.
         if !high.is_finite() || high < 0.0 || !dt.is_finite() || dt <= 0.0
+            || self.finite_strain && high*dt>=core::f64::consts::PI
             || self.sections.iter().any(|section| {
                 let (lo, hi) = section.omega_band_rad_s(); lo > 0.0 || high > hi
             }) || self.sections.iter().flat_map(|section| section.spectra())
@@ -142,6 +167,9 @@ impl StringBankLongitudinalRelaxation {
     pub(in crate::bowed_string::runtime::reciprocal::bank) fn branches(&self,
         system: &FrictionModalSystem, gate: &CancelGate) -> Result<Vec<RelaxationBranch>, ReciprocalStringError>
     {
+        if self.finite_strain && !self.channels.is_empty() {
+            return Err(bank_invalid("full-strain material history cannot be rebuilt as linear axial branches"));
+        }
         for (component, modes) in &self.basis {
             if system.components().get(*component).is_none_or(|c| c.modes() != modes.as_slice()) {
                 return Err(bank_invalid("axial material history requires its unchanged original solid basis"));

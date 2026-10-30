@@ -456,8 +456,8 @@ impl input::Spec {
             }
         };
         let bank = match &self.longitudinal_memory {
-            Some(memory) => memory.bind(bank, &self, gate)?,
-            None => bank,
+            Some(memory) if !memory.finite_strain => memory.bind(bank, &self, gate)?,
+            _ => bank,
         };
         // The original body basis survives fluid, torsion and material-history
         // binding. Compute its air reaction once, before bows or preload run.
@@ -537,6 +537,9 @@ impl input::Spec {
             bank.into_scheduled(self.schedule.clone(),names,performance_config)?
         };
         if let Some(forces)=&self.forces { performance=performance.with_material_forces(forces.clone(),gate)?; }
+        if let Some(memory)=self.longitudinal_memory.as_ref().filter(|memory|memory.finite_strain) {
+            performance=memory.bind_after_preload(performance,&self,gate)?;
+        }
         if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }
         if let Some(program)=bow_station_program {
             performance=performance.with_bow_station_motion(program,gate)?;

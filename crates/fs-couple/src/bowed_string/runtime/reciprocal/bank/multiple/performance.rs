@@ -205,6 +205,20 @@ pub struct MultiBowPerformance {
     coating_monitor: Option<coating::BoundShellCoatingMonitor>,
 }
 impl MultiBowPerformance {
+    /// Add source material histories AFTER force/static preparation, before any
+    /// sample. Relaxed initialization uses the actual preloaded geometry and
+    /// leaves the force program and its original preload report intact.
+    pub fn with_material_finite_strain_longitudinal_relaxation(mut self,
+        selections:Vec<super::super::nonlinear::longitudinal::relaxation::LongitudinalRelaxationSelection>,
+        initial_memory:Option<Vec<f64>>,max_memory_states:usize,gate:&fs_exec::CancelGate)
+        -> Result<Self,crate::render::plate::impact::ImpactError> {
+        self.validate_sample_count(0)
+            .map_err(|e|crate::render::plate::impact::ImpactError::Owner(e.to_string()))?;
+        self.bank=self.bank.with_material_finite_strain_longitudinal_relaxation(
+            selections,initial_memory,max_memory_states,gate)?;
+        Ok(self)
+    }
+
     /// Add fiber support acceleration and material contact travel to the SAME
     /// performance clock. Bind after optional bow-station paths. Schedule speeds
     /// denote support endpoint velocities; acceleration limits apply to every

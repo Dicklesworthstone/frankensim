@@ -305,6 +305,18 @@ impl MultiFrictionModalSystem {
     /// Accepted first-order material history, with no mutable admission bypass.
     #[must_use]
     pub fn material_memory(&self) -> &[f64] { self.core.material_memory() }
+    /// Accepted nonlinear constitutive histories, in original binding order.
+    pub fn nonlinear_material_memory(&self) -> Vec<&[f64]> {self.core.nonlinear_material_memory()}
+    /// Retain the common constitutive state after contact/static preparation.
+    /// Contact maps and their response matrices are unchanged by this binding.
+    pub fn with_mapped_material_histories(mut self,
+        bindings:Vec<super::nonlinear::history::MappedModalHistoryBinding>,
+        maximum_states:usize,gate:&CancelGate) -> Result<Self,ModalFrictionError> {
+        self.core=self.core.with_mapped_material_histories(bindings,maximum_states,gate)?;
+        Ok(self)
+    }
+    /// Source admission reads the unchanged original mechanical basis.
+    pub(crate) fn original_core(&self) -> &FrictionModalSystem {&self.core}
     /// Work required to observe an original range of accepted material arms.
     pub fn material_relaxation_observation_work(&self, branches: core::ops::Range<usize>)
         -> Result<usize, ModalCouplingError>
@@ -326,7 +338,7 @@ impl MultiFrictionModalSystem {
     /// External modal-force dimension.
     #[must_use] pub fn mode_count(&self) -> usize { self.core.mode_count() }
     /// The shared linear network's admitted stiffness bound [rad/s]; contacts are not in it.
-    #[must_use] pub const fn linear_frequency_upper_bound_rad_s(&self) -> f64 { self.core.linear_frequency_upper_bound_rad_s() }
+    #[must_use] pub fn linear_frequency_upper_bound_rad_s(&self) -> f64 { self.core.linear_frequency_upper_bound_rad_s() }
     /// Original shared mechanical period [s].
     #[must_use] pub fn sample_period_s(&self) -> f64 { self.core.sample_period_s() }
     /// Preserved original accepted sample clock.
@@ -568,6 +580,9 @@ impl MultiFrictionModalSystem {
     fn publish_step(&mut self, mut accepted: MultiFrictionFrame) -> &MultiFrictionFrame {
         self.core.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
         self.core.network.publish_staged();
+        if accepted.nonlinear.is_some() {
+            if let Some(state)=&mut self.core.nonlinear {state.publish_histories();}
+        }
         self.branches.copy_from_slice(&self.staged_branches);
         self.core.branch = self.branches[0];
         for (drive, &stretch) in self.series_drives.iter_mut().zip(&self.staged_stretch) {

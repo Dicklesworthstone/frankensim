@@ -14,6 +14,8 @@ use std::borrow::Cow;
 
 mod equilibrium;
 pub use equilibrium::NonlinearPreloadDiagnostics;
+pub mod history;
+use history::BoundHistory;
 
 /// Displacement-only positive constitutive energy. Contiguous bindings supply
 /// additional energy; mapped bindings may explicitly replace selected original
@@ -239,6 +241,7 @@ impl BoundPotential {
 }
 pub(super) struct NonlinearFrictionState {
     potentials: Vec<BoundPotential>,
+    histories: Vec<BoundHistory>,
     config: NonlinearModalConfig,
     last: Option<NonlinearFrictionFrame>,
     pub(super) preload: Option<NonlinearPreloadDiagnostics>,
@@ -299,7 +302,8 @@ impl FrictionModalSystem {
             return Err(invalid("nonlinear storage requires cold nonempty binding and finite force/iteration budgets").into());
         }
         let mut occupied = vec![false; self.mode_count()];
-        let mut potentials = self.nonlinear.take().map_or_else(Vec::new, |state| state.potentials);
+        let (mut potentials,histories) = self.nonlinear.take()
+            .map_or_else(||(Vec::new(),Vec::new()), |state| (state.potentials,state.histories));
         for potential in &potentials {
             for &coordinate in &potential.coordinates { occupied[coordinate] = true; }
         }
@@ -343,12 +347,13 @@ impl FrictionModalSystem {
         }
         let state = NonlinearFrictionState {
             potentials,
+            histories,
             config,
             last: None,
             preload: None,
         };
         let q = coordinates(self.components());
-        let total = finite(self.network.total_energy_j()? + state.potential_energy(&q)?)?;
+        let total = finite(self.network.total_energy_j()? + state.potential_energy(&q)? + state.history_energy(&q)?)?;
         limit(
             "linear plus nonlinear energy",
             total,
@@ -449,6 +454,7 @@ impl FrictionModalSystem {
         // storage into a diagnostic-only source, or silently lose it entirely.
         next.adhesive = self.adhesive;
         next.nonlinear = self.nonlinear;
+        next.validate_material_history_band()?;
         limit("complete initial material/nonlinear energy", next.total_energy_j()?,
             next.network.config.maximum_total_energy_j)?;
         poll(Some(gate))?;
@@ -468,7 +474,10 @@ impl FrictionModalSystem {
     /// state. May be signed when a complete strain law replaces linear storage.
     pub fn nonlinear_energy_j(&self) -> Result<f64, ModalCouplingError> {
         match &self.nonlinear {
-            Some(state) => state.potential_energy(&coordinates(self.components())),
+            Some(state) => {
+                let q=coordinates(self.components());
+                finite(state.potential_energy(&q)?+state.history_energy(&q)?)
+            },
             None => Ok(0.0),
         }
     }
@@ -478,6 +487,9 @@ impl NonlinearFrictionState {
         external: &[f64], obstacles: Option<&super::multiple::obstacles::ObstacleSet>,
         gate: &CancelGate) -> Result<NonlinearPreloadDiagnostics, ModalFrictionError>
     {
+        if !self.histories.is_empty() {
+            return Err(invalid("initialize static equilibrium before binding hereditary material history").into());
+        }
         equilibrium::initialize(self, network, external, obstacles, gate)
     }
     fn potential_energy(&self, q: &[f64]) -> Result<f64, ModalCouplingError> {
@@ -523,7 +535,7 @@ impl NonlinearFrictionState {
         })
     }
     pub(super) fn stage_trial<T: NonlinearTrial>(
-        &self,
+        &mut self,
         trial: &mut T,
         external: &[f64],
         gate: Option<&CancelGate>,
@@ -538,7 +550,7 @@ impl NonlinearFrictionState {
         let before_q = coordinates(inner.components());
         let dt = inner.sample_period_s();
         let has_loss = self.potentials.iter().any(|p| p.potential.has_constitutive_loss());
-        let before_potential = self.potential_energy(&before_q)?;
+        let before_potential = finite(self.potential_energy(&before_q)?+self.history_energy(&before_q)?)?;
         let before = finite(inner.network.total_energy_j()? + before_potential)?;
         let mut reaction = vec![0.0; inner.mode_count()];
         self.reactions(&before_q, &before_q, &mut reaction, gate)?;
@@ -546,6 +558,11 @@ impl NonlinearFrictionState {
         if has_loss {
             self.loss_reactions(&before_q, &velocities(inner.components()), &mut loss_reaction, gate)?;
             self.add_loss_reaction(&mut reaction, &loss_reaction)?;
+        }
+        let mut history_reaction=if self.histories.is_empty() {Vec::new()} else {vec![0.0;inner.mode_count()]};
+        if !self.histories.is_empty() {
+            self.history_reactions(&before_q,false,&mut history_reaction,gate)?;
+            self.add_loss_reaction(&mut reaction,&history_reaction)?;
         }
         let mut next_reaction = reaction.clone();
         let mut forces = external.to_vec();
@@ -563,9 +580,9 @@ impl NonlinearFrictionState {
             let frame = trial.stage(&forces, gate)?;
             let inner = trial.core();
             let after_q = coordinates(&inner.network.candidates);
-            let after_potential = self.potential_energy(&after_q)?;
+            let mut after_potential = self.potential_energy(&after_q)?;
             self.reactions(&before_q, &after_q, &mut next_reaction, gate)?;
-            let nonlinear_dissipation = if has_loss {
+            let mut nonlinear_dissipation = if has_loss {
                 let midpoint: Vec<_> = before_q.iter().zip(&after_q)
                     .map(|(&a, &b)| f64::midpoint(a, b)).collect();
                 let increment: Vec<_> = before_q.iter().zip(&after_q).map(|(&a, &b)| b - a).collect();
@@ -576,6 +593,14 @@ impl NonlinearFrictionState {
                 // separately integrated endpoint velocity or guessed decay ratio.
                 finite(-dot(&loss_reaction, &increment)?)?
             } else { 0.0 };
+            if !self.histories.is_empty() {
+                let (stored,loss)=self.stage_histories(&before_q,&after_q,dt,&mut history_reaction,
+                    inner.network.config.energy_absolute_tolerance_j,
+                    inner.network.config.energy_relative_tolerance,gate)?;
+                self.add_loss_reaction(&mut next_reaction,&history_reaction)?;
+                after_potential=finite(after_potential+stored)?;
+                nonlinear_dissipation=finite(nonlinear_dissipation+loss)?;
+            }
             if nonlinear_dissipation < 0.0 {
                 return Err(invalid("nonlinear constitutive reaction is not passive").into());
             }
@@ -648,6 +673,10 @@ impl NonlinearFrictionState {
                             &mut loss_reaction, gate)?;
                         self.add_loss_reaction(&mut next_reaction, &loss_reaction)?;
                     }
+                    if !self.histories.is_empty() {
+                        self.history_reactions(&after_q,true,&mut history_reaction,gate)?;
+                        self.add_loss_reaction(&mut next_reaction,&history_reaction)?;
+                    }
                     for ((weight, endpoint), held) in
                         weights.iter().zip(&next_reaction).zip(&reaction)
                     {
@@ -694,6 +723,7 @@ impl NonlinearFrictionState {
         .into())
     }
     pub(super) fn publish(&mut self, frame: NonlinearFrictionFrame) {
+        self.publish_histories();
         self.last = Some(frame);
     }
     fn add_loss_reaction(&self, reaction: &mut [f64], loss: &[f64]) -> Result<(), ModalFrictionError> {
