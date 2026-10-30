@@ -91,7 +91,7 @@ fn boundary(reservoir: Option<f64>) -> Boundary {
         }),
     }
 }
-fn setup<'a, L: ThermalLaw + ConductivityLaw>(
+pub(super) fn setup<'a, L: ThermalLaw + ConductivityLaw>(
     law: &'a L,
     h: &[f64],
     reservoir: Option<f64>,
@@ -181,7 +181,7 @@ fn controls(dt: f64) -> ImplicitConductionControls {
         ..ImplicitConductionControls::default()
     }
 }
-fn near(a: f64, b: f64, tolerance: f64) {
+pub(super) fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:.15e} != {b:.15e}");
 }
 

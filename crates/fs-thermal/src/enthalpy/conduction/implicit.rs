@@ -20,6 +20,10 @@ use crate::enthalpy::backward_euler::{BackwardEulerStep, BackwardEulerTrial, Ste
 use crate::enthalpy::entropy::EntropyAudit;
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 
+/// Accuracy-controlled comparisons of the same original implicit intervals.
+#[path = "implicit/adaptive.rs"]
+pub mod adaptive;
+
 /// One fused constitutive query, with derivatives on the same enthalpy chart.
 /// At a genuine corner the material owner explicitly selects its one-sided
 /// generalized derivative. The original residual still decides acceptance.
@@ -29,6 +33,15 @@ pub struct ImplicitConductionState {
     pub temperature_slope_kg_k_j: f64,
     pub conductivity_w_m_k: f64,
     pub conductivity_slope_kg_w_m_k_j: f64,
+}
+
+/// Source-owned error coordinates for adaptive time integration. A phase
+/// fraction is optional because a caloric law need not represent phase change.
+/// When supplied, its phase identity must be fixed by the material owner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImplicitConductionObservables {
+    pub temperature_k: f64,
+    pub phase_mass_fraction: Option<f64>,
 }
 
 /// Immutable original caloric/conductivity objects and their analytic tangents.
@@ -42,6 +55,21 @@ pub trait ImplicitConductionLaw {
         &self,
         specific_h_j_kg: f64,
     ) -> Result<ImplicitConductionState, DepositionError>;
+
+    /// Resolve temperature and any declared phase observable on this SAME
+    /// caloric chart. Owners can override this to share one original inverse.
+    /// Requesting phase error control without an observable refuses explicitly.
+    fn time_observables(
+        &self,
+        specific_h_j_kg: f64,
+    ) -> Result<ImplicitConductionObservables, DepositionError> {
+        Ok(ImplicitConductionObservables {
+            temperature_k: self
+                .state_at_specific_enthalpy(specific_h_j_kg)?
+                .temperature_k,
+            phase_mass_fraction: None,
+        })
+    }
 }
 
 /// Physical interval and bounded nonlinear work, distinct from PDE accuracy.
@@ -666,25 +694,13 @@ impl<'a> ImplicitConductionChain<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(DepositionSimulation<'m>, ImplicitConductionReport), ImplicitConductionError> {
         checkpoint()?;
-        if !target_s.is_finite()
-            || target_s < thermal.time_s
-            || !positive(controls.maximum_dt_s)
-            || !positive(controls.minimum_dt_s)
-            || controls.minimum_dt_s > controls.maximum_dt_s
-            || controls.maximum_steps == 0
-            || controls.maximum_newton_iterations == 0
-            || controls.maximum_newton_iterations > 128
-            || controls.maximum_backtracks > 32
-            || controls.maximum_halvings > 32
-            || controls.maximum_residual_evaluations == 0
-            || !nonnegative(controls.cell_tolerance_j)
-            || !nonnegative(controls.total_tolerance_j)
-            || workspace.cells() != self.ids.len()
-        {
-            return Err(ImplicitConductionError::Invalid(
-                "invalid implicit interval, work, accuracy or workspace controls",
-            ));
-        }
+        validate_advance(
+            thermal.time_s,
+            target_s,
+            self.ids.len(),
+            controls,
+            workspace,
+        )?;
         self.admit(thermal, &mut checkpoint)?;
         let mut next = thermal.clone();
         let mut observer = self.conduction.clone();
@@ -781,6 +797,35 @@ impl<'a> ImplicitConductionChain<'a> {
         checkpoint()?;
         Ok((next, report))
     }
+}
+
+fn validate_advance(
+    start_s: f64,
+    target_s: f64,
+    cells: usize,
+    controls: ImplicitConductionControls,
+    workspace: &ImplicitConductionWorkspace,
+) -> Result<(), ImplicitConductionError> {
+    if !target_s.is_finite()
+        || target_s < start_s
+        || !positive(controls.maximum_dt_s)
+        || !positive(controls.minimum_dt_s)
+        || controls.minimum_dt_s > controls.maximum_dt_s
+        || controls.maximum_steps == 0
+        || controls.maximum_newton_iterations == 0
+        || controls.maximum_newton_iterations > 128
+        || controls.maximum_backtracks > 32
+        || controls.maximum_halvings > 32
+        || controls.maximum_residual_evaluations == 0
+        || !nonnegative(controls.cell_tolerance_j)
+        || !nonnegative(controls.total_tolerance_j)
+        || workspace.cells() != cells
+    {
+        return Err(ImplicitConductionError::Invalid(
+            "invalid implicit interval, work, accuracy or workspace controls",
+        ));
+    }
+    Ok(())
 }
 
 fn conductance_derivative(

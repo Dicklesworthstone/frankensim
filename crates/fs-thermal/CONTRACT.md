@@ -596,3 +596,35 @@ entry paths. Mixed enthalpy/internal-energy batches preserve the original solids
 vapor, mass, stored energy and clock on refusal. This adds no open-mass internal-
 energy model, pressure-work conversion or equation of state. Such conversions
 remain the explicit responsibility of the physical material/equipment owner.
+
+## Adaptive implicit thermal accuracy
+
+`enthalpy::conduction::implicit::adaptive` adds first-order step-doubling
+control around the original `ImplicitConductionChain`. One full backward-Euler
+interval is compared with two actual half intervals; only the conservative
+half-step trajectory is accepted. Comparison trials never contribute physical
+heat, entropy or accepted time, and no Richardson-extrapolated state is formed.
+Unequal representable half spans receive their first-order error correction.
+
+`ImplicitConductionLaw::time_observables` supplies original temperature and an
+optional original phase mass fraction. The per-cell estimator checks stored
+specific energy, temperature and, when requested, phase inventory. Relative
+scales use changes from the accepted state, rather than absolute enthalpy or
+Kelvin values. Phase accuracy refuses when an original observable is unavailable
+rather than inferring phase from temperature. The h-labelled coordinate retains
+the declared thermal storage basis.
+
+Controls retain the original local/whole-call joule gates and bound comparison
+spans, comparison count, accepted half steps, consecutive reductions, Newton
+work and the shared residual-evaluation budget. Scheduled events are hit exactly.
+Source refusal, exhausted work, cancellation and unresolved accuracy return no
+partial trajectory. Reports separate local time-error estimates from algebraic
+energy residuals, count all attempted nonlinear work, and expose the next proposed
+comparison span for continuation.
+
+Four native regressions cover analytic cooling and caloric-datum invariance;
+phase-driven refinement on an exactly isothermal latent plateau; non-dyadic bath
+events and fine-only heat/entropy; and atomic refusal for missing observables,
+minimum-step limits, trial/residual budgets and late cancellation. A local
+step-doubling indicator is not a certified global time error or spatial error
+bound. The existing fixed-chain geometry and material-domain restrictions remain.
