@@ -279,23 +279,3 @@ impl<F: FluidTransport + ?Sized> DepositionObserver for HydrostaticExpansion<'_,
         Ok(())
     }
 }
-
-/// Preserve the exact thermal owner's checkpoint error through boolean native
-/// cancellation adapters, rather than replacing a budget/source error.
-fn checked<T, E: Into<HeatedMotionError>>(
-    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    operation: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<T, E>,
-) -> Result<T, HeatedMotionError> {
-    let mut failure = None;
-    let result = operation(&mut || match checkpoint() {
-        Ok(()) => false,
-        Err(error) => {
-            failure = Some(error);
-            true
-        }
-    });
-    match failure {
-        Some(error) => Err(error.into()),
-        None => result.map_err(Into::into),
-    }
-}

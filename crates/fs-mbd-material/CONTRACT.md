@@ -561,3 +561,51 @@ changes reaching flotation, independent regional center of buoyancy and torque,
 source-density acceleration, reference rebuilding and restart, and late
 cancellation/work-budget rollback. Synthetic coefficients test the implementation;
 they do not establish measured material or hydrodynamic validity.
+
+## Continuing creeping flow during material-resolved thermal expansion
+
+`HeatedRigidBody::advance_creeping_sphere` composes the original thermal
+timeline, source free expansion, `CreepingSphere` load/midpoint owner and
+momentum-preserving configuration transfer. A single uniform spherical region
+is required. Its current radius is rebuilt from the declared ORIGINAL sphere
+and the same integrated strain that supplies its volume and inertia. Geometry
+is never compounded and the original closed-body mass stays bit-identical.
+The original fluid snapshot supplies all density and viscosity values without
+another source query when radius changes; its gravity must match native gravity.
+
+Consequently Stokes translation, rotary resistance and displaced-fluid force
+change as r, r^3 and r^3 while the body's moment of inertia changes as r^2.
+The original owner retains its force closure, native position/momentum/attitude
+step and all Reynolds, diffusion-time and relaxation-step gates. Admission
+also runs at each UPDATED thermal endpoint, even when there is no subsequent
+mechanical step in that advance. `advance_creeping_sphere_with` composes an
+existing heat/transport observer on these exact substeps; its generated heat,
+the finite material history and continuing motion publish atomically.
+
+The audit separates external-fluid viscous heat, maintained-background-flow
+work, inertia-remap work and the change of buoyancy potential caused only by
+configuration. The latter uses U_b = rho_fluid V g dot x_COM, with the native
+world-origin gravitational datum; this unbounded reservoir has no declared
+absolute pressure, so that parameter account is NOT a thermodynamic p dV law.
+Absolute parameter-work budgets sum inertia and displacement contributions
+before cancellation. The native fixed-configuration mechanical/fluid defect
+remains numerical error and is never turned into heat. Neither Stokes loss nor
+configuration work is silently added to the finite solid's caloric storage.
+
+This is a first-order thermal/mechanical split with the original uniform-cell,
+reference-thermal-geometry and slow free-expansion assumptions. It adds no
+resolved expanding-surface fluid flow, radial viscous heating, fluid kinetic
+energy, added mass/Basset history, reciprocal thermoelastic work, free surface,
+phase change or constrained deformation. The original low-Reynolds and fluid
+diffusion gates remain model-admission limits, not certified error bounds.
+Changing the frozen reservoir between calls changes the model; its exchange
+work is not inferred. Source, geometry, flow-regime, work or cancellation
+refusal discards the full proposed heat, motion and optional source history.
+
+G1/G3/G4 definitions in `tests/heated_creeping_motion.rs` compare actual
+translation, spin and external heat/work against an independent midpoint
+recurrence with source-only alpha, viscosity and fluid-density substitutions.
+They also cover exact frozen-geometry native-step parity, reference rebuilding,
+restart, shared generated-heat substeps, updated-radius regime refusal, late
+rollback and retained fluid snapshots. Synthetic coefficients establish only
+implementation checks; execution and physical validation are reported separately.

@@ -6,6 +6,8 @@
 //! source expansion and principal-frame lowering as static configuration.
 //! Parameter work is reported and bounded separately from caloric heat and
 //! integration error. Reciprocal thermoelastic heat is not inferred.
+/// Expanded no-slip spherical boundaries in the original material fluid.
+pub mod creeping_flow;
 /// Source-bound viscous interfaces with reciprocal finite-body heat feedback.
 #[cfg(feature = "dissipative-coupling")]
 pub mod damping;
@@ -42,6 +44,7 @@ pub enum HeatedMotionError {
     Principal(PrincipalFrameError),
     Dynamics(DynamicsError),
     Hydrostatic(crate::hydrostatic::HydrostaticStepError),
+    CreepingFlow(crate::creeping_flow::CreepingFlowError),
     Invalid(&'static str),
     Budget(&'static str),
 }
@@ -79,6 +82,11 @@ impl From<crate::hydrostatic::HydrostaticError> for HeatedMotionError {
 impl From<crate::hydrostatic::HydrostaticStepError> for HeatedMotionError {
     fn from(e: crate::hydrostatic::HydrostaticStepError) -> Self {
         Self::Hydrostatic(e)
+    }
+}
+impl From<crate::creeping_flow::CreepingFlowError> for HeatedMotionError {
+    fn from(e: crate::creeping_flow::CreepingFlowError) -> Self {
+        Self::CreepingFlow(e)
     }
 }
 
@@ -393,4 +401,24 @@ fn mechanical_change(
             + (after.rotational_kinetic_energy - before.rotational_kinetic_energy)
             + (after.gravitational_potential_energy - before.gravitational_potential_energy),
     )
+}
+
+/// Preserve the exact thermal owner's checkpoint error through boolean native
+/// cancellation adapters, rather than replacing a budget/source error.
+fn checked<T, E: Into<HeatedMotionError>>(
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    operation: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<T, E>,
+) -> Result<T, HeatedMotionError> {
+    let mut failure = None;
+    let result = operation(&mut || match checkpoint() {
+        Ok(()) => false,
+        Err(error) => {
+            failure = Some(error);
+            true
+        }
+    });
+    match failure {
+        Some(error) => Err(error.into()),
+        None => result.map_err(Into::into),
+    }
 }

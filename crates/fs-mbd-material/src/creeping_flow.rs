@@ -20,7 +20,7 @@
 //! material's continuum/Newtonian validity remains an external model obligation.
 //! Do not superpose another exterior drag law on this same sphere.
 
-use crate::principal::PrincipalBody;
+use crate::principal::{PrincipalBody, PrincipalFrame};
 use crate::{MaterialInertiaError, VolumeMoments};
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
@@ -187,6 +187,24 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         ambient_velocity_world: Vec3,
         limits: CreepingFlowLimits,
     ) -> Result<Self, Error> {
+        Self::with_transport(
+            source,
+            source.transport_state()?,
+            radius_m,
+            gravity,
+            ambient_velocity_world,
+            limits,
+        )
+    }
+
+    fn with_transport(
+        source: &'a F,
+        transport: FluidTransportState,
+        radius_m: f64,
+        gravity: Gravity,
+        ambient_velocity_world: Vec3,
+        limits: CreepingFlowLimits,
+    ) -> Result<Self, Error> {
         let sphere = VolumeMoments::sphere(radius_m)?;
         if !ambient_velocity_world.is_finite()
             || !small_positive(limits.maximum_reynolds, 0.1)
@@ -196,7 +214,6 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 "finite ambient velocity and limits in (0,0.1] required",
             ));
         }
-        let transport = source.transport_state()?;
         let resistance_kg_s =
             positive(6.0 * core::f64::consts::PI * transport.dynamic_viscosity_pa_s() * radius_m)?;
         let rotary_resistance_kg_m2_s =
@@ -217,6 +234,20 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             ambient_velocity_world,
             limits,
         })
+    }
+
+    /// Rebuild only the spherical boundary, retaining the SAME frozen fluid
+    /// snapshot. Thermal configuration adapters must not re-query a mutable
+    /// external source halfway through an accepted reservoir interval.
+    pub(crate) fn at_radius(&self, radius_m: f64) -> Result<Self, Error> {
+        Self::with_transport(
+            self.source,
+            self.transport,
+            radius_m,
+            self.gravity,
+            self.ambient_velocity_world,
+            self.limits,
+        )
     }
 
     /// Retain the original fluid owner and its provenance or mixture receipts.
@@ -243,7 +274,12 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 "creeping sphere requires one uniform spherical material region",
             ));
         }
-        let geometry = regions[0].geometry();
+        self.admit_geometry(regions[0].geometry())
+    }
+
+    /// Configuration adapters establish the single uniform region and its
+    /// material inventory; this compares its current volume and full moments.
+    pub(crate) fn admit_geometry(&self, geometry: VolumeMoments) -> Result<(), Error> {
         let expected = self.sphere.inertia_m5().m[0];
         if (geometry.volume_m3() / self.sphere.volume_m3() - 1.0).abs() > 1e-10
             || geometry
@@ -270,7 +306,18 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
     ) -> Result<CreepingLoad, Error> {
         poll(&mut cancelled)?;
         self.admit_body(body)?;
-        let properties = body.properties();
+        self.load_frame(body.frame(), state, &mut cancelled)
+    }
+
+    /// Same force owner for an already admitted spherical configuration.
+    pub(crate) fn load_frame(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingLoad, Error> {
+        poll(&mut cancelled)?;
+        let properties = frame.properties();
         let relative = state
             .center_of_mass_velocity_world(properties)?
             .sub(self.ambient_velocity_world);
@@ -334,6 +381,20 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CreepingStep, Error> {
         poll(&mut cancelled)?;
+        self.admit_body(body)?;
+        self.step_frame(body.frame(), state, controls, &mut cancelled)
+    }
+
+    /// Native midpoint closure shared by frozen and thermally updated bodies.
+    /// The caller has already admitted this frame's one uniform sphere.
+    pub(crate) fn step_frame(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        controls: CreepingStepControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingStep, Error> {
+        poll(&mut cancelled)?;
         if !small_positive(controls.maximum_relaxation_fraction, 1.0)
             || !controls.duration_s.is_finite()
             || controls.duration_s <= 0.0
@@ -344,20 +405,11 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 "positive finite step/work controls and relaxation fraction in (0,1] required",
             ));
         }
-        let load_before = self.load(body, state, &mut cancelled)?;
-        let p = body.properties();
+        let load_before = self.load_frame(frame, state, &mut cancelled)?;
+        let p = frame.properties();
         let inertia = p.principal_inertia_body();
         let translation_time = positive(p.mass() / self.resistance_kg_s)?;
-        let rotation_time =
-            positive(inertia.x.min(inertia.y).min(inertia.z) / self.rotary_resistance_kg_m2_s)?;
-        let shortest_time = translation_time.min(rotation_time);
-        let diffusion_ratio = positive(self.diffusion_time_s / shortest_time)?;
-        if diffusion_ratio > self.limits.maximum_diffusion_ratio {
-            return Err(Error::Unsteady {
-                diffusion_ratio,
-                maximum: self.limits.maximum_diffusion_ratio,
-            });
-        }
+        let (shortest_time, diffusion_ratio) = self.timescales_frame(frame)?;
         let dt = controls.duration_s;
         if finite(dt / shortest_time)? > controls.maximum_relaxation_fraction {
             return Err(Error::Invalid(
@@ -393,10 +445,10 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 angular_mid.z * inertia.z,
             ),
         )?;
-        let load_midpoint = self.load(body, midpoint, &mut cancelled)?;
+        let load_midpoint = self.load_frame(frame, midpoint, &mut cancelled)?;
         let dynamics =
             RigidBodyIntegrator::new(self.gravity).step(state, p, load_midpoint.wrench, dt)?;
-        let load_after = self.load(body, dynamics.state_after, &mut cancelled)?;
+        let load_after = self.load_frame(frame, dynamics.state_after, &mut cancelled)?;
         let viscous_heat_j = finite(dt * load_midpoint.dissipated_power_w)?;
         let background_work_j = finite(dt * load_midpoint.background_power_w)?;
         if load_midpoint.dissipated_power_w > 0.0 && viscous_heat_j == 0.0
@@ -438,6 +490,39 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             energy_defect_j,
             diffusion_ratio,
         })
+    }
+
+    /// Fastest body relaxation and the admitted fluid/body diffusion ratio.
+    /// Re-evaluate after configuration changes even at a thermal endpoint that
+    /// has no subsequent mechanical step in the current advance.
+    pub(crate) fn timescales_frame(&self, frame: &PrincipalFrame) -> Result<(f64, f64), Error> {
+        let p = frame.properties();
+        let inertia = p.principal_inertia_body();
+        let translation_time = positive(p.mass() / self.resistance_kg_s)?;
+        let rotation_time =
+            positive(inertia.x.min(inertia.y).min(inertia.z) / self.rotary_resistance_kg_m2_s)?;
+        let shortest_time = translation_time.min(rotation_time);
+        let diffusion_ratio = positive(self.diffusion_time_s / shortest_time)?;
+        if diffusion_ratio > self.limits.maximum_diffusion_ratio {
+            return Err(Error::Unsteady {
+                diffusion_ratio,
+                maximum: self.limits.maximum_diffusion_ratio,
+            });
+        }
+        Ok((shortest_time, diffusion_ratio))
+    }
+
+    /// Frozen-volume buoyancy potential, using the native gravity's world
+    /// origin as datum. With changing volume its parameter change is an
+    /// explicit reservoir account, NOT an inferred thermodynamic p dV law.
+    pub(crate) fn buoyancy_potential_j(&self, state: RigidBodyState) -> Result<f64, Error> {
+        finite(
+            self.fluid_mass_kg
+                * self
+                    .gravity
+                    .acceleration_world()
+                    .dot(state.pose().position_world()),
+        )
     }
 }
 
