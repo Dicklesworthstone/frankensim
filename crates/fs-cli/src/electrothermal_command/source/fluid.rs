@@ -1,8 +1,10 @@
 //! Scene-owned fluid role and prescribed conservative transport. Material
 //! properties still resolve through the common state-point and transport owners.
 
-use fs_lbm::conjugate::{FlowFace, FlowField, FluidProperties, Voxel, VoxelDomain};
+use fs_exec::CancelGate;
+use fs_lbm::conjugate::{ChtError, FlowFace, FlowField, FluidProperties, ThermalFace, ThermalSetup, Voxel, VoxelDomain};
 use fs_lbm::material::conjugate::MaterialChtFluid;
+use fs_matdb::{ClaimSelection, PropertyKey, SelectionPolicy};
 use fs_material::fluid_transport::FluidTransportState;
 use fs_material::liquid::{DYNAMIC_VISCOSITY_DIMS, DYNAMIC_VISCOSITY_PROPERTY};
 use fs_material::state_point::{
@@ -11,10 +13,12 @@ use fs_material::state_point::{
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
 use fs_qty::Density;
-use super::Source;
+use super::{Source, invalid, poll};
 use super::super::{J, array, fields, integer, number, positive, quote, required, values};
 
 pub(crate) const NO_CLAIM: &str = "steady fixed-geometry isotropic ohmic/thermal conduction with prescribed volume-conservative fluid velocity; density, heat capacity and viscosity frozen at an explicit sourced reference state, local conductivity and resistivity re-resolved; no momentum/pressure solve, variable-density enthalpy transport, phase change, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification";
+
+pub(super) const TRANSIENT_NO_CLAIM: &str = "fixed-geometry backward-Euler electrothermal evolution with prescribed volume-conservative fluid velocity; fluid density and heat capacity verified constant over the complete storage interval, viscosity frozen at the sourced reference, local conductivity and resistivity re-resolved; single-phase fixed cell masses, optional sourced solid Cp and exterior gray radiation; no momentum/pressure solve, variable-density or variable-Cp fluid enthalpy transport, phase change, deformation, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification; temporal accuracy requires time-step refinement";
 
 /// One fluid material, its exact reference receipt and the actual energy fluxes.
 /// No material identity is inferred from a mechanical occupancy or phase name.
@@ -114,6 +118,54 @@ pub(crate) fn load_fluid(
 }
 
 impl Fluid {
+    /// The native face flux is rho*Cp*Q*T. Its conservative storage must use
+    /// the SAME constant rho/Cp law throughout the interval, not merely agree
+    /// at the endpoints. The original source-line owner exposes every crossed
+    /// breakpoint and rejects holes, source switching and ambiguous claims.
+    pub(super) fn admit_transient(
+        &self, source: &Source, lower_k: f64, upper_k: f64,
+        thermal: &ThermalSetup, gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        poll(gate)?;
+        if self.reference.card_identity() != source.pack.card().content_hash() {
+            return Err(invalid("fluid.transient", "transport and storage must use the same material card"));
+        }
+        let lower = source.point_at(lower_k)?;
+        let upper = source.point_at(upper_k)?;
+        for (name, dims) in [
+            (DENSITY_PROPERTY, Density::DIMS),
+            (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS),
+        ] {
+            poll(gate)?;
+            let reference = self.reference.property(name).expect("fluid reference required rho and Cp");
+            let line = source.pack.card().claims().query_line_typed(
+                &PropertyKey::new(name, dims), &source.temperature_axis,
+                &lower, &upper, ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+            ).map_err(|e| invalid("fluid.transient", format!("{name} requires continuous source support: {e:?}")))?;
+            for (_, answer) in &line.knots {
+                poll(gate)?;
+                if answer.receipt.selected != reference.answer().receipt.selected
+                    || answer.evidence.value.value != reference.value_si()
+                {
+                    return Err(invalid("fluid.transient", format!(
+                        "{name} must remain constant and match its original reference claim over the entire storage interval; variable fluid enthalpy advection is unsupported",
+                    )));
+                }
+            }
+        }
+        for face in thermal.faces {
+            let temperature = match face {
+                ThermalFace::Inflow { temperature } => temperature,
+                ThermalFace::Outflow { backflow_temperature } => backflow_temperature,
+                _ => continue,
+            };
+            if !temperature.is_finite() || temperature < lower_k || temperature > upper_k {
+                return Err(invalid("fluid.transient", "inflow and backflow temperatures must lie inside the sourced storage interval"));
+            }
+        }
+        poll(gate)
+    }
+
     /// This is reference-state evidence, not a claim of local evolving rho/cp.
     pub fn render(&self) -> String {
         format!(concat!(
@@ -144,6 +196,12 @@ mod tests {
     use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
     fn source(cp: f64, resistivity: f64, conductivity: f64, typed: bool) -> Source {
+        material_source(cp, resistivity, conductivity, typed, "liquid", |_| {})
+    }
+    fn material_source(
+        cp: f64, resistivity: f64, conductivity: f64, typed: bool, phase: &str,
+        mut edit: impl FnMut(&mut PropertyClaim),
+    ) -> Source {
         let mut claims = ClaimSet::new();
         for (key, value, dims) in [
             (DENSITY_PROPERTY, 1.0, Density::DIMS),
@@ -155,20 +213,22 @@ mod tests {
             let quantity = if typed && key == THERMAL_CONDUCTIVITY_PROPERTY {
                 QuantitySpec::semantic(SemanticType::new(QuantityKind::ThermalConductivity, ValueForm::Static))
             } else { QuantitySpec::dimensional(dims) };
-            claims.insert_claim(PropertyClaim {
+            let mut claim = PropertyClaim {
                 key: PropertyKey::with_quantity(key, quantity), value: PropertyValue::Scalar { value, dims },
                 validity: ValidityDomain::unconstrained().with("T", 290.0, 350.0),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
                 provenance: Provenance { source: "synthetic conducting fluid".into(),
                     license: "test-only".into(), artifact: None },
-            }).unwrap();
+            };
+            edit(&mut claim);
+            claims.insert_claim(claim).unwrap();
         }
         crate::electrothermal_command::tests::authored_observation(&mut claims, "synthetic conducting fluid");
         let pack = NormalizedPack::new("fluid-fixture", "test-v1", hash_bytes(b"synthetic fluid"),
             "test-only", claims, vec![], vec![]).unwrap();
         let pack = NormalizedMaterialCardPack::new(MaterialStateId {
-            chemistry: "synthetic".into(), phase: "liquid".into(), process: "authored test".into(), revision: 0,
+            chemistry: "synthetic".into(), phase: phase.into(), process: "authored test".into(), revision: 0,
         }, pack).unwrap();
         // Exercise the ordinary pack decoder, not an alternate data path.
         Source::new(NormalizedMaterialCardPack::from_bytes(&pack.to_bytes()).unwrap(),
@@ -254,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn scene_file_reaches_fluid_solver_and_rejects_solid_transient_storage() {
+    fn scene_file_reaches_both_steady_and_transient_fluid_solvers() {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -267,9 +327,9 @@ mod tests {
             "materials":[{"pack":"fluid.fsmcdpk","conducting":true,"temperature_axis":"T",
                 "temperature_kind":"legacy","state":[]}],
             "material_indices":[0,0,0],"initial_temperature_k":300,
-            "fluid":{"material_index":0,"reference_temperature_k":300,"velocity_m_s":[0,0,0],
-                "flow_faces":["wall","wall","wall","wall","wall","wall"]},
-            "thermal_faces":[{"temperature_k":300},{"temperature_k":300},"adiabatic","adiabatic","adiabatic","adiabatic"],
+            "fluid":{"material_index":0,"reference_temperature_k":300,"velocity_m_s":[1,0,0],
+                "flow_faces":["open","open","wall","wall","wall","wall"]},
+            "thermal_faces":[{"inflow_temperature_k":300},{"backflow_temperature_k":300},"adiabatic","adiabatic","adiabatic","adiabatic"],
             "electrodes":[{"lo":[0,0,0],"hi":[1,1,1],"voltage_v":0},
                 {"lo":[2,0,0],"hi":[3,1,1],"voltage_v":3}],
             "numerics":{"max_passes":100,"max_thermal_passes":100,"temperature_tolerance_k":1e-9,
@@ -284,14 +344,35 @@ mod tests {
         assert!((value.f64_field("total_joule_w").unwrap() - 4.5).abs() < 1e-8);
         assert!(value.get("fluid_reference").unwrap().str_field("material_state").is_some());
         assert!(value.str_field("no_claim").unwrap().contains("prescribed"));
+        let temperatures = value.get("temperature_k").unwrap().as_array().unwrap();
+        assert!(temperatures[2].as_f64().unwrap() > temperatures[0].as_f64().unwrap());
         assert_eq!(result, run(&[path.as_os_str().to_owned()], true));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), scene);
         assert_eq!(std::fs::read(dir.join("fluid.fsmcdpk")).unwrap(), bytes);
-        let refusal = run(&[path.as_os_str().to_owned(), "--transient".into(),
-            dir.join("not-read.json").into_os_string()], true);
-        assert_eq!(refusal.exit_code, crate::exit::INPUT);
-        assert!(refusal.stdout.is_empty());
-        assert!(refusal.stderr.contains("solid-only transient"));
+        let time_path = dir.join("time.json");
+        std::fs::write(&time_path, transient::request_text()).unwrap();
+        let args = [path.as_os_str().to_owned(), "--transient".into(), time_path.into_os_string()];
+        let transient = run(&args, true);
+        assert_eq!(transient.exit_code, crate::exit::SUCCESS, "{}", transient.stderr);
+        let value = J::parse(&transient.stdout).unwrap();
+        assert_eq!(value.f64_field("steps"), Some(8.0));
+        assert_eq!(value.f64_field("total_joule_w"), Some(0.0));
+        assert!(value.get("fluid_reference").unwrap().str_field("material_state").is_some());
+        assert!(value.str_field("no_claim").unwrap().contains("verified constant"));
+        assert_eq!(transient, run(&args, true));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), scene);
+        assert_eq!(std::fs::read(dir.join("fluid.fsmcdpk")).unwrap(), bytes);
+        let bad_path = dir.join("bad-boundary.json");
+        for bad in [
+            scene.replace("\"inflow_temperature_k\":300", "\"inflow_temperature_k\":0"),
+            scene.replace("\"backflow_temperature_k\":300", "\"backflow_temperature_k\":-1"),
+        ] {
+            std::fs::write(&bad_path, bad).unwrap();
+            let refused = run(&[bad_path.as_os_str().to_owned()], true);
+            assert_eq!(refused.exit_code, crate::exit::INPUT);
+            assert!(refused.stdout.is_empty());
+        }
     }
 
+    mod transient;
 }

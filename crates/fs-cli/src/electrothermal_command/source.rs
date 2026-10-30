@@ -170,9 +170,6 @@ impl Problem {
         storage: Option<&transient::Storage<'_>>, gate: &CancelGate,
     ) -> Result<ResultField, ChtError> {
         poll(gate)?;
-        if storage.is_some() && self.fluid.is_some() {
-            return Err(invalid("fluid.transient", "fluid scenes require a separate advective storage model; the solid-only transient path is not applicable"));
-        }
         let initial = self.states(start, gate)?;
         let mut solids = Vec::with_capacity(self.materials.len());
         for (m, source) in self.materials.iter().enumerate() {

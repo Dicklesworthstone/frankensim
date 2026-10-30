@@ -56,7 +56,8 @@ Each material must additionally supply `density` [kg/m3] and
 `specific_heat_capacity` [J/(kg K)] under the existing dimensional property
 schemas. The existing `ResolvedHeatCapacityCurve` resolves the complete source
 context over the requested interval, retains the selected Cp/density receipts,
-and constructs its bounded single-solid-phase enthalpy chart. Reference
+and constructs its bounded single-phase enthalpy chart. The explicit scene role
+chooses solid or fluid storage; it does not discover phase stability. Reference
 enthalpy is zero at the lower endpoint; only changes enter the energy equation.
 This is not a mixture with an independent absolute-enthalpy source.
 
@@ -70,7 +71,7 @@ For each time step the code solves the backward-Euler balance
 
 ```text
 m_c [h_c(T_new) - h_c(T_old)] / dt
-    + sum(outward conductive heat fluxes)
+    + sum(outward conductive and admitted advective heat fluxes)
     = authored_power_c + joule_power_c(T_new).
 ```
 
@@ -86,6 +87,15 @@ conductivity-field solver. Geometry, material IDs, physical thermal contacts,
 spatial conductivity and boundary assembly are unchanged. Insulated domains
 are anchored by storage, not by an invented fixed-temperature cell.
 
+An optional fluid role uses this same path with its existing prescribed
+volume-conservative face flow. Its source density and Cp must be constant over
+the **complete** requested interval and match the original reference claims;
+all source breakpoints are checked, not just endpoints. Inlet and backflow
+temperatures must lie inside that interval. This keeps the native `rho*Cp*Q*T`
+flux consistent with `m*delta(h)` storage, including the cancellation of the
+arbitrary enthalpy reference. Neighboring solids may retain variable Cp.
+See `MATERIAL_ELECTROTHERMAL_FLUID.md` for admission and physical boundaries.
+
 The steady and transient command paths share the material/electrical/thermal
 coupling driver. The transient path additionally checks actual chart storage
 against the thermal linearization using the **sum of absolute cell defects**,
@@ -100,6 +110,7 @@ The transient result uses `frankensim.electrothermal.transient.result.v1` and
 contains final temperatures, potentials, local Joule heat, final resolved
 conductivities, invariant cell masses, work count, material/chart identities,
 initial mass-source identities and final local material-state identities.
+Fluid scenes also retain the original `fluid_reference` transport state.
 `records` contains each accepted endpoint time, peak temperature, signed stored
 energy change, deposited source energy, physical outward heat and energy defect.
 A failed run emits a diagnostic and nonzero exit, with no partial trajectory on
@@ -145,11 +156,14 @@ centre is 300.2440891879 K and supplied heat is 1.79060906094 J. These are
 reference calculations, **not outputs from the unexecuted Rust program**.
 The standalone cooling check gave refinement error ratios 1.95 and 1.97.
 
-The model is fixed-geometry, fixed-mass, all-solid, isotropic, ohmic conduction.
-Cp is used in the usual negligible-volume-change solid thermal approximation;
+The model is fixed-geometry, fixed cell mass, isotropic ohmic conduction with
+optional prescribed constant-density fluid heat transport. Cp is used in the
+negligible-volume-change solid and incompressible-fluid thermal approximations;
 there is no thermal-expansion work, stress evolution, phase change, latent heat,
-chemistry, fluid transport, radiation, AC current, uncertainty propagation or
-experimental qualification. The declared solid phase is a caller assumption,
+chemistry, fluid momentum/pressure evolution, variable-density or variable-Cp
+fluid advection, AC current, uncertainty propagation or experimental qualification.
+Exterior gray radiation uses its existing explicitly admitted source-backed
+owner. The declared single phase is a caller assumption,
 not a phase-boundary discovery. Generated-chart interpolation and source error
 remain separate, and tighter chart tolerance can exhaust the existing knot cap.
 Finite time-step accuracy requires its own refinement study. No arbitrary-law

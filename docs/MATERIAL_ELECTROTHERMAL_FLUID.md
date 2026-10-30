@@ -1,7 +1,8 @@
 # Conducting fluids in material-driven electrothermal scenes
 
-`frankensim electrothermal scene.json` can now admit a fluid material alongside
-solid materials without changing the electrical or thermal solver. The existing
+`frankensim electrothermal scene.json` admits a fluid material alongside
+solid materials without changing the electrical or thermal solver. Add
+`--transient time.json` to advance supported scenes in time. The existing
 `frankensim.electrothermal.v1` scene remains all-solid when `fluid` is omitted.
 
 Add this optional object to the ordinary scene:
@@ -14,6 +15,26 @@ Add this optional object to the ordinary scene:
   "flow_faces": ["open", "open", "wall", "wall", "wall", "wall"]
 }
 ```
+
+Pair nonzero boundary flow with open thermal faces in the same x-, x+, y-,
+y+, z-, z+ order. For the positive x velocity above, use:
+
+```json
+"thermal_faces": [
+  {"inflow_temperature_k": 300},
+  {"backflow_temperature_k": 300},
+  "adiabatic", "adiabatic", "adiabatic", "adiabatic"
+]
+```
+
+The inlet supplies the entering fluid temperature to the original flux
+assembly. The outlet advects the adjacent fluid cell's temperature with zero
+diffusive outflow; if flow reverses, its positive `backflow_temperature_k`
+supplies entering enthalpy. Native open-face rules treat solid portions of
+these boundaries as adiabatic. A temperature, heat-flux, convective or adiabatic
+thermal face remains closed to mass flow; prescribing velocity through it
+refuses. Both new temperature variants require positive kelvin and apply to
+steady and transient scenes.
 
 The index refers to the existing `materials` array, not another registry. Every
 cell assigned that material becomes a fluid cell. Other assignments remain
@@ -63,9 +84,11 @@ create/destroy transported fluid. Use a compatible straight passage, or zero
 velocity with six walls for a quiescent conductor.
 
 There is one fluid material because the current heat owner has one reference
-fluid heat-capacity flux. Density, heat capacity and viscosity remain frozen at
-the explicitly requested reference state. This approximation does not establish
-the validity of constant properties across arbitrary temperature changes.
+fluid heat-capacity flux. In a steady run, density, heat capacity and viscosity
+remain frozen at the explicitly requested reference state. That approximation
+does not establish the validity of constant properties across arbitrary
+temperature changes. Transient admission additionally checks the full density
+and heat-capacity source interval as described below.
 Viscosity does not alter a prescribed velocity. Local conductivity and electrical
 resistivity do update. There is no variable-density enthalpy advection, melting,
 phase-front movement, ion/species transport, electrochemistry, motional EMF,
@@ -74,8 +97,52 @@ Lorentz forcing, AC response or experimental qualification.
 An electrical electrode box is an ideal equipotential, **not an implicit
 mechanical wall**. Assign a solid material to electrode cells when the geometry
 should block fluid flow. Solid-solid contact resistance cannot be assigned to
-the fluid material. `--transient` with `fluid` currently refuses: the existing
-solid-only storage path must not be mislabeled as a liquid advection model.
+the fluid material.
+
+## Transient fluid and solid storage
+
+Use the ordinary time request described in `MATERIAL_ELECTROTHERMAL_TRANSIENT.md`:
+
+```sh
+frankensim --json electrothermal scene.json --transient time.json
+```
+
+The fluid's density and specific heat must be constant throughout the declared
+temperature interval and exactly match the original reference claims. The
+existing material source-line query checks continuous support and **every**
+crossed breakpoint, including supported sampled surfaces at the fixed pressure
+and composition. Equal endpoint values cannot hide an interior change. Missing
+support, claim switching, varying fluid density or Cp, and inlet/backflow
+temperatures outside the interval refuse before time evolution.
+
+This admission makes the native face energy flux `rho * Cp * Q * T` consistent
+with fluid cell storage `rho * V * Cp * (T_new - T_old)`. The original enthalpy
+chart owns storage, using the scene's explicit single-fluid-phase assumption;
+solid cells retain their existing potentially variable Cp charts. The same
+native backward-Euler energy solver handles conduction, conservative prescribed
+advection, fluid and solid storage, local Joule heating, thermal contacts and
+admitted exterior radiation. No second advection or storage solver is added.
+
+Cell masses remain fixed while equal incoming and outgoing fluid mass carries
+enthalpy across the control volumes. The arbitrary enthalpy reference cancels
+because flow is volume-conservative and density is constant. Physical outflow
+in each time record includes the native boundary advection and conduction,
+without counting the storage diagonal as external heat. The accepted endpoint
+rechecks electrical resistivity and thermal conductivity at local temperature.
+
+Changing only source Cp changes both transient heat storage and the transported
+heat-capacity flux. Changing a neighboring solid's Cp changes the fluid's
+temperature through their shared conduction solve. Voltage/current and authored
+power schedules use the existing time request. The result retains
+`fluid_reference` alongside final local source identities and per-step energy
+accounts. A failed step publishes no partial trajectory and leaves inputs intact.
+
+This is a constant-density incompressible thermal approximation on fixed
+geometry. The fluid role assumes one stable phase; it does not discover phase
+boundaries. Prescribed flow, frozen reference viscosity, absence of momentum or
+pressure evolution, and the other limits above still apply. Varying fluid Cp
+requires a conservative enthalpy-advection owner and is deliberately refused.
+Backward Euler requires timestep refinement to establish temporal accuracy.
 
 ## Focused checks
 
@@ -83,5 +150,10 @@ The new Rust tests cover source-only changes in current and temperature,
 source heat-capacity changes in advective cooling with unchanged prescribed
 flow, dimensional/semantic conductivity preservation, invalid/reference-domain
 and nonconservative-flow refusals, and pack/scene-to-command execution with
-replay and rejection of unsupported transient storage. They use authored
-synthetic data, not measured liquid-metal or electrolyte calibration.
+replay. Three transient regressions additionally compare the original coupled
+solver with an independent three-control-volume balance through drive switch-off,
+exercise fluid/solid capacity coupling, and reject interior rho/Cp variation,
+unsupported inlet states, late storage escape and cancellation. The file-driven
+regression reaches both steady and transient paths. These are authored synthetic
+fixtures, not measured liquid-metal or electrolyte calibration; the new Rust
+regressions have not been executed in this implementation environment.

@@ -139,21 +139,32 @@ pub(crate) struct Trajectory {
 
 pub(crate) fn march(problem: &Problem, request: &Request, gate: &CancelGate) -> Result<Trajectory, ChtError> {
     poll(gate)?;
+    if let Some(fluid) = &problem.fluid {
+        fluid.admit_transient(&problem.materials[fluid.material_index], request.lower_k,
+            request.upper_k, &problem.thermal, gate)?;
+    }
     let density_key = PropertyKey::new(DENSITY_PROPERTY, Density::DIMS);
     let cp_key = PropertyKey::new(SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS);
     let density_requirement = ScalarPropertyRequirement::try_with_key(&density_key, ScalarAdmissibility::StrictlyPositive)
         .map_err(|e| invalid("material.storage", e))?;
     let mut curves = Vec::with_capacity(problem.materials.len());
-    for source in &problem.materials {
+    for (index, source) in problem.materials.iter().enumerate() {
         poll(gate)?;
         let lower = source.point_at(request.lower_k)?;
         let upper = source.point_at(request.upper_k)?;
+        // The scene owns the fixed role. This is an explicit single-phase
+        // incompressible-fluid assumption, not inferred phase stability.
+        let phase = if problem.fluid.as_ref().is_some_and(|f| f.material_index == index) {
+            SolidLiquidPhase::Liquid
+        } else {
+            SolidLiquidPhase::Solid
+        };
         curves.push(ResolvedHeatCapacityCurve::try_new(
             source.pack.card(), HeatCapacitySourceQuery {
                 heat_capacity: &cp_key, density: &density_key,
                 temperature_axis: &source.temperature_axis, lower: &lower, upper: &upper,
                 selection: SelectionPolicy::SingleClaimOnly,
-            }, SolidLiquidPhase::Solid, 0.0, request.interpolation_j_kg,
+            }, phase, 0.0, request.interpolation_j_kg,
         ).map_err(|e| invalid("material.storage", e))?);
     }
     let mut masses = Vec::with_capacity(problem.domain.cell_count());
@@ -222,7 +233,9 @@ pub(crate) fn march(problem: &Problem, request: &Request, gate: &CancelGate) -> 
         }
         let peak = next.temperature.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let record = TransientRecord {
-            time_s: request.dt * step as f64, max_temperature_k: peak, max_solid_temperature_k: peak,
+            time_s: request.dt * step as f64, max_temperature_k: peak,
+            max_solid_temperature_k: next.max_where(|cell| !problem.domain.is_fluid(cell))
+                .map_or(f64::NAN, |(_, t)| t),
             stored_energy_change_j: stored, source_j, boundary_outflow_j: outflow_j,
             closure_j, radiated_w, iterations: next.report.iterations,
         };
@@ -240,12 +253,13 @@ pub(crate) fn march(problem: &Problem, request: &Request, gate: &CancelGate) -> 
 pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> String {
     let last = &trajectory.last.coupled;
     let record = trajectory.records.last().expect("a completed trajectory has steps");
+    let no_claim = if problem.fluid.is_some() { super::fluid::TRANSIENT_NO_CLAIM } else { NO_CLAIM };
     if !json {
         return format!("Electrothermal transient: {} steps, {} s, {} thermal solves\nPeak temperature: {} K; final Joule power: {} W\nLast stored-energy increment: {} J; energy defect: {} J\nThermal-contact relative defect: {}\n{}\n",
             trajectory.records.len(), record.time_s, trajectory.thermal_solves,
             record.max_temperature_k, last.electric.total_joule_w,
             record.stored_energy_change_j, record.closure_j,
-            trajectory.last.thermal_contact_relative_defect, NO_CLAIM);
+            trajectory.last.thermal_contact_relative_defect, no_claim);
     }
     let records = trajectory.records.iter().map(|r| format!(
         "{{\"time_s\":{},\"max_temperature_k\":{},\"stored_energy_change_j\":{},\"source_j\":{},\"physical_outflow_j\":{},\"closure_j\":{},\"radiated_w\":{}}}",
@@ -267,7 +281,7 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         "\"total_joule_w\":{},\"electrode_power_w\":{},\"resolved_conductivity_w_m_k\":{},",
         "\"thermal_solves\":{},\"records\":[{}],\"materials\":[{}],\"source_states\":[{}],",
         "\"electrical_interfaces\":{},\"thermal_interfaces\":{},",
-        "\"thermal_contact_relative_defect\":{},\"radiation\":{},\"no_claim\":{}}}\n"),
+        "\"thermal_contact_relative_defect\":{},\"radiation\":{},\"fluid_reference\":{},\"no_claim\":{}}}\n"),
         record.time_s, trajectory.records.len(), problem.domain.dims(), values(trajectory.masses.iter().copied()),
         values(last.thermal.temperature.iter().copied()), values(last.electric.potential_v.iter().copied()),
         values(last.electric.joule_w.iter().copied()), last.electric.total_joule_w, last.electric.delivered_w,
@@ -275,5 +289,6 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         source_states, super::super::interfaces::render(problem, &trajectory.last.interfaces),
         super::super::interfaces::render_thermal(problem, &trajectory.last),
         trajectory.last.thermal_contact_relative_defect,
-        super::super::radiation::render(&trajectory.last.radiation), quote(NO_CLAIM))
+        super::super::radiation::render(&trajectory.last.radiation),
+        problem.fluid.as_ref().map_or_else(|| "null".into(), super::Fluid::render), quote(no_claim))
 }

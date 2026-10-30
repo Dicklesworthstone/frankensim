@@ -54,10 +54,6 @@ pub fn run(args: &[OsString], json: bool) -> CommandOutput {
         Err(error) => return refusal(exit::INPUT, "electrothermal-input", &error, json),
     };
     if transient {
-        if problem.fluid.is_some() {
-            return refusal(exit::INPUT, "electrothermal-transient-input",
-                "fluid scenes do not support the solid-only transient storage model", json);
-        }
         let request = match source::transient::load(Path::new(&args[2]), problem.domain.cell_count()) {
             Ok(request) => request,
             Err(error) => return refusal(exit::INPUT, "electrothermal-transient-input", &error, json),
@@ -205,6 +201,12 @@ fn load(path: &Path) -> Result<Problem, String> {
         else if value.get("temperature_k").is_some() {
             fields(value, &["temperature_k"])?;
             ThermalFace::Temperature(positive(value, "temperature_k")?)
+        } else if value.get("inflow_temperature_k").is_some() {
+            fields(value, &["inflow_temperature_k"])?;
+            ThermalFace::Inflow { temperature: positive(value, "inflow_temperature_k")? }
+        } else if value.get("backflow_temperature_k").is_some() {
+            fields(value, &["backflow_temperature_k"])?;
+            ThermalFace::Outflow { backflow_temperature: positive(value, "backflow_temperature_k")? }
         } else if value.get("heat_flux_w_m2").is_some() {
             fields(value, &["heat_flux_w_m2"])?;
             ThermalFace::HeatFlux(scalar(value, "heat_flux_w_m2")?)

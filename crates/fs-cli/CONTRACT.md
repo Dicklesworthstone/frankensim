@@ -2867,3 +2867,39 @@ re-solves, retain identical raw sample projects/statistics and primal fields,
 and resume calibration from retained inputs after source files are moved.
 These are local discrete mean controls; probability children and their
 anytime-valid statistical claims retain their existing owners.
+
+
+### Source-driven conducting-fluid transient scenes
+
+`electrothermal --transient` admits the existing scene-owned fluid role through
+the same native electrical, conductivity, face-flux and backward-Euler storage
+owners used by solid scenes. Native source-line admission checks every crossed
+breakpoint of the original density and heat-capacity laws over the complete
+requested temperature interval. Both must remain constant and match their
+original reference claims. Equal endpoint values cannot conceal an interior
+variation; support holes and claim switching refuse. Solid heat capacity may
+retain its existing variable source chart.
+
+The prescribed volume-conservative flow's rho*Cp*Q*T flux and fluid rho*V*Cp
+temperature storage therefore share one material law. Local conductivity and
+resistivity still refresh at every nonlinear endpoint. Cell mass stays fixed;
+physical outflow includes actual boundary advection/conduction and admitted
+surface exchange, excluding the temporary storage diagonal. The same scene
+and time schemas retain scheduled drives, authored heat, contacts, source
+identities and original all-or-nothing trajectory publication. Transient JSON
+includes `fluid_reference` (null for all-solid scenes).
+
+`thermal_faces` now exposes positive-kelvin `inflow_temperature_k` and
+`backflow_temperature_k` variants, mapped directly to native Inflow and
+Outflow. Nonzero prescribed boundary flow requires an open thermal face;
+closed thermal rules retain the native refusal. Transient inflow and backflow
+temperatures must lie within the admitted source interval. The file-driven
+regression uses nonzero through-flow for both steady and transient commands.
+
+This remains prescribed incompressible flow with one fixed-phase fluid,
+constant source-supported fluid density/Cp, frozen reference viscosity and
+fixed geometry. No momentum/pressure solve, variable-Cp enthalpy advection,
+phase transition or thermal-expansion work is inferred. Single-phase charts
+are scene assumptions, not phase-stability proofs; timestep refinement is
+required. Three new G1/G3/G4 regressions cover an independent control-volume
+transient, shared solid/fluid storage, and interior-law/late-state refusals.
