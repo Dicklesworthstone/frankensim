@@ -72,10 +72,10 @@ pub use sgs::{NsfSgsConfig, NsfSgsTransport};
 mod open;
 pub use open::{NsfOpenState, NsfReservoirAperture};
 mod open_boundary;
-use open_boundary::{BoundaryFlux, IncomingPopulations, OpenFaces};
+use open_boundary::{BoundaryFlux, CharacteristicPatchBinding, IncomingPopulations, OpenFaces};
 pub use open_boundary::{
     NsfBoundaryDrive, NsfBoundaryExchange, NsfBoundaryTrace, NsfCharacteristicAxis,
-    NsfCharacteristicBoundary,
+    NsfCharacteristicBoundary, NsfCharacteristicPatch,
 };
 mod characteristic_trial;
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
@@ -562,12 +562,14 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     wall_out: f64,
     open: Option<NsfCharacteristicAxis>,
     characteristic_pressure_offset_pa: [Option<f64>; 2],
+    characteristic_patch: Option<CharacteristicPatchBinding>,
     open_faces: Option<OpenFaces>,
     reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
     reservoir_aperture: Option<open::BoundReservoirAperture>,
     last_reservoir_mass_out_kg: Option<f64>,
     open_out: BoundaryFlux,
     last_boundary_exchange: Option<[NsfBoundaryExchange; 2]>,
+    last_patch_exchange: Option<NsfBoundaryExchange>,
     steps: usize,
     cumulative: EnergyLedger,
     /// Velocity of the bounce-back wall at the low (index 0) and high (index 1) edge of each non-periodic axis.
@@ -759,12 +761,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             wall_out: 0.0,
             open: None,
             characteristic_pressure_offset_pa: [None; 2],
+            characteristic_patch: None,
             open_faces: None,
             reservoir_faces: [[None; 2]; 3],
             reservoir_aperture: None,
             last_reservoir_mass_out_kg: None,
             open_out: BoundaryFlux::default(),
             last_boundary_exchange: None,
+            last_patch_exchange: None,
             steps: 0,
             cumulative: EnergyLedger::default(),
             edge_velocity: [[[0.0; 3]; 2]; 3],
@@ -1259,6 +1263,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             self.open_energy_flux(face, i, a, 1, rho, theta, sig)?;
                         open.total_out[1] += total;
                         open.internal_out[1] += internal;
+                        if faces.is_some_and(|faces| faces.contains_patch(x, 1)) {
+                            open.patch_total_out += total;
+                        }
                     } else if self.open_at(i, a, 1).is_some() {
                         open.prescribed_out += wall_flux(i, a, 1)?;
                     } else {
@@ -1271,6 +1278,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             self.open_energy_flux(face, i, a, -1, rho, theta, sig)?;
                         open.total_out[0] -= total;
                         open.internal_out[0] -= internal;
+                        if faces.is_some_and(|faces| faces.contains_patch(x, 0)) {
+                            open.patch_total_out -= total;
+                        }
                     } else if self.open_at(i, a, -1).is_some() {
                         open.prescribed_out -= wall_flux(i, a, -1)?;
                     } else {
@@ -1421,7 +1431,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mut result = None;
         for _ in 0..COUPLING_PASSES {
             let faces1 = self.resolve_open_faces(
-                self.open.as_ref(), self.characteristic_pressure_offset_pa, &rho1, &u_guess, &th1,
+                self.open.as_ref(), self.characteristic_pressure_offset_pa,
+                self.characteristic_patch, &rho1, &u_guess, &th1,
             )?;
             let mut f1 = self.force_field(&rho1, &th1, faces1.as_ref());
             if have_sources {
@@ -1530,7 +1541,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // Admit the actual endpoint too, without replacing the common
         // predictor faces that supplied its force and conservative FV flux.
         let _ = self.resolve_open_faces(
-            self.open.as_ref(), self.characteristic_pressure_offset_pa, &rho1, &u1, &th1,
+            self.open.as_ref(), self.characteristic_pressure_offset_pa,
+            self.characteristic_patch, &rho1, &u1, &th1,
         )?;
         // The next collision must use the actual accepted force-corrected
         // velocity and source state, after the final temperature corrector.
@@ -1643,6 +1655,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             faces1.as_ref(),
             open1,
         );
+        let patch_exchange = self.finish_patch_exchange(
+            boundary_links,
+            self.open_faces.as_ref(),
+            faces1.as_ref(),
+            open1,
+        );
         self.f = next;
         self.e = e1;
         self.material = material_new;
@@ -1657,6 +1675,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.open_out = open1;
         self.open_faces = faces1;
         self.last_boundary_exchange = boundary_exchange;
+        self.last_patch_exchange = patch_exchange;
         self.last_reservoir_mass_out_kg = reservoir_mass_out_kg;
         self.steps += 1;
         self.cumulative.viscous_heating_j += ledger.viscous_heating_j;
@@ -1805,6 +1824,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.steps
     }
     /// FNV-1a hash of every population and energy bit (bitwise invariance checks).
+    /// An attached characteristic patch also contributes its shape, side and accepted drive.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1819,6 +1839,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 feed(self.f[i][q]);
             }
             feed(self.e[i]);
+        }
+        if let Some(patch) = self.characteristic_patch {
+            feed(1.0);
+            feed(if patch.high { 1.0 } else { 0.0 });
+            for bound in patch.shape.start.into_iter().chain(patch.shape.end) {
+                feed(bound as f64);
+            }
+            match patch.drive {
+                NsfBoundaryDrive::IncomingCharacteristic(value) => { feed(0.0); feed(value); }
+                NsfBoundaryDrive::PressureOffset(value) => { feed(1.0); feed(value); }
+            }
         }
         h
     }

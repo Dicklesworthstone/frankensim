@@ -4,6 +4,8 @@
 mod source;
 #[path = "nsf3_open_boundaries/pressure.rs"]
 mod pressure;
+#[path = "nsf3_open_boundaries/patch.rs"]
+mod patch;
 
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{

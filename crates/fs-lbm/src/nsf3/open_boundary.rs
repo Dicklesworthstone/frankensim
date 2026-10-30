@@ -21,6 +21,10 @@
 use super::{NsfError, NsfGrid3, Q, THETA0, check_state, equilibrium};
 use crate::lattice3::Lattice3;
 
+mod patch;
+pub use patch::NsfCharacteristicPatch;
+pub(super) use patch::CharacteristicPatchBinding;
+
 /// Source-bound reference and one incoming plane-normal acoustic characteristic.
 /// Both faces use their own outward normal; low is negative, high positive.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -118,6 +122,7 @@ pub(super) struct BoundaryFlux {
     pub total_out: [f64; 2],
     pub internal_out: [f64; 2],
     pub prescribed_out: f64,
+    pub patch_total_out: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -133,6 +138,7 @@ pub(super) struct OpenFace {
 pub(super) struct OpenFaces {
     axis: usize,
     values: [Vec<OpenFace>; 2],
+    patch: Option<CharacteristicPatchBinding>,
 }
 
 pub(super) struct IncomingPopulations {
@@ -209,7 +215,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ));
             }
         }
-        self.rebind_characteristics(open, [None; 2])?;
+        self.rebind_characteristics(open, [None; 2], None)?;
         Ok(self)
     }
 
@@ -230,7 +236,15 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// entropy/tangential data retain the original material reference; outflow
     /// retains the adjacent cell. Pressure, temperature, Mach and source-domain
     /// refusals apply before any physical state or control is published.
+    /// An attached aperture retains its own drive; these controls apply to the
+    /// complementary cells of its face and every cell of the opposite face.
     pub fn set_boundary_drives(&mut self, drives: [NsfBoundaryDrive; 2]) -> Result<(), NsfError> {
+        self.set_boundary_drives_with_binding(drives, self.characteristic_patch)
+    }
+
+    fn set_boundary_drives_with_binding(
+        &mut self, drives: [NsfBoundaryDrive; 2], patch: Option<CharacteristicPatchBinding>,
+    ) -> Result<(), NsfError> {
         let mut open = self
             .open
             .ok_or(NsfError::Input("no characteristic axis is attached"))?;
@@ -251,10 +265,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             }
         }
-        self.rebind_characteristics(open, pressure)
+        self.rebind_characteristics(open, pressure, patch)
     }
 
     /// Actual accepted controls, low then high, with their physical units.
+    /// An attached aperture has its separate `characteristic_patch_drive`.
     #[must_use]
     pub fn boundary_drives(&self) -> Option<[NsfBoundaryDrive; 2]> {
         let open = self.open.as_ref()?;
@@ -361,6 +376,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     fn rebind_characteristics(
         &mut self, open: NsfCharacteristicAxis, pressure_offset_pa: [Option<f64>; 2],
+        patch: Option<CharacteristicPatchBinding>,
     ) -> Result<(), NsfError> {
         let bound = open.maximum_relative_perturbation;
         if !bound.is_finite() || bound <= 0.0 || bound > 0.1 {
@@ -370,7 +386,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
-        let faces = self.resolve_open_faces(Some(&open), pressure_offset_pa, &rho, &u, &self.theta)?;
+        let faces = self.resolve_open_faces(Some(&open), pressure_offset_pa, patch, &rho, &u, &self.theta)?;
         let force = self.force_field(&rho, &self.theta, faces.as_ref());
         let mut f = self.f.clone();
         for i in 0..self.n {
@@ -387,6 +403,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &[], faces.as_ref())?;
         self.open = Some(open);
         self.characteristic_pressure_offset_pa = pressure_offset_pa;
+        self.characteristic_patch = patch;
         self.open_faces = faces;
         self.f = f;
         self.force = force;
@@ -394,6 +411,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.wall_out = wall;
         self.open_out = flux;
         self.last_boundary_exchange = None;
+        self.last_patch_exchange = None;
         Ok(())
     }
 
@@ -401,6 +419,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &self,
         open: Option<&NsfCharacteristicAxis>,
         pressure_offset_pa: [Option<f64>; 2],
+        patch: Option<CharacteristicPatchBinding>,
         rho: &[f64],
         u: &[[f64; 3]],
         theta: &[f64],
@@ -451,7 +470,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 let ui = u[i].map(|v| v * velocity_unit);
                 let outgoing =
                     sign * ui[open.axis] - normal_reference + (pi - reference.pressure) / impedance;
-                let (normal, pressure) = match pressure_offset_pa[side] {
+                let (incoming, pressure_offset) = match patch.filter(|patch|
+                    usize::from(patch.high) == side && patch.shape.contains(x, open.axis))
+                {
+                    Some(patch) => match patch.drive {
+                        NsfBoundaryDrive::IncomingCharacteristic(value) => (value, None),
+                        NsfBoundaryDrive::PressureOffset(value) => (0.0, Some(value)),
+                    },
+                    None => (boundary.incoming_characteristic_m_s, pressure_offset_pa[side]),
+                };
+                let (normal, pressure) = match pressure_offset {
                     Some(offset) => {
                         // J- = J+ - 2 dp/Z. Evaluate the equivalent normal
                         // velocity directly, avoiding cancellation between
@@ -461,9 +489,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             reference.pressure + offset)
                     }
                     None => (
-                        normal_reference + 0.5 * (outgoing + boundary.incoming_characteristic_m_s),
+                        normal_reference + 0.5 * (outgoing + incoming),
                         reference.pressure
-                            + 0.5 * impedance * (outgoing - boundary.incoming_characteristic_m_s),
+                            + 0.5 * impedance * (outgoing - incoming),
                     ),
                 };
                 let entropy_temperature = if normal >= 0.0 {
@@ -532,6 +560,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         Ok(Some(OpenFaces {
             axis: open.axis,
             values,
+            patch,
         }))
     }
 
@@ -651,10 +680,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &self,
         post: &[[f64; Q]],
         incoming: Option<&IncomingPopulations>,
-    ) -> Option<[LinkExchange; 2]> {
+    ) -> Option<([LinkExchange; 2], Option<LinkExchange>)> {
         let incoming = incoming?;
         let axis = incoming.axis;
         let mut result = [LinkExchange::default(); 2];
+        let mut patch_exchange = self.characteristic_patch.map(|_| LinkExchange::default());
         for (side, output) in result.iter_mut().enumerate() {
             let sign = if side == 0 { -1 } else { 1 };
             let edge = if side == 0 {
@@ -682,20 +712,29 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     for a in 0..3 {
                         output.momentum[a] += f64::from(c[a]) * exchanged;
                     }
+                    if self.characteristic_patch.is_some_and(|patch|
+                        usize::from(patch.high) == side && patch.shape.contains(x, axis))
+                    {
+                        let patch = patch_exchange.as_mut().expect("selected patch");
+                        patch.mass += exchanged;
+                        for a in 0..3 {
+                            patch.momentum[a] += f64::from(c[a]) * exchanged;
+                        }
+                    }
                 }
             }
         }
-        Some(result)
+        Some((result, patch_exchange))
     }
 
     pub(super) fn finish_boundary_exchange(
         &self,
-        links: Option<[LinkExchange; 2]>,
+        links: Option<([LinkExchange; 2], Option<LinkExchange>)>,
         before: Option<&OpenFaces>,
         after: Option<&OpenFaces>,
         flux_after: BoundaryFlux,
     ) -> Option<[NsfBoundaryExchange; 2]> {
-        let links = links?;
+        let (links, _) = links?;
         let (before, after) = (before?, after?);
         let axis = before.axis;
         let mass_unit = self.law.rho_ref_kg_m3 * self.law.dx_m.powi(3);

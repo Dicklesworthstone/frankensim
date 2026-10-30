@@ -12,6 +12,7 @@ pub struct NsfCharacteristicTrial<'a, L: Lattice3<27>> {
     owner: &'a mut NsfGrid3<L>,
     candidate: NsfGrid3<L>,
     exchange: [NsfBoundaryExchange; 2],
+    patch_exchange: Option<NsfBoundaryExchange>,
     ledger: EnergyLedger,
     mass_before_kg: f64,
     energy_before_j: f64,
@@ -23,6 +24,8 @@ impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
     pub const fn grid(&self) -> &NsfGrid3<L> { &self.candidate }
     /// Summed mass, momentum, energy and work; pressure/flow are interval means.
     pub const fn boundary_exchange(&self) -> &[NsfBoundaryExchange; 2] { &self.exchange }
+    /// Selected aperture's original exchange; already included in its full face.
+    pub const fn patch_exchange(&self) -> Option<&NsfBoundaryExchange> { self.patch_exchange.as_ref() }
     /// Original step accounts summed over this interval, with final storage and
     /// the interval total-energy residual. Viscous heat keeps its budget-remainder
     /// qualification; no independently resolved heat account is invented here.
@@ -62,12 +65,30 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// every predictor, not by another flow solve or a rebaked source waveform.
     /// Dropping or refusing the trial preserves both accepted controls and all
     /// original populations, force/energy history and material state.
+    /// An attached aperture retains its accepted control throughout the trial.
     pub fn preview_boundary_interval(
         &mut self,
         drives: [NsfBoundaryDrive; 2],
         steps: usize,
         maximum_cell_steps: usize,
         cancelled: impl Fn() -> bool,
+    ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
+        self.preview_boundary_interval_inner(drives, None, steps, maximum_cell_steps, cancelled)
+    }
+
+    /// Preview a selected aperture control and its complementary face controls
+    /// in one original transaction. The patch shape and source gas are retained.
+    /// A rejected or dropped candidate publishes no controls, fields or accounts.
+    pub fn preview_boundary_interval_with_patch(
+        &mut self, drives: [NsfBoundaryDrive; 2], patch_drive: NsfBoundaryDrive,
+        steps: usize, maximum_cell_steps: usize, cancelled: impl Fn() -> bool,
+    ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
+        self.preview_boundary_interval_inner(drives, Some(patch_drive), steps, maximum_cell_steps, cancelled)
+    }
+
+    fn preview_boundary_interval_inner(
+        &mut self, drives: [NsfBoundaryDrive; 2], patch_drive: Option<NsfBoundaryDrive>,
+        steps: usize, maximum_cell_steps: usize, cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
         if cancelled() {
             return Err(NsfError::Input("characteristic interval cancelled"));
@@ -81,8 +102,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mass_before_kg = self.total_mass_kg();
         let energy_before_j = self.total_energy_j();
         let mut candidate = self.characteristic_copy();
-        candidate.set_boundary_drives(drives)?;
+        match patch_drive {
+            Some(drive) => candidate.set_boundary_drives_with_patch(drives, drive)?,
+            None => candidate.set_boundary_drives(drives)?,
+        }
         let mut exchange = [NsfBoundaryExchange::default(); 2];
+        let mut patch_exchange = candidate.characteristic_patch.map(|_| NsfBoundaryExchange::default());
         let mut ledger = EnergyLedger::default();
         let mut reservoir_mass_out_kg = 0.0;
         for _ in 0..steps {
@@ -112,8 +137,24 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 total.mean_acoustic_pressure_pa += step.mean_acoustic_pressure_pa;
                 total.acoustic_pressure_work_out_j += step.acoustic_pressure_work_out_j;
             }
+            if let Some(total) = &mut patch_exchange {
+                let step = candidate.last_patch_exchange().expect("admitted characteristic patch");
+                total.mass_out_kg += step.mass_out_kg;
+                for a in 0..3 { total.momentum_out_kg_m_s[a] += step.momentum_out_kg_m_s[a]; }
+                total.total_energy_out_j += step.total_energy_out_j;
+                total.mean_pressure_pa += step.mean_pressure_pa;
+                total.normal_volume_flow_m3_s += step.normal_volume_flow_m3_s;
+                total.pressure_work_out_j += step.pressure_work_out_j;
+                total.mean_acoustic_pressure_pa += step.mean_acoustic_pressure_pa;
+                total.acoustic_pressure_work_out_j += step.acoustic_pressure_work_out_j;
+            }
         }
         for face in &mut exchange {
+            face.mean_pressure_pa /= steps as f64;
+            face.mean_acoustic_pressure_pa /= steps as f64;
+            face.normal_volume_flow_m3_s /= steps as f64;
+        }
+        if let Some(face) = &mut patch_exchange {
             face.mean_pressure_pa /= steps as f64;
             face.mean_acoustic_pressure_pa /= steps as f64;
             face.normal_volume_flow_m3_s /= steps as f64;
@@ -122,7 +163,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         ledger.residual_rel = (energy - energy_before_j - ledger.wall_heat_j
             - ledger.open_boundary_energy_j - ledger.open_energy_j - ledger.source_energy_j).abs()
             / energy_before_j.abs().max(energy.abs()).max(1e-300);
-        if exchange.iter().any(|face| ![
+        if exchange.iter().chain(patch_exchange.iter()).any(|face| ![
             face.mass_out_kg, face.total_energy_out_j, face.mean_pressure_pa,
             face.normal_volume_flow_m3_s, face.pressure_work_out_j,
             face.mean_acoustic_pressure_pa, face.acoustic_pressure_work_out_j,
@@ -141,7 +182,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             return Err(NsfError::Input("characteristic interval cancelled"));
         }
         Ok(NsfCharacteristicTrial {
-            owner: self, candidate, exchange, ledger, mass_before_kg, energy_before_j,
+            owner: self, candidate, exchange, patch_exchange, ledger, mass_before_kg, energy_before_j,
             reservoir_mass_out_kg,
         })
     }
@@ -156,11 +197,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             theta: self.theta.clone(), force: self.force.clone(), div: self.div.clone(),
             wall_out: self.wall_out, open: self.open,
             characteristic_pressure_offset_pa: self.characteristic_pressure_offset_pa,
+            characteristic_patch: self.characteristic_patch,
             open_faces: self.open_faces.clone(),
             reservoir_faces: self.reservoir_faces, open_out: self.open_out,
             reservoir_aperture: self.reservoir_aperture.clone(),
             last_reservoir_mass_out_kg: self.last_reservoir_mass_out_kg,
             last_boundary_exchange: self.last_boundary_exchange, steps: self.steps,
+            last_patch_exchange: self.last_patch_exchange,
             cumulative: self.cumulative, edge_velocity: self.edge_velocity,
             moving_walls: self.moving_walls, sources: None, src_now: self.src_now.clone(),
             marker: core::marker::PhantomData,
