@@ -140,6 +140,7 @@ pub use medium_exposure::{
     MediumExposure, MediumExposureFilm, render_medium_exposure, render_medium_exposure_range,
     render_medium_exposure_range_with_execution, render_medium_exposure_with_execution,
 };
+mod scene_exposure;
 mod thermal_lighting;
 #[cfg(feature = "volumes")]
 pub use absorbing::{AbsorbingFilm, render_absorbing, render_absorbing_range};
@@ -148,6 +149,11 @@ pub use scattering::{
     SCATTERING_TRACER_SEMANTICS_VERSION, ScatteringFilm, render_absorbing_range_with_execution,
     render_absorbing_with_execution, render_scattering, render_scattering_range,
     render_scattering_range_with_execution, render_scattering_with_execution,
+};
+pub use scene_exposure::{
+    SceneExposure, SceneExposureBudget, SceneExposureError, SceneExposureFilm, SceneFrame,
+    render_scene_exposure, render_scene_exposure_range, render_scene_exposure_range_with_execution,
+    render_scene_exposure_with_execution,
 };
 #[cfg(feature = "photometry")]
 pub(crate) mod photometric;
@@ -2920,6 +2926,8 @@ pub enum TracerError {
     Conductor(ConductorError),
     /// Lighting artifact, selection, or probability admission refused.
     Lighting(LightingError),
+    /// Accepted scene states or their exposure/preparation budget were invalid.
+    SceneExposure(SceneExposureError),
     /// A calibrated fixture connection exceeded its admitted physical domain.
     #[cfg(feature = "photometry")]
     FixtureConnection {
@@ -3041,6 +3049,7 @@ impl core::fmt::Display for TracerError {
             Self::Dielectric(error) => write!(formatter, "dielectric transport refused: {error}"),
             Self::Conductor(error) => write!(formatter, "conductor transport refused: {error}"),
             Self::Lighting(error) => write!(formatter, "scene lighting refused: {error}"),
+            Self::SceneExposure(error) => write!(formatter, "scene exposure refused: {error}"),
             #[cfg(feature = "photometry")]
             Self::FixtureConnection { source, reason } => {
                 write!(formatter, "fixture {source} connection refused: {reason}")
@@ -3924,17 +3933,65 @@ fn render_range_with_medium_impl(
     #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
     has_medium_emission: bool,
 ) -> Result<(), TracerError> {
-    let (lighting, requested_mode) = preflight_render_with_medium_emission(
+    render_range_with_scene_exposure_impl(
         scene,
         cx,
         s,
-        Some(film),
+        film,
         from,
         to,
         shutter,
         camera_path,
+        #[cfg(feature = "volumes")]
+        medium,
         has_medium_emission,
-    )?;
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_range_with_scene_exposure_impl(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    s: &Settings,
+    film: &mut Film,
+    from: u32,
+    to: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+    #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
+    has_medium_emission: bool,
+    scene_exposure: Option<&SceneExposure<'_>>,
+) -> Result<(), TracerError> {
+    let (owned_lighting, requested_mode) = if scene_exposure.is_some() {
+        (
+            None,
+            preflight_render_buffers(cx, s, Some(film), from, to, shutter, camera_path)?,
+        )
+    } else {
+        let (lighting, mode) = preflight_render_with_medium_emission(
+            scene,
+            cx,
+            s,
+            Some(film),
+            from,
+            to,
+            shutter,
+            camera_path,
+            has_medium_emission,
+        )?;
+        (Some(lighting), mode)
+    };
+    let lighting = match &owned_lighting {
+        Some(lighting) => lighting,
+        None => {
+            scene_exposure
+                .ok_or(TracerError::InvalidInput)?
+                .at_time(shutter.ok_or(TracerError::InvalidInput)?.open_s())?
+                .1
+        }
+    };
+    cx.checkpoint()?;
     if to == from {
         return Ok(());
     }
@@ -3960,9 +4017,9 @@ fn render_range_with_medium_impl(
             let slot = &mut staged_xyz[pixel as usize];
             for sample in from..to {
                 cx.checkpoint()?;
-                let xyz = trace_pixel_sample_with_primary_and_medium(
+                let xyz = trace_pixel_sample_with_scene_exposure(
                     scene,
-                    &lighting,
+                    lighting,
                     cx,
                     s,
                     kn,
@@ -3976,6 +4033,7 @@ fn render_range_with_medium_impl(
                     false,
                     #[cfg(feature = "volumes")]
                     medium,
+                    scene_exposure,
                 )?
                 .xyz;
                 slot[0] += xyz[0];
@@ -4007,6 +4065,7 @@ enum RenderTileFailure {
 struct ParallelRenderKernel<'run, 'assets> {
     scene: &'assets Scene,
     lighting: &'run SceneLighting<'assets>,
+    scene_exposure: Option<&'run SceneExposure<'assets>>,
     settings: &'run Settings,
     base_xyz: Option<&'run [[f64; 3]]>,
     staging: &'run Mutex<Vec<[f64; 3]>>,
@@ -4101,7 +4160,7 @@ impl ParallelRenderKernel<'_, '_> {
                         atomic_saturating_add(self.compute_ns, elapsed_ns(compute_started));
                         return ControlFlow::Break(Cancelled);
                     }
-                    let sample_xyz = match trace_pixel_sample_with_primary_and_medium(
+                    let sample_xyz = match trace_pixel_sample_with_scene_exposure(
                         self.scene,
                         self.lighting,
                         cx,
@@ -4117,6 +4176,7 @@ impl ParallelRenderKernel<'_, '_> {
                         false,
                         #[cfg(feature = "volumes")]
                         self.medium,
+                        self.scene_exposure,
                     ) {
                         Ok(sample) => sample.xyz,
                         Err(TracerError::Cancelled) => {
@@ -5746,23 +5806,77 @@ fn render_range_parallel_with_medium_impl<R: RenderPoolRunner>(
     #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
     has_medium_emission: bool,
 ) -> Result<ParallelRenderResult, RenderExecutionError> {
+    render_range_parallel_with_scene_exposure_impl(
+        scene,
+        cx,
+        settings,
+        base_film,
+        sample_plan,
+        from,
+        to,
+        shutter,
+        camera_path,
+        execution,
+        runner,
+        #[cfg(feature = "volumes")]
+        medium,
+        has_medium_emission,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn render_range_parallel_with_scene_exposure_impl<R: RenderPoolRunner>(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    base_film: Option<&Film>,
+    sample_plan: Option<&IndependentPilotSamplePlan>,
+    from: u32,
+    to: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+    execution: &RenderExecutionConfig,
+    runner: &R,
+    #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
+    has_medium_emission: bool,
+    scene_exposure: Option<&SceneExposure<'_>>,
+) -> Result<ParallelRenderResult, RenderExecutionError> {
     let setup_started = Instant::now();
     if sample_plan.is_some() && (base_film.is_some() || from != 0 || to != settings.spp) {
         return Err(RenderExecutionError::Internal(
             "fixed sample plan is valid only for a fresh complete production render",
         ));
     }
-    let (lighting, requested_mode) = preflight_render_with_medium_emission(
-        scene,
-        cx,
-        settings,
-        base_film,
-        from,
-        to,
-        shutter,
-        camera_path,
-        has_medium_emission,
-    )?;
+    let (owned_lighting, requested_mode) = if scene_exposure.is_some() {
+        (
+            None,
+            preflight_render_buffers(cx, settings, base_film, from, to, shutter, camera_path)?,
+        )
+    } else {
+        let (lighting, mode) = preflight_render_with_medium_emission(
+            scene,
+            cx,
+            settings,
+            base_film,
+            from,
+            to,
+            shutter,
+            camera_path,
+            has_medium_emission,
+        )?;
+        (Some(lighting), mode)
+    };
+    let lighting = match &owned_lighting {
+        Some(lighting) => lighting,
+        None => {
+            scene_exposure
+                .ok_or(TracerError::InvalidInput)?
+                .at_time(shutter.ok_or(TracerError::InvalidInput)?.open_s())?
+                .1
+        }
+    };
+    cx.checkpoint()?;
     let layout = RenderTileLayout::try_new(
         settings.width,
         settings.height,
@@ -5880,7 +5994,8 @@ fn render_range_parallel_with_medium_impl<R: RenderPoolRunner>(
     let merge_ns = AtomicU64::new(0);
     let kernel = ParallelRenderKernel {
         scene,
-        lighting: &lighting,
+        lighting,
+        scene_exposure,
         settings,
         base_xyz: base_film.map(|film| film.xyz.as_slice()),
         staging: &staging,
@@ -9311,19 +9426,40 @@ fn cinematic_input_continuity_fingerprint(
     cx: &Cx<'_>,
 ) -> Result<ContentHash, CinematicAovError> {
     let mut hasher = DomainHasher::new(CINEMATIC_AOV_CONTINUITY_DOMAIN);
+    update_scene_continuity(&mut hasher, scene, cx)?;
+    update_camera_continuity(&mut hasher, camera, cx)?;
+    cx.checkpoint().map_err(TracerError::from)?;
+    Ok(hasher.finalize())
+}
+
+/// Numeric scene continuity guard. Chart allocations are process-local guards,
+/// not portable content identities, because the chart trait cannot expose all
+/// backend state. Meshes, materials, sources and trajectories are hashed by value.
+fn scene_continuity_fingerprint(scene: &Scene, cx: &Cx<'_>) -> Result<ContentHash, TracerError> {
+    let mut hasher = DomainHasher::new("org.frankensim.render.scene-exposure-state.v1");
+    update_scene_continuity(&mut hasher, scene, cx)?;
+    cx.checkpoint()?;
+    Ok(hasher.finalize())
+}
+
+fn update_scene_continuity(
+    hasher: &mut DomainHasher,
+    scene: &Scene,
+    cx: &Cx<'_>,
+) -> Result<(), TracerError> {
     hasher.update(&(scene.primitives.len() as u64).to_le_bytes());
     for (primitive_index, primitive) in scene.primitives.iter().enumerate() {
         if primitive_index.is_multiple_of(1_024) {
             cx.checkpoint().map_err(TracerError::from)?;
         }
-        update_shape_continuity(&mut hasher, &primitive.shape, cx)?;
+        update_shape_continuity(hasher, &primitive.shape, cx)?;
         hasher.update(primitive.material.content_identity().as_bytes());
         match primitive.emission {
             None => hasher.update(&[0]),
             Some((spectrum, scale)) => {
                 hasher.update(&[1]);
-                update_continuity_f64s(&mut hasher, spectrum.c);
-                update_continuity_f64(&mut hasher, scale);
+                update_continuity_f64s(hasher, spectrum.c);
+                update_continuity_f64(hasher, scale);
             }
         }
     }
@@ -9339,38 +9475,57 @@ fn cinematic_input_continuity_fingerprint(
             hasher.update(environment.semantic_hash().as_bytes());
         }
     }
-    update_continuity_point(&mut hasher, scene.camera.eye);
-    update_continuity_vec(&mut hasher, scene.camera.forward);
-    update_continuity_vec(&mut hasher, scene.camera.up);
-    update_continuity_f64(&mut hasher, scene.camera.half_tan);
+    update_continuity_point(hasher, scene.camera.eye);
+    update_continuity_vec(hasher, scene.camera.forward);
+    update_continuity_vec(hasher, scene.camera.up);
+    update_continuity_f64(hasher, scene.camera.half_tan);
+    Ok(())
+}
 
+fn camera_continuity_fingerprint(
+    cx: &Cx<'_>,
+    camera: &AnimatedCamera,
+) -> Result<ContentHash, TracerError> {
+    // Preserve the original medium-exposure camera identity for existing films.
+    let mut hasher = DomainHasher::new("org.frankensim.render.medium-exposure-camera.v1");
+    update_camera_continuity(&mut hasher, camera, cx)?;
+    cx.checkpoint()?;
+    Ok(hasher.finalize())
+}
+
+fn update_camera_continuity(
+    hasher: &mut DomainHasher,
+    camera: &AnimatedCamera,
+    cx: &Cx<'_>,
+) -> Result<(), TracerError> {
     hasher.update(&(camera.shots().len() as u64).to_le_bytes());
     for shot in camera.shots() {
+        cx.checkpoint()?;
         hasher.update(&shot.shot_id().to_le_bytes());
-        update_continuity_f64(&mut hasher, shot.start_s());
-        update_continuity_f64(&mut hasher, shot.end_s());
+        update_continuity_f64(hasher, shot.start_s());
+        update_continuity_f64(hasher, shot.end_s());
         hasher.update(&(shot.keyframes().len() as u64).to_le_bytes());
         for keyframe in shot.keyframes() {
-            update_continuity_f64(&mut hasher, keyframe.absolute_time_s());
-            update_physical_camera_continuity(&mut hasher, keyframe.camera());
+            cx.checkpoint()?;
+            update_continuity_f64(hasher, keyframe.absolute_time_s());
+            update_physical_camera_continuity(hasher, keyframe.camera());
             match keyframe.focus() {
                 KeyframeFocus::AxialDistance => hasher.update(&[0]),
                 KeyframeFocus::WorldPoint(point) => {
                     hasher.update(&[1]);
-                    update_continuity_point(&mut hasher, point);
+                    update_continuity_point(hasher, point);
                 }
             }
         }
     }
-    cx.checkpoint().map_err(TracerError::from)?;
-    Ok(hasher.finalize())
+    Ok(())
 }
 
 fn update_shape_continuity(
     hasher: &mut DomainHasher,
     shape: &Shape,
     cx: &Cx<'_>,
-) -> Result<(), CinematicAovError> {
+) -> Result<(), TracerError> {
     match shape {
         Shape::Mesh(mesh) => {
             hasher.update(&[0]);
@@ -9408,7 +9563,7 @@ fn update_shared_geometry_continuity(
     hasher: &mut DomainHasher,
     geometry: &SharedGeometry,
     cx: &Cx<'_>,
-) -> Result<(), CinematicAovError> {
+) -> Result<(), TracerError> {
     match geometry {
         SharedGeometry::Mesh(mesh) => {
             hasher.update(&[0]);
@@ -9427,7 +9582,7 @@ fn update_mesh_continuity(
     hasher: &mut DomainHasher,
     mesh: &TriMesh,
     cx: &Cx<'_>,
-) -> Result<(), CinematicAovError> {
+) -> Result<(), TracerError> {
     hasher.update(&(mesh.vertices.len() as u64).to_le_bytes());
     for (index, vertex) in mesh.vertices.iter().enumerate() {
         if index.is_multiple_of(1_024) {
@@ -9649,15 +9804,65 @@ fn trace_pixel_sample_with_primary_and_medium(
     capture_primary: bool,
     #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
 ) -> Result<PathTraceSample, TracerError> {
+    trace_pixel_sample_with_scene_exposure(
+        scene,
+        lighting,
+        cx,
+        settings,
+        kn,
+        sobol,
+        path_sobol,
+        key,
+        pixel,
+        sample,
+        shutter,
+        camera_path,
+        capture_primary,
+        #[cfg(feature = "volumes")]
+        medium,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_pixel_sample_with_scene_exposure(
+    scene: &Scene,
+    lighting: &SceneLighting<'_>,
+    cx: &Cx<'_>,
+    settings: &Settings,
+    kn: f64,
+    sobol: Option<&Sobol>,
+    path_sobol: Option<&Sobol>,
+    key: [u32; 2],
+    pixel: u32,
+    sample: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+    capture_primary: bool,
+    #[cfg(feature = "volumes")] medium: Option<MediumInput<'_, '_>>,
+    scene_exposure: Option<&SceneExposure<'_>>,
+) -> Result<PathTraceSample, TracerError> {
     // Pool seeds control scheduling/placement only. Bind downstream chart,
     // camera, and intersection work to the public render seed while retaining
     // the executor's logical tile/iteration and refusal routing.
     let render_cx = cx.with_stream_seed(settings.seed);
     let (jx, jy, ul) = pixel_dims(settings, sobol, key, pixel, sample)?;
-    let ray_time = match shutter {
-        Some(interval) => {
-            let normalized =
-                interval.sample_for_stream(settings.seed, u64::from(pixel), u64::from(sample));
+    let sampled_time = shutter.map(|interval| {
+        let normalized =
+            interval.sample_for_stream(settings.seed, u64::from(pixel), u64::from(sample));
+        (interval, normalized)
+    });
+    // Select before caching moving geometry and keep this state for the entire
+    // path, including all spectral/Fresnel continuations and light proposals.
+    let (scene, lighting) = match scene_exposure {
+        Some(exposure) => {
+            let (interval, normalized) = sampled_time.ok_or(TracerError::InvalidInput)?;
+            exposure.at_time(interval.time_at(normalized))?
+        }
+        None => (scene, lighting),
+    };
+    let ray_time = match sampled_time {
+        Some((interval, normalized)) => {
             let absolute_time_s = interval.time_at(normalized);
             let mut cached_animated = std::array::from_fn(|_| None);
             let mut cached_count = 0;
@@ -15535,6 +15740,25 @@ fn preflight_render_with_medium_emission<'a>(
     camera_path: CameraPath<'_>,
     has_medium_emission: bool,
 ) -> Result<(SceneLighting<'a>, FilmTimeMode), TracerError> {
+    let requested_mode =
+        preflight_render_buffers(cx, settings, film, from, to, shutter, camera_path)?;
+    let lighting = validate_scene_with_medium_emission(scene, cx, shutter, has_medium_emission)?;
+    cx.checkpoint()?;
+    Ok((lighting, requested_mode))
+}
+
+/// Admission shared by prepared histories and ordinary single-scene renders.
+/// Accepted histories have already validated each state over its own interval.
+#[allow(clippy::too_many_arguments)]
+fn preflight_render_buffers(
+    cx: &Cx<'_>,
+    settings: &Settings,
+    film: Option<&Film>,
+    from: u32,
+    to: u32,
+    shutter: Option<ShutterInterval>,
+    camera_path: CameraPath<'_>,
+) -> Result<FilmTimeMode, TracerError> {
     cx.checkpoint()?;
     let expected_len = checked_pixel_len(settings.width, settings.height)?;
     if to < from {
@@ -15552,9 +15776,7 @@ fn preflight_render_with_medium_emission<'a>(
     } else if from != 0 {
         return Err(TracerError::InvalidInput);
     }
-    let lighting = validate_scene_with_medium_emission(scene, cx, shutter, has_medium_emission)?;
-    cx.checkpoint()?;
-    Ok((lighting, requested_mode))
+    Ok(requested_mode)
 }
 
 fn checked_pixel_len(width: u32, height: u32) -> Result<usize, TracerError> {

@@ -136,29 +136,7 @@ fn validate_settings(settings: &Settings) -> Result<(), TracerError> {
 // Cache the numeric optics once, not just a caller-chosen shot identifier.
 // Reuse the same physical-camera hashing as cinematic progressive rendering.
 fn camera_identity(cx: &Cx<'_>, camera: &AnimatedCamera) -> Result<ContentHash, TracerError> {
-    let mut hash = DomainHasher::new("org.frankensim.render.medium-exposure-camera.v1");
-    hash.update(&(camera.shots().len() as u64).to_le_bytes());
-    for shot in camera.shots() {
-        cx.checkpoint()?;
-        hash.update(&shot.shot_id().to_le_bytes());
-        update_continuity_f64(&mut hash, shot.start_s());
-        update_continuity_f64(&mut hash, shot.end_s());
-        hash.update(&(shot.keyframes().len() as u64).to_le_bytes());
-        for keyframe in shot.keyframes() {
-            cx.checkpoint()?;
-            update_continuity_f64(&mut hash, keyframe.absolute_time_s());
-            update_physical_camera_continuity(&mut hash, keyframe.camera());
-            match keyframe.focus() {
-                KeyframeFocus::AxialDistance => hash.update(&[0]),
-                KeyframeFocus::WorldPoint(point) => {
-                    hash.update(&[1]);
-                    update_continuity_point(&mut hash, point);
-                }
-            }
-        }
-    }
-    cx.checkpoint()?;
-    Ok(hash.finalize())
+    camera_continuity_fingerprint(cx, camera)
 }
 
 /// Render accepted physical history with the scene or admitted cinematic camera.

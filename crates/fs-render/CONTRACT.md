@@ -574,6 +574,30 @@ differentiable lift). Pure Rust throughout.
   coherence, exact split-range/tile replay and refusal rollback. This remains
   quasi-static exposure integration: no finite-light-travel-time effects,
   interpolation across missing simulation states, or thermal-energy debit.
+- **Accepted scene history (`tracer`):**
+  `SceneExposure` borrows contiguous complete `SceneFrame` states and prepares
+  each selected state's stationary and moving light proposals once. Explicit
+  aggregate limits bound frame, primitive and source-triangle metadata before
+  preparation. Each animated trajectory is admitted over its own frame's
+  intersection with the shutter. Binary search selects the later accepted
+  state at an exact discontinuity and includes the final history endpoint.
+  Geometry, topology, thermal temperature/emissivity, optical materials,
+  environment and light proposals remain coherent for the entire sampled path,
+  including shadow rays and recursive spectral/Fresnel continuations.
+  Optional cinematic cameras and physical medium histories use that same
+  absolute shutter time, even when their state boundaries differ. Integration
+  holds accepted states; it never interpolates missing topology or averages
+  temperature before evaluating emission. Scenes and physical fields remain
+  borrowed, and lookup allocates no memory or light hierarchy per path.
+  `SceneExposureFilm` binds numeric scene/camera/medium history, shutter policy,
+  settings and sample prefix. Chart allocations retain the existing explicitly
+  process-local continuity guard, not a portable authority-bearing identity.
+  Fresh, progressive and bounded tile entries reuse the same path kernel and
+  atomic publication. Focused tests exercise independent Planck/reflection
+  integration, per-sample frozen-state lighting oracles, topology changes,
+  medium/moving-source clock coherence, exact execution replay and rollback.
+  This is quasi-static uniform exposure rendering; adaptive/AOV history and
+  finite light travel time are outside this entry point's contract.
 - **Physical volume-source lighting (`tracer,volumes`):**
   Absorbing and scattering snapshots cache an emission-direction distribution
   over their original temperature/density buffers. A visible-band Planck proxy
