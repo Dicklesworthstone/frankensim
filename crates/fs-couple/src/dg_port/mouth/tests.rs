@@ -198,3 +198,148 @@ fn joint_mouth_and_fixed_gap_channels_commute_at_construction_and_share_signed_w
     }
 }
 
+
+#[test]
+fn independent_mouth_matches_original_uncondensed_owners_and_mutual_history() {
+    for branched in [false, true] {
+        let (mut load, model) = load(branched);
+        let mut rational = model.zoh(DT).unwrap();
+        let main = load.propagator().clone();
+        let mut main_state = load.state().clone();
+        let branch = load.branches().first().map(|branch| branch.propagator().clone());
+        let mut branch_state = load.branches().first().map(|branch| branch.state().clone());
+        for sample in 0..48 {
+            let qb = if sample < 27 { (f64::from(sample % 7)-3.0)*1e-9 } else { 0.0 };
+            let qm = if sample < 19 { (f64::from(sample % 5)+1.0)*2e-9 } else { 0.0 };
+            let dg = main.multiport_response(&main_state).unwrap();
+            let b = branch.as_ref().map(|p| p.multiport_response(branch_state.as_ref().unwrap()).unwrap());
+            let history = rational.clone().step_mean(&vec![0.0; model.ports]);
+            let direct = load.terminal().unwrap().mean_direct_term().to_vec();
+            // Independent uncondensed continuity unknowns [J, Uside, Uout]
+            // retain each original main/branch/radiation owner.
+            let (matrix, rhs) = if let Some(b) = &b {
+                (vec![
+                    dg.impedance_pa_s_m3[8]+b.impedance_pa_s_m3[0],
+                    -b.impedance_pa_s_m3[1], dg.impedance_pa_s_m3[7],
+                    -b.impedance_pa_s_m3[2],
+                    b.impedance_pa_s_m3[3]+direct[4], direct[5],
+                    dg.impedance_pa_s_m3[5], direct[7],
+                    dg.impedance_pa_s_m3[4]+direct[8],
+                ], vec![
+                    dg.history_pressure_pa[2]-b.history_pressure_pa[0]+dg.impedance_pa_s_m3[6]*qb,
+                    b.history_pressure_pa[1]-history[1]-direct[3]*qm,
+                    dg.history_pressure_pa[1]-history[2]+dg.impedance_pa_s_m3[3]*qb-direct[6]*qm,
+                ])
+            } else {
+                (vec![dg.impedance_pa_s_m3[3]+direct[3]],
+                    vec![dg.history_pressure_pa[1]-history[1]+dg.impedance_pa_s_m3[2]*qb-direct[2]*qm])
+            };
+            let mut lu = LuWorkspace::new(rhs.len()).unwrap();
+            lu.factor(&matrix).unwrap();
+            let mut expected = vec![0.0; rhs.len()];
+            lu.solve_factored_into(&rhs, &mut expected).unwrap();
+            let response = load.independent_mouth_response().unwrap();
+            let legacy = load.port_response().unwrap();
+            let h = response.history_pressure_pa;
+            let z = response.impedance_pa_s_m3;
+            near(legacy.history_pressure_pa, h[0]-h[1],
+                legacy.history_pressure_pa.abs()+h[0].abs()+h[1].abs());
+            near(legacy.impedance_pa_s_m3, z[0][0]-z[0][1]-z[1][0]+z[1][1],
+                legacy.impedance_pa_s_m3.abs()+z.iter().flatten().map(|x| x.abs()).sum::<f64>());
+            assert!(z[0][1].abs() > 0.0 && z[1][0].abs() > 0.0,
+                "self-only mouths must not replace mutual radiation");
+            let trial = load.preview_step_with_mouth_flow(qb, qm).unwrap();
+            let mouth = *trial.independent_mouth_frame().unwrap();
+            assert!(trial.driven_mouth_frame().is_none());
+            let flows: Vec<_> = trial.terminal_frames().iter().map(|f| f.outward_flow_m3_s).collect();
+            let mut complete_flows = vec![qm];
+            complete_flows.extend_from_slice(&flows);
+            let pressure = rational.step_mean(&complete_flows);
+            assert_eq!(mouth.outward_flow_m3_s, qm);
+            assert_eq!(mouth.mean_pressure_pa, pressure[0]);
+            for (row, actual) in [mouth.inlet_pressure_pa, mouth.mean_pressure_pa].into_iter().enumerate() {
+                let predicted = h[row]+z[row][0]*qb+z[row][1]*qm;
+                near(actual, predicted, actual.abs()+h[row].abs()
+                    +(z[row][0]*qb).abs()+(z[row][1]*qm).abs());
+            }
+            let mut inputs = vec![PortInput { id: INLET, effort: qb }];
+            if branched {
+                let junction = trial.branch_frames()[0].junction_flow_m3_s;
+                near(junction, expected[0], junction.abs()+expected[0].abs());
+                inputs.push(PortInput { id: SIDE, effort: -junction });
+                branch.as_ref().unwrap().step(branch_state.as_mut().unwrap(), &[
+                    PortInput { id: PortId(0), effort: junction },
+                    PortInput { id: PortId(1), effort: -flows[0] },
+                ]).unwrap();
+                branch.as_ref().unwrap().sync_nodal(branch_state.as_mut().unwrap()).unwrap();
+            }
+            inputs.push(PortInput { id: OUTLET, effort: -*flows.last().unwrap() });
+            main.step(&mut main_state, &inputs).unwrap();
+            main.sync_nodal(&mut main_state).unwrap();
+            for (i, frame) in trial.terminal_frames().iter().enumerate() {
+                let q = expected[i+usize::from(branched)];
+                near(frame.outward_flow_m3_s, q, frame.outward_flow_m3_s.abs()+q.abs());
+                near(frame.mean_pressure_pa, pressure[i+1], frame.mean_pressure_pa.abs()+pressure[i+1].abs());
+            }
+            let exterior_work: f64 = pressure.iter().zip(&complete_flows).map(|(p,q)| p*(q*DT)).sum();
+            let dg_work = trial.output().ledger.port_work_step_j;
+            near(trial.source_work_j(), dg_work+exterior_work,
+                trial.source_work_j().abs()+dg_work.abs()+exterior_work.abs());
+            assert_eq!(mouth.source_work_j, trial.source_work_j());
+            trial.accept();
+            assert_eq!(load.state(), &main_state);
+            if let Some(state) = &branch_state { assert_eq!(load.branches()[0].state(), state); }
+            assert_eq!(load.terminal().unwrap().pole_states(), rational.pole_states());
+            assert_eq!(load.last_independent_mouth_frame(), Some(&mouth));
+        }
+    }
+}
+
+#[test]
+fn independent_mouth_trials_rollback_and_legacy_steps_clear_their_record() {
+    let (mut load, _) = load(true);
+    load.preview_step_with_mouth_flow(1e-9, 3e-9).unwrap().accept();
+    let before = load.clone();
+    drop(load.preview_step_with_mouth_flow(-2e-9, 4e-9).unwrap());
+    for (qb, qm) in [(f64::NAN, 0.0), (0.0, f64::NAN), (0.0, f64::INFINITY)] {
+        assert!(load.preview_step_with_mouth_flow(qb, qm).is_err());
+    }
+    assert_eq!(load.state(), before.state());
+    assert_eq!(load.branches()[0].state(), before.branches()[0].state());
+    assert_eq!(load.terminal().unwrap().pole_states(), before.terminal().unwrap().pole_states());
+    assert_eq!(load.last_terminal_frames(), before.last_terminal_frames());
+    assert_eq!(load.last_independent_mouth_frame(), before.last_independent_mouth_frame());
+    load.preview_step(1e-9).unwrap().accept();
+    assert!(load.last_independent_mouth_frame().is_none());
+    assert!(load.last_driven_mouth_frame().is_some());
+}
+
+#[test]
+fn independent_mouth_retains_finite_gap_work_and_closed_terminal_rows() {
+    use crate::dg_port::{DgTerminalChannelInput, DgTerminalChannelKind};
+    let (original, model) = load(true);
+    let mut load = original.with_terminal_channels(vec![
+        DgTerminalChannelInput { port: SIDE, kind: DgTerminalChannelKind::Slit {
+            width_m: 0.002, height_m: 4e-5, length_m: 0.001,
+            transverse_cells: 16, maximum_mach: 0.2,
+        } },
+        DgTerminalChannelInput { port: OUTLET, kind: DgTerminalChannelKind::Closed },
+    ], 16).unwrap();
+    let mut rational = model.zoh(DT).unwrap();
+    for sample in 0..24 {
+        let qb = (f64::from(sample % 5)-2.0)*1e-9;
+        let qm = if sample < 13 { 3e-9 } else { -1e-9 };
+        let trial = load.preview_step_with_mouth_flow(qb, qm).unwrap();
+        let mouth = *trial.independent_mouth_frame().unwrap();
+        let flows = [qm, trial.terminal_frames()[0].outward_flow_m3_s, 0.0];
+        assert_eq!(trial.terminal_frames()[1].outward_flow_m3_s, 0.0);
+        let pressure = rational.step_mean(&flows);
+        assert_eq!(mouth.mean_pressure_pa, pressure[0]);
+        let exterior_work: f64 = pressure.iter().zip(flows).map(|(p,q)| p*(q*DT)).sum();
+        let original_work = trial.output().ledger.port_work_step_j;
+        near(trial.source_work_j(), original_work+exterior_work,
+            trial.source_work_j().abs()+original_work.abs()+exterior_work.abs());
+        trial.accept();
+        assert_eq!(load.terminal().unwrap().pole_states(), rational.pole_states());
+    }
+}

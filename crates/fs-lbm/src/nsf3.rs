@@ -1673,9 +1673,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             faces1.as_ref(),
             open1,
         );
-        let reservoir_flows = self.reservoir_volume_flows(&u0, &u1);
-        if reservoir_flows.iter().any(|flow| !flow.outward_volume_flow_m3_s.is_finite()) {
-            return Err(NsfError::Input("reservoir aperture continuum flow overflowed"));
+        let reservoir_flows = self.reservoir_volume_flows(
+            &rho0, &u0, &self.theta, &rho1, &u1, &th1);
+        if reservoir_flows.iter().any(|flow| !flow.is_finite()) {
+            return Err(NsfError::Input("reservoir aperture continuum exchange overflowed"));
         }
         self.f = next;
         self.e = e1;

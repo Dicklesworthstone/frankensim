@@ -39,17 +39,37 @@ pub struct NsfReservoirAperture {
     pub state: NsfOpenState,
 }
 
-/// Original continuum face flow on one localized reservoir tile.
-/// The face velocity is the midpoint of the adjacent fluid and prescribed
-/// ghost velocities, integrated with the same endpoint trapezoid as NSF
-/// energy transport. This is distinct from the streamed lattice mass account:
-/// compressible mass flux is not divided by a reference density to invent Q.
+/// Original continuum pressure/flow projection on one localized reservoir tile.
+/// Face pressure and velocity use the midpoint of the adjacent fluid and
+/// prescribed ghost states, integrated with the original endpoint trapezoid.
+/// The pressure-work fields contain the integral of that pointwise product,
+/// not the product of interval means. They omit enthalpy, heat and viscous
+/// stress work and never replace the original conservative total-energy flux.
+/// Compressible streamed mass remains independent of continuum volume flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NsfReservoirFlow {
     /// Adjacent original fluid cell, in canonical z/y/x order.
     pub cell: [usize; 3],
     /// Interval-mean outward volume flow [m³/s], retaining its sign.
     pub outward_volume_flow_m3_s: f64,
+    /// Interval-mean absolute face pressure [Pa].
+    pub mean_pressure_pa: f64,
+    /// Interval-mean face pressure relative to the grid's original source
+    /// reference pressure [Pa], not to the mutable prescribed ghost.
+    pub mean_acoustic_pressure_pa: f64,
+    /// Integral of absolute face pressure times outward volume flow [J].
+    pub pressure_work_out_j: f64,
+    /// Integral of reference-relative pressure times outward volume flow [J].
+    /// Positive work leaves the resolved fluid. Spatial/time covariance stays
+    /// in this record rather than being converted into dissipation.
+    pub acoustic_pressure_work_out_j: f64,
+}
+impl NsfReservoirFlow {
+    pub(super) fn is_finite(&self) -> bool {
+        [self.outward_volume_flow_m3_s, self.mean_pressure_pa,
+            self.mean_acoustic_pressure_pa, self.pressure_work_out_j,
+            self.acoustic_pressure_work_out_j].iter().all(|x| x.is_finite())
+    }
 }
 
 #[derive(Clone)]
@@ -156,6 +176,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.last_reservoir_flows = self.reservoir_aperture.as_ref().expect("bound aperture")
             .indices.iter().map(|&index| NsfReservoirFlow {
                 cell: self.at(index), outward_volume_flow_m3_s: 0.0,
+                mean_pressure_pa: 0.0, mean_acoustic_pressure_pa: 0.0,
+                pressure_work_out_j: 0.0, acoustic_pressure_work_out_j: 0.0,
             }).collect();
         let drives = self.boundary_drives().expect("admitted characteristic axis");
         self.set_boundary_drives(drives)?;
@@ -227,27 +249,49 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.last_reservoir_mass_out_kg
     }
 
-    /// Accepted per-tile continuum flows in canonical grid order. Cold values
-    /// are zero; an absent aperture gives an empty slice. Failed steps and
-    /// dropped characteristic trials preserve this complete accepted record.
+    /// Immutable source-reference pressure used by all reservoir acoustic
+    /// pressure and work accounts [Pa]. Warm ghost controls do not change it.
+    #[must_use]
+    pub const fn reservoir_reference_pressure_pa(&self) -> f64 {
+        self.spec.pressure_pa
+    }
+
+    /// Accepted per-tile continuum pressure/flow accounts in canonical grid
+    /// order. Cold records are zero because no interval has been integrated;
+    /// an absent aperture gives an empty slice. Failed steps, warm control
+    /// rebinding and dropped trials preserve this complete accepted record.
     #[must_use]
     pub fn last_reservoir_flows(&self) -> &[NsfReservoirFlow] {
         &self.last_reservoir_flows
     }
 
     pub(super) fn reservoir_volume_flows(
-        &self, before: &[[f64; 3]], after: &[[f64; 3]],
+        &self, rho0: &[f64], before: &[[f64; 3]], theta0: &[f64],
+        rho1: &[f64], after: &[[f64; 3]], theta1: &[f64],
     ) -> Vec<NsfReservoirFlow> {
         let Some(aperture) = &self.reservoir_aperture else { return Vec::new(); };
         let axis = aperture.source.axis;
         let sign = if aperture.source.high { 1.0 } else { -1.0 };
         let unit = self.law.dx_m.powi(3) / self.law.dt_s;
-        aperture.indices.iter().map(|&index| NsfReservoirFlow {
-            cell: self.at(index),
-            // Average spatially at the physical face, then temporally over
-            // this step. The same fixed ghost participates at both endpoints.
-            outward_volume_flow_m3_s: sign * unit * 0.25
-                * (before[index][axis] + after[index][axis] + 2.0 * aperture.ghost.u[axis]),
+        let ghost_pressure = self.law.pressure_pa(aperture.ghost.rho, aperture.ghost.theta);
+        let reference = self.spec.pressure_pa;
+        aperture.indices.iter().map(|&index| {
+            let pressure0 = 0.5 * (self.law.pressure_pa(rho0[index], theta0[index]) + ghost_pressure);
+            let pressure1 = 0.5 * (self.law.pressure_pa(rho1[index], theta1[index]) + ghost_pressure);
+            let acoustic0 = pressure0 - reference;
+            let acoustic1 = pressure1 - reference;
+            let q0 = sign * unit * 0.5 * (before[index][axis] + aperture.ghost.u[axis]);
+            let q1 = sign * unit * 0.5 * (after[index][axis] + aperture.ghost.u[axis]);
+            NsfReservoirFlow {
+                cell: self.at(index),
+                // Preserve the original flow arithmetic and observer replay.
+                outward_volume_flow_m3_s: sign * unit * 0.25
+                    * (before[index][axis] + after[index][axis] + 2.0 * aperture.ghost.u[axis]),
+                mean_pressure_pa: 0.5 * (pressure0 + pressure1),
+                mean_acoustic_pressure_pa: 0.5 * (acoustic0 + acoustic1),
+                pressure_work_out_j: 0.5 * self.law.dt_s * (pressure0 * q0 + pressure1 * q1),
+                acoustic_pressure_work_out_j: 0.5 * self.law.dt_s * (acoustic0 * q0 + acoustic1 * q1),
+            }
         }).collect()
     }
 

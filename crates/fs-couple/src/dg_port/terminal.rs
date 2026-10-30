@@ -224,3 +224,73 @@ impl TerminalCoupling {
     }
 }
 
+
+/// Independent physical source coordinates after the SAME terminal solve.
+pub(super) struct IndependentMouthRelation {
+    pub(super) efforts: DgIndependentMouthResponse,
+    pub(super) outward_history_m3_s: Vec<f64>,
+    pub(super) outward_per_source: Vec<[f64; 2]>,
+}
+
+impl TerminalCoupling {
+    pub(super) fn independent_mouth_relation(
+        &self, response: DgMultiportResponse, terminal: &PreparedMimoLoad,
+        channels: &[DgTerminalChannelLoad],
+    ) -> Result<IndependentMouthRelation, AcousticRealizeError> {
+        if !self.driven_mouth {
+            return Err(invalid("independent mouth response requires the original leading exterior channel"));
+        }
+        // Reuse the exact accepted history elimination, including branch
+        // condensation, finite-gap memories and sealed-channel active rows.
+        let original = self.relation(response, terminal, channels)?;
+        let response = &original.response;
+        let count = response.ports.len();
+        let n = self.ports.len();
+        let width = n + 1;
+        let z = &response.impedance_pa_s_m3;
+        let direct = terminal.mean_direct_term();
+        let mut history = vec![0.0; width];
+        terminal.mean_history_output_into(&mut history)
+            .map_err(|_| invalid("independent exterior history left the finite domain"))?;
+        let mut outward_per_source = vec![[0.0; 2]; n];
+        for coordinate in 0..2 {
+            let rhs: Vec<_> = self.active.iter().map(|&i| {
+                if coordinate == 0 {
+                    z[count * self.indices[i] + self.inlet_index]
+                } else {
+                    -direct[(i + 1) * width]
+                }
+            }).collect();
+            if let Some(solve) = &self.solve {
+                for (&index, value) in self.active.iter().zip(solve.apply(&rhs)?) {
+                    outward_per_source[index][coordinate] = value;
+                }
+            }
+        }
+        let mut efforts = DgIndependentMouthResponse {
+            history_pressure_pa: [response.history_pressure_pa[self.inlet_index], history[0]],
+            impedance_pa_s_m3: [[z[count * self.inlet_index + self.inlet_index], 0.0],
+                [0.0, direct[0]]],
+        };
+        for (i, &column) in self.indices.iter().enumerate() {
+            let bore_transfer = z[count * self.inlet_index + column];
+            let mouth_transfer = direct[i + 1];
+            let q = original.outward_history_m3_s[i];
+            efforts.history_pressure_pa[0] -= bore_transfer * q;
+            efforts.history_pressure_pa[1] += mouth_transfer * q;
+            for coordinate in 0..2 {
+                let transfer = outward_per_source[i][coordinate];
+                efforts.impedance_pa_s_m3[0][coordinate] -= bore_transfer * transfer;
+                efforts.impedance_pa_s_m3[1][coordinate] += mouth_transfer * transfer;
+            }
+        }
+        if !efforts.history_pressure_pa.iter()
+            .chain(efforts.impedance_pa_s_m3.iter().flatten())
+            .chain(outward_per_source.iter().flatten()).all(|value| value.is_finite())
+        {
+            return Err(invalid("independent mouth elimination left the finite effort domain"));
+        }
+        Ok(IndependentMouthRelation { efforts,
+            outward_history_m3_s: original.outward_history_m3_s, outward_per_source })
+    }
+}

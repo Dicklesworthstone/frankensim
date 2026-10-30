@@ -7,6 +7,9 @@ use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRad
 use fs_exec::CancelGate;
 use fs_vfit::mimo::load::{MimoLoadLimits, PreparedMimoLoad};
 
+mod independent;
+pub use independent::{DgIndependentMouthFrame, DgIndependentMouthResponse};
+
 /// Accepted exterior mouth pressure and signed work from the original joint
 /// model. This is energy exchange, not a heat or rational-storage certificate.
 #[derive(Clone, Copy, Debug, PartialEq)]

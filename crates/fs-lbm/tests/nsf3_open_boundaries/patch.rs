@@ -463,26 +463,48 @@ fn reservoir_tile_flows_replay_the_original_face_and_time_quadrature() {
         let drives = [NsfBoundaryDrive::PressureOffset(1.0), AMBIENT];
         direct.set_boundary_drives(drives).unwrap();
         let dx = direct.law().dx_m;
-        let unit = dx/direct.law().dt_s;
-        let mut sums = vec![0.0; escape.cells.len()];
+        let dt = direct.law().dt_s;
+        let unit = dx/dt;
+        let mut sums = vec![[0.0; 5]; escape.cells.len()];
         for _ in 0..4 {
             let before: Vec<_> = direct.last_reservoir_flows().iter()
-                .map(|flow| direct.cell(flow.cell).1[1]).collect();
+                .map(|flow| direct.cell(flow.cell)).collect();
             direct.step().unwrap();
             for (i, flow) in direct.last_reservoir_flows().iter().enumerate() {
-                let after = direct.cell(flow.cell).1[1];
+                let after = direct.cell(flow.cell);
                 let expected = sign*dx*dx*0.25
-                    * ((before[i]+after)*unit + 2.0*escape.state.velocity_m_s[1]);
+                    * ((before[i].1[1]+after.1[1])*unit + 2.0*escape.state.velocity_m_s[1]);
                 assert!((flow.outward_volume_flow_m3_s-expected).abs()
                     < 2e-13*expected.abs().max(1e-25));
-                sums[i] += flow.outward_volume_flow_m3_s;
+                let p0 = 0.5 * (before[i].0*gas.density*gas.specific_gas_constant*before[i].2 + gas.pressure);
+                let p1 = 0.5 * (after.0*gas.density*gas.specific_gas_constant*after.2 + gas.pressure);
+                let q0 = sign*dx*dx*0.5 * (before[i].1[1]*unit + escape.state.velocity_m_s[1]);
+                let q1 = sign*dx*dx*0.5 * (after.1[1]*unit + escape.state.velocity_m_s[1]);
+                let acoustic0 = p0-gas.pressure;
+                let acoustic1 = p1-gas.pressure;
+                assert!((flow.mean_pressure_pa - 0.5*(p0+p1)).abs() < 1e-9);
+                assert!((flow.mean_acoustic_pressure_pa - 0.5*(acoustic0+acoustic1)).abs() < 1e-9);
+                let work = 0.5*dt*(p0*q0+p1*q1);
+                let acoustic = 0.5*dt*(acoustic0*q0+acoustic1*q1);
+                let roundoff = 2e-12*gas.pressure*(q0.abs()+q1.abs())*dt + 1e-30;
+                assert!((flow.pressure_work_out_j-work).abs() < roundoff);
+                assert!((flow.acoustic_pressure_work_out_j-acoustic).abs() < roundoff);
+                for (sum, value) in sums[i].iter_mut().zip([
+                    flow.outward_volume_flow_m3_s, flow.mean_pressure_pa,
+                    flow.mean_acoustic_pressure_pa, flow.pressure_work_out_j,
+                    flow.acoustic_pressure_work_out_j,
+                ]) { *sum += value; }
             }
         }
-        assert!(sums.iter().any(|flow| flow.abs() > 1e-20));
+        assert!(sums.iter().any(|sum| sum[0].abs() > 1e-20));
         let cold = preview.last_reservoir_flows().to_vec();
         let trial = preview.preview_boundary_interval(drives, 4, 512, || false).unwrap();
         for (flow, sum) in trial.reservoir_flows().iter().zip(&sums) {
-            assert_eq!(flow.outward_volume_flow_m3_s, sum/4.0);
+            assert_eq!(flow.outward_volume_flow_m3_s, sum[0]/4.0);
+            assert_eq!(flow.mean_pressure_pa, sum[1]/4.0);
+            assert_eq!(flow.mean_acoustic_pressure_pa, sum[2]/4.0);
+            assert_eq!(flow.pressure_work_out_j, sum[3]);
+            assert_eq!(flow.acoustic_pressure_work_out_j, sum[4]);
         }
         assert_eq!(trial.grid().last_reservoir_flows(), direct.last_reservoir_flows());
         drop(trial);
@@ -494,6 +516,63 @@ fn reservoir_tile_flows_replay_the_original_face_and_time_quadrature() {
         assert!(preview.preview_boundary_interval(drives, 1, 128, || true).is_err());
         assert_eq!(preview.last_reservoir_flows(), accepted);
     }
+}
+
+#[test]
+fn warm_reservoir_pressure_work_uses_the_original_reference_and_rolls_back() {
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100000.0).unwrap();
+    let make = || grid(0, 0.0, true).with_reservoir_aperture(NsfReservoirAperture {
+        axis: 1, high: true, cells: vec![[3, 3, 1], [4, 3, 2]],
+        state: NsfOpenState {
+            density_kg_m3: gas.density, velocity_m_s: [0.0, 0.001, 0.0],
+            temperature_k: gas.temperature,
+        },
+    }).unwrap();
+    let mut direct = make();
+    let mut preview = make();
+    for _ in 0..2 { direct.step().unwrap(); preview.step().unwrap(); }
+    let before = (preview.state_hash(), preview.reservoir_aperture().cloned(),
+        preview.last_reservoir_flows().to_vec(), preview.cumulative_ledger());
+    assert_eq!(preview.reservoir_reference_pressure_pa(), gas.pressure);
+    let state = preview.reservoir_aperture_state_at(100010.0, 300.05).unwrap();
+    let drives = [NsfBoundaryDrive::PressureOffset(1.0), AMBIENT];
+    direct.set_reservoir_aperture_state(state).unwrap();
+    direct.set_boundary_drives(drives).unwrap();
+    assert_eq!(direct.last_reservoir_flows(), before.2.as_slice());
+    assert_eq!(direct.reservoir_reference_pressure_pa(), gas.pressure);
+    let mut works = vec![[0.0; 2]; 2];
+    for _ in 0..4 {
+        direct.step().unwrap();
+        for (work, flow) in works.iter_mut().zip(direct.last_reservoir_flows()) {
+            assert!((flow.mean_pressure_pa - gas.pressure - flow.mean_acoustic_pressure_pa).abs() < 1e-9);
+            work[0] += flow.pressure_work_out_j;
+            work[1] += flow.acoustic_pressure_work_out_j;
+        }
+    }
+    let calls = Cell::new(0);
+    assert!(preview.preview_boundary_interval_with_reservoir(
+        drives, None, state, 4, 512, || {
+            calls.set(calls.get()+1); calls.get() == 3
+        }).is_err());
+    assert_eq!((preview.state_hash(), preview.reservoir_aperture().cloned(),
+        preview.last_reservoir_flows().to_vec(), preview.cumulative_ledger()), before);
+    let trial = preview.preview_boundary_interval_with_reservoir(
+        drives, None, state, 4, 512, || false).unwrap();
+    assert_eq!(trial.grid().state_hash(), direct.state_hash());
+    assert_eq!(trial.grid().last_reservoir_flows(), direct.last_reservoir_flows());
+    for (flow, work) in trial.reservoir_flows().iter().zip(&works) {
+        assert_eq!(flow.pressure_work_out_j, work[0]);
+        assert_eq!(flow.acoustic_pressure_work_out_j, work[1]);
+    }
+    assert!(trial.reservoir_flows().iter().any(|flow| flow.acoustic_pressure_work_out_j != 0.0));
+    drop(trial);
+    assert_eq!((preview.state_hash(), preview.reservoir_aperture().cloned(),
+        preview.last_reservoir_flows().to_vec(), preview.cumulative_ledger()), before);
+    preview.preview_boundary_interval_with_reservoir(
+        drives, None, state, 4, 512, || false).unwrap().accept();
+    assert_eq!(preview.state_hash(), direct.state_hash());
+    assert_eq!(preview.last_reservoir_flows(), direct.last_reservoir_flows());
+    assert_eq!(preview.cumulative_ledger(), direct.cumulative_ledger());
 }
 
 #[test]
