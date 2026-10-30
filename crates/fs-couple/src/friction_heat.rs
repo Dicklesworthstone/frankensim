@@ -46,6 +46,7 @@ pub mod network;
 
 /// Prepared native articulated contacts and original finite-cell heat together.
 pub mod articulated;
+pub mod hertz;
 
 fn invalid(message: &'static str) -> DepositionError {
     DepositionError::InvalidInput(message)

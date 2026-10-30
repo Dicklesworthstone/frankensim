@@ -1,6 +1,9 @@
 //! G1/G3/G4: original full articulated response and one finite caloric network.
 //! Curves and caloric data below are explicit synthetic fixtures, not measurements.
 
+#[path = "articulated_friction_heat/hertz.rs"]
+mod hertz;
+
 use fs_contact::interface_binding::bind_dry_interface_system_card;
 use fs_contact::interface_binding::thermal_friction::{
     SourceThermalCoulomb, SourceThermalCoulombState, ThermalFrictionAxes,

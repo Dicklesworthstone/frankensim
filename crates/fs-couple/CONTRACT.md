@@ -10116,6 +10116,52 @@ synthetic fixtures, not measured-material validation. Geometry, normal loading
 and material spin remain caller-owned frozen-interval inputs; spatial/time
 refinement and source applicability remain necessary.
 
+### Source-backed Hertz recoil and finite-cell thermal feedback
+
+`friction_heat::hertz::propose_rigid_hertz_heat` borrows the original rigid
+bodies, their mass properties, a pinned `SourceThermalCoulomb`, and the original
+finite enthalpy network. It returns both contacted body candidates, the complete
+thermal endpoint, the original Hertz work report, and final coefficient-use
+receipts together. Accepted mechanics, source ownership and heat remain
+unchanged through preparation, nonlinear trials and final admission.
+
+One `PreparedRigidHertzPair` retains the full point/spin mobility from both
+native inertia tensors. Each thermal trial refreshes only the original selected
+static/kinetic friction claims at its solved common-face temperature and explicit
+caller-supplied pressure, then solves the original joint Hertz force/spin law.
+Normal load, circular radius, poses and contact frame stay held. Unsupported
+additional evolving query coordinates refuse through the original source owner.
+The mechanics and thermal network share the actual representable interval
+`(accepted_time_s + dt_s) - accepted_time_s`.
+
+Actual native dissipated work enters one original contact route through
+`FrictionHeatNetworkStep`. Endpoint material conductivities and the original
+cell-centre distances determine signed interface transport; no heat fraction or
+new capacity is supplied. Other links, boundaries and signed outside heat stay
+active. The replaced direct contact link is suppressed once. The original
+circular face, shared centre and normal must agree with the mechanical patch.
+Caller-owned body/material correspondence remains explicit. Per-cell,
+interface, thermal, native momentum/work and combined kinetic-plus-caloric
+energy gates precede the returned candidate. Optional entropy uses the original
+caloric law at the final root.
+
+Five new native integration groups in the existing
+`tests/articulated_friction_heat.rs` target cover independent scalar thermal
+references for translation and spin, both-body recoil, source receipts,
+zero-slip ordinary conduction and entropy, physical geometry/clock/source
+admission, and late source/cancellation/budget refusal with exact retry. The
+clock case independently checks recoil and heat at a nonzero clock where the
+requested and representable durations differ. All five and the six existing
+articulated groups pass against the current original-source full-inertia
+implementation. These are synthetic analytical fixtures, not measured-material
+validation or a full Cargo/DSR workspace gate.
+
+This is the stateless static/gross-sliding/spin Hertz rung; it does not consume
+elastic partial-slip history or rolling-deformation work. Normal evolution,
+moving footprints and pose integration remain separate owners. Finite cells,
+a common patch temperature and backward-Euler heat require spatial/time
+refinement; nonlinear convergence alone does not prove root uniqueness.
+
 ## Finite-gas rocket propulsion and translation
 
 `rocket_blowdown::GasRocketState` binds an immutable source-bearing finite
