@@ -1331,7 +1331,8 @@ bound the run. Its CSV includes every species and all solved thermodynamic
 and velocity fields; reported balances independently reconstruct original
 element inventories, physical energy and fluid/support momentum.
 
-The default 4³/100 µs run completed 33 accepted intervals and 4,224 cell solves
+Before the volumetric molecular extension, the default 4³/100 µs run completed
+33 accepted intervals and 4,224 cell solves
 with maximum combined CFL 0.339843 and 221,800 total numerical workspace bytes.
 All 64 accepted cells were finite and species nonnegative; final temperatures
 were 1200.633–2438.868 K, pressures 167869–294049 Pa and maximum speed
@@ -1339,9 +1340,30 @@ were 1200.633–2438.868 K, pressures 167869–294049 Pa and maximum speed
 residuals were zero; the largest elemental residual was 5.21e-18 mol.
 The example explicitly reports local inert-nitrogen preservation: maximum
 fraction drift fell from 6.90e-4 before compatible reconstruction to 4.45e-16
-afterward. All 89 focused flux-library tests pass after integrating the current
-planar molecular/reacting owners. These are coarse numerical source/solver results,
+afterward. All 89 focused flux-library tests passed in that earlier planar
+molecular/reacting baseline. These are coarse numerical source/solver results,
 not experimentally validated flame or detonation predictions.
+
+Appending `molecular` to the example arguments enables the original 3-D
+Maxwell--Stefan, Fourier and full viscous-stress/work owners with state-dependent
+kinetic coefficients. All ten Lennard-Jones records come from the same pinned
+Cantera mechanism revision. The nonpolar Chapman--Enskog/Wilke/Eucken estimate
+explicitly omits polar H2O corrections, rotational relaxation and Soret/Dufour
+effects, and declares zero bulk viscosity. The source-owned explicit
+`2e-8 J/(mol K)` Cp-fit deficit allowance admits the retained atomic-H fit
+without clipping its original Cp or changing its conductivity calculation.
+
+The native molecular 4³/100 µs run completed 33 coupled intervals, 66 molecular
+substeps, 4,224 chemistry cell solves and 40,639 accepted source steps without
+coupling or molecular retries. Its complete numerical workspace was 345,688
+bytes; maximum wave CFL and parabolic number were 0.339861 and 0.005563510.
+All 64 exported cells were finite with nonnegative species. Mass and physical
+energy residuals were -5.421011e-20 kg and 5.684342e-14 J; each fluid/support
+momentum residual was at most 8.68e-19 kg m/s and each element residual at most
+3.47e-18 mol. Final temperatures were 1201.141--2438.854 K. Local nitrogen
+fraction change was 4.574416e-7: differential diffusion can change an inert
+species' local fraction. This coarse run exercises the complete physical
+consumer and its balances; it does not resolve flame or shock thickness.
 
 The selected backward Euler or SDIRK2 source method remains explicit.
 Symmetric ordering alone is not a coupled temporal-order or entropy proof;
@@ -1356,9 +1378,11 @@ three-axis reaction/advection/diffusion solution against analytic cell averages;
 and retain every phase's support load, complete source/energy balances, excess
 capacity, work refusal and final-cancellation replay. The analytic L1 errors
 on 12³/24³ cells are 8.09463491e-4 and 1.04199187e-4. This observed refinement
-does not imply a general third-order method. The integrated source suite passes
+does not imply a general third-order method. The integrated source suite passed
 207 gas tests and all 98 focused flux tests (20 spatial-mixture plus 78 other
-cases); the repository-level DSR gate remains a separate unavailable check.
+cases). These runs preceded the opt-in Cp-fit allowance; all nine kinetic
+transport tests and the complete molecular example passed after that change.
+The repository-level DSR gate remains a separate unavailable check.
 
 ### Three-dimensional evolving-species molecular transport
 

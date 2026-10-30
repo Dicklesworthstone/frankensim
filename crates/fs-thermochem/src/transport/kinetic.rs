@@ -24,13 +24,20 @@
 
 use crate::equilibrium::composition::IdealGasEquilibriumV1;
 use crate::kinetics::{KineticsErrorV1, admit_caloric_interval};
-use crate::{SpeciesId, ThermochemErrorV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
+use crate::{
+    MolarThermalQuantityV1, SpeciesId, ThermochemErrorV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R,
+};
 use fs_qty::{DynViscosity, Length, Pressure, Qty, Temperature};
 
 /// Fixed operation-tree version, including the complete Omega22 correlation.
 pub const KINETIC_GAS_TRANSPORT_VERSION_V1: u32 = 1;
 /// Explicit bound on component and quadratic pair work.
 pub const MAX_KINETIC_TRANSPORT_SPECIES_V1: usize = 128;
+/// Maximum opt-in source-fit Cp deficit, one part per million of `5R/2`.
+/// This admission-policy ceiling is not an uncertainty bound or a correction
+/// to the original source. A larger physical deficit needs another closure.
+pub const MAX_TRANSLATIONAL_CP_DEFICIT_ALLOWANCE_V1: MolarThermalQuantityV1 =
+    MolarThermalQuantityV1::new(2.5 * R * 1e-6);
 /// Coherent-SI conductivity, W/(m K).
 pub type ThermalConductivityQuantityV1 = Qty<1, 1, -3, -1, 0, 0>;
 const BOLTZMANN: f64 = 1.380_649e-23;
@@ -137,6 +144,7 @@ pub struct KineticGasTransportV1 {
     model_version: u32,
     species: Vec<LennardJonesSpeciesV1>,
     domain: KineticTransportDomainV1,
+    translational_cp_deficit_allowance: MolarThermalQuantityV1,
     viscosity_scales: Vec<f64>,
     diffusion_scales: Vec<f64>,
     pair_well_depths: Vec<f64>,
@@ -267,6 +275,7 @@ impl KineticGasTransportV1 {
             model_version,
             species,
             domain,
+            translational_cp_deficit_allowance: MolarThermalQuantityV1::new(0.0),
             viscosity_scales,
             diffusion_scales,
             pair_well_depths,
@@ -289,6 +298,36 @@ impl KineticGasTransportV1 {
     /// Explicitly declared physical property domain.
     pub const fn domain(&self) -> KineticTransportDomainV1 {
         self.domain
+    }
+    /// Explicitly admit a bounded source-fit deficit below the classical `5R/2`
+    /// molar Cp limit. The default is zero, retaining the original strict
+    /// admission with its separate 32-epsilon arithmetic tolerance.
+    ///
+    /// The caller must justify this finite nonnegative allowance [J/(mol K)]
+    /// against the original fit on the declared domain. It may not exceed
+    /// [`MAX_TRANSLATIONAL_CP_DEFICIT_ALLOWANCE_V1`]. Every actual source Cp is
+    /// still checked, including absent species; a larger deficit is refused.
+    /// This control never clips Cp, edits the source or changes Eucken's use of
+    /// the original Cp. It is part of this model's explicit declaration and
+    /// equality, not empirical validation or a source-uncertainty certificate.
+    pub fn with_translational_cp_deficit_allowance(
+        mut self,
+        allowance: MolarThermalQuantityV1,
+    ) -> Result<Self, KineticTransportErrorV1> {
+        if !allowance.value().is_finite()
+            || allowance.value() < 0.0
+            || allowance.value() > MAX_TRANSLATIONAL_CP_DEFICIT_ALLOWANCE_V1.value()
+        {
+            return Err(KineticTransportErrorV1::Invalid(
+                "translational Cp source-fit deficit allowance",
+            ));
+        }
+        self.translational_cp_deficit_allowance = allowance;
+        Ok(self)
+    }
+    /// Authored source-fit Cp deficit budget [J/(mol K)]; zero is strict mode.
+    pub const fn translational_cp_deficit_allowance(&self) -> MolarThermalQuantityV1 {
+        self.translational_cp_deficit_allowance
     }
     /// Number of canonical species, including currently absent species.
     pub fn species_count(&self) -> usize {
@@ -361,9 +400,12 @@ impl KineticGasTransportV1 {
                 .map_err(|source| KineticTransportErrorV1::Thermochemistry { species: i, source })?
                 .cp()
                 .value();
-            // Three classical translational degrees of freedom are intrinsic
-            // to the collision model; it cannot represent a lower source Cp.
-            if cp < 2.5 * R * (1.0 - 32.0 * f64::EPSILON) {
+            // Keep floating-point tolerance separate from an explicitly
+            // declared source-fit deficit. The Eucken closure below always
+            // consumes the original Cp, without a translational floor.
+            if cp < 2.5 * R * (1.0 - 32.0 * f64::EPSILON)
+                && 2.5 * R - cp > self.translational_cp_deficit_allowance.value()
+            {
                 return Err(KineticTransportErrorV1::Invalid(
                     "source Cp is below the classical translational limit",
                 ));

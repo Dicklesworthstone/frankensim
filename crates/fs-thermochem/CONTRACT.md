@@ -1052,7 +1052,31 @@ imposing a constant polyatomic Prandtl number. Polyatomic internal relaxation,
 Soret/Dufour transport, polar interactions and experimental validation are not
 claimed by this estimate.
 
-Seven native tests pass on actual source: independent SI prefactors; complete
+The default classical translational admission remains `Cp >= 5R/2`, with only
+its original 32-epsilon arithmetic tolerance. An explicit consuming
+`with_translational_cp_deficit_allowance(MolarThermalQuantityV1)` declaration
+can admit a small source-fit deficit in J/(mol K). The retained accessor and
+model equality distinguish that declaration from strict mode. The caller must
+justify it against the original fit and physical domain; every actual Cp is
+still checked, including possible products with zero current fraction.
+Allowances must be finite, nonnegative and no larger than one part per million
+of `5R/2`. This hard policy ceiling prevents this small-fit control from
+waiving a substantial physical deficit; it is not an empirical uncertainty
+bound. Zero restores exactly the original strict admission. The allowance
+changes neither the source bank nor its Cp: Eucken conductivity continues to
+consume the actual source value, without a floor or any coefficient edits.
+
+The retained Cantera hydrogen source supplies a concrete case: its original H
+high-temperature NASA fit has a deficit of about `1.4445e-8 J/(mol K)` near
+1456.31 K. Two focused regressions exercise explicit `2e-8 J/(mol K)` admission
+against that actual source, strict and insufficient-budget refusal, unchanged
+source identity and exact original-Cp Eucken evaluation, invalid/overlarge
+allowance refusal, and continued rejection of a physical `Cp=2R` source even
+at the maximum permitted allowance. This opt-in does not validate the Eucken
+approximation, prove a source-fit error bound, or extend the collision domain.
+
+Nine native tests pass on actual source: the two Cp-admission cases above;
+independent SI prefactors; complete
 collision-correlation values and admitted domain; monatomic Prandtl/Schmidt
 relations; pure/trace/Wilke limits; pressure, diameter and temperature scaling;
 original variable-Cp conductivity; and source identity, canonicalization,

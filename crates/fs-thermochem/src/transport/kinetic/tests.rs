@@ -582,3 +582,147 @@ fn g3_physical_domains_original_calorics_and_cancellation_fail_closed() {
         )
     );
 }
+
+#[test]
+fn explicit_fit_deficit_admits_original_hydrogen_cp_without_flooring_eucken() {
+    use crate::kinetics::hydrogen::{HydrogenCalorics, cantera_h2o2};
+
+    // Exact retained Cantera H NASA coefficients: the high-temperature Cp fit
+    // falls slightly below 5R/2, even though this is a monatomic species. Keep
+    // the original model, including the explicit h/s continuity treatment.
+    let mechanism = cantera_h2o2(HydrogenCalorics::ContinuousAt300K).unwrap();
+    let hydrogen = mechanism
+        .thermodynamics()
+        .models()
+        .iter()
+        .find(|source| source.species() == &id("H"))
+        .unwrap()
+        .clone();
+    let strict = KineticGasTransportV1::new(
+        bank(vec![hydrogen.clone()]),
+        "pinned-cantera-hydrogen-cp-fit",
+        1,
+        vec![collision("H", 2.05, 145.0)],
+        KineticTransportDomainV1 {
+            minimum_temperature_k: 300.0,
+            maximum_temperature_k: 3500.0,
+            minimum_pressure_pa: 1000.0,
+            maximum_pressure_pa: 1e6,
+        },
+        || false,
+    )
+    .unwrap();
+    assert_eq!(strict.translational_cp_deficit_allowance().value(), 0.0);
+    let allowance = MolarThermalQuantityV1::new(2e-8);
+    let admitted = strict
+        .clone()
+        .with_translational_cp_deficit_allowance(allowance)
+        .unwrap();
+    assert_ne!(admitted, strict);
+    assert_eq!(admitted.translational_cp_deficit_allowance(), allowance);
+    assert_eq!(admitted.thermodynamics(), strict.thermodynamics());
+    assert_eq!(admitted.species_data(), strict.species_data());
+    assert_eq!(admitted.domain(), strict.domain());
+    assert_eq!(admitted.model_id(), strict.model_id());
+    assert_eq!(admitted.model_version(), strict.model_version());
+    let mut work = strict.workspace().unwrap();
+    for t in [1200.0, 1456.3097] {
+        let cp = hydrogen
+            .evaluate_properties(Temperature::new(t))
+            .unwrap()
+            .cp()
+            .value();
+        let deficit = 2.5 * R - cp;
+        assert!(deficit > 1e-8 && deficit < allowance.value());
+        assert!(matches!(
+            strict.evaluate(
+                Temperature::new(t),
+                Pressure::new(101325.0),
+                &[1.0],
+                &mut work,
+                || false
+            ),
+            Err(KineticTransportErrorV1::Invalid(
+                "source Cp is below the classical translational limit"
+            ))
+        ));
+        let result = admitted
+            .evaluate(
+                Temperature::new(t),
+                Pressure::new(101325.0),
+                &[1.0],
+                &mut work,
+                || false,
+            )
+            .unwrap();
+        let mu_over_mass = result.pure_viscosities()[0] / hydrogen.molar_mass().value();
+        let original_eucken = mu_over_mass * (cp + 1.25 * R);
+        let floored_eucken = mu_over_mass * (2.5 * R + 1.25 * R);
+        assert_eq!(result.pure_conductivities()[0], original_eucken);
+        assert!(original_eucken < floored_eucken);
+        close(
+            result.thermal_conductivity().value(),
+            original_eucken,
+            3e-15,
+        );
+        let insufficient = strict
+            .clone()
+            .with_translational_cp_deficit_allowance(MolarThermalQuantityV1::new(0.5 * deficit))
+            .unwrap();
+        assert!(matches!(
+            insufficient.evaluate(
+                Temperature::new(t),
+                Pressure::new(101325.0),
+                &[1.0],
+                &mut work,
+                || false
+            ),
+            Err(KineticTransportErrorV1::Invalid(_))
+        ));
+    }
+    assert_eq!(
+        admitted
+            .with_translational_cp_deficit_allowance(MolarThermalQuantityV1::new(0.0))
+            .unwrap(),
+        strict
+    );
+}
+
+#[test]
+fn cp_fit_allowance_is_bounded_and_cannot_admit_a_physical_heat_capacity_deficit() {
+    let strict = model(
+        bank(vec![source("A", 0.04, 2.0, 0.0)]),
+        vec![collision("A", 3.5, 100.0)],
+    );
+    for invalid in [
+        -1e-12,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        MAX_TRANSLATIONAL_CP_DEFICIT_ALLOWANCE_V1.value().next_up(),
+        0.5 * R,
+    ] {
+        assert!(matches!(
+            strict
+                .clone()
+                .with_translational_cp_deficit_allowance(MolarThermalQuantityV1::new(invalid)),
+            Err(KineticTransportErrorV1::Invalid(_))
+        ));
+    }
+    let admitted_control = strict
+        .with_translational_cp_deficit_allowance(MAX_TRANSLATIONAL_CP_DEFICIT_ALLOWANCE_V1)
+        .unwrap();
+    let mut work = admitted_control.workspace().unwrap();
+    assert!(matches!(
+        admitted_control.evaluate(
+            Temperature::new(300.0),
+            Pressure::new(101325.0),
+            &[1.0],
+            &mut work,
+            || false
+        ),
+        Err(KineticTransportErrorV1::Invalid(
+            "source Cp is below the classical translational limit"
+        ))
+    ));
+}
