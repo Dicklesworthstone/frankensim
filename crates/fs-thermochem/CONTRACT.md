@@ -1425,3 +1425,29 @@ verification values, check analytic derivatives and the unchanged ice
 regression, and exercise exact domain and pressure boundaries. Numerical
 agreement is implementation evidence, not validation of an arbitrary frozen
 specimen or an effective mixed-phase microstructure.
+
+
+## Peng--Robinson real-gas mechanical EOS
+
+`eos::peng_robinson` adds a bounded fixed-composition Peng--Robinson mechanical
+closure. Each component carries caller-supplied critical temperature, critical
+pressure, Pitzer acentric factor and molar mass; an optional explicit symmetric
+binary-interaction matrix supplies classical quadratic mixing. No critical
+property, interaction coefficient or phase identity is inferred from a species
+name. Up to 64 components are retained.
+
+A PT evaluation keeps every real cubic root satisfying the physical covolume
+constraint `Z>B`, with molar volume, density, residual Gibbs energy and one
+log fugacity coefficient per component. Callers may request the smallest root,
+largest root, or the minimum residual-Gibbs root at the SAME fixed composition.
+The last choice is a mechanical branch selection, not a multiphase flash or
+global tangent-plane stability proof. No root clipping, van-der-Waals loop
+smoothing, phase lever rule, critical-region regularization or caloric departure
+function is added.
+
+Focused tests pin an independently evaluated supercritical methane root and
+density, retain all three subcritical methane roots, recover the ideal-gas
+dilute limit, verify binary-component permutation/fugacity invariance, and
+exercise malformed source/composition/state refusals. This creates the reusable
+nonideal mechanical/fugacity primitive needed by later dense-gas flow and flash
+owners; it does not by itself change the existing ideal-gas solvers.

@@ -12,6 +12,9 @@ use fs_qty::{Density, Dimensionless, MolarMass, Pressure, Qty, Temperature};
 
 use crate::{MassSpecificGasConstantV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 
+/// Nonideal cubic mechanical EOS with explicit phase roots and fugacity.
+pub mod peng_robinson;
+
 /// Version of the fixed mechanical ideal-gas EOS operation tree and receipt.
 pub const IDEAL_GAS_EOS_EVALUATOR_VERSION_V1: u32 = 1;
 
