@@ -4,6 +4,38 @@
 > body-to-body contact over certified motion.
 
 
+## Simultaneous directional Coulomb impacts
+
+`frictional_multicontact::elliptic::solve_elliptic_frictional_contacts`
+admits an explicitly oriented principal friction ellipse at each original
+contact. A power-conjugate block congruence maps every normal, tangential and
+cross-contact response into the existing non-associated circular Coulomb owner;
+physical impulses and endpoint velocities are reconstructed in the original
+basis. Normal impulses are solved together with friction, not supplied as
+independent estimates.
+
+Equal principal coefficients retain identity coordinates, including the
+frictionless pair. Unequal coefficients must both be positive; a singly zero
+principal coefficient returns an explicit unsupported-degeneracy error.
+Unrepresentable transforms and unproved determinacy refuse. The original
+contraction witness uses the exact two-dimensional spectral norm for tangent
+blocks, preserving roundoff inflation and the strict contraction margin.
+
+Acceptance independently checks original normal complementarity, ellipse
+capacity, final-slip traction, tangential duality gap, coordinate/work agreement
+and passivity. Native determinacy evidence remains labelled in its transformed
+basis. Canonical contact-ID assembly preserves caller-permutation determinism;
+cancellation and solver budgets retain the native owner's limits. This is an
+instantaneous rigid impulse model: it introduces no duration, compliance,
+contact pressure, thermal partition or finite-slip history.
+
+Twenty-one original and directional integration tests pass, covering analytical
+normal/tangential coupling, constructed multi-contact roots, rotated frames,
+circular/frictionless reduction, redundant/nonunique response, permutation,
+cancellation and refusal. The coordinate transformation adds bounded quadratic
+assembly to the existing dense contact solve; no performance benchmark or
+experimental friction calibration is claimed.
+
 ## Source-pinned directional impact coefficients
 
 `SourceThermalEllipticCoulomb::solve_preimpact_impulse` refreshes the original

@@ -8,6 +8,9 @@ mod normal_gauge;
 #[path = "frictional_multicontact/range.rs"]
 mod range;
 
+#[path = "frictional_multicontact/elliptic.rs"]
+mod elliptic;
+
 fn contact(id: u64, velocity: [f64; 3], mu: f64) -> FrictionalContact {
     FrictionalContact {
         id,

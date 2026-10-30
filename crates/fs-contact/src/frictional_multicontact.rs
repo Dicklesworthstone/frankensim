@@ -29,6 +29,9 @@ mod natural;
 mod normal_gauge;
 mod range;
 
+/// Directional impulse ellipses through the original simultaneous Coulomb owner.
+pub mod elliptic;
+
 /// What the numerical witness establishes about this accepted response.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FrictionalContactDeterminacy {
@@ -585,13 +588,18 @@ fn contraction_witness(
             l[(2 * i) * blocks + 2 * j + 1] = rn * w[a * d + b + 1].hypot(w[a * d + b + 2]);
             l[(2 * i + 1) * blocks + 2 * j] = rt * w[(a + 1) * d + b].hypot(w[(a + 2) * d + b])
                 + if i == j { mu[i] } else { 0.0 };
-            // Frobenius norm bounds the 2x2 operator norm, avoiding a second
-            // eigensolver and preserving a conservative determinacy boundary.
+            // Exact 2x2 spectral norm, evaluated by two stable hypotenuses.
+            // The Frobenius bound adds a spurious sqrt(2) for the +/-rho
+            // diagonal residual of a directional mobility, and can refuse
+            // even uncoupled, uniquely determined tangential responses.
+            // The common roundoff inflation below keeps this a sufficient
+            // Lipschitz certificate without another eigendecomposition.
             let x = diagonal - rt * w[(a + 1) * d + b + 1];
             let y = -rt * w[(a + 1) * d + b + 2];
             let z = -rt * w[(a + 2) * d + b + 1];
             let t = diagonal - rt * w[(a + 2) * d + b + 2];
-            l[(2 * i + 1) * blocks + 2 * j + 1] = x.hypot(y).hypot(z.hypot(t));
+            l[(2 * i + 1) * blocks + 2 * j + 1] = (0.5 * x + 0.5 * t).hypot(0.5 * z - 0.5 * y)
+                + (0.5 * x - 0.5 * t).hypot(0.5 * z + 0.5 * y);
         }
     }
     let mut weights = vec![1.0; blocks];
