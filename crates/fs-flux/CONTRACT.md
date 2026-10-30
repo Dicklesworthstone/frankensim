@@ -823,6 +823,13 @@ bound is at most 0.45. A CFL refusal halves the step without dropping order;
 an actual state-admissibility refusal retries at first order with a smaller
 step. No conservative state or source temperature is clipped.
 
+MUSCL supplies reconstructed primitives directly to the checked `fs-gas`
+primitive-face entries. That owner performs the same caloric and full-energy
+precision admission, reusing its just-computed thermodynamic properties instead
+of immediately inverting the new conservative energy. First-order faces retain
+the original conservative decoding path. This removes redundant source work
+without changing the Riemann, wall, fallback, CFL or timestep equations.
+
 Axes may be independently periodic, transmissive or stationary reflecting.
 Periodic pairs reuse identical flux bits. Transmissive means zero-gradient
 continuation, not a nonreflecting subsonic outlet. Walls impose exact zero
@@ -848,7 +855,8 @@ circular pressure blast, smooth oblique contact refinement and atomic refusal/
 cancellation/restart. Oblique-contact density L1 errors on 12²/24²/48² grids are
 3.449212181169e-3 / 8.636199681318e-4 / 2.117512986278e-4, giving observed orders
 1.998 and 2.028. The focused no-default-feature `fs-flux` library configuration
-passes 42 tests on the pinned nightly. These are manufactured/conformance
+passes 47 tests, including the molecular-transport extension below, on the
+pinned nightly. These are manufactured/conformance
 results, not experimental validation or a production performance benchmark.
 
 This lane remains Estimated engineering shock capturing. It does not supply
@@ -869,6 +877,17 @@ and integrated wall-support impulse. The 32² run advances 456 accepted steps
 to 2.578101380129e-3 s with zero mass residual, 2.27e-13 J referenced-energy
 residual and less than 1e-15 kg m/s momentum/support mismatch. This is an
 executable engineering example, not a nitrogen shock experiment or benchmark.
+
+A bounded before/after diagnostic of the primitive-face reuse used the same
+48² example, 687 accepted steps, pinned nightly-2026-07-06, optimized release
+profile, and shared Linux x86_64 container reporting AMD EPYC 9V74. One warm
+binary run fell from 43.5289 s to 26.2137 s (1.6605× observed wall-time ratio).
+Both runs retained zero mass and referenced-energy residuals. Across all 2304
+exported cells, pressure CSV values agreed; maximum differences were 1.00e-13
+kg/m³ in density, 1.00e-11 m/s in velocity and 1.00e-10 K in temperature.
+This is a single-run diagnostic under shared machine load, not a portable
+throughput guarantee or a repeated statistical benchmark. The direct numerical
+regressions remain the correctness gate.
 
 ### Source-owned molecular transport in the same Cartesian gas
 

@@ -70,6 +70,17 @@ transverse-boost covariance on both flux branches, shear-heating source-domain
 refusal, slip-wall pressure and cancellation. This adds no entropy theorem,
 viscous wall model, three-dimensional closure or physical shock-thickness claim.
 
+`NormalPrimitive` and the `*_normal_flux_from_primitive` entries admit
+reconstructed density, normal/tangential velocity and pressure through the
+same source and conservative-energy precision checks. They reuse the original
+source-computed thermodynamics in the unchanged HLLC/HLL and wall kernels,
+avoiding an immediate inverse temperature solve on energy just constructed
+from those same primitives. Callers cannot supply a cached sound speed or
+substitute a caloric model. Two added regressions compare conservative and
+primitive entries for contacts, supersonic flow, HLL shear mixing and both wall
+branches, plus source/precision/cancellation refusals. All 154 focused native
+gas library tests pass on the pinned nightly.
+
 MUSCL uses monotonized-central primitive slopes, reduced together when needed
 to retain positive density/pressure and the declared source interval. SSP RK2
 uses one shared oriented flux per face. Periodic end faces share the same flux

@@ -77,6 +77,19 @@ impl NormalConserved {
     }
 }
 
+/// Reconstructed planar trace; all caloric properties remain source-computed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NormalPrimitive {
+    /// Mass density [kg/m³].
+    pub density: f64,
+    /// Velocity along the oriented face normal [m/s].
+    pub normal_velocity: f64,
+    /// Velocity along its unit tangent [m/s].
+    pub transverse_velocity: f64,
+    /// Absolute pressure [Pa].
+    pub pressure: f64,
+}
+
 /// Shared HLLC/HLL flux in the same normal/tangent frame as its traces.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NormalFaceFlux {
@@ -118,6 +131,25 @@ impl FrozenGas {
         transverse_velocity: f64,
         pressure: f64,
     ) -> Result<NormalConserved, Error> {
+        self.normal_state_at(NormalPrimitive {
+            density,
+            normal_velocity,
+            transverse_velocity,
+            pressure,
+        })
+        .map(|(state, _)| state)
+    }
+
+    fn normal_state_at(
+        &self,
+        state: NormalPrimitive,
+    ) -> Result<(NormalConserved, Primitive), Error> {
+        let NormalPrimitive {
+            density,
+            normal_velocity,
+            transverse_velocity,
+            pressure,
+        } = state;
         if !transverse_velocity.is_finite() {
             return Err(Error::Invalid("non-finite transverse velocity"));
         }
@@ -143,7 +175,7 @@ impl FrozenGas {
                 "planar conservative state cannot retain the declared caloric precision",
             ));
         }
-        Ok(q)
+        Ok((q, primitive))
     }
 
     /// Decode a planar trace through the original caloric source.
@@ -180,6 +212,25 @@ impl FrozenGas {
         self.normal_interface(left, pl, right, pr, &mut cancelled)
     }
 
+    /// Evaluate reconstructed traces without inverting their just-computed energy.
+    ///
+    /// Each trace passes the same source-domain and caloric-precision admission
+    /// as `normal_conserved`. Pressure, temperature and sound speed are computed
+    /// by this owner, then reused by the unchanged HLLC/HLL kernel. No caller
+    /// supplies cached thermodynamics or an approximate equation of state.
+    pub fn hllc_normal_flux_from_primitive(
+        &self,
+        left: NormalPrimitive,
+        right: NormalPrimitive,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (left, pl) = self.normal_state_at(left)?;
+        poll(&mut cancelled)?;
+        let (right, pr) = self.normal_state_at(right)?;
+        self.normal_interface(left, pl, right, pr, &mut cancelled)
+    }
+
     /// Reflect a planar trace at a stationary, adiabatic slip wall.
     ///
     /// `outward_normal` is -1 or +1 relative to the supplied normal axis. The
@@ -192,7 +243,31 @@ impl FrozenGas {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NormalFaceFlux, Error> {
         let p = self.normal_primitive(state, &mut cancelled)?;
-        let wall = self.wall_flux(state.normal_state(), p, outward_normal, &mut cancelled)?;
+        self.normal_wall_interface(state, p, outward_normal, &mut cancelled)
+    }
+
+    /// Source-admitted reconstructed trace at a stationary adiabatic slip wall.
+    /// Reuses source-computed thermodynamics without an energy inversion, while
+    /// preserving the same thermally perfect wall shock/rarefaction solve.
+    pub fn stationary_wall_normal_flux_from_primitive(
+        &self,
+        state: NormalPrimitive,
+        outward_normal: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (state, p) = self.normal_state_at(state)?;
+        self.normal_wall_interface(state, p, outward_normal, &mut cancelled)
+    }
+
+    fn normal_wall_interface(
+        &self,
+        state: NormalConserved,
+        primitive: Primitive,
+        outward_normal: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        let wall = self.wall_flux(state.normal_state(), primitive, outward_normal, cancelled)?;
         Ok(NormalFaceFlux {
             mass: 0.0,
             normal_momentum: wall.momentum,

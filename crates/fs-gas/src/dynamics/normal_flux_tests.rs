@@ -164,3 +164,144 @@ fn g4_planar_flux_refuses_erased_heat_invalid_states_and_cancellation() {
         Err(Error::Cancelled)
     );
 }
+
+#[test]
+fn g3_source_owned_primitive_faces_match_conservative_hllc_hll_and_wall_fluxes() {
+    let trace = |a: [f64; 4]| NormalPrimitive {
+        density: a[0],
+        normal_velocity: a[1],
+        transverse_velocity: a[2],
+        pressure: a[3],
+    };
+    let components = |f: NormalFaceFlux| {
+        [
+            f.mass,
+            f.normal_momentum,
+            f.transverse_momentum,
+            f.energy,
+            f.signal_speed,
+        ]
+    };
+    for cp in [0.0, 0.4] {
+        let g = gas(cp, 1e18);
+        let conservative = |p: NormalPrimitive| {
+            g.normal_conserved(
+                p.density,
+                p.normal_velocity,
+                p.transverse_velocity,
+                p.pressure,
+            )
+            .unwrap()
+        };
+        for (left, right) in [
+            ([1.0, 0.0, 3.0, 1.0], [4.0, 0.0, -4.0, 1.0]),
+            ([1.0, 0.2, 3.0, 1.0], [0.125, 0.2, -4.0, 0.1]),
+            ([1.0, -2.0, 0.5, 0.4], [1.0, 2.0, -0.7, 0.4]),
+            ([1.2, -8.0, 0.3, 1.7], [0.8, -10.0, -0.1, 1.3]),
+        ] {
+            let (left, right) = (trace(left), trace(right));
+            let original = g
+                .hllc_normal_flux(conservative(left), conservative(right), || false)
+                .unwrap();
+            let reused = g
+                .hllc_normal_flux_from_primitive(left, right, || false)
+                .unwrap();
+            assert_eq!(original.used_hll_fallback, reused.used_hll_fallback);
+            for (actual, expected) in components(reused).into_iter().zip(components(original)) {
+                assert!((actual - expected).abs() <= 3e-11 * (1.0 + expected.abs()));
+            }
+        }
+        for normal in [-1.0, 1.0] {
+            for velocity in [-0.4, 0.0, 2.0] {
+                let p = trace([1.2, normal * velocity, 5.0, 1.0]);
+                let original = g
+                    .stationary_wall_normal_flux(conservative(p), normal, || false)
+                    .unwrap();
+                let reused = g
+                    .stationary_wall_normal_flux_from_primitive(p, normal, || false)
+                    .unwrap();
+                for (actual, expected) in components(reused).into_iter().zip(components(original)) {
+                    assert!((actual - expected).abs() <= 3e-11 * (1.0 + expected.abs()));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g4_primitive_faces_keep_source_precision_domain_and_cancellation_admission() {
+    let g = gas(0.4, 0.0);
+    let p = NormalPrimitive {
+        density: 1.0,
+        normal_velocity: 0.2,
+        transverse_velocity: 0.3,
+        pressure: 1.0,
+    };
+    for invalid in [
+        NormalPrimitive {
+            pressure: 100.0,
+            ..p
+        },
+        NormalPrimitive { pressure: 0.0, ..p },
+        NormalPrimitive { density: -1.0, ..p },
+        NormalPrimitive {
+            normal_velocity: f64::NAN,
+            ..p
+        },
+        NormalPrimitive {
+            transverse_velocity: 1e12,
+            ..p
+        },
+    ] {
+        assert!(
+            g.hllc_normal_flux_from_primitive(invalid, p, || false)
+                .is_err()
+        );
+        assert!(
+            g.hllc_normal_flux_from_primitive(p, invalid, || false)
+                .is_err()
+        );
+        assert!(
+            g.stationary_wall_normal_flux_from_primitive(invalid, 1.0, || false)
+                .is_err()
+        );
+    }
+    for cutoff in [1, 2, 3] {
+        let mut polls = 0;
+        assert_eq!(
+            g.hllc_normal_flux_from_primitive(p, p, || {
+                polls += 1;
+                polls == cutoff
+            }),
+            Err(Error::Cancelled)
+        );
+    }
+    for cutoff in [1, 2] {
+        let mut polls = 0;
+        assert_eq!(
+            g.stationary_wall_normal_flux_from_primitive(p, 1.0, || {
+                polls += 1;
+                polls == cutoff
+            }),
+            Err(Error::Cancelled)
+        );
+    }
+    let g = gas(0.0, 0.0);
+    let left = NormalPrimitive {
+        density: 1.0,
+        normal_velocity: -2.0,
+        transverse_velocity: 30.0,
+        pressure: 0.4,
+    };
+    let right = NormalPrimitive {
+        normal_velocity: 2.0,
+        transverse_velocity: -30.0,
+        ..left
+    };
+    assert_eq!(
+        g.hllc_normal_flux_from_primitive(left, right, || false),
+        Err(Error::Invalid(
+            "HLL intermediate state outside admitted source domain"
+        ))
+    );
+}

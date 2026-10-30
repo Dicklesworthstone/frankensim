@@ -8,7 +8,7 @@
 //! turbulence, physical shock-thickness or experimental-validation claim.
 
 pub use fs_gas::dynamics::{Error, FrozenGas, Reconstruction, StepControl};
-use fs_gas::dynamics::{MAX_EULER_CELLS, NormalConserved, NormalFaceFlux};
+use fs_gas::dynamics::{MAX_EULER_CELLS, NormalConserved, NormalFaceFlux, NormalPrimitive};
 use fs_qty::Time;
 
 /// Original-source Fourier heat transport and complete planar Newtonian stress.
@@ -729,27 +729,37 @@ fn spatial(
                         position * nx + line
                     }
                 };
-                let reconstruct = |k: usize, sign: f64| -> Result<NormalConserved, Error> {
-                    if reconstruction == Reconstruction::FirstOrder {
-                        return Ok(states[k].normal(axis));
-                    }
+                let reconstruct = |k: usize, sign: f64| -> NormalPrimitive {
                     let center = primitive[k].array();
                     let p: [f64; 4] =
                         std::array::from_fn(|d| center[d] + sign * slopes[k][axis][d]);
-                    gas.normal_conserved(p[0], p[axis + 1], p[2 - axis], p[3])
+                    NormalPrimitive {
+                        density: p[0],
+                        normal_velocity: p[axis + 1],
+                        transverse_velocity: p[2 - axis],
+                        pressure: p[3],
+                    }
                 };
-                let flux = if face > 0 && face < count {
-                    gas.hllc_normal_flux(
-                        reconstruct(cell_index(face - 1), 0.5)?,
-                        reconstruct(cell_index(face), -0.5)?,
-                        &mut *cancelled,
-                    )?
-                } else if pair == AxisBoundaries::Periodic {
-                    gas.hllc_normal_flux(
-                        reconstruct(cell_index(count - 1), 0.5)?,
-                        reconstruct(cell_index(0), -0.5)?,
-                        &mut *cancelled,
-                    )?
+                let first_order = reconstruction == Reconstruction::FirstOrder;
+                let flux = if face > 0 && face < count || pair == AxisBoundaries::Periodic {
+                    let (left, right) = if face > 0 && face < count {
+                        (cell_index(face - 1), cell_index(face))
+                    } else {
+                        (cell_index(count - 1), cell_index(0))
+                    };
+                    if first_order {
+                        gas.hllc_normal_flux(
+                            states[left].normal(axis),
+                            states[right].normal(axis),
+                            &mut *cancelled,
+                        )?
+                    } else {
+                        gas.hllc_normal_flux_from_primitive(
+                            reconstruct(left, 0.5),
+                            reconstruct(right, -0.5),
+                            &mut *cancelled,
+                        )?
+                    }
                 } else {
                     let AxisBoundaries::Ends { lower, upper } = pair else {
                         unreachable!()
@@ -757,14 +767,26 @@ fn spatial(
                     let at_lower = face == 0;
                     let boundary = if at_lower { lower } else { upper };
                     let sign = if at_lower { -1.0 } else { 1.0 };
-                    let q =
-                        reconstruct(cell_index(if at_lower { 0 } else { count - 1 }), 0.5 * sign)?;
-                    match boundary {
-                        BoundaryCondition::Reflecting => {
-                            gas.stationary_wall_normal_flux(q, sign, &mut *cancelled)?
-                        }
-                        BoundaryCondition::Transmissive => {
+                    let k = cell_index(if at_lower { 0 } else { count - 1 });
+                    match (first_order, boundary) {
+                        (true, BoundaryCondition::Reflecting) => gas.stationary_wall_normal_flux(
+                            states[k].normal(axis),
+                            sign,
+                            &mut *cancelled,
+                        )?,
+                        (true, BoundaryCondition::Transmissive) => {
+                            let q = states[k].normal(axis);
                             gas.hllc_normal_flux(q, q, &mut *cancelled)?
+                        }
+                        (false, BoundaryCondition::Reflecting) => gas
+                            .stationary_wall_normal_flux_from_primitive(
+                                reconstruct(k, 0.5 * sign),
+                                sign,
+                                &mut *cancelled,
+                            )?,
+                        (false, BoundaryCondition::Transmissive) => {
+                            let p = reconstruct(k, 0.5 * sign);
+                            gas.hllc_normal_flux_from_primitive(p, p, &mut *cancelled)?
                         }
                     }
                 };
