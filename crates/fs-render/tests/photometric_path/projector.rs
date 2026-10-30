@@ -2,6 +2,9 @@
 //! The oracle integrates the declared pupil/gobo ray-power law, without
 //! calling the production projector evaluator, sampler or surface BSDF.
 
+#[path = "projector/splitter.rs"]
+mod splitter;
+
 use super::*;
 use fs_exec::RunId;
 use fs_render::instances::{GeometryInstance, SharedGeometry};

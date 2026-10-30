@@ -14,6 +14,13 @@
 //! flux is exactly clear flux times mean gobo transmission in the represented
 //! piecewise-constant model, apart from floating-point arithmetic.
 //!
+//! An optional ideal beam splitter adds outgoing slope offsets `d_k` with
+//! absolute power fractions `t_k`. The mask becomes
+//! `sum_k t_k * M(a*(1-s/f) - s*(u-d_k))`; the outgoing `cos(theta)^4`
+//! denominator remains shared. Slope translation has unit Jacobian, so total
+//! flux is clear flux times mean gobo transmission times `sum_k t_k`.
+//! Overlapping images add; at focus each copy shifts by `q*d_k` metres.
+//!
 //! At `1/q = 1/f - 1/s`, screen coordinates obey `g = -s*p/q` independently
 //! of pupil position. At another screen distance `z`, the pupil contributes
 //! the true geometric defocus displacement `(1-z/q)*a`. Diffraction,
@@ -30,6 +37,9 @@ use fs_geom::{Point3, Vec3};
 
 use crate::instances::RigidTransform;
 use crate::photometry::source::SourceError;
+
+mod beam_splitter;
+pub use beam_splitter::{MAX_PROJECTOR_BEAMS, ParaxialBeamSplitter, ProjectorBeam};
 
 /// Maximum admitted samples in one passive gobo transmission map.
 pub const MAX_GOBO_TEXELS: usize = 1_048_576;
@@ -193,6 +203,8 @@ pub struct ThinLensProjector {
     focus_distance_m: Option<f64>,
     radiance_factor: f64,
     gobo: GoboTransmission,
+    beam_splitter: Option<ParaxialBeamSplitter>,
+    transmitted_fraction: f64,
 }
 
 impl ThinLensProjector {
@@ -239,8 +251,44 @@ impl ThinLensProjector {
             pupil_factor,
             focus_distance_m,
             radiance_factor,
+            transmitted_fraction: gobo.mean_transmission(),
             gobo,
+            beam_splitter: None,
         })
+    }
+
+    /// Replace outgoing beam replication with this ideal passive splitter.
+    ///
+    /// Gobo geometry, focus and the clear-output calibration are retained.
+    /// Replacing a splitter does not compound the previous splitter's losses.
+    /// The full aperture's radiance bound is checked during scene admission.
+    pub fn with_beam_splitter(
+        mut self,
+        splitter: ParaxialBeamSplitter,
+    ) -> Result<Self, SourceError> {
+        let transmission = self.gobo.mean_transmission() * splitter.transmitted_fraction();
+        if !transmission.is_finite()
+            || (self.gobo.mean_transmission() > 0.0
+                && splitter.transmitted_fraction() > 0.0
+                && transmission == 0.0)
+        {
+            return Err(SourceError::NumericalRange);
+        }
+        self.transmitted_fraction = transmission;
+        self.beam_splitter = Some(splitter);
+        Ok(self)
+    }
+
+    /// Optional outgoing beam replication, or the original unsplit light field.
+    #[must_use]
+    pub const fn beam_splitter(&self) -> Option<&ParaxialBeamSplitter> {
+        self.beam_splitter.as_ref()
+    }
+
+    /// Surviving fraction of clear-output flux after the gobo and splitter.
+    #[must_use]
+    pub const fn transmitted_fraction(&self) -> f64 {
+        self.transmitted_fraction
     }
 
     /// Optical-to-primitive rigid frame; optical +Z is the emitting direction.
@@ -292,13 +340,16 @@ impl ThinLensProjector {
             return Err(SourceError::NumericalRange);
         }
         let direction = normalized_direction(optical_dir)?;
-        if direction.z <= 0.0 || self.gobo.data.maximum == 0.0 {
+        if direction.z <= 0.0 || self.transmitted_fraction == 0.0 {
             return Ok(0.0);
         }
         let pupil_x = optical_point.x * self.pupil_factor;
         let pupil_y = optical_point.y * self.pupil_factor;
         if !pupil_x.is_finite() || !pupil_y.is_finite() {
             return Err(SourceError::NumericalRange);
+        }
+        if let Some(splitter) = &self.beam_splitter {
+            return self.split_luminance(splitter, [pupil_x, pupil_y], direction);
         }
         // Compare homogeneous coordinates first. Forming w.xy/w.z before
         // rejecting an unilluminated grazing ray could overflow needlessly.
@@ -323,6 +374,58 @@ impl ThinLensProjector {
         Ok(value)
     }
 
+    fn split_luminance(
+        &self,
+        splitter: &ParaxialBeamSplitter,
+        pupil: [f64; 2],
+        direction: Vec3,
+    ) -> Result<f64, SourceError> {
+        let half_width = 0.5 * self.gobo.width_m() * direction.z;
+        let half_height = 0.5 * self.gobo.height_m() * direction.z;
+        let (mut sum, mut correction) = (0.0_f64, 0.0_f64);
+        for beam in splitter.beams() {
+            if beam.throughput() == 0.0 {
+                continue;
+            }
+            let offset = beam.slope_offset();
+            let x = pupil[0] * direction.z
+                - self.gobo_distance_m * (direction.x - offset[0] * direction.z);
+            let y = pupil[1] * direction.z
+                - self.gobo_distance_m * (direction.y - offset[1] * direction.z);
+            if !x.is_finite() || !y.is_finite() {
+                return Err(SourceError::NumericalRange);
+            }
+            // Test bounded homogeneous coordinates before any grazing divide.
+            if x < -half_width || x >= half_width || y < -half_height || y >= half_height {
+                continue;
+            }
+            let mask = self
+                .gobo
+                .transmission_at(x / direction.z, y / direction.z)?;
+            let value = beam.throughput() * mask;
+            if mask > 0.0 && value == 0.0 {
+                return Err(SourceError::NumericalRange);
+            }
+            let next = sum + value;
+            correction += if sum >= value {
+                (sum - next) + value
+            } else {
+                (value - next) + sum
+            };
+            sum = next;
+        }
+        let transmission = sum + correction;
+        if transmission == 0.0 {
+            return Ok(0.0);
+        }
+        let cosine_squared = direction.z * direction.z;
+        let value = self.radiance_factor * transmission / cosine_squared / cosine_squared;
+        if !value.is_finite() || value <= 0.0 {
+            return Err(SourceError::NumericalRange);
+        }
+        Ok(value)
+    }
+
     /// Finite upper bound on the represented radiance factor over an aperture
     /// with the supplied maximum absolute optical X/Y coordinates in metres.
     /// This bounds the source law, not floating-point or physical model error.
@@ -333,19 +436,26 @@ impl ThinLensProjector {
         {
             return Err(SourceError::InvalidDistribution);
         }
-        if self.gobo.data.maximum == 0.0 {
+        if self.transmitted_fraction == 0.0 {
             return Ok(0.0);
         }
-        let maximum_slope = [
+        let mut maximum_slope = [
             (pupil_abs_xy_m[0] * self.pupil_factor.abs() + 0.5 * self.gobo.width_m())
                 / self.gobo_distance_m,
             (pupil_abs_xy_m[1] * self.pupil_factor.abs() + 0.5 * self.gobo.height_m())
                 / self.gobo_distance_m,
         ];
+        let mut maximum_transmission = self.gobo.data.maximum;
+        if let Some(splitter) = &self.beam_splitter {
+            for (maximum, offset) in maximum_slope.iter_mut().zip(splitter.maximum_abs_offset()) {
+                *maximum = (*maximum + offset).next_up();
+            }
+            maximum_transmission *= splitter.transmitted_fraction();
+        }
         let inverse_cosine_squared =
             1.0 + maximum_slope[0] * maximum_slope[0] + maximum_slope[1] * maximum_slope[1];
         let value = self.radiance_factor
-            * self.gobo.data.maximum
+            * maximum_transmission
             * inverse_cosine_squared
             * inverse_cosine_squared;
         if !value.is_finite() || value <= 0.0 {

@@ -1894,6 +1894,16 @@ One-sided luminance is `flux/(pi*area)` and two-sided luminance is
 Polygonal apertures use their represented mesh area, without claiming an exact
 curved aperture. Emission adds to the existing material's reflected radiance.
 
+`PhotometricAreaEmitter::filtered` applies a passive 80-bin spectral transmission
+using the same normalization owner as point-fixture filtering. The photopic
+transmission scales both clear and emitted lumens; only the surviving spectrum
+is normalized. Gray filters retain the original spectrum, opaque filters
+produce zero flux, and repeated filters multiply their spectral transmission.
+The filter is uniform over the source and independent of direction. Attaching
+or replacing achromatic projector optics retains the filtered clear calibration;
+it does not restore absorbed power. This is not a spatially varying color gobo
+or an angle-dependent dichroic model.
+
 Finite-source proposals select emitters by flux and triangles by area. Source
 hits and surface/phase/probe proposals use complementary MIS with the original
 BSDF/phase density and physical-medium survival probability. A terminal path
@@ -1992,13 +2002,51 @@ adds this source model without changing existing Lambertian/point streams.
 
 The model does not solve lamp illumination or a multi-element lens train and
 does not include aberrations, diffraction, wavelength-dependent focal length,
-prisms or frost. Its thin-lens/paraxial law and uniform pupil/gobo ray-power
+physical prism refraction or frost. Its thin-lens/paraxial law and uniform pupil/gobo ray-power
 assumption are declared approximations, with unknown physical-model error.
 Finite input and radiance representability are checked at admission; numerical
 agreement with the ideal model does not certify a manufactured fixture.
 `photometric_stage --paths --projector-focus 5 --workers 4` exercises this
 source together with native material reflection and heterogeneous spectral
 haze. The same option works with `--total-csv` for surface lux.
+
+### Calibrated multi-beam projector optics
+
+`ParaxialBeamSplitter` supplies at most 32 `ProjectorBeam` branches to
+`ThinLensProjector::with_beam_splitter`. Each branch declares a dimensionless
+optical X/Y slope offset `d_k` and a passive flux fraction `t_k`. Fractions are
+finite and nonnegative, and their compensated sum must not exceed one. They
+are not renormalized. An absorbing splitter with zero total transmission is
+valid. Splitter replacement replaces the optical state rather than multiplying
+it into a previously applied splitter.
+
+For outgoing slope `u = omega.xy/omega.z`, branch `k` reads the same gobo at
+`g_k = a*(1-s/f) - s*(u-d_k)`. The shared source evaluator uses
+`L = Phi_clear*s²*sum(t_k*M(g_k))/(A*G*cos(theta_out)^4)`. Translating slopes
+does not change the pupil/gobo ray-power measure, so total emitted lumens are
+`Phi_clear*mean(M)*sum(t_k)`. Overlapping branches add their actual light;
+absorbed power is not redistributed among the surviving branches. At the
+existing image distance `q`, each projected copy shifts by `q*d_k` while
+retaining magnification `-q/s` and the same geometric pupil defocus.
+
+Source hits, surface/probe connections and volume connections evaluate this
+one light field. The existing native mesh-area proposal and complementary MIS
+remain in force; all bounded branches are evaluated without another random
+draw or a separate branch-selection estimator. Admission includes the shifted
+angular support in its finite source-radiance bound. An unsplit projector keeps
+its original arithmetic. Reflections, absorption and multiple scattering still
+use the original material and physical-grid owners.
+
+This is an ideal, achromatic paraxial exit-pupil model. It does not resolve a
+faceted prism's spatial pupil partition, wavelength-dependent Snell refraction,
+Fresnel/internal reflections, diffraction or aberrations. A supplied branch
+pattern and throughput are declared source data, not inferred manufacturer
+measurements. Sampling uncertainty still excludes those model/calibration
+errors and the finite-depth remainder. Path semantics version 8 adds the
+splitter and finite-source filtering while preserving existing unsplit streams.
+The headless example accepts `--projector-focus 5 --projector-split 3 4` for
+three beams on a 4-degree ring with 90% total splitter transmission, with either
+`--paths` or `--total-csv` and the existing worker/progressive execution.
 
 ### Receiver-dependent point-fixture sampling
 

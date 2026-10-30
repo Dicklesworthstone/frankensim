@@ -31,10 +31,10 @@ pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIllumina
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-/// Version 7 adds an explicit native physical camera with sampled pupils. The
+/// Version 8 adds passive multi-beam projector optics and finite-source filters. The
 /// legacy camera, complete source sum and all existing path streams remain unchanged.
 /// Active point fixtures with glass still require missing specular connections.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 7;
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 8;
 
 /// Maximum sampled point-fixture connections at one surface or volume vertex.
 /// The bounded proposal storage is local to that path, with no per-vertex heap

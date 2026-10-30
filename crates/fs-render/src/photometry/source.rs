@@ -428,6 +428,37 @@ impl SourceSpectrum {
         let bin = ((lambda_nm - LAMBDA_MIN) / BIN_WIDTH_NM) as usize;
         self.bins[bin.min(SPECTRAL_BINS - 1)]
     }
+
+    /// Shared passive filtering for calibrated point and finite sources.
+    /// Return the surviving normalized spectrum and its photopic transmission;
+    /// callers must apply that fraction to their luminous-flux calibration.
+    /// An opaque result retains a valid spectrum but has zero transmission.
+    pub(crate) fn filtered(
+        &self,
+        transmittance: [f64; SPECTRAL_BINS],
+    ) -> Result<(Self, f64), SourceError> {
+        if transmittance
+            .iter()
+            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+        {
+            return Err(SourceError::InvalidFilter);
+        }
+        if transmittance.iter().all(|value| *value == transmittance[0]) {
+            return Ok((self.clone(), transmittance[0]));
+        }
+        let mut surviving = [0.0; SPECTRAL_BINS];
+        let mut transmission = 0.0;
+        for (index, value) in surviving.iter_mut().enumerate() {
+            *value = self.bins[index] * transmittance[index];
+            transmission += *value * LUMINOUS_EFFICACY_LM_W * photopic_weight_nm(index);
+        }
+        let spectrum = if transmission > 0.0 {
+            Self::try_from_bins(surviving)?
+        } else {
+            self.clone()
+        };
+        Ok((spectrum, transmission.min(1.0)))
+    }
 }
 
 /// A far-field point fixture or one emitter of a multi-emitter fixture.
@@ -526,28 +557,10 @@ impl PhotometricSource {
     /// the photopic transmission of the original shape. A fully opaque filter
     /// returns a zero-flux source. Repeated filters multiply transmission.
     pub fn filtered(&self, transmittance: [f64; SPECTRAL_BINS]) -> Result<Self, SourceError> {
-        if transmittance
-            .iter()
-            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
-        {
-            return Err(SourceError::InvalidFilter);
-        }
-        if transmittance.iter().all(|value| *value == transmittance[0]) {
-            let mut result = self.clone();
-            result.emitted_flux_lm *= transmittance[0];
-            return Ok(result);
-        }
-        let mut surviving = [0.0; SPECTRAL_BINS];
-        let mut transmission = 0.0;
-        for (index, value) in surviving.iter_mut().enumerate() {
-            *value = self.spectrum.bins[index] * transmittance[index];
-            transmission += *value * LUMINOUS_EFFICACY_LM_W * photopic_weight_nm(index);
-        }
+        let (spectrum, transmission) = self.spectrum.filtered(transmittance)?;
         let mut result = self.clone();
-        result.emitted_flux_lm *= transmission.min(1.0);
-        if transmission > 0.0 {
-            result.spectrum = SourceSpectrum::try_from_bins(surviving)?;
-        }
+        result.emitted_flux_lm *= transmission;
+        result.spectrum = spectrum;
         Ok(result)
     }
 }

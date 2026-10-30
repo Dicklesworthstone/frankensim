@@ -11,6 +11,9 @@
 //! Append `--panels` to include two finite, lumen-calibrated emitting meshes.
 //! Append `--projector-focus 5` to project a passive gobo onto the stage with
 //! an ideal thin lens focused at 5 metres; changing that distance defocuses it.
+//! Append `--projector-split 3 4` to that option for three projected beams on
+//! a 4-degree ring, with 90% total splitter transmission. This is a declared
+//! paraxial exit light field, not a solved refractive prism.
 //! Append `--point-connections 4` to sample at most four point-fixture
 //! connections per path vertex; direct calculation-grid lux remains exact.
 //! Append `--camera-lens 50 24 2.8 12` to `--paths` for a 50 mm focal length,
@@ -26,8 +29,8 @@ use fs_render::camera::{Aperture, CameraProjection, PhysicalCamera};
 use fs_render::charts::TriMesh;
 use fs_render::instances::RigidTransform;
 use fs_render::photometry::area::{
-    EmissionSidedness, GoboTransmission, PhotometricAreaEmitter, PhotometricEmitters,
-    ThinLensProjector,
+    EmissionSidedness, GoboTransmission, MAX_PROJECTOR_BEAMS, ParaxialBeamSplitter,
+    PhotometricAreaEmitter, PhotometricEmitters, ProjectorBeam, ThinLensProjector,
 };
 use fs_render::photometry::image::LuminanceJob;
 use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction, ScatterSettings};
@@ -50,11 +53,12 @@ use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbso
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--projector-focus METRES] [--point-connections K] [--workers N] [--camera-lens FOCAL_MM SENSOR_HEIGHT_MM F_NUMBER FOCUS_M]; options require a path mode; camera lens requires --paths";
+    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--projector-focus METRES] [--projector-split BEAMS ANGLE_DEG] [--point-connections K] [--workers N] [--camera-lens FOCAL_MM SENSOR_HEIGHT_MM F_NUMBER FOCUS_M]; options require a path mode; splitting requires a projector; camera lens requires --paths";
     let mode = args.first().map_or("", String::as_str);
     let mut workers = None;
     let mut panels = false;
     let mut projector_focus_m = None;
+    let mut projector_split = None;
     let mut point_connections = None;
     let mut camera_lens = None;
     let mut extra = args.get(1..).unwrap_or_default().iter();
@@ -79,6 +83,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     );
                 }
                 projector_focus_m = Some(distance);
+            }
+            "--projector-split" if projector_split.is_none() => {
+                let count = extra.next().ok_or(USAGE)?.parse::<usize>()?;
+                let angle = extra.next().ok_or(USAGE)?.parse::<f64>()?.to_radians();
+                if !(1..=MAX_PROJECTOR_BEAMS).contains(&count)
+                    || !angle.is_finite()
+                    || !(0.0..std::f64::consts::FRAC_PI_2).contains(&angle)
+                {
+                    return Err("split count must be 1..=32 and ring angle 0..<90 degrees".into());
+                }
+                projector_split = Some((count, angle));
             }
             "--camera-lens" if camera_lens.is_none() => {
                 let focal_m = extra.next().ok_or(USAGE)?.parse::<f64>()? * 0.001;
@@ -112,6 +127,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if camera_lens.is_some() && !paths {
         return Err(USAGE.into());
     }
+    if projector_split.is_some() && projector_focus_m.is_none() {
+        return Err(USAGE.into());
+    }
     let execution = workers
         .map(|count| RenderExecutionConfig::try_new(32, 32, count, 512 * 1024 * 1024, RunId(1)))
         .transpose()?;
@@ -137,6 +155,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             total_csv,
             panels,
             projector_focus_m,
+            projector_split,
             point_connections,
             camera_lens,
             execution.as_ref(),
@@ -151,6 +170,7 @@ fn run(
     total_csv: bool,
     panels: bool,
     projector_focus_m: Option<f64>,
+    projector_split: Option<(usize, f64)>,
     point_connections: Option<u32>,
     camera_lens: Option<(CameraProjection, Aperture, f64)>,
     execution: Option<&RenderExecutionConfig>,
@@ -261,6 +281,7 @@ fn run(
             total_csv,
             panels,
             projector_focus_m,
+            projector_split,
             point_connections,
             execution,
         );
@@ -317,6 +338,7 @@ fn run_paths(
     total_csv: bool,
     panels: bool,
     projector_focus_m: Option<f64>,
+    projector_split: Option<(usize, f64)>,
     point_connections: Option<u32>,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
@@ -401,7 +423,26 @@ fn run_paths(
         )?;
         let gobo_distance_m = 0.1;
         let focal_length_m = 1.0 / (1.0 / gobo_distance_m + 1.0 / focus_m);
-        let projector = ThinLensProjector::try_new(frame, gobo_distance_m, focal_length_m, gobo)?;
+        let mut projector =
+            ThinLensProjector::try_new(frame, gobo_distance_m, focal_length_m, gobo)?;
+        if let Some((count, angle)) = projector_split {
+            let (sine, cosine) = fs_math::det::sin_cos(angle);
+            let slope = sine / cosine;
+            let beams = (0..count)
+                .map(|index| {
+                    let azimuth = std::f64::consts::TAU * index as f64 / count as f64;
+                    let (sin_phi, cos_phi) = fs_math::det::sin_cos(azimuth);
+                    ProjectorBeam::try_new([slope * cos_phi, slope * sin_phi], 0.9 / count as f64)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            projector = projector.with_beam_splitter(ParaxialBeamSplitter::try_new(beams)?)?;
+            if !total_csv {
+                println!(
+                    "Ideal projector splitter: {count} beams, {:.3} degree ring, 90% total transmission",
+                    angle.to_degrees(),
+                );
+            }
+        }
         let emitter = PhotometricAreaEmitter::try_new(
             index,
             2000.0,

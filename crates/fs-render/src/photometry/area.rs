@@ -5,10 +5,13 @@
 //! primitive material still reflects incoming light. No display RGB value,
 //! fictitious temperature or independently reconstructed surface is involved.
 
-use super::source::{PhotometricSource, SourceError, SourceSpectrum};
+use super::source::{PhotometricSource, SPECTRAL_BINS, SourceError, SourceSpectrum};
 
 mod projector;
-pub use projector::{GoboTransmission, MAX_GOBO_TEXELS, ThinLensProjector};
+pub use projector::{
+    GoboTransmission, MAX_GOBO_TEXELS, MAX_PROJECTOR_BEAMS, ParaxialBeamSplitter, ProjectorBeam,
+    ThinLensProjector,
+};
 
 /// Which geometric sides emit the supplied total luminous flux.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,16 +79,16 @@ impl PhotometricAreaEmitter {
 
     /// Use an ideal thin-lens projector in place of Lambertian emission.
     ///
-    /// The original post-dimmer flux is clear-output flux. The passive gobo
-    /// reduces emitted flux by its represented area-mean transmission; blocked
-    /// flux is not renormalized into surviving rays. Replacing a projector uses
+    /// The original post-dimmer, spectrally filtered flux is clear-output flux.
+    /// The passive gobo and optional splitter reduce emitted flux; blocked
+    /// power is not renormalized into surviving rays. Replacing a projector uses
     /// the same clear-output calibration. Only front emission is supported;
     /// scene admission checks the aperture's plane, winding and numeric range.
     pub fn with_projector(mut self, projector: ThinLensProjector) -> Result<Self, SourceError> {
         if self.sidedness != EmissionSidedness::Front {
             return Err(SourceError::InvalidDistribution);
         }
-        let transmission = projector.gobo().mean_transmission();
+        let transmission = projector.transmitted_fraction();
         let emitted_flux_lm = self.clear_flux_lm * transmission;
         if !emitted_flux_lm.is_finite()
             || (self.clear_flux_lm > 0.0 && transmission > 0.0 && emitted_flux_lm == 0.0)
@@ -97,19 +100,47 @@ impl PhotometricAreaEmitter {
         Ok(self)
     }
 
+    /// Apply a spatially uniform passive spectral filter to emitted ray power.
+    ///
+    /// Both clear-output and currently emitted lumens decrease by the photopic
+    /// transmission of the original spectrum. The surviving spectrum is
+    /// normalized without replacing lost power. Gobo and splitter data are
+    /// retained, and replacing optics later retains the filtered calibration.
+    /// This represents achromatic optics with a uniform spectral filter, not
+    /// spatially varying color gobos or wavelength-dependent beam deflection.
+    pub fn filtered(&self, transmittance: [f64; SPECTRAL_BINS]) -> Result<Self, SourceError> {
+        let (spectrum, fraction) = self.spectrum.filtered(transmittance)?;
+        let clear_flux_lm = self.clear_flux_lm * fraction;
+        let emitted_flux_lm = self.emitted_flux_lm * fraction;
+        if !clear_flux_lm.is_finite()
+            || !emitted_flux_lm.is_finite()
+            || (fraction > 0.0
+                && ((self.clear_flux_lm > 0.0 && clear_flux_lm == 0.0)
+                    || (self.emitted_flux_lm > 0.0 && emitted_flux_lm == 0.0)))
+        {
+            return Err(SourceError::NumericalRange);
+        }
+        let mut result = self.clone();
+        result.clear_flux_lm = clear_flux_lm;
+        result.emitted_flux_lm = emitted_flux_lm;
+        result.spectrum = spectrum;
+        Ok(result)
+    }
+
     /// Primitive in the same borrowed scene used by the path job.
     #[must_use]
     pub const fn primitive_index(&self) -> usize {
         self.primitive_index
     }
 
-    /// Total flux after dimming and passive gobo losses, summed over emitting sides.
+    /// Total flux after dimming, spectral filtering and passive optical losses,
+    /// summed over emitting sides.
     #[must_use]
     pub const fn flux_lm(&self) -> f64 {
         self.emitted_flux_lm
     }
 
-    /// Post-dimmer clear-output flux before any passive gobo loss.
+    /// Post-dimmer, spectrally filtered clear flux before gobo or splitter losses.
     #[must_use]
     pub const fn clear_flux_lm(&self) -> f64 {
         self.clear_flux_lm
