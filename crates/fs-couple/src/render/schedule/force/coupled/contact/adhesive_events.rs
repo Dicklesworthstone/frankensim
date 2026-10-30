@@ -20,6 +20,9 @@ use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
 
 pub(super) mod native;
+
+/// Matrix-free stopping and release through a complete passive elastic network.
+pub mod linear_network;
 use native::{EventNativeAccount, projected_velocity, stage_account, stage_motion};
 
 #[derive(Debug)]

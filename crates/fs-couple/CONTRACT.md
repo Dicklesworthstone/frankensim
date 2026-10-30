@@ -12379,3 +12379,31 @@ singular passive Foster blocks without removing their physical branches.
 The final source replay starts from the old accepted radius and uses actual represented body travel. Mechanics, circular footprint, angle, gap, clock and observation publish together after the existing force/work/source gates. Connected topology contributes zero release; no rupture or bulk liquid dynamics is inferred.
 
 Six native tests cover reciprocal impulse/momentum and complete work, pinned-radius angle change, source-friction sensitivity, original connection/external/prescribed work, cancellation/source/range refusal with deterministic retry, and a late numerical-energy refusal that preserves both bodies and liquid history. All six prior planar and axisymmetric capillary tests pass. The underlying branch remains explicitly symmetric and quasistatic in the liquid.
+
+
+## Adhesive events through complete linear elastic networks
+
+`render::schedule::force::coupled::contact::adhesive_events::linear_network`
+propagates one scalar dry junction through all mass-normalized elastic modes,
+modal damping, and arbitrary admitted rank-one spring/damper connections with
+their original rest extensions. Sliding uses the held kinetic resistance;
+sticking constrains only the contact coordinate while the internal network
+continues to move. The changing constraint reaction determines release.
+
+The matrix-free operator uses preallocated workspaces and bounded Taylor cells.
+Dense-polynomial event isolation can resolve intervening stops even when the
+sample endpoint velocities have the same sign. Positive quadrature accounts
+separately for modal damping, each connection loss, and junction friction;
+external work, contact impulse, and its time moment are retained independently.
+The result carries explicit propagation, projection, and event-location work
+uncertainty, which must fit the caller's physical energy budget. This is a
+bounded numerical estimate, not a formal certification of all possible roots.
+
+Fresh nonzero velocities are not captured by a sticking tolerance. The caller
+owns accepted phase and state; cancellation, unresolved grazing events, or
+exhausted work/accuracy budgets cannot publish a partial trajectory. Exactly
+stationary constrained states retain the required impulse without traversing
+irrelevant high-frequency cells. The law assumes fixed sources, normal
+capacity, frame, coefficients, and external loads during a step; nonlinear
+material memory, radiation dynamics, vector friction, and simultaneous contact
+constraints are outside this owner.
