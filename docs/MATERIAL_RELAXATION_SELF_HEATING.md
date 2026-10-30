@@ -22,7 +22,7 @@ endpoint power times duration, a residual-energy correction or a fraction of
 total damping. Constrained material histories can dissipate even without motion.
 
 The frame adapter forms disjoint groups for each original layer and independent
-prefix/suffix groups for foreign material histories. The sum is checked against
+prefix/interior/suffix groups for foreign material histories. The sum is checked against
 the native material-loss account. Only the bound layer's own heat enters its
 cell. Foreign material loss, exterior-fluid/connection loss and authored modal
 loss remain explicit environment sinks. Numerical dissipation is never heat.
@@ -131,3 +131,83 @@ Refinement reduced error against the continuous coupled ODE, approximately
 halving the temperature error per halved step in the rate-feedback cases.
 These are manufactured equations, NOT execution of the Rust source, measured
 material validation or a general physical/temporal error certificate.
+
+## Several heated bodies on the same trajectory
+
+`FrameRelaxationThermalSystem::new_shared` accepts original bindings and their
+whole-layer cell destinations in declaration order. The existing `new` delegates
+to this path with one binding; there is not a separate single-body thermal solver.
+Element and layer numbers remain local to each frame, while receiving `CellId`s
+must be distinct across the complete set of bound bodies.
+
+```rust,ignore
+let mut coupled = FrameRelaxationThermalSystem::new_shared(
+    vec![(receiver_material, receiver_layer_cells),
+         (driver_material, driver_layer_cells)],
+    mechanical, &thermal, &original_shared_material_network,
+    observation_budget, &gate,
+)?;
+let report = coupled.step(
+    &mut thermal, &held_complete_native_forces,
+    thermal_controls, &all_cell_energy_guesses_j, &gate,
+)?;
+let receiver_heat = &report.layers[report.material_layer_ranges[0].clone()];
+let driver_heat = &report.layers[report.material_layer_ranges[1].clone()];
+```
+
+`materials()` retains all original bindings in that same declaration order;
+`material()` remains the first binding for compatibility. `material_layer_ranges()`
+and the report's matching ranges disambiguate equal local element/layer IDs.
+The common generic fluid source type can be `&dyn FluidTransport` when the
+original models borrow different gas/liquid types. No averaged medium replaces
+those retained original sources.
+
+Memory blocks may be separated by other bodies' histories and supplied in the
+opposite order from native construction. Preparation admits disjoint ranges,
+sorts only heat addresses, and independently integrates all unbound gaps.
+It never sends a foreign constrained history's loss to a neighboring layer.
+Overlapping histories, repeated whole-cell inventory, missing receivers and
+insufficient aggregate group budgets refuse before the owner is returned.
+
+Mechanical connections and cross-body thermal conduction retain their original
+owners. The source network declares each conductive link's original material
+conductivities, endpoints, area and half-cell distances. Changing only the
+receiving body's conductivity can change its temperature and relaxation, then
+its reaction on the driving body. No heat transfer is inferred from a mechanical
+spring, and no mechanical joint is inferred from a thermal link.
+
+Each interval uses one complete mechanical step and one shared caloric residual.
+All bodies' endpoint source queries finish before ONE ordered native relaxation-
+time replacement. Every mechanical history, source snapshot and thermal cell
+publishes together. A late refusal cannot leave the driver at new conditions
+and the receiver at old ones. The source-only API
+`temperature::shared::set_layer_temperatures` uses the same batch proposal for
+prescribed multi-body conditions; the original single-source API delegates to it.
+
+The material heat cache remains aggregate and reuses the original full generator.
+One source query per binding per thermal trial is still required; changed times
+still rebuild the native operator and invalidate its heat cache. This is not a
+measured throughput improvement, an increase in solver capacity, or a stronger
+order of thermal integration. Fixed storage/geometry, fully solid caloric laws,
+first-order splitting and whole-layer thermal assumptions are unchanged.
+
+Three shared-condition and five shared-heat Rust regression groups are added.
+They cover reordered source blocks, native-condition parity, all-body rollback,
+disconnected controls, separate layer caloric balances, interior foreign memory,
+data-only receiver conductivity and aggregate admission. Existing single-body
+regressions exercise the same implementation. Native compilation, execution and
+rustfmt remain UNEXECUTED because this editing executor has no Rust/RCH/DSR;
+its toolchain download host could not be resolved. Exact source/patch checks do
+not replace native qualification.
+
+Independent dimensional equations ran four piecewise-condition cases and six
+shared-heating cases at four timestep resolutions. Maximum state difference
+against DOP853 in the prescribed cases was 6.81e-16 (normalized), with no boundary
+storage jump. The shared-heating maximum combined-energy discrepancy was
+2.31e-17 J; foreign internal histories agreed with constrained analytic decay
+within 1.83e-17. Changing only the receiver conductivity from zero to 1e-4 W/(m K)
+changed the driver's displacement by approximately -1.0664e-8 m in the synthetic
+fluid-loaded case. The receiving core warmed from approximately 300.000204 K
+to 300.343735 K. Refinement reduced errors against continuous coupled equations.
+These deliberately manufactured material/geometry/caloric values are NOT real-
+material predictions, native Rust execution or experimental validation.

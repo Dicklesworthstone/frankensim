@@ -175,3 +175,5 @@ fn missing_or_duplicate_layer_inventory_is_not_replaced_by_arbitrary_heat_fracti
         assert_eq!(heat.time_s(),0.0);
     });
 }
+
+mod shared;
