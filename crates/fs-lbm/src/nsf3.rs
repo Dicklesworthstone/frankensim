@@ -42,7 +42,9 @@
 //! With no volume source, total-energy conservation makes it equal the kinetic energy loss net of pressure
 //! work TERM BY TERM to round-off. Manufactured mass/momentum sources also do mechanical work; without a
 //! separately qualified source-work split, that signed remainder is reported as
-//! `unresolved_internal_exchange_j`, never as viscous heating. The exact total source supply is still
+//! `unresolved_internal_exchange_j`, never as viscous heating. A localized reservoir aperture also
+//! transports kinetic energy; its internal remainder uses that unresolved account until a separate
+//! reservoir-work split is qualified. The exact total source supply is still
 //! independently audited. These identities are bookkeeping, not evidence; the physical content of
 //! viscous heating is tested on a Taylor-Green vortex.
 //!
@@ -54,8 +56,9 @@
 //! never enabled by default. The optional open-axis boundary is a separately
 //! bounded local linear characteristic rung, not a qualified nonreflecting jet interface. Sound-speed dispersion is second order; see the
 //! battery.
-//! Prescribed reservoir ghost states are also available as a separate, mutually
-//! exclusive boundary mode; they do not preserve outgoing acoustic characteristics.
+//! Prescribed complete reservoir faces are a separate, mutually exclusive mode.
+//! A localized reservoir aperture may instead open a disjoint transverse wall
+//! of a characteristic zone. Neither preserves outgoing acoustic characteristics.
 
 use crate::lattice3::Lattice3;
 use core::fmt;
@@ -67,7 +70,7 @@ pub use material::{NsfGasMedium, ThermochemicalNsfGas};
 mod sgs;
 pub use sgs::{NsfSgsConfig, NsfSgsTransport};
 mod open;
-pub use open::NsfOpenState;
+pub use open::{NsfOpenState, NsfReservoirAperture};
 mod open_boundary;
 use open_boundary::{BoundaryFlux, IncomingPopulations, OpenFaces};
 pub use open_boundary::{
@@ -314,15 +317,17 @@ pub struct EnergyLedger {
     /// Viscous heating of the step [J] (defined from the budget, see the module note).
     /// With prescribed reservoir faces this remainder also includes kinetic-energy
     /// transport and is not an independent viscous-heating measurement. Zero for
-    /// a step with manufactured mass/momentum sources; see the unresolved account.
+    /// a step with manufactured mass/momentum sources or a localized reservoir
+    /// aperture; see the unresolved account.
     /// With SGS this remainder also includes modeled and numerical dissipation;
     /// it is not an independent measurement of molecular viscous heating.
     pub viscous_heating_j: f64,
-    /// Signed internal-energy remainder for manufactured mass/momentum sources [J].
+    /// Signed internal-energy remainder for mechanical sources or a localized reservoir [J].
     /// Includes physical/numerical dissipation and the unseparated mechanical
-    /// action of those sources after their total energy supply is removed.
+    /// action of those sources or reservoir kinetic transport after their total
+    /// energy supply is removed.
     /// It can be negative. It is neither heat nor a total-energy balancing credit.
-    /// Zero for source-free and heat-only steps.
+    /// Zero for source-free and heat-only steps without a localized aperture.
     pub unresolved_internal_exchange_j: f64,
     /// Reversible kinetic-to-internal exchange `-integral(p div u)` of the step [J].
     pub pressure_work_j: f64,
@@ -332,7 +337,7 @@ pub struct EnergyLedger {
     /// conduction and viscous work. Zero without characteristic boundaries.
     pub open_boundary_energy_j: f64,
     /// Total energy entering prescribed reservoir ghost faces [J].
-    /// Separate from characteristic-face energy; the two modes cannot coexist.
+    /// Separate from characteristic-face energy, including a localized side aperture.
     pub open_energy_j: f64,
     /// Total energy supplied by the volume source during this step [J].
     /// The exact trapezoid used by the energy update, in the medium's fixed
@@ -559,6 +564,8 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     characteristic_pressure_offset_pa: [Option<f64>; 2],
     open_faces: Option<OpenFaces>,
     reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
+    reservoir_aperture: Option<open::BoundReservoirAperture>,
+    last_reservoir_mass_out_kg: Option<f64>,
     open_out: BoundaryFlux,
     last_boundary_exchange: Option<[NsfBoundaryExchange; 2]>,
     steps: usize,
@@ -754,6 +761,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             characteristic_pressure_offset_pa: [None; 2],
             open_faces: None,
             reservoir_faces: [[None; 2]; 3],
+            reservoir_aperture: None,
+            last_reservoir_mass_out_kg: None,
             open_out: BoundaryFlux::default(),
             last_boundary_exchange: None,
             steps: 0,
@@ -875,6 +884,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         if !velocity.iter().all(|v| v.is_finite()) || velocity[axis] != 0.0 {
             return Err(NsfError::Input(
                 "a wall velocity must be finite and tangential to the wall",
+            ));
+        }
+        if self.reservoir_aperture.is_some() && velocity != [0.0; 3] {
+            return Err(NsfError::Input(
+                "a localized reservoir aperture requires stationary domain walls",
             ));
         }
         let speed =
@@ -1300,8 +1314,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             .at(x, self.spec.dims, side)[q]
                     }
                     None if !self.solid[self.index(y)] => post[self.index(y)][q],
-                    Some((a, side)) if self.reservoir_faces[a][side].is_some() => {
-                        let b = self.reservoir_faces[a][side].expect("guarded reservoir face");
+                    Some((a, side)) if self.reservoir_ghost(i, a, side).is_some()
+                        && self.reservoir_link_is_open(x, c, -1, a, side) => {
+                        let b = self.reservoir_ghost(i, a, side).expect("guarded reservoir boundary");
                         let (rho, mom) = raw_moments::<L>(&post[i]);
                         let local_u = mom.map(|m| m / rho);
                         // Post-collision populations carry rho*u + F/2. Extrapolate
@@ -1383,6 +1398,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let incoming = self.open_incoming_populations(&post, &rho0, &u0);
         let boundary_links = self.open_link_exchange(&post, incoming.as_ref());
         let mut next = self.stream(&post, incoming.as_ref());
+        let reservoir_mass_out_kg = self.reservoir_link_mass_out_kg(&post, &next);
+        if reservoir_mass_out_kg.is_some_and(|mass| !mass.is_finite()) {
+            return Err(NsfError::Input("reservoir aperture mass exchange overflowed"));
+        }
         if have_sources {
             for i in 0..n {
                 if !self.solid[i] {
@@ -1571,12 +1590,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 remainder - prescribed_in
             }
         };
+        // The characteristic remainder removes its internal-energy flux. A
+        // side reservoir has the original total-energy flux, so remove that
+        // exact supply too, retaining the unresolved kinetic-transport split.
+        // Do not change arithmetic for existing aperture-free grids.
+        let viscous = if self.reservoir_aperture.is_some() {
+            viscous - prescribed_in
+        } else {
+            viscous
+        };
         let remainder = if source_in == 0.0 {
             viscous
         } else {
             viscous - source_in
         };
-        let (viscous, unresolved) = if source_carries_mechanics {
+        let (viscous, unresolved) = if source_carries_mechanics || self.reservoir_aperture.is_some() {
             (0.0, remainder)
         } else {
             (remainder, 0.0)
@@ -1629,6 +1657,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.open_out = open1;
         self.open_faces = faces1;
         self.last_boundary_exchange = boundary_exchange;
+        self.last_reservoir_mass_out_kg = reservoir_mass_out_kg;
         self.steps += 1;
         self.cumulative.viscous_heating_j += ledger.viscous_heating_j;
         self.cumulative.unresolved_internal_exchange_j += ledger.unresolved_internal_exchange_j;

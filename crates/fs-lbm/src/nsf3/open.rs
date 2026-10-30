@@ -26,6 +26,26 @@ pub struct NsfOpenState {
     pub temperature_k: f64,
 }
 
+/// A finite set of boundary-face tiles connected to one prescribed reservoir.
+///
+/// `cells` names the adjacent fluid cells, all on the selected domain face.
+/// Each tile has area `dx^2`. The reservoir shares the grid's material law;
+/// it does not introduce an independent gas composition or an acoustic load.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NsfReservoirAperture {
+    pub axis: usize,
+    pub high: bool,
+    pub cells: Vec<[usize; 3]>,
+    pub state: NsfOpenState,
+}
+
+#[derive(Clone)]
+pub(super) struct BoundReservoirAperture {
+    pub source: NsfReservoirAperture,
+    indices: Vec<usize>,
+    ghost: OpenGhost,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct OpenGhost {
     pub rho: f64,
@@ -35,6 +55,133 @@ pub(super) struct OpenGhost {
 }
 
 impl<L: Lattice3<27>> NsfGrid3<L> {
+    /// Open one localized reservoir aperture on a stationary transverse wall
+    /// of an already attached characteristic axis, before the first step.
+    ///
+    /// Tiles must be unique fluid cells, away from other domain edges and the
+    /// two-cell characteristic collars. Their one-cell interior/tangential
+    /// halo must also be fluid. Thus a lattice link never intersects this
+    /// aperture and a characteristic face or internal solid simultaneously.
+    /// A diagonal crossing exactly on an aperture/wall tile edge belongs to
+    /// the wall unless every incident tile is open. Streaming uses this rule
+    /// for both directions of the same link; no axis-order corner choice is
+    /// introduced. Normal finite-volume fluxes retain their original tile area.
+    ///
+    /// Incoming populations, thermal-pressure force and enthalpy/conduction
+    /// use the original prescribed-ghost law. Its signed energy is reported in
+    /// `EnergyLedger::open_energy_j`, separately from characteristic exchange.
+    /// The full Guo force chart is rebased without changing physical cell
+    /// density, velocity or energy. Only one aperture is admitted, with at most
+    /// the grid's declared cell count; no dense extra grid is allocated.
+    ///
+    /// This is a prescribed reservoir, not a transparent acoustic boundary,
+    /// finite gas inventory, qualified aperture-edge scheme or flute model.
+    pub fn with_reservoir_aperture(
+        mut self,
+        source: NsfReservoirAperture,
+    ) -> Result<Self, NsfError> {
+        let open = self.open.ok_or(NsfError::Input(
+            "a localized reservoir aperture requires an attached characteristic axis",
+        ))?;
+        if self.steps != 0 || self.reservoir_aperture.is_some() || self.sources.is_some()
+            || self.sgs.is_some() || self.moving_walls
+            || self.reservoir_faces.iter().flatten().any(Option::is_some)
+        {
+            return Err(NsfError::Input(
+                "one reservoir aperture requires a cold molecular grid with stationary boundaries",
+            ));
+        }
+        if source.axis >= 3 || source.axis == open.axis || self.spec.periodic[source.axis]
+            || self.spec.dims[source.axis] < 2
+            || source.cells.is_empty() || source.cells.len() > self.n
+        {
+            return Err(NsfError::Input(
+                "reservoir aperture needs bounded nonempty tiles on a transverse non-periodic face",
+            ));
+        }
+        let plane = if source.high { self.spec.dims[source.axis] - 1 } else { 0 };
+        let mut indices = Vec::with_capacity(source.cells.len());
+        for &x in &source.cells {
+            if x.iter().zip(self.spec.dims).any(|(&v, n)| v >= n)
+                || x[source.axis] != plane
+                || x[open.axis] < 2 || x[open.axis] >= self.spec.dims[open.axis] - 2
+                || (0..3).any(|a| a != source.axis && (x[a] == 0 || x[a] + 1 >= self.spec.dims[a]))
+            {
+                return Err(NsfError::Input(
+                    "reservoir aperture tiles must avoid domain corners and characteristic collars",
+                ));
+            }
+            // The ghost extrapolation has no solid/open junction rule. Admit
+            // the local two-layer fluid collar explicitly instead of allowing
+            // a diagonal population to bypass an interior obstacle.
+            for da in -1..=1 {
+                for db in -1..=1 {
+                    for depth in 0..=1 {
+                        let mut y = x;
+                        let a = (source.axis + 1) % 3;
+                        let b = (source.axis + 2) % 3;
+                        y[a] = (y[a] as isize + da) as usize;
+                        y[b] = (y[b] as isize + db) as usize;
+                        y[source.axis] = if source.high { plane - depth } else { depth };
+                        if self.solid[self.index(y)] {
+                            return Err(NsfError::Input(
+                                "reservoir aperture requires a fluid interior and tangential collar",
+                            ));
+                        }
+                    }
+                }
+            }
+            indices.push(self.index(x));
+        }
+        indices.sort_unstable();
+        if indices.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(NsfError::Input("reservoir aperture tiles must be unique"));
+        }
+        let ghost = self.admit_open_state(source.state)?;
+        self.reservoir_aperture = Some(BoundReservoirAperture { source, indices, ghost });
+        self.last_reservoir_mass_out_kg = Some(0.0);
+        let drives = self.boundary_drives().expect("admitted characteristic axis");
+        self.set_boundary_drives(drives)?;
+        Ok(self)
+    }
+
+    /// Original aperture geometry and physical reservoir state, if attached.
+    #[must_use]
+    pub fn reservoir_aperture(&self) -> Option<&NsfReservoirAperture> {
+        self.reservoir_aperture.as_ref().map(|bound| &bound.source)
+    }
+
+    /// Actual streamed mass leaving the localized reservoir aperture in the
+    /// last accepted step [kg]. Positive is outward; `None` means no aperture.
+    /// Zero before the first step. Counted from original population links,
+    /// independently of whole-grid storage and the characteristic-face accounts.
+    #[must_use]
+    pub const fn last_reservoir_mass_out_kg(&self) -> Option<f64> {
+        self.last_reservoir_mass_out_kg
+    }
+
+    pub(super) fn reservoir_link_mass_out_kg(
+        &self, post: &[[f64; 27]], streamed: &[[f64; 27]],
+    ) -> Option<f64> {
+        let aperture = self.reservoir_aperture.as_ref()?;
+        let axis = aperture.source.axis;
+        let side = usize::from(aperture.source.high);
+        let normal = if aperture.source.high { 1 } else { -1 };
+        let mut out = 0.0;
+        // Sparse indices are sorted at admission: tile input order and worker
+        // scheduling cannot change the reduction. Use the same half-link
+        // ownership as streaming, and its actual incoming population value.
+        for &i in &aperture.indices {
+            let x = self.at(i);
+            for (q, c) in L::E.iter().copied().enumerate() {
+                if c[axis] == normal && self.reservoir_link_is_open(x, c, 1, axis, side) {
+                    out += post[i][q] - streamed[i][L::OPP[q]];
+                }
+            }
+        }
+        Some(out * self.law.rho_ref_kg_m3 * self.law.dx_m.powi(3))
+    }
+
     /// Replace one non-periodic face with a prescribed exterior state.
     /// `None` restores its stationary wall. Solid cells remain solid.
     ///
@@ -177,10 +324,48 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     pub(super) fn open_at(&self, i: usize, axis: usize, direction: i64) -> Option<OpenGhost> {
         if self.shifted(self.at(i), axis, direction).is_none() {
-            self.reservoir_faces[axis][usize::from(direction > 0)]
+            self.reservoir_ghost(i, axis, usize::from(direction > 0))
         } else {
             None
         }
+    }
+
+    pub(super) fn reservoir_ghost(&self, i: usize, axis: usize, side: usize) -> Option<OpenGhost> {
+        if let Some(ghost) = self.reservoir_faces[axis][side] {
+            return Some(ghost);
+        }
+        let aperture = self.reservoir_aperture.as_ref()?;
+        (aperture.source.axis == axis && usize::from(aperture.source.high) == side
+            && aperture.indices.binary_search(&i).is_ok()).then_some(aperture.ghost)
+    }
+
+    /// Wall precedence at the geometric half-link intersection. A tangential
+    /// half-cell coordinate touches two tiles (four for a corner diagonal);
+    /// each must be part of the same aperture. Reversing the link and its
+    /// direction leaves this intersection and its ownership unchanged.
+    pub(super) fn reservoir_link_is_open(
+        &self, x: [usize; 3], c: [i32; 3], direction: i32, axis: usize, side: usize,
+    ) -> bool {
+        if self.reservoir_faces[axis][side].is_some() {
+            return true;
+        }
+        let Some(aperture) = self.reservoir_aperture.as_ref() else { return false; };
+        if aperture.source.axis != axis || usize::from(aperture.source.high) != side {
+            return false;
+        }
+        let axes = [(axis + 1) % 3, (axis + 2) % 3];
+        for mask in 0..4 {
+            let mut y = x;
+            for (bit, &a) in axes.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    let next = x[a] as i64 + i64::from(direction) * i64::from(c[a]);
+                    if next < 0 || next >= self.spec.dims[a] as i64 { return false; }
+                    y[a] = next as usize;
+                }
+            }
+            if aperture.indices.binary_search(&self.index(y)).is_err() { return false; }
+        }
+        true
     }
 }
 
@@ -188,7 +373,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 mod tests {
     use super::*;
     use crate::d3q27::D3q27;
-    use crate::nsf3::{MAX_QUALIFIED_MACH, NsfSpec, WallThermal};
+    use crate::nsf3::{MAX_QUALIFIED_MACH, NsfCharacteristicAxis, NsfCharacteristicBoundary,
+        NsfSpec, WallThermal};
     use fs_material::gas::{GasSpec, GasState};
 
     fn spec(axis: usize, workers: usize) -> NsfSpec {
@@ -240,6 +426,239 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn aperture_grid(axis: usize, workers: usize) -> NsfGrid3<D3q27> {
+        let mut s = spec(axis, workers);
+        s.dims = [9; 3];
+        s.maximum_cells = 9usize.pow(3);
+        s.periodic = [false; 3];
+        NsfGrid3::new(s, |_| false, |_| (1.0, [0.0; 3], 293.15))
+            .unwrap()
+            .with_characteristic_axis(NsfCharacteristicAxis {
+                axis,
+                faces: [NsfCharacteristicBoundary {
+                    reference_pressure_pa: 101325.0,
+                    reference_temperature_k: 293.15,
+                    reference_velocity_m_s: [0.0; 3],
+                    incoming_characteristic_m_s: 0.0,
+                }; 2],
+                maximum_relative_perturbation: 0.05,
+            })
+            .unwrap()
+    }
+
+    fn aperture(axis: usize, high: bool, temperature_k: f64) -> NsfReservoirAperture {
+        let mut cells = Vec::new();
+        for a in 3..=5 {
+            for b in 3..=5 {
+                let mut x = [0; 3];
+                x[axis] = if high { 8 } else { 0 };
+                x[(axis + 1) % 3] = a;
+                x[(axis + 2) % 3] = b;
+                cells.push(x);
+            }
+        }
+        NsfReservoirAperture { axis, high, cells, state: state([0.0; 3], temperature_k) }
+    }
+
+    #[test]
+    fn g0_reservoir_aperture_preserves_equilibrium_all_transverse_faces() {
+        for characteristic_axis in 0..3 {
+            for axis in 0..3 {
+                if axis == characteristic_axis { continue; }
+                for high in [false, true] {
+                    let source = aperture(axis, high, 293.15);
+                    let mut grid = aperture_grid(characteristic_axis, 1)
+                        .with_reservoir_aperture(source.clone()).unwrap();
+                    assert_eq!(grid.reservoir_aperture(), Some(&source));
+                    let before = grid.total_energy_j();
+                    for _ in 0..4 {
+                        let ledger = grid.step().unwrap();
+                        assert!(ledger.residual_rel < 2e-12, "{ledger:?}");
+                    }
+                    for i in 0..grid.n {
+                        let (rho, u, temperature) = grid.cell(grid.at(i));
+                        assert!((rho - 1.0).abs() < 2e-13, "axis={axis} high={high} rho={rho}");
+                        assert!(u.iter().all(|v| v.abs() < 2e-13));
+                        assert!((temperature / 293.15 - 1.0).abs() < 2e-13);
+                    }
+                    assert!((grid.total_energy_j() / before - 1.0).abs() < 2e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_reservoir_aperture_diagonal_edges_keep_wall_ownership() {
+        for axis in 0..3 {
+            for high in [false, true] {
+                let source = aperture(axis, high, 293.15);
+                let grid = aperture_grid((axis + 1) % 3, 1)
+                    .with_reservoir_aperture(source).unwrap();
+                let mut centre = [4; 3];
+                centre[axis] = if high { 8 } else { 0 };
+                let mut edge = centre;
+                edge[(axis + 1) % 3] = 3;
+                let mut corner = edge;
+                corner[(axis + 2) % 3] = 3;
+                let side = usize::from(high);
+                for x in [centre, edge, corner] {
+                    for c in D3q27::E {
+                        if c[axis] != if high { -1 } else { 1 } { continue; }
+                        let expected = (0..3).filter(|&a| a != axis)
+                            .all(|a| (3..=5).contains(&(x[a] as i32 - c[a])));
+                        let owned = grid.reservoir_link_is_open(x, c, -1, axis, side);
+                        assert_eq!(owned, expected, "axis={axis} high={high} x={x:?} c={c:?}");
+                        assert_eq!(owned, grid.reservoir_link_is_open(
+                            x, c.map(|v| -v), 1, axis, side));
+                    }
+                }
+                // Exercise the real streamer, with distinguishable opposite
+                // populations. A diagonal crossing the aperture edge must
+                // bounce back; a wholly open diagonal uses the original ghost.
+                // A third-order xyz mode has zero mass and momentum but
+                // opposite signs on opposite corner populations.
+                let post: Vec<_> = (0..grid.n).map(|_| std::array::from_fn(|q| {
+                    let [x, y, z] = D3q27::E[q];
+                    D3q27::W[q] * (1.0 + 1e-3 * f64::from(x * y * z))
+                })).collect();
+                let (rho, mom) = grid.macro_fields(&grid.f);
+                let u = grid.velocity_field(&rho, &mom, &grid.force);
+                let incoming = grid.open_incoming_populations(&post, &rho, &u);
+                let streamed = grid.stream(&post, incoming.as_ref());
+                let i = grid.index(edge);
+                for (q, c) in D3q27::E.iter().copied().enumerate() {
+                    if c[axis] != if high { -1 } else { 1 } { continue; }
+                    if grid.reservoir_link_is_open(edge, c, -1, axis, side) {
+                        // At a matched rest ghost, the extrapolated equilibrium
+                        // difference vanishes and the local post population stays.
+                        assert!((streamed[i][q] - post[i][q]).abs() < 1e-15);
+                    } else {
+                        assert_eq!(streamed[i][q], post[i][D3q27::OPP[q]]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_reservoir_aperture_heat_uses_original_flux_and_separate_ledger() {
+        let mut grid = aperture_grid(0, 1);
+        let cells: Vec<_> = (0..grid.n).map(|i| grid.cell(grid.at(i))).collect();
+        let before = grid.total_energy_j();
+        let mass_before = grid.total_mass_kg();
+        grid = grid.with_reservoir_aperture(aperture(1, false, 293.35)).unwrap();
+        assert_eq!(grid.total_energy_j(), before);
+        for (i, expected) in cells.iter().enumerate() {
+            let actual = grid.cell(grid.at(i));
+            assert!((actual.0 - expected.0).abs() < 2e-14);
+            assert_eq!(actual.2, expected.2);
+            for a in 0..3 { assert!((actual.1[a] - expected.1[a]).abs() < 2e-14); }
+        }
+        let mut mass_out = 0.0;
+        let mut reservoir_mass_out = 0.0;
+        for _ in 0..12 {
+            let ledger = grid.step().unwrap();
+            assert_eq!(ledger.wall_heat_j, 0.0);
+            assert_eq!(ledger.viscous_heating_j, 0.0);
+            assert!(ledger.residual_rel < 2e-12, "{ledger:?}");
+            let aperture_mass = grid.last_reservoir_mass_out_kg().unwrap();
+            reservoir_mass_out += aperture_mass;
+            mass_out += aperture_mass + grid.last_boundary_exchange().unwrap()
+                .iter().map(|face| face.mass_out_kg).sum::<f64>();
+        }
+        let ledger = grid.cumulative_ledger();
+        assert!(ledger.open_energy_j > 0.0, "{ledger:?}");
+        assert!(grid.cell([4, 0, 4]).2 > 293.15);
+        let error = grid.total_energy_j() - before
+            - ledger.open_energy_j - ledger.open_boundary_energy_j - ledger.wall_heat_j;
+        assert!(error.abs() / before < 2e-12, "{ledger:?} error={error:e}");
+        let mass_error = grid.total_mass_kg() - mass_before + mass_out;
+        assert!(mass_error.abs() / mass_before < 2e-12, "mass_error={mass_error:e}");
+        assert!(reservoir_mass_out.abs() > 1e-12 * mass_before);
+        let mut sealed = aperture_grid(0, 1);
+        for _ in 0..12 { sealed.step().unwrap(); }
+        assert!(grid.cell([4, 0, 4]).2 > sealed.cell([4, 0, 4]).2 + 1e-4);
+    }
+
+    #[test]
+    fn g0_reservoir_aperture_trials_cancel_repeat_and_accept_exactly() {
+        let source = aperture(1, false, 293.35);
+        let mut grid = aperture_grid(0, 1).with_reservoir_aperture(source.clone()).unwrap();
+        let before = (grid.state_hash(), grid.steps(), grid.cumulative_ledger(),
+            grid.last_reservoir_mass_out_kg());
+        let drives = grid.boundary_drives().unwrap();
+        let mut candidate_hash = 0;
+        let mut candidate_ledger = None;
+        let mut candidate_mass = None;
+        for _ in 0..2 {
+            let trial = grid.preview_boundary_interval(drives, 3, 3 * 729, || false).unwrap();
+            assert_eq!(trial.grid().reservoir_aperture(), Some(&source));
+            if let Some(expected) = candidate_ledger {
+                assert_eq!(*trial.energy_ledger(), expected);
+                assert_eq!(trial.grid().state_hash(), candidate_hash);
+                assert_eq!(Some(trial.reservoir_mass_out_kg()), candidate_mass);
+            }
+            candidate_hash = trial.grid().state_hash();
+            candidate_ledger = Some(*trial.energy_ledger());
+            candidate_mass = Some(trial.reservoir_mass_out_kg());
+            drop(trial);
+            assert_eq!((grid.state_hash(), grid.steps(), grid.cumulative_ledger(),
+                grid.last_reservoir_mass_out_kg()), before);
+            assert_eq!(grid.reservoir_aperture(), Some(&source));
+        }
+        let calls = std::cell::Cell::new(0);
+        assert!(grid.preview_boundary_interval(drives, 3, 3 * 729, || {
+            calls.set(calls.get() + 1);
+            calls.get() == 3
+        }).is_err());
+        assert_eq!((grid.state_hash(), grid.steps(), grid.cumulative_ledger(),
+            grid.last_reservoir_mass_out_kg()), before);
+        grid.preview_boundary_interval(drives, 3, 3 * 729, || false).unwrap().accept();
+        assert_eq!(grid.state_hash(), candidate_hash);
+        assert_eq!(grid.steps(), 3);
+        assert_eq!(grid.reservoir_aperture(), Some(&source));
+        assert!(candidate_ledger.unwrap().open_energy_j > 0.0);
+    }
+
+    #[test]
+    fn g0_reservoir_aperture_refuses_ambiguous_topology_and_warm_attachment() {
+        let valid = aperture(1, false, 293.15);
+        let mut bad_sources = vec![aperture(0, false, 293.15)];
+        let mut duplicate = valid.clone();
+        duplicate.cells.push(duplicate.cells[0]);
+        bad_sources.push(duplicate);
+        for cell in [[1, 0, 4], [4, 0, 0], [4, 1, 4], [9, 0, 4]] {
+            let mut invalid = valid.clone(); invalid.cells = vec![cell]; bad_sources.push(invalid);
+        }
+        let mut empty = valid.clone(); empty.cells.clear(); bad_sources.push(empty);
+        let mut hot = valid.clone(); hot.state.temperature_k = 400.0; bad_sources.push(hot);
+        for source in bad_sources {
+            assert!(aperture_grid(0, 1).with_reservoir_aperture(source).is_err());
+        }
+        assert!(uniform(0, 1, state([0.0; 3], 293.15))
+            .with_reservoir_aperture(valid.clone()).is_err());
+        let mut grid = aperture_grid(0, 1); grid.step().unwrap();
+        assert!(grid.with_reservoir_aperture(valid.clone()).is_err());
+        let mut grid = aperture_grid(0, 1).with_reservoir_aperture(valid.clone()).unwrap();
+        let before = grid.state_hash();
+        assert!(grid.set_edge_velocity(2, false, [0.001, 0.0, 0.0]).is_err());
+        assert!(grid.set_open_face(1, true, Some(valid.state)).is_err());
+        assert_eq!(grid.state_hash(), before);
+        assert!(grid.with_reservoir_aperture(valid).is_err());
+    }
+
+    #[test]
+    fn g0_reservoir_aperture_is_worker_count_invariant() {
+        let mut results = Vec::new();
+        for workers in [1, 3] {
+            let mut grid = aperture_grid(0, workers)
+                .with_reservoir_aperture(aperture(1, false, 293.35)).unwrap();
+            for _ in 0..8 { grid.step().unwrap(); }
+            results.push((grid.state_hash(), grid.cumulative_ledger()));
+        }
+        assert_eq!(results[0], results[1]);
     }
 
     #[test]

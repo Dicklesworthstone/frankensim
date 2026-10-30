@@ -15,6 +15,7 @@ pub struct NsfCharacteristicTrial<'a, L: Lattice3<27>> {
     ledger: EnergyLedger,
     mass_before_kg: f64,
     energy_before_j: f64,
+    reservoir_mass_out_kg: f64,
 }
 
 impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
@@ -30,6 +31,10 @@ impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
     pub const fn previous_mass_kg(&self) -> f64 { self.mass_before_kg }
     /// Accepted sensible-chart total energy before the trial [J].
     pub const fn previous_energy_j(&self) -> f64 { self.energy_before_j }
+    /// Original streamed mass leaving the localized reservoir aperture over
+    /// this interval [kg], independently counted from characteristic exchange.
+    /// Zero when no aperture is attached.
+    pub const fn reservoir_mass_out_kg(&self) -> f64 { self.reservoir_mass_out_kg }
     /// Publish the already admitted complete candidate. No fallible work follows.
     pub fn accept(self) { *self.owner = self.candidate; }
 }
@@ -79,11 +84,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         candidate.set_boundary_drives(drives)?;
         let mut exchange = [NsfBoundaryExchange::default(); 2];
         let mut ledger = EnergyLedger::default();
+        let mut reservoir_mass_out_kg = 0.0;
         for _ in 0..steps {
             if cancelled() {
                 return Err(NsfError::Input("characteristic interval cancelled"));
             }
             let step = candidate.step()?;
+            reservoir_mass_out_kg += candidate.last_reservoir_mass_out_kg().unwrap_or(0.0);
             ledger.internal_j = step.internal_j;
             ledger.kinetic_j = step.kinetic_j;
             ledger.viscous_heating_j += step.viscous_heating_j;
@@ -124,7 +131,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ledger.internal_j, ledger.kinetic_j, ledger.viscous_heating_j,
                 ledger.unresolved_internal_exchange_j, ledger.pressure_work_j,
                 ledger.wall_heat_j, ledger.open_boundary_energy_j,
-                ledger.open_energy_j, ledger.source_energy_j, ledger.residual_rel]
+                ledger.open_energy_j, ledger.source_energy_j, ledger.residual_rel,
+                reservoir_mass_out_kg]
                 .iter().all(|x| x.is_finite())
         {
             return Err(NsfError::Input("characteristic interval exchange overflowed"));
@@ -134,6 +142,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         Ok(NsfCharacteristicTrial {
             owner: self, candidate, exchange, ledger, mass_before_kg, energy_before_j,
+            reservoir_mass_out_kg,
         })
     }
 
@@ -149,6 +158,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             characteristic_pressure_offset_pa: self.characteristic_pressure_offset_pa,
             open_faces: self.open_faces.clone(),
             reservoir_faces: self.reservoir_faces, open_out: self.open_out,
+            reservoir_aperture: self.reservoir_aperture.clone(),
+            last_reservoir_mass_out_kg: self.last_reservoir_mass_out_kg,
             last_boundary_exchange: self.last_boundary_exchange, steps: self.steps,
             cumulative: self.cumulative, edge_velocity: self.edge_velocity,
             moving_walls: self.moving_walls, sources: None, src_now: self.src_now.clone(),
