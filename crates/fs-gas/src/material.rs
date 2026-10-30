@@ -5,6 +5,10 @@
 //! original mass, volume and total internal energy. Transport and acoustics use
 //! those same products and sources. No additional reaction heat is applied.
 
+/// Shared material-card viscosity/conductivity in conservative gas transport.
+#[cfg(feature = "experimental-euler")]
+pub mod transport;
+
 use crate::chemistry::{
     IsochoricKineticsError, IsochoricKineticsResult, IsochoricKineticsSolve,
     advance_adiabatic_energy,

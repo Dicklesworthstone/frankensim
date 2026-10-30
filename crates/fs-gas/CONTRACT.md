@@ -295,6 +295,63 @@ not add species advection or chemistry/flow splitting to that field. Neither
 path supplies diffusion flames, generic third-body/falloff mechanisms, spray,
 knock, real-gas phases, moving volumes or a validated ignition model.
 
+### Material cards in the shared molecular transport law
+
+With both `material` and `experimental-euler` enabled,
+`material::transport::MaterialTransport<L>` implements the existing
+`multicomponent::dissipation::TransportLaw`. This connects the original
+`ThermochemicalGasModel` transport cards to every consumer of that shared law,
+including molecular species flow, reacting flow, finite-plenum networks and
+the frozen Cartesian `fs-flux` consumer. No separate mixture formula or Euler
+material registry is introduced.
+
+Coefficient ownership is explicit: the original material evaluator supplies
+viscosity and thermal conductivity using its source selection and Wilke/WMS
+owners; the separately supplied `L` supplies only the complete canonical
+binary-diffusivity matrix; bulk viscosity is an explicit nonnegative input.
+The scalar coefficients returned by `L` are deliberately unused and never
+serve as missing-card fallbacks. Pair transport retains its own source domains
+and refusal behavior. Material cards do not imply binary diffusivity or bulk
+viscosity. Admission compares the entire original NASA-9 species models, not
+their labels, and requires the material bank to cover the complete pair axis.
+
+The adapter retains the original material bank, cards, selection policies,
+water/pack identities, complete external `QueryPoint`, and binary law. Each
+actual face temperature and pressure replaces only those two coordinates in
+the query, with canonical absolute-temperature/pressure meanings. Other axes
+and their quantity conventions remain unchanged. Exactly normalized canonical
+mole fractions pass through the original `with_composition` owner unchanged.
+Native conservative faces may close a compensated sum while their canonical
+ordered sum differs from one by roundoff. Only the native `64*epsilon*n`
+unit-sum envelope is admitted; the original `with_mole_amounts` generated-simplex
+owner reconciles those values. The actual resulting canonical fractions are
+then supplied to BOTH material and pair-transport owners. Genuinely nonunit
+inputs refuse. Exact-zero species are omitted from material queries; no trace
+floor makes an absent species appear. The full pair matrix remains present because the
+original diffusion owner supports evolution into those species. A newly active
+species must have its real transport card support at the actual state.
+
+`resolve` exposes the original resolved material state and query receipts for
+the same face inputs. Source dimension/state admission precedes both material
+and diffusion queries. The caller's binary output is copied only after complete
+material resolution, successful original pair evaluation, shared matrix
+validation and a final cancellation poll. Failed or cancelled evaluations leave
+that output unchanged. Material refusals remain structured as
+`DissipationError::Material(MaterialError)`, including through the existing
+reacting-flow transaction. The adapter contains no accepted fluid state.
+
+The original material resolver allocates and evaluates source cards at each
+call; this path does not inherit the allocation-free claim of `KineticTransport`.
+Five focused G0/G1/G3/G4 tests exercise complete query/source retention, zero
+species, coefficient ownership, independent Fourier/viscous mode responses to
+data-only card changes, no-query input admission, late output cancellation and
+binary refusal, canonical three-active-species/one-zero roundoff reconciliation
+through the same material and binary composition, and whole reacting-flow rollback when a new product's card
+cannot support the final temperature. Fixtures are manufactured engineering
+data, not measured gas validation. Existing source domains, neutral ideal-gas
+assumptions, diffusion omissions and each consuming solver's numerical limits
+remain in force.
+
 ## Reusable finite-rate reactor for cell-wise chemistry
 
 `chemistry::IsochoricReactor` owns one original immutable kinetic mechanism and

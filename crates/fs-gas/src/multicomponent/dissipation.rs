@@ -13,6 +13,8 @@ mod law;
 pub use law::{
     ConstantTransport, KineticTransport, TransportCoefficients, TransportDomain, TransportLaw,
 };
+#[cfg(feature = "material")]
+pub(crate) use law::validate_binary;
 
 use super::{
     Boundaries, Boundary, Error as FlowError, MAX_COMPONENTS, Mesh1d, MixtureEuler1d, MixtureGas,
@@ -110,6 +112,9 @@ pub enum DissipationError {
     MaxwellStefan(MaxwellStefanErrorV1),
     /// Original kinetic transport-property owner refused.
     Kinetic(KineticTransportErrorV1),
+    /// Original source-card material resolver refused the actual face state.
+    #[cfg(feature = "material")]
+    Material(fs_material::MaterialError),
     /// An accepted-stage parabolic estimate exceeds its declared bound.
     ParabolicNumber { observed: f64, maximum: f64 },
     /// Complete requested evolution exceeded its bounded attempt count.

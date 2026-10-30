@@ -22,6 +22,9 @@ use fs_thermochem::{
     UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R, required_nasa9_parameter_dims,
 };
 
+#[cfg(feature = "experimental-euler")]
+mod transport;
+
 fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()
 }

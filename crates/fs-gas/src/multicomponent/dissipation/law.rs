@@ -235,7 +235,7 @@ impl TransportLaw for KineticTransport {
     }
 }
 
-pub(super) fn validate_binary(d: &[f64], n: usize) -> Result<f64, DissipationError> {
+pub(crate) fn validate_binary(d: &[f64], n: usize) -> Result<f64, DissipationError> {
     if d.len() != n * n {
         return Err(DissipationError::Invalid("binary diffusivity dimensions"));
     }
