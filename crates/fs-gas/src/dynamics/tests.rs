@@ -116,6 +116,9 @@ mod geometry_tests;
 #[path = "normal_flux_tests.rs"]
 mod normal_flux_tests;
 
+#[path = "spatial_flux_tests.rs"]
+mod spatial_flux_tests;
+
 #[test]
 fn g0_source_energy_gauge_variable_cv_and_supersonic_round_trip() {
     let ordinary = gas(0.4, 0.0);

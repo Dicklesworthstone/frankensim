@@ -1,5 +1,22 @@
 use super::{Conserved, Error, FrozenGas, Primitive, poll, positive};
 
+mod spatial;
+pub use spatial::{SpatialConserved, SpatialFaceFlux, SpatialPrimitive};
+
+// The component count is fixed at monomorphization: [rho, rho*u_n,
+// rho*u_t..., E]. Planar and volumetric faces use this same numerical kernel.
+trait Trace<const N: usize>: Copy {
+    fn array(self) -> [f64; N];
+    fn from_array(values: [f64; N]) -> Self;
+    fn normal_state(self) -> Conserved;
+}
+
+struct NumericalFlux<const N: usize> {
+    values: [f64; N],
+    signal_speed: f64,
+    used_hll_fallback: bool,
+}
+
 /// One shared oriented face flux, per unit cross-sectional area.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FaceFlux {
@@ -77,6 +94,18 @@ impl NormalConserved {
     }
 }
 
+impl Trace<4> for NormalConserved {
+    fn array(self) -> [f64; 4] {
+        self.array()
+    }
+    fn from_array(values: [f64; 4]) -> Self {
+        Self::from_array(values)
+    }
+    fn normal_state(self) -> Conserved {
+        self.normal_state()
+    }
+}
+
 /// Reconstructed planar trace; all caloric properties remain source-computed.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NormalPrimitive {
@@ -113,6 +142,19 @@ impl From<NormalFaceFlux> for FaceFlux {
             mass: f.mass,
             momentum: f.normal_momentum,
             energy: f.energy,
+            signal_speed: f.signal_speed,
+            used_hll_fallback: f.used_hll_fallback,
+        }
+    }
+}
+
+impl From<NumericalFlux<4>> for NormalFaceFlux {
+    fn from(f: NumericalFlux<4>) -> Self {
+        Self {
+            mass: f.values[0],
+            normal_momentum: f.values[1],
+            transverse_momentum: f.values[2],
+            energy: f.values[3],
             signal_speed: f.signal_speed,
             used_hll_fallback: f.used_hll_fallback,
         }
@@ -160,22 +202,11 @@ impl FrozenGas {
             transverse_momentum: density * transverse_velocity,
             energy: normal.energy + density * (0.5 * transverse_velocity * transverse_velocity),
         };
-        let reduced = q.normal_state();
-        let recovered_velocity = reduced.momentum / reduced.density;
-        let recovered_energy =
-            reduced.energy / reduced.density - 0.5 * recovered_velocity * recovered_velocity;
-        let expected_energy = self.sensible(primitive.temperature)?;
-        let domain = self.domain();
-        let tolerance = domain.absolute_energy_tolerance
-            + domain.relative_energy_tolerance * expected_energy.abs();
-        if !self.admissible_normal_state(q)
-            || (recovered_energy - expected_energy).abs() > tolerance
-        {
-            return Err(Error::Invalid(
-                "planar conservative state cannot retain the declared caloric precision",
-            ));
-        }
-        Ok((q, primitive))
+        self.admit_trace_precision(
+            q,
+            primitive,
+            "planar conservative state cannot retain the declared caloric precision",
+        )
     }
 
     /// Decode a planar trace through the original caloric source.
@@ -187,11 +218,7 @@ impl FrozenGas {
         state: NormalConserved,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Primitive, Error> {
-        poll(&mut cancelled)?;
-        if !state.array().iter().all(|x| x.is_finite()) || !positive(state.density) {
-            return Err(Error::Invalid("invalid planar conservative state"));
-        }
-        self.decode(state.normal_state(), None, &mut cancelled)
+        self.decode_trace(state, "invalid planar conservative state", &mut cancelled)
     }
 
     /// HLLC flux for a planar face, with full-energy HLL fallback admission.
@@ -267,21 +294,61 @@ impl FrozenGas {
         outward_normal: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NormalFaceFlux, Error> {
-        let wall = self.wall_flux(state.normal_state(), primitive, outward_normal, cancelled)?;
-        Ok(NormalFaceFlux {
-            mass: 0.0,
-            normal_momentum: wall.momentum,
-            transverse_momentum: 0.0,
-            energy: 0.0,
-            signal_speed: wall.signal_speed,
-            used_hll_fallback: false,
-        })
+        self.trace_wall_interface(state, primitive, outward_normal, cancelled)
+            .map(NormalFaceFlux::from)
     }
 
-    fn admissible_normal_state(&self, state: NormalConserved) -> bool {
+    fn admissible_trace<const N: usize>(&self, state: impl Trace<N>) -> bool {
         state.array().iter().all(|x| x.is_finite())
-            && positive(state.density)
+            && positive(state.array()[0])
             && self.admissible_state(state.normal_state())
+    }
+
+    fn admit_trace_precision<const N: usize, Q: Trace<N>>(
+        &self,
+        state: Q,
+        primitive: Primitive,
+        reason: &'static str,
+    ) -> Result<(Q, Primitive), Error> {
+        let reduced = state.normal_state();
+        let recovered_velocity = reduced.momentum / reduced.density;
+        let recovered_energy =
+            reduced.energy / reduced.density - 0.5 * recovered_velocity * recovered_velocity;
+        let expected_energy = self.sensible(primitive.temperature)?;
+        let domain = self.domain();
+        let tolerance = domain.absolute_energy_tolerance
+            + domain.relative_energy_tolerance * expected_energy.abs();
+        if !self.admissible_trace(state) || (recovered_energy - expected_energy).abs() > tolerance {
+            return Err(Error::Invalid(reason));
+        }
+        Ok((state, primitive))
+    }
+
+    fn decode_trace<const N: usize>(
+        &self,
+        state: impl Trace<N>,
+        reason: &'static str,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Primitive, Error> {
+        poll(cancelled)?;
+        let values = state.array();
+        if !values.iter().all(|x| x.is_finite()) || !positive(values[0]) {
+            return Err(Error::Invalid(reason));
+        }
+        self.decode(state.normal_state(), None, cancelled)
+    }
+
+    fn trace_wall_interface<const N: usize>(
+        &self,
+        state: impl Trace<N>,
+        primitive: Primitive,
+        outward_normal: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NumericalFlux<N>, Error> {
+        let wall = self.wall_flux(state.normal_state(), primitive, outward_normal, cancelled)?;
+        let mut values = [0.0; N];
+        values[1] = wall.momentum;
+        flux(values, wall.signal_speed, false)
     }
 
     /// HLLC flux between two conservative states of this same frozen mixture.
@@ -322,6 +389,18 @@ impl FrozenGas {
         pr: Primitive,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NormalFaceFlux, Error> {
+        self.trace_interface(left, pl, right, pr, cancelled)
+            .map(NormalFaceFlux::from)
+    }
+
+    fn trace_interface<const N: usize, Q: Trace<N>>(
+        &self,
+        left: Q,
+        pl: Primitive,
+        right: Q,
+        pr: Primitive,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NumericalFlux<N>, Error> {
         poll(cancelled)?;
         let fl = physical_flux(left, pl);
         let fr = physical_flux(right, pr);
@@ -337,21 +416,27 @@ impl FrozenGas {
         if sr <= 0.0 {
             return flux(fr, speed, false);
         }
-        let al = left.density * (sl - pl.velocity);
-        let ar = right.density * (sr - pr.velocity);
+        let (ql, qr) = (left.array(), right.array());
+        let al = ql[0] * (sl - pl.velocity);
+        let ar = qr[0] * (sr - pr.velocity);
         let contact = (pr.pressure - pl.pressure + al * pl.velocity - ar * pr.velocity) / (al - ar);
         let pstar = pl.pressure + al * (contact - pl.velocity);
         if contact.is_finite() && sl < contact && contact < sr && positive(pstar) {
-            let star = |q: NormalConserved, p: Primitive, s: f64| NormalConserved {
-                density: q.density * (s - p.velocity) / (s - contact),
-                normal_momentum: q.density * (s - p.velocity) / (s - contact) * contact,
-                transverse_momentum: q.transverse_momentum * (s - p.velocity) / (s - contact),
-                energy: ((s - p.velocity) * q.energy - p.pressure * p.velocity + pstar * contact)
-                    / (s - contact),
+            let star = |q: Q, p: Primitive, s: f64| {
+                let values = q.array();
+                Q::from_array(core::array::from_fn(|k| match k {
+                    0 => values[0] * (s - p.velocity) / (s - contact),
+                    1 => values[0] * (s - p.velocity) / (s - contact) * contact,
+                    k if k == N - 1 => {
+                        ((s - p.velocity) * values[k] - p.pressure * p.velocity + pstar * contact)
+                            / (s - contact)
+                    }
+                    k => values[k] * (s - p.velocity) / (s - contact),
+                }))
             };
             let ls = star(left, pl, sl);
             let rs = star(right, pr, sr);
-            if self.admissible_normal_state(ls) && self.admissible_normal_state(rs) {
+            if self.admissible_trace(ls) && self.admissible_trace(rs) {
                 let (q, qs, f, s) = if contact >= 0.0 {
                     (left, ls, fl, sl)
                 } else {
@@ -365,7 +450,6 @@ impl FrozenGas {
                 );
             }
         }
-        let (ql, qr) = (left.array(), right.array());
         for expansion in 0..=8 {
             poll(cancelled)?;
             let (l, r) = if expansion == 0 {
@@ -377,10 +461,10 @@ impl FrozenGas {
             if !l.is_finite() || !r.is_finite() {
                 return Err(Error::Invalid("HLL wave-speed overflow"));
             }
-            let middle = NormalConserved::from_array(core::array::from_fn(|k| {
+            let middle = Q::from_array(core::array::from_fn(|k| {
                 (r * qr[k] - l * ql[k] + fl[k] - fr[k]) / (r - l)
             }));
-            if self.admissible_normal_state(middle) {
+            if self.admissible_trace(middle) {
                 return flux(
                     core::array::from_fn(|k| {
                         (r * fl[k] - l * fr[k] + l * r * (qr[k] - ql[k])) / (r - l)
@@ -396,23 +480,25 @@ impl FrozenGas {
     }
 }
 
-fn physical_flux(q: NormalConserved, p: Primitive) -> [f64; 4] {
-    [
-        q.normal_momentum,
-        q.normal_momentum * p.velocity + p.pressure,
-        q.transverse_momentum * p.velocity,
-        (q.energy + p.pressure) * p.velocity,
-    ]
+fn physical_flux<const N: usize>(q: impl Trace<N>, p: Primitive) -> [f64; N] {
+    let q = q.array();
+    core::array::from_fn(|k| match k {
+        0 => q[1],
+        1 => q[1] * p.velocity + p.pressure,
+        k if k == N - 1 => (q[k] + p.pressure) * p.velocity,
+        k => q[k] * p.velocity,
+    })
 }
-fn flux(f: [f64; 4], signal_speed: f64, used_hll_fallback: bool) -> Result<NormalFaceFlux, Error> {
+fn flux<const N: usize>(
+    f: [f64; N],
+    signal_speed: f64,
+    used_hll_fallback: bool,
+) -> Result<NumericalFlux<N>, Error> {
     if !f.iter().all(|x| x.is_finite()) {
         return Err(Error::Invalid("non-finite numerical flux"));
     }
-    Ok(NormalFaceFlux {
-        mass: f[0],
-        normal_momentum: f[1],
-        transverse_momentum: f[2],
-        energy: f[3],
+    Ok(NumericalFlux {
+        values: f,
         signal_speed,
         used_hll_fallback,
     })

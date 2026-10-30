@@ -19,7 +19,10 @@ pub(crate) mod wall;
 
 pub use eos::{CaloricDomain, FrozenGas};
 pub use evolve::{Boundaries, Boundary, Euler1d, Reconstruction, StepControl, StepReport, Totals};
-pub use flux::{FaceFlux, NormalConserved, NormalFaceFlux, NormalPrimitive};
+pub use flux::{
+    FaceFlux, NormalConserved, NormalFaceFlux, NormalPrimitive, SpatialConserved, SpatialFaceFlux,
+    SpatialPrimitive,
+};
 pub use geometry::Mesh1d;
 
 use fs_thermochem::mixture::FrozenIdealGasMixtureErrorV1;
