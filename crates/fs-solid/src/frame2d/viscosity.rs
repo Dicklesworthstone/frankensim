@@ -164,6 +164,44 @@ impl FrameViscousSection {
 }
 
 impl Frame2d {
+    /// Original linear-reference longitudinal strain coordinates.
+    ///
+    /// Returns node-major DOFs, three work-conjugate displacement columns and
+    /// reference length L [m]. Their dot products with displacement are x0
+    /// (axial extension), x1 (symmetric bending) and x2 (antisymmetric bending),
+    /// all in metres. Constant-section Euler-Bernoulli storage is exactly
+    /// `EA*x0^2/(2*L) + EI*(3*x1^2+x2^2)/(2*L^3)`.
+    /// The same columns map their scalar forces back to nodal forces/moments.
+    ///
+    /// This is geometry, not a material law. Elastic, viscous and constitutive
+    /// memory consumers must supply their own admitted section integrals once.
+    /// No source is evaluated, allocation made or accepted state changed.
+    /// Corotational geometry needs current-configuration maps and is refused.
+    pub fn reference_strain_traces(
+        &self,
+        element: usize,
+    ) -> Result<([usize; 6], [[f64; 6]; 3], f64), SolidError> {
+        if self.geometry != Geometry::Linear {
+            return Err(invalid("strain traces require linear reference geometry"));
+        }
+        let element = self.elements.get(element)
+            .ok_or_else(|| invalid("strain trace member does not exist"))?;
+        let (l, c, s) = (element.l0, element.cos0, element.sin0);
+        if !l.is_finite() || l <= 0.0 || !c.is_finite() || !s.is_finite() {
+            return Err(invalid("strain trace geometry is not finite"));
+        }
+        let columns = [
+            [-c, -s, 0.0, c, s, 0.0],
+            [-2.0 * s, 2.0 * c, l, 2.0 * s, -2.0 * c, l],
+            [0.0, 0.0, l, 0.0, 0.0, -l],
+        ];
+        let dofs = [
+            3 * element.i, 3 * element.i + 1, 3 * element.i + 2,
+            3 * element.j, 3 * element.j + 1, 3 * element.j + 2,
+        ];
+        Ok((dofs, columns, l))
+    }
+
     /// Add an elastic member whose SAME sources also determine its physical
     /// strain-rate damping. Static equilibrium and mass are unchanged by eta;
     /// every later native Newmark call automatically includes these losses.
@@ -256,7 +294,7 @@ impl Frame2d {
             };
             sections.push((index, section.clone()));
             band = (band.0.max(section.band.0), band.1.min(section.band.1));
-            let (l, c, s) = (element.l0, element.cos0, element.sin0);
+            let (dofs, columns, l) = self.reference_strain_traces(index)?;
             let ca = section.axial.viscous_rigidity_n_s() / l;
             let cb = section.bending.viscous_stiffness_n_m2_s() / l / l / l;
             if (section.axial.viscous_rigidity_n_s() > 0.0 && ca == 0.0)
@@ -268,19 +306,9 @@ impl Frame2d {
                     "material section viscosity is unrepresentable on the member geometry",
                 ));
             }
-            let dofs = [
-                3 * element.i,
-                3 * element.i + 1,
-                3 * element.i + 2,
-                3 * element.j,
-                3 * element.j + 1,
-                3 * element.j + 2,
-            ];
-            for (damping_n_s_m, displacement_weights) in [
-                (ca, [-c, -s, 0.0, c, s, 0.0]),
-                (3.0 * cb, [-2.0 * s, 2.0 * c, l, 2.0 * s, -2.0 * c, l]),
-                (cb, [0.0, 0.0, l, 0.0, 0.0, -l]),
-            ] {
+            for (damping_n_s_m, displacement_weights) in
+                [ca, 3.0 * cb, cb].into_iter().zip(columns)
+            {
                 ports.push(FrameViscousPort {
                     element: index,
                     dofs,
@@ -335,3 +363,6 @@ impl Frame2d {
 fn invalid(what: &str) -> SolidError {
     SolidError::InvalidInput { what: what.into() }
 }
+
+#[cfg(test)]
+mod strain_tests;
