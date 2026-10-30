@@ -99,6 +99,7 @@ impl DgApertureFrame {
 /// One clock and one accepted state for the existing nonlinear aperture and DG
 /// duct. Failed input, nonlinear solve, propagation or port compatibility leaves
 /// both participants unchanged; source material/contact histories stay retained.
+#[derive(Clone)]
 pub struct ApertureDg<A = DynamicAperture> {
     aperture: A,
     load: ApertureDgLoad,

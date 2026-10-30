@@ -27,6 +27,7 @@ use fs_dcontact::{ContactStorage, Obstacle};
 use fs_exec::CancelGate;
 use fs_phs::Storage;
 use fs_scenario::BeatingReed;
+use std::rc::Rc;
 
 /// Explicit SI parameters for a moving slit and its characteristic load.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -145,11 +146,14 @@ pub struct ApertureProgress {
 }
 
 /// A persistent moving slit whose contact law is never chosen implicitly.
+/// Clones retain independent motion, material memory, clocks and port accounts;
+/// only the immutable contact potential is shared.
+#[derive(Clone)]
 pub struct DynamicAperture {
     spec: DynamicApertureSpec,
     reed: BeatingReed,
     lay: Obstacle,
-    contact_storage: ContactStorage,
+    contact_storage: Rc<ContactStorage>,
     // A physical reduction is retained, not flattened into unguarded scalars.
     plate: Option<Box<PlateApertureReduction>>,
     closure: Option<Box<PlateClosure>>,
@@ -266,7 +270,7 @@ impl DynamicAperture {
             spec,
             reed,
             lay,
-            contact_storage,
+            contact_storage: contact_storage.into(),
             plate: None,
             closure: None,
             viscous_slit: None,

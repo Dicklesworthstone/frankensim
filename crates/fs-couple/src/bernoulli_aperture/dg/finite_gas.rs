@@ -7,6 +7,8 @@
 
 /// One deliberately shared finite gas inventory spanning both original tracts.
 pub mod series;
+/// Conservative finite gas transport through original moving acoustic sources.
+pub mod transport;
 
 use super::{ApertureDg, DgApertureFrame, accept_acoustic_candidate};
 use crate::acoustic_realize::AcousticRealizeError;

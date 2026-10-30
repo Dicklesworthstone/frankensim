@@ -196,7 +196,7 @@ impl ModalAperture {
                 "initial hereditary material memory exceeds the original energy budget",
             ));
         }
-        valve.hereditary_solid = Some(HereditaryModalSolid { source, root_mass });
+        valve.hereditary_solid = Some(HereditaryModalSolid { source, root_mass }.into());
         valve.relaxation = Some(relaxation);
         valve.exact = Some(exact);
         valve.material_gas = Some(gas);
@@ -208,6 +208,6 @@ impl ModalAperture {
     /// Source tensor laws, original modes and work-conjugate physical mappings.
     /// Accepted internal coordinates are in material_relaxation().memory_sqrt_j().
     pub fn hereditary_solid(&self) -> Option<&HereditaryModalSolid> {
-        self.hereditary_solid.as_ref()
+        self.hereditary_solid.as_deref()
     }
 }

@@ -37,6 +37,9 @@ mod regional;
 #[path = "dg_gas_rebind/finite_series.rs"]
 mod finite_series;
 
+#[path = "dg_gas_rebind/finite_transport.rs"]
+mod finite_transport;
+
 const DT: f64 = 1.0 / 96_000.0;
 const RADIUS: f64 = 0.001;
 const LENGTH: f64 = 0.05;

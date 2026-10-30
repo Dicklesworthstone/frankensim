@@ -19,6 +19,7 @@ pub(super) struct CoupledArm {
     pub relaxation_time_s: f64,
 }
 
+#[derive(Clone)]
 pub(super) struct ExactModes {
     modes: ModeMaps,
     pressure: Vec<f64>,
@@ -27,6 +28,7 @@ pub(super) struct ExactModes {
     arms: Vec<Vec<ExactArm>>,
 }
 
+#[derive(Clone)]
 enum ModeMaps {
     Diagonal(Vec<ExactBlade>),
     Coupled(CoupledModes),
@@ -313,6 +315,7 @@ impl ExactModes {
 /// z = [sqrt(K) q, sqrt(M) v, F/sqrt(K), memory] has energy-scaled components.
 /// Two extra rows per mode integrate displacement increments and mean position
 /// without cancellation. This is the original material pencil, not new modes.
+#[derive(Clone)]
 struct CoupledModes {
     root_mass: Vec<f64>,
     root_stiffness: Vec<f64>,

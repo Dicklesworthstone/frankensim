@@ -42,7 +42,7 @@ impl PairedAperture {
         if let Some(law) = self.viscous_slit {
             closure.viscous_flow(law, self.blades.map(|s|s.displacement_m), self.spec.density_kg_m3, 0.0)?;
         }
-        self.closure=Some(Box::new(closure));
+        self.closure=Some(closure.into());
         self.validate_state(self.blades)?;
         self.validate_energy(self.stored_energy_j())?;
         Ok(self)

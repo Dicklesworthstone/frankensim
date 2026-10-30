@@ -177,7 +177,7 @@ impl ModalAperture {
         // The physical total slit length now comes from the actual boundary.
         // Pressure force and swept-volume maps remain the original face integral.
         self.spec.width_m = closure.width_m();
-        self.closure = Some(closure);
+        self.closure = Some(closure.into());
         self.solid_closure = Some(spec);
         self.validate_state(&self.state)?;
         let energy = self.stored_energy_j();

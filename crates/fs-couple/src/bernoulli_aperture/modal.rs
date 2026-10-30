@@ -21,6 +21,7 @@ use fs_phs::Storage;
 use fs_phs::{
     NewtonSite, SolveBudget, SolveCertificate, admit_newton_iterate, arithmetic_rounding_floor,
 };
+use std::rc::Rc;
 mod exact;
 /// Source-bound nodal clearance, contact and physical slit flow.
 pub mod closure;
@@ -103,17 +104,20 @@ pub struct ModalApertureFrame {
 }
 
 /// A complete modal state; no acoustic network or filter is duplicated here.
+/// Clones copy every modal coordinate, material memory and port account while
+/// sharing only immutable contact geometry and original solid source images.
+#[derive(Clone)]
 pub struct ModalAperture {
     spec: ModalApertureSpec,
     state: Vec<BladeState>,
     obstacle: Obstacle,
-    contact_storage: ContactStorage,
-    closure: Option<closure::ModalPlateClosure>,
+    contact_storage: Rc<ContactStorage>,
+    closure: Option<Rc<closure::ModalPlateClosure>>,
     solid_closure: Option<solid::SolidSurfaceClosureSpec>,
     samples: u64,
     material_plates: Vec<material::MaterialModalPlate>,
-    material_solid: Option<solid::MaterialModalSolid>,
-    hereditary_solid: Option<solid::HereditaryModalSolid>,
+    material_solid: Option<Rc<solid::MaterialModalSolid>>,
+    hereditary_solid: Option<Rc<solid::HereditaryModalSolid>>,
     pressure_ports: [Option<pressure::MaterialPressurePort>; 2],
     material_gas: Option<fs_material::gas::GasState>,
     viscous_slit: Option<super::viscous::ViscousSlit>,
@@ -247,7 +251,7 @@ impl ModalAperture {
             spec,
             state,
             obstacle,
-            contact_storage,
+            contact_storage: contact_storage.into(),
             closure: None,
             solid_closure: None,
             samples: 0,

@@ -50,7 +50,7 @@ impl ModalAperture {
             let q = displacements(&self.state);
             closure.viscous_flow(law, &q[..self.state.len()], self.spec.density_kg_m3, 0.0)?;
         }
-        self.closure = Some(closure);
+        self.closure = Some(closure.into());
         self.validate_state(&self.state)?;
         let energy = self.stored_energy_j();
         if !energy.is_finite() || energy > self.spec.limits.maximum_energy_j {
@@ -62,7 +62,7 @@ impl ModalAperture {
     }
     /// Actual source-bound geometry; absent means the original effective slit.
     pub fn plate_closure(&self) -> Option<&ModalPlateClosure> {
-        self.closure.as_ref()
+        self.closure.as_deref()
     }
 
     fn force_velocity(

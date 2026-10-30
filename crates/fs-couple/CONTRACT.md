@@ -9081,6 +9081,48 @@ synthetic regressions cover actual transport into complete warm loads and
 transactional refusal/retry. Native execution and measured validation remain
 separate gates. This advances MR05/MR06/MR33/MR67.
 
+## Finite transport networks drive original moving apertures
+
+`bernoulli_aperture::dg::finite_gas::transport` admits single-coordinate,
+independent-blade and material-modal sources through their original
+`LoadedApertureDg` owners. They use the same finite-gas transaction as wall-DG
+and passive complete loads. Typed source inputs retain prescribed pressure,
+body flow, independent forces and original modal pressure tractions; callers
+cannot also prescribe the acoustic flow computed by the moving source.
+Reservoirs admit caloric controls but no source drive or acoustic ports.
+
+Every material path consumes one original species/partial-enthalpy snapshot.
+The original source and complete load advance once in their initial medium,
+then the original caloric feedback pays actual bore/channel parameter work
+from that transported inventory. Gas changes reach the same source density,
+viscosity and exact acoustic impedance without resetting its motion, contact,
+material memories, accepted clock, channel momentum or exterior pole history.
+Immutable source potentials/reference geometry are shared across previews;
+all evolving histories and work accounts are cloned independently.
+
+The enclosing account contains gas plus full mechanical/acoustic storage,
+native exported loss, actual heat, prescribed upstream/body/mechanical work
+and signed exterior exchange. Valve-to-duct work is internal and cancels;
+modal pressure work is already inside original mechanical work. The inherited
+`acoustic_storage_change_j` and `acoustic_dissipation_j` fields therefore cover
+the complete bound node, including mechanics. The existing final transport
+driving-force, mass, energy and cancellation gates publish all parcels and
+sources together. An immutable candidate exposes the same proposed endpoints.
+
+Separate gas volumes retain explicit physical material-transport paths. This
+first-order fixed-volume partition does not infer thermodynamic mass flow from
+oscillatory valve flow, static pressure prestress, jet noise or loss-to-heat
+partition. A two-sided acoustic source still needs its own joint inventory
+model; it is refused here rather than assigning one parcel to both tracts.
+
+Four public G1/G3/G4 regression groups in
+`tests/dg_gas_rebind/finite_transport.rs` exercise species conservation, original
+transport equivalence, independent caloric/mechanical/duct/channel energy,
+changed subsequent source response, zero-link reduction, and complete rollback
+with exact retry. They are authored but native compilation/execution remains
+unverified in the current environment. Parser/format checks are not native
+numerical evidence. This is an implementation increment under MR05/MR06/MR33/MR67.
+
 ## Continuing spatial dielectric charge through thermal phase change
 
 `ConductionThermalNetwork::step_dielectric_candidate` connects the native

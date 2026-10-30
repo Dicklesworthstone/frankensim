@@ -93,21 +93,25 @@ pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>> {
     /// The single original-snapshot species/partial-enthalpy transport.
     /// Its entropy account belongs to that stage, not subsequent heat/wave work.
     pub transport: GasTransportStep,
-    /// Same-clock acoustic endpoints and local gas/work closure, by parcel ID.
+    /// Same-clock bound-node endpoints and local gas/work closure, by parcel ID.
+    /// Moving-source adapters include their original mechanical reports here.
     pub acoustics: BTreeMap<u64, A>,
     /// Original heating reports for parcels without an acoustic owner.
     pub reservoirs: BTreeMap<u64, GasHeatStep>,
     pub gas_storage_change_j: f64,
+    /// Complete bound-node storage, including moving-source mechanics when present.
     pub acoustic_storage_change_j: f64,
     pub supplied_heat_j: f64,
+    /// Net external work into bound nodes, including mechanical drives and
+    /// subtracting signed exterior exchange. Internal source/load work cancels.
     pub port_work_j: f64,
-    /// Unpartitioned native gas/wall/boundary loss leaves the modeled enclosure.
+    /// Unpartitioned native mechanical/gas/wall/boundary loss leaves the enclosure.
     /// No loss is guessed to heat a particular parcel or wall.
     pub acoustic_dissipation_j: f64,
     /// Internal gas-to-wave transfer, already included in the storage changes.
     pub parameter_work_j: f64,
     pub total_mass_residual_kg: f64,
-    /// Gas + wave/wall storage + native loss - external heat - port work.
+    /// Gas + complete bound-node storage + native loss - external heat - port work.
     /// Internal enthalpy transfer and gas-to-wave work are not added again.
     pub combined_energy_residual_j: f64,
 }
@@ -137,11 +141,20 @@ impl<N, A> FiniteGasDgTransportCandidate<N, A> {
     ) { (self.parcels, self.nodes, self.step) }
 }
 
-/// Only acoustic ownership varies across the wall and complete-load adapters.
+/// Only bound-node ownership and its typed physical source inputs vary across
+/// wall, complete-load and moving-source adapters.
 /// Native transport, caloric feedback input, endpoint gates, global accounts
 /// and atomic publication stay in the single transaction below.
 pub(crate) trait FiniteGasTransportNode: Clone {
     type Step;
+    type Input;
+
+    /// Admit the node-specific source controls before any transport runs, and
+    /// expose the same caloric controls for bound nodes and finite reservoirs.
+    fn transport_input(
+        input: &Self::Input,
+        bound: bool,
+    ) -> Result<&FiniteGasDgTransportInput, &'static str>;
 
     fn dt(&self) -> f64;
     fn step_count(&self) -> u64;
@@ -150,14 +163,14 @@ pub(crate) trait FiniteGasTransportNode: Clone {
     fn admit<C: FnMut() -> bool>(
         &self,
         gas: &ClosedGasParcel,
-        input: &FiniteGasDgTransportInput,
+        input: &Self::Input,
         cancelled: &mut C,
     ) -> Result<(), FiniteGasDgError<GasEnergyError>>;
 
     fn advance<C: FnMut() -> bool>(
         &mut self,
         gas: &mut ClosedGasParcel,
-        input: &FiniteGasDgTransportInput,
+        input: &Self::Input,
         evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
             -> Result<FiniteGasDgBackground<GasCompositionStep>, GasEnergyError>,
         cancelled: &mut C,
@@ -170,6 +183,14 @@ pub(crate) trait FiniteGasTransportNode: Clone {
 
 impl FiniteGasTransportNode for FiniteGasDgNode {
     type Step = FiniteGasDgStep<GasCompositionStep>;
+    type Input = FiniteGasDgTransportInput;
+
+    fn transport_input(
+        input: &Self::Input,
+        _bound: bool,
+    ) -> Result<&FiniteGasDgTransportInput, &'static str> {
+        Ok(input)
+    }
 
     fn dt(&self) -> f64 { self.propagator.dt() }
     fn step_count(&self) -> u64 { self.state.step_count() }
@@ -326,7 +347,7 @@ pub fn advance_finite_gas_dg_transport_with_paths<C: FnMut() -> bool>(
 pub(crate) fn advance_finite_gas_transport_with_paths<N: FiniteGasTransportNode, C: FnMut() -> bool>(
     parcels: &mut BTreeMap<u64, ClosedGasParcel>,
     nodes: &mut BTreeMap<u64, N>,
-    inputs: &BTreeMap<u64, FiniteGasDgTransportInput>,
+    inputs: &BTreeMap<u64, N::Input>,
     paths: GasTransportPaths<'_>,
     duration_s: f64,
     controls: FiniteGasDgTransportSolve,
@@ -368,7 +389,7 @@ pub fn finite_gas_dg_transport_candidate_with_paths<C: FnMut() -> bool>(
 pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNode, C: FnMut() -> bool>(
     parcels: &BTreeMap<u64, ClosedGasParcel>,
     nodes: &BTreeMap<u64, N>,
-    inputs: &BTreeMap<u64, FiniteGasDgTransportInput>,
+    inputs: &BTreeMap<u64, N::Input>,
     paths: GasTransportPaths<'_>,
     duration_s: f64,
     controls: FiniteGasDgTransportSolve,
@@ -386,6 +407,7 @@ pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNod
     let mut endpoints = BTreeMap::new();
     for (&id, input) in inputs {
         check(cancelled)?;
+        let input = N::transport_input(input, nodes.contains_key(&id)).map_err(Error::Invalid)?;
         if !input.supplied_heat_j.is_finite()
             || input.acoustic.is_some() != nodes.contains_key(&id)
             || (!nodes.contains_key(&id) && !input.ports.is_empty())
@@ -414,8 +436,9 @@ pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNod
     let mut port_work = Sum::default();
     let mut losses = Sum::default();
     let mut parameter_work = Sum::default();
-    for (&id, input) in inputs {
+    for (&id, node_input) in inputs {
         check(cancelled)?;
+        let input = N::transport_input(node_input, nodes.contains_key(&id)).map_err(Error::Invalid)?;
         heat.add(input.supplied_heat_j)?;
         if let Some(node) = next_nodes.get_mut(&id) {
             let transported_gas = &transported[&id];
@@ -435,7 +458,7 @@ pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNod
                     transported_enthalpy_j: enthalpy, source,
                 })
             };
-            let step = node.advance(&mut gas, input, evolve, cancelled)
+            let step = node.advance(&mut gas, node_input, evolve, cancelled)
                 .map_err(|error| acoustic_error(id, error))?;
             let [net_port_work, acoustic_loss, gas_work] = N::accounts(&step);
             port_work.add(net_port_work)?;

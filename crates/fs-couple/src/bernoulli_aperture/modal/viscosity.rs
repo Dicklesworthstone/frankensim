@@ -8,6 +8,7 @@ use crate::plate_viscosity::ModalPlateViscosity;
 use fs_exec::CancelGate;
 use fs_la::factor::{Cholesky, cholesky};
 
+#[derive(Clone)]
 pub(super) struct ApertureViscosity {
     matrix: Vec<f64>,
     factor: Option<Cholesky>,

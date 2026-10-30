@@ -42,6 +42,7 @@ use crate::unilateral_contact::distributed::ApertureContactStep;
 use fs_dcontact::{ContactStorage, Obstacle};
 use fs_material::gas::GasState;
 use fs_phs::Storage;
+use std::rc::Rc;
 
 /// One effective blade in its own opening-positive mean-edge coordinate.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -334,16 +335,19 @@ pub struct PairedApertureFrame {
 }
 
 /// Stateful paired mechanical source; trials never advance accepted state.
+/// Clones copy both blades and their complete material histories; immutable
+/// contact potentials and reference interface geometry are shared.
+#[derive(Clone)]
 pub struct PairedAperture {
     spec: PairedApertureSpec,
     blades: [BladeState; 2],
     contact: Obstacle,
-    contact_storage: ContactStorage,
+    contact_storage: Rc<ContactStorage>,
     plates: Option<Box<[PlateApertureReduction; 2]>>,
     gas: Option<GasState>,
     viscous_slit: Option<super::viscous::ViscousSlit>,
     relaxation: [Option<ApertureRelaxation>; 2],
-    closure: Option<Box<PairedPlateClosure>>,
+    closure: Option<Rc<PairedPlateClosure>>,
     exact: Option<[ExactBlade; 2]>,
     samples: u64,
 }
@@ -413,7 +417,7 @@ impl PairedAperture {
             BladePropagator::ExactZoh => Some([ExactBlade::new(&spec.blades[0], spec.time_step_s)?,
                 ExactBlade::new(&spec.blades[1], spec.time_step_s)?]),
         };
-        let model = Self { spec, blades, contact, contact_storage, plates: None, gas: None, viscous_slit: None, relaxation: [None, None], closure: None, exact, samples: 0 };
+        let model = Self { spec, blades, contact, contact_storage: contact_storage.into(), plates: None, gas: None, viscous_slit: None, relaxation: [None, None], closure: None, exact, samples: 0 };
         model.admit_linear_clock()?;
         model.validate_state(blades)?;
         Ok(model)

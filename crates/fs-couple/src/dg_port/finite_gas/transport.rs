@@ -32,6 +32,14 @@ pub type FiniteGasDgPortTransportCandidate =
 
 impl FiniteGasTransportNode for DgPortLoad {
     type Step = FiniteGasDgPortStep<GasCompositionStep>;
+    type Input = FiniteGasDgTransportInput;
+
+    fn transport_input(
+        input: &Self::Input,
+        _bound: bool,
+    ) -> Result<&FiniteGasDgTransportInput, &'static str> {
+        Ok(input)
+    }
 
     fn dt(&self) -> f64 {
         self.propagator().dt()

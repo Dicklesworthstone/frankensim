@@ -69,6 +69,7 @@ pub struct ApertureDuctSpec {
 
 /// Existing mechanical owners. Source geometry, contacts and material histories
 /// remain inside these objects; this enum adds no alternative reed model.
+#[derive(Clone)]
 pub enum LoadedAperture {
     /// One opening coordinate, including the existing symmetric-pair reduction.
     Single(Box<DynamicAperture>),

@@ -30,6 +30,7 @@ pub enum InitialModalMemory {
 }
 
 /// Source spectra by plate/region and the accepted energy-normalized memories.
+#[derive(Clone)]
 pub struct ModalRelaxation {
     spectra: Vec<Vec<GeneralizedMaxwell>>,
     initial: InitialModalMemory,

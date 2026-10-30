@@ -198,7 +198,7 @@ impl ModalAperture {
         };
         let mut valve = Self::new_with_propagator(spec, state, contact, BladePropagator::ExactZoh)?
             .with_viscosity(viscosity, gate)?;
-        valve.material_solid = Some(MaterialModalSolid { source, root_mass });
+        valve.material_solid = Some(MaterialModalSolid { source, root_mass }.into());
         valve.material_gas = Some(gas);
         valve.validate_state(&valve.state)?;
         poll(gate)?;
@@ -207,7 +207,7 @@ impl ModalAperture {
 
     /// Original complete solid source, modal shapes and physical coordinate map.
     pub fn material_solid(&self) -> Option<&MaterialModalSolid> {
-        self.material_solid.as_ref()
+        self.material_solid.as_deref()
     }
 
     /// Accepted nodal displacement and velocity from this original solid image.
