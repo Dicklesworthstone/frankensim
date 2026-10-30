@@ -24,6 +24,68 @@ fn power_closes(r:&ModalHarmonicResponse) {
 }
 
 #[test]
+fn harmonic_sparse_rank_preserves_the_original_dense_form_and_coordinate_order() {
+    // G1/G3: a 30-coordinate body remains embedded in 445 original mechanical
+    // coordinates, with two trailing air rows. Compare the resulting quadratic
+    // form against an independently evaluated full outer product, including
+    // signed cross-body bridge participation and both representations of zero.
+    let gate = CancelGate::new_clock_free();
+    let (mechanical, dimension) = (445, 447);
+    let initial = C64::new(0.25, -0.5);
+    let mut matrix = vec![initial; dimension * dimension];
+    let mut support = Vec::with_capacity(mechanical);
+    let mut film = vec![-0.0; mechanical];
+    for (offset, value) in film[400..430].iter_mut().enumerate() {
+        *value = if offset % 2 == 0 { 0.2 } else { -0.3 } * (offset + 1) as f64;
+    }
+    let mut bridge = vec![0.0; mechanical];
+    bridge[0] = 0.7;
+    bridge[412] = -0.25;
+    bridge[444] = 0.4;
+    let gains = [C64::new(3000.0, -150.0), C64::new(75.0, -10.0)];
+    add_rank(&mut matrix, dimension, &film, gains[0], &mut support, &gate).unwrap();
+    assert_eq!(support.len(), 30);
+    assert_eq!(support.first().unwrap().0, 400);
+    assert_eq!(support.last().unwrap().0, 429);
+    add_rank(&mut matrix, dimension, &bridge, gains[1], &mut support, &gate).unwrap();
+    assert_eq!(support.iter().map(|&(i, _)| i).collect::<Vec<_>>(), [0, 412, 444]);
+    for i in 0..dimension {
+        for j in 0..dimension {
+            let expected = if i < mechanical && j < mechanical {
+                initial + gains[0].scale(film[i] * film[j])
+                    + gains[1].scale(bridge[i] * bridge[j])
+            } else {
+                initial
+            };
+            assert_eq!(matrix[i * dimension + j], expected, "row {i}, column {j}");
+        }
+    }
+    let before = matrix.clone();
+    add_rank(&mut matrix, dimension, &vec![-0.0; mechanical], gains[0], &mut support, &gate).unwrap();
+    assert!(support.is_empty());
+    assert_eq!(matrix, before);
+}
+
+#[test]
+fn harmonic_sparse_zero_support_keeps_finite_input_and_cancellation_gates() {
+    // G0/G4: dropping exact zero products must not turn a nonfinite physical
+    // coefficient or a cancelled operation into an admitted zero response.
+    let gate = CancelGate::new_clock_free();
+    let mut matrix = vec![C64::ZERO; 4];
+    let mut support = Vec::new();
+    assert!(add_rank(&mut matrix, 2, &[0.0, -0.0], C64::new(f64::NAN, 0.0), &mut support, &gate).is_err());
+    assert!(add_rank(&mut matrix, 2, &[f64::INFINITY, 0.0], C64::ZERO, &mut support, &gate).is_err());
+    assert_eq!(matrix, vec![C64::ZERO; 4]);
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(matches!(
+        add_rank(&mut matrix, 2, &[0.0, -0.0], C64::ZERO, &mut support, &cancelled),
+        Err(ModalCouplingError::Cancelled)
+    ));
+    assert_eq!(matrix, vec![C64::ZERO; 4]);
+}
+
+#[test]
 fn harmonic_two_body_response_matches_independent_dynamic_stiffness_and_power() {
     // G1: direct 2x2 inversion of physical coupled equations, with signed
     // cross terms and complex forcing. Rest length changes only the DC state.

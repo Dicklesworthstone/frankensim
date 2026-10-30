@@ -82,11 +82,29 @@ fn add_rank(
     dimension: usize,
     column: &[f64],
     gain: C64,
+    support: &mut Vec<(usize, f64)>,
     gate: &CancelGate,
 ) -> Result<(), ModalCouplingError> {
-    for (i, &a) in column.iter().enumerate() {
+    poll(Some(gate))?;
+    if !complex_finite(gain) {
+        return Err(invalid("harmonic operator overflow"));
+    }
+    // A material or connection may touch only one body inside a much larger
+    // coupled instrument. Keep every nonzero coefficient in its original order
+    // and reuse this support buffer across ranks; exact zeros need no matrix
+    // update. No threshold, retained coordinate or history is removed.
+    support.clear();
+    for (index, &value) in column.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(invalid("harmonic rank column is not finite"));
+        }
+        if value != 0.0 {
+            support.push((index, value));
+        }
+    }
+    for &(i, a) in support.iter() {
         poll(Some(gate))?;
-        for (j, &b) in column.iter().enumerate() {
+        for &(j, b) in support.iter() {
             matrix[i * dimension + j] = matrix[i * dimension + j] + gain.scale(a * b);
         }
     }
@@ -188,6 +206,8 @@ impl CoupledModalSystem {
     /// MAX_HARMONIC_UNKNOWNS. The existing solve-relative tolerance gates the
     /// original equations. Constant-loss connections reuse the prepared owner's
     /// SAME coupled-basis damping columns; the spring retains its original column.
+    /// Rank assembly visits only exact nonzero column support, while the stated
+    /// work allowance remains a conservative full-support bound.
     /// This is the continuous response of that fixed finite-dimensional image,
     /// not a new frequency-dependent loss law evaluated at the drive frequency.
     /// No accepted state, material history, sample clock or ledger is changed.
@@ -268,6 +288,7 @@ impl CoupledModalSystem {
         let s = C64::new(0.0, -omega_rad_s);
         let modes: Vec<_> = self.models.iter().flat_map(|m| m.modes()).collect();
         let mut matrix = vec![C64::ZERO; square];
+        let mut support = Vec::with_capacity(n);
         for (i, mode) in modes.iter().enumerate() {
             poll(Some(gate))?;
             let w = mode.angular_frequency_rad_s;
@@ -284,6 +305,7 @@ impl CoupledModalSystem {
                     dimension,
                     column,
                     C64::from_re(law.stiffness_n_m),
+                    &mut support,
                     gate,
                 )?;
                 add_rank(
@@ -291,6 +313,7 @@ impl CoupledModalSystem {
                     dimension,
                     damping,
                     C64::new(0.0, -omega_rad_s * law.damping_n_s_m),
+                    &mut support,
                     gate,
                 )?;
             } else {
@@ -300,6 +323,7 @@ impl CoupledModalSystem {
                     dimension,
                     column,
                     C64::new(law.stiffness_n_m, -omega_rad_s * law.damping_n_s_m),
+                    &mut support,
                     gate,
                 )?;
             }
@@ -311,7 +335,7 @@ impl CoupledModalSystem {
                 *b = root * p;
             }
             let gain = s / (s + C64::from_re(arm.relaxation_time_s.recip()));
-            add_rank(&mut matrix, dimension, &column, gain, gate)?;
+            add_rank(&mut matrix, dimension, &column, gain, &mut support, gate)?;
         }
         if let Some(air) = &self.radiation {
             for (j, pole) in air.model.poles.iter().enumerate() {
