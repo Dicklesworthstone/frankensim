@@ -59,6 +59,8 @@ pub mod lighting;
 pub mod material_geometry;
 #[cfg(feature = "material-state")]
 pub mod material_state;
+#[cfg(feature = "photometry")]
+pub mod photometry;
 pub mod spectral;
 #[cfg(feature = "tracer")]
 pub mod thermal_surface;

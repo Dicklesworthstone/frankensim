@@ -54,6 +54,9 @@ differentiable = ["chart-backends", "dep:fs-ad"]
 # [F]-gated per the Ambition-Tag rule (bead 872c): the spectral path
 # tracer v1 — hero-wavelength MIS over the chart backends, EXR out.
 tracer = ["chart-backends", "dep:fs-alloc", "dep:fs-rand", "dep:fs-img", "dep:fs-substrate"]
+# Calibrated, headless point-fixture transport in SI photometric units.
+# Explicitly opt-in while the observer/model error remains unbounded.
+photometry = ["tracer", "volumes"]
 # Resolve optical/thermal appearance from the same material state as mechanics.
 material-state = ["tracer", "dep:fs-material", "dep:fs-conduction"]
 # Actual accepted material-body vertices through the original solid boundary and BVH.
@@ -62,6 +65,10 @@ material-geometry = ["chart-backends", "dep:fs-mbd-material", "dep:fs-solid"]
 [[test]]
 name = "material_geometry"
 required-features = ["material-geometry", "material-state"]
+
+[[test]]
+name = "photometry_battery"
+required-features = ["photometry"]
 
 [[test]]
 name = "volumes_battery"

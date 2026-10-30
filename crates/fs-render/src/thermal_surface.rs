@@ -16,6 +16,7 @@
 //! approximation). A thermal hit within an active dielectric medium refuses;
 //! no refractive-index correction is invented for the original cooling model.
 
+#[cfg(feature = "material-state")]
 mod entropy;
 
 use fs_blake3::{ContentHash, DomainHasher};

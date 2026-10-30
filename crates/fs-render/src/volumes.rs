@@ -461,7 +461,7 @@ impl Ray {
 /// Beer–Lambert transmittance (the homogeneous analytic fast path).
 #[must_use]
 pub fn beer_lambert(sigma: f64, length: f64) -> f64 {
-    (-sigma * length).exp()
+    fs_math::det::exp(-sigma * length)
 }
 
 /// One Woodcock (delta-tracking) transmittance sample along
@@ -650,8 +650,13 @@ pub fn hg_sample_cos(g: f64, u: f64) -> f64 {
 /// azimuthal 1/2π folded out).
 #[must_use]
 pub fn hg_pdf_cos(g: f64, cos_theta: f64) -> f64 {
-    let denom = (2.0 * g).mul_add(-cos_theta, 1.0 + g * g);
-    0.5 * (1.0 - g * g) / denom.powf(1.5)
+    // Equivalent to 1 + g² - 2g cosθ, without cancellation at a narrow
+    // forward/backward peak. Pure IEEE arithmetic also avoids platform powf.
+    let magnitude = g.abs();
+    let aligned_cos = if g < 0.0 { -cos_theta } else { cos_theta };
+    let gap = 1.0 - magnitude;
+    let denom = (2.0 * magnitude).mul_add(1.0 - aligned_cos, gap * gap);
+    0.5 * gap * (1.0 + magnitude) / (denom * denom.sqrt())
 }
 
 /// Sample the Rayleigh phase function (pdf ∝ 1 + cos²θ): exact

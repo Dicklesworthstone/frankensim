@@ -14726,20 +14726,43 @@ fn intersect(
     ray: &Ray,
     ray_time: Option<&PathTime>,
 ) -> Result<Option<SceneIntersection>, TracerError> {
+    intersect_primitives(&scene.primitives, cx, ray, ray_time, None)
+}
+
+/// Shared geometry traversal for calibrated finite light connections. The
+/// legacy tracer passes no override and keeps its original distance policy.
+fn intersect_primitives(
+    primitives: &[Primitive],
+    cx: &Cx<'_>,
+    ray: &Ray,
+    ray_time: Option<&PathTime>,
+    distance_limit: Option<f64>,
+) -> Result<Option<SceneIntersection>, TracerError> {
     let mut best: Option<SceneIntersection> = None;
-    for (i, prim) in scene.primitives.iter().enumerate() {
+    for (i, prim) in primitives.iter().enumerate() {
         cx.checkpoint()?;
         let current_best_t = best.as_ref().map(|current| current.hit.t);
         let candidate = match &prim.shape {
             Shape::Mesh(mesh) => mesh
-                .intersect_with_cx_bounded(cx, ray, current_best_t.unwrap_or(f64::INFINITY))?
+                .intersect_with_cx_bounded(
+                    cx,
+                    ray,
+                    current_best_t.unwrap_or(distance_limit.unwrap_or(f64::INFINITY)),
+                )?
                 .map(|hit| SceneIntersection {
                     primitive_index: i,
                     hit,
                     instance_hit: None,
                 }),
             Shape::Chart(chart) => {
-                let (hit, audit) = sphere_trace(chart.as_ref(), cx, ray, 1e4, TRACE_EPS, 1.0);
+                let (hit, audit) = sphere_trace(
+                    chart.as_ref(),
+                    cx,
+                    ray,
+                    distance_limit.unwrap_or(1e4),
+                    TRACE_EPS,
+                    1.0,
+                );
                 if matches!(
                     audit.termination,
                     TraceTermination::Hit
@@ -14761,9 +14784,10 @@ fn intersect(
                 }
             }
             Shape::Instance(instance) => {
+                let limit = distance_limit.unwrap_or(1e4);
                 let t_max = match instance.geometry() {
-                    SharedGeometry::Mesh(_) => current_best_t.map_or(1e4, |t| t.min(1e4)),
-                    SharedGeometry::Chart(_) => 1e4,
+                    SharedGeometry::Mesh(_) => current_best_t.map_or(limit, |t| t.min(limit)),
+                    SharedGeometry::Chart(_) => limit,
                 };
                 instance
                     .intersect(cx, ray, t_max, TRACE_EPS)?
@@ -14775,9 +14799,10 @@ fn intersect(
             }
             Shape::AnimatedInstance(instance) => {
                 let time = ray_time.ok_or(TracerError::MissingRayTime)?;
+                let limit = distance_limit.unwrap_or(1e4);
                 let t_max = match instance.geometry() {
-                    SharedGeometry::Mesh(_) => current_best_t.map_or(1e4, |t| t.min(1e4)),
-                    SharedGeometry::Chart(_) => 1e4,
+                    SharedGeometry::Mesh(_) => current_best_t.map_or(limit, |t| t.min(limit)),
+                    SharedGeometry::Chart(_) => limit,
                 };
                 let instance_hit = if let Some(cached) = time
                     .cached_animated
@@ -14806,7 +14831,7 @@ fn intersect(
                 {
                     instance_object_id(&prim.shape)
                         .zip(instance_object_id(
-                            &scene.primitives[best_hit.primitive_index].shape,
+                            &primitives[best_hit.primitive_index].shape,
                         ))
                         .is_some_and(|(candidate, current)| candidate < current)
                 }
@@ -14818,6 +14843,17 @@ fn intersect(
         }
     }
     Ok(best)
+}
+
+#[cfg(feature = "photometry")]
+pub(crate) fn photometric_intersect(
+    primitives: &[Primitive],
+    cx: &Cx<'_>,
+    ray: &Ray,
+    distance_m: f64,
+) -> Result<Option<(usize, Hit)>, TracerError> {
+    intersect_primitives(primitives, cx, ray, None, Some(distance_m))
+        .map(|hit| hit.map(|hit| (hit.primitive_index, hit.hit)))
 }
 
 fn validate_scene<'scene>(

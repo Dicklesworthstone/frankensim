@@ -1487,3 +1487,51 @@ refuse before returning any candidate scene replacement. This observer adds no
 thermal debit or state update. Dielectric bindings refuse: an exterior-only
 regional partition does not supply the internal optical interfaces and shared
 medium-boundary tracking required for transparent multi-material bodies.
+
+## Calibrated point-fixture photometry
+
+The opt-in `photometry` feature composes `tracer` and `volumes` for a headless
+SI reference calculation. `PhotometricSource` takes the existing proper-rigid
+fixture transform, emitted lumens, linear dimmer, angular distribution and
+visible spectrum. Local +Z is the optical axis; callers can use a right-handed
+Z-up world without coordinate conversion. Isotropic, uniform-cone, cosine-power,
+explicit beam/field/cutoff and tabulated theta/phi laws integrate to unit flux.
+Tables interpolate in cos(theta)/azimuth with exact cell solid-angle weights;
+this is the declared represented distribution, not an interpolation-error bound.
+Passive spectral filters reduce flux instead of renormalizing away attenuation.
+
+`PhotometricScene` borrows the original tracer primitives, native mesh BVHs and
+rigid mesh instances. Chart geometry refuses: a proximity-certified hit does
+not determine whether a surface is before a finite light-connection endpoint,
+and must not silently turn a chart receiver into its own shadow.
+`IlluminanceProbe`, `CalculationGrid` and `IlluminanceJob` return the
+direct, unscattered component in lux using inverse-square, receiving cosine,
+visibility and Beer–Lambert extinction. Point-source near-field singularities,
+out-of-range connections, transparent materials, animated geometry and legacy
+uncalibrated emission refuse. Existing opaque material-state bindings remain
+usable. Receiver endpoint exclusion is an explicit metre-valued tolerance and
+is not substituted for the physical transport distance.
+
+`HomogeneousMedium` reuses the volume transport/phase kernels with nonnegative
+inverse-metre absorption/scattering and isotropic, HG or Rayleigh scattering.
+The single-scattering integrator analytically integrates camera-path extinction
+within midpoint panels and refines under an explicit panel budget. Its returned
+quadrature discrepancy is an estimate, never an enclosure; discontinuous shadows
+or narrow beams can remain unresolved. Omitted multiple scattering has no finite
+bound. Gray coefficients are an explicit wavelength-independent approximation.
+
+Source spectra use the existing approximate CIE observer and 80 five-nanometre
+bins with the 683 lm/W photopic conversion. Observer error, input calibration,
+geometry uncertainty and omitted transport are not certified. Direct analytic
+values carry `NumericalKind::NoClaim`, not a fictitious zero-width certificate;
+unknown total error is `None`. There is no claim of CIE 171 conformance or
+measured-fixture agreement. G0/G1/G3/G4/G5 tests exercise flux, spectral filtering,
+inverse square/cosine laws, real mesh visibility, homogeneous reference integrals,
+frame invariance, cancellation and deterministic progressive partitions.
+
+Jobs borrow immutable scene/receiver state, reserve their bounded result storage
+fallibly and publish only whole completed receivers. Every source, intersection
+and scattering sample polls `Cx`. A fresh uncancelled context can resume the
+retained prefix; partitioning changes no sums. Determinism is same-ISA/toolchain
+and fixed caller source order. No GPU, window, file parser or random stream is
+required. Cross-ISA bit equality and large-rig throughput are separate claims.
