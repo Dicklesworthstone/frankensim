@@ -385,6 +385,26 @@ pub struct MaxwellStefanWorkspaceV1 {
     mass_flux: Vec<f64>,
 }
 
+impl MaxwellStefanWorkspaceV1 {
+    /// Allocated numerical array capacities in bytes. Immutable species and
+    /// fixed-size owner values are excluded. Higher-level spatial operators
+    /// include this original solve storage in their prepared memory budgets.
+    pub fn workspace_bytes(&self) -> usize {
+        [
+            &self.matrix,
+            &self.ratios,
+            &self.right,
+            &self.row_scales,
+            &self.driving,
+            &self.molar_flux,
+            &self.mass_flux,
+        ]
+        .iter()
+        .map(|values| values.capacity() * core::mem::size_of::<f64>())
+        .sum()
+    }
+}
+
 /// Complete borrowed diffusive fluxes and actual equation residuals.
 #[derive(Clone, Copy, Debug)]
 pub struct MaxwellStefanEvaluationV1<'a> {

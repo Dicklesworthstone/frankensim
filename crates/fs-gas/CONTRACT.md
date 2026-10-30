@@ -1398,3 +1398,38 @@ or experimentally validated flame/emission prediction. A finite-step entropy
 check does not turn the source's irreversible channels into detailed-balanced
 reactions, establish a fully discrete coupled entropy theorem, or give higher
 order to surrounding pressure, transport, radiation or solid-source splitting.
+
+## Shared original-mixture planar molecular faces
+
+`multicomponent::dissipation::PlanarTransport` prepares the original
+Maxwell--Stefan workspace and transport law on the exact evolving species
+bank. Its shared private face kernel also serves the original axial and gas
+network operators; there is no second species conversion, diffusion solver or
+enthalpy convention. A planar face transports every diffusive species flux,
+both momentum components and full referenced energy together. Its Newtonian
+stress includes normal and transverse derivatives under the three-dimensional
+trace convention with zero out-of-plane velocity. Energy includes partial
+referenced species enthalpy, Fourier heat and both components of stress work.
+No separate chemical or viscous heat source duplicates those transfers.
+
+Conservative inputs use the original caloric inversion. Already reconstructed
+primitive inputs use the original source admission without another inversion.
+Stationary adiabatic slip walls retain normal viscous traction and exactly zero
+species, shear and energy flux. Output is scratch until success; callers own
+spatial gradients, conservative divergence, requested-duration transaction and
+the complete boundary impulse. The reported diffusion scale is a conservative
+engineering step-size estimate, not a spectral or invariant-domain certificate.
+
+Prepared numerical capacity includes the binary matrix and all original
+Maxwell--Stefan solve buffers. Successful kernels allocate no new scratch.
+Immutable gas/species storage, bounded stack scratch and the caller's transport
+law storage/evaluation allocations are outside that budget. Material-card
+providers retain their original source-query allocation and validity contract.
+
+Five focused regressions cover independent binary diffusion with unequal Cp,
+Fourier/full-tensor/enthalpy flux, primitive/conservative agreement, tangential
+frame and formation-gauge covariance, exact axial reduction, slip-wall loads,
+exact-zero species, source/axis refusal and final cancellation/replay. Original
+axial/network regressions remain authoritative for their geometry and balances.
+This face owner supplies no Soret/Dufour closure, no-slip or molecular reservoir
+boundary, nonideal transport, spatial accuracy or combustion validation.

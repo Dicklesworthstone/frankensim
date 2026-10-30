@@ -8,13 +8,15 @@
 //! require additional closures and are not represented by this operator.
 
 pub(super) mod evolve;
+mod face;
 mod law;
 
+pub use face::{PlanarTransport, TransportFaceReport};
+#[cfg(feature = "material")]
+pub(crate) use law::validate_binary;
 pub use law::{
     ConstantTransport, KineticTransport, TransportCoefficients, TransportDomain, TransportLaw,
 };
-#[cfg(feature = "material")]
-pub(crate) use law::validate_binary;
 
 use super::{
     Boundaries, Boundary, Error as FlowError, MAX_COMPONENTS, Mesh1d, MixtureEuler1d, MixtureGas,
@@ -22,8 +24,9 @@ use super::{
 };
 use fs_qty::Time;
 use fs_thermochem::transport::kinetic::KineticTransportErrorV1;
+pub use fs_thermochem::transport::maxwell_stefan::MaxwellStefanSolveV1;
 use fs_thermochem::transport::maxwell_stefan::{
-    MaxwellStefanErrorV1, MaxwellStefanSolveV1, MaxwellStefanV1, MaxwellStefanWorkspaceV1,
+    MaxwellStefanErrorV1, MaxwellStefanV1, MaxwellStefanWorkspaceV1,
 };
 
 /// Explicit diffusion work, step-size, and constitutive residual budgets.
@@ -55,7 +58,8 @@ impl Default for DissipationControl {
     }
 }
 impl DissipationControl {
-    pub(super) fn validate(self) -> Result<(), DissipationError> {
+    /// Admit the same bounded molecular controls for axial and spatial owners.
+    pub fn validate(self) -> Result<(), DissipationError> {
         if !positive(self.parabolic_cfl)
             || self.parabolic_cfl > 0.45
             || !positive(self.maximum_step_s)
@@ -252,34 +256,7 @@ impl<L: TransportLaw> DissipationOperator<L> {
                 ));
             }
         }
-        let species = flow
-            .gas()
-            .source()
-            .models()
-            .iter()
-            .map(|s| (s.species().clone(), s.molar_mass()))
-            .collect();
-        let maxwell_stefan = MaxwellStefanV1::new(species)?;
-        let minimum = flow
-            .gas()
-            .source()
-            .models()
-            .iter()
-            .map(|s| s.molar_mass().value())
-            .fold(f64::INFINITY, f64::min);
-        let maximum = flow
-            .gas()
-            .source()
-            .models()
-            .iter()
-            .map(|s| s.molar_mass().value())
-            .fold(0.0, f64::max);
-        let mass_ratio = maximum / minimum;
-        if !positive(mass_ratio) {
-            return Err(DissipationError::Invalid(
-                "molecular mass ratio is unrepresentable",
-            ));
-        }
+        let (maxwell_stefan, mass_ratio) = face::prepare_diffusion(flow.gas())?;
         let work = Workspace {
             current: allocated(count * m, 0.0)?,
             stage: allocated(count * m, 0.0)?,

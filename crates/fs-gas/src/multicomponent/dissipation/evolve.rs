@@ -2,12 +2,11 @@ use super::super::evolve::totals;
 use super::super::{
     Boundaries, Boundary, MAX_SPECIES, Mesh1d, MixtureEuler1d, MixtureGas, Primitive, Totals, sum,
 };
-use super::law::validate_binary;
 use super::{
     DissipationControl, DissipationError, DissipationOperator, DissipationReport, MAX_COMPONENTS,
     TransportLaw, poll, positive,
 };
-use fs_qty::{Pressure, Temperature, Time};
+use fs_qty::{Temperature, Time};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 use fs_thermochem::transport::maxwell_stefan::{
     MaxwellStefanSolveV1, MaxwellStefanV1, MaxwellStefanWorkspaceV1,
@@ -435,96 +434,39 @@ pub(in crate::multicomponent) fn interior_face<L: TransportLaw>(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, DissipationError> {
     let n = gas.species_count();
-    let distance = 0.5 * wl + 0.5 * wr;
-    let right_weight = (0.5 * wl) / distance;
-    let left_weight = 1.0 - right_weight;
-    let t = left_weight * pl.temperature + right_weight * pr.temperature;
-    let p = left_weight * pl.pressure + right_weight * pr.pressure;
-    let velocity = left_weight * pl.velocity + right_weight * pr.velocity;
-    let grad_t = (pr.temperature - pl.temperature) / distance;
-    let grad_u = (pr.velocity - pl.velocity) / distance;
-    let mut xl = [0.0; MAX_SPECIES];
-    let mut xr = [0.0; MAX_SPECIES];
-    let mut x = [0.0; MAX_SPECIES];
-    let mut gradient = [0.0; MAX_SPECIES];
-    fractions(gas, &left[..n], &mut xl[..n])?;
-    fractions(gas, &right[..n], &mut xr[..n])?;
-    for k in 0..n {
-        x[k] = left_weight * xl[k] + right_weight * xr[k];
-        gradient[k] = (xr[k] - xl[k]) / distance;
-    }
-    let pivot = (0..n)
-        .max_by(|&a, &b| x[a].total_cmp(&x[b]))
-        .expect("nonempty species bank");
-    close_simplex(&mut x[..n], pivot)?;
-    gradient[pivot] = -sum((0..n).filter(|&k| k != pivot).map(|k| gradient[k]));
-    let ratio = pr.pressure / pl.pressure;
-    let log_pressure = if positive(ratio) {
-        fs_math::det::ln(ratio)
-    } else {
-        fs_math::det::ln(pr.pressure) - fs_math::det::ln(pl.pressure)
-    };
-    let coefficients = law.evaluate(
-        Temperature::new(t),
-        Pressure::new(p),
-        &x[..n],
-        binary,
-        &mut || cancelled(),
-    )?;
-    coefficients.validate()?;
-    let maximum_diffusion = validate_binary(binary, n)?;
-    let evaluated = diffusion.evaluate(
-        &x[..n],
-        &gradient[..n],
-        Temperature::new(t),
-        Pressure::new(p),
-        log_pressure / distance,
-        binary,
-        controls,
+    let evaluated = super::face::interior::<false, L>(
+        gas,
+        law,
+        diffusion,
         workspace,
-        &mut *cancelled,
+        super::face::Trace {
+            densities: &left[..n],
+            primitive: pl,
+            transverse_velocity: 0.0,
+            cv_density: cvl,
+        },
+        super::face::Trace {
+            densities: &right[..n],
+            primitive: pr,
+            transverse_velocity: 0.0,
+            cv_density: cvr,
+        },
+        wl,
+        wr,
+        [0.0; 2],
+        mass_ratio,
+        binary,
+        out,
+        controls,
+        cancelled,
     )?;
     stage.gradient_residual = stage
         .gradient_residual
-        .max(evaluated.maximum_gradient_residual_per_m());
+        .max(evaluated.maximum_gradient_residual_per_m);
     stage.mass_frame_residual = stage
         .mass_frame_residual
-        .max(evaluated.mass_frame_residual_kg_m2_s().abs());
-    out[..n].copy_from_slice(evaluated.mass_fluxes());
-    let longitudinal = coefficients.longitudinal_viscosity()?;
-    let stress = longitudinal * grad_u;
-    out[n] = -stress;
-    let mut enthalpy_flux = [0.0; MAX_SPECIES];
-    for k in 0..n {
-        if out[k] == 0.0 {
-            continue;
-        }
-        let model = &gas.source().models()[k];
-        let h_referenced = (model
-            .molar_internal_energy_change(
-                Temperature::new(gas.domain().minimum_temperature),
-                Temperature::new(t),
-            )
-            .map_err(super::FlowError::from)?
-            .value()
-            + R * t)
-            / model.molar_mass().value();
-        enthalpy_flux[k] = h_referenced * out[k];
-    }
-    out[n + 1] = sum(enthalpy_flux[..n].iter().copied())
-        - coefficients.thermal_conductivity.value() * grad_t
-        - velocity * stress;
-    if !out.iter().all(|x| x.is_finite()) {
-        return Err(DissipationError::Invalid("non-finite molecular face flux"));
-    }
-    let gamma =
-        1.0 + (pl.pressure / (pl.temperature * cvl)).max(pr.pressure / (pr.temperature * cvr));
-    // The mass-ratio and Cp/Cv factors are a conservative engineering scale
-    // for coupled concentration/temperature transport, not a spectral proof.
-    let diffusivity = (maximum_diffusion * mass_ratio * gamma)
-        .max(longitudinal / pl.density.min(pr.density))
-        .max(coefficients.thermal_conductivity.value() / cvl.min(cvr));
-    let rate = diffusivity / distance;
+        .max(evaluated.mass_frame_residual_kg_m2_s.abs());
+    let rate = evaluated.diffusivity_m2_s / (0.5 * wl + 0.5 * wr);
     if !rate.is_finite() || rate < 0.0 {
         return Err(DissipationError::Invalid("molecular face scale overflow"));
     }
@@ -571,36 +513,39 @@ fn wall_face<L: TransportLaw>(
     out: &mut [f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, DissipationError> {
-    poll(cancelled)?;
     let n = gas.species_count();
-    let mut x = [0.0; MAX_SPECIES];
-    fractions(gas, &state[..n], &mut x[..n])?;
-    let c = law.evaluate(
-        Temperature::new(p.temperature),
-        Pressure::new(p.pressure),
-        &x[..n],
-        binary,
-        &mut || cancelled(),
-    )?;
-    c.validate()?;
-    validate_binary(binary, n)?;
-    let viscosity = c.longitudinal_viscosity()?;
     let gradient = if left {
         p.velocity / distance
     } else {
         -p.velocity / distance
     };
-    out.fill(0.0);
-    out[n] = -viscosity * gradient;
-    // Zero species permeability, zero heat flux and u_wall*tau=0.
-    let rate = (viscosity / p.density) / distance;
-    if !out[n].is_finite() || !rate.is_finite() {
+    let evaluated = super::face::wall::<false, L>(
+        gas,
+        law,
+        super::face::Trace {
+            densities: &state[..n],
+            primitive: p,
+            transverse_velocity: 0.0,
+            cv_density: 0.0,
+        },
+        gradient,
+        0.0,
+        binary,
+        out,
+        cancelled,
+    )?;
+    let rate = evaluated.diffusivity_m2_s / distance;
+    if !rate.is_finite() {
         return Err(DissipationError::Invalid("wall traction overflow"));
     }
     Ok(rate)
 }
 
-fn fractions(gas: &MixtureGas, densities: &[f64], out: &mut [f64]) -> Result<(), DissipationError> {
+pub(super) fn fractions(
+    gas: &MixtureGas,
+    densities: &[f64],
+    out: &mut [f64],
+) -> Result<(), DissipationError> {
     for (k, model) in gas.source().models().iter().enumerate() {
         out[k] = densities[k] / model.molar_mass().value();
     }
@@ -616,7 +561,7 @@ fn fractions(gas: &MixtureGas, densities: &[f64], out: &mut [f64]) -> Result<(),
         .expect("nonempty source bank");
     close_simplex(out, pivot)
 }
-fn close_simplex(x: &mut [f64], pivot: usize) -> Result<(), DissipationError> {
+pub(super) fn close_simplex(x: &mut [f64], pivot: usize) -> Result<(), DissipationError> {
     let remainder = 1.0 - sum((0..x.len()).filter(|&k| k != pivot).map(|k| x[k]));
     if !positive(remainder)
         || remainder > 1.0
