@@ -14856,6 +14856,28 @@ pub(crate) fn photometric_intersect(
         .map(|hit| hit.map(|hit| (hit.primitive_index, hit.hit)))
 }
 
+/// Evaluate the same spectral opaque material law for a calibrated direct
+/// fixture connection in an index-one medium. Photometry admission excludes
+/// dielectric and anisotropic tangent-frame materials before this call.
+#[cfg(feature = "photometry")]
+pub(crate) fn photometric_brdf(
+    material: &Material,
+    normal: Vec3,
+    outgoing: Vec3,
+    incoming: Vec3,
+    wavelength_nm: f64,
+) -> Result<f64, TracerError> {
+    opaque_bsdf_eval(
+        material,
+        normal,
+        outgoing,
+        incoming,
+        wavelength_nm,
+        None,
+        None,
+    )
+}
+
 fn validate_scene<'scene>(
     scene: &'scene Scene,
     cx: &Cx<'_>,

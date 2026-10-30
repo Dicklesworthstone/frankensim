@@ -21,6 +21,7 @@ use fs_evidence::NumericalCertificate;
 use fs_exec::{Cancelled, Cx};
 use fs_geom::{Point3, Vec3};
 
+pub mod image;
 pub mod medium;
 pub mod source;
 
@@ -66,6 +67,10 @@ pub enum PhotometryError {
     GridIndexOutOfRange,
     /// Geometric tolerance, distance or memory budget is invalid.
     InvalidOptions,
+    /// Camera ray, distance, image dimensions or aperture are unsupported.
+    InvalidCameraRay,
+    /// Single-scattering quadrature settings are invalid.
+    InvalidScatterSettings,
     /// The output count exceeds the explicit job budget.
     OutputBudgetExceeded,
     /// Output storage could not be reserved.
@@ -97,6 +102,8 @@ pub enum PhotometryError {
     Medium(MediumError),
     /// The original renderer's geometry backend refused the ray.
     Geometry(TracerError),
+    /// The existing physical camera refused ray generation.
+    Camera(crate::camera::CameraError),
 }
 
 impl core::fmt::Display for PhotometryError {
@@ -130,6 +137,15 @@ impl From<TracerError> for PhotometryError {
         match value {
             TracerError::Cancelled => Self::Cancelled,
             other => Self::Geometry(other),
+        }
+    }
+}
+
+impl From<crate::camera::CameraError> for PhotometryError {
+    fn from(value: crate::camera::CameraError) -> Self {
+        match value {
+            crate::camera::CameraError::Cancelled => Self::Cancelled,
+            other => Self::Camera(other),
         }
     }
 }

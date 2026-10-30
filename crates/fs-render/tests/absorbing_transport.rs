@@ -305,7 +305,7 @@ fn g1_hot_cells_emit_in_si_units_and_stop_at_opaque_geometry() {
         .unwrap();
         let mut settings = settings(DirectStrategy::Mis);
         settings.max_depth = 1;
-        let expected = |length| {
+        let expected = |length: f64| {
             xyz_of_spectrum(|lambda| planck(1800.0, lambda) * -(-1.4_f64 * length).exp_m1())
         };
         let scene = empty_scene();

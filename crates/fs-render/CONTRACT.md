@@ -1535,3 +1535,22 @@ and scattering sample polls `Cx`. A fresh uncancelled context can resume the
 retained prefix; partitioning changes no sums. Determinism is same-ISA/toolchain
 and fixed caller source order. No GPU, window, file parser or random stream is
 required. Cross-ISA bit equality and large-rig throughput are separate claims.
+
+`LuminanceJob` uses the existing pinhole `PhysicalCamera` and the original
+Lambertian, GGX and spectral conductor BRDFs. Its row-major pixels report
+cd/m² before exposure or tone mapping, with direct surface and single-scattered
+haze components separately available. Primary opaque geometry terminates both
+components at the same hit; fixture-to-surface/haze and surface/haze-to-camera
+extinction are each applied once. Camera segments that enter an active point
+source's exclusion radius in scattering media refuse before quadrature, even
+if no midpoint would sample the singularity. Finite apertures refuse.
+
+This image model omits interreflection, scattering onto surfaces, multiple
+scattering and finite emitter appearance. Pixel centres are point samples, not
+pixel-area integrals. Neither a haze refinement estimate nor a completed image
+certifies those omitted terms. G1 image tests check rho*E/pi, spectral reflection,
+both extinction legs and HG propagation direction; G3/G4/G5 tests check shadows,
+primary truncation, singularity refusal and progressive cancellation/replay.
+The `photometric_stage` example accepts ordinary Rust fixture/scene data and
+prints an illuminance summary and luminance diagnostics, or a lux CSV with
+`--csv`; its fixture profiles and haze coefficients are declared examples.
