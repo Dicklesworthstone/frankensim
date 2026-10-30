@@ -6,6 +6,9 @@
 //! They share the original loaded-inertia congruence with physical forcing.
 //! Neither a fitted modal damping ratio nor a fictitious internal mass is used.
 
+/// Source-pinned temperature changes of relaxation rates at retained history.
+pub mod temperature;
+
 use super::{FrameFluidCoordinates, FrameFluidPlacement, MaterialFluidFrame};
 use crate::air_path::cylinder::frame::FrameFluidError;
 use crate::render::schedule::force::coupled::{CoupledModalSystem, ModalCouplingError};
