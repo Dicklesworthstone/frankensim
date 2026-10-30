@@ -80,6 +80,49 @@ The binary can also be run as `cargo run -p fs-couple --example
 finite_gas_string -- ...` with the same arguments. Use the workspace's native
 build execution policy when building either target.
 
+## Attached experiments and synchronized output
+
+The same native binary accepts the Instrument Lab attachment boundary:
+
+```text
+--self-contained --attached-source RELATIVE_PATH [--attached-source RELATIVE_PATH ...]
+--history-output NEW_HISTORY.csv
+--require-sample-rate 48000
+```
+
+In self-contained mode, every core/sleeve material pack, species/caloric/transport
+pack, initial gas record and nozzle reservoir record must be explicitly attached.
+Names are exact relative paths beneath the scenario's directory. The existing
+native attachment reader snapshots those bytes before physical source loading;
+unlisted files are refused even when they exist on the host. Its limits remain
+32 files, 8 MiB per file and 32 MiB combined. Ordinary CLI path resolution is
+unchanged when `--self-contained` is absent.
+
+`--history-output` writes the complete original CSV to a new file instead of
+stdout. This retains every accepted sample, optional layer temperature, gas-flow
+and species column, and electrical-feedback column. Serialization is bounded
+to 16 MiB and completes before either output is created; shorten the declared
+run if that bound is exceeded. Both destinations must be new files. Physical
+admission and output-size refusals create neither artifact; filesystem write
+errors can still leave incomplete files and are reported as errors.
+
+`--require-sample-rate` asserts a receiver capability before source loading or
+simulation. It never changes the authored physical clock, resamples the sound,
+or normalizes pressure. Instrument Lab requests 48 kHz; an incompatible scenario
+must be edited explicitly. This runner does not accept `--decimate`.
+
+After both artifacts are written, the native writer emits the same calibration
+line used by the existing material-string browser adapter:
+
+```text
+samples=N; rate_Hz=48000; clips=N; full_scale_Pa=X
+```
+
+The browser uses that native pressure scale with the original WAV bytes for
+playback and A/B comparison. The CSV is an observation of the same trajectory,
+not a second simulation. See the [Instrument Lab instructions](../../../../apps/instrument-lab/README.md)
+for the local renderer, exact source attachments and experiment export.
+
 ## Solve electrical feedback during heat and gas flow
 
 Uniform strings can close the electrical source and thermal endpoint together.

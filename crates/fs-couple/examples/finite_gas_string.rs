@@ -11,6 +11,12 @@ mod input;
 mod layered;
 #[path = "finite_gas_string/flow.rs"]
 mod flow;
+#[path = "finite_gas_string/output.rs"]
+mod output;
+#[path = "../src/bin/music_render/wind_input/attachments.rs"]
+mod attachments;
+#[path = "material_strings/native_input.rs"]
+mod native_sources;
 #[allow(dead_code)]
 #[path = "../src/bin/music_render/json.rs"]
 mod json;
@@ -52,6 +58,8 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+// The existing native string adapter and this runner share one source reader.
+use bounded_read as read_bounded;
 
 fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -554,21 +562,32 @@ fn simulate(
 
 fn run(args: &[String]) -> Result<()> {
     let (args, gas_options) = thermochemical::Options::extract(args)?;
+    let (args, output_options) = output::Options::extract(&args)?;
+    let (args, source_options) = native_sources::SourceOptions::extract(&args)?;
     if args.len() != 3 {
-        return Err("usage: finite_gas_string SCENARIO SOLID_CLAIMS.pack OUTPUT.wav --gas-record FILE --gas-component SPECIES.pack NASA9.pack TRANSPORT.pack [repeat] --gas-water none|ID --gas-phase frozen".into());
+        return Err("usage: finite_gas_string SCENARIO SOLID_CLAIMS.pack OUTPUT.wav --gas-record FILE --gas-component SPECIES.pack NASA9.pack TRANSPORT.pack [repeat] --gas-water none|ID --gas-phase frozen [--self-contained --attached-source RELATIVE_PATH ...] [--history-output NEW.csv] [--require-sample-rate HZ]".into());
+    }
+    if source_options.decimate {
+        return Err("finite_gas_string does not support --decimate; author the physical sample rate explicitly".into());
     }
     let bytes = bounded_read(Path::new(&args[0]), input::MAX_INPUT_BYTES)?;
     let spec = input::parse(std::str::from_utf8(&bytes)?)?;
-    let pack = NormalizedPack::from_bytes(&bounded_read(Path::new(&args[1]), 16 << 20)?)?;
-    let mut cards = vec![material(&pack)?];
+    output_options.admit(spec.sample_rate_hz, Path::new(&args[2]))?;
     let directory = Path::new(&args[0]).parent().unwrap_or_else(|| Path::new("."));
+    let sources = source_options.load(directory)?;
+    let pack = NormalizedPack::from_bytes(&sources.read_option(Path::new(&args[1]), 16 << 20)?)?;
+    let mut cards = vec![material(&pack)?];
     if let Some(bonded) = &spec.bonded {
         for sleeve in &bonded.sleeves {
-            let bytes = bounded_read(&directory.join(&sleeve.pack), 16 << 20)?;
+            let bytes = sources.read_relative(&sleeve.pack, 16 << 20)?;
             cards.push(material(&NormalizedPack::from_bytes(&bytes)?)?);
         }
     }
-    let (gas, reservoir) = load_gas(&gas_options, &spec, directory, bounded_read)?;
+    // Attached names remain exact logical paths; ordinary CLI record names
+    // retain their historical scenario-relative reservoir resolution.
+    let gas_directory = if sources.is_restricted() { Path::new("") } else { directory };
+    let (gas, reservoir) = load_gas(&gas_options, &spec, gas_directory,
+        |path, limit| sources.read_option(path, limit))?;
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let history = pool.scope(|arena| {
@@ -595,6 +614,8 @@ fn run(args: &[String]) -> Result<()> {
         spec.sample_rate_hz,
         spec.full_scale_pa,
     )?;
+    let csv = output_options.history.as_ref()
+        .map(|_| output::csv_bytes(&history, output::MAX_HISTORY_BYTES)).transpose()?;
     // Physics admission completes before either output is exposed. Creating a
     // new file also protects an earlier accepted render from accidental reuse.
     let mut file = std::fs::OpenOptions::new()
@@ -603,50 +624,20 @@ fn run(args: &[String]) -> Result<()> {
         .open(&args[2])?;
     file.write_all(&wav)?;
     file.flush()?;
+    if let (Some(path), Some(csv)) = (&output_options.history, csv) {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+        file.write_all(&csv)?;
+        file.flush()?;
+    } else {
+        output::write_csv(&history, std::io::BufWriter::new(std::io::stdout().lock()))?;
+    }
     eprintln!(
         "{}; sample_rate_hz={}; full_scale_pa={:e}; clipped_samples={clips}",
         history.description, spec.sample_rate_hz, spec.full_scale_pa
     );
-    let mut output = std::io::BufWriter::new(std::io::stdout().lock());
-    write!(
-        output,
-        "time_s,pressure_pa,displacement_m,velocity_m_s,solid_temperature_k,gas_temperature_k,gas_pressure_pa,material_heat_j,drag_heat_j,solid_to_gas_heat_j,joule_heat_j,prescribed_solid_heat_j,prescribed_gas_heat_j,mechanical_work_j,storage_change_j,energy_defect_j,energy_tolerance_j,current_a,endpoint_current_a,resistance_ohm,endpoint_resistance_ohm,first_mode_damping_ratio,tension_n,first_mode_frequency_hz,reversible_heat_j,axial_free_energy_change_j,mechanical_entropy_energy_change_j"
-    )?;
-    if let Some(temperatures) = history.layer_temperatures.first() {
-        for layer in 0..temperatures.len() {
-            write!(output, ",layer_{layer}_temperature_k")?;
-        }
-    }
-    if let Some(gas_flow) = &history.gas_flow {
-        for name in flow::COLUMNS { write!(output, ",{name}")?; }
-        for species in &gas_flow.species {
-            let escaped = species.replace('"', "\"\"");
-            write!(output, ",\"gas_mole_fraction_{escaped}\",\"reservoir_mole_fraction_{escaped}\"")?;
-        }
-    }
-    if history.electrical_feedback.is_some() {
-        write!(output, ",cumulative_electrical_source_work_j,cumulative_electrical_source_residual_j,electrical_feedback_trials")?;
-    }
-    writeln!(output)?;
-    for (sample, record) in history.records.iter().enumerate() {
-        for (i, value) in record.iter().enumerate() {
-            if i != 0 {
-                write!(output, ",")?;
-            }
-            write!(output, "{value:.17e}")?;
-        }
-        if let Some(temperatures) = history.layer_temperatures.get(sample) {
-            for temperature in temperatures { write!(output, ",{temperature:.17e}")?; }
-        }
-        if let Some(gas_flow) = &history.gas_flow {
-            for value in &gas_flow.records[sample] { write!(output, ",{value:.17e}")?; }
-        }
-        if let Some(feedback) = &history.electrical_feedback {
-            for value in feedback[sample] { write!(output, ",{value:.17e}")?; }
-        }
-        writeln!(output)?;
-    }
-    output.flush()?;
+    // The same calibrated receipt grammar as the existing material performer.
+    eprintln!("samples={}; rate_Hz={}; clips={clips}; full_scale_Pa={:e}",
+        history.pressure_pa.len(), spec.sample_rate_hz, spec.full_scale_pa);
     Ok(())
 }
 
