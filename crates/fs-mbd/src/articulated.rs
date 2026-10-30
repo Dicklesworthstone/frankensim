@@ -1807,7 +1807,7 @@ pub(super) fn validate_external_wrenches(
     Ok(())
 }
 
-fn solve_floating_base_system(
+pub(crate) fn solve_floating_base_system(
     matrix: &Mat6,
     right_hand_side: Wrench,
 ) -> Result<Twist, ArticulatedError> {

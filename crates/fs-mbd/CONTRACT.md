@@ -2244,3 +2244,56 @@ compensated positive `log(1+x)` evaluation, retaining weak departures without
 platform libm. The reversal regression continues through the second physical
 arrest and subsequent sticking, checking both stopping times against an
 independent scalar exponential/bisection reference and continued bulk loss.
+
+### Frictional impacts with closed rigid distance linkages
+
+`articulated_contacts::friction::constrained::resolve_constrained_articulated_frictional_contacts`
+resolves supplied Coulomb impacts together with independent positive rigid
+distances between original material points, within or across free articulated
+trees. It reuses the original articulated impulse response, friction law and
+actual endpoint/energy/momentum checks. The empty-distance entry delegates to
+the original contact owner. Supplied distance geometry and range velocity must
+already satisfy the declared physical tolerances; this event does not locate
+collisions, assemble mechanisms or repair positional/velocity drift.
+
+The native augmented impulse mobility is `[D B; B^T A]`. The small normalized
+SPD bilateral block A is factored once with the original `fs-la` Cholesky owner.
+Cached recovery columns produce the constrained contact mobility
+`D - B A^-1 B^T`; the original non-associated Signorini--Coulomb solver supplies
+contact impulses j, and the distance reactions are `-A^-1 B^T j`. Contact and
+bilateral impulses are accumulated together before the original native update
+of each involved tree. Joint/base recoil, full inertia tensors, lever arms,
+cross-contact response and cross-tree force transfer all remain in that map.
+This follows auxiliary-constraint response condensation, as described in
+Baraff, *Linear-Time Dynamics Using Lagrange Multipliers* (1996), section 8,
+<https://www.cs.cmu.edu/~baraff/papers/sig96.pdf>.
+
+Positive distance impulses separate the named B point from A; their forces are
+equal, opposite and collinear at the actual frozen geometry. Both orbital and
+spin angular momentum therefore use the same internal wrench pair. Every
+actual returned contact velocity and range rate is checked after the summed
+native application. The receipt exposes distance errors/rates, reactions, and
+actual constraint work `sum(lambda*(rate_before+rate_after)/2)` in joules.
+Admitted input tangency defects remain in that work and the original global
+energy residual, which may refuse them; they are not hidden as physical heat.
+The moving-support work and contact determinacy policies remain unchanged.
+A velocity-only contact witness does not imply unique distance reactions.
+
+The constrained entry admits at most 21 contacts, 32 independent distance rows,
+128 trees and 4096 total original links. Vanishing mobility relative to isolated
+endpoint bodies, nonreciprocal or insufficiently resolved normalized mobility,
+redundant constraints, invalid geometry, exhausted bounds and cancellation
+refuse atomically. Only the small bilateral block is factored; the native mass
+response stays linear in the involved tree size per row. There is no dense
+generalized mass matrix, sequential contact kick or later velocity projection.
+
+`tests/articulated_constrained_impacts.rs` checks analytic unequal-body impulse
+sharing and distinct tangential mobility; an independent fixed-joint reduction
+with full tensors, COM offsets and rotated scenes; simultaneous shared rods and
+redundant contact velocities; smooth rigid-loop motion before and after impact;
+exact empty-constraint delegation; and geometric/rank/budget/cancellation
+refusal with deterministic retry. The existing contact and contact-step suites
+exercise preservation of the original friction and prescribed-support paths.
+This supplies instantaneous distance-constrained impacts, not continuous
+cross-tree integration, spherical/weld impact closure, CCD, finite-patch spin
+friction, compliant history or a unique-reaction guarantee.

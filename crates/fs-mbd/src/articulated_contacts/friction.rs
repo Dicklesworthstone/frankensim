@@ -6,6 +6,9 @@
 //! Signorini--Coulomb solve; no independent link masses or sequential tangent
 //! clipping are substituted for articulated recoil.
 
+/// Simultaneous frictional impacts with rigid bilateral distance reactions.
+pub mod constrained;
+
 use super::{
     ArticulatedContactError, ArticulatedContactSystem, ContactCounterpart, EventResponse,
     EventWorkspace, LinkContactPoint, Prepared, finite, magnitude, poll, prepare_point,
@@ -90,7 +93,67 @@ pub fn resolve_articulated_frictional_contacts(
     config: FrictionalContactConfig,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedFrictionalContactResult, ArticulatedContactError> {
-    poll(&mut cancelled)?;
+    let PreparedContactEvent {
+        mut workspace,
+        prepared,
+        laws,
+        order,
+    } = prepare_event(systems, contacts, config, &mut cancelled)?;
+    let delassus = workspace.delassus(systems, &prepared, &mut cancelled)?;
+    let contact = solve_frictional_contacts(&laws, &delassus, config, &mut cancelled)?;
+    admit_support_work(&contact, contacts, &order)?;
+    let impulses: Vec<_> = contact.impulses.iter().flatten().copied().collect();
+    let predicted_speeds: Vec<_> = contact
+        .relative_velocities_after
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    let mechanics = workspace.apply(
+        systems,
+        &prepared,
+        EventResponse {
+            impulses: &impulses,
+            predicted_speeds: &predicted_speeds,
+            stored_energy_change: 0.0,
+            dissipated_energy: contact.dissipated_energy,
+            velocity_tolerance: config.velocity_tolerance,
+            energy_tolerance: config.energy_tolerance,
+        },
+        &mut cancelled,
+    )?;
+    Ok(ArticulatedFrictionalContactResult {
+        contact_ids: order.iter().map(|&index| contacts[index].id).collect(),
+        responses: mechanics.responses,
+        contact,
+        relative_velocities_after: mechanics
+            .speeds_after
+            .chunks_exact(3)
+            .map(|row| [row[0], row[1], row[2]])
+            .collect(),
+        delassus,
+        plane_work: mechanics.plane_work,
+        energy_balance_residual: mechanics.energy_balance_residual,
+        linear_momentum_residual: mechanics.linear_momentum_residual,
+        angular_momentum_residual: mechanics.angular_momentum_residual,
+        endpoint_velocity_residual: mechanics.endpoint_velocity_residual,
+    })
+}
+
+struct PreparedContactEvent {
+    workspace: EventWorkspace,
+    prepared: Vec<Prepared>,
+    laws: Vec<FrictionalContact>,
+    order: Vec<usize>,
+}
+
+fn prepare_event(
+    systems: &[ArticulatedContactSystem<'_>],
+    contacts: &[ArticulatedFrictionalContact],
+    config: FrictionalContactConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PreparedContactEvent, ArticulatedContactError> {
+    poll(cancelled)?;
     if contacts.len() > 21 || contacts.len() > config.maximum_contacts || systems.len() > 128 {
         return Err(ArticulatedContactError::Invalid(
             "articulated frictional event exceeds its size cap",
@@ -106,11 +169,11 @@ pub fn resolve_articulated_frictional_contacts(
             "duplicate contact identity",
         ));
     }
-    let mut workspace = EventWorkspace::new(systems, &mut cancelled)?;
+    let workspace = EventWorkspace::new(systems, cancelled)?;
     let mut prepared = Vec::with_capacity(3 * contacts.len());
     let mut laws = Vec::with_capacity(contacts.len());
     for &index in &order {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         let c = contacts[index];
         let normal = unit_normal(c.normal_world)?;
         // Normalize before crossing to avoid overflow in arbitrary finite hints.
@@ -179,8 +242,19 @@ pub fn resolve_articulated_frictional_contacts(
             normal_law: c.normal_law,
         });
     }
-    let delassus = workspace.delassus(systems, &prepared, &mut cancelled)?;
-    let contact = solve_frictional_contacts(&laws, &delassus, config, &mut cancelled)?;
+    Ok(PreparedContactEvent {
+        workspace,
+        prepared,
+        laws,
+        order,
+    })
+}
+
+fn admit_support_work(
+    contact: &FrictionalContactResult,
+    contacts: &[ArticulatedFrictionalContact],
+    order: &[usize],
+) -> Result<(), ArticulatedContactError> {
     if matches!(
         contact.determinacy,
         FrictionalContactDeterminacy::UniqueVelocity(_)
@@ -201,40 +275,5 @@ pub fn resolve_articulated_frictional_contacts(
             }
         }
     }
-    let impulses: Vec<_> = contact.impulses.iter().flatten().copied().collect();
-    let predicted_speeds: Vec<_> = contact
-        .relative_velocities_after
-        .iter()
-        .flatten()
-        .copied()
-        .collect();
-    let mechanics = workspace.apply(
-        systems,
-        &prepared,
-        EventResponse {
-            impulses: &impulses,
-            predicted_speeds: &predicted_speeds,
-            stored_energy_change: 0.0,
-            dissipated_energy: contact.dissipated_energy,
-            velocity_tolerance: config.velocity_tolerance,
-            energy_tolerance: config.energy_tolerance,
-        },
-        &mut cancelled,
-    )?;
-    Ok(ArticulatedFrictionalContactResult {
-        contact_ids: order.iter().map(|&index| contacts[index].id).collect(),
-        responses: mechanics.responses,
-        contact,
-        relative_velocities_after: mechanics
-            .speeds_after
-            .chunks_exact(3)
-            .map(|row| [row[0], row[1], row[2]])
-            .collect(),
-        delassus,
-        plane_work: mechanics.plane_work,
-        energy_balance_residual: mechanics.energy_balance_residual,
-        linear_momentum_residual: mechanics.linear_momentum_residual,
-        angular_momentum_residual: mechanics.angular_momentum_residual,
-        endpoint_velocity_residual: mechanics.endpoint_velocity_residual,
-    })
+    Ok(())
 }
