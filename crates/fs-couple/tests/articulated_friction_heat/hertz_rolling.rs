@@ -1,6 +1,9 @@
 //! Independent planar mechanics and finite-cell reference for the joint owner.
 //! Original material/source owners use explicitly synthetic data throughout.
 
+#[path = "hertz_rolling_collinear.rs"]
+mod collinear;
+
 use fs_contact::interface_binding::thermal_friction::SourceThermalCoulomb;
 use fs_couple::friction_heat::hertz::RigidHertzHeatSource;
 use fs_couple::friction_heat::hertz_rolling::*;

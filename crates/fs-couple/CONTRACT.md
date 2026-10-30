@@ -13792,3 +13792,47 @@ current and energy, actual magnetic gap motion under strain-data-only changes,
 source/boundary refusal and late cancellation/replay. Shared material lowering
 also has a source-bundle parity/refusal regression. Native runtime execution
 must be reported separately from parsing and test-target compilation.
+
+
+## Physical Hertz stop/restart with original surface and bulk heat — v0
+
+`friction_heat::hertz_rolling::collinear::propose_rigid_hertz_rolling_collinear_heat`
+composes the native finite-body collinear stop/restart trajectory with the
+original source-bound interface and finite thermal network. One immutable
+native geometry is reused for all thermal root trials. Each complete trial
+restarts the accepted momenta and opaque stop/material history, queries the
+original Hertz source at its own common face temperature and pressure, and
+admits the original rolling card at the sphere's actual bulk temperature.
+
+The native trajectory's integrated surface loss enters the original massless
+face once. Its independent integrated bulk loss enters the matched original
+whole-sphere caloric cell once. The original mass, material/body identities,
+COM, unique caloric inventory, geometry and work-route checks remain active.
+Outside heat is measured before internal bulk injection. A true surface stop
+can leave nonzero rolling loss, and ordinary thermal conduction continues for
+the rest of the requested representable interval. No mean-rate or endpoint
+power surrogate replaces the original integrated work.
+
+Acceptance checks direct caloric closure
+`deltaH-Qoutside-Dsurface-Dbulk`, direct native/caloric closure
+`deltaK+deltaH-Qoutside`, and the independent original-owner residual sum.
+The complete native stop continuation, original rolling checkpoint, source
+receipt and caloric endpoint return together. A late source refusal, native
+phase budget, thermal trial budget or cancellation returns no partial state.
+
+For each trial, the mechanical coefficients are held at that trial's endpoint
+temperatures and phase integration is exact for the admitted held model.
+Storage and conduction retain the original backward-Euler window. Exact
+stopping for those fixed coefficients is not an exact continuous-temperature
+stopping claim; thermal refinement remains independent. The caller cuts source
+or topology events. Geometry, normal load/radius and frequency remain held;
+this owner adds no normal elastic work, general shear/spin or island event
+trajectory, moving thermal footprint, variable viscosity or bulk entropy claim.
+
+Six G1/G3/G4 groups in
+`tests/articulated_friction_heat/hertz_rolling_collinear.rs` independently
+reconstruct stopping time, scalar/exponential impulses and work, and the
+finite two-capacity thermal root. They cover high static capacity, continued
+post-stop conduction, temperature-dependent stopping, bulk rate variance,
+post-stop rolling heat, authenticated continuation and late failure/retry.
+The fixtures retain the unmodified original quasistatic material gates.
