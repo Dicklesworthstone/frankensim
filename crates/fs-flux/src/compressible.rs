@@ -11,6 +11,9 @@ pub use fs_gas::dynamics::{Error, FrozenGas, Reconstruction, StepControl};
 use fs_gas::dynamics::{MAX_EULER_CELLS, NormalConserved, NormalFaceFlux};
 use fs_qty::Time;
 
+/// Original-source Fourier heat transport and complete planar Newtonian stress.
+pub mod molecular;
+
 /// Conservative density, Cartesian momentum and full referenced total energy.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct State {

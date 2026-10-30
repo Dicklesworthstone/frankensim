@@ -10,6 +10,8 @@ use fs_thermochem::{
     StandardStatePhaseV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K, required_nasa9_parameter_dims,
 };
 
+mod molecular;
+
 fn gas(cp_linear: f64) -> FrozenGas {
     // Manufactured NASA-9 source: R_specific=1, Cp/R=3.5+cp_linear*T.
     // No experimental material or constant-gamma claim for cp_linear != 0.

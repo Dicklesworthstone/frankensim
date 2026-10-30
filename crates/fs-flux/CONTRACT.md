@@ -869,3 +869,63 @@ and integrated wall-support impulse. The 32² run advances 456 accepted steps
 to 2.578101380129e-3 s with zero mass residual, 2.27e-13 J referenced-energy
 residual and less than 1e-15 kg m/s momentum/support mismatch. This is an
 executable engineering example, not a nitrogen shock experiment or benchmark.
+
+### Source-owned molecular transport in the same Cartesian gas
+
+`compressible::molecular::MolecularTransport2d` binds the original
+`fs-gas::multicomponent::dissipation::TransportLaw` to that same `FrozenGas`,
+grid and boundary conditions. Admission compares the complete original NASA-9
+models, not just species labels. `KineticTransport` therefore carries its
+original collision records into the spatial solver; changing those data changes
+actual momentum and temperature. `ConstantTransport` remains an explicitly
+declared approximation. Every active face evaluates viscosity, bulk viscosity
+and conductivity at its local midpoint temperature, pressure and original
+frozen mole composition. Negative, nonfinite or source-refused values stop the
+transaction without substituting air constants.
+
+The molecular flux is `(0, -tau_xn, -tau_yn, -u_face dot tau_n - k grad_n T)`.
+The complete planar velocity gradient includes both cross derivatives and the
+three-dimensional Newtonian trace `tau = mu*(grad u + grad u^T - 2/3 div u I)
++ bulk*div u I`, with zero out-of-plane velocity. Shared face fluxes conserve
+mass, both momenta and total energy. Dissipated kinetic energy remains in that
+same total-energy state and raises the original caloric temperature; there is
+no second viscous-heating source. Fourier diffusivity uses the source's
+volumetric **Cv** because the transported variable is internal energy at fixed
+cell mass and volume. There is no independently authored heat-capacity field.
+
+Periodic pairs reuse the same flux. Stationary reflecting walls enforce zero
+heat and work and zero tangential viscous traction, while retaining their normal
+viscous support impulse. Transmissive boundaries have zero molecular flux.
+These are adiabatic slip and zero-gradient conditions, not no-slip or finite
+thermal reservoirs. Molecular impulses and balances include physical grid depth.
+
+`advance` integrates a complete requested molecular interval with SSP RK2 and
+bounded retries, then atomically publishes the field and per-face impulses. It
+does not advance the Euler clock or replace its prior advection metadata.
+The global parabolic estimate includes normal and cross stress coefficients,
+both cell widths, the smallest current density/Cv and doubled wall gradients;
+both RK stages check it and the original EOS admits every trial state. This is
+a conservative engineering step-size estimate, not a proved nonlinear
+invariant-domain or entropy bound. Source or work-limit refusal and cancellation
+leave the caller's accepted field and operator impulses unchanged.
+
+`MolecularEuler2d` composes molecular half step, original Euler step and molecular
+half step as one atomic interval. If post-heating advection shortens its CFL
+interval, the entire split restarts from the original field. Its public report
+and per-face impulses combine all three phases; the borrowed Euler owner's
+metadata still describes only the middle advection phase. The symmetric
+composition permits second-order smooth evolution when the constituent paths
+retain their order, while limiting and first-order retries reduce that order.
+Workspace is bounded and allocated at preparation, then reused. Runtime material
+law implementations may mutate only their evaluation workspaces.
+
+Five focused G0/G1/G2/G3/G4 regressions exercise a 2-D Fourier mode, oblique
+longitudinal and transverse Newtonian modes, collision-diameter-only pressure
+and shear changes, wall impulse/energy closure, late cancellation/replay,
+zero-transport recovery and atomic work refusal. Synthetic source and collision
+data test composition and conservation; they are not measurements of a real gas.
+This extension keeps spatially uniform frozen composition. It does not supply
+species diffusion, chemistry, Soret/Dufour effects, no-slip boundaries, turbulence,
+rarefied gas, physical shock-thickness validation or mutual fluid/solid thermal
+evolution. Those capabilities require their original owners and additional
+admitted source data, rather than inferred closures.
