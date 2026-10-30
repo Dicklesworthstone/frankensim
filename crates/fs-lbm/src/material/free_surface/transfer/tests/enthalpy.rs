@@ -14,6 +14,7 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
 
 mod components;
+mod rheology;
 
 fn thermal_card(rho: f64, hot_nu: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();

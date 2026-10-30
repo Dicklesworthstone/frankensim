@@ -231,7 +231,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         cx: &Cx<'_>,
     ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport), TetLiquidTransferError> {
         let (flow, report, _) = self.transfer_tetrahedra(
-            domain, grid_origin_m, source, None, limits, cx,
+            domain, grid_origin_m, source, None, None, limits, cx,
         )?;
         Ok((flow, report))
     }
@@ -244,11 +244,17 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         grid_origin_m: [f64; 3],
         source: TetrahedralLiquidState<'_>,
         source_h: Option<&[f64]>,
+        rheology: Option<&super::enthalpy::rheology::RheologyBinding>,
         limits: TetLiquidTransferLimits,
         cx: &Cx<'_>,
     ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport, TransferredEnthalpy), TetLiquidTransferError> {
         checkpoint(cx)?;
-        self.require_frozen_source()?;
+        // Only an admitted original thermal/rheology binding can cross this
+        // boundary with an evolving source. The same geometric and moment
+        // owners serve both paths; no reference-rate viscosity is frozen.
+        if rheology.is_none() {
+            self.require_frozen_source()?;
+        }
         admit_domain(&domain, &|_, _, _| false)?;
         if self.material().surface_tension_n_m().is_some() || self.planar_wetting().is_some() {
             return Err(invalid(
@@ -422,7 +428,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         components::correct(&mut initial, &components, rho * cell_volume, dx, limits, cx)?;
         let predicted = integrate_cells(&initial, rho * cell_volume, dx, cx)?;
         check_projection(&original, &predicted, domain.gravity_m_s2, limits)?;
-        let flow = self.free_surface3_from_cells(domain, &initial, cx)?;
+        let flow = self.free_surface3_from_cells_inner(domain, &initial, cx)?;
         let mut actual = LiquidTransferMoments::default();
         let mut actual_components = vec![LiquidTransferMoments::default(); components.len()];
         for (index, cell) in initial.iter().enumerate() {

@@ -3623,12 +3623,20 @@ hidden caloric/source-density changes with late refusal and deterministic retry.
 These synthetic fixtures received source/API and independent arithmetic review;
 Rust parsing, compilation and test execution were unavailable in this session.
 
-MR28 remains open. This handoff requires already-liquid, stress-free material,
+MR28 remains open. This handoff requires already-liquid material without stored elastic/plastic history,
 one constant-density caloric chart and explicitly omitted capillarity. It does
 not discard solid elastic/plastic history, implement melting release, change
 phase volume, supply pressure/capillary work or certify total fluid mechanical
 energy conservation.
 
+
+### Source rheology through conservative tetrahedral liquid transfer
+
+`free_surface3_from_tetrahedra_with_enthalpy_and_rheology` carries the original temperature/shear material law into the existing thermal VOF owner. Each source tetrahedron supplies its actual affine velocity gradient and `sqrt(2 D:D)`. Original pinned property-line admission covers that tetrahedron's complete P1 temperature span at its actual rate; a reference rate cannot conceal unsupported source shear. Shared vertices are admitted separately when adjacent tetrahedra have different strain. Source-query and original geometric budgets remain explicit.
+
+The original exact overlap, per-fragment mass, linear/angular momentum and enthalpy transfer remain authoritative. The receiving native owner resolves its own force-corrected shear and source viscosity, retaining the same law through continuing motion and molecular `mu*gamma_dot^2` heat. Source rates are reported separately from receiving constitutive samples. The equilibrium population initializer rebuilds viscous stress; it does not transfer the source stress tensor or erase elastic memory. Kinetic/potential projection discrepancies remain numerical accounts, never heat. The existing `with_time_origin` preserves an explicitly supplied source clock before continuation.
+
+Two synthetic regressions specify data-only rheology changes in actual native motion/dissipation, independent mass/enthalpy and both-momentum checks, source-versus-receiver rates, rigid-rotation objectivity, out-of-domain source shear, bounded admission, late receiver refusal and cancellation. Constant reference density, fully liquid source, absent stored elastic/plastic history and neglected capillary surface energy remain required. MR28, MR29 and MR69 remain open for their broader phase, stress-history and moving-geometry obligations.
 
 ### Constant sourced capillarity in the original heated free surface
 
