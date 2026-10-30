@@ -12,7 +12,7 @@ use fs_thermochem::{
 
 mod molecular;
 
-fn gas(cp_linear: f64) -> FrozenGas {
+pub(super) fn gas(cp_linear: f64) -> FrozenGas {
     // Manufactured NASA-9 source: R_specific=1, Cp/R=3.5+cp_linear*T.
     // No experimental material or constant-gamma claim for cp_linear != 0.
     let mut a = [0.0; 9];
@@ -98,7 +98,7 @@ fn field(
     Euler2d::new(gas, grid, states, boundaries, || false).unwrap()
 }
 
-fn close(actual: f64, expected: f64, tolerance: f64) {
+pub(super) fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance * (1.0 + expected.abs()),
         "actual={actual:e}, expected={expected:e}"

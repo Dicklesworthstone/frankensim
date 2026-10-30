@@ -41,7 +41,7 @@ impl Default for MolecularControl {
     }
 }
 impl MolecularControl {
-    fn validate(self) -> Result<(), MolecularError> {
+    pub(in crate::compressible) fn validate(self) -> Result<(), MolecularError> {
         if !positive(self.parabolic_cfl)
             || self.parabolic_cfl > 0.45
             || !positive(self.minimum_step_s)
@@ -50,7 +50,7 @@ impl MolecularControl {
             || !(1..=1_000_000).contains(&self.maximum_steps)
             || self.maximum_halvings > 32
         {
-            return Err(MolecularError::Invalid("planar molecular controls"));
+            return Err(MolecularError::Invalid("molecular controls"));
         }
         Ok(())
     }
@@ -110,7 +110,7 @@ pub enum MolecularError {
 }
 impl core::fmt::Display for MolecularError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "planar molecular gas transport: {self:?}")
+        write!(f, "molecular gas transport: {self:?}")
     }
 }
 impl std::error::Error for MolecularError {}
@@ -406,7 +406,10 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
     }
 }
 
-fn parabolic(observed: f64, maximum: f64) -> Result<(), MolecularError> {
+pub(in crate::compressible) fn parabolic(
+    observed: f64,
+    maximum: f64,
+) -> Result<(), MolecularError> {
     if !observed.is_finite() || observed > maximum * (1.0 + 32.0 * f64::EPSILON) {
         Err(MolecularError::ParabolicNumber { observed, maximum })
     } else {

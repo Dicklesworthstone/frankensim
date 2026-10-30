@@ -68,7 +68,7 @@ mesh evolution and timestep acceptance remain with the consuming spatial owner.
 Focused G0/G3/G4 tests cover axial correspondence, moving shear contacts,
 transverse-boost covariance on both flux branches, shear-heating source-domain
 refusal, slip-wall pressure and cancellation. This adds no entropy theorem,
-viscous wall model, three-dimensional closure or physical shock-thickness claim.
+viscous wall model or physical shock-thickness claim.
 
 `NormalPrimitive` and the `*_normal_flux_from_primitive` entries admit
 reconstructed density, normal/tangential velocity and pressure through the
@@ -80,6 +80,29 @@ substitute a caloric model. Two added regressions compare conservative and
 primitive entries for contacts, supersonic flow, HLL shear mixing and both wall
 branches, plus source/precision/cancellation refusals. All 154 focused native
 gas library tests pass on the pinned nightly.
+
+`SpatialConserved`, `SpatialPrimitive` and `SpatialFaceFlux` extend that same
+closure to a normal and two orthogonal tangent directions. The state carries
+`rho * (e(T)-e(Tmin) + (u_n²+u_t1²+u_t2²)/2)`. All three momenta and the full
+energy participate in one HLLC/HLL solve. A private const-generic kernel is
+shared by the planar and volumetric entry points, including star-state
+admission, bounded HLL wave-speed expansion, and physical flux evaluation;
+it does not fork the Riemann model or append independent scalar advection.
+The three-dimensional constructor, decoder and primitive fast path preserve
+the same original source and caloric-precision admission. Wall pressure uses
+the existing thermally perfect shock/rarefaction closure, with zero mass,
+both tangential fluxes and work at a stationary adiabatic slip wall.
+
+The spatial face tests check bitwise planar reduction when the second tangent
+vanishes; double-shear contacts; rotations and Galilean boosts of both tangent
+components on HLLC and HLL branches; combined shear-heating domain refusal;
+tangentially invariant wall pressure; source-owned primitive/conservative
+agreement; and precision/domain/cancellation refusal. This is the closure for
+the multi-D owner in `fs-flux`, not a three-dimensional mesh integrator here.
+The Estimated claim and the entropy, vacuum, wall-model and physical-validation
+limitations remain unchanged. All 162 focused native gas library tests passed
+on the pinned nightly through the original dependency sources; the complete
+workspace DSR gate was unavailable and is not implied by this narrower result.
 
 MUSCL uses monotonized-central primitive slopes, reduced together when needed
 to retain positive density/pressure and the declared source interval. SSP RK2

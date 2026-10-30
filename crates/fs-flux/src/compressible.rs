@@ -1,4 +1,4 @@
-//! Two-dimensional compressible finite volumes over the original `fs-gas` EOS.
+//! Cartesian compressible finite volumes over the original `fs-gas` EOS.
 //!
 //! Unsplit MUSCL / SSP RK2 shares one conservative flux per Cartesian face.
 //! Normal and transverse momentum and both kinetic-energy components use the
@@ -6,6 +6,8 @@
 //! one-sided shock/rarefaction solution, not a linear acoustic pressure law.
 //! This opt-in inviscid engineering lane has no entropy-stability, adjoint,
 //! turbulence, physical shock-thickness or experimental-validation claim.
+//! [`spatial`] extends the same closure and conservative step semantics to
+//! three-dimensional volumes with both transverse momentum components.
 
 pub use fs_gas::dynamics::{Error, FrozenGas, Reconstruction, StepControl};
 use fs_gas::dynamics::{MAX_EULER_CELLS, NormalConserved, NormalFaceFlux, NormalPrimitive};
@@ -16,6 +18,8 @@ mod cartesian;
 pub mod mixture;
 /// Original-source Fourier heat transport and complete planar Newtonian stress.
 pub mod molecular;
+/// Volumetric shock propagation with three conservative momentum components.
+pub mod spatial;
 use cartesian::StageStats;
 
 /// Conservative density, Cartesian momentum and full referenced total energy.
@@ -822,17 +826,17 @@ fn capture_boundaries(
     )
 }
 
-fn sum_arrays(
-    values: impl Iterator<Item = [f64; 4]>,
+fn sum_arrays<const N: usize>(
+    values: impl Iterator<Item = [f64; N]>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<[f64; 4], Error> {
-    let mut sum = [0.0; 4];
-    let mut correction = [0.0; 4];
+) -> Result<[f64; N], Error> {
+    let mut sum = [0.0; N];
+    let mut correction = [0.0; N];
     for (index, a) in values.enumerate() {
         if index % 64 == 0 {
             poll(cancelled)?;
         }
-        for d in 0..4 {
+        for d in 0..N {
             let y = a[d] - correction[d];
             let t = sum[d] + y;
             correction[d] = (t - sum[d]) - y;

@@ -949,6 +949,115 @@ rarefied gas, physical shock-thickness validation or mutual fluid/solid thermal
 evolution. Those capabilities require their original owners and additional
 admitted source data, rather than inferred closures.
 
+## Three-dimensional conservative shock propagation
+
+`compressible::spatial::Euler3d` supplies a volumetric Euler field behind the
+same opt-in `experimental-compressible` feature. The original `fs-gas` source
+and its shared planar/spatial HLLC/HLL kernel own every caloric and Riemann
+decision. All three momentum densities and their kinetic energy evolve in the
+same five-component flux; the two transverse components are never separate
+passive scalars appended after the energy calculation.
+
+Uniform Cartesian cells retain explicit dx/dy/dz, actual face areas and cell
+volumes. Cell order is x fastest, then y, then z. Boundary faces use the other
+axes in increasing order: y/z on x sides, x/z on y sides, x/y on z sides. Six
+physical sides support stationary reflecting or zero-gradient transmissive
+ends; an axis may instead be periodic. Transmissive does not mean a transparent
+subsonic acoustic boundary. Periodic endpoints reuse identical face flux bits.
+Exact thermally perfect wall reflection has zero mass, tangential momentum and
+energy flux and retains the nonlinear shock/rarefaction pressure response.
+
+The spatial step uses unsplit MC-limited primitive reconstruction and SSP RK2.
+Its CFL sums x/y/z contributions, using each cell's maximum adjacent numerical
+signal speed in every direction, and checks both stages including HLL fallback
+speeds. A source-domain limiter contracts all six reconstructed traces from
+the admitted cell average. Source refusals retry at first order with halved
+time steps; CFL-only retries retain the requested reconstruction. No cell
+average or temperature is clipped. All cell, face, stage and boundary buffers
+are fallibly allocated at construction under the existing cell-count budget.
+Accepted steps reuse them. Cancellation is polled through cells, faces and
+reductions; failed trials retain field, clock, last report and accepted loads.
+
+Every physical boundary face publishes its outward RK-integrated mass,
+three-axis momentum and referenced-energy transfer. Extensive totals use the
+same compensated reduction as the planar owner. Closed-wall fluid/support
+momentum therefore closes through the actual update, including nonuniform
+pressure footprints; endpoint pressure times duration is not substituted for
+the numerical impulse. Structural consumers use these original per-face loads.
+
+Seven focused tests cover noncubic physical geometry and uniform flow; smooth
+three-axis contact refinement; Sod evolution matching the original 1-D source
+on each axis; extrusion matching the original variable-caloric 2-D solver;
+spherical blast symmetry/conservation; all-wall impulse and late-cancel replay;
+and geometry/source/extensive admission. Contact density L1 errors at
+12³/24³/36³ are 1.08724113e-3, 2.86537347e-4 and 1.03126986e-4, with observed
+orders 1.924 and 2.520 over this finite resolution range. These are numerical
+fixtures, not measured gas validation or an entropy/invariant-domain theorem.
+
+`cargo run --release -p fs-flux --no-default-features --features
+experimental-compressible --example shock_box_3d -- 12` runs the original
+200–1000 K nitrogen NASA9 source in a reflecting 1 m³ box with an off-centre
+800 K sphere in a 400 K gas. It writes a full x/y/z/rho/u/v/w/p/T CSV and reports
+balances. The retained 12³ run advanced 164 steps through 0.7 ambient acoustic
+crossings, maximum combined CFL 0.316812; mass residual was -1.110223e-16 kg,
+referenced energy residual 0 J and fluid/support momentum residual components
+at most 1.95e-16 kg m/s. The observed 15.70 s wall time is one container run,
+not a general performance claim.
+
+This fixed-box Euler rung does not itself provide evolving composition,
+reactions, internal obstacles, cut cells,
+moving geometry, reciprocal moving-wall FSI, a shock adjoint, physical shock
+thickness or experimental validation. The full EOS-specific fully discrete
+entropy/invariant-domain and moving-domain programs remain separate work.
+
+### Three-dimensional Newtonian stress, Fourier heat and the coupled field
+
+`spatial::molecular::MolecularTransport3d` binds the original gas's exact species
+models to the existing `TransportLaw`. It evaluates shear viscosity, bulk
+viscosity and conductivity at each evolving face temperature and pressure.
+The full tensor is `tau_ij = mu*(du_i/dx_j+du_j/dx_i) +
+(bulk-2*mu/3)*div(u)*delta_ij`. Both tangential stresses, all cross derivatives
+and all three diagonal contributions participate. Its momentum flux is
+`-tau*n`; total energy carries `-u dot tau*n - k*grad(T) dot n`. Internal
+heating follows from conservative total energy, with no duplicated viscous
+source. One stored face flux transfers equal and opposite amounts to neighbors.
+
+The operator reuses the volumetric Euler update and boundary capture, original
+caloric admission, shared molecular controls and named source/refusal errors.
+It preallocates cell gradients and face buffers; each cell gradient is computed
+once per stage and reused on adjacent faces. The first prepared face pass
+provides both the parabolic estimate and first SSP stage, avoiding duplicate
+source/gradient work on successful molecular substeps. The bound includes all
+three cell widths and full normal/cross-stress coefficients, while both stages
+must pass source and parabolic admission. This is an engineering time-step
+estimate, not a nonlinear entropy or invariant-domain theorem.
+
+`MolecularEuler3d` composes molecular half step, original Euler step and molecular
+half step over one accepted physical interval. If heating changes the Euler CFL
+and shortens the interval, the entire trial restarts from its original field.
+The complete report and per-face loads combine all phases. The borrowed Euler
+owner's report describes only the middle advective stage; consumers needing
+physical total wall traction must use the molecular owner's report and loads.
+All accepted field, clock, history and impulses remain unchanged on failed work,
+source refusal or cancellation, including the final publication checkpoint.
+
+Stationary reflecting faces are adiabatic slip walls: normal viscous traction
+acts on the support, and tangential stress, heat and wall work vanish. Open ends
+have zero molecular flux. These are neither no-slip nor fixed-temperature
+walls. The combined normal wall traction is signed `p-tau_nn`; it may be tensile
+and cannot be treated as a positive absolute pressure or clipped to zero.
+
+Five focused tests check all-three-axis heat diffusion, oblique longitudinal
+and shear modes against independent discrete Fourier symbols, exact planar
+extrusion, zero-law Euler recovery and source/work refusal, and six-wall total
+impulse with late cancellation/replay. Thermal L2 errors for 6³/12³/18³ cells
+on an anisotropic physical box are 4.45971174e-4, 1.13831840e-4 and 5.07037363e-5,
+giving observed orders 1.97 and 2.00. These retain source-owned Cv and all
+velocity components. They do not establish gas-specific molecular calibration,
+physical shock thickness, turbulence or experimental validity. Composition
+remains spatially uniform and frozen; 3-D species diffusion, reactions and
+radial/no-slip boundary-layer physics require their own admitted evolution.
+
 ### Evolving composition on the shared Cartesian discretization
 
 `compressible::mixture::MixtureEuler2d` advances every canonical species mass

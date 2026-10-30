@@ -255,7 +255,7 @@ pub(super) fn slopes<E: Failure>(
     }
     Ok(limited)
 }
-fn mc(left: f64, right: f64) -> f64 {
+pub(super) fn mc(left: f64, right: f64) -> f64 {
     if left > 0.0 && right > 0.0 {
         (0.5 * left + 0.5 * right).min(2.0 * left).min(2.0 * right)
     } else if left < 0.0 && right < 0.0 {
