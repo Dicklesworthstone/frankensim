@@ -361,10 +361,11 @@ fn finish(
             .zip(velocity)
             .fold(C64::ZERO, |sum, (&shape, &v)| sum + v.scale(shape))
     };
-    let begin = source.source_memory_count(cards, gate)?;
-    let end = begin
-        .checked_add(trace.coating_histories)
-        .ok_or_else(|| invalid("coating harmonic heat extent overflow"))?;
+    let range = source.shell_coating_memory_range(cards, gate)?.unwrap_or(0..0);
+    if range.len() != trace.coating_histories {
+        return Err(invalid("coating harmonic observation lost its source history range"));
+    }
+    let (begin, end) = (range.start, range.end);
     let heat = dynamics
         .material_branch_dissipation_w
         .get(begin..end)

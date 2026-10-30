@@ -90,6 +90,28 @@ pub(super) fn describe(performance: &MultiBowPerformance, output: &mut impl Writ
         output,
         "coating_strain_scope=actual retained body displacement at initial and accepted mechanical endpoints; full coated facets and film thickness; deterministic floating-point Bernstein bounds; component_order=[xx,yy,zz,xy,yz,zx]; authored constitutive envelope, not a material failure threshold; no between-step or omitted prestress/cure/continuum certificate"
     )?;
+    if let Some(memory) = report.relaxation {
+        writeln!(
+            output,
+            "coating_memory_branches={}; coating_memory_stored_energy_j={:.17e}; coating_memory_instantaneous_dissipation_w={:.17e}; maximum_coating_memory_stored_energy_j={:.17e}; maximum_coating_memory_stored_energy_sample={}; maximum_coating_memory_instantaneous_dissipation_w={:.17e}; maximum_coating_memory_instantaneous_dissipation_sample={}",
+            memory.current.branch_count,
+            memory.current.stored_energy_j,
+            memory.current.dissipated_power_w,
+            memory.maximum_stored_energy_j,
+            memory.maximum_stored_energy_sample,
+            memory.maximum_dissipated_power_w,
+            memory.maximum_dissipated_power_sample
+        )?;
+        writeln!(
+            output,
+            "coating_memory_scope=original accepted material histories at the same checked endpoints; relaxing-arm storage only, equilibrium film stiffness remains in shell energy; instantaneous W is not integrated heat; equal-time factors may mix films; no thermal feedback or temperature rise is inferred"
+        )?;
+    } else {
+        writeln!(
+            output,
+            "coating_memory_scope=no hereditary coating image selected; no coating-memory energy or power result"
+        )?;
+    }
     for (index, film) in report.films().enumerate() {
         let original = film.source.source;
         let input = original.input();

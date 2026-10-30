@@ -3,6 +3,8 @@
 //! accepts the positive Prony model's causal continuation outside that band;
 //! it does not turn the continuation into measured material evidence.
 use super::*;
+use crate::bowed_string::runtime::reciprocal::bank::multiple::MultiBowStringBank;
+use crate::render::schedule::force::coupled::MaterialRelaxationObservation;
 use crate::shear_shell::coating::relaxation::ShellCoatingRelaxation;
 
 impl MaterialStringBankSource {
@@ -11,6 +13,41 @@ impl MaterialStringBankSource {
     /// and acoustic volume. The source survives cold gas/torsion rebuilds.
     pub fn material_shell_coating_relaxation(&self) -> Option<&ShellCoatingRelaxation> {
         self.material_shell_coating_relaxation.as_ref()
+    }
+
+    /// Source histories precede the coating block; later explicit string and
+    /// thermal histories follow it. Share this selection with every observer.
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn shell_coating_memory_range(
+        &self,
+        cards: &[BowedStringCard],
+        gate: &CancelGate,
+    ) -> Result<Option<core::ops::Range<usize>>, ReciprocalStringError> {
+        poll(gate)?;
+        let projected = match (
+            &self.material_shell_image,
+            &self.material_shell_assembly_image,
+        ) {
+            (Some(image), None) => image.coating_relaxation(),
+            (None, Some(image)) => image.coating_relaxation(),
+            _ => {
+                return Err(invalid(
+                    "coating observation requires one original material shell image",
+                ));
+            }
+        };
+        if projected.is_some() != self.material_shell_coating_relaxation.is_some() {
+            return Err(invalid(
+                "coating observation requires the projected memory to be bound",
+            ));
+        }
+        let Some(memory) = &self.material_shell_coating_relaxation else {
+            return Ok(None);
+        };
+        let begin = self.source_memory_count(cards, gate)?;
+        let end = begin
+            .checked_add(memory.relaxation_times_s().len())
+            .ok_or_else(|| invalid("coating observation history extent overflow"))?;
+        Ok(Some(begin..end))
     }
 
     pub(in crate::bowed_string::runtime::reciprocal::bank) fn shell_coating_memory_branches(
@@ -81,6 +118,42 @@ impl MaterialStringBankSource {
 }
 
 impl ReciprocalStringBank {
+    /// Numeric work for a coating-memory endpoint query. `None` means no
+    /// hereditary coating image is selected, including frozen-frequency films.
+    /// Immutable source selection is separately bounded by the original bank.
+    pub fn material_shell_coating_observation_work(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<Option<usize>, ReciprocalStringError> {
+        self.source
+            .shell_coating_memory_range(&self.cards, gate)?
+            .map(|range| {
+                self.system
+                    .material_relaxation_observation_work(range)
+                    .map_err(ReciprocalStringError::Network)
+            })
+            .transpose()
+    }
+
+    /// Observe the actual accepted coating histories without advancing them.
+    /// J is relaxing-arm storage; equilibrium film stiffness remains in the
+    /// shell. W is instantaneous power, not the interval's integrated heat.
+    /// Equal-time factors can mix films, so only the coating total is exposed.
+    pub fn material_shell_coating_observation(
+        &self,
+        maximum_work: usize,
+        gate: &CancelGate,
+    ) -> Result<Option<MaterialRelaxationObservation>, ReciprocalStringError> {
+        self.source
+            .shell_coating_memory_range(&self.cards, gate)?
+            .map(|range| {
+                self.system
+                    .material_relaxation_observation(range, maximum_work, gate)
+                    .map_err(ReciprocalStringError::Network)
+            })
+            .transpose()
+    }
+
     /// Bind every projected coating branch to the SAME coupled mechanics,
     /// pressure acceleration and material heat account before playback.
     ///
@@ -148,5 +221,42 @@ impl ReciprocalStringBank {
             .validate_material_bridge_frequencies(&self.system, gate)?;
         poll(gate)?;
         Ok(self)
+    }
+}
+
+impl MultiBowStringBank {
+    /// Work for the same original coating block after adding simultaneous bows.
+    pub fn material_shell_coating_observation_work(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<Option<usize>, ReciprocalStringError> {
+        self.source()
+            .bank()
+            .shell_coating_memory_range(self.cards(), gate)?
+            .map(|range| {
+                self.system()
+                    .material_relaxation_observation_work(range)
+                    .map_err(ReciprocalStringError::Network)
+            })
+            .transpose()
+    }
+
+    /// Coating storage [J] and instantaneous loss [W] on the joint accepted state.
+    /// Uses the same source range as single-bow and harmonic observations;
+    /// neither all-material heat nor equilibrium shell energy is relabeled.
+    pub fn material_shell_coating_observation(
+        &self,
+        maximum_work: usize,
+        gate: &CancelGate,
+    ) -> Result<Option<MaterialRelaxationObservation>, ReciprocalStringError> {
+        self.source()
+            .bank()
+            .shell_coating_memory_range(self.cards(), gate)?
+            .map(|range| {
+                self.system()
+                    .material_relaxation_observation(range, maximum_work, gate)
+                    .map_err(ReciprocalStringError::Network)
+            })
+            .transpose()
     }
 }

@@ -310,6 +310,33 @@ it does not certify intersample peaks, omitted modes, continuum error or
 three-dimensional interlaminar strain. A harmonic force-scale bound cannot be
 reinterpreted as a bow-force or bow-speed limit for nonlinear playing.
 
+The same monitor now observes the **actual coating memory** at those endpoints.
+For each original Maxwell arm it reads the accepted displacement and internal
+strain, forms `e = sqrt(k) * b.q - z`, and reports `H = sum(e*e/2)` in joules
+and `P = sum(e*e/tau)` in watts. The signed modal projection is summed before
+squaring, preserving interference between modes. The existing coupled owner
+performs this allocation-free query; the monitor caches the source-selected
+branch range and accounts for every query in its declared work allowance.
+The single-bow and multiple-bow library APIs expose the same observation.
+
+The native log adds `coating_memory_stored_energy_j` and
+`coating_memory_instantaneous_dissipation_w`, along with their separate maxima
+and earliest attaining mechanical samples. These read the same accepted state
+as the strain bounds, including a retained failed-envelope endpoint. A later
+cold replacement of checked coating histories is refused before playback,
+just as a late preload is. No extra force, timestep or pressure correction is
+introduced, and the original solver's integrated material-loss account remains
+unchanged.
+
+This is the coating's **relaxing-arm storage**, excluding equilibrium film
+stiffness already in the shell. Instantaneous power is not accumulated heat;
+the monitor does not integrate endpoint watts or infer a temperature rise.
+Equal-time factors may mix films, so these values describe the whole coating
+stack, not an invented per-film split. A bare or frozen-frequency shell without
+a hereditary coating image explicitly reports that no coating-memory result
+is available. Material fit, causal continuation, spatial discretization and
+amplitude limits remain those of the original selected model.
+
 
 ### Controlled bridge excitation through the same time-domain model
 

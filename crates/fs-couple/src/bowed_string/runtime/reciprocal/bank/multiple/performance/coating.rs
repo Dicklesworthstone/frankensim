@@ -1,16 +1,19 @@
-//! Local film-strain applicability on the original accepted performance state.
+//! Local film strain and material memory on the accepted performance state.
 //!
 //! This observer uses every retained body mode, every coated triangle and both
 //! film faces through the original MITC owner. It neither changes the mechanics
 //! nor rescales pressure. Checks cover the initial state and each mechanical
 //! endpoint, including thermal playback, before pressure reaches resampling.
 //! They do not bound extrema between endpoints, omitted modes, cure strain or
-//! mean strain absent from the retained coordinates.
+//! mean strain absent from the retained coordinates. The same endpoints expose
+//! coating-memory storage and instantaneous loss through the original owner.
 
 use super::{MultiBowPerformance, MultiBowStringBank, render_invalid};
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::bowed_string::runtime::reciprocal::ReciprocalStringError;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
+use crate::render::schedule::force::coupled::MaterialRelaxationObservation;
 use crate::shear_shell::coating::strain::{
     CoatingStrainSource, OwnedShellCoatingStrain, ShellCoatingFilmSource, ShellCoatingStrainBudget,
     ShellCoatingStrainResources,
@@ -21,7 +24,7 @@ use std::{mem::size_of, sync::Arc};
 /// Additional local-observation allowances; original mechanics limits stand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShellCoatingMonitorOptions {
-    /// Cached observer, per-film running maxima and reusable real modal buffer.
+    /// Cached observer, running maxima and reusable modal/history buffers.
     /// Borrowed original images, allocator overhead and original core stack
     /// frames are excluded, as in [`ShellCoatingStrainBudget`].
     pub maximum_bytes: usize,
@@ -38,6 +41,11 @@ pub enum ShellCoatingMonitorError {
     Observation {
         sample: u64,
         source: AcousticRealizeError,
+    },
+    /// The original material-memory owner refused an accepted-state query.
+    Relaxation {
+        sample: u64,
+        source: ReciprocalStringError,
     },
     /// A sufficient spatial bound cannot establish the authored envelope.
     /// This is not evidence that the actual film has failed or been damaged.
@@ -84,6 +92,20 @@ pub struct ShellCoatingMonitorFilm<'a> {
     pub maximum: &'a ShellCoatingFilmMaximum,
 }
 
+/// Current coating-memory state and separate maxima over checked endpoints.
+/// These are relaxing-arm quantities, not equilibrium film storage or
+/// accumulated heat. Equal-time factors can mix films; no film split is made.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShellCoatingMemoryMaximum {
+    pub current: MaterialRelaxationObservation,
+    pub maximum_stored_energy_j: f64,
+    /// Earliest local endpoint attaining the largest relaxing-arm storage.
+    pub maximum_stored_energy_sample: u64,
+    pub maximum_dissipated_power_w: f64,
+    /// Earliest local endpoint attaining the largest instantaneous loss rate.
+    pub maximum_dissipated_power_sample: u64,
+}
+
 /// Borrowed running observation, available even after a refused output callback.
 pub struct ShellCoatingMonitorReport<'a> {
     pub options: ShellCoatingMonitorOptions,
@@ -96,6 +118,9 @@ pub struct ShellCoatingMonitorReport<'a> {
     /// Local endpoint index; zero is the state before this performance starts.
     pub last_checked_sample: u64,
     pub failure: Option<&'a ShellCoatingMonitorError>,
+    /// `None` for a bare or frozen-frequency shell with no hereditary image.
+    /// Otherwise observes the SAME accepted endpoint as the strain report.
+    pub relaxation: Option<&'a ShellCoatingMemoryMaximum>,
     source: CoatingStrainSource<'a>,
     maxima: &'a [ShellCoatingFilmMaximum],
 }
@@ -115,6 +140,12 @@ pub(super) struct BoundShellCoatingMonitor {
     observer: OwnedShellCoatingStrain,
     gate: Arc<CancelGate>,
     displacement: Vec<f64>,
+    coating_branches: Option<core::ops::Range<usize>>,
+    coating_work: usize,
+    /// Detect a cold history replacement after initial observation, just as the
+    /// displacement buffer detects a late preload. Reused at every endpoint.
+    coating_memory: Vec<f64>,
+    relaxation: Option<ShellCoatingMemoryMaximum>,
     maxima: Vec<ShellCoatingFilmMaximum>,
     initial_absolute_sample: u64,
     last_checked_sample: u64,
@@ -136,7 +167,7 @@ fn source(bank: &MultiBowStringBank) -> Result<CoatingStrainSource<'_>, ShellCoa
 }
 
 impl MultiBowPerformance {
-    /// Observe local film strain before rendering and at every accepted step.
+    /// Observe local film strain and coating memory at every accepted endpoint.
     ///
     /// The shared cancellation gate is retained so large local-field queries
     /// remain cancellable within callbacks. Binding is allowed once before this
@@ -156,6 +187,26 @@ impl MultiBowPerformance {
             ));
         }
         let source = source(&self.bank)?;
+        let coating_branches = self
+            .bank
+            .source()
+            .bank()
+            .shell_coating_memory_range(self.bank.cards(), &gate)
+            .map_err(|source| ShellCoatingMonitorError::Relaxation { sample: 0, source })?;
+        let coating_work = coating_branches
+            .as_ref()
+            .map(|range| {
+                self.bank
+                    .system()
+                    .material_relaxation_observation_work(range.clone())
+            })
+            .transpose()
+            .map_err(|source| ShellCoatingMonitorError::Relaxation {
+                sample: 0,
+                source: ReciprocalStringError::Network(source),
+            })?
+            .unwrap_or(0);
+        let histories = coating_branches.as_ref().map_or(0, |range| range.len());
         let modes = match source {
             CoatingStrainSource::Shell(image) => image.physical_modes().len(),
             CoatingStrainSource::Assembly(image) => image
@@ -171,10 +222,11 @@ impl MultiBowPerformance {
             .checked_add(1)
             .and_then(|count| usize::try_from(count).ok())
             .ok_or_else(|| invalid("complete coating-monitor endpoint count overflows"))?;
-        // Includes the source-independent running maxima and one reusable real
-        // q buffer, with no per-sample allocation or copied material image.
+        // Includes running maxima and reusable q/history buffers, with no
+        // per-sample allocation or copied material image.
         let overhead_bytes = modes
-            .checked_mul(size_of::<f64>())
+            .checked_add(histories)
+            .and_then(|n| n.checked_mul(size_of::<f64>()))
             .and_then(|q| {
                 films
                     .checked_mul(size_of::<ShellCoatingFilmMaximum>())
@@ -185,6 +237,8 @@ impl MultiBowPerformance {
         let per_evaluation_work = films
             .checked_mul(64)
             .and_then(|n| modes.checked_mul(4).and_then(|q| n.checked_add(q)))
+            .and_then(|n| histories.checked_mul(4).and_then(|z| n.checked_add(z)))
+            .and_then(|n| n.checked_add(coating_work))
             .and_then(|n| n.checked_add(32))
             .ok_or_else(|| invalid("coating-monitor endpoint work overflows"))?;
         let overhead_work = per_evaluation_work
@@ -229,6 +283,10 @@ impl MultiBowPerformance {
             observer,
             gate,
             displacement: vec![0.0; modes],
+            coating_branches,
+            coating_work,
+            coating_memory: vec![0.0; histories],
+            relaxation: None,
             maxima: vec![ShellCoatingFilmMaximum::default(); films],
             initial_absolute_sample: self.bank.system().samples_rendered(),
             last_checked_sample: 0,
@@ -251,6 +309,7 @@ impl MultiBowPerformance {
                     checked_endpoints: monitor.observer.completed_evaluations(),
                     last_checked_sample: monitor.last_checked_sample,
                     failure: monitor.failure.as_ref(),
+                    relaxation: monitor.relaxation.as_ref(),
                     source,
                     maxima: &monitor.maxima,
                 })
@@ -298,6 +357,24 @@ impl BoundShellCoatingMonitor {
                 "bind coating monitoring after all preload or body-state changes",
             )));
         }
+        if let Some(range) = &self.coating_branches {
+            if bank
+                .system()
+                .material_memory()
+                .get(range.clone())
+                .is_none_or(|memory| {
+                    memory.len() != self.coating_memory.len()
+                        || memory
+                            .iter()
+                            .zip(&self.coating_memory)
+                            .any(|(now, checked)| now.to_bits() != checked.to_bits())
+                })
+            {
+                return Err(self.stop(invalid(
+                    "bind coating monitoring after all material-history changes",
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -338,12 +415,49 @@ impl BoundShellCoatingMonitor {
         for (q, state) in self.displacement.iter_mut().zip(states) {
             *q = state.displacement_m_sqrt_kg;
         }
+        let relaxation = self
+            .coating_branches
+            .as_ref()
+            .map(|range| {
+                bank.system().material_relaxation_observation(
+                    range.clone(),
+                    self.coating_work,
+                    &self.gate,
+                )
+            })
+            .transpose()
+            .map_err(|source| ShellCoatingMonitorError::Relaxation {
+                sample,
+                source: ReciprocalStringError::Network(source),
+            })?;
+        if let Some(range) = &self.coating_branches {
+            self.coating_memory.copy_from_slice(
+                bank.system()
+                    .material_memory()
+                    .get(range.clone())
+                    .ok_or_else(|| invalid("coating monitor lost its accepted material history"))?,
+            );
+        }
         let source = source(bank)?;
         let summary = self
             .observer
             .evaluate_snapshot(source, &self.displacement, &self.gate)
             .map_err(|source| ShellCoatingMonitorError::Observation { sample, source })?;
         let initial = self.observer.completed_evaluations() == 1;
+        if let Some(value) = relaxation {
+            let peak = self
+                .relaxation
+                .get_or_insert_with(ShellCoatingMemoryMaximum::default);
+            peak.current = value;
+            if initial || value.stored_energy_j > peak.maximum_stored_energy_j {
+                peak.maximum_stored_energy_j = value.stored_energy_j;
+                peak.maximum_stored_energy_sample = sample;
+            }
+            if initial || value.dissipated_power_w > peak.maximum_dissipated_power_w {
+                peak.maximum_dissipated_power_w = value.dissipated_power_w;
+                peak.maximum_dissipated_power_sample = sample;
+            }
+        }
         for (peak, value) in self.maxima.iter_mut().zip(self.observer.values()) {
             if initial || value.frobenius_upper_bound > peak.frobenius_upper_bound {
                 peak.covered_elements = value.covered_elements;

@@ -323,6 +323,38 @@ fn g1_coating_memory_survives_cold_rebuild_and_changes_reciprocal_pressure() {
     });
 }
 
+#[test]
+fn g0_transient_coating_observation_reads_original_histories_without_advancing() {
+    with_cx(|cx, gate| {
+        let bare = prepared(cx, gate, false);
+        assert_eq!(bare.material_shell_coating_observation_work(gate).unwrap(), None);
+        assert_eq!(bare.material_shell_coating_observation(0, gate).unwrap(), None);
+
+        let mut bank = prepared(cx, gate, true).with_residual_flexibility(gate).unwrap();
+        let work = bank.material_shell_coating_observation_work(gate).unwrap().unwrap();
+        let initial = bank.material_shell_coating_observation(work, gate).unwrap().unwrap();
+        assert_eq!(initial.branch_count, bank.source().material_shell_coating_relaxation()
+            .unwrap().relaxation_times_s().len());
+        assert_eq!(initial.stored_energy_j, 0.0);
+        assert_eq!(initial.dissipated_power_w, 0.0);
+        assert!(bank.material_shell_coating_observation(work - 1, gate).is_err());
+        let zero = vec![0.0; bank.system().mode_count()];
+        for _ in 0..32 { bank.step(&zero, drive()).unwrap(); }
+        let history = bank.system().material_memory().to_vec();
+        let observed = bank.material_shell_coating_observation(work, gate).unwrap().unwrap();
+        assert!(observed.stored_energy_j > 0.0);
+        assert!(observed.dissipated_power_w > 0.0);
+        // This fixture's only material histories are coating arms. Their
+        // storage must equal the original owner's complete material account.
+        assert_eq!(observed.stored_energy_j, bank.system().material_energy_j().unwrap());
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(bank.material_shell_coating_observation(work, &cancelled).is_err());
+        assert_eq!(bank.system().material_memory(), history);
+        assert_eq!(bank.system().samples_rendered(), 32);
+    });
+}
+
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{
     MultiBowPerformance, MultiBowPerformanceConfig,
     coating::{ShellCoatingMonitorError, ShellCoatingMonitorOptions},
@@ -408,6 +440,12 @@ fn g0_coating_monitor_checks_every_endpoint_without_changing_sound_or_mechanics(
         assert_eq!(report.resources.evaluations, 33);
         assert_eq!(report.last_checked_sample, 0);
         assert_eq!(report.films().count(), 1);
+        let memory = report.relaxation.unwrap();
+        assert!(memory.current.branch_count > 0);
+        assert_eq!(memory.current.stored_energy_j, 0.0);
+        assert_eq!(memory.current.dissipated_power_w, 0.0);
+        assert_eq!(memory.maximum_stored_energy_sample, 0);
+        assert_eq!(memory.maximum_dissipated_power_sample, 0);
         assert_eq!(
             report.films().next().unwrap().maximum.frobenius_upper_bound,
             0.0
@@ -439,6 +477,17 @@ fn g0_coating_monitor_checks_every_endpoint_without_changing_sound_or_mechanics(
         assert_eq!(report.checked_endpoints, 33);
         assert_eq!(report.last_checked_sample, 32);
         assert!(report.failure.is_none());
+        let memory = report.relaxation.unwrap();
+        let work = guarded.bank().material_shell_coating_observation_work(gate)
+            .unwrap().unwrap();
+        assert_eq!(memory.current, guarded.bank()
+            .material_shell_coating_observation(work, gate).unwrap().unwrap());
+        assert!(memory.current.stored_energy_j > 0.0);
+        assert!(memory.current.dissipated_power_w > 0.0);
+        assert!(memory.maximum_stored_energy_j >= memory.current.stored_energy_j);
+        assert!(memory.maximum_dissipated_power_w >= memory.current.dissipated_power_w);
+        assert!((1..=32).contains(&memory.maximum_stored_energy_sample));
+        assert!((1..=32).contains(&memory.maximum_dissipated_power_sample));
         let film = report.films().next().unwrap();
         assert!(film.maximum.frobenius_upper_bound > 0.0);
         assert!(film.maximum.limit_ratio < 1.0);
@@ -498,6 +547,7 @@ fn g4_coating_monitor_refuses_initial_and_accepted_over_envelope_states() {
         let report = performance.coating_monitor_report().unwrap();
         assert_eq!(report.last_checked_sample, clock);
         assert_eq!(report.checked_endpoints as u64, clock + 1);
+        assert!(report.relaxation.unwrap().current.stored_energy_j > 0.0);
         assert!(matches!(report.failure,
             Some(ShellCoatingMonitorError::Envelope { sample, ratio, .. }) if *sample == clock && *ratio > 1.0));
         assert!(performance.validate_sample_count(0).is_err());
