@@ -80,6 +80,77 @@ fn series_current(a: [f64; 2], b: [f64; 2], voltage: f64) -> (f64, [f64; 2]) {
 }
 
 #[test]
+fn coupled_field_owner_uses_the_same_response_closure_and_retains_complete_sources() {
+    let source = response(
+        ElectricalPropertyBasis::Conductivity,
+        ConductorMagnitude::ElectricField,
+        1.0,
+        0.1,
+        10.0,
+    );
+    let model = specimen(source.clone(), source, 1.0);
+    let voltage = [(0, 0.0), (3, 0.0), (2, 2.0), (5, 2.0)];
+    let ordinary = model
+        .solve_candidate(&voltage, &[], limits(), controls(), policy(), &mut || false)
+        .unwrap();
+    let mut calls = 0;
+    let (coupled, driver) = model
+        .solve_coupled_with_materials_candidate(
+            model.conductors().to_vec(),
+            limits(),
+            controls(),
+            policy(),
+            &mut || false,
+            |native, cancelled| {
+                calls += 1;
+                let field = native.solve(&voltage, controls(), &mut || cancelled())?;
+                Ok::<_, ConductionResponseError>((field, calls))
+            },
+        )
+        .unwrap();
+    assert_eq!(driver, calls);
+    assert_eq!(coupled.report().field_solves, calls);
+    assert_eq!(ordinary.report().voltage_v, coupled.report().voltage_v);
+    assert_eq!(
+        ordinary.report().cell_power_w,
+        coupled.report().cell_power_w
+    );
+    assert_eq!(ordinary.report().evaluated, coupled.report().evaluated);
+    let (model, _) = coupled.into_parts();
+    let (native, sources) = model.into_frozen_parts();
+    let rebound =
+        PlanarConductionResponse::from_frozen_parts(native.clone(), sources, &mut || false)
+            .unwrap();
+    assert_eq!(native.conductors(), rebound.conductors());
+    let other = response(
+        ElectricalPropertyBasis::Conductivity,
+        ConductorMagnitude::ElectricField,
+        2.0,
+        0.1,
+        10.0,
+    );
+    assert!(
+        PlanarConductionResponse::from_frozen_parts(native, vec![other; 4].into(), &mut || false)
+            .is_err()
+    );
+
+    let cancelled = std::cell::Cell::new(false);
+    let result = rebound.solve_coupled_with_materials_candidate(
+        rebound.conductors().to_vec(),
+        limits(),
+        controls(),
+        policy(),
+        &mut || cancelled.get(),
+        |native, _| {
+            let field = native.solve(&voltage, controls(), &mut || false)?;
+            cancelled.set(true);
+            Ok::<_, ConductionResponseError>((field, ()))
+        },
+    );
+    assert!(matches!(result, Err(ConductionResponseError::Cancelled)));
+}
+
+#[test]
 fn nonlinear_material_data_redistribute_native_current_field_and_local_joule_heat() {
     let mut currents = Vec::new();
     for first in [1.0, 2.0] {

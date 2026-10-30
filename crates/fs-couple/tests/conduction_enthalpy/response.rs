@@ -1,4 +1,6 @@
 //! Manufactured T/E and T/J sources, independent finite-capacity BE balances.
+#[path = "response/circuit.rs"]
+mod circuit;
 #[path = "response/heat.rs"]
 mod heat;
 use super::{cells, config, ends, field_controls, initial, limits, mesh, near, network};

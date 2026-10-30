@@ -73,9 +73,10 @@ impl From<ConductorError> for ConductionResponseError {
 }
 
 /// Same geometry and original sources; no independent circuit or thermal state.
-/// A frozen linearization is private. Its actual-amplitude solve is repeated
-/// inside the source closure; accepted nonlinear fields cannot be scaled to a
-/// different excitation or obtained by silently freezing an operating point.
+/// A frozen linearization is private outside an explicit coupled-solve callback.
+/// Its actual-amplitude solve is repeated inside the source closure; accepted
+/// nonlinear fields cannot be scaled to a different excitation or obtained by
+/// silently freezing an operating point.
 #[derive(Clone)]
 pub struct PlanarConductionResponse {
     native: PlanarConduction,
@@ -185,6 +186,36 @@ impl PlanarConductionResponse {
     }
     pub fn sources(&self) -> &[ScalarConductorResponse] {
         &self.sources
+    }
+
+    /// Transfer this operator AND its complete source laws to a continuing
+    /// coupled owner. The operator alone is only a frozen linearization and
+    /// cannot be advanced as a nonlinear material. Rejoin the same parts with
+    /// [`Self::from_frozen_parts`] before every source-response solve.
+    pub fn into_frozen_parts(self) -> (PlanarConduction, Arc<[ScalarConductorResponse]>) {
+        (self.native, self.sources)
+    }
+
+    /// Rejoin an external owner's retained spatial operator and original laws
+    /// without assembling another matrix or selecting another source. Every
+    /// complete conductor is admitted by its original law. Surface contacts
+    /// retain a separate owner and cannot enter this bulk response closure.
+    pub fn from_frozen_parts(
+        native: PlanarConduction,
+        sources: Arc<[ScalarConductorResponse]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ConductionResponseError> {
+        poll(cancelled)?;
+        if sources.len() != native.conductors().len() || !native.contacts().is_empty() {
+            return Err(ConductionResponseError::Invalid(
+                "complete bulk-only response laws required for the retained operator",
+            ));
+        }
+        for (source, conductor) in sources.iter().zip(native.conductors()) {
+            poll(cancelled)?;
+            source.admit(conductor)?;
+        }
+        Ok(Self { native, sources })
     }
 
     /// Solve the original voltage/current traces at this fixed external context.
@@ -302,33 +333,21 @@ impl PlanarConductionResponse {
         controls: ConductionResponseControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConductionResponseCandidate, ConductionResponseError> {
-        poll(cancelled)?;
-        controls.validate()?;
-        if seeds.len() != self.sources.len() || seeds.len() > assembly.max_cells {
-            return Err(ConductionResponseError::Invalid(
-                "complete bounded source response seeds required",
-            ));
-        }
-        for (source, seed) in self.sources.iter().zip(&seeds) {
-            poll(cancelled)?;
-            source.admit(seed)?;
-        }
-        let mut applied = seeds.clone();
-        let (mut maximum_sigma, mut maximum_current, mut absolute_power) =
-            (0.0_f64, 0.0_f64, 0.0_f64);
-        for iteration in 1..=controls.maximum_iterations {
-            poll(cancelled)?;
-            let native = PlanarConduction::assemble(
-                self.mesh().clone(),
-                applied,
-                assembly,
-                cancelled,
-                |_| true,
-            )?;
-            let field =
-                match drive {
+        self.solve_coupled_with_materials_candidate(
+            seeds,
+            assembly,
+            field_controls,
+            controls,
+            cancelled,
+            |native, cancelled| {
+                let field = match drive {
                     ResponseDrive::Traces { voltage, currents } => native
-                        .solve_with_current_traces(voltage, currents, field_controls, cancelled)?,
+                        .solve_with_current_traces(
+                            voltage,
+                            currents,
+                            field_controls,
+                            &mut || cancelled(),
+                        )?,
                     ResponseDrive::Current {
                         positive,
                         negative,
@@ -338,9 +357,91 @@ impl PlanarConductionResponse {
                         negative,
                         current_a,
                         field_controls,
-                        cancelled,
+                        &mut || cancelled(),
                     )?,
                 };
+                Ok::<_, ConductionResponseError>((field, ()))
+            },
+        )
+        .map(|(candidate, ())| candidate)
+    }
+
+    /// Close material response at the actual field of an external physical
+    /// owner, such as a continuing Kirchhoff circuit. Each callback receives
+    /// the current frozen FEEC operator and must return a native field from
+    /// that EXACT operator plus its proposed driver state. The callback must
+    /// start every trial from its same accepted physical history; a constitutive
+    /// iteration does not advance time. Only the driver state paired with the
+    /// converged source/field candidate is returned.
+    ///
+    /// Source evaluation, current/work defects, iteration limits and source
+    /// continuity are identical to the voltage- and current-driven paths.
+    /// Source data is evaluated at actual amplitude after the callback, never
+    /// at a normalized field used internally by a frozen linear solver. The
+    /// callback owns its circuit/port balances and any external work budget.
+    /// Returned `field_solves` counts callbacks, one native field solve each.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_coupled_with_materials_candidate<D, E>(
+        &self,
+        seeds: Vec<ResolvedConductorState>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: ConductionResponseControls,
+        cancelled: &mut impl FnMut() -> bool,
+        mut solve: impl for<'p> FnMut(
+            &'p PlanarConduction,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<(ConductionField<'p>, D), E>,
+    ) -> Result<(ConductionResponseCandidate, D), E>
+    where
+        E: From<ConductionResponseError>,
+    {
+        poll(cancelled).map_err(ConductionResponseError::from)?;
+        controls.validate()?;
+        self.native
+            .validate_controls(0, field_controls)
+            .map_err(ConductionResponseError::from)?;
+        if seeds.len() != self.sources.len() || seeds.len() > assembly.max_cells {
+            return Err(ConductionResponseError::Invalid(
+                "complete bounded source response seeds required",
+            )
+            .into());
+        }
+        for (source, seed) in self.sources.iter().zip(&seeds) {
+            poll(cancelled).map_err(ConductionResponseError::from)?;
+            source.admit(seed).map_err(ConductionResponseError::from)?;
+        }
+        let mut applied = seeds.clone();
+        let (mut maximum_sigma, mut maximum_current, mut absolute_power) =
+            (0.0_f64, 0.0_f64, 0.0_f64);
+        for iteration in 1..=controls.maximum_iterations {
+            poll(cancelled).map_err(ConductionResponseError::from)?;
+            let native = PlanarConduction::assemble(
+                self.mesh().clone(),
+                applied,
+                assembly,
+                cancelled,
+                |_| true,
+            )
+            .map_err(ConductionResponseError::from)?;
+            let (field, driver) = solve(&native, cancelled)?;
+            if !std::ptr::eq(field.problem(), &native) {
+                return Err(ConductionResponseError::Invalid(
+                    "coupled response field belongs to another frozen operator",
+                )
+                .into());
+            }
+            if field.boundary_current_a().abs() > field_controls.current_tolerance_a
+                || field.maximum_free_current_residual_a() > field_controls.current_tolerance_a
+                || field.power_balance_residual_w().abs() > field_controls.power_tolerance_w
+            {
+                return Err(ConductionResponseError::Field(ConductionError::Balance {
+                    current_residual_a: field.boundary_current_a(),
+                    maximum_free_current_residual_a: field.maximum_free_current_residual_a(),
+                    power_residual_w: field.power_balance_residual_w(),
+                })
+                .into());
+            }
             let mut evaluated = Vec::with_capacity(seeds.len());
             let mut next = Vec::with_capacity(seeds.len());
             let mut converged = true;
@@ -348,33 +449,41 @@ impl PlanarConductionResponse {
             maximum_current = 0.0;
             absolute_power = 0.0;
             for (triangle, (source, seed)) in self.sources.iter().zip(&seeds).enumerate() {
-                poll(cancelled)?;
+                poll(cancelled).map_err(ConductionResponseError::from)?;
                 let e = field.electric_field_v_m()[triangle];
                 let j = field.current_density_a_m2()[triangle];
-                let conductor = source.at_fields(seed, e, j)?;
-                let sigma = finite(conductor.resistivity_ohm_m().recip())?;
+                let conductor = source
+                    .at_fields(seed, e, j)
+                    .map_err(ConductionResponseError::from)?;
+                let sigma = finite(conductor.resistivity_ohm_m().recip())
+                    .map_err(ConductionResponseError::from)?;
                 let used = native.conductivity_s_m[triangle];
-                let conductivity_defect_s_m = finite(sigma - used)?;
+                let conductivity_defect_s_m =
+                    finite(sigma - used).map_err(ConductionResponseError::from)?;
                 let evaluated_j = conductor.conductivity().current_density_a_m2(e);
                 let defect = [
-                    finite(j[0] - evaluated_j[0])?,
-                    finite(j[1] - evaluated_j[1])?,
+                    finite(j[0] - evaluated_j[0]).map_err(ConductionResponseError::from)?,
+                    finite(j[1] - evaluated_j[1]).map_err(ConductionResponseError::from)?,
                 ];
-                let current_defect = finite(defect[0].hypot(defect[1]))?;
+                let current_defect =
+                    finite(defect[0].hypot(defect[1])).map_err(ConductionResponseError::from)?;
                 let volume =
                     self.mesh()
                         .face_measure(triangle)
                         .ok_or(ConductionResponseError::Invalid(
                             "native conductor cell volume missing",
                         ))?;
-                let power_defect_w = finite(volume * e[0].mul_add(defect[0], e[1] * defect[1]))?;
+                let power_defect_w = finite(volume * e[0].mul_add(defect[0], e[1] * defect[1]))
+                    .map_err(ConductionResponseError::from)?;
                 let tolerance = finite(
                     controls.absolute_conductivity_tolerance_s_m
                         + controls.relative_conductivity_tolerance * sigma.max(used),
-                )?;
+                )
+                .map_err(ConductionResponseError::from)?;
                 maximum_sigma = maximum_sigma.max(conductivity_defect_s_m.abs());
                 maximum_current = maximum_current.max(current_defect);
-                absolute_power = finite(absolute_power + power_defect_w.abs())?;
+                absolute_power = finite(absolute_power + power_defect_w.abs())
+                    .map_err(ConductionResponseError::from)?;
                 converged &= conductivity_defect_s_m.abs() <= tolerance
                     && current_defect <= controls.current_density_tolerance_a_m2;
                 next.push(conductor.clone());
@@ -386,7 +495,7 @@ impl PlanarConductionResponse {
                     power_defect_w,
                 });
             }
-            poll(cancelled)?;
+            poll(cancelled).map_err(ConductionResponseError::from)?;
             if converged && absolute_power <= field_controls.power_tolerance_w {
                 let report = ConductionResponseReport {
                     voltage_v: field.voltage_v().to_vec(),
@@ -406,13 +515,16 @@ impl PlanarConductionResponse {
                         ConductionResponseError::Invalid("source evaluation count overflows"),
                     )?,
                 };
-                return Ok(ConductionResponseCandidate {
-                    problem: Self {
-                        native,
-                        sources: self.sources.clone(),
+                return Ok((
+                    ConductionResponseCandidate {
+                        problem: Self {
+                            native,
+                            sources: self.sources.clone(),
+                        },
+                        report,
                     },
-                    report,
-                });
+                    driver,
+                ));
             }
             applied = next;
         }
@@ -421,6 +533,7 @@ impl PlanarConductionResponse {
             maximum_conductivity_defect_s_m: maximum_sigma,
             maximum_current_density_defect_a_m2: maximum_current,
             absolute_power_defect_w: absolute_power,
-        })
+        }
+        .into())
     }
 }

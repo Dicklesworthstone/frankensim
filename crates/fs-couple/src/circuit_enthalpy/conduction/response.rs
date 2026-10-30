@@ -19,6 +19,12 @@ fn response_error(error: ConductionResponseError) -> Error {
     }
 }
 
+impl From<ConductionResponseError> for Error {
+    fn from(error: ConductionResponseError) -> Self {
+        response_error(error)
+    }
+}
+
 /// Actual native fields and endpoint material evaluations, with independent
 /// terminal work. Applied and evaluated source defects stay in `field` and are
 /// never deposited as physical heat.
@@ -311,7 +317,7 @@ impl ConductionThermalNetwork<'_> {
         })
     }
 
-    fn response_materials_at(
+    pub(super) fn response_materials_at(
         &self,
         problem: &PlanarConductionResponse,
         sample: &MaterialNetworkSample,
@@ -355,7 +361,7 @@ impl ConductionThermalNetwork<'_> {
         )
     }
 
-    fn admit_response_heat(
+    pub(super) fn admit_response_heat(
         &self,
         sample: &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
@@ -386,7 +392,7 @@ impl ConductionThermalNetwork<'_> {
         Ok(())
     }
 
-    fn admit_response_caloric(
+    pub(super) fn admit_response_caloric(
         &self,
         problem: &PlanarConductionResponse,
         cancel: &RefCell<impl FnMut() -> bool>,

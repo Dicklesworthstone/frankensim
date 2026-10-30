@@ -9,6 +9,8 @@
 //! Scalar and oriented tensor materials use that same field extraction; both
 //! principal source properties and the fixed frame survive every thermal trial.
 
+/// Field-dependent material response inside the same native circuit and heat solve.
+pub mod response;
 /// Source-derived C/L and explicit fixed-coordinate reconfiguration work.
 pub mod storage;
 /// Reversible material C(T)/L(T) on the same spatial circuit/enthalpy residual.
@@ -164,6 +166,42 @@ fn same_conductor(a: &ResolvedConductor, b: &ResolvedConductor) -> bool {
         && a.length_m().to_bits() == b.length_m().to_bits()
         && a.area_m2().to_bits() == b.area_m2().to_bits()
         && same_material(a.material(), b.material())
+}
+
+fn graph_heat_routes<C>(
+    thermal: &DepositionSimulation<'_>,
+    circuit: &ConductionCircuit<C>,
+    graph_resistors: &[ResistorCell],
+    cancel: &RefCell<impl FnMut() -> bool>,
+) -> Result<BTreeMap<usize, fs_thermal::enthalpy::CellId>, Error> {
+    let mut routes = BTreeMap::new();
+    if graph_resistors.len() > circuit.graph.branches.len() {
+        return Err(invalid("too many graph-resistor heat destinations"));
+    }
+    for route in graph_resistors {
+        check(cancel)?;
+        if route.branch == circuit.terminal.branch
+            || !matches!(
+                circuit.graph.branches.get(route.branch),
+                Some((_, _, Branch::Resistor { .. }))
+            )
+            || !thermal.cells().contains_key(&route.cell)
+            || routes.insert(route.branch, route.cell).is_some()
+        {
+            return Err(invalid(
+                "each nonspatial graph resistor needs one unique active heat receiver",
+            ));
+        }
+    }
+    for (branch, (_, _, law)) in circuit.graph.branches.iter().enumerate() {
+        if branch != circuit.terminal.branch
+            && matches!(law, Branch::Resistor { .. })
+            && !routes.contains_key(&branch)
+        {
+            return Err(invalid("a graph-resistor heat destination is missing"));
+        }
+    }
+    Ok(routes)
 }
 
 impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
@@ -323,6 +361,37 @@ pub struct ConductionCircuitStep {
 struct CircuitFieldCandidate<C> {
     circuit: ConductionCircuit<C>,
     step: ConductionCircuitStep,
+}
+
+// Native electrical state independent of the spatial operator's ownership.
+// Both ordinary and nonlinear material consumers use this same trial result.
+struct CircuitTrialState {
+    graph: CircuitGraph,
+    fluxes_wb: Vec<f64>,
+    charges_c: Vec<f64>,
+    material_resistors: Vec<MaterialResistor>,
+    step: ConductionCircuitStep,
+}
+impl CircuitTrialState {
+    fn finish<C: PlanarConductorMaterial>(
+        self,
+        original: &ConductionCircuit<C>,
+        problem: PlanarConduction<C>,
+    ) -> CircuitFieldCandidate<C> {
+        CircuitFieldCandidate {
+            circuit: ConductionCircuit {
+                problem,
+                graph: self.graph,
+                terminal: original.terminal.clone(),
+                fluxes_wb: self.fluxes_wb,
+                charges_c: self.charges_c,
+                time_s: self.step.spatial.end_s,
+                material_resistors: self.material_resistors,
+                storage: original.storage.clone(),
+            },
+            step: self.step,
+        }
+    }
 }
 impl<C: PlanarConductorMaterial> ThermalDriver for CircuitFieldCandidate<C> {
     type Model = ConductionCircuit<C>;
@@ -580,33 +649,7 @@ impl ConductionThermalNetwork<'_> {
                 "spatial circuit geometry exceeds declared assembly capacity",
             ));
         }
-        let mut graph_routes = BTreeMap::new();
-        if graph_resistors.len() > circuit.graph.branches.len() {
-            return Err(invalid("too many graph-resistor heat destinations"));
-        }
-        for route in graph_resistors {
-            check(&cancel)?;
-            if route.branch == circuit.terminal.branch
-                || !matches!(
-                    circuit.graph.branches.get(route.branch),
-                    Some((_, _, Branch::Resistor { .. }))
-                )
-                || !thermal.cells().contains_key(&route.cell)
-                || graph_routes.insert(route.branch, route.cell).is_some()
-            {
-                return Err(invalid(
-                    "each nonspatial graph resistor needs one unique active heat receiver",
-                ));
-            }
-        }
-        for (branch, (_, _, law)) in circuit.graph.branches.iter().enumerate() {
-            if branch != circuit.terminal.branch
-                && matches!(law, Branch::Resistor { .. })
-                && !graph_routes.contains_key(&branch)
-            {
-                return Err(invalid("a graph-resistor heat destination is missing"));
-            }
-        }
+        let graph_routes = graph_heat_routes(thermal, circuit, graph_resistors, &cancel)?;
         let network = MaterialNetwork {
             cells: self.cells,
             resistors: material_resistors,
@@ -789,7 +832,7 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
     fn trial(
         &self,
         problem: PlanarConduction<C>,
-        mut material_resistors: Vec<MaterialResistor>,
+        material_resistors: Vec<MaterialResistor>,
         target_s: f64,
         ports: &[f64],
         field_controls: ConductionControls,
@@ -797,7 +840,37 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
         contacts: &contacts::PreparedContacts<'_, '_>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<CircuitFieldCandidate<C>, Error> {
+        let (_, trial) = self.trial_field(
+            &problem,
+            material_resistors,
+            target_s,
+            ports,
+            field_controls,
+            controls,
+            Some(contacts),
+            cancel,
+        )?;
+        Ok(trial.finish(self, problem))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trial_field<'p>(
+        &self,
+        problem: &'p PlanarConduction<C>,
+        mut material_resistors: Vec<MaterialResistor>,
+        target_s: f64,
+        ports: &[f64],
+        field_controls: ConductionControls,
+        controls: MaterialCircuitSolve,
+        contacts: Option<&contacts::PreparedContacts<'_, '_>>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<(ConductionField<'p, C>, CircuitTrialState), Error> {
         check(cancel)?;
+        if contacts.is_none() && !problem.contacts().is_empty() {
+            return Err(invalid(
+                "spatial contact fields require their prepared source and heat owner",
+            ));
+        }
         let dt = finite(target_s - self.time_s)?;
         let resistance = problem
             .resistance(
@@ -890,7 +963,10 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             electric_field_v_m: field.electric_field_v_m().to_vec(),
             current_density_a_m2: field.current_density_a_m2().to_vec(),
             cell_power_w: field.cell_power_w().to_vec(),
-            contacts: contacts.heat(field.contact_response())?,
+            contacts: contacts
+                .map(|contacts| contacts.heat(field.contact_response()))
+                .transpose()?
+                .unwrap_or_default(),
             nodal_boundary_current_a: field.nodal_boundary_current_a().to_vec(),
             nodal_applied_current_a: field.nodal_applied_current_a().to_vec(),
             boundary_current_a: field.boundary_current_a(),
@@ -957,16 +1033,6 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
         }
         let fluxes_wb = dae.flux_index.iter().map(|&i| native.x[i]).collect();
         let charges_c = dae.charge_index.iter().map(|&i| native.x[i]).collect();
-        let circuit = Self {
-            problem,
-            graph,
-            terminal: self.terminal.clone(),
-            fluxes_wb,
-            charges_c,
-            time_s: target_s,
-            material_resistors,
-            storage: self.storage.clone(),
-        };
         let step = ConductionCircuitStep {
             native,
             stored_before_j,
@@ -979,6 +1045,15 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             energy_residual_j,
         };
         check(cancel)?;
-        Ok(CircuitFieldCandidate { circuit, step })
+        Ok((
+            field,
+            CircuitTrialState {
+                graph,
+                fluxes_wb,
+                charges_c,
+                material_resistors,
+                step,
+            },
+        ))
     }
 }

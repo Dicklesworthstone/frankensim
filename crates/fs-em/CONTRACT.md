@@ -1247,8 +1247,8 @@ conductivity/resistivity sources at the actual recovered |E| and |J| of each
 triangle. Its bounded iterations use the SAME FEEC assembly, voltage/current
 traces, field recovery and charge/terminal-work admission as
 `PlanarConduction`. The ordinary constructor keeps its static-source refusal.
-The frozen linearization is private; nonlinear response is never obtained by
-scaling a unit-voltage resistance.
+The frozen linearization is private outside the explicit coupled-solve callback;
+nonlinear response is never obtained by scaling a converged unit-voltage result.
 
 Accepted candidates retain both the applied material coefficients that produced
 the native fields and their complete source evaluations at those fields.
@@ -1272,3 +1272,20 @@ separate power admission, continuation and refusal rollback.
 ## Total-current electrodes with original source response
 
 `PlanarConduction::solve_current` imposes signed total current on complete equipotential electrodes using the original frozen FEEC operator. Actual-amplitude recovery checks both terminal currents and authored I*V independently; source-dependent callers repeat this constraint inside the existing E/J closure. `PlanarConductionResponse` supplies ordinary and thermally refreshed current candidates without unit-field material queries or scaling accepted nonlinear fields. Actual local E.J remains heat; constitutive defects remain numerical residuals. Six manufactured regression groups cover series and parallel heterogeneous specimens, nonuniform electrode reaction, data-only source changes, both signs/zero, constant-law parity, source/work gates and cancellation/retry. Bounds remain fixed geometry and memoryless scalar response; convergence and uniqueness are not guaranteed.
+
+## Original source response under coupled electrical drives
+
+`PlanarConductionResponse::solve_coupled_with_materials_candidate` admits an
+external owner's actual native field through the same source iteration used by
+voltage/current boundaries. The returned field must borrow that exact frozen
+operator; another operator's field refuses. Each trial retains its proposed
+driver state, but only the state paired with the admitted constitutive field
+is returned. Circuit history, source work and external work limits remain with
+the caller; response iteration does not authorize advancing physical time.
+
+The complete original laws and applied operator can be transferred together to
+a continuing owner and rejoined without matrix assembly. Original source
+admission rejects mismatched law/operator pairs. The original conductivity,
+current-density and local-power defect gates and cancellation behavior remain
+unchanged. The conduction regressions compare direct and coupled execution and
+check source continuity and cancellation after a native trial.
