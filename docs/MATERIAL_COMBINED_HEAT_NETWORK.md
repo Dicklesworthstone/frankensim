@@ -242,6 +242,53 @@ fully solid, uniform, small-signal ceramic and positive combined capacity
 envelope. Thermal strain, depoling and dielectric loss require their own
 admitted laws; fixed heat geometry and first-order endpoint coupling remain.
 
+## Thermoelectric conversion and field-actuator motion
+
+The free functions
+`contacts::heat::thermoelectric::step_thermoelectric_candidate` and
+`step_thermoelectric_motion_candidate` consume the same `HeatAssembly`.
+The original Kelvin-leg driver resolves integrated Seebeck voltage, signed
+terminal Peltier heat and interior Thomson allocation at the actual trial
+temperatures. Finite coolant now shares that solve with material Fourier
+transport, load/contact resistance, thermal interfaces and radiation.
+
+```rust,ignore
+use fs_couple::circuit_enthalpy::contacts::heat::thermoelectric::{
+    step_thermoelectric_candidate, step_thermoelectric_motion_candidate,
+};
+let proposal = step_thermoelectric_candidate(
+    &provider, &cx, &thermal, target_s, &circuit, &ports,
+    &kelvin_legs, controls, &energy_guess_j,
+)?;
+let moving = step_thermoelectric_motion_candidate(
+    &provider, &cx, &thermal, target_s, &field_motion, &ports,
+    force_n, &kelvin_legs, controls, &energy_guess_j,
+)?;
+```
+
+The moving entry uses the original reciprocal electrical/field/mechanical
+descriptor, including electrical back-reaction and native inertia/support
+storage. Coolant material changes can therefore affect junction temperatures,
+generated current and actuator motion through the same accepted endpoint.
+Each entry returns one proposal from its supplied accepted history; the two
+calls above illustrate alternative consumers, not sequential physical steps.
+
+The original circuit deposits Joule loss once. Kelvin port work and reversible
+junction/bulk heat remain paired internal transfers; finite coolant exchange
+also remains internal. The physical energy gates retain actual external
+electrical/mechanical work and prescribed heat, and exclude closed-radiation
+roundoff. Full assembly samples remain in `report.coupled.source.network`.
+`ThermoelectricNetworkError<E>` retains typed provider failures in `Heat(E)`
+while its default preserves the concrete prepared-network API.
+
+The finite-coolant Kelvin regression uses an affine Seebeck source and checks
+independent four-cell heat balances, midpoint charge, reversible entropy and
+total energy over continued steps. Only fluid viscosity or heat capacity
+changes between cases. Existing Kelvin-leg geometry and single-phase limits,
+source pins and refusal of unresolved contact temperature jumps still apply.
+The field-motion entry retains its original held field/support material
+snapshots; this connection does not add field entropy or moving heat geometry.
+
 ## Energy and scope
 
 The standard circuit/enthalpy report preserves the actual source arithmetic,

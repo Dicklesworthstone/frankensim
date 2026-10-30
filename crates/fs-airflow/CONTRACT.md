@@ -237,6 +237,21 @@ coolant/ceramic substitutions and late source/budget/cancellation refusal.
 Uniform fully solid material, fixed geometry and original capacity/source
 limits remain; thermal strain, depoling and dielectric loss are not inferred.
 
+Thermoelectric conversion and its existing reciprocal field-motion variant
+also consume `HeatAssembly` through the free functions in
+`fs_couple::circuit_enthalpy::contacts::heat::thermoelectric`. Finite coolant
+and prescribed reservoirs enter the original Kelvin/circuit/enthalpy residual.
+Integrated Seebeck voltage, terminal Peltier heat and interior Thomson
+allocation retain their original material source and destinations; bulk and
+contact Joule heat are still deposited once. Complete accepted fluid samples
+remain in `report.coupled.source.network`, and provider errors remain typed
+under `ThermoelectricNetworkError::Heat`. Closed radiation and finite coolant
+exchange remain internal to the same energy account. The finite-links Kelvin
+regression checks independent four-cell and charge equations, reversible
+entropy, continued state and source-only viscosity/Cp substitutions. Existing
+leg trace/contact restrictions, fixed heat geometry and first-order coupling
+remain; the moving field/support materials keep their declared native scope.
+
 ### Complete material heat on the native explicit timeline
 
 `SourceConvectionHeatNetwork::observe_with_links` composes the complete prepared

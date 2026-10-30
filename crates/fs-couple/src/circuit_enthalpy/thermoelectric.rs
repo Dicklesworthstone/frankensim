@@ -50,22 +50,22 @@ pub struct ThermoelectricLeg {
 
 /// Original constitutive refusals survive all numerical trial callbacks.
 #[derive(Debug)]
-pub enum ThermoelectricNetworkError {
+pub enum ThermoelectricNetworkError<E = super::contacts::heat::HeatNetworkError> {
     /// Original common caloric/electrical/conductive material owner.
     Network(MaterialNetworkError),
     /// Original complete thermal/contact/radiation material assembly.
-    Heat(super::contacts::heat::HeatNetworkError),
+    Heat(E),
     /// Original reversible thermoelectric source owner.
     Seebeck(ThermoelectricError),
     /// Unsupported leg topology, phase or geometry.
     Invalid(&'static str),
 }
-impl core::fmt::Display for ThermoelectricNetworkError {
+impl<E: core::fmt::Debug> core::fmt::Display for ThermoelectricNetworkError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "thermoelectric network: {self:?}")
     }
 }
-impl std::error::Error for ThermoelectricNetworkError {}
+impl<E: core::fmt::Debug> std::error::Error for ThermoelectricNetworkError<E> {}
 
 /// Exact source, orientation and solved current for one accepted leg.
 #[derive(Clone, Debug, PartialEq)]
@@ -129,7 +129,22 @@ impl<'m, S> ThermoelectricCandidate<'m, S> {
     }
 }
 
-pub(super) type Error = CircuitEnthalpyError<ThermoelectricNetworkError>;
+pub(super) type Error<E = super::contacts::heat::HeatNetworkError> =
+    CircuitEnthalpyError<ThermoelectricNetworkError<E>>;
+
+// Keep the existing Kelvin/material failures while composing a provider's
+// original typed heat failure. Native cancellation and numerical refusals keep
+// their original CircuitEnthalpyError variants.
+pub(super) fn with_heat_error<E: From<super::contacts::heat::HeatNetworkError>>(
+    error: Error,
+) -> Error<E> {
+    error.map_source(|source| match source {
+        ThermoelectricNetworkError::Network(error) => ThermoelectricNetworkError::Network(error),
+        ThermoelectricNetworkError::Heat(error) => ThermoelectricNetworkError::Heat(error.into()),
+        ThermoelectricNetworkError::Seebeck(error) => ThermoelectricNetworkError::Seebeck(error),
+        ThermoelectricNetworkError::Invalid(message) => ThermoelectricNetworkError::Invalid(message),
+    })
+}
 fn invalid(message: &'static str) -> Error { CircuitEnthalpyError::Invalid(message) }
 fn network(error: MaterialNetworkError) -> Error {
     match error {
@@ -352,32 +367,33 @@ fn coupled_candidate_entropy_option<'m, D: ThermoelectricDriver>(
 // Shared Kelvin/circuit/enthalpy kernel. The transport owner supplies complete
 // proposed coefficients and retained source payload; it never advances time.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub(super) fn coupled_resolved_candidate<'m, S, D: ThermoelectricDriver>(
+pub(super) fn coupled_resolved_candidate<'m, S, D: ThermoelectricDriver,
+    E: From<super::contacts::heat::HeatNetworkError>>(
     material: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
     circuit: &MaterialCircuit, ports: &[f64], legs: &[ThermoelectricLeg],
     contact_cells: &[ContactHeatCells], controls: CircuitEnthalpySolve, guess_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'m>, &mut dyn FnMut() -> bool)
-        -> Result<ContactThermalCoefficients<S>, Error>,
+        -> Result<ContactThermalCoefficients<S>, Error<E>>,
     bulk_source: impl Fn(&S) -> &MaterialNetworkSample,
     advance: impl Fn(Vec<MaterialResistor>, Vec<SeriesElectricalContact>, &[f64], f64,
-        &mut dyn FnMut() -> bool) -> Result<D, Error>,
+        &mut dyn FnMut() -> bool) -> Result<D, Error<E>>,
     with_entropy: bool, cancelled: impl FnMut() -> bool,
 ) -> Result<(DepositionSimulation<'m>, D::Model,
-    CircuitEnthalpyReport<ThermoelectricSample<S>, D::Step>, Option<CircuitEntropyAudit>), Error> {
+    CircuitEnthalpyReport<ThermoelectricSample<S>, D::Step>, Option<CircuitEntropyAudit>), Error<E>> {
     let cancel = RefCell::new(cancelled);
-    let check = || -> Result<(), Error> {
+    let check = || -> Result<(), Error<E>> {
         if (*cancel.borrow_mut())() { Err(CircuitEnthalpyError::Cancelled) } else { Ok(()) }
     };
     check()?;
-    let routing = admit(thermal, material, circuit, ports, legs)?;
+    let routing = admit(thermal, material, circuit, ports, legs).map_err(with_heat_error::<E>)?;
     let initial = resolve(thermal, &mut || (*cancel.borrow_mut())())?;
     let mut pins = Vec::with_capacity(legs.len());
     for (leg, &(_, cell_index)) in legs.iter().zip(&routing) {
         check()?;
         let source = span(material, thermal, bulk_source(&initial.bulk.source),
-            leg, cell_index, leg.selection.clone())?;
+            leg, cell_index, leg.selection.clone()).map_err(with_heat_error::<E>)?;
         let selected = source.material()[0].property(ABSOLUTE_SEEBECK_PROPERTY)
-            .ok_or(invalid("admitted Seebeck claim is absent"))?.answer().receipt.selected;
+            .ok_or(CircuitEnthalpyError::Invalid("admitted Seebeck claim is absent"))?.answer().receipt.selected;
         pins.push(MaterialPropertySelection::PinnedByProperty(vec![
             (ABSOLUTE_SEEBECK_PROPERTY.to_owned(), selected)]));
     }
@@ -392,16 +408,16 @@ pub(super) fn coupled_resolved_candidate<'m, S, D: ThermoelectricDriver>(
             // powers remain on original cell boundaries. Future source additions
             // must provide their classification rather than silently disappear.
             if with_entropy && !coefficients.sources_w.is_empty() {
-                return Err(invalid("thermoelectric entropy requires explicit independent source semantics"));
+                return Err(CircuitEnthalpyError::Invalid("thermoelectric entropy requires explicit independent source semantics"));
             }
             let mut inputs = ports.to_vec();
             let mut spans = Vec::with_capacity(legs.len());
             for ((leg, &(port, cell_index)), pin) in legs.iter().zip(&routing).zip(&pins) {
                 check()?;
                 let source = span(material, state, bulk_source(&coefficients.source),
-                    leg, cell_index, pin.clone())?;
+                    leg, cell_index, pin.clone()).map_err(with_heat_error::<E>)?;
                 inputs[port] = source.transfer(0.0).map_err(|e|
-                    CircuitEnthalpyError::Source(ThermoelectricNetworkError::Seebeck(e)))?.voltage_drop_v;
+                    CircuitEnthalpyError::Source(ThermoelectricNetworkError::<E>::Seebeck(e)))?.voltage_drop_v;
                 spans.push(source);
             }
             let electrical = advance(coefficients.resistors, resolved.contacts, &inputs, dt,
@@ -414,21 +430,23 @@ pub(super) fn coupled_resolved_candidate<'m, S, D: ThermoelectricDriver>(
                 // Native y is minus the a-to-b voltage-source branch current.
                 let current_a = -electrical.native().y[port];
                 let transfer = source.transfer(current_a).map_err(|e|
-                    CircuitEnthalpyError::Source(ThermoelectricNetworkError::Seebeck(e)))?;
-                electrical_work_j = finite(electrical_work_j + dt * inputs[port] * electrical.native().y[port])?;
+                    CircuitEnthalpyError::Source(ThermoelectricNetworkError::<E>::Seebeck(e)))?;
+                electrical_work_j = finite(electrical_work_j + dt * inputs[port] * electrical.native().y[port])
+                    .map_err(with_heat_error::<E>)?;
                 let bulk = material.cells[cell_index].cell;
                 for (cell, power) in [(leg.terminals[0], transfer.terminal_heat_w[0]),
                     (bulk, transfer.bulk_heat_w), (leg.terminals[1], transfer.terminal_heat_w[1])] {
                     let total = coefficients.sources_w.entry(cell).or_insert(0.0);
-                    *total = finite(*total + power)?;
-                    heat_w = finite(heat_w + power)?;
+                    *total = finite(*total + power).map_err(with_heat_error::<E>)?;
+                    heat_w = finite(heat_w + power).map_err(with_heat_error::<E>)?;
                 }
                 samples.push(ThermoelectricLegSample { source_branch: leg.source_branch,
                     resistor_branch: leg.resistor_branch, terminals: leg.terminals, bulk, material: source, transfer });
             }
-            let heat_j = finite(dt * heat_w)?;
-            if finite(heat_j + electrical_work_j)?.abs() > controls.total_energy_tolerance_j {
-                return Err(invalid("Seebeck port work and reciprocal junction/bulk heat do not close"));
+            let heat_j = finite(dt * heat_w).map_err(with_heat_error::<E>)?;
+            if finite(heat_j + electrical_work_j).map_err(with_heat_error::<E>)?.abs()
+                > controls.total_energy_tolerance_j {
+                return Err(CircuitEnthalpyError::Invalid("Seebeck port work and reciprocal junction/bulk heat do not close"));
             }
             Ok(DrivenCoefficients { circuit: electrical, sources_w: coefficients.sources_w,
                 conductances_w_k: coefficients.conductances_w_k, circuit_trials: 1,
