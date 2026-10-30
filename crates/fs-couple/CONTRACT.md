@@ -13272,12 +13272,24 @@ plate observer uses the same state prefix. The existing inlet-pressure plus plat
 observation convention remains; this change does not supply a new exterior outlet
 microphone model.
 
-For an exactly quadratic body/duct, a quasistatic reed uses the shared selected-port
-`PreparedScatteringZoh`. Its existing aperture root closes against the SAME held
-window's affine mean-pressure response, with no delayed outgoing-wave surrogate,
-hidden 5 Pa primer, extra initialization step or render-length-dependent model
-selection. Complete state/output buffers are reused. The reference-wave boundary
-account remains distinct from physical material heat in the shared owner.
+For an exactly quadratic body/duct, a quasistatic reed uses the same complete
+`PreparedExactZoh` held-volume-flow owner as the massive reed. The original strict
+aperture root closes against the SAME interval's affine mean-pressure response,
+with no delayed-pressure surrogate, hidden 5 Pa primer, extra initialization
+step or render-length-dependent model selection. The original static opening
+clamp and flow dead zone remain. Its physical flow is reconstructed from that
+constitutive law; positive finite mean body impedance and the actual accepted
+body pressure/work must agree before publication. Complete state/output buffers
+are reused.
+
+This connection gives exactly `body_work = dt * mean_pressure * held_flow`.
+The massless valve's independently evaluated jet loss and mouth/body work obey
+`jet_heat + body_work = mouth_work`; zero mechanical storage remains the declared
+quasistatic model. The prior held-wave Robin connection included a within-window
+pressure variance term absent from the valve's mean-flow work account. The
+held-flow connection removes that coupling loss without modifying original
+material/acoustic resistance or smoothing the aperture law. It does not certify
+the physical adequacy of a massless model near a reed resonance.
 
 For a massive reed and exactly quadratic body, the prepared complete body now
 supplies its current-window held-volume-flow response `p_bar = free + B*q`.
@@ -13452,3 +13464,15 @@ Molecular fields require `GasFieldResolution::Continuous`; midpoint input refuse
 All three new full coupling/render regressions are unexecuted in this environment.
 Rust formatting/parser checks passed; the constituent molecular field and wavefront
 operators have separate native evidence, without claiming a full render run.
+
+### Original work through a quasistatic valve and a warm complete body
+
+The first-window reference integrates the original body J/R/G under constant
+physical volume flow independently of the prepared maps. A mixed compact/Vk body
+with off-diagonal damping and warm Maxwell history is checked at zero and 100 Pa
+mouth pressure by independently integrating its full states, pressure and original
+R heat. Both body storage plus heat equals bore work and body storage plus heat
+plus jet loss equals mouth work. At zero mouth pressure the original body motion
+drives reverse valve flow and pays for both loss channels. Direct helper checks
+also cover signed reverse flow and complete static closure. Existing massive
+contact/work, refinement, state-prefix and nonlinear-refusal checks still pass.

@@ -47,6 +47,108 @@ pub(crate) struct LoadedReedStep {
     pub(crate) account: LoadedReedAccount,
 }
 
+/// Quasistatic valve on the same held-flow boundary, with no mechanical store.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct QuasistaticLoadStep {
+    pub(crate) pressure_pa: f64,
+    pub(crate) volume_flow_m3_s: f64,
+    pub(crate) jet_heat_j: f64,
+    pub(crate) mouth_work_j: f64,
+    pub(crate) bore_work_j: f64,
+    pub(crate) residual_j: f64,
+}
+
+/// Close the original quasistatic pressure-dependent aperture against the
+/// complete body's mean held-flow response. The existing strict characteristic
+/// root retains its closure, branch selection, clamp and flow dead zone.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_quasistatic_load(
+    reed: BeatingReed,
+    rho: f64,
+    dt: f64,
+    mouth_pressure_pa: f64,
+    free_pressure_pa: f64,
+    mean_impedance: f64,
+    previous_flow_m3_s: f64,
+) -> Result<QuasistaticLoadStep, AcousticRealizeError> {
+    if !reed_parameters_valid(reed)
+        || reed.mass_kg != 0.0
+        || ![
+            rho,
+            dt,
+            mouth_pressure_pa,
+            free_pressure_pa,
+            mean_impedance,
+            previous_flow_m3_s,
+        ]
+        .iter()
+        .all(|x| x.is_finite())
+        || rho <= 0.0
+        || dt <= 0.0
+        || mean_impedance <= 0.0
+    {
+        return Err(refuse(
+            "quasistatic loaded valve requires finite zero-mass parameters and positive gas, clock and response",
+        ));
+    }
+    let incoming = 0.5 * free_pressure_pa;
+    let guess = incoming + mean_impedance * previous_flow_m3_s;
+    let outgoing = super::solve_reed_wave(
+        reed,
+        rho,
+        mean_impedance,
+        0.0,
+        incoming,
+        mouth_pressure_pa,
+        guess,
+        0.0,
+    )?;
+    let pressure_pa = outgoing + incoming;
+    let drop = mouth_pressure_pa - pressure_pa;
+    // Read the original constitutive law rather than dividing a rounded
+    // pressure difference by a possibly tiny body response.
+    let volume_flow_m3_s = super::aperture_of(reed).volume_flow(drop, rho);
+    let jet_heat_j = dt * drop * volume_flow_m3_s;
+    let mouth_work_j = dt * mouth_pressure_pa * volume_flow_m3_s;
+    let bore_work_j = dt * pressure_pa * volume_flow_m3_s;
+    let residual_j = jet_heat_j + bore_work_j - mouth_work_j;
+    let boundary_residual = pressure_pa - (free_pressure_pa + mean_impedance * volume_flow_m3_s);
+    let pressure_scale = pressure_pa.abs()
+        + free_pressure_pa.abs()
+        + mouth_pressure_pa.abs()
+        + (mean_impedance * volume_flow_m3_s).abs();
+    let work_scale = jet_heat_j.abs() + mouth_work_j.abs() + bore_work_j.abs();
+    if ![
+        pressure_pa,
+        volume_flow_m3_s,
+        jet_heat_j,
+        mouth_work_j,
+        bore_work_j,
+        residual_j,
+        boundary_residual,
+        pressure_scale,
+        work_scale,
+    ]
+    .iter()
+    .all(|x| x.is_finite())
+        || jet_heat_j < 0.0
+        || residual_j.abs() > 64.0 * f64::EPSILON * work_scale.max(f64::MIN_POSITIVE)
+        || boundary_residual.abs() > 64.0 * f64::EPSILON * pressure_scale.max(f64::MIN_POSITIVE)
+    {
+        return Err(refuse(
+            "quasistatic loaded valve physical work or current-window flow balance refused",
+        ));
+    }
+    Ok(QuasistaticLoadStep {
+        pressure_pa,
+        volume_flow_m3_s,
+        jet_heat_j,
+        mouth_work_j,
+        bore_work_j,
+        residual_j,
+    })
+}
+
 /// Fixed-clock mechanics and original contact law. A successful warm solve
 /// allocates no memory; exponentials and owned storage are prepared once.
 pub(crate) struct PreparedReedLoad {

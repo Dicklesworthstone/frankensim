@@ -1,9 +1,8 @@
 //! Complete vibrating surfaces on the existing reed and duct owners.
 //!
-//! The quasistatic valve closes against the exact current-window scattering
-//! response. A massive reed closes its moving aperture, swept flow and contact
-//! against the complete quadratic body's mean pressure under held volume flow.
-//! The latter shares one work interval and retains the original physical losses.
+//! Quasistatic and massive reeds close against the complete quadratic body's
+//! mean pressure under held volume flow. The moving aperture, swept flow and
+//! contact share one work interval with all original body and material states.
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
@@ -33,15 +32,11 @@ pub(super) fn realize_reed_ode(
     let dt = 1.0 / f64::from(sample_rate_hz);
     let linear = prepare_render_linear(&bore)?;
     if reed.mass_kg == 0.0 && linear.is_exact_quadratic() {
-        let radius = sections.first().map_or(0.0, |section| section.radius);
-        let area = core::f64::consts::PI * radius * radius;
-        let impedance = gas.density * gas.sound_speed / area;
         return realize_quasistatic(
             bore,
             state,
             observation,
             source,
-            impedance,
             reed,
             gas,
             listener_m,
@@ -234,7 +229,6 @@ fn realize_quasistatic(
     mut state: Vec<f64>,
     observation: Option<PlateBankObservation>,
     source: usize,
-    impedance: f64,
     reed: BeatingReed,
     gas: &GasState,
     listener_m: f64,
@@ -245,36 +239,48 @@ fn realize_quasistatic(
         max_modes: system.state_dim(),
         max_omega_dt: core::f64::consts::PI,
     };
-    let mut propagator = fs_phs::linear_exact::PreparedScatteringZoh::new_owned(
-        system, source, impedance, dt, budget,
-    )
-    .map_err(render_phs_error)?;
+    let mut propagator = fs_phs::linear_exact::PreparedExactZoh::new_owned(system, dt, budget)
+        .map_err(render_phs_error)?;
     let mut input = vec![0.0; propagator.system().port_dim()];
     let mut next_state = vec![0.0; state.len()];
     let mut average_output = vec![0.0; input.len()];
-    let mut previous_incoming = 0.0;
+    let mut previous_flow = 0.0;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        // The shared cache gives the SAME interval's mean-pressure response:
-        // p = free + beta*a, hence b = free + (beta-1)*a. The existing valve
-        // root therefore enforces its pressure/flow law without a sample lag.
-        let (free, beta) = propagator
-            .average_relation(&state, &input)
+        // The same held-flow boundary as the massive reed makes body work
+        // exactly dt*p_bar*q, without an unmatched Robin pressure variance.
+        let (free, impedance) = propagator
+            .average_relation(&state, &input, source)
             .map_err(render_phs_error)?;
-        let incoming = crate::reed_bore::solve_reed_wave(
+        let valve = crate::reed_bore::loaded::solve_quasistatic_load(
             reed,
             gas.density,
-            impedance,
-            beta - 1.0,
-            free,
+            dt,
             blowing_envelope(reed, i as f64 * dt),
-            previous_incoming,
-            0.0,
+            free,
+            impedance,
+            previous_flow,
         )?;
-        input[source] = incoming;
-        propagator
+        input[source] = valve.volume_flow_m3_s;
+        let body = propagator
             .step_into(&state, &input, &mut next_state, &mut average_output)
             .map_err(render_phs_error)?;
+        let pressure_scale = free.abs()
+            + (impedance * input[source]).abs()
+            + average_output[source].abs()
+            + valve.pressure_pa.abs();
+        let work_scale = body.supplied.abs()
+            + valve.bore_work_j.abs()
+            + dt * pressure_scale * input[source].abs();
+        if (average_output[source] - valve.pressure_pa).abs()
+            > 2.0e-11 * pressure_scale.max(f64::MIN_POSITIVE)
+            || (body.supplied - valve.bore_work_j).abs()
+                > 2.0e-11 * work_scale.max(f64::MIN_POSITIVE)
+        {
+            return Err(AcousticRealizeError::Reed {
+                what: "quasistatic valve and complete body did not agree on pressure work",
+            });
+        }
         let pressure = average_output[source]
             + plate_chain_radiation(
                 observation.as_ref(),
@@ -289,7 +295,7 @@ fn realize_quasistatic(
                 what: "ODE reed pressure left the finite set",
             });
         }
-        previous_incoming = incoming;
+        previous_flow = valve.volume_flow_m3_s;
         core::mem::swap(&mut state, &mut next_state);
         out.push(pressure);
     }

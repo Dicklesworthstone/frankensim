@@ -163,12 +163,9 @@ fn quasistatic_first_window_closes_against_independent_physical_port_integration
     let reed = reed(0.0, 100.0);
     let observed = render(&mut PlateBank::default(), reed, 1)[0];
     assert!(observed > 0.0 && observed < reed.blowing_pressure_pa);
-    let impedance =
-        gas.density * gas.sound_speed / (core::f64::consts::PI * sections()[0].radius.powi(2));
     let drop = reed.blowing_pressure_pa - observed;
     let opening = quasistatic_aperture_opening(reed.rest_opening_m, reed.closing_pressure_pa, drop);
     let valve_flow = bernoulli_volume_flow(reed.width_m, opening, drop, gas.density);
-    let incoming = 0.5 * (observed + impedance * valve_flow);
     let duct = ode_bore_chain(
         &sections(),
         ChainOutlet::PressureRelease,
@@ -178,25 +175,43 @@ fn quasistatic_first_window_closes_against_independent_physical_port_integration
         None,
     )
     .unwrap();
-    let n = duct.state_dim();
-    let (j, r, g) = duct.structure();
+    let duration = 1.0 / f64::from(RATE);
+    let (_, pressure, _) =
+        held_flow_reference(&duct, &vec![0.0; duct.state_dim()], 0, valve_flow, duration);
+    assert!((pressure / observed - 1.0).abs() < 2e-9);
+}
+
+// Integrate the original complete body at a fixed physical input. Pressure and
+// original R heat are independent accumulated observables, not energy remainders.
+fn held_flow_reference(
+    system: &fs_phs::PortHamiltonian,
+    initial: &[f64],
+    source: usize,
+    flow: f64,
+    duration: f64,
+) -> (Vec<f64>, f64, f64) {
+    let n = system.state_dim();
+    let m = system.port_dim();
+    let (j, r, g) = system.structure();
     let rhs = |state: &[f64]| {
-        let effort = duct.effort(&state[..n]);
-        let pressure: f64 = g.iter().zip(&effort).map(|(g, e)| g * e).sum();
-        let flow = (2.0 * incoming - pressure) / impedance;
+        let effort = system.effort(&state[..n]);
+        let pressure: f64 = (0..n).map(|row| g[row * m + source] * effort[row]).sum();
         let mut result = vec![0.0; n + 2];
         for row in 0..n {
             result[row] = (0..n)
                 .map(|column| (j[row * n + column] - r[row * n + column]) * effort[column])
                 .sum::<f64>()
-                + g[row] * flow;
+                + g[row * m + source] * flow;
+            result[n + 1] += effort[row]
+                * (0..n)
+                    .map(|column| r[row * n + column] * effort[column])
+                    .sum::<f64>();
         }
         result[n] = pressure;
-        result[n + 1] = flow;
         result
     };
     let mut state = vec![0.0; n + 2];
-    let duration = 1.0 / f64::from(RATE);
+    state[..n].copy_from_slice(initial);
     let h = duration / 2048.0;
     for _ in 0..2048 {
         let a = rhs(&state);
@@ -220,9 +235,81 @@ fn quasistatic_first_window_closes_against_independent_physical_port_integration
         }
     }
     let pressure = state[n] / duration;
-    let flow = state[n + 1] / duration;
-    assert!((pressure / observed - 1.0).abs() < 2e-9);
-    assert!((flow / valve_flow - 1.0).abs() < 2e-9);
+    let heat = state[n + 1];
+    state.truncate(n);
+    (state, pressure, heat)
+}
+
+#[test]
+fn quasistatic_warm_complete_body_closes_mouth_jet_and_original_loss_work() {
+    let gas = gas();
+    let duration = 1.0 / f64::from(RATE);
+    let mut warm = bank([0.7, -0.4], [0.015, -0.02], true);
+    for _ in 0..24 {
+        warm.advance_controlled(0.7, duration, gas.density, 1.0, || false)
+            .unwrap();
+    }
+    assert!(warm.vk.as_ref().unwrap().state().last().unwrap().abs() > 0.0);
+    let line = || {
+        ode_bore_chain(
+            &sections(),
+            ChainOutlet::PressureRelease,
+            2,
+            &[],
+            &gas,
+            None,
+        )
+        .unwrap()
+    };
+    let (reference, initial, observation) =
+        compose_plate_chain(&mut warm, line(), 1, &gas, RATE).unwrap();
+    assert!(observation.is_some());
+    let source = 1;
+    let before = reference.hamiltonian(&initial);
+    assert!(before > 0.0);
+    for mouth in [0.0, 100.0] {
+        let reed = reed(0.0, mouth);
+        let (system, state, _) = compose_plate_chain(&mut warm, line(), 1, &gas, RATE).unwrap();
+        assert_eq!(
+            state, initial,
+            "the physical bank's complete warm history changed"
+        );
+        // Observe the fluid port directly. Omitting the separate microphone
+        // observation leaves every physical surface and feedback path in place.
+        let pressure =
+            realize_quasistatic(system, state, None, source, reed, &gas, 1.0, duration, 1).unwrap()
+                [0];
+        let drop = mouth - pressure;
+        let opening =
+            quasistatic_aperture_opening(reed.rest_opening_m, reed.closing_pressure_pa, drop);
+        let flow = bernoulli_volume_flow(reed.width_m, opening, drop, gas.density);
+        let (next, mean_pressure, heat) =
+            held_flow_reference(&reference, &initial, source, flow, duration);
+        assert!((pressure - mean_pressure).abs() < 2e-9 * pressure.abs().max(mean_pressure.abs()));
+        let after = reference.hamiltonian(&next);
+        let jet_heat = duration * drop * flow;
+        let mouth_work = duration * mouth * flow;
+        let bore_work = duration * mean_pressure * flow;
+        let scale = before.abs()
+            + after.abs()
+            + mouth_work.abs()
+            + bore_work.abs()
+            + heat.abs()
+            + jet_heat.abs();
+        assert!(heat >= 0.0 && jet_heat >= 0.0);
+        assert!((after - before + heat - bore_work).abs() <= 2e-9 * scale);
+        assert!((after - before + heat + jet_heat - mouth_work).abs() <= 2e-9 * scale);
+        if mouth == 0.0 {
+            assert!(
+                pressure.abs() > 1e-5,
+                "complete warm body must drive the valve"
+            );
+            assert!(
+                after < before,
+                "unpowered warm body must pay for both loss channels"
+            );
+        }
+    }
 }
 
 #[test]

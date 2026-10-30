@@ -181,3 +181,43 @@ fn rejected_loaded_trials_leave_the_prepared_response_unchanged() {
     assert_eq!(accepted.volume_flow_m3_s, replay.volume_flow_m3_s);
     assert_eq!(accepted.account.residual_j, replay.account.residual_j);
 }
+
+#[test]
+fn quasistatic_load_pays_for_reverse_flow_and_respects_complete_closure() {
+    let reed = BeatingReed {
+        mass_kg: 0.0,
+        ..reed()
+    };
+    let dt = 1.0 / 48_000.0;
+    let impedance = 1e6;
+    for (mouth, free) in [(0.0, 75.0), (300.0, -75.0), (12_000.0, 0.0)] {
+        let step = solve_quasistatic_load(reed, 1.2, dt, mouth, free, impedance, 0.0).unwrap();
+        let drop = mouth - step.pressure_pa;
+        let opening = reed.rest_opening_m * (1.0 - drop / reed.closing_pressure_pa).clamp(0.0, 1.0);
+        let expected_flow =
+            reed.width_m * opening * drop.signum() * (2.0 * drop.abs() / 1.2).sqrt();
+        assert_close(step.volume_flow_m3_s, expected_flow, expected_flow.abs());
+        assert_close(
+            step.pressure_pa,
+            free + impedance * expected_flow,
+            free.abs() + (impedance * expected_flow).abs(),
+        );
+        let mouth_work = dt * mouth * expected_flow;
+        let bore_work = dt * step.pressure_pa * expected_flow;
+        let jet_heat = dt * drop * expected_flow;
+        let scale = mouth_work.abs() + bore_work.abs() + jet_heat.abs();
+        assert_close(step.mouth_work_j, mouth_work, scale);
+        assert_close(step.bore_work_j, bore_work, scale);
+        assert_close(step.jet_heat_j, jet_heat, scale);
+        assert_close(jet_heat + bore_work - mouth_work, 0.0, scale);
+        assert!(step.jet_heat_j >= 0.0);
+        if mouth == 0.0 {
+            assert!(step.volume_flow_m3_s < 0.0 && step.bore_work_j < 0.0);
+            assert_eq!(step.mouth_work_j, 0.0);
+        }
+        if mouth > reed.closing_pressure_pa {
+            assert_eq!(step.volume_flow_m3_s, 0.0);
+            assert_eq!(step.pressure_pa, 0.0);
+        }
+    }
+}
