@@ -1,14 +1,15 @@
 //! Material-driven convection on the shared finite-cell enthalpy state.
 //!
-//! The fluid is an explicitly prescribed reservoir, not another finite thermal
-//! store. One original transport snapshot supplies Re or Ra, Pr and h per binding.
+//! Prescribed-reservoir boundaries and reciprocal finite-fluid links use the
+//! same material/correlation owner. One original transport snapshot supplies
+//! Re or Ra, Pr and h per binding.
 //! The original thermal owner supplies wall temperature and currently exposed
 //! area. Implicit solves evaluate every thermal trial; explicit observers
 //! re-evaluate at each native substep. Neither freezes the initial heat source.
 //! Borrowed-snapshot boundaries freeze fluid properties. The source-backed
 //! adapter re-evaluates transport and expansion at declared reservoir or film
-//! temperature inside the same residual. Geometry and reservoir energy remain
-//! prescribed; this is not a resolved-flow model.
+//! temperature inside the same residual. Boundary and finite-link APIs retain
+//! their own storage ownership. Geometry stays prescribed; neither resolves flow.
 
 pub mod source;
 
@@ -248,32 +249,9 @@ fn evaluate_bound_cells<'a>(
         // dimensional conversion below consume this same admitted snapshot.
         let transport = binding.fluid.transport_state()
             .map_err(|error| ConvectionSourceError::Material(error.into()))?;
-        let result = match binding.law {
-            CellConvectionLaw::Forced { correlation, speed_m_s, mut settings } => {
-                if wall > binding.reference_temperature.value() {
-                    settings.direction = ThermalDirection::HeatingFluid;
-                } else if wall < binding.reference_temperature.value() {
-                    settings.direction = ThermalDirection::CoolingFluid;
-                }
-                evaluate_forced_from_material(correlation, &transport,
-                    speed_m_s, binding.characteristic_length, settings).map(Some)
-            }
-            CellConvectionLaw::VerticalPlate { gravity_m_s2, expansion_per_k } => {
-                if wall == binding.reference_temperature.value() {
-                    transport.rayleigh(gravity_m_s2, expansion_per_k, 0.0,
-                        binding.characteristic_length.value())
-                        .map_err(MaterialConvectionError::from).map(|_| None)
-                } else {
-                    evaluate_vertical_plate_from_material(&transport, gravity_m_s2,
-                        expansion_per_k, Temperature::new(wall), binding.reference_temperature,
-                        binding.characteristic_length).map(Some)
-                }
-            }
-        }.map_err(ConvectionSourceError::Material)?;
-        let evaluation = result.map(|value| {
-            let (_, nusselt, coefficient) = value.into_parts();
-            CellConvectionEvaluation { nusselt, coefficient }
-        });
+        let evaluation = evaluate_convection_state(&transport, wall,
+            binding.reference_temperature, binding.characteristic_length, binding.law)
+            .map_err(ConvectionSourceError::Material)?;
         let delta = finite(binding.reference_temperature.value() - wall)?;
         let power = match &evaluation {
             None => 0.0,
@@ -295,4 +273,36 @@ fn evaluate_bound_cells<'a>(
     }
     check(&mut cancelled)?;
     Ok(CellConvectionSources { sources_w, samples, total_w })
+}
+
+// All finite-cell boundaries and internal fluid links use this same correlation
+// admission, actual thermal direction and exact-equilibrium convention.
+fn evaluate_convection_state(
+    transport: &FluidTransportState, wall: f64, reference: Temperature,
+    length: Length, law: CellConvectionLaw,
+) -> Result<Option<CellConvectionEvaluation>, MaterialConvectionError> {
+    let result = match law {
+        CellConvectionLaw::Forced { correlation, speed_m_s, mut settings } => {
+            if wall > reference.value() {
+                settings.direction = ThermalDirection::HeatingFluid;
+            } else if wall < reference.value() {
+                settings.direction = ThermalDirection::CoolingFluid;
+            }
+            evaluate_forced_from_material(correlation, transport,
+                speed_m_s, length, settings).map(Some)
+        }
+        CellConvectionLaw::VerticalPlate { gravity_m_s2, expansion_per_k } => {
+            if wall == reference.value() {
+                transport.rayleigh(gravity_m_s2, expansion_per_k, 0.0, length.value())
+                    .map_err(MaterialConvectionError::from).map(|_| None)
+            } else {
+                evaluate_vertical_plate_from_material(transport, gravity_m_s2,
+                    expansion_per_k, Temperature::new(wall), reference, length).map(Some)
+            }
+        }
+    }?;
+    Ok(result.map(|value| {
+        let (_, nusselt, coefficient) = value.into_parts();
+        CellConvectionEvaluation { nusselt, coefficient }
+    }))
 }

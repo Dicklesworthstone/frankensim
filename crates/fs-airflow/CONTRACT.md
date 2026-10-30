@@ -126,6 +126,27 @@ independent finite-body updates with simultaneous native spatial conduction,
 event-clipped exposure changes, retained endpoint sources, interval heat accounts,
 late source-support refusal and cancellation.
 
+### Reciprocal material convection on finite thermal links
+
+`source::links::evaluate_source_link_convection` resolves the original fluid
+material at the actual fluid-cell or wall/fluid film temperature and supplies
+`G = h A` to an existing thermal link. Both endpoint temperatures come from
+their original caloric laws. The native link applies equal-and-opposite heat,
+retains its interface coverage, and participates in the existing thermal
+conductance/timestep owner. No external source power, duplicate fluid storage,
+mass update or separate time integrator is introduced.
+
+One link has one conductance owner; repeated bindings, foreign fluid endpoints,
+nonzero authored conductance, competing overrides, unsupported material states
+and cancellation refuse. Distinct links may share a finite fluid cell. The
+source resolver must retain the same fluid material/conditions as its caloric
+law; a generic transport trait cannot establish that identity. Fixed geometry,
+uniform-cell validity, prescribed relative flow and correlation/source support
+remain explicit. Focused regressions derive liquid storage and transport from
+one material card, independently solve a closed wall/liquid backward-Euler
+balance, change viscosity data, reverse link orientation, and check zero external
+heat plus transactional source/ownership refusals.
+
 ### Shared thermochemical medium in hydraulic and heat paths
 
 `FrozenFlowMedium::bind_fan_bank` connects the same original reference/inlet

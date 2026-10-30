@@ -7,6 +7,8 @@
 
 /// Source-backed convection on the existing explicit thermal timeline.
 pub mod observer;
+/// Reciprocal convection on the original finite-cell thermal links.
+pub mod links;
 
 use super::*;
 use fs_material::fluid_transport::{ThermalFluidTransport, ThermalFluidTransportState};
