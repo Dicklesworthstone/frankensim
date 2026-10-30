@@ -74,6 +74,9 @@ impl Default for ImplicitSpatialConfig {
 /// Accepted finite attachment motion and the actual simultaneous solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplicitSpatialStep {
+    /// Exact accepted stage used by the force and work quadratures. Material
+    /// consumers can check physical applicability without reconstructing it.
+    pub midpoint_state: FreeFloatingMotionState,
     /// Original state, spatial impulses, attachment storage, loss and work defects.
     pub spatial: SpatialMotionStep,
     /// Native Newton--Krylov report, with an independently repeated final residual.
@@ -314,6 +317,7 @@ pub(super) fn step_with_bushings(
     )
     .scale(config.angular_velocity_scale);
     let mut cancel = cancelled.borrow_mut();
+    let midpoint_state = midpoint.state.clone();
     let spatial = finish_midpoint(
         model,
         state,
@@ -330,6 +334,7 @@ pub(super) fn step_with_bushings(
         &mut *cancel,
     )?;
     Ok(ImplicitSpatialStep {
+        midpoint_state,
         spatial,
         nonlinear: report,
         residual_evaluations: evaluations.get(),

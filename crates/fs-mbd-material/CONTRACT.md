@@ -644,3 +644,29 @@ runtime execution remains pending. This is an established exterior conduction
 field and an infinite prescribed reservoir. Initial fluid diffusion, finite
 fluid storage, advective or nonlinear convection, phase change and reciprocal
 thermoelastic heat are not supplied.
+
+## Source-bound compliant articulated attachments
+
+`attachments::MaterialBushing` integrates three original ordered per-area interface
+stiffness/viscosity laws over a rectangular bonded pad and lowers them to the native
+six-axis `SpatialBushing`. Original mechanism material regions, interface
+selections, query coordinates, frames and geometry remain attached.
+
+`step_bushings_implicit` advances a group of bindings in one original simultaneous
+implicit solve, requiring the same mechanism and admitting each binding at the
+input, exact accepted native midpoint and endpoint before returning the unchanged
+native report. Refusal or cancellation publishes no updated state. Native
+reciprocal force, moment, storage, dissipation and motion owners remain authoritative.
+`rebind_at_state` refreshes the original complete source bundle at the actual
+unchanged mechanical state, returning native U_new - U_old as signed external
+parameter work under a caller budget.
+
+Source frequency applicability remains explicit; unowned gap/strain/rate/field
+restrictions refuse. This is a massless bilateral small-local-rotation layer with
+independent material axes, without debonding, unilateral contact, a heat store or
+automatic thermoelastic feedback. Accepted-sample admission does not enclose the
+continuous trajectory or establish the full excitation/modal bandwidth. Three
+integration tests cover independent surface integrals, native implicit material
+substitutions, frame/work balance, midpoint/endpoint refusal and atomic rebinding.
+Focused formatting and whitespace checks pass; native execution remains unverified
+after a single-threaded metadata-only check was SIGKILLed in unchanged asupersync.

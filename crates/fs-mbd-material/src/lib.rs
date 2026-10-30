@@ -17,6 +17,8 @@
 
 /// Complete source-bound mechanism compilation using the existing dynamics engine.
 pub mod articulated;
+/// Source-bound compliant pads on the original articulated dynamics owner.
+pub mod attachments;
 /// Compatible nonuniform deformation with conserved material mass.
 pub mod deformation;
 /// Principal-frame adaptation for the existing free-body and contact APIs.
