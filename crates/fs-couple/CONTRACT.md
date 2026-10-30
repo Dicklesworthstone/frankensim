@@ -9138,6 +9138,42 @@ with exact retry. They are authored but native compilation/execution remains
 unverified in the current environment. Parser/format checks are not native
 numerical evidence. This is an implementation increment under MR05/MR06/MR33/MR67.
 
+## Mixed physical owners in one finite gas network
+
+`dg_port::finite_gas::transport::assembly` admits original wall-DG nodes,
+complete passive loads and moving apertures in one parcel-indexed assembly.
+`FiniteGasAcousticNode` retains each complete native owner;
+`FiniteGasAcousticInput` distinguishes held native ports from moving-source
+drives. Plain reservoirs have caloric controls without an acoustic owner.
+Every input kind must match its actual owner before material transport runs.
+
+The enum dispatches the existing node adapters into the same transport kernel.
+No constitutive, caloric, feedback, conservation or publication algorithm is
+duplicated. A wall retains its complete physical port collection; a passive
+load retains its one original inlet; an aperture computes its own acoustic
+flow. Native gas/source/volume/history admissions and a common physical clock
+remain mandatory. Original reports preserve those distinct physical accounts.
+
+Gas and complete node storage, actual heat, exported loss and external work
+close once over the entire heterogeneous enclosure. Valve-to-duct work remains
+internal, while passive net port work already includes exterior exchange.
+One material snapshot drives all owners; final transport driving forces and
+energy/mass gates run after every endpoint. Immutable previews and accepted
+publication retain every gas, mechanical, material, channel and terminal
+history together. The existing fixed-volume first-order partition and explicit
+material-path limits remain; it does not create an acoustic junction between
+distinct chambers.
+
+Two public regression groups in
+`tests/dg_gas_rebind/finite_transport/assembly.rs` use a warm source-backed
+elastic wall, a passive finite-channel/rational load, an independently moving
+paired aperture and one finite reservoir. They compare each accepted endpoint
+to its original owner using the same transported snapshot, check species and
+independent caloric/external-work accounts, and exercise input-kind refusal,
+immutable preview, final cancellation, exact retry and continued evolution.
+These are authored synthetic implementation regressions; native execution and
+measured physical validation remain separate gates.
+
 ## Continuing spatial dielectric charge through thermal phase change
 
 `ConductionThermalNetwork::step_dielectric_candidate` connects the native

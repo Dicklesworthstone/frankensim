@@ -4,6 +4,9 @@
 //! the acoustic owner differs: each node retains its bore, finite branches,
 //! terminal-channel momentum, exterior poles and aggregate physical accounts.
 
+/// Wall ducts, passive complete loads and moving sources on one gas network.
+pub mod assembly;
+
 use super::{FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgPortStep, admit_initial};
 use crate::bernoulli_aperture::wall::material::{
     FiniteGasDgTransportCandidate, FiniteGasDgTransportStep, FiniteGasTransportNode,

@@ -1,5 +1,8 @@
 //! Species transport, moving mechanics and original acoustic histories share one commit.
 //! Synthetic source laws independently check implementation, not measured instruments.
+#[path = "finite_transport/assembly.rs"]
+mod assembly;
+
 use super::finite_gas::{channel_load, controls, energy_solve, gas};
 use super::*;
 use fs_couple::bernoulli_aperture::dg::finite_gas::transport::{
