@@ -1,8 +1,8 @@
 frankensim-flue-performance-v1
 clock 288000 48000
 output 120000 5 1000000
-gas 293.15 101325 0
-exterior same
+gas pack breath-woodwind-exhaled-coltman1966-nederveen1969
+exterior 293.15 101325 0
 network 4 3
 duct_node inlet
 duct_node junction
