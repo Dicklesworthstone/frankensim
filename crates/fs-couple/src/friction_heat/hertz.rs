@@ -32,6 +32,9 @@ use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 use fs_tribo::partial_slip::TangentFrame;
 use std::cell::Cell;
 
+/// Source-resolved simultaneous Hertz patches on one finite body/heat island.
+pub mod multiple;
+
 /// The original ordered interface source and caller-owned closed normal patch.
 #[derive(Clone, Copy)]
 pub struct RigidHertzHeatContact<'a> {

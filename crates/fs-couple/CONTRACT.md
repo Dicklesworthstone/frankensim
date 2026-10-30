@@ -12511,3 +12511,46 @@ events or establish global uniqueness across softening branches. Workspaces
 and dense dimensions are explicitly bounded (at most 64 sites); local material
 probes are shared across the joint Jacobian rather than replaced by independent
 site mechanics.
+
+
+## Source-resolved Hertz islands on shared finite thermal cells — v0
+
+`friction_heat::hertz::multiple::propose_rigid_hertz_island_heat` couples
+multiple original Hertz patches to one original native body island and one
+finite enthalpy network. Each stable patch identity binds its pinned original
+coefficient source, unchanged normal load/radius, one distinct original thermal
+route and its own solved common-interface temperature. Explicit pressure and
+the T/p-only source-axis refusals remain intact. Conductivity inputs retain
+canonical original link identities; a precomputed permutation maps thermal
+link order to native patch order without repeated trial searches.
+
+One native island is prepared over the actual representable interval
+`(accepted_time + requested_dt) - accepted_time`. Every nonlinear trial
+refreshes all original source claims at their respective interface temperatures,
+solves all mechanical patches together from unchanged accepted momenta, and
+routes their actual dissipation through `FrictionHeatNetworkStep`. That original
+network sums powers into shared cells once, suppresses the replaced direct
+contact links once, and retains all ordinary outside heat and other conduction.
+No fixed heat fraction, duplicate capacity, prescribed face temperature or
+numerical-loss heating is introduced. Geometry, circular area, centre and
+normal must match the original native contacts.
+
+Only a complete body/source/thermal candidate leaves the owner. Per-patch
+mechanical and interface audits remain in force, and both direct
+`Delta K + Delta H - Q_outside` and the sum of the original mechanical/network
+residuals must pass independently. Final-candidate caloric entropy can be
+requested from the same original network. Source failures, exhausted budgets,
+late audits and cancellation preserve all accepted owners and exact retry.
+Allocation, unknown count, nonlinear iterations and total trials are explicit
+bounds; native controls are admitted before trial allocations.
+
+Frozen geometry/normal data, the native response-rank and endpoint-event limits,
+original orthogonal finite cells, common massless faces and backward Euler
+remain the approximation scope. This does not consume retained elastic
+partial-slip memory or rolling loss and does not establish root uniqueness or
+experimental validity. Six focused G1/G3/G4 groups in
+`tests/articulated_friction_heat/hertz_multiple.rs` use an independent
+three-body/two-patch mechanical response and eliminated finite-cell thermal
+root, check source receipts and entropy, canonical permutations and signed
+outside heat, stationary two-route conduction, source/geometry/ownership
+refusals, loaded late failure/cancellation retry and large-clock synchronization.

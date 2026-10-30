@@ -3,6 +3,8 @@
 
 #[path = "articulated_friction_heat/hertz.rs"]
 mod hertz;
+#[path = "articulated_friction_heat/hertz_multiple.rs"]
+mod hertz_multiple;
 #[path = "articulated_friction_heat/hertz_rolling.rs"]
 mod hertz_rolling;
 
