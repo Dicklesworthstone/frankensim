@@ -908,3 +908,49 @@ stick/slide, unequal-radius spin, independent pressure quadrature, exact zero
 limits, dependent-load redistribution, unsupported motion and bounded refusal.
 The original `tests/tangential_multiple.rs` exercises the shared factor through
 its unchanged retained-contact and history semantics.
+
+## Simultaneous Hertz surfaces and original linear rolling loss — v0
+
+`sliding_patch::contact::multiple::rolling::PreparedHertzRollingContacts`
+retains one original full `5N × 5N` positive-semidefinite mechanical response.
+Per-patch conjugate coordinates are
+`[du_x, du_y, a*dtheta_spin, R*dtheta_roll_x, R*dtheta_roll_y]` and
+`[Fx, Fy, Mspin/a, Mroll_x/R, Mroll_y/R]`. The mechanical/material owner supplies
+each original fixed nonnegative rolling coefficient `d` in N/m. This algebra
+creates no material card or applicability claim; the native viscoelastic sphere
+adapter supplies `d=A*N/(R*dt)` from its original source law.
+
+All rolling coordinates are eliminated together through the symmetrically
+equilibrated factor of `B=I+sqrt(D)*Crr*sqrt(D)`. The identity belongs to the
+original viscous equation, not additional mechanical compliance. One reusable
+transfer matrix supplies the full Schur response and released motion to the
+original simultaneous Hertz owner, retaining every cross-patch response and
+its dependent static-load redistribution. Recovery includes rolling induced
+by the solved surface wrench even when initial rolling is zero. Zero damping
+constrains effort only; that coordinate retains all native recoil.
+
+Final admission reconstructs motion using the unchanged original full matrix.
+It independently rechecks original Hertz kinetic support, force, spin moment
+and surface work at that motion, plus the original rolling equation and each
+separate heat/work balance. Static candidates retain the original feasible
+static reaction; arithmetic residuals do not query a discontinuous kinetic law.
+Final support evaluations are reserved within the caller's original evaluation
+budget. Small compatibility/work residuals cannot excuse reversed tiny-slip
+traction. Numerical Schur pivot failure or cancellation of a physically positive
+diagonal refuses without clamping, regularizing compliance or invented heat.
+
+Preparation is limited to 128 patches and 409600 full-response entries. At most
+three full-size dense arrays coexist; trials reuse the factors with linear
+scratch storage. Existing Hertz sweep, support-evaluation, physical-effort and
+residual gates remain explicit. Cancellation is polled at bounded preparation,
+solve and audit boundaries; failure leaves the prepared owner unchanged.
+The caller retains canonical physical ordering, geometry, normal evolution,
+material history and thermal storage. This bounded held-response solve claims
+neither universal convergence nor uniqueness of the original Hertz root.
+
+Seven focused G1/G3 groups in `tests/hertz_rolling_multiple.rs` compare against
+independent full-equation Gaussian elimination, analytic shear/spin support,
+manufactured static traction with nonzero bulk loss, dependent static load
+redistribution, induced rolling, zero-damping/load and prescribed-motion limits,
+canonical permutations, original-matrix numerical refusals and cancellation
+retry. The original nine `hertz_wrench_multiple` groups also pass unchanged.
