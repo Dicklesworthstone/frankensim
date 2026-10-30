@@ -1715,7 +1715,7 @@ elastic energy, partition heat, or certify the exact continuum trajectory.
 
 
 
-## Simultaneous native Hertz contact islands — v0
+## Simultaneous native Hertz contact islands — v1
 
 `tangential_friction::hertz::multiple::PreparedRigidHertzIsland` freezes the
 original contact geometry, normal loads, radii and held interval and captures
@@ -1727,11 +1727,17 @@ Untouched spectators neither enter the energy account nor consume the
 participating-body budget. Keyed coefficient trials reuse the same original
 momenta and prepared response and require exactly unchanged N and radius.
 
-Every trial invokes the original simultaneous Hertz constitutive owner, sums
-all point impulses and free spin couples, and forms each body endpoint once.
-Every patch then evaluates original Hertz traction and heat at its actual
-common endpoint-derived midpoint motion. Native force/moment, work/heat,
-endpoint compatibility, and loaded normal-motion gates apply per patch.
+The original constitutive owner now admits dependent positive-semidefinite
+contact coordinates without invented compliance. Several distinct patches
+between the same two finite bodies can therefore share their translational
+and rotational motion. Static load redistribution, unresolved-feasibility
+refusals and deterministic nonunique root selection belong to that original
+owner; the native adapter does not choose separate per-patch physical states.
+
+Every trial sums all point impulses and free spin couples and forms each body
+endpoint once. Every patch evaluates original Hertz traction and heat at its
+actual common endpoint-derived midpoint motion. Native force/moment, work/heat,
+endpoint compatibility and loaded normal-motion gates apply per patch.
 The whole island separately checks actual kinetic change against impulse work
 and summed physical dissipation, and checks linear and angular momentum.
 Only a complete admitted candidate reaches the publication boundary; failures
@@ -1740,15 +1746,15 @@ and cancellation leave all original body states and preparation unchanged.
 This is a held-geometry, held-effort phase. Normal impulse, pose evolution,
 retained elastic contact memory and rolling deformation remain with their
 original owners. Endpoint-assisted shear/spin and loaded normal motion refuse
-unresolved events requiring trajectory refinement. This initial island rung
-requires a positive-definite full contact response; dependent coordinates are
-refused without invented compliance. It supplies no thermal store or
-experimental validation. Seven focused G1/G3/G4 groups in
+unresolved events requiring trajectory refinement. It supplies no thermal
+store or experimental validation. Focused G1/G3/G4 groups in
 `tests/hertz_multiple.rs` check independent three-body force/spin recoil and
-heat, full-tensor cross-patch response against a separate dense inverse,
-world/gauge/boost covariance, exact input-order canonicalization, energetic
-spectators, coefficient reuse, original single-patch reduction and atomic
-late-failure/cancellation retry.
+heat, full-tensor response against a separate dense inverse, world/gauge/boost
+covariance, exact input-order canonicalization, energetic spectators,
+coefficient reuse, single-patch reduction and atomic late-failure retry.
+Additional same-pair tests use distinct coaxial and coplanar patches with
+actual dependent motion, unequal loads/radii/coefficients, independent summed
+impulse and heat, released patches and unchanged cancellation/effort refusal.
 
 ## Spatial point loading and finite articulated connections
 

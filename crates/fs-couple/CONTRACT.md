@@ -12577,7 +12577,7 @@ Frozen geometry/normal data, the native response-rank and endpoint-event limits,
 original orthogonal finite cells, common massless faces and backward Euler
 remain the approximation scope. This does not consume retained elastic
 partial-slip memory or rolling loss and does not establish root uniqueness or
-experimental validity. Six focused G1/G3/G4 groups in
+experimental validity. Seven focused G1/G3/G4 groups in
 `tests/articulated_friction_heat/hertz_multiple.rs` use an independent
 three-body/two-patch mechanical response and eliminated finite-cell thermal
 root, check source receipts and entropy, canonical permutations and signed
@@ -12618,7 +12618,10 @@ Vk-only responses, signed areas and common-clock gate. The native target uses
 the actual exercised physics; unavailable bow/texture and cavity-source setup
 are explicitly outside its tested scope. Full workspace qualification is not
 asserted.
-
+A dependent two-body/two-patch fixture also couples a shared native support
+to two distinct original finite thermal pads carrying that same body's identity;
+its independently derived full mechanical response and finite-cell root check
+both body momenta, each physical heat contribution and all temperatures.
 
 ## Native circular wetting between unlike surfaces
 

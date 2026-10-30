@@ -3,6 +3,8 @@
 //!
 //! This crate never queries a material database or upgrades caller input into an admitted claim.
 
+mod contact_response;
+
 /// Solver-independent finite-patch tangential partial-slip rung.
 pub mod partial_slip;
 /// Real-contact-area shear strength for adhesive contacts, including zero net load.

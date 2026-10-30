@@ -572,7 +572,7 @@ fn prepared_coefficient_trials_and_single_patch_reduce_to_original_physics() {
 }
 
 #[test]
-fn patch_identity_geometry_rank_effort_and_work_budgets_refuse_without_publication() {
+fn patch_identity_geometry_normal_effort_and_work_budgets_refuse_without_publication() {
     let f = fixture(true, false);
     let saved = f.bodies.clone();
     let prepared = f.prepared();
@@ -609,15 +609,22 @@ fn patch_identity_geometry_rank_effort_and_work_budgets_refuse_without_publicati
         )
         .is_err()
     );
-    // Distinct names do not make duplicate kinematic rows independent. This
-    // admitted SPD rung refuses the rank defect without diagonal compliance.
-    duplicate = [f.contacts()[0], f.contacts()[0]];
-    duplicate[1].patch_id = "another";
+    // Normal motion still belongs to the original normal-contact owner, even
+    // when the tangential response admits dependent contact coordinates.
+    let mut separating = saved.clone();
+    separating[0] = RigidBodyState::new(
+        separating[0].pose(),
+        separating[0]
+            .linear_momentum_world()
+            .add(Vec3::new(0.0, 0.0, 0.01)),
+        separating[0].angular_momentum_body(),
+    )
+    .unwrap();
     assert!(
         PreparedRigidHertzIsland::new(
-            &saved,
+            &separating,
             &f.properties,
-            &duplicate,
+            &f.contacts(),
             DT,
             controls(),
             &CancelGate::new()
@@ -666,6 +673,355 @@ fn patch_identity_geometry_rank_effort_and_work_budgets_refuse_without_publicati
         prepared.advance(&f.laws(), &CancelGate::new()).unwrap(),
         f.run()
     );
+}
+
+fn same_pair(slip: bool, spin: bool) -> Fixture {
+    // Two separate circular contact regions on stepped/fingered faces. Their
+    // centres are 0.11 m apart along the common normal; they are not duplicate
+    // descriptions of one physical patch. Both belong to the same two bodies.
+    let properties = vec![
+        MassProperties::new(2.0, Vec3::ZERO, Vec3::new(0.08, 0.10, 0.12)).unwrap(),
+        MassProperties::new(3.0, Vec3::ZERO, Vec3::new(0.15, 0.20, 0.25)).unwrap(),
+    ];
+    let bodies = [0, 1]
+        .map(|i| {
+            state(
+                Pose::new(
+                    Vec3::new(0.0, 0.0, [0.2, -0.3][i]),
+                    UnitQuaternion::IDENTITY,
+                )
+                .unwrap(),
+                properties[i],
+                Vec3::new(if slip { [1.6, -0.4][i] } else { 0.0 }, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, if spin { [4.0, -1.0][i] } else { 0.0 }),
+            )
+        })
+        .to_vec();
+    Fixture {
+        bodies,
+        properties,
+        bindings: [0.04, -0.07].map(|height| RigidContactBinding {
+            body_a: 0,
+            body_b: 1,
+            arm_a_body: Vec3::new(0.0, 0.0, height - 0.2),
+            arm_b_body: Vec3::new(0.0, 0.0, height + 0.3),
+        }),
+        frames: [TangentFrame::new([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).unwrap(); 2],
+        laws: [law(10.0, 0.03, 0.25), law(7.0, 0.02, 0.55)],
+    }
+}
+
+#[test]
+fn dependent_same_pair_patches_slide_with_one_summed_impulse_and_original_source_trials() {
+    let f = same_pair(true, false);
+    let prepared = f.prepared();
+    assert_eq!(prepared.body_indices(), &[0, 1]);
+    // Both spin coordinates measure the same physical relative angular rate.
+    // Their exact radius-scaled row dependency makes the full 6x6 Gram PSD.
+    let w = prepared.scaled_mobility_per_kg();
+    for column in 0..6 {
+        close(0.03 * w[2 * 6 + column], 0.02 * w[5 * 6 + column], 3e-18);
+    }
+    assert!(
+        (prepared.contacts()[0].contact_points_world[0].z
+            - prepared.contacts()[1].contact_points_world[0].z)
+            .abs()
+            > 0.1
+    );
+    let arm_a = [-0.16, -0.27];
+    let arm_b = [0.34, 0.23];
+    let response = [0, 1].map(|i| {
+        [0, 1].map(|j| {
+            1.0 / 2.0 + 1.0 / 3.0 + arm_a[i] * arm_a[j] / 0.10 + arm_b[i] * arm_b[j] / 0.20
+        })
+    });
+    for mus in [[0.25, 0.55], [0.4, 0.15], [0.0, 0.0]] {
+        let trials = [0, 1].map(|i| {
+            HertzWrenchContact::new(HertzWrenchParameters {
+                static_mu: if mus[i] == 0.0 { 0.0 } else { mus[i] + 0.1 },
+                kinetic_mu: mus[i],
+                ..f.laws[i].parameters()
+            })
+            .unwrap()
+        });
+        let laws = [
+            RigidHertzIslandLaw {
+                patch_id: "upper",
+                law: &trials[0],
+            },
+            RigidHertzIslandLaw {
+                patch_id: "lower",
+                law: &trials[1],
+            },
+        ];
+        let candidate = prepared.advance(&laws, &CancelGate::new()).unwrap();
+        let force = [-10.0 * mus[0], -7.0 * mus[1]];
+        let impulse = DT * (force[0] + force[1]);
+        let angular_a = DT * (arm_a[0] * force[0] + arm_a[1] * force[1]);
+        let angular_b = -DT * (arm_b[0] * force[0] + arm_b[1] * force[1]);
+        close_vec(
+            candidate.bodies_after[0].linear_momentum_world(),
+            f.bodies[0]
+                .linear_momentum_world()
+                .add(Vec3::new(impulse, 0.0, 0.0)),
+            3e-13,
+        );
+        close_vec(
+            candidate.bodies_after[1].linear_momentum_world(),
+            f.bodies[1]
+                .linear_momentum_world()
+                .sub(Vec3::new(impulse, 0.0, 0.0)),
+            3e-13,
+        );
+        close_vec(
+            candidate.bodies_after[0].angular_momentum_body(),
+            Vec3::new(0.0, angular_a, 0.0),
+            3e-13,
+        );
+        close_vec(
+            candidate.bodies_after[1].angular_momentum_body(),
+            Vec3::new(0.0, angular_b, 0.0),
+            3e-13,
+        );
+        let mut heat = 0.0;
+        for i in 0..2 {
+            let after = 2.0 + DT * (response[i][0] * force[0] + response[i][1] * force[1]);
+            let dissipated = -force[i] * DT * (2.0 + after) * 0.5;
+            let report = &candidate.report.contacts[1 - i];
+            close(report.contact.force_n[0], force[i], 3e-12);
+            close(report.slip_velocity_after_m_s[0], after, 3e-13);
+            close(report.dissipated_energy_j, dissipated, 3e-12);
+            assert_eq!(report.normal_velocity_before_m_s, 0.0);
+            assert_eq!(report.normal_velocity_after_m_s, 0.0);
+            heat += dissipated;
+        }
+        close(candidate.report.dissipated_energy_j, heat, 3e-12);
+        close(
+            candidate.report.kinetic_before_j - candidate.report.kinetic_after_j,
+            heat,
+            3e-12,
+        );
+        let mut reversed = laws;
+        reversed.reverse();
+        assert_eq!(
+            prepared.advance(&reversed, &CancelGate::new()).unwrap(),
+            candidate
+        );
+        if mus == [0.0, 0.0] {
+            assert_eq!(candidate.bodies_after, f.bodies);
+            assert!(
+                candidate
+                    .report
+                    .contacts
+                    .iter()
+                    .all(|r| r.contact.mode == HertzWrenchMode::Frictionless
+                        && r.dissipated_energy_j == 0.0)
+            );
+        }
+    }
+    let original = f.run();
+    let mut reordered = f.contacts();
+    reordered.reverse();
+    let ordered = PreparedRigidHertzIsland::new(
+        &f.bodies,
+        &f.properties,
+        &reordered,
+        DT,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        ordered.advance(&f.laws(), &CancelGate::new()).unwrap(),
+        original
+    );
+    let mut published = f.bodies.clone();
+    assert_eq!(
+        apply_rigid_hertz_island(
+            &mut published,
+            &f.properties,
+            &reordered,
+            DT,
+            controls(),
+            &CancelGate::new()
+        )
+        .unwrap(),
+        original.report
+    );
+    assert_eq!(published, original.bodies_after);
+
+    // Two separated pads on one plane have only three independent tangent
+    // work coordinates, despite six named patch coordinates. Physical inertia
+    // ratios give equal transverse angular recoil on both bodies, preserving
+    // normal closure without adding any normal impulse or constraint repair.
+    let mut planar = same_pair(true, false);
+    planar.properties[1] =
+        MassProperties::new(3.0, Vec3::ZERO, Vec3::new(0.15, 0.15, 0.25)).unwrap();
+    planar.bindings = [0.08, -0.08].map(|x| RigidContactBinding {
+        body_a: 0,
+        body_b: 1,
+        arm_a_body: Vec3::new(x, 0.0, -0.2),
+        arm_b_body: Vec3::new(x, 0.0, 0.3),
+    });
+    let admitted = planar.prepared();
+    let matrix = admitted.scaled_mobility_per_kg();
+    for column in 0..6 {
+        close(matrix[column], matrix[3 * 6 + column], 3e-15);
+        close(
+            matrix[4 * 6 + column] - matrix[6 + column],
+            8.0 * matrix[2 * 6 + column],
+            3e-15,
+        );
+        close(
+            0.03 * matrix[2 * 6 + column],
+            0.02 * matrix[5 * 6 + column],
+            3e-18,
+        );
+    }
+    let endpoint = planar.run();
+    let force = [-2.5, -3.85];
+    let impulse = DT * (force[0] + force[1]);
+    let rate_after = 2.0 + impulse * (1.0 / 2.0 + 1.0 / 3.0 + 0.04 / 0.10 + 0.09 / 0.15);
+    close_vec(
+        endpoint.bodies_after[0].linear_momentum_world(),
+        planar.bodies[0]
+            .linear_momentum_world()
+            .add(Vec3::new(impulse, 0.0, 0.0)),
+        3e-13,
+    );
+    close_vec(
+        endpoint.bodies_after[1].linear_momentum_world(),
+        planar.bodies[1]
+            .linear_momentum_world()
+            .sub(Vec3::new(impulse, 0.0, 0.0)),
+        3e-13,
+    );
+    close_vec(
+        endpoint.bodies_after[0].angular_momentum_body(),
+        Vec3::new(0.0, -0.2 * impulse, 0.0),
+        3e-13,
+    );
+    close_vec(
+        endpoint.bodies_after[1].angular_momentum_body(),
+        Vec3::new(0.0, -0.3 * impulse, 0.0),
+        3e-13,
+    );
+    for i in 0..2 {
+        let receipt = &endpoint.report.contacts[1 - i];
+        close(receipt.slip_velocity_after_m_s[0], rate_after, 3e-13);
+        close(
+            receipt.dissipated_energy_j,
+            -force[i] * DT * 0.5 * (2.0 + rate_after),
+            3e-12,
+        );
+        close(receipt.normal_velocity_after_m_s, 0.0, 3e-14);
+    }
+}
+
+#[test]
+fn dependent_same_pair_spin_matches_two_physical_hertz_moments_and_atomic_release_retry() {
+    let mut f = same_pair(false, true);
+    for release_lower in [false, true] {
+        if release_lower {
+            f.laws[1] = law(0.0, 0.02, 0.55);
+        }
+        let original = f.bodies.clone();
+        let prepared = f.prepared();
+        let candidate = prepared.advance(&f.laws(), &CancelGate::new()).unwrap();
+        let moment = [
+            -3.0 * PI / 16.0 * 0.25 * 10.0 * 0.03,
+            if release_lower {
+                0.0
+            } else {
+                -3.0 * PI / 16.0 * 0.55 * 7.0 * 0.02
+            },
+        ];
+        let impulse = DT * (moment[0] + moment[1]);
+        let after = 5.0 + impulse * (1.0 / 0.12 + 1.0 / 0.25);
+        close_vec(
+            candidate.bodies_after[0].angular_momentum_body(),
+            original[0]
+                .angular_momentum_body()
+                .add(Vec3::new(0.0, 0.0, impulse)),
+            3e-13,
+        );
+        close_vec(
+            candidate.bodies_after[1].angular_momentum_body(),
+            original[1]
+                .angular_momentum_body()
+                .sub(Vec3::new(0.0, 0.0, impulse)),
+            3e-13,
+        );
+        let mut heat = 0.0;
+        for i in 0..2 {
+            let r = &candidate.report.contacts[1 - i];
+            let dissipation = -moment[i] * DT * 0.5 * (5.0 + after);
+            close(r.contact.spin_moment_nm, moment[i], 3e-13);
+            close(r.spin_after_rad_s, after, 3e-13);
+            close(r.dissipated_energy_j, dissipation, 3e-13);
+            close_vec(
+                candidate.bodies_after[i].linear_momentum_world(),
+                Vec3::ZERO,
+                3e-14,
+            );
+            heat += dissipation;
+        }
+        close(
+            candidate.report.kinetic_before_j - candidate.report.kinetic_after_j,
+            heat,
+            3e-13,
+        );
+        if release_lower {
+            let released = &candidate.report.contacts[0];
+            assert_eq!(released.contact.mode, HertzWrenchMode::Frictionless);
+            assert_eq!(released.contact.spin_moment_nm, 0.0);
+            assert_eq!(released.dissipated_energy_j, 0.0);
+        }
+        let gate = CancelGate::new();
+        gate.request();
+        assert!(prepared.advance(&f.laws(), &gate).is_err());
+        assert_eq!(
+            prepared.advance(&f.laws(), &CancelGate::new()).unwrap(),
+            candidate
+        );
+        let limited = RigidHertzIslandControls {
+            mechanical: RigidHertzControls {
+                contact: HertzWrenchConfig {
+                    maximum_spin_moment_nm: 1e-5,
+                    ..controls().mechanical.contact
+                },
+                ..controls().mechanical
+            },
+            ..controls()
+        };
+        let mut bodies = original.clone();
+        assert!(
+            apply_rigid_hertz_island(
+                &mut bodies,
+                &f.properties,
+                &f.contacts(),
+                DT,
+                limited,
+                &CancelGate::new()
+            )
+            .is_err()
+        );
+        assert_eq!(bodies, original);
+        let mut retry = original.clone();
+        assert_eq!(
+            apply_rigid_hertz_island(
+                &mut retry,
+                &f.properties,
+                &f.contacts(),
+                DT,
+                controls(),
+                &CancelGate::new()
+            )
+            .unwrap(),
+            candidate.report
+        );
+        assert_eq!(retry, candidate.bodies_after);
+    }
 }
 
 #[test]

@@ -828,40 +828,53 @@ claimed. Normal evolution, partial slip, shear-induced peeling, ageing and
 thermal material refresh require their own owners.
 
 
-## Simultaneous original Hertz contact islands — v0
+## Simultaneous original Hertz contact islands — v1
 
 `sliding_patch::contact::multiple::PreparedHertzContacts` retains the full
 row-major `3N × 3N` radius-scaled response for the original integrated Hertz
 shear/spin laws. All off-diagonal patch blocks remain in the actual load line.
 One preparation admits and factors that response for repeated coefficient
 trials; no sweep advances constitutive time or accepts an individual patch.
-The simultaneous zero-slip reaction has static priority when every original
-static surface admits it. Otherwise deterministic caller-order block solves
-start from zero and use the unchanged three-coordinate Hertz solver.
+The bounded pivoted positive-semidefinite response factor is shared with the
+existing two-axis tangential owner. Its supported minimum-norm reaction is a
+numerical seed only; physical compatibility always uses the original matrix.
+
+Dependent coordinates can admit another static load allocation even when
+that seed exceeds one patch's capacity. A bounded static-feasibility phase
+therefore seeks redistribution inside every original static Hertz set. Its
+temporary equal-coefficient projections supply no physical heat or published
+mode. Kinetic alternatives require a directly checked separation inequality
+against the original static supports, with an explicit work margin and an
+arithmetic guard that includes cancellation in the full transposed response.
+This is a numerical separation check, not an interval certificate. Unresolved
+static feasibility explicitly refuses. Frictionless patches have exactly zero
+wrench and are not additional zero-motion constraints. Small unsupported
+motion cannot disappear merely because it falls below displacement tolerance.
 
 Acceptance independently rechecks every patch's original kinetic support or
-static membership at the final common motion. Compatibility and actual work
-use the unchanged full matrix, including cross-patch terms. Per-patch native
-force, moment, work and displacement residuals and the total physical heat/work
-balance must meet the declared budgets. Intermediate block reactions do not
-consume accepted-effort limits; those limits apply to the fully converged
-physical wrench. Numerical residuals are never heat. Exact zero response
-preserves prescribed slip, even below displacement tolerance; an exactly
-frictionless patch carries exactly zero wrench.
+static membership at the final common motion. Per-patch native force, moment,
+work and displacement residuals and the total physical heat/work balance must
+meet the declared budgets. Intermediate block reactions do not consume
+accepted-effort limits; those limits apply to the fully resolved physical
+wrench. Numerical residuals and static-search work are never heat. Exact zero
+response preserves prescribed slip, even below displacement tolerance.
 
 Preparation is bounded by at most 128 contacts and 147456 matrix entries;
-solves are bounded by at most 4096 sweeps and 1048576 native support evaluations.
-The original matrix and its numerical factor are the two dense arrays, with
-linear per-contact state. Cancellation is polled during preparation, solves,
-and final admission. Failure leaves the reusable owner and all caller state
-unchanged. The caller supplies a stable physical contact order.
+static and kinetic work share at most 4096 sweeps and 1048576 native support
+evaluations. The original matrix, factor and temporary/range factor require
+at most three dense arrays, plus linear per-contact state. Cancellation is
+polled during preparation, solves and final admission. Failure leaves the
+reusable owner and all caller state unchanged. The caller supplies a stable
+physical contact order. Every local three-coordinate block must retain the
+original positive-definite or exact-zero admission; no regularizing compliance
+or diagonal shift is introduced.
 
-This rung admits full positive-definite response or exact zero response.
-Nonzero rank-deficient response is explicitly refused, without a diagonal
-shift or invented compliance. Different static and kinetic coefficients can
-make root selection nonunique; neither convergence nor uniqueness is promised.
-Normal evolution, geometry, thermal storage, rolling loss and retained elastic
-partial-slip memory remain with their original owners. G1/G3 focused tests in
-`tests/hertz_wrench_multiple.rs` check dense static reactions, mixed stick/slide,
-unequal-radius spin, full six-coordinate coupling against independent local
-pressure quadrature, exact zero limits and transactional refusal/retry.
+Nonunique static allocations and different static/kinetic coefficients retain
+explicit deterministic root selection without general convergence or uniqueness
+claims. Normal evolution, geometry, thermal storage, rolling loss and retained
+elastic partial-slip memory remain with their original owners. Focused G1/G3
+tests in `tests/hertz_wrench_multiple.rs` check dense static reactions, mixed
+stick/slide, unequal-radius spin, independent pressure quadrature, exact zero
+limits, dependent-load redistribution, unsupported motion and bounded refusal.
+The original `tests/tangential_multiple.rs` exercises the shared factor through
+its unchanged retained-contact and history semantics.

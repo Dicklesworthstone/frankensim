@@ -386,6 +386,10 @@ fn matrix_effort_iteration_cancellation_refusals_preserve_reusable_owner() {
         assert!(matches!(
             PreparedHertzContacts::new(2, broken, config(), || false),
             Err(MultipleHertzError::Invalid(_))
+                | Err(MultipleHertzError::Contact {
+                    error: HertzWrenchError::Invalid(_),
+                    ..
+                })
         ));
     }
     let prepared = PreparedHertzContacts::new(2, c.clone(), config(), || false).unwrap();
@@ -443,6 +447,183 @@ fn matrix_effort_iteration_cancellation_refusals_preserve_reusable_owner() {
             ..
         })
     ));
+    assert_eq!(
+        prepared.advance(&inputs(&laws, &free), || false).unwrap(),
+        clean
+    );
+}
+
+fn duplicate_response(response: f64) -> Vec<f64> {
+    let mut c = vec![0.0; 36];
+    for i in 0..2 {
+        for j in 0..2 {
+            for axis in 0..3 {
+                c[(3 * i + axis) * 6 + 3 * j + axis] = response;
+            }
+        }
+    }
+    c
+}
+
+#[test]
+fn dependent_static_coordinates_redistribute_unequal_capacity_without_kinetic_heat() {
+    // The three duplicate coordinates give exact rank three. A total reaction
+    // of 12 N is statically feasible, although its minimum-norm 6/6 split
+    // exceeds the weak patch's 3 N static capacity. The two kinetic capacities
+    // sum to only 10 N: choosing kinetic from that seed would falsely slide.
+    let laws = [law(0.25, 5.0), law(0.25, 20.0)];
+    let c = duplicate_response(0.2);
+    let free = [2.4, 0.0, 0.0, 2.4, 0.0, 0.0];
+    let prepared = PreparedHertzContacts::new(2, c.clone(), config(), || false).unwrap();
+    assert_eq!(prepared.scaled_compliance_m_per_n(), c);
+    let result = prepared.advance(&inputs(&laws, &free), || false).unwrap();
+    assert!(result.sweeps > 0);
+    assert_eq!(result.contacts[0].mode, HertzWrenchMode::Sticking);
+    assert_eq!(result.contacts[1].mode, HertzWrenchMode::Sticking);
+    close(result.contacts[0].force_n[0], -3.0, 2e-13);
+    close(result.contacts[1].force_n[0], -9.0, 2e-13);
+    assert_eq!(result.dissipated_energy_j, 0.0);
+    close(result.work_residual_j, 0.0, 1e-12);
+    // Nonunique allocations can differ with caller order; the physical total
+    // reaction and exact lack of motion/heat must not acquire that dependence.
+    let swapped = prepared
+        .advance(&inputs(&[laws[1], laws[0]], &free), || false)
+        .unwrap();
+    close(
+        swapped.contacts.iter().map(|step| step.force_n[0]).sum(),
+        -12.0,
+        2e-13,
+    );
+    assert!(
+        swapped
+            .contacts
+            .iter()
+            .all(|step| step.mode == HertzWrenchMode::Sticking)
+    );
+    assert_eq!(swapped.dissipated_energy_j, 0.0);
+    // A wholly feasible minimum-norm seed still takes the zero-sweep path.
+    let smaller = [0.4, 0.0, 0.0, 0.4, 0.0, 0.0];
+    let seeded = prepared
+        .advance(&inputs(&laws, &smaller), || false)
+        .unwrap();
+    assert_eq!(seeded.sweeps, 0);
+    close(seeded.contacts[0].force_n[0], -1.0, 2e-14);
+    close(seeded.contacts[1].force_n[0], -1.0, 2e-14);
+}
+
+#[test]
+fn dependent_sliding_and_unsupported_drives_obey_original_joint_supports() {
+    let laws = [law(0.25, 10.0), law(0.25, 10.0)];
+    let prepared =
+        PreparedHertzContacts::new(2, duplicate_response(0.2), config(), || false).unwrap();
+    // Supported common drive requires 20 N, exceeding the sum of the original
+    // static capacities (12 N). Both original kinetic wrenches are 4 N and the
+    // complete common motion is 4 - .2*(4+4) = 2.4 m.
+    let sliding = prepared
+        .advance(&inputs(&laws, &[4.0, 0.0, 0.0, 4.0, 0.0, 0.0]), || false)
+        .unwrap();
+    for step in &sliding.contacts {
+        assert_eq!(step.mode, HertzWrenchMode::Sliding);
+        close(step.force_n[0], -4.0, 2e-13);
+        close(step.slip_displacement_m[0], 2.4, 2e-13);
+    }
+    close(sliding.dissipated_energy_j, 2.0 * 4.0 * 2.4, 2e-12);
+    // Opposing prescribed drives lie exactly outside the response range. Equal
+    // static/kinetic coefficients make the independent Coulomb solution unique
+    // here; opposite wrenches cancel recoil and preserve both imposed motions.
+    let equal = HertzWrenchContact::new(HertzWrenchParameters {
+        static_mu: 0.4,
+        kinetic_mu: 0.4,
+        ..laws[0].parameters()
+    })
+    .unwrap();
+    let unsupported = prepared
+        .advance(
+            &inputs(&[equal, equal], &[0.3, 0.0, 0.0, -0.3, 0.0, 0.0]),
+            || false,
+        )
+        .unwrap();
+    close(unsupported.contacts[0].force_n[0], -4.0, 2e-13);
+    close(unsupported.contacts[1].force_n[0], 4.0, 2e-13);
+    close(unsupported.contacts[0].slip_displacement_m[0], 0.3, 2e-13);
+    close(unsupported.contacts[1].slip_displacement_m[0], -0.3, 2e-13);
+    close(unsupported.dissipated_energy_j, 2.4, 2e-12);
+    // A zero-capacity contact is not an extra zero-motion constraint in the
+    // static feasibility problem. Its force remains exactly zero while moving.
+    let released = [laws[0], law(0.25, 0.0)];
+    let mixed = prepared
+        .advance(&inputs(&released, &[1.0, 0.0, 0.0, 3.0, 0.0, 0.0]), || {
+            false
+        })
+        .unwrap();
+    assert_eq!(mixed.contacts[0].mode, HertzWrenchMode::Sticking);
+    close(mixed.contacts[0].force_n[0], -5.0, 2e-13);
+    assert_eq!(mixed.contacts[1].mode, HertzWrenchMode::Frictionless);
+    assert_eq!(mixed.contacts[1].force_n, [0.0; 2]);
+    close(mixed.contacts[1].slip_displacement_m[0], 2.0, 2e-13);
+    assert_eq!(mixed.dissipated_energy_j, 0.0);
+    // Even a full-rank response has a reduced static constraint set when one
+    // patch is frictionless. The global all-zero-motion seed would wrongly
+    // request a nonzero reaction there; solve only the active static rows.
+    let mut full_rank = duplicate_response(0.2);
+    for axis in 0..6 {
+        full_rank[axis * 6 + axis] += 0.1;
+    }
+    let active = PreparedHertzContacts::new(2, full_rank, config(), || false)
+        .unwrap()
+        .advance(&inputs(&released, &[1.0, 0.0, 0.0, 3.0, 0.0, 0.0]), || {
+            false
+        })
+        .unwrap();
+    assert_eq!(active.contacts[0].mode, HertzWrenchMode::Sticking);
+    close(active.contacts[0].force_n[0], -1.0 / 0.3, 2e-13);
+    assert_eq!(active.contacts[1].mode, HertzWrenchMode::Frictionless);
+    assert_eq!(active.contacts[1].force_n, [0.0; 2]);
+    close(
+        active.contacts[1].slip_displacement_m[0],
+        3.0 - 0.2 / 0.3,
+        2e-13,
+    );
+    assert_eq!(active.dissipated_energy_j, 0.0);
+}
+
+#[test]
+fn unresolved_dependent_static_boundary_refuses_instead_of_choosing_kinetic() {
+    let controls = MultipleHertzConfig {
+        maximum_sweeps: 8,
+        ..config()
+    };
+    let laws = [law(0.25, 5.0), law(0.25, 20.0)];
+    let prepared =
+        PreparedHertzContacts::new(2, duplicate_response(0.2), controls, || false).unwrap();
+    let saved = prepared.clone();
+    // A small excess over the 15 N combined static capacity is larger than the
+    // physical/roundoff compatibility budget but its separating work margin is
+    // below the declared static decision budget. A kinetic drop is not proved.
+    let boundary = [3.0 + 1e-10, 0.0, 0.0, 3.0 + 1e-10, 0.0, 0.0];
+    assert!(matches!(
+        prepared.advance(&inputs(&laws, &boundary), || false),
+        Err(MultipleHertzError::StaticFeasibilityUnresolved { .. })
+    ));
+    // Tiny unsupported motion must not disappear through an absolute slip
+    // tolerance. This deliberately unresolved decision is also never stiction.
+    let tiny = [1e-20, 0.0, 0.0, -1e-20, 0.0, 0.0];
+    assert!(matches!(
+        prepared.advance(&inputs(&laws, &tiny), || false),
+        Err(MultipleHertzError::StaticFeasibilityUnresolved { .. })
+    ));
+    assert_eq!(prepared, saved);
+    let free = [2.4, 0.0, 0.0, 2.4, 0.0, 0.0];
+    let clean = prepared.advance(&inputs(&laws, &free), || false).unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        prepared.advance(&inputs(&laws, &free), || {
+            polls += 1;
+            polls == 32
+        }),
+        Err(MultipleHertzError::Cancelled)
+    ));
+    assert_eq!(prepared, saved);
     assert_eq!(
         prepared.advance(&inputs(&laws, &free), || false).unwrap(),
         clean

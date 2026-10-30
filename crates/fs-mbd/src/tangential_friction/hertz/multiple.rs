@@ -5,8 +5,9 @@
 //! patch identities determine assembly and reduction order; reordering caller
 //! inputs does not change a solve. Geometry, normal loads and radii are held,
 //! and the surrounding trajectory/normal owner must refine unresolved events.
-//! This rung admits the original constitutive solver's positive-definite
-//! response, without invented compliance or a sequential accepted-patch sweep.
+//! The original constitutive owner admits positive-semidefinite full response,
+//! including dependent wrench coordinates of distinct patches on the same pair.
+//! No invented compliance or sequential accepted-patch sweep is introduced.
 
 use super::{
     PreparedRigidHertzPair, RigidHertzContact, RigidHertzControls, RigidHertzError, finite, points,

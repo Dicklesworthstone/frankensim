@@ -14,7 +14,10 @@ use fs_mbd::tangential_friction::hertz::RigidHertzControls;
 use fs_mbd::tangential_friction::hertz::multiple::RigidHertzIslandControls;
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
-use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
+use fs_thermal::enthalpy::{
+    CellId, DepositionBudget, DepositionError, DepositionSimulation, Event, MaterialId, StepConfig,
+    ThermalLaw, TimedEvent,
+};
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::sliding_patch::contact::{HertzWrenchConfig, HertzWrenchMode};
 use std::cell::Cell;
@@ -195,6 +198,23 @@ fn reference(
     dt: f64,
     moving: bool,
 ) -> ([f64; 2], [f64; 3], [f64; 2], [f64; 2]) {
+    reference_with_response(
+        initial,
+        outside_w,
+        dt,
+        moving,
+        mobility(),
+        [VELOCITY[0] - VELOCITY[1], VELOCITY[0] - VELOCITY[2]],
+    )
+}
+fn reference_with_response(
+    initial: [f64; 3],
+    outside_w: [f64; 3],
+    dt: f64,
+    moving: bool,
+    w: [[f64; 2]; 2],
+    speed: [f64; 2],
+) -> ([f64; 2], [f64; 3], [f64; 2], [f64; 2]) {
     let d = K.map(|k| dt * k * AREA / A);
     let base: [f64; 3] = std::array::from_fn(|i| CAP[i] * (initial[i] - 300.0) + dt * outside_w[i]);
     let denom = [CAP[0] + 2.0 * d[0], CAP[1] + d[1], CAP[2] + d[2]];
@@ -211,7 +231,6 @@ fn reference(
     });
     let rhs: [f64; 2] =
         std::array::from_fn(|i| d[0] * base[0] / denom[0] + d[i + 1] * base[i + 1] / denom[i + 1]);
-    let w = mobility();
     let slope: [f64; 2] = std::array::from_fn(|i| LOAD[i] * SLOPE[i]);
     let mut theta = [0.0; 2];
     for _ in 0..20 {
@@ -224,8 +243,7 @@ fn reference(
         });
         let slip: [f64; 2] = std::array::from_fn(|i| {
             if moving {
-                dt * (VELOCITY[0] - VELOCITY[i + 1])
-                    - 0.5 * dt * dt * (w[i][0] * effort[0] + w[i][1] * effort[1])
+                dt * speed[i] - 0.5 * dt * dt * (w[i][0] * effort[0] + w[i][1] * effort[1])
             } else {
                 0.0
             }
@@ -261,9 +279,7 @@ fn reference(
         }
     });
     let heat = std::array::from_fn(|i| {
-        -force[i]
-            * (dt * (VELOCITY[0] - VELOCITY[i + 1])
-                + 0.5 * dt * dt * (w[i][0] * force[0] + w[i][1] * force[1]))
+        -force[i] * (dt * speed[i] + 0.5 * dt * dt * (w[i][0] * force[0] + w[i][1] * force[1]))
     });
     (theta.map(|t| t + 300.0), cells, heat, force)
 }
@@ -762,4 +778,155 @@ fn large_accepted_clock_uses_identical_representable_duration_for_all_patches_an
     );
     assert_eq!(candidate.target_time_s, clock + DT);
     assert_eq!(accepted.time_s(), clock);
+}
+
+// Two finite thermal pads belong to one rigid surrounding support. They retain
+// distinct spatial cells/material-state temperatures; no uniform whole-support
+// caloric approximation or extra mechanical body is introduced. The fixture's
+// other mass/inertia is rigid and thermally isolated during this fixed phase.
+fn two_body_pad_thermal(initial: [f64; 3]) -> DepositionSimulation<'static> {
+    let template = thermal(initial, So3::identity());
+    let mut events: Vec<_> = template
+        .cells()
+        .values()
+        .map(|cell| {
+            let mut incoming = cell.clone();
+            incoming.body_id = if incoming.id == CellId(0) { 0 } else { 1 };
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(incoming),
+            }
+        })
+        .collect();
+    events.extend(template.links().values().map(|&link| TimedEvent {
+        time_s: 0.0,
+        event: Event::Contact(link),
+    }));
+    DepositionSimulation::new(
+        events,
+        &[(MaterialId(0), &super::CALORIC as &dyn ThermalLaw)],
+        DepositionBudget {
+            max_cells: 3,
+            max_links: 2,
+            max_events: 5,
+            max_substeps: 8,
+        },
+    )
+    .unwrap()
+    .advance_to(
+        0.0,
+        StepConfig {
+            max_dt_s: DT,
+            energy_tolerance_j: 1e-10,
+        },
+        || Ok(()),
+    )
+    .unwrap()
+    .0
+}
+
+#[test]
+fn dependent_two_patch_same_body_pair_heats_distinct_original_support_pads() {
+    let mut island = Island::new(true);
+    // The inner body and enclosing support have coincident COMs. Their actual
+    // contact points are distinct z=±A; opposite spin coordinates are redundant,
+    // so the full six-coordinate response has rank five, without regularization.
+    island.bodies[1] = RigidBodyState::new(
+        Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).unwrap(),
+        island.bodies[1].linear_momentum_world(),
+        Vec3::ZERO,
+    )
+    .unwrap();
+    let saved = island.bodies;
+    let sources = [law(0), law(1)];
+    let initial = [302.0, 298.0, 304.0];
+    let accepted = two_body_pad_thermal(initial);
+    let routes = routes(&accepted);
+    let mut contacts = island.contacts(&sources, &routes);
+    for (i, contact) in contacts.iter_mut().enumerate() {
+        contact.contact.binding.body_b = 1;
+        contact.contact.binding.arm_b_body = Vec3::new(0.0, 0.0, ARM[i]);
+    }
+    let mut controls = controls();
+    controls.mechanical.mechanical.maximum_bodies = 2;
+    let candidate = propose_rigid_hertz_island_heat(
+        &island.bodies[..2],
+        &island.properties[..2],
+        &contacts,
+        &accepted,
+        0.0,
+        DT,
+        controls,
+        &[0.0; 3],
+        source,
+        &CancelGate::new(),
+    )
+    .unwrap();
+    // Independent sum of the two original bodies' translational and rotational
+    // responses. Both force rows act on BOTH bodies, including off-diagonal recoil.
+    let w = std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            1.0 / MASS[0] + 1.0 / MASS[1] + ARM[i] * ARM[j] * (1.0 / INERTIA[0] + 1.0 / INERTIA[1])
+        })
+    });
+    let (faces, cells, heat, force) = reference_with_response(
+        initial,
+        [0.0; 3],
+        DT,
+        true,
+        w,
+        [VELOCITY[0] - VELOCITY[1]; 2],
+    );
+    assert_eq!(candidate.mechanical.body_indices, [0, 1]);
+    for i in 0..2 {
+        let mechanical = &candidate.mechanical.report.contacts[i];
+        assert_eq!(mechanical.patch_id, PATCH[i]);
+        assert_eq!(mechanical.contact.mode, HertzWrenchMode::Sliding);
+        close(mechanical.contact.force_n[0], force[i]);
+        close(mechanical.dissipated_energy_j, heat[i]);
+        let thermal = candidate
+            .heat
+            .interfaces
+            .iter()
+            .find(|r| r.link_id == LINK[i])
+            .unwrap();
+        close(thermal.interface_temperature_k, faces[i]);
+        close(thermal.dissipated_j, heat[i]);
+        assert_eq!(candidate.thermal.cells()[&CellId(i as u64 + 1)].body_id, 1);
+    }
+    for (i, &temperature) in cells.iter().enumerate() {
+        close(
+            candidate.thermal.temperature_k(CellId(i as u64)).unwrap(),
+            temperature,
+        );
+    }
+    let impulse = DT * (force[0] + force[1]);
+    let moment = DT * (ARM[0] * force[0] + ARM[1] * force[1]);
+    for (i, sign) in [(0, 1.0), (1, -1.0)] {
+        close(
+            candidate.mechanical.bodies_after[i]
+                .linear_momentum_world()
+                .x,
+            island.bodies[i].linear_momentum_world().x + sign * impulse,
+        );
+        close(
+            candidate.mechanical.bodies_after[i]
+                .angular_momentum_body()
+                .y,
+            sign * moment,
+        );
+    }
+    close(
+        kinetic(&candidate.mechanical.bodies_after) - kinetic(&island.bodies[..2])
+            + heat.iter().sum::<f64>(),
+        0.0,
+    );
+    close(
+        energy(&candidate.thermal) - energy(&accepted),
+        heat.iter().sum(),
+    );
+    close(candidate.combined_energy_residual_j, 0.0);
+    close(candidate.summed_energy_residual_j, 0.0);
+    assert_eq!(island.bodies, saved);
+    assert_eq!(accepted.time_s(), 0.0);
 }
