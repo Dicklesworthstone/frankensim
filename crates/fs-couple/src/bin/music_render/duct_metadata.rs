@@ -401,9 +401,16 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
     let regions: Vec<_> = p.segment_gases().iter().map(gas_state).collect();
     let field = reed_field_provenance(p);
     let molecular = reed_molecular_provenance(p);
-    let scope = if p.molecular_driving_point().is_some() && p.outlet_receiver().is_some() {
-        "terminal-only Rayleigh pressure; same original molecular duct and flanged exterior load in feedback and observation; finite-history sampled approximation; no tone-hole, jet, structural or room radiation; not measured calibration"
-    } else { scope };
+    let (point, scope, observation_scope) = if p.molecular_driving_point()
+        .is_some_and(|source| !source.open_hole_sites().is_empty()) && p.outlet_receiver().is_some() {
+        ("baffled-openings",
+            "terminal and open-chimney Rayleigh pressure; same original molecular duct, finite chimneys and independent flanged exterior loads in feedback and observation; finite-history sampled approximation with parallel translated baffles and individually propagated mouth pressures; no mutual exterior loading, nonlinear vortex, jet, structural or room radiation; not measured calibration",
+            "sum of terminal and all open or vented chimney pressures in the bound exterior gas; each mouth uses its own range and observer filter")
+    } else if p.molecular_driving_point().is_some() && p.outlet_receiver().is_some() {
+        (point,
+            "terminal-only Rayleigh pressure; same original molecular duct and flanged exterior load in feedback and observation; finite-history sampled approximation; no tone-hole, jet, structural or room radiation; not measured calibration",
+            observation_scope)
+    } else { (point, scope, observation_scope) };
     format!(",\"pressure_point\":\"{point}\",\"model_scope\":\"{scope}\",\"observation_scope\":\"{observation_scope}\",\"ambient_gas\":{},\"segment_gases\":[{}]{receiver}{field}{molecular}",
         gas_state(p.ambient_gas()),regions.join(","))
 }
@@ -412,7 +419,45 @@ fn reed_molecular_provenance(p: &fs_couple::render::schedule::reed::ReedPerforma
     let Some(point) = p.molecular_driving_point() else { return String::new(); };
     let state = point.material().state();
     let reservoirs = molecular_reservoirs(state);
-    format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"frozen_cv_j_kg_k\":{:e},\"frozen_sound_speed_m_s\":{:e},\"one_way_wavefront_s\":{:e},\"propagation_blocks\":{},\"material_points\":{},\"exterior_gas\":{},\"reservoirs\":[{reservoirs}],\"scope\":\"original homogeneous gas reservoirs and declared wall diffusion in characteristic feedback and terminal flow; shared converged FIR and Rayleigh owners; observer propagation remains a separate declared law; no live chemistry, regional molecular field, compact tone-hole branch or measured source-data claim\"}}",
+    let branches = point.geometry().segments.iter().any(|segment| matches!(segment, fs_duct::Segment::ToneHole { .. }));
+    let scope = if branches {
+        "original homogeneous gas reservoirs and declared wall diffusion in characteristic feedback, finite chimneys and terminal or mouth flows; shared converged FIR and Rayleigh owners; explicit independent flanged mouth loads; fixed vent-admittance mixture, not resolved pad geometry; observer propagation remains a separate declared law at each mouth range; no live chemistry, regional molecular field, mutual exterior radiation or measured source-data claim"
+    } else {
+        "original homogeneous gas reservoirs and declared wall diffusion in characteristic feedback and terminal flow; shared converged FIR and Rayleigh owners; observer propagation remains a separate declared law; no live chemistry, regional molecular field, compact tone-hole branch or measured source-data claim"
+    };
+    let openings = if point.open_hole_sites().is_empty() { String::new() } else {
+        let sites = point.open_hole_sites().iter().enumerate().map(|(mouth, site)| format!(
+            "{{\"mouth\":{mouth},\"axial_position_m\":{:e},\"hole_radius_m\":{:e},\"bore_radius_m\":{:e},\"chimney_height_m\":{:e},\"open_chimney_length_m\":{:e},\"open_fraction\":{:e}}}",
+            site.axial_position_m, site.hole_radius_m, site.bore_radius_m,
+            site.chimney_height_m, site.open_chimney_length_m, site.open_fraction,
+        )).collect::<Vec<_>>().join(",");
+        let observers = p.molecular_open_hole_observers().enumerate()
+            .map(|(mouth, (info, receipt))| {
+                use fs_couple::air_path::GasAbsorptionModel;
+                let filter = receipt.filter;
+                let law = match filter.absorption.law {
+                    GasAbsorptionModel::Iso9613Air { .. } => "iso9613",
+                    GasAbsorptionModel::MolecularRelaxation => "relaxation",
+                    GasAbsorptionModel::StokesKirchhoff => "stokes-kirchhoff",
+                    GasAbsorptionModel::Lossless => "none",
+                };
+                let optional = |value: Option<f64>| value.map_or_else(|| "null".to_owned(), |value| format!("{value:e}"));
+                let r = info.receiver;
+                format!("{{\"mouth\":{mouth},\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"gas\":{},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"sample_rate_hz\":{},\"fft_samples\":{},\"axial_delay_mechanical_samples\":{},\"exterior_delay_mechanical_samples\":[{},{}],\"priming_source_sample\":-1,\"observer\":{{\"law\":\"{law}\",\"declared\":{},\"range_m\":{:e},\"range_spread_m\":{},\"taps\":{},\"latency_s\":{:e},\"low_frequency_delay_s\":{:e},\"alignment_samples\":{:e},\"padding_samples\":{},\"truncated_energy\":{:e},\"budget_energy\":{:e},\"receiver_delay_s\":{:e},\"delay_speed_m_s\":{},\"consumer_delay_s\":{},\"internal_part_unpropagated\":{},\"classical_validity_exceeded_from_hz\":{}}}}}",
+                    r.position_m[0], r.position_m[1], r.position_m[2], info.radius_m,
+                    gas_state(&info.gas), r.radial_rings, r.angular_points, r.maximum_frequency_hz,
+                    info.sample_rate_hz, info.fft_samples, info.axial_delay_samples,
+                    info.exterior_delay_samples.0, info.exterior_delay_samples.1,
+                    p.observer_law_declared(), filter.range_m, optional(receipt.range_spread_m),
+                    filter.taps, filter.latency_s, filter.low_frequency_delay_s,
+                    filter.alignment_samples, filter.padding_samples, filter.truncated_energy,
+                    filter.budget_energy, filter.receiver_delay_s, optional(filter.delay_speed_m_s),
+                    optional(receipt.consumer_delay_s), receipt.internal_part_unpropagated,
+                    optional(filter.classical_validity_exceeded_from_hz))
+            }).collect::<Vec<_>>().join(",");
+        format!(",\"open_mouths\":[{sites}],\"open_mouth_observers\":[{observers}],\"mouth_flow_scope\":\"original mouth volume flow includes the vent fraction once; full authored radius in both independent flanged load and Rayleigh disk; observer filters act before pressure summation\"")
+    };
+    format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"frozen_cv_j_kg_k\":{:e},\"frozen_sound_speed_m_s\":{:e},\"one_way_wavefront_s\":{:e},\"propagation_blocks\":{},\"material_points\":{},\"exterior_gas\":{},\"reservoirs\":[{reservoirs}]{openings},\"scope\":\"{scope}\"}}",
         state.frozen_cv_j_kg_k(), state.frozen_sound_speed_m_s(), point.one_way_wavefront_s(),
         point.material().blocks(), point.material().material_points(), gas_state(point.exterior_gas()))
 }

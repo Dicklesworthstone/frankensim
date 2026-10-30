@@ -63,9 +63,36 @@ the receiver's propagation delay. Select an appropriate existing observer law
 for that exterior path. An optional `exterior` record after `baffled_outlet`
 binds both terminal radiation and receiver, at the common static pressure.
 
+## Finite side openings in the same gas
+
+The companion `reed-molecular-openings-synthetic.performance` adds two finite
+chimneys, one fully open and one partly vented, using the existing geometry:
+
+```text
+segments 5
+cylinder 0.001 0.05
+hole 0.0002 0.001 0.001 1
+cylinder 0.001 0.05
+hole 0.00015 0.0015 0.001 0.5
+cylinder 0.001 0.05
+```
+
+The final number on each `hole` record is its opening fraction, from zero
+(closed cavity) to one (fully open). Each chimney uses the same molecular
+reservoirs and wall law as the bore. The declared exterior supplies every
+mouth load. A closed chimney still changes feedback through its cavity;
+an open or vented chimney also supplies its own solved mouth flow to the
+receiver. The opening fraction weights that flow once.
+
+The physical output sums the terminal and side-mouth pressures. Each molecular
+mouth has its own travel delay and exterior absorption filter at its actual
+receiver range. Their positions retain the existing parallel-baffle convention:
+the receiver's x coordinate for a hole is translated by `bore_length - hole_x`.
+This is a declared compact opening model, not a resolved three-dimensional
+instrument exterior. The sidecar records each mouth and its propagation law.
+
 This route retains frozen homogeneous linear acoustics and the existing reed,
-FIR and baffled receiver approximations. Explicit segment gases, axial or
-steady-generated gas fields, and tone holes refuse; their molecular coupling
-is not supplied by this harmonic owner. It does not model evolving species,
-mean flow or compliant bore walls. Ordinary inputs without `molecular` keep
-their existing propagation path.
+FIR and baffled receiver approximations. Explicit segment gases and axial or
+steady-generated gas fields still refuse. It does not model evolving species,
+mean flow, compliant bore walls, nonlinear hole vortices or mutual exterior
+scattering. Ordinary inputs without `molecular` keep their existing path.

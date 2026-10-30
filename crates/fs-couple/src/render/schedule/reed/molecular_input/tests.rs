@@ -87,14 +87,8 @@ fn unsupported_sources_and_missing_species_refuse_instead_of_dropping_the_law() 
         "cylinder 0.001 0.15",
         "cylinder 0.001 0.15 gas mixture 293.15 101325 mole 2 N2 0.7 O2 0.3",
     );
-    let hole = INPUT.replace(
-        "segments 1\ncylinder 0.001 0.15",
-        "segments 3\ncylinder 0.001 0.075\nhole 0.0001 0.001 0.001 0\ncylinder 0.001 0.075",
-    );
-    for input in [segment_gas, hole] {
-        assert!(matches!(ReedPerformance::from_bytes(input.as_bytes(), 37),
-            Err(ReedPerformanceError::Input { what, .. }) if what.contains("homogeneous ambient species")));
-    }
+    assert!(matches!(ReedPerformance::from_bytes(segment_gas.as_bytes(), 37),
+        Err(ReedPerformanceError::Input { what, .. }) if what.contains("homogeneous ambient species")));
     let field = crate::driving_point::regional::field::tests::field_with_viscosity(
         280.0,
         [1.33e-5, 4.15e-5],

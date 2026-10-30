@@ -11719,7 +11719,7 @@ attenuation and dispersion at every sampled frequency; they are not reapplied
 as an observer filter. The original frozen molecular sound speed sets the
 wavefront-time estimate, while the inlet's equilibrium gas remains the real
 pressure/volume-flow reference. The explicitly supplied exterior gas enters
-the existing terminal-radiation law. Scattering reflection remains finite at
+the existing terminal and side-mouth radiation laws. Scattering reflection remains finite at
 lossless impedance poles. Source and near-DC band refusals propagate.
 
 `ReedBoreVoice::new_with_molecular_driving_point` feeds that line into the same
@@ -11731,7 +11731,7 @@ reed pressure sensitivity, exact block replay and source-domain refusals.
 The adapter retains frozen homogeneous linear plane-wave acoustics, explicit
 rigid/slip or diffusive walls, the sampled FIR approximation and the existing
 compact-jet observer. It adds no nonlinear gas evolution, compliant walls,
-compact tone holes, measured molecular data or experimental instrument claim.
+measured molecular data or experimental instrument claim.
 
 The molecular path also supplies actual flanged outlet flow to the existing
 `OutletPressure` observer. Its original chain and radiation load determine
@@ -11744,6 +11744,32 @@ scheduled adapter primes the observer with the same initial characteristic
 wave as the reed. A diagnostic compact proxy requires identical inlet and
 exterior gases; the physical baffled receiver can use a distinct exterior.
 
+Finite side chimneys retain the original molecular reservoirs and wall law.
+Each open or vented mouth is bound to the flanged compact load in the declared
+exterior; the original admittance-mixture owner applies its opening fraction
+once. Closed chimneys remain acoustic cavities. A closed terminal with an open
+side mouth uses the actual network's near-DC reflection, not a sealed `+1`.
+Earlier side reflections stay in the full sampled reflection history.
+
+`baffled_outlet_and_open_holes_with_delay_speeds` obtains terminal and mouth
+flows in one original chain solve per frequency and uses the shared outlet
+realizer. Mouth flow is not replaced by chimney inlet flow. The retained sweep
+has a public 1,048,576-bin budget; it refuses rather than dropping an opening.
+Each mouth has its own axial-plus-chimney delay and exterior delay. Native
+molecular playback primes every opening from the identical source sample -1,
+applies the selected exterior law at each mouth's own receiver range, then sums
+pressure. Individual FIR delay admission and omission policy remain binding.
+`molecular_open_hole_observers` and native sidecars expose those actual paths.
+
+The observer retains the existing parallel-baffle geometry convention: each
+side receiver is translated by `L - x_hole` along x. Compact independent mouth
+loads and separate Rayleigh disks are approximations, not an exact radiation
+power match. Fractional opening is the original admittance mixture, not a
+resolved pad aperture. No nonlinear hole vortex loss or mutual exterior
+scattering is added. G1 tests compare an independent finite-line/side-branch
+network, and G3 tests exercise source-rate sensitivity, separate wavefronts,
+closed-mouth omission and exact block replay.
+
 `ReedPerformance` exposes this same owner through optional `molecular`,
 `molecular_resolution` and `molecular_wall` records before `compile_limits`.
 The shared material reader evaluates the law against the original ambient
@@ -11753,12 +11779,16 @@ reed flow, and the same exterior drives terminal loading and observation.
 Native sidecars retain the actual reservoirs, frozen sound speed and source
 wavefront time. Observer absorption remains a separate declared exterior law.
 Legacy gas without species, per-segment overrides, axial or steady-generated
-fields and tone holes refuse on this homogeneous molecular route; no law is
+fields refuse on this homogeneous molecular route; no law is
 silently dropped. Existing files without these records keep their prior path.
 The runnable `examples/reed-molecular-synthetic.performance` uses authored
 synthetic coefficients, not measured N2/O2 material data. Focused file tests
 exercise data-only rate changes, physical pressure, exact block replay and
-unsupported-source admission.
+unsupported-source admission. The companion
+`examples/reed-molecular-openings-synthetic.performance` supplies fully open and
+partly vented chimneys through the same native geometry. Standalone integration
+tests in `tests/molecular_reed_performance.rs` cover that physical consumer,
+per-mouth exterior paths and observer changes that preserve reed feedback.
 
 ### Material-solid surface contact in the shared aperture solve
 

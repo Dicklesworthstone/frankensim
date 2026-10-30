@@ -9,7 +9,30 @@ use crate::pcm_wav::baffled::CircularOutletReceiver;
 pub(super) struct TerminalObservation {
     pressure: OutletPressure,
     holes: Vec<OutletPressure>,
+    molecular_hole_observers: Option<Vec<MolecularHoleObserver>>,
     failure: Option<OutletError>,
+}
+
+struct MolecularHoleObserver {
+    filter: ObserverFilter,
+    omission: Result<ObserverOmission, AcousticRealizeError>,
+}
+
+impl TerminalObservation {
+    pub(super) fn admit_molecular_hole_observers(
+        &self,
+        declared: bool,
+    ) -> Result<(), AcousticRealizeError> {
+        if let Some(observers) = &self.molecular_hole_observers {
+            for observer in observers {
+                let omission = observer.omission.as_ref().map_err(Clone::clone)?;
+                if matches!(observer.filter.receipt().absorption.law, GasAbsorptionModel::StokesKirchhoff) {
+                    omission.admit(true, declared)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(super) enum ObservationInput {
@@ -109,8 +132,10 @@ impl ObservationInput {
     /// Original molecular constitutive owner in both pressure feedback and
     /// physical terminal flow. There is no equilibrium reconstruction at the
     /// observation boundary and no independent reed state or material law.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_molecular(self, point: MolecularDrivingPoint, reed: BeatingReed,
-        termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64)
+        termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64,
+        declared_law: Option<DeclaredObserverLaw>, records: &[GasRecord])
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
         let delay = 2.0 * point.one_way_wavefront_s() * f64::from(rate);
         if !(delay >= 2.0 && delay < samples as f64 - 2.0) {
@@ -134,20 +159,45 @@ impl ObservationInput {
             }
             Self::Legacy(_) => {}
         }
+        // Each mouth has its own distance and hence its own absorption,
+        // dispersion and finite-FIR delay allocation. Filtering a sum at the
+        // bell's range would silently assign that range to every side opening.
+        let mut hole_observers = Vec::new();
+        let mut hole_delay_speeds = Vec::new();
+        if let Self::Baffled { receiver, .. } = &self {
+            let length: f64 = point.geometry().segments.iter().map(Segment::axial_length).sum();
+            for site in point.open_hole_sites() {
+                let mut position = receiver.position_m;
+                position[0] += length - site.axial_position_m;
+                let range_m = position[0].hypot(position[1]).hypot(position[2]);
+                let gas = point.exterior_gas();
+                let filter = observer_filter(declared_law, gas, records, range_m, rate)?;
+                admit_receiver_delay(&filter, Some((position, Some(*gas))),
+                    site.hole_radius_m, gas.sound_speed)?;
+                let omission = observer_omission(gas, records, range_m,
+                    observer_band_top_hz(Some(receiver.maximum_frequency_hz), rate));
+                hole_delay_speeds.push(filter.receipt().delay_speed_m_s.unwrap_or(gas.sound_speed));
+                hole_observers.push(MolecularHoleObserver { filter, omission });
+            }
+        }
         let voice = ReedBoreVoice::new_with_molecular_driving_point(point, termination, reed,
             PlateBank::default(), self.range_m(), rate, &crate::driving_point::LineLadder::default())
             .map_err(ReedPerformanceError::Model)?;
         let Self::Baffled { receiver, .. } = self else {
             return Ok((voice, None));
         };
-        let mut pressure = voice.molecular_driving_point()
+        let (mut pressure, mut holes) = voice.molecular_driving_point()
             .expect("molecular constructor retains its original source")
-            .baffled_outlet_delayed_at(rate, voice.line.history().len(), receiver, delay_speed_m_s)
+            .baffled_outlet_and_open_holes_with_delay_speeds(rate, voice.line.history().len(),
+                receiver, delay_speed_m_s, &hole_delay_speeds)
             .map_err(ReedPerformanceError::Outlet)?;
-        // The outlet receives the identical sample -1 already in feedback.
+        // Every opening receives the identical sample -1 already in feedback.
         pressure.step(voice.p_plus_prev).map_err(ReedPerformanceError::Outlet)?;
+        for hole in &mut holes {
+            hole.step(voice.p_plus_prev).map_err(ReedPerformanceError::Outlet)?;
+        }
         Ok((voice, Some(TerminalObservation {
-            pressure, holes: Vec::new(), failure: None,
+            pressure, holes, molecular_hole_observers: Some(hole_observers), failure: None,
         })))
     }
 
@@ -220,6 +270,7 @@ impl ObservationInput {
             Some(TerminalObservation {
                 pressure,
                 holes,
+                molecular_hole_observers: None,
                 failure: None,
             }),
         ))
@@ -237,6 +288,27 @@ impl ReedPerformance {
     #[must_use]
     pub fn outlet_receiver(&self) -> Option<OutletReceiverInfo> {
         self.terminal.as_ref().map(|terminal| terminal.pressure.info())
+    }
+
+    /// Molecular side-mouth receivers and their individual exterior laws, in
+    /// authored open/vented-hole order. Closed cavities have no radiating mouth.
+    /// Each filter acts before summing pressure with the terminal contribution.
+    pub fn molecular_open_hole_observers(
+        &self,
+    ) -> impl Iterator<Item = (OutletReceiverInfo, ReedObserverReceipt)> + '_ {
+        self.terminal.iter().flat_map(|terminal| {
+            terminal.molecular_hole_observers.iter().flat_map(|observers| {
+                terminal.holes.iter().zip(observers).map(|(hole, observer)| {
+                    let info = hole.info();
+                    (info, ReedObserverReceipt {
+                        filter: *observer.filter.receipt(),
+                        range_spread_m: Some(range_spread(info.receiver.position_m, info.radius_m)),
+                        consumer_delay_s: None,
+                        internal_part_unpropagated: false,
+                    })
+                })
+            })
+        })
     }
 
     /// Original observer failure, retained even through the legacy PressureRenderer
@@ -296,16 +368,30 @@ impl ReedPerformance {
                     return Err(ReedPerformanceError::Outlet(error));
                 }
             };
-            for hole in &mut terminal.holes {
-                match hole.step(p_plus) {
-                    Ok(hole_pressure) => sum += hole_pressure,
-                    Err(error) => {
-                        terminal.failure = Some(error.clone());
-                        return Err(ReedPerformanceError::Outlet(error));
+            if let Some(observers) = &mut terminal.molecular_hole_observers {
+                sum = self.observer.process(sum);
+                for (hole, observer) in terminal.holes.iter_mut().zip(observers) {
+                    match hole.step(p_plus) {
+                        Ok(pressure) => sum += observer.filter.process(pressure),
+                        Err(error) => {
+                            terminal.failure = Some(error.clone());
+                            return Err(ReedPerformanceError::Outlet(error));
+                        }
                     }
                 }
+            } else {
+                for hole in &mut terminal.holes {
+                    match hole.step(p_plus) {
+                        Ok(pressure) => sum += pressure,
+                        Err(error) => {
+                            terminal.failure = Some(error.clone());
+                            return Err(ReedPerformanceError::Outlet(error));
+                        }
+                    }
+                }
+                sum = self.observer.process(sum);
             }
-            *slot = self.observer.process(sum);
+            *slot = sum;
         }
         Ok(())
     }
@@ -357,12 +443,12 @@ mod molecular_tests {
         let source = point(gas);
         let (mut proxy, no_terminal) = ObservationInput::Legacy(1.0)
             .build_molecular(source.clone(), reed(), Termination::FlangedOpen,
-                8000, 1024, gas.sound_speed).unwrap();
+                8000, 1024, gas.sound_speed, Some(DeclaredObserverLaw::Lossless), &[]).unwrap();
         assert!(no_terminal.is_none());
         let (mut physical, terminal) = ObservationInput::Baffled {
             receiver: receiver(), exterior: Some(gas),
         }.build_molecular(source, reed(), Termination::FlangedOpen,
-            8000, 1024, gas.sound_speed).unwrap();
+            8000, 1024, gas.sound_speed, Some(DeclaredObserverLaw::Lossless), &[]).unwrap();
         let mut terminal = terminal.unwrap();
         assert!(terminal.holes.is_empty());
         let mut expected = physical.molecular_driving_point().unwrap()
@@ -389,14 +475,14 @@ mod molecular_tests {
         let source = point(gas(320.0));
         assert!(ObservationInput::Legacy(1.0).build_molecular(
             source.clone(), reed(), Termination::FlangedOpen,
-            8000, 1024, gas(320.0).sound_speed).is_err());
+            8000, 1024, gas(320.0).sound_speed, Some(DeclaredObserverLaw::Lossless), &[]).is_err());
         for (exterior, termination) in [
             (Some(gas(293.15)), Termination::FlangedOpen),
             (Some(gas(320.0)), Termination::UnflangedOpen),
         ] {
             assert!(ObservationInput::Baffled { receiver: receiver(), exterior }
                 .build_molecular(source.clone(), reed(), termination,
-                    8000, 1024, gas(320.0).sound_speed).is_err());
+                    8000, 1024, gas(320.0).sound_speed, Some(DeclaredObserverLaw::Lossless), &[]).is_err());
         }
     }
 }

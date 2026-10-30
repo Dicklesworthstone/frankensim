@@ -9,14 +9,15 @@
 //! A homogeneous explicit-species source can instead declare `molecular`,
 //! `molecular_resolution` and `molecular_wall` records before `compile_limits`.
 //! The shared molecular reservoirs then reach both pressure feedback and the
-//! physical outlet, independently of the listener's exterior absorption law.
+//! physical terminal and side mouths, independently of the listener's exterior
+//! absorption law. Molecular side mouths apply that law at their own ranges.
 //! It does not infer material identity
 //! or turn a pitch into a medium property. Pressure commands replace the fixture
 //! attack envelope; all retained reed and bore state survives release and resume.
 //! Optional `slit_length LENGTH_M` after the reed record selects the shared
 //! quasisteady viscous slit from the exact inlet gas, including axial fields.
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
-//! `baffled_outlet` selects the existing terminal-only Rayleigh observation.
+//! `baffled_outlet` selects Rayleigh observation of the admitted openings.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
 //!
 //! Both observers then apply one observer absorption law over their range,
@@ -779,9 +780,9 @@ impl ReedPerformance {
         }
         let molecular = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("molecular") {
-            if explicit_segment_gas || gas_field.is_some() || holes > 0 {
+            if explicit_segment_gas || gas_field.is_some() {
                 return Err(bad(r.line + 1,
-                    "molecular bore propagation requires homogeneous ambient species, no segment gas or axial field, and no tone holes"));
+                    "molecular bore propagation requires homogeneous ambient species, no segment gas or axial field"));
             }
             Some(molecular_input::read(&mut r, &gas_records[0])?)
         } else { None };
@@ -881,6 +882,7 @@ impl ReedPerformance {
             let (voice, terminal) = observation.build_molecular(
                 point, reed, termination, rate, samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
+                declared_law, &gas_records,
             )?;
             (voice, terminal, observer, omission)
         } else if let Some((field, resolution)) = &gas_field {
@@ -1009,6 +1011,9 @@ impl ReedPerformance {
         let omission = self.observer_omission.as_ref().map_err(Clone::clone)?;
         if matches!(self.observer.receipt().absorption.law, GasAbsorptionModel::StokesKirchhoff) {
             omission.admit(true, self.observer_law_declared)?;
+        }
+        if let Some(terminal) = &self.terminal {
+            terminal.admit_molecular_hole_observers(self.observer_law_declared)?;
         }
         Ok(omission)
     }
