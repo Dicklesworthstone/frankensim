@@ -300,6 +300,13 @@ impl Conduction<'_, '_> {
             let g = outgoing.entry(id).or_insert(0.0);
             *g = finite(*g + sample.liquid_decay_conductance_w_k)?;
         }
+        for (&(body, _), sample) in self.body_atmosphere.faces.iter()
+            .zip(&self.body_atmosphere.last)
+        {
+            check()?;
+            let g = outgoing.entry(self.body_ids[body]).or_insert(0.0);
+            *g = finite(*g + sample.conductance_w_k)?;
+        }
         if outgoing.is_empty() {
             return Ok(proposed_s);
         }
@@ -317,9 +324,11 @@ impl Conduction<'_, '_> {
         let mut dt = proposed_s;
         for (id, g) in outgoing {
             check()?;
-            let decay = finite(
-                g * self.caloric.maximum_temperature_slope() / thermal.cells()[&id].mass_kg,
-            )?;
+            let temperature_slope = match self.body_ids.binary_search(&id) {
+                Ok(index) => self.bodies[index].caloric().maximum_temperature_slope(),
+                Err(_) => self.caloric.maximum_temperature_slope(),
+            };
+            let decay = finite(g * temperature_slope / thermal.cells()[&id].mass_kg)?;
             if decay > 0.0 {
                 // A half-capacity numerical margin preserves a convex thermal
                 // update for frozen coefficients. It is not a material law.
@@ -337,6 +346,10 @@ impl Conduction<'_, '_> {
             for sample in &self.surface_last {
                 check()?;
                 conductance = finite(conductance + sample.gas_decay_conductance_w_k)?;
+            }
+            for sample in &self.body_atmosphere.last {
+                check()?;
+                conductance = finite(conductance + sample.conductance_w_k)?;
             }
             let decay = finite(gas.temperature_slope * conductance / gas.parcel.mass_kg())?;
             if decay > 0.0 {

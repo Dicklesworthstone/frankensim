@@ -34,6 +34,7 @@ pub struct FreeSurfaceThermalBody<'m> {
     selection: MaterialPropertySelection,
     material: ResolvedMaterialStatePoint,
     conduction_links: Vec<FreeSurfaceBodyLink>,
+    gas_faces: Vec<atmosphere::FreeSurfaceBodyGasFace>,
 }
 
 /// One declared solid/solid face, owned by the cell on its first side.
@@ -106,7 +107,11 @@ pub struct FreeSurfaceBodyExchange {
     pub enthalpy_after_j: f64,
     /// Signed energy from solids INTO liquid. Never external supply or loss.
     pub heat_to_liquid_j: f64,
-    /// `H_liquid_delta + H_solid_delta - external_heat - viscous_heat` [J].
+    /// Direct signed heat from the SAME finite atmosphere into these solids.
+    /// This is distinct from `heat_to_liquid_j`; never debit the gas twice.
+    pub heat_from_gas_j: f64,
+    /// `H_liquid_delta + H_solid_delta - liquid_external_heat - viscous_heat
+    /// - heat_from_gas` [J]. Gas exchange is internal when gas is included.
     pub combined_balance_defect_j: f64,
     /// Source/conductance samples used by the final thermal substep.
     pub last_applied: Vec<FreeSurfaceBodyContactSample>,
@@ -185,6 +190,7 @@ impl<'m> FreeSurfaceThermalBody<'m> {
             selection,
             material,
             conduction_links: Vec::new(),
+            gas_faces: Vec::new(),
         };
         // The common owner admits geometry, extensive storage and the actual
         // borrowed caloric law; there is no separate wall thermal integrator.
@@ -234,6 +240,22 @@ impl<'m> FreeSurfaceThermalBody<'m> {
     /// Explicit outgoing geometry, with the owning cell on the first side.
     pub fn conduction_links(&self) -> &[FreeSurfaceBodyLink] {
         &self.conduction_links
+    }
+
+    /// Attach exposed patches to the same finite atmosphere as the liquid.
+    ///
+    /// Every subsequent thermal step must supply that finite atmosphere.
+    /// Current native wall/gas geometry and the combined solid contact/film
+    /// area budget are admitted on each step, before any participant advances.
+    /// No independent bath temperature or gas transport coefficient is stored.
+    #[must_use]
+    pub fn with_gas_faces(mut self, faces: Vec<atmosphere::FreeSurfaceBodyGasFace>) -> Self {
+        self.gas_faces = faces;
+        self
+    }
+
+    pub fn gas_faces(&self) -> &[atmosphere::FreeSurfaceBodyGasFace] {
+        &self.gas_faces
     }
 
     /// Fixed mass from the original chart density and cell volume [kg].

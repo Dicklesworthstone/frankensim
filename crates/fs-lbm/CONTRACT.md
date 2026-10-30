@@ -5116,3 +5116,47 @@ physical timestep and relaxation, accepted-gas bit parity and stale-state
 refusal, and inconsistent acoustic/transport density. This mapping does not
 extend the original low-Mach lattice solver to shock, cavitation or multiphase
 physics, nor certify its spatial or temporal discretization error.
+
+### Shared finite atmosphere for moving liquid and finite solid walls
+
+`FreeSurfaceThermalBody::with_gas_faces` attaches explicit stationary solid/gas
+patches to the SAME finite atmosphere used by the original moving-liquid
+conduction and surface-exchange entry points. `FreeSurfaceBodyGasFace` supplies
+native wall/gas coordinates, patch area, solid centroid distance and continuum
+gas-film thickness. No independent bath temperature, conductivity or thermal
+inventory is introduced.
+
+The original solid source and caloric chart supply k(T), finite mass and
+temperature; `ThermalMaterialPoint::at` preserves their material-card identity.
+The original gas model evaluates film transport at the mean solid/gas temperature
+and the finite parcel's current EOS pressure and composition. Selected film
+claims remain pinned across each interval. All solid and liquid rates use one
+thermal substep state, and their aggregate opposite heat enters the original gas
+internal-energy owner exactly once.
+
+Native wall/gas adjacency, dry gas occupancy, unique physical patches and the
+shared face budget are checked before advancement. Solid film areas must fit
+the original thermal owner's remaining exposed area after BOTH solid/solid and
+solid/liquid contact coverage. The timestep bound combines film and native
+contact conductances with each body's own caloric temperature slope; the gas
+capacity bound includes all liquid and solid films together.
+
+`body_environment` reports direct gas/solid heat and actual source samples.
+`FreeSurfaceBodyExchange::heat_from_gas_j` is distinct from its
+`heat_to_liquid_j = heat_from_gas_j - solid_storage_change`. Direct gas/solid
+exchange never enters the liquid's external-heat account. The finite-gas audit
+closes actual liquid, solid and gas storage, retaining molecular and electrical
+heat in their existing accounts. All native VOF, material, thermal, geometry,
+budget and cancellation gates precede publication of liquid, solid and gas
+candidates.
+
+This remains a fixed-geometry, finite-cell solid and single-liquid,
+constant-density VOF approximation with an explicitly declared well-mixed,
+fixed-volume gas and quasi-steady continuum films. It supplies no gas momentum,
+pressure traction, evaporation, reaction, moving-wall or phase-density handoff,
+nor a total kinetic/capillary-energy closure. Film geometry is held during the
+thermal stage and must describe the accepted configuration on each call.
+Three focused G1/G3/G4 regressions cover independent finite-store balances,
+solid-data changes reaching actual liquid populations through the common gas,
+aggregate small-gas timestep control, geometry/coverage/domain refusal,
+cancellation, retained histories and successful retry.

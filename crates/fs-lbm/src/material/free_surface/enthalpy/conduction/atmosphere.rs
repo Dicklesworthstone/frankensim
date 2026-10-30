@@ -5,6 +5,10 @@
 use super::*;
 use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel};
 
+mod body;
+pub use body::{FreeSurfaceBodyGasExchange, FreeSurfaceBodyGasFace, FreeSurfaceBodyGasSample};
+pub(super) use body::BodyAtmosphere;
+
 /// Finite gas account over one accepted native VOF/enthalpy interval.
 ///
 /// Gas-supplied heat in `environment` or a solved `surface` appears in the liquid
@@ -15,7 +19,7 @@ use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel
 pub struct FreeSurfaceFiniteGasExchange {
     /// Actual mass times the change of the gas's sourced specific INTERNAL energy.
     pub internal_energy_change_j: f64,
-    /// Actual gas storage change plus its opposite supplied liquid heat.
+    /// Actual gas storage change plus supplied liquid AND solid heat.
     pub gas_balance_defect_j: f64,
     /// Combined actual liquid/wall/gas storage minus authored, molecular,
     /// electrical and radiant heat, according to their original accounts.
@@ -89,7 +93,7 @@ impl FiniteAtmosphere {
 
     pub(super) fn balance(
         &self,
-        heat_to_liquid_j: f64,
+        heat_to_condensed_j: f64,
         thermal: &EnergyAudit,
         thermal_tolerance_j: f64,
     ) -> Result<FreeSurfaceFiniteGasExchange, Error> {
@@ -98,7 +102,7 @@ impl FiniteAtmosphere {
                 * (self.parcel.state().specific_internal_energy_j_kg()
                     - self.initial_specific_energy_j_kg),
         )?;
-        let defect = environment::finite(stored + heat_to_liquid_j)?;
+        let defect = environment::finite(stored + heat_to_condensed_j)?;
         let allowance = environment::finite(
             self.substeps as f64 * self.parcel.mass_kg() * self.controls.energy_tolerance_j_kg,
         )?;
@@ -110,7 +114,7 @@ impl FiniteAtmosphere {
         let combined = environment::finite(
             thermal.stored_energy_change_j + stored
                 - thermal.incoming_energy_j
-                - (thermal.external_heat_j - heat_to_liquid_j),
+                - (thermal.external_heat_j - heat_to_condensed_j),
         )?;
         if combined.abs() > environment::finite(thermal_tolerance_j + allowance)? {
             return Err(Error::Invalid(
@@ -130,12 +134,15 @@ impl FiniteAtmosphere {
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// Exchange heat with a finite source-backed atmosphere, finite walls and
     /// the SAME native liquid conduction, rheology, momentum and mass transport.
+    /// Walls with `with_gas_faces` exchange directly with this SAME gas parcel.
+    /// Every solid has its own sourced conductivity and caloric capacity; one
+    /// aggregate opposite gas debit includes solid and liquid films together.
     ///
     /// The well-mixed gas has fixed mass, composition and volume. Each actual
-    /// thermal substep deposits opposite joules into its original NASA-9
+    /// thermal substep deposits aggregate opposite liquid/solid joules into its original NASA-9
     /// internal-energy owner. Updated gas T and EOS pressure re-evaluate the
     /// original film transport sources; source switches and unsupported states
-    /// refuse. The native thermal CFL includes both liquid contact losses and
+    /// refuse. The native thermal CFL includes solid and liquid contact losses and
     /// the finite gas capacity, so small atmospheres cannot act as infinite baths.
     ///
     /// Provide currently exposed patches at every call. Geometry is held during
@@ -168,9 +175,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         poll(gate)?;
-        if exposed.is_empty() || exposed.len() > controls.maximum_faces {
+        if (exposed.is_empty() && bodies.iter().all(|body| body.gas_faces().is_empty()))
+            || exposed.len() > controls.maximum_faces
+        {
             return Err(Error::Invalid(
-                "finite atmosphere requires bounded exposed liquid patches",
+                "finite atmosphere requires bounded exposed liquid or solid patches",
             ));
         }
         let mut candidate = FiniteAtmosphere::try_new(gas, gas_controls)?;
