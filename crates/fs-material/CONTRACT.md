@@ -3603,8 +3603,10 @@ Reports aggregate directional species and donor-enthalpy throughput, pore uptake
 work counts and whole-window balances. Only the last substep's detailed source
 report is retained. The total omitted throat void volume is measured against
 stored pore-body volume and must fit an explicitly declared geometric bound.
-This first-order fixed-volume model needs temporal refinement. Moving porosity,
-solid heat, sorption and a resolved nonlinear throat profile are separate owners.
+This first-order fixed-volume model needs temporal refinement. The adsorbing
+variant below connects original finite-site and solid-heat owners to this same
+window loop. Moving porosity, skeleton conduction and a resolved nonlinear
+throat profile remain separate physical models.
 
 Five focused regressions cover delayed forwarding, first-order convergence
 against the independent three-volume diffusion eigenmodes, heterogeneous
@@ -3655,6 +3657,38 @@ uptake/desorption energy and entropy, equilibrium turnover, reference invariance
 piecewise caloric inversion and atomic/source refusals. All pass actual-source
 Rust test typechecking together with the wet/DGM/pore-domain tests. Native
 execution of these new coupled tests remains blocked by full executor storage.
+
+
+### Finite adsorption and skeleton heat along a transient pore domain
+
+`network::transport::pore_domain::adsorption::AdsorbingPoreDomain` attaches one
+original finite competitive site population to each selected pore body. The
+existing bounded `PoreDomain` time-window loop now also advances the original
+joint gas-transport/adsorption candidate. Each interval samples original
+dusty-gas throats, site affinity and kinetics on one accepted gas snapshot;
+gross withdrawals share the original inventory. Bound species and the finite
+dry/bound solid heat evolve with the same source calorics, and every subsequent
+interval uses the updated gas composition, pressure and temperatures.
+
+Whole-window admission reconstructs final gas plus bound-species inventories.
+Native reference-cancelled gas/solid energy defects and complete-system entropy
+increments accumulate with compensation under a single window allowance,
+without multiplying the allowance by substep count. Reports retain gross
+directional throat throughput, gross adsorption/desorption, final original
+source reports and finite solid energy changes. Typed withdrawal, site turnover
+and caloric range/convergence refusals may trigger the same bounded halving;
+source/model refusals do not. A late refusal publishes no gas, site or clock.
+
+Rigid geometry and fixed gas-filled pore volume remain explicit. Adsorbed site
+occupancy does not become liquid saturation or an invented permeability law.
+No Darcy work, adsorption heat or formation-reference energy is counted twice;
+skeleton conduction, swelling, capillarity and moving pore-volume work are not
+inferred. The original native adsorption near-isothermal and frozen-forcing
+limits remain active; successful bounded stepping is not a time-error estimate.
+
+Four focused native regressions cover the independent two-species site/finite
+heat formula, changed subsequent dusty-gas throughput with persistent loading
+history, typed inventory-driven refinement and atomic late failure.
 
 
 ## Variable-caloric off-design converging-diverging nozzle

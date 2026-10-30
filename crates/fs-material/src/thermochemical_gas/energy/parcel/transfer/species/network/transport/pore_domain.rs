@@ -18,8 +18,12 @@
 //! No scalar averaging or nonlinear layered interface solution is inferred.
 //!
 //! This first-order fixed-volume model supplies no temporal/spatial error
-//! certificate. Reservoirs are finite and evolve. Skeleton heat, sorption,
-//! moving porosity, capillary work and liquid storage need their own owners.
+//! certificate. Reservoirs are finite and evolve. [`adsorption`] couples the
+//! same time-window driver to the existing finite gas/adsorbent owner. Moving
+//! porosity, capillary work and liquid storage remain separate physical models.
+
+/// Finite competitive adsorption and skeleton heat on the same pore timeline.
+pub mod adsorption;
 
 use std::collections::BTreeMap;
 
@@ -32,7 +36,7 @@ use super::super::super::diffusion::{
     network::admit_entropy,
 };
 use super::super::super::{Sum, inventory, stored_change};
-use super::super::{MAX_SNAPSHOT_PARCELS, SpeciesNetworkError};
+use super::super::{MAX_SNAPSHOT_PARCELS, SpeciesNetworkError, SpeciesNetworkStep};
 use super::{
     GasTransportError, GasTransportPaths, GasTransportSolve, GasTransportStep,
     dusty_gas::DustyGasNetworkLink, step_candidate_with_paths,
@@ -141,7 +145,7 @@ pub struct PoreFaceTransfer {
 
 /// Bounded summary: source reports are retained for the last substep only.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PoreDomainStep {
+pub struct PoreDomainStep<Step = GasTransportStep> {
     pub duration_s: f64,
     pub accepted_substeps: usize,
     pub attempts: usize,
@@ -155,7 +159,7 @@ pub struct PoreDomainStep {
     pub pore_mass_change_kg: f64,
     pub neglected_throat_volume_m3: f64,
     pub throat_volume_fraction: f64,
-    pub last_substep: GasTransportStep,
+    pub last_substep: Step,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -184,6 +188,12 @@ pub enum PoreDomainError {
         elapsed_s: f64,
         attempted_step_s: f64,
         error: GasTransportError,
+    },
+    /// Original joint gas/solid refusal at the actual attempted pore substep.
+    Adsorption {
+        elapsed_s: f64,
+        attempted_step_s: f64,
+        error: crate::adsorption::competitive::network::AdsorptionNetworkError,
     },
     WorkLimit {
         elapsed_s: f64,
@@ -234,6 +244,87 @@ fn retryable(error: &GasTransportError) -> bool {
                 ..
             })
     )
+}
+
+// The two native physical owners share only bounded stepping and face-throughput
+// accounting. Their caloric, inventory and entropy admission remains their own.
+trait PoreSubstep {
+    fn exchange(&self) -> &SpeciesNetworkStep;
+}
+impl PoreSubstep for GasTransportStep {
+    fn exchange(&self) -> &SpeciesNetworkStep {
+        &self.exchange
+    }
+}
+enum PoreAdvanceError {
+    Transport(GasTransportError),
+    Adsorption(crate::adsorption::competitive::network::AdsorptionNetworkError),
+}
+impl PoreAdvanceError {
+    fn cancelled(&self) -> bool {
+        match self {
+            Self::Transport(error) => *error == GasTransportError::Cancelled,
+            Self::Adsorption(error) => {
+                *error == crate::adsorption::competitive::network::AdsorptionNetworkError::Cancelled
+            }
+        }
+    }
+    fn retryable(&self) -> bool {
+        match self {
+            Self::Transport(error) => retryable(error),
+            Self::Adsorption(error) => adsorption::retryable(error),
+        }
+    }
+    fn at(self, elapsed_s: f64, attempted_step_s: f64) -> Error {
+        match self {
+            Self::Transport(error) => Error::Transport {
+                elapsed_s,
+                attempted_step_s,
+                error,
+            },
+            Self::Adsorption(error) => Error::Adsorption {
+                elapsed_s,
+                attempted_step_s,
+                error,
+            },
+        }
+    }
+}
+struct PoreWindow<Step> {
+    domain: PoreDomain,
+    duration_s: f64,
+    accepted_substeps: usize,
+    attempts: usize,
+    minimum_accepted_step_s: f64,
+    maximum_accepted_step_s: f64,
+    faces: Vec<PoreFaceTransfer>,
+    neglected_throat_volume_m3: f64,
+    throat_volume_fraction: f64,
+    last_substep: Step,
+}
+impl<Step> PoreWindow<Step> {
+    fn finish(self, balances: (f64, f64, f64, f64, f64)) -> (PoreDomain, PoreDomainStep<Step>) {
+        let (mass, species, energy, entropy, pore_mass) = balances;
+        (
+            self.domain,
+            PoreDomainStep {
+                duration_s: self.duration_s,
+                accepted_substeps: self.accepted_substeps,
+                attempts: self.attempts,
+                minimum_accepted_step_s: self.minimum_accepted_step_s,
+                maximum_accepted_step_s: self.maximum_accepted_step_s,
+                faces: self.faces,
+                total_mass_residual_kg: mass,
+                maximum_species_mass_residual_kg: species,
+                total_energy_residual_j: energy,
+                entropy_change_j_k: entropy,
+                pore_mass_change_kg: pore_mass,
+                neglected_throat_volume_m3: self.neglected_throat_volume_m3,
+                throat_volume_fraction: self.throat_volume_fraction,
+                last_substep: self.last_substep,
+            },
+        )
+    }
 }
 
 impl PoreDomain {
@@ -312,6 +403,47 @@ impl PoreDomain {
         controls: PoreDomainSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PoreDomainCandidate, Error> {
+        let run = self.run_window(
+            duration_s,
+            faces,
+            endpoints,
+            controls,
+            &mut cancelled,
+            |parcels, paths, dt, endpoints, controls, cancelled| {
+                step_candidate_with_paths(parcels, paths, dt, endpoints, controls, cancelled)
+                    .map(|candidate| candidate.into_parts())
+                    .map_err(PoreAdvanceError::Transport)
+            },
+        )?;
+        let balances = window_balances(
+            &self.parcels,
+            &run.domain.parcels,
+            self.cells.len(),
+            controls.transport,
+            &mut cancelled,
+        )?;
+        check(&mut cancelled)?;
+        let (domain, step) = run.finish(balances);
+        Ok(PoreDomainCandidate { domain, step })
+    }
+
+    fn run_window<Step: PoreSubstep, C: FnMut() -> bool>(
+        &self,
+        duration_s: f64,
+        faces: &[PoreFace<'_>],
+        endpoints: &[GasEnergySolve],
+        controls: PoreDomainSolve,
+        mut cancelled: C,
+        mut advance: impl FnMut(
+            &BTreeMap<u64, ClosedGasParcel>,
+            GasTransportPaths<'_>,
+            f64,
+            &BTreeMap<u64, GasEnergySolve>,
+            GasTransportSolve,
+            &mut C,
+        )
+            -> Result<(BTreeMap<u64, ClosedGasParcel>, Step), PoreAdvanceError>,
+    ) -> Result<PoreWindow<Step>, Error> {
         check(&mut cancelled)?;
         let end_time = self.time_s + duration_s;
         if !positive(duration_s)
@@ -426,7 +558,7 @@ impl PoreDomain {
                 ));
             }
             attempts += 1;
-            match step_candidate_with_paths(
+            match advance(
                 &parcels,
                 paths,
                 dt,
@@ -434,9 +566,8 @@ impl PoreDomain {
                 controls.transport,
                 &mut cancelled,
             ) {
-                Ok(candidate) => {
-                    let (next, step) = candidate.into_parts();
-                    for row in &step.exchange.fluxes {
+                Ok((next, step)) => {
+                    for row in &step.exchange().fluxes {
                         check(&mut cancelled)?;
                         let edge = row.transfer.donor.min(row.transfer.receiver);
                         if row.transfer.donor.max(row.transfer.receiver) != edge + 1
@@ -477,32 +608,21 @@ impl PoreDomain {
                     };
                     last = Some(step);
                 }
-                Err(GasTransportError::Cancelled) => return Err(Error::Cancelled),
+                Err(error) if error.cancelled() => return Err(Error::Cancelled),
                 Err(error) => {
                     let smaller = 0.5 * dt;
-                    if retryable(&error)
+                    if error.retryable()
                         && positive(smaller)
                         && smaller >= controls.minimum_step_s
                         && elapsed + smaller > elapsed
                     {
                         ceiling = smaller;
                     } else {
-                        return Err(Error::Transport {
-                            elapsed_s: elapsed,
-                            attempted_step_s: dt,
-                            error,
-                        });
+                        return Err(error.at(elapsed, dt));
                     }
                 }
             }
         }
-        let (mass, species, energy, entropy, pore_mass) = window_balances(
-            &self.parcels,
-            &parcels,
-            self.cells.len(),
-            controls.transport,
-            &mut cancelled,
-        )?;
         let faces = totals
             .into_iter()
             .map(|((face, species), sums)| PoreFaceTransfer {
@@ -514,30 +634,22 @@ impl PoreDomain {
             })
             .collect();
         check(&mut cancelled)?;
-        Ok(PoreDomainCandidate {
+        Ok(PoreWindow {
             domain: Self {
                 area_m2: self.area_m2,
                 cells: self.cells.clone(),
                 parcels,
                 time_s: end_time,
             },
-            step: PoreDomainStep {
-                duration_s,
-                accepted_substeps: accepted,
-                attempts,
-                minimum_accepted_step_s: minimum,
-                maximum_accepted_step_s: maximum,
-                faces,
-                total_mass_residual_kg: mass,
-                maximum_species_mass_residual_kg: species,
-                total_energy_residual_j: energy,
-                entropy_change_j_k: entropy,
-                pore_mass_change_kg: pore_mass,
-                neglected_throat_volume_m3: throat_volume.value,
-                throat_volume_fraction,
-                last_substep: last
-                    .ok_or(Error::Invalid("pore window accepted no physical substep"))?,
-            },
+            duration_s,
+            accepted_substeps: accepted,
+            attempts,
+            minimum_accepted_step_s: minimum,
+            maximum_accepted_step_s: maximum,
+            faces,
+            neglected_throat_volume_m3: throat_volume.value,
+            throat_volume_fraction,
+            last_substep: last.ok_or(Error::Invalid("pore window accepted no physical substep"))?,
         })
     }
 
