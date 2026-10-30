@@ -101,6 +101,56 @@ fn expansion(
 }
 
 #[test]
+fn native_and_graph_geometry_share_the_same_pre_resolved_temperature_bundle() {
+    let (card, original) = curve(
+        ElectricalPropertyBasis::Conductivity,
+        vec![(300.0, 0.5), (400.0, 0.25)],
+    );
+    let (card, original, keys) = with_strains(card, original, &[vec![(300.0, 0.1), (400.0, 0.3)]]);
+    let path = expansion(&card, &original.material().query(), &keys, [300.0, 400.0]);
+    let law = MaterialOhmicNode::try_new(&card, original, "T", [300.0, 400.0], 2.0, 0.5)
+        .unwrap()
+        .with_free_expansion(path, 0)
+        .unwrap();
+    let query = law
+        .source()
+        .original()
+        .material()
+        .query()
+        .with("T", 375.0)
+        .unwrap();
+    let state = law.source().at_query_point(&query).unwrap();
+    let bundle = state.material().clone();
+    let native = law.resolve_from_state(state).unwrap();
+    assert_eq!(native.material(), &bundle);
+    assert_eq!(native, law.resolve_at_temperature_k(375.0).unwrap());
+    near(native.length_m(), 2.0 * 1.25 / 1.1);
+    near(native.area_m2(), 0.5 * (1.25_f64 / 1.1).powi(2));
+    // A canonical source refresh may resolve outside this consumer's declared
+    // temperature slice. Reusing its material receipt must not bypass that slice.
+    let narrow = MaterialOhmicNode::try_new(
+        &card,
+        law.source().original().clone(),
+        "T",
+        [300.0, 350.0],
+        2.0,
+        0.5,
+    )
+    .unwrap();
+    assert!(
+        narrow
+            .resolve_from_state(law.source().at_query_point(&query).unwrap())
+            .is_err()
+    );
+    let (foreign, state) = curve(
+        ElectricalPropertyBasis::Conductivity,
+        vec![(300.0, 0.5), (400.0, 0.25)],
+    );
+    assert_ne!(foreign.content_hash(), card.content_hash());
+    assert!(law.resolve_from_state(state).is_err());
+}
+
+#[test]
 fn original_strain_tangent_keeps_fitted_datum_and_one_sided_source_knots() {
     let (card, original) = curve(
         ElectricalPropertyBasis::Resistivity,

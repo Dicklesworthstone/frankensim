@@ -6,7 +6,10 @@
 mod prepared;
 pub mod conductivity;
 pub use conductivity::CellConductionResponse;
-pub use prepared::{MaterialTransportObserver, PreparedMaterialNetwork};
+pub use prepared::{
+    ConductorFreeExpansion, ExpandingMaterialNetwork, MaterialTransportObserver,
+    PreparedMaterialNetwork,
+};
 use conductivity::ElectricalAxes;
 
 use super::*;

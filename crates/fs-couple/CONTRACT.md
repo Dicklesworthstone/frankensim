@@ -13701,3 +13701,43 @@ A `MaterialGraphResidual` may have zero algebraic unknowns and zero equations wh
 ## Continuing rod motion under prescribed body temperatures
 
 `RodMotion::rebind_material_temperatures_candidate` applies an admitted local section-temperature field at the accepted clock, preserving pose, momenta, kinetic frames, supports and integration-step count. It reevaluates native forces at the actual moving pose and returns `RodThermalRefresh`, whose signed fixed-pose strain-storage change is work supplied through the prescribed thermal parameter. Failed source admission, actual-pose strain bounds or cancellation return no changed trajectory. This operation consumes a supplied body-temperature field; it does not equate ambient reservoir temperature with body temperature or supply a finite thermal-reservoir balance. Sensible/latent storage, reciprocal thermoelastic heat exchange, phase evolution, cross-section expansion, mass transport and separately bound link heating remain with their respective physical owners.
+
+### Sourced free expansion in native electrothermal circuits and field motion
+
+`circuit_enthalpy::material::PreparedMaterialNetwork::with_free_expansion`
+attaches original `PreparedFreeExpansion` paths to named whole-cell resistor
+branches. `ExpandingMaterialNetwork` reuses the original material queries and
+source pins, the SAME `MaterialOhmicNode` geometry/source admission as the
+constitutive graph, and the native Kirchhoff/finite-enthalpy residual. At the
+actual trial temperature, `L=L_ref*s_parallel` and
+`A=A_ref*s_perp1*s_perp2`; `ResolvedConductor` retains resistance, current and
+Joule power ownership. Conductivity is evaluated before its reciprocal, with
+the original complete bundle intact. The new geometry lowering performs no
+additional material query, and the source strain lines are prepared once.
+
+The adapter's `step_candidate` preserves native charges/fluxes and routes each
+branch's actual Joule heat once to its original caloric cell. Its
+`field_motion_candidate` uses the same reciprocal electric/magnetic gap owner:
+changed resistor geometry changes current, field force, mechanical work and
+finite heating in one coupled solve. Resistor expansion does not change the
+actuator's geometry or invent a force coefficient. Initial circuit sources and
+geometry must match the actual accepted thermal state. Failed source queries,
+invalid boundaries, nonlinear refusal or cancellation return no partial state.
+
+This lane admits quasistatic, stress-free, wholly solid expansion at fixed
+delivered mass. Reference thermal geometry and caloric charts remain intact;
+changing density never changes mass. Expanded cells refuse occupied thermal
+contacts, Robin exchange and reservoirs because those evolving areas and layer
+distances require their own geometric heat-transfer closure. Independent
+applied watts remain allowed. Constrained thermoelastic work, evolving thermal
+surfaces, phase changes, skin effects and changing magnetic storage geometry
+are outside this admission. Coupled temporal order remains the original first
+order; no performance benchmark or unconditional passivity claim is made.
+
+Four focused G1/G3/G4 groups in `tests/circuit_material_network/expansion.rs`
+cover both electrical bases, all principal current directions, voltage/current
+heating against independently solved endpoint equations, finite-inductor
+current and energy, actual magnetic gap motion under strain-data-only changes,
+source/boundary refusal and late cancellation/replay. Shared material lowering
+also has a source-bundle parity/refusal regression. Native runtime execution
+must be reported separately from parsing and test-target compilation.

@@ -351,10 +351,61 @@ impl MaterialOhmicNode {
             .map(|(conductor, _)| conductor)
     }
 
+    /// Lower an already resolved original thermal/electrical bundle through
+    /// the SAME prepared conductor geometry, without another material query.
+    ///
+    /// A coupled thermal owner may resolve conductivity and other transport
+    /// properties together. This consumes that complete state after checking
+    /// its original card, keys, claims, requirements, coordinate quantities and
+    /// fixed conditions. Only the declared temperature may differ. Geometry
+    /// uses the same source path and normalization as the graph response.
+    /// No source selection, interpolation or physical history is changed.
+    pub fn resolve_from_state(
+        &self,
+        state: ResolvedConductorState,
+    ) -> Result<ResolvedConductor, ConductorError> {
+        self.response.admit(&state)?;
+        let mut temperature = None;
+        for ((axis, value), (_, original)) in state
+            .material()
+            .query_point()
+            .iter()
+            .zip(self.response.original().material().query_point())
+        {
+            if axis == &self.temperature_axis {
+                temperature = Some(*value);
+            } else if value.to_bits() != original.to_bits() {
+                return Err(invalid(
+                    "Ohmic prepared geometry must retain every fixed source coordinate",
+                ));
+            }
+        }
+        let temperature = temperature
+            .ok_or_else(|| invalid("Ohmic prepared geometry requires its source temperature"))?;
+        let (length, area, _) = self.geometry_with_slope(temperature)?;
+        state.into_uniform_conductor(length, area)
+    }
+
     fn resolve_with_geometry_slope(
         &self,
         temperature_k: f64,
     ) -> Result<(ResolvedConductor, f64), ConductorError> {
+        let (length_m, area_m2, geometry_slope) = self.geometry_with_slope(temperature_k)?;
+        let query = self
+            .response
+            .original()
+            .material()
+            .query()
+            .with(&self.temperature_axis, temperature_k)
+            .map_err(|_| invalid("Ohmic graph temperature coordinate is invalid"))?;
+        let conductor = self
+            .response
+            .at_query_point(&query)?
+            .into_uniform_conductor(length_m, area_m2)?;
+        Ok((conductor, geometry_slope))
+    }
+
+    fn geometry_with_slope(&self, temperature_k: f64) -> Result<(f64, f64, f64), ConductorError> {
         if !temperature_k.is_finite()
             || !(self.temperature_range_k[0]..=self.temperature_range_k[1]).contains(&temperature_k)
         {
@@ -362,7 +413,7 @@ impl MaterialOhmicNode {
                 "Ohmic graph temperature outside its admitted source interval",
             ));
         }
-        let (length_m, area_m2, geometry_slope) = match &self.free_expansion {
+        Ok(match &self.free_expansion {
             None => (self.length_m, self.area_m2, 0.0),
             Some((source, axis)) => {
                 let tangent = source
@@ -384,19 +435,7 @@ impl MaterialOhmicNode {
                     relative[*axis] - relative[across[0]] - relative[across[1]],
                 )
             }
-        };
-        let query = self
-            .response
-            .original()
-            .material()
-            .query()
-            .with(&self.temperature_axis, temperature_k)
-            .map_err(|_| invalid("Ohmic graph temperature coordinate is invalid"))?;
-        let conductor = self
-            .response
-            .at_query_point(&query)?
-            .into_uniform_conductor(length_m, area_m2)?;
-        Ok((conductor, geometry_slope))
+        })
     }
 
     fn resistance_temperature_slope(

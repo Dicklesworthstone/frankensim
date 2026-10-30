@@ -3,6 +3,8 @@
 use super::*;
 
 mod extension;
+mod expansion;
+pub use expansion::{ConductorFreeExpansion, ExpandingMaterialNetwork};
 
 /// Immutable transport-source choices tied to one borrowed material network.
 ///

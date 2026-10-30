@@ -1,6 +1,8 @@
 //! Fully data-bound electrical/thermal material substitutions on shared history.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "circuit_material_network/expansion.rs"]
+mod expansion;
 use common::*;
 use fs_couple::circuit_enthalpy::material::*;
 use fs_couple::cavity_phs::piston::thermal::source::ThermalMaterialPoint;

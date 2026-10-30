@@ -5139,3 +5139,16 @@ quiescent liquid and explicit symmetry assumptions. The legs have no independent
 thermal storage; transient spatial resolution and coefficient-freezing error
 require refinement. No convection, fluid pressure/motion, confinement correction,
 phase-transition propagation or experimental accuracy is claimed.
+
+### Shared electrical geometry for native thermal networks
+
+`MaterialOhmicNode::resolve_from_state` lowers an already resolved complete
+electrical/thermal bundle through the same prepared L/A and optional free
+expansion used by graph evaluation. It retains the card, full source
+requirements/keys/claims, quantity schema and fixed conditions; only the
+declared temperature may change. No second property query occurs. Original
+source-domain admission belongs to the canonical resolved bundle, and geometry
+remains bounded by the prepared interval. A focused regression checks parity
+with ordinary node resolution, bundle preservation and foreign/out-of-range
+refusal. The `conductor_graph` integration target compiles; this check does not
+establish runtime execution of that regression.
