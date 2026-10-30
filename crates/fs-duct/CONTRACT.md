@@ -491,7 +491,8 @@ pipe `Z_in = +i Zc cot(kL)`.
     A spatial attachment adds `elements * quadrature_points * poles * J`
     states for J active molecular reservoirs. That evaluated-state API refuses
     nonuniform gas; the pointwise-law API below handles the original field.
-    Live gas changes refuse; finite reservoir history transfer is not guessed.
+    Evaluated-only attachments lack a source law for live gas changes. The
+    source-backed uniform transfer is described below.
     Compliant and Maxwell material walls can subsequently use the frozen
     pressure map. Independent molecular loss is separate from wall loss in
     harmonic responses and their coupled power accounts. The existing dense
@@ -1842,3 +1843,15 @@ profile against independent physical-equation RK4; preserve uniform-field
 bits; and compare finite chimney flows and scalar/mutual exterior closures.
 Source-domain/passivity refusals, work caps, cancellation and repeated-radius
 response caching remain observable.
+
+## Continuing uniform molecular gas backgrounds
+
+`DgDuct::rebind_uniform_molecular_gas_field` continues the original molecular/thermal coordinates through a prescribed change of uniform background gas. Source-backed field attachment retains its complete `RelaxationAbsorption` declaration, including the uniform specialization; `molecular_relaxation_law()` exposes that declaration. The existing `molecular_relaxation_field()` still identifies the nonuniform pointwise route. Evaluated-only attachments cannot invent a missing source law.
+
+Both fields must remain uniform, cover the exact original geometry, and retain identical complete species fractions and evaluated reservoir support. The original law reevaluates every material coefficient. Native exact-mass circular diffusion, positive spatial wall quadrature on fixed variable geometry, and adiabatic molecular gas are supported. Every spatial point, original radius, radial section count, mass basis and angular admission band survives; new local Bessel models must meet the same complex-response and real-loss gates. Inactive species retain their original source declaration and the material owner's original omission semantics.
+
+The intervention preserves weak acoustic compression, axial/viscous momentum, and each thermal/molecular mode's physical entropy perturbation. With `t_n=y_n+a_n P_n x_p`, compression is proportional to `x_p - sum a_n P_n^T y_n`, so pressure includes the history-dependent caloric correction. Thermal and reservoir entropy densities scale with `sqrt(rho cp_inf/T)` and `sqrt(rho C_j/T)`. This is an explicit prescribed intervention without injected acoustic entropy or compression, not a background heat, inventory or species transport solve. The external material owner owes the signed change in actual quadratic storage as parameter work.
+
+Structural displacement, velocity, viscosity and Maxwell coordinates retain their existing owner and histories. Accepted sample count, initial storage, port work and dissipated energy survive. The new operator and state publish atomically after finite/work/cancellation checks; a changed operator invalidates its old propagator. Unchanged material preserves coordinates and operator bitwise; an empty molecular declaration delegates to the original nonmolecular transfer. Nonuniform background refresh, species-fraction changes and changed reservoir support refuse.
+
+Focused native tests under `dg::molecular::update::tests` cover independent physical entropy/compression/momentum reconstruction, a conical spatial-wall weak equation-of-state check, nonzero hereditary wall continuation and energy balance, round trips, exact no-op/empty-law parity, and refusal/cancellation rollback.

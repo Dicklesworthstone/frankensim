@@ -141,9 +141,13 @@ impl DgDuct {
             .expect("field count validated original field")
             .clone();
         if field.uniform_state().is_some() {
-            return Ok(
-                self.with_molecular_relaxation_controlled(evaluate(&field, &law, 0.0)?, cancelled)?
-            );
+            let mut duct =
+                self.with_molecular_relaxation_controlled(evaluate(&field, &law, 0.0)?, cancelled)?;
+            duct.molecular
+                .as_mut()
+                .expect("original uniform molecular owner")
+                .field_law = Some(law);
+            return Ok(duct);
         }
         let inlet = evaluate(&field, &law, 0.0)?;
         // Use the original mass integrator and element boundaries. The temporary
@@ -401,6 +405,17 @@ impl DgDuct {
     /// report their evaluated state through [`Self::molecular_relaxation`].
     #[must_use]
     pub fn molecular_relaxation_field(&self) -> Option<&RelaxationAbsorption> {
+        self.molecular
+            .as_ref()
+            .filter(|m| m.state.is_none())
+            .and_then(|m| m.field_law.as_ref())
+    }
+
+    /// Original molecular declaration for a complete source-backed gas field,
+    /// including its uniform specialization. Evaluated-only attachments carry
+    /// no recoverable source law and return `None`.
+    #[must_use]
+    pub fn molecular_relaxation_law(&self) -> Option<&RelaxationAbsorption> {
         self.molecular.as_ref().and_then(|m| m.field_law.as_ref())
     }
 }

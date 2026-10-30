@@ -20,6 +20,13 @@ pub enum DgGasRefresh {
         /// Maximum relative error for every local gas on the retained band.
         maximum_relative_error: f64,
     },
+    /// Uniform molecular/thermal gas with original radial/spatial histories.
+    /// Retains the original species fractions and source molecular law;
+    /// preserves entropy perturbations, compression and viscous momentum.
+    UniformMolecularDiffusion {
+        /// New-gas complex and loss admission on the original angular band.
+        maximum_relative_error: f64,
+    },
 }
 
 /// One accepted source-gas intervention in the complete represented load.
@@ -103,6 +110,17 @@ pub(crate) fn prepare_dg_gas(
             maximum_relative_error,
         } => candidate
             .rebind_spatial_viscothermal_gas_field(
+                &mut state,
+                field,
+                maximum_relative_error,
+                maximum_absolute_parameter_work_j,
+                cancelled,
+            )
+            .map_err(field_error),
+        DgGasRefresh::UniformMolecularDiffusion {
+            maximum_relative_error,
+        } => candidate
+            .rebind_uniform_molecular_gas_field(
                 &mut state,
                 field,
                 maximum_relative_error,

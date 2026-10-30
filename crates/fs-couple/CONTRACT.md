@@ -12828,3 +12828,9 @@ covariance, finite-patch peeling with separate fracture/viscous losses, full
 native free motion after failure, reclosure, gravity/external work, source and
 geometry refusal, work-budget/cancellation refusal, strict energy refusal, and
 late body-budget rollback with bit-identical retry.
+
+## Molecular gas refresh on continuing DG ports
+
+`DgGasRefresh::UniformMolecularDiffusion` selects the native uniform-background molecular/thermal entropy-and-compression transfer in the existing `prepare_dg_gas` transaction. It supports the original exact-mass and spatial wall routes, including the explicit spatial quadrature used by `DgSourceInput` gas fields; it never flattens spatial histories. The original molecular source law, species fractions, geometry and reservoir support remain bound. The same option is forwarded by existing one- and two-sided Bernoulli/DG gas-refresh APIs.
+
+The complete port transaction rebuilds the native propagator and algebraic port relations while preserving independently sourced branches, terminal channels and every original exterior MIMO pole state. Existing equilibrium-pressure and total absolute parameter-work checks still apply. Interior material changes do not reidentify the exterior medium. Parameter work is charged once, separately from molecular/thermal dissipation; this operation does not itself solve background heating or species transport. A regression in `dg_port::gas::tests::molecular` exercises nonzero molecular histories with an independently sourced branch/channel and full mutual rational terminal. Its full-crate integration execution remains separate from the focused native DG constitutive/continuation tests.

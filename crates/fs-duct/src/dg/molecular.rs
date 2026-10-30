@@ -40,6 +40,7 @@ use super::*;
 use fs_material::relaxation::{RelaxationAbsorption, RelaxationState};
 
 mod field;
+mod update;
 
 #[derive(Clone, Debug)]
 pub(super) struct MolecularMemory {
@@ -135,7 +136,12 @@ fn restore_pressure_boundaries(duct: &DgDuct, operator: &mut [f64], n: usize) {
         let resistance = gas.density * gas.sound_speed / e.areas[node];
         let factor = det::sqrt(0.5 / resistance);
         let entries: Vec<_> = (0..local)
-            .map(|i| (element * local + i, factor * e.mp_inv_sqrt[i * local + node]))
+            .map(|i| {
+                (
+                    element * local + i,
+                    factor * e.mp_inv_sqrt[i * local + node],
+                )
+            })
             .collect();
         stamp_square(operator, n, &entries, 1.0);
     }
@@ -150,7 +156,10 @@ fn stamp_mode(operator: &mut [f64], n: usize, mode: &ThermalMode, field_dofs: us
             stamp_square(operator, n, &temperature, mode.heat_rate);
         }
         for (j, (&b, &rate)) in mode.reservoir_scales.iter().zip(&mode.rates).enumerate() {
-            let mut slip: Vec<_> = temperature.iter().map(|&(index, value)| (index, -b * value)).collect();
+            let mut slip: Vec<_> = temperature
+                .iter()
+                .map(|&(index, value)| (index, -b * value))
+                .collect();
             slip.push((mode.start + (j + 1) * width + i, 1.0));
             stamp_square(operator, n, &slip, rate);
         }
@@ -171,8 +180,10 @@ impl DgDuct {
     /// Matched boundaries retain their original equilibrium resistance, which
     /// is not a broadband nonreflecting termination in a dispersive gas.
     ///
-    /// This is cold construction. Live material changes require a separate
-    /// physical reservoir-transfer rule and explicitly refuse. Empty reservoirs
+    /// This is cold construction from an evaluated law. Live uniform changes
+    /// use `rebind_uniform_molecular_gas_field` after source-backed field
+    /// attachment; this evaluated-only route retains no original declaration
+    /// to re-evaluate and cannot refresh. Empty reservoirs
     /// preserve the existing operator and all original coefficients bitwise.
     pub fn with_molecular_relaxation(self, state: RelaxationState) -> Result<Self, DuctError> {
         self.with_molecular_relaxation_controlled(state, &mut || false)
@@ -440,12 +451,7 @@ impl DgDuct {
             for i in 0..width {
                 let temperature = state.tilde[mode.start + i]
                     + mode.pressure_scale * mode.projection.value(&state.tilde, i);
-                for (j, (&b, &rate)) in mode
-                    .reservoir_scales
-                    .iter()
-                    .zip(&mode.rates)
-                    .enumerate()
-                {
+                for (j, (&b, &rate)) in mode.reservoir_scales.iter().zip(&mode.rates).enumerate() {
                     let slip = state.tilde[mode.start + (j + 1) * width + i] - b * temperature;
                     power += rate * slip * slip;
                 }
