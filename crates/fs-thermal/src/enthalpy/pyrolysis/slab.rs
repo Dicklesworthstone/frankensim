@@ -1,8 +1,8 @@
-//! Conservative recession of a homogeneous, noncharring condensed slab.
+//! Conservative moving geometry for a homogeneous reactive condensed slab.
 //!
 //! The original reactive cells conduct heat and release volatiles. At each
 //! geometry interval their retained mass determines length through the supplied
-//! incompressible density. The back face stays fixed. A limited linear
+//! incompressible component densities. The back face stays fixed. A limited linear
 //! reconstruction of specific enthalpy in retained-mass coordinate is integrated
 //! onto equal-mass cells; mass and enthalpy, never temperature, are transferred.
 //! Original calorics invert the result and original series links use the new
@@ -15,7 +15,10 @@
 //! <https://github.com/firemodels/fds/blob/a26081f3b24915552fab7ebf078185af817d9043/Manuals/FDS_Technical_Reference_Guide/Solid_Chapter.tex>.
 //! Fixed-back anchoring and the conservative limited reconstruction are explicit
 //! choices of this implementation, not an exact port of FDS. No material is
-//! discarded or retained as a numerical seed. Pores, char, mechanical work,
+//! discarded or retained as a numerical seed. [`RecedingSlab::with_char`] adds
+//! retained char with separate calorics, density and conductivity; its explicit
+//! additive-volume law is not the general FDS shrinking/swelling algorithm.
+//! Pore transport, char oxidation, mechanical work,
 //! thermal expansion, gas-domain displacement and complete burnout are separate
 //! models. Geometry is frozen during each implicit interval; the composition
 //! remains first order and remapping can smooth a temperature profile.
@@ -36,11 +39,38 @@ pub const MAX_RECEDING_SLAB_CELLS: usize = 128;
 pub struct SlabGeometry<'a> {
     /// Constant cross-section normal to the original cells' x axis, m².
     pub area_m2: f64,
-    /// Retained condensed density, kg/m³; no porosity or thermal expansion.
+    /// Virgin condensed density, kg/m³; no evolving porosity or thermal expansion.
     pub density_kg_m3: f64,
-    /// Constant through-thickness conductivity, W/(m K).
+    /// Constant virgin through-thickness conductivity, W/(m K).
     pub conductivity_w_m_k: f64,
     /// Density/conductivity and incompressible shrinking-model provenance.
+    pub source: &'a str,
+}
+
+/// Explicit effective-conductivity closure for the two condensed components.
+/// Both use their actual volume fractions, never their mass fractions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConductivityMixing {
+    /// Volume-weighted arithmetic mean: components parallel to heat flow.
+    Parallel,
+    /// Volume-weighted harmonic mean: components in series along heat flow.
+    Series,
+}
+
+/// Caller-sourced char properties for the original single-step reaction.
+///
+/// The retained volume is `m_virgin/rho_virgin + m_char/rho_char`. Densities
+/// may be effective bulk values, but this does not evolve porosity, pore-gas
+/// pressure or permeability. Expansion gives negative signed recession.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CharProperties<'a> {
+    /// Constant retained-char density, kg/m³.
+    pub density_kg_m3: f64,
+    /// Constant char through-thickness conductivity, W/(m K).
+    pub conductivity_w_m_k: f64,
+    /// Declared unresolved component arrangement for heat transport.
+    pub conductivity_mixing: ConductivityMixing,
+    /// Density, conductivity and mixing-closure applicability/provenance.
     pub source: &'a str,
 }
 
@@ -49,11 +79,14 @@ pub struct SlabGeometry<'a> {
 pub struct SlabSolve {
     /// Maximum accepted geometry intervals in one call, 1 through 65536.
     pub maximum_geometry_steps: usize,
-    /// Maximum whole-interval halvings for excessive local mass loss, 0..32.
+    /// Maximum whole-interval halvings for excessive mass/volume change, 0..32.
     pub maximum_halvings: usize,
     /// Largest admitted loss from any one cell in a frozen-geometry interval.
     /// Must lie in (0, 1); the default keeps at least 75% until rezoning.
     pub maximum_cell_mass_loss_fraction: f64,
+    /// Largest absolute fractional cell-volume change in a frozen interval.
+    /// Applies to shrinkage and swelling; must lie in (0, 1).
+    pub maximum_cell_volume_change_fraction: f64,
     /// Smallest positive attempted geometry interval, s.
     pub minimum_interval_s: f64,
     /// Whole-call sum of absolute remap mass residuals, kg. Also bounds the
@@ -68,6 +101,7 @@ impl Default for SlabSolve {
             maximum_geometry_steps: 8192,
             maximum_halvings: 24,
             maximum_cell_mass_loss_fraction: 0.25,
+            maximum_cell_volume_change_fraction: 0.25,
             minimum_interval_s: 1e-10,
             mass_tolerance_kg: 1e-12,
             energy_tolerance_j: 1e-6,
@@ -84,24 +118,33 @@ pub struct SlabReport {
     pub pyrolysis: PyrolysisAudit,
     /// Accepted frozen-geometry intervals.
     pub geometry_steps: usize,
-    /// Discarded complete intervals whose local mass loss was too large.
+    /// Discarded complete intervals whose local mass/volume change was too large.
     pub rejected_geometry_attempts: usize,
     /// Intervals that actually changed geometry/reconstructed the mesh.
     pub remaps: usize,
     /// Largest accepted local fractional mass loss before remapping.
     pub maximum_cell_mass_loss_fraction: f64,
+    /// Largest accepted absolute component-volume change before remapping.
+    pub maximum_cell_volume_change_fraction: f64,
     /// Signed remap mass change, kg; not an emitted or retained source.
     pub remap_mass_residual_kg: f64,
+    /// Signed remap virgin-mass change, kg; not chemical conversion.
+    pub remap_virgin_mass_residual_kg: f64,
+    /// Signed remap char-mass change, kg; not chemical conversion.
+    pub remap_char_mass_residual_kg: f64,
+    /// Sum of absolute virgin and char remap defects across all intervals, kg.
+    pub absolute_remap_component_mass_residual_kg: f64,
     /// Signed remap energy change, J; not a heat source.
     pub remap_energy_residual_j: f64,
     /// Sum of absolute remap mass changes, kg.
     pub absolute_remap_mass_residual_kg: f64,
     /// Sum of absolute remap energy changes, J.
     pub absolute_remap_energy_residual_j: f64,
-    /// Sum of overlap mass times |donor-average h - receiver-average h|, J.
-    /// This records redistribution/smoothing, not a bound on PDE error.
+    /// Sum of overlap mass times the absolute donor/receiver enthalpy difference,
+    /// J. For char, component formation references are removed first. This
+    /// records redistribution/smoothing, not a bound on PDE error.
     pub remap_enthalpy_redistribution_j: f64,
-    /// Largest |rho * area * rounded cell length - cell mass|, kg.
+    /// Largest rounded-volume error times the largest component density, kg.
     pub maximum_geometry_mass_residual_kg: f64,
     /// Actual final distance between front and fixed back, m.
     pub thickness_m: f64,
@@ -146,11 +189,12 @@ impl From<ImplicitError> for SlabError {
     }
 }
 
-/// Original reactive solid with one explicit, fixed-back shrinking geometry.
+/// Original reactive solid with one explicit, fixed-back moving geometry.
 #[derive(Clone)]
 pub struct RecedingSlab<'a> {
     solid: PyrolysisSimulation<'a>,
     geometry: SlabGeometry<'a>,
+    char: Option<CharProperties<'a>>,
     ids: Vec<CellId>,
     link_ids: Vec<u64>,
     initial_front_m: f64,
@@ -163,11 +207,33 @@ fn close(a: f64, b: f64) -> bool {
 
 impl<'a> RecedingSlab<'a> {
     /// Adopt the ORIGINAL activated x-aligned slab without changing its state.
-    /// The current density and every series link must agree with the explicit
+    /// This constructor admits only zero char yield. Current density and each
+    /// series link must agree with the explicit
     /// properties. Only the two outer slots may have external boundaries.
     pub fn new(
         solid: PyrolysisSimulation<'a>,
         geometry: SlabGeometry<'a>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, SlabError> {
+        Self::adopt(solid, geometry, None, checkpoint)
+    }
+
+    /// Adopt a slab with retained char and an explicit additive-volume closure.
+    /// The original material must supply nonzero char yield and char calorics.
+    /// All initial component volumes and links must match the supplied closure.
+    pub fn with_char(
+        solid: PyrolysisSimulation<'a>,
+        geometry: SlabGeometry<'a>,
+        char: CharProperties<'a>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, SlabError> {
+        Self::adopt(solid, geometry, Some(char), checkpoint)
+    }
+
+    fn adopt(
+        solid: PyrolysisSimulation<'a>,
+        geometry: SlabGeometry<'a>,
+        char: Option<CharProperties<'a>>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, SlabError> {
         checkpoint()?;
@@ -177,6 +243,11 @@ impl<'a> RecedingSlab<'a> {
             || !positive(geometry.density_kg_m3)
             || !positive(geometry.conductivity_w_m_k)
             || geometry.source.trim().is_empty()
+            || char.is_some_and(|c| {
+                !positive(c.density_kg_m3)
+                    || !positive(c.conductivity_w_m_k)
+                    || c.source.trim().is_empty()
+            })
             || !solid.thermal.covered_areas.is_empty()
             || solid.thermal.links.len() != n - 1
         {
@@ -188,8 +259,14 @@ impl<'a> RecedingSlab<'a> {
         cells.sort_by(|a, b| a.geometry.start_m[0].total_cmp(&b.geometry.start_m[0]));
         let first = cells[0];
         let material = solid.materials[&first.material_id];
-        if material.char_mass_yield != 0.0 {
-            return Err(DepositionError::InvalidInput("receding slab does not admit char").into());
+        if (char.is_none() && material.char_mass_yield != 0.0)
+            || (char.is_some()
+                && (material.char_mass_yield <= 0.0 || material.char_caloric.is_none()))
+        {
+            return Err(DepositionError::InvalidInput(
+                "retained char requires explicit char geometry and original char calorics",
+            )
+            .into());
         }
         let mut ids = Vec::with_capacity(n);
         for (i, cell) in cells.iter().enumerate() {
@@ -200,19 +277,22 @@ impl<'a> RecedingSlab<'a> {
             if cell.material_id != first.material_id
                 || cell.body_id != first.body_id
                 || cell.segment_id != first.segment_id
-                || inventory.char_mass_kg != 0.0
-                || inventory.virgin_mass_kg != cell.mass_kg
+                || !close(
+                    inventory.virgin_mass_kg + inventory.char_mass_kg,
+                    cell.mass_kg,
+                )
+                || (char.is_none() && inventory.char_mass_kg != 0.0)
                 || !positive(dx)
                 || g.start_m[1..] != first.geometry.start_m[1..]
                 || g.end_m[1..] != first.geometry.start_m[1..]
                 || (i > 0 && cells[i - 1].geometry.end_m != g.start_m)
                 || !close(g.volume_m3, geometry.area_m2 * dx)
                 || !close(g.surface_area_m2, 2.0 * geometry.area_m2)
-                || !close(cell.mass_kg, geometry.density_kg_m3 * g.volume_m3)
+                || !close(component_volume(inventory, geometry, char)?, g.volume_m3)
                 || (i > 0 && i + 1 < n && !insulated(cell.boundary))
             {
                 return Err(DepositionError::InvalidInput(
-                    "receding slab requires contiguous homogeneous noncharring cells and outer-face sources",
+                    "receding slab requires contiguous homogeneous material cells and outer-face sources",
                 ).into());
             }
             ids.push(cell.id);
@@ -229,8 +309,11 @@ impl<'a> RecedingSlab<'a> {
                 .ok_or(DepositionError::InvalidInput("missing slab series link"))?;
             let dx = [pair[0], pair[1]]
                 .map(|cell| 0.5 * (cell.geometry.end_m[0] - cell.geometry.start_m[0]));
-            let expected =
-                series_conductance_w_k(geometry.area_m2, dx, [geometry.conductivity_w_m_k; 2])?;
+            let k = [
+                component_conductivity(solid.inventories[&pair[0].id], geometry, char)?,
+                component_conductivity(solid.inventories[&pair[1].id], geometry, char)?,
+            ];
+            let expected = series_conductance_w_k(geometry.area_m2, dx, k)?;
             if links.next().is_some()
                 || !close(link.area_m2, geometry.area_m2)
                 || !close(link.conductance_w_k, expected)
@@ -248,6 +331,7 @@ impl<'a> RecedingSlab<'a> {
         Ok(Self {
             solid,
             geometry,
+            char,
             ids,
             link_ids,
             initial_front_m,
@@ -259,9 +343,22 @@ impl<'a> RecedingSlab<'a> {
     pub fn state(&self) -> &PyrolysisSimulation<'a> {
         &self.solid
     }
-    /// Retained source and homogeneous material/geometric assumptions.
+    /// Retained source and virgin material/geometric assumptions.
     pub const fn geometry(&self) -> SlabGeometry<'a> {
         self.geometry
+    }
+    /// Explicit retained-char closure, if this is a charring slab.
+    pub const fn char_properties(&self) -> Option<CharProperties<'a>> {
+        self.char
+    }
+    /// Current effective conductivity from the declared component-volume mix.
+    pub fn cell_conductivity_w_m_k(&self, id: CellId) -> Result<f64, SlabError> {
+        let inventory = *self
+            .solid
+            .inventories
+            .get(&id)
+            .ok_or(DepositionError::InvalidInput("unknown receding slab cell"))?;
+        Ok(component_conductivity(inventory, self.geometry, self.char)?)
     }
     /// Actual accepted time, s.
     pub fn time_s(&self) -> f64 {
@@ -295,7 +392,7 @@ impl<'a> RecedingSlab<'a> {
     pub fn thickness_m(&self) -> f64 {
         self.back_m - self.front_m()
     }
-    /// Front displacement from the initially admitted state, m.
+    /// Front displacement from the initially admitted state, m; negative for swelling.
     pub fn recession_m(&self) -> f64 {
         self.front_m() - self.initial_front_m
     }
@@ -306,7 +403,7 @@ impl<'a> RecedingSlab<'a> {
         Ok(series_conductance_w_k(
             self.geometry.area_m2,
             [0.25 * dx; 2],
-            [self.geometry.conductivity_w_m_k; 2],
+            [self.cell_conductivity_w_m_k(cell.id)?; 2],
         )?)
     }
 
@@ -330,7 +427,8 @@ impl<'a> RecedingSlab<'a> {
     /// Advance original implicit heat/reaction, then conservative geometry.
     ///
     /// The maximum interval is the original `maximum_dt_s`. Excessive actual
-    /// local mass loss retries the entire interval from accepted state; releases
+    /// local mass loss or component-volume change retries the entire interval
+    /// from accepted state; releases
     /// from rejected attempts never enter the returned account. Material and
     /// numerical errors from the original implicit owner propagate unchanged.
     pub fn advance_implicit_to(
@@ -382,8 +480,24 @@ impl<'a> RecedingSlab<'a> {
                             / next.solid.cells()[id].mass_kg
                     })
                     .fold(0.0, f64::max);
-                if maximum_loss <= geometry_controls.maximum_cell_mass_loss_fraction {
-                    accepted = Some((candidate, implicit_report.pyrolysis, maximum_loss));
+                let mut maximum_volume_change = 0.0_f64;
+                for &id in &next.ids {
+                    let old =
+                        component_volume(next.solid.inventories[&id], next.geometry, next.char)?;
+                    let new =
+                        component_volume(candidate.inventories[&id], next.geometry, next.char)?;
+                    maximum_volume_change = maximum_volume_change.max(((new - old) / old).abs());
+                }
+                if maximum_loss <= geometry_controls.maximum_cell_mass_loss_fraction
+                    && maximum_volume_change
+                        <= geometry_controls.maximum_cell_volume_change_fraction
+                {
+                    accepted = Some((
+                        candidate,
+                        implicit_report.pyrolysis,
+                        maximum_loss,
+                        maximum_volume_change,
+                    ));
                     break;
                 }
                 report.rejected_geometry_attempts += 1;
@@ -392,11 +506,14 @@ impl<'a> RecedingSlab<'a> {
                 }
                 dt *= 0.5;
             }
-            let (candidate, audit, maximum_loss) = accepted.ok_or(SlabError::GeometrySteps)?;
-            let changed = next
-                .ids
-                .iter()
-                .any(|id| next.solid.cells()[id].mass_kg != candidate.cells()[id].mass_kg);
+            let (candidate, audit, maximum_loss, maximum_volume_change) =
+                accepted.ok_or(SlabError::GeometrySteps)?;
+            let changed = next.ids.iter().any(|id| {
+                next.solid.inventories[id].virgin_mass_kg
+                    != candidate.inventories[id].virgin_mass_kg
+                    || next.solid.inventories[id].char_mass_kg
+                        != candidate.inventories[id].char_mass_kg
+            });
             next.solid = candidate;
             accumulate(&mut report.pyrolysis, audit)?;
             if changed {
@@ -404,6 +521,15 @@ impl<'a> RecedingSlab<'a> {
                 report.remaps += 1;
                 report.remap_mass_residual_kg =
                     finite(report.remap_mass_residual_kg + remap.mass_kg)?;
+                report.remap_virgin_mass_residual_kg =
+                    finite(report.remap_virgin_mass_residual_kg + remap.virgin_mass_kg)?;
+                report.remap_char_mass_residual_kg =
+                    finite(report.remap_char_mass_residual_kg + remap.char_mass_kg)?;
+                report.absolute_remap_component_mass_residual_kg = finite(
+                    report.absolute_remap_component_mass_residual_kg
+                        + remap.virgin_mass_kg.abs()
+                        + remap.char_mass_kg.abs(),
+                )?;
                 report.remap_energy_residual_j =
                     finite(report.remap_energy_residual_j + remap.energy_j)?;
                 report.absolute_remap_mass_residual_kg =
@@ -423,11 +549,17 @@ impl<'a> RecedingSlab<'a> {
                     finite(report.pyrolysis.thermal.residual_j + remap.energy_j)?;
                 report.pyrolysis.absolute_energy_residual_j =
                     finite(report.pyrolysis.absolute_energy_residual_j + remap.energy_j.abs())?;
+                report.pyrolysis.temperature_evaluations += remap.temperature_evaluations;
             }
             report.geometry_steps += 1;
             report.maximum_cell_mass_loss_fraction =
                 report.maximum_cell_mass_loss_fraction.max(maximum_loss);
+            report.maximum_cell_volume_change_fraction = report
+                .maximum_cell_volume_change_fraction
+                .max(maximum_volume_change);
             if report.absolute_remap_mass_residual_kg > geometry_controls.mass_tolerance_kg
+                || report.absolute_remap_component_mass_residual_kg
+                    > geometry_controls.mass_tolerance_kg
                 || report.absolute_remap_energy_residual_j > geometry_controls.energy_tolerance_j
                 || report.pyrolysis.mass_residual_kg.abs()
                     + report.pyrolysis.kinetic_mass_roundoff_kg
@@ -470,7 +602,11 @@ impl<'a> RecedingSlab<'a> {
             rejected_geometry_attempts: 0,
             remaps: 0,
             maximum_cell_mass_loss_fraction: 0.0,
+            maximum_cell_volume_change_fraction: 0.0,
             remap_mass_residual_kg: 0.0,
+            remap_virgin_mass_residual_kg: 0.0,
+            remap_char_mass_residual_kg: 0.0,
+            absolute_remap_component_mass_residual_kg: 0.0,
             remap_energy_residual_j: 0.0,
             absolute_remap_mass_residual_kg: 0.0,
             absolute_remap_energy_residual_j: 0.0,
@@ -488,6 +624,9 @@ impl<'a> RecedingSlab<'a> {
         controls: SlabSolve,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Remap, SlabError> {
+        if self.char.is_some() {
+            return self.rezone_char(controls, checkpoint);
+        }
         let n = self.ids.len();
         let mut edges = Vec::with_capacity(n + 1);
         let mut h = Vec::with_capacity(n);
@@ -641,9 +780,12 @@ impl<'a> RecedingSlab<'a> {
         checkpoint()?;
         Ok(Remap {
             mass_kg: mass_residual,
+            virgin_mass_kg: mass_residual,
+            char_mass_kg: 0.0,
             energy_j: energy_residual,
             redistribution_j: redistribution.value(),
             geometry_mass_kg: geometry_mass,
+            temperature_evaluations: 0,
         })
     }
 }
@@ -668,6 +810,8 @@ fn admit_controls(
         || slab.maximum_halvings > 32
         || !positive(slab.maximum_cell_mass_loss_fraction)
         || slab.maximum_cell_mass_loss_fraction >= 1.0
+        || !positive(slab.maximum_cell_volume_change_fraction)
+        || slab.maximum_cell_volume_change_fraction >= 1.0
         || !positive(slab.minimum_interval_s)
         || !nonnegative(slab.mass_tolerance_kg)
         || !nonnegative(slab.energy_tolerance_j)
@@ -682,10 +826,61 @@ fn admit_controls(
 
 struct Remap {
     mass_kg: f64,
+    virgin_mass_kg: f64,
+    char_mass_kg: f64,
     energy_j: f64,
     redistribution_j: f64,
     geometry_mass_kg: f64,
+    temperature_evaluations: usize,
 }
+
+fn component_volume(
+    inventory: super::PyrolysisCell,
+    geometry: SlabGeometry<'_>,
+    char: Option<CharProperties<'_>>,
+) -> Result<f64, DepositionError> {
+    let char_volume = match char {
+        Some(c) => inventory.char_mass_kg / c.density_kg_m3,
+        None if inventory.char_mass_kg == 0.0 => 0.0,
+        None => return Err(DepositionError::InvalidInput("char volume is unspecified")),
+    };
+    let volume = finite(inventory.virgin_mass_kg / geometry.density_kg_m3 + char_volume)?;
+    if !positive(volume) {
+        return Err(DepositionError::Arithmetic);
+    }
+    Ok(volume)
+}
+
+fn component_conductivity(
+    inventory: super::PyrolysisCell,
+    geometry: SlabGeometry<'_>,
+    char: Option<CharProperties<'_>>,
+) -> Result<f64, DepositionError> {
+    let Some(char) = char else {
+        return Ok(geometry.conductivity_w_m_k);
+    };
+    let volume = component_volume(inventory, geometry, Some(char))?;
+    let virgin_volume = inventory.virgin_mass_kg / geometry.density_kg_m3;
+    let char_volume = inventory.char_mass_kg / char.density_kg_m3;
+    let conductivity = finite(match char.conductivity_mixing {
+        ConductivityMixing::Parallel => {
+            (virgin_volume * geometry.conductivity_w_m_k + char_volume * char.conductivity_w_m_k)
+                / volume
+        }
+        ConductivityMixing::Series => {
+            volume
+                / (virgin_volume / geometry.conductivity_w_m_k
+                    + char_volume / char.conductivity_w_m_k)
+        }
+    })?;
+    if !positive(conductivity) {
+        return Err(DepositionError::Arithmetic);
+    }
+    Ok(conductivity)
+}
+
+#[path = "slab/charring.rs"]
+mod charring;
 
 // Linear reconstruction is conservative in each donor mass interval. MC
 // slopes are additionally limited at BOTH donor edges, including nonuniform

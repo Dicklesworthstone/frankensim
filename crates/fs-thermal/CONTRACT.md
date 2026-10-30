@@ -367,7 +367,7 @@ authored coefficients stay fixed within each original advance.
 
 ### Conservative noncharring slab recession
 
-`pyrolysis::slab::RecedingSlab` adopts the original homogeneous x-aligned cell
+`pyrolysis::slab::RecedingSlab::new` adopts the original homogeneous x-aligned cell
 chain with caller-sourced constant density, conductivity and cross-section.
 Actual retained mass sets thickness through `L = m / (rho A)` with a fixed
 back face. This is the single-material density/length relation in the pinned
@@ -390,8 +390,9 @@ rounded-geometry mass equivalent and enthalpy redistribution are returned.
 The redistribution diagnostic is not lost heat or a PDE error bound. No seed
 mass, heat-capacity floor or release clipping extends the physical domain.
 Geometry and coefficient evolution remain first-order split from each implicit
-interval. Char, pores, mechanical work, thermal expansion, gas-domain volume
-displacement and complete burnout require separate models.
+interval. The charring extension below supplies separate residue geometry.
+Pores, mechanical work, thermal expansion, gas-domain volume displacement and
+complete burnout require separate models.
 
 Seven native groups verify independent isothermal inventory/recession,
 nonlinear-caloric overlap conservation, monotone reconstruction/refinement,
@@ -408,3 +409,54 @@ complete, with emitted-mass spatial sensitivity of about 1.88%; their actual
 accounts are retained in
 `data/reference/compartment_fire/pyrolysis/receding_slab_example_results.json`.
 These authored heating cases do not establish experimental PMMA validation.
+
+### Conservative charring slab shrinkage and swelling
+
+`RecedingSlab::with_char` adds retained residue to the same finite-rate
+virgin-to-char-and-volatile material, implicit heat solver and release accounts.
+`CharProperties` supplies independent char density, conductivity, source and
+a declared `ConductivityMixing::Parallel` or `Series` arrangement. The
+existing `new` constructor remains the noncharring path.
+
+The declared condensed volume is `V = m_virgin/rho_virgin + m_char/rho_char`.
+The back remains fixed; front motion may be positive recession or negative
+recession (swelling). This additive-volume choice is explicit, not the general
+conditional FDS shrinking/swelling algorithm. Parallel conductivity is the
+volume-fraction arithmetic mixture used by the pinned FDS Solid Chapter;
+series conductivity is its harmonic counterpart for the separately declared
+unresolved arrangement. All rebuilt internal links and the public
+`cell_conductivity_w_m_k` and `front_half_cell_conductance_w_k` queries use the
+same current component mixture.
+
+Equal-retained-mass rezoning conserves total mass, char mass and physical
+enthalpy, with virgin mass recovered as the complementary component. Char
+fraction and sensible enthalpy use a paired limited reconstruction that
+preserves donor means, nonnegative component inventories and the common
+caloric-domain bounds. Formation references travel with their component
+masses. The original scalar energy owner recovers mixed temperature with
+reaction disabled during inversion; rezoning creates no volatile stream or
+additional reaction heat. Separate virgin/char remap residuals prevent total
+mass cancellation from hiding composition drift.
+
+Frozen-geometry intervals are bounded by both the existing mass-loss limit
+and `maximum_cell_volume_change_fraction` (default 0.25). This also controls
+swelling with little mass loss. An excessive change retries the entire
+unpublished interval, retaining no rejected release. Reports include maximum
+volume change, component and total mass discrepancy, physical-energy
+discrepancy, geometry roundoff and original caloric evaluation work.
+Cancellation or failed budgets return no candidate.
+
+Five additional native groups establish independent component inventory,
+volume, fixed-back motion, outgoing enthalpy and both conductivity limits;
+nonlinear-caloric remap and series-link consistency; better-than-threefold
+remap refinement with independent phase energy-datum shifts; swelling retries;
+and source refusal, cancellation and deterministic reuse. All 12 slab tests
+pass, and the focused native thermal library passes 183 tests with one existing
+performance test ignored. This is not a full-workspace DSR result.
+
+Geometry/coefficient evolution remains split and first order in time, and
+remap refinement does not certify global PDE accuracy or an entropy theorem.
+No gas-volume displacement or pressure work is inferred. Pore transport,
+permeability/porosity evolution, char oxidation, cracking, multi-step wood
+chemistry, latent phases, complete burnout transitions and an experimentally
+validated wood material remain outside this closure.

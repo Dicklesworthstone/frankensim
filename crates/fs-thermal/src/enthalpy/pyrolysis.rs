@@ -8,8 +8,8 @@
 //! The base owner has fixed geometry and instantaneous removal of volatiles at
 //! their local production temperature. The `implicit` extension couples endpoint
 //! conduction and reaction without the explicit conduction timestep limit.
-//! The `slab` extension adds homogeneous noncharring recession and conservative
-//! enthalpy rezoning at an explicitly supplied constant condensed density.
+//! The `slab` extension adds moving geometry and conservative component/enthalpy
+//! rezoning at explicitly supplied virgin and optional char densities.
 //! This reduced first-order model does not model pore
 //! gas transport, oxidation, cracking, flame chemistry or a validated
 //! PMMA/wood parameter set. Full cell exhaustion and exhausted work budgets
@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 #[path = "pyrolysis/implicit.rs"]
 pub mod implicit;
 
-/// Conservative shrinking and rezoning of homogeneous noncharring slabs.
+/// Conservative moving geometry and rezoning of homogeneous reactive slabs.
 #[path = "pyrolysis/slab.rs"]
 pub mod slab;
 

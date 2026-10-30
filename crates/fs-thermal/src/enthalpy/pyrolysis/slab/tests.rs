@@ -67,6 +67,17 @@ fn fixture<'a>(
     weights: &[f64],
     rate: f64,
 ) -> RecedingSlab<'a> {
+    fixture_with_components(law, gas, temperatures, weights, rate, None)
+}
+
+fn fixture_with_components<'a>(
+    law: &'a dyn CondensedCaloric,
+    gas: &'a dyn VolatileEnthalpy,
+    temperatures: &[f64],
+    weights: &[f64],
+    rate: f64,
+    char: Option<(&'a dyn CondensedCaloric, f64, CharProperties<'a>)>,
+) -> RecedingSlab<'a> {
     let n = temperatures.len();
     assert_eq!(n, weights.len());
     let sum: f64 = weights.iter().sum();
@@ -144,9 +155,9 @@ fn fixture<'a>(
         &[PyrolysisMaterial {
             material_id: MaterialId(1),
             virgin: law,
-            char_caloric: None,
+            char_caloric: char.map(|c| c.0),
             volatile: gas,
-            char_mass_yield: 0.0,
+            char_mass_yield: char.map_or(0.0, |c| c.1),
             kinetics: Arrhenius {
                 prefactor_s_inv: rate,
                 activation_energy_j_mol: 0.0,
@@ -157,16 +168,16 @@ fn fixture<'a>(
         || Ok(()),
     )
     .unwrap();
-    RecedingSlab::new(
-        solid,
-        SlabGeometry {
-            area_m2: AREA,
-            density_kg_m3: DENSITY,
-            conductivity_w_m_k: CONDUCTIVITY,
-            source: "constant incompressible manufactured condensed solid",
-        },
-        || Ok(()),
-    )
+    let geometry = SlabGeometry {
+        area_m2: AREA,
+        density_kg_m3: DENSITY,
+        conductivity_w_m_k: CONDUCTIVITY,
+        source: "constant incompressible manufactured condensed solid",
+    };
+    match char {
+        None => RecedingSlab::new(solid, geometry, || Ok(())),
+        Some(c) => RecedingSlab::with_char(solid, geometry, c.2, || Ok(())),
+    }
     .unwrap()
 }
 
@@ -547,3 +558,6 @@ fn source_geometry_char_and_work_limits_refuse_without_partial_publication() {
         Err(SlabError::Thermal(DepositionError::InvalidInput(_)))
     ));
 }
+
+#[path = "charring_tests.rs"]
+mod charring;
