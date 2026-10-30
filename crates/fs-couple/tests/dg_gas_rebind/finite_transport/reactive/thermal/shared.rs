@@ -1,4 +1,6 @@
 //! One shared material inventory couples several original finite gas owners.
+mod molecular;
+
 use super::*;
 use fs_couple::dg_port::finite_gas::transport::assembly::reactive::thermal::shared::{
     SharedFiniteGasAcousticThermalPort, SharedFiniteGasAcousticThermalSolve,
