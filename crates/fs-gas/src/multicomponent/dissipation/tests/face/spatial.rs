@@ -394,3 +394,53 @@ fn spatial_faces_refuse_wrong_sources_unresolved_energy_and_invalid_axes_then_re
         (expected, report, capacity)
     );
 }
+
+
+#[test]
+fn spatial_no_slip_wall_carries_two_shears_heat_and_wall_work() {
+    let mut op = prepared3(0.0);
+    let trace = input3(&[1.0, 0.0], [0.3, 1.6, -0.8], 2.0);
+    let mut q = [0.0; 6];
+    let primitive = op.gas().spatial_conserved_into(trace, &mut q).unwrap();
+    let mut out = [f64::NAN; 6];
+    op.no_slip_wall_from_primitive(
+        trace,
+        0.25,
+        [0.4, -0.2],
+        WallThermalCondition::Isothermal(Temperature::new(primitive.temperature - 0.5)),
+        2.0,
+        [-3.0, 4.0],
+        &mut out,
+        || false,
+    )
+    .unwrap();
+    let cross = 0.02 - 2.0 / 3.0 * 0.07;
+    let normal = (4.0 / 3.0 * 0.07 + 0.02) * 2.0 + cross;
+    let shear1 = 0.07 * (0.4 - 1.6) / 0.25;
+    let shear2 = 0.07 * (-0.2 + 0.8) / 0.25;
+    close(out[2], -normal);
+    close(out[3], -shear1);
+    close(out[4], -shear2);
+    close(
+        out[5],
+        0.4 * (-shear1) - 0.2 * (-shear2) - 0.09 * (-0.5 / 0.25),
+    );
+    assert_eq!(out[0], 0.0);
+    assert_eq!(out[1], 0.0);
+
+    let mut stationary = [0.0; 6];
+    op.no_slip_wall_from_primitive(
+        trace,
+        0.25,
+        [0.0; 2],
+        WallThermalCondition::Adiabatic,
+        2.0,
+        [-3.0, 4.0],
+        &mut stationary,
+        || false,
+    )
+    .unwrap();
+    assert_ne!(stationary[3], 0.0);
+    assert_ne!(stationary[4], 0.0);
+    assert_eq!(stationary[5], 0.0);
+}

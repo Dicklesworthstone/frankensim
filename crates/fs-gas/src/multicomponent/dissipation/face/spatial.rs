@@ -183,6 +183,60 @@ impl<L: TransportLaw> SpatialTransport<L> {
         )
     }
 
+
+    /// Impermeable flat no-slip wall with prescribed two-component tangential
+    /// wall velocity and optional fixed temperature.
+    #[allow(clippy::too_many_arguments)]
+    pub fn no_slip_wall(
+        &mut self,
+        cell: SpatialCell<'_>,
+        wall_distance: f64,
+        wall_tangential_velocity: [f64; 2],
+        thermal: WallThermalCondition,
+        normal_velocity_gradient: f64,
+        transverse_tangential_gradients: [f64; 2],
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TransportFaceReport, DissipationError> {
+        let trace = conservative_trace(&self.prepared.gas, cell, &mut cancelled)?;
+        self.no_slip_wall_trace(
+            trace,
+            wall_distance,
+            wall_tangential_velocity,
+            thermal,
+            normal_velocity_gradient,
+            transverse_tangential_gradients,
+            out,
+            &mut cancelled,
+        )
+    }
+
+    /// Same no-slip/thermal wall law from source-admitted primitives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn no_slip_wall_from_primitive(
+        &mut self,
+        cell: SpatialPrimitive<'_>,
+        wall_distance: f64,
+        wall_tangential_velocity: [f64; 2],
+        thermal: WallThermalCondition,
+        normal_velocity_gradient: f64,
+        transverse_tangential_gradients: [f64; 2],
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TransportFaceReport, DissipationError> {
+        let trace = primitive_trace(&self.prepared.gas, cell, &mut cancelled)?;
+        self.no_slip_wall_trace(
+            trace,
+            wall_distance,
+            wall_tangential_velocity,
+            thermal,
+            normal_velocity_gradient,
+            transverse_tangential_gradients,
+            out,
+            &mut cancelled,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn interior(
         &mut self,
@@ -211,6 +265,35 @@ impl<L: TransportLaw> SpatialTransport<L> {
             &mut prepared.binary,
             out,
             controls,
+            cancelled,
+        )
+    }
+
+
+    #[allow(clippy::too_many_arguments)]
+    fn no_slip_wall_trace(
+        &mut self,
+        trace: VectorTrace<'_, 2>,
+        wall_distance: f64,
+        wall_tangential_velocity: [f64; 2],
+        thermal: WallThermalCondition,
+        normal_velocity_gradient: f64,
+        transverse_tangential_gradients: [f64; 2],
+        out: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<TransportFaceReport, DissipationError> {
+        let prepared = &mut self.prepared;
+        no_slip_wall_components(
+            &prepared.gas,
+            &mut prepared.law,
+            trace,
+            wall_distance,
+            wall_tangential_velocity,
+            thermal,
+            normal_velocity_gradient,
+            transverse_tangential_gradients,
+            &mut prepared.binary,
+            out,
             cancelled,
         )
     }

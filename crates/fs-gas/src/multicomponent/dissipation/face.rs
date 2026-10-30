@@ -22,6 +22,17 @@ pub struct TransportFaceReport {
     pub mass_frame_residual_kg_m2_s: f64,
 }
 
+/// Thermal boundary for an impermeable no-slip molecular wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WallThermalCondition {
+    /// Zero conductive heat flux.
+    Adiabatic,
+    /// Prescribed wall temperature. The value must remain inside the gas's
+    /// admitted caloric interval; transport is evaluated at the arithmetic
+    /// cell/wall face temperature.
+    Isothermal(Temperature),
+}
+
 /// Prepared molecular faces on the exact original evolving species bank.
 ///
 /// The same private kernel serves the original axial and network owners.
@@ -248,6 +259,73 @@ impl<L: TransportLaw> PlanarTransport<L> {
             trace,
             normal_velocity_gradient,
             transverse_tangential_gradient,
+            &mut self.binary,
+            out,
+            &mut cancelled,
+        )
+    }
+
+    /// Impermeable no-slip wall with prescribed tangential wall velocity and
+    /// optional fixed wall temperature. For a flat impermeable wall,
+    /// tangential derivatives of normal velocity vanish, so shear uses the
+    /// one-sided normal derivative between the cell center and wall.
+    ///
+    /// Species flux is zero. The energy flux is wall mechanical work plus
+    /// Fourier heat, `u_wall · (-tau_tn) - k d_n T`; stationary adiabatic
+    /// walls therefore exert shear without boundary work.
+    #[allow(clippy::too_many_arguments)]
+    pub fn no_slip_wall(
+        &mut self,
+        cell: NormalCell<'_>,
+        wall_distance: f64,
+        wall_tangential_velocity: f64,
+        thermal: WallThermalCondition,
+        normal_velocity_gradient: f64,
+        transverse_tangential_gradient: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TransportFaceReport, DissipationError> {
+        let trace = conservative_trace(&self.gas, cell, &mut cancelled)?;
+        let transverse_velocity = trace.transverse_velocity;
+        no_slip_wall_components(
+            &self.gas,
+            &mut self.law,
+            trace.with_transverse([transverse_velocity]),
+            wall_distance,
+            [wall_tangential_velocity],
+            thermal,
+            normal_velocity_gradient,
+            [transverse_tangential_gradient],
+            &mut self.binary,
+            out,
+            &mut cancelled,
+        )
+    }
+
+    /// Same no-slip/thermal wall closure from source-admitted primitives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn no_slip_wall_from_primitive(
+        &mut self,
+        cell: NormalPrimitive<'_>,
+        wall_distance: f64,
+        wall_tangential_velocity: f64,
+        thermal: WallThermalCondition,
+        normal_velocity_gradient: f64,
+        transverse_tangential_gradient: f64,
+        out: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TransportFaceReport, DissipationError> {
+        let trace = primitive_trace(&self.gas, cell, &mut cancelled)?;
+        let transverse_velocity = trace.transverse_velocity;
+        no_slip_wall_components(
+            &self.gas,
+            &mut self.law,
+            trace.with_transverse([transverse_velocity]),
+            wall_distance,
+            [wall_tangential_velocity],
+            thermal,
+            normal_velocity_gradient,
+            [transverse_tangential_gradient],
             &mut self.binary,
             out,
             &mut cancelled,
@@ -656,6 +734,98 @@ fn wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     let diffusivity_m2_s = viscosity_scale / p.density;
     if !out[n].is_finite() || !diffusivity_m2_s.is_finite() {
         return Err(DissipationError::Invalid("wall traction overflow"));
+    }
+    poll(cancelled)?;
+    Ok(TransportFaceReport {
+        diffusivity_m2_s,
+        ..TransportFaceReport::default()
+    })
+}
+
+
+#[allow(clippy::too_many_arguments)]
+fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
+    gas: &MixtureGas,
+    law: &mut L,
+    trace: VectorTrace<'_, TRANSVERSE>,
+    wall_distance: f64,
+    wall_tangential_velocity: [f64; TRANSVERSE],
+    thermal: WallThermalCondition,
+    normal_gradient: f64,
+    transverse_gradients: [f64; TRANSVERSE],
+    binary: &mut [f64],
+    out: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<TransportFaceReport, DissipationError> {
+    poll(cancelled)?;
+    let n = gas.species_count();
+    if out.len() != n + 2 + TRANSVERSE
+        || !positive(wall_distance)
+        || !normal_gradient.is_finite()
+        || !transverse_gradients.iter().all(|v| v.is_finite())
+        || !wall_tangential_velocity.iter().all(|v| v.is_finite())
+    {
+        return Err(DissipationError::Invalid(
+            "no-slip molecular wall dimensions, velocity or gradients",
+        ));
+    }
+    let p = trace.primitive;
+    let wall_temperature = match thermal {
+        WallThermalCondition::Adiabatic => p.temperature,
+        WallThermalCondition::Isothermal(t) => {
+            let value = t.value();
+            if !value.is_finite()
+                || !(gas.domain().minimum_temperature..=gas.domain().maximum_temperature)
+                    .contains(&value)
+            {
+                return Err(DissipationError::Invalid(
+                    "molecular wall temperature outside caloric domain",
+                ));
+            }
+            value
+        }
+    };
+    let face_temperature = 0.5 * p.temperature + 0.5 * wall_temperature;
+    let temperature_gradient = match thermal {
+        WallThermalCondition::Adiabatic => 0.0,
+        WallThermalCondition::Isothermal(_) => (wall_temperature - p.temperature) / wall_distance,
+    };
+    let mut x = [0.0; MAX_SPECIES];
+    fractions(gas, trace.densities, &mut x[..n])?;
+    let c = law.evaluate(
+        Temperature::new(face_temperature),
+        Pressure::new(p.pressure),
+        &x[..n],
+        binary,
+        &mut || cancelled(),
+    )?;
+    c.validate()?;
+    validate_binary(binary, n)?;
+    let longitudinal = c.longitudinal_viscosity()?;
+    let mu = c.dynamic_viscosity.value();
+    let cross = c.bulk_viscosity.value() - (2.0 / 3.0) * mu;
+    out.fill(0.0);
+    let mut normal_stress = longitudinal * normal_gradient;
+    for gradient in transverse_gradients {
+        normal_stress += cross * gradient;
+    }
+    out[n] = -normal_stress;
+    let mut wall_work = 0.0;
+    for axis in 0..TRANSVERSE {
+        let shear =
+            mu * (wall_tangential_velocity[axis] - trace.transverse_velocity[axis]) / wall_distance;
+        out[n + 1 + axis] = -shear;
+        wall_work += wall_tangential_velocity[axis] * out[n + 1 + axis];
+    }
+    out[n + 1 + TRANSVERSE] =
+        wall_work - c.thermal_conductivity.value() * temperature_gradient;
+    let viscosity_scale = viscosity_scale::<TRANSVERSE>(longitudinal, cross, mu);
+    let diffusivity_m2_s = (viscosity_scale / p.density)
+        .max(c.thermal_conductivity.value() / trace.cv_density);
+    if !out.iter().all(|v| v.is_finite()) || !diffusivity_m2_s.is_finite() {
+        return Err(DissipationError::Invalid(
+            "no-slip molecular wall flux overflow",
+        ));
     }
     poll(cancelled)?;
     Ok(TransportFaceReport {

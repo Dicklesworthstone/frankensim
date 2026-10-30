@@ -358,3 +358,47 @@ fn planar_faces_refuse_foreign_sources_invalid_axes_and_final_cancellation_then_
     .unwrap();
     assert_eq!(out, expected);
 }
+
+
+#[test]
+fn planar_no_slip_wall_carries_shear_heat_and_prescribed_wall_work() {
+    let mut op = prepared(0.0);
+    let trace = input(&[1.0, 0.0], [0.3, 1.6], 2.0);
+    let mut q = [0.0; 5];
+    let primitive = op.gas().normal_conserved_into(trace, &mut q).unwrap();
+    let mut out = [f64::NAN; 5];
+    op.no_slip_wall_from_primitive(
+        trace,
+        0.25,
+        0.4,
+        WallThermalCondition::Isothermal(Temperature::new(primitive.temperature - 0.5)),
+        2.0,
+        -3.0,
+        &mut out,
+        || false,
+    )
+    .unwrap();
+    let cross = 0.02 - 2.0 / 3.0 * 0.07;
+    let normal = (4.0 / 3.0 * 0.07 + 0.02) * 2.0 + cross * -3.0;
+    let shear = 0.07 * (0.4 - 1.6) / 0.25;
+    close(out[2], -normal);
+    close(out[3], -shear);
+    close(out[4], 0.4 * (-shear) - 0.09 * (-0.5 / 0.25));
+    assert_eq!(out[0], 0.0);
+    assert_eq!(out[1], 0.0);
+
+    let mut stationary = [0.0; 5];
+    op.no_slip_wall_from_primitive(
+        trace,
+        0.25,
+        0.0,
+        WallThermalCondition::Adiabatic,
+        2.0,
+        -3.0,
+        &mut stationary,
+        || false,
+    )
+    .unwrap();
+    assert_ne!(stationary[3], 0.0);
+    assert_eq!(stationary[4], 0.0);
+}
