@@ -1,5 +1,8 @@
 //! Original chemistry changes the same transported gas and continuing acoustic owners.
 //! Authored isomer/transport laws test implementation, not measured combustion.
+#[path = "reactive/thermal.rs"]
+mod thermal;
+
 use super::*;
 use fs_couple::cavity_phs::piston::reactive::{
     GasReaction, GasReactionError, GasReactionSolve, boundary::GasReactionBoundary,
