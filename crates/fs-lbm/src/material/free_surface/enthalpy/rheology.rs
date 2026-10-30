@@ -85,19 +85,19 @@ impl RheologyBinding {
             temperature_axis,
             rate_axis,
         )?;
-        if law
-            .reference_state()
-            .material()
-            .property("specific_heat_capacity")
-            .is_some_and(|property| {
-                property
-                    .source_axes()
-                    .iter()
-                    .any(|(axis, _)| axis == rate_axis)
-            })
-        {
+        if ["density", "specific_heat_capacity"].iter().any(|name| {
+            law.reference_state()
+                .material()
+                .property(name)
+                .is_some_and(|property| {
+                    property
+                        .source_axes()
+                        .iter()
+                        .any(|(axis, _)| axis == rate_axis)
+                })
+        }) {
             return Err(Error::Invalid(
-                "shear-dependent caloric storage needs an additional thermodynamic state owner",
+                "shear-dependent density or caloric storage needs an additional thermodynamic state owner",
             ));
         }
         Ok(Self {

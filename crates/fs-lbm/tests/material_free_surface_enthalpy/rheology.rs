@@ -508,3 +508,155 @@ fn g1_thermal_substeps_share_temperature_shear_state_and_energy_account() {
     }
     assert_ne!(endpoints[0].to_bits(), endpoints[1].to_bits());
 }
+
+fn buoyant_rheological_card(density_slope: f64, shear_slope: f64) -> MaterialCard {
+    let original = rheological_card(0.0002, shear_slope, 0.0, 1000.0);
+    let mut claims = ClaimSet::new();
+    for (_, source) in original.claims().claims_ordered() {
+        let mut claim = source.clone();
+        if claim.key.name() == "density" {
+            claim.value = PropertyValue::Curve {
+                abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+                knots: vec![(300.0, 1000.0 + 100.0 * density_slope), (500.0, 1000.0 - 100.0 * density_slope)],
+                dims: claim.key.dims(),
+            };
+            claim.interpolation = InterpolationPolicy::LinearInside;
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap()
+}
+fn buoyant_bounds(maximum_departure: f64) -> fs_lbm::material::transport::boussinesq::BoussinesqConfig<3> {
+    fs_lbm::material::transport::boussinesq::BoussinesqConfig {
+        gravity_m_s2: [0.0, -0.2, 0.0],
+        max_relative_density_departure: maximum_departure,
+        max_relative_specific_heat_departure: 0.0,
+    }
+}
+fn with_buoyant_rheology<R>(
+    card: &MaterialCard, maximum_departure: f64,
+    exercise: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
+    let law = LiquidTemperatureLaw::try_new(card, &query_point(), "T", LiquidViscosityBasis::Dynamic, MaterialPropertySelection::SingleClaimOnly).unwrap();
+    let source = ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(law.reference_state().material().clone(), LiquidViscosityBasis::Dynamic, "T", "rate").unwrap();
+    let chart = caloric(card);
+    let gate = CancelGate::new_clock_free();
+    let mut cells = initial(true);
+    for cell in &mut cells {
+        cell.velocity_m_s = [0.003 * (cell.coordinates[2] as f64 - 3.5), 0.0, 0.0];
+    }
+    let bounds = buoyant_bounds(maximum_departure);
+    with_cx(&gate, |cx| {
+        let scaling = plan_free_surface_from_material(&source, 0.001, 0.001, 0.1).unwrap();
+        let mut liquid = scaling.free_surface3_from_cells_with_boussinesq_rheology(
+            MaterialFreeSurfaceDomain3 { gravity_m_s2: bounds.gravity_m_s2, ..domain() },
+            &cells, &law, &chart, FreeSurfaceEnthalpyControls::default(), solve(), bounds,
+            |_| 300000.0, cx, &gate,
+        ).unwrap();
+        exercise(&mut liquid, &gate)
+    })
+}
+#[test]
+fn source_density_and_shear_viscosity_jointly_drive_native_motion_and_same_heat() {
+    let mut outcomes = Vec::new();
+    for (density_slope, shear_slope) in [(0.2, 0.003), (0.0, 0.003), (0.2, 0.0)] {
+        let source = buoyant_rheological_card(density_slope, shear_slope);
+        outcomes.push(with_buoyant_rheology(&source, 0.03, |liquid, gate| {
+            let mass = liquid.flow().ledger_mass_kg().unwrap();
+            liquid.step(gate).unwrap();
+            let material = liquid.material_at(CELL).unwrap();
+            let temperature = coordinate(material, "T");
+            near(temperature, 450.0, 1e-12);
+            let raw_density = 1000.0 - density_slope * (temperature - 400.0);
+            near(material.density_kg_m3(), raw_density, 1e-12);
+            let acceleration = [0.0, -0.2 * raw_density / 1000.0, 0.0];
+            let rate = independent_rate(stress_numerator(liquid, CELL, acceleration), temperature, 0.0002, shear_slope);
+            assert!(rate > 0.0);
+            near(liquid.rheology_at(CELL).unwrap().shear_rate_per_s, rate, 2e-10);
+            near(coordinate(material, "rate"), rate, 2e-10);
+            let mu = 0.1 + 0.0002 * (temperature - 400.0) + shear_slope * rate;
+            near(material.dynamic_viscosity_pa_s(), mu, 2e-12);
+            near(liquid.rheology_at(CELL).unwrap().collision_tau, 0.5 + 3.0 * mu, 2e-12);
+            assert_eq!(material.material().card_identity(), source.content_hash());
+            let before_h = liquid.total_enthalpy_j().unwrap();
+            let report = liquid.step_with_viscous_heating(&[], gate).unwrap();
+            let applied = report.applied.iter().find(|s| s.coordinates == CELL).unwrap();
+            near(applied.shear_rate_per_s, rate, 2e-10);
+            near(applied.material.dynamic_viscosity_pa_s(), mu, 2e-12);
+            near(applied.heat_j, mu * rate * rate * applied.liquid_volume_m3 * 0.001, 4e-10);
+            assert!(report.flow.viscous_heat_j > 0.0);
+            assert_eq!(report.flow.external_heat_j, 0.0);
+            near(report.flow.mass_after_kg, mass, 1e-12);
+            assert!((liquid.total_enthalpy_j().unwrap() - before_h - report.flow.viscous_heat_j).abs() < 1e-8);
+            for _ in 0..3 { liquid.step_with_viscous_heating(&[], gate).unwrap(); }
+            (liquid.flow().lattice().grid().state_bits(), liquid.flow().sample_at_si(3, 3, 3).unwrap().unwrap().velocity_m_s, liquid.total_enthalpy_j().unwrap())
+        }));
+    }
+    for other in &outcomes[1..] {
+        assert_ne!(outcomes[0].0, other.0);
+        assert!(outcomes[0].1.iter().zip(other.1).any(|(a, b)| (a - b).abs() > 1e-14));
+        assert_ne!(outcomes[0].2.to_bits(), other.2.to_bits());
+    }
+}
+#[test]
+fn combined_density_endpoint_refusal_preserves_native_and_caloric_history() {
+    let source = buoyant_rheological_card(0.2, 0.003);
+    with_buoyant_rheology(&source, 0.011, |liquid, gate| {
+        liquid.step(gate).unwrap();
+        let bits = liquid.flow().lattice().grid().state_bits();
+        let h = liquid.total_enthalpy_j().unwrap();
+        let time = liquid.physical_time_s();
+        let steps = liquid.accepted_steps();
+        let material = liquid.material_at(CELL).unwrap().clone();
+        let rheology = *liquid.rheology_at(CELL).unwrap();
+        // This raises T from 450 to 460 K, inside the source/caloric domain,
+        // but outside the admitted 1.1% density departure.
+        assert!(liquid.step_with_heat(&[FreeSurfaceCellHeat { coordinates: CELL, energy_j: 0.02 }], gate).is_err());
+        assert_eq!(liquid.flow().lattice().grid().state_bits(), bits);
+        assert_eq!(liquid.total_enthalpy_j().unwrap(), h);
+        assert_eq!(liquid.physical_time_s(), time);
+        assert_eq!(liquid.accepted_steps(), steps);
+        assert_eq!(liquid.material_at(CELL), Some(&material));
+        assert_eq!(liquid.rheology_at(CELL), Some(&rheology));
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(liquid.step_with_viscous_heating(&[], &cancelled).is_err());
+        assert_eq!(liquid.flow().lattice().grid().state_bits(), bits);
+        assert_eq!(liquid.total_enthalpy_j().unwrap(), h);
+    });
+}
+#[test]
+fn combined_source_refuses_rate_dependent_storage_even_at_equal_reference_value() {
+    for name in ["density", "specific_heat_capacity"] {
+        let original = buoyant_rheological_card(0.2, 0.003);
+        let reference = LiquidTemperatureLaw::try_new(&original, &query_point(), "T", LiquidViscosityBasis::Dynamic, MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let value = reference.reference_state().material().property(name).unwrap().value_si();
+        let mut claims = ClaimSet::new();
+        for (_, source) in original.claims().claims_ordered() {
+            let mut claim = source.clone();
+            if claim.key.name() == name {
+                claim.value = PropertyValue::Curve {
+                    abscissa: "rate".into(), abscissa_dims: Frequency::DIMS,
+                    knots: vec![(0.0, value), (1000.0, value)], dims: claim.key.dims(),
+                };
+                claim.interpolation = InterpolationPolicy::LinearInside;
+                claim.validity = claim.validity.with_quantity("rate", QuantitySpec::dimensional(Frequency::DIMS), 0.0, 1000.0);
+            }
+            claims.insert_claim(claim).unwrap();
+        }
+        let card = MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap();
+        let law = LiquidTemperatureLaw::try_new(&card, &query_point(), "T", LiquidViscosityBasis::Dynamic, MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let source = ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(law.reference_state().material().clone(), LiquidViscosityBasis::Dynamic, "T", "rate").unwrap();
+        let chart = caloric(&card);
+        let gate = CancelGate::new_clock_free();
+        let bounds = buoyant_bounds(0.03);
+        with_cx(&gate, |cx| {
+            let scaling = plan_free_surface_from_material(&source, 0.001, 0.001, 0.1).unwrap();
+            assert!(scaling.free_surface3_from_cells_with_boussinesq_rheology(
+                MaterialFreeSurfaceDomain3 { gravity_m_s2: bounds.gravity_m_s2, ..domain() },
+                &initial(true), &law, &chart, FreeSurfaceEnthalpyControls::default(), solve(), bounds,
+                |_| 300000.0, cx, &gate,
+            ).is_err());
+        });
+    }
+}

@@ -5439,3 +5439,20 @@ Three native regressions cover differing donor Cp, reverse flow, common-datum
 invariance, real outlet backflow, nonconservative-flow/invalid-field refusal and
 cancellation. They are authored but unrun here; pinned syntax checks, static API
 review and independent three-cell arithmetic passed.
+
+## Physical storage admission in combined buoyancy and rheology
+
+The shared moving-liquid rheology binding rejects a density or Cp source with
+the evolving physical-rate axis, even if its value at the reference rate equals
+the original storage coefficient. A coincident value cannot grant a missing
+shear-induced volume or caloric-state model. This one admission applies to
+direct VOF initialization, complete-melt release and conservative tetrahedral
+ingress through their existing shared binding. Temperature-dependent density
+remains supported through the original bounded Boussinesq projection.
+
+Three additional native VOF regressions cover source-density and shear-viscosity
+substitutions in continued motion and molecular heat, an independent
+force-corrected constitutive root, density-bound and cancellation rollback, and
+rejection of rate-dependent storage at equal reference values. The separate
+constitutive/force/heat arithmetic closes to roundoff. Native Rust compilation
+and execution of these added tests remain unavailable in this environment.
