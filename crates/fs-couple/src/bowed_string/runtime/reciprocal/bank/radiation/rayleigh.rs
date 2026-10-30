@@ -5,7 +5,7 @@
 //! owner supplies their full reciprocal impedance; the existing PSD-residue
 //! fitter supplies a causal passive approximation. No new eigenproblem, modal
 //! damping ratio, acoustic gain, or time integrator is introduced.
-use super::super::{ReciprocalStringBank, ReciprocalStringError};
+use super::super::{ModalPreparation, ReciprocalStringBank, ReciprocalStringError};
 use crate::render::plate::impact::radiation::{Model, fit};
 use crate::thin_plate::RetainedPlateBasis;
 use fs_bem::helmholtz::{HelmholtzError, Medium, rayleigh_modal::{AreaSample, PreparedSurface}};
