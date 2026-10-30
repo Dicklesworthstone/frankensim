@@ -8,7 +8,7 @@
 use super::{LinearSplit, checked_eigh, exponential, finite, product, refuse};
 use crate::{PhsError, PortHamiltonian};
 use fs_la::factor::qr;
-use fs_math::det;
+use fs_math::{det, eft::two_sum};
 
 pub(super) struct PositiveHeat {
     n: usize,
@@ -61,22 +61,10 @@ impl PositiveHeat {
                 root: Vec::new(),
             });
         }
-        // Scale before diagonalization: an absolutely tiny physical viscosity
-        // must not be mistaken for a numerically zero matrix.
-        let normalized: Vec<_> = resistance.iter().map(|r| r / scale).collect();
-        let (values, vectors) = checked_eigh(&normalized, n)?;
-        if values.iter().any(|&value| value < 0.0) {
-            return Err(refuse(
-                "physical heat resistance has an unresolved negative eigenvalue",
-            ));
-        }
-        let mut resistance_root = vec![0.0; n * n];
-        for i in 0..n {
-            let weight = det::sqrt(values[i]) * det::sqrt(scale);
-            for j in 0..n {
-                resistance_root[i * n + j] = weight * vectors[j * n + i];
-            }
-        }
+        // Passive resistance graphs have an explicit positive decomposition.
+        // Their exact effort nullspaces must not depend on the rounded sign of
+        // a numerical eigenvalue, especially beside much stronger loss blocks.
+        let resistance_root = factor_resistance(resistance, n)?;
         let mut original = vec![0.0; n * n];
         for i in 0..n {
             for k in 0..n {
@@ -198,6 +186,184 @@ impl PositiveHeat {
         }
         Ok(value)
     }
+}
+
+// Exact zero entries separate independent resistance components. A general
+// full-C material block must not force a Foster graph's nullspace through an
+// eigensolve, or set the absolute scale of a physically weak thermal block.
+fn factor_resistance(resistance: &[f64], n: usize) -> Result<Vec<f64>, PhsError> {
+    let mut root = vec![0.0; n * n];
+    let mut seen = vec![false; n];
+    for start in 0..n {
+        if seen[start] {
+            continue;
+        }
+        let mut indices = vec![start];
+        seen[start] = true;
+        let mut next = 0;
+        while next < indices.len() {
+            let i = indices[next];
+            next += 1;
+            for j in 0..n {
+                if !seen[j] && (resistance[i * n + j] != 0.0 || resistance[j * n + i] != 0.0) {
+                    indices.push(j);
+                    seen[j] = true;
+                }
+            }
+        }
+        indices.sort_unstable();
+        let count = indices.len();
+        let matrix: Vec<_> = indices
+            .iter()
+            .flat_map(|&i| indices.iter().map(move |&j| resistance[i * n + j]))
+            .collect();
+        let factor = if let Some(factor) = graph_root(&matrix, count)? {
+            factor
+        } else {
+            let scale = matrix.iter().fold(0.0_f64, |s, r| s.max(r.abs()));
+            let normalized: Vec<_> = matrix.iter().map(|r| r / scale).collect();
+            let (values, vectors) = checked_eigh(&normalized, count)?;
+            if values.iter().any(|&value| value < 0.0) {
+                return Err(refuse(
+                    "physical heat resistance has an unresolved negative eigenvalue",
+                ));
+            }
+            let mut factor = vec![0.0; count * count];
+            for i in 0..count {
+                let weight = det::sqrt(values[i]) * det::sqrt(scale);
+                for j in 0..count {
+                    factor[i * count + j] = weight * vectors[j * count + i];
+                }
+            }
+            factor
+        };
+        check_resistance_root(&matrix, &factor, count)?;
+        for (i, &row) in indices.iter().enumerate() {
+            for (j, &column) in indices.iter().enumerate() {
+                root[row * n + column] = factor[i * count + j];
+            }
+        }
+    }
+    Ok(root)
+}
+
+// Exact signed diagonal dominance supplies physical edge/ground squares:
+// |R_ij| (e_i + sign(R_ij) e_j)^2 and (R_ii-sum_j |R_ij|) e_i^2.
+// Every positive coefficient survives at its own absolute scale. No tolerance
+// selects rank, rescues a negative remainder or changes the original R.
+fn graph_root(resistance: &[f64], n: usize) -> Result<Option<Vec<f64>>, PhsError> {
+    let mut grounds = vec![0.0; n];
+    let mut count = 0;
+    for i in 0..n {
+        for j in 0..n {
+            if resistance[i * n + j] != resistance[j * n + i] {
+                return Ok(None);
+            }
+            if i != j {
+                if i < j && resistance[i * n + j] != 0.0 {
+                    count += 1;
+                }
+            }
+        }
+        let Some(ground) = nonnegative_ground(resistance, n, i) else {
+            return Ok(None);
+        };
+        grounds[i] = ground;
+        if grounds[i] > 0.0 {
+            count += 1;
+        }
+    }
+    // Forests and diagonal damping already fit in n rows. Denser passive
+    // graphs use the existing QR owner to retain every edge in n coordinates.
+    let mut rows = vec![0.0; count.max(n) * n];
+    let mut row = 0;
+    for i in 0..n {
+        if grounds[i] > 0.0 {
+            rows[row * n + i] = det::sqrt(grounds[i]);
+            row += 1;
+        }
+        for j in i + 1..n {
+            let value = resistance[i * n + j];
+            if value != 0.0 {
+                let weight = det::sqrt(value.abs());
+                rows[row * n + i] = weight;
+                rows[row * n + j] = if value < 0.0 { -weight } else { weight };
+                row += 1;
+            }
+        }
+    }
+    let root = if count > n {
+        compress(&rows, count, n)?
+    } else {
+        rows
+    };
+    Ok(Some(root))
+}
+
+// Grow an exact floating-point expansion of R_ii-sum_j |R_ij|. A rounded
+// off-diagonal sum can otherwise conceal a negative ground below one ulp of
+// the diagonal. Nonoverlapping expansion components are ordered by magnitude,
+// so the last nonzero component supplies the exact represented residual sign.
+fn nonnegative_ground(resistance: &[f64], n: usize, i: usize) -> Option<f64> {
+    let mut expansion = vec![resistance[i * n + i]];
+    for j in 0..n {
+        if i == j || resistance[i * n + j] == 0.0 {
+            continue;
+        }
+        let mut value = -resistance[i * n + j].abs();
+        let mut next = Vec::with_capacity(expansion.len() + 1);
+        for &part in &expansion {
+            let (sum, error) = two_sum(value, part);
+            if !sum.is_finite() || !error.is_finite() {
+                return None;
+            }
+            if error != 0.0 {
+                next.push(error);
+            }
+            value = sum;
+        }
+        if value != 0.0 {
+            next.push(value);
+        }
+        expansion = next;
+    }
+    if expansion.last().is_some_and(|&value| value < 0.0) {
+        return None;
+    }
+    let ground: f64 = expansion.iter().sum();
+    (ground.is_finite() && ground >= 0.0).then_some(ground)
+}
+
+// Both graph and eigen factors must resolve each represented nonzero entry;
+// a large unrelated diagonal or cancellation inside QR cannot hide its loss.
+// At structural zeros only, use the local product sum as the roundoff scale.
+fn check_resistance_root(resistance: &[f64], root: &[f64], n: usize) -> Result<(), PhsError> {
+    for i in 0..n {
+        for j in i..n {
+            let mut gram = 0.0;
+            let mut products = 0.0;
+            for k in 0..n {
+                let product = root[k * n + i] * root[k * n + j];
+                gram += product;
+                products += product.abs();
+            }
+            let magnitude = if resistance[i * n + j] != 0.0 {
+                resistance[i * n + j].abs()
+            } else {
+                products
+            };
+            if !gram.is_finite()
+                || !magnitude.is_finite()
+                || (gram - resistance[i * n + j]).abs()
+                    > 128.0 * n as f64 * f64::EPSILON * magnitude
+            {
+                return Err(refuse(
+                    "physical resistance factor exceeds componentwise roundoff",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // QR's factors retain exact zero rows/columns without asking for numerical

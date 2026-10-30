@@ -871,3 +871,29 @@ admits the resulting structure. The caller supplies physical units and boundary
 orientation. The focused Maxwell-oscillator test verifies that independent
 force leverages reproduce the original motion, memory, energy, loss and total
 physical work, and checks malformed/nonfinite column refusal.
+
+### Positive heat for passive Foster and general material resistance
+
+Exact-heat preparation separates resistance components by exact nonzero
+off-diagonal connectivity. Exactly symmetric, diagonally dominant components
+use every original edge and ground square. Ground signs use exact expansions
+through the existing `fs_math::eft::two_sum` owner; rounded accumulation cannot
+rescue a negative ground. The existing QR owner compresses graph factors only
+when their row count exceeds the component dimension. General material
+components retain the checked eigensolver and strict nonnegative eigenvalue
+admission at each component's own absolute scale.
+
+Both paths must reconstruct every nonzero resistance entry within
+`128 * component_dimension * EPSILON` relative to that entry; structural zeros
+use the local absolute product sum as their roundoff scale. Unresolved factors
+refuse. This retains weak thermal components beside strong mechanical damping
+without clipping eigenvalues, applying a numerical rank threshold or adding
+viscosity. The original R, complete physical generator, heat quadrature,
+prepared warm path and independent work/energy admission remain unchanged.
+
+The seven focused exact-heat tests include the four original small-motion
+regressions plus actual Foster duct edge-power/work integration and subdivision,
+a non-diagonally-dominant material block alongside a compressed passive graph
+and separate 1e-200 loss, and refusal of a represented tiny-indefinite matrix
+whose negative ground is hidden by ordinary summation. These are native
+physical-equation checks, not interval or full-workspace qualification.

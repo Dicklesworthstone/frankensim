@@ -2,7 +2,10 @@
 use fs_phs::linear_exact::{
     LinearSplitBudget, PreparedExactZoh, integrated_resistance_loss, split_quadratic, step_render,
 };
-use fs_phs::{PortHamiltonian, QuadraticStorage, RelaxationBranch, mass_spring_damper};
+use fs_phs::{
+    AcousticSection, ChainOutlet, PortHamiltonian, QuadraticStorage, RelaxationBranch,
+    ViscothermalPin, acoustic_chain_outlet_wall, mass_spring_damper,
+};
 
 fn budget(n: usize) -> LinearSplitBudget {
     LinearSplitBudget {
@@ -258,4 +261,190 @@ fn complete_material_heat_matches_physical_rhs_and_clock_subdivision_with_atomic
         .unwrap();
     assert_eq!(next, record.x);
     assert_eq!(accepted.dissipated, record.dissipated);
+}
+
+#[test]
+fn separate_general_graph_and_tiny_loss_components_keep_their_physical_scales() {
+    let n = 7;
+    let mut r = vec![0.0; n * n];
+    // Positive definite, but not diagonally dominant: needs the general factor.
+    r[0] = 1.0;
+    r[1] = 2.0;
+    r[n] = 2.0;
+    r[n + 1] = 5.0;
+    // Six edge rows in four coordinates exercise the existing QR compression.
+    for i in 2..6 {
+        for j in i + 1..6 {
+            r[i * n + i] += 0.25;
+            r[j * n + j] += 0.25;
+            r[i * n + j] = -0.25;
+            r[j * n + i] = -0.25;
+        }
+    }
+    r[6 * n + 6] = 1e-200;
+    let mut q = vec![0.0; n * n];
+    for i in 0..n {
+        q[i * n + i] = 1.0;
+    }
+    let sys = PortHamiltonian::new(
+        n,
+        1,
+        vec![0.0; n * n],
+        r.clone(),
+        vec![0.0; n],
+        Box::new(QuadraticStorage::new(q, n).unwrap()),
+    )
+    .unwrap();
+    let dt = 0.25;
+    let prepared = PreparedExactZoh::new(&sys, dt, budget(n)).unwrap();
+    assert_eq!(sys.structure().1, r);
+    let mut initial = [0.0; 7];
+    initial[6] = 1.0;
+    relative(
+        prepared.step(&initial, &[0.0]).unwrap().dissipated,
+        dt * 1e-200,
+        5e-12,
+    );
+    initial[6] = 0.0;
+    initial[2] = 1.0;
+    initial[3] = -1.0;
+    relative(
+        prepared.step(&initial, &[0.0]).unwrap().dissipated,
+        -(-2.0 * dt).exp_m1(),
+        5e-12,
+    );
+    initial[2..6].fill(1.0);
+    assert!(prepared.step(&initial, &[0.0]).unwrap().dissipated < 1e-28);
+    // Also check the admitted non-diagonally-dominant component's heat against
+    // independently integrated coupled relaxation, not an energy difference.
+    initial.fill(0.0);
+    initial[0] = 0.3;
+    initial[1] = -0.1;
+    let reference = rk4([0.3, -0.1, 0.0], dt, 2048, |x| {
+        [
+            -x[0] - 2.0 * x[1],
+            -2.0 * x[0] - 5.0 * x[1],
+            x[0] * x[0] + 4.0 * x[0] * x[1] + 5.0 * x[1] * x[1],
+        ]
+    });
+    relative(
+        prepared.step(&initial, &[0.0]).unwrap().dissipated,
+        reference[2],
+        5e-12,
+    );
+}
+
+#[test]
+fn a_negative_ground_hidden_below_the_diagonal_ulp_is_not_admitted_as_passive() {
+    let tiny = 2.0_f64.powi(-55);
+    // The rounded row-0 sum is 1, but its exact ground is -tiny. At [1,1,1]
+    // this represented matrix has negative physical power. An eigensolver's
+    // stopping tolerance must not erase the weak off-diagonal and admit it.
+    for (n, r) in [
+        (3, vec![1.0, -1.0, -tiny, -1.0, 1.0, 0.0, -tiny, 0.0, tiny]),
+        (2, vec![1.0, -1.0, -1.0, 1.0 - 1e-13]),
+    ] {
+        let mut q = vec![0.0; n * n];
+        for i in 0..n {
+            q[i * n + i] = 1.0;
+        }
+        let sys = PortHamiltonian::new(
+            n,
+            1,
+            vec![0.0; n * n],
+            r.clone(),
+            vec![0.0; n],
+            Box::new(QuadraticStorage::new(q, n).unwrap()),
+        )
+        .unwrap();
+        assert!(PreparedExactZoh::new(&sys, 0.1, budget(n)).is_err());
+        assert_eq!(sys.structure().1, r);
+    }
+}
+
+#[test]
+fn actual_foster_duct_heat_matches_edge_power_quadrature_and_subdivision() {
+    // Evaluated dry air at 293.15 K and 101325 Pa. Keep the actual constructor:
+    // its two thermal graph nullspaces previously produced rounded negative
+    // eigenvalues beside the much stronger viscous series conductances.
+    let density = 1.204_105_429_879_052_6;
+    let sound_speed = 343.233_814_329_002;
+    let viscosity = 1.813_405_882_148_823_4e-5;
+    let pin = ViscothermalPin {
+        dynamic_viscosity: viscosity,
+        gamma: 1.4,
+        prandtl: 0.708_416_410_255_627_1,
+        foster_branches: 3,
+    };
+    let sys = acoustic_chain_outlet_wall(
+        &[AcousticSection {
+            length: 0.3,
+            radius: 0.01,
+            outlet_radius: 0.01,
+            cells: 2,
+        }],
+        density,
+        sound_speed,
+        ChainOutlet::PressureRelease,
+        1,
+        &[],
+        Some(&pin),
+        None,
+    )
+    .unwrap();
+    let n = sys.state_dim();
+    assert_eq!(n, 16);
+    let q = sys.storage().exact_quadratic_matrix().unwrap();
+    let (j, r, g) = sys.structure();
+    let original_r = r.to_vec();
+    let initial_effort = [
+        30.0, 1e-4, -10.0, -0.5e-4, 0.4e-4, 0.1e-4, -0.3e-4, 10.0, -2.0, 3.0, -0.1e-4, 0.5e-4,
+        -0.6e-4, -1.0, 4.0, 2.0,
+    ];
+    let initial: [f64; 16] = core::array::from_fn(|i| initial_effort[i] / q[i * n + i]);
+    let input = 1e-5;
+    let duration = 1.0 / 48_000.0;
+    let prepared = PreparedExactZoh::new(&sys, duration, budget(n)).unwrap();
+    let record = prepared.step(&initial, &[input]).unwrap();
+    assert_eq!(sys.structure().1, original_r);
+    let mut extended = [0.0; 18];
+    extended[..n].copy_from_slice(&initial);
+    let inertance = density * 0.15 / (core::f64::consts::PI * 0.01_f64.powi(2));
+    let steady_resistance = 8.0 * viscosity / (density * 0.01_f64.powi(2)) * inertance;
+    let reference = rk4(extended, duration, 2048, |x| {
+        let effort: [f64; 16] = core::array::from_fn(|i| q[i * n + i] * x[i]);
+        let mut result = [0.0; 18];
+        for i in 0..n {
+            result[i] = g[i] * input
+                + (0..n)
+                    .map(|k| (j[i * n + k] - r[i * n + k]) * effort[k])
+                    .sum::<f64>();
+            result[17] += input * g[i] * effort[i];
+            for k in i + 1..n {
+                assert!(r[i * n + k] <= 0.0);
+                result[16] += -r[i * n + k] * (effort[i] - effort[k]).powi(2);
+            }
+        }
+        // Independently integrate the actual Foster edge powers and two
+        // Poiseuille grounds; no endpoint energy subtraction or prepared root.
+        result[16] += steady_resistance * (effort[1].powi(2) + effort[3].powi(2));
+        result
+    });
+    relative(record.dissipated, reference[16], 3e-10);
+    let energy = sys.hamiltonian(&initial);
+    let state_error: f64 = (0..n)
+        .map(|i| q[i * n + i] * (record.x[i] - reference[i]).powi(2))
+        .sum();
+    assert!(state_error < 1e-20 * energy);
+    assert!((record.supplied - reference[17]).abs() < 2e-11 * energy);
+    let closure = sys.hamiltonian(&record.x) - energy + record.dissipated - record.supplied;
+    assert!(closure.abs() < 2e-11 * energy);
+    let half = PreparedExactZoh::new(&sys, duration / 2.0, budget(n)).unwrap();
+    let a = half.step(&initial, &[input]).unwrap();
+    let b = half.step(&a.x, &[input]).unwrap();
+    relative(a.dissipated + b.dissipated, record.dissipated, 3e-11);
+    let subdivision_error: f64 = (0..n)
+        .map(|i| q[i * n + i] * (b.x[i] - record.x[i]).powi(2))
+        .sum();
+    assert!(subdivision_error < 1e-20 * energy);
 }
