@@ -6,6 +6,9 @@
 //! wall momentum. Neither gas is an infinite reservoir or an acoustic-flow
 //! proxy. This first-order transfer-then-motion split needs time refinement.
 
+/// One finite material/phase body exchanges heat with both metered gases.
+pub mod thermal;
+
 use super::super::{GasEnergyError, PistonError, invalid, poll, positive};
 use super::{DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep};
 use fs_material::thermochemical_gas::energy::parcel::transfer::GasMassTransferStep;

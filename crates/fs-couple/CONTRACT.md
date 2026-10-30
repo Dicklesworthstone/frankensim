@@ -8754,6 +8754,43 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## One finite thermal body on the moving two-gas valve
+
+`DoubleActingGasPiston::thermal_valve_candidate` composes the metering valve
+with the existing two-face finite-enthalpy thermal owner. Native compressible
+species/enthalpy transport is sampled once at the original opening. Every
+bounded heat/momentum trial then starts from that same post-transfer pair and
+the same original body; no trial resamples mass flow or spends received gas.
+
+The original thermal solver resolves both conductances at the actual two gas
+midpoints and one body enthalpy midpoint. It retains the source evaluations,
+separate heat brackets and aggregate joint-trial budget. Sensible or latent body
+storage uses the existing material phase chart. The accepted face heats enter
+the original valve finalization, including its post-motion pressure-order gate
+and independent native caloric, kinetic and force-work measurements.
+
+`DoubleThermalValveCandidate` returns both gases, shared wall and the one body
+endpoint together. Its report contains the native mechanical account once,
+inside the valve report, plus the original thermal/interface observations.
+The enclosing energy residual adds the body's independently measured enthalpy
+balance to the reference-stable valve balance: both face heats and transported
+enthalpy cancel internally, while all prescribed heat and force work stay
+explicit. Source failure, nested-work exhaustion or final cancellation returns
+no partially advanced owner. Callers publish the complete candidate without
+applying its accepted heat a second time.
+
+The metering geometry remains frozen over the first-order transport stage.
+Finite-body negligible-pV-work and fixed-geometry assumptions remain those of
+the original enthalpy owner; no wall melting-induced shape, jet recoil or
+heterogeneous acoustic junction is inferred.
+
+Three focused regression groups cover independent caloric/species/body energy
+with sensible and latent storage, exact reductions to the original insulated
+valve and closed-valve thermal owners, and late source/budget/cancellation
+refusals with exact retry and continuation. They are authored but unexecuted in
+the unavailable pinned native build environment; syntax/format checks do not
+establish numerical or experimental validation.
+
 ## Moving metering valves between independent finite gases
 
 `cavity_phs::piston::double_acting::valve` connects the original two finite
