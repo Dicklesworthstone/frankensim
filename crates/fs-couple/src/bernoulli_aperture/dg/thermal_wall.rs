@@ -5,6 +5,9 @@
 //! retained caloric chart then pays the native wall's signed parameter work;
 //! every endpoint trial starts from that same marched state and initial body.
 
+/// Reciprocal finite gas and material-wall heat on the continuing acoustic step.
+pub mod gas;
+
 use super::{ApertureDg, DgApertureFrame, accept_acoustic_candidate_observed, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::ApertureDrive;
@@ -314,18 +317,19 @@ fn feedback_error(error: feedback::ScalarError<AcousticRealizeError>) -> Acousti
     }
 }
 
+/// Reuse the same original enthalpy/native-wall work solve in joint transactions.
+/// The observer bounds nested material work before evaluating each endpoint.
 #[allow(clippy::too_many_arguments)]
-fn finish(
+fn body_candidate(
     marched: &DgPortLoad,
-    mut frame: DgApertureFrame,
-    initial_energy_j: f64,
     body: UniformEnthalpyStepInput<'_>,
     material: &MaterialCard,
     temperature_axis: &str,
     controls: FiniteWallThermalSolve,
     wall_heat_j: f64,
+    observed: &mut impl FnMut() -> Result<(), AcousticRealizeError>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(DgPortLoad, FiniteWallApertureDgStep), AcousticRealizeError> {
+) -> Result<Candidate, AcousticRealizeError> {
     let heat = body.internal_heat_j + wall_heat_j;
     if !heat.is_finite()
         || (wall_heat_j != 0.0 && heat == body.internal_heat_j)
@@ -337,11 +341,12 @@ fn finish(
     }
     let h0 = body.initial.specific_enthalpy_j_kg();
     let density = body.mass_kg / body.volume_m3;
-    let mut candidate = feedback::solve_scalar(
+    feedback::solve_scalar(
         controls.exchange.heat_bracket_j,
         controls.exchange.source_tolerance_j,
         controls.exchange.maximum_iterations,
         |work, trials, cancelled| {
+            observed()?;
             let net = heat - work;
             let dh = net / body.mass_kg;
             let h1 = h0 + dh;
@@ -406,7 +411,25 @@ fn finish(
         },
         cancelled,
     )
-    .map_err(feedback_error)?;
+    .map_err(feedback_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    marched: &DgPortLoad,
+    mut frame: DgApertureFrame,
+    initial_energy_j: f64,
+    body: UniformEnthalpyStepInput<'_>,
+    material: &MaterialCard,
+    temperature_axis: &str,
+    controls: FiniteWallThermalSolve,
+    wall_heat_j: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(DgPortLoad, FiniteWallApertureDgStep), AcousticRealizeError> {
+    let mut candidate = body_candidate(
+        marched, body, material, temperature_axis, controls, wall_heat_j,
+        &mut || Ok(()), cancelled,
+    )?;
     refresh_output::<core::convert::Infallible>(&mut candidate.load, &mut frame.duct, cancelled)
         .map_err(|error| match error {
             FiniteGasDgError::Cancelled => AcousticRealizeError::Cancelled,

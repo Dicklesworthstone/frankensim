@@ -15775,3 +15775,42 @@ thermal/Newmark references, original conductivity/contact/emissivity swaps,
 source-integrated conduction, continuing loaded motion, and source/domain/budget/
 late-cancellation refusal with deterministic retry. Fixture values are numerical
 test data, not measured material validation.
+
+## Reciprocal finite gas and material-wall heat on the continuing DG aperture
+
+The joint finite gas/wall transaction couples one original closed gas parcel
+and one original finite main-wall enthalpy body through the existing
+MaterialConductionLayers interface. Gas conductivity comes from the resolved
+gas internal-energy midpoint. Solid conductivity comes from the original body
+card at its enthalpy midpoint, with explicit source conditions, property
+selection, area and effective conduction distances. Temperature is reconstructed
+from each owner's conserved energy; arithmetic temperature averaging is not
+substituted.
+
+The original mechanics and complete acoustic load march once at their accepted
+initial state. Native solid heat is integrated once from that interval's solved
+ports. Every interface trial returns to the same marched acoustic candidate and
+original gas/body inventories. Existing gas-work and wall-work solves refresh
+the native endpoint in the declared gas-then-wall order. Their sum is the
+represented storage intervention. One signed interface heat is credited to the
+gas and debited from the body, and the midpoint conductance law must close its
+own residual.
+
+The enclosing balance includes gas internal energy, body enthalpy, mechanical
+and acoustic storage, original terminal exchange and external inputs. Deposited
+native wall heat is subtracted once from exported dissipation. Interface heat
+and both native parameter works cancel internally; inferred numerical,
+mechanical, gas or terminal loss is never invented as material heating.
+A global material-trial limit supplements the existing individual caloric,
+work, interface and energy budgets. Final refusal or cancellation preserves all
+accepted inventories, mechanics, material histories, terminal poles and clocks.
+
+The gas subreport describes the gas-first intermediate endpoint, while the
+coupled frame describes the final gas-plus-wall endpoint of the same acoustic
+march. Their storage must not be added together. This route retains fixed gas
+mass/composition/volume, a complete fixed-density all-solid wall body and the
+existing first-order frozen acoustic partition. Independent branch inventories,
+computed exterior mean-pressure feedback and an upstream tract retain the
+closed-inventory refusals. Expansion, phase transfer, resolved thermal profiles,
+advection and convection require their own declared owners and are not implied
+by the series-conduction model.
