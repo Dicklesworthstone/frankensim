@@ -1,4 +1,4 @@
-import type {NativeWindAttachment, NativeWindGasSources, NativeWindOptions, NativeStringProfiles, NativeCoatingStrainGuard, NativeFiniteGasStringSources, NativeRenderer} from './native-wind-client.mjs';
+import type {NativeWindAttachment, NativeWindGasSources, NativeWindOptions, NativeStringProfiles, NativeCoatingStrainGuard, NativeFiniteGasStringSources, NativeMaterialManifest, NativeRenderer} from './native-wind-client.mjs';
 
 export const MAX_SOURCE_BYTES: number;
 export const MAX_ATTACHMENTS: number;
@@ -21,6 +21,7 @@ export interface NativeExperiment {
   stringProfiles?: NativeStringProfiles;
   coatingStrainGuard?: NativeCoatingStrainGuard;
   finiteGasString?: NativeFiniteGasStringSources;
+  materialManifests?: NativeMaterialManifest[];
 }
 export function editableAttachmentText(bytes: Uint8Array): string;
 export function editedAttachmentBytes(original: Uint8Array, text: string): Uint8Array;

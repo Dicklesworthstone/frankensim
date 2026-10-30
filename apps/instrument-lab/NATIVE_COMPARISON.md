@@ -27,6 +27,50 @@ WAVs can be downloaded unchanged. The browser holds only one reference and one
 current result; replacing/clearing them releases their old object URLs. Leaving
 the page releases playback and captures. They are not a persistent library.
 
+## Compile material data while rendering
+
+Configure the local server with `--material-compiler /absolute/path/xtask`
+(or `FSIM_MATDB_COMPILER`), using the existing executable from
+`cargo build -p xtask`. The selected wind, string or finite-gas renderer stays
+configured as before.
+
+In **Compile original material sources**, add a binding from an attached
+manifest to the exact pack path used by the performance or gas association.
+Attach every source file named by the manifest with its original relative
+location. For the measured-string laboratory example, the bindings can be:
+
+| Original attached manifest | Attached source table | Output pack path |
+| --- | --- | --- |
+| `cello/manifest.tsv` | `cello/properties.tsv` | `cello-g-whole.fsmatpk` |
+| `plate/body-manifest.tsv` | `plate/body.tsv` | `body.fsmatpk` |
+
+Use the original manifests and tables from the
+[measured-string recipe](../../crates/fs-couple/examples/material_strings/MEASURED_STRINGS.md).
+Remove precompiled attachments at those output paths before adding the bindings.
+The native `xtask matdb-pack` compiler creates each new pack, and its exact bytes
+enter the selected physical renderer. Source properties and source domains are
+never interpreted in the browser.
+
+**Bind claims to a named material card** passes the explicit chemistry, phase,
+process and revision to the compiler's `--material-state` option. Use the
+identity required by your original material source and performance. Leave this
+off for ordinary claims, model, interface or species packs; the measured-string
+example above uses the original claims packs. The native compiler owns material
+identity and revision admission. A material name never supplies coefficients.
+
+Use **Edit text…** on a source table, apply the edit, and render again to compare
+the changed material through the same native pressure and listening path.
+Generated pack paths are also available in the existing gas and specimen source
+selectors. Changing source bytes or a compilation binding makes the preceding
+WAV visibly stale. **Save experiment** retains the exact original manifests,
+tables and explicit compilation settings, so reopening uses the same inputs.
+
+Compilation and rendering share the request's execution budget and cancellation.
+Generated packs and original inputs together obey the existing attachment count
+and byte limits. A missing compiler, refused source, collision with an existing
+attachment, or oversized result stops the request; a stale binary is never
+substituted. Experiments using precompiled packs keep their existing path.
+
 ## What is measured
 
 The service reads `music_render`'s native provenance sidecar or

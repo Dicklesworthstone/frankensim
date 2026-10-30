@@ -450,3 +450,31 @@ test('finite-gas results require bounded complete history and calibration for th
     async () => new Response(stream, {headers:{'Content-Type':'application/json'}})));
   assert.equal(cancelled, true, 'oversized JSON must cancel the reader before decoding its payload');
 });
+
+test("material manifests reach the exact render packet with explicit card identity and unchanged PCM", async () => {
+  const connected = {...status, supportsMaterialManifests:true,
+    maximumAttachments:32, maximumAttachmentFileBytes:8388608,
+    maximumAttachmentBytes:33554432, maximumRequestBytes:48*1024*1024};
+  const source = "frankensim-material-modal-valve-v1\r\n# original material and performer\r\n";
+  const files = [{path:"sources/manifest.tsv", bytes:new TextEncoder().encode("original manifest\r\n")},
+    {path:"sources/properties.tsv", bytes:new TextEncoder().encode("original table µ\r\n")}];
+  const options = {materialManifests:[{packPath:"reed.pack", manifestPath:files[0].path,
+    materialState:{chemistry:"authored composite", phase:"solid", process:"source state", revision:0}}]};
+  const expected = wave();
+  const result = await renderNativeWindBundle(source, files, connected, options, undefined, async (_url, request) => {
+    const packet = validateInput(new TextEncoder().encode(request.body), true);
+    assert.deepEqual(packet.materialManifests, options.materialManifests);
+    assert.deepEqual(packet.attachments, files);
+    assert.equal(new TextDecoder().decode(packet.source), source);
+    return audio(expected);
+  });
+  assert.deepEqual(new Uint8Array(await result.arrayBuffer()), expected);
+  const never = async () => assert.fail("unsupported or colliding compilation must not be sent");
+  for (const supportsMaterialManifests of [undefined, false])
+    await assert.rejects(renderNativeWindBundle(source, files, {...connected, supportsMaterialManifests},
+      options, undefined, never), /material compiler/);
+  await assert.rejects(renderNativeWindBundle(source, files, {...connected, maximumAttachments:2},
+    options, undefined, never), /Too many source attachments/);
+  await assert.rejects(renderNativeWindBundle(source, files, connected,
+    {materialManifests:[{packPath:files[0].path, manifestPath:files[0].path}]}, undefined, never), /collide/);
+});

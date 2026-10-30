@@ -149,6 +149,8 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     if (status.supportsCoatingStrainGuard !== true)
       throw new Error('This local renderer cannot retain coating strain checks. Update the local server.');
   }
+  if (options.materialManifests !== undefined && status.supportsMaterialManifests !== true)
+    throw new Error('This local renderer cannot compile material manifests. Configure the xtask material compiler on the local server.');
   if (options.decimate !== undefined && typeof options.decimate !== 'boolean') {
     throw new Error("Choose whether to use native decimation explicitly.");
   }
@@ -174,12 +176,13 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
   }
   let body = bytes, contentType = "text/plain;charset=utf-8";
   if (attachments.length || options.decimate || options.gasSources !== undefined || renderer !== 'wind'
-      || options.stringProfiles !== undefined || options.coatingStrainGuard !== undefined || options.finiteGasString !== undefined) {
+      || options.stringProfiles !== undefined || options.coatingStrainGuard !== undefined || options.finiteGasString !== undefined || options.materialManifests !== undefined) {
     if (![status.maximumAttachments, status.maximumAttachmentFileBytes,
       status.maximumAttachmentBytes, status.maximumRequestBytes].every(positiveInteger)) {
       throw new Error("This local renderer does not support attached source files. Update the local server.");
     }
-    if (attachments.length > status.maximumAttachments) throw new Error("Too many source attachments.");
+    const compiledCount = Array.isArray(options.materialManifests) ? options.materialManifests.length : 0;
+    if (attachments.length + compiledCount > status.maximumAttachments) throw new Error("Too many source attachments and compiled packs.");
     let total = 0;
     for (const file of attachments) {
       if (typeof file.path !== "string" || !(file.bytes instanceof Uint8Array) || !file.bytes.byteLength
@@ -194,7 +197,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     if (new TextEncoder().encode(body).byteLength > status.maximumRequestBytes) {
       throw new Error("The complete experiment exceeds the renderer's request limit.");
     }
-    if (renderer === 'finite-gas-string' || options.finiteGasString !== undefined || options.coatingStrainGuard !== undefined)
+    if (renderer === 'finite-gas-string' || options.finiteGasString !== undefined || options.coatingStrainGuard !== undefined || options.materialManifests !== undefined)
       validateInput(new TextEncoder().encode(body), true);
   }
   const response = await request(RENDER_URL, {

@@ -187,3 +187,56 @@ test('finite-gas string packets require complete frozen sources and preserve nat
   assert.throws(() => admit({...packet, renderer:'wind',
     source:Buffer.from('frankensim-reed-performance-v1\n').toString('base64')}));
 });
+
+test('material manifest experiments retain original source data, explicit identities and generated gas bindings', () => {
+  const source = 'frankensim-material-strings-v3\r\n# unchanged measured setup and temperature_known 0\r\n';
+  const files = [
+    {path:'sources/manifest.tsv', bytes:encode('original manifest\r\n')},
+    {path:'sources/properties.tsv', bytes:encode('original source table · µ\r\n')},
+  ];
+  const materialState = {chemistry:'authored mixture', phase:'solid', process:'measured-state', revision:0};
+  const materialManifests = [
+    {packPath:'materials/string.pack', manifestPath:files[0].path},
+    {packPath:'gas/transport.pack', manifestPath:files[0].path, materialState},
+    {packPath:'gas/species.pack', manifestPath:files[0].path},
+    {packPath:'gas/nasa9.pack', manifestPath:files[0].path},
+  ];
+  const options = {renderer:'strings', materialManifests,
+    gasSources:{components:[{speciesPath:'gas/species.pack', nasa9Path:'gas/nasa9.pack',
+      transportPath:'gas/transport.pack'}], phase:'frozen', waterSpecies:null}};
+  const saved = serializeNativeExperiment(source, files, options);
+  const restored = validateInput(encode(saved), true);
+  assert.deepEqual(restored.materialManifests, materialManifests);
+  assert.deepEqual(restored.attachments, files);
+  assert.deepEqual(restored.gasSources, options.gasSources);
+  assert.equal(decode(restored.source), source);
+  assert.deepEqual(validateInput(encode(serializeNativeExperiment(source, restored.attachments, restored)), true), restored);
+  files[1].bytes = encode('authored material-table variant\n');
+  const changed = validateInput(encode(serializeNativeExperiment(source, files, options)), true);
+  assert.notDeepEqual(changed.attachments[1].bytes, restored.attachments[1].bytes);
+  assert.deepEqual(changed.source, restored.source);
+  assert.deepEqual(changed.materialManifests, restored.materialManifests);
+});
+
+test('material compilation requires original manifest inputs, new confined targets and explicit complete identities', () => {
+  const source = 'frankensim-material-modal-valve-v1\n';
+  const files = [{path:'source/manifest.tsv', bytes:encode('original source')}];
+  const binding = {packPath:'reed.pack', manifestPath:files[0].path};
+  const check = value => validateInput(encode(serializeNativeExperiment(source, files,
+    {materialManifests:value})), true);
+  for (const value of [[], null, {}, [null], [{...binding, manifestPath:'absent.tsv'}],
+    [{...binding, packPath:files[0].path}], [binding, binding],
+    [{...binding, packPath:'output.wav'}], [{...binding, packPath:'../reed.pack'}],
+    [{...binding, packPath:'source'}], [{...binding, packPath:'reed.pack/part'}, binding],
+    [binding, {packPath:'other.pack', manifestPath:'reed.pack'}],
+    [binding, ...Array.from({length:31}, (_, i) => ({...binding, packPath:'pack-' + i}))],
+    ...[{}, {chemistry:'c', phase:'s', process:'p'}, {chemistry:'c', phase:'s', process:'p', revision:-1},
+      {chemistry:'c', phase:'s', process:'p', revision:4294967296},
+      {chemistry:'c', phase:'s', process:'p', revision:'0'}].map(materialState => [{...binding, materialState}])]) {
+    assert.throws(() => check(value));
+  }
+  assert.equal(check([binding]).materialManifests[0].materialState, undefined,
+    'plain source claims, models, interfaces and species acquire no guessed material identity');
+  const old = validateInput(encode(serializeNativeExperiment(source, files)), true);
+  assert.equal(old.materialManifests, undefined);
+});

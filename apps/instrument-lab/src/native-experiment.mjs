@@ -127,6 +127,41 @@ function validateFiniteGasString(value, renderer, attachedNames, gasSources, dec
   return {solidPath:value.solidPath, gasRecordPath:value.gasRecordPath};
 }
 
+function admitAttachmentPath(path, names) {
+  if (typeof path !== 'string' || utf8Bytes(path) > 512 || !path
+      || path.startsWith('-') || path.includes('\\') || path.includes(':') || /[\u0000-\u0020\u007f]/.test(path)
+      || path.split('/').some(part => !part || part === '.' || part === '..' || part.startsWith('.')))
+    throw new NativeWindError(400, 'Attachment paths must be explicit relative paths without whitespace or traversal.');
+  if (names.has(path) || [...names].some(name => path.startsWith(name + '/') || name.startsWith(path + '/')))
+    throw new NativeWindError(400, 'Attachment paths collide with another input or the native output.');
+  names.add(path);
+  return path;
+}
+
+function validateMaterialManifests(value, attachments, names) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.length || attachments.length + value.length > MAX_ATTACHMENTS)
+    throw new NativeWindError(400, 'Material manifests and attached sources together must fit the source-file limit.');
+  const original = new Set(attachments.map(file => file.path));
+  return value.map(binding => {
+    if (!binding || typeof binding !== 'object' || Array.isArray(binding)
+        || Object.keys(binding).some(key => !['packPath', 'manifestPath', 'materialState'].includes(key))
+        || !original.has(binding.manifestPath))
+      throw new NativeWindError(400, 'Each material compilation needs an original attached manifest and a new pack path.');
+    const packPath = admitAttachmentPath(binding.packPath, names);
+    const state = binding.materialState;
+    if (state !== undefined && (!state || typeof state !== 'object' || Array.isArray(state)
+        || Object.keys(state).some(key => !['chemistry', 'phase', 'process', 'revision'].includes(key))
+        || ['chemistry', 'phase', 'process'].some(key => typeof state[key] !== 'string'
+          || !state[key].trim() || utf8Bytes(state[key]) > 512 || /[\u0000-\u001f\u007f]/.test(state[key]))
+        || !Number.isInteger(state.revision) || state.revision < 0 || state.revision > 4294967295))
+      throw new NativeWindError(400, 'A named material card needs explicit chemistry, phase, process and an unsigned 32-bit revision.');
+    return {packPath, manifestPath:binding.manifestPath,
+      ...(state === undefined ? {} : {materialState:{chemistry:state.chemistry, phase:state.phase,
+        process:state.process, revision:state.revision}})};
+  });
+}
+
 /** Decode an attached text source for editing; binary packs stay byte attachments. */
 export function editableAttachmentText(bytes) {
   if (!(bytes instanceof Uint8Array) || !bytes.length)
@@ -163,7 +198,7 @@ export function validateInput(bytes, bundled = false) {
   if (packet?.format !== 'frankensim-native-wind-input-v1' || !Array.isArray(packet.attachments)
       || packet.attachments.length > MAX_ATTACHMENTS)
     throw new NativeWindError(400, 'Experiment requires its version and at most 32 source attachments.');
-  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources', 'renderer', 'stringProfiles', 'coatingStrainGuard', 'finiteGasString'].includes(key))
+  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources', 'renderer', 'stringProfiles', 'coatingStrainGuard', 'finiteGasString', 'materialManifests'].includes(key))
       || (packet.decimate !== undefined && typeof packet.decimate !== 'boolean'))
     throw new NativeWindError(400, 'Experiment contains unsupported fields or an invalid native decimation option.');
   const renderer = packet.renderer === undefined ? 'wind' : packet.renderer;
@@ -174,21 +209,16 @@ export function validateInput(bytes, bundled = false) {
   const attachments = packet.attachments.map(file => {
     if (!file || typeof file !== 'object' || Object.keys(file).some(key => !['path', 'bytes'].includes(key)))
       throw new NativeWindError(400, 'Source attachments require only their path and exact bytes.');
-    const path = file?.path;
-    if (typeof path !== 'string' || utf8Bytes(path) > 512 || !path
-        || path.startsWith('-') || path.includes('\\') || path.includes(':') || /[\u0000-\u0020\u007f]/.test(path)
-        || path.split('/').some(part => !part || part === '.' || part === '..' || part.startsWith('.')))
-      throw new NativeWindError(400, 'Attachment paths must be explicit relative paths without whitespace or traversal.');
-    if (names.has(path) || [...names].some(name => path.startsWith(name + '/') || name.startsWith(path + '/')))
-      throw new NativeWindError(400, 'Attachment paths collide with another input or the native output.');
-    names.add(path);
+    const path = admitAttachmentPath(file?.path, names);
     const content = decodedBase64(file.bytes, MAX_ATTACHMENT_FILE_BYTES);
     if (!content.length) throw new NativeWindError(400, 'Source attachments must be nonempty.');
     total += content.length;
     if (total > MAX_ATTACHMENT_BYTES) throw new NativeWindError(413, 'Attachments exceed the 32 MiB combined limit.');
     return {path, bytes:content};
   });
-  const attachedNames = new Set(attachments.map(file => file.path));
+  const materialManifests = validateMaterialManifests(packet.materialManifests, attachments, names);
+  const attachedNames = new Set([...attachments.map(file => file.path),
+    ...(materialManifests ?? []).map(binding => binding.packPath)]);
   const gasSources = validateGasSources(packet.gasSources, attachedNames);
   const stringProfiles = validateStringProfiles(packet.stringProfiles, renderer, attachedNames);
   const coatingStrainGuard = validateCoatingStrainGuard(packet.coatingStrainGuard, renderer, stringProfiles);
@@ -196,7 +226,8 @@ export function validateInput(bytes, bundled = false) {
   return {source, attachments, decimate:packet.decimate ?? false, ...(renderer !== 'wind' ? {renderer} : {}),
     ...(gasSources ? {gasSources} : {}), ...(stringProfiles ? {stringProfiles} : {}),
     ...(coatingStrainGuard ? {coatingStrainGuard} : {}),
-    ...(finiteGasString ? {finiteGasString} : {})};
+    ...(finiteGasString ? {finiteGasString} : {}),
+    ...(materialManifests ? {materialManifests} : {})};
 }
 
 /** Same versioned packet for HTTP rendering and files. No token, executable or output path is stored. */
@@ -209,5 +240,6 @@ export function serializeNativeExperiment(source, attachments, options = {}) {
     ...(options.gasSources !== undefined ? {gasSources:options.gasSources} : {}),
     ...(options.stringProfiles !== undefined ? {stringProfiles:options.stringProfiles} : {}),
     ...(options.coatingStrainGuard !== undefined ? {coatingStrainGuard:options.coatingStrainGuard} : {}),
-    ...(options.finiteGasString !== undefined ? {finiteGasString:options.finiteGasString} : {})});
+    ...(options.finiteGasString !== undefined ? {finiteGasString:options.finiteGasString} : {}),
+    ...(options.materialManifests !== undefined ? {materialManifests:options.materialManifests} : {})});
 }

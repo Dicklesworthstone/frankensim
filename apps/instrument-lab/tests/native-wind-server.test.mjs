@@ -17,7 +17,7 @@ const bundle = (bytes = source(), files = []) => Buffer.from(JSON.stringify({
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn) { for (let i = 0; i < 400; i++) { if (await fn()) return; await pause(10); } throw new Error('Timed out waiting for test condition.'); }
 async function setup(options = {}) {
-  const {withStrings = false, withFiniteGasString = false, ...serverOptions} = options;
+  const {withStrings = false, withFiniteGasString = false, withMaterialCompiler = false, ...serverOptions} = options;
   const dir = await mkdtemp(join(tmpdir(), 'native-wind-test-')), dist = join(dir, 'dist'), tempRoot = join(dir, 'jobs');
   await mkdir(dist); await mkdir(tempRoot); await writeFile(join(dist, 'index.html'), '<title>Synthetic adapter test</title>');
   const receipt = join(dir, 'receipt.json'), engine = join(dir, 'fixture.mjs');
@@ -53,7 +53,25 @@ if (finite) {
 }
 `;
   await writeFile(engine, fixture, {mode:0o700});
-  const app = createNativeWindServer({engine, stringsEngine:withStrings ? engine : null,
+  const compiler = join(dir, 'material-compiler.mjs'), compilerReceipt = join(dir, 'compiler.json');
+  if (withMaterialCompiler) await writeFile(compiler, `#!${process.execPath}
+// Synthetic compiler transport witness; no material normalization or physics.
+import {readFileSync, writeFileSync, truncateSync} from 'node:fs';
+import {dirname, join} from 'node:path';
+const args = process.argv.slice(2);
+if (args[0] !== 'matdb-pack') process.exit(3);
+const manifest = args[args.indexOf('--manifest') + 1], output = args[args.indexOf('--out') + 1];
+const source = readFileSync(manifest), table = readFileSync(join(dirname(manifest), 'properties.tsv'));
+writeFileSync(${JSON.stringify(compilerReceipt)}, JSON.stringify({args, pid:process.pid,
+ manifest:source.toString('base64'), table:table.toString('base64')}));
+if (source.toString().includes('compile-refuse')) { console.error('synthetic material refusal'); process.exit(2); }
+if (source.toString().includes('compile-hang')) {
+ process.on('SIGTERM', () => {}); await new Promise(() => setInterval(() => {}, 1000));
+}
+writeFileSync(output, Buffer.concat([Buffer.from('compiled transport witness\\0'), source, table]), {flag:'wx', mode:0o600});
+if (source.toString().includes('compile-large')) truncateSync(output, ${MAX_ATTACHMENT_FILE_BYTES + 1});
+`, {mode:0o700});
+  const app = createNativeWindServer({engine, materialCompiler:withMaterialCompiler ? compiler : null, stringsEngine:withStrings ? engine : null,
     finiteGasStringEngine:withFiniteGasString ? engine : null, dist, tempRoot, ...serverOptions});
   await new Promise((accept, reject) => {app.server.once('error', reject); app.server.listen(0, '127.0.0.1', accept);});
   const url = `http://127.0.0.1:${app.server.address().port}`;
@@ -62,7 +80,7 @@ if (finite) {
   const run = (bytes = source(), extra = {}) => fetch(url + '/api/native-wind/render', {method:'POST',
     headers:{'Content-Type':'text/plain;charset=utf-8', 'X-Native-Wind-Token':initial.token}, body:bytes, ...extra});
   const runBundle = bytes => run(bytes, {headers:{'Content-Type':'application/json', 'X-Native-Wind-Token':initial.token}});
-  return {...app, url, dir, receipt, tempRoot, status, initial, run, runBundle,
+  return {...app, url, dir, receipt, compilerReceipt, tempRoot, status, initial, run, runBundle,
     async cleanup() { await app.shutdown(); await rm(dir, {recursive:true, force:true}); }};
 }
 const native = {skip:process.platform === 'win32'};
@@ -499,5 +517,75 @@ test('finite-gas history, sample-rate and calibration failures never return a pa
       await until(async () => !(await app.status()).busy);
       assert.deepEqual(await readdir(app.tempRoot), []);
     }
+  } finally { await app.cleanup(); }
+});
+
+test('attached material manifests compile through xtask arguments and feed the actual native source paths', native, async () => {
+  const app = await setup({withMaterialCompiler:true});
+  try {
+    assert.equal(app.initial.supportsMaterialManifests, true);
+    const names = ['sources/manifest.tsv', 'sources/properties.tsv', 'reed.pack'];
+    const input = Buffer.from('frankensim-material-modal-valve-v1\r\n# read-files ' + JSON.stringify(names) + '\r\n');
+    const manifest = Buffer.from('original manifest µ\r\n');
+    const packet = JSON.parse(bundle(input, [[names[0], manifest], [names[1], Buffer.from('original table\r\n')]]));
+    packet.materialManifests = [{packPath:'reed.pack', manifestPath:names[0],
+      materialState:{chemistry:'authored composite', phase:'solid', process:'measured-state', revision:0}}];
+    for (const table of [Buffer.from('original table\r\n'), Buffer.from('authored data-only material variant\r\n')]) {
+      packet.attachments[1].bytes = table.toString('base64');
+      const response = await app.runBundle(JSON.stringify(packet));
+      assert.equal(response.status, 200); assert.equal((await response.arrayBuffer()).byteLength, 48);
+      const compiled = JSON.parse(await readFile(app.compilerReceipt, 'utf8'));
+      const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+      assert.deepEqual(compiled.args, ['matdb-pack', '--manifest', join(record.cwd, names[0]),
+        '--out', join(record.cwd, 'reed.pack'), '--material-state',
+        'authored composite', 'solid', 'measured-state', '0']);
+      assert.equal(compiled.manifest, manifest.toString('base64'));
+      assert.equal(compiled.table, table.toString('base64'));
+      const expectedPack = Buffer.concat([Buffer.from('compiled transport witness\0'), manifest, table]);
+      assert.deepEqual(record.files.map(file => [file.path, file.bytes]),
+        [[names[0], manifest.toString('base64')], [names[1], table.toString('base64')],
+          ['reed.pack', expectedPack.toString('base64')]]);
+      assert.equal(record.bytes, input.toString('base64'));
+      assert.deepEqual(record.args, ['wind', join(record.cwd, 'input.performance'), join(record.cwd, 'output.wav'),
+        '--self-contained', ...names.flatMap(name => ['--attached-source', name])]);
+      await until(async () => !(await app.status()).busy);
+    }
+  } finally { await app.cleanup(); }
+});
+
+test('unavailable, refusing or oversized material compilation never starts the native performer', native, async () => {
+  for (const [mode, expected] of [[null, 503], ['compile-refuse', 400], ['compile-large', 502]]) {
+    const app = await setup({withMaterialCompiler:mode !== null});
+    try {
+      const packet = JSON.parse(bundle(source(), [
+        ['source/manifest.tsv', Buffer.from(mode ?? 'original manifest')],
+        ['source/properties.tsv', Buffer.from('original source table')]]));
+      packet.materialManifests = [{packPath:'reed.pack', manifestPath:'source/manifest.tsv'}];
+      assert.equal(app.initial.supportsMaterialManifests, mode !== null);
+      const response = await app.runBundle(JSON.stringify(packet));
+      assert.equal(response.status, expected);
+      assert.match((await response.json()).error, /compiler|material pack/);
+      await until(async () => !(await app.status()).busy);
+      await assert.rejects(readFile(app.receipt), {code:'ENOENT'});
+    } finally { await app.cleanup(); }
+  }
+});
+
+test('browser cancellation includes a running material compiler and prevents subsequent rendering', native, async () => {
+  const app = await setup({withMaterialCompiler:true});
+  try {
+    const packet = JSON.parse(bundle(source(), [
+      ['source/manifest.tsv', Buffer.from('compile-hang')],
+      ['source/properties.tsv', Buffer.from('original source table')]]));
+    packet.materialManifests = [{packPath:'reed.pack', manifestPath:'source/manifest.tsv'}];
+    const controller = new AbortController();
+    const pending = app.run(JSON.stringify(packet), {signal:controller.signal,
+      headers:{'Content-Type':'application/json', 'X-Native-Wind-Token':app.initial.token}}).catch(error => error);
+    await until(async () => { try { await readFile(app.compilerReceipt); return true; } catch { return false; } });
+    const record = JSON.parse(await readFile(app.compilerReceipt, 'utf8'));
+    controller.abort(); await pending;
+    await until(async () => !(await app.status()).busy);
+    assert.throws(() => process.kill(record.pid, 0));
+    await assert.rejects(readFile(app.receipt), {code:'ENOENT'});
   } finally { await app.cleanup(); }
 });

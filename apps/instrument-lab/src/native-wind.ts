@@ -10,6 +10,7 @@ import splitApertureResolvedDgSource from "../../../crates/fs-couple/examples/re
 import sideApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-side-aperture.performance?raw";
 import radiatingMouthResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-radiating-mouth.performance?raw";
 import separateOpeningsResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-separate-openings.performance?raw";
+import multipleEscapesResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-multiple-escapes.performance?raw";
 import finiteReservoirResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-finite-reservoir.performance?raw";
 import slitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-slit-edge.performance?raw";
 import siSlitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-si-slit-edge.performance?raw";
@@ -34,9 +35,10 @@ import regionalCavityStringSource from "../../../crates/fs-couple/examples/mater
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
 import shearStringSource from "../../../crates/fs-couple/examples/material_strings/shear-layer-bow.material-strings?raw";
 import finiteGasStringSource from "../../../crates/fs-couple/examples/finite_gas_string/browser-feedback-flow.string?raw";
-import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles, type NativeCoatingStrainGuard, type NativeFiniteGasStringSources, type NativeRenderer } from "./native-wind-client.mjs";
+import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles, type NativeCoatingStrainGuard, type NativeFiniteGasStringSources, type NativeMaterialManifest, type NativeRenderer } from "./native-wind-client.mjs";
 import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
+import { createNativeMaterialManifests } from "./native-material-manifests";
 import { createNativeAtmosphereControls } from "./native-atmosphere";
 import { createNativeStringProfiles } from "./native-string-profiles";
 import { createNativeFiniteGasStringControls } from "./native-finite-gas-string";
@@ -142,6 +144,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: a finite 10 mL nitrogen chamber feeds one resolved opening while a separate opening radiates alongside the bore and cork duct. The chamber's mass and energy evolve with the actual flow, changing its pressure and temperature.",
     help: "Load the supplied nitrogen species, NASA9 and transport packs through Gas source files, with frozen phase and no water species. finite_reservoir declares the chamber volume and exchange limits; its boundary hold carries only an endpoint. Change volume or initial aperture density and temperature to alter the source. This 8 ms numerical fixture has no breathing pump, mean gas transport through the acoustic ducts, or measured flute qualification. See docs/RESOLVED_NSF_DG_COUPLING.md for the source-pack commands.",
+  },
+  {
+    name: "resolved-dg-multiple-escapes.performance",
+    label: "Resolved flow — multiple radiating openings",
+    renderer: "resolved",
+    source: multipleEscapesResolvedDgSource,
+    decimate: true,
+    intro: "Starter: the same resolved gas field feeds a bore and two atmospheric openings. The microphone combines each original signed tile flow with its declared placement, delay and exterior gas propagation.",
+    help: "Repeat reservoir_observation aperture with each original aperture index. Changing the selected gas updates all exterior paths while retaining the original grid. Multiple observers require an explicit aperture index when selecting the existing single reservoir_feedback reaction. This numerical fixture does not establish measured flute geometry or a multi-reservoir radiation reaction.",
   },
   {
     name: "resolved-dg-slit-edge.performance",
@@ -424,10 +435,11 @@ export function createNativeWindPanel(): HTMLElement {
   const cancelAttachment = el("button", {type:"button", class:"btn"}, "Cancel edit");
   const attachmentEditor = el("section", {"aria-label":"Edit attached physical source"},
     attachmentEditorTitle,
-    el("p", {class:"small muted"}, "Edit original profile, geometry or control records. Apply keeps this file's path and all profile associations; the native renderer checks the physical data. Binary material, interface and model packs use Replace."),
+    el("p", {class:"small muted"}, "Edit original manifest, material table, profile, geometry or control records. Apply keeps this file's path and all profile associations; the native renderer checks the physical data. Binary material, interface and model packs use Replace."),
     attachmentSource, el("div", {class:"btn-row"}, applyAttachment, cancelAttachment));
   attachmentEditor.hidden = true;
   const attachmentIdentity = (): string => JSON.stringify(attachments.map(file => [file.path, file.sha256]));
+  const materials = createNativeMaterialManifests(() => { refreshSourcePaths(); edited(); });
   const gas = createNativeGasControls(() => edited());
   const profiles = createNativeStringProfiles(() => edited());
   const finiteGasString = createNativeFiniteGasStringControls(() => edited());
@@ -472,6 +484,7 @@ export function createNativeWindPanel(): HTMLElement {
   let renderedGasIdentity: string | null = null;
   let renderedProfileIdentity: string | null = null;
   let renderedFiniteGasIdentity: string | null = null;
+  let renderedMaterialIdentity: string | null = null;
   let renderedRenderer: string | null = null;
   let sourceName = selectedExample.name;
 
@@ -493,6 +506,8 @@ export function createNativeWindPanel(): HTMLElement {
     decimate.disabled = locked || heated;
     decimation.hidden = heated;
     gas.setDisabled(locked);
+    materials.setDisabled(locked);
+    materials.setAvailable(status?.supportsMaterialManifests === true);
     atmosphere.setDisabled(otherEdit);
     atmosphere.element.hidden = heated;
     profiles.element.hidden = selectedRenderer() !== "strings";
@@ -513,7 +528,7 @@ export function createNativeWindPanel(): HTMLElement {
     atmosphere.refresh(currentSource());
     sourceInfo.textContent = `${sourceName} · ${new TextEncoder().encode(currentSource()).byteLength.toLocaleString()} bytes`;
     if (renderedSource !== null) {
-      renderedFrom.textContent = currentSource() === renderedSource && attachmentIdentity() === renderedAttachmentIdentity && decimate.checked === renderedDecimate && gas.identity() === renderedGasIdentity && selectedRenderer() === renderedRenderer && profiles.identity() === renderedProfileIdentity && finiteGasString.identity() === renderedFiniteGasIdentity
+      renderedFrom.textContent = currentSource() === renderedSource && attachmentIdentity() === renderedAttachmentIdentity && decimate.checked === renderedDecimate && gas.identity() === renderedGasIdentity && selectedRenderer() === renderedRenderer && profiles.identity() === renderedProfileIdentity && finiteGasString.identity() === renderedFiniteGasIdentity && materials.identity() === renderedMaterialIdentity
         ? "This WAV was rendered from the performance and source files currently shown."
         : "This WAV is from your previous performance or source files. Render again to hear your edits.";
     }
@@ -532,6 +547,7 @@ export function createNativeWindPanel(): HTMLElement {
     renderedGasIdentity = null;
     renderedProfileIdentity = null;
     renderedFiniteGasIdentity = null;
+    renderedMaterialIdentity = null;
     renderedRenderer = null;
     renderedFiles.textContent = "";
     if (previewUrl !== null) URL.revokeObjectURL(previewUrl);
@@ -586,11 +602,13 @@ export function createNativeWindPanel(): HTMLElement {
     const submittedAttachmentIdentity = attachmentIdentity();
     const submittedDecimate = decimate.checked;
     const submittedRenderer = selectedRenderer();
+    let submittedMaterials: NativeMaterialManifest[] | undefined;
     let submittedGas: NativeWindGasSources | undefined;
     let submittedProfiles: NativeStringProfiles | undefined;
     let submittedCoatingGuard: NativeCoatingStrainGuard | undefined;
     let submittedFiniteGas: NativeFiniteGasStringSources | undefined;
     try {
+      submittedMaterials = materials.read();
       submittedGas = gas.read();
       submittedProfiles = submittedRenderer === "strings" ? profiles.read() : undefined;
       submittedCoatingGuard = submittedRenderer === "strings" ? profiles.readCoatingStrainGuard() : undefined;
@@ -600,6 +618,7 @@ export function createNativeWindPanel(): HTMLElement {
     const submittedGasIdentity = gas.identity();
     const submittedProfileIdentity = profiles.identity();
     const submittedFiniteGasIdentity = finiteGasString.identity();
+    const submittedMaterialIdentity = materials.identity();
     const controller = new AbortController();
     rendering = controller;
     audio.pause();
@@ -616,11 +635,15 @@ export function createNativeWindPanel(): HTMLElement {
         const native = await renderNativePerformance(submitted, submittedFiles, connected, {renderer:submittedRenderer,
           decimate:submittedDecimate, gasSources:submittedGas, stringProfiles:submittedProfiles,
           coatingStrainGuard:submittedCoatingGuard,
-          finiteGasString:submittedFiniteGas}, controller.signal);
+          finiteGasString:submittedFiniteGas, materialManifests:submittedMaterials}, controller.signal);
         if (rendering !== controller || controller.signal.aborted) return;
         let details = submittedFiles.length
           ? "Rendered source files: " + submittedFiles.map(file => `${file.path} · ${file.bytes.byteLength.toLocaleString()} bytes · SHA-256 ${file.sha256}`).join("\n")
           : "This render used no attached source files.";
+        if (submittedMaterials) details += "\nCompiled material sources: " + submittedMaterials.map(binding =>
+          `${binding.packPath} from ${binding.manifestPath}` + (binding.materialState
+            ? ` · material ${binding.materialState.chemistry} / ${binding.materialState.phase} / ${binding.materialState.process} / revision ${binding.materialState.revision}`
+            : " · original source envelope")).join("; ");
         if (submittedGas) details += "\nGas associations: " + submittedGas.components
           .map(component => `${component.speciesPath} / ${component.nasa9Path} / ${component.transportPath}`).join("; ")
           + ` · phase ${submittedGas.phase} · water ${submittedGas.waterSpecies ?? "none"}`;
@@ -640,6 +663,7 @@ export function createNativeWindPanel(): HTMLElement {
         renderedGasIdentity = submittedGasIdentity;
         renderedProfileIdentity = submittedProfileIdentity;
         renderedFiniteGasIdentity = submittedFiniteGasIdentity;
+        renderedMaterialIdentity = submittedMaterialIdentity;
         renderedRenderer = submittedRenderer;
         renderedFiles.textContent = details;
         audio.src = nextUrl;
@@ -687,6 +711,7 @@ export function createNativeWindPanel(): HTMLElement {
     canonical.hidden = false;
     attachments = [];
     decimate.checked = selectedExample.decimate;
+    materials.reset();
     gas.reset();
     profiles.reset();
     finiteGasString.reset();
@@ -707,21 +732,25 @@ export function createNativeWindPanel(): HTMLElement {
     if (selectedRenderer() === "finite-gas-string") decimate.checked = false;
     edited(); void checkConnection();
   });
+  const refreshSourcePaths = (): void => {
+    const originalPaths = attachments.map(file => file.path);
+    materials.setAttachments(originalPaths);
+    const sourcePaths = [...originalPaths, ...materials.packPaths()];
+    gas.setAttachments(sourcePaths);
+    profiles.setAttachments(sourcePaths);
+    finiteGasString.setAttachments(sourcePaths);
+  };
   const drawAttachments = (): void => {
     attachmentInfo.textContent = attachments.length
       ? `${attachments.length} source files · ${attachments.reduce((sum, file) => sum + file.bytes.byteLength, 0).toLocaleString()} bytes. Paths must match the performance exactly.`
       : "Attach the original material packs or artifacts referenced by your performance. Keep their source paths; edit a path below when the description uses a subdirectory.";
     attachmentList.replaceChildren();
-    gas.setAttachments(attachments.map(file => file.path));
-    profiles.setAttachments(attachments.map(file => file.path));
-    finiteGasString.setAttachments(attachments.map(file => file.path));
+    refreshSourcePaths();
     for (const attached of attachments) {
       const path = el("input", { type: "text", value: attached.path, spellcheck: "false",
         "aria-label": `Source path for ${attached.path}` });
       path.addEventListener("input", () => {
-        attached.path = path.value; gas.setAttachments(attachments.map(file => file.path));
-        profiles.setAttachments(attachments.map(file => file.path));
-        finiteGasString.setAttachments(attachments.map(file => file.path)); edited();
+        attached.path = path.value; refreshSourcePaths(); edited();
       });
       const editText = el("button", {type:"button", class:"btn"}, "Edit text…");
       editText.addEventListener("click", () => {
@@ -816,6 +845,7 @@ export function createNativeWindPanel(): HTMLElement {
     try {
       const packet = serializeNativeExperiment(currentSource(), attachments, {
         renderer:selectedRenderer(), decimate:decimate.checked, gasSources:gas.read(),
+        materialManifests:materials.read(),
         stringProfiles:selectedRenderer() === "strings" ? profiles.read() : undefined,
         coatingStrainGuard:selectedRenderer() === "strings" ? profiles.readCoatingStrainGuard() : undefined,
         finiteGasString:selectedRenderer() === "finite-gas-string" ? finiteGasString.read() : undefined,
@@ -827,7 +857,7 @@ export function createNativeWindPanel(): HTMLElement {
       const link = el("a", {href:url, download:sourceName.replace(/(?:\.native)?\.json$|\.(?:performance|material-strings|string)$/, "") + ".native.json"});
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      showResult("Experiment saved with the original performance, source files, profiles and gas associations. Open it to continue this material comparison.");
+      showResult("Experiment saved with the original performance, source files, material bindings, profiles and gas associations. Open it to continue this material comparison.");
     } catch (error) { showResult(message(error), true); }
   });
   experimentFile.addEventListener("change", () => {
@@ -850,6 +880,7 @@ export function createNativeWindPanel(): HTMLElement {
       // Commit the complete imported experiment only after every byte and
       // association was admitted. A bad file leaves the current model intact.
       attachments = nextAttachments;
+      materials.load(experiment.materialManifests);
       source.value = text; loadedSource = text; loadedEditorValue = source.value;
       sourceName = selected.name;
       renderer.value = experiment.renderer ?? "wind";
@@ -877,7 +908,7 @@ export function createNativeWindPanel(): HTMLElement {
     const maxBytes = Math.min(32 * 1024 * 1024, status?.maximumAttachmentBytes ?? 32 * 1024 * 1024);
     const total = attachments.reduce((sum, file) => sum + file.bytes.byteLength, 0)
       + selected.reduce((sum, file) => sum + file.size, 0);
-    if (attachments.length + selected.length > maxFiles || total > maxBytes
+    if (attachments.length + selected.length + materials.packPaths().length > maxFiles || total > maxBytes
         || selected.some(file => !file.size || file.size > maxFileBytes)) {
       showResult(`Choose at most ${maxFiles} nonempty files, ${maxFileBytes.toLocaleString()} bytes per file and ${maxBytes.toLocaleString()} bytes combined.`, true);
       return;
@@ -964,7 +995,7 @@ export function createNativeWindPanel(): HTMLElement {
       sourceHelp,
       el("p", {}, "Wind and material-string descriptions use their original native loaders. Attach the exact material packs and artifacts named by the source, including subdirectory paths. Changing a pack changes its physical properties; missing data and unsupported states remain native refusals. Keep the same declared pressure scale when comparing renders."),
       el("p", {}, "Rendering uses the local music_render, material_strings or finite_gas_string executable. The heated string performer evolves its material and finite atmosphere together and returns synchronized CSV observations with the WAV. The hosted review page can show and edit the source; audio is available through the local renderer server. Wind and material-string decimation retains the original mechanics; heated strings require a declared 48 kHz clock."),
-      el("p", {}, "Open experiment loads a complete native source packet, including its original material files, gas associations and specimen profiles. Save experiment keeps the current configuration in that same format; neither action renders sound. The material-string launcher can prepare these packets directly from a physical assembly."),
+      el("p", {}, "Open experiment loads a complete native source packet, including its original material files, manifest bindings, gas associations and specimen profiles. Save experiment keeps the current configuration in that same format; neither action renders sound. The material-string launcher can prepare these packets directly from a physical assembly."),
       el("p", {}, canonical,
         " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/tree/main/crates/fs-couple/examples/material_strings", target: "_blank", rel: "noopener"}, "String source-pack instructions"),
         " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/blob/main/crates/fs-couple/examples/material_strings/MEASURED_STRINGS.md", target: "_blank", rel: "noopener"}, "Measured string source recipe"),
@@ -973,7 +1004,7 @@ export function createNativeWindPanel(): HTMLElement {
     atmosphere.element,
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),
-    source, attachmentPanel, attachmentEditor, profiles.element, finiteGasString.element, gas.element, decimation,
+    source, attachmentPanel, attachmentEditor, materials.element, profiles.element, finiteGasString.element, gas.element, decimation,
     el("div", { class: "btn-row nw-actions" }, render, cancel, openExperiment, saveExperiment, open, attach, reset, check,
       file, experimentFile, attachmentFile, replacementFile),
     result, playback, comparison.element);

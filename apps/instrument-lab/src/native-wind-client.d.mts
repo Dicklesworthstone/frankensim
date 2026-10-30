@@ -16,6 +16,7 @@ export interface NativeWindStatus {
   supportsGasSources?: boolean;
   supportsPressureReceipts?: boolean;
   supportsCoatingStrainGuard?: boolean;
+  supportsMaterialManifests?: boolean;
 }
 export type NativeWindRequest = typeof globalThis.fetch;
 export function nativeWindStatus(signal?: AbortSignal, request?: NativeWindRequest): Promise<NativeWindStatus>;
@@ -34,6 +35,11 @@ export interface NativeWindGasSources {
 }
 export interface NativeStringProfiles { bodyPath?: string; stopPath?: string; contactThermalPath?: string; }
 export interface NativeCoatingStrainGuard { maximumBytes: number; maximumWork: number; }
+export interface NativeMaterialManifest {
+  packPath: string;
+  manifestPath: string;
+  materialState?: {chemistry: string; phase: string; process: string; revision: number};
+}
 export interface NativeFiniteGasStringSources { solidPath: string; gasRecordPath: string; }
 export type NativeRenderer = 'wind' | 'strings' | 'resolved' | 'finite-gas-string';
 export interface NativeWindOptions {
@@ -43,6 +49,7 @@ export interface NativeWindOptions {
   stringProfiles?: NativeStringProfiles;
   coatingStrainGuard?: NativeCoatingStrainGuard;
   finiteGasString?: NativeFiniteGasStringSources;
+  materialManifests?: readonly NativeMaterialManifest[];
 }
 export function renderNativeWindBundle(source: string, attachments: readonly NativeWindAttachment[], status: NativeWindStatus, options?: NativeWindOptions, signal?: AbortSignal, request?: NativeWindRequest): Promise<Blob>;
 export interface NativePerformanceResult { wave: Blob; receipt: NativePressureReceipt | null; history?: Blob; }
