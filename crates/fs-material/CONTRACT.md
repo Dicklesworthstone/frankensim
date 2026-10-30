@@ -4923,3 +4923,47 @@ independent Cp/CpT quadrature; subdivided, latent-only, small and zero heat;
 source overlap, matching and work refusal; and chart identity, numerical
 representation and early/late cancellation. The tests compile the exact
 original production sources against the new ice thermochemistry library.
+
+## Freezing on the shared conservative thermal timeline
+
+`phase::water::freezing::thermal::FreezingWaterThermalLaw` connects the same
+ice/liquid enthalpy owner to `fs_thermal::enthalpy::ThermalLaw`. Preparation
+obtains outward-rounded whole-interval Cp bounds independently for original
+Ice Ih and IF97 Region 1. The maximum reciprocal lower Cp bounds dT/dh over
+the entire immutable caloric path; the physical fusion plateau has exactly
+zero slope. A latent-only chart prepares no sensible-branch certificate.
+The retained bounds are reused across thermal steps and checkpoints.
+
+The adapter uses the existing temperature inversion and stable pressure-local
+integral of dh/T. It does not introduce a second heat solver, apparent-Cp
+regularization, a sampled stability minimum, or a new energy reference.
+Unresolved source bounds and cancellation yield no prepared law. Runtime
+domain errors propagate through the existing transactional thermal owner.
+
+`cargo run -p fs-material --example water_freeze_thaw` evolves a uniform
+50 g sample at 101325 Pa through cold and warm reservoir contact. The original
+sources give Tm=273.152519079769 K and fusion enthalpy 333426.514501674 J/kg.
+An explicitly supplied 5 W/K contact conducts to 253.15 K until 300 s and then
+293.15 K until 650 s. Temperature and phase inventory emerge from conserved
+enthalpy: the sample crosses the fusion plateau, becomes cold ice, thaws, and
+returns to warm liquid. The example separately reports liquid mass and volume
+fractions, physical free volume, Delta U, pressure work, heat, sample/reservoir
+entropy and the temporal entropy defect.
+
+The source Gibbs mismatch is 0.016931408 J/kg and the explicit pressure-local
+fusion entropy correction is 6.198518076e-5 J/(kg K); neither is hidden as
+physical entropy generation. The native run's maximum independent energy
+residual is 6.84e-10 J. This is arithmetic/solver closure, not experimental
+prediction accuracy. The example assumes internal equilibrium and supplied
+contact conductance. Reference thermal geometry remains fixed while material
+volume is reported separately; no resolved front, nucleation, freezing-induced
+stress, moving contact area or rigid-vessel behavior is inferred.
+
+Ten integrated native tests pass: the six freezing-core tests plus four
+thermal tests for complete branch Cp bounds and latent-only preparation,
+reservoir-driven freeze/thaw with timestep-refined entropy defect, isolated
+ice/water contact with conserved heat and positive thermal entropy, and
+cancellation/domain atomicity. The complete original fs-thermal library,
+the freezing material namespace and the executable example build and run
+without numerical stubs. Full workspace/DSR verification remains unavailable
+because the required sibling constellation checkouts and DSR runner are absent.

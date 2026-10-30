@@ -13,6 +13,9 @@
 //! enthalpy. Its explicitly reported source matching correction must never be
 //! substituted for absolute entropy in pressure-changing equipment.
 
+/// Whole-path bounded heat-transfer integration on the shared thermal timeline.
+pub mod thermal;
+
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::ice::{
     IceIhError, IceIhState, IceMeltingSolution, IceMeltingSolve, MINIMUM_TEMPERATURE_K,
