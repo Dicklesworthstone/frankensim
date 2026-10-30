@@ -98,6 +98,8 @@ pub struct HarmonicModel {
     m: usize,
     q: Vec<f64>,
     generator: Vec<f64>,
+    // Original J-R, retained for constitutive chain rules without inverting Q.
+    structure: Vec<f64>,
     r: Vec<f64>,
     g: Vec<f64>,
     budget: HarmonicBudget,
@@ -200,7 +202,7 @@ impl HarmonicModel {
             .checked_mul(m)
             .ok_or_else(|| invalid("port dimension overflow"))?;
         let bytes = square
-            .checked_mul(80)
+            .checked_mul(88)
             .and_then(|v| ports.checked_mul(16).and_then(|p| v.checked_add(p)))
             .and_then(|v| n.checked_mul(256).and_then(|p| v.checked_add(p)))
             .and_then(|v| m.checked_mul(64).and_then(|p| v.checked_add(p)))
@@ -254,16 +256,23 @@ impl HarmonicModel {
                 }
             }
         }
+        let mut structure = vec![0.0; square];
         let mut generator = vec![0.0; square];
         for i in 0..n {
             poll(cancelled)?;
             for k in 0..n {
+                structure[i * n + k] = j[i * n + k] - r[i * n + k];
+            }
+            if structure[i * n..(i + 1) * n].iter().any(|v| !v.is_finite()) {
+                return Err(invalid("original structure is not representable"));
+            }
+            for k in 0..n {
                 generator[i * n + k] = if k < n_diff {
                     (0..n_diff)
-                        .map(|l| (j[i * n + l] - r[i * n + l]) * q[l * n + k])
+                        .map(|l| structure[i * n + l] * q[l * n + k])
                         .sum()
                 } else {
-                    j[i * n + k] - r[i * n + k]
+                    structure[i * n + k]
                 };
             }
         }
@@ -277,6 +286,7 @@ impl HarmonicModel {
             m,
             q,
             generator,
+            structure,
             r: r.to_vec(),
             g: g.to_vec(),
             budget,
@@ -445,7 +455,7 @@ impl HarmonicFactor<'_> {
             .collect();
         let supply: f64 = port_power.iter().sum();
         let balance = loss - supply;
-        if effort.iter().chain(&output).any(|&z| !finite(z))
+        if effort.iter().chain(&output).any(|&v| !finite(v))
             || port_power.iter().any(|v| !v.is_finite())
             || [energy, loss, supply, balance]
                 .iter()

@@ -4,6 +4,9 @@
 use super::*;
 use fs_la::pole_response::{PoleResponseError, PoleResponseOptions, PreparedPole};
 
+mod derivatives;
+pub use derivatives::{HarmonicParameterDirection, HarmonicPoleDerivative};
+
 /// Numerical-owner limits plus physical mapping/output limits. Each limit
 /// applies to preparation and independently to each complete batch. The
 /// immutable source model has its own HarmonicBudget; no state is truncated.
