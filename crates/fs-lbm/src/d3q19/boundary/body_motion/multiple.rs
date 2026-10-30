@@ -111,7 +111,8 @@ impl BoundaryGrid3 {
     }
 
     /// Advance actual spheres with simultaneous sphere-pair and prescribed-plane
-    /// normal films. Plane points are at this tick's START and translate at their
+    /// films, including each plane's optional reciprocal tangential/spin law.
+    /// Plane points are at this tick's START and translate at their
     /// declared velocity. The exchange uses all midpoint gaps; actual start,
     /// midpoint and endpoint gaps admit both original affine relative drifts.
     ///

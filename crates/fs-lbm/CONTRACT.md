@@ -4855,3 +4855,96 @@ outside this increment. Midpoint damping retains its existing passivity
 interpretation and unresolved endpoint reversal; it is not L-stable or a claim
 that arbitrarily small-gap trajectories are temporally resolved. The broad
 moving-boundary bead remains open.
+
+### Reciprocal tangential and parallel-spin wall lubrication
+
+`LubricationPlane3::with_tangential(cutoff_gap, roughness_gap)` adds an explicit
+leading-logarithmic sphere-wall resistance to the same frozen and moving
+immersed-body entry points. The original normal sphere-pair and plane films
+remain present and simultaneous. The tangential scales are independent of both
+normal cutoffs and retain `0 < roughness <= cutoff`. Admission also requires
+the tangential cutoff to be at most `0.02*radius` for every supplied sphere.
+This is a declared small-gap model domain, not a certified accuracy bound.
+Actual gaps remain positive even below the roughness scale.
+
+For either unit tangent t, let `s = n cross t`,
+`u = (v_body - v_plane).t`, and `w = R*omega.s`. The missing resistance in
+these power-conjugate coordinates is
+`k * [[4,-1],[-1,4]]`, with
+`k = (4*pi*mu*R/5) * ln(h_cut/max(h,h_rough))` below the cutoff, zero above.
+The coefficients follow the Goldman-Cox-Brenner leading logarithms, reproduced
+in Ryu, Hommel, Roberts and Frechette (2019), equations 7-10,
+<https://link.aps.org/accepted/10.1103/PhysRevE.99.022802>. The constant terms
+cancel in the cutoff difference; higher-order gap terms are not modeled.
+The code evaluates the logarithm through the existing deterministic
+`fs_math::det::ln` owner. Normal-axis spin has no leading singular resistance
+in this model and receives no invented correction.
+
+The two eigenvalues are `3*k` and `5*k`, acting on `(u+w)/sqrt(2)` and
+`(u-w)/sqrt(2)`. Both tangential directions therefore add four scalar modes to
+the original impulse-space Schur solve. This retains translation-rotation
+reciprocity, pressure-induced moments and nonzero rolling-mode resistance;
+zero material-point slip alone does not eliminate the hydrodynamic loss.
+All original normal modes and all new modes participate in the same solve,
+including off-diagonal terms for shared bodies and arbitrary admitted full
+inertia tensors. The tangent basis is an internal coordinate choice, not an
+anisotropic friction direction.
+
+Each original native six-velocity response is still factored once. Its three
+rotational impulse columns are evaluated only for bodies touched by an active
+tangential block; normal-only and inactive-tangent paths retain the previous
+three-column arithmetic. There is no second velocity solver, additional fluid
+collision pass, or extra film population source. The existing maximum of
+64 bodies, 64 planes and 64 physical films remains. Scalar solve work has its
+own `SphereLubrication3::with_resistance_mode_limit` control: default 64,
+explicit opt-in through 320. A normal film consumes one mode; an active
+tangential block consumes four additional modes. Storage is O(modes squared)
+and factorization O(modes cubed), with bounded polling and fallible reservation.
+
+`SphereLubricationExchange3` now reports center spin impulses separately,
+includes spin in each body's world angular impulse and midpoint wrench work,
+and reports actual mode dimension and tangential-plane count. Every frozen
+body's angular balance subtracts the film spin impulse exactly once; the
+original moving rigid-body owner propagates that changed momentum through its
+unchanged half-drifts. Each plane report includes the free reaction couple at
+its actual footpoints. For body force F and center torque T at center c,
+the wall receives force -F at footpoint p and couple
+`-T - (c-p) cross F`. The resulting world angular impulses cancel, including
+the moment of tangential traction. Dropping that couple would violate the
+global angular balance.
+
+The loss is the nonnegative sum of each scalar resistance times its ACTUAL
+returned midpoint mode speed squared. Body film work includes force times
+translation plus center torque times spin. Since these planes translate but
+do not rotate, prescribed-plane work remains reaction force dotted with plane
+velocity. The work residual includes both body and plane work plus modeled
+loss. Spin impulses are never mislabeled as external actuator torque or
+counted again in the fluid populations. All fields, mode limits, endpoint
+geometry, native speed admission and cancellation complete before publication.
+
+Six new focused native groups pass alongside all 38 previous related groups.
+They check an independent physical two-coordinate translation/spin solve and
+reaction couple; rolling and opposed-spin eigenmodes, including second-order
+time refinement; a separately assembled 12-by-12 full-tensor physical system
+against the native 16-mode mixed sphere/plane solve under scene rotation,
+common translation and plane permutation; actual sampled close-wall motion;
+independent tangential cutoff/roughness and exact inactive-option results;
+and mode/asymptotic-domain admission, cancellation, late driven-plane crossing
+and atomic deterministic retry. Rolling-mode errors at 4/8/16 steps are
+`1.339430650594553e-7`, `3.348109667462851e-8`, and
+`8.369982382530616e-9`. Over 24 sampled ticks, two full-tensor bodies beside an
+actual voxel wall with Guo forcing, external loads and normal particle-pair
+films have a maximum independently reconstructed world momentum defect of
+`3.037859740881953e-13` lattice units and modeled loss
+`7.877813066050252e-10`.
+
+These are focused selected-source native checks, not full Cargo/DSR, ISA parity
+or experimental calibration. The surfaces still supply missing-film ports;
+they do not create or move resolved fluid boundaries. Fully flooded Newtonian
+creeping flow, fixed wall normals, constant prescribed translation and the
+small-gap leading asymptotics are the admitted model. General tangential
+sphere-pair resistance, finite-gap complete drag, cavitation, solid contact,
+rotating or recoiling walls, thermal allocation and complete moving-wall fluid
+displacement remain outside it. The original midpoint damping is not L-stable
+and does not establish temporal resolution of arbitrarily stiff gap dynamics.
+The broad moving-boundary bead remains open.

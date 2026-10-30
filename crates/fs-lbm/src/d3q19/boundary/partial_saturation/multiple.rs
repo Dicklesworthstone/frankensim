@@ -50,7 +50,7 @@ pub struct PartialSaturationBodiesExchange3<const N: usize> {
     /// Imposed fluid body-force impulse, torque and local midpoint work once
     /// over the whole fluid, including retained interior populations.
     pub forcing: PartialSaturationForcing3,
-    /// Unresolved normal sphere-gap resistance, separate from the populations.
+    /// Unresolved sphere-gap/plane resistance, separate from the populations.
     /// Zero for the original uncorrected entry points.
     pub lubrication: SphereLubricationExchange3<N>,
     /// Actual rounded composite correction minus summed per-body corrections.
@@ -537,6 +537,7 @@ impl BoundaryGrid3 {
                     dl[i - 3]
                         - external[a][i]
                         - response.hydrodynamic.body_angular_impulse_about_center[i - 3]
+                        - report.lubrication.body_spin_impulses[a][i - 3]
                 }
             });
             let hydro = response.hydrodynamic;
