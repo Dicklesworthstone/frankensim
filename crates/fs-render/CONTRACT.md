@@ -1878,10 +1878,10 @@ original sample streams. `BsdfOnly` admits area-only scenes but refuses active
 point fixtures, whose delta directions cannot be sampled by a continuous BSDF.
 
 The stage example accepts `--paths --panels` or `--total-csv --panels`, optionally
-with `--workers N`. Sources remain uniform Lambertian patches: an emitter
-binding does not itself provide a lens train, spatial gobo, non-Lambertian
-aperture or animated fixture emission. Calibration, finite depth, spectral and
-geometric uncertainty retain their explicit unknown total-error bounds.
+with `--workers N`. Default bindings remain uniform Lambertian patches. The
+optional projector model below supplies a position/direction-dependent source
+law. Calibration, finite depth, spectral and geometric uncertainty retain
+their explicit unknown total-error bounds.
 
 ### Native glass and brushed surfaces in calibrated paths
 
@@ -1917,3 +1917,54 @@ normal/mark parameters into measured material claims. Path semantics version 4
 adds these material paths; previously admitted opaque sample streams remain
 unchanged. Sampling estimates still exclude finite-depth and physical-model
 error, including geometric-optics and surface-model approximations.
+
+### Finite-aperture thin-lens projectors
+
+`PhotometricAreaEmitter::with_projector` binds `ThinLensProjector` to the same
+native mesh source. Its optical frame is relative to the original primitive;
+static rigid placement moves the aperture and optics together. The pupil must
+lie in optical `z=0` with winding toward `+Z`. Plane/normal checks allow only
+coordinate-roundoff tolerance, which is not a geometry-error certificate.
+The original material still reflects incoming light, and source rays use the
+same spectral paths, shadows, absorption, scattering and glass as other finite
+emitters. No independent projection renderer is introduced.
+
+This is an explicitly ideal exit-pupil light field: clear output carries
+uniform ray power over pupil area `A` and rectangular gobo area `G`. With gobo
+distance `s`, positive thin-lens focal length `f`, pupil point `a`, and outgoing
+slope `u = omega.xy / omega.z`, the source evaluates
+`g = a*(1-s/f) - s*u`. Thus the real image distance satisfies
+`1/f = 1/s + 1/q`, with image magnification `-q/s`. Different pupil points
+produce different rays outside that focus plane; defocus is determined by
+the actual aperture geometry, not an angular texture blur.
+
+`GoboTransmission` is a centred rectangular array of piecewise-constant gray
+transmittances in `[0,1]`, in metres, row-major from negative to positive Y.
+Outside the rectangle transmission is zero. If `M(g)` is its value, emitted
+luminance is `Phi_clear*s²*M(g)/(A*G*cos(theta)^4)`. The projected-plane
+Jacobian `dOmega = cos(theta)^3*dg/s²` makes
+`L*cos(theta)*dA*dOmega = Phi_clear*M(g)*dA*dg/(A*G)`.
+Consequently `flux_lm()` reports `clear_flux_lm()*mean(M)` after the dimmer;
+blocked power is removed, never redistributed into the transmitting texels.
+These are total outgoing source lumens before later scene-medium/glass losses.
+The original spectrum scales this luminance without changing its color.
+
+Both source hits and direct source proposals evaluate this same light field.
+Emitter selection uses transmitted flux; the proposal still samples the actual
+mesh aperture by area, so blocked gobo rays contribute zero with the original
+endpoint density. Its complementary MIS weights therefore stay valid. Small
+transmitting features or severe defocus can require more samples; no adaptive
+pattern-resolution or error-per-second guarantee is claimed. Whole path
+samples, cancellation, deterministic parallel accumulation and estimated IID
+standard error retain the existing job semantics. Path semantics version 5
+adds this source model without changing existing Lambertian/point streams.
+
+The model does not solve lamp illumination or a multi-element lens train and
+does not include aberrations, diffraction, wavelength-dependent focal length,
+prisms or frost. Its thin-lens/paraxial law and uniform pupil/gobo ray-power
+assumption are declared approximations, with unknown physical-model error.
+Finite input and radiance representability are checked at admission; numerical
+agreement with the ideal model does not certify a manufactured fixture.
+`photometric_stage --paths --projector-focus 5 --workers 4` exercises this
+source together with native material reflection and heterogeneous spectral
+haze. The same option works with `--total-csv` for surface lux.

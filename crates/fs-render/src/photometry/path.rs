@@ -28,11 +28,11 @@ pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIllumina
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-/// Version 4 admits native smooth/rough glass for finite-source scenes and
-/// brushed conductor frames. Active point fixtures with glass still refuse:
-/// a continuous path cannot sample their missing specular point connections.
-/// Previously admitted opaque sample streams are retained.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 4;
+/// Version 5 adds finite-aperture thin-lens projectors with passive gobos.
+/// The same position/direction emission law is used by source hits and direct
+/// proposals; previously admitted source laws and sample streams are retained.
+/// Active point fixtures with glass still require missing specular connections.
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 5;
 
 /// An accepted pixel estimate before exposure, white balance or tone mapping.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,11 +98,13 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
         )
     }
 
-    /// Admit calibrated point fixtures and finite Lambertian mesh sources.
+    /// Admit calibrated point fixtures and finite mesh sources.
     ///
     /// Each surface binding supplies total emitted lumens and a visible
     /// spectrum. The original native mesh area and winding determine emitted
     /// radiance; its original material continues to reflect incoming light.
+    /// A source's optional thin-lens projector adds a body-local pupil/gobo
+    /// emission law, including passive flux loss and finite-aperture defocus.
     /// Source hits and direct-light proposals use complementary MIS weights.
     /// `BsdfOnly` is supported when no point fixture has positive flux.
     ///

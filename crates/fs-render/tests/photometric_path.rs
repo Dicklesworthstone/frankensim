@@ -21,6 +21,9 @@ mod dielectric;
 #[path = "photometric_path/brushed.rs"]
 mod brushed;
 
+#[path = "photometric_path/projector.rs"]
+mod projector;
+
 use core::f64::consts::{FRAC_PI_2, PI};
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

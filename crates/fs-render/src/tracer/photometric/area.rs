@@ -16,8 +16,14 @@ struct Emitter<'a> {
     source: &'a PhotometricAreaEmitter,
     faces: Range<usize>,
     luminance_cd_m2: f64,
+    projector: Option<ProjectorPlacement>,
     probability: f64,
     cumulative_probability: f64,
+}
+
+struct ProjectorPlacement {
+    world_to_optical: crate::instances::RigidTransform,
+    clear_flux_per_area_lm_m2: f64,
 }
 
 struct Face {
@@ -136,6 +142,25 @@ impl<'a> AreaLighting<'a> {
                     });
                 }
             };
+            // Optics live in the primitive's original body frame. Check the
+            // pupil in that frame, before a possibly large world translation
+            // can hide a nonplanar aperture in coordinate rounding.
+            let primitive_to_optical = source
+                .projector()
+                .map(|projector| projector.frame().inverse())
+                .transpose()
+                .map_err(|_| PhotometryError::Source(SourceError::NumericalRange))?;
+            let world_to_optical = source
+                .projector()
+                .map(|projector| {
+                    placement
+                        .unwrap_or_else(crate::instances::RigidTransform::identity)
+                        .compose(projector.frame())?
+                        .inverse()
+                })
+                .transpose()
+                .map_err(|_| PhotometryError::Source(SourceError::NumericalRange))?;
+            let mut pupil_abs_xy_m = [0.0_f64; 2];
             result
                 .faces
                 .try_reserve(mesh.triangles.len())
@@ -149,13 +174,29 @@ impl<'a> AreaLighting<'a> {
             for triangle in &mesh.triangles {
                 cx.checkpoint()?;
                 let mut vertices = [Point3::new(0.0, 0.0, 0.0); 3];
-                for (point, &index) in vertices.iter_mut().zip(triangle) {
+                let mut optical_vertices = vertices;
+                for ((point, optical_point), &index) in
+                    vertices.iter_mut().zip(&mut optical_vertices).zip(triangle)
+                {
                     let vertex = mesh.vertices.get(index as usize).ok_or(
                         PhotometryError::InvalidPrimitive {
                             primitive: primitive_index,
                         },
                     )?;
                     let local = Point3::new(vertex[0], vertex[1], vertex[2]);
+                    if let (Some(projector), Some(to_optical)) =
+                        (source.projector(), primitive_to_optical)
+                    {
+                        *optical_point = to_optical.transform_point(local);
+                        let roundoff_scale_m = vertex
+                            .iter()
+                            .chain(projector.frame().translation_m().iter())
+                            .map(|value| value.abs())
+                            .fold(0.0_f64, f64::max);
+                        projector.validate_aperture_point(*optical_point, roundoff_scale_m)?;
+                        pupil_abs_xy_m[0] = pupil_abs_xy_m[0].max(optical_point.x.abs());
+                        pupil_abs_xy_m[1] = pupil_abs_xy_m[1].max(optical_point.y.abs());
+                    }
                     *point = placement.map_or(local, |transform| transform.transform_point(local));
                     if [point.x, point.y, point.z]
                         .iter()
@@ -165,6 +206,12 @@ impl<'a> AreaLighting<'a> {
                             primitive: primitive_index,
                         });
                     }
+                }
+                if let Some(projector) = source.projector() {
+                    projector.validate_aperture_normal(cross(
+                        optical_vertices[1].delta_from(optical_vertices[0]),
+                        optical_vertices[2].delta_from(optical_vertices[0]),
+                    ))?;
                 }
                 triangle_keys.push(triangle_key(vertices));
                 let perpendicular = cross(
@@ -217,13 +264,30 @@ impl<'a> AreaLighting<'a> {
                 EmissionSidedness::Both => 2.0,
             };
             let luminance = source.flux_lm() / area_sum / PI / sides;
+            let projector = world_to_optical.map(|world_to_optical| ProjectorPlacement {
+                world_to_optical,
+                clear_flux_per_area_lm_m2: source.clear_flux_lm() / area_sum,
+            });
+            let maximum_luminance = if let Some(optics) = source.projector() {
+                let scale = source.clear_flux_lm() / area_sum;
+                let maximum = scale * optics.maximum_luminance_factor(pupil_abs_xy_m)?;
+                if !scale.is_finite()
+                    || !maximum.is_finite()
+                    || (source.flux_lm() > 0.0 && maximum <= 0.0)
+                {
+                    return Err(PhotometryError::Source(SourceError::NumericalRange));
+                }
+                maximum
+            } else {
+                luminance
+            };
             if !luminance.is_finite()
                 || (source.flux_lm() > 0.0 && luminance <= 0.0)
                 || source
                     .spectrum()
                     .bins_w_per_lumen_nm()
                     .iter()
-                    .any(|power| !(luminance * *power).is_finite())
+                    .any(|power| !(maximum_luminance * *power).is_finite())
             {
                 return Err(PhotometryError::Source(SourceError::NumericalRange));
             }
@@ -241,6 +305,7 @@ impl<'a> AreaLighting<'a> {
                 source,
                 faces: first_face..result.faces.len(),
                 luminance_cd_m2: luminance,
+                projector,
                 probability: 0.0,
                 cumulative_probability: flux_sum,
             });
@@ -297,9 +362,13 @@ impl<'a> AreaLighting<'a> {
             return Ok([0.0; PACKET]);
         };
         let emitter = &self.emitters[emitter_index];
-        if emitter.luminance_cd_m2 == 0.0
+        if emitter.source.flux_lm() == 0.0
             || !emits_towards(emitter.source.sidedness(), geometric_normal, outgoing)
         {
+            return Ok([0.0; PACKET]);
+        }
+        let luminance = emitter.luminance(point, outgoing)?;
+        if luminance == 0.0 {
             return Ok([0.0; PACKET]);
         }
         let weight = if previous.is_none()
@@ -319,9 +388,8 @@ impl<'a> AreaLighting<'a> {
         };
         let mut radiance = [0.0; PACKET];
         for (lane, &wavelength) in wavelengths.iter().enumerate() {
-            radiance[lane] = emitter.luminance_cd_m2
-                * emitter.source.spectrum().value_w_per_lumen_nm(wavelength)
-                * weight;
+            radiance[lane] =
+                luminance * emitter.source.spectrum().value_w_per_lumen_nm(wavelength) * weight;
         }
         Ok(radiance)
     }
@@ -381,6 +449,11 @@ impl<'a> AreaLighting<'a> {
         if !receiver.admits(direction) {
             return Ok(result);
         }
+        let emitter = &self.emitters[sample.emitter];
+        let luminance = emitter.luminance(sample.point, direction.scale(-1.0))?;
+        if luminance == 0.0 {
+            return Ok(result);
+        }
         let opaque_pdf = receiver.opaque_pdf(direction)?;
         if !opaque_pdf.is_finite() || opaque_pdf < 0.0 {
             return Err(TracerError::InvalidInput);
@@ -420,7 +493,6 @@ impl<'a> AreaLighting<'a> {
                 shifted
             }
         };
-        let emitter = &self.emitters[sample.emitter];
         if !visible_endpoint(
             scene,
             cx,
@@ -477,7 +549,7 @@ impl<'a> AreaLighting<'a> {
                 }
             };
             result[lane] = response
-                * emitter.luminance_cd_m2
+                * luminance
                 * emitter.source.spectrum().value_w_per_lumen_nm(wavelength)
                 * transmittance[lane]
                 / sample.pdf_solid_angle
@@ -617,6 +689,29 @@ impl<'a> AreaLighting<'a> {
             return Err(TracerError::InvalidInput);
         }
         Ok(density)
+    }
+}
+
+impl Emitter<'_> {
+    /// Source hits and NEE must evaluate the same pupil-position/direction
+    /// law. The area proposal remains a density over geometric endpoints;
+    /// a blocked gobo ray contributes zero without changing that density.
+    fn luminance(&self, point: Point3, outgoing: Vec3) -> Result<f64, TracerError> {
+        let Some(placement) = &self.projector else {
+            return Ok(self.luminance_cd_m2);
+        };
+        let optics = self.source.projector().ok_or(TracerError::InvalidInput)?;
+        let factor = optics
+            .luminance_per_clear_flux_per_area(
+                placement.world_to_optical.transform_point(point),
+                placement.world_to_optical.transform_vector(outgoing),
+            )
+            .map_err(|_| TracerError::InvalidInput)?;
+        let luminance = placement.clear_flux_per_area_lm_m2 * factor;
+        if !luminance.is_finite() || luminance < 0.0 {
+            return Err(TracerError::InvalidInput);
+        }
+        Ok(luminance)
     }
 }
 

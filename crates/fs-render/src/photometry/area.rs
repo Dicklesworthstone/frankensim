@@ -1,4 +1,4 @@
-//! Uniform Lambertian emission attached to the scene's original mesh surfaces.
+//! Calibrated emission attached to the scene's original mesh surfaces.
 //!
 //! A binding supplies total emitted lumens and the original visible spectrum.
 //! Admission computes the actual world-space triangle area; the existing
@@ -6,6 +6,9 @@
 //! fictitious temperature or independently reconstructed surface is involved.
 
 use super::source::{PhotometricSource, SourceError, SourceSpectrum};
+
+mod projector;
+pub use projector::{GoboTransmission, MAX_GOBO_TEXELS, ThinLensProjector};
 
 /// Which geometric sides emit the supplied total luminous flux.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,9 +19,9 @@ pub enum EmissionSidedness {
     Both,
 }
 
-/// Uniform spectral emitter bound to one native mesh primitive.
+/// Spectral emitter bound to one native mesh primitive.
 ///
-/// For actual mesh area `A`, front-side luminance is `flux/(pi*A)` for
+/// By default, for actual mesh area `A`, front-side luminance is `flux/(pi*A)` for
 /// [`EmissionSidedness::Front`] and `flux/(2*pi*A)` on either side for
 /// [`EmissionSidedness::Both`]. Area is measured in square metres at scene
 /// admission, including the original rigid-instance placement. The represented
@@ -27,12 +30,16 @@ pub enum EmissionSidedness {
 /// The binding does not replace the primitive's material or geometry. Bind a
 /// separate primitive for each spatially uniform source spectrum. Mesh disks
 /// remain polygonal sources; their declared flux uses their actual mesh area.
+/// [`Self::with_projector`] replaces the Lambertian law with a calibrated
+/// directional thin-lens light field on a planar front-emitting aperture.
 #[derive(Debug, Clone)]
 pub struct PhotometricAreaEmitter {
     primitive_index: usize,
+    clear_flux_lm: f64,
     emitted_flux_lm: f64,
     spectrum: SourceSpectrum,
     sidedness: EmissionSidedness,
+    projector: Option<ThinLensProjector>,
 }
 
 impl PhotometricAreaEmitter {
@@ -59,10 +66,35 @@ impl PhotometricAreaEmitter {
         }
         Ok(Self {
             primitive_index,
+            clear_flux_lm: emitted_flux_lm,
             emitted_flux_lm,
             spectrum,
             sidedness,
+            projector: None,
         })
+    }
+
+    /// Use an ideal thin-lens projector in place of Lambertian emission.
+    ///
+    /// The original post-dimmer flux is clear-output flux. The passive gobo
+    /// reduces emitted flux by its represented area-mean transmission; blocked
+    /// flux is not renormalized into surviving rays. Replacing a projector uses
+    /// the same clear-output calibration. Only front emission is supported;
+    /// scene admission checks the aperture's plane, winding and numeric range.
+    pub fn with_projector(mut self, projector: ThinLensProjector) -> Result<Self, SourceError> {
+        if self.sidedness != EmissionSidedness::Front {
+            return Err(SourceError::InvalidDistribution);
+        }
+        let transmission = projector.gobo().mean_transmission();
+        let emitted_flux_lm = self.clear_flux_lm * transmission;
+        if !emitted_flux_lm.is_finite()
+            || (self.clear_flux_lm > 0.0 && transmission > 0.0 && emitted_flux_lm == 0.0)
+        {
+            return Err(SourceError::NumericalRange);
+        }
+        self.emitted_flux_lm = emitted_flux_lm;
+        self.projector = Some(projector);
+        Ok(self)
     }
 
     /// Primitive in the same borrowed scene used by the path job.
@@ -71,10 +103,22 @@ impl PhotometricAreaEmitter {
         self.primitive_index
     }
 
-    /// Total flux after the linear dimmer, summed over the emitting sides.
+    /// Total flux after dimming and passive gobo losses, summed over emitting sides.
     #[must_use]
     pub const fn flux_lm(&self) -> f64 {
         self.emitted_flux_lm
+    }
+
+    /// Post-dimmer clear-output flux before any passive gobo loss.
+    #[must_use]
+    pub const fn clear_flux_lm(&self) -> f64 {
+        self.clear_flux_lm
+    }
+
+    /// Ideal projector law, or `None` for the original uniform Lambertian law.
+    #[must_use]
+    pub const fn projector(&self) -> Option<&ThinLensProjector> {
+        self.projector.as_ref()
     }
 
     /// Full normalized 80-bin spectrum, without an RGB approximation.
@@ -95,7 +139,7 @@ impl PhotometricAreaEmitter {
 pub struct PhotometricEmitters<'a> {
     /// Delta-position fixtures with flux-normalized angular intensity laws.
     pub points: &'a [PhotometricSource],
-    /// Finite Lambertian emitters attached to original scene primitives.
+    /// Finite Lambertian or ideal-projector emitters on original scene primitives.
     pub surfaces: &'a [PhotometricAreaEmitter],
 }
 

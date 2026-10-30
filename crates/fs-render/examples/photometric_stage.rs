@@ -9,6 +9,8 @@
 //! Append `--workers 4` to either path mode to use the native CPU tile executor;
 //! the accepted spectral samples and output values remain unchanged.
 //! Append `--panels` to include two finite, lumen-calibrated emitting meshes.
+//! Append `--projector-focus 5` to project a passive gobo onto the stage with
+//! an ideal thin lens focused at 5 metres; changing that distance defocuses it.
 //! These declared fixture profiles and gray haze are examples, not measurements.
 
 use std::error::Error;
@@ -18,7 +20,10 @@ use fs_geom::{Point3, Vec3};
 use fs_render::camera::{Aperture, CameraProjection, PhysicalCamera};
 use fs_render::charts::TriMesh;
 use fs_render::instances::RigidTransform;
-use fs_render::photometry::area::{EmissionSidedness, PhotometricAreaEmitter, PhotometricEmitters};
+use fs_render::photometry::area::{
+    EmissionSidedness, GoboTransmission, PhotometricAreaEmitter, PhotometricEmitters,
+    ThinLensProjector,
+};
 use fs_render::photometry::image::LuminanceJob;
 use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction, ScatterSettings};
 use fs_render::photometry::path::{
@@ -39,10 +44,11 @@ use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbso
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--workers N]; options require a path mode";
+    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--projector-focus METRES] [--workers N]; options require a path mode";
     let mode = args.first().map_or("", String::as_str);
     let mut workers = None;
     let mut panels = false;
+    let mut projector_focus_m = None;
     let mut extra = args.get(1..).unwrap_or_default().iter();
     while let Some(flag) = extra.next() {
         match flag.as_str() {
@@ -50,6 +56,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 workers = Some(extra.next().ok_or(USAGE)?.parse::<usize>()?);
             }
             "--panels" if !panels => panels = true,
+            "--projector-focus" if projector_focus_m.is_none() => {
+                let distance = extra.next().ok_or(USAGE)?.parse::<f64>()?;
+                if !distance.is_finite() || distance <= 0.0 {
+                    return Err(
+                        "projector focus must be a finite positive distance in metres".into(),
+                    );
+                }
+                projector_focus_m = Some(distance);
+            }
             _ => return Err(USAGE.into()),
         }
     }
@@ -60,7 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "--total-csv" => (false, false, true),
         _ => return Err(USAGE.into()),
     };
-    if (workers.is_some() || panels) && !(paths || total_csv) {
+    if (workers.is_some() || panels || projector_focus_m.is_some()) && !(paths || total_csv) {
         return Err(USAGE.into());
     }
     let execution = workers
@@ -81,7 +96,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        run(&cx, csv, paths, total_csv, panels, execution.as_ref())
+        run(
+            &cx,
+            csv,
+            paths,
+            total_csv,
+            panels,
+            projector_focus_m,
+            execution.as_ref(),
+        )
     })
 }
 
@@ -91,6 +114,7 @@ fn run(
     paths: bool,
     total_csv: bool,
     panels: bool,
+    projector_focus_m: Option<f64>,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // Right-handed world, Z up, metres. Local source +Z is its optical axis.
@@ -190,6 +214,7 @@ fn run(
             grid,
             total_csv,
             panels,
+            projector_focus_m,
             execution,
         );
     }
@@ -244,6 +269,7 @@ fn run_paths(
     grid: CalculationGrid,
     total_csv: bool,
     panels: bool,
+    projector_focus_m: Option<f64>,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // A back wall receives reflected floor light through the same material law.
@@ -294,6 +320,56 @@ fn run_paths(
                 "2 finite panels, 4,800 emitted lm, 1 m^2 each; native material reflection retained"
             );
         }
+    }
+    if let Some(focus_m) = projector_focus_m {
+        // Clear output is uniform in pupil/gobo ray power. This declared
+        // ideal source is not a measured lamp or a solved physical lens train.
+        let frame = RigidTransform::try_new([1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 5.0])?;
+        let vertices =
+            [[-0.04, -0.04], [0.04, -0.04], [0.04, 0.04], [-0.04, 0.04]].map(|[x, y]| {
+                let p = frame.transform_point(Point3::new(x, y, 0.0));
+                [p.x, p.y, p.z]
+            });
+        let index = primitives.len();
+        primitives.push(Primitive {
+            shape: Shape::Mesh(TriMesh::new(
+                Vec::from(vertices),
+                vec![[0, 1, 2], [0, 2, 3]],
+            )),
+            material: Material::Lambertian {
+                reflectance: LiftedSpectrum { c: [-40.0; 3] },
+            },
+            emission: None,
+        });
+        let gobo = GoboTransmission::try_new(
+            0.04,
+            0.04,
+            4,
+            4,
+            vec![
+                0.0, 0.25, 0.25, 0.0, 0.25, 1.0, 1.0, 0.25, 0.25, 1.0, 1.0, 0.25, 0.0, 0.25, 0.25,
+                0.0,
+            ],
+        )?;
+        let gobo_distance_m = 0.1;
+        let focal_length_m = 1.0 / (1.0 / gobo_distance_m + 1.0 / focus_m);
+        let projector = ThinLensProjector::try_new(frame, gobo_distance_m, focal_length_m, gobo)?;
+        let emitter = PhotometricAreaEmitter::try_new(
+            index,
+            2000.0,
+            1.0,
+            SourceSpectrum::equal_energy(),
+            EmissionSidedness::Front,
+        )?
+        .with_projector(projector)?;
+        if !total_csv {
+            println!(
+                "Finite projector: {:.0} clear lm, {:.0} transmitted lm, focus {focus_m:.3} m; ideal geometric optics",
+                emitter.clear_flux_lm(),
+                emitter.flux_lm(),
+            );
+        }
+        surface_emitters.push(emitter);
     }
     let emitters = PhotometricEmitters {
         points: sources,
