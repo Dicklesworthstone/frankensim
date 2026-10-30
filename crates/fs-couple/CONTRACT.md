@@ -13476,3 +13476,40 @@ plus jet loss equals mouth work. At zero mouth pressure the original body motion
 drives reverse valve flow and pays for both loss channels. Direct helper checks
 also cover signed reverse flow and complete static closure. Existing massive
 contact/work, refinement, state-prefix and nonlinear-refusal checks still pass.
+
+
+## Joint two-tangent adhesive friction on complete linear networks
+
+`adhesive_events::linear_network::vector::VectorLinearNetworkFlow` advances
+the original mass-normalized modal coordinates and every original passive
+spring/dashpot link with simultaneous Euclidean Coulomb disks. Each contact
+has two independent tangent columns and one capacity; the monotone rung has
+equal static and kinetic strengths. It has genuine set-valued sticking and
+direction-changing vector slip, without per-axis force clips or smoothing.
+
+The complete backward-Euler operator is condensed to at most sixteen contact
+unknowns. A prepared mechanical factor and mobility are reused at a fixed cell
+size; analytic disk projection derivatives drive a bounded semismooth Newton
+solve, with a projected-gradient fallback. Workspace allocation occurs at
+admission. Unit-column Gram pivots require independent, conditioned contact
+coordinates; no dependent reaction choice is assigned physical authority.
+
+Each cell measures original modal/link damping, contact impulse and its first
+time moment, per-contact slip and friction work, and original stored energy.
+The exact discrete loss `0.5*|delta_v|^2 + 0.5*delta_q^T*K*delta_q` is reported
+separately as numerical dissipation, including each connection's spring share.
+It is never material damping, friction heat or physical fracture loss. An
+independent uncondensed equation check and Coulomb work gap contribute to the
+numerical work estimate. Explicit cell, nonlinear, cancellation, physical-state,
+energy-accuracy and cumulative numerical-loss gates precede return. Failed calls
+retain no accepted history and retry deterministically from caller-owned state.
+
+This is first-order discrete mechanics; cell refinement remains necessary.
+Work estimates are not interval or trajectory-error certificates, and link-force
+maxima cover discrete endpoints. No exact event time, unequal static/kinetic
+strength, evolving normal geometry, moving tangent frame, material memory or
+nonlinear network is supplied. Nine G1/G3/G4 tests cover analytic oblique stops,
+disk-versus-box behavior, joint momentum/sticking, independent full-network RK4
+and first-order convergence of state and numerical loss, basis/contact-order
+covariance, internal elastic motion, partitioned impulses and moments, and
+strict physical/numerical/cancellation refusal with bit-identical retry.

@@ -32,6 +32,10 @@ mod roots;
 #[path = "linear_network/multiple.rs"]
 pub mod multiple;
 
+/// Joint two-dimensional Coulomb disks with separately measured time-discretization loss.
+#[path = "linear_network/vector.rs"]
+pub mod vector;
+
 const ORDER: usize = 24;
 pub const MAX_LINEAR_NETWORK_EVENTS: usize = 64;
 
