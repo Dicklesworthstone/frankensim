@@ -73,3 +73,66 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
         )
     }
 }
+
+/// Original accepted sources: reservoirs exchange external heat; finite links
+/// exchange internal heat between existing caloric inventories. Neither payload
+/// introduces a second temperature or advances after the joint publication.
+#[derive(Debug)]
+pub struct FiniteRelaxationConvection<F, L = F> {
+    pub reservoirs: ResolvedCellConvectionSources<F>,
+    pub finite: ResolvedLinkConvection<L>,
+}
+pub type FiniteConvectiveRelaxationReport<F, L = F> = RelaxationHeatReport<FiniteRelaxationConvection<F, L>>;
+
+impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
+    /// Continue the complete material/circuit/frame trajectory with FINITE
+    /// coolant cells, optionally alongside separately prescribed reservoirs.
+    /// Every trial reuses `resolve_with_links`: each wall-fluid interface sees
+    /// both actual caloric temperatures and its declared bulk/film convention.
+    ///
+    /// Prepare the thermal owner and heat network with their existing
+    /// `*_with_link_conductances` entry points, using the original initial
+    /// source evaluation. Fourier bindings must exclude these links. Their
+    /// native areas, coverage, equal/opposite heat, cell masses and caloric
+    /// laws stay authoritative. Several walls can share one finite coolant.
+    /// Empty reservoir `cells` gives a closed finite heat-exchange system.
+    ///
+    /// Changing coolant capacity or transport changes its evolving temperature
+    /// and thus the solids' temperature, source relaxation and circuit response.
+    /// Finite exchange enters only the native conductance map, never a duplicate
+    /// pair of heater powers or an external bath. Native conductive entropy
+    /// accounting already includes this reciprocal transfer once.
+    ///
+    /// Retain the original coolant laws and contexts in `resolve_links`; generic
+    /// transport cannot prove their correspondence to a caloric material. Flow,
+    /// pressure/composition and geometry are prescribed: no advection, mass or
+    /// momentum transfer, phase-front motion or variable Stokes loading is
+    /// inferred. The original rate/thermal split still requires time refinement.
+    /// Typed source failures and either cancellation authority preserve ALL
+    /// accepted histories, including finite coolant and field charge/flux.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn step_relaxation_with_links<F: ThermalFluidTransport, L: ThermalFluidTransport, M, E>(
+        &self, cx:&Cx<'_>,
+        owner:&mut FrameRelaxationThermalSystem<'_, '_, '_, '_, M>,
+        thermal:&mut DepositionSimulation<'_>, external_modal_forces:&[f64],
+        electrical:Option<RelaxationElectricalInput<'_>>, controls:FrameThermalSolve,
+        energy_guess_j:&[f64], gate:&CancelGate, links:&[SourceConvectiveLink],
+        maximum_links:usize,
+        resolve_links:impl Fn(&SourceConvectiveLink,&DepositionSimulation<'_>,Temperature)->Result<L,E>,
+    )->Result<FiniteConvectiveRelaxationReport<F,L>,ConvectiveRelaxationError<E>>
+    where R:Fn(&SourceConvectiveCell,&DepositionSimulation<'_>,Temperature)->Result<F,E> {
+        owner.step_heat_network_with(thermal,external_modal_forces,
+            RelaxationHeatInput {network:self.heat,cx},electrical,controls,energy_guess_j,gate,|trial| {
+                let ContactThermalCoefficients {bulk,contacts}=self.resolve_with_links(
+                    cx,trial,links,maximum_links,&resolve_links)?;
+                let ConvectionHeatSample {heat,convection,finite_convection}=bulk.source;
+                let finite=finite_convection.ok_or(ConvectionHeatError::Convection(
+                    SourceCellConvectionError::Convection(ConvectionSourceError::Invalid(
+                        "complete finite convection evaluation is absent"))))?;
+                Ok(ContactThermalCoefficients {contacts,bulk:CircuitThermalCoefficients {
+                    resistors:bulk.resistors,sources_w:bulk.sources_w,conductances_w_k:bulk.conductances_w_k,
+                    source:(heat,FiniteRelaxationConvection {reservoirs:convection,finite}),
+                }})
+            })
+    }
+}
