@@ -27,6 +27,9 @@ use super::transport::{ObjectiveTangentialLaw, TangentialHistoryRotation};
 use super::{TangentialLaw, TangentialStep, TangentialStepInput};
 use crate::{FrictionRegime, TriboError, finite, nonnegative_finite, positive_finite};
 
+mod compliance;
+pub use compliance::SymmetricTangentialCompliance;
+
 /// Constant static/kinetic principal coefficients and an initial texture axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EllipticCoulomb {

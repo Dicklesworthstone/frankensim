@@ -10,6 +10,78 @@ const KINETIC_Y: &str = "owned-query-kinetic-y";
 const SPEED: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
 
+#[test]
+fn full_matrix_motion_keeps_owned_query_coordinates_and_pins_atomic() {
+    use fs_tribo::tangential::elliptic::SymmetricTangentialCompliance;
+    let card = source_card();
+    let law = law(&card);
+    let initial = law.initial_state();
+    let query = endpoint();
+    let matrix = [[0.01, -0.003], [-0.003, 0.02]];
+    let compliance = SymmetricTangentialCompliance::new(matrix).unwrap();
+    // At the declared speed=1 and path=0.5 the original claims give
+    // capacities [3,2]. Construct half a metre of associated physical slip
+    // over half a second, then add the full off-diagonal mechanical recoil.
+    let multiplier = 0.5 / fs_math::det::hypot(0.2, 0.4);
+    let force = [1.8, 1.6];
+    let slip = [0.2 * multiplier, 0.4 * multiplier];
+    let mut drive = mechanical();
+    drive.dt_s = 0.5;
+    drive.slip_increment_m = [
+        slip[0] + matrix[0][0] * force[0] + matrix[0][1] * force[1],
+        slip[1] + matrix[1][0] * force[0] + matrix[1][1] * force[1],
+    ];
+    let step = law
+        .advance_at_query_with_compliance(
+            &initial,
+            &drive,
+            &query,
+            EllipticFrictionMode::Kinetic,
+            compliance,
+        )
+        .unwrap();
+    for axis in 0..2 {
+        close(step.traction_n[axis], force[axis]);
+        close(step.slip_increment_m[axis], slip[axis]);
+        let source = &step.state.friction_sources()[axis];
+        assert_eq!(source.query(), query);
+        for property in source.properties() {
+            let original = initial.friction_sources()[axis]
+                .property(property.requirement().name())
+                .unwrap();
+            assert_eq!(
+                property.answer().receipt.selected,
+                original.answer().receipt.selected
+            );
+            card.claims()
+                .verify_receipt(&property.answer().receipt)
+                .unwrap();
+        }
+    }
+    close(
+        fs_math::det::hypot(step.slip_increment_m[0], step.slip_increment_m[1]),
+        0.5,
+    );
+    close(step.dissipated_j, multiplier);
+    let accepted = step.state.clone();
+    for refused in [
+        query.clone().with("path", 0.49).unwrap(),
+        query.with("ambient", 296.0).unwrap(),
+    ] {
+        assert!(
+            law.advance_at_query_with_compliance(
+                &accepted,
+                &drive,
+                &refused,
+                EllipticFrictionMode::Kinetic,
+                compliance,
+            )
+            .is_err()
+        );
+        assert_eq!(step.state, accepted);
+    }
+}
+
 fn temperature_quantity() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,

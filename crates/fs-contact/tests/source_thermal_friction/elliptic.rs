@@ -1,11 +1,102 @@
 //! G1/G3: original directional source claims, texture and physical work together.
 use super::*;
+use fs_contact::interface_binding::thermal_friction::elliptic::EllipticFrictionMode;
 use fs_contact::interface_binding::thermal_friction::elliptic::SourceThermalEllipticCoulomb;
 use fs_tribo::partial_slip::TangentFrame;
+use fs_tribo::tangential::elliptic::SymmetricTangentialCompliance;
 use fs_tribo::tangential::transport::{FramedTangentialState, TangentialTransportConfig};
 
 const STATIC_Y: &str = "second-principal-static";
 const KINETIC_Y: &str = "second-principal-kinetic";
+
+#[test]
+fn full_compliance_refreshes_original_sources_at_an_independent_elliptic_solution() {
+    let card = directional_card();
+    let law = law(&card, [0.6, 0.8]);
+    let initial = law.initial_state();
+    let mut state = initial.clone();
+    let matrix = [[0.01, 0.003], [0.003, 0.02]];
+    let compliance = SymmetricTangentialCompliance::new(matrix).unwrap();
+    let world = |v: [f64; 2]| [0.6 * v[0] - 0.8 * v[1], 0.8 * v[0] + 0.6 * v[1]];
+    // Construct a boundary force and its associated slip independently, then
+    // add the actual matrix recoil to obtain the released displacement.
+    for (temperature, caps) in [(280.0, [6.0, 1.0]), (320.0, [2.0, 5.0])] {
+        let force = world([0.6 * caps[0], 0.8 * caps[1]]);
+        let slip = world([0.04 * 0.6 / caps[0], 0.04 * 0.8 / caps[1]]);
+        let free = [
+            slip[0] + matrix[0][0] * force[0] + matrix[0][1] * force[1],
+            slip[1] + matrix[1][0] * force[0] + matrix[1][1] * force[1],
+        ];
+        let step = law
+            .advance_at_query_with_compliance(
+                &state,
+                &input(temperature, free),
+                &query(temperature),
+                EllipticFrictionMode::Kinetic,
+                compliance,
+            )
+            .unwrap();
+        for axis in 0..2 {
+            close(step.traction_n[axis], force[axis]);
+            close(step.slip_increment_m[axis], slip[axis]);
+            close(step.compatibility_residual_m[axis], 0.0);
+        }
+        close(step.dissipated_j, 0.04);
+        for (axis, source) in step.state.friction_sources().iter().enumerate() {
+            assert_eq!(source.state_coordinate("T"), Some(temperature));
+            for property in source.properties() {
+                let original = initial.friction_sources()[axis]
+                    .property(property.requirement().name())
+                    .unwrap();
+                assert_eq!(
+                    property.answer().receipt.selected,
+                    original.answer().receipt.selected
+                );
+                card.claims()
+                    .verify_receipt(&property.answer().receipt)
+                    .unwrap();
+            }
+        }
+        state = step.state;
+    }
+}
+
+#[test]
+fn matrix_source_branch_and_refusals_preserve_the_original_checkpoint() {
+    let card = directional_card();
+    let law = law(&card, [1.0, 0.0]);
+    let state = law.initial_state();
+    let original = state.clone();
+    let compliance = SymmetricTangentialCompliance::new([[0.01, 0.004], [0.004, 0.02]]).unwrap();
+    let mut drive = input(300.0, [0.05, 0.02]);
+    let advance = |drive: &TangentialStepInput, point: &QueryPoint, mode| {
+        law.advance_at_query_with_compliance(&state, drive, point, mode, compliance)
+    };
+    let rest = advance(&drive, &query(300.0), EllipticFrictionMode::StaticOrSliding).unwrap();
+    assert_eq!(rest.regime, FrictionRegime::Sticking);
+    close(rest.traction_n[0], 5.0);
+    close(rest.traction_n[1], 0.0);
+    let moving = advance(&drive, &query(300.0), EllipticFrictionMode::Kinetic).unwrap();
+    assert_eq!(moving.regime, FrictionRegime::Sliding);
+    assert!(moving.dissipated_j > 0.0);
+    assert_eq!(
+        moving.state.constitutive_law().static_coefficients(),
+        rest.state.constitutive_law().static_coefficients()
+    );
+    drive.solve.maximum_force_n = 1.0;
+    assert!(advance(&drive, &query(300.0), EllipticFrictionMode::StaticOrSliding).is_err());
+    drive = input(321.0, [0.05, 0.02]);
+    assert!(advance(&drive, &query(321.0), EllipticFrictionMode::Kinetic).is_err());
+    drive = input(300.0, [0.05, 0.02]);
+    drive.compliance_m_per_n = 0.01;
+    assert!(matches!(
+        advance(&drive, &query(300.0), EllipticFrictionMode::Kinetic),
+        Err(SourceThermalCoulombError::Invalid(
+            "matrix owns the sole directional body compliance"
+        ))
+    ));
+    assert_eq!(state, original);
+}
 
 fn directional_card() -> InterfaceSystemCard {
     card(vec![

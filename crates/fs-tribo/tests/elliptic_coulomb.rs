@@ -10,6 +10,9 @@ use fs_tribo::{
     FrictionLaw, FrictionRegime, TangentialLaw, TangentialSolveConfig, TangentialStepInput,
 };
 
+#[path = "elliptic_coulomb/compliance.rs"]
+mod compliance;
+
 fn input(free: [f64; 2], compliance: f64) -> TangentialStepInput {
     TangentialStepInput {
         normal_n: 10.0,

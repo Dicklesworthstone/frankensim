@@ -136,6 +136,37 @@ caller data. These tests establish the numerical associated elliptical model,
 not measured directional behavior, elastic microslip, wear, or a rule for
 combining two differently textured surfaces.
 
+### Direct elliptical friction with full body compliance
+
+`elliptic::SymmetricTangentialCompliance` and
+`EllipticCoulomb::{advance_with_compliance, advance_kinetic_with_compliance}`
+resolve the associated directional law against a finite, symmetric,
+positive-semidefinite two-axis compliance in the accepted tangent frame.
+The explicit matrix is the sole compliance owner; the input scalar compliance
+must be zero. Exactly isotropic matrices delegate to the original scalar path.
+
+The direct implementation complements the existing generic matrix adapter:
+it solves `(D C D + lambda I) y = D du_free`, `|y| = 1`, with a fixed-size
+scaled eigensystem and a scalar search bounded by `max_iterations`, without
+heap allocation or repeated constitutive probes. It retains off-diagonal
+response, original texture/history, physical traction-slip work and
+world-frame compatibility residuals. Kinetic continuation preserves the
+original static coefficients in the returned checkpoint. No measured
+throughput improvement is claimed.
+
+Positive-definite compliance admits the unique static reaction. Rank-one
+compliance admits resolved sliding and static reactions determined by a
+one-axis friction law. Nonzero feasible static demands with two active
+friction axes conservatively refuse, including a boundary solution; this
+refusal does not assert that every such reaction is nonunique. Invalid,
+unrepresentable or unresolved cases leave accepted history unchanged.
+The local law supplies no body trajectory, normal impulse or arrest
+localization.
+
+`tests/elliptic_coulomb/compliance.rs` exercises independently constructed
+associated solutions, scalar equivalence, rotated frames, degenerate axes,
+singular response and refusal boundaries.
+
 ### Full two-axis tangential body compliance
 
 `tangential::matrix::advance_with_matrix_compliance` couples the original

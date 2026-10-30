@@ -196,6 +196,34 @@ groups in `tests/source_thermal_friction/query.rs` exercise two-temperature,
 speed/path source response, preserved breakaway capacity, complete-query and
 source-domain refusal, canonical coordinate ownership and atomic retry.
 
+### Original directional sources with full matrix compliance
+
+`SourceThermalEllipticCoulomb::advance_at_query_with_compliance` combines the
+complete caller-owned query with the native full-matrix directional solve.
+Both original principal source bundles are resolved once before the native
+projection. Their ordered interface, selection policy, source pins,
+authority, conditions and query receipts remain attached to the resulting
+constitutive state. The explicit matrix owns all mechanical compliance;
+a nonzero scalar compliance refuses.
+
+The query refresh preserves every unowned coordinate and the existing
+declared ownership of surface temperatures, pressure, speed and unsigned
+path. Static-or-sliding and kinetic continuation use the same original
+owners; kinetic continuation retains their static limits for subsequent
+steps. Source/domain, force-budget or mechanical failures publish neither
+refreshed source receipts nor constitutive history.
+
+The caller remains responsible for consistency between motion-dependent
+query coordinates and actual resolved slip. Released displacement is not
+physical slip when compliance is nonzero. This bridge neither infers a
+speed/path query from free motion nor supplies the surrounding consistency
+root, thermal solve or trajectory event search.
+
+The source-friction ellipse and query regressions cover rotated
+off-diagonal compliance, independent associated work, static/kinetic
+continuation, exact owned query coordinates, original source pins and
+atomic source/budget refusals.
+
 ### Source-backed thermal Hertz force and spin
 
 `SourceThermalCoulomb::hertz_at(T, p, N, a)` binds the same pinned coefficient

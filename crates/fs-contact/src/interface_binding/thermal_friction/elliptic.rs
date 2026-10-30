@@ -6,7 +6,9 @@
 //! pinned through every update. The effective interface texture direction is
 //! explicit geometry; it is not inferred from opaque texture-frame names.
 
-use fs_tribo::tangential::elliptic::{EllipticCoulomb, EllipticCoulombState};
+use fs_tribo::tangential::elliptic::{
+    EllipticCoulomb, EllipticCoulombState, SymmetricTangentialCompliance,
+};
 use fs_tribo::tangential::transport::{ObjectiveTangentialLaw, TangentialHistoryRotation};
 
 use super::*;
@@ -133,7 +135,13 @@ impl SourceThermalEllipticCoulomb {
             self.principal[0].source_at_input(&state.sources[0], input)?,
             self.principal[1].source_at_input(&state.sources[1], input)?,
         ];
-        self.advance_with_sources(state, input, sources, EllipticFrictionMode::StaticOrSliding)
+        self.advance_with_sources(
+            state,
+            input,
+            sources,
+            EllipticFrictionMode::StaticOrSliding,
+            None,
+        )
     }
 
     /// Advance at the exact query produced by the thermal/mechanical owner.
@@ -153,7 +161,38 @@ impl SourceThermalEllipticCoulomb {
             self.principal[0].source_at_query(&state.sources[0], input, point)?,
             self.principal[1].source_at_query(&state.sources[1], input, point)?,
         ];
-        self.advance_with_sources(state, input, sources, mode)
+        self.advance_with_sources(state, input, sources, mode, None)
+    }
+
+    /// Refresh the original complete query and solve against the full symmetric
+    /// two-axis body compliance in the accepted tangent frame.
+    ///
+    /// The matrix is the sole mechanical compliance: the scalar field in
+    /// `input` must be zero. Both original source bundles are resolved once,
+    /// before the allocation-free native matrix projection. Declared speed/path
+    /// coordinates still belong to the caller's actual-motion consistency solve;
+    /// they are never inferred from the released displacement or a scalar probe.
+    /// Source, branch, force-budget and compatibility failures preserve the old
+    /// query receipts and constitutive history together.
+    pub fn advance_at_query_with_compliance(
+        &self,
+        state: &SourceThermalEllipticState,
+        input: &TangentialStepInput,
+        point: &QueryPoint,
+        mode: EllipticFrictionMode,
+        compliance: SymmetricTangentialCompliance,
+    ) -> Result<TangentialStep<SourceThermalEllipticState>, SourceThermalCoulombError> {
+        self.check(state)?;
+        if input.compliance_m_per_n != 0.0 {
+            return Err(SourceThermalCoulombError::Invalid(
+                "matrix owns the sole directional body compliance",
+            ));
+        }
+        let sources = [
+            self.principal[0].source_at_query(&state.sources[0], input, point)?,
+            self.principal[1].source_at_query(&state.sources[1], input, point)?,
+        ];
+        self.advance_with_sources(state, input, sources, mode, Some(compliance))
     }
 
     fn advance_with_sources(
@@ -162,6 +201,7 @@ impl SourceThermalEllipticCoulomb {
         input: &TangentialStepInput,
         sources: [ResolvedInterfaceStatePoint; 2],
         mode: EllipticFrictionMode,
+        compliance: Option<SymmetricTangentialCompliance>,
     ) -> Result<TangentialStep<SourceThermalEllipticState>, SourceThermalCoulombError> {
         let (static_mu, kinetic_mu) =
             principal_coefficients(&self.principal, [&sources[0], &sources[1]])?;
@@ -169,9 +209,15 @@ impl SourceThermalEllipticCoulomb {
             state
                 .law
                 .continue_coefficients(&state.constitutive, static_mu, kinetic_mu)?;
-        let step = match mode {
-            EllipticFrictionMode::StaticOrSliding => law.advance(&history, input)?,
-            EllipticFrictionMode::Kinetic => law.advance_kinetic(&history, input)?,
+        let step = match (mode, compliance) {
+            (EllipticFrictionMode::StaticOrSliding, None) => law.advance(&history, input)?,
+            (EllipticFrictionMode::Kinetic, None) => law.advance_kinetic(&history, input)?,
+            (EllipticFrictionMode::StaticOrSliding, Some(matrix)) => {
+                law.advance_with_compliance(&history, input, matrix)?
+            }
+            (EllipticFrictionMode::Kinetic, Some(matrix)) => {
+                law.advance_kinetic_with_compliance(&history, input, matrix)?
+            }
         };
         Ok(TangentialStep {
             traction_n: step.traction_n,
