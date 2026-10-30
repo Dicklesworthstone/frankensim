@@ -105,7 +105,7 @@ impl SharedCavity {
             .chain(
                 self.thermal_compression
                     .as_ref()
-                    .map(|m| m.options().band_rad_s),
+                    .map(|m| m.band_rad_s()),
             )
         {
             if !(band[0]..=band[1]).contains(&omega_rad_s) {

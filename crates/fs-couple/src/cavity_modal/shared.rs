@@ -19,6 +19,7 @@ pub mod thermal;
 pub mod molecular;
 pub use dg::{SharedCavityDg, SharedCavityDgError, SharedCavityDgFrame};
 pub use thermal::{CylindricalCavityThermalOptions, CylindricalThermalCompression, ThermalCompressionArm};
+pub use thermal::{CylindricalMaterialWallCompression, CylindricalMaterialWallOptions};
 
 /// Circular-neck viscous diffusion, prepared from the actual geometry and gas.
 /// Admission checks sampled complex impedance AND real-loss error against the
@@ -73,7 +74,7 @@ pub struct SharedCavity {
     surface_modes: usize,
     neck_component: usize,
     viscous_neck: Option<fs_phs::ZkDiffusive>,
-    thermal_compression: Option<CylindricalThermalCompression>,
+    thermal_compression: Option<thermal::Compression>,
     molecular_compression: Option<molecular::MolecularCavityCompression>,
     external: Vec<f64>,
     ports: crate::port_adoption::ModulePorts,
@@ -157,7 +158,7 @@ impl SharedCavity {
         neck_budget: ModalAcousticTimeBudget,
         config: ModalCouplingConfig,
         viscous_neck: Option<fs_phs::ZkDiffusive>,
-        thermal_compression: Option<(CylindricalThermalCompression,Option<Vec<f64>>)>,
+        thermal_compression: Option<(thermal::Compression,Option<Vec<f64>>)>,
         molecular_compression: Option<(molecular::MolecularCavityCompression,Option<Vec<f64>>)>,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
@@ -329,7 +330,15 @@ impl SharedCavity {
     pub fn neck_viscous_diffusion(&self) -> Option<&fs_phs::ZkDiffusive> { self.viscous_neck.as_ref() }
     /// Actual cylindrical thermal geometry, positive compression arms and sampled band.
     pub fn cavity_thermal_compression(&self)->Option<&CylindricalThermalCompression> {
-        self.thermal_compression.as_ref()
+        match self.thermal_compression.as_ref() {
+            Some(thermal::Compression::Isothermal(law))=>Some(law), _=>None,
+        }
+    }
+    /// Finite material wall and gas caloric law used by the same compression solve.
+    pub fn cavity_material_wall_compression(&self)->Option<&CylindricalMaterialWallCompression> {
+        match self.thermal_compression.as_ref() {
+            Some(thermal::Compression::Material(law))=>Some(law), _=>None,
+        }
     }
     /// Original gas reservoirs lowered into the same cavity compression solve.
     pub fn cavity_molecular_compression(&self)->Option<&molecular::MolecularCavityCompression> {

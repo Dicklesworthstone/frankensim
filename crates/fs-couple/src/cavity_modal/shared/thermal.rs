@@ -18,6 +18,64 @@ use fs_la::eigen::jacobi_eigh;
 use fs_material::relaxation::RelaxationState;
 
 mod molecular;
+mod spectrum;
+pub mod material_wall;
+pub use material_wall::{CylindricalMaterialWallCompression, CylindricalMaterialWallOptions};
+
+// A single runtime compression owner, preserving each public source-specific
+// accessor. Material walls and prescribed-temperature walls never run in parallel.
+pub(super) enum Compression {
+    Isothermal(CylindricalThermalCompression),
+    Material(CylindricalMaterialWallCompression),
+}
+impl Compression {
+    pub(super) fn band_rad_s(&self)->[f64;2] { match self {
+        Self::Isothermal(law)=>law.options().band_rad_s,
+        Self::Material(law)=>law.options().band_rad_s,
+    }}
+    pub(super) fn equilibrium_stiffness_n_m(&self)->f64 { match self {
+        Self::Isothermal(law)=>law.equilibrium_stiffness_n_m(),
+        Self::Material(law)=>law.equilibrium_stiffness_n_m(),
+    }}
+    pub(super) fn arms(&self)->&[ThermalCompressionArm] { match self {
+        Self::Isothermal(law)=>law.arms(), Self::Material(law)=>law.arms(),
+    }}
+    pub(super) fn stiffness_at(&self,omega:f64)->Result<C64,ModalCouplingError> { match self {
+        Self::Isothermal(law)=>law.stiffness_at(omega),
+        Self::Material(law)=>law.stiffness_at(omega),
+    }}
+    pub(super) fn observation(&self,extension:f64,memory:&[f64])->Result<(f64,f64),ModalCouplingError> { match self {
+        Self::Isothermal(law)=>law.observation(extension,memory),
+        Self::Material(law)=>law.observation(extension,memory),
+    }}
+}
+
+fn compression_stiffness(equilibrium:f64,arms:&[ThermalCompressionArm],band:[f64;2],omega:f64)
+    ->Result<C64,ModalCouplingError>
+{
+    if !omega.is_finite() || !(band[0]..=band[1]).contains(&omega) {
+        return Err(network_invalid("cavity thermal response is outside its admitted band"));
+    }
+    let s=C64::new(0.0,omega);
+    Ok(arms.iter().fold(C64::from_re(equilibrium),|sum,arm|
+        sum+(s/(s+C64::from_re(arm.relaxation_time_s.recip()))).scale(arm.stiffness_n_m)))
+}
+
+fn compression_observation(equilibrium:f64,arms:&[ThermalCompressionArm],extension:f64,memory:&[f64])
+    ->Result<(f64,f64),ModalCouplingError>
+{
+    if memory.len()!=arms.len() {
+        return Err(network_invalid("cavity thermal history must retain every arm"));
+    }
+    let mut force=equilibrium*extension;
+    let mut energy=0.5*equilibrium*extension*extension;
+    for (arm,&z) in arms.iter().zip(memory) {
+        let mismatch=arm.root_stiffness*extension-z;
+        force+=arm.root_stiffness*mismatch;
+        energy+=0.5*mismatch*mismatch;
+    }
+    Ok((force,energy))
+}
 
 /// Geometry and diffusion accuracy for an isothermal cylindrical sidewall.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -220,26 +278,11 @@ impl CylindricalThermalCompression {
 
     /// Complex stiffness [N/m] in the +i omega convention, inside the admitted band.
     pub fn stiffness_at(&self,omega:f64)->Result<C64,ModalCouplingError> {
-        if !omega.is_finite() || !(self.options.band_rad_s[0]..=self.options.band_rad_s[1]).contains(&omega) {
-            return Err(network_invalid("cavity thermal response is outside its admitted band"));
-        }
-        let s=C64::new(0.0,omega);
-        Ok(self.arms.iter().fold(C64::from_re(self.equilibrium_stiffness_n_m),|sum,arm|
-            sum+(s/(s+C64::from_re(arm.relaxation_time_s.recip()))).scale(arm.stiffness_n_m)))
+        compression_stiffness(self.equilibrium_stiffness_n_m,&self.arms,self.options.band_rad_s,omega)
     }
 
     pub(super) fn observation(&self,extension:f64,memory:&[f64])->Result<(f64,f64),ModalCouplingError> {
-        if memory.len()!=self.arms.len() {
-            return Err(network_invalid("cavity thermal history must retain every arm"));
-        }
-        let mut force=self.equilibrium_stiffness_n_m*extension;
-        let mut energy=0.5*self.equilibrium_stiffness_n_m*extension*extension;
-        for (arm,&z) in self.arms.iter().zip(memory) {
-            let mismatch=arm.root_stiffness*extension-z;
-            force+=arm.root_stiffness*mismatch;
-            energy+=0.5*mismatch*mismatch;
-        }
-        Ok((force,energy))
+        compression_observation(self.equilibrium_stiffness_n_m,&self.arms,extension,memory)
     }
 }
 
@@ -271,7 +314,7 @@ impl SharedCavity {
         let viscous=neck_options.map(|options|Self::prepare_viscous_neck(&source,
             sample_rate_hz,config,options,gate)).transpose()?;
         Self::new_inner(source,surfaces,sample_rate_hz,neck_initial,neck_budget,
-            config,viscous,Some((thermal,initial_thermal_memory)),None,gate)
+            config,viscous,Some((Compression::Isothermal(thermal),initial_thermal_memory)),None,gate)
     }
 
     /// Retain radial thermal wall diffusion in an explicitly cylindrical cavity.
@@ -305,7 +348,7 @@ impl SharedCavity {
         let viscous=neck_options.map(|options|Self::prepare_viscous_neck(&source,
             sample_rate_hz,config,options,gate)).transpose()?;
         Self::new_inner(source,surfaces,sample_rate_hz,neck_initial,neck_budget,
-            config,viscous,Some((thermal,initial_thermal_memory)),None,gate)
+            config,viscous,Some((Compression::Isothermal(thermal),initial_thermal_memory)),None,gate)
     }
 }
 

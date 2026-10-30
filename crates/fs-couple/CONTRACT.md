@@ -12866,3 +12866,7 @@ and check common source-band refusals. These tests are retained for the
 canonical coupling build; the session's executed native slice verifies the
 underlying molecular/compliant-wall operator but does not execute these
 coupling/FIR tests.
+
+## Finite source-material cavity walls
+
+`SharedCavity::new_with_cylindrical_material_wall` couples an explicit cylindrical gas region to a finite solid wall using the original `PreparedThermalTransport` source, evaluated at the reference gas temperature. Radial finite-volume capacities and Fourier conductances include gas, wall, and any original local molecular reservoirs in one caloric operator before pressure elimination. Its positive compression realization joins the existing exact mechanical runtime and harmonic response, with one accepted state, pressure, availability, dissipation, and rollback account. Gas and wall cell counts are independent spatial refinement axes; the cold realization is limited to 128 total thermal coordinates and rejects unresolved or unrepresentable spectra. The exterior wall is held at the reference temperature and endcaps are insulated. The scope is small perturbations, uniform acoustic pressure, fixed geometry, and frozen reference coefficients; this path does not infer mean heating, phase evolution, thermal expansion, interface resistance, exterior convection, or spatial accuracy from the declared frequency band.
