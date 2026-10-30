@@ -77,7 +77,7 @@ One closed-boundary triangle BEM sweep supplies BOTH the finite-point receiver
 pressure and the complete resisting force/velocity matrix. Transposed source
 rows project those same pressure traces into signed cross-mode work.
 Reciprocity makes the exact modal impedance symmetric (Z = Z^T for real mode
-shapes); collocation breaks it by its discretisation error, about 0.5 % on the
+shapes); collocation breaks it by its discretisation error, up to 0.8 % on the
 illustrative card, and the skew part of the large reactance then shows up as
 +/- eigenvalue pairs of the Hermitian form. The load and the power form
 therefore use the reciprocal part Z_r = (Z+Z^T)/2, whose whole power form
@@ -151,10 +151,15 @@ cover input/rim/enclosure refusal, uniform pressure work, felt impact/retry,
 complete source power, transfer phase/audits, zero-load parity and passive load
 state/history integration. The audio command above rendered natively at
 5cf1fd1fe on ts1 (single-threaded, 1442 s): 4800 frames, peak 0.593 Pa, max
-|Z-Z^T|/|Z| = 8.06e-3, lowest power eigenvalue +1.03e-6|Z| at 305.9 Hz,
-246 load poles at complex RMS 0.0187 against the 0.02 limit. The margin is
-thin since 88b352677 damped the fit's off-band storage poles; before it the
-same impedance fitted with 230 poles at 0.0071.
+|Z-Z^T|/|Z| = 8.06e-3, 246 load poles at complex RMS 0.0187 against the 0.02
+limit. A 480-frame bake of the same card at 5208aaa05 (the same impedance:
+identical asymmetry, poles and fit errors) gives the receipt as it now reads.
+The band's lowest power eigenvalue is -6.37e-8|Z| at 162.2 Hz, inside its
+refusal, and the least headroom is 5.87e-3|Z| at 305.9 Hz. The earlier receipt
+printed +1.03e-6|Z| at 305.9 Hz as the lowest: the eigenvalue at the frequency
+of least headroom, not the band's lowest. The fit margin is thin since
+88b352677 damped the fit's off-band storage poles; before it the same impedance
+fitted with 230 poles at 0.0071.
 `data/instruments/descriptions/timpani/` holds the measured card.
 
 ## Preserved zero-thickness comparison surface

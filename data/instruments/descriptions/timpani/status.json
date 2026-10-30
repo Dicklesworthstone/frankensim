@@ -7,7 +7,7 @@
   "physics_present": [
     "Head: a tensioned 0.2 mm PET film (Remo Weather King thickness, DuPont Mylar constants) with bending and nonlinear stretching, on Fleischer's measured kettle B (bearing-edge radius 357 mm, 140 l); 17 modes up to the (5,1) pair",
     "Interior air: the kettle's own pressure modes, every angular order, up to 1500 Hz (68 modes), coupled to the head by reciprocal pressure work, so the bulk compliance raises the (0,1) and the interior air's near-field mass lowers every mode",
-    "Exterior air: a closed-surface BEM of the head and the kettle's outer wall from 40 to 400 Hz, kept as its reciprocal part and fitted to a 317-pole passive multiport load whose radiation damping and added mass act inside the same time step",
+    "Exterior air: a closed-surface BEM of the head and the kettle's outer wall from 40 to 400 Hz, kept as its reciprocal part and fitted to a 272-pole passive multiport load whose radiation damping and added mass act inside the same time step",
     "Mallet: Rhaouti, Chaigne and Joly's measured timpani mallet (0.028 kg effective mass, F = 1.6e8 x^2.54, 1.4 m/s, contact window from ink spots), struck 10 cm in from the rim",
     "Tension: computed (2582 N/m) so the coupled (1,1) mode sits at the 2B recordings' principal (112.1 Hz); every other frequency follows from the physics",
     "Receiver: the BEM's own pressure 1 m off the axis and 1 m above the head plane, in free field"
