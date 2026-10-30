@@ -54,6 +54,9 @@ use fs_matdb::MaterialStateId;
 mod model;
 pub use model::NativeCapillaryModel;
 
+/// Simultaneous original circular wetting bridges on one complete native network.
+pub mod multiple;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CapillaryModalConfig<C = BridgeLoadLineConfig> {
     /// Ceiling includes one final bridge proposal on actual staged motion.

@@ -13546,3 +13546,41 @@ This lane retains fixed normal indentation, fixed tangent geometry and source
 conditions, with bounded internal timesteps. It does not add rotating frames,
 normal impacts, velocity weakening, nonlinear constitutive memory, dependent
 reaction selection or exact continuous event times.
+
+
+## Simultaneous circular wetting bridges on original native mechanics
+
+`capillary::multiple::MultipleCircularWettingModalSystem` binds up to 32 original
+asymmetric circular contact-line bridges to one original modal network. Every
+bridge retains its two independently sourced surfaces, physical volume,
+footprints, pinning/sliding state and loss channels. Complete reciprocal gap
+columns condense the full native displacement response, including all
+cross-bridge terms, original component modes and bilateral connections.
+
+A bounded simultaneous Newton solve uses the original analytic force tangents,
+prepared dense LU and backtracking. Probes always start from accepted footprint
+states over the same physical timestep. One aggregate source-evaluation ceiling
+includes rejected probes and reserves the final actual-motion replay of every
+bridge. All bridge/Newton/candidate buffers are allocated at admission; the
+original native propagator retains its own allocation behavior. Inverse-Jacobian
+gain screens ill-conditioned local continuation and propagates original force
+uncertainty through every cross-bridge compliance. These remain numerical
+estimates, not interval, global uniqueness or stability certificates.
+
+One native stage applies the sum of solved forces. Every original bridge is
+reevaluated at its actual staged gap, and body motion, all footprint histories,
+gap coordinates, diagnostics and sample clock publish together after source,
+force, compatibility, complete work/energy and cancellation checks. Original
+surface storage, native loss, per-line viscosity/pinning and external/prescribed
+work remain distinct. No heat recipient is invented.
+
+Seven focused G1/G3/G4 tests exercise analytical three-body impulse/motion,
+coupled two-bridge work, independently pinned footprints, six original elastic
+modes with pressure and connection loss, reduction to the existing scalar owner,
+bridge permutation, cross-bridge source causality, aggregate work/conditioning
+limits, source identity, cancellation and strict/late-native atomic retry. The
+18 existing circular and planar/axisymmetric native tests also pass. Each bridge
+retains the original connected, acute-angle, nonpositive-pressure, quasistatic
+liquid scope. This owner does not model liquid exchange/coalescence between
+bridges, changing contact geometry, bridge rupture, liquid inertia, evaporation,
+thermal deposition or exact within-sample trajectories.
