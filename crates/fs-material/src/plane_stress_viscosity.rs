@@ -144,7 +144,7 @@ impl PlaneStressViscosity {
             }
             let p = source.property(name).ok_or_else(|| invalid("missing plane-stress viscosity coefficient"))?;
             if p.requirement().quantity() != QuantitySpec::dimensional(DynViscosity::DIMS)
-                || !p.is_constant_at_fixed_temperature() || !p.value_si().is_finite() {
+                || !p.is_constant_at_fixed_environment() || !p.value_si().is_finite() {
                 return Err(invalid("reduced viscosity needs fixed-state constants with quantity Pa s"));
             }
             let (lo, hi) = p.angular_frequency_band_rad_s()

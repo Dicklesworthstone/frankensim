@@ -327,3 +327,56 @@ fn invalid_source_coefficients_dimensions_and_frequency_sampled_springs_refuse()
         "one frequency sample is not an equilibrium law"
     );
 }
+
+#[test]
+fn held_source_moisture_reaches_inertia_equilibrium_and_complete_tensor_memory() {
+    use crate::state_point::query_at_fixed_environment;
+    use fs_qty::semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm};
+    let moisture = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Moisture(MoistureBasis::DryMass), ValueForm::Static));
+    let (properties, mut claims) = fixture();
+    claims.push(scalar("density", Density::DIMS, 850.0));
+    for claim in &mut claims {
+        claim.validity = claim.validity.clone()
+            .with_quantity("moisture_content", moisture, 0.0, 0.2);
+        let factor = match claim.key.name() {
+            "density" => 1.2,
+            "young_modulus" => 0.5,
+            "branch_tau" => 2.0,
+            name if name.starts_with("branch_c") => 0.5,
+            _ => continue,
+        };
+        let PropertyValue::Scalar { value, dims } = claim.value.clone() else { unreachable!() };
+        claim.value = PropertyValue::Curve { abscissa: "moisture_content".into(),
+            abscissa_dims: Dims::NONE, knots: vec![(0.0, value), (0.2, factor*value)], dims };
+        claim.interpolation = InterpolationPolicy::LinearInside;
+    }
+    let source = card(claims);
+    let at = |value| query_at_fixed_environment(&source, 300.0, 100.0,
+        &[("moisture_content".into(), value)]).unwrap();
+    let dry = ResolvedTensorMaterial::resolve(&source, &at(0.0), properties,
+        MaterialPropertySelection::SingleClaimOnly).unwrap();
+    let wet = dry.at_query_point(&source, &at(0.2)).unwrap();
+    assert_eq!(wet.density_kg_m3(), 1.2*dry.density_kg_m3());
+    assert_eq!(wet.law().branches()[0].tau_s, 2.0*dry.law().branches()[0].tau_s);
+    for i in 0..6 {
+        for j in 0..6 {
+            assert_eq!(wet.law().c_eq()[i][j], 0.5*dry.law().c_eq()[i][j]);
+            assert_eq!(wet.law().branches()[0].c_pa[i][j], 0.5*dry.law().branches()[0].c_pa[i][j]);
+        }
+    }
+    let (dry_storage, dry_loss) = dry.law().modulus_mandel(100.0).unwrap();
+    let (wet_storage, wet_loss) = wet.law().modulus_mandel(100.0).unwrap();
+    assert_ne!(dry_storage, wet_storage);
+    assert_ne!(dry_loss, wet_loss);
+    for law in [dry.law(), wet.law()] {
+        let mut history = law.history();
+        let step = history.advance([0.001, -0.002, 0.001, 0.001, 0.0, -0.001],
+            0.02, || false).unwrap();
+        assert!(step.dissipated > 0.0);
+        assert!(step.balance_residual.abs() < 1e-10*step.work.abs());
+    }
+    assert_eq!(dry.state().card_identity(), wet.state().card_identity());
+    assert_ne!(dry.state().identity(), wet.state().identity());
+    assert!(dry.at_query_point(&source, &at(0.3)).is_err());
+}

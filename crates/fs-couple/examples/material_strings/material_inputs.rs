@@ -3,10 +3,6 @@
 //! legacy claim packs keep their historical explicit synthetic association.
 use super::*;
 use fs_matdb::{ClaimSet, NormalizedMaterialCardPack};
-use fs_qty::{
-    QuantitySpec,
-    semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
-};
 
 #[derive(Clone)]
 pub enum MaterialPack {
@@ -94,60 +90,7 @@ pub fn query(card: &MaterialCard, temperature: f64, omega: f64) -> Result<QueryP
 pub fn query_with_environment(
     card: &MaterialCard, temperature: f64, omega: f64, environment: &[(String, f64)],
 ) -> Result<QueryPoint> {
-    if environment.len() > 8 {
-        return Err("material state exceeds eight extra held coordinates".into());
-    }
-    for (axis, kind) in [
-        ("T", QuantityKind::AbsoluteTemperature),
-        (
-            "omega",
-            QuantityKind::Frequency(FrequencyConvention::Angular),
-        ),
-    ] {
-        let expected = QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
-        for (_, claim) in card.claims().claims_ordered() {
-            if let Some(quantity) = claim.validity.axis_quantities().get(axis)
-                && *quantity != expected
-                && *quantity != QuantitySpec::dimensional(kind.expected_dims())
-            {
-                return Err(format!("material axis {axis} must retain the performance's kelvin/radian-per-second convention").into());
-            }
-        }
-    }
-    let mut axes = vec![("T".into(), temperature), ("omega".into(), omega)];
-    for (index, (axis, value)) in environment.iter().enumerate() {
-        if axis.is_empty() || axis.len() > 256 || axis.chars().any(char::is_control)
-            || axis == "T" || axis == "omega" || !value.is_finite()
-            || environment[..index].iter().any(|(prior, _)| prior == axis)
-        {
-            return Err("held material coordinates must be distinct finite values outside reserved T/omega".into());
-        }
-        let mut quantity = None;
-        for (_, claim) in card.claims().claims_ordered() {
-            if claim.validity.bound(axis).is_none() { continue; }
-            let declared = claim.validity.axis_quantities().get(axis)
-                .copied().ok_or("held material coordinates require explicit source quantity semantics")?;
-            if quantity.is_some_and(|prior| prior != declared) {
-                return Err(format!("material claims disagree on coordinate {axis} semantics").into());
-            }
-            quantity = Some(declared);
-        }
-        let quantity = quantity.ok_or("held material coordinate is absent from the source card")?;
-        if !quantity.semantic_type().is_some_and(|semantic|
-            semantic.form() == ValueForm::Static && matches!(semantic.kind(),
-                QuantityKind::Pressure | QuantityKind::Composition(_) | QuantityKind::Moisture(_)
-                    | QuantityKind::MassConcentration | QuantityKind::AmountConcentration))
-        {
-            return Err("held material coordinates require static pressure, composition, moisture or concentration; temperature/frequency retain the global state convention".into());
-        }
-        axes.push((axis.clone(), *value));
-    }
-    // Use the same typed-axis construction as material reeds, walls and plates,
-    // after checking all declarations rather than selecting the first claim.
-    Ok(fs_couple::material_source::MaterialRecord {
-        pack: String::new(),
-        state: card.id().process.clone(),
-        axes,
-    }
-    .query_point(card)?)
+    Ok(fs_material::state_point::query_at_fixed_environment(
+        card, temperature, omega, environment,
+    )?)
 }

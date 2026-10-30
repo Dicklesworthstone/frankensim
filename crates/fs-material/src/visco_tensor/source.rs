@@ -121,7 +121,7 @@ impl ResolvedTensorMaterial {
     ) -> Result<Self> {
         let density = state.property("density").expect("resolved source density");
         if density.requirement().quantity() != QuantitySpec::dimensional(Density::DIMS)
-            || !density.is_constant_at_fixed_temperature()
+            || !density.is_constant_at_fixed_environment()
             || !density.value_si().is_finite()
             || density.value_si() <= 0.0
         {
@@ -363,7 +363,7 @@ impl TensorPronyProperties {
     /// Bind every selected coefficient at one original material state.
     /// The admitted frequency band is the intersection of ALL selected source
     /// domains, including equilibrium stiffness and the strain bound. Constant
-    /// coefficients at fixed temperature are required: a sampled modulus at one
+    /// coefficients at the complete held environment are required: a sampled modulus at one
     /// frequency is not silently treated as an equilibrium spring.
     pub fn bind(&self, state: &ResolvedMaterialStatePoint) -> Result<TensorProny> {
         let requirements = self.requirements()?;
@@ -375,7 +375,7 @@ impl TensorPronyProperties {
             })?;
             if property.requirement().quantity() != requirement.quantity()
                 || !property.value_si().is_finite()
-                || !property.is_constant_at_fixed_temperature()
+                || !property.is_constant_at_fixed_environment()
             {
                 return Err(TensorSourceError::Invalid(format!(
                     "{name}: requires dimensioned finite coefficients constant at the original state"

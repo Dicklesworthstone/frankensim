@@ -23,6 +23,10 @@ use crate::elastic::OrthotropicElastic;
 mod reference_ratios;
 pub use reference_ratios::*;
 
+mod fixed_environment;
+pub use fixed_environment::{MaterialEnvironmentError, MAX_FIXED_ENVIRONMENT_COORDINATES,
+    append_held_environment, query_at_fixed_environment, query_with_source_conventions};
+
 mod isotropic_parameters;
 pub use isotropic_parameters::*;
 

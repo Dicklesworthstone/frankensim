@@ -142,3 +142,48 @@ fn passive_resultant_is_scale_independent_and_rejects_active_cross_coupling() {
         assert!(factor_passive_resultant(&active).is_err());
     }
 }
+
+#[test]
+fn held_source_moisture_changes_viscous_stress_power_and_bending_without_new_loss_law() {
+    use fs_material::state_point::query_at_fixed_environment;
+    use fs_qty::{QuantitySpec, semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+    let moisture = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Moisture(MoistureBasis::DryMass), ValueForm::Static));
+    let original = [4.0, 9.0, 16.0, 1.0, 0.5, -0.75];
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    for (key, value) in KEYS.into_iter().zip(original) {
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(key, DynViscosity::DIMS),
+            value: PropertyValue::Curve { abscissa: "moisture_content".into(),
+                abscissa_dims: Dims::NONE, knots: vec![(0.0, value), (0.2, 2.0*value)],
+                dims: DynViscosity::DIMS },
+            validity: ValidityDomain::unconstrained().with("T", 280.0, 310.0)
+                .with("omega", 10.0, 10000.0).with_quantity("moisture_content", moisture, 0.0, 0.2),
+            uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
+            observations: vec![], provenance: Provenance { source: "manufactured moisture-viscosity curve".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+        requirements.push(ScalarPropertyRequirement::try_new(
+            key, DynViscosity::DIMS, ScalarAdmissibility::Finite).unwrap());
+    }
+    let card = MaterialCard::assemble(MaterialStateId { chemistry: "synthetic".into(),
+        phase: "solid".into(), process: "held environmental curve".into(), revision: 0 }, claims, vec![]).unwrap();
+    let build = |value| {
+        let point = query_at_fixed_environment(&card, 293.15, 1000.0,
+            &[("moisture_content".into(), value)]).unwrap();
+        let state = resolve_material_state_point(&card, &point, &requirements,
+            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        PlaneStressViscosity::from_material(state, MaterialPlane::Axes12, KEYS).unwrap()
+    };
+    let dry = build(0.0); let wet = build(0.2);
+    let (dry_stress, dry_power) = dry.stress_and_power([0.3, -0.7, 1.1]).unwrap();
+    let (wet_stress, wet_power) = wet.stress_and_power([0.3, -0.7, 1.1]).unwrap();
+    for i in 0..3 { close(wet_stress[i], 2.0*dry_stress[i]); }
+    close(wet_power, 2.0*dry_power);
+    let dry_bending = dry.bending_matrix_n_m_s(0.002, 0.43).unwrap();
+    let wet_bending = wet.bending_matrix_n_m_s(0.002, 0.43).unwrap();
+    for i in 0..9 { close(wet_bending[i], 2.0*dry_bending[i]); }
+    assert_ne!(dry.source().identity(), wet.source().identity());
+    assert_eq!(dry.source().card_identity(), wet.source().card_identity());
+}
