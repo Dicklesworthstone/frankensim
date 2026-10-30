@@ -28,6 +28,8 @@ pub mod prepared;
 mod prepared_zoh;
 mod positive_heat;
 mod scattering;
+mod common_flow_zoh;
+pub use common_flow_zoh::PreparedCommonFlowZoh;
 pub use prepared_zoh::PreparedExactZoh;
 pub use scattering::{PreparedScatteringZoh, ScatteringStep, ScatteringStepRecord};
 pub(crate) use prepared_zoh::energetic_scale;

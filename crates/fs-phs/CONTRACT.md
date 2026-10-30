@@ -949,3 +949,38 @@ refusal. Seven existing heat regressions remain green. Preparation retains
 the shared dense capacity; held-wave bandwidth, nonlinear exciter convergence
 and cancellation at caller boundaries remain consumer responsibilities. No
 full-workspace or measured real-time performance claim is made.
+
+## Exact quadratic common-flow junctions with retained material history
+
+`PreparedCommonFlowZoh` owns a single pure common-flow descriptor in its original
+state and port order. With differential storage Q, constraint column B and
+positive S=B^T Q B, its full-dimensional tangent generator uses
+P=I-B S^-1 B^T Q, P J P^T, P R P^T and P G. The original compatible physical
+state is never projected, reduced, retuned or reset. The trailing zero-energy
+multiplier is returned as the instantaneous endpoint reaction for the held
+external input. The unchanged descriptor remains available through `system()`.
+
+Preparation reuses the complete quadratic propagator, original G output forms,
+and the positive factor of ORIGINAL physical R integrated along the tangent
+trajectory. Storage change, physical heat and external source work close
+independently at the existing relative energy gate. Initial and endpoint
+original velocity constraints are checked at floating-point accumulation scale;
+failure does not repair or publish a physical state. `step_into` reuses all owner
+scratch and writes both caller buffers only after acceptance.
+
+Only exactly declared quadratic storage, one trailing pure constraint, zero
+algebraic storage/resistance/source blocks, positive representable effective
+inverse inertia, and existing complete-state/dense capacities are admitted.
+This is not a general descriptor, nonlinear exciter, multiple-constraint or
+anti-aliasing solver. Source variation within a held interval remains the
+consumer's time-resolution responsibility. No benchmarked real-time or
+experimental-fidelity claim follows from exact quadratic time evolution.
+The focused G1/G3 common-flow tests compare the complete original Newton and
+Maxwell equations against independent RK4 and scalar acceleration-constraint
+elimination, including full non-diagonally-dominant damping, three external
+work ports, original physical heat, mean outputs, and endpoint reaction. They
+also retain all 21 states of a viscothermal Foster duct/common-pressure chamber
+join at 48 kHz beyond the midpoint admission band, check clock subdivision,
+and verify nonlinear/capacity/incompatible-state refusals without publishing
+partial outputs. This evidence covers these bounded quadratic fixtures; it
+is not a general DAE, nonlinear source, real-time, or workspace qualification.
