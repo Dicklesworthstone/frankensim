@@ -5,6 +5,8 @@
 //! scattering events. It borrows the original scene, fixture spectra and media
 //! fields. Every accepted path contributes absolute colorimetric XYZ with
 //! luminance in cd/m² in Y; exposure and display transforms are not applied.
+//! [`PathIlluminanceJob`] integrates incoming paths over a probe hemisphere and
+//! adds the exact direct fixture term to report surface illuminance in lux.
 //!
 //! A finite path-depth ceiling still omits transport. Estimated IID sampling
 //! error does not bound that omission, source calibration, spectral/observer
@@ -17,11 +19,16 @@ use fs_exec::Cx;
 use super::source::PhotometricSource;
 use super::{PhotometryError, TransportOptions};
 
+mod illuminance;
+pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIlluminanceJob};
+
 /// Borrowed native physical media for spectral fixture paths.
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 1;
+/// Version 2 adds probe hemispheres and consistent physical range admission
+/// for rigid instances and thermal volume-source connections.
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 2;
 
 /// An accepted pixel estimate before exposure, white balance or tone mapping.
 #[derive(Debug, Clone, Copy, PartialEq)]

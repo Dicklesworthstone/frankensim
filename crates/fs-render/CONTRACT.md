@@ -1664,3 +1664,35 @@ refuse point-source exclusion-radius crossings before free-flight sampling.
 The `photometric_stage --paths` example shares ordinary fixture/scene data with
 the direct calculation and renders reflections plus multiple scattering through
 a borrowed heterogeneous, spectrally absorbing field.
+
+### Surface illuminance with reflected and volume transport
+
+`PathIlluminanceJob` borrows the same scene, fixtures and native physical grids
+and accepts `IlluminanceProbe` arrays or `CalculationGrid` without a probe-array
+copy. `Scene::camera` is unused. `IlluminanceSampling` fixes the sample count,
+maximum vertex depth, sampler and seed independently of image dimensions.
+The probe measures incoming light without applying a receiver material.
+
+The original direct solver supplies the unscattered fixture term once per
+probe. Cosine-weighted hemisphere paths supply `pi * L` in lux using the shared
+spectral integrator and its existing surface/volume interactions. The measured
+hemisphere consumes no vertex depth. `continuous_lux` includes reflected and
+scattered fixture light and physical LTE volume emission; delta point-source
+directions occur only in `direct_lux`. Their sum is `illuminance_lux`, without
+double counting or converting an outgoing image back to an assumed irradiance.
+
+The initial geometric ray is offset outward, while physical-medium transport
+retains the exact receiver endpoint, including adjacent thin cells. Both poles
+of the probe hemisphere use the existing stable orthonormal basis. Calibrated
+mesh and rigid-instance paths discover the actual first hit before enforcing
+the caller's metre range; the legacy instance range is unchanged.
+
+Probe-order sample passes publish complete moment updates. Direct lux and the
+first successful path publish together; a failed path exposes no incomplete
+probe. The original Welford accumulator estimates IID sampling standard error
+in lux after two paths. The exact direct term contributes no sampling variance.
+Owen–Sobol results carry no IID standard-error claim. Total error remains
+unknown, including the finite-depth remainder and physical-model uncertainty.
+`photometric_stage --total-csv` writes positions, direct/continuous/total lux,
+estimated IID standard error, sample count and explicit unknown total bounds
+for a stage grid using heterogeneous spectral haze and reflected light.

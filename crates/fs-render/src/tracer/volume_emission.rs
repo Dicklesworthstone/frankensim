@@ -159,6 +159,7 @@ pub(super) fn direct_contribution(
     receiver: Receiver<'_>,
     wavelengths: &[f64; PACKET],
     rng: &PathRng,
+    #[cfg(feature = "photometry")] fixtures: Option<&photometric::FixtureLighting<'_>>,
 ) -> Result<[f64; PACKET], TracerError> {
     let mut result = [0.0; PACKET];
     if settings.strategy == DirectStrategy::BsdfOnly
@@ -198,6 +199,13 @@ pub(super) fn direct_contribution(
         origin: receiver.shadow_origin(point),
         dir: direction,
     };
+    #[cfg(feature = "photometry")]
+    let intersection = if fixtures.is_some() {
+        intersect_primitives(&scene.primitives, cx, &ray, ray_time, Some(f64::MAX))?
+    } else {
+        intersect(scene, cx, &ray, ray_time)?
+    };
+    #[cfg(not(feature = "photometry"))]
     let intersection = intersect(scene, cx, &ray, ray_time)?;
     // Match the path integrator's physical endpoint convention, retaining
     // thin source cells between a numerical spawn offset and the surface.
@@ -214,6 +222,18 @@ pub(super) fn direct_contribution(
                 distance,
             )
         });
+    #[cfg(feature = "photometry")]
+    let (physical_direction, distance) = if let Some(fixtures) = fixtures {
+        // Match calibrated continuation range without applying the point-light
+        // singularity exclusion to this finite thermal source line integral.
+        fixtures.admit_source_segment(
+            point,
+            direction,
+            intersection.map(|intersection| intersection.hit.point),
+        )?
+    } else {
+        (physical_direction, distance)
+    };
     let source = medium.source_radiance(cx, point, physical_direction, distance, wavelengths)?;
     let weight = if depth + 1 == settings.max_depth {
         1.0

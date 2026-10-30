@@ -4,6 +4,8 @@
 //! Add `-- --csv` to emit the direct-illuminance calculation grid as CSV.
 //! Add `-- --paths` for reflected and multiply scattered spectral fixture paths
 //! through a borrowed heterogeneous physical medium.
+//! Add `-- --total-csv` for direct plus reflected/scattered surface lux through
+//! that same physical medium, with estimated IID sampling error per grid point.
 //! These declared fixture profiles and gray haze are examples, not measurements.
 
 use std::error::Error;
@@ -15,7 +17,9 @@ use fs_render::charts::TriMesh;
 use fs_render::instances::RigidTransform;
 use fs_render::photometry::image::LuminanceJob;
 use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction, ScatterSettings};
-use fs_render::photometry::path::{PathLuminanceJob, PathMedium};
+use fs_render::photometry::path::{
+    IlluminanceSampling, PathIlluminanceJob, PathLuminanceJob, PathMedium,
+};
 use fs_render::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum};
 use fs_render::photometry::{CalculationGrid, IlluminanceJob, PhotometricScene, TransportOptions};
 use fs_render::spectral::LiftedSpectrum;
@@ -30,11 +34,12 @@ use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbso
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (csv, paths) = match args.as_slice() {
-        [] => (false, false),
-        [flag] if flag == "--csv" => (true, false),
-        [flag] if flag == "--paths" => (false, true),
-        _ => return Err("usage: photometric_stage [--csv | --paths]".into()),
+    let (csv, paths, total_csv) = match args.as_slice() {
+        [] => (false, false, false),
+        [flag] if flag == "--csv" => (true, false, false),
+        [flag] if flag == "--paths" => (false, true, false),
+        [flag] if flag == "--total-csv" => (false, false, true),
+        _ => return Err("usage: photometric_stage [--csv | --paths | --total-csv]".into()),
     };
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -51,11 +56,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        run(&cx, csv, paths)
+        run(&cx, csv, paths, total_csv)
     })
 }
 
-fn run(cx: &Cx<'_>, csv: bool, paths: bool) -> Result<(), Box<dyn Error>> {
+fn run(cx: &Cx<'_>, csv: bool, paths: bool, total_csv: bool) -> Result<(), Box<dyn Error>> {
     // Right-handed world, Z up, metres. Local source +Z is its optical axis.
     // This proper rotation turns +Z downward; changing these transforms and
     // constructing a new scene supplies another pan/tilt/fixture snapshot.
@@ -131,8 +136,10 @@ fn run(cx: &Cx<'_>, csv: bool, paths: bool) -> Result<(), Box<dyn Error>> {
         .map(|v| v.lux)
         .fold(0.0, f64::max);
     let mean_lux = illuminance.results().iter().map(|v| v.lux).sum::<f64>() / grid.len() as f64;
-    println!("2 fixtures, 19,800 emitted lm; 13 x 9 stage grid at 0.5 m spacing");
-    println!("Direct illuminance: mean {mean_lux:.3} lx, peak {peak_lux:.3} lx");
+    if !total_csv {
+        println!("2 fixtures, 19,800 emitted lm; 13 x 9 stage grid at 0.5 m spacing");
+        println!("Direct illuminance: mean {mean_lux:.3} lx, peak {peak_lux:.3} lx");
+    }
 
     let camera = PhysicalCamera::try_look_at(
         Point3::new(7.0, -10.0, 5.0),
@@ -142,8 +149,8 @@ fn run(cx: &Cx<'_>, csv: bool, paths: bool) -> Result<(), Box<dyn Error>> {
         10.0,
         Aperture::try_circular(0.0)?, // Pinhole; no exposure or tone mapping.
     )?;
-    if paths {
-        return run_paths(cx, Vec::from(surfaces), &sources, &camera);
+    if paths || total_csv {
+        return run_paths(cx, Vec::from(surfaces), &sources, &camera, grid, total_csv);
     }
     let mut image = LuminanceJob::new(
         &scene,
@@ -193,6 +200,8 @@ fn run_paths(
     mut primitives: Vec<Primitive>,
     sources: &[PhotometricSource],
     camera: &PhysicalCamera,
+    grid: CalculationGrid,
+    total_csv: bool,
 ) -> Result<(), Box<dyn Error>> {
     // A back wall receives reflected floor light through the same material law.
     primitives.push(Primitive {
@@ -242,6 +251,51 @@ fn run_paths(
         MassScatteringSpectrum::constant(0.025)?,
         GridPhase::henyey_greenstein(0.7)?,
     )?;
+    if total_csv {
+        let mut job = PathIlluminanceJob::for_grid(
+            &scene,
+            sources,
+            PathMedium::Scattering(&medium),
+            grid,
+            TransportOptions {
+                max_outputs: 4096,
+                ..TransportOptions::default()
+            },
+            IlluminanceSampling {
+                samples_per_probe: 1024,
+                max_depth: 6,
+                sampler: Sampler::Iid,
+                seed: 0x5052_4556_495a,
+            },
+            cx,
+        )?;
+        while !job.is_complete() {
+            job.advance(cx, 768)?;
+        }
+        println!(
+            "x_m,y_m,z_m,direct_lux,continuous_lux,total_lux,estimated_standard_error_lux,samples,total_error_bound_lux"
+        );
+        for (index, estimate) in job.estimates().enumerate() {
+            let estimate = estimate.ok_or("completed probe has no estimate")?;
+            let point = grid.probe(index)?.position_m();
+            let stderr = estimate
+                .estimated_standard_error_lux
+                .map(|value| format!("{value:.9}"))
+                .unwrap_or_default();
+            println!(
+                "{},{},{},{:.9},{:.9},{:.9},{},{},unknown",
+                point.x,
+                point.y,
+                point.z,
+                estimate.direct_lux,
+                estimate.continuous_lux,
+                estimate.illuminance_lux,
+                stderr,
+                estimate.samples,
+            );
+        }
+        return Ok(());
+    }
     let settings = Settings {
         width: 16,
         height: 12,

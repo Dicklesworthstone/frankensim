@@ -3,6 +3,12 @@
 
 #![cfg(feature = "photometry")]
 
+#[path = "photometric_path/probe_throughput.rs"]
+mod probe_throughput;
+
+#[path = "photometric_path/illuminance.rs"]
+mod illuminance;
+
 use core::f64::consts::{FRAC_PI_2, PI};
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

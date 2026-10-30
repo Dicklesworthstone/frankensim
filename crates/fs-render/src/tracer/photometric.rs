@@ -9,9 +9,15 @@ use super::*;
 use crate::camera::{Aperture, PhysicalCamera};
 use crate::photometry::medium::HomogeneousMedium;
 use crate::photometry::source::{LUMINOUS_EFFICACY_LM_W, PhotometricSource};
-use crate::photometry::{PhotometricScene, PhotometryError, TransportOptions};
+use crate::photometry::transport::PhotometricMedium;
+use crate::photometry::{
+    IlluminanceEstimate, IlluminanceProbe, PhotometricScene, PhotometryError, TransportOptions,
+};
 use crate::volumes::transport::AbsorbingGrid;
 use crate::volumes::transport::scattering::{PhaseFunction, ScatteringGrid};
+
+#[cfg(test)]
+mod thermal_range_tests;
 
 /// Borrowed physical medium used by the calibrated path estimator.
 #[derive(Clone, Copy)]
@@ -32,10 +38,17 @@ pub(super) struct FixtureLighting<'a> {
     scattering: bool,
 }
 
+struct FixtureSegment {
+    direction: Vec3,
+    distance: f64,
+    medium_interval: Option<(f64, f64)>,
+}
+
 /// One admitted scene, fixture set, medium and sample policy. All retained
 /// assets are borrowed, including the original mesh BVHs and physical cells.
 pub(crate) struct FixtureTransport<'scene, 'field> {
     scene: &'scene Scene,
+    direct_scene: PhotometricScene<'scene>,
     fixtures: FixtureLighting<'scene>,
     lighting: AdmittedLighting<'scene>,
     medium: Option<PathMedium<'scene, 'field>>,
@@ -52,6 +65,41 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         medium: FixtureMedium<'scene, 'field>,
         options: TransportOptions,
         settings: Settings,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::try_admit(scene, sources, medium, options, settings, true, cx)
+    }
+
+    /// Admit probe addresses without reading or validating the unused camera.
+    /// The receiver index occupies the existing deterministic pixel address.
+    pub(crate) fn try_for_probes(
+        scene: &'scene Scene,
+        sources: &'scene [PhotometricSource],
+        medium: FixtureMedium<'scene, 'field>,
+        options: TransportOptions,
+        settings: Settings,
+        probe_count: u32,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        cx.checkpoint()?;
+        if probe_count == 0 {
+            return Err(PhotometryError::InvalidOptions);
+        }
+        let settings = Settings {
+            width: probe_count,
+            height: 1,
+            ..settings
+        };
+        Self::try_admit(scene, sources, medium, options, settings, false, cx)
+    }
+
+    fn try_admit(
+        scene: &'scene Scene,
+        sources: &'scene [PhotometricSource],
+        medium: FixtureMedium<'scene, 'field>,
+        options: TransportOptions,
+        settings: Settings,
+        admit_camera: bool,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
         cx.checkpoint()?;
@@ -71,21 +119,28 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         if !scene.lights.is_empty() || scene.environment.is_some() {
             return Err(PhotometryError::InvalidOptions);
         }
-        PhotometricScene::try_new(
+        let direct_medium = match medium {
+            FixtureMedium::Vacuum => PhotometricMedium::Homogeneous(HomogeneousMedium::vacuum()),
+            FixtureMedium::Absorbing(grid) => PhotometricMedium::Absorbing(grid),
+            FixtureMedium::Scattering(grid) => PhotometricMedium::Scattering(grid),
+        };
+        let direct_scene = PhotometricScene::try_with_medium(
             &scene.primitives,
             sources,
-            HomogeneousMedium::vacuum(),
+            direct_medium,
             options,
             cx,
         )?;
-        PhysicalCamera::try_legacy_compatible(
-            scene.camera.eye,
-            scene.camera.forward,
-            scene.camera.up,
-            scene.camera.half_tan,
-            1.0,
-            Aperture::try_circular(0.0)?,
-        )?;
+        if admit_camera {
+            PhysicalCamera::try_legacy_compatible(
+                scene.camera.eye,
+                scene.camera.forward,
+                scene.camera.up,
+                scene.camera.half_tan,
+                1.0,
+                Aperture::try_circular(0.0)?,
+            )?;
+        }
         let (medium, medium_bounds_m, scattering) = match medium {
             FixtureMedium::Vacuum => (None, None, false),
             FixtureMedium::Absorbing(grid) if grid.is_vacuum() => (None, None, false),
@@ -117,6 +172,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         cx.checkpoint()?;
         Ok(Self {
             scene,
+            direct_scene,
             fixtures: FixtureLighting {
                 sources,
                 options,
@@ -172,11 +228,128 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         cx.checkpoint()?;
         Ok(result.xyz)
     }
+
+    /// The delta-position fixture contribution is integrated separately from
+    /// hemisphere samples, which have zero probability of finding a point.
+    pub(crate) fn direct_illuminance(
+        &self,
+        cx: &Cx<'_>,
+        probe: &IlluminanceProbe,
+    ) -> Result<IlluminanceEstimate, PhotometryError> {
+        self.direct_scene.illuminance(cx, probe)
+    }
+
+    /// One cosine-weighted sample of continuous incoming irradiance. Y is lux;
+    /// the direct delta-fixture term is supplied by `direct_illuminance`.
+    /// Reflected/scattered fixture light and physical medium emission use the
+    /// original spectral path estimator, including its finite depth ceiling.
+    pub(crate) fn sample_probe(
+        &self,
+        cx: &Cx<'_>,
+        probe: &IlluminanceProbe,
+        probe_index: u32,
+        sample: u32,
+    ) -> Result<[f64; 3], TracerError> {
+        cx.checkpoint()?;
+        if probe_index >= self.settings.width * self.settings.height || sample >= self.settings.spp
+        {
+            return Err(TracerError::InvalidInput);
+        }
+        let (u1, u2, ul) = pixel_dims(
+            &self.settings,
+            self.sobol.as_ref(),
+            self.key,
+            probe_index,
+            sample,
+        )?;
+        let position = probe.position_m();
+        let normal = probe.normal();
+        let radius = u1.sqrt();
+        let phi = 2.0 * PI * u2;
+        let direction = to_world_all_sphere(
+            normal,
+            [
+                radius * det::cos(phi),
+                radius * det::sin(phi),
+                (1.0 - u1).max(0.0).sqrt(),
+            ],
+        );
+        // Advancing along the sampled direction keeps the geometric ray and
+        // physical receiver-to-hit segment collinear. A normal offset would
+        // change that segment's direction without changing the cosine PDF.
+        let origin = position.offset(direction.scale(self.fixtures.options.ray_epsilon_m));
+        let offset = origin.delta_from(position);
+        if [origin.x, origin.y, origin.z]
+            .iter()
+            .any(|value| !value.is_finite())
+            || !offset.dot(normal).is_finite()
+            || offset.dot(normal) <= 0.0
+        {
+            // An unrepresentable offset must not silently reuse the unshifted
+            // receiver or invent a larger physical exclusion distance.
+            return Err(TracerError::InvalidInput);
+        }
+        let state = SpectralPathState {
+            ray: Ray {
+                origin,
+                dir: direction,
+            },
+            throughput: [1.0; PACKET],
+            previous_bsdf: None,
+            prev_origin: position,
+            // Only geometry uses the offset. Medium transport starts at the
+            // exact receiver, retaining even cells thinner than ray epsilon.
+            segment_origin: position,
+            medium_stack: MediumStack::new(),
+            rng: PathRng {
+                pixel: probe_index,
+                sample,
+                dim: 1,
+                key: self.key,
+                qmc_depth: 0,
+                qmc_values: [0.0; PATH_QMC_DIMENSIONS],
+                qmc_valid: false,
+            },
+            // The receiver is a measurement, not a scattering vertex. Depth
+            // one therefore includes one actual surface or volume collision.
+            next_depth: 0,
+            active_lane: None,
+            remaining_smooth_dielectric_splits: SMOOTH_DIELECTRIC_SPLIT_BUDGET,
+        };
+        let render_cx = cx.with_stream_seed(self.settings.seed);
+        let result = trace_path_with_emitters(
+            self.scene,
+            &self.lighting,
+            &render_cx,
+            &self.settings,
+            LUMINOUS_EFFICACY_LM_W,
+            probe_index,
+            sample,
+            u1,
+            u2,
+            ul,
+            None,
+            CameraPath::Legacy,
+            false,
+            self.path_sobol.as_ref(),
+            Some(state),
+            self.medium,
+            Some(&self.fixtures),
+        )?;
+        // cos(theta)/pdf = pi for the sampled receiving hemisphere. This is
+        // the irradiance integral, with no receiver BRDF or additional cosine.
+        let xyz = result.xyz.map(|value| PI * value);
+        if xyz.iter().any(|value| !value.is_finite()) {
+            return Err(TracerError::InvalidInput);
+        }
+        cx.checkpoint()?;
+        Ok(xyz)
+    }
 }
 
 impl FixtureLighting<'_> {
-    /// Preserve the actual surface endpoint, or the finite grid exit for a
-    /// geometric miss. Empty vacuum tails carry no emission or boundary light.
+    /// Admit a transport segment, including exclusion of singular point-source
+    /// lines when its sampled volume collisions could connect to those points.
     pub(super) fn admit_segment(
         &self,
         cx: &Cx<'_>,
@@ -184,6 +357,63 @@ impl FixtureLighting<'_> {
         direction: Vec3,
         surface: Option<Point3>,
     ) -> Result<f64, TracerError> {
+        let segment = self.physical_segment(origin, direction, surface)?;
+        if self.scattering
+            && let Some((start, end)) = segment.medium_interval
+        {
+            for (index, source) in self.sources.iter().enumerate() {
+                cx.checkpoint()?;
+                if source.flux_lm() == 0.0 {
+                    continue;
+                }
+                let parameter = source
+                    .position_m()
+                    .delta_from(origin)
+                    .dot(segment.direction);
+                if !parameter.is_finite() {
+                    return Err(connection_error(
+                        index,
+                        "unrepresentable ray/source distance",
+                    ));
+                }
+                let closest = origin.offset(segment.direction.scale(parameter.clamp(start, end)));
+                let delta = source.position_m().delta_from(closest);
+                let distance = if delta == Vec3::new(0.0, 0.0, 0.0) {
+                    0.0
+                } else {
+                    norm(delta)?
+                };
+                if distance <= self.options.ray_epsilon_m {
+                    return Err(connection_error(
+                        index,
+                        "ray enters point-source exclusion radius",
+                    ));
+                }
+            }
+        }
+        Ok(segment.distance)
+    }
+
+    /// A thermal source line integral has no sampled fixture connection along
+    /// the segment, so only physical geometry and range admission apply.
+    pub(super) fn admit_source_segment(
+        &self,
+        origin: Point3,
+        direction: Vec3,
+        surface: Option<Point3>,
+    ) -> Result<(Vec3, f64), TracerError> {
+        let segment = self.physical_segment(origin, direction, surface)?;
+        Ok((segment.direction, segment.distance))
+    }
+
+    /// Preserve the actual surface endpoint, or the finite grid exit for a
+    /// geometric miss. Empty vacuum tails carry no emission or boundary light.
+    fn physical_segment(
+        &self,
+        origin: Point3,
+        direction: Vec3,
+        surface: Option<Point3>,
+    ) -> Result<FixtureSegment, TracerError> {
         if [
             origin.x,
             origin.y,
@@ -216,37 +446,11 @@ impl FixtureLighting<'_> {
         if !distance.is_finite() || distance > self.options.max_distance_m {
             return Err(TracerError::FixturePathRange);
         }
-        if self.scattering
-            && let Some((start, end)) = interval
-        {
-            for (index, source) in self.sources.iter().enumerate() {
-                cx.checkpoint()?;
-                if source.flux_lm() == 0.0 {
-                    continue;
-                }
-                let parameter = source.position_m().delta_from(origin).dot(direction);
-                if !parameter.is_finite() {
-                    return Err(connection_error(
-                        index,
-                        "unrepresentable ray/source distance",
-                    ));
-                }
-                let closest = origin.offset(direction.scale(parameter.clamp(start, end)));
-                let delta = source.position_m().delta_from(closest);
-                let distance = if delta == Vec3::new(0.0, 0.0, 0.0) {
-                    0.0
-                } else {
-                    norm(delta)?
-                };
-                if distance <= self.options.ray_epsilon_m {
-                    return Err(connection_error(
-                        index,
-                        "ray enters point-source exclusion radius",
-                    ));
-                }
-            }
-        }
-        Ok(distance)
+        Ok(FixtureSegment {
+            direction,
+            distance,
+            medium_interval: interval,
+        })
     }
 }
 

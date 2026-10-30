@@ -5,6 +5,8 @@
 //! display RGB or the legacy relative-XYZ film as a photometric measurement.
 //! Direct illuminance evaluates `I(direction) * cos(theta) * T / distance²`.
 //! It is the unscattered, unreflected component, not total room illuminance.
+//! [`path::PathIlluminanceJob`] adds sampled reflected and volume transport to
+//! that direct calculation using the existing spectral path integrator.
 //!
 //! The existing CIE analytic observer and 80-bin spectral discretization are
 //! numerical models. Neither manufacturer calibration nor their model error

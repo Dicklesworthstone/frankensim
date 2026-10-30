@@ -12980,6 +12980,17 @@ fn trace_path_with_emitters(
     let remaining_smooth_dielectric_splits = state.remaining_smooth_dielectric_splits;
     for depth in state.next_depth..s.max_depth {
         cx.checkpoint()?;
+        #[cfg(feature = "photometry")]
+        let intersection = if fixtures.is_some() {
+            // Calibrated mesh instances must not inherit the legacy 10 km
+            // traversal ceiling. Find the actual first surface, then enforce
+            // the caller's physical range in admit_segment below. Instances
+            // require a finite traversal bound, even for this unbounded search.
+            intersect_primitives(&scene.primitives, cx, &ray, ray_time, Some(f64::MAX))?
+        } else {
+            intersect(scene, cx, &ray, ray_time)?
+        };
+        #[cfg(not(feature = "photometry"))]
         let intersection = intersect(scene, cx, &ray, ray_time)?;
         #[cfg(feature = "photometry")]
         let fixture_segment_length = fixtures
@@ -13097,6 +13108,8 @@ fn trace_path_with_emitters(
                         },
                         &lambdas,
                         &rng,
+                        #[cfg(feature = "photometry")]
+                        fixtures,
                     )?;
                     for lane in 0..PACKET {
                         let contribution = throughput[lane] * direct[lane];
@@ -13489,6 +13502,8 @@ fn trace_path_with_emitters(
                 },
                 &lambdas,
                 &rng,
+                #[cfg(feature = "photometry")]
+                fixtures,
             )?;
             for lane in 0..PACKET {
                 let contribution = throughput[lane] * direct[lane];
