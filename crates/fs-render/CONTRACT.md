@@ -1763,8 +1763,9 @@ position distributions: the continuous BSDF/phase hit technique cannot reach
 them, so their separately summed next-event terms have unit MIS weight. They
 do not alter the continuous-light sampling mixture or its random draws.
 
-The admitted scene uses native meshes/rigid mesh instances and opaque spectral
-materials. Relative area/environment/material emission refuses at this SI
+The admitted scene uses native meshes/rigid mesh instances and spectral
+materials, with the finite-source glass extension described below. Relative
+area/environment/material emission refuses at this SI
 boundary. Borrowed physical grids supply spectral attenuation, scattering and
 their already calibrated LTE radiance. The camera is the existing pinhole
 `Scene::camera`. With fixtures present, hero wavelengths use the same 80-bin
@@ -1877,7 +1878,42 @@ original sample streams. `BsdfOnly` admits area-only scenes but refuses active
 point fixtures, whose delta directions cannot be sampled by a continuous BSDF.
 
 The stage example accepts `--paths --panels` or `--total-csv --panels`, optionally
-with `--workers N`. Sources remain uniform Lambertian patches: lenses, spatial
-gobos, refraction, non-Lambertian finite apertures and animated fixture emission
-are not provided by these bindings. Calibration, finite depth, spectral and
+with `--workers N`. Sources remain uniform Lambertian patches: an emitter
+binding does not itself provide a lens train, spatial gobo, non-Lambertian
+aperture or animated fixture emission. Calibration, finite depth, spectral and
 geometric uncertainty retain their explicit unknown total-error bounds.
+
+### Native glass and brushed surfaces in calibrated paths
+
+Both path jobs accept the existing smooth/rough `Material::Dielectric` for
+finite-source scenes. Closed outward-oriented native meshes and static rigid
+instances retain the spectral renderer's boundary stack, wavelength-dependent
+Snell/Fresnel transport, internal Beer–Lambert absorption and radiance eta
+factors. Ambient physical grids are displaced inside homogeneous glass. An
+opaque finite emitter may sit inside a separate glass solid; the emitting
+primitive itself cannot also be a dielectric boundary. Camera and calculation
+points must start in ambient space. General nested-medium initialization at
+interior sensor positions is not supplied by these jobs.
+
+Rough-interface source proposals evaluate native reflection/transmission
+response and continuation density separately at each packet wavelength. The
+shadow direction selects the actual incident or transmitted medium. Smooth
+interfaces use the native refractive walk, including its spectral/delta splits;
+there is no calibrated area-source manifold proposal, so those source hits
+retain full weight. Optional legacy rectangle/environment connector discovery
+is skipped for calibrated jobs, which cannot contain those sources.
+
+Active point-fixture-plus-glass scenes refuse explicitly. Their delta-position
+emitters cannot be found by continuous refractive walks; a general specular
+point-connection estimator remains absent. The public direct-only
+`PhotometricScene` retains its opaque-material admission rather than presenting
+straight-through or missing refractive transport as total illumination.
+
+`Material::BrushedConductor` uses its existing body-local tangent frame for
+calibrated point/area connections and BSDF sampling, including rigid placement.
+The original optical table, surface detail and medium-index conventions remain
+authoritative. This does not promote representative optical data or decorative
+normal/mark parameters into measured material claims. Path semantics version 4
+adds these material paths; previously admitted opaque sample streams remain
+unchanged. Sampling estimates still exclude finite-depth and physical-model
+error, including geometric-optics and surface-model approximations.

@@ -130,7 +130,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             FixtureMedium::Absorbing(grid) => PhotometricMedium::Absorbing(grid),
             FixtureMedium::Scattering(grid) => PhotometricMedium::Scattering(grid),
         };
-        let direct_scene = PhotometricScene::try_with_medium(
+        let direct_scene = PhotometricScene::try_with_path_medium(
             &scene.primitives,
             sources,
             direct_medium,
@@ -522,6 +522,7 @@ pub(super) fn surface_contribution(
     point: Point3,
     normal: Vec3,
     outgoing: Vec3,
+    brushed: Option<&crate::surface_detail::ShadingFrame>,
     wavelengths: &[f64; PACKET],
 ) -> Result<[f64; PACKET], TracerError> {
     contribution(
@@ -537,7 +538,9 @@ pub(super) fn surface_contribution(
                 Ok(0.0)
             } else {
                 Ok(cosine
-                    * opaque_bsdf_eval(material, normal, outgoing, incoming, lambda, None, None)?)
+                    * opaque_bsdf_eval(
+                        material, normal, outgoing, incoming, lambda, None, brushed,
+                    )?)
             }
         },
     )

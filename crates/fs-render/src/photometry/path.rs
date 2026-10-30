@@ -1,8 +1,8 @@
 //! Calibrated fixture transport through the original spectral path integrator.
 //!
 //! Unlike the direct calculation in [`super::image`], this entry follows
-//! reflected paths and, when supplied a physical scattering grid, multiple
-//! scattering events. It borrows the original scene, fixture spectra and media
+//! reflected/refracted paths and, when supplied a physical scattering grid,
+//! multiple scattering events. It borrows the original scene, fixture spectra and media
 //! fields. Every accepted path contributes absolute colorimetric XYZ with
 //! luminance in cd/m² in Y; exposure and display transforms are not applied.
 //! [`PathIlluminanceJob`] integrates incoming paths over a probe hemisphere and
@@ -28,9 +28,11 @@ pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIllumina
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-/// Version 3 adds lumen-calibrated finite mesh emitters with complementary
-/// source-hit and direct-light sampling. Point-only sample streams are retained.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 3;
+/// Version 4 admits native smooth/rough glass for finite-source scenes and
+/// brushed conductor frames. Active point fixtures with glass still refuse:
+/// a continuous path cannot sample their missing specular point connections.
+/// Previously admitted opaque sample streams are retained.
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 4;
 
 /// An accepted pixel estimate before exposure, white balance or tone mapping.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,6 +105,13 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
     /// radiance; its original material continues to reflect incoming light.
     /// Source hits and direct-light proposals use complementary MIS weights.
     /// `BsdfOnly` is supported when no point fixture has positive flux.
+    ///
+    /// Finite-source scenes can contain native smooth/rough glass, with the
+    /// camera in ambient space and closed outward-oriented glass boundaries.
+    /// Interior camera-medium initialization is not provided. Active point
+    /// fixtures with glass refuse because specular point connections are not
+    /// implemented. A finite opaque emitter may sit inside a separate glass
+    /// solid; its declared flux is emitted before that solid's optical losses.
     pub fn new_with_emitters(
         scene: &'scene Scene,
         emitters: PhotometricEmitters<'scene>,

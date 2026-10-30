@@ -49,8 +49,11 @@ struct AreaSample {
 pub(in crate::tracer) enum Receiver<'a> {
     Surface {
         material: &'a Material,
-        normal: Vec3,
+        frame: SurfaceFrame,
         outgoing: Vec3,
+        incident_medium: Option<DielectricGlass>,
+        boundary: Option<BoundaryMedia>,
+        brushed: Option<&'a crate::surface_detail::ShadingFrame>,
         intersection: &'a SceneIntersection,
         incoming_ray: &'a Ray,
     },
@@ -107,6 +110,12 @@ impl<'a> AreaLighting<'a> {
                 return Err(PhotometryError::UnsupportedPrimitive {
                     primitive: primitive_index,
                     reason: "calibrated area emission cannot share legacy relative emission",
+                });
+            }
+            if matches!(primitive.material, Material::Dielectric { .. }) {
+                return Err(PhotometryError::UnsupportedPrimitive {
+                    primitive: primitive_index,
+                    reason: "calibrated surface emission requires an opaque emitting boundary",
                 });
             }
             let (mesh, placement) = match &primitive.shape {
@@ -294,7 +303,8 @@ impl<'a> AreaLighting<'a> {
             return Ok([0.0; PACKET]);
         }
         let weight = if previous.is_none()
-            || previous.is_some_and(|previous| previous.pdf.is_delta())
+            || previous
+                .is_some_and(|previous| previous.pdf.is_delta() || previous.smooth_slab.is_some())
             || strategy == DirectStrategy::BsdfOnly
         {
             1.0
@@ -334,7 +344,19 @@ impl<'a> AreaLighting<'a> {
         rng: &PathRng,
     ) -> Result<[f64; PACKET], TracerError> {
         let mut result = [0.0; PACKET];
-        if !self.active || settings.strategy == DirectStrategy::BsdfOnly {
+        if !self.active
+            || settings.strategy == DirectStrategy::BsdfOnly
+            || matches!(
+                receiver,
+                Receiver::Surface {
+                    material: Material::Dielectric { surface, .. },
+                    ..
+                } if surface.is_delta()
+            )
+        {
+            // Smooth interfaces have no continuous source proposal. Their
+            // native reflected/refracted continuations retain full hit weight,
+            // without inspecting an unrelated sampled source connection.
             return Ok(result);
         }
         cx.checkpoint()?;
@@ -359,18 +381,30 @@ impl<'a> AreaLighting<'a> {
         if !receiver.admits(direction) {
             return Ok(result);
         }
-        let competing_pdf = receiver.pdf(direction)?;
-        if !competing_pdf.is_finite() || competing_pdf < 0.0 {
+        let opaque_pdf = receiver.opaque_pdf(direction)?;
+        if !opaque_pdf.is_finite() || opaque_pdf < 0.0 {
+            return Err(TracerError::InvalidInput);
+        }
+        if !matches!(receiver, Receiver::Phase { .. }) && distance <= fixtures.options.ray_epsilon_m
+        {
+            // This is a geometric resolution limit, not a point-light
+            // singularity or a reason to clamp the area-source energy.
             return Err(TracerError::InvalidInput);
         }
         let shadow_origin = match receiver {
             Receiver::Phase { .. } => point,
-            Receiver::Surface { normal, .. } | Receiver::Probe { normal } => {
-                if distance <= fixtures.options.ray_epsilon_m {
-                    // This is a geometric resolution limit, not a point-light
-                    // singularity or a reason to clamp the area-source energy.
-                    return Err(TracerError::InvalidInput);
-                }
+            Receiver::Surface {
+                frame,
+                boundary: Some(_),
+                ..
+            } => dielectric_spawn_origin(point, frame.geometric, direction),
+            Receiver::Surface {
+                frame: SurfaceFrame {
+                    oriented: normal, ..
+                },
+                ..
+            }
+            | Receiver::Probe { normal } => {
                 let shifted = point.offset(direction.scale(fixtures.options.ray_epsilon_m));
                 let displacement = shifted.delta_from(point);
                 if [shifted.x, shifted.y, shifted.z]
@@ -397,33 +431,52 @@ impl<'a> AreaLighting<'a> {
         )? {
             return Ok(result);
         }
-        let transmittance = if let Some(medium) = medium {
+        // The material stack owns the homogeneous glass interior. Ambient
+        // haze is displaced there, including at a rough interface whose NEE
+        // direction lies on the transmitted side.
+        let shadow_medium = receiver.shadow_medium(direction);
+        let ambient_medium = medium.filter(|_| shadow_medium.is_none());
+        let transmittance = if let Some(glass) = shadow_medium {
+            let mut values = [1.0; PACKET];
+            for (lane, &wavelength) in wavelengths.iter().enumerate() {
+                values[lane] = medium_transmittance(Some(glass), wavelength, distance)?;
+            }
+            values
+        } else if let Some(medium) = ambient_medium {
             medium.transmittance(cx, point, direction, distance, wavelengths)?
         } else {
             [1.0; PACKET]
         };
-        let competing_pdf =
-            competing_pdf * medium.map_or(1.0, |medium| medium.escape_probability(&transmittance));
+        let survival =
+            ambient_medium.map_or(1.0, |medium| medium.escape_probability(&transmittance));
         // A probe launches its incoming ray even when max_depth=1. Ordinary
         // terminal vertices do not evaluate another continuation source hit.
         let terminal =
             !matches!(receiver, Receiver::Probe { .. }) && depth + 1 == settings.max_depth;
-        let weight = if terminal {
-            1.0
-        } else {
-            match settings.strategy {
-                DirectStrategy::Mis => {
-                    balance_heuristic(1, sample.pdf_solid_angle, 1, competing_pdf)
-                }
-                DirectStrategy::PowerMis => {
-                    power_heuristic(1, sample.pdf_solid_angle, 1, competing_pdf)
-                }
-                DirectStrategy::NeeOnly => 1.0,
-                DirectStrategy::BsdfOnly => return Ok(result),
-            }
-        };
         for (lane, &wavelength) in wavelengths.iter().enumerate() {
-            result[lane] = receiver.response(direction, wavelength)?
+            // At a dispersive boundary the native continuation fans out by
+            // wavelength. Its actual lane PDF, including event probability,
+            // is the competitor rather than a hero-wavelength approximation.
+            let (response, pdf) = receiver.response_and_pdf(direction, wavelength, opaque_pdf)?;
+            let competing_pdf = pdf * survival;
+            if !competing_pdf.is_finite() || competing_pdf < 0.0 {
+                return Err(TracerError::InvalidInput);
+            }
+            let weight = if terminal {
+                1.0
+            } else {
+                match settings.strategy {
+                    DirectStrategy::Mis => {
+                        balance_heuristic(1, sample.pdf_solid_angle, 1, competing_pdf)
+                    }
+                    DirectStrategy::PowerMis => {
+                        power_heuristic(1, sample.pdf_solid_angle, 1, competing_pdf)
+                    }
+                    DirectStrategy::NeeOnly => 1.0,
+                    DirectStrategy::BsdfOnly => return Ok(result),
+                }
+            };
+            result[lane] = response
                 * emitter.luminance_cd_m2
                 * emitter.source.spectrum().value_w_per_lumen_nm(wavelength)
                 * transmittance[lane]
@@ -570,20 +623,47 @@ impl<'a> AreaLighting<'a> {
 impl Receiver<'_> {
     fn admits(self, direction: Vec3) -> bool {
         match self {
-            Self::Surface { normal, .. } | Self::Probe { normal } => normal.dot(direction) > 0.0,
+            Self::Surface {
+                material: Material::Dielectric { surface, .. },
+                frame,
+                ..
+            } => !surface.is_delta() && frame.oriented.dot(direction) != 0.0,
+            Self::Surface { frame, .. } => frame.oriented.dot(direction) > 0.0,
+            Self::Probe { normal } => normal.dot(direction) > 0.0,
             Self::Phase { .. } => true,
         }
     }
 
-    fn pdf(self, direction: Vec3) -> Result<f64, TracerError> {
+    fn shadow_medium(self, direction: Vec3) -> Option<DielectricGlass> {
+        match self {
+            Self::Surface {
+                frame,
+                incident_medium,
+                boundary,
+                ..
+            } => boundary.map_or(incident_medium, |boundary| {
+                if frame.oriented.dot(direction) > 0.0 {
+                    boundary.incident
+                } else {
+                    boundary.transmitted
+                }
+            }),
+            Self::Phase { .. } | Self::Probe { .. } => None,
+        }
+    }
+
+    /// Opaque, phase and probe densities are shared by the packet. Dielectric
+    /// response evaluation supplies its wavelength-dependent density instead.
+    fn opaque_pdf(self, direction: Vec3) -> Result<f64, TracerError> {
         match self {
             Self::Surface {
                 material,
-                normal,
+                frame,
                 outgoing,
+                brushed,
                 ..
-            } => Ok(if normal.dot(direction) > 0.0 {
-                bsdf_pdf(material, normal, outgoing, direction, None)
+            } => Ok(if frame.oriented.dot(direction) > 0.0 {
+                bsdf_pdf(material, frame.oriented, outgoing, direction, brushed)
             } else {
                 0.0
             }),
@@ -595,25 +675,61 @@ impl Receiver<'_> {
         }
     }
 
-    fn response(self, direction: Vec3, wavelength: f64) -> Result<f64, TracerError> {
+    fn response_and_pdf(
+        self,
+        direction: Vec3,
+        wavelength: f64,
+        opaque_pdf: f64,
+    ) -> Result<(f64, f64), TracerError> {
         match self {
             Self::Surface {
                 material,
-                normal,
+                frame,
                 outgoing,
+                incident_medium,
+                boundary,
+                brushed,
                 ..
             } => {
-                let cosine = normal.dot(direction).max(0.0);
-                Ok(cosine
-                    * opaque_bsdf_eval(
-                        material, normal, outgoing, direction, wavelength, None, None,
-                    )?)
+                if let Material::Dielectric { surface, .. } = material {
+                    let Some(alpha) = surface.roughness_alpha() else {
+                        return Ok((0.0, 0.0));
+                    };
+                    let boundary = boundary.ok_or(TracerError::InvalidInput)?;
+                    let evaluation = evaluate_rough_dielectric(
+                        frame.oriented,
+                        outgoing,
+                        direction,
+                        medium_ior(boundary.incident, wavelength)?,
+                        medium_ior(boundary.transmitted, wavelength)?,
+                        alpha,
+                    )?;
+                    Ok((
+                        frame.oriented.dot(direction).abs() * evaluation.value,
+                        evaluation.pdf,
+                    ))
+                } else {
+                    let cosine = frame.oriented.dot(direction).max(0.0);
+                    Ok((
+                        cosine
+                            * opaque_bsdf_eval(
+                                material,
+                                frame.oriented,
+                                outgoing,
+                                direction,
+                                wavelength,
+                                incident_medium,
+                                brushed,
+                            )?,
+                        opaque_pdf,
+                    ))
+                }
             }
             Self::Phase {
                 phase,
                 incoming_travel,
-            } => Ok(phase.eval_cos(incoming_travel.dot(direction))?),
-            Self::Probe { normal } => Ok(normal.dot(direction).max(0.0)),
+            } => Ok((phase.eval_cos(incoming_travel.dot(direction))?, opaque_pdf)),
+            Self::Probe { normal } => Ok((normal.dot(direction).max(0.0), opaque_pdf)),
         }
     }
 }

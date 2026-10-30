@@ -15,6 +15,12 @@ mod parallel;
 #[path = "photometric_path/area.rs"]
 mod area;
 
+#[path = "photometric_path/dielectric.rs"]
+mod dielectric;
+
+#[path = "photometric_path/brushed.rs"]
+mod brushed;
+
 use core::f64::consts::{FRAC_PI_2, PI};
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

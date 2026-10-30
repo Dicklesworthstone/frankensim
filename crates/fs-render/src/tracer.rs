@@ -13329,6 +13329,11 @@ fn trace_path_with_regions(
     let allow_dielectric_connectors = medium.is_none() && scene_media.is_none();
     #[cfg(not(feature = "volumes"))]
     let allow_dielectric_connectors = true;
+    // Those proposals target legacy rectangle/environment sources only.
+    // Calibrated mesh emitters retain complete refractive random walks and
+    // have no manifold competitor, so do not discover or track one for them.
+    #[cfg(feature = "photometry")]
+    let allow_dielectric_connectors = allow_dielectric_connectors && fixtures.is_none();
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
     let rng = PathRng {
         pixel,
@@ -14021,6 +14026,7 @@ fn trace_path_with_regions(
                 hit.point,
                 n,
                 ray.dir.scale(-1.0),
+                brushed_frame.as_ref(),
                 &lambdas,
             )?;
             for lane in 0..PACKET {
@@ -14041,8 +14047,11 @@ fn trace_path_with_regions(
                     hit.point,
                     photometric::area::Receiver::Surface {
                         material: &prim.material,
-                        normal: n,
+                        frame,
                         outgoing: ray.dir.scale(-1.0),
+                        incident_medium: medium_stack.last().map(|entry| entry.glass),
+                        boundary: dielectric_boundary,
+                        brushed: brushed_frame.as_ref(),
                         intersection: &intersection,
                         incoming_ray: &ray,
                     },

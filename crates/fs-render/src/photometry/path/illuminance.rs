@@ -98,6 +98,8 @@ impl ProbeMoment {
 /// at the same absolute `(probe, sample)` address with a fresh `Cx`.
 /// Scene, fixtures, physical fields and explicit probe arrays remain borrowed
 /// and immutable throughout the job. `Scene::camera` is unused and unvalidated.
+/// Probes must lie in ambient space, including when finite emitters illuminate
+/// them through native glass. An initial interior medium stack is not inferred.
 pub struct PathIlluminanceJob<'scene, 'field> {
     transport: FixtureTransport<'scene, 'field>,
     receivers: Receivers<'scene>,

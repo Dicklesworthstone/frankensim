@@ -363,6 +363,30 @@ impl<'a> PhotometricScene<'a> {
         options: TransportOptions,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
+        Self::admit(primitives, sources, medium, options, false, cx)
+    }
+
+    /// The spectral path adapter supplies native tangent frames and dielectric
+    /// boundary state. The direct-only image adapter does not, so its public
+    /// admission must retain the narrower material contract.
+    pub(crate) fn try_with_path_medium(
+        primitives: &'a [Primitive],
+        sources: &'a [PhotometricSource],
+        medium: PhotometricMedium<'a>,
+        options: TransportOptions,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::admit(primitives, sources, medium, options, true, cx)
+    }
+
+    fn admit(
+        primitives: &'a [Primitive],
+        sources: &'a [PhotometricSource],
+        medium: PhotometricMedium<'a>,
+        options: TransportOptions,
+        native_paths: bool,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
         cx.checkpoint()?;
         if !options.ray_epsilon_m.is_finite()
             || options.ray_epsilon_m <= 0.0
@@ -372,6 +396,7 @@ impl<'a> PhotometricScene<'a> {
         {
             return Err(PhotometryError::InvalidOptions);
         }
+        let has_point_emission = sources.iter().any(|source| source.flux_lm() > 0.0);
         for (index, primitive) in primitives.iter().enumerate() {
             cx.checkpoint()?;
             let unsupported = match &primitive.shape {
@@ -386,10 +411,19 @@ impl<'a> PhotometricScene<'a> {
                     Some("legacy emission has no luminous calibration")
                 }
                 _ => match primitive.material {
-                    Material::Dielectric { .. } => {
+                    Material::Dielectric { .. } if !native_paths => {
                         Some("refractive connections are not yet supported")
                     }
-                    Material::BrushedConductor { .. } => {
+                    Material::Dielectric { .. } if has_point_emission => {
+                        // A continuous refractive walk can hit finite emitters,
+                        // but cannot find a delta-position point fixture. The
+                        // missing specular point connections must not become a
+                        // silent zero inside a result labelled total lux.
+                        Some(
+                            "active point fixtures with glass require specular point-source connections",
+                        )
+                    }
+                    Material::BrushedConductor { .. } if !native_paths => {
                         Some("anisotropic tangent-frame shading is not yet supported")
                     }
                     Material::GrayDiffuseThermal { .. }
