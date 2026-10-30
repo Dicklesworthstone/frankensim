@@ -18,7 +18,7 @@ use super::super::{J, array, fields, integer, number, positive, quote, required,
 
 pub(crate) const NO_CLAIM: &str = "steady fixed-geometry isotropic ohmic/thermal conduction with prescribed volume-conservative fluid velocity; density, heat capacity and viscosity frozen at an explicit sourced reference state, local conductivity and resistivity re-resolved; no momentum/pressure solve, variable-density enthalpy transport, phase change, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification";
 
-pub(super) const TRANSIENT_NO_CLAIM: &str = "fixed-geometry backward-Euler electrothermal evolution with prescribed volume-conservative fluid velocity; fluid density and heat capacity verified constant over the complete storage interval, viscosity frozen at the sourced reference, local conductivity and resistivity re-resolved; single-phase fixed cell masses, optional sourced solid Cp and exterior gray radiation; no momentum/pressure solve, variable-density or variable-Cp fluid enthalpy transport, phase change, deformation, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification; temporal accuracy requires time-step refinement";
+pub(super) const TRANSIENT_NO_CLAIM: &str = "fixed-geometry backward-Euler electrothermal evolution with prescribed volume-conservative fluid velocity; fluid density verified constant over the complete source interval, one sourced Cp/enthalpy chart for storage and first-order upwind face transport, viscosity frozen at the sourced reference, local conductivity and resistivity re-resolved; single-phase fixed cell masses, sourced fluid and solid Cp and exterior gray radiation; no momentum/pressure solve, variable-density fluid transport, phase change, deformation, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification; temporal accuracy requires time-step refinement";
 
 /// One fluid material, its exact reference receipt and the actual energy fluxes.
 /// No material identity is inferred from a mechanical occupancy or phase name.
@@ -118,10 +118,10 @@ pub(crate) fn load_fluid(
 }
 
 impl Fluid {
-    /// The native face flux is rho*Cp*Q*T. Its conservative storage must use
-    /// the SAME constant rho/Cp law throughout the interval, not merely agree
-    /// at the endpoints. The original source-line owner exposes every crossed
-    /// breakpoint and rejects holes, source switching and ambiguous claims.
+    /// Constant density preserves reference control-volume mass. Cp may vary:
+    /// the transient owner builds ONE sourced caloric chart for both storage
+    /// and conservative face enthalpy. Full source-line queries retain every
+    /// crossed breakpoint and refuse holes, switching or ambiguous claims.
     pub(super) fn admit_transient(
         &self, source: &Source, lower_k: f64, upper_k: f64,
         thermal: &ThermalSetup, gate: &CancelGate,
@@ -144,12 +144,17 @@ impl Fluid {
             ).map_err(|e| invalid("fluid.transient", format!("{name} requires continuous source support: {e:?}")))?;
             for (_, answer) in &line.knots {
                 poll(gate)?;
-                if answer.receipt.selected != reference.answer().receipt.selected
-                    || answer.evidence.value.value != reference.value_si()
-                {
+                if answer.receipt.selected != reference.answer().receipt.selected {
                     return Err(invalid("fluid.transient", format!(
-                        "{name} must remain constant and match its original reference claim over the entire storage interval; variable fluid enthalpy advection is unsupported",
+                        "{name} must retain its original reference source claim throughout the interval",
                     )));
+                }
+                let value = answer.evidence.value.value;
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(invalid("fluid.transient", format!("{name} must remain finite and positive")));
+                }
+                if name == DENSITY_PROPERTY && value != reference.value_si() {
+                    return Err(invalid("fluid.transient", "density must remain constant throughout the complete source interval"));
                 }
             }
         }
@@ -166,7 +171,7 @@ impl Fluid {
         poll(gate)
     }
 
-    /// This is reference-state evidence, not a claim of local evolving rho/cp.
+    /// This is reference-state evidence; transient calorics retain their own chart.
     pub fn render(&self) -> String {
         format!(concat!(
             "{{\"material_index\":{},\"temperature_k\":{},\"material_state\":{},",

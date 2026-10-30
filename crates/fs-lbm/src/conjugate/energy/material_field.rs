@@ -1,7 +1,7 @@
 //! Explicit material-state conductivity ingress for the existing energy kernel.
 
 use super::{
-    ChtError, EnergyConfig, EnergySolution, FlowField, FluidProperties,
+    AdvectiveEnthalpyField, ChtError, EnergyConfig, EnergySolution, FlowField, FluidProperties,
     SolidMaterial, ThermalSetup, VoxelDomain, solve_energy_field,
 };
 use fs_exec::CancelGate;
@@ -40,6 +40,15 @@ impl EnergyConfig {
         molecular_w_m_k: &[[f64; 3]],
         gate: &CancelGate,
     ) -> Result<EnergySolution, ChtError> {
+        self.solve_with_fields(domain, fluid, solids, flow, setup, molecular_w_m_k, None, gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_fields(
+        &self, domain: &VoxelDomain, fluid: &FluidProperties, solids: &[SolidMaterial],
+        flow: &FlowField, setup: &ThermalSetup, molecular_w_m_k: &[[f64; 3]],
+        enthalpy: Option<AdvectiveEnthalpyField<'_>>, gate: &CancelGate,
+    ) -> Result<EnergySolution, ChtError> {
         super::super::poll(gate)?;
         if molecular_w_m_k.len() != domain.cell_count() {
             return Err(ChtError::InvalidInput {
@@ -66,7 +75,7 @@ impl EnergyConfig {
         }
         let solution = solve_energy_field(
             domain, fluid, solids, flow, setup, self, None, None,
-            Some(molecular_w_m_k), gate,
+            Some(molecular_w_m_k), enthalpy, gate,
         )?;
         super::super::poll(gate)?;
         Ok(solution)
@@ -110,6 +119,44 @@ impl EnergyConfig {
         time_step_s: f64,
         gate: &CancelGate,
     ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
+        self.step_with_fields(domain, fluid, solids, flow, setup, molecular_w_m_k,
+            None, capacity_j_k, previous_k, time_step_s, gate)
+    }
+
+    /// Backward-Euler material storage and conservative source-enthalpy
+    /// advection on the SAME finite-volume heat operator. Conductivity, contacts,
+    /// thermal boundaries and physical sinks retain their ordinary owners.
+    ///
+    /// The advective field is a frozen caloric linearization: the caller owns
+    /// nonlinear iteration and must check the true chart's local face fluxes
+    /// and `m * delta(h)` at the accepted state. Interior transport uses the
+    /// donor's complete affine enthalpy, not local `Cp * T`. Boundary values use
+    /// that same chart/datum at inlet or backflow temperature. The returned
+    /// report audits this frozen law; it is not nonlinear closure evidence.
+    ///
+    /// # Errors
+    /// In addition to [`Self::step_with_conductivity`] refusals, requires
+    /// [`super::ConvectionScheme::Upwind`], constant density, locally conservative
+    /// volume flow, a finite positive-Cp tangent on every fluid cell and exact
+    /// supplied enthalpy on each open boundary. No state is mutated on refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_enthalpy(
+        &self, domain: &VoxelDomain, fluid: &FluidProperties, solids: &[SolidMaterial],
+        flow: &FlowField, setup: &ThermalSetup, molecular_w_m_k: &[[f64; 3]],
+        enthalpy: AdvectiveEnthalpyField<'_>, capacity_j_k: &[f64], previous_k: &[f64],
+        time_step_s: f64, gate: &CancelGate,
+    ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
+        self.step_with_fields(domain, fluid, solids, flow, setup, molecular_w_m_k,
+            Some(enthalpy), capacity_j_k, previous_k, time_step_s, gate)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn step_with_fields(
+        &self, domain: &VoxelDomain, fluid: &FluidProperties, solids: &[SolidMaterial],
+        flow: &FlowField, setup: &ThermalSetup, molecular_w_m_k: &[[f64; 3]],
+        enthalpy: Option<AdvectiveEnthalpyField<'_>>, capacity_j_k: &[f64], previous_k: &[f64],
+        time_step_s: f64, gate: &CancelGate,
+    ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
         use crate::conjugate::{CellSink, TransientRecord};
         let invalid = |reason: &str| ChtError::InvalidInput {
             field: "thermal.material_storage", reason: reason.into(),
@@ -140,8 +187,8 @@ impl EnergyConfig {
                 cell, conductance_w_k: rate, temperature_k: temperature,
             });
         }
-        let solution = self.solve_with_conductivity(
-            domain, fluid, solids, flow, &stepped, molecular_w_m_k, gate,
+        let solution = self.solve_with_fields(
+            domain, fluid, solids, flow, &stepped, molecular_w_m_k, enthalpy, gate,
         )?;
         let mut stored = 0.0;
         for (cell, ((&capacity, &old), &new)) in capacity_j_k.iter().zip(previous_k)

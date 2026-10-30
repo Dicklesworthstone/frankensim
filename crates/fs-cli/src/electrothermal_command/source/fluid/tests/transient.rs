@@ -160,7 +160,7 @@ fn g3_solid_capacity_changes_the_adjacent_advecting_fluid_through_shared_heat_st
 
 #[test]
 fn g0_g4_interior_property_variation_and_late_storage_escape_refuse_without_mutation() {
-    for property in [DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY] {
+    for property in [DENSITY_PROPERTY] {
         let mut p = problem(1.0, 2.0, 1.0, 1.0, false);
         p.materials[0] = material_source(1.0, 2.0, 1.0, false, "liquid", |claim| {
             if claim.key.name() == property {
@@ -212,3 +212,5 @@ fn g0_g4_interior_property_variation_and_late_storage_escape_refuse_without_muta
     );
     assert_eq!(p.initial_temperature, before);
 }
+
+mod caloric;

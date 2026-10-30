@@ -5268,3 +5268,31 @@ startup to mushy circulation/remelting, endpoint refusal, and source-preserving
 complete release followed by further heated motion. They are authored but unrun
 here. Independent exact-rational ring force/work arithmetic passed; it does not
 replace native execution, refinement or experimental qualification.
+
+## Conservative affine enthalpy ingress on the original thermal operator
+
+`EnergyConfig::step_with_enthalpy` uses the SAME finite-volume conductivity,
+contact, boundary, sink, storage and Krylov owners with an explicit frozen
+`AdvectiveEnthalpyField`. Each fluid cell supplies h0, T0 and positive Cp from
+one admitted material chart; solids have no fluid entry. Both sides of each
+interior face use the same donor's complete h0+Cp*(T-T0), including its offset,
+so transported energy is equal and opposite even when local Cp differs. Inlet
+and backflow values are explicit enthalpies at their declared temperature.
+Outflow has zero diffusion; Inflow retains the original half-cell diffusion.
+
+This entry requires first-order upwind, one constant positive density and
+locally volume-conservative flow, finite coefficients and impermeable solid
+faces. Reference FluidProperties Cp does not replace supplied caloric tangents.
+The original conductivity-only and constant-Cp entries retain their existing
+numerical scheme. Public VoxelDomain adjacency permits coupled material owners
+to audit the same physical faces without constructing another grid topology.
+
+The returned native balance describes the frozen linearization. Its open-face
+audit evaluates centered enthalpy and temperature differences to reduce affine
+cancellation. Nonlinear callers must independently check true chart storage and
+face fluxes before accepting state; neither raw coefficients nor a small global
+linear residual establish material-source validity or nonlinear conservation.
+Three native regressions cover differing donor Cp, reverse flow, common-datum
+invariance, real outlet backflow, nonconservative-flow/invalid-field refusal and
+cancellation. They are authored but unrun here; pinned syntax checks, static API
+review and independent three-cell arithmetic passed.

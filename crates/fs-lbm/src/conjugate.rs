@@ -116,7 +116,8 @@ pub use electric::{
     ElectrodeSolution, ElectrothermalReport, solve_electric, solve_electrothermal,
 };
 pub use energy::{
-    CellSink, CompactComponent, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig,
+    AdvectiveEnthalpyField, AffineSpecificEnthalpy, CellSink, CompactComponent, ContactResistance,
+    ConvectionScheme, EnergyBalance, EnergyConfig,
     EnergyReport, EnergySolution, FaceContactResistance, JunctionSolution, ThermalFace,
     ThermalSetup, solve_energy,
 };

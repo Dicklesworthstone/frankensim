@@ -87,8 +87,8 @@ There is one fluid material because the current heat owner has one reference
 fluid heat-capacity flux. In a steady run, density, heat capacity and viscosity
 remain frozen at the explicitly requested reference state. That approximation
 does not establish the validity of constant properties across arbitrary
-temperature changes. Transient admission additionally checks the full density
-and heat-capacity source interval as described below.
+temperature changes. Transient admission checks the full density source interval
+and uses the original heat-capacity chart for both storage and transport.
 Viscosity does not alter a prescribed velocity. Local conductivity and electrical
 resistivity do update. There is no variable-density enthalpy advection, melting,
 phase-front movement, ion/species transport, electrochemistry, motional EMF,
@@ -107,42 +107,59 @@ Use the ordinary time request described in `MATERIAL_ELECTROTHERMAL_TRANSIENT.md
 frankensim --json electrothermal scene.json --transient time.json
 ```
 
-The fluid's density and specific heat must be constant throughout the declared
-temperature interval and exactly match the original reference claims. The
-existing material source-line query checks continuous support and **every**
-crossed breakpoint, including supported sampled surfaces at the fixed pressure
-and composition. Equal endpoint values cannot hide an interior change. Missing
-support, claim switching, varying fluid density or Cp, and inlet/backflow
-temperatures outside the interval refuse before time evolution.
+The fluid's density must be constant throughout the declared temperature interval
+and match its original reference claim. Specific heat may vary with temperature.
+The existing source-line query checks continuous support and every crossed
+breakpoint, including supported sampled surfaces at fixed pressure and
+composition. Missing support, source switching, nonpositive Cp, changing density
+or inlet/backflow temperatures outside the interval refuse.
 
-This admission makes the native face energy flux `rho * Cp * Q * T` consistent
-with fluid cell storage `rho * V * Cp * (T_new - T_old)`. The original enthalpy
-chart owns storage, using the scene's explicit single-fluid-phase assumption;
-solid cells retain their existing potentially variable Cp charts. The same
-native backward-Euler energy solver handles conduction, conservative prescribed
-advection, fluid and solid storage, local Joule heating, thermal contacts and
-admitted exterior radiation. No second advection or storage solver is added.
+The same original bounded enthalpy chart owns both cell storage
+`m * [h(T_new) - h(T_old)]` and conservative face transport
+`rho * Q * h(T_upstream)`. Each nonlinear pass supplies the existing native
+finite-volume operator with per-cell caloric tangents. Both sides of an
+interior face use the SAME upstream value and slope, including the enthalpy
+offset. They therefore exchange equal and opposite energy even when local Cp
+differs. Incoming and backflow enthalpy are evaluated directly on that same
+chart at the boundary temperature; outgoing enthalpy follows the fluid cell.
 
-Cell masses remain fixed while equal incoming and outgoing fluid mass carries
-enthalpy across the control volumes. The arbitrary enthalpy reference cancels
-because flow is volume-conservative and density is constant. Physical outflow
-in each time record includes the native boundary advection and conduction,
-without counting the storage diagonal as external heat. The accepted endpoint
-rechecks electrical resistivity and thermal conductivity at local temperature.
+Fluid transients use **first-order upwind enthalpy transport**. The steady
+command retains its existing reference-Cp Patankar scheme. A transient result
+identifies its scheme as `"fluid_advection":"source-enthalpy-first-order-upwind"`
+(`null` for all-solid scenes). The native field API refuses a power-law scheme
+for nonlinear enthalpy because its reference-Cp blend is a different numerical
+model. No source data or physics implementation changes are needed when an
+admitted material's Cp curve changes.
 
-Changing only source Cp changes both transient heat storage and the transported
-heat-capacity flux. Changing a neighboring solid's Cp changes the fluid's
-temperature through their shared conduction solve. Voltage/current and authored
-power schedules use the existing time request. The result retains
-`fluid_reference` alongside final local source identities and per-step energy
-accounts. A failed step publishes no partial trajectory and leaves inputs intact.
+The original backward-Euler operator handles conduction, storage, prescribed
+advection, local Joule heat, contacts and exterior radiation together. The outer
+material iteration rechecks true chart storage and sums absolute face-local
+advective linearization errors, so compensating local errors cannot hide in a
+global balance. Each accepted time record independently uses true boundary
+enthalpy, rather than the frozen tangent's flux, along with native conduction
+and physical heat exchange. Source-chart interpolation error remains separate
+from numerical energy closure and material uncertainty.
 
-This is a constant-density incompressible thermal approximation on fixed
+Cell masses remain fixed while equal incoming and outgoing mass transports
+enthalpy through each control volume. A common enthalpy datum cancels because
+flow conserves volume locally and density is constant. Storage diagonals are
+not external heat. Changing source Cp changes both heat storage and advected
+enthalpy; changing a neighboring solid's Cp changes fluid temperature through
+shared conduction. Local electrical resistivity and thermal conductivity are
+re-evaluated at the accepted temperature, and the existing voltage/current and
+authored-power schedules remain active.
+
+The result retains `fluid_reference` as reference-state evidence alongside
+source/chart identities and per-step energy accounts. Failed nonlinear,
+material-domain, conservation or cancellation checks publish no partial
+trajectory and leave accepted input state intact.
+
+This remains a constant-density incompressible thermal approximation on fixed
 geometry. The fluid role assumes one stable phase; it does not discover phase
-boundaries. Prescribed flow, frozen reference viscosity, absence of momentum or
-pressure evolution, and the other limits above still apply. Varying fluid Cp
-requires a conservative enthalpy-advection owner and is deliberately refused.
-Backward Euler requires timestep refinement to establish temporal accuracy.
+boundaries. Reference viscosity remains frozen and flow remains prescribed.
+Pressure/momentum evolution, density-driven volume change and phase transition
+require their corresponding owners. Spatial and timestep refinement are needed
+to establish upwind/backward-Euler accuracy.
 
 ## Focused checks
 
@@ -152,8 +169,12 @@ flow, dimensional/semantic conductivity preservation, invalid/reference-domain
 and nonconservative-flow refusals, and pack/scene-to-command execution with
 replay. Three transient regressions additionally compare the original coupled
 solver with an independent three-control-volume balance through drive switch-off,
-exercise fluid/solid capacity coupling, and reject interior rho/Cp variation,
-unsupported inlet states, late storage escape and cancellation. The file-driven
+exercise fluid/solid capacity coupling, and reject interior density variation,
+unsupported inlet states, late storage escape and cancellation. Additional native
+field regressions check donor-face conservation, reversed flow and enthalpy-datum
+invariance. A source-varying-Cp trajectory is compared with independent analytic
+three-cell balances through drive switch-off, including exact chart admission
+and unchanged-input retry. The file-driven
 regression reaches both steady and transient paths. These are authored synthetic
 fixtures, not measured liquid-metal or electrolyte calibration; the new Rust
 regressions have not been executed in this implementation environment.

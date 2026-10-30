@@ -1,6 +1,8 @@
 //! Time evolution through the same material/electrical/heat owners as the
 //! steady command. Cell mass is fixed; storage uses the sourced Cp chart.
 
+mod advection;
+
 use std::path::Path;
 
 use fs_exec::CancelGate;
@@ -223,7 +225,8 @@ pub(crate) fn march(problem: &Problem, request: &Request, gate: &CancelGate) -> 
         // Audit its independently re-evaluated physical flux, not storage sinks.
         let surface_w: f64 = result.radiation.iter().map(|r| r.outward_w()).sum();
         let radiated_w: f64 = result.radiation.iter().map(|r| r.radiated_w).sum();
-        let outflow_j = request.dt * (next.report.balance.boundary_outflow_w + physical_sink + surface_w);
+        let boundary_w = storage.physical_boundary_outflow_w(problem, &thermal, next, gate)?;
+        let outflow_j = request.dt * (boundary_w + physical_sink + surface_w);
         let closure_j = stored + outflow_j - source_j;
         let tolerance = request.absolute_j + request.relative * (stored_scale + source_j.abs() + outflow_j.abs());
         if [stored, source_j, outflow_j, closure_j, tolerance, result.coupled.electric.delivered_w]
@@ -281,7 +284,7 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         "\"total_joule_w\":{},\"electrode_power_w\":{},\"resolved_conductivity_w_m_k\":{},",
         "\"thermal_solves\":{},\"records\":[{}],\"materials\":[{}],\"source_states\":[{}],",
         "\"electrical_interfaces\":{},\"thermal_interfaces\":{},",
-        "\"thermal_contact_relative_defect\":{},\"radiation\":{},\"fluid_reference\":{},\"no_claim\":{}}}\n"),
+        "\"thermal_contact_relative_defect\":{},\"radiation\":{},\"fluid_reference\":{},\"fluid_advection\":{},\"no_claim\":{}}}\n"),
         record.time_s, trajectory.records.len(), problem.domain.dims(), values(trajectory.masses.iter().copied()),
         values(last.thermal.temperature.iter().copied()), values(last.electric.potential_v.iter().copied()),
         values(last.electric.joule_w.iter().copied()), last.electric.total_joule_w, last.electric.delivered_w,
@@ -290,5 +293,6 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         super::super::interfaces::render_thermal(problem, &trajectory.last),
         trajectory.last.thermal_contact_relative_defect,
         super::super::radiation::render(&trajectory.last.radiation),
-        problem.fluid.as_ref().map_or_else(|| "null".into(), super::Fluid::render), quote(no_claim))
+        problem.fluid.as_ref().map_or_else(|| "null".into(), super::Fluid::render),
+        if problem.fluid.is_some() { quote("source-enthalpy-first-order-upwind") } else { "null".into() }, quote(no_claim))
 }

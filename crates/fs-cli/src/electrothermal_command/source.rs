@@ -251,8 +251,19 @@ impl Problem {
                 r.prepare(self, &configured, &field, surface_temperatures, gate)).transpose()?;
             let with_boundary = boundary.as_ref().map_or(&configured, PreparedBoundaryExchange::setup);
             let capacity = storage.map(|s| s.capacities(&previous, gate)).transpose()?;
-            let solution = match (storage, &capacity) {
-                (Some(s), Some(capacity)) => self.energy.step_with_conductivity(
+            let advection = storage.map(|s| s.advection(self, &previous, with_boundary, gate))
+                .transpose()?.flatten();
+            let solution = match (storage, &capacity, &advection) {
+                (Some(s), Some(capacity), Some(advection)) => {
+                    // Variable-Cp transport is conservative upwind enthalpy;
+                    // the reference-Cp Patankar blend is not its constitutive law.
+                    let energy = EnergyConfig { scheme: fs_lbm::conjugate::ConvectionScheme::Upwind, ..self.energy };
+                    energy.step_with_enthalpy(
+                        &self.domain, fluid, solids, flow, with_boundary, &field,
+                        advection.field(), capacity, s.previous, s.dt, gate,
+                    )?.0
+                }
+                (Some(s), Some(capacity), None) => self.energy.step_with_conductivity(
                     &self.domain, fluid, solids, flow, with_boundary, &field,
                     capacity, s.previous, s.dt, gate,
                 )?.0,
@@ -275,13 +286,18 @@ impl Problem {
                 (Some(s), Some(capacity)) => s.consistent(&solution.temperature, capacity, gate)?,
                 _ => true,
             };
+            let advection_consistent = match (storage, &advection) {
+                (Some(s), Some(a)) => s.advection_consistent(self, &solution.temperature, a, gate)?,
+                _ => true,
+            };
             let conductivity_defect = conductivity_defect(&next, &solution.conductivity);
             defect = conductivity_defect.max(contact_defect);
             let change = previous.iter().zip(&solution.temperature)
                 .map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
             if conductivity_defect <= self.conductivity_tolerance
                 && contact_defect <= self.thermal_contact_tolerance
-                && change <= self.coupling.temperature_tolerance_k && storage_consistent && radiation_defect <= 1.0
+                && change <= self.coupling.temperature_tolerance_k && storage_consistent
+                && advection_consistent && radiation_defect <= 1.0
             {
                 for (temperature, face) in surface_temperatures.iter_mut().zip(&radiation) {
                     *temperature = face.surface_temperature_k;
@@ -303,7 +319,7 @@ impl Problem {
             });
         }
         Err(ChtError::SolverNotConverged {
-            system: "source-resolved thermal conductivity/contact/storage", iterations: passes,
+            system: "source-resolved thermal conductivity/contact/storage/advection", iterations: passes,
             relative_residual: defect, tolerance: self.conductivity_tolerance.min(self.thermal_contact_tolerance),
         })
     }

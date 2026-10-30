@@ -322,9 +322,15 @@ impl VoxelDomain {
     }
 
     /// Neighbour of `c` across local face `face` (0..6 in [`super::Face3::ALL`]
-    /// order), or `None` at the domain boundary.
+    /// order), or `None` at the domain boundary. This is geometric adjacency;
+    /// the caller checks fluid/solid occupancy separately.
+    ///
+    /// # Panics
+    /// If `c` is outside the domain or `face` is outside `0..6`.
     #[inline]
-    pub(crate) fn neighbor(&self, c: usize, face: usize) -> Option<usize> {
+    #[must_use]
+    pub fn neighbor(&self, c: usize, face: usize) -> Option<usize> {
+        assert!(c < self.cell_count() && face < 6, "cell/face index outside domain");
         let [x, y, z] = self.coords(c);
         match face {
             0 => (x > 0).then(|| c - 1),

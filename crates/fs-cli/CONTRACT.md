@@ -2903,3 +2903,37 @@ phase transition or thermal-expansion work is inferred. Single-phase charts
 are scene assumptions, not phase-stability proofs; timestep refinement is
 required. Three new G1/G3/G4 regressions cover an independent control-volume
 transient, shared solid/fluid storage, and interior-law/late-state refusals.
+
+## One source caloric chart for fluid storage and transported enthalpy
+
+Electrothermal fluid transients now admit temperature-varying source Cp while
+retaining the original single constant-density fluid, fixed cell masses and
+prescribed volume-conservative flow. Full source-line queries retain continuous
+support, original selected claims and fixed pressure/composition context. Density
+must remain constant throughout every crossed segment; positive Cp may vary.
+Inlet/backflow temperatures must lie within the same source interval.
+
+The existing ResolvedHeatCapacityCurve supplies BOTH m*delta(h) storage and
+rho*Q*h_upstream transport through the original native heat operator. Each outer
+material pass refreshes conductivity/resistivity, storage secants and advective
+caloric tangents. Acceptance sums absolute local storage and incident-face
+enthalpy defects, so opposite errors cannot cancel. Final time records replace
+frozen boundary advection with true chart enthalpy while retaining native
+conduction, physical sinks/radiation and accepted endpoint Joule heat.
+
+All fluid transients explicitly use first-order upwind enthalpy, reported as
+fluid_advection="source-enthalpy-first-order-upwind" (null for all-solid scenes).
+The steady command retains its reference-Cp scheme. Source interpolation error,
+numerical closure and source uncertainty remain distinct. This adds neither
+variable-density mass transport, momentum/pressure evolution, phase change nor
+thermal deformation. Prescribed-flow and stable-single-phase assumptions remain
+explicit; mesh/time refinement is still required.
+
+Two new source-Cp regressions compare continuing driven/cooling fields and energy
+with independent analytic three-cell equations, check complete source/boundary
+support, and retain unchanged inputs/retry. Existing fluid capacity/current and
+solid-coupling tests use the unified path. Native Rust regressions are authored
+but unrun under the environment's existing memory/build constraint. Read-only
+syntax/whitespace checks, independent API/sign review and reference arithmetic
+passed; the additional backflow regression and documentation were finalized in
+memory when the local disk filled, then published through GitHub.

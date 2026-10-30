@@ -87,13 +87,15 @@ conductivity-field solver. Geometry, material IDs, physical thermal contacts,
 spatial conductivity and boundary assembly are unchanged. Insulated domains
 are anchored by storage, not by an invented fixed-temperature cell.
 
-An optional fluid role uses this same path with its existing prescribed
-volume-conservative face flow. Its source density and Cp must be constant over
-the **complete** requested interval and match the original reference claims;
-all source breakpoints are checked, not just endpoints. Inlet and backflow
-temperatures must lie inside that interval. This keeps the native `rho*Cp*Q*T`
-flux consistent with `m*delta(h)` storage, including the cancellation of the
-arbitrary enthalpy reference. Neighboring solids may retain variable Cp.
+An optional fluid role uses this same path with its existing prescribed,
+volume-conservative face flow. Source density must remain constant throughout
+the complete interval; fluid and solid Cp may vary. The fluid's ONE sourced
+enthalpy chart drives both native first-order upwind `rho*Q*h(T_upstream)`
+transport and `m*delta(h)` storage. The original source-line owner checks all
+crossed breakpoints, not just endpoints. Inlet and backflow temperatures must
+lie inside the chart. Local volume conservation cancels the common enthalpy
+datum. Nonlinear acceptance checks absolute face-local transport defects as
+well as storage; time records independently evaluate true boundary enthalpy.
 See `MATERIAL_ELECTROTHERMAL_FLUID.md` for admission and physical boundaries.
 
 The steady and transient command paths share the material/electrical/thermal
@@ -160,8 +162,8 @@ The model is fixed-geometry, fixed cell mass, isotropic ohmic conduction with
 optional prescribed constant-density fluid heat transport. Cp is used in the
 negligible-volume-change solid and incompressible-fluid thermal approximations;
 there is no thermal-expansion work, stress evolution, phase change, latent heat,
-chemistry, fluid momentum/pressure evolution, variable-density or variable-Cp
-fluid advection, AC current, uncertainty propagation or experimental qualification.
+chemistry, fluid momentum/pressure evolution, variable-density fluid transport,
+AC current, uncertainty propagation or experimental qualification.
 Exterior gray radiation uses its existing explicitly admitted source-backed
 owner. The declared single phase is a caller assumption,
 not a phase-boundary discovery. Generated-chart interpolation and source error

@@ -22,6 +22,8 @@ use super::{ChtError, finite, finite_positive};
 use crate::d3q19::Face3;
 
 mod material_field;
+mod enthalpy_field;
+pub use enthalpy_field::{AdvectiveEnthalpyField, AffineSpecificEnthalpy};
 mod face_contact;
 pub use face_contact::FaceContactResistance;
 
@@ -271,8 +273,9 @@ pub struct EnergyBalance {
     /// Net total energy flux (advective + diffusive) out of the domain.
     pub boundary_outflow_w: f64,
     /// Net upwind advective part of `boundary_outflow_w` (informational;
-    /// enthalpy referenced to 0 K, which is exact because net boundary
-    /// mass flow vanishes).
+    /// constant-Cp mode references enthalpy to 0 K; an explicit caloric field
+    /// uses its common supplied datum. Net boundary mass flow must vanish for
+    /// this flux to be independent of that datum).
     pub advective_outflow_w: f64,
     /// Heat leaving through cell sinks (`ThermalSetup::cell_sinks`).
     pub sink_outflow_w: f64,
@@ -412,6 +415,7 @@ struct FaceTerm {
 enum Advective {
     None,
     OwnCell(f64),
+    Affine { mass_flow_kg_s: f64, enthalpy: AffineSpecificEnthalpy },
     Fixed(f64),
 }
 
@@ -425,6 +429,8 @@ struct Context<'a> {
     contacts: Vec<((u16, u16), f64)>,
     face_contacts: std::collections::BTreeMap<(usize, usize), f64>,
     rho_c: f64,
+    density: f64,
+    enthalpy: Option<AdvectiveEnthalpyField<'a>>,
     scheme: ConvectionScheme,
 }
 
@@ -459,6 +465,22 @@ impl Context<'_> {
         }
     }
 
+    fn enthalpy_boundary(&self, c: usize, f: usize) -> FaceTerm {
+        let field = self.enthalpy.expect("enthalpy path");
+        let mass = self.density * self.flow.outward(self.domain, c, f);
+        if mass >= 0.0 {
+            let enthalpy = field.cells[c].expect("admitted fluid boundary");
+            FaceTerm {
+                diag: mass * enthalpy.heat_capacity_j_kg_k, off: None,
+                rhs: -mass * enthalpy.intercept(),
+                advective: Advective::Affine { mass_flow_kg_s: mass, enthalpy },
+            }
+        } else {
+            let j = mass * field.boundary_j_kg[f].expect("admitted boundary enthalpy");
+            FaceTerm { diag: 0.0, off: None, rhs: -j, advective: Advective::Fixed(j) }
+        }
+    }
+
     fn term(&self, c: usize, f: usize) -> FaceTerm {
         let axis = f / 2;
         let area = self.domain.face_area(c, axis);
@@ -472,6 +494,22 @@ impl Context<'_> {
             let contact = self.contact(c, n);
             let half_n = 0.5 * self.domain.widths(n)[axis];
             let d = area / (half_c / kc + contact + half_n / kn);
+            if let Some(field) = self.enthalpy {
+                let mass = self.density * self.flow.outward(self.domain, c, f);
+                // Solid faces are impermeable. At a fluid face both rows use
+                // exactly the same donor tangent, including its affine offset.
+                if mass != 0.0 {
+                    let upstream = if mass > 0.0 { c } else { n };
+                    let h = field.cells[upstream].expect("admitted fluid donor");
+                    let rate = mass * h.heat_capacity_j_kg_k;
+                    return FaceTerm {
+                        diag: d + rate.max(0.0),
+                        off: Some((n, d + (-rate).max(0.0))),
+                        rhs: -mass * h.intercept(),
+                        advective: Advective::None,
+                    };
+                }
+            }
             let a = d.mul_add(self.weight(flux / d), (-flux).max(0.0));
             return FaceTerm {
                 diag: a + flux,
@@ -517,6 +555,12 @@ impl Context<'_> {
                 advective: Advective::None,
             },
             ThermalFace::Inflow { temperature } => {
+                if self.enthalpy.is_some() {
+                    let mut term = self.enthalpy_boundary(c, f);
+                    term.diag += half;
+                    term.rhs += half * temperature;
+                    return term;
+                }
                 let a = half.mul_add(self.weight(flux / half), (-flux).max(0.0));
                 let advective = if flux >= 0.0 {
                     Advective::OwnCell(flux)
@@ -533,6 +577,9 @@ impl Context<'_> {
             ThermalFace::Outflow {
                 backflow_temperature,
             } => {
+                if self.enthalpy.is_some() {
+                    return self.enthalpy_boundary(c, f);
+                }
                 if flux >= 0.0 {
                     FaceTerm {
                         diag: flux,
@@ -701,7 +748,7 @@ fn solve_energy_once(
     nonlinear: Option<(&[f64], Option<&[f64]>)>,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
-    solve_energy_field(domain, fluid, solids, flow, setup, config, step, nonlinear, None, gate)
+    solve_energy_field(domain, fluid, solids, flow, setup, config, step, nonlinear, None, None, gate)
 }
 
 /// Shared assembly/solve/accounting kernel. An explicit field replaces only
@@ -717,9 +764,11 @@ fn solve_energy_field(
     step: Option<&PseudoStep<'_>>,
     nonlinear: Option<(&[f64], Option<&[f64]>)>,
     molecular_conductivity: Option<&[[f64; 3]]>,
+    enthalpy: Option<AdvectiveEnthalpyField<'_>>,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
     fluid.validate()?;
+    if let Some(field) = enthalpy { field.validate(domain, flow, setup, config, gate)?; }
     for solid in solids {
         finite_positive("solid.conductivity_w_m_k", solid.conductivity_w_m_k)?;
         for k in solid.axis_conductivity() {
@@ -873,6 +922,8 @@ fn solve_energy_field(
         contacts,
         face_contacts,
         rho_c: fluid.volumetric_heat_capacity(),
+        density: fluid.density_kg_m3,
+        enthalpy,
         scheme: config.scheme,
     };
     let source = |c: usize| {
@@ -953,6 +1004,13 @@ fn solve_energy_field(
                 continue;
             }
             let term = ctx.term(c, f);
+            if !term.diag.is_finite() || !term.rhs.is_finite()
+                || term.off.is_some_and(|(_, a)| !a.is_finite())
+            {
+                return Err(ChtError::InvalidInput {
+                    field: "thermal.face_coefficients", reason: "face energy coefficients overflow".into(),
+                });
+            }
             diag += term.diag;
             rhs += term.rhs;
             anchored |= term.off.is_none() && term.diag > 0.0;
@@ -963,7 +1021,12 @@ fn solve_energy_field(
                     let axis = f / 2;
                     let d = domain.face_area(c, axis) * ctx.k[c][axis]
                         / (0.5 * (domain.widths(c)[axis] + domain.widths(n)[axis]));
-                    let flux = ctx.rho_c * flow.outward(domain, c, f);
+                    let q = flow.outward(domain, c, f);
+                    let rho_c = ctx.enthalpy.map_or(ctx.rho_c, |field| {
+                        ctx.density * field.cells[if q >= 0.0 { c } else { n }]
+                            .expect("admitted fluid donor").heat_capacity_j_kg_k
+                    });
+                    let flux = rho_c * q;
                     max_cell_peclet = max_cell_peclet.max(flux.abs() / d);
                 }
             }
@@ -1075,7 +1138,24 @@ fn solve_energy_field(
                 continue;
             }
             let term = ctx.term(c, f);
-            let j = flux_of(&term, c);
+            let advective = match term.advective {
+                Advective::None => 0.0,
+                Advective::OwnCell(q) => q * temperature[c],
+                Advective::Affine { mass_flow_kg_s, enthalpy } =>
+                    mass_flow_kg_s * enthalpy.at_temperature(temperature[c]),
+                Advective::Fixed(j) => j,
+            };
+            // Centered enthalpy/diffusion avoids cancelling large affine
+            // matrix coefficients when auditing a small physical heat flux.
+            let j = if ctx.enthalpy.is_some() && domain.is_fluid(c) {
+                match setup.faces[f] {
+                    ThermalFace::Inflow { temperature: inlet } => advective
+                        + domain.face_area(c, f / 2) * ctx.k[c][f / 2]
+                            / (0.5 * domain.widths(c)[f / 2]) * (temperature[c] - inlet),
+                    ThermalFace::Outflow { .. } => advective,
+                    _ => flux_of(&term, c),
+                }
+            } else { flux_of(&term, c) };
             if fixed[c].is_none() {
                 out_w += j;
             } else {
@@ -1084,11 +1164,7 @@ fn solve_energy_field(
                 fixed_w -= j;
             }
             scale += j.abs();
-            adv_w += match term.advective {
-                Advective::None => 0.0,
-                Advective::OwnCell(q) => q * temperature[c],
-                Advective::Fixed(j) => j,
-            };
+            adv_w += advective;
         }
     }
     for part in &setup.compact_components {
