@@ -17,6 +17,8 @@
 //! a different material/geometry owner.
 
 pub mod thermoelastic;
+/// Joint solid-layer viscosity/enthalpy feedback with complete exterior fluid memory.
+pub mod fluid;
 
 use super::{FrameVibrationBasis, FrameVibrationComponent, FrameVibrationError};
 use crate::circuit_enthalpy::{
@@ -87,6 +89,7 @@ impl FrameThermalSolve {
 #[derive(Debug)]
 pub enum FrameThermalSourceError {
     Frame(FrameVibrationError),
+    Fluid(crate::air_path::cylinder::frame::FrameFluidError),
     Material(MaterialStatePointError),
     Network(MaterialNetworkError),
     Port(fs_ports::CoupleError),
