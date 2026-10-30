@@ -7,7 +7,7 @@
 //! characteristic junction. Second-order accuracy is limited to smooth branches.
 
 use super::{
-    AcousticRealizeError, BeatingReed, FastSolveStats, Obstacle, ReedSolverMode,
+    AcousticRealizeError, BeatingReed, Obstacle,
     reed_pressure_face, reed_structural, reed_swept_flow,
 };
 use crate::unilateral_contact::distributed::ApertureContactStep;
@@ -217,19 +217,8 @@ pub(super) fn step_with_contact_response(
         OpeningPropagator::Midpoint => {
             // The held-aperture solve is a predictor only. Even free flight must
             // solve again: changing opening changes jet flow and the pressure load.
-            let free = super::step_massive_reed(
-                reed,
-                rho,
-                zc,
-                p_minus,
-                p_m,
-                y,
-                v,
-                dt,
-                u_body,
-                None,
-                ReedSolverMode::Strict,
-                &mut FastSolveStats::default(),
+            let free = super::massive_reed_predictor(
+                reed, rho, zc, p_minus, p_m, y, v, dt, u_body,
             )?;
             (reed.mass_kg + half_dt * damping + half_dt * half_dt * stiffness,
                 reed.mass_kg * v - half_dt * stiffness * (y - reed.rest_opening_m),
@@ -506,11 +495,17 @@ mod tests {
         assert!((actual.0 - expected_pressure).abs() < 1e-8);
         assert!((actual.1 - y1).abs() < 1e-13);
         assert!((actual.2 - v1).abs() < 1e-9);
-        let old = super::super::step_massive_reed(
+        let actual_free = super::super::step_massive_reed(
             reed, rho, zc, incoming, mouth, y, v, dt, body, None,
             ReedSolverMode::Strict, &mut FastSolveStats::default(),
         ).unwrap();
-        assert!((old.1 - y1).abs() > 1e-7, "held-opening negative control must fail");
+        assert!((actual_free.0 - expected_pressure).abs() < 1e-8);
+        assert!((actual_free.1 - y1).abs() < 1e-13);
+        assert!((actual_free.2 - v1).abs() < 1e-9);
+        let old = super::super::massive_reed_predictor(
+            reed, rho, zc, incoming, mouth, y, v, dt, body,
+        ).unwrap();
+        assert!((old.1 - y1).abs() > 1e-7, "frozen-opening predictor is not a physical step");
     }
 
     // An independent continuous ODE oracle: invert the Bernoulli quadratic
@@ -551,13 +546,14 @@ mod tests {
         let initial = [1.1 * reed.rest_opening_m, 0.25];
         let duration = 2e-4;
         let reference = rk4_reference(initial, duration);
-        let mut errors = Vec::new();
-        let mut frozen_errors = Vec::new();
+        let mut contact_errors = Vec::new();
+        let mut free_errors = Vec::new();
+        let mut predictor_errors = Vec::new();
         for count in [64, 128, 256] {
             let dt = duration / f64::from(count);
             for (obstacle, output) in [
-                (Some(&lay), &mut errors),
-                (None, &mut frozen_errors),
+                (Some(&lay), &mut contact_errors),
+                (None, &mut free_errors),
             ] {
                 let [mut y, mut v] = initial;
                 for _ in 0..count {
@@ -571,13 +567,28 @@ mod tests {
                 output.push(((y - reference[0]) / reed.rest_opening_m)
                     .hypot((v - reference[1]) / (reed.rest_opening_m * omega)));
             }
+            let [mut y, mut v] = initial;
+            for _ in 0..count {
+                let (_, next_y, next_v) = super::super::massive_reed_predictor(
+                    reed, 1.2, 1e6, 75.0, 1000.0, y, v, dt, 2e-7,
+                ).unwrap();
+                (y, v) = (next_y, next_v);
+            }
+            let omega = (reed.stiffness_n_m / reed.mass_kg).sqrt();
+            predictor_errors.push(((y - reference[0]) / reed.rest_opening_m)
+                .hypot((v - reference[1]) / (reed.rest_opening_m * omega)));
         }
-        for pair in errors.windows(2) {
-            assert!(pair[0] / pair[1] > 3.8 && pair[0] / pair[1] < 4.2, "{errors:?}");
+        for errors in [&contact_errors, &free_errors] {
+            for pair in errors.windows(2) {
+                assert!(pair[0] / pair[1] > 3.8 && pair[0] / pair[1] < 4.2, "{errors:?}");
+            }
         }
-        let frozen_ratio = frozen_errors[1] / frozen_errors[2];
-        assert!(frozen_ratio > 1.8 && frozen_ratio < 2.3, "{frozen_errors:?}");
-        assert!(errors[2] < 0.2 * frozen_errors[2]);
+        for (a, b) in contact_errors.iter().zip(&free_errors) {
+            assert!((a - b).abs() <= 1e-12 * a.max(*b).max(f64::MIN_POSITIVE));
+        }
+        let predictor_ratio = predictor_errors[1] / predictor_errors[2];
+        assert!(predictor_ratio > 1.8 && predictor_ratio < 2.3, "{predictor_errors:?}");
+        assert!(free_errors[2] < 0.2 * predictor_errors[2]);
     }
 
     #[test]

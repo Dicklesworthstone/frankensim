@@ -405,61 +405,144 @@ pub(crate) fn step_massive_reed(
     mode: ReedSolverMode,
     stats: &mut FastSolveStats,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
-    if let Some(obstacle) = lay {
-        let result = contact::step(reed, rho, zc, p_minus, p_m, y, v, dt, u_body, obstacle)?;
-        if mode == ReedSolverMode::FastNewton {
-            stats.fallback_samples += 1;
+    let result = match lay {
+        Some(obstacle) => contact::step(
+            reed, rho, zc, p_minus, p_m, y, v, dt, u_body, obstacle,
+        )?,
+        None => {
+            // Contact-free motion uses the SAME implicit midpoint opening and
+            // swept-face flow as the contact/material path. The old closed form
+            // survives only as a root predictor inside that common equation.
+            let next = contact::step_with_contact_response(
+                reed,
+                rho,
+                zc,
+                p_minus,
+                p_m,
+                y,
+                v,
+                dt,
+                u_body,
+                |opening| Ok(opening.max(0.0)),
+                None,
+                contact::OpeningPropagator::Midpoint,
+                |opening, moving| {
+                    solve_moving_aperture_wave(
+                        reed.width_m,
+                        opening,
+                        rho,
+                        zc,
+                        p_minus,
+                        p_m,
+                        moving,
+                    )
+                },
+                |_after, _velocity| {
+                    Ok(fs_dcontact::AffineContactResponse {
+                        elastic_force: 0.0,
+                        force: 0.0,
+                        dissipated_power: 0.0,
+                    })
+                },
+            )?;
+            (next.outgoing, next.opening, next.velocity)
         }
-        return Ok(result);
-    }
-    let face = reed_pressure_face(reed);
-    let (k, r_damp) = reed_structural(reed);
-    // The contact-free linear mechanics and pressure use the SAME midpoint
-    // velocity. The implicit contact path above reuses this exact free step
-    // when its opening segment has no contact. Eliminating mechanics gives:
-    //   vbar = v_free - beta * dp
-    //   dp + Z (Ujet - A vbar + Ubody) = Pmouth - 2 Pminus.
-    // Positive A*beta adds load; it cannot introduce a negative impedance.
-    let (elastic, contact_damping) = lay.map_or(Ok((0.0, 0.0)), |obstacle| {
-        slit_contact_coefficients(obstacle, y)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
-    })?;
-    let solve = |contact_force: f64, contact_loss: f64| {
-        let half_dt = 0.5 * dt;
-        let mass_mid = reed.mass_kg + half_dt * (r_damp + contact_loss) + half_dt * half_dt * k;
-        let v_free = (reed.mass_kg * v + half_dt * (contact_force - k * (y - reed.rest_opening_m)))
-            / mass_mid;
-        let beta = half_dt * face / mass_mid;
-        let load = 1.0 + zc * face * beta;
-        let drive = (p_m - 2.0 * p_minus - zc * (reed_swept_flow(face, v_free) + u_body)) / load;
-        if !mass_mid.is_finite() || !load.is_finite() || !v_free.is_finite() {
-            return Err(AcousticRealizeError::Reed {
-                what: "midpoint reed mechanics left the finite set",
-            });
-        }
-        let jet_pressure =
-            solve_moving_aperture_wave(reed.width_m, y.max(0.0), rho, zc / load, 0.0, drive, 0.0)?;
-        let dp = drive - jet_pressure;
-        let p_plus = p_m - p_minus - dp;
-        let v_mid = v_free - beta * dp;
-        let y1 = y + dt * v_mid;
-        let v1 = 2.0 * v_mid - v;
-        if !p_plus.is_finite() || !y1.is_finite() || !v1.is_finite() {
-            return Err(AcousticRealizeError::Reed {
-                what: "massive reed left the finite set",
-            });
-        }
-        Ok((p_plus, y1, v1))
     };
-    let mut result = solve(elastic, contact_damping)?;
-    if elastic - contact_damping * (0.5 * (v + result.2)) < 0.0 {
-        result = solve(0.0, 0.0)?;
-    }
     if mode == ReedSolverMode::FastNewton {
-        // The quasistatic Newton Jacobian does not describe a moving aperture.
+        // The quasistatic pressure Newton does not describe a moving aperture.
         stats.fallback_samples += 1;
     }
     Ok(result)
+}
+
+// Closed-form frozen-opening reduction retained only to seed the common implicit
+// moving-opening solve. It is not a physical stepping API: final flow must be
+// reevaluated at the midpoint opening and the same midpoint swept-face velocity.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn massive_reed_predictor(
+    reed: BeatingReed,
+    rho: f64,
+    zc: f64,
+    p_minus: f64,
+    p_m: f64,
+    y: f64,
+    v: f64,
+    dt: f64,
+    u_body: f64,
+) -> Result<(f64, f64, f64), AcousticRealizeError> {
+    if ![
+        rho,
+        zc,
+        p_minus,
+        p_m,
+        y,
+        v,
+        dt,
+        u_body,
+        reed.mass_kg,
+        reed.rest_opening_m,
+        reed.width_m,
+        reed.closing_pressure_pa,
+        reed.stiffness_n_m,
+        reed.damping_ratio,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+        || rho <= 0.0
+        || zc <= 0.0
+        || dt <= 0.0
+        || reed.mass_kg <= 0.0
+        || reed.rest_opening_m <= 0.0
+        || reed.width_m <= 0.0
+        || reed.closing_pressure_pa <= 0.0
+        || reed.stiffness_n_m < 0.0
+        || reed.damping_ratio < 0.0
+    {
+        return Err(AcousticRealizeError::Reed {
+            what: "massive reed predictor requires finite admitted mechanics and positive time step",
+        });
+    }
+    let face = reed_pressure_face(reed);
+    let (k, r_damp) = reed_structural(reed);
+    let half_dt = 0.5 * dt;
+    let mass_mid = reed.mass_kg + half_dt * r_damp + half_dt * half_dt * k;
+    let v_free =
+        (reed.mass_kg * v - half_dt * k * (y - reed.rest_opening_m)) / mass_mid;
+    let beta = half_dt * face / mass_mid;
+    let load = 1.0 + zc * face * beta;
+    let drive =
+        (p_m - 2.0 * p_minus - zc * (reed_swept_flow(face, v_free) + u_body)) / load;
+    if !mass_mid.is_finite()
+        || mass_mid <= 0.0
+        || !load.is_finite()
+        || load <= 0.0
+        || !v_free.is_finite()
+        || !drive.is_finite()
+    {
+        return Err(AcousticRealizeError::Reed {
+            what: "massive reed predictor left the finite set",
+        });
+    }
+    let jet_pressure = solve_moving_aperture_wave(
+        reed.width_m,
+        y.max(0.0),
+        rho,
+        zc / load,
+        0.0,
+        drive,
+        0.0,
+    )?;
+    let dp = drive - jet_pressure;
+    let p_plus = p_m - p_minus - dp;
+    let v_mid = v_free - beta * dp;
+    let y1 = y + dt * v_mid;
+    let v1 = 2.0 * v_mid - v;
+    if !p_plus.is_finite() || !y1.is_finite() || !v1.is_finite() {
+        return Err(AcousticRealizeError::Reed {
+            what: "massive reed predictor left the finite set",
+        });
+    }
+    Ok((p_plus, y1, v1))
 }
 
 /// Fixed-state characteristic junction, shared by any moving slit valve.
