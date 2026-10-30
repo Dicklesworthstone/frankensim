@@ -16,6 +16,8 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::o
 
 #[path = "bow_motion.rs"]
 pub mod bow_motion;
+#[path = "input/forces.rs"]
+mod forces;
 
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
@@ -219,7 +221,7 @@ pub struct Spec {
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     /// The explicit contact-thermal profile requires original film density.
     pub contact_thermal: bool,
-    pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
+    pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<MaterialForceProgram>,
     pub bow_fibers: Option<fibers::Input>,
     /// Prescribed position along the string, separate from tangential speed/load.
     pub bow_station_motion: Option<bow_motion::Input>,
@@ -920,47 +922,9 @@ impl Spec {
             Some(input)
         } else { None };
         let bow_station_motion = bow_motion::Input::parse(&mut r)?;
-        let mut row = r.row("forces")?;
-        let initialization = match row.word()? {
-            "retain" => ForceInitialization::RetainState,
-            "preload" => ForceInitialization::StaticPreload,
-            _ => return Err("force initialization must be retain or preload".into()),
-        };
-        let ports = row.count(64)?; let event_count = row.count(MAX_EVENTS)?; row.end()?;
-        let mut locations = Vec::with_capacity(ports); let mut initial_force_n = Vec::with_capacity(ports);
-        for _ in 0..ports {
-            let mut row = r.row("port")?;
-            let string = row.count(count-1)?; let station_fraction = row.scalar()?;
-            let coupling = match row.word()? {
-                "centreline" => StringForceCoupling::Centreline,
-                "surface" => StringForceCoupling::Surface,
-                "along" => {
-                    let direction = TransverseDirection::try_new([row.scalar()?, row.scalar()?])?;
-                    if strings[string].polarizations.is_none() && direction.components()[1] != 0.0 {
-                        return Err("second-plane force requires polarizations two".into());
-                    }
-                    StringForceCoupling::CentrelineAlong(direction)
-                },
-                _ => return Err("force coupling must be centreline, surface or along DX DY".into()),
-            };
-            if !(0.0 < station_fraction && station_fraction < 1.0) { return Err("load station must be interior".into()); }
-            locations.push(StringForcePort { location: StringBowLocation { string, station_fraction }, coupling });
-            initial_force_n.push(row.scalar()?); row.end()?;
-        }
-        let mut events = Vec::with_capacity(event_count);
-        for _ in 0..event_count {
-            let mut row = r.row("force")?;
-            let sample: u64 = row.parse()?; let port = row.count(64)?; let force_n = row.scalar()?; row.end()?;
-            if sample >= samples || port >= ports { return Err("force event exceeds its physical ports or observed window".into()); }
-            events.push(ModalForceEvent { sample, voice: 0, port, force_n });
-        }
+        let forces = forces::parse(&mut r, count, |string| strings[string].polarizations.is_some(),
+            rate, samples, block)?;
         if r.lines.next().is_some() { return Err("unexpected header record".into()); }
-        if ports == 0 && (event_count != 0 || initialization == ForceInitialization::StaticPreload) {
-            return Err("preload and force events require an explicit load port".into());
-        }
-        let forces = (ports != 0).then_some(StringForceProgram { ports: locations, initial_force_n, events,
-            initialization, limits: ForceRenderConfig { sample_rate_hz: rate, max_block: block,
-                max_events: MAX_EVENTS, max_controls: MAX_CONTROLS, max_projection_terms: 16_777_216 } });
         // The canonical decoder reserves from declared counts. Bound them before
         // invoking it, then require exact re-encoding so nothing is silently lost.
         let mut total = 0usize; let lines = schedule.lines().count();

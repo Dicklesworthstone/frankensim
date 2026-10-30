@@ -14547,3 +14547,40 @@ The admitted model is a first-order frozen-temperature split with fixed referenc
 The source gas is bound before finite walls. `from_gas`/`from_relaxation` refuse FE objects with pre-attached anonymous numeric conductive walls. Source patch attachment is nonempty and once-only; original FE boundary conflicts and frequency-local solid admission remain typed `ThermoviscousError` causes. Immutable borrowing prevents a prepared response from surviving a source change. Existing band, phasor and duct TwoPort semantics are unchanged.
 
 Two new original-material integration cases pass in the focused native fallback: conductivity/capacity substitutions change the full resolved molecular response while all four live loss channels close input work within 2e-8; source identity is retained; wrong common temperature and anonymous numeric wall attachment refuse. The three retained resolved gas/molecular/duct cases also pass. Complete original material, thermochemistry, thermal, port-Hamiltonian and duct libraries compiled in the existing focused seam, with no numerical replacements. This is not a pinned-toolchain/full-workspace gate or an instrument render qualification.
+
+## Prescribed physical bridge loads on the shared string performer
+
+`PhysicalForceProgram<P>` retains physical ports, initial held newtons,
+source-timed `ModalForceEvent` assignments, initialization and the original
+force resource limits. `StringForceProgram` remains its string-port
+specialization. `MaterialForceProgram` accepts `MaterialForcePort::String`
+and `MaterialForcePort::ShellBridge { bridge }` in the same authored order.
+
+`MultiBowStringBank::material_force_columns` obtains each bridge row from
+the original shell or assembly image and places its complete structural
+prefix at the actual flattened body-component offset. All other entries are
+zero direct load. A newton amplitude multiplies that original work-conjugate
+displacement/load map, including original moment-per-newton lever arms.
+The method refuses missing/ambiguous shell ownership, absent bridge indices,
+inconsistent extents, nonfinite selected maps, cancellation, size overflow
+and the declared projection budget. Sources using residual-flexibility
+condensation refuse bridge ports until complete direct-force columns exist;
+string ports preserve their original source admission.
+
+`MultiBowPerformance::with_material_forces` and `with_string_forces` use
+one binder and the original `ProjectedForceProgram`, released-equilibrium
+solver and performance loop. All future events are validated before preload.
+Rate and callback limits match the original mechanical clock; controls apply
+before the same joint mechanical or thermal step. Duplicate ports sum
+coherently before projection, while assignments to one port at one sample
+retain the original stable last-assignment behavior. No source projection or
+extra physics stepper enters the callback.
+
+`material_force_program` exposes mixed authored inputs;
+`string_force_program` exposes legacy string inputs.
+`projected_material_forces` and the retained `projected_string_forces`
+view expose the same common compiled controls. Preload energy retains the
+original full-network account. Finite pulses are held newton loads with
+explicit release samples, not implicit impulses, contact impact models or
+block-dependent gains. Pressure, material history, coating applicability
+and energy diagnostics retain their existing owners and physical limits.

@@ -310,6 +310,44 @@ it does not certify intersample peaks, omitted modes, continuum error or
 three-dimensional interlaminar strain. A harmonic force-scale bound cannot be
 reinterpreted as a bow-force or bow-speed limit for nonlinear playing.
 
+
+### Controlled bridge excitation through the same time-domain model
+
+The native performer now admits prescribed shell-bridge loads alongside its
+existing physical string loads. A bridge port selects the original shell or
+assembly force/displacement map; its signed amplitude is in newtons. For
+modal coordinates `q`, that map supplies `B f` to the coupled equations
+and the work-conjugate port velocity is `B^T q_dot`. Thus the same geometry
+that projects the force also determines its mechanical work. The source
+basis, reciprocal string and air connections, viscoelastic histories,
+pressure observer and coating guard remain those of the original performer.
+
+This closes a practical experimental gap between a harmonic transfer query
+and nonlinear bowing: the body can receive a controlled finite pulse while
+all bow traction is released and the strings remain attached. The existing
+grouped-force compiler accepts mixed string/bridge ports, coherent loads on
+one bridge, and timed release. One joint mechanical step handles all due
+controls. Static preload uses the original full-network equilibrium solver;
+a pulse uses retained-state load-on and does not reset state at release.
+
+The [violin recipe](../data/instruments/descriptions/violin/README.md#controlled-bridge-pulse-and-ringdown)
+uses a 1 N, 64-sample rectangular pulse at 144 kHz and preserves the
+four-string il Cannone construction. Bare/coated runs can therefore compare
+the attack, coupled free decay and pressure under identical physical input.
+Changes arise through the assembled mass, stiffness and material relaxation,
+then body/string/air exchange and the selected observer. There is no assigned
+spectral correction or independent audio normalization.
+
+The pulse is authored rather than measured, and its spectrum is not flat.
+A raw pressure spectrum must not be labeled Pa/N; the existing loaded harmonic
+query supplies normalized transfer values within admitted source bands.
+The rectangular input also has out-of-band content, so the hereditary
+recipe's explicit Prony continuation remains an assumption outside the
+measured varnish window. The strain guard can check the same actual accepted
+endpoints, subject to its existing spatial/modal and small-strain limits.
+The compact default receiver and finite mesh/mode/time resolution still
+need qualification before an audible difference can be attributed to varnish.
+
 ### Verification and remaining qualification
 
 Seven focused native shell checks cover the physical section and projection path, equilibrium stiffness counted once, unchanged coating mass, full off-diagonal reconstruction, unique-time aggregation, and transactional refusals. Four original prepared-owner tests cover state, work and heat against an independent full fs-phs realization, step subdivision, histories beyond the previous small-state ceiling, and stiff relaxation. Four unloaded harmonic checks cover force/velocity and power identities, source support and bare/assembly response.
@@ -347,6 +385,18 @@ tests also pass. The three authored full-bank monitor regressions remain
 unrun: after the native core Cargo run succeeded, shared disk exhaustion
 prevented further coupling/example compilation. No complete thermal, BEM or
 WAV run is inferred from these focused checks.
+
+The prescribed bridge-force extension passes bounded Rust metadata typechecking
+of the exact new force implementation and original force compiler, using inert
+surrounding bank/source containers. The exact native force parser and its four
+regression tests also typecheck; the final native CLI source passes formatter
+syntax parsing. These checks emitted no executable. Shared disk exhaustion
+prevented new runtime test execution, a complete native CLI build and the
+bare/coated pulse WAV comparison. A regression in the existing shell/cavity
+test seam exercises original force mapping, coherent mixed loads, release,
+energy, reciprocal string/air response and callback-partition identity;
+its native execution remains pending. The committed pulse is a reproducible input;
+no resulting sound, decay shift or convergence result is claimed.
 
 ## Remaining physical limits
 

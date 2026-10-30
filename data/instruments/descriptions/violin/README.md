@@ -125,6 +125,58 @@ allowance. The allowance is not a bound on frequency, sound or total
 prediction error. Its source-dependent modal loss is passive but does not
 advance hereditary film states.
 
+
+### Controlled bridge pulse and ringdown
+
+`cannone-dominant-bridge-pulse.material-strings` supplies a prescribed
+1 N bridge-0 load for the first 64 mechanical samples, then releases it.
+At the existing 144 kHz clock this is a 0.444 ms rectangular pulse, with
+impulse 0.000444 N·s. All bows have zero normal force and velocity, while all
+four strings remain reciprocally connected to the body and enclosed air.
+The pulse is an authored controlled input, not a measured hammer waveform or
+an ideal impulse.
+
+Use the common launcher directly so the released-bow schedule is retained.
+With the ordinary source packs available in the recipe's existing pack
+directory, render the bare assembly into a new directory:
+
+```bash
+materials=crates/fs-couple/examples/material_strings
+geometry=data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026
+python3 apps/instrument-lab/tools/render_material_strings.py \
+  --renderer target/release/material_strings \
+  --performance "$materials/cannone-dominant-bridge-pulse.material-strings" \
+  --pack-root "$materials/packs" \
+  --shell-table "$geometry/shell-assembly-h8.tsv" \
+  --assembly-options "$materials/cannone-h8.assembly" \
+  --full-scale-pa 1 \
+  --out /path/to/new-bare-bridge-pulse
+```
+
+For the coated comparison, use another new output directory and select
+`cannone-h8-varnish-memory.assembly`. Supply the compiled varnish pack with
+the same `--pack` binding shown above. Optionally add
+`--coating-strain-guard 536870912 100000000000000`; these explicit example
+allowances must admit the complete run. Keep the pulse, strings, geometry,
+retained modes, atmosphere, receiver and common PCM scale equal. If the native
+writer reports clipping, raise that common scale for both renders; do not
+independently normalize their audio.
+
+The original coupled solver advances the forced attack and the subsequent
+free decay without resetting displacement, velocity or material histories
+at release. Varnish-induced changes to mass, section stiffness and relaxation
+can therefore change bridge motion, decay, body/air exchange and pressure in
+one physical calculation. The native log retains the actual physical ports,
+initial newtons, initialization and authored event count.
+
+The finite pulse has a frequency-dependent spectrum, so its raw pressure FFT
+is not itself a normalized bridge transfer. Use the loaded harmonic report
+for supported Pa/N comparisons, and compare the actual transient waveforms
+and ringdown at equal input and pressure scale. The rectangular input also
+contains frequencies outside a finite measured varnish band; the hereditary
+recipe's explicit continuation assumption still applies. This fixture adds
+a reproducible experiment input, not a completed audio or convergence result.
+
 ### Inspect the varnish's structural response
 
 Add `--prepare-only` to the launcher command above to stage a new run, then

@@ -284,3 +284,104 @@ fn missing_faces_wrong_normals_stale_gas_and_incomplete_pressure_windows_refuse(
 }
 
 
+
+#[test]
+fn prescribed_bridge_pulse_drives_the_same_body_cavity_and_strings_on_one_clock() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{
+        MultiBowPerformanceConfig,
+        force::{MaterialForcePort, MaterialForceProgram, StringForceCoupling, StringForcePort},
+    };
+    use fs_couple::pcm_wav::observation::PressureRenderer;
+    use fs_couple::render::schedule::force::{
+        ForceInitialization, ForceRenderConfig, ModalForceEvent,
+        coupled::contact::friction::multiple::MultiFrictionConfig,
+    };
+    with_cx(|cx,gate| with_volume(1,gas(101_325.0),|fe| {
+        let make = || bank(cx,gate,fe,gas(101_325.0),700.0)
+            .with_material_shell_cavity(fe,resolution(),gate).unwrap()
+            .with_additional_bows(vec![],MultiFrictionConfig {
+                max_ports:4,max_sweeps:32,max_setup_terms:1_048_576,
+            },gate).unwrap();
+        let mut direct = make();
+        let string = StringForcePort {
+            location:StringBowLocation {string:0,station_fraction:0.31},
+            coupling:StringForceCoupling::Centreline,
+        };
+        // Separate actuators on the SAME bridge must add coherently; releasing
+        // one does not release the other. A string actuator shares their clock.
+        let ports = vec![MaterialForcePort::ShellBridge {bridge:0},
+            MaterialForcePort::ShellBridge {bridge:0},MaterialForcePort::String(string)];
+        let columns = direct.material_force_columns(&ports,1024,gate).unwrap();
+        let source = direct.source().bank();
+        let body = source.strings().len();
+        let offset = direct.system().components()[..body].iter().map(|c|c.modes().len()).sum::<usize>();
+        let row = &source.material_shell_image().unwrap().force_ports()[0];
+        assert_eq!(&columns[0][offset..offset+row.len()],row.as_slice());
+        assert!(columns[0][..offset].iter().all(|&f|f==0.0));
+        // The real spatial-cavity constructor appends a separate acoustic
+        // component. Its pressure receives no fictitious direct bridge force.
+        assert!(direct.system().components().len()>body+1);
+        assert!(columns[0][offset+row.len()..].iter().all(|&f|f==0.0));
+        assert_eq!(columns[0],columns[1]);
+        assert_eq!(columns[2],direct.string_force_columns(&[string],1024,gate).unwrap()[0]);
+        assert!(direct.material_force_columns(&[MaterialForcePort::ShellBridge {bridge:1}],1024,gate).is_err());
+        assert!(direct.material_force_columns(&ports,direct.system().mode_count()*ports.len()-1,gate).is_err());
+        let event = |sample,port,force_n| ModalForceEvent {sample,voice:0,port,force_n};
+        let program = MaterialForceProgram {
+            ports,initial_force_n:vec![0.02,-0.01,0.0],
+            // Unsorted events and equal-time overwrite exercise the original
+            // grouped compiler. All three ports release at sample 20.
+            events:vec![event(20,0,0.0),event(8,0,0.03),event(8,0,0.02),
+                event(8,1,0.005),event(8,2,0.001),event(20,1,0.0),event(20,2,0.0)],
+            initialization:ForceInitialization::RetainState,
+            limits:ForceRenderConfig {sample_rate_hz:48_000,max_block:32,
+                max_events:64,max_controls:1024,max_projection_terms:32_768},
+        };
+        let released = FrictionDrive {speed_m_s:0.0,normal_force_n:0.0};
+        let mut expected = Vec::new();
+        for sample in 0..96 {
+            let held = if sample<8 {[0.02,-0.01,0.0]} else if sample<20 {[0.02,0.005,0.001]} else {[0.0;3]};
+            let force:Vec<_> = (0..direct.system().mode_count()).map(|mode|
+                columns.iter().zip(held).fold(0.0,|sum,(column,n)|sum+column[mode]*n)).collect();
+            let frame = direct.step(&force,&[released]).unwrap();
+            assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+            if sample>=20 {assert_eq!(frame.external_work_j,0.0);}
+            expected.push(frame.observer_pressure_pa.to_bits());
+            // Before the string actuator turns on, its motion must already
+            // come from reciprocal bridge/body coupling.
+            if sample==7 {
+                assert!(direct.system().components()[0].states().iter()
+                    .any(|s|s.velocity_m_sqrt_kg_per_s!=0.0));
+            }
+        }
+        assert!(expected[20..].iter().any(|&p|f64::from_bits(p).abs()>1e-12));
+        assert!(direct.system().components()[0].states().iter().any(|s|s.velocity_m_sqrt_kg_per_s!=0.0));
+        assert!(direct.system().components()[body+1].states().iter().any(|s|s.velocity_m_sqrt_kg_per_s!=0.0));
+        let cavity = direct.source().bank().spatial_cavity().unwrap();
+        let mut scratch = vec![0.0;cavity.observation_state_len()];
+        let mut pressure = vec![0.0;cavity.coupling().cavity_modes()];
+        direct.spatial_cavity_pressures_into(&mut scratch,&mut pressure).unwrap();
+        assert!(pressure.iter().any(|p|p.abs()>1e-12));
+        for chunk in [1,31] {
+            let schedule = GestureSchedule::try_new(700,vec![GestureTrack {
+                id:"released".into(),target:GestureTarget::BowStroke {string:0},
+                initial:GestureValue::Bow {velocity_m_per_s:0.0,normal_force_n:0.0,station:0.2},
+                events:vec![],
+            }]).unwrap();
+            let mut p = make().into_scheduled(schedule,vec!["released".into()],
+                MultiBowPerformanceConfig {samples:96,max_block:32,max_work:4096,max_events:64}).unwrap()
+                .with_material_forces(program.clone(),gate).unwrap();
+            assert_eq!(p.material_force_program().unwrap().events,program.events);
+            assert!(p.string_force_program().is_none());
+            assert_eq!(p.projected_material_forces().unwrap().events(),p.projected_string_forces().unwrap().events());
+            let mut output = vec![0.0;96];
+            for block in output.chunks_mut(chunk) {p.block(block).unwrap();}
+            assert_eq!(p.samples_rendered(),96);
+            assert_eq!(p.bank().system().samples_rendered(),96);
+            assert_eq!(output.iter().map(|p|p.to_bits()).collect::<Vec<_>>(),expected);
+            for (a,b) in p.bank().system().components().iter().zip(direct.system().components()) {
+                assert_eq!(a.states(),b.states());
+            }
+        }
+    }));
+}

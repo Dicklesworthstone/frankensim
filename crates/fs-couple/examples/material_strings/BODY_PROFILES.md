@@ -45,6 +45,62 @@ Change only the body pack or its grain angle to compare results; there is no pit
 normalization, per-mode gain fitting or replacement of the physical string input.
 Complete source and model admission still precedes `create_new` output.
 
+
+## Prescribed bridge loads in the same performance
+
+The performance's existing `forces` block accepts original shell bridge
+ports alongside its string ports. This works with v3 shells and v4 assemblies:
+
+```text
+forces retain 3 3
+port bridge 0 1
+port bridge 0 -0.25
+port 0 0.4 centreline 0
+force 64 0 0
+force 64 1 0
+force 128 2 0.002
+```
+
+Here the first two independent ports initially supply a coherent net 0.75 N
+to declared bridge 0, then both release at mechanical sample 64. The third
+port supplies a string centreline load starting at sample 128. Samples belong
+to the performance's original mechanical clock; pressure decimation and
+callback partitioning do not change their timing. The existing string
+`centreline`, `surface` and `along DX DY` forms retain their meanings.
+
+`port bridge BRIDGE_INDEX INITIAL_N` selects the source profile's bridge
+force column in declaration order, with indices 0 through 7 admitted by the
+grammar and actual existence checked against the constructed body. Its
+signed amplitude is in newtons along the declared nodal load pattern.
+Any moment-per-newton lever arms in an original library footprint participate
+in that same work-conjugate port. The file grammar does not accept modal
+participation vectors or infer a second torque direction.
+
+The material source supplies the column in its own reduced structural basis.
+It is placed at the actual body-component offset, leaving strings and
+separately appended acoustic components at zero direct load. Their response
+still follows from the original reciprocal connections. Mixed forces use the
+same grouped-event compiler, source budgets, static-preload solver and joint
+step as string plucks and bowing. Duplicate ports sum before projection;
+equal-time assignments to the same port keep the last authored assignment.
+Maps are prepared at binding, with no per-sample source projection.
+
+Use `retain` for a load-on transient that preserves existing motion.
+`preload` retains the existing released, initially unexcited full-network
+equilibrium admission; subsequent zero-force events release that equilibrium.
+Bow traction follows the separate schedule, so explicitly release all bows
+for a clean bridge experiment. The coating-strain guard can observe the same
+accepted motion and must be attached after preload.
+
+A source without an original shell/assembly image, an absent bridge, or
+residual-flexibility condensation lacking complete direct-force columns
+refuses. String-only loads keep their existing admission. The 64-port cap and
+the original event, control and projection-work limits remain in force.
+
+The [violin bridge-pulse recipe](../../../../data/instruments/descriptions/violin/README.md#controlled-bridge-pulse-and-ringdown)
+provides a released-bow comparison using the same four-string violin,
+geometry, material packs and pressure observer.
+
 ## Profile grammar
 
 The fixed-order UTF-8/LF records, with no ignored fields, are:

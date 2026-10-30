@@ -54,7 +54,9 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{MaterialBowCo
 use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::{LongitudinalStringResolution,LongitudinalMaterialLoss};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{MultiBowPerformance,MultiBowPerformanceConfig};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::bow_stations::BowStationProgram;
-use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::force::{StringForceCoupling,StringForcePort,StringForceProgram};
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::force::{
+    MaterialForcePort, MaterialForceProgram, StringForceCoupling, StringForcePort,
+};
 use fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity;
 use fs_couple::cavity_modal::{HelmholtzModalCavity,CavityNeckLoss};
 use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
@@ -509,7 +511,7 @@ impl input::Spec {
             let names=self.schedule.tracks().iter().map(|t|t.id.clone()).collect();
             bank.into_scheduled(self.schedule.clone(),names,performance_config)?
         };
-        if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
+        if let Some(forces)=&self.forces { performance=performance.with_material_forces(forces.clone(),gate)?; }
         if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }
         if let Some(program)=bow_station_program {
             performance=performance.with_bow_station_motion(program,gate)?;
@@ -830,6 +832,11 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         }
     }
     eprintln!("bow_friction={:?}",ready.spec.friction);
+    if let Some(forces)=ready.performance.material_force_program() {
+        eprintln!("physical_force_ports={:?}; initial_force_N={:?}; initialization={:?}; authored_events={}; preload_energy_J={:?}; shared mechanical clock and coupled solver",
+            forces.ports,forces.initial_force_n,forces.initialization,forces.events.len(),
+            ready.performance.preload_energy_j());
+    }
     for port in 0..ready.spec.bow_contact_count() {
         if let Some(layer)=ready.performance.bank().bow_shear_layer(port) {
             eprintln!("bow_shear_layer_port={port}; source={}; area_m2={}; thickness_m={}; initial_T_K={}; stiffness_N_m={}; yield_N={}; plastic_resistance_N_s_m={}; max_elastic_shear={}",
