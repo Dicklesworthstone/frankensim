@@ -664,7 +664,7 @@ target/release/material_strings \
   /path/to/new-memory-run/G3/performance.material-strings \
   /path/to/new-memory-run/G3/render.wav \
   --body-profile /path/to/new-memory-run/G3/body.profile \
-  --body-response /path/to/new-memory-run/G3/body-response.tsv 100 2000 128 0
+  --body-response /path/to/new-memory-run/G3/body-response.tsv 101 2000 128 0
 ```
 
 This writes logarithmically spaced complex bridge mobilities, signed exterior
@@ -684,6 +684,59 @@ strings, loads, atmosphere and PCM scale. The response adds no sound-pressure
 gain, amplitude normalization of the WAV or new time stepper. Reports admit
 2–1024 frequencies within the complete work allowance and an 8 MiB output
 limit; all frequency solves pass before a new report file is created.
+
+For structural analysis alone, omit the WAV positional argument and select
+`--body-response-only`. This resolves and projects the same body geometry and
+material sources but constructs no string bank, cavity dynamics, bow performer
+or prepared time propagator:
+
+```bash
+target/release/material_strings \
+  /path/to/new-memory-run/G3/performance.material-strings \
+  --body-response-only /path/to/new-memory-run/G3/body-response.tsv 101 2000 128 0 \
+  --body-profile /path/to/new-memory-run/G3/body.profile
+```
+
+The performance still supplies the body dimensions, material state and mode
+count; its declared input limits remain validated. Only the body/interface
+source packs are loaded. Existing restricted-source options remain available.
+The TSV explicitly excludes strings, bow/contact, cavity pressure feedback,
+exterior reaction and configured microphone filters. Playback-only CLI
+options such as contact heat, bow traces, stops and decimation refuse in this
+mode. No WAV path is opened.
+
+### Loaded bridge response and receiver pressure
+
+`--loaded-body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX`, used with
+the normal performance and new-WAV positional arguments, instead interrogates
+the actual coupled performer before the WAV render. It uses the original
+continuous harmonic owner with the retained strings, bridge connections,
+selected cavity, complete material memory and admitted exterior radiation
+reaction. Bow/contact traction is released for this linear transfer; it is
+not a harmonic approximation to nonlinear bowed playing. Unsupported nonlinear
+or adhesive attachments refuse through the original owner.
+
+The report includes all bridge mobilities, structural exterior/cavity volume
+velocities, the original coupled pressure observer in Pa/N, supplied power,
+component/connection loss, coating and other material loss, radiation loss,
+mean stored energy and solve/power residuals. Coating heat comes from the
+actual retained Maxwell branches. The unloaded structural report evaluates
+the original film law; this loaded report evaluates the actual fitted
+constitutive realization used for playback. Both retain the source band.
+
+The original `prepared-linear` multiply-work declaration is the complete loaded
+sweep allowance, divided across its frequencies. A small nonprepared run uses
+`MAX_WORK`; no limit is silently increased. The 2–1024 frequency and 8 MiB report
+limits and create-new semantics remain binding. Every solve passes before a
+report file is created, and the query does not advance accepted state or
+material histories. The normal WAV then continues through the performer.
+
+Additional `plate_observer`, `shell_observer` and `one_way_observer` microphone
+filters are outside the bank's native pressure transfer, so this loaded
+export explicitly refuses those selections. Its pressure retains the native
+observer's compact or admitted physical scope and provides no exterior-wave
+convergence or finite-amplitude strain certificate. Structural and loaded
+response options are mutually exclusive on one invocation.
 
 ## Separate exterior and cavity pressure surfaces
 

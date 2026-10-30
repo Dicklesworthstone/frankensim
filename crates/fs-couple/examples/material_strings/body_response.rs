@@ -9,7 +9,11 @@ use fs_couple::shear_shell::{MaterialShellImage, assembly::MaterialShellAssembly
 use fs_math::c64::C64;
 use std::{ffi::OsString, fmt::Write as _, fs::OpenOptions, io::Write as _, path::PathBuf};
 
+mod loaded;
+
 pub(super) struct Options {
+    analysis_only: bool,
+    loaded: bool,
     output: PathBuf,
     minimum_hz: f64,
     maximum_hz: f64,
@@ -19,21 +23,24 @@ pub(super) struct Options {
 
 impl Options {
     pub(super) fn extract(args: &[OsString]) -> Result<(Vec<OsString>, Option<Self>)> {
-        let mut retained = args.iter().take(3).cloned().collect::<Vec<_>>();
+        let mut retained = args.iter().take(2).cloned().collect::<Vec<_>>();
         let mut selected = None;
-        let mut index = 3;
+        let mut index = 2;
         while index < args.len() {
-            if args[index] != "--body-response" {
+            if args[index] != "--body-response"
+                && args[index] != "--body-response-only"
+                && args[index] != "--loaded-body-response"
+            {
                 retained.push(args[index].clone());
                 index += 1;
                 continue;
             }
             if selected.is_some() {
-                return Err("--body-response cannot be repeated".into());
+                return Err("select exactly one structural or loaded body-response option".into());
             }
             let values = args
                 .get(index + 1..index + 6)
-                .ok_or("--body-response needs NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX")?;
+                .ok_or("body-response needs NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX")?;
             let number = |value: &OsString| -> Result<f64> {
                 Ok(value
                     .to_str()
@@ -60,6 +67,8 @@ impl Options {
                 return Err("body-response requires finite 0 < MIN_HZ < MAX_HZ, 2..=1024 points and a bridge index in 0..8".into());
             }
             selected = Some(Self {
+                analysis_only: args[index] == "--body-response-only",
+                loaded: args[index] == "--loaded-body-response",
                 output: PathBuf::from(&values[0]),
                 minimum_hz,
                 maximum_hz,
@@ -71,6 +80,25 @@ impl Options {
         Ok((retained, selected))
     }
 
+    pub(super) const fn analysis_only(&self) -> bool {
+        self.analysis_only
+    }
+    pub(super) const fn loaded(&self) -> bool {
+        self.loaded
+    }
+
+    fn frequency_hz(&self, point: usize) -> f64 {
+        if point == 0 {
+            self.minimum_hz
+        } else if point + 1 == self.points {
+            self.maximum_hz
+        } else {
+            let lo = fs_math::det::ln(self.minimum_hz);
+            let span = fs_math::det::ln(self.maximum_hz) - lo;
+            fs_math::det::exp(lo + span * point as f64 / (self.points - 1) as f64)
+        }
+    }
+
     /// Finish every source-band and solve check before creating a new report.
     pub(super) fn write(
         &self,
@@ -78,6 +106,9 @@ impl Options {
         assembly: Option<&MaterialShellAssemblyImage>,
         gate: &fs_exec::CancelGate,
     ) -> Result<()> {
+        if self.loaded {
+            return Err("loaded body-response requires the actual coupled performer".into());
+        }
         let (ports, memory) = if let Some(image) = shell {
             (image.force_ports(), image.coating_relaxation())
         } else if let Some(image) = assembly {
@@ -117,7 +148,7 @@ impl Options {
         let mut text = String::new();
         writeln!(
             text,
-            "# frankensim-body-response-v1\n# scope: unloaded structural body; the coupled WAV is rendered separately"
+            "# frankensim-body-response-v1\n# scope: unloaded structural body\n# excluded: strings, bow/contact, cavity pressure feedback, exterior radiation reaction and configured microphone filters"
         )?;
         writeln!(
             text,
@@ -170,17 +201,9 @@ impl Options {
             text,
             "\ttotal_loss_W_per_N2\tpower_residual_W_per_N2\tsolve_relative_residual"
         )?;
-        let lo = fs_math::det::ln(self.minimum_hz);
-        let span = fs_math::det::ln(self.maximum_hz) - lo;
         for point in 0..self.points {
             poll(gate)?;
-            let frequency = if point == 0 {
-                self.minimum_hz
-            } else if point + 1 == self.points {
-                self.maximum_hz
-            } else {
-                fs_math::det::exp(lo + span * point as f64 / (self.points - 1) as f64)
-            };
+            let frequency = self.frequency_hz(point);
             let value = response(core::f64::consts::TAU * frequency)?;
             write!(text, "{frequency:.17e}")?;
             for port in &value.force_port_velocity_m_s {
@@ -223,5 +246,97 @@ impl Options {
             self.output, self.points, self.bridge
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn response_only_needs_no_wav_and_preserves_source_options() {
+        let args = words(&[
+            "renderer",
+            "performance",
+            "--body-response-only",
+            "response.tsv",
+            "100",
+            "2000",
+            "32",
+            "0",
+            "--body-profile",
+            "body.profile",
+            "--self-contained",
+        ]);
+        let (retained, option) = Options::extract(&args).unwrap();
+        assert!(option.unwrap().analysis_only());
+        assert_eq!(
+            retained,
+            words(&[
+                "renderer",
+                "performance",
+                "--body-profile",
+                "body.profile",
+                "--self-contained"
+            ])
+        );
+        let args = words(&[
+            "renderer",
+            "performance",
+            "render.wav",
+            "--body-response",
+            "response.tsv",
+            "100",
+            "2000",
+            "32",
+            "0",
+        ]);
+        let (retained, option) = Options::extract(&args).unwrap();
+        assert!(!option.unwrap().analysis_only());
+        assert_eq!(retained, words(&["renderer", "performance", "render.wav"]));
+        let args = words(&[
+            "renderer",
+            "performance",
+            "render.wav",
+            "--loaded-body-response",
+            "loaded.tsv",
+            "100",
+            "2000",
+            "32",
+            "0",
+        ]);
+        let (retained, option) = Options::extract(&args).unwrap();
+        assert!(option.as_ref().unwrap().loaded());
+        assert!(!option.unwrap().analysis_only());
+        assert_eq!(retained, words(&["renderer", "performance", "render.wav"]));
+    }
+
+    #[test]
+    fn response_modes_are_exclusive_and_require_complete_arguments() {
+        let first = [
+            "renderer",
+            "performance",
+            "--body-response-only",
+            "response.tsv",
+            "100",
+            "2000",
+            "32",
+            "0",
+        ];
+        let mut repeated = words(&first);
+        repeated.extend(words(&[
+            "--body-response",
+            "other.tsv",
+            "100",
+            "2000",
+            "32",
+            "0",
+        ]));
+        assert!(Options::extract(&repeated).is_err());
+        assert!(Options::extract(&words(&first[..7])).is_err());
     }
 }

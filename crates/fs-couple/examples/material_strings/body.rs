@@ -46,10 +46,38 @@ enum BodyModel {
     Shell(shell::Spec),
     Assembly(shell::assembly::Spec),
 }
+
+/// The original retained structural image, without a string bank or propagator.
+pub(super) enum ProjectedShellBody {
+    Shell(fs_couple::shear_shell::MaterialShellImage),
+    Assembly(fs_couple::shear_shell::assembly::MaterialShellAssemblyImage),
+}
+impl ProjectedShellBody {
+    pub(super) fn shell(&self) -> Option<&fs_couple::shear_shell::MaterialShellImage> {
+        match self { Self::Shell(image) => Some(image), Self::Assembly(_) => None }
+    }
+    pub(super) fn assembly(&self) -> Option<&fs_couple::shear_shell::assembly::MaterialShellAssemblyImage> {
+        match self { Self::Assembly(image) => Some(image), Self::Shell(_) => None }
+    }
+}
 impl Profile {
     pub fn has_planar_material_basis(&self) -> bool { matches!(self.model, BodyModel::Plate(_)) }
     pub fn has_shell_material_basis(&self) -> bool {
         matches!(self.model, BodyModel::Shell(_) | BodyModel::Assembly(_))
+    }
+
+    /// Use the same source resolution and eigensolve as playback, without its
+    /// strings, cavity, bow, acoustic loading or prepared transition matrices.
+    pub(super) fn project_shell(&self, spec: &input::Spec, catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, gate: &CancelGate)
+        -> Result<ProjectedShellBody>
+    {
+        poll(gate)?;
+        match &self.model {
+            BodyModel::Shell(shell) => Ok(ProjectedShellBody::Shell(shell.project(spec, catalog, loader, gate)?)),
+            BodyModel::Assembly(assembly) => Ok(ProjectedShellBody::Assembly(assembly.project(spec, catalog, loader, gate)?)),
+            BodyModel::Plate(_) => Err("body-response requires a curved shell or assembled shell body".into()),
+        }
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self> {

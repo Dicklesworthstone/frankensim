@@ -12,9 +12,14 @@ pub(super) struct SourceOptions {
 
 impl SourceOptions {
     pub(super) fn extract(args: &[OsString]) -> Result<(Vec<OsString>, Self)> {
+        Self::extract_after(args, 3)
+    }
+
+    /// The response-only entry point has no WAV positional argument.
+    pub(super) fn extract_after(args: &[OsString], positional_count: usize) -> Result<(Vec<OsString>, Self)> {
         let mut options = Self::default();
-        let mut retained = args.iter().take(3).cloned().collect::<Vec<_>>();
-        let mut rest = args.iter().skip(3);
+        let mut retained = args.iter().take(positional_count).cloned().collect::<Vec<_>>();
+        let mut rest = args.iter().skip(positional_count);
         while let Some(arg) = rest.next() {
             if arg == "--self-contained" {
                 if options.restricted { return Err("--self-contained cannot be repeated".into()); }

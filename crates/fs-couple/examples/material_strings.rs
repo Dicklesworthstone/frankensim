@@ -638,25 +638,34 @@ fn workers_option(raw:&[std::ffi::OsString])->Result<(usize,Vec<std::ffi::OsStri
 fn run(raw:&[std::ffi::OsString])->Result<()> {
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
     let (args, gas_options)=thermochemical::Options::extract_os(raw)?;
-    let (args, source_options)=native_input::SourceOptions::extract(&args)?;
     let (args, response_options)=body_response::Options::extract(&args)?;
-    if args.len()<3 {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--contact-thermal PROFILE] [--decimate] [--workers N] [--self-contained --attached-source RELATIVE_PATH ...] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
+    let response_only=response_options.as_ref().is_some_and(body_response::Options::analysis_only);
+    let positional_count=if response_only {2} else {3};
+    let (args, source_options)=if response_only { native_input::SourceOptions::extract_after(&args,2)? }
+        else { native_input::SourceOptions::extract(&args)? };
+    if args.len()<positional_count {
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-response|--loaded-body-response NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX] [options], or material_strings PERFORMANCE --body-response-only NEW.tsv MIN_HZ MAX_HZ POINTS BRIDGE_INDEX --body-profile PROFILE [source options]".into());
     }
     if gas_options.record.is_some() {
         return Err("material-string gas records belong in the performance file".into());
     }
     let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
     let sources=source_options.load(parent)?;
-    let (store_dir,options)=path_option(&args[3..],"--observer-store")?;
+    let (store_dir,options)=path_option(&args[positional_count..],"--observer-store")?;
     if sources.is_restricted() && store_dir.is_some() {
         return Err("--self-contained refuses --observer-store; observer setup must be computed from attached physical sources".into());
     }
     let (trace_path,options)=path_option(&options,"--bow-trace")?;
     let (thermal_path,options)=path_option(&options,"--contact-thermal")?;
+    if response_only && (store_dir.is_some() || trace_path.is_some() || thermal_path.is_some() || source_options.decimate) {
+        return Err("--body-response-only accepts body/source options; playback observer stores, traces, contact heat and decimation need a WAV render".into());
+    }
     let thermal_profile=thermal_path.map(|p|contact_thermal::Profile::parse(
         &sources.read_option(p,contact_thermal::MAX_BYTES)?)).transpose()?;
     let (body_path,stop_path)=stops::profile_paths(&options)?;
+    if response_only && stop_path.is_some() {
+        return Err("--body-response-only is the unloaded structural body; --stop-profile requires the coupled performer".into());
+    }
     let mut profile=body_path.map(|p|body::Profile::parse(&sources.read_option(p,body::MAX_SHELL_BYTES)?)).transpose()?;
     if response_options.is_some() && !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
         return Err("--body-response requires --body-profile with curved or assembled shell mechanics".into());
@@ -672,6 +681,10 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     let gas_registry=gas_sources.registry(&gas_bindings);
     let mut spec=input::Spec::parse_with_gas_sources(
         &read_bounded(path,input::MAX_INPUT_BYTES)?,gas_registry.as_ref())?;
+    if response_options.as_ref().is_some_and(body_response::Options::loaded)
+        && (spec.plate_observer.is_some() || spec.shell_observer.is_some() || spec.one_way_observer.is_some()) {
+        return Err("--loaded-body-response uses the original coupled pressure observer; additional plate, shell or one-way microphone filters need their own frequency-response transfer".into());
+    }
     spec.contact_thermal=thermal_profile.is_some();
     let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let mut remaining=input::MAX_TOTAL_PACK_BYTES;
@@ -682,6 +695,21 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
             Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
         })?;
+    }
+    if response_only {
+        let mut catalog=Catalog::new();
+        let projected=profile.as_ref().ok_or("--body-response-only requires --body-profile")?
+            .project_shell(&spec,&mut catalog,&mut |name| {
+                let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
+                remaining=remaining.checked_sub(bytes.len()).ok_or("material pack byte budget exceeded")?;
+                MaterialPack::from_bytes(&bytes)
+            },&gate)?;
+        for (path,source) in &catalog {
+            eprintln!("body_source={path:?}; pack={:?}; hash={}; artifact={}",source.pack.pack_id(),
+                source.pack.content_hash(),source.pack.source_artifact());
+        }
+        return response_options.as_ref().expect("response-only option checked")
+            .write(projected.shell(),projected.assembly(),&gate);
     }
     spec.friction.load(&gate,|name| {
         let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
@@ -873,8 +901,13 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         eprintln!("pressure_observation={info:?}; mechanical state and gesture clock unchanged");
     }
     if let Some(response)=response_options {
-        let source=ready.performance.bank().source().bank();
-        response.write(source.material_shell_image(),source.material_shell_assembly_image(),&gate)?;
+        if response.loaded() {
+            let work=ready.spec.prepared_linear.map_or(input::MAX_WORK,|budget|budget.max_multiply_terms);
+            response.write_loaded(ready.performance.bank(),work,&gate)?;
+        } else {
+            let source=ready.performance.bank().source().bank();
+            response.write(source.material_shell_image(),source.material_shell_assembly_image(),&gate)?;
+        }
     }
     let output=OpenOptions::new().write(true).create_new(true).open(&args[2])?;
     let mut trace=trace_path.map(|path|OpenOptions::new().write(true).create_new(true).open(path)

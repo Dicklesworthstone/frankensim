@@ -5307,6 +5307,52 @@ or air-pressure feedback; the ordinary coupled WAV route supplies those
 separate dynamics. Focused shell, harmonic and frontend native checks do not
 constitute a completed coated-violin render or mesh/mode/time convergence.
 
+The additional `--body-response-only` selection omits the WAV positional
+argument and projects the same body through the original shell/assembly
+resolver without constructing strings, cavity dynamics, the bow performer or
+the prepared time propagator. The performance still supplies body dimensions,
+material state, mode count and input limits; only body/interface packs are
+loaded. Playback-only options refuse. This remains the unloaded exact-source
+structural transfer and opens no WAV output.
+
+`ReciprocalStringBank::material_shell_bridge_harmonic_response` and the same
+method on `MultiBowStringBank` instead force one original physical shell bridge
+inside the complete connected performer. They reuse the original coupled
+harmonic owner with every retained string, cavity, bilateral connection,
+Maxwell history and selected exterior radiation pole. Contacts are explicitly
+released; this is not a linearization of nonlinear bowed playing. The pressure
+readout is exactly the original time-owner observation: acceleration rows use
+-omega^2*q and real modal transfer rows use Re(T)*v + Im(T)*omega_mode*q.
+No extra receiver transfer, normalization or pressure gain is introduced.
+
+The harmonic owner retains branch ordering in per-Maxwell mean storage and
+heat arrays, respectively |c^T*q-z|^2/4 and |c^T*q-z|^2/(2*tau). The bank
+attributes coating heat and storage through its original bound history range;
+the complement is other material heat. Equal-time factors can mix films, so
+this loaded query does not invent per-film allocation. It evaluates the actual
+positive Prony playback realization, whereas `coating_harmonic_response`
+evaluates the original film law. Source/fitted-operator frequency supports
+are intersected across the retained strings, shell, films, interfaces and air
+fit, with bound fluid impedance admission at the drive frequency. Bare images
+are supported. Frozen films, unbound projected coating memory, unsupported
+nonlinear/adhesive/contact/local-strain attachments and residual flexibility
+without complete direct bridge-force columns refuse. Queries change no accepted
+state, history or sample clock. Source admission is not an amplitude or
+mesh/modal convergence certificate.
+
+The frontend `--loaded-body-response` exports bridge mobilities, signed shell
+volume velocities, complex native pressure in Pa/N, supplied and component/
+connection/coating/other-material/radiation power, stored energy and solve/power
+residuals before the ordinary WAV render. The existing prepared multiply-work
+declaration bounds the entire sweep, divided across frequencies; nonprepared
+runs retain their existing allowance. All samples pass before a create-new
+write, with the same 2..1024 point and 8 MiB limits. This selection still builds
+the complete performer/prepared propagator. Additional frontend plate/shell/
+one-way microphone filters refuse because they lie outside the returned native
+observer. Focused production harmonic/pressure and report-writer native checks
+pass; their small container facades do not validate complete bank construction.
+Normal-Cargo bank and projection integration regressions remain unexecuted.
+
 `SharedMaterialShellBody` and
 `ReciprocalStringBank::from_material_shear_shell` connect that image to every
 original material string, its own physical bridge map, shared gas and optional

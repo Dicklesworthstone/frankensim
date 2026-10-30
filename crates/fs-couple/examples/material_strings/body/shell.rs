@@ -4,7 +4,7 @@
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::shell::SharedMaterialShellBody;
 use fs_couple::shear_shell::{
-    compile_material_shear_shell, ShellProjectionBudget, ShellRegionMaterial,
+    compile_material_shear_shell, MaterialShellImage, ShellProjectionBudget, ShellReductionOptions, ShellRegionMaterial,
     CONSTANT_LOSS_REFERENCE_OMEGA, CONSTANT_LOSS_REFERENCE_OMEGA_DIMS, TRANSVERSE_SHEAR_VISCOSITY_PROPERTIES,
 };
 use fs_plate::shell::ShellMesh;
@@ -280,6 +280,31 @@ impl Spec {
         catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
         settings: StringBankOptions, cx: &Cx<'_>, gate: &CancelGate) -> Result<ReciprocalStringBank>
     {
+        let body = self.resolve_body(spec, catalog, loader, gate)?;
+        // The prepared record, when the data declares one, must reach the constructor: a body above the ordinary
+        // 42-coordinate block cannot be built without it.
+        Ok(ReciprocalStringBank::from_material_shear_shell_prepared(cx, sources, spec.gas, body,
+            spec.cavity.clone(), spec.prepared_linear, spec.bow_law(0)?.clone(), settings, gate)?)
+    }
+
+    /// Resolve the same physical body without constructing strings or a time propagator.
+    pub(super) fn project(&self, spec: &input::Spec, catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, gate: &CancelGate)
+        -> Result<MaterialShellImage>
+    {
+        let body = self.resolve_body(spec, catalog, loader, gate)?;
+        let reduction = ShellReductionOptions {
+            constraints: body.constraints, mass: body.mass, drilling_alpha: body.drilling_alpha,
+            eigenvalue_window: body.eigenvalue_window, n_modes: body.n_modes,
+            assembly_budget: body.assembly_budget, projection_budget: body.projection_budget,
+        };
+        Ok(body.specimen.reduce(&body.directors, &reduction, &body.force_ports, gate)?)
+    }
+
+    fn resolve_body(&self, spec: &input::Spec, catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, gate: &CancelGate)
+        -> Result<SharedMaterialShellBody>
+    {
         poll(gate)?;
         self.preflight(spec)?;
         let component = self.resolve_component("body", spec, catalog, loader, gate)?;
@@ -299,10 +324,7 @@ impl Spec {
                 max_projection_terms: self.projection_work, reference_resistance_n_s_m: 1.0 },
             modal_budget: modal_budget(), listener_m: spec.body.listener,
         };
-        // The prepared record, when the data declares one, must reach the constructor: a body above the ordinary
-        // 42-coordinate block cannot be built without it.
-        Ok(ReciprocalStringBank::from_material_shear_shell_prepared(cx, sources, spec.gas, body,
-            spec.cavity.clone(), spec.prepared_linear, spec.bow_law(0)?.clone(), settings, gate)?)
+        Ok(body)
     }
 
     fn resolve_component(&self, name: &str, spec: &input::Spec,

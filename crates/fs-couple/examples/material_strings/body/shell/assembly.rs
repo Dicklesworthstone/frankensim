@@ -2,7 +2,7 @@
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::shell::SharedMaterialShellAssemblyBody;
 use fs_couple::shear_shell::assembly::{
-    MaterialShellAssembly, ShellAssemblyForcePort, ShellAssemblyReductionOptions,
+    MaterialShellAssembly, MaterialShellAssemblyImage, ShellAssemblyForcePort, ShellAssemblyReductionOptions,
 };
 use fs_plate::shell::junction::{
     EdgeTie, FaceTie, RotationCoupling, TieBudget, TieKind, TieOffset, TieSide,
@@ -337,6 +337,39 @@ impl Spec {
         cx: &Cx<'_>,
         gate: &CancelGate,
     ) -> Result<ReciprocalStringBank> {
+        let body = self.resolve_body(spec, catalog, loader, gate)?;
+        let bank = ReciprocalStringBank::from_material_shell_assembly_prepared(
+            cx,
+            sources,
+            spec.gas,
+            body,
+            spec.cavity.clone(),
+            spec.prepared_linear,
+            spec.bow_law(0)?.clone(),
+            settings,
+            gate,
+        )?;
+        let image = bank.source().material_shell_assembly_image()
+            .ok_or("assembled body lost its original modal image")?;
+        self.glue.require_modes(image.eigenvalue_intervals(), gate)?;
+        Ok(bank)
+    }
+
+    /// Project the original assembled body independently of playback preparation.
+    pub(crate) fn project(&self, spec: &input::Spec, catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, gate: &CancelGate)
+        -> Result<MaterialShellAssemblyImage>
+    {
+        let body = self.resolve_body(spec, catalog, loader, gate)?;
+        let image = body.specimen.reduce(&body.reduction, &body.force_ports, gate)?;
+        self.glue.require_modes(image.eigenvalue_intervals(), gate)?;
+        Ok(image)
+    }
+
+    fn resolve_body(&self, spec: &input::Spec, catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, gate: &CancelGate)
+        -> Result<SharedMaterialShellAssemblyBody>
+    {
         poll(gate)?;
         self.preflight(spec)?;
         let components = self
@@ -387,21 +420,7 @@ impl Spec {
             modal_budget: modal_budget(),
             listener_m: spec.body.listener,
         };
-        let bank = ReciprocalStringBank::from_material_shell_assembly_prepared(
-            cx,
-            sources,
-            spec.gas,
-            body,
-            spec.cavity.clone(),
-            spec.prepared_linear,
-            spec.bow_law(0)?.clone(),
-            settings,
-            gate,
-        )?;
-        let image = bank.source().material_shell_assembly_image()
-            .ok_or("assembled body lost its original modal image")?;
-        self.glue.require_modes(image.eigenvalue_intervals(), gate)?;
-        Ok(bank)
+        Ok(body)
     }
 }
 

@@ -128,14 +128,14 @@ advance hereditary film states.
 ### Inspect the varnish's structural response
 
 Add `--prepare-only` to the launcher command above to stage a new run, then
-invoke the native renderer with the same staged files and a response export:
+request the structural response using those staged files. No WAV positional
+argument is needed for this analysis:
 
 ```bash
 target/release/material_strings \
   /path/to/new-varnished-violin-run/G3/performance.material-strings \
-  /path/to/new-varnished-violin-run/G3/render.wav \
   --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
-  --body-response /path/to/new-varnished-violin-run/G3/body-response.tsv 100 2000 128 0
+  --body-response-only /path/to/new-varnished-violin-run/G3/body-response.tsv 101 2000 128 0
 ```
 
 The logarithmic TSV evaluates each film's original law at the common drive
@@ -145,12 +145,54 @@ dissipation, and power/solve residuals. Bare and hereditary images are
 supported; frozen-film images refuse this exact-source analysis. All samples
 must pass source support and solve checks before a new file is created.
 
-This is the unloaded retained body's response, normalized to a 1 N peak
-bridge force. It has no string or air-pressure feedback and no per-element
-finite-amplitude strain certificate. The ordinary WAV calculation separately
-includes the coupled strings, bow and cavity. Compare bare and coated runs
-with the same inputs and PCM scale. No independent audio normalization or
-sound-pressure gain is introduced.
+This command projects the same source body without constructing the string
+bank, cavity dynamics, bow performer or prepared time propagator. The staged
+performance still supplies body dimensions, material state, mode count and
+input limits. It is the unloaded retained body's response, normalized to a
+1 N peak bridge force, with no string or air-pressure feedback and no
+per-element finite-amplitude strain certificate.
+
+### Inspect the loaded bridge-to-pressure response
+
+To retain string loading, cavity feedback, material histories and selected
+exterior radiation reaction, query the actual performer before an ordinary
+WAV render:
+
+```bash
+target/release/material_strings \
+  /path/to/new-varnished-violin-run/G3/performance.material-strings \
+  /path/to/new-varnished-violin-run/G3/render.wav \
+  --body-profile /path/to/new-varnished-violin-run/G3/body.profile \
+  --loaded-body-response /path/to/new-varnished-violin-run/G3/loaded-response.tsv 101 2000 128 0
+```
+
+The logarithmic report includes complex receiver pressure in Pa/N, every
+bridge mobility, shell volume velocities, coating heat and stored energy,
+other component/material/connection/radiation loss, and solve/power residuals.
+It uses the original coupled harmonic solver and the same native pressure
+observer as the time calculation. All retained strings remain connected;
+bow/contact traction is released for this linear transfer. This is not a
+harmonic approximation to nonlinear bowed playing.
+
+The loaded response evaluates the actual passive Prony film realization
+used for playback; the structural report evaluates the original fitted film
+law. Both enforce source support at every frequency. Coating heat comes from
+its original history range, with no fabricated allocation among films whose
+equal-time factors were combined. The query does not change accepted states
+or histories, and the ordinary WAV render then proceeds.
+
+This option still builds the full performer and prepared propagator. The
+declared `prepared-linear` multiply-work allowance covers the entire sweep.
+Unsupported nonlinear/contact attachments, residual-flexibility extensions
+without full direct force columns, and additional frontend microphone filters
+refuse. Pressure retains the selected observer's existing physical scope;
+the compact default is not a converged exterior-wave solution.
+
+Compare bare and coated runs with the same inputs and pressure scale,
+including pressure phase, bridge mobility and dissipated power at common
+supported frequencies. No independent audio normalization or sound-pressure
+gain is introduced. Both response commands validate all samples before a
+create-new report write.
 
 Evolving coating strain checks, moisture/cure/aging effects, penetration and
 frequency-dependent Poisson ratio remain outside these coating options.

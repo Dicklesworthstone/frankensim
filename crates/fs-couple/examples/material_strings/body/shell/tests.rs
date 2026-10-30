@@ -17,6 +17,32 @@ fn ready(cx: &Cx<'_>, gate: &CancelGate, loss: f64, shear: f64) -> Ready {
 }
 
 #[test]
+fn response_projection_reuses_playback_body_without_loading_string_sources() {
+    scoped(|cx, gate| {
+        let profile = shell_profile();
+        let spec = shell_spec();
+        let mut catalog = Catalog::new();
+        let mut loaded = Vec::new();
+        let projected = profile.project_shell(&spec, &mut catalog, &mut |name| {
+            assert_eq!(name, "body.fsmatpk", "structural response requested a string source");
+            loaded.push(name.to_owned());
+            Ok(pack_with_shear(name, 1.0, 1.0, None).into())
+        }, gate).unwrap();
+        assert_eq!(loaded, ["body.fsmatpk"]);
+        assert!(projected.assembly().is_none());
+        let projected = projected.shell().unwrap();
+        let performer = ready(cx, gate, 1.0, 1.0);
+        let image = performer.performance.bank().source().bank().material_shell_image().unwrap();
+        assert_eq!(projected.eigenvalue_intervals(), image.eigenvalue_intervals());
+        assert_eq!(projected.physical_modes(), image.physical_modes());
+        assert_eq!(projected.force_ports(), image.force_ports());
+        assert_eq!(projected.volume_shapes_m2_per_sqrt_kg(), image.volume_shapes_m2_per_sqrt_kg());
+        assert_eq!(projected.cavity_volume_shapes_m2_per_sqrt_kg(), image.cavity_volume_shapes_m2_per_sqrt_kg());
+        assert_eq!(projected.damping().matrix_per_s(), image.damping().matrix_per_s());
+    });
+}
+
+#[test]
 fn independent_bridge_axis_projects_the_original_shell_and_reaches_pressure() {
     scoped(|cx, gate| {
         let text = include_str!("../../cylinder-flow.material-strings")
