@@ -1,5 +1,32 @@
 # CONTRACT: fs-couple
 
+## Spatial shock loads on original structural pressure surfaces
+
+The opt-in `experimental-shock-loading` feature supplies `shock_loading`.
+Frozen and species-bearing one-dimensional Euler adapters consume the accepted
+SSP RK wall momentum exchange, retaining its actual accepted duration. They
+require reflecting, stationary, adiabatic ends with zero mass/energy transport.
+An explicit global axis fixes orientation; held exterior absolute pressure is
+subtracted once from the structural load, never from the gas flux. The caller
+supplies the most recent report; a mismatch with current extensive state refuses.
+The optional `experimental-compressible` feature adds the original Cartesian
+Euler owner's latest per-face wall impulse, with orthonormal frame embedding.
+
+Cold surface preparation reuses `fs-plate::ShellPressurePort` and retains sparse
+original-node P1 pressure rows. Each explicitly selected planar patch belongs
+to one fluid face. Duplicate facets, area/normal mismatch, differing accepted
+intervals, work-budget failure and cancellation refuse without a partial load.
+Unloaded and supported nodes keep their original identities. Returned impulse,
+interval-mean force, resultant, torque and spatial virtual work preserve this
+discrete pressure map. Per-face Cartesian loads retain nonuniform shock moments.
+
+This is a stationary-wall load transfer and a one-way prescribed structural
+forcing path. It does not move the gas boundary, assert joint fluid/solid energy
+closure, resolve within-step load variation, model fracture or validate material
+shock response. G1 source-Hugoniot reflection and independent fluid/support
+momentum, G0/G3 affine surface work/moment and native modal impulse-consumer
+tests accompany explicit boundary/geometry/refusal and cancellation checks.
+
 ## Constitutive feedback through public material equations
 
 `constitutive_graph::MaterialGraphResidual` closes caller-authored, dimensioned

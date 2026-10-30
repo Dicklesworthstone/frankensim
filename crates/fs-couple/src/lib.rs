@@ -109,6 +109,9 @@ pub mod rocket_blowdown;
 pub mod selector;
 /// Independent characterized sheet bending and inertia on the original DKT owner.
 pub mod sheet_plate;
+/// Accepted Euler wall impulses on the original structural pressure surfaces.
+#[cfg(feature = "experimental-shock-loading")]
+pub mod shock_loading;
 pub mod speaker;
 /// Shared enthalpy and material fields driving native three-dimensional solid equilibrium.
 pub mod solid_enthalpy;
