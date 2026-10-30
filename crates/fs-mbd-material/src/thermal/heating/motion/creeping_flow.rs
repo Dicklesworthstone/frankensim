@@ -5,6 +5,9 @@
 //! owner supplies all drag, rotary resistance, buoyancy, regime admission and
 //! midpoint dynamics. There is no parallel heat or motion integrator here.
 
+/// Source-bound heat exchange with the same surrounding fluid.
+pub mod heat_exchange;
+
 use super::*;
 use crate::creeping_flow::{CreepingLoad, CreepingSphere, CreepingStepControls};
 use fs_material::fluid_transport::FluidTransport;

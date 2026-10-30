@@ -609,3 +609,38 @@ They also cover exact frozen-geometry native-step parity, reference rebuilding,
 restart, shared generated-heat substeps, updated-radius regime refusal, late
 rollback and retained fluid snapshots. Synthetic coefficients establish only
 implementation checks; execution and physical validation are reported separately.
+
+## Material-fluid heat exchange on the continuing sphere trajectory
+
+`advance_creeping_sphere_in_thermal_fluid` and its `_with` composition use the
+original enthalpy observer and `CreepingExpansion` to close ambient heat,
+temperature, source expansion, radius, inertia and fluid-loaded motion. The
+steady exterior spherical-conduction limit supplies G = 4*pi*k_fluid*r and
+signed heat into the body G*(T_fluid-T_body). Current expanded radius enters
+every exchange; the ambient rho/Cp/k/mu tuple is identical to the motion view.
+The original body card and prepared conductivity path supply the Biot check.
+
+Admission requires a wholly exposed spherical region, no overlapping authored
+Robin/contact surface, low translational/rotational/expansion Peclet, low
+Rayleigh and Biot numbers, slow thermal/radius evolution and small temperature
+contrast for frozen fluid properties. Gas buoyancy expansion comes from its
+original ideal EOS. Unknown liquid expansion refuses nonzero gravity with
+nonzero thermal contrast, including contrast generated inside a candidate.
+
+Signed reservoir heat enters the existing external-heat account once. Fluid
+viscous loss and inertia/buoyancy configuration work retain separate accounts.
+The heat-exchange layer evaluates prepared solid curves and cached caloric
+slope, adding no runtime material queries.
+The additional explicit relaxation limit composes with the original timeline
+and any generated-heat observer, whose history publishes atomically with heat
+and motion. Source/regime/boundary-event/cancellation failure discards all of
+those proposed histories.
+
+Seven focused integration definitions cover independent exponential heating
+and cooling with refinement, k/Cp/expansion substitutions, shared heater work,
+pressure/Rayleigh effects, high-Peclet refusal at low Reynolds, source/boundary
+ownership and late rollback. Their native test target passes `cargo check`;
+runtime execution remains pending. This is an established exterior conduction
+field and an infinite prescribed reservoir. Initial fluid diffusion, finite
+fluid storage, advective or nonlinear convection, phase change and reciprocal
+thermoelastic heat are not supplied.

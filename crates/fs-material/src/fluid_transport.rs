@@ -12,6 +12,9 @@ use crate::gas_mixture::ResolvedGasMixtureState;
 use crate::liquid::ResolvedLiquidState;
 use crate::moist_air::ResolvedMoistAirState;
 
+mod thermal;
+pub use thermal::{ThermalFluidTransport, ThermalFluidTransportState};
+
 /// Immutable transport coefficients for one evaluated material state point.
 /// Derived quantities cannot be mutated independently of their inputs.
 #[derive(Clone, Copy, Debug, PartialEq)]

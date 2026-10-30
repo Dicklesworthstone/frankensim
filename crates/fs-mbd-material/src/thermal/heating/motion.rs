@@ -45,6 +45,7 @@ pub enum HeatedMotionError {
     Dynamics(DynamicsError),
     Hydrostatic(crate::hydrostatic::HydrostaticStepError),
     CreepingFlow(crate::creeping_flow::CreepingFlowError),
+    ThermalTransport(fs_material::thermal::transport::ThermalTransportError),
     Invalid(&'static str),
     Budget(&'static str),
 }
@@ -87,6 +88,11 @@ impl From<crate::hydrostatic::HydrostaticStepError> for HeatedMotionError {
 impl From<crate::creeping_flow::CreepingFlowError> for HeatedMotionError {
     fn from(e: crate::creeping_flow::CreepingFlowError) -> Self {
         Self::CreepingFlow(e)
+    }
+}
+impl From<fs_material::thermal::transport::ThermalTransportError> for HeatedMotionError {
+    fn from(e: fs_material::thermal::transport::ThermalTransportError) -> Self {
+        Self::ThermalTransport(e)
     }
 }
 

@@ -4825,6 +4825,24 @@ water integration has 24 passing tests. Both water examples compile and run.
 The full workspace/DSR gate remains unavailable in this checkout because the
 required sibling constellation repositories and DSR executable are absent.
 
+## Coherent thermal-fluid transport view
+
+`fluid_transport::ThermalFluidTransport` extends the existing transport view
+with its original absolute temperature and optional isobaric volumetric
+expansion. Density, Cp, conductivity and viscosity remain the same immutable
+checked tuple used by mechanical consumers. Original ideal-gas owners derive
+beta = 1/T at fixed composition after their EOS/caloric/acoustic coherence gate.
+Source-resolved liquids require one explicitly typed absolute-temperature
+coordinate and retain unknown expansion; a missing coefficient never means
+zero expansion. An explicit authored-state constructor can declare its own
+temperature and optional beta, without acquiring source-data authority.
+
+This is one evaluated state, not a temperature-dependent fluid law or evolving
+reservoir. Consumers must keep source/domain and frozen-property assumptions,
+and must verify agreement when binding mechanical and thermal snapshots.
+Three focused unit definitions cover coherent gas data, authored expansion and
+typed liquid temperature. Runtime qualification is reported separately.
+
 ## Source-bound Ohmic constitutive graph
 
 `conductor::graph::MaterialOhmicNode` exposes the original scalar conductor as a public constitutive-law node with temperature-change and signed-current inputs, and signed-voltage and nonnegative-Joule-power outputs. It preserves the selected electrical property key and basis, original material bundle and claims, and continuously supported temperature slice, including fixed-context sampled surfaces. Conductivity is queried before conversion to resistance. Its piecewise-consistent tangent differentiates the native resistance and Joule-power equations; interior knots use the right interval and the final endpoint uses the left interval. Construction admits positive, representable native transport across every electrical source knot and refuses unsupported spans, unowned response coordinates, and phase-fraction evolution. This is fixed-geometry, memoryless scalar DC transport; thermal storage, time, contacts, skin effects, expansion, and phase evolution remain with their existing physical owners.
