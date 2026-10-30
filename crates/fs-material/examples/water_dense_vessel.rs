@@ -1,20 +1,30 @@
 //! Heat and cool dense water at fixed mass and volume with original IF97 Region 3.
 //!
 //! Run: `cargo run -p fs-material --example water_dense_vessel`.
+//! Add `-- --bath` for finite-conductance heating/cooling on the original
+//! thermal timeline, with actual reservoir entropy and pressure evolution.
 //! A 1-litre rigid volume contains 0.5 kg of water at 650 K. Prescribed heat
 //! raises its temperature to approximately 750 K over 100 seconds, then the
 //! same power is reversed for 100 seconds. Density remains 500 kg/m3, while
 //! pressure follows the original density/temperature Helmholtz equation.
 //!
-//! This is an illustrative, spatially uniform quasistatic equilibrium path.
-//! It supplies neither a container-strength prediction nor wall compliance,
-//! wall heat storage, finite-rate transport or a heater-reservoir entropy model.
+//! The default mode is a spatially uniform quasistatic equilibrium path with
+//! prescribed heat and no heater-reservoir entropy model. The bath mode computes
+//! finite-conductance heat exchange and actual reservoir entropy. Neither mode
+//! supplies container strength, wall compliance/storage or internal fluid flow.
 //! The positive Cv bound and source-domain admission cover the entire prepared
 //! interval. Pressure enthalpy V Delta p is reported separately from the exactly
 //! zero work at the rigid boundary.
 
+use fs_material::phase::water::dense::thermal::{
+    DenseIsochoricThermalLaw, DenseWaterThermalNetwork,
+};
 use fs_material::phase::water::dense::{DenseIsochore, DenseWaterControls, DenseWaterState};
 use fs_qty::{Density, Temperature};
+use fs_thermal::enthalpy::{
+    Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, Event, MaterialId, Reservoir,
+    StepConfig, TimedEvent,
+};
 use fs_thermochem::water::if97::region3::increments::DenseIsochoricIntervalSolve;
 use fs_thermochem::water::if97::{SOURCE_RELEASE, SOURCE_URL};
 
@@ -39,8 +49,8 @@ fn row(time: f64, state: DenseWaterState, heat: f64, initial: DenseWaterState) {
     );
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let law = DenseIsochore::new(
+fn chart() -> Result<DenseIsochore, Box<dyn std::error::Error>> {
+    Ok(DenseIsochore::new(
         Density::new(MASS_KG / VOLUME_M3),
         DenseWaterControls {
             // The authored heat/cool trajectory is 650..750 K. Preparing a
@@ -55,7 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         },
         || false,
-    )?;
+    )?)
+}
+
+fn prescribed_heat() -> Result<(), Box<dyn std::error::Error>> {
+    let law = chart()?;
     let initial = law.state_at_temperature(Temperature::new(650.0), || false)?;
     let hot = law.state_at_temperature(Temperature::new(750.0), || false)?;
     let heating_j =
@@ -157,4 +171,143 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "# The source interval is reused across all heat steps; reservoir entropy is unspecified."
     );
     Ok(())
+}
+
+fn bath_transient() -> Result<(), Box<dyn std::error::Error>> {
+    let law = DenseIsochoricThermalLaw::new(chart()?);
+    let initial = law
+        .chart()
+        .state_at_temperature(Temperature::new(650.0), || false)?;
+    let bath = |temperature_k| Boundary {
+        ambient_k: 650.0,
+        htc_w_m2_k: 0.0,
+        source_w: 0.0,
+        reservoir: Some(Reservoir {
+            area_m2: 0.01,
+            // Authored whole-vessel coupling; not a water conductivity claim.
+            conductance_w_k: 25.0,
+            temperature_k,
+        }),
+    };
+    let mut network = DenseWaterThermalNetwork::new(
+        &law,
+        vec![
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id: CellId(0),
+                    segment_id: 0,
+                    body_id: 0,
+                    material_id: MaterialId(0),
+                    mass_kg: MASS_KG,
+                    // This explicitly InternalEnergy law stores u, never stream h.
+                    specific_h_j_kg: initial.specific_internal_energy_j_kg(),
+                    geometry: CellGeometry {
+                        start_m: [0.0, 0.0, 0.0],
+                        end_m: [0.1, 0.0, 0.0],
+                        volume_m3: VOLUME_M3,
+                        surface_area_m2: 0.01,
+                    },
+                    boundary: bath(750.0),
+                }),
+            },
+            TimedEvent {
+                time_s: 100.0,
+                event: Event::Boundary(CellId(0), bath(650.0)),
+            },
+        ],
+        DepositionBudget {
+            max_cells: 1,
+            max_links: 0,
+            max_events: 2,
+            max_substeps: 8192,
+        },
+        || Ok(()),
+    )?;
+    println!("# {SOURCE_RELEASE}: {SOURCE_URL}");
+    println!(
+        "# sealed volume: mass={MASS_KG} kg, volume={VOLUME_M3} m3, rho=500 kg/m3; authored bath conductance=25 W/K"
+    );
+    println!(
+        "# bath=750 K until t=100 s, then 650 K; timestep cap=0.25 s; source domain=649..751 K"
+    );
+    println!(
+        "# Spatially uniform rigid-body model; no inferred dense-water conductivity, wall storage, compliance or internal flow."
+    );
+    println!(
+        "# Q=Delta U=Delta H-V Delta p; moving-boundary work=0 J. Source entropy and numerical temporal defects remain separate."
+    );
+    println!(
+        "time_s,temperature_K,pressure_MPa,cumulative_heat_J,delta_U_J,delta_H_J,V_delta_p_J,source_delta_S_J_K,reservoir_entropy_J_K,conductive_generation_J_K,temporal_defect_J_K"
+    );
+    let (mut heat, mut reservoir_entropy, mut generation, mut thermal_entropy) =
+        (0.0, 0.0, 0.0, 0.0);
+    let mut maximum_residual = 0.0_f64;
+    let mut maximum_source_entropy_defect = 0.0_f64;
+    let mut substeps = 0;
+    for sample in 0..=10 {
+        let time = f64::from(sample) * 20.0;
+        if sample > 0 {
+            let (next, audit) = network.advance_to(
+                time,
+                StepConfig {
+                    max_dt_s: 0.25,
+                    energy_tolerance_j: STEP_ENERGY_TOLERANCE_J,
+                },
+                || Ok(()),
+            )?;
+            heat += audit.thermal.external_heat_j;
+            reservoir_entropy += audit.entropy.reservoir_entropy_input_j_k;
+            generation += audit.entropy.conduction_generation_j_k;
+            thermal_entropy += audit.entropy.thermal_storage_change_j_k;
+            substeps += audit.thermal.substeps;
+            maximum_source_entropy_defect =
+                maximum_source_entropy_defect.max(audit.entropy_storage_source_defect_j_k.abs());
+            if audit.boundary_work_j != 0.0 || audit.entropy.has_unclassified_sources {
+                return Err(
+                    "sealed bath model acquired mechanical work or an unclassified heat source"
+                        .into(),
+                );
+            }
+            network = next;
+        }
+        let current = network.profile(|| Ok(()))?[0].material;
+        let difference = law.chart().source_interval().difference(
+            initial.source().temperature(),
+            current.source().temperature(),
+        )?;
+        let du = MASS_KG * difference.specific_internal_energy_change().value();
+        let dh = MASS_KG * difference.specific_enthalpy_change().value();
+        let vdp = VOLUME_M3 * difference.pressure_change().value();
+        let ds = MASS_KG * difference.specific_entropy_change().value();
+        for residual in [du - heat, dh - vdp - heat] {
+            maximum_residual = maximum_residual.max(residual.abs());
+            if !residual.is_finite() || residual.abs() > HISTORY_ENERGY_TOLERANCE_J {
+                return Err(format!("rigid-water bath history residual {residual} J").into());
+            }
+        }
+        println!(
+            "{time:.1},{:.9},{:.9},{heat:.9},{du:.9},{dh:.9},{vdp:.9},{ds:.12},{reservoir_entropy:.12},{generation:.12},{:.12}",
+            current.temperature_k(),
+            current.pressure_pa() * 1e-6,
+            thermal_entropy - reservoir_entropy - generation
+        );
+    }
+    println!(
+        "# original timeline substeps={substeps}; maximum history residual={maximum_residual:.9e} J; maximum interval thermal/source entropy difference={maximum_source_entropy_defect:.9e} J/K"
+    );
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut arguments = std::env::args().skip(1);
+    let mode = arguments.next();
+    if arguments.next().is_some() {
+        return Err("usage: water_dense_vessel [--bath|--prescribed]".into());
+    }
+    match mode.as_deref() {
+        None | Some("--prescribed") => prescribed_heat(),
+        Some("--bath") => bath_transient(),
+        Some(_) => Err("usage: water_dense_vessel [--bath|--prescribed]".into()),
+    }
 }

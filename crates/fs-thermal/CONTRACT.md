@@ -571,3 +571,28 @@ checked in this change; their Cargo runtime build was killed while compiling
 the existing asupersync dependency. The earlier native test counts above are
 prior validation, not runtime evidence for this extension. Geometry-model
 validity and nonlinear/time accuracy remain the composing caller's responsibility.
+
+## Declared thermal storage and closed-volume admission
+
+`ThermalLaw::storage_basis` declares whether the original caloric law stores
+specific enthalpy or fixed-volume specific internal energy. Existing laws retain
+the enthalpy default. The inherited `specific_h_j_kg` field carries the selected
+coordinate; the timeline applies the same conservative heat exchange and
+`integral de/T` entropy account without converting one thermodynamic potential
+into another. Each law can admit its own mass/geometry relationship through
+`validate_cell`, called before a birth changes inventory.
+
+`material_storage_basis` exposes the original registered law's declaration.
+Nonzero prescribed mass flow and inlet calorics require enthalpy storage. The
+single-surface, joint-chamber and external-endpoint sublimation paths also require
+enthalpy before constructing or publishing open-mass exchange. Batch admission
+finishes before any endpoint mutation. Zero-flow connections remain available
+for heat-only internal-energy storage.
+
+Focused regressions exercise two rigid bodies exchanging heat with conserved
+internal energy and increasing thermal entropy; invalid mass/volume births;
+forward/reverse circulation and boundary-flow refusal; and all three sublimation
+entry paths. Mixed enthalpy/internal-energy batches preserve the original solids,
+vapor, mass, stored energy and clock on refusal. This adds no open-mass internal-
+energy model, pressure-work conversion or equation of state. Such conversions
+remain the explicit responsibility of the physical material/equipment owner.

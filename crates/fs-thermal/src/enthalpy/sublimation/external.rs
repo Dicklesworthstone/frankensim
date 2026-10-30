@@ -9,7 +9,8 @@
 use std::collections::BTreeSet;
 
 use crate::enthalpy::{
-    DepositedCell, DepositionBudget, DepositionError, DepositionSimulation, TimedEvent,
+    DepositedCell, DepositionBudget, DepositionError, DepositionSimulation, ThermalStorageBasis,
+    TimedEvent,
 };
 use crate::sublimation::SolidSurfaceState;
 
@@ -95,6 +96,11 @@ impl DepositionSimulation<'_> {
             if !ids.insert(id) || cell != &exchange.expected {
                 return Err(DepositionError::InvalidInput(
                     "duplicate or stale external solid exchange",
+                ));
+            }
+            if self.material_storage_basis(cell.material_id)? != ThermalStorageBasis::Enthalpy {
+                return Err(DepositionError::InvalidInput(
+                    "external solid exchange requires enthalpy storage and an explicit open-mass model",
                 ));
             }
             let [lo, hi] = exchange.pure_solid_enthalpy_range_j_kg;
@@ -223,6 +229,68 @@ mod tests {
         state.apply_solid_exchanges(&[update], || Ok(())).unwrap();
         assert_eq!(state.cells()[&CellId(1)], expected);
         assert_eq!(state.temperature_k(CellId(1)), Ok(249.5));
+        assert_eq!(state.time_s(), 0.0);
+    }
+
+    #[test]
+    fn internal_energy_endpoint_refuses_the_entire_external_exchange() {
+        struct InternalEnergy;
+        impl ThermalLaw for InternalEnergy {
+            fn storage_basis(&self) -> ThermalStorageBasis {
+                ThermalStorageBasis::InternalEnergy
+            }
+            fn temperature_k(&self, u: f64) -> Result<f64, DepositionError> {
+                CALORIC.temperature_k(u)
+            }
+            fn maximum_temperature_slope(&self) -> f64 {
+                CALORIC.maximum_temperature_slope()
+            }
+        }
+        let internal = InternalEnergy;
+        let events = state()
+            .cells()
+            .values()
+            .cloned()
+            .map(|mut cell| {
+                if cell.id == CellId(2) {
+                    cell.material_id = MaterialId(2);
+                }
+                TimedEvent {
+                    time_s: 0.0,
+                    event: Event::Birth(cell),
+                }
+            })
+            .collect();
+        let mut state = DepositionSimulation::new(
+            events,
+            &[(MaterialId(1), &CALORIC), (MaterialId(2), &internal)],
+            DepositionBudget {
+                max_cells: 2,
+                max_links: 0,
+                max_events: 2,
+                max_substeps: 4,
+            },
+        )
+        .unwrap()
+        .advance_to(
+            0.0,
+            StepConfig {
+                max_dt_s: 1.0,
+                energy_tolerance_j: 1e-10,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0;
+        let before = state.cells().clone();
+        let updates = [exchange(&state, 1), exchange(&state, 2)];
+        assert_eq!(
+            state.apply_solid_exchanges(&updates, || Ok(())),
+            Err(DepositionError::InvalidInput(
+                "external solid exchange requires enthalpy storage and an explicit open-mass model",
+            )),
+        );
+        assert_eq!(state.cells(), &before);
         assert_eq!(state.time_s(), 0.0);
     }
 

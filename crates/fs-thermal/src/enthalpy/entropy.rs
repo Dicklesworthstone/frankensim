@@ -11,7 +11,8 @@ use super::*;
 /// identity, not a spatial/time accuracy certificate or a global second-law proof.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EntropyAudit {
-    /// Actual sum of m*integral(dh/T), excluding entropy delivered at cell birth.
+    /// Actual sum of m*integral(de/T) in each law's declared thermal-storage
+    /// basis, excluding entropy delivered at cell birth.
     pub thermal_storage_change_j_k: f64,
     /// Signed input Q/T_reservoir at each actual ambient/support temperature.
     pub reservoir_entropy_input_j_k: f64,
@@ -78,7 +79,8 @@ impl Sum {
 
 impl DepositionSimulation<'_> {
     /// Advance the original explicit thermal owner and integrate entropy on its
-    /// actual CFL/event grid. Every active law must provide its exact dh/T integral.
+    /// actual CFL/event grid. Every active law must provide its exact de/T integral
+    /// in its declared storage basis (dh at fixed pressure, du at fixed volume).
     /// A missing law, domain failure or cancellation publishes no candidate.
     /// Existing `advance_to` performs no entropy evaluation and keeps its behavior.
     ///

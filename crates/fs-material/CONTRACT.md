@@ -5231,3 +5231,42 @@ faces under diagonal unconstrained free expansion. Arbitrary curved normals,
 shear, constrained stress and moving interbody contact coverage require their
 own geometry owners. Thermal boundary laws and disjoint coverage admission
 remain with the consumer; surface geometry alone adds no heat or storage.
+
+## Sealed dense-water heat exchange on the shared thermal timeline
+
+`phase::water::dense::thermal::DenseIsochoricThermalLaw` retains the original
+prepared IF97 Region 3 isochore. Its declared storage basis is internal energy,
+with original T(u), whole-interval positive-Cv slope bound, local analytic
+dT/du = 1/Cv, and original-source entropy increments. Birth admission requires
+m = rho V within a 64-epsilon arithmetic allowance and refuses unsupported u.
+Mass advection and the existing sublimation owners refuse this storage basis.
+
+`DenseWaterThermalNetwork` couples sealed rigid volumes through the original
+thermal contacts, reservoir boundaries, events, timestep owner and immutable
+candidate publication. All volumes are born at time zero. Stable source
+differences and represented endpoints independently check Delta U = Q and
+Delta H - V Delta p = Q. Moving-boundary work is exactly zero; V Delta p is
+an enthalpy contribution, not wall work. Thermal-coordinate entropy and original
+source entropy are reported separately, exposing finite inverse representation
+effects without discarding tiny representable heat.
+
+Four new integration tests, together with four existing dense-source tests, cover
+source Cv/tangents and tiny-heat entropy, mass/volume admission and actual
+advection refusal, finite-body equilibration, exact bath events, continuation,
+cancellation, budgets and source-domain failure. The bath transient converges
+against independent quadrature of t = (m/G) integral Cv(T)/(T_bath - T) dT:
+at 20.695034947 s, temperature errors for maximum steps 0.4/0.2/0.1 s are
+0.241386644/0.120461412/0.060267601 K.
+
+`water_dense_vessel --bath` computes finite-conductance heating and cooling,
+pressure and reservoir entropy; its original prescribed-heat mode remains
+available. The example's 0.5 kg, 1-litre vessel with authored 25 W/K conductance
+reaches 732.426872 K and 68.727035 MPa at 100 s, with Q = 120810.286679 J,
+Delta H = 163953.619467 J and V Delta p = 43143.332788 J. Across 800 steps its
+maximum history energy residual is 2.6663e-7 J.
+
+This is a spatially uniform network on one fixed-density chart. Conductances are
+authored; dense-water conductivity, container strength, wall storage/compliance,
+internal convection, multiphase behavior and regional stitching are not supplied.
+Native validation compiles the actual dense namespace and complete thermochemistry
+and thermal owners; it does not constitute a full workspace gate.

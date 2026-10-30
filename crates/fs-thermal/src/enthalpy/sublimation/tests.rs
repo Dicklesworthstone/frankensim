@@ -2,7 +2,7 @@
 use super::*;
 use crate::enthalpy::{
     Boundary, CellGeometry, DepositedCell, DepositionBudget, MaterialId, Reservoir, ThermalLaw,
-    ThermalLink, TimedEvent,
+    ThermalLink, ThermalStorageBasis, TimedEvent,
 };
 use crate::sublimation::SublimationProperties;
 
@@ -125,6 +125,68 @@ fn initial(source_w: f64) -> DepositionSimulation<'static> {
 }
 fn close(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:e} != {b:e}");
+}
+
+#[test]
+fn internal_energy_storage_refuses_sublimation_without_mutation() {
+    struct InternalEnergy;
+    impl ThermalLaw for InternalEnergy {
+        fn storage_basis(&self) -> ThermalStorageBasis {
+            ThermalStorageBasis::InternalEnergy
+        }
+        fn temperature_k(&self, u: f64) -> Result<f64, DepositionError> {
+            CALORIC.temperature_k(u)
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            CALORIC.maximum_temperature_slope()
+        }
+    }
+    let internal = InternalEnergy;
+    let mut thermal = DepositionSimulation::new(
+        vec![birth(0.0, cell(1, -20_000.0, 0.0))],
+        &[(MaterialId(1), &internal)],
+        DepositionBudget {
+            max_cells: 1,
+            max_links: 0,
+            max_events: 1,
+            max_substeps: 4,
+        },
+    )
+    .unwrap()
+    .advance_to(0.0, config(1.0), || Ok(()))
+    .unwrap()
+    .0;
+    let before = thermal.cells().clone();
+    let before_mass = thermal.mass_kg();
+    let before_energy = thermal.energy_j();
+    let mut reservoir = VaporReservoir::Finite {
+        vapor_mass_kg: 0.0,
+        volume_m3: 0.001,
+        temperature_k: 250.0,
+    };
+    let before_reservoir = reservoir;
+    let error = thermal
+        .sublimate_cell(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            &mut reservoir,
+            0.25,
+            phase(),
+            || Ok(()),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ThermalSublimationError::Thermal(DepositionError::InvalidInput(
+            "sublimation requires enthalpy storage and an explicit open-mass model",
+        )),
+    );
+    assert_eq!(thermal.cells(), &before);
+    assert_eq!(thermal.mass_kg(), before_mass);
+    assert_eq!(thermal.energy_j(), before_energy);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(reservoir, before_reservoir);
 }
 
 #[test]

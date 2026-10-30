@@ -1,15 +1,16 @@
 //! Growing-domain thermal transport for resolved material-extrusion schedules.
 //!
 //! Cells are caller-resolved control volumes, not a slicer or bead-forming law.
-//! Each has one uniform enthalpy and temperature. Internal links exchange the
-//! SAME signed joules on their two sides. Birth adds exactly `mass * h_in`;
+//! Each has one uniform specific thermal-storage coordinate and temperature.
+//! Internal links exchange the SAME signed joules on their two sides. Birth
+//! adds exactly `mass * e_in` in the original law's declared storage basis;
 //! previously deposited cells retain their history. Contact and bed areas are
 //! removed from the free surface, including for zero-conductance contacts.
 //! Geometry is fixed between explicit events; no deformation or remeshing is
 //! inferred. Cell, segment, body and material identities survive thermal steps.
 //!
 //! Forward Euler is subcycled with a declared maximum step and a monotonicity
-//! bound `dt <= 0.8 m / (max(dT/dh) * sum(outgoing conductance))`. All event
+//! bound `dt <= 0.8 m / (max(dT/de) * sum(outgoing conductance))`. All event
 //! times are hit exactly. No future cell conducts heat. A failed/cancelled
 //! advance publishes no candidate. Cost is sparse, O(cells + links + events) storage,
 //! O((cells + links) log(cells)) per substep; no dense global solve or full
@@ -59,20 +60,39 @@ pub struct CellId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MaterialId(pub u64);
 
-/// Replaceable enthalpy/temperature law. All materials must use a consistent
-/// specific-energy datum for an energy audit to have physical meaning. `T(h)`
+/// Physical thermodynamic coordinate stored by the original thermal law.
+/// Heat-only exchange can couple either basis; mass transport requires enthalpy
+/// and must not silently treat fixed-volume internal energy as stream enthalpy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermalStorageBasis {
+    /// Specific enthalpy h [J/kg], with pressure work owned by the material model.
+    Enthalpy,
+    /// Specific internal energy u [J/kg] for an explicitly fixed-volume model.
+    InternalEnergy,
+}
+
+/// Replaceable thermal-storage/temperature law. All materials must use a consistent
+/// specific-energy datum for an energy audit to have physical meaning. `T(e)`
 /// must be continuous and nondecreasing over the admitted domain, and the law
 /// must remain immutable throughout an advance and checkpoint/restart.
 pub trait ThermalLaw {
-    /// Temperature in kelvin at specific enthalpy in J/kg. Refuse extrapolation.
+    /// Coordinate selected by this immutable law. Existing laws store enthalpy.
+    fn storage_basis(&self) -> ThermalStorageBasis { ThermalStorageBasis::Enthalpy }
+    /// Admit law-specific mass, geometry and storage constraints before birth
+    /// changes any timeline inventory. Generic geometry admission runs first.
+    fn validate_cell(&self, _cell: &DepositedCell) -> Result<(), DepositionError> { Ok(()) }
+    /// Temperature in kelvin at the selected specific energy [J/kg]. The
+    /// historical h-labelled argument is u for an explicit internal-energy law.
+    /// Refuse extrapolation.
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError>;
-    /// Global upper bound on dT/dh [kg K/J] over the admitted enthalpy domain.
+    /// Global upper bound on dT/de [kg K/J] over the admitted storage domain.
     /// Must be finite and nonnegative; an underestimated bound invalidates CFL.
     /// Admitted once at timeline construction and reused across advances and
     /// checkpoints; the bound must remain valid for the immutable law.
     fn maximum_temperature_slope(&self) -> f64;
-    /// Exact relative thermal entropy integral `integral dh / T(h)` [J/(kg K)]
-    /// on this same admitted caloric law, at its fixed pressure/composition.
+    /// Exact relative thermal entropy integral `integral de / T(e)` [J/(kg K)]
+    /// on this same admitted caloric law: dh/T at fixed pressure/composition,
+    /// or du/T for explicitly fixed volume/composition.
     /// `None` explicitly means unavailable; the transport owner never invents
     /// a heat capacity, entropy datum, mixing law or extrapolated chart.
     /// Implementations must retain latent heat in this integral exactly once.
@@ -136,7 +156,9 @@ pub struct DepositedCell {
     pub material_id: MaterialId,
     /// Delivered mass, kg, strictly positive.
     pub mass_kg: f64,
-    /// Incoming specific enthalpy, J/kg. Uses the selected law's energy datum.
+    /// Incoming specific thermal energy, J/kg, using the selected law's datum.
+    /// This historical h-labelled field stores h for `Enthalpy` and u for an
+    /// explicitly selected `InternalEnergy` law.
     pub specific_h_j_kg: f64,
     /// Located geometry.
     pub geometry: CellGeometry,
@@ -313,9 +335,10 @@ pub struct EnergyAudit {
     /// Integrated ambient/reservoir/source input, including endpoint heat
     /// impulses, J, positive inward.
     pub external_heat_j: f64,
-    /// Actual change in stored `sum(m*h)`, J.
+    /// Actual change in the declared thermal storage `sum(m*e)`, J. This is not
+    /// automatically the total system internal energy when a law stores h.
     pub stored_energy_change_j: f64,
-    /// Stored change minus incoming enthalpy minus external input, J.
+    /// Stored change minus incoming storage energy minus external input, J.
     /// Evaluated from compensated per-cell initial/birth-relative changes.
     /// Recomputing it from the rounded aggregate report fields can lose small
     /// heat increments against large formation-enthalpy reference energies.
@@ -424,6 +447,11 @@ impl<'a> DepositionSimulation<'a> {
     pub fn mass_kg(&self) -> f64 {
         self.cells.values().map(|c| c.mass_kg).sum()
     }
+    /// Thermodynamic storage basis of the original registered caloric law.
+    pub fn material_storage_basis(&self, id: MaterialId) -> Result<ThermalStorageBasis, DepositionError> {
+        self.materials.get(&id).map(|law| law.storage_basis())
+            .ok_or(DepositionError::InvalidInput("unregistered caloric material"))
+    }
     /// Stored thermal energy relative to declared material data, J.
     #[must_use]
     pub fn energy_j(&self) -> f64 {
@@ -505,6 +533,7 @@ impl<'a> DepositionSimulation<'a> {
                     ));
                 }
                 validate_boundary(cell.boundary)?;
+                self.materials[&cell.material_id].validate_cell(&cell)?;
                 audit.incoming_mass_kg = finite(audit.incoming_mass_kg + cell.mass_kg)?;
                 audit.incoming_energy_j =
                     finite(audit.incoming_energy_j + finite(cell.mass_kg * cell.specific_h_j_kg)?)?;

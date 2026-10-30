@@ -39,6 +39,83 @@ fn ring(rate: f64) -> Vec<MassFlow> {
 }
 fn close(a: f64, b: f64, tol: f64) { assert!((a-b).abs() <= tol, "{a} != {b}"); }
 
+struct RigidStorage;
+impl ThermalLaw for RigidStorage {
+    fn storage_basis(&self) -> ThermalStorageBasis { ThermalStorageBasis::InternalEnergy }
+    fn validate_cell(&self, cell: &DepositedCell) -> Result<(), DepositionError> {
+        let expected = 1000.0 * cell.geometry.volume_m3;
+        if (cell.mass_kg - expected).abs() > 8.0 * f64::EPSILON * expected {
+            return Err(DepositionError::InvalidInput("rigid storage mass/volume mismatch"));
+        }
+        self.temperature_k(cell.specific_h_j_kg).map(|_| ())
+    }
+    fn temperature_k(&self, u: f64) -> Result<f64, DepositionError> {
+        if !u.is_finite() || !(0.0..=1e6).contains(&u) {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(300.0 + u / 1000.0)
+    }
+    fn maximum_temperature_slope(&self) -> f64 { 0.001 }
+    fn specific_entropy_change_j_kg_k(&self, a: f64, b: f64) -> Result<Option<f64>, DepositionError> {
+        Ok(Some(1000.0 * (self.temperature_k(b)? / self.temperature_k(a)?).ln()))
+    }
+}
+
+#[test]
+fn fixed_volume_storage_uses_original_heat_exchange_and_admits_its_mass_volume_constraint() {
+    assert_eq!(LAW.storage_basis(), ThermalStorageBasis::Enthalpy);
+    let s = prepared(&RigidStorage, vec![cell(0, 1.0, 100_000.0), cell(1, 2.0, 0.0)],
+        vec![TimedEvent { time_s: 0.0, event: Event::Contact(ThermalLink {
+            id: 9, a: CellId(0), b: CellId(1), area_m2: 0.1, conductance_w_k: 2.0 }) }]);
+    assert_eq!(s.material_storage_basis(MaterialId(1)).unwrap(), ThermalStorageBasis::InternalEnergy);
+    assert!(s.material_storage_basis(MaterialId(99)).is_err());
+    let (next, energy, entropy) = s.advance_to_with_entropy(0.25, cfg(0.25), || Ok(())).unwrap();
+    assert_eq!(next.cells()[&CellId(0)].specific_h_j_kg, 99_950.0);
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 25.0);
+    assert_eq!(energy.external_heat_j, 0.0);
+    assert_eq!(energy.residual_j, 0.0);
+    assert!(entropy.thermal_storage_change_j_k > 0.0);
+    assert!(entropy.conduction_generation_j_k > 0.0);
+    let mut bad = cell(0, 1.0, 0.0);
+    bad.geometry.volume_m3 *= 2.0;
+    let unborn = DepositionSimulation::new(vec![TimedEvent { time_s: 0.0, event: Event::Birth(bad) }],
+        &[(MaterialId(1), &RigidStorage)], budget()).unwrap();
+    assert!(matches!(unborn.advance_to(0.0, cfg(1.0), || Ok(())),
+        Err(DepositionError::InvalidInput("rigid storage mass/volume mismatch"))));
+    assert!(unborn.cells().is_empty());
+    assert_eq!(unborn.time_s(), 0.0);
+}
+
+#[test]
+fn internal_energy_storage_cannot_silently_become_open_stream_enthalpy() {
+    let s = prepared(&RigidStorage,
+        vec![cell(0, 1.0, 10_000.0), cell(1, 1.0, 20_000.0), cell(2, 1.0, 30_000.0)], vec![]);
+    let original = s.cells().clone();
+    for rate in [0.1, -0.1] {
+        let observer = Advected::new(Witness::default(), ring(rate), 3).unwrap();
+        assert!(matches!(s.advance_observed(&observer, 0.1, cfg(0.1), || Ok(())),
+            Err(DepositionError::InvalidInput("mass flow requires enthalpy storage, not fixed-volume internal energy"))));
+        assert!(observer.inner().durations.is_empty());
+        assert_eq!(observer.audit().substeps, 0);
+    }
+    let boundaries = vec![
+        MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 0.1,
+            material_id: MaterialId(1), specific_h_j_kg: 20_000.0 },
+        MassBoundary::Outlet { id: 11, cell: CellId(0), kg_s: 0.1 },
+    ];
+    let observer = Advected::new(Witness::default(), vec![], 0).unwrap()
+        .with_boundaries(boundaries, 2).unwrap();
+    assert!(matches!(s.advance_observed(&observer, 0.1, cfg(0.1), || Ok(())),
+        Err(DepositionError::InvalidInput("mass flow requires enthalpy storage, not fixed-volume internal energy"))));
+    assert!(observer.inner().durations.is_empty());
+    let zero = Advected::new((), ring(0.0), 3).unwrap();
+    let (unchanged, _, audit) = s.advance_observed(&zero, 0.1, cfg(0.1), || Ok(())).unwrap();
+    assert_eq!(unchanged.cells(), &original);
+    assert_eq!(audit.external_heat_j, 0.0);
+    assert_eq!(s.cells(), &original);
+    assert_eq!(s.time_s(), 0.0);
+}
+
 #[test]
 fn unequal_mass_upwind_step_conserves_heat_without_external_sources() {
     let masses = [1.0,2.0,4.0];

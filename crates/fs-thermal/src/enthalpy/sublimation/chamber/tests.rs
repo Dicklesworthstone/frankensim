@@ -149,6 +149,65 @@ fn close(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn internal_energy_surface_refuses_the_entire_chamber_exchange() {
+    struct InternalEnergy;
+    impl ThermalLaw for InternalEnergy {
+        fn storage_basis(&self) -> ThermalStorageBasis {
+            ThermalStorageBasis::InternalEnergy
+        }
+        fn temperature_k(&self, u: f64) -> Result<f64, DepositionError> {
+            CALORIC.temperature_k(u)
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            CALORIC.maximum_temperature_slope()
+        }
+    }
+    let internal = InternalEnergy;
+    let mut second = cell(2, -20_000.0, 0.0);
+    second.material_id = MaterialId(2);
+    let mut thermal = DepositionSimulation::new(
+        vec![birth(0.0, cell(1, 0.0, 0.0)), birth(0.0, second)],
+        &[(MaterialId(1), &CALORIC), (MaterialId(2), &internal)],
+        DepositionBudget {
+            max_cells: 2,
+            max_links: 0,
+            max_events: 2,
+            max_substeps: 4,
+        },
+    )
+    .unwrap()
+    .advance_to(0.0, thermal_config(1.0), || Ok(()))
+    .unwrap()
+    .0;
+    let before = thermal.cells().clone();
+    let before_mass = thermal.mass_kg();
+    let before_energy = thermal.energy_j();
+    let mut chamber = bath(40.0, 0.01);
+    let before_chamber = chamber;
+    let error = thermal
+        .sublimate_chamber(
+            &selection(),
+            &Ice,
+            &mut chamber,
+            0.25,
+            phase_config(),
+            || Ok(()),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ThermalSublimationError::Thermal(DepositionError::InvalidInput(
+            "shared chamber sublimation requires enthalpy storage and an explicit open-mass model",
+        )),
+    );
+    assert_eq!(thermal.cells(), &before);
+    assert_eq!(thermal.mass_kg(), before_mass);
+    assert_eq!(thermal.energy_j(), before_energy);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(chamber, before_chamber);
+}
+
+#[test]
 fn identical_surfaces_fill_one_chamber_without_duplicate_inventory() {
     let mut thermal = initial(0.0);
     let old_mass = thermal.mass_kg();

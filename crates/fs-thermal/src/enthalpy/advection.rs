@@ -25,7 +25,7 @@ pub mod species;
 pub mod entropy;
 
 use std::collections::{BTreeMap, BTreeSet};
-use super::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer, MaterialId};
+use super::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer, MaterialId, ThermalStorageBasis};
 
 /// One physical connection, independent of conductive-contact identity/area.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -294,6 +294,9 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             if index % 256 == 0 { check()?; }
             let (_, id, kg_s) = boundary.identity();
             let cell = thermal.cells().get(&id).ok_or(invalid("inactive mass-flow boundary cell"))?;
+            if thermal.material_storage_basis(cell.material_id)? != ThermalStorageBasis::Enthalpy {
+                return Err(invalid("mass flow requires enthalpy storage, not fixed-volume internal energy").into());
+            }
             let reference_h = self.reference_h(thermal, id)?;
             let (power_w, gross_power_w, side) = match *boundary {
                 MassBoundary::Inlet { material_id, specific_h_j_kg, .. } => {
@@ -304,6 +307,9 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                     // inlet still carries its OWN species-weighted enthalpy.
                     let law = thermal.materials.get(&material_id)
                         .ok_or(invalid("unregistered inlet caloric law"))?;
+                    if law.storage_basis() != ThermalStorageBasis::Enthalpy {
+                        return Err(invalid("mass-flow inlet requires an enthalpy caloric law").into());
+                    }
                     let t = law.temperature_k(specific_h_j_kg)?;
                     if !t.is_finite() || t <= 0.0 { return Err(DepositionError::MaterialDomain.into()); }
                     pending.inlet_kg_s = finite(pending.inlet_kg_s + kg_s)?;
@@ -358,6 +364,10 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             let a = thermal.cells().get(&flow.a).ok_or(invalid("inactive advective cell"))?;
             let b = thermal.cells().get(&flow.b).ok_or(invalid("inactive advective cell"))?;
             let Some((up_id, _, rate)) = flow.directed() else { continue; };
+            if thermal.material_storage_basis(a.material_id)? != ThermalStorageBasis::Enthalpy
+                || thermal.material_storage_basis(b.material_id)? != ThermalStorageBasis::Enthalpy {
+                return Err(invalid("mass flow requires enthalpy storage, not fixed-volume internal energy").into());
+            }
             if a.material_id != b.material_id && self.stationary_species.is_none() {
                 return Err(invalid("advection across different material IDs requires a composition model").into());
             }

@@ -9,6 +9,9 @@
 //! No Region 1/2/3 stitching, phase mixture, wall compliance or kinetics is
 //! inferred. Use the separate isochoric water owner for low-temperature boiling.
 
+/// Rigid dense-water volumes on the existing conservative thermal timeline.
+pub mod thermal;
+
 use fs_qty::{Density, Temperature};
 use fs_thermochem::water::if97::region3::increments::{
     DenseIsochoricInterval, DenseIsochoricIntervalError, DenseIsochoricIntervalSolve,

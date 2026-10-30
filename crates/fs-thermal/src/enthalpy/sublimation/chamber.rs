@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ThermalSublimationError, add_thermal, sum};
 use crate::enthalpy::{
-    CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, StepConfig,
+    CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, StepConfig, ThermalStorageBasis,
 };
 use crate::sublimation::{
     SolidSurfaceState, SublimationError, SublimationLaw, SurfaceKinetics, VaporReservoir,
@@ -224,6 +224,12 @@ impl DepositionSimulation<'_> {
                 .ok_or(DepositionError::InvalidInput(
                     "shared chamber phase step needs active solid cells",
                 ))?;
+            if self.material_storage_basis(cell.material_id)? != ThermalStorageBasis::Enthalpy {
+                return Err(DepositionError::InvalidInput(
+                    "shared chamber sublimation requires enthalpy storage and an explicit open-mass model",
+                )
+                .into());
+            }
             cell_ids.push(surface.cell_id);
             caloric.push(self.materials[&cell.material_id]);
             inputs.push(phase::ChamberSurface {
