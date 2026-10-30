@@ -1,5 +1,31 @@
 # CONTRACT: fs-couple
 
+
+## Source-owned moving-sphere collision and support
+
+`friction_heat::directional::sphere_plane::advance_source_sphere_plane` binds
+original ordered material sources to the existing sphere event engine. Support
+uses source-consistent actual travel and native segment replay; each impact uses
+an explicit static or kinetic source coefficient ellipse sampled at its actual
+preimpact speed. Collision does not advance accumulated slip/path. Full source
+static/kinetic coefficients remain available to subsequent sustained contact.
+
+Caller-owned temperature/pressure and complete queries refresh at real event and
+support boundaries. Each support bracket is supplied for that actual interval;
+no pressure, area, interface temperature or collision duration is inferred.
+Body response, source history and bounded chronological impact receipts publish
+together only after the original motion/work gates and final cancellation check.
+Later support refreshes do not overwrite retained impact claim receipts.
+
+Sustained traction-slip work and total unallocated impact loss stay separate. The
+plane owns the texture frame; this point-contact adapter supplies neither a
+rotating finite thermal contact map nor an impact-to-heat allocation. Independent
+source, native sliding and attitude refinement retain their existing meanings.
+The source-sphere impact tests cover an analytical speed-dependent impulse and
+spin, impact followed by finite arrest and static hold, late source/cancellation
+rollback, and a refused collision after ballistic flight. These are authored
+synthetic reference cases, not experimental validation.
+
 ## Accelerated moving-contact friction heat
 
 `friction_heat::moving::trajectory::QuadraticContactPath` supplies actual

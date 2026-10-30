@@ -19,6 +19,9 @@ use fs_tribo::tangential::elliptic::driven::{
 use fs_tribo::tangential::elliptic::relaxation::EllipticRelaxationControls;
 use std::cell::Cell;
 
+#[path = "sphere_plane/impacts.rs"]
+mod impacts;
+
 /// Pressure-free source: an ideal rigid point contact does not define an area.
 fn source_fixture(
     kinetic_x: PropertyValue,

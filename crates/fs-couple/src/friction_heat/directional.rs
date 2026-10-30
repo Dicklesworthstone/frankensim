@@ -21,6 +21,9 @@ pub mod trajectory;
 /// Static hold and driven directional friction with the original heat network.
 pub mod driven;
 
+/// Original source claims through moving-sphere impacts and sustained contact.
+pub mod sphere_plane;
+
 use super::{
     FrictionHeatInput, FrictionHeatReport, FrictionHeatRoute, FrictionHeatStep,
     FrictionHeatTolerances,

@@ -218,8 +218,11 @@ fn off_axis_impact_preserves_rotated_texture_and_prescribed_plane_work() {
     let boost = Vec3::new(0.3, -0.2, 0.4);
     scene.normal_world = rotate(scene.normal_world);
     scene.velocity_world = boost;
+    // Rotating exact contact can round inside the strictly nonpenetrating plane.
+    // Give the original event detector a positive, roundoff-scale flight gap.
+    let clearance = 64.0 * f64::EPSILON * scene.radius;
     let transformed = state(
-        rotate(input.body().pose().position_world()),
+        rotate(input.body().pose().position_world()).add(scene.normal_world.scale(clearance)),
         rotate(velocity(input.body())).add(boost),
         Vec3::ZERO,
         rotation,
