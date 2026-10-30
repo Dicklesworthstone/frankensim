@@ -456,3 +456,6 @@ fn g3_native_checkpoint_keeps_step_budget_and_refuses_material_changes() {
         assert!(checkpoint.bind(&state.problem(&alternate), cx).is_err());
     });
 }
+
+#[path = "dynamic/cavity.rs"]
+mod cavity;

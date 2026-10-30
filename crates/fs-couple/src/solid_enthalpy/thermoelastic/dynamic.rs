@@ -11,6 +11,9 @@
 //! second solve or a self-referential material lifetime. The scheme uses the
 //! existing endpoint coupling and requires time refinement; an energy identity
 //! alone is not a continuum or reversible-entropy accuracy certificate.
+/// Finite source gas loads and exchanges heat with the actual deforming wall.
+pub mod cavity;
+
 use super::*;
 use fs_solid::loads3::transient::{
     TransientConfig3, response::TransientResponse3, checkpoint::TetTransientCheckpoint3,
@@ -356,6 +359,10 @@ impl<O: DepositionObserver> DepositionObserver for DynamicHeat<'_, '_, '_, '_, O
     fn conductances(&mut self, thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<BTreeMap<u64, f64>, Self::Error> {
         self.inner.conductances(thermal, check).map_err(ThermoelasticFeedbackError::Observer)
+    }
+    fn reservoir_conductances(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.inner.reservoir_conductances(thermal, check).map_err(ThermoelasticFeedbackError::Observer)
     }
     fn heat_transfers(&mut self, thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<Vec<HeatTransfer>, Self::Error> {

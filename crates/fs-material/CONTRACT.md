@@ -5641,3 +5641,20 @@ arithmetic do not establish native runtime or experimental validation.
 `DarcyGasBarrier::continuum_geometry` borrows the original ordered intrinsic tensors, source receipts, compiled sum(L/k_normal) and intersected T/p support for native liquid or other continuum hydraulic owners. It constructs no gas state and introduces no second Darcy or transport law. Consumers use their actual viscosity, density, superficial area and solved flow, and admit both absolute face pressures and local temperature against the same original source limits. Normal permeability retains the existing planar-gradient, unconstrained transverse-flow convention. Zero intrinsic permeability remains exactly sealed.
 
 Every nonzero gas-slip calibration and every prescribed gas-only wet-mobility state refuses this view, including unit-mobility endpoints. Full single-fluid pore occupation is the admitted case; liquid relative permeability, capillarity, changing saturation, skeleton deformation and storage are not inferred. Native tests cover original rotated/layered geometry, unchanged source receipts and domains, signed speed limits, exact seals, and gas-calibration refusal.
+
+## Conservative frozen-gas endpoint coordinates for native moving walls
+
+`ClosedGasParcel::at_volume_internal_energy_increment` reconstructs a complete
+source state from a positive represented volume and an actual internal-energy
+increment. The original temperature-anchored caloric inversion and EOS own the
+result. Parcel mass, composition, source model and auxiliary conditions remain
+unchanged, and original-law increments cancel common formation datums before
+rounding. Unsupported source states, unrepresented coordinates, cancellation
+and energy mismatch return no changed parcel.
+
+This method is a coordinate adapter, not an extra heat/work integrator. Its
+enclosing mechanical/thermal owner must close actual gas energy against its
+native boundary work and heat. The deformable-cavity owner in fs-couple does so
+using the original tetrahedral pressure footprint and retained Newmark state.
+The source regression checks isothermal volume/pressure, exact mass and context,
+invalid energy/volume and immutable refusal; native execution remains pending.
