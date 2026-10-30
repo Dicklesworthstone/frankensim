@@ -1889,3 +1889,48 @@ state errors `2.517403282442654e-5`, `6.292077779579408e-6`, and
 `1.5729300554268022e-6` at 8/16/32 steps; its 2048/4096-step references agree
 within `2e-13`. This proves the named focused behavior, not a full Cargo/DSR,
 experimental validation, cross-platform determinism or performance gate.
+
+## Simultaneous native Hertz and material rolling islands — v0
+
+`tangential_friction::hertz_rolling::multiple::PreparedRigidHertzRollingIsland`
+captures unique participating bodies and each original rolling checkpoint,
+orders original patch identities canonically, and assembles the complete
+`5N × 5N` shared-body response from sparse two-body full-inertia factors.
+The original constitutive owner eliminates all material rolling moments
+together before the simultaneous Hertz shear/spin solve. Every force and
+couple is summed before creating one endpoint per participating body.
+Spectators do not enter the island energy or participating-body budget.
+
+Repeated source trials retain exact original load, radius and patch identity
+and start from the same captured bodies and histories. The original material
+card is admitted at initial and actual midpoint/endpoint rates and its declared
+temperature/frequency. Each original rolling history advances once on the
+common native endpoint. Original Hertz surface loss and sphere bulk rolling
+loss remain distinct. Per-patch force/moment, compatibility, endpoint, work,
+heat and cumulative-history gates precede island kinetic-work, total-energy
+and linear/angular-momentum closure. Failure or cancellation publishes no body
+or checkpoint; the prepared owner remains reusable without hidden warm starts.
+
+One deforming sphere must retain one material parameter/source identity and
+held bulk temperature across its contacts. Ordered A/B surface labels may
+differ while referring to that same physical sphere. Loaded spherical contact
+footprints must be disjoint. Wrapper patch IDs must equal original rolling
+patch identities, preventing relabeling of an existing loss history.
+Controls bound participating bodies, at most 128 contacts, at most 409600
+full-response entries, constitutive sweeps/evaluations and physical efforts.
+Dependent full responses use the original PSD Hertz/static-feasibility owner.
+
+Geometry, normal loads and frequency are held. Loaded normal motion and
+endpoint-assisted shear/spin/rolling effort refuse unresolved events requiring
+trajectory refinement. The parent's first-order normal-pressure rolling loss
+and symmetric-Hertz-traction decoupling remains, with independent separated
+patch fields. This does not resolve interacting bulk deformation fields,
+normal/pose evolution, retained partial-slip storage or experimental validity.
+
+Seven focused G1/G3/G4 groups in `tests/hertz_rolling_multiple.rs` check
+independent coupled rolling torque/heat equations, dependent opposite pads on
+one pair, friction-induced rolling from rest, original single-patch agreement,
+zero/released ports, full-tensor 5N mobility against an independent adjugate
+inverse, world/tangent-frame covariance, exact permutation/reuse/spectator
+invariance and physical ownership, cancellation, budget and late-failure
+refusals. The original seven joint-pair and nine Hertz-island groups also pass.

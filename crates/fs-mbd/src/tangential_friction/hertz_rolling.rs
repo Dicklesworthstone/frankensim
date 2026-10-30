@@ -22,6 +22,8 @@
 //! store is added. The association of the supplied Hertz law with the ordered
 //! interface remains caller-owned unless a source-bound wrapper establishes it.
 
+pub mod multiple;
+
 use super::hertz::{
     PreparedRigidHertzPair, RigidHertzContact, RigidHertzControls, RigidHertzError,
     apply_pair_wrench, points, relative_point, relative_spin, scaled_response,
