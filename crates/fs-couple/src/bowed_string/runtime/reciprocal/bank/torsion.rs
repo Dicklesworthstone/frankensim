@@ -10,8 +10,9 @@
 //! counted separately.
 //!
 //! This is small-angle twist of bonded circular layers, not helical winding,
-//! interlayer slip, unilateral bridge-foot contact, rotary gas drag, or large
-//! axial strain. All bows use the same declared positive surface side. The
+//! interlayer slip, unilateral bridge-foot contact, or large axial strain.
+//! Optional cylinder gas loading supplies rotational drag in the same coupled
+//! solve. All bows use the same declared positive surface side. The
 //! material band screens the retained linear modes, not nonlinear harmonics.
 //! See Bavu, Smith & Wolfe, 'Torsional waves in a bowed string' (2005),
 //! arXiv:physics/0505059, for the importance of surface rather than centre speed.
@@ -287,7 +288,8 @@ impl MaterialStringSource {
     /// Source values must already be present. The original bending model and
     /// prestress are retained, not retuned to match a torsional resonance.
     /// All torsional endpoints are fixed in rotation over the complete span.
-    /// Gas continues to load transverse motion; rotational gas loading is absent.
+    /// Optional cylinder gas loading adds rotational drag using the same gas
+    /// and section radius, while preserving the original material polar inertia.
     ///
     /// # Errors
     /// Zero/oversized/nested mode selection, unrepresentable total dimension, or

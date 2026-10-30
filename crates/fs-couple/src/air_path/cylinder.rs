@@ -32,6 +32,9 @@
 /// Source-defined elastic frames with complete exterior-fluid inertia and memory.
 pub mod frame;
 
+/// The same Newtonian exterior with rotational no-slip boundary conditions.
+pub mod rotary;
+
 use super::invalid;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_aeroac::bessel::{j0, y0};

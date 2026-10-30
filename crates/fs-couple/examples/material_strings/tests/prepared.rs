@@ -1,7 +1,7 @@
 //! Explicit prepared resources enable the actual >42-coordinate fluid model.
 use super::*;
 
-const PREPARED: &str = "prepared-linear 64 67108864 200000000000";
+const PREPARED: &str = "prepared-linear 96 134217728 1000000000000";
 
 fn text() -> String {
     include_str!("../prepared-cylinder-flow.material-strings")
@@ -15,9 +15,9 @@ fn prepared_file_preserves_every_fluid_coordinate_and_explicit_budget_through_pr
         let input = input::Spec::parse(bytes.as_bytes()).unwrap();
         let budget = input.prepared_linear.unwrap();
         assert_eq!(budget, PreparedModalBudget {
-            max_modes: 64, max_dense_bytes: 67_108_864, max_multiply_terms: 200_000_000_000,
+            max_modes: 96, max_dense_bytes: 134_217_728, max_multiply_terms: 1_000_000_000_000,
         });
-        assert_eq!(input.network_dimensions(false).unwrap(), (54, 51, 54*52*52));
+        assert_eq!(input.network_dimensions(false).unwrap(), (78, 75, 78*76*76));
 
         // Both transverse planes participate in one physical body projection.
         // Removing only the explicit backend selection retains the original
@@ -31,8 +31,8 @@ fn prepared_file_preserves_every_fluid_coordinate_and_explicit_budget_through_pr
         // Invalid resource ceilings refuse during cold setup, before a sample
         // or WAV is published. They do not fall back to sampled air resistance.
         for (from, to, reason) in [
-            (PREPARED, "prepared-linear 64 1 200000000000", "max_dense_bytes"),
-            (PREPARED, "prepared-linear 64 67108864 1", "max_multiply_terms"),
+            (PREPARED, "prepared-linear 96 1 1000000000000", "max_dense_bytes"),
+            (PREPARED, "prepared-linear 96 134217728 1", "max_multiply_terms"),
         ] {
             let error = input::Spec::parse(bytes.replace(from, to).as_bytes()).unwrap()
                 .compile(cx, gate, |name| Ok(pack(name, 7800.0, 200_000.0, None)))
@@ -54,7 +54,7 @@ fn prepared_file_preserves_every_fluid_coordinate_and_explicit_budget_through_pr
         assert_eq!(planes.directions().bridge(), [0.6, 0.8]);
         assert!(matches!(planes.source(), MaterialStringSource::WithTorsion(_)));
         assert_eq!(ready.performance.bank().system().components().iter()
-            .map(|c| c.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 48]);
+            .map(|c| c.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 72]);
         assert!(ready.performance.preload_energy_j().unwrap() > 0.0);
         assert!(ready.performance.bank().system().components()[3].states().iter()
             .all(|s| s.displacement_m_sqrt_kg == 0.0 && s.velocity_m_sqrt_kg_per_s == 0.0));
@@ -76,15 +76,15 @@ fn prepared_file_preserves_every_fluid_coordinate_and_explicit_budget_through_pr
 fn prepared_row_is_optional_strict_and_cannot_override_complete_file_mode_caps() {
     let bytes = text();
     let ceiling = fs_couple::render::schedule::force::coupled::MAX_PREPARED_MODAL_MODES;
-    let over_ceiling = format!("prepared-linear {} 67108864 200000000000", ceiling + 1);
+    let over_ceiling = format!("prepared-linear {} 134217728 1000000000000", ceiling + 1);
     for invalid in [
-        "prepared-linear 0 67108864 200000000000",
+        "prepared-linear 0 134217728 1000000000000",
         over_ceiling.as_str(),
-        "prepared-linear 53 67108864 200000000000",
-        "prepared-linear 64 0 200000000000",
-        "prepared-linear 64 67108864 0",
-        "prepared-linear 64 67108864 200000000000 ignored",
-        "prepared-linear 64 67108864 -1",
+        "prepared-linear 77 134217728 1000000000000",
+        "prepared-linear 96 0 1000000000000",
+        "prepared-linear 96 134217728 0",
+        "prepared-linear 96 134217728 1000000000000 ignored",
+        "prepared-linear 96 134217728 -1",
     ] {
         assert!(input::Spec::parse(bytes.replace(PREPARED, invalid).as_bytes()).is_err(),
             "accepted {invalid}");
@@ -94,11 +94,11 @@ fn prepared_row_is_optional_strict_and_cannot_override_complete_file_mode_caps()
     let reordered = bytes.replace(&format!("{PREPARED}\n"), "")
         .replace("cylinder-gas-loading", &format!("{PREPARED}\ncylinder-gas-loading"));
     assert!(input::Spec::parse(reordered.as_bytes()).is_err());
-    // 54 coordinates at 24 intervals and two more per interval: one interval past the file's mode cap.
-    let intervals = 24 + (input::MAX_TOTAL_MODES - 54) / 2 + 1;
+    // 78 coordinates at 24 intervals and three more per interval: one interval past the file's mode cap.
+    let intervals = 24 + (input::MAX_TOTAL_MODES - 78) / 3 + 1;
     let gas = format!("cylinder-gas-loading 0.001 30 {intervals}");
     let above_file_limit = bytes
-        .replace("prepared-linear 64", &format!("prepared-linear {ceiling}"))
+        .replace("prepared-linear 96", &format!("prepared-linear {ceiling}"))
         .replace("cylinder-gas-loading 0.001 30 24", &gas);
     assert!(input::Spec::parse(above_file_limit.as_bytes()).is_err());
     let no_fluid = bytes.replace("cylinder-gas-loading 0.001 30 24\n", "");

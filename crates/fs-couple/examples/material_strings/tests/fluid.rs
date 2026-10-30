@@ -13,7 +13,7 @@ fn small() -> input::Spec {
 }
 
 #[test]
-fn cylinder_data_precedes_surface_preload_and_reaches_both_planes_cavity_and_pcm() {
+fn cylinder_data_precedes_surface_preload_and_reaches_both_planes_torsion_cavity_and_pcm() {
     scoped(|cx, gate| {
         let mut direct = compile(cx, gate, small(), 7800.0);
         let source = direct.performance.bank().source().bank();
@@ -41,7 +41,7 @@ fn cylinder_data_precedes_surface_preload_and_reaches_both_planes_cavity_and_pcm
             + loading.strings()[0].flow().added_mass_per_length_kg_m());
 
         let components = direct.performance.bank().system().components();
-        assert_eq!(components.iter().map(|c| c.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 24]);
+        assert_eq!(components.iter().map(|c| c.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 36]);
         assert_eq!(components[0].modes()[0], components[0].modes()[1]);
         for state in &components[0].states()[..2] {
             assert_ne!(state.displacement_m_sqrt_kg, 0.0);
@@ -155,16 +155,16 @@ fn causal_gas_loading_keeps_construction_loss_for_homogeneous_bonded_and_wound_s
 fn fluid_count_is_a_live_axis_and_complete_dimensions_preserve_explicit_work_limits() {
     scoped(|cx, gate| {
         let input = small();
-        assert_eq!(input.network_dimensions(false).unwrap(), (30, 27, 30*28*28));
-        assert_eq!(input.network_dimensions(true).unwrap(), (30, 29, 30*30*30));
+        assert_eq!(input.network_dimensions(false).unwrap(), (42, 39, 42*40*40));
+        assert_eq!(input.network_dimensions(true).unwrap(), (42, 41, 42*42*42));
         let finer = input::Spec::parse(text().replace(FLOW,
             "cylinder-gas-loading 0.001 30 16").as_bytes()).unwrap();
-        assert_eq!(finer.network_dimensions(false).unwrap(), (38, 35, 38*36*36));
+        assert_eq!(finer.network_dimensions(false).unwrap(), (54, 51, 54*52*52));
         let mut coarse = compile(cx, gate, input, 7800.0);
         let mut refined = compile(cx, gate, finer, 7800.0);
         assert_eq!(coarse.performance.bank().cards()[0].fundamental_hz(),
             refined.performance.bank().cards()[0].fundamental_hz());
-        assert_eq!(refined.performance.bank().system().components()[3].modes().len(), 32);
+        assert_eq!(refined.performance.bank().system().components()[3].modes().len(), 48);
         assert!(pressure(&mut coarse, 128).iter().zip(pressure(&mut refined, 37))
             .any(|(p, q)| (p-q).abs() > 1e-17));
 
@@ -173,7 +173,7 @@ fn fluid_count_is_a_live_axis_and_complete_dimensions_preserve_explicit_work_lim
         let connected = text().replace(FLOW, "cylinder-gas-loading 0.001 30 24")
             .replace("two 0.6 0.8 1 0", "two 0.6 0.8 0.6 0.8");
         let connected = input::Spec::parse(connected.as_bytes()).unwrap();
-        assert_eq!(connected.network_dimensions(false).unwrap().0, 54);
+        assert_eq!(connected.network_dimensions(false).unwrap().0, 78);
         let error = connected.compile(cx, gate, |name| Ok(pack(name, 7800.0, 200_000.0, None)))
             .err().expect("the legacy exact owner must refuse an oversized connected island").to_string();
         assert!(error.contains("dense exponential block capacity"), "{error}");

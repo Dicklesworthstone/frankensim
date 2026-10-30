@@ -26,7 +26,7 @@ fn source_selected_stretching_reaches_causal_gas_body_bow_and_existing_pcm_write
             .iter()
             .map(|c| c.modes().len())
             .collect::<Vec<_>>();
-        assert_eq!(layout, vec![3, 2, 1, 8]);
+        assert_eq!(layout, vec![3, 2, 1, 12]);
         let expected = pressure(&mut direct, 37);
         assert!(expected.iter().any(|p| p.abs() > 1e-15));
         for block in [1, 128] {
@@ -151,7 +151,7 @@ fn nonlinear_force_loaded_material_pluck_reaches_shared_body_gas_cavity_and_pcm(
         let source=bank.source().bank();
         assert!(source.geometric_stretching().is_some());
         assert!(source.cylinder_gas_loading().is_some() && source.material_cavity().is_some());
-        assert_eq!(bank.system().components().iter().map(|m|m.modes().len()).collect::<Vec<_>>(),vec![3,2,1,8]);
+        assert_eq!(bank.system().components().iter().map(|m|m.modes().len()).collect::<Vec<_>>(),vec![3,2,1,12]);
         assert!(bank.stretching_observation(0).unwrap().tension_n>bank.cards()[0].tension_n);
         let stored=direct.performance.preload_energy_j().unwrap();
         assert!(stored>0.0);assert_eq!(stored,bank.system().total_energy_j().unwrap());
@@ -229,7 +229,7 @@ fn retained_axial_modes_equilibrate_with_the_same_force_loaded_string() {
         let build=||compile(cx,gate,input::Spec::parse(text.as_bytes()).unwrap(),7800.0);
         let mut direct=build();let bank=direct.performance.bank();
         assert!(bank.source().bank().longitudinal_waves().is_some());
-        assert_eq!(bank.system().components().iter().map(|m|m.modes().len()).collect::<Vec<_>>(),vec![3,2,1,8,2]);
+        assert_eq!(bank.system().components().iter().map(|m|m.modes().len()).collect::<Vec<_>>(),vec![3,2,1,12,2]);
         assert!(bank.system().components()[4].states().iter().any(|s|s.displacement_m_sqrt_kg!=0.0));
         assert!(bank.longitudinal_observation(0).unwrap().minimum_tension_n>0.0);
         let report=bank.system().nonlinear_preload_diagnostics().unwrap();
@@ -255,7 +255,7 @@ fn canonical_double_bow_stretching_reaches_shared_cavity_fluid_and_pcm_without_a
         assert!(source.bank().material_cavity().is_some());
         assert_eq!(source.bank().cylinder_gas_loading().unwrap().strings().len(), 2);
         assert_eq!(direct.performance.bank().system().components().iter()
-            .map(|c| c.modes().len()).collect::<Vec<_>>(), vec![3, 3, 2, 1, 8, 8]);
+            .map(|c| c.modes().len()).collect::<Vec<_>>(), vec![3, 3, 2, 1, 12, 12]);
         let expected = pressure(&mut direct, 37);
         assert!(expected.iter().any(|p| p.abs() > 1e-15));
         for block in [1, 128] { assert_eq!(pressure(&mut build(), block), expected); }
@@ -296,7 +296,7 @@ fn moving_normal_contact_and_material_stretching_reach_the_original_pressure_wri
         assert!(bank.source().bank().material_cavity().is_some());
         assert!(bank.source().bank().cylinder_gas_loading().is_some());
         assert_eq!(bank.source().bow_contact_loads().len(), 1);
-        assert_eq!(bank.system().components().iter().map(|c| c.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 8]);
+        assert_eq!(bank.system().components().iter().map(|c| c.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 12]);
         let (mut work, mut loss, mut old_offset) = (0.0, 0.0, 0.0);
         let (mut active, mut separated, mut stretch) = (0, 0, 0.0_f64);
         let mut expected = Vec::new();

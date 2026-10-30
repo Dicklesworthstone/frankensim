@@ -46,7 +46,7 @@ fn native_moving_finger_uses_original_physics_clock_and_pcm() {
         assert_eq!(bank.source().bank().geometric_stretching().unwrap().potentials()[0].transverse_planes(), 2);
         assert!(bank.source().bank().cylinder_gas_loading().is_some());
         assert!(bank.source().bank().material_cavity().is_some());
-        assert_eq!(bank.system().components().iter().map(|m| m.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 8]);
+        assert_eq!(bank.system().components().iter().map(|m| m.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 12]);
         assert!(bank.system().components()[3].states().iter().any(|s| s.velocity_m_sqrt_kg_per_s != 0.0));
         let mut wav = build(cx, gate, &text);
         let (output, summary) = wav.write(Cursor::new(Vec::<u8>::new()), gate).unwrap();

@@ -1482,20 +1482,29 @@ cylinder-gas-loading 0.001 30 12
 ```
 
 The fields are `X_MIN X_MAX INTERVALS`. This selects the shared unsteady-Stokes
-cylinder operator for every transverse mode in every string. The original
-homogeneous or bonded section supplies its **actual outer radius**, and the
+cylinder operators for every selected bending and twist mode in every string.
+The original homogeneous or bonded section supplies its **actual outer radius**, and the
 performance's existing gas supplies density and dynamic viscosity. No second
 radius, gas record, material name switch or per-mode air-loss coefficient is
 accepted here. Changing pressure, the species fractions or a layer pack therefore
 rebuilds the mechanical response through those original physical sources.
 
-The operator adds the surrounding gas's potential-flow inertia and a positive
+The transverse operator adds the surrounding gas's potential-flow inertia and a positive
 spectral approximation of its viscous memory. Each memory branch is a real
 inertial coordinate connected to the string by a dashpot. Both transverse planes,
 the string/body reactions, fluid kinetic energy and viscous work participate in
 the existing coupled solve. The old sampled string-air resistance is replaced,
 so it is not counted twice; the original material bending viscosity and sourced
-torsion remain attached. This selection precedes additional bows, optional
+torsion remain attached.
+
+For every selected twist mode, the rotational Stokes operator adds the steady
+viscous torque and positive angular diffusion-memory branches from that same
+gas and section radius. The original material polar inertia stays unchanged;
+there is no instantaneous rotary potential-flow inertia. Both angular sides
+exchange work through the existing surface-velocity and torque ports. The
+rotary loss and all memory energy enter the same network energy account.
+
+This selection precedes additional bows, optional
 `--stop-profile` contacts, static preload and the canonical schedule. Memory
 positions are unforced static gauges; a released preload accelerates the fluid
 through the actual string coupling.
@@ -1512,8 +1521,8 @@ A finer memory grid alone does not establish instrument fidelity.
 
 The supplied `cylinder-flow.material-strings` fixture selects a V3 bonded string
 with one bending mode in each of two planes, one twist mode, a two-mode body and
-a cavity neck. Twelve memory branches per transverse mode add 24 coordinates,
-for **30 complete-network coordinates**. Build its independent sleeve pack using
+a cavity neck. Twelve memory branches per bending or twist mode add 36 coordinates,
+for **42 complete-network coordinates**. Build its independent sleeve pack using
 the earlier copied TSV files, then render it:
 
 ```bash
@@ -1539,10 +1548,10 @@ operator supplies the same inertia and dispersion in both planes; their physical
 coupling directions determine which motions reach contacts and the shared body.
 
 The executable counts **all** requested material, body, neck and fluid
-coordinates against its 128-mode bound. It computes a connection allowance for
+coordinates against its 1024-mode bound. It computes a connection allowance for
 every string bridge, additional directed translation, angular joint, memory dashpot, body tensor column and cavity
 compression/neck-loss channel. The original setup estimate
-`N * (L + 1)^2` remains bounded by 16,777,216 work units and the shared connection
+`N * (L + 1)^2` remains bounded by 67,634,176 work units and the shared connection
 ceiling is 4096. A zero body-viscosity tensor may consume fewer columns than the
 declared allowance. The ordinary exact propagator additionally admits at most
 **42 modes in each connected linear island**; this stricter computational bound
@@ -1550,10 +1559,11 @@ can refuse a model that fits the file-level counts. No requested mode or memory
 branch is silently removed. The render report includes the declared resolution
 and complete numerical allocation.
 
-The continuum assumes small transverse motion of a long, isolated circular
-cylinder in an unconfined incompressible Newtonian gas, using local two-dimensional
-flow along the string. It does not resolve finite-amplitude wakes, neighboring
-strings, end/axial flow, rotary drag, rarefaction or compressible radiation.
+The continua assume small transverse motion and small-angle rotation of a long,
+isolated circular cylinder in an unconfined incompressible Newtonian gas, using
+local two-dimensional flow along the string. They do not resolve finite-amplitude
+wakes, nonlinear swirl, neighboring strings, end/axial flow, rarefaction or
+compressible radiation.
 The atmosphere remains fixed during one realization. Body/neck observation keeps
 its existing compact-radiation approximation.
 
@@ -1581,18 +1591,18 @@ their existing owners. The ordinary path remains selected when the row is absent
 
 `prepared-cylinder-flow.material-strings` has one layered two-plane string with
 both bridge-direction components nonzero, one twist mode, two body modes and a
-cavity. It requests 24 fluid branches per transverse mode: **54 coordinates**
-and 51 linear connections. Its declaration is:
+cavity. It requests 24 fluid branches per bending or twist mode: **78 coordinates**
+and 75 linear connections. Its declaration is:
 
 ```text
 cylinder-gas-loading 0.001 30 24
-prepared-linear 64 67108864 200000000000
+prepared-linear 96 134217728 1000000000000
 ```
 
 For the supplied positive-loss materials, the final operator's conservative
-preflight estimate is about **37.6 MB of additional dense storage and
-161.2 billion scalar multiply-add terms**, within its explicit 64 MiB and
-200-billion-term budgets. The work estimate reserves worst-case Taylor products
+preflight estimate is about **89.4 MB of additional dense storage and
+722.1 billion scalar multiply-add terms**, within its explicit 128 MiB and
+one-trillion-term budgets. The work estimate reserves worst-case Taylor products
 and scaling levels; it is not elapsed runtime or a real-time performance claim.
 Preparation can be expensive even though the accepted fixed-period transition is
 cached. The native regression therefore performs one such construction and only

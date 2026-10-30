@@ -9,7 +9,7 @@ section bonded 0.0002 1
 layer sleeve.fsmatpk 0.0003
 polarizations two 0.6 0.8 0.6 0.8
 cylinder-gas-loading 0.001 30 24
-prepared-linear 64 67108864 200000000000
+prepared-linear 96 134217728 1000000000000
 cavity neck 0.003 0.01 0.02 100 1
 friction stribeck 0.8 0.4 0.1 0
 forces preload 1 1

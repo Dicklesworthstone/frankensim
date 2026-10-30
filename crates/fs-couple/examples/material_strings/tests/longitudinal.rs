@@ -36,7 +36,7 @@ fn data_selected_axial_modes_reach_bonded_strings_cavity_gas_and_bit_stable_pcm(
                 .iter()
                 .map(|c| c.modes().len())
                 .collect::<Vec<_>>(),
-            vec![3, 2, 1, 8, 2]
+            vec![3, 2, 1, 12, 2]
         );
         let expected = pressure(&mut direct, 37);
         assert!(expected.iter().any(|p| p.abs() > 1e-15));
@@ -116,7 +116,7 @@ fn parser_counts_longitudinal_coordinates_and_refuses_conflicts_before_source_io
     assert!(
         input::Spec::parse(
             original
-                .replace("prepared-linear 64", "prepared-linear 14")
+                .replace("prepared-linear 64", "prepared-linear 18")
                 .as_bytes()
         )
         .is_err()

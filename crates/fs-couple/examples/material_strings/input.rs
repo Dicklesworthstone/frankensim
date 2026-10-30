@@ -1165,12 +1165,16 @@ impl Spec {
         if let Some(fibers) = &self.bow_fibers {
             modes = modes.checked_add(fibers.mode_count(self)?).ok_or("complete fiber mode count overflow")?;
         }
-        let mut transverse = 0usize;
+        let mut fluid_loaded_string_modes = 0usize;
         for wire in &self.strings {
             let planes = if wire.polarizations.is_some() { 2 } else { 1 };
             let bending = wire.bending_modes.checked_mul(planes)
                 .ok_or("transverse mode count overflow")?;
-            transverse = transverse.checked_add(bending).ok_or("transverse mode count overflow")?;
+            // Every transverse and torsional coordinate has its own causal
+            // cylinder-fluid memory. Count both before enforcing exact budgets.
+            fluid_loaded_string_modes = fluid_loaded_string_modes.checked_add(bending)
+                .and_then(|n| n.checked_add(wire.twist_modes))
+                .ok_or("fluid-loaded string mode count overflow")?;
             modes = modes.checked_add(bending).and_then(|n| n.checked_add(wire.twist_modes))
                 .ok_or("complete string/body mode count overflow")?;
         }
@@ -1185,7 +1189,7 @@ impl Spec {
             .ok_or("complete connection count overflow")?;
         if let Some(resolution) = self.cylinder_gas_loading {
             resolution.validate()?;
-            let memory = transverse.checked_mul(resolution.intervals)
+            let memory = fluid_loaded_string_modes.checked_mul(resolution.intervals)
                 .ok_or("fluid memory dimension overflow")?;
             modes = modes.checked_add(memory).ok_or("complete fluid mode count overflow")?;
             links = links.checked_add(memory).ok_or("complete fluid connection count overflow")?;

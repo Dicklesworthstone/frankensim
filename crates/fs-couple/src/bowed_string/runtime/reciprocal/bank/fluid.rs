@@ -5,14 +5,16 @@
 //! coupled through dashpots in the existing exact linear owner; their kinetic
 //! energy, reactions and dissipation enter the original work ledger. Nothing is
 //! applied to the acoustic samples. Both physical polarizations share one gas
-//! and cross-section, while original shear/torsion remains unchanged.
+//! and cross-section. Selected twist modes also carry the rotational Stokes
+//! continuum, using the original solid polar inertia and the actual radius.
 //!
 //! Local two-dimensional flow is a slender-cylinder approximation along a
 //! vibrating string. Spectral cutoffs, quadrature and string modes must be
-//! refined. No nonlinear wake, confinement, rotary loading or radiation claim.
+//! refined. No nonlinear wake, confinement or radiation claim.
 
 use super::*;
 use crate::air_path::cylinder::{CylinderFlow, CylinderFlowResolution};
+use crate::air_path::cylinder::rotary::RotaryCylinderFlow;
 use fs_math::det;
 
 /// One original solid realization and its separately retained fluid continuum.
@@ -20,6 +22,7 @@ use fs_math::det;
 pub struct StringCylinderLoading {
     solid_card: BowedStringCard,
     flow: CylinderFlow,
+    rotary: Option<RotaryCylinderFlow>,
 }
 impl StringCylinderLoading {
     /// Original solid mass, bending, tension and old sampled loss realization.
@@ -29,6 +32,9 @@ impl StringCylinderLoading {
     /// Source-derived added inertia, memory masses, resistance and resolution.
     #[must_use]
     pub const fn flow(&self) -> &CylinderFlow { &self.flow }
+    /// Rotational fluid memory for the same section, when solid torsion exists.
+    #[must_use]
+    pub const fn rotary_flow(&self) -> Option<&RotaryCylinderFlow> { self.rotary.as_ref() }
 }
 
 /// Frozen fluid and structural provenance retained through every performance.
@@ -45,6 +51,41 @@ impl StringBankFluidLoading {
     /// density property or hidden inside per-mode authored damping.
     #[must_use]
     pub fn strings(&self) -> &[StringCylinderLoading] { &self.strings }
+
+    // The exact steady rotary resistance and collapsed low tail act against
+    // stationary gas. Every remaining torque is a reciprocal fluid branch.
+    // Recompute from the original solid modes on each assembly, never add to
+    // an already loaded image or change the material's polar inertia.
+    pub(super) fn add_rotary_damping(&self, index: usize, source: &MaterialStringSource,
+        card: &BowedStringCard, modes: &mut [ModalAcousticMode])
+        -> Result<(), ReciprocalStringError>
+    {
+        let loading = self.strings.get(index)
+            .ok_or_else(|| invalid("rotary loading lost its original string"))?;
+        let Some(flow) = &loading.rotary else {
+            if source.torsion_source().is_some() {
+                return Err(invalid("cylinder loading omitted the original torsion"));
+            }
+            return Ok(());
+        };
+        let twist = source.torsion_source()
+            .ok_or_else(|| invalid("rotary fluid has no original torsional material"))?;
+        let start = transverse_count(source, card);
+        if modes.len() != start + twist.mode_count() {
+            return Err(invalid("rotary fluid lost the original torsional basis"));
+        }
+        let rate = (flow.steady_resistance_per_length_n_s()
+            + flow.low_tail_resistance_per_length_n_s()) / twist.section().rotary_inertia_kg_m();
+        for mode in &mut modes[start..] {
+            let added = 0.5 * rate / mode.angular_frequency_rad_s;
+            let loss = mode.damping_ratio + added;
+            if !added.is_finite() || added <= 0.0 || !loss.is_finite() {
+                return Err(invalid("rotary gas resistance is not representable in the solid basis"));
+            }
+            mode.damping_ratio = loss;
+        }
+        Ok(())
+    }
 
     pub(super) fn append_components(
         &self,
@@ -63,7 +104,7 @@ impl StringBankFluidLoading {
         for (index, (card, loading)) in cards.iter().zip(&self.strings).enumerate() {
             poll(gate)?;
             let transverse_modes = transverse_count(&sources[index].source, card);
-            let fluid_modes = transverse_modes.checked_mul(loading.flow.branches().len())
+            let fluid_modes = sources[index].source.modes().checked_mul(loading.flow.branches().len())
                 .ok_or_else(|| invalid("cylinder memory dimension overflow"))?;
             let mut modes = Vec::with_capacity(fluid_modes);
             let solid_shape = det::sqrt(2.0 / card.linear_density_kg_m / card.length_m);
@@ -93,6 +134,45 @@ impl StringBankFluidLoading {
                         pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
                     });
                 }
+            }
+            if let Some(flow) = &loading.rotary {
+                let twist = sources[index].source.torsion_source()
+                    .ok_or_else(|| invalid("rotary fluid has no original torsion"))?;
+                let radius = flow.radius_m();
+                let solid_surface = radius * det::sqrt(2.0
+                    / twist.section().rotary_inertia_kg_m() / card.length_m);
+                let offset = transverse_modes * loading.flow.branches().len();
+                for k in 0..twist.mode_count() {
+                    for (branch_index, branch) in flow.branches().iter().enumerate() {
+                        poll(gate)?;
+                        // Convert angle/torque to surface displacement/force on
+                        // BOTH sides of one dashpot; r cancels from its work.
+                        let fluid_surface = radius * det::sqrt(2.0
+                            / branch.inertia_per_length_kg_m / card.length_m);
+                        let resistance = branch.resistance_per_length_n_s
+                            * (0.5 * card.length_m) / radius / radius;
+                        if [solid_surface, fluid_surface, resistance].iter()
+                            .any(|value| !value.is_finite() || *value <= 0.0) {
+                            return Err(invalid("rotary fluid/string conjugate port is unrepresentable"));
+                        }
+                        let mut left = vec![0.0; sources[index].source.modes()];
+                        let mut right = vec![0.0; fluid_modes];
+                        left[transverse_modes + k] = solid_surface;
+                        right[offset + k * flow.branches().len() + branch_index] = fluid_surface;
+                        links.push(ModalConnection {
+                            left: ModalAttachment { component: index, shapes: left },
+                            right: ModalAttachment { component: fluid_start + index, shapes: right },
+                            stiffness_n_m: 0.0, damping_n_s_m: resistance, rest_extension_m: 0.0,
+                        });
+                        modes.push(ModalAcousticMode {
+                            angular_frequency_rad_s: 0.0, damping_ratio: 0.0,
+                            pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
+                        });
+                    }
+                }
+            }
+            if modes.len() != fluid_modes {
+                return Err(invalid("cylinder memory did not retain every transverse and rotary coordinate"));
             }
             components.push(ModalAcousticTimeModel::try_new_with_free_coordinates(
                 options.sample_rate_hz, modes, options.string_budget,
@@ -146,7 +226,10 @@ impl ReciprocalStringBank {
     /// damping keeps material Kelvin-Voigt loss, the construction's independent
     /// tension loss and the collapsed slow fluid tail. Every remaining fluid
     /// contribution is a coupled mass, so it cannot be double-counted as old
-    /// per-mode gas resistance.
+    /// per-mode gas resistance. Selected torsion receives its distinct rotary
+    /// diffusion spectrum and steady viscous torque in the same solve. The
+    /// material's polar inertia and shear storage remain unchanged; gas memory
+    /// exchanges torque through the bow's existing surface-velocity port.
     /// Original Prony specimens retain their actual internal strains and use
     /// the loaded transverse mass in their bending-memory projection. Bind an
     /// explicit layered-string spectrum only after selecting gas loading.
@@ -178,10 +261,10 @@ impl ReciprocalStringBank {
             return Err(invalid("cylinder loading requires one cold binding before string motion or playback"));
         }
         // Bound complete dimensions BEFORE allocating quadrature or port arrays.
-        let transverse_modes = self.source.strings.iter().zip(&self.cards)
-            .try_fold(0usize, |n, (source, card)| n.checked_add(transverse_count(&source.source, card)))
-            .ok_or_else(|| invalid("complete transverse mode count overflow"))?;
-        let added_modes = transverse_modes.checked_mul(resolution.intervals)
+        let moving_modes = self.source.strings.iter()
+            .try_fold(0usize, |n, member| n.checked_add(member.source.modes()))
+            .ok_or_else(|| invalid("complete transverse and torsional mode count overflow"))?;
+        let added_modes = moving_modes.checked_mul(resolution.intervals)
             .ok_or_else(|| invalid("complete fluid memory dimension overflow"))?;
         let total_modes = self.system.mode_count().checked_add(added_modes)
             .ok_or_else(|| invalid("complete fluid/string/body dimension overflow"))?;
@@ -229,7 +312,11 @@ impl ReciprocalStringBank {
             }
             card.validate().map_err(|_| invalid("fluid-loaded physical string card is not admissible"))?;
             cards.push(card);
-            loading.push(StringCylinderLoading { solid_card: solid.clone(), flow });
+            let rotary = member.source.torsion_source().map(|_| {
+                RotaryCylinderFlow::from_gas(radius, self.source.gas, resolution, gate)
+                    .map_err(ReciprocalStringError::Material)
+            }).transpose()?;
+            loading.push(StringCylinderLoading { solid_card: solid.clone(), flow, rotary });
         }
         let bodies = self.system.components()[self.cards.len()..].to_vec();
         let fluid = StringBankFluidLoading { resolution, strings: loading,

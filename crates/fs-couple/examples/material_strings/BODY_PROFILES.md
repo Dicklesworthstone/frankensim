@@ -466,7 +466,7 @@ projections retain their physical indices and sources.
 The same construction accepts `--stop-profile` before static preload. The native
 composition regression uses two layered two-plane strings, a regional viscous
 body, one torque joint, a cavity, one receiver-bound stop and six fluid branches
-per transverse mode: 33 complete coordinates. It also changes one region's
+per bending or twist mode: 45 complete coordinates. It also changes one region's
 viscosity without changing the fluid law or the other materials.
 
 See [README.md](README.md#causal-gas-loading-of-the-moving-strings) for resolution

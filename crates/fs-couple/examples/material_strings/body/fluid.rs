@@ -31,7 +31,7 @@ fn regional_body_torque_and_stop_keep_the_same_sources_when_fluid_coordinates_ar
     scoped(|cx, gate| {
         let mut loaded = ready(cx, gate, true, 1.0);
         let mut plain = ready(cx, gate, false, 1.0);
-        assert_eq!(loaded.spec.network_dimensions(true).unwrap(), (33, 31, 33*32*32));
+        assert_eq!(loaded.spec.network_dimensions(true).unwrap(), (45, 43, 45*44*44));
         assert_eq!(loaded.rotational_bridge_baselines_m, vec![0.2]);
         assert_eq!(loaded.stop_profile.as_ref().unwrap().bytes, STOP.as_bytes());
         assert_eq!(loaded.performance.bank().system().obstacle_count(), 1);
@@ -54,7 +54,7 @@ fn regional_body_torque_and_stop_keep_the_same_sources_when_fluid_coordinates_ar
         assert_eq!(contact.left.shapes[2], 0.0, "a radial stop invented torsional loading");
         let components = loaded.performance.bank().system().components();
         assert_eq!(components.iter().map(|c| c.modes().len()).collect::<Vec<_>>(),
-            vec![3, 3, 2, 1, 12, 12]);
+            vec![3, 3, 2, 1, 18, 18]);
         assert!(components[4..].iter().flat_map(|c| c.states()).all(|s|
             s.displacement_m_sqrt_kg == 0.0 && s.velocity_m_sqrt_kg_per_s == 0.0));
         assert!(loaded.performance.preload_energy_j().unwrap() > 0.0);

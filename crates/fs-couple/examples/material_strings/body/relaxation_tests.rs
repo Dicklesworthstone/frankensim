@@ -110,7 +110,7 @@ fn body_memory_is_bound_after_original_bonded_torsional_gas_and_axial_coordinate
         assert!(source.material_cavity().is_some());
         assert_eq!(source.material_chart_relaxation().unwrap().mode_count(),2);
         assert_eq!(a.performance.bank().system().components().iter().map(|c|c.modes().len())
-            .collect::<Vec<_>>(),vec![3,2,1,8,2]);
+            .collect::<Vec<_>>(),vec![3,2,1,12,2]);
         let p=pressure(&mut a,1);assert_eq!(p,pressure(&mut b,37));
         assert!(p.iter().any(|v|v.abs()>1e-15));
         let frame=a.performance.bank().system().last_frame().unwrap();

@@ -44,7 +44,7 @@ fn sourced_axial_bearing_reacts_in_original_bow_body_gas_and_pcm_transaction() {
         assert!(source.material_shell_image().is_some());
         let axial_component = longitudinal.strings()[0].axial_component();
         assert_eq!(a.performance.bank().system().components().iter()
-            .map(|component| component.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 8, 2]);
+            .map(|component| component.modes().len()).collect::<Vec<_>>(), vec![3, 2, 1, 12, 2]);
         let expected = pressure(&mut a, 7);
         assert!(expected.iter().any(|p| p.abs() > 1e-15));
         let system = a.performance.bank().system();

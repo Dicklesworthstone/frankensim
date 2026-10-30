@@ -22,7 +22,7 @@ fn base(cx: &Cx<'_>, gate: &CancelGate, gas: GasState) -> ReciprocalStringBank {
     let mut config = options();
     config.network.max_modes = 64;
     config.network.max_connections = 64;
-    config.network.max_setup_terms = 65_536;
+    config.network.max_setup_terms = 131_072;
     ReciprocalStringBank::from_material_plate(
         cx, vec![small_source()], gas, body(1), law(), config, gate,
     ).unwrap()
@@ -34,8 +34,10 @@ fn rotation(bank: &ReciprocalStringBank) -> StringBodyRotationConnection {
 }
 
 #[test]
-fn added_mass_changes_both_plane_frequencies_and_force_maps_but_not_solid_or_twist() {
+fn gas_loading_preserves_solid_polar_inertia_and_retains_distinct_rotary_memory() {
     with_cx(|cx, gate| {
+        let dry = base(cx, gate, gas());
+        let dry_twist = dry.system().components()[0].modes()[2];
         let a = base(cx, gate, gas()).with_cylinder_gas_loading(resolution(), gate).unwrap();
         let dense = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 4.0*101_325.0).unwrap();
         let b = base(cx, gate, dense).with_cylinder_gas_loading(resolution(), gate).unwrap();
@@ -54,7 +56,18 @@ fn added_mass_changes_both_plane_frequencies_and_force_maps_but_not_solid_or_twi
             assert_eq!(modes[0], modes[1], "one physical plane lost the same atmosphere");
             assert_eq!(bank.system().components().len(), 3, "fluid displaced a physical body index");
             let twist = &modes[2];
+            assert_eq!(twist.angular_frequency_rad_s, dry_twist.angular_frequency_rad_s);
             assert_eq!(twist, &a.system().components()[0].modes()[2]);
+            let rotary = bank.source().cylinder_gas_loading().unwrap().strings()[0]
+                .rotary_flow().expect("the atmosphere must also load retained twist");
+            let polar_inertia = 0.5*7800.0*core::f64::consts::PI*0.0003_f64.powi(4);
+            let rotary_loss = 0.5*(rotary.steady_resistance_per_length_n_s()
+                + rotary.low_tail_resistance_per_length_n_s()) / polar_inertia
+                / twist.angular_frequency_rad_s;
+            assert!((twist.damping_ratio-dry_twist.damping_ratio-rotary_loss).abs()
+                < 1e-13*twist.damping_ratio);
+            assert_eq!(bank.system().components()[2].modes().len(), 3*resolution().intervals,
+                "fluid omitted the original torsional coordinates");
             let card = &bank.cards()[0];
             let omega = card.mode_omega_rad_s(1);
             let k = core::f64::consts::PI / card.length_m;
@@ -68,6 +81,50 @@ fn added_mass_changes_both_plane_frequencies_and_force_maps_but_not_solid_or_twi
         let pb = &b.system().port().left.shapes;
         assert!((pb[0]/pa[0] - expected).abs() < 2e-14);
         assert_eq!(pa[2], pb[2], "gas added mass changed solid polar inertia");
+    });
+}
+
+#[test]
+fn applied_torque_exchanges_energy_with_rotary_gas_and_reaches_the_body() {
+    with_cx(|cx, gate| {
+        let mut spec = GasSpec::dry_air_ussa1976();
+        spec.sutherland_beta *= 4.0;
+        let viscous = GasState::try_new(&spec, 293.15, 101_325.0).unwrap();
+        let loaded = |gas| {
+            let bank = base(cx, gate, gas);
+            let link = rotation(&bank);
+            bank.with_rotational_body_connections(vec![link], gate).unwrap()
+                .with_cylinder_gas_loading(resolution(), gate).unwrap()
+        };
+        let mut a = loaded(gas());
+        let mut b = loaded(viscous);
+        let released = FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };
+        let mut force = vec![0.0; a.system().mode_count()];
+        // One physical 1e-7 N m torque at the original bow station. The port's
+        // twist entry is r*theta; divide by the actual radius to apply torque.
+        let torque = 1e-7*a.system().port().left.shapes[2]/0.0003;
+        let mut rotary_energy = 0.0_f64;
+        let mut difference = 0.0_f64;
+        let mut work = 0.0;
+        let mut loss = 0.0;
+        for i in 0..192 {
+            force[2] = if i < 48 { torque } else { 0.0 };
+            let fa = *a.step(&force, released).unwrap();
+            let fb = *b.step(&force, released).unwrap();
+            work += fa.external_work_j;
+            loss += fa.network_dissipation_j;
+            assert_eq!(fa.drive_work_j, 0.0);
+            assert_eq!(fa.friction_dissipation_j, 0.0);
+            rotary_energy = rotary_energy.max(a.system().components()[2].states()
+                [2*resolution().intervals..].iter()
+                .map(|state| 0.5*state.velocity_m_sqrt_kg_per_s.powi(2)).sum::<f64>());
+            difference = difference.max((fa.observer_pressure_pa-fb.observer_pressure_pa).abs());
+            assert!(fa.energy_residual_j.abs() <= fa.energy_tolerance_j);
+            assert!(fb.energy_residual_j.abs() <= fb.energy_tolerance_j);
+        }
+        assert!(rotary_energy > 0.0, "gas never received the applied physical torque");
+        assert!(difference > 0.0, "source viscosity never reached the torque-loaded receiver");
+        assert!((a.system().total_energy_j().unwrap()+loss-work).abs() < 2e-11);
     });
 }
 

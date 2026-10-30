@@ -483,7 +483,7 @@ const CEILING_SAMPLES: u64 = 96;
 fn ceiling_inputs(modes: usize, samples: u64) -> (Profile, input::Spec) {
     let text = clamped_plate_body(15, 11, "window 1 400000000", 2_000_000_000);
     let profile = Profile::parse(text.as_bytes()).unwrap();
-    // 70 body modes, the cavity, two string planes, twist and the gas memory (2 planes x 12 intervals) make 98: declare room for 128.
+    // 70 body modes, the cavity, two string planes, twist and gas memory (3 modes x 12 intervals) make 110: declare room for 128.
     let performance = include_str!("../../cylinder-flow.material-strings")
         .replace("48000 4096 0.01 128", &format!("48000 {samples} 0.01 128"))
         .replace("cylinder-gas-loading 0.001 30 12",

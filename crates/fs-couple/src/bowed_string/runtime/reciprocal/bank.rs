@@ -644,6 +644,9 @@ fn assemble_sources(
         }).collect();
         if let Some(source) = source {
             source.append_extra_modes(card, &mut modes, gate)?;
+            if let Some(loading) = fluid_loading {
+                loading.add_rotary_damping(index, source, card, &mut modes)?;
+            }
         }
         if modes.len() != total_modes {
             return Err(invalid("material string source differs from its complete modal basis"));
