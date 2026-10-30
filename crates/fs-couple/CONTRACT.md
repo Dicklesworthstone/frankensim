@@ -15773,6 +15773,44 @@ thermal histories unchanged. Five focused regressions cover continuing
 memory and physical U balance, lossless cooling, full anisotropic rotated
 entropy, orthotropic common-scale admission and non-affine/late refusal.
 
+## Complete material heat on inertial plastic solids
+
+`ThermoplasticDynamics::advance_heat_network_candidate` binds the existing
+complete material heat network to the continuing native P1/J2 inertial owner.
+Bulk conductivity, integrated thermal layers, source-backed thermal interface
+resistance and enclosure emissivity see the same finite caloric cells as local
+plasticity and reciprocal thermal expansion. Structural cells retain their
+original caloric object, material card and complete fixed source context; a
+separately valid thermal query with different pressure or processing coordinates
+refuses before an advance.
+
+The original backward-Euler consistent-mass solve retains displacement,
+full nodal velocity, plastic/hardening history and the accepted clock. Physical
+yield/overstress dissipation and reversible heat enter one thermal evolution.
+Elastic/hardening storage, kinetic storage, constitutive numerical loss and
+inertial numerical loss remain separate; neither numerical loss is heat.
+The original `SolidHeatAudit` removes integrated internal radiation roundoff
+from external supply and checks both corrected energy residuals against the
+same joule tolerance. Additional finite thermal bodies stay on that shared
+timeline. This entry point refuses electrical networks without their work owner.
+
+Continuation accepts returned thermal and mechanical states together and uses
+the returned observer's `second` member for independent observer history.
+Cancellation, source failure, observer failure and energy rejection publish no
+partial state. Geometry, thermal areas/view factors and reference mass remain
+fixed; the original fully-solid, small-strain/rotation source ranges apply.
+Thermal substeps do not refine mechanical loading or inertia, so physical
+interval refinement remains required. No moving contact geometry or melting
+claim is added.
+
+G1/G3 checks in
+`tests/solid_plastic_material_transport/heat/solid/dynamics.rs` cover the
+consistent reference-mass kinetic account, continuing plastic motion, one-time
+physical heating, closed total energy and data-only emissivity/interface swaps.
+The shared solid test also exercises source-context disagreement and
+cancellation for the dynamic entry point. These are synthetic numerical
+fixtures, not measured constitutive validation.
+
 ## Complete heat networks on reciprocal elastic trajectories
 
 `ThermoelasticSolid::advance_heat_network_candidate` and

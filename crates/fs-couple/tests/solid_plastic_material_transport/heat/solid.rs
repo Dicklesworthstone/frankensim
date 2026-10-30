@@ -1,4 +1,7 @@
 //! Original 3D solve, source binding and closed accounting through one entry point.
+#[path = "solid/dynamics.rs"]
+mod dynamics;
+
 use super::*;
 use fs_couple::circuit_enthalpy::contacts::heat::solid::SolidHeatError;
 use fs_couple::circuit_enthalpy::material::MaterialCell;
@@ -64,11 +67,22 @@ fn same_card_and_caloric_law_do_not_excuse_different_mechanical_source_condition
         assert!(matches!(solid.advance_heat_network_candidate(thermal, &prepared, &(),
             1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
             control(), cx), Err(SolidHeatError::Invalid("heat and solid material conditions disagree"))));
+        let moving = fs_couple::solid_enthalpy::plastic::dynamics::ThermoplasticDynamics::try_new(
+            solid.clone(), vec![[0.0; 3]; NODES.len()], cx).unwrap();
+        let velocity = moving.velocity_mps().to_vec();
+        assert!(matches!(moving.advance_heat_network_candidate(thermal, &prepared, &(),
+            1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
+            control(), cx), Err(SolidHeatError::Invalid("heat and solid material conditions disagree"))));
+        assert_eq!(moving.velocity_mps(), velocity.as_slice());
         assert_eq!(thermal.cells(), &saved); assert_eq!(solid.solution(), &history);
         gate.request();
         assert!(matches!(solid.advance_heat_network_candidate(thermal, original, &(),
             1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
             control(), cx), Err(SolidHeatError::Cancelled)));
+        assert!(matches!(moving.advance_heat_network_candidate(thermal, original, &(),
+            1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
+            control(), cx), Err(SolidHeatError::Cancelled)));
+        assert_eq!(moving.velocity_mps(), velocity.as_slice());
         assert_eq!(thermal.cells(), &saved); assert_eq!(solid.solution(), &history);
     });
 }

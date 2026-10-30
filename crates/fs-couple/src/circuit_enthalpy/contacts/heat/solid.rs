@@ -1,5 +1,7 @@
 //! Source-consistent, closed-energy admission for the original loaded 3D solid.
 //! The native candidate and observer histories remain the sole state owners.
+
+mod dynamics;
 use super::{HeatNetworkError, MaterialHeatObserver, PreparedHeatNetwork};
 use crate::solid_enthalpy::plastic::{
     ThermoplasticCandidate, ThermoplasticConfig, ThermoplasticError, ThermoplasticSolid,
