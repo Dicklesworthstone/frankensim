@@ -23,6 +23,9 @@ use crate::render::plate::impact::cavity::network::ModalCavityParts;
 use fs_feec::acoustics::helmholtz::diffusion::DiffusionModes;
 use fs_phs::RelaxationBranch;
 
+mod molecular;
+pub use molecular::ShellCavityMolecularOptions;
+
 /// Thermal FE/window admission, independent of instrument identity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellCavityThermalOptions {
@@ -69,6 +72,11 @@ pub struct ShellCavityThermalLoss {
     pressure_rows: Vec<Vec<f64>>,
     /// Cholesky rows of the remaining equilibrium compression energy.
     equilibrium_rows: Vec<Vec<f64>>,
+    /// Original compression-volume normalizations for physical constitutive observation.
+    pressure_norms: Vec<f64>,
+    instantaneous_bulk_modulus_pa: f64,
+    instantaneous_pressure_scale: f64,
+    molecular: Option<fs_material::relaxation::RelaxationState>,
 }
 impl ShellCavityThermalLoss {
     pub const fn options(&self) -> &ShellCavityThermalOptions { &self.options }
@@ -76,11 +84,51 @@ impl ShellCavityThermalLoss {
     pub const fn diffusivity_m2_s(&self) -> f64 { self.diffusivity_m2_s }
     pub const fn unresolved_fraction_bound(&self) -> f64 { self.unresolved_fraction }
     pub fn decay_rates_per_s(&self) -> &[f64] { &self.rates }
-    /// Index of each memory's original eigenmode; an exactly zero projection
-    /// has no mechanical participant, but remains in diffusion_modes().
+    /// Original eigenmode for each wall-diffusion memory, in memory-prefix order.
+    /// Joint caloric branches can repeat an index. Molecular-only histories in
+    /// the unresolved spatial complement follow this prefix and have no heat
+    /// eigenmode. Exactly zero projections remain in diffusion_modes().
     pub fn memory_mode_indices(&self) -> &[usize] { &self.mode_indices }
     pub fn memory_states(&self) -> usize { self.memory_rows.len() }
     pub fn normalized_pressure_overlaps(&self) -> &[Vec<f64>] { &self.overlaps }
+    /// Exact source gas and internal reservoirs used by the joint caloric law.
+    pub const fn molecular_relaxation(&self) -> Option<&fs_material::relaxation::RelaxationState> {
+        self.molecular.as_ref()
+    }
+    /// Molecular histories in spatial directions not resolved by the heat basis.
+    pub fn molecular_complement_memory_states(&self) -> usize {
+        self.memory_rows.len() - self.mode_indices.len()
+    }
+    /// Instantaneous compression with wall diffusion and internal reservoirs frozen [Pa].
+    pub const fn instantaneous_bulk_modulus_pa(&self) -> f64 {
+        self.instantaneous_bulk_modulus_pa
+    }
+    /// Constitutive bulk matrix in the original mass-normalized pressure basis,
+    /// using exp(-i omega t). This observes the SAME storage and relaxation rows
+    /// as the native mechanical runtime; it is not a separate cavity field solve.
+    /// Pressure-basis and geometric convergence remain the original FE obligations.
+    pub fn normalized_bulk_response(&self, omega_rad_s: f64)
+        -> Result<Vec<fs_math::c64::C64>, ShellCavityError>
+    {
+        use fs_math::c64::C64;
+        if !omega_rad_s.is_finite() || omega_rad_s < 0.0 {
+            return Err(bad("caloric response requires finite nonnegative frequency"));
+        }
+        let n = self.pressure_norms.len();
+        let mut result = vec![C64::ZERO; n*n];
+        for i in 0..n { result[i*n+i] = C64::from_re(self.instantaneous_bulk_modulus_pa); }
+        for (row, &rate) in self.pressure_rows.iter().zip(&self.rates) {
+            let response = C64::from_re(rate) / C64::new(rate, -omega_rad_s);
+            for i in 0..n { for j in 0..n {
+                result[i*n+j] = result[i*n+j] - response.scale(
+                    row[i]*self.pressure_norms[i]*row[j]*self.pressure_norms[j]);
+            }}
+        }
+        if result.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) {
+            return Err(bad("caloric response is unrepresentable"));
+        }
+        Ok(result)
+    }
 
     pub(super) fn prepare(
         fe: &HelmholtzFe<'_>, gas: &GasState, shapes: &[Vec<f64>],
@@ -193,7 +241,9 @@ impl ShellCavityThermalLoss {
         }
         check_cancel(gate)?;
         Ok(Self { options, diffusion, diffusivity_m2_s:diffusivity, unresolved_fraction:unresolved,
-            rates, mode_indices, memory_rows, overlaps, pressure_rows, equilibrium_rows })
+            rates, mode_indices, memory_rows, overlaps, pressure_rows, equilibrium_rows,
+            pressure_norms:norms, instantaneous_bulk_modulus_pa:bulk,
+            instantaneous_pressure_scale:1.0, molecular:None })
     }
 
     pub(super) fn replace_compression_links(&self, image: &mut ModalCavityParts,
@@ -225,6 +275,7 @@ impl ShellCavityThermalLoss {
         if pressure.len()!=self.equilibrium_rows.len() || memory[start..].iter().any(|z|!z.is_finite()) {
             return Err(bad("cavity pressure requires complete finite thermal and pressure coordinates"));
         }
+        for p in pressure.iter_mut() { *p *= self.instantaneous_pressure_scale; }
         for (row,&z) in self.pressure_rows.iter().zip(&memory[start..]) {
             for (p,coefficient) in pressure.iter_mut().zip(row) { *p += coefficient*z; }
         }

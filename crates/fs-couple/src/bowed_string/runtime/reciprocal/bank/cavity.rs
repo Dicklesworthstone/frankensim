@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 mod openings;
 pub use openings::{MAX_SHELL_CAVITY_OPENINGS, ShellCavityOpening};
 mod thermal;
-pub use thermal::{ShellCavityThermalLoss, ShellCavityThermalOptions};
+pub use thermal::{ShellCavityMolecularOptions, ShellCavityThermalLoss, ShellCavityThermalOptions};
 
 /// Numerical admission, independent of instrument name or material choice.
 #[derive(Clone, Copy, Debug)]
@@ -176,7 +176,7 @@ impl ReciprocalStringBank {
         self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions, gate: &CancelGate,
     ) -> Result<Self, ShellCavityError> {
         let gas = self.source.gas;
-        self.with_material_shell_cavity_inner(fe, gas, options, Vec::new(), None, gate)
+        self.with_material_shell_cavity_inner(fe, gas, options, Vec::new(), None, None, gate)
     }
 
     /// Connect explicitly declared compact mouths to the same original FE and
@@ -194,7 +194,7 @@ impl ReciprocalStringBank {
         openings: Vec<ShellCavityOpening>, gate: &CancelGate,
     ) -> Result<Self, ShellCavityError> {
         let gas = self.source.gas;
-        self.with_material_shell_cavity_inner(fe, gas, options, openings, None, gate)
+        self.with_material_shell_cavity_inner(fe, gas, options, openings, None, None, gate)
     }
 
     /// Couple gas heat diffusion on the SAME original cavity FE to every solid,
@@ -213,7 +213,34 @@ impl ReciprocalStringBank {
     ) -> Result<Self, ShellCavityError> {
         thermal.validate()?;
         let gas = self.source.gas;
-        self.with_material_shell_cavity_inner(fe, gas, options, openings, Some(thermal), gate)
+        self.with_material_shell_cavity_inner(fe, gas, options, openings, Some(thermal), None, gate)
+    }
+
+    /// Couple the original source molecular reservoirs to the SAME 3-D heat FE.
+    /// Each heat eigenmode uses one joint caloric operator before compression
+    /// is eliminated. Spatial directions outside the admitted heat window keep
+    /// their source adiabatic molecular relaxation; no reservoir is omitted or
+    /// applied twice. Gas, wall diffusion, pressure and mechanical histories
+    /// share the original exact propagator and energy account.
+    ///
+    /// Gas and source snapshots must match exactly. Geometry, pressure and heat
+    /// windows retain their original convergence obligations. This cold binding
+    /// uses a frozen mean gas, isothermal solid boundaries and insulated mouths;
+    /// it adds no mean heating, species evolution or finite-wall thermal store.
+    /// New gas history starts unrelaxed at the molecularly frozen pressure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_material_shell_cavity_thermal_molecular(
+        self, fe: &HelmholtzFe<'_>, gas: GasState, options: ShellCavityOptions,
+        openings: Vec<ShellCavityOpening>, thermal: ShellCavityThermalOptions,
+        relaxation: fs_material::relaxation::RelaxationState,
+        molecular: ShellCavityMolecularOptions, gate: &CancelGate,
+    ) -> Result<Self, ShellCavityError> {
+        thermal.validate()?;
+        if relaxation.gas() != &gas {
+            return Err(bad("source reservoirs must match the declared interior gas exactly"));
+        }
+        self.with_material_shell_cavity_inner(fe, gas, options, openings, Some(thermal),
+            Some((relaxation, molecular)), gate)
     }
 
     /// The original pressure FE, necks and thermal diffusion in an explicitly
@@ -232,7 +259,7 @@ impl ReciprocalStringBank {
         gate: &CancelGate,
     ) -> Result<Self, ShellCavityError> {
         if let Some(thermal) = thermal { thermal.validate()?; }
-        self.with_material_shell_cavity_inner(fe, gas, options, openings, thermal, gate)
+        self.with_material_shell_cavity_inner(fe, gas, options, openings, thermal, None, gate)
     }
 
     /// One source-derived interior/compact-mouth/exterior construction. The
@@ -247,13 +274,14 @@ impl ReciprocalStringBank {
         exterior: super::radiation::bem::ShellBemOptions, gate: &CancelGate,
     ) -> Result<(Self, super::radiation::bem::ShellBemReport), ShellCavityError> {
         let gas = self.source.gas;
-        self.with_material_shell_cavity_inner(fe, gas, options, openings, None, gate)?
+        self.with_material_shell_cavity_inner(fe, gas, options, openings, None, None, gate)?
             .with_material_shell_bem(exterior, gate).map_err(ShellCavityError::Radiation)
     }
 
     fn with_material_shell_cavity_inner(
         mut self, fe: &HelmholtzFe<'_>, gas: GasState, options: ShellCavityOptions,
         opening_sources: Vec<ShellCavityOpening>, thermal: Option<ShellCavityThermalOptions>,
+        molecular: Option<(fs_material::relaxation::RelaxationState, ShellCavityMolecularOptions)>,
         gate: &CancelGate,
     ) -> Result<Self, ShellCavityError> {
         check_cancel(gate)?;
@@ -284,7 +312,7 @@ impl ReciprocalStringBank {
         let (identity, _) = self.source.body_radiation_basis(&self.system, gate)
             .map_err(ShellCavityError::Bank)?;
         let (binding, area) = prepare(&self.source, fe, gas, options, identity,
-            body.modes().len(), self.source.options.network.max_modes, opening_sources, thermal, gate)?;
+            body.modes().len(), self.source.options.network.max_modes, opening_sources, thermal, molecular, gate)?;
         let mut image = if binding.openings.is_empty() {
             binding.coupling.modal_network(body, self.source.options.sample_rate_hz,
                 area, options.acoustic_budget, gate)
@@ -466,7 +494,8 @@ fn parts(source: &MaterialStringBankSource) -> Result<Vec<ShellPart<'_>>, ShellC
 
 fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, gas: GasState, options: ShellCavityOptions,
     identity: ContentHash, body_modes: usize, maximum_mechanical_modes: usize,
-    opening_sources: Vec<ShellCavityOpening>, thermal: Option<ShellCavityThermalOptions>, gate: &CancelGate)
+    opening_sources: Vec<ShellCavityOpening>, thermal: Option<ShellCavityThermalOptions>,
+    molecular: Option<(fs_material::relaxation::RelaxationState, ShellCavityMolecularOptions)>, gate: &CancelGate)
     -> Result<(MaterialShellCavity, f64), ShellCavityError>
 {
     let parts = parts(source)?;
@@ -558,9 +587,17 @@ fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, gas: GasStat
         }
     }
     check_cancel(gate)?;
-    let thermal_loss = thermal.map(|thermal| ShellCavityThermalLoss::prepare(fe,
-        &gas, &pressure_shapes, &coupling, &openings, thermal, &options.eigensolver, gate))
-        .transpose()?;
+    if molecular.is_some() && thermal.is_none() {
+        return Err(bad("joint molecular caloric law requires its original heat-space admission"));
+    }
+    let thermal_loss = thermal.map(|thermal| {
+        let prepared = ShellCavityThermalLoss::prepare(fe, &gas, &pressure_shapes,
+            &coupling, &openings, thermal, &options.eigensolver, gate)?;
+        match molecular {
+            Some((source, options)) => prepared.with_molecular(&gas, &coupling, source, options, gate),
+            None => Ok(prepared),
+        }
+    }).transpose()?;
     if thermal_loss.is_some() { coupling.require_compression_memory(); }
     Ok((MaterialShellCavity { gas, basis_identity: identity,
         positions: fe.positions().to_vec(), tetrahedra: fe.tetrahedra().to_vec(),

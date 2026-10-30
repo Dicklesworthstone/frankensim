@@ -3,6 +3,9 @@
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::cavity::ShellCavityThermalOptions;
 
+#[path = "thermal/molecular.rs"]
+mod molecular;
+
 fn pressure_resolution()->ShellCavityOptions {
     let mut o=resolution();o.maximum_hz=1.0;o
 }

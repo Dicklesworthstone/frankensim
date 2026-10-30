@@ -9,6 +9,7 @@ use fs_couple::shear_shell::{MaterialShellImage, assembly::MaterialShellAssembly
 use fs_math::c64::C64;
 use std::{ffi::OsString, fmt::Write as _, fs::OpenOptions, io::Write as _, path::PathBuf};
 
+#[path = "body_response/loaded.rs"]
 mod loaded;
 
 pub(super) struct Options {

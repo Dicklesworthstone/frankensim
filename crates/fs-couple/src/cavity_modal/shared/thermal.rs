@@ -18,7 +18,7 @@ use fs_la::eigen::jacobi_eigh;
 use fs_material::relaxation::RelaxationState;
 
 mod molecular;
-mod spectrum;
+pub(crate) mod spectrum;
 pub mod material_wall;
 pub use material_wall::{CylindricalMaterialWallCompression, CylindricalMaterialWallOptions};
 

@@ -10,16 +10,16 @@
 use fs_la::eigen::jacobi_eigh;
 use fs_math::{c64::C64, det};
 
-pub(super) const MAX_COORDINATES: usize = 128;
+pub(crate) const MAX_COORDINATES: usize = 128;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct BulkArm {
+pub(crate) struct BulkArm {
     pub increment_pa: f64,
     pub relaxation_time_s: f64,
 }
 
 #[derive(Debug)]
-pub(super) struct Spectrum {
+pub(crate) struct Spectrum {
     pub arms: Vec<BulkArm>,
     pub frozen_bulk_modulus_pa: f64,
 }
@@ -47,7 +47,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), &'static str> {
 
 /// All coordinates are retained. This cold solve has a hard dimension bound;
 /// positivity and eigen residuals are checked before any runtime is published.
-pub(super) fn realize(
+pub(crate) fn realize(
     pressure: f64,
     alpha: f64,
     mut a: Vec<f64>,

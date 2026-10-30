@@ -120,13 +120,21 @@ fn closed_body(fe: &HelmholtzFe<'_>, rho: f64, gate: &CancelGate) -> SharedMater
     let specimen = compile_material_shear_shell(mesh,vec![input],budget,gate).unwrap()
         .with_pressure_surfaces(ShellPressureSurfaces { exterior: facets.clone(), cavity: facets }, gate).unwrap();
     let mut port = vec![0.0;6*specimen.mesh().nodes.len()]; port[6*moving] = 1.0;
+    // One source loss law, one force footprint, one scalar modal factor and
+    // both complete pressure maps. The 20-element fixture needs 20,007,612
+    // terms with the native MITC condensation allowance, not the former 1e6.
+    let projection_work = fs_plate::shell::mitc::viscosity::projection_terms(
+        budget.max_nodes,budget.max_triangles,1).unwrap()
+        + 6*budget.max_nodes + 4
+        + 2*fs_plate::shell::pressure::projection_terms(
+            budget.max_nodes,budget.max_triangles,1).unwrap();
     SharedMaterialShellBody {
         specimen, directors, constraints, mass: ShellMass::Consistent, drilling_alpha: 1e-3,
         eigenvalue_window: (0.0,1e10), n_modes: 1, force_ports: vec![port],
         bridges: vec![SharedPlateBridge { station_fraction: 0.8, stiffness_n_m: 3000.0,
             damping_n_s_m: 0.1, rest_extension_m: 0.0 }],
         assembly_budget: budget,
-        projection_budget: ShellProjectionBudget { max_modes: 1, max_projection_terms: 1_000_000,
+        projection_budget: ShellProjectionBudget { max_modes: 1, max_projection_terms: projection_work,
             reference_resistance_n_s_m: 1.0 },
         modal_budget: ModalAcousticTimeBudget::audible_reference(), listener_m: 1.0,
     }
