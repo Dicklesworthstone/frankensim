@@ -1,7 +1,8 @@
 //! Data-only assembly of the original NSF volume, DG bore and pressure observer.
 //!
 //! Geometry is an explicit Cartesian grid and stationary solid-cell mask,
-//! optionally sampled from bounded SI boxes and clipped wedges. Gas
+//! optionally sampled from bounded SI boxes, clipped wedges, spheres and
+//! capped oriented cylinders. Gas
 //! evolution retains either the original dry-air law or complete thermochemical
 //! source models; a mixture snapshot is never converted into an invented law.
 //! Initial physical states and finite pressure/characteristic controls are data. No jet
@@ -664,19 +665,31 @@ fn read_solids(rows: &mut Rows<'_>, dims: [usize; 3], dx_m: f64, cells: usize,
     let mut shapes = Vec::with_capacity(count);
     for _ in 0..count {
         poll(gate)?;
-        let wedge = rows.next_is("solid_wedge");
-        let mut row = rows.row(if wedge { "solid_wedge" } else { "solid_box" })?;
+        let kind = if rows.next_is("solid_wedge") { "solid_wedge" }
+            else if rows.next_is("solid_cylinder") { "solid_cylinder" }
+            else if rows.next_is("solid_sphere") { "solid_sphere" }
+            else { "solid_box" };
+        let mut row = rows.row(kind)?;
         let add = match row.word()? {
             "add" => true, "subtract" => false,
             _ => return Err(bad(row.line, "solid operation requires add or subtract")),
         };
         let min = fs_geom::Point3::new(row.scalar()?, row.scalar()?, row.scalar()?);
-        let max = fs_geom::Point3::new(row.scalar()?, row.scalar()?, row.scalar()?);
-        let clip = if wedge {
-            Some((fs_geom::Vec3::new(row.scalar()?, row.scalar()?, row.scalar()?), row.scalar()?))
-        } else { None };
+        let shape = if kind == "solid_sphere" {
+            geometry::Shape::Sphere { center: min, radius_m: row.scalar()? }
+        } else {
+            let max = fs_geom::Point3::new(row.scalar()?, row.scalar()?, row.scalar()?);
+            if kind == "solid_cylinder" {
+                geometry::Shape::Cylinder { start: min, end: max, radius_m: row.scalar()? }
+            } else {
+                let clip = if kind == "solid_wedge" {
+                    Some((fs_geom::Vec3::new(row.scalar()?, row.scalar()?, row.scalar()?), row.scalar()?))
+                } else { None };
+                geometry::Shape::Box { bounds: fs_geom::Aabb { min, max }, clip }
+            }
+        };
         row.end()?;
-        shapes.push(geometry::Primitive { add, bounds: fs_geom::Aabb { min, max }, clip });
+        shapes.push(geometry::Primitive { add, shape });
     }
     geometry::rasterize(dims, dx_m, &shapes, maximum_cell_evaluations, gate)
         .map_err(|what| bad(rows.line, what))

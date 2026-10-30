@@ -876,3 +876,32 @@ thermal volume. The solved regional states feed the original DG viscothermal
 and molecular operators. Closed chimneys retain their separately declared gas.
 This route uses prescribed steady flow, not an inferred mean acoustic flow,
 transient NSF heat/species transport, or a predicted pressure drop.
+
+### Curved SI solids
+
+The same `solid_geometry` block also accepts these original FRep primitives:
+
+```text
+solid_cylinder add|subtract X0 Y0 Z0 X1 Y1 Z1 RADIUS_M
+solid_sphere add|subtract CX CY CZ RADIUS_M
+```
+
+Cylinder endpoints are the centers of its flat caps in metres. The original
+infinite-cylinder primitive is intersected with a finite box, then rigidly
+rotated and translated to those endpoints. Reversing the endpoints describes
+the same solid. Sphere coordinates are its center and radius in metres. A round
+passage can be authored by adding an outer cylinder and subtracting a narrower
+one with the same endpoints; subsequent shapes retain declaration-order CSG.
+
+The entire physical shape, including its radial extent, must lie in the grid.
+Nonpositive radii, coincident cylinder endpoints, unresolved shapes, exhausted
+cell-evaluation budgets and cancellation refuse. The projected circular-cap
+bounds permit an axial end cap exactly on a grid boundary without permitting
+radial overhang. These primitives reach the original stationary NSF mask and
+retain its halfway bounce-back and characteristic-collar restrictions; they do
+not create cut cells or supply missing measured instrument/player anatomy.
+
+The focused original-owner tests check oblique cylinders, reversed endpoints,
+finite caps, hollow-passage subtraction and independent analytic volume changes
+on three grid rungs. This is bounded manufactured-geometry evidence, not a
+universal convergence or real-flute qualification.
