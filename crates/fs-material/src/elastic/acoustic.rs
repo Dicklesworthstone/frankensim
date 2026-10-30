@@ -81,6 +81,36 @@ pub struct HydrostaticElasticResponse {
 }
 
 impl ElasticAcousticState {
+    /// Cubic crystal stiffness in its crystallographic [100]/[010]/[001]
+    /// frame. C11, C12 and C44 are the three independent tensor coefficients,
+    /// not isotropic Young/Poisson parameters. The shared full-tensor admission
+    /// checks positive definiteness; stable negative C12 remains admissible.
+    /// The source's adiabatic/isothermal convention is retained upstream.
+    pub fn from_cubic(
+        density_kg_m3: f64,
+        c11_pa: f64,
+        c12_pa: f64,
+        c44_pa: f64,
+        material_state_identity: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+    ) -> Result<Self, MaterialError> {
+        let mut stiffness = [[0.0; 6]; 6];
+        for (i, row) in stiffness.iter_mut().enumerate().take(3) {
+            for (j, value) in row.iter_mut().enumerate().take(3) {
+                *value = if i == j { c11_pa } else { c12_pa };
+            }
+        }
+        for (i, row) in stiffness.iter_mut().enumerate().skip(3) {
+            row[i] = 2.0 * c44_pa;
+        }
+        Self::try_new_mandel(
+            stiffness,
+            density_kg_m3,
+            material_state_identity,
+            maximum_absolute_mandel_strain,
+        )
+    }
+
     /// Build the isotropic tensor directly from independently selected bulk
     /// and shear moduli. Neither modulus is replaced by a rounded E/nu pair.
     /// The caller explicitly chooses isotropy and the source's response regime;

@@ -322,6 +322,29 @@ impl TetElasticMaterial {
         )
     }
 
+    /// Rotate the original source-derived cubic law into the solver frame.
+    /// The common tensor conversion retains its crystallographic axes, density
+    /// and source identity. Mechanical forces and waves use the same tensor;
+    /// no polycrystalline averaging or material-name coefficient is introduced.
+    pub fn from_resolved_cubic_state(
+        state: &fs_material::elastic::acoustic::sourced::cubic::ResolvedCubicElasticState,
+        target_frame: ContentHash,
+        crystal_to_target: [[f64; 3]; 3],
+    ) -> Result<ElasticTensorTransformReceipt, TetElasticError> {
+        Self::try_new_oriented_tensor(
+            state.acoustic().density_kg_m3(),
+            *state.acoustic().stiffness_mandel_pa(),
+            ElasticTensorBasis {
+                notation: ElasticTensorNotation::Mandel,
+                order: ElasticTensorOrder::XxYyZzXyYzZx,
+                frame: state.crystal_frame(),
+            },
+            target_frame,
+            crystal_to_target,
+            state.identity(),
+        )
+    }
+
     /// Construct an oriented orthotropic state.
     ///
     /// `principal_to_world` is a proper orthonormal rotation whose columns are

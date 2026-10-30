@@ -39,6 +39,18 @@ fn silver_pack_passes_physicality_gates() {
                 s.insert(c[3].to_string(), v);
                 ids.push(c[1].to_string());
             }
+            "curve" => {
+                let mut previous = f64::NEG_INFINITY;
+                for knot in c[7].split(',') {
+                    let (t, v) = knot.split_once(':').expect("temperature/value");
+                    let t: f64 = t.parse().expect("temperature");
+                    let v: f64 = v.parse().expect("value");
+                    assert!(t.is_finite() && t > previous);
+                    assert!(v.is_finite() && v > 0.0);
+                    previous = t;
+                }
+                ids.push(c[1].to_string());
+            }
             "uncertainty" => unc.push(c[1].to_string()),
             "validity" => val.push(c[1].to_string()),
             "observation" => {}

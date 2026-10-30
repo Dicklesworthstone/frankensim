@@ -28,3 +28,28 @@ validity	c12-0k	T	0	0	K
 scalar	c44-0k	sf95-table-1	single_crystal_c44_at_0_k	51100000000	Pa	constant
 uncertainty	c44-0k	unstated	-	-	-	-
 validity	c44-0k	T	0	0	K
+observation	sf95-table-9-cubic	Pure silver cubic-crystal adiabatic elastic coefficients in crystallographic [100]/[010]/[001] axes; Table 9 cites Neighbours and Alers (1958)	Table 9: thirteen literal positive-temperature rows from 10 to 300 K for C11, C12, C44 and the separately printed adiabatic bulk modulus B; GPa converted exactly to Pa	C11, C12 and C44 are the independent crystal coefficients. The bulk column is source-derived B=(C11+2*C12)/3 and is separately rounded; it is not a fourth independent measurement or an isotropic shear modulus. Piecewise-linear interpolation is an explicit engineering approximation between printed rows, without an assigned interpolation error or unstated covariance model. Source pressure, exact measurement frequency and full specimen processing are not supplied by this table. The source-pressure-known=0 and source-measurement-frequency-known=0 query flags retain these gaps. The existing Table 1 density is only at 293.15 K and is not from an identified common specimen: joint density/stiffness use is an explicitly opted-in engineering reference, not qualification of a wire, alloy, cold-worked polycrystal or annealed specimen. The original 0 K observations remain separate; no density-temperature curve, attenuation or pressure-dependent tangent is inferred. The adiabatic tangent supports incremental frozen elastic pressure/wave calculations and cannot be silently used as an isothermal thermal-storage law.
+curve	cubic-c11-table9	sf95-table-9-cubic	cubic_adiabatic_c11	T	K	Pa	10:131440000000,25:131410000000,50:131120000000,75:130540000000,100:129800000000,125:129080000000,150:128350000000,175:127620000000,200:126910000000,225:126190000000,250:125460000000,275:124730000000,300:123990000000	linear
+uncertainty	cubic-c11-table9	unstated	-	-	-	-
+validity	cubic-c11-table9	T	10	300	K
+validity	cubic-c11-table9	source-pressure-known	0	0	1
+validity	cubic-c11-table9	source-measurement-frequency-known	0	0	1
+validity	cubic-c11-table9	engineering-reference-model	1	1	1
+curve	cubic-c12-table9	sf95-table-9-cubic	cubic_adiabatic_c12	T	K	Pa	10:97300000000,25:97330000000,50:97260000000,75:97040000000,100:96660000000,125:96280000000,150:95910000000,175:95540000000,200:95170000000,225:94810000000,250:94440000000,275:94050000000,300:93670000000	linear
+uncertainty	cubic-c12-table9	unstated	-	-	-	-
+validity	cubic-c12-table9	T	10	300	K
+validity	cubic-c12-table9	source-pressure-known	0	0	1
+validity	cubic-c12-table9	source-measurement-frequency-known	0	0	1
+validity	cubic-c12-table9	engineering-reference-model	1	1	1
+curve	cubic-c44-table9	sf95-table-9-cubic	cubic_adiabatic_c44	T	K	Pa	10:51080000000,25:50980000000,50:50720000000,75:50280000000,100:49820000000,125:49360000000,150:48900000000,175:48440000000,200:47970000000,225:47500000000,250:47040000000,275:46580000000,300:46120000000	linear
+uncertainty	cubic-c44-table9	unstated	-	-	-	-
+validity	cubic-c44-table9	T	10	300	K
+validity	cubic-c44-table9	source-pressure-known	0	0	1
+validity	cubic-c44-table9	source-measurement-frequency-known	0	0	1
+validity	cubic-c44-table9	engineering-reference-model	1	1	1
+curve	adiabatic-bulk-table9	sf95-table-9-cubic	adiabatic_bulk_modulus	T	K	Pa	10:108680000000,25:108690000000,50:108550000000,75:108210000000,100:107710000000,125:107210000000,150:106720000000,175:106230000000,200:105750000000,225:105270000000,250:104780000000,275:104280000000,300:103780000000	linear
+uncertainty	adiabatic-bulk-table9	unstated	-	-	-	-
+validity	adiabatic-bulk-table9	T	10	300	K
+validity	adiabatic-bulk-table9	source-pressure-known	0	0	1
+validity	adiabatic-bulk-table9	source-measurement-frequency-known	0	0	1
+validity	adiabatic-bulk-table9	engineering-reference-model	1	1	1

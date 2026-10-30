@@ -1632,3 +1632,6 @@ mod composites_bonding;
 
 #[path = "material_catalog_expansion/viscoelastic_sources.rs"]
 mod viscoelastic_sources;
+
+#[path = "material_catalog_expansion/cubic_silver.rs"]
+mod cubic_silver;

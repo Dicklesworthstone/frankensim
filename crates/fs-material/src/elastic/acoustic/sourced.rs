@@ -12,6 +12,9 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
+/// Explicit three-coefficient cubic symmetry using the same tensor consumers.
+pub mod cubic;
+
 /// Exact property keys in density, bulk-modulus, shear-modulus order. Choosing
 /// this type explicitly declares the isotropic model; it is unsuitable for
 /// directional crystal constants or a homogenization without a stated law.
@@ -182,7 +185,7 @@ fn require_scalar(
     {
         return Err(MaterialStatePointError::InvalidRequirement {
             property: requirement.name().into(),
-            reason: "isotropic density/bulk/shear requires the declared scalar quantity, not a directional tensor or stress component",
+            reason: "elastic scalar parameters require the declared scalar quantity, not an addressed tensor or stress component",
         });
     }
     Ok(())
