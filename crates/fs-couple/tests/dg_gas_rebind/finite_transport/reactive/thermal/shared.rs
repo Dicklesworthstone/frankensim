@@ -1,5 +1,7 @@
 //! One shared material inventory couples several original finite gas owners.
+#[path = "shared/molecular.rs"]
 mod molecular;
+#[path = "shared/wall.rs"]
 mod wall;
 
 use super::*;

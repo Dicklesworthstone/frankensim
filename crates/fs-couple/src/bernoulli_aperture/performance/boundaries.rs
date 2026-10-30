@@ -236,6 +236,12 @@ impl AperturePerformance {
                 invalid("source forces and boundaries exceed the auxiliary compilation work budget")
             })?;
         }
+        if let Some(gas) = &self.finite_gas {
+            assignments = assignments.checked_sub(gas.program.controls.len())
+                .ok_or_else(|| invalid("heat and other source controls exceed the combined storage budget"))?;
+            work = work.checked_sub(gas.program.controls.len() as u64)
+                .ok_or_else(|| invalid("heat and other source controls exceed the auxiliary compilation work budget"))?;
+        }
         Ok((assignments, work))
     }
 

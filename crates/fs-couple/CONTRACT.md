@@ -15108,3 +15108,29 @@ operators, independent cell geometry, actual flue pressure and callback
 partitioning, thermal/species interventions, malformed/source/work refusals and
 late thermal cancellation. The bundled flue example reaches computed baffled
 radiation, the original microphone and explicit CLI decimation/PCM output.
+
+### Authored finite-gas heat on the continuing DG aperture performance
+
+`AperturePerformance::with_finite_gas_heat` attaches one original
+`ClosedGasParcel` and a finite signed-power program before playback. The first
+assignment is at mechanical sample zero; later assignments are strictly
+increasing inside the original half-open window. Each held watt value supplies
+power times the actual mechanical step to the existing
+`ApertureDg::step_with_finite_gas_heat_controlled` transaction. The original
+source-supported caloric inversion pays acoustic parameter work and publishes
+the same accepted inventory to the continuing aperture, main DG bore and finite
+terminal passages. Original wall, diffusion and terminal histories remain in
+their owners. The actual full finite-gas step report remains accessible.
+
+Admission requires the same complete initial frozen-gas source, original uniform
+circular geometry and full main-gas volume, the original loss/transfer owner,
+and explicit caloric/coupling controls. Heat assignments share the existing
+performance storage/work budget with pressure, force and boundary programs.
+Cold attachment and every physical trial honor cancellation. Failed physical
+samples publish neither gas/source/load state nor control cursors and retain
+the existing poisoned-renderer contract.
+
+
+This API retains a fixed-volume closed inventory. It refuses independent
+upstream/branch gases and computed exterior mean-pressure jumps; explicit mass
+and enthalpy transport remains required for those boundaries.

@@ -12,6 +12,8 @@ pub mod file;
 pub mod force;
 /// Explicit pressures and forces on the retained moving graph boundaries.
 pub mod boundaries;
+/// Scheduled heat into the original finite thermochemical DG inventory.
+pub mod finite_gas;
 
 use super::dynamic::DynamicAperture;
 use super::dg::ApertureDg;
@@ -118,6 +120,7 @@ pub struct AperturePerformance {
     boundaries: Option<boundaries::BoundarySchedule>,
     boundary_frame: Option<BoundaryNetworkFrame>,
     mechanical_work_j: f64,
+    finite_gas: Option<finite_gas::FiniteGasPlayback>,
     observation_policy: ObservationPolicy,
 }
 fn receiver_error(error: String) -> RenderError {
@@ -331,6 +334,7 @@ impl AperturePerformance {
         Ok(Self { system, observation, receiver, dg_terminal_flows, exterior_gas, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, poisoned: false, forces: None, boundaries: None,
             boundary_frame: None, mechanical_work_j: 0.0,
+            finite_gas: None,
             observation_policy: ObservationPolicy::Diagnostic })
     }
 
@@ -405,7 +409,11 @@ impl AperturePerformance {
         let boundary_drives = self.boundaries.as_ref().map_or(&[][..], |b| b.candidate());
         match &mut self.system {
             CoupledAperture::Dg(m) => {
-                let frame = m.step_with_force(drive, force_n).map_err(RenderError::Voice)?;
+                let frame = if let Some(gas) = &mut self.finite_gas {
+                    gas.step(m, drive, force_n)?
+                } else {
+                    m.step_with_force(drive, force_n).map_err(RenderError::Voice)?
+                };
                 let pressure = match self.observation {
                     ApertureObservation::Inlet => frame.aperture.bore_pressure_pa,
                     ApertureObservation::TubeBaffled(_) => {
@@ -486,6 +494,7 @@ impl PressureRenderer for AperturePerformance {
                     *slot = value; self.next = next; self.held_pressure_pa = pressure;
                     if let Some(forces) = &mut self.forces { forces.accept(sample); }
                     if let Some(boundaries) = &mut self.boundaries { boundaries.accept(); }
+                    if let Some(gas) = &mut self.finite_gas { gas.accept(sample); }
                     self.mechanical_work_j = work;
                     self.boundary_frame = boundary_frame;
                 }
