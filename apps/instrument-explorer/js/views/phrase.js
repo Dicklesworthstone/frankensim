@@ -166,6 +166,7 @@ function noteTitle(n) {
   else if (unpitched(n)) parts.push('no steady pitch: the waveform never settles into one period');
   else if (n.f0_hz) parts.push(`sounds ${fmt.num(n.f0_hz, 1)} Hz`);
   if (n.octave_check) parts.push(`(${n.octave_check})`);
+  if (n.harmonic_check) parts.push(`(${n.harmonic_check})`);
   return parts.join(' · ');
 }
 

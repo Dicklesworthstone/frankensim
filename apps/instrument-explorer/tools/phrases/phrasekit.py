@@ -90,6 +90,7 @@ def pitch(x, a, b, want):
         sel = (freqs >= fx * 0.98) & (freqs <= fx * 1.02)
         return float(db[sel].max()) if sel.any() else -120.0
 
+    f_ac = f
     folded = 0
     while 6 * f < SR / 2 and folded < 3:
         odd = np.mean([level(k * f) for k in (1, 3, 5)])
@@ -98,9 +99,35 @@ def pitch(x, a, b, want):
             break
         f *= 2
         folded += 1
+
+    # The converse: vibrato spreads the k-th harmonic k times as wide as the fundamental, so the autocorrelation at the
+    # true period can sink under the candidates' bar while a strong upper harmonic stays sharp (a sung /a/ C3 at 131
+    # Hz, its 7th harmonic 11 dB over the 1st, read 455 Hz and was folded up to that 7th harmonic). When every slot
+    # j f/k (j = 1..k-1) carries a line within 25 dB of the level at f and 10 dB or more above the spectrum midway to
+    # both neighbouring slots, f is the k-th harmonic of f/k: divide by the largest such k, and say so. A true pitch has
+    # nothing between its own harmonics, so no k passes. After an octave fold only odd k are tried: an even one would
+    # put back the period the fold found to have no odd harmonics.
+    def floor(fx):
+        sel = (freqs >= fx * 0.98) & (freqs <= fx * 1.02)
+        return float(np.median(db[sel])) if sel.any() else -120.0
+
+    divided, f_fold = 1, f
+    ref = level(f)
+    for k in range(8, 1, -1):
+        g = f / k
+        if (k % 2 or not folded) and g >= 30 and all(
+                level(j * g) >= ref - 25 and level(j * g) - max(floor((j - 0.5) * g), floor((j + 0.5) * g)) >= 10
+                for j in range(1, k)):
+            divided = k
+            break
+    f /= divided
     t = hz(want) if want else None
     out = dict(f0_hz=round(f, 2), cents=None if not t else round(1200 * math.log2(f / t), 1), periodicity=round(clarity, 3))
-    if folded:
+    if divided > 1:
+        moved = f", which the octave check moved to {f_fold:.1f} Hz" if folded else ""
+        out["harmonic_check"] = (f"the autocorrelation read {f_ac:.1f} Hz{moved}: harmonic {divided} of {f:.1f} Hz, "
+                                 f"whose every lower harmonic carries a line; corrected")
+    elif folded:
         out["octave_check"] = f"the autocorrelation's period was {2 ** folded}x too long (no odd harmonics); corrected"
     return out
 
@@ -169,7 +196,9 @@ def main():
     (OUT / "phrases.json").write_text(json.dumps(dict(phrases=docs, pitch_method=(
         "Candidate periods from the autocorrelation of the note's steady part, checked against its spectrum: a period "
         "with no line at its own frequency whose lines all fall at multiples of k is k times too long and is moved; "
-        "of the rest, the lowest with 70 % of the best harmonic contrast wins. A note whose autocorrelation peak "
+        "of the rest, the lowest with 70 % of the best harmonic contrast wins. A pitch f whose every lower slot j f/k "
+        "(j < k) also carries a line, as when vibrato blurs the true period and an upper harmonic's own period wins, "
+        "is the k-th harmonic of f/k and is moved down, and the note says so. A note whose autocorrelation peak "
         "stays under 0.5 has no steady pitch.")), indent=1))
     print(len(docs), "phrases")
 
