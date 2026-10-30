@@ -617,6 +617,84 @@ fn g1_material_transport_changes_reciprocal_equilibrium_and_continuing_inertia()
 }
 
 #[test]
+fn complete_assembly_preserves_equilibrium_and_actual_newmark_motion() {
+    with_network(0.2, 1.0, 0.2, false, 100000.0, |cx, thermal, source, prepared| {
+        let fixed: Vec<_> = (0..15).filter(|d| *d != 3).collect();
+        let initial = source.geometry()
+            .assemble(&[], VolumeLoad3::None, &[(3, 0.8)], cx).unwrap();
+        let loads = source.geometry()
+            .assemble(&[], VolumeLoad3::None, &[(3, 1.0)], cx).unwrap();
+        let body = ThermoelasticSolid::try_new(
+            source, thermal, &initial, &fixed, &[[280.0, 360.0]; 2],
+            mechanical(), solve(), cx,
+        ).unwrap();
+        let record = Steps { count: 0, cancel_at: usize::MAX };
+        let saved_cells = thermal.cells().clone();
+        let original_displacement = body.equilibrium().solution.displacement.clone();
+        // A borrowed trait object also exercises the public ?Sized observer alias.
+        let assembly: &dyn HeatAssembly<Sample = HeatNetworkSample, Error = HeatNetworkError> = prepared;
+        let (native, native_audit) = body.advance_heat_network_candidate(
+            thermal, prepared, &record, 0.1, &loads, thermal_controls(), solve(), cx,
+        ).unwrap();
+        let (complete, audit) = body.advance_heat_assembly_candidate(
+            thermal, assembly, &record, 0.1, &loads, thermal_controls(), solve(), cx,
+        ).unwrap();
+        assert_eq!(complete.thermal.cells(), native.thermal.cells());
+        assert_eq!(complete.solid.equilibrium().solution.displacement,
+            native.solid.equilibrium().solution.displacement);
+        assert_eq!(complete.solid.time_s(), native.solid.time_s());
+        assert_eq!(complete.report.mechanical_work_j, native.report.mechanical_work_j);
+        assert_eq!(complete.observer.second, native.observer.second);
+        assert_eq!(complete.observer.first.sample().unwrap().radiation,
+            native.observer.first.sample().unwrap().radiation);
+        assert_eq!(audit, native_audit);
+        assert!(complete.report.cells.iter().any(|cell| cell.reversible_heat_j != 0.0));
+        assert_ne!(complete.solid.equilibrium().solution.displacement, original_displacement);
+        assert_eq!(body.equilibrium().solution.displacement, original_displacement);
+        assert_eq!(body.time_s(), 0.0);
+        let mut velocity = [[0.0; 3]; 5];
+        velocity[1][0] = 0.02;
+        let moving = body.begin_transient(
+            &initial,
+            &velocity,
+            TransientConfig3 {
+                maximum_steps: 8,
+                maximum_displacement_m: 0.05,
+                absolute_force_tolerance_n: 1e-11,
+                absolute_energy_tolerance_j: 1e-10,
+                relative_energy_tolerance: 1e-8,
+                ..TransientConfig3::default()
+            },
+            cx,
+        ).unwrap();
+        let original_motion = moving.nodal_motion(cx).unwrap();
+        let (native, native_audit) = moving.advance_heat_network_candidate(
+            thermal, prepared, &record, 0.1, &loads, thermal_controls(), solve(), cx,
+        ).unwrap();
+        let (complete, audit) = moving.advance_heat_assembly_candidate(
+            thermal, assembly, &record, 0.1, &loads, thermal_controls(), solve(), cx,
+        ).unwrap();
+        assert_eq!(complete.thermal.cells(), native.thermal.cells());
+        assert_eq!(complete.solid.nodal_motion(cx).unwrap(), native.solid.nodal_motion(cx).unwrap());
+        assert_eq!(complete.solid.step(), 1);
+        assert_eq!(complete.solid.time_s(), native.solid.time_s());
+        assert_eq!(complete.report.kinetic_energy_change_j, native.report.kinetic_energy_change_j);
+        assert_eq!(complete.report.mechanical_work_j, native.report.mechanical_work_j);
+        assert_eq!(complete.observer.second, native.observer.second);
+        assert_eq!(complete.observer.first.sample().unwrap().radiation,
+            native.observer.first.sample().unwrap().radiation);
+        assert_eq!(audit, native_audit);
+        assert_ne!(complete.solid.nodal_motion(cx).unwrap(), original_motion);
+        assert_eq!(moving.nodal_motion(cx).unwrap(), original_motion);
+        assert_eq!(moving.step(), 0);
+        assert_eq!(moving.time_s(), 0.0);
+        assert_eq!(thermal.cells(), &saved_cells);
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(record.count, 0);
+    });
+}
+
+#[test]
 fn g4_shared_source_admission_and_late_failures_preserve_every_original_history() {
     for pressure in [100000.0, 100001.0] {
         with_network(
@@ -665,6 +743,15 @@ fn g4_shared_source_admission_and_late_failures_preserve_every_original_history(
                             "heat and reciprocal solid material conditions disagree"
                         ))
                     ));
+                    assert!(matches!(
+                        body.advance_heat_assembly_candidate(
+                            thermal, prepared, &record, 0.1, &loads,
+                            thermal_controls(), solve(), cx,
+                        ),
+                        Err(HeatAssemblyAdvanceError::Binding(ThermoelasticHeatError::Invalid(
+                            "heat and reciprocal solid material conditions disagree"
+                        )))
+                    ));
                 } else {
                     let first = body
                         .advance_heat_network_candidate(
@@ -695,6 +782,13 @@ fn g4_shared_source_admission_and_late_failures_preserve_every_original_history(
                         )
                         .is_err()
                     );
+                    assert!(matches!(
+                        body.advance_heat_assembly_candidate(
+                            thermal, prepared, &cancel, 0.1, &loads,
+                            thermal_controls(), solve(), cx,
+                        ),
+                        Err(HeatAssemblyAdvanceError::Coupled(_))
+                    ));
                     assert_eq!(cancel.count, 0);
                     let mut short = solve();
                     short.maximum_iterations = 1;
@@ -782,6 +876,25 @@ fn g4_shared_source_admission_and_late_failures_preserve_every_original_history(
                     count: 0,
                     cancel_at: 2,
                 };
+                if pressure != 100000.0 {
+                    assert!(matches!(
+                        moving.advance_heat_assembly_candidate(
+                            thermal, prepared, &record, 0.1, &loads,
+                            thermal_controls(), solve(), cx,
+                        ),
+                        Err(HeatAssemblyAdvanceError::Binding(ThermoelasticHeatError::Invalid(
+                            "heat and reciprocal solid material conditions disagree"
+                        )))
+                    ));
+                } else {
+                    assert!(matches!(
+                        moving.advance_heat_assembly_candidate(
+                            thermal, prepared, &cancel, 0.1, &loads,
+                            thermal_controls(), solve(), cx,
+                        ),
+                        Err(HeatAssemblyAdvanceError::Coupled(_))
+                    ));
+                }
                 assert!(
                     moving
                         .advance_heat_network_candidate(

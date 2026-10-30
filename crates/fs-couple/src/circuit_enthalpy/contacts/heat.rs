@@ -23,7 +23,8 @@ pub use assembly::HeatAssembly;
 mod extension;
 mod observer;
 mod layers;
-pub use observer::MaterialHeatObserver;
+pub use observer::{MaterialHeatObserver, AssemblyHeatObserver, HeatSourceObserver,
+    HeatAssemblyAdvanceError, observe_heat_assembly};
 pub mod solid;
 /// Thermoelectric conversion with the same complete material heat assembly.
 pub mod thermoelectric;
@@ -117,6 +118,20 @@ pub struct HeatNetworkSample {
     pub radiation: Option<RadiationCellSources>,
 }
 impl HeatNetworkSample {
+    /// Native frozen-emissivity rate bound for the explicit thermal timeline.
+    /// Finite conduction/contact links already participate in its native CFL
+    /// calculation and are not added again. Complete assemblies add the bounds
+    /// of their own prescribed heat sources to this original contribution.
+    pub fn explicit_source_conductance_bounds_w_k(
+        &self,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<fs_thermal::enthalpy::CellId, f64>, HeatNetworkError> {
+        checkpoint()?;
+        self.radiation.as_ref()
+            .map(|radiation| radiation.conductance_bounds_w_k(checkpoint))
+            .transpose().map(|bounds| bounds.unwrap_or_default()).map_err(HeatNetworkError::from)
+    }
+
     /// Roundoff-net watts into this closed enclosure's cells. Physically this is
     /// internal exchange, NOT external supply; preserve rather than redistribute it.
     pub fn radiation_net_power_w(&self) -> f64 {

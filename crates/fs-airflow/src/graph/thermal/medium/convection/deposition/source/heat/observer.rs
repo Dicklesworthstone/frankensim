@@ -223,27 +223,7 @@ where
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         let coefficients = self.resolve_checked(thermal, checkpoint)?.bulk;
         let source = coefficients.source;
-        let mut additional = if let Some(radiation) = &source.heat.radiation {
-            radiation
-                .conductance_bounds_w_k(&mut *checkpoint)
-                .map_err(HeatNetworkError::from)?
-        } else {
-            BTreeMap::new()
-        };
-        for sample in source.convection.convection().samples() {
-            checkpoint()?;
-            let g = sample.evaluation.as_ref().map_or(0.0, |evaluation| {
-                evaluation.coefficient.value.value() * sample.exposed_area_m2
-            });
-            let sum = additional.get(&sample.cell).copied().unwrap_or(0.0) + g;
-            if !g.is_finite() || g < 0.0 || !sum.is_finite() {
-                return Err(HeatNetworkError::Invalid(
-                    "combined convection/radiation conductance is unrepresentable",
-                )
-                .into());
-            }
-            additional.insert(sample.cell, sum);
-        }
+        let additional = source.explicit_source_conductance_bounds_w_k(&mut *checkpoint)?;
         if !source.heat.radiation_net_power_w().is_finite()
             || !source
                 .convection

@@ -3,7 +3,9 @@
 mod dynamics;
 
 use super::*;
-use fs_couple::circuit_enthalpy::contacts::heat::solid::SolidHeatError;
+use fs_couple::circuit_enthalpy::contacts::heat::{
+    HeatAssembly, HeatAssemblyAdvanceError, HeatNetworkSample, solid::SolidHeatError,
+};
 use fs_couple::circuit_enthalpy::material::MaterialCell;
 use fs_material::thermal::source::ThermalMaterialPoint;
 
@@ -14,6 +16,18 @@ fn direct_heat_entry_preserves_native_states_and_closes_the_original_energy_tole
         let (loaded, audit) = solid.advance_heat_network_candidate(thermal, prepared, &record,
             1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
             control(), cx).unwrap();
+        // Exercise the public unsized provider path with the exact same native owner.
+        let assembly: &dyn HeatAssembly<Sample = HeatNetworkSample, Error = HeatNetworkError> = prepared;
+        let (assembled, assembly_audit) = solid.advance_heat_assembly_candidate(
+            thermal, assembly, &record, 1.0, &supports(SHEAR), &applied(),
+            IncrementSettings::default(), thermal_config(), control(), cx).unwrap();
+        assert_eq!(assembled.thermal().cells(), loaded.thermal().cells());
+        assert_eq!(assembled.solid().solution(), loaded.solid().solution());
+        assert_eq!(assembled.observer().second, loaded.observer().second);
+        assert_eq!(assembled.observer().first.sample().unwrap().radiation,
+            loaded.observer().first.sample().unwrap().radiation);
+        assert_eq!(assembly_audit, audit);
+        assert!(assembled.report().physical_heat_j > 0.0);
         let observer = prepared.observe(cx, record.clone(), control().energy_tolerance_j).unwrap();
         let manual = solid.advance(thermal, &observer, 1.0, &supports(SHEAR), &applied(),
             IncrementSettings::default(), thermal_config(), control(), cx).unwrap();
@@ -45,6 +59,55 @@ fn direct_heat_entry_preserves_native_states_and_closes_the_original_energy_tole
 }
 
 #[test]
+fn complete_assembly_preserves_actual_inertial_plastic_state_and_native_heat_account() {
+    with_heat(0.7, 0.1, |cx, _, _, thermal, solid, prepared| {
+        let mut velocity = vec![[0.0; 3]; NODES.len()];
+        velocity[3][0] = 1.0;
+        let moving = fs_couple::solid_enthalpy::plastic::dynamics::ThermoplasticDynamics::try_new(
+            solid.clone(), velocity.clone(), cx,
+        ).unwrap();
+        let record = Recorder::default();
+        let (native, native_audit) = moving.advance_heat_network_candidate(
+            thermal, prepared, &record, 1.0, &supports(SHEAR), &applied(),
+            IncrementSettings::default(), thermal_config(), control(), cx,
+        ).unwrap();
+        let assembly: &dyn HeatAssembly<Sample = HeatNetworkSample, Error = HeatNetworkError> = prepared;
+        let (complete, audit) = moving.advance_heat_assembly_candidate(
+            thermal, assembly, &record, 1.0, &supports(SHEAR), &applied(),
+            IncrementSettings::default(), thermal_config(), control(), cx,
+        ).unwrap();
+        assert_eq!(complete.thermal().cells(), native.thermal().cells());
+        assert_eq!(complete.dynamics().solid().solution(), native.dynamics().solid().solution());
+        assert_eq!(complete.dynamics().velocity_mps(), native.dynamics().velocity_mps());
+        assert_eq!(complete.dynamics().time_s(), native.dynamics().time_s());
+        assert_eq!(complete.observer().second, native.observer().second);
+        assert_eq!(complete.observer().first.sample().unwrap().radiation,
+            native.observer().first.sample().unwrap().radiation);
+        assert_eq!(audit, native_audit);
+        let actual = complete.report();
+        let expected = native.report();
+        assert_eq!(actual.inertia.kinetic_before_j, expected.inertia.kinetic_before_j);
+        assert_eq!(actual.inertia.kinetic_after_j, expected.inertia.kinetic_after_j);
+        assert_eq!(actual.inertia.numerical_loss_j, expected.inertia.numerical_loss_j);
+        assert_eq!(actual.material.physical_heat_j, expected.material.physical_heat_j);
+        assert!(actual.inertia.kinetic_before_j > 0.0);
+        assert!(actual.inertia.kinetic_after_j > 0.0);
+        assert!(actual.inertia.numerical_loss_j > 0.0);
+        assert!(actual.material.physical_heat_j > 0.0);
+        assert!(complete.dynamics().solid().solution().element_states[0].alpha > 0.0);
+        close(
+            actual.material.thermal_audit.stored_energy_change_j,
+            actual.material.physical_heat_j + actual.material.reversible_heat_j + audit.external_heat_j,
+            control().energy_tolerance_j,
+        );
+        assert_eq!(moving.velocity_mps(), velocity.as_slice());
+        assert_eq!(moving.time_s(), 0.0);
+        assert_eq!(thermal.time_s(), 0.0);
+        assert!(record.durations.is_empty());
+    });
+}
+
+#[test]
 fn same_card_and_caloric_law_do_not_excuse_different_mechanical_source_conditions() {
     with_heat(0.7, 0.1, |cx, gate, f, thermal, solid, original| {
         let keys = vec![Some((f.conductivity.clone(), MaterialPropertySelection::SingleClaimOnly)); 2];
@@ -67,12 +130,20 @@ fn same_card_and_caloric_law_do_not_excuse_different_mechanical_source_condition
         assert!(matches!(solid.advance_heat_network_candidate(thermal, &prepared, &(),
             1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
             control(), cx), Err(SolidHeatError::Invalid("heat and solid material conditions disagree"))));
+        assert!(matches!(solid.advance_heat_assembly_candidate(thermal, &prepared, &(),
+            1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
+            control(), cx), Err(HeatAssemblyAdvanceError::Binding(SolidHeatError::Invalid(
+                "heat and solid material conditions disagree")))));
         let moving = fs_couple::solid_enthalpy::plastic::dynamics::ThermoplasticDynamics::try_new(
             solid.clone(), vec![[0.0; 3]; NODES.len()], cx).unwrap();
         let velocity = moving.velocity_mps().to_vec();
         assert!(matches!(moving.advance_heat_network_candidate(thermal, &prepared, &(),
             1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
             control(), cx), Err(SolidHeatError::Invalid("heat and solid material conditions disagree"))));
+        assert!(matches!(moving.advance_heat_assembly_candidate(thermal, &prepared, &(),
+            1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
+            control(), cx), Err(HeatAssemblyAdvanceError::Binding(SolidHeatError::Invalid(
+                "heat and solid material conditions disagree")))));
         assert_eq!(moving.velocity_mps(), velocity.as_slice());
         assert_eq!(thermal.cells(), &saved); assert_eq!(solid.solution(), &history);
         gate.request();
@@ -82,6 +153,12 @@ fn same_card_and_caloric_law_do_not_excuse_different_mechanical_source_condition
         assert!(matches!(moving.advance_heat_network_candidate(thermal, original, &(),
             1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
             control(), cx), Err(SolidHeatError::Cancelled)));
+        assert!(matches!(solid.advance_heat_assembly_candidate(thermal, original, &(),
+            1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
+            control(), cx), Err(HeatAssemblyAdvanceError::Binding(SolidHeatError::Cancelled))));
+        assert!(matches!(moving.advance_heat_assembly_candidate(thermal, original, &(),
+            1.0, &supports(SHEAR), &applied(), IncrementSettings::default(), thermal_config(),
+            control(), cx), Err(HeatAssemblyAdvanceError::Binding(SolidHeatError::Cancelled))));
         assert_eq!(moving.velocity_mps(), velocity.as_slice());
         assert_eq!(thermal.cells(), &saved); assert_eq!(solid.solution(), &history);
     });

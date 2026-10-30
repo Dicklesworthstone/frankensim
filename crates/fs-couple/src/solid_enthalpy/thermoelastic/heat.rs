@@ -5,6 +5,9 @@
 //! reversible heat retain the original thermoelastic trajectory. Both see the
 //! same finite caloric cells and source context; neither is advanced twice.
 
+mod assembly;
+pub use assembly::ThermoelasticHeatAssemblyError;
+
 use super::dynamic::{DynamicThermoelasticCandidate, DynamicThermoelasticSolid};
 use super::*;
 use crate::circuit_enthalpy::contacts::heat::{

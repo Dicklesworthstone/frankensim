@@ -1814,3 +1814,30 @@ Regression sources exercise data-only permeability/viscosity changes, independen
 derived pressure/heat operating points, hydraulic heat in the same enthalpy state,
 original source receipts, discarded-trial support refusal, sealed topology, solid
 feedback and parallel redistribution/mixing.
+
+
+## Complete coolant assemblies on native solid motion
+
+The existing `SourceConvectionHeatNetwork` and its finite `with_links` view
+also serve the shared `observe_heat_assembly` timeline and all four native
+static/dynamic thermoplastic and reciprocal thermoelastic assembly entries.
+Source-bound coolant and original solid material temperatures remain on the
+same native candidate. Finite coolant storage/transport can therefore change
+actual deformation and retained plastic history while preserving original
+material identities, heat destinations and source receipts.
+
+The complete source sample owns the explicit additional-rate bound: original
+radiation plus prescribed reservoir h*A, with native finite-link conductances
+excluded because they already enter the thermal owner. The specialized
+convection observer and generic assembly observer reuse this same calculation.
+The independent combined-source/event regression checks identical substeps,
+continued history, finite fluid endpoints and external heat; an undeclared
+explicit bound refuses without changing the original history.
+
+The finite-coolant J2 regression changes only original coolant Cp data and
+compares actual loaded equilibrium with an independent two-shear return
+mapping, then continues cooling through unloading with retained plastic
+history. Physical heat, finite internal exchange, original mechanical storage
+and numerical loss remain separate. Fixed geometry and the existing thermal
+and mechanical refinement requirements continue to apply.
+

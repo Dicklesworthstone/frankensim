@@ -1,8 +1,33 @@
 //! The full heat assembly shares one native timeline with finite fluid storage.
 use super::*;
-use fs_couple::circuit_enthalpy::contacts::heat::HeatNetworkError;
+use fs_couple::circuit_enthalpy::{
+    CircuitEnthalpyError,
+    contacts::{
+        ContactThermalCoefficients,
+        heat::{HeatAssembly, HeatNetworkError, PreparedHeatNetwork, observe_heat_assembly},
+    },
+};
 use fs_thermal::enthalpy::DepositionObserver;
 use fs_thermal::observers::{CoupledObservers, ObserverCouplingError};
+
+// A complete implicit provider remains valid for implicit drivers, but cannot
+// enter an explicit timeline without declaring its physical source-rate bound.
+// Neither this provider nor the real coolant assembly needs to be Clone.
+struct ImplicitOnly<'a, A: ?Sized>(&'a A);
+impl<A: HeatAssembly + ?Sized> HeatAssembly for ImplicitOnly<'_, A> {
+    type Sample = A::Sample;
+    type Error = A::Error;
+    fn prepared_heat_network(&self) -> &PreparedHeatNetwork<'_, '_> {
+        self.0.prepared_heat_network()
+    }
+    fn resolve_heat(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        self.0.resolve_heat(cx, thermal)
+    }
+}
 
 const EVENT_S: f64 = 0.2;
 const END_S: f64 = 0.4;
@@ -263,6 +288,62 @@ fn g1_g3_complete_material_heat_and_both_fluid_boundaries_share_native_substeps(
             let (next, accepted, audit) = thermal
                 .advance_observed(&observer, END_S, config(0.5), || Ok(()))
                 .unwrap();
+            // The common assembly observer must follow the same independent
+            // finite-link + prescribed-reservoir stability restriction and
+            // event sequence as the original specialized coolant observer.
+            let assembly = network.with_links(
+                &links,
+                1,
+                |_: &SourceConvectiveLink, _: &DepositionSimulation<'_>, t: Temperature| {
+                    fluid.at_temperature(t)
+                },
+            );
+            let common = observe_heat_assembly(&assembly, &cx, Trace::default(), 1e-8).unwrap();
+            let (common_next, common_history, common_audit) = thermal
+                .advance_observed(&common, END_S, config(0.5), || Ok(()))
+                .unwrap();
+            assert_eq!(common_next.cells(), next.cells());
+            assert_eq!(common_history.second, accepted.second);
+            assert_eq!(common_audit.substeps, audit.substeps);
+            near(common_audit.external_heat_j, audit.external_heat_j, 1e-12);
+            near(common_history.first.closed_radiation_net_j(), 0.0, 0.0);
+            let common_endpoint = common_history.first.sample().unwrap();
+            let common_link = &common_endpoint.finite_convection.as_ref().unwrap().samples()[0];
+            let specialized_link = &accepted.first.sample().unwrap()
+                .finite_convection.as_ref().unwrap().samples()[0];
+            near(common_link.wall_temperature_k, specialized_link.wall_temperature_k, 0.0);
+            near(common_link.fluid_temperature_k, specialized_link.fluid_temperature_k, 0.0);
+            assert_eq!(
+                common_link.material.material().identity(),
+                specialized_link.material.material().identity(),
+            );
+            assert!(common.first.sample().is_none() && common.second.steps.is_empty());
+            let (common_middle, common_part, first_audit) = thermal
+                .advance_observed(&common, EVENT_S, config(0.5), || Ok(()))
+                .unwrap();
+            let (common_resumed, common_part, last_audit) = common_middle
+                .advance_observed(&common_part, END_S, config(0.5), || Ok(()))
+                .unwrap();
+            assert_eq!(common_resumed.cells(), common_next.cells());
+            assert_eq!(common_part.second, common_history.second);
+            near(first_audit.external_heat_j + last_audit.external_heat_j,
+                common_audit.external_heat_j, 1e-10);
+
+            let undeclared = ImplicitOnly(&assembly);
+            // Resolving the implicit physical assembly itself remains valid.
+            undeclared.resolve_heat(&cx, &thermal).unwrap();
+            let refused = observe_heat_assembly(&undeclared, &cx, Trace::default(), 1e-8).unwrap();
+            assert!(matches!(
+                thermal.advance_observed(&refused, END_S, config(0.5), || Ok(())),
+                Err(ObserverCouplingError::First(CircuitEnthalpyError::Source(
+                    ConvectionHeatError::Heat(HeatNetworkError::Invalid(
+                        "heat assembly has not declared its explicit source-rate bounds",
+                    )),
+                )))
+            ));
+            assert!(refused.first.sample().is_none() && refused.second.steps.is_empty());
+            assert_eq!(thermal.cells(), &saved);
+
             let (expected, reservoir_heat) = reference(cp, 0.5);
             assert_eq!(accepted.second.steps.len(), expected.steps.len());
             for (actual, expected) in accepted.second.steps.iter().zip(&expected.steps) {

@@ -2,6 +2,8 @@
 //! The native candidate and observer histories remain the sole state owners.
 
 mod dynamics;
+mod assembly;
+pub use assembly::SolidHeatAssemblyError;
 use super::{HeatNetworkError, MaterialHeatObserver, PreparedHeatNetwork};
 use crate::solid_enthalpy::plastic::{
     ThermoplasticCandidate, ThermoplasticConfig, ThermoplasticError, ThermoplasticSolid,

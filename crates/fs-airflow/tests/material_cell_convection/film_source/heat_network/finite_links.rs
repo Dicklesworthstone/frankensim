@@ -521,3 +521,6 @@ fn g1_g3_finite_coolant_storage_and_transport_reach_the_original_circuit() {
     assert!(viscous[0] > reference[0] && viscous[1] > reference[1]);
     assert!(higher_capacity[0] < reference[0] && higher_capacity[1] < reference[1]);
 }
+
+#[path = "finite_links/solid.rs"]
+mod solid;

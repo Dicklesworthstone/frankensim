@@ -16104,3 +16104,56 @@ motion steps with stiffness/density/conductivity substitutions, original
 reservoir and interval heat, and failed-candidate rollback. An independent
 analytic energy reference closes to roundoff; native Rust compilation and test
 execution remain unavailable in this implementation environment.
+
+
+## Complete heat assemblies on native solid trajectories
+
+`observe_heat_assembly` connects any original `HeatAssembly` to the existing
+explicit thermal observer timeline. `MaterialHeatObserver` and
+`AssemblyHeatObserver` are aliases over one `HeatSourceObserver`, preserving the
+original prepared-network sample and errors. The complete source payload stays
+available in the accepted first observer; the second observer retains the
+caller's independent history. Providers and samples need not implement Clone.
+
+The four `advance_heat_assembly_candidate` entries use this same observer:
+
+| Original solid owner | Retained native behavior |
+| --- | --- |
+| `ThermoplasticSolid` | Loaded equilibrium, plastic history and physical plastic heat |
+| `ThermoplasticDynamics` | Inertial motion, velocity, plastic history and consistent-mass kinetic storage |
+| `ThermoelasticSolid` | Reciprocal equilibrium, material potential, reversible heat and nodal work |
+| `DynamicThermoelasticSolid` | Newmark displacement, velocity, acceleration, reciprocal heat and the original clock |
+
+Each entry requires the same original material cards, caloric objects and
+physical query context as its prepared heat network. The assembly's finite
+coolant cells keep their own original caloric laws. Additional convection,
+source conduction, interfaces and radiation use the same actual trial
+temperatures and accepted thermal substeps as the solid iteration. Full source
+samples survive; no second integrator, mechanical solver or thermal state is
+created. Source-bound coolant data can therefore change actual deformation
+and retained plastic history through the existing physical response.
+
+Native finite-link conductances enter the original timestep restriction once.
+For an explicit observer, `HeatAssembly::explicit_source_conductance_bounds_w_k`
+must also supply the original closed-radiation and prescribed-reservoir rate
+bounds from that exact source sample. The native convection provider supplies
+radiation plus h*A and omits finite links from this additional map. An implicit
+provider without declared explicit bounds remains usable by implicit drivers
+and refuses explicit stepping. These are frozen-coefficient bounds, not a
+nonlinear temporal-error estimate.
+
+The original closed-energy account removes the enclosure's numerical net
+from external supply. Finite coolant exchange is internal; prescribed
+reservoir heat is external. Physical plastic and reversible heat enter once.
+Kinetic storage, plastic algorithmic loss and exported dynamic damping retain
+their existing distinct accounts. Late source, cancellation, ownership or
+energy failure returns no accepted participant. Continue with the returned
+thermal/solid state, the same original assembly and the second observer's
+history.
+
+Fixed reference heat geometry, small strain/rotation, sub-solidus source
+support and each native mechanical model's domain remain required. Thermal
+substeps do not refine mechanical loading; physical intervals need independent
+refinement. These entries do not add moving thermal geometry, phase-volume
+change, capillary energy or a new constitutive law.
+

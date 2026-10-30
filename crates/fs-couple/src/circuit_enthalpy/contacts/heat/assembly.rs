@@ -30,6 +30,28 @@ pub trait HeatAssembly {
     /// The exact original prepared owner, including its admission and routing.
     fn prepared_heat_network(&self) -> &PreparedHeatNetwork<'_, '_>;
 
+    /// Additional explicit-source rate bounds [W/K] at the exact resolved sample.
+    ///
+    /// Include the original closed-radiation bound and every prescribed
+    /// reservoir source. Native finite-link conductances are already handled
+    /// by the thermal owner and must not appear again here. The original
+    /// frozen-coefficient interpretation applies; this is not a nonlinear
+    /// temporal-error estimate.
+    ///
+    /// Implicit coupled drivers do not require this hook. An explicit observer
+    /// refuses an undeclared bound instead of silently treating an extra source
+    /// as unconditionally stable. Evaluation must not advance any state.
+    fn explicit_source_conductance_bounds_w_k(
+        &self,
+        _sample: &Self::Sample,
+        _checkpoint: &mut dyn FnMut() -> Result<(), fs_thermal::enthalpy::DepositionError>,
+    ) -> Result<std::collections::BTreeMap<fs_thermal::enthalpy::CellId, f64>,
+        CircuitEnthalpyError<Self::Error>> {
+        Err(CircuitEnthalpyError::Source(HeatNetworkError::Invalid(
+            "heat assembly has not declared its explicit source-rate bounds",
+        ).into()))
+    }
+
     /// Complete transport at one original candidate state, with typed failures.
     fn resolve_heat(
         &self,
@@ -50,6 +72,15 @@ impl HeatAssembly for PreparedHeatNetwork<'_, '_> {
 
     fn prepared_heat_network(&self) -> &PreparedHeatNetwork<'_, '_> {
         self
+    }
+
+    fn explicit_source_conductance_bounds_w_k(
+        &self,
+        sample: &Self::Sample,
+        checkpoint: &mut dyn FnMut() -> Result<(), fs_thermal::enthalpy::DepositionError>,
+    ) -> Result<std::collections::BTreeMap<fs_thermal::enthalpy::CellId, f64>,
+        CircuitEnthalpyError<Self::Error>> {
+        sample.explicit_source_conductance_bounds_w_k(checkpoint).map_err(as_circuit_error)
     }
 
     fn resolve_heat(

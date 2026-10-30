@@ -85,6 +85,32 @@ pub struct ConvectionHeatSample<F, L = F> {
     pub finite_convection: Option<ResolvedLinkConvection<L>>,
 }
 
+impl<F, L> ConvectionHeatSample<F, L> {
+    /// Original frozen-source rate bounds for explicit native thermal steps.
+    /// Finite coolant links already enter the native conductance matrix.
+    pub fn explicit_source_conductance_bounds_w_k(
+        &self,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<std::collections::BTreeMap<fs_thermal::enthalpy::CellId, f64>, HeatNetworkError> {
+        let mut additional = self.heat.explicit_source_conductance_bounds_w_k(checkpoint)?;
+        for sample in self.convection.convection().samples() {
+            checkpoint()?;
+            let g = sample.evaluation.as_ref().map_or(0.0, |evaluation| {
+                evaluation.coefficient.value.value() * sample.exposed_area_m2
+            });
+            let sum = additional.get(&sample.cell).copied().unwrap_or(0.0) + g;
+            if !g.is_finite() || g < 0.0 || !sum.is_finite() {
+                return Err(HeatNetworkError::Invalid(
+                    "combined convection/radiation conductance is unrepresentable",
+                ));
+            }
+            additional.insert(sample.cell, sum);
+        }
+        checkpoint()?;
+        Ok(additional)
+    }
+}
+
 impl<F, L> AsRef<HeatNetworkSample> for ConvectionHeatSample<F, L> {
     fn as_ref(&self) -> &HeatNetworkSample {
         &self.heat

@@ -33,6 +33,16 @@ where
         self.heat
     }
 
+    fn explicit_source_conductance_bounds_w_k(
+        &self,
+        sample: &Self::Sample,
+        checkpoint: &mut dyn FnMut() -> Result<(), fs_thermal::enthalpy::DepositionError>,
+    ) -> Result<std::collections::BTreeMap<fs_thermal::enthalpy::CellId, f64>,
+        CircuitEnthalpyError<Self::Error>> {
+        sample.explicit_source_conductance_bounds_w_k(checkpoint)
+            .map_err(ConvectionHeatError::<E>::from).map_err(circuit_error)
+    }
+
     fn resolve_heat(
         &self,
         cx: &Cx<'_>,
@@ -95,6 +105,16 @@ where
 
     fn prepared_heat_network(&self) -> &PreparedHeatNetwork<'_, '_> {
         self.network.heat
+    }
+
+    fn explicit_source_conductance_bounds_w_k(
+        &self,
+        sample: &Self::Sample,
+        checkpoint: &mut dyn FnMut() -> Result<(), fs_thermal::enthalpy::DepositionError>,
+    ) -> Result<std::collections::BTreeMap<fs_thermal::enthalpy::CellId, f64>,
+        CircuitEnthalpyError<Self::Error>> {
+        sample.explicit_source_conductance_bounds_w_k(checkpoint)
+            .map_err(ConvectionHeatError::<E>::from).map_err(circuit_error)
     }
 
     fn resolve_heat(
