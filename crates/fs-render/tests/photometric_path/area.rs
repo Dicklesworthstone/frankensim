@@ -138,7 +138,7 @@ fn projected_polygon_lux(
     luminance * projection
 }
 
-fn diffuse_emitting_cube(coefficient: f64) -> Primitive {
+pub(super) fn diffuse_emitting_cube(coefficient: f64) -> Primitive {
     // Exactly represented planar enclosure: 6 faces * 4 m², inward winding.
     // Unlike a tessellated sphere, this reference has no curvature error.
     Primitive {

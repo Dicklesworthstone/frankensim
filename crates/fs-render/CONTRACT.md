@@ -18,6 +18,11 @@ differentiable lift). Pure Rust throughout.
   sample (`pdf = cosθ/π`).
 - `Lambertian { albedo }` — `brdf` (`ρ/π`); `furnace_radiance(incident,
   samples)` — the FURNACE Monte-Carlo estimate (exactly `albedo·incident`).
+- `spectral::SpectralReflectance` and `Material::SpectralDiffuse` retain a
+  declared passive visible-band reflectance curve. The native diffuse BSDF
+  evaluates `rho(lambda)/pi` at every wavelength, including exact black/white,
+  without assigning a temperature or an emission source. See the calibrated
+  diffuse-material contract below for table admission and accuracy limits.
 - `balance_heuristic` / `power_heuristic` — MIS weights; `mis_weight_sum(pf,
   pg)` — the weight-sum audit (nominally `1`).
 - `mis_integrate_unit(f, n)` — an unbiased MIS estimate of `∫₀¹ f` combining
@@ -1754,8 +1759,9 @@ retained prefix; partitioning changes no sums. Determinism is same-ISA/toolchain
 and fixed caller source order. No GPU, window, file parser or random stream is
 required. Cross-ISA bit equality and large-rig throughput are separate claims.
 
-`LuminanceJob` uses the existing pinhole `PhysicalCamera` and the original
-Lambertian, GGX and spectral conductor BRDFs. Its row-major pixels report
+`LuminanceJob` uses the existing pinhole `PhysicalCamera` and the native
+diffuse (including tabulated spectral reflectance), GGX and spectral conductor
+BRDFs. Its row-major pixels report
 cd/m² before exposure or tone mapping, with direct surface and single-scattered
 haze components separately available. Primary opaque geometry terminates both
 components at the same hit; fixture-to-surface/haze and surface/haze-to-camera
@@ -1819,6 +1825,40 @@ data or permission to redistribute the report; no normative tables have been
 copied or inferred. The open observer dataset above is a separate CIE reference.
 Real-fixture accuracy still requires the reporter's licensed measurements,
 material/medium characterization and calibration uncertainties.
+
+### Passive spectral diffuse materials
+
+`Material::SpectralDiffuse { reflectance }` admits
+`spectral::SpectralReflectance::constant(rho)` or `::table(knots)` as a native
+opaque Lambertian surface. Tables contain 2--16 strictly increasing wavelength
+knots in nanometres, with endpoints exactly 380 and 780 nm and finite fractions
+in [0,1]. Evaluation is linear in wavelength; malformed data and out-of-band
+evaluation refuse without sorting, clipping or extrapolation. Exact zero and
+unit reflectance are admitted. Values are stored directly, preserving tiny
+reflectance that a rounded `1 - emissivity` representation could erase.
+
+The fixed-capacity table validation/interpolation owner is shared with existing
+spectral thermal emissivity, while the public reflectance and emissivity types
+retain distinct meanings. Existing thermal identity bytes and arithmetic are
+preserved. The passive material has no temperature, LTE source or implicit
+emission. Its material identity includes the original reflectance knots;
+identities establish declaration/replay binding, not measurement authority.
+
+Direct photometric images, spectral path images, illuminance-probe paths and
+the native bidirectional diffuse branches evaluate the original `rho(lambda)`.
+The existing cosine-weighted sampler and matched PDF are reused; each diffuse
+bounce preserves the wavelength's own reflected fraction. A cached RGB AOV
+projection is display metadata and never replaces the physical path spectrum.
+Photometry version 5 and path version 11 add this material admission without
+changing existing source spectra or the arithmetic of existing material families.
+
+Independent regressions use published CIE weights for two-band illumination,
+exact black/white limits and a closed emitting cube with wavelength-dependent
+reflectance. The cube's finite-depth reflection series averages powers of the
+original spectral reflectance, exposing premature gray averaging. The table
+does not certify measurement calibration, spectral resolution/interpolation,
+angular Lambertian accuracy or omitted transport. Numerical `NoClaim`, unknown
+total error and the separate interpretation of sampling uncertainty remain.
 
 ### Borrowed spectral physical media
 

@@ -24,10 +24,9 @@
 
 use fs_math::det;
 
-/// Integration domain (nm): the standard visible band.
-pub const LAMBDA_MIN: f64 = 380.0;
-/// Upper edge of the visible band (nm).
-pub const LAMBDA_MAX: f64 = 780.0;
+pub(crate) mod reflectance;
+pub use reflectance::{LAMBDA_MAX, LAMBDA_MIN, SpectralReflectance, SpectralReflectanceError};
+
 /// Fixed midpoint-rule nodes for all spectral integrals in this
 /// module: 80 × 5 nm bins. Part of the bit contract.
 pub const QUAD_BINS: usize = 80;

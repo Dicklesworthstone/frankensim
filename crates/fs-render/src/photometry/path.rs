@@ -32,12 +32,13 @@ pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIllumina
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-/// Version 10 admits shared tabulated phase laws for spectral haze transport.
+/// Version 11 admits passive tabulated diffuse reflectance at every bounce.
+/// Version 10's shared tabulated phase laws remain supported.
 /// Analytic phase models retain their arithmetic, hashes and sample addresses.
 /// The published CIE observer, physical camera, multi-beam projector and
 /// finite-source filters retain their existing source and observation models.
 /// Active point fixtures with glass still require missing specular connections.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 10;
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 11;
 
 /// Maximum sampled point-fixture connections at one surface or volume vertex.
 /// The bounded proposal storage is local to that path, with no per-vertex heap

@@ -10,9 +10,10 @@ use super::{
     BOLTZMANN_J_K, ContentHash, DomainHasher, GrayDiffuseThermalSurface, LIGHT_M_S,
     ThermalSurfaceError, planck_radiance_w_m2_sr_nm,
 };
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
-
-const MAX_KNOTS: usize = 16;
+use crate::spectral::{
+    LAMBDA_MAX, LAMBDA_MIN,
+    reflectance::{VisibleFractionTable, VisibleFractionTableError},
+};
 
 /// Bounded piecewise-linear emissivity, including both visible-band endpoints.
 ///
@@ -21,9 +22,7 @@ const MAX_KNOTS: usize = 16;
 /// interpolates RGB values or implies a law outside the declared band.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpectralEmissivity {
-    knots: [(f64, f64); MAX_KNOTS],
-    len: u8,
-    emitting: bool,
+    table: VisibleFractionTable,
 }
 
 impl SpectralEmissivity {
@@ -37,60 +36,20 @@ impl SpectralEmissivity {
     /// Endpoints must be exactly 380 and 780 nm. At most 16 knots are copied
     /// into inline storage; no allocation or caller-owned table survives.
     pub fn table(knots: &[(f64, f64)]) -> Result<Self, ThermalSurfaceError> {
-        if !(2..=MAX_KNOTS).contains(&knots.len())
-            || knots[0].0 != LAMBDA_MIN
-            || knots[knots.len() - 1].0 != LAMBDA_MAX
-        {
-            return Err(ThermalSurfaceError::SpectralEmissivity);
-        }
-        let mut accepted = Self {
-            knots: [(0.0, 0.0); MAX_KNOTS],
-            len: knots.len() as u8,
-            emitting: false,
-        };
-        for (index, &(wavelength_nm, emissivity)) in knots.iter().enumerate() {
-            if !wavelength_nm.is_finite()
-                || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm)
-                || (index > 0 && wavelength_nm <= knots[index - 1].0)
-            {
-                return Err(ThermalSurfaceError::SpectralEmissivity);
-            }
-            if !emissivity.is_finite() || !(0.0..=1.0).contains(&emissivity) {
-                return Err(ThermalSurfaceError::Emissivity);
-            }
-            // One physical zero has one spectral identity.
-            let emissivity = if emissivity == 0.0 { 0.0 } else { emissivity };
-            accepted.knots[index] = (wavelength_nm, emissivity);
-            accepted.emitting |= emissivity > 0.0;
-        }
-        Ok(accepted)
+        Ok(Self {
+            table: VisibleFractionTable::table(knots).map_err(thermal_table_error)?,
+        })
     }
 
     /// Evaluate the accepted linear law at a wavelength in the closed band.
     pub fn at(&self, wavelength_nm: f64) -> Result<f64, ThermalSurfaceError> {
-        if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
-            return Err(ThermalSurfaceError::Wavelength);
-        }
-        let knots = self.knots();
-        let index = knots.partition_point(|&(wavelength, _)| wavelength <= wavelength_nm) - 1;
-        let (left_wavelength, left_value) = knots[index];
-        if wavelength_nm == left_wavelength {
-            return Ok(left_value);
-        }
-        let (right_wavelength, right_value) = knots[index + 1];
-        if left_value == right_value {
-            return Ok(left_value);
-        }
-        let fraction = (wavelength_nm - left_wavelength) / (right_wavelength - left_wavelength);
-        // The convex form preserves nonnegative support near a zero endpoint
-        // without subtracting nearly equal emissivities or clamping the law.
-        Ok((1.0 - fraction) * left_value + fraction * right_value)
+        self.table.at(wavelength_nm).map_err(thermal_table_error)
     }
 
     /// Declared wavelength and emissivity knots, without unused inline slots.
     #[must_use]
     pub fn knots(&self) -> &[(f64, f64)] {
-        &self.knots[..usize::from(self.len)]
+        self.table.knots()
     }
 
     /// Identity of the declared band, interpolation model and numerical table.
@@ -98,12 +57,20 @@ impl SpectralEmissivity {
     #[must_use]
     pub fn identity(&self) -> ContentHash {
         let mut hash = DomainHasher::new("org.frankensim.render.spectral-emissivity.v1");
-        hash.update(&[self.len]);
+        hash.update(&[self.knots().len() as u8]);
         for &(wavelength_nm, emissivity) in self.knots() {
             hash.update(&wavelength_nm.to_bits().to_le_bytes());
             hash.update(&emissivity.to_bits().to_le_bytes());
         }
         hash.finalize()
+    }
+}
+
+fn thermal_table_error(error: VisibleFractionTableError) -> ThermalSurfaceError {
+    match error {
+        VisibleFractionTableError::Knots => ThermalSurfaceError::SpectralEmissivity,
+        VisibleFractionTableError::Fraction => ThermalSurfaceError::Emissivity,
+        VisibleFractionTableError::Wavelength => ThermalSurfaceError::Wavelength,
     }
 }
 
@@ -142,7 +109,7 @@ impl SpectralDiffuseThermalSurface {
         if source_identity == ContentHash([0; 32]) {
             return Err(ThermalSurfaceError::SourceIdentity);
         }
-        if emissivity.emitting {
+        if emissivity.table.has_positive_value() {
             // exp(x)-1 >= x gives the Rayleigh–Jeans upper bound B_lambda <=
             // 2*c*k*T/lambda^4. Its largest value in this band occurs at 380 nm.
             // This check avoids both a broadband T^4 restriction and a source
@@ -196,7 +163,7 @@ impl SpectralDiffuseThermalSurface {
     /// A sufficiently cold spectrum may still underflow numerically to zero.
     #[must_use]
     pub const fn is_emitting(&self) -> bool {
-        self.emissivity.emitting
+        self.emissivity.table.has_positive_value()
     }
 
     /// Source, temperature and declared spectral-diffuse-model identity.

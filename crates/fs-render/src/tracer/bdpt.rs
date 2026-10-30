@@ -240,6 +240,7 @@ impl Vertex {
                 )
             }
             Material::Lambertian { .. }
+            | Material::SpectralDiffuse { .. }
             | Material::GrayDiffuseThermal { .. }
             | Material::SpectralDiffuseThermal { .. }
             | Material::Ggx { .. }
@@ -274,6 +275,7 @@ impl Vertex {
                 match scene.primitives[primitive_index].material {
                     Material::Dielectric { surface, .. } => !surface.is_delta(),
                     Material::Lambertian { .. }
+                    | Material::SpectralDiffuse { .. }
                     | Material::GrayDiffuseThermal { .. }
                     | Material::SpectralDiffuseThermal { .. }
                     | Material::Ggx { .. }
@@ -481,7 +483,10 @@ fn surface_scattering(
     let normal =
         oriented_normal(vertex, predecessor_direction).ok_or(TracerError::MissingNormal)?;
     match material {
-        Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
+        Material::Lambertian { .. }
+        | Material::SpectralDiffuse { .. }
+        | Material::Ggx { .. }
+        | Material::Conductor { .. } => {
             let medium = vertex
                 .medium_toward(predecessor_direction)
                 .map(|entry| entry.glass);
@@ -547,15 +552,16 @@ fn surface_pdf_solid_angle(
     let normal =
         oriented_normal(vertex, predecessor_direction).ok_or(TracerError::MissingNormal)?;
     match material {
-        Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
-            Ok(bsdf_pdf(
-                material,
-                normal,
-                predecessor_direction,
-                next_direction,
-                None,
-            ))
-        }
+        Material::Lambertian { .. }
+        | Material::SpectralDiffuse { .. }
+        | Material::Ggx { .. }
+        | Material::Conductor { .. } => Ok(bsdf_pdf(
+            material,
+            normal,
+            predecessor_direction,
+            next_direction,
+            None,
+        )),
         Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
         Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
             Err(TracerError::ThermalSurfaceUnsupported)
@@ -603,7 +609,10 @@ fn sample_surface(
         Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
             Err(TracerError::ThermalSurfaceUnsupported)
         }
-        Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
+        Material::Lambertian { .. }
+        | Material::SpectralDiffuse { .. }
+        | Material::Ggx { .. }
+        | Material::Conductor { .. } => {
             let Some((wi, pdf_fwd)) = bsdf_sample(material, normal, wo, random[0], random[1], None)
             else {
                 return Ok(None);
