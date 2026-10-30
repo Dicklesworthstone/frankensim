@@ -2,6 +2,9 @@
 #[path = "trajectory.rs"]
 mod trajectory;
 
+#[path = "driven.rs"]
+mod driven;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::elliptic::motion::{
     MotionQueryError, MotionQuerySolve,

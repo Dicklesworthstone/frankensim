@@ -3,6 +3,30 @@
 > Status: ACTIVE (Stage 1, increment 1 — bead tqag). Capability-routed
 > body-to-body contact over certified motion.
 
+## Source-owned driven directional motion
+
+`SourceThermalEllipticCoulomb::advance_driven_motion_consistent` carries the
+original ordered material claims, principal coefficients, texture and accepted
+Resting/Sliding mode into the native driven friction owner. Each private source
+trial starts from the same accepted history and mode. Temperature-dependent
+static capacity can release a previously resting contact; a moving contact
+continues on the kinetic branch.
+
+The shared distance closure sets every declared speed to unsigned travel over
+duration and advances each owned accumulated-distance coordinate from its own
+accepted origin. It uses the actual native path, including changing direction,
+rather than the net-displacement norm. Original material pins and receipts stay
+intact. The caller supplies a physical/source bracket; full-matrix drive does
+not supply a general free-slip upper bound. Accepted roots retain the existing
+lower-sided residual and explicit evaluation budgets.
+
+Four driven groups cover load-band hysteresis, temperature-triggered release,
+speed-dependent breakaway with an independent scalar solution, curved full-matrix
+path closure, source identity, and atomic refusal/retry. Coefficients remain
+held within each phase. Inner curved-motion time refinement and outer
+source/thermal refresh are separate accuracy requirements; no unique branch,
+global error bound or measured material admission is inferred.
+
 ## Source-owned continuous directional sliding and arrest
 
 `SourceThermalEllipticCoulomb::relax_motion_consistent` closes the original

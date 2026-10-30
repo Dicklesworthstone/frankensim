@@ -1,5 +1,29 @@
 # CONTRACT: fs-mbd
 
+## Explicit drive in directional rigid contact
+
+`tangential_friction::directional::driven` applies held external world forces
+and body-frame torques together with the original integrated directional
+traction to the original finite body pair. It reuses full off-centre tensor
+mobility and point kinematics. The native and source-callback entry points
+publish body momenta, accepted friction history and Resting/Sliding mode
+together after independent impulse, endpoint and energy checks.
+
+External work is evaluated through the mass-metric decomposition: free
+full-body work minus free relative-contact work plus the driven trajectory's
+actual relative work. This retains common-body and complementary rotational
+motion, so static relative hold can gain kinetic energy without producing
+frictional heat. The independent balance is `delta K + D - W_external`;
+native effective drive, body momentum changes and callback work are audited
+separately. A force pre-kick is not substituted for the simultaneous drive.
+
+Four driven rigid groups cover common-body static work, breakaway, full-tensor
+off-centre response, frame covariance, zero-drive recovery, and rejection of
+false work/drive/rest receipts or cancellation without publication. Poses,
+inertias, contact arms and frame are held during this phase. Actual normal
+recoil is reported; normal constraints, pose evolution and material/thermal
+refresh retain their existing owners.
+
 ## Source callbacks for continuous directional trajectories
 
 `apply_rigid_directional_trajectory_with` supplies the original pair's full

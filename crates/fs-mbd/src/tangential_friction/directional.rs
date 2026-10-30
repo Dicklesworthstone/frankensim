@@ -10,6 +10,9 @@
 /// Continuous held-load directional motion through resolved finite arrest.
 pub mod trajectory;
 
+/// Explicit external wrenches, static hold and source-owned driven sliding.
+pub mod driven;
+
 use super::{RigidContactBinding, components, magnitude, vector};
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
 use fs_contact::interface_binding::thermal_friction::elliptic::EllipticFrictionMode;

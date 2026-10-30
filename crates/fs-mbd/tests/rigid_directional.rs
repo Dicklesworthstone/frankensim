@@ -11,6 +11,9 @@ use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStep};
 #[path = "rigid_directional/trajectory.rs"]
 mod trajectory;
 
+#[path = "rigid_directional/driven.rs"]
+mod driven;
+
 fn close(a: f64, b: f64) {
     assert!(
         (a - b).abs() < 3e-9 * a.abs().max(b.abs()).max(1.0),
