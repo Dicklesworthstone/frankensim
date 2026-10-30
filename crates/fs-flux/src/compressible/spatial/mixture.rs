@@ -22,6 +22,8 @@ use fs_qty::Time;
 
 const WIDTH_LIMIT: usize = MAX_SPECIES + 4;
 
+/// Original species diffusion, Fourier heat and full three-dimensional stress.
+pub mod molecular;
 /// Original finite-rate chemistry coupled atomically to this volumetric field.
 pub mod reactive;
 
@@ -344,16 +346,12 @@ impl MixtureEuler3d {
         &self,
         side: BoundarySide,
     ) -> impl ExactSizeIterator<Item = BoundaryImpulse<'_>> {
-        let n = self.gas.species_count();
-        let width = n + 4;
-        let range = self.grid.boundary_range(side);
-        self.boundary_impulses[range.start * width..range.end * width]
-            .chunks_exact(width)
-            .map(move |q| BoundaryImpulse {
-                species_masses: &q[..n],
-                momentum: [q[n], q[n + 1], q[n + 2]],
-                energy: q[n + 3],
-            })
+        boundary_view(
+            &self.boundary_impulses,
+            &self.grid,
+            self.gas.species_count(),
+            side,
+        )
     }
     /// Compensated extensive totals in fixed canonical cell/component order.
     pub fn totals(&self) -> Totals {
@@ -721,6 +719,33 @@ fn cell(q: &[f64], n: usize) -> Cell<'_> {
         momentum: [q[n], q[n + 1], q[n + 2]],
         energy: q[n + 3],
     }
+}
+fn boundary_view<'a>(
+    values: &'a [f64],
+    grid: &CartesianGrid,
+    species: usize,
+    side: BoundarySide,
+) -> impl ExactSizeIterator<Item = BoundaryImpulse<'a>> {
+    let width = species + 4;
+    let range = grid.boundary_range(side);
+    values[range.start * width..range.end * width]
+        .chunks_exact(width)
+        .map(move |q| BoundaryImpulse {
+            species_masses: &q[..species],
+            momentum: [q[species], q[species + 1], q[species + 2]],
+            energy: q[species + 3],
+        })
+}
+fn copy_values(
+    source: &[f64],
+    target: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), Error> {
+    for (source, target) in source.chunks(4096).zip(target.chunks_mut(4096)) {
+        stepping::poll::<Error>(cancelled)?;
+        target.copy_from_slice(source);
+    }
+    Ok(())
 }
 fn sum_rows(
     values: &[f64],

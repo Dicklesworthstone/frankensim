@@ -6,6 +6,8 @@ use fs_gas::multicomponent::{Boundaries, Boundary, MixtureEuler1d};
 use fs_qty::Length;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+mod molecular;
+
 const PERIODIC: Boundaries3d = Boundaries3d {
     x: AxisBoundaries::Periodic,
     y: AxisBoundaries::Periodic,

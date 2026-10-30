@@ -1342,3 +1342,50 @@ shock limiting and first-order retries may reduce observed order. This
 stationary inviscid reacting rung does not supply molecular species diffusion,
 moving-domain GCL/remap, wall heat transfer, physical flame/detonation thickness,
 turbulence, reciprocal FSI or experimental ignition/detonation validation.
+
+### Three-dimensional evolving-species molecular transport
+
+`spatial::mixture::molecular::MolecularTransport3d` integrates the original
+`SpatialTransport` source over the existing physical Cartesian grid. Every
+species diffusive flux, all three viscous momentum fluxes, species-referenced
+partial enthalpy, Fourier heat and full stress work enter one conservative
+divergence. Actual local composition, temperature and pressure reach the
+original transport law; pressure diffusion remains in the source's original
+Maxwell--Stefan driving force. No frozen mixture coefficient or additional
+viscous heat source replaces these terms.
+
+Nine velocity derivatives are cached once per cell/stage. A face consumes both
+transverse derivative directions with the complete three-dimensional Newtonian
+trace and shear terms. Topology, physical areas/volumes, conservative updates
+and RK boundary quadrature reuse the original spatial owner. One stored face
+flux serves both adjacent cells; periodic copies retain identical bits. The
+initial gradient/source pass supplies both the first SSP stage and its step
+estimate, avoiding a duplicate successful pass.
+
+The prepared operator advances an exact requested duration using bounded SSP
+RK2 substeps, original source admission and an engineering parabolic estimate
+covering all axes, cross-stress stencils and wall gradients. This is not a
+spectral, unconditional-positivity or entropy certificate. Field values,
+integrated boundary transfers and reports publish after the final poll; Euler
+time and its advective metadata remain owned by the composing flow integrator.
+Actual state capacity follows O(1) exchanges between owners. All numerical
+state/stage/face/gradient/boundary/MS buffers are counted under the explicit
+combined field/operator budget and existing 1 GiB ceiling; immutable sources,
+bounded stack scratch and supplied-law storage/allocations remain excluded.
+
+Periodic axes and stationary adiabatic impermeable slip walls are admitted.
+Wall normal stress includes both transverse dilatations; species, both shear
+tractions, heat and stationary-wall work are exactly zero. Transmissive Euler
+ends refuse because they do not define a molecular reservoir law. Soret/Dufour
+effects, no-slip layers, moving geometry, dense-gas transport and calibrated
+shock/flame thickness remain separate capabilities.
+
+Focused checks use independent oblique three-dimensional species-diffusion,
+vector-stress and Fourier symbols, physical energy converted from damped
+kinetic motion, the original planar owner under extrusion/axis rotation,
+closed-wall momentum balances, exact absent species, source/budget/work refusal
+and last-publication cancellation with deterministic replay.
+The oblique diffusion L1 errors on 8³/16³ cells are 6.45856775e-4 and
+1.69469136e-4, respectively, for an observed order of 1.930. Full vector stress
+is checked against independent discrete longitudinal/transverse symbols, and
+the integrated thermal gain equals lost kinetic energy without a heat source.
