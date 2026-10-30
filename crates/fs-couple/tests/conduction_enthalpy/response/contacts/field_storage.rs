@@ -1,5 +1,7 @@
 //! Nonlinear spatial/contact response, sourced R/C/L and physical field U.
 //! Coefficients are manufactured numerical fixtures, not measured materials.
+#[path = "field_storage/assembly.rs"]
+mod assembly;
 #[path = "field_storage/heat.rs"]
 mod heat;
 use super::*;

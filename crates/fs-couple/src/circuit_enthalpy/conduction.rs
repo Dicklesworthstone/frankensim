@@ -11,10 +11,10 @@ pub mod circuit;
 pub mod contacts;
 /// Retained dielectric charge and local conduction heat on this same material network.
 pub mod dielectric;
+/// Complete sourced heat assemblies on the same electrical/thermal residual.
+pub mod heat;
 /// Source-driven nonlinear spatial current and the original finite heat network.
 pub mod response;
-// The complete sourced heat network enters this same electrical/thermal residual.
-mod heat;
 
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
@@ -149,6 +149,9 @@ impl core::fmt::Display for ConductionThermalError {
 }
 impl std::error::Error for ConductionThermalError {}
 type Error = CircuitEnthalpyError<ConductionThermalError>;
+fn map_conduction_error<E: From<ConductionThermalError>>(error: Error) -> CircuitEnthalpyError<E> {
+    error.map_source(E::from)
+}
 fn invalid(reason: &'static str) -> Error {
     CircuitEnthalpyError::Source(ConductionThermalError::Invalid(reason))
 }

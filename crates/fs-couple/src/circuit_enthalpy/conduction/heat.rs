@@ -3,6 +3,9 @@
 //! material refresh. Its original interface and radiosity owners supply heat;
 //! the original spatial electrical solve alone supplies Joule dissipation.
 
+mod assembly;
+pub use assembly::{ConductionHeatError, step_response_field_circuit_candidate};
+
 use super::circuit::response::{
     ConductionResponseCircuit, ConductionResponseCircuitEnthalpyCandidate,
     thermal::ConductionResponseFieldThermalCandidate,
@@ -65,66 +68,29 @@ impl PreparedHeatNetwork<'_, '_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<ConductionResponseFieldThermalCandidate<'t, HeatNetworkSample>, Error> {
-        let cancel = RefCell::new(|| cx.checkpoint().is_err());
-        check(&cancel)?;
-        let bulk = self.field_material_network().map_err(heat_error)?;
-        let layout = ConductionThermalNetwork {
-            cells: bulk.cells,
-            links: bulk.links,
-            regions,
-            volume_tolerance_m3,
-        };
-        if regions.len() != circuit.sources().len() || regions.len() > assembly.max_cells {
-            return Err(invalid(
-                "one bounded heat route per original circuit triangle required",
-            ));
-        }
-        let mut field_axes = Vec::new();
-        for region in regions {
-            check(&cancel)?;
-            let source = circuit
-                .sources()
-                .get(region.triangle)
-                .ok_or_else(|| invalid("thermal route names an absent circuit conductor"))?;
-            for (axis, _) in source.axes() {
-                field_axes.push((region.cell, axis.as_str()));
-            }
-        }
-        self.admit_field_independent_boundaries(cx, &field_axes)
-            .map_err(heat_error)?;
-        let destinations = self.resistor_destinations();
-        let next = layout.step_response_circuit_resolved_bound(
+        step_response_field_circuit_candidate(
+            self,
+            cx,
             thermal,
             target_s,
             circuit,
             ports,
-            &destinations,
-            bulk.resistors,
             contacts,
-            Some(fields),
+            fields,
+            regions,
+            volume_tolerance_m3,
             assembly,
             field_controls,
             response,
             controls,
             initial_energy_increments_j,
-            |trial| {
-                let coefficients = self.resolve(cx, trial).map_err(heat_error)?;
-                if !coefficients.contacts.is_empty() {
-                    return Err(invalid(
-                        "spatial field-storage circuit cannot omit series electrical-contact work",
-                    ));
-                }
-                Ok(coefficients.bulk)
-            },
-            |sample| &sample.material,
-            &cancel,
-        )?;
-        let internal_heat_j = finite(
-            (target_s - thermal.time_s()) * next.report().source.network.radiation_net_power_w(),
-        )?;
-        let next = next.close_field_report(internal_heat_j, controls.total_energy_tolerance_j)?;
-        check(&cancel)?;
-        Ok(next)
+        )
+        .map_err(|error| {
+            error.map_source(|source| match source {
+                ConductionHeatError::Conduction(error) => error,
+                ConductionHeatError::Heat(error) => ConductionThermalError::Heat(error),
+            })
+        })
     }
 
     /// Advance the original nonlinear spatial circuit with this complete

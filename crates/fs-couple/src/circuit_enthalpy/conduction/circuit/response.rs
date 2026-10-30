@@ -548,7 +548,11 @@ impl ConductionThermalNetwork<'_> {
     // One constitutive/thermal residual retains the original typed heat
     // observations, including callers that resolve contacts and radiation.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::circuit_enthalpy::conduction) fn step_response_circuit_resolved_bound<'t, S>(
+    pub(in crate::circuit_enthalpy::conduction) fn step_response_circuit_resolved_bound<
+        't,
+        S,
+        E: From<ConductionThermalError>,
+    >(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
@@ -565,61 +569,73 @@ impl ConductionThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         resolve_sources: impl Fn(
             &DepositionSimulation<'_>,
-        ) -> Result<CircuitThermalCoefficients<S>, Error>,
+        )
+            -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<ConductionResponseCircuitEnthalpyCandidate<'t, FieldThermalSource<S>>, Error> {
-        check(cancel)?;
+    ) -> Result<
+        ConductionResponseCircuitEnthalpyCandidate<'t, FieldThermalSource<S>>,
+        CircuitEnthalpyError<E>,
+    > {
+        check(cancel).map_err(map_conduction_error)?;
         if !(1..=MAX_RESPONSE_ITERATIONS).contains(&response.maximum_iterations)
             || circuit.time_s().to_bits() != thermal.time_s().to_bits()
             || material_resistors.len() != circuit.circuit.material_resistors.len()
         {
-            return Err(invalid(
+            return Err(map_conduction_error(invalid(
                 "matching clocks, bounded response and complete material graph-resistor bindings required",
-            ));
+            )));
         }
-        let problem = circuit.response(cancel)?;
-        let dt = self.admit_mesh_step(
-            thermal,
-            target_s,
-            problem.mesh(),
-            assembly,
-            controls,
-            initial_energy_increments_j,
-        )?;
-        let routes = self.admit_mesh_routes(thermal, problem.mesh(), cancel)?;
-        let graph_routes = graph_heat_routes(thermal, &circuit.circuit, graph_resistors, cancel)?;
-        self.admit_response_caloric(&problem, cancel)?;
+        let problem = circuit.response(cancel).map_err(map_conduction_error)?;
+        let dt = self
+            .admit_mesh_step(
+                thermal,
+                target_s,
+                problem.mesh(),
+                assembly,
+                controls,
+                initial_energy_increments_j,
+            )
+            .map_err(map_conduction_error)?;
+        let routes = self
+            .admit_mesh_routes(thermal, problem.mesh(), cancel)
+            .map_err(map_conduction_error)?;
+        let graph_routes = graph_heat_routes(thermal, &circuit.circuit, graph_resistors, cancel)
+            .map_err(map_conduction_error)?;
+        self.admit_response_caloric(&problem, cancel)
+            .map_err(map_conduction_error)?;
         let network = MaterialNetwork {
             cells: self.cells,
             resistors: material_resistors,
             links: self.links,
         };
         for binding in material_resistors {
-            check(cancel)?;
+            check(cancel).map_err(map_conduction_error)?;
             if routes.contains(&binding.destination.cell) {
-                return Err(invalid(
+                return Err(map_conduction_error(invalid(
                     "a whole-cell material resistor cannot reuse the spatial conductor's volume",
-                ));
+                )));
             }
         }
         let resolve = |state: &DepositionSimulation<'_>| {
             let coefficients = resolve_sources(state)?;
-            self.admit_response_heat(sample(&coefficients.source), cancel)?;
-            Ok::<_, Error>(coefficients)
+            self.admit_response_heat(sample(&coefficients.source), cancel)
+                .map_err(map_conduction_error)?;
+            Ok::<_, CircuitEnthalpyError<E>>(coefficients)
         };
         let accepted = resolve(thermal)?;
         for original in &circuit.circuit.material_resistors {
-            check(cancel)?;
+            check(cancel).map_err(map_conduction_error)?;
             let next = accepted
                 .resistors
                 .iter()
                 .find(|r| r.branch == original.branch)
-                .ok_or_else(|| invalid("accepted material-resistor branch is absent"))?;
+                .ok_or_else(|| invalid("accepted material-resistor branch is absent"))
+                .map_err(map_conduction_error)?;
             if !same_conductor(&original.conductor, &next.conductor) {
-                return Err(invalid(
+                return Err(map_conduction_error(invalid(
                     "accepted graph-resistor geometry and sources must match the actual thermal state",
-                ));
+                )));
             }
         }
         let contacts = contacts::PreparedContacts::new_for_contacts(
@@ -631,15 +647,17 @@ impl ConductionThermalNetwork<'_> {
             &routes,
             sample(&accepted.source),
             cancel,
-        )?;
-        let initial =
-            self.response_materials_at(&problem, sample(&accepted.source), &routes, cancel)?;
+        )
+        .map_err(map_conduction_error)?;
+        let initial = self
+            .response_materials_at(&problem, sample(&accepted.source), &routes, cancel)
+            .map_err(map_conduction_error)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b) || !same_material(a.material(), b.material())
         }) {
-            return Err(invalid(
+            return Err(map_conduction_error(invalid(
                 "accepted response-circuit sources must match the actual thermal state",
-            ));
+            )));
         }
         let fields = field_bindings
             .map(|bindings| {
@@ -652,7 +670,8 @@ impl ConductionThermalNetwork<'_> {
                 )
                 .map_err(super::thermal::field_thermal_error)
             })
-            .transpose()?;
+            .transpose()
+            .map_err(map_conduction_error)?;
         let (thermal, circuit, report) = cell_driver_candidate(
             thermal,
             target_s,
@@ -660,17 +679,12 @@ impl ConductionThermalNetwork<'_> {
             initial_energy_increments_j,
             |state, remaining| {
                 let mut coefficients = resolve(state)?;
-                let sources = self.response_materials_at(
-                    &problem,
-                    sample(&coefficients.source),
-                    &routes,
-                    cancel,
-                )?;
-                let contact_sources = contacts.refresh_contacts(
-                    problem.contacts(),
-                    sample(&coefficients.source),
-                    cancel,
-                )?;
+                let sources = self
+                    .response_materials_at(&problem, sample(&coefficients.source), &routes, cancel)
+                    .map_err(map_conduction_error)?;
+                let contact_sources = contacts
+                    .refresh_contacts(problem.contacts(), sample(&coefficients.source), cancel)
+                    .map_err(map_conduction_error)?;
                 let bounded = ConductionResponseControls {
                     maximum_iterations: response.maximum_iterations.min(remaining),
                     ..response
@@ -689,7 +703,8 @@ impl ConductionThermalNetwork<'_> {
                                 })?;
                         Ok::<_, Error>((rebound, samples))
                     })
-                    .transpose()?;
+                    .transpose()
+                    .map_err(map_conduction_error)?;
                 let driver = refreshed
                     .as_ref()
                     .map_or(&circuit.circuit, |(rebound, _)| rebound.circuit());
@@ -716,7 +731,8 @@ impl ConductionThermalNetwork<'_> {
                             CircuitEnthalpyError::CircuitBudget
                         }
                         other => other,
-                    })?;
+                    })
+                    .map_err(map_conduction_error)?;
                 let circuit_trials = candidate.step.field_solves;
                 let source = if let (Some(fields), Some((rebound, samples))) = (&fields, refreshed)
                 {
@@ -731,7 +747,8 @@ impl ConductionThermalNetwork<'_> {
                             controls.total_energy_tolerance_j,
                             cancel,
                         )
-                        .map_err(super::thermal::field_thermal_error)?
+                        .map_err(super::thermal::field_thermal_error)
+                        .map_err(map_conduction_error)?
                 } else {
                     FieldThermalSource {
                         network: coefficients.source,
@@ -749,33 +766,36 @@ impl ConductionThermalNetwork<'_> {
                 })
             },
             |candidate, _dt, checkpoint| {
-                let mut powers = self.deposit_power(
-                    &candidate.step.circuit.spatial.cell_power_w,
-                    &routes,
-                    checkpoint,
-                )?;
-                for heat in &candidate.step.circuit.graph_resistors {
-                    checkpoint()?;
-                    let cell = graph_routes[&heat.branch];
-                    let previous = *powers.get(&cell).unwrap_or(&0.0);
-                    let total = finite(previous + heat.power_w)?;
-                    if heat.power_w != 0.0 && total == previous {
-                        return Err(invalid(
-                            "response-circuit heat disappeared in receiving-cell sum",
-                        ));
+                (|| {
+                    let mut powers = self.deposit_power(
+                        &candidate.step.circuit.spatial.cell_power_w,
+                        &routes,
+                        checkpoint,
+                    )?;
+                    for heat in &candidate.step.circuit.graph_resistors {
+                        checkpoint()?;
+                        let cell = graph_routes[&heat.branch];
+                        let previous = *powers.get(&cell).unwrap_or(&0.0);
+                        let total = finite(previous + heat.power_w)?;
+                        if heat.power_w != 0.0 && total == previous {
+                            return Err(invalid(
+                                "response-circuit heat disappeared in receiving-cell sum",
+                            ));
+                        }
+                        powers.insert(cell, total);
                     }
-                    powers.insert(cell, total);
-                }
-                contacts::deposit(
-                    &candidate.step.circuit.spatial.contacts,
-                    &mut powers,
-                    checkpoint,
-                )?;
-                Ok(powers)
+                    contacts::deposit(
+                        &candidate.step.circuit.spatial.contacts,
+                        &mut powers,
+                        checkpoint,
+                    )?;
+                    Ok::<_, Error>(powers)
+                })()
+                .map_err(map_conduction_error)
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(cancel)?;
+        check(cancel).map_err(map_conduction_error)?;
         Ok(ConductionResponseCircuitEnthalpyCandidate {
             thermal,
             circuit,
