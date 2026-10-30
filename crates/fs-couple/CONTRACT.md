@@ -15814,3 +15814,27 @@ computed exterior mean-pressure feedback and an upstream tract retain the
 closed-inventory refusals. Expansion, phase transfer, resolved thermal profiles,
 advection and convection require their own declared owners and are not implied
 by the series-conduction model.
+
+## Paired gas and wall heat during aperture performance
+
+AperturePerformance::with_finite_gas_wall_heat retains the original gas parcel,
+wall enthalpy chart, immutable material card and material-conduction declaration.
+Scheduled signed gas and wall powers share the original physical sample clock.
+Each paired event consumes two existing auxiliary control and compilation slots.
+The native joint transaction publishes both inventories, mechanics and acoustic
+histories together. Heat-control cursors publish with successfully observed
+samples; observation failure keeps the existing poisoned-callback semantics.
+
+The accepted gas, wall state, original material/interface declaration and last
+complete energy report remain inspectable. Separate gas heating, wall heating
+and finite reservoir transport programs cannot own the same evolving inventory
+simultaneously. The joint route inherits its fixed-inventory, fixed-geometry,
+all-solid scope and the original first-order acoustic partition.
+
+Focused G0/G1/G3/G4 regression cases in
+tests/dg_gas_rebind/finite_performance/wall/gas.rs check independent gas/body
+caloric changes, signed midpoint conduction, native parameter work, complete
+energy closure, continuing acoustic histories, scheduled powers, block
+partition invariance and transactional refusal/cancellation. These cases are
+implementation evidence only when executed; they do not supply experimental
+validation or establish omitted transport, phase or geometric feedback.

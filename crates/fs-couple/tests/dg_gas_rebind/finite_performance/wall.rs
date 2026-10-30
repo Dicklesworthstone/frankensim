@@ -23,7 +23,7 @@ use fs_material::phase::{
 };
 use fs_material::state_point::{
     MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, ScalarAdmissibility,
-    ScalarPropertyRequirement, resolve_material_state_point,
+    ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point,
 };
 use fs_phs::linear_exact::DenseExponentialBudget;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -76,6 +76,12 @@ fn material(density_slope: f64, elastic_upper: f64) -> (MaterialCard, ResolvedHe
             elastic_upper,
         ),
         ("poisson_ratio", Dims::NONE, [0.3; 3], 800.0),
+        (
+            "thermal_conductivity",
+            THERMAL_CONDUCTIVITY_DIMS,
+            [5.0, 6.0, 11.0],
+            800.0,
+        ),
         (
             "young_viscosity",
             DynViscosity::DIMS,
@@ -815,3 +821,6 @@ fn refused_wall_power_and_cancelled_samples_preserve_accepted_physics_and_contro
     assert_eq!(state, clean_state);
     equal_source(&attempted, &clean);
 }
+
+#[path = "wall/gas.rs"]
+mod gas;

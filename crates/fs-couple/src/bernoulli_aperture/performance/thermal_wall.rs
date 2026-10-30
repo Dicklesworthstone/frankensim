@@ -142,8 +142,8 @@ impl AperturePerformance {
     /// independent materials. The complete downstream terminal/branch load and
     /// its exterior observation remain active. This fixed-gas route does not add gas/body
     /// conduction, independent upstream heating, expansion or phase transfer.
-    /// A finite-gas heat program requires a joint thermal transaction and cannot
-    /// be attached simultaneously.
+    /// Use with_finite_gas_wall_heat to evolve both inventories with reciprocal
+    /// conduction; separate thermal programs cannot be attached simultaneously.
     ///
     /// Admission never advances physics. A refused physical sample leaves its
     /// body, aperture and complete load unchanged; the existing renderer then
@@ -161,9 +161,10 @@ impl AperturePerformance {
             || self.finite_wall.is_some()
             || self.finite_gas.is_some()
             || self.finite_transport.is_some()
+            || self.finite_gas_wall.is_some()
         {
             return Err(invalid(
-                "finite wall heat must bind once before playback; combined finite gas/body heat needs a joint transaction",
+                "finite wall heat must bind once before playback; use with_finite_gas_wall_heat for joint thermal exchange",
             ));
         }
         if body.internal_heat_j != 0.0

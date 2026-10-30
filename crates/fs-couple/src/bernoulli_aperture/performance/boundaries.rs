@@ -254,6 +254,13 @@ impl AperturePerformance {
             work = work.checked_sub(wall.program.controls.len() as u64)
                 .ok_or_else(|| invalid("wall heat and other source controls exceed the auxiliary compilation work budget"))?;
         }
+        if let Some(joint) = &self.finite_gas_wall {
+            let count = joint.assignment_count();
+            assignments = assignments.checked_sub(count)
+                .ok_or_else(|| invalid("joint gas/wall heat exceeds the combined source storage budget"))?;
+            work = work.checked_sub(count as u64)
+                .ok_or_else(|| invalid("joint gas/wall heat exceeds the auxiliary compilation work budget"))?;
+        }
         Ok((assignments, work))
     }
 

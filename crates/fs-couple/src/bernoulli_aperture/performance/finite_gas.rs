@@ -106,9 +106,9 @@ impl AperturePerformance {
     {
         if self.poisoned || self.system.aperture().accepted_steps() != 0
             || self.finite_gas.is_some() || self.finite_transport.is_some()
-            || self.finite_wall.is_some()
+            || self.finite_wall.is_some() || self.finite_gas_wall.is_some()
         {
-            return Err(invalid("finite gas heat must bind once before playback; combined finite gas/body heat needs a joint transaction"));
+            return Err(invalid("finite gas heat must bind once before playback; use with_finite_gas_wall_heat for joint thermal exchange"));
         }
         let (assignments, work) = self.remaining_control_budgets()?;
         if program.controls.is_empty() || program.controls.len() > assignments
