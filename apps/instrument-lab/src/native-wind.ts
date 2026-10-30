@@ -10,6 +10,7 @@ import splitApertureResolvedDgSource from "../../../crates/fs-couple/examples/re
 import sideApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-side-aperture.performance?raw";
 import radiatingMouthResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-radiating-mouth.performance?raw";
 import separateOpeningsResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-separate-openings.performance?raw";
+import finiteReservoirResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-finite-reservoir.performance?raw";
 import slitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-slit-edge.performance?raw";
 import siSlitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-si-slit-edge.performance?raw";
 import upstreamResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-upstream.performance?raw";
@@ -132,6 +133,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: warm air enters through one transverse opening while a distinct opening exchanges sound with the exterior. The same resolved gas field couples to the bore and a finite duct on the cork side.",
     help: "boundary aperture selects the driven opening by its declared zero-based index; reservoir_observation aperture selects the escape opening that receives reservoir_feedback. Edit the pressure and temperature history, original gas data or opening cells. The microphone combines escape and bore radiation with their original paths. This short numerical integration fixture still requires physical geometry, grid and jet validation.",
+  },
+  {
+    name: "resolved-dg-finite-reservoir.performance",
+    label: "Resolved flow — finite breath chamber",
+    renderer: "resolved",
+    source: finiteReservoirResolvedDgSource,
+    decimate: false,
+    intro: "Starter: a finite 10 mL nitrogen chamber feeds one resolved opening while a separate opening radiates alongside the bore and cork duct. The chamber's mass and energy evolve with the actual flow, changing its pressure and temperature.",
+    help: "Load the supplied nitrogen species, NASA9 and transport packs through Gas source files, with frozen phase and no water species. finite_reservoir declares the chamber volume and exchange limits; its boundary hold carries only an endpoint. Change volume or initial aperture density and temperature to alter the source. This 8 ms numerical fixture has no breathing pump, mean gas transport through the acoustic ducts, or measured flute qualification. See docs/RESOLVED_NSF_DG_COUPLING.md for the source-pack commands.",
   },
   {
     name: "resolved-dg-slit-edge.performance",

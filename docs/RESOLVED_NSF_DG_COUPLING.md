@@ -1194,3 +1194,50 @@ composition evolution or experimental flute qualification in this attachment.
 The focused integration and native-input regressions are authored numerical
 checks; the direct GitHub implementation session did not execute native builds,
 runtime tests, convergence campaigns or listening comparisons.
+
+### Supplied-source chamber example
+
+`crates/fs-couple/examples/resolved-dg-finite-reservoir.performance` connects
+a 10 mL nitrogen chamber to opening 0, a separate radiating escape to opening 1,
+the original downstream bore, a finite closed cork-side duct, and the existing
+material microphone. It retains the previous separate-opening fixture's physical
+mesh while the original nitrogen properties determine its physical timestep.
+The 64 samples at 8 kHz are an 8 ms numerical integration window, not a playable
+phrase or a measured flute model.
+
+The resolved gas starts at 300 K and 95000 Pa. The quiescent chamber starts at
+300.15 K with density `1.0664144914103022 kg/m3`, corresponding to approximately
+95002 Pa under the supplied N2 species EOS. That density follows the original
+species molar mass `28.01340 g/mol`; the transport correlation's distinct fit
+molar mass is not substituted into thermodynamics. The 280..340 K caloric window
+and 95000 Pa reference stay within the supplied dilute transport source's
+declared domain. Source admission still applies to every actual state.
+
+Build the three existing source packs and render from the repository root.
+Use fresh output paths for repeated runs:
+
+```sh
+mkdir -p target/resolved-chamber-packs
+for source in nitrogen nitrogen-nasa9-mcbride2002 nitrogen-transport-lemmon2004
+do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$source/manifest.tsv" \
+    --out "target/resolved-chamber-packs/$source.pack"
+done
+cargo run -p fs-couple --bin music_render -- resolved \
+  crates/fs-couple/examples/resolved-dg-finite-reservoir.performance \
+  target/resolved-dg-finite-reservoir.wav --block 8 \
+  --gas-component target/resolved-chamber-packs/nitrogen.pack \
+    target/resolved-chamber-packs/nitrogen-nasa9-mcbride2002.pack \
+    target/resolved-chamber-packs/nitrogen-transport-lemmon2004.pack \
+  --gas-water none --gas-phase frozen
+```
+
+Instrument Lab includes the same file verbatim as **Resolved flow — finite
+breath chamber**. Attach the same three packs with the existing gas-source
+controls. The browser still delegates the solve to the original native renderer.
+Changing `finite_reservoir` volume changes stored gas capacity; changing the
+source aperture's density or temperature changes its original initial state.
+Neither edit supplies a desired pitch, artificial turbulence or calibrated
+audio. The example and new native regressions require an actual native run
+before stability, numerical accuracy or audibility claims.
