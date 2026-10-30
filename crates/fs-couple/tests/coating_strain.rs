@@ -205,3 +205,69 @@ fn complete_setup_and_query_allowances_refuse_before_partial_reports() {
     assert_eq!(observer.completed_evaluations(), 1);
     assert!(observer.evaluate(&[C64::ZERO; 3], &gate).is_err());
 }
+
+#[test]
+fn actual_snapshot_keeps_retained_offsets_and_coherent_modes_in_the_original_films() {
+    let gate = CancelGate::new_clock_free();
+    let image = image(&gate);
+    let mut observer = image.prepare_coating_strain(budget(3), &gate).unwrap();
+    let offset = [0.4e-6, -0.6e-6, 0.3e-6];
+    let vibration = [1.1e-6, 0.2e-6, -0.9e-6];
+    let total = core::array::from_fn::<_, 3, _>(|i| offset[i] + vibration[i]);
+    let snapshot = observer.evaluate_snapshot(&total, &gate).unwrap();
+    let phasor = observer
+        .evaluate(&total.map(|re| C64 { re, im: 0.0 }), &gate)
+        .unwrap();
+    for (a, b) in snapshot.films.iter().zip(&phasor.films) {
+        assert!(std::ptr::eq(a.source, b.source));
+        assert_eq!(a.covered_elements, 18);
+        near(a.frobenius_upper_bound, b.frobenius_upper_bound);
+        near(a.limit_ratio, b.limit_ratio);
+        for (actual, reference) in a.component_amplitudes.iter().zip(b.component_amplitudes) {
+            near(*actual, reference);
+        }
+    }
+    // Cancellation happens in generalized displacement before recovery/norms.
+    // The observer does not sum absolute modal amplitudes or invent a preload.
+    let cancelled = core::array::from_fn::<_, 3, _>(|i| total[i] - total[i]);
+    let zero = observer.evaluate_snapshot(&cancelled, &gate).unwrap();
+    assert!(
+        zero.films
+            .iter()
+            .all(|film| film.frobenius_upper_bound == 0.0)
+    );
+    assert_eq!(observer.completed_evaluations(), 3);
+}
+
+#[test]
+fn snapshot_refusals_keep_the_query_allowance_and_over_envelope_motion_is_reported() {
+    let gate = CancelGate::new_clock_free();
+    let image = image(&gate);
+    let mut observer = image.prepare_coating_strain(budget(2), &gate).unwrap();
+    assert!(observer.evaluate_snapshot(&[0.0; 2], &gate).is_err());
+    assert!(
+        observer
+            .evaluate_snapshot(&[f64::INFINITY; 3], &gate)
+            .is_err()
+    );
+    let stopped = CancelGate::new_clock_free();
+    stopped.request();
+    assert!(matches!(
+        observer.evaluate_snapshot(&[0.0; 3], &stopped),
+        Err(AcousticRealizeError::Cancelled)
+    ));
+    assert_eq!(observer.completed_evaluations(), 0);
+    let excessive = observer
+        .evaluate_snapshot(&[1.0, 0.5, -0.2], &gate)
+        .unwrap();
+    assert!(!excessive.within_authored_envelope);
+    assert!(
+        excessive
+            .sufficient_common_amplitude_scale
+            .is_some_and(|scale| scale < 1.0)
+    );
+    let zero = observer.evaluate_snapshot(&[0.0; 3], &gate).unwrap();
+    assert!(zero.within_authored_envelope);
+    assert!(zero.films.iter().all(|film| film.limit_ratio == 0.0));
+    assert!(observer.evaluate_snapshot(&[0.0; 3], &gate).is_err());
+}

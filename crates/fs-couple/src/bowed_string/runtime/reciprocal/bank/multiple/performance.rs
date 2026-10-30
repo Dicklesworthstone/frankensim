@@ -154,7 +154,7 @@ impl MultiBowStringBank {
             base_sample, forces, drives: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count],
             candidate: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count], poisoned: false,
             string_forces: None, stop_motion: None, stop_station_motion: None, bow_station_motion: None,
-            fiber_support: None, shell_observer: None })
+            fiber_support: None, shell_observer: None, coating_monitor: None })
     }
 }
 
@@ -202,6 +202,7 @@ pub struct MultiBowPerformance {
     bow_station_motion: Option<bow_stations::BoundBowStations>,
     fiber_support: Option<fiber_motion::BoundFiberSupport>,
     shell_observer: Option<observation::BoundShellObserver>,
+    coating_monitor: Option<coating::BoundShellCoatingMonitor>,
 }
 impl MultiBowPerformance {
     /// Add fiber support acceleration and material contact travel to the SAME
@@ -283,6 +284,12 @@ impl MultiBowPerformance {
         if output.len() > self.config.max_block { return Err(render_invalid("multi-bow callback exceeds its admitted capacity")); }
         for slot in output {
             let sample = self.samples_rendered();
+            if let Some(monitor) = self.coating_monitor.as_mut() {
+                if let Err(error) = monitor.before_step(&self.bank, sample) {
+                    self.poisoned = true;
+                    return Err(error);
+                }
+            }
             let mut next = self.next;
             self.candidate.copy_from_slice(&self.drives);
             while let Some(event) = self.events.get(next) {
@@ -329,6 +336,14 @@ impl MultiBowPerformance {
             let result = step(&mut self.bank, forces, drives, motion);
             match result {
                 Ok(compact_pressure) => {
+                    // The mechanics have accepted this endpoint. Refusal here
+                    // stops output and poisons this wrapper; it is not rollback.
+                    if let Some(monitor) = self.coating_monitor.as_mut() {
+                        if let Err(error) = monitor.accepted_endpoint(&self.bank, sample + 1) {
+                            self.poisoned = true;
+                            return Err(error);
+                        }
+                    }
                     if let Some(support) = self.fiber_support.as_mut() {
                         support.commit();
                     }
@@ -370,6 +385,9 @@ pub mod fiber_motion;
 
 /// Source-bound finite-distance closed-shell pressure on the same accepted clock.
 pub mod observation;
+
+/// Local coating applicability on every original accepted mechanical endpoint.
+pub mod coating;
 
 
 /// Source-bound contact heat on the original scheduled pressure/PCM route.

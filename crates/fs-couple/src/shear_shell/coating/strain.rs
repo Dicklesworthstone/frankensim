@@ -16,7 +16,7 @@ use fs_exec::CancelGate;
 use fs_math::c64::C64;
 use fs_plate::shell::mitc::{
     NodalDirectors,
-    strain::{HarmonicElementStrain, PreparedElementStrain, TensorStrainBound},
+    strain::{HarmonicElementStrain, PreparedElementStrain, RealElementStrain, TensorStrainBound},
 };
 use std::mem::size_of;
 
@@ -59,7 +59,8 @@ pub struct ShellCoatingFilmSource<'a> {
     pub source: &'a ResolvedShellCoating,
 }
 
-/// Whole-film amplitude envelope for the supplied peak complex body motion.
+/// Whole-film amplitude envelope for supplied peak complex body motion, or
+/// absolute spatial envelope for an explicitly observed real snapshot.
 #[derive(Clone, Debug)]
 pub struct ShellCoatingFilmStrain<'a> {
     pub component_index: Option<usize>,
@@ -102,6 +103,27 @@ pub struct ShellCoatingStrainReport<'a> {
     pub sufficient_common_amplitude_scale: Option<f64>,
 }
 
+/// Numeric film envelope, independent of a report borrow. A prepared transient
+/// observer reuses this storage at every accepted endpoint.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShellCoatingFilmStrainValue {
+    pub covered_elements: usize,
+    pub frobenius_upper_bound: f64,
+    pub component_amplitudes: [f64; 6],
+    pub ruling_element: usize,
+    pub ruling_control_point: usize,
+    pub ruling_z_face: usize,
+    pub limit_ratio: f64,
+    pub sufficient_amplitude_scale: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+/// Common applicability result for one complete instantaneous or harmonic query.
+pub struct ShellCoatingStrainSummary {
+    pub within_authored_envelope: bool,
+    pub sufficient_common_amplitude_scale: Option<f64>,
+}
+
 struct Element {
     index: usize,
     region: usize,
@@ -109,11 +131,10 @@ struct Element {
     field: PreparedElementStrain,
 }
 
-struct Part<'a> {
-    component_index: Option<usize>,
-    component_name: Option<&'a str>,
-    source: &'a ResolvedShearShell,
-    modes: &'a [Vec<f64>],
+struct Part {
+    // These immutable source allocations survive moves of their owning bank.
+    // Only identity is compared; addresses are never dereferenced or exposed.
+    source_storage: [usize; 4],
     film_regions: Vec<usize>,
     elements: Vec<Element>,
 }
@@ -122,14 +143,26 @@ struct Part<'a> {
 /// its retained modes. No foreign directors, sections or material limits can
 /// be substituted. Query errors and cancellation leave its allowance intact.
 pub struct PreparedShellCoatingStrain<'a> {
-    parts: Vec<Part<'a>>,
+    source: CoatingStrainSource<'a>,
+    plan: OwnedShellCoatingStrain,
+}
+
+/// Internal detached plan, bound to the immutable original image allocations.
+/// Keeping source borrows out of this type permits the original performance to
+/// own it without cloning its shell, modes or constitutive histories.
+pub(crate) struct OwnedShellCoatingStrain {
+    parts: Vec<Part>,
+    values: Vec<ShellCoatingFilmStrainValue>,
     resources: ShellCoatingStrainResources,
     modes: usize,
     films: usize,
+    assembly: bool,
+    snapshot: bool,
     completed_evaluations: usize,
 }
 
-enum Source<'a> {
+#[derive(Clone, Copy)]
+pub(crate) enum CoatingStrainSource<'a> {
     Shell(&'a MaterialShellImage),
     Assembly(&'a MaterialShellAssemblyImage),
 }
@@ -142,7 +175,18 @@ struct SourcePart<'a> {
     modes: &'a [Vec<f64>],
 }
 
-impl<'a> Source<'a> {
+impl SourcePart<'_> {
+    fn storage_identity(&self) -> [usize; 4] {
+        [
+            self.modes.as_ptr() as usize,
+            self.modes.len(),
+            self.shell.mesh().nodes.as_ptr() as usize,
+            self.shell.coatings().as_ptr() as usize,
+        ]
+    }
+}
+
+impl<'a> CoatingStrainSource<'a> {
     fn len(&self) -> usize {
         match self {
             Self::Shell(_) => 1,
@@ -171,6 +215,30 @@ impl<'a> Source<'a> {
             }
         }
     }
+
+    pub(crate) fn film_sources(self) -> impl Iterator<Item = ShellCoatingFilmSource<'a>> {
+        (0..self.len()).flat_map(move |i| {
+            let part = self.part(i);
+            part.shell
+                .coatings()
+                .iter()
+                .enumerate()
+                .map(move |(film_index, source)| ShellCoatingFilmSource {
+                    component_index: part.index,
+                    component_name: part.name,
+                    film_index,
+                    source,
+                })
+        })
+    }
+
+    pub(crate) fn prepare_snapshot(
+        self,
+        budget: ShellCoatingStrainBudget,
+        gate: &CancelGate,
+    ) -> Result<OwnedShellCoatingStrain, AcousticRealizeError> {
+        prepare(self, budget, true, gate)
+    }
 }
 
 impl MaterialShellImage {
@@ -182,7 +250,11 @@ impl MaterialShellImage {
         budget: ShellCoatingStrainBudget,
         gate: &CancelGate,
     ) -> Result<PreparedShellCoatingStrain<'_>, AcousticRealizeError> {
-        prepare(Source::Shell(self), budget, gate)
+        let source = CoatingStrainSource::Shell(self);
+        Ok(PreparedShellCoatingStrain {
+            source,
+            plan: prepare(source, budget, false, gate)?,
+        })
     }
 }
 
@@ -193,7 +265,11 @@ impl MaterialShellAssemblyImage {
         budget: ShellCoatingStrainBudget,
         gate: &CancelGate,
     ) -> Result<PreparedShellCoatingStrain<'_>, AcousticRealizeError> {
-        prepare(Source::Assembly(self), budget, gate)
+        let source = CoatingStrainSource::Assembly(self);
+        Ok(PreparedShellCoatingStrain {
+            source,
+            plan: prepare(source, budget, false, gate)?,
+        })
     }
 }
 
@@ -223,11 +299,12 @@ fn strain_owner(error: fs_plate::PlateError) -> AcousticRealizeError {
     }
 }
 
-fn prepare<'a>(
-    source: Source<'a>,
+fn prepare(
+    source: CoatingStrainSource<'_>,
     budget: ShellCoatingStrainBudget,
+    snapshot: bool,
     gate: &CancelGate,
-) -> Result<PreparedShellCoatingStrain<'a>, AcousticRealizeError> {
+) -> Result<OwnedShellCoatingStrain, AcousticRealizeError> {
     poll(gate)?;
     if budget.evaluations == 0 || source.len() == 0 {
         return Err(invalid(
@@ -237,13 +314,21 @@ fn prepare<'a>(
     let modes = source.part(0).modes.len();
     let mut films = 0usize;
     let mut resources = ShellCoatingStrainResources {
-        retained_bytes: size_of::<PreparedShellCoatingStrain<'a>>(),
-        evaluation_bytes: size_of::<ShellCoatingStrainReport<'a>>()
-            + HarmonicElementStrain::RETAINED_BYTES
-            + size_of::<TensorStrainBound>()
-            + 36 * size_of::<f64>(),
+        retained_bytes: if snapshot {
+            size_of::<OwnedShellCoatingStrain>()
+        } else {
+            size_of::<PreparedShellCoatingStrain<'_>>()
+        },
+        evaluation_bytes: size_of::<TensorStrainBound>()
+            + if snapshot {
+                RealElementStrain::RETAINED_BYTES + 18 * size_of::<f64>()
+            } else {
+                size_of::<ShellCoatingStrainReport<'_>>()
+                    + HarmonicElementStrain::RETAINED_BYTES
+                    + 36 * size_of::<f64>()
+            },
         preparation_work: 1,
-        per_evaluation_work: 2 * modes,
+        per_evaluation_work: if snapshot { modes } else { 2 * modes },
         total_work: 0,
         evaluations: budget.evaluations,
         coated_elements: 0,
@@ -268,7 +353,7 @@ fn prepare<'a>(
         }
         let count = shell.coatings().len();
         add_product(&mut films, count, 1)?;
-        add_product(&mut resources.retained_bytes, 1, size_of::<Part<'a>>())?;
+        add_product(&mut resources.retained_bytes, 1, size_of::<Part>())?;
         add_product(&mut resources.retained_bytes, count, size_of::<usize>())?;
         add_product(&mut resources.preparation_work, modes, 1)?;
         add_product(
@@ -282,6 +367,7 @@ fn prepare<'a>(
             count + 1,
         )?;
         add_product(&mut resources.per_evaluation_work, count, 64)?;
+        add_product(&mut resources.per_evaluation_work, 1, 32)?;
         for film in shell.coatings() {
             let region = film_region(shell, film)?;
             let pairs = shell.regions()[region]
@@ -294,7 +380,11 @@ fn prepare<'a>(
             add_product(
                 &mut resources.per_evaluation_work,
                 pairs,
-                PreparedElementStrain::LAYER_BOUND_WORK + 32,
+                if snapshot {
+                    PreparedElementStrain::REAL_LAYER_BOUND_WORK + 32
+                } else {
+                    PreparedElementStrain::LAYER_BOUND_WORK + 32
+                },
             )?;
         }
         for region in shell.regions() {
@@ -320,15 +410,26 @@ fn prepare<'a>(
             add_product(
                 &mut resources.per_evaluation_work,
                 elements,
-                72 * modes + PreparedElementStrain::HARMONIC_FIELD_WORK + count,
+                if snapshot {
+                    36 * modes + PreparedElementStrain::REAL_FIELD_WORK + count
+                } else {
+                    72 * modes + PreparedElementStrain::HARMONIC_FIELD_WORK + count
+                },
             )?;
         }
     }
     add_product(
-        &mut resources.evaluation_bytes,
+        &mut resources.retained_bytes,
         films,
-        size_of::<ShellCoatingFilmStrain<'a>>(),
+        size_of::<ShellCoatingFilmStrainValue>(),
     )?;
+    if !snapshot {
+        add_product(
+            &mut resources.evaluation_bytes,
+            films,
+            size_of::<ShellCoatingFilmStrain<'_>>(),
+        )?;
+    }
     resources.total_work = resources.preparation_work;
     add_product(
         &mut resources.total_work,
@@ -385,48 +486,37 @@ fn prepare<'a>(
             }
         }
         parts.push(Part {
-            component_index: part.index,
-            component_name: part.name,
-            source: part.shell,
-            modes: part.modes,
+            source_storage: part.storage_identity(),
             film_regions,
             elements,
         });
     }
     poll(gate)?;
-    Ok(PreparedShellCoatingStrain {
+    Ok(OwnedShellCoatingStrain {
         parts,
+        values: vec![ShellCoatingFilmStrainValue::default(); films],
         resources,
         modes,
         films,
+        assembly: matches!(source, CoatingStrainSource::Assembly(_)),
+        snapshot,
         completed_evaluations: 0,
     })
 }
 
 impl<'a> PreparedShellCoatingStrain<'a> {
     pub const fn resources(&self) -> &ShellCoatingStrainResources {
-        &self.resources
+        &self.plan.resources
     }
     pub const fn film_count(&self) -> usize {
-        self.films
+        self.plan.films
     }
     pub const fn completed_evaluations(&self) -> usize {
-        self.completed_evaluations
+        self.plan.completed_evaluations
     }
 
     pub fn film_sources(&self) -> impl Iterator<Item = ShellCoatingFilmSource<'a>> + '_ {
-        self.parts.iter().flat_map(|part| {
-            part.source
-                .coatings()
-                .iter()
-                .enumerate()
-                .map(move |(film_index, source)| ShellCoatingFilmSource {
-                    component_index: part.component_index,
-                    component_name: part.component_name,
-                    film_index,
-                    source,
-                })
-        })
+        self.source.film_sources()
     }
 
     /// Observe one supplied peak phasor in the original mass-normalized body
@@ -439,91 +529,197 @@ impl<'a> PreparedShellCoatingStrain<'a> {
         displacement_m_sqrt_kg: &[C64],
         gate: &CancelGate,
     ) -> Result<ShellCoatingStrainReport<'a>, AcousticRealizeError> {
+        let summary =
+            self.plan
+                .evaluate(self.source, Motion::Harmonic(displacement_m_sqrt_kg), gate)?;
+        Ok(self.report(summary))
+    }
+
+    /// Observe an actual real body displacement at one instant. Static offsets
+    /// already present in these coordinates participate coherently. Removed
+    /// prestress/cure strain and motion between observed instants are excluded.
+    /// The original harmonic preparation allowance conservatively admits these
+    /// cheaper real queries; a successful query consumes one planned evaluation.
+    pub fn evaluate_snapshot(
+        &mut self,
+        displacement_m_sqrt_kg: &[f64],
+        gate: &CancelGate,
+    ) -> Result<ShellCoatingStrainReport<'a>, AcousticRealizeError> {
+        let summary = self
+            .plan
+            .evaluate_snapshot(self.source, displacement_m_sqrt_kg, gate)?;
+        Ok(self.report(summary))
+    }
+
+    fn report(&self, summary: ShellCoatingStrainSummary) -> ShellCoatingStrainReport<'a> {
+        let films = self
+            .source
+            .film_sources()
+            .zip(&self.plan.values)
+            .map(|(source, value)| ShellCoatingFilmStrain {
+                component_index: source.component_index,
+                component_name: source.component_name,
+                film_index: source.film_index,
+                source: source.source,
+                covered_elements: value.covered_elements,
+                frobenius_upper_bound: value.frobenius_upper_bound,
+                component_amplitudes: value.component_amplitudes,
+                ruling_element: value.ruling_element,
+                ruling_control_point: value.ruling_control_point,
+                ruling_z_face: value.ruling_z_face,
+                limit_ratio: value.limit_ratio,
+                sufficient_amplitude_scale: value.sufficient_amplitude_scale,
+            })
+            .collect();
+        ShellCoatingStrainReport {
+            films,
+            within_authored_envelope: summary.within_authored_envelope,
+            sufficient_common_amplitude_scale: summary.sufficient_common_amplitude_scale,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Motion<'a> {
+    Harmonic(&'a [C64]),
+    Snapshot(&'a [f64]),
+}
+
+impl Motion<'_> {
+    fn valid(&self, modes: usize) -> bool {
+        match self {
+            Self::Harmonic(q) => {
+                q.len() == modes && q.iter().all(|z| z.re.is_finite() && z.im.is_finite())
+            }
+            Self::Snapshot(q) => q.len() == modes && q.iter().all(|x| x.is_finite()),
+        }
+    }
+}
+
+impl OwnedShellCoatingStrain {
+    pub(crate) const fn resources(&self) -> &ShellCoatingStrainResources {
+        &self.resources
+    }
+    pub(crate) const fn film_count(&self) -> usize {
+        self.films
+    }
+    pub(crate) const fn mode_count(&self) -> usize {
+        self.modes
+    }
+    pub(crate) const fn completed_evaluations(&self) -> usize {
+        self.completed_evaluations
+    }
+    /// Scratch values from the most recent query; publish them only after that
+    /// query succeeds. Failure changes no physical state or successful count.
+    pub(crate) fn values(&self) -> &[ShellCoatingFilmStrainValue] {
+        &self.values
+    }
+
+    pub(crate) fn evaluate_snapshot(
+        &mut self,
+        source: CoatingStrainSource<'_>,
+        displacement_m_sqrt_kg: &[f64],
+        gate: &CancelGate,
+    ) -> Result<ShellCoatingStrainSummary, AcousticRealizeError> {
+        self.evaluate(source, Motion::Snapshot(displacement_m_sqrt_kg), gate)
+    }
+
+    fn evaluate(
+        &mut self,
+        source: CoatingStrainSource<'_>,
+        motion: Motion<'_>,
+        gate: &CancelGate,
+    ) -> Result<ShellCoatingStrainSummary, AcousticRealizeError> {
         poll(gate)?;
-        let q = displacement_m_sqrt_kg;
         if self.completed_evaluations == self.resources.evaluations {
             return Err(invalid(
                 "coating strain observation exhausted its planned evaluations",
             ));
         }
-        if q.len() != self.modes || q.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) {
+        if !motion.valid(self.modes) || (self.snapshot && matches!(motion, Motion::Harmonic(_))) {
             return Err(invalid(
-                "coating strain requires one finite complex displacement per original body mode",
+                "coating strain requires admitted finite displacement on every original body mode",
             ));
         }
-        let mut films = Vec::with_capacity(self.films);
-        for part in &self.parts {
+        if source.len() != self.parts.len()
+            || self.assembly != matches!(source, CoatingStrainSource::Assembly(_))
+            || self
+                .parts
+                .iter()
+                .enumerate()
+                .any(|(i, part)| source.part(i).storage_identity() != part.source_storage)
+        {
+            return Err(invalid(
+                "coating strain observation requires its unchanged original source image",
+            ));
+        }
+        self.values.fill(ShellCoatingFilmStrainValue::default());
+        let mut offset = 0;
+        for (index, part) in self.parts.iter().enumerate() {
             poll(gate)?;
-            let offset = films.len();
-            for (film_index, source) in part.source.coatings().iter().enumerate() {
-                films.push(ShellCoatingFilmStrain {
-                    component_index: part.component_index,
-                    component_name: part.component_name,
-                    film_index,
-                    source,
-                    covered_elements: 0,
-                    frobenius_upper_bound: 0.0,
-                    component_amplitudes: [0.0; 6],
-                    ruling_element: 0,
-                    ruling_control_point: 0,
-                    ruling_z_face: 0,
-                    limit_ratio: 0.0,
-                    sufficient_amplitude_scale: None,
-                });
-            }
+            let source_part = source.part(index);
+            let films = source_part.shell.coatings();
+            let values = &mut self.values[offset..offset + films.len()];
+            offset += films.len();
             for element in &part.elements {
                 poll(gate)?;
-                let mut real = [0.0; 18];
-                let mut imag = [0.0; 18];
-                for (mode, amplitude) in part.modes.iter().zip(q) {
-                    for (local_node, &node) in element.nodes.iter().enumerate() {
-                        for dof in 0..6 {
-                            let shape = mode[6 * node + dof];
-                            real[6 * local_node + dof] += shape * amplitude.re;
-                            imag[6 * local_node + dof] += shape * amplitude.im;
+                match motion {
+                    Motion::Snapshot(q) => {
+                        let mut real = [0.0; 18];
+                        for (mode, amplitude) in source_part.modes.iter().zip(q) {
+                            for (local_node, &node) in element.nodes.iter().enumerate() {
+                                for dof in 0..6 {
+                                    real[6 * local_node + dof] += mode[6 * node + dof] * amplitude;
+                                }
+                            }
                         }
+                        let field = element
+                            .field
+                            .real_field(&real, &mut || gate.is_requested())
+                            .map_err(strain_owner)?;
+                        observe_element(
+                            element,
+                            &part.film_regions,
+                            films,
+                            values,
+                            |faces, nu| {
+                                field.isotropic_layer_bound(faces, nu, &mut || gate.is_requested())
+                            },
+                        )?;
                     }
-                }
-                let field = element
-                    .field
-                    .harmonic_field(&real, &imag, &mut || gate.is_requested())
-                    .map_err(strain_owner)?;
-                for (film_index, &region) in part.film_regions.iter().enumerate() {
-                    if region != element.region {
-                        continue;
+                    Motion::Harmonic(q) => {
+                        let mut real = [0.0; 18];
+                        let mut imaginary = [0.0; 18];
+                        for (mode, amplitude) in source_part.modes.iter().zip(q) {
+                            for (local_node, &node) in element.nodes.iter().enumerate() {
+                                for dof in 0..6 {
+                                    let shape = mode[6 * node + dof];
+                                    real[6 * local_node + dof] += shape * amplitude.re;
+                                    imaginary[6 * local_node + dof] += shape * amplitude.im;
+                                }
+                            }
+                        }
+                        let field = element
+                            .field
+                            .harmonic_field(&real, &imaginary, &mut || gate.is_requested())
+                            .map_err(strain_owner)?;
+                        observe_element(
+                            element,
+                            &part.film_regions,
+                            films,
+                            values,
+                            |faces, nu| {
+                                field.isotropic_layer_bound(faces, nu, &mut || gate.is_requested())
+                            },
+                        )?;
                     }
-                    let report = &mut films[offset + film_index];
-                    let faces = report.source.faces_m();
-                    let bound = field
-                        .isotropic_layer_bound(
-                            [faces.0, faces.1],
-                            report.source.input().material.poisson_ratio(),
-                            &mut || gate.is_requested(),
-                        )
-                        .map_err(strain_owner)?;
-                    if report.covered_elements == 0
-                        || bound.frobenius_upper_bound > report.frobenius_upper_bound
-                    {
-                        report.frobenius_upper_bound = bound.frobenius_upper_bound;
-                        report.ruling_element = element.index;
-                        report.ruling_control_point = bound.ruling_control_point;
-                        report.ruling_z_face = bound.ruling_z_face;
-                    }
-                    for (stored, candidate) in report
-                        .component_amplitudes
-                        .iter_mut()
-                        .zip(bound.component_amplitudes)
-                    {
-                        *stored = stored.max(candidate);
-                    }
-                    report.covered_elements += 1;
                 }
             }
         }
         let mut sufficient_common_amplitude_scale: Option<f64> = None;
         let mut within_authored_envelope = true;
-        for film in &mut films {
-            let limit = film.source.input().material.strain_limit();
+        for (film, source) in self.values.iter_mut().zip(source.film_sources()) {
+            let limit = source.source.input().material.strain_limit();
             film.limit_ratio = film.frobenius_upper_bound / limit;
             if film.covered_elements == 0 || !film.limit_ratio.is_finite() {
                 return Err(invalid(
@@ -545,10 +741,42 @@ impl<'a> PreparedShellCoatingStrain<'a> {
         }
         poll(gate)?;
         self.completed_evaluations += 1;
-        Ok(ShellCoatingStrainReport {
-            films,
+        Ok(ShellCoatingStrainSummary {
             within_authored_envelope,
             sufficient_common_amplitude_scale,
         })
     }
+}
+
+fn observe_element(
+    element: &Element,
+    film_regions: &[usize],
+    films: &[ResolvedShellCoating],
+    values: &mut [ShellCoatingFilmStrainValue],
+    mut layer: impl FnMut([f64; 2], f64) -> Result<TensorStrainBound, fs_plate::PlateError>,
+) -> Result<(), AcousticRealizeError> {
+    for ((film, &region), value) in films.iter().zip(film_regions).zip(values) {
+        if region != element.region {
+            continue;
+        }
+        let faces = film.faces_m();
+        let bound = layer([faces.0, faces.1], film.input().material.poisson_ratio())
+            .map_err(strain_owner)?;
+        if value.covered_elements == 0 || bound.frobenius_upper_bound > value.frobenius_upper_bound
+        {
+            value.frobenius_upper_bound = bound.frobenius_upper_bound;
+            value.ruling_element = element.index;
+            value.ruling_control_point = bound.ruling_control_point;
+            value.ruling_z_face = bound.ruling_z_face;
+        }
+        for (stored, candidate) in value
+            .component_amplitudes
+            .iter_mut()
+            .zip(bound.component_amplitudes)
+        {
+            *stored = stored.max(candidate);
+        }
+        value.covered_elements += 1;
+    }
+    Ok(())
 }
