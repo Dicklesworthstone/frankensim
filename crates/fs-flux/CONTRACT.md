@@ -857,3 +857,15 @@ reacting/composition-changing 2-D flow, viscous/thermal shock structure,
 internal obstacles, curved/cut cells, moving meshes, reciprocal moving-wall
 FSI, turbulence or a shock adjoint. Unsupported shocked temperatures refuse
 against the original source interval instead of extrapolating it.
+
+`cargo run --release -p fs-flux --no-default-features --features
+experimental-compressible --example shock_box -- 32` runs an off-centre circular
+nitrogen pressure pulse through more than one box acoustic crossing and wall
+reflection. It uses the retained 200–1000 K NASA-9 coefficients also used by
+`fs-gas`'s `shock_tube` example, with the same explicit example-level material
+association. CSV contains position, density, both velocities, pressure and
+temperature; stderr reports accepted steps, maximum CFL, mass/energy residuals
+and integrated wall-support impulse. The 32² run advances 456 accepted steps
+to 2.578101380129e-3 s with zero mass residual, 2.27e-13 J referenced-energy
+residual and less than 1e-15 kg m/s momentum/support mismatch. This is an
+executable engineering example, not a nitrogen shock experiment or benchmark.
