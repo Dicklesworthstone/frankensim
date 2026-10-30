@@ -1374,3 +1374,26 @@ not experimentally validated ignition, emissions or fire predictions.
 The source supplies methane/natural-gas chemistry with nitrogen species;
 it does not supply a soot model, PMMA/wood volatile mechanism, transport
 closure, sprays, real-gas phases or a time integrator.
+
+
+## Near-atmospheric water and freshwater-ice conductivity
+
+`water::conductivity` supplies the original IAPWS SR6-08(2011) equation (8)
+liquid conductivity and the explicitly empirical Yen (1981), CRREL Report
+81-10 equation (33) ice conductivity. Both return typed W/(m K) values and
+analytic W/(m K²) temperature derivatives without changing caloric data.
+Liquid admission is 273.15–383.15 K and the original IF97 saturation pressure
+through 0.3 MPa; the temperature-only relation does not select stability
+against ice. The selected ice window is 243.15–273.16 K for ordinary
+polycrystalline freshwater ice near atmospheric pressure. The ice source
+supplies no pressure correction, crystal-axis tensor, porosity/salinity law
+or quantified experimental uncertainty bound. Original coefficients are not
+retuned to the report's rounded discussion of conductivity near melting.
+
+Source domains refuse rather than clip or extrapolate. These allocation-free
+safe Rust correlations use deterministic repository math and add neither heat
+capacity nor latent heat. G0/G1 tests reproduce the admitted original liquid
+verification values, check analytic derivatives and the unchanged ice
+regression, and exercise exact domain and pressure boundaries. Numerical
+agreement is implementation evidence, not validation of an arbitrary frozen
+specimen or an effective mixed-phase microstructure.

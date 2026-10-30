@@ -20,6 +20,8 @@ use crate::{MassSpecificEnergyQuantityV1, MassSpecificThermalQuantityV1};
 pub mod if97;
 /// Original ice Ih Gibbs source and pressure-dependent melting correlation.
 pub mod ice;
+/// Explicit near-ambient liquid and empirical freshwater-ice transport sources.
+pub mod conductivity;
 use core::fmt;
 use fs_math::det;
 use fs_qty::{Density, Pressure, Qty, Temperature};
