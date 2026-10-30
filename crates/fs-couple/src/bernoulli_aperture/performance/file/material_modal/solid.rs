@@ -18,7 +18,6 @@ use crate::bernoulli_aperture::modal::{
 };
 use fs_dcontact::Obstacle;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_matdb::QueryPoint;
 use fs_material::gas::GasState;
 use fs_material::state_point::{
     MaterialPropertySelection, ResolvedMaterialStatePoint,
@@ -332,6 +331,8 @@ pub(super) fn read(
         let omega = row.scalar()?;
         let strain_limit = property(&mut row)?;
         let line = row.line;
+        let environment = crate::material_source::read_fixed_environment(&mut row.fields)
+            .map_err(|error| failure(line, error, gate))?;
         row.finish()?;
         if temperature <= 0.0 || omega < 0.0 {
             return Err(bad(
@@ -363,9 +364,8 @@ pub(super) fn read(
             branches,
         };
         let pack = cache.load(&path, line, loader, gate)?;
-        let query = QueryPoint::new()
-            .with("T", temperature)
-            .and_then(|p| p.with("omega", omega))
+        let query = fs_material::state_point::query_at_fixed_environment(
+            pack.card(), temperature, omega, &environment)
             .map_err(|e| failure(line, e, gate))?;
         let source = ResolvedTensorMaterial::resolve(
             pack.card(),

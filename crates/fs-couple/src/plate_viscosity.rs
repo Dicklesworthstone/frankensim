@@ -65,7 +65,7 @@ pub(crate) fn resolve_region_viscosity(region: &ResolvedPlateRegion, properties:
     };
     for key in elastic {
         let p = region.input.material.property(key).ok_or_else(|| invalid("viscous plate is missing its original elastic coefficient"))?;
-        if !p.is_constant_at_fixed_temperature() {
+        if !p.is_constant_at_fixed_environment() {
             return Err(invalid("viscous plate needs fixed-state elastic and inertial coefficients"));
         }
         if let Some((lo,hi)) = p.angular_frequency_band_rad_s().map_err(owner)? {
@@ -275,8 +275,8 @@ impl PlateViscosity {
     /// the same ordered-plane convention as the elastic chart. The material
     /// law rotates to each region's actual orientation and integrates its h^3.
     ///
-    /// Existing scalar bending loss must be absent. Scalars or temperature-only
-    /// curves at the original fixed state are allowed; frequency curves are not
+    /// Existing scalar bending loss must be absent. Source curves or surfaces
+    /// at the original held typed environment are allowed; frequency curves are not
     /// broadband constitutive laws. All elastic coefficients also limit the band.
     pub fn from_chart(chart: &ResolvedPlateChart, properties: [&str; 6], gate: &CancelGate)
         -> Result<Self, AcousticRealizeError>

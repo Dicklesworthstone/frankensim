@@ -133,7 +133,7 @@ fn property(
         .property(key)
         .ok_or_else(|| invalid("modal spectrum lacks a selected material property"))?;
     if p.requirement().quantity() != QuantitySpec::dimensional(dims)
-        || !p.is_constant_at_fixed_temperature()
+        || !p.is_constant_at_fixed_environment()
         || !p.value_si().is_finite()
     {
         return Err(invalid(

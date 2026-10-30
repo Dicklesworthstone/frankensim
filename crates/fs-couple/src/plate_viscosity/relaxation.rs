@@ -160,7 +160,7 @@ fn coefficient(source: &ResolvedMaterialStatePoint, key: &str, dims: Dims,
 {
     let p = source.property(key).ok_or_else(|| invalid("regional memory lacks a selected source coefficient"))?;
     if p.requirement().quantity() != QuantitySpec::dimensional(dims)
-        || !p.is_constant_at_fixed_temperature() || !p.value_si().is_finite() {
+        || !p.is_constant_at_fixed_environment() || !p.value_si().is_finite() {
         return Err(invalid("regional memory needs dimensioned constant coefficients at the original material state"));
     }
     if let Some((lo,hi)) = p.angular_frequency_band_rad_s().map_err(owner)? {

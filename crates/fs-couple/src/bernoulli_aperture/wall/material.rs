@@ -205,7 +205,7 @@ fn property(material: &ResolvedMaterialStatePoint, name: &str, dims: Dims,
 {
     let p = material.property(name).ok_or_else(|| invalid("wall material is missing a required property"))?;
     if p.requirement().quantity() != QuantitySpec::dimensional(dims)
-        || !p.is_constant_at_fixed_temperature() || !p.value_si().is_finite() {
+        || !p.is_constant_at_fixed_environment() || !p.value_si().is_finite() {
         return Err(invalid("wall material requires dimensioned, fixed-state constant coefficients"));
     }
     if let Some((lo, hi)) = p.angular_frequency_band_rad_s()

@@ -18,7 +18,7 @@ use crate::thin_plate::{
 };
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
-use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
+use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::gas::GasState;
 use fs_material::state_point::{
     MaterialPropertySelection, ScalarAdmissibility as Admit,
@@ -93,6 +93,7 @@ struct Input {
     exterior: f64,
     temperature: f64,
     omega: f64,
+    environment: Vec<(String, f64)>,
     length: f64,
     width: f64,
     thickness: f64,
@@ -186,6 +187,10 @@ impl ParsedBoundaries {
                 opening_m: row.scalar()?,
                 opening_velocity_m_s: row.scalar()?,
             };
+            let environment = crate::material_source::read_fixed_environment(&mut row.fields)
+                .map_err(|source| MaterialBoundaryError::MaterialSource {
+                    line: row.line, source: source.to_string(),
+                })?;
             row.end()?;
             if temperature <= 0.0
                 || omega < 0.0
@@ -288,6 +293,7 @@ impl ParsedBoundaries {
                 exterior,
                 temperature,
                 omega,
+                environment,
                 length,
                 width,
                 thickness,
@@ -355,9 +361,8 @@ impl ParsedBoundaries {
             let gas = context.gases[section];
             let impedance = context.represented[section].impedance_pa_s_m3;
             let pack = load(&input.path, input.line)?;
-            let point = QueryPoint::new()
-                .with("T", input.temperature)
-                .and_then(|p| p.with("omega", input.omega))
+            let point = fs_material::state_point::query_at_fixed_environment(
+                pack.card(), input.temperature, input.omega, &input.environment)
                 .map_err(|source| MaterialBoundaryError::MaterialSource {
                     line: input.line,
                     source: source.to_string(),
@@ -424,7 +429,7 @@ impl ParsedBoundaries {
                         source,
                     }
                 })?;
-                if !property.is_constant_at_fixed_temperature()
+                if !property.is_constant_at_fixed_environment()
                     || band.is_some_and(|(lo, hi)| {
                         lo > core::f64::consts::TAU * use_band.0
                             || hi < core::f64::consts::TAU * use_band.1

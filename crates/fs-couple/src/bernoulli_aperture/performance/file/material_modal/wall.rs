@@ -6,7 +6,7 @@ use crate::bernoulli_aperture::wall::material::{
 };
 use crate::bernoulli_aperture::wall::material::source::WallConstitutiveSource;
 use fs_exec::CancelGate;
-use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
+use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::state_point::{MaterialPropertySelection, resolve_material_state_point};
 use std::sync::Arc;
 
@@ -84,13 +84,15 @@ pub(super) fn read(rows: &mut Reader<'_>, maximum_frequency_hz: f64,
         let constitutive = WallConstitutiveSource::read(orthotropic, &mut row.fields)
             .map_err(|what| bad(row.line, what))?;
         let line = row.line;
+        let environment = crate::material_source::read_fixed_environment(&mut row.fields)
+            .map_err(|source| PlateValveInputError::MaterialSource { line, source: source.to_string() })?;
         row.finish()?;
         if temperature <= 0.0 || omega < 0.0 || thickness_m <= 0.0 {
             return Err(bad(line, "wall needs positive solid temperature/thickness and nonnegative source frequency"));
         }
         let pack = cache.load(&path, line, load, gate)?;
-        let point = QueryPoint::new().with("T", temperature)
-            .and_then(|p| p.with("omega", omega))
+        let point = fs_material::state_point::query_at_fixed_environment(
+            pack.card(), temperature, omega, &environment)
             .map_err(|e| PlateValveInputError::MaterialSource { line, source: e.to_string() })?;
         let required = constitutive.requirements().map_err(PlateValveInputError::Physics)?;
         let material = resolve_material_state_point(pack.card(), &point, &required,

@@ -567,3 +567,29 @@ fn native_volume_memory_initialization_and_original_projection_limits_are_explic
         );
     }
 }
+
+#[test]
+fn g3_solid_reed_environment_retains_source_tensor_memory_through_the_dg_microphone() {
+    let material = environment_pack(solid_pack(1000.0, 20000.0, 400.0, "", 100000.0), true);
+    let text = hereditary_source();
+    let load = |moisture, block| MaterialModalDgValvePerformance::from_bytes_with_sources(
+        at_environment(&text, "solid_material ", moisture).as_bytes(), block,
+        &CancelGate::new_clock_free(), None, |_| Ok(material.clone())).unwrap();
+    let dry = load(0.0, 37);
+    let wet = load(0.2, 37);
+    let a = dry.solid_record().unwrap().materials()[0].resolved();
+    let b = wet.solid_record().unwrap().materials()[0].resolved();
+    assert_eq!(a.card_identity(), b.card_identity());
+    assert_ne!(a.identity(), b.identity());
+    assert_eq!(b.property("density").unwrap().value_si(), 1100.0);
+    assert_eq!(b.property("young_modulus").unwrap().value_si(), 16000.0);
+    assert_eq!(b.property("branch_33").unwrap().value_si(), 320.0);
+    assert!(valve(&wet).hereditary_solid().is_some());
+    let (reference, dry) = render(dry);
+    let (changed, wet) = render(wet);
+    assert!(changed.iter().all(|p| p.is_finite()));
+    assert!(reference.iter().zip(&changed).any(|(a,b)| (a-b).abs() > 1e-15));
+    assert_ne!(dry.system().load().state(), wet.system().load().state());
+    assert!(wet.last_frame().unwrap().aperture.relaxation_loss_j >= 0.0);
+    assert_eq!(changed, render(load(0.2, 1)).0);
+}

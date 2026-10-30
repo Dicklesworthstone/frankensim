@@ -363,3 +363,104 @@ fn g3_local_opening_gas_and_geometry_reach_modal_valve_and_microphone() {
 }
 
 mod dg;
+
+// Manufactured source laws exercise the original material query, not an
+// empirical wet-cane fit or an inferred equilibrium with the surrounding gas.
+fn environment_pack(base: NormalizedMaterialCardPack, typed: bool) -> NormalizedMaterialCardPack {
+    use fs_qty::{QuantitySpec, semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+    let moisture = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Moisture(MoistureBasis::DryMass), ValueForm::Static));
+    let mut claims = ClaimSet::new();
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: "manufactured held-moisture material".into(),
+        method: "declared source interpolation".into(), artifact:base.source_artifact(),
+        caveats: "not measured cane, wall tissue or an instrument".into(),
+        provenance: Provenance {source:"manufactured environmental law".into(),
+            license:"CC0-1.0".into(), artifact:None},
+    }).unwrap();
+    for (_, original) in base.card().claims().claims_ordered() {
+        let PropertyValue::Scalar {value, dims} = &original.value else { panic!("scalar test source") };
+        let name = original.key.name();
+        let factor = if name == "density" { 1.1 }
+            else if name == "young_modulus" || name.contains("modulus") || name.starts_with("branch_") { 0.8 }
+            else if name.starts_with("eta") || name.contains("viscosity") { 1.5 }
+            else if name.ends_with("time") { 1.2 } else { 1.0 };
+        let mut claim = original.clone();
+        claim.value = PropertyValue::Curve {abscissa:"moisture_content".into(),
+            abscissa_dims:Dims::NONE, knots:vec![(0.0,*value),(0.2,*value*factor)], dims:*dims};
+        claim.validity = if typed {
+            claim.validity.with_quantity("moisture_content", moisture, 0.0, 0.2)
+        } else { claim.validity.with("moisture_content", 0.0, 0.2) };
+        claim.interpolation = InterpolationPolicy::LinearInside;
+        claim.observations = vec![observation.clone()];
+        claims.insert_claim(claim).unwrap();
+    }
+    let normalized = NormalizedPack::new("held-environment-fixture", "manufactured-v1",
+        base.source_artifact(), "CC0-1.0", claims, vec![], vec![]).unwrap();
+    NormalizedMaterialCardPack::new(base.card().id().clone(), normalized).unwrap()
+}
+fn at_environment(text: &str, prefix: &str, moisture: f64) -> String {
+    text.lines().map(|line| if line.starts_with(prefix) {
+        format!("{line} environment 1 moisture_content {moisture}")
+    } else {line.to_owned()}).collect::<Vec<_>>().join("\n") + "\n"
+}
+
+#[test]
+fn g3_declared_moisture_reaches_original_reed_mass_stiffness_loss_and_microphone() {
+    let pack = environment_pack(pack(900.0, false), true);
+    let tensor = "loss tensor eta11 eta22 eta66 eta12 eta16 eta26 1 1000000";
+    for loss in [tensor, "loss regional-maxwell relaxed 1 boundary_modulus boundary_time"] {
+        let text = input().replace(tensor, loss);
+        let load = |moisture, block| MaterialModalValvePerformance::from_bytes_with_sources(
+            at_environment(&text, "section ", moisture).as_bytes(), block,
+            &CancelGate::new_clock_free(), None, |_| Ok(pack.clone())).unwrap();
+        let dry = load(0.0, 37);
+        let wet = load(0.2, 37);
+        let region = |p: &MaterialModalValvePerformance| {
+            valve(p).material_plates()[0].source().regions()[0].input.material.clone()
+        };
+        let a = region(&dry);
+        let b = region(&wet);
+        assert_eq!(a.card_identity(), b.card_identity(), "one unchanged original source card");
+        assert_ne!(a.identity(), b.identity());
+        assert_eq!(a.property("density").unwrap().value_si(), 900.0);
+        assert_eq!(b.property("density").unwrap().value_si(), 900.0 * 1.1);
+        assert_eq!(b.property("young_modulus").unwrap().value_si(), 4e9 * 0.8);
+        assert_ne!(valve(&dry).spec().modes, valve(&wet).spec().modes);
+        if loss == tensor {
+            assert_ne!(valve(&dry).viscosity_matrix_n_s_m(), valve(&wet).viscosity_matrix_n_s_m());
+        } else {
+            assert!(valve(&wet).material_relaxation().is_some());
+        }
+        let (reference, _) = render(dry);
+        let (changed, accepted) = render(wet);
+        assert!(changed.iter().all(|value| value.is_finite()));
+        assert!(reference.iter().zip(&changed).any(|(a,b)| (a-b).abs() > 1e-15));
+        let frame = accepted.source().last_frame().unwrap();
+        let scale = frame.stored_energy_j + frame.storage_change_j.abs()
+            + frame.source_work_j.abs() + frame.aperture.mechanical_work_j.abs();
+        assert!(frame.balance_residual_j().abs() <= 1e-16 + 1e-7 * scale);
+        assert_eq!(changed, render(load(0.2, 1)).0);
+    }
+}
+
+#[test]
+fn g0_native_material_environments_refuse_missing_untyped_and_unsupported_source_states() {
+    let text = input();
+    let typed = environment_pack(pack(900.0, false), true);
+    let untyped = environment_pack(pack(900.0, false), false);
+    let check = |text: &str, pack: &NormalizedMaterialCardPack| {
+        MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
+            &CancelGate::new_clock_free(), None, |_| Ok(pack.clone())).is_err()
+    };
+    assert!(check(&text, &typed), "source response axis must not receive a guessed state");
+    assert!(check(&at_environment(&text, "section ", 0.1), &untyped));
+    assert!(check(&at_environment(&text, "section ", 0.3), &typed));
+    let valid = at_environment(&text, "section ", 0.1);
+    for suffix in ["environment 0", "environment 9 moisture_content 0.1",
+        "environment 1 moisture_content NaN", "environment 1 T 300",
+        "environment 1 omega 2000", "environment 2 moisture_content 0.1 moisture_content 0.2",
+        "environment 1 unknown_coordinate 0.1", "environment 1 moisture_content 0.1 extra"] {
+        assert!(check(&valid.replace("environment 1 moisture_content 0.1", suffix), &typed), "{suffix}");
+    }
+}

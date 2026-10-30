@@ -7,7 +7,7 @@ use super::{DgSourceError, Row, bad, checkpoint};
 use crate::bernoulli_aperture::wall::material::source::WallConstitutiveSource;
 use crate::bernoulli_aperture::wall::material::{AxialConstraint, LocalMaterialWall};
 use fs_exec::CancelGate;
-use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
+use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::state_point::{MaterialPropertySelection, resolve_material_state_point};
 use std::{str::SplitAsciiWhitespace, sync::Arc};
 
@@ -23,6 +23,7 @@ pub struct DgMaterialWallInput {
     path: String,
     temperature_k: f64,
     angular_frequency_rad_s: f64,
+    environment: Vec<(String, f64)>,
     thickness_m: f64,
     axial: AxialConstraint,
     band_hz: [f64; 2],
@@ -62,6 +63,8 @@ impl DgMaterialWallInput {
     /// Read after the `dg_wall` keyword:
     /// `rigid`, `isotropic PACK T OMEGA H AXIAL FMIN FMAX LOSS`, or
     /// `orthotropic PACK T OMEGA H AXIAL FMIN FMAX HOOP_AXIS AXIAL_AXIS LOSS`.
+    /// Either material row may end with `environment COUNT AXIS VALUE ...`
+    /// for explicitly typed, held source coordinates independent of the gas.
     /// Axes are distinct one-based principal material directions in 1..=3,
     /// following the local cylindrical hoop/axial directions, not Cartesian grain.
     /// AXIAL is stress-free/strain-fixed. Isotropic LOSS retains elastic,
@@ -107,12 +110,15 @@ impl DgMaterialWallInput {
         let band_hz = [row.positive()?, row.positive()?];
         let constitutive = WallConstitutiveSource::read(orthotropic, row.fields)
             .map_err(|what| bad(line, what))?;
+        let environment = crate::material_source::read_fixed_environment(row.fields)
+            .map_err(|source| DgSourceError::Physics(crate::acoustic_realize::AcousticRealizeError::Nonlinear(
+                format!("DG wall material line {line}: {source}"))))?;
         row.finish()?;
         if angular_frequency_rad_s < 0.0 || band_hz[0] >= band_hz[1] {
             return Err(bad(line, "DG wall needs nonnegative source frequency and an ordered positive band"));
         }
         Ok(Some(Self {
-            line, path, temperature_k, angular_frequency_rad_s, thickness_m,
+            line, path, temperature_k, angular_frequency_rad_s, environment, thickness_m,
             axial, band_hz, constitutive,
         }))
     }
@@ -135,10 +141,10 @@ impl DgMaterialWallInput {
         if pack.to_bytes().len() > MAX_DG_WALL_PACK_BYTES {
             return Err(bad(self.line, "DG wall material artifact exceeds 8 MiB"));
         }
-        let point = QueryPoint::new()
-            .with("T", self.temperature_k)
-            .and_then(|point| point.with("omega", self.angular_frequency_rad_s))
-            .map_err(|_| bad(self.line, "invalid DG wall material query"))?;
+        let point = fs_material::state_point::query_at_fixed_environment(
+            pack.card(), self.temperature_k, self.angular_frequency_rad_s, &self.environment)
+            .map_err(|source| DgSourceError::Physics(crate::acoustic_realize::AcousticRealizeError::Nonlinear(
+                format!("DG wall material line {}: {source}", self.line))))?;
         let normal_viscosity_properties = self.constitutive.normal_viscosity_properties();
         let requirements = self.constitutive.requirements().map_err(DgSourceError::Physics)?;
         let material = resolve_material_state_point(pack.card(), &point, &requirements,

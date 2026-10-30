@@ -8,7 +8,7 @@ use crate::thin_plate::{PlateChartRadiation, PlateMaterialModel, PlateRegionMate
     PlateThicknessConstraint, ResolvedPlateChart, compile_plate_material_chart};
 use crate::plate_viscosity::PlateViscosityLimits;
 use fs_exec::CancelGate;
-use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
+use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility as Admit,
     ScalarPropertyRequirement as Requirement, resolve_material_state_point};
 use fs_material::visco_tensor::source::{TensorBranchProperties, TensorElasticity, TensorPronyProperties};
@@ -249,12 +249,15 @@ pub(super) fn read(
         let thickness = row.scalar()?;
         let angle = row.scalar()?;
         let line = row.line;
+        let environment = crate::material_source::read_fixed_environment(&mut row.fields)
+            .map_err(|source| PlateValveInputError::MaterialSource { line, source: source.to_string() })?;
         row.finish()?;
         if temperature <= 0.0 || omega < 0.0 || thickness <= 0.0 {
             return Err(bad(line, "material state needs positive kelvin/thickness and nonnegative angular frequency"));
         }
         let pack = cache.load(&path, line, loader, gate)?;
-        let point = QueryPoint::new().with("T", temperature).and_then(|p| p.with("omega", omega))
+        let point = fs_material::state_point::query_at_fixed_environment(
+            pack.card(), temperature, omega, &environment)
             .map_err(|e| PlateValveInputError::MaterialSource { line, source: e.to_string() })?;
         let tensor_requirements = loss.tensor_properties(model).map(|p| p.requirements())
             .transpose().map_err(|error| PlateValveInputError::MaterialSource {

@@ -74,6 +74,45 @@ the accepted modal coordinates. A density, modulus, geometry or selected
 viscosity substitution is therefore a source-data change before construction,
 not a change to the pressure/contact or acoustic-network code.
 
+## Held material environments
+
+Material source rows now accept the optional suffix
+`environment COUNT AXIS VALUE ...`. For example, a source-backed plate
+section can declare its own measured moisture coordinate:
+
+```text
+section blade.matpack isotropic 293.15 1000 0.0003 0 environment 1 moisture_content 0.12
+```
+
+The same suffix follows the existing fields of `solid_material`, graph
+`wall`, uniform or regional DG material-wall inputs, and `boundary_plate`.
+It changes the query of the original material card before any structural or
+acoustic realization. It does not change pack identity, geometry, loss
+selection, or the physical source/observer clocks. Different sections, walls
+or keys can declare independent values even when they share one source pack.
+
+These rows use the same `fs-material` query constructor as material strings.
+Temperature remains absolute kelvin and the existing frequency coordinate
+remains angular frequency in radians per second. Up to eight additional
+coordinates must be explicitly typed by every declaring source claim as
+static pressure, composition, moisture or concentration; conflicting,
+missing, duplicate, nonfinite and out-of-domain states refuse. The source's
+own normalized units and conventions are retained. Gas relative humidity
+does not automatically become solid moisture, and a declaration is not a
+sorption or transport model.
+
+The original mass, elasticity, full plate viscosity, regional Maxwell memory,
+solid tensor memory and compliant duct-wall owners consume that one resolved
+state. Frequency-dependent material response is not frozen into a broadband
+constant; the original loss law and its frequency-applicability checks remain
+in force. Source coordinates are retained in the resolved material identity,
+including the existing native material metadata.
+
+Focused native regressions exercise manufactured moisture curves through the
+same reed motion and microphone, characteristic and DG wall constitutive
+response, and the hereditary solid-valve path. These numerical source laws
+are not measured wet-cane data or an instrument-accuracy qualification.
+
 ## Full material viscosity, including cross-mode reactions
 
 `ModalAperture::from_viscous_material_plates` accepts one or two tuples of

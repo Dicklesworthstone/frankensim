@@ -186,6 +186,34 @@ impl MaterialRecord {
     }
 }
 
+/// Optional held environment after a native material record's existing fields:
+/// `environment COUNT AXIS VALUE ...`. The source card owns quantity semantics;
+/// this only admits bounded coordinates before any material artifact is loaded.
+pub(crate) fn read_fixed_environment(
+    fields: &mut std::str::SplitAsciiWhitespace<'_>,
+) -> Result<Vec<(String, f64)>, MaterialIngressError> {
+    let Some(selector) = fields.next() else { return Ok(Vec::new()); };
+    if selector != "environment" {
+        return Err(refuse("material state suffix requires environment COUNT AXIS VALUE ..."));
+    }
+    let count = fields.next().and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| (1..=fs_material::state_point::MAX_FIXED_ENVIRONMENT_COORDINATES).contains(count))
+        .ok_or_else(|| refuse("material environment needs 1..=8 explicit coordinates"))?;
+    let mut coordinates: Vec<(String, f64)> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let axis = fields.next().ok_or_else(|| refuse("missing material environment axis"))?;
+        plain_token(axis, "a material environment axis")?;
+        let value = fields.next().and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| refuse("material environment coordinates need finite numeric values"))?;
+        if axis == "T" || axis == "omega" || coordinates.iter().any(|(prior, _)| prior == axis) {
+            return Err(refuse("material environment coordinates must be distinct and cannot replace T or omega"));
+        }
+        coordinates.push((axis.to_owned(), value));
+    }
+    Ok(coordinates)
+}
+
 /// The label of a `fixture LABEL` suffix that follows bare material numbers.
 ///
 /// # Errors

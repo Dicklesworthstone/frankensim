@@ -386,3 +386,47 @@ fn g0_wall_relaxation_requires_source_dimensions_band_and_resolved_times() {
         assert!(loaded(&changed, &material, 37).is_err(), "invalid spectrum declaration was accepted");
     }
 }
+
+#[test]
+fn g3_held_wall_environment_reaches_both_ducts_and_the_same_coupled_reed() {
+    let material = environment_pack(wall_pack(1e6, None, 100000.0), true);
+    let dry_text = at_environment(&input_walls(), "wall ", 0.0);
+    let wet_text = at_environment(&input_walls(), "wall ", 0.2);
+    let dry = loaded(&dry_text, &material, 37).unwrap();
+    let wet = loaded(&wet_text, &material, 37).unwrap();
+    assert_eq!(valve(&dry).material_plates()[0].source().specimen_identity(),
+        valve(&wet).material_plates()[0].source().specimen_identity());
+    for side in [ValveSide::Upstream, ValveSide::Downstream] {
+        let a = &dry.renderer().source().system().material_walls(side)[0];
+        let b = &wet.renderer().source().system().material_walls(side)[0];
+        assert_eq!(a.source().material.card_identity(), b.source().material.card_identity());
+        assert_ne!(a.source().material.identity(), b.source().material.identity());
+        assert_ne!(a.patch(), b.patch());
+    }
+    let (reference, dry) = render(dry);
+    let (changed, wet) = render(wet);
+    assert!(changed.iter().all(|p| p.is_finite()));
+    assert!(reference.iter().zip(&changed).any(|(a,b)| (a-b).abs() > 1e-15));
+    let motion = |source: &ScheduledTwoSidedPressure| match source.source().system().valve() {
+        LoadedAperture::Modal(valve) => valve.modal_states().to_vec(),
+        _ => panic!("original reed motion"),
+    };
+    assert_ne!(motion(&dry), motion(&wet), "wall state changes actual acoustic back-reaction");
+    assert_eq!(changed, render(loaded(&wet_text, &material, 1).unwrap()).0);
+
+    // Uniform and regional DG adapters call this same original wall input.
+    // Geometry, constitutive selection and use band remain fixed.
+    let load_dg = |moisture| {
+        let text = format!("isotropic wall.matpack 293.15 1000 0.001 strain-fixed 50 2000 kelvin-voigt environment 1 moisture_content {moisture}");
+        crate::dg_port::input::wall::DgMaterialWallInput::read(1, &mut text.split_ascii_whitespace())
+            .unwrap().unwrap().resolve(std::sync::Arc::new(material.clone()),
+                &CancelGate::new_clock_free()).unwrap()
+    };
+    let a = load_dg(0.0);
+    let b = load_dg(0.2);
+    assert_eq!(a.pack().content_hash(), b.pack().content_hash());
+    assert_ne!(a.wall().material().identity(), b.wall().material().identity());
+    assert_eq!(a.wall().thickness_m(), b.wall().thickness_m());
+    assert_ne!(a.wall().specific_impedance(0.007, 1000.0).unwrap(),
+        b.wall().specific_impedance(0.007, 1000.0).unwrap());
+}
