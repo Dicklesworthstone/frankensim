@@ -7,7 +7,12 @@
     { "name": "specific_enthalpy", "unit": "J/kg", "kind": "dimensional" },
     { "name": "thermal_conductivity", "unit": "W/m/K", "kind": "thermal-conductivity" },
     { "name": "dynamic_viscosity", "unit": "Pa*s", "kind": "dimensional" },
-    { "name": "volumetric_thermal_expansion_coefficient", "unit": "K^-1", "kind": "dimensional" }
+    { "name": "volumetric_thermal_expansion_coefficient", "unit": "K^-1", "kind": "dimensional" },
+    { "name": "sound_speed", "unit": "m/s", "kind": "dimensional" },
+    { "name": "isothermal_compressibility", "unit": "Pa^-1", "kind": "dimensional" },
+    { "name": "isentropic_compressibility", "unit": "Pa^-1", "kind": "dimensional" },
+    { "name": "adiabatic_bulk_modulus", "unit": "Pa", "kind": "dimensional" },
+    { "name": "specific_heat_capacity_cv", "unit": "J/kg/K", "kind": "dimensional" }
   ],
   "models": [],
   "domain": {

@@ -344,6 +344,17 @@ mod tests {
             dense.sound_speed_m_s().to_bits(),
             dense.source().state().sound_speed.to_bits()
         );
+        let acoustic =
+            crate::fluid_acoustics::FluidAcoustics::acoustic_state(&dense).unwrap();
+        assert_eq!(acoustic.density_kg_m3().to_bits(), dense.density_kg_m3().to_bits());
+        assert_eq!(
+            acoustic.sound_speed_m_s().to_bits(),
+            dense.sound_speed_m_s().to_bits()
+        );
+        assert_eq!(
+            acoustic.characteristic_impedance_pa_s_m().to_bits(),
+            dense.characteristic_impedance_pa_s_m().to_bits()
+        );
         assert!(dense.specific_internal_energy_j_kg().is_finite());
         assert!(dense.specific_enthalpy_j_kg().is_finite());
     }

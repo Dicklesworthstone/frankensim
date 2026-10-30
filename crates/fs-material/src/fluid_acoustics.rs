@@ -154,6 +154,16 @@ gas_owner!(
     ResolvedThermochemicalGasState
 );
 
+// The retained source().state() is an ideal reference. Acoustic consumers
+// must use the checked real-gas root and its own caloric derivatives.
+impl FluidAcoustics
+    for crate::thermochemical_gas::nonideal::ResolvedThermochemicalRealGasState
+{
+    fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+        FluidAcousticState::try_new(self.density_kg_m3(), self.sound_speed_m_s())
+    }
+}
+
 macro_rules! water_owner {
     ($($ty:ty),+ $(,)?) => {$ (
         impl FluidAcoustics for $ty {

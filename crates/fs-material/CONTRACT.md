@@ -5444,6 +5444,12 @@ original complete gas coherence check. Original IF97 Gibbs, dense and unified
 regional states supply their own density and sound speed; no ideal-gas cp/cv
 substitution is made for a liquid or dense fluid.
 
+The checked Peng–Robinson thermochemical owner supplies its actual stable-root
+density and adiabatic sound speed through the same view. Its retained ideal
+reference is provenance only and never supplies these coefficients. The
+existing dense-gas caloric regression checks acoustic/transport parity and
+preserves the actual departure from the ideal reference.
+
 `ResolvedFluidAcousticState` retains the complete material query, original source
 claims and every usage receipt. The caller explicitly selects a sound-speed or
 adiabatic-modulus role and exact scalar property keys. Pressure semantics,

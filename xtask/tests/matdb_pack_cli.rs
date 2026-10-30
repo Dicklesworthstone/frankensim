@@ -3318,6 +3318,145 @@ mod common_material_acquisition {
         );
     }
 
+    #[test]
+    fn g1_sourced_water_acoustic_pressure_properties() {
+        use fs_qty::{Pressure, Velocity};
+        let (pack, _) = compile("water-liquid-iapws-sr6-08");
+        // Independent rounded IAPWS SR6-08(2011), Table 8, 298.15 K, 0.1 MPa.
+        let rho: f64 = 997.047013;
+        let cp: f64 = 4181.44618;
+        let sound: f64 = 1496.69922;
+        let dv_dp: f64 = -4.53803340e-13;
+        let dv_dt: f64 = 2.58054178e-7;
+        let compressibility_dims = Dims([1, -1, 2, 0, 0, 0]);
+        let properties = [
+            ("sound_speed", Velocity::DIMS, sound),
+            ("isothermal_compressibility", compressibility_dims, -dv_dp * rho),
+            ("isentropic_compressibility", compressibility_dims, 1.0 / (rho * sound * sound)),
+            ("adiabatic_bulk_modulus", Pressure::DIMS, rho * sound * sound),
+            ("volumetric_thermal_expansion_coefficient", Dims([0, 0, 0, -1, 0, 0]), dv_dt * rho),
+            ("specific_heat_capacity_cv", Dims([2, 0, -2, -1, 0, 0]), cp + 298.15 * dv_dt * dv_dt / dv_dp),
+        ];
+        for (name, dims, expected) in properties {
+            let claims = pack.claims().claims_for(name);
+            assert_eq!(claims.len(), 1);
+            let claim = claims[0].1;
+            let PropertyValue::Curve { knots, dims: actual_dims, .. } = &claim.value else {
+                panic!("source water curve required for {name}")
+            };
+            assert_eq!(*actual_dims, dims);
+            assert_eq!(knots.len(), 15);
+            assert_eq!(knots.first().unwrap().0, 283.15);
+            assert_eq!(knots.last().unwrap().0, 353.15);
+            let actual = sample(&pack, name, &[("temperature", 298.15)]);
+            assert!((actual / expected - 1.0).abs() < 2e-8, "{name}: {actual} versus Table 8 {expected}");
+            for (axis, outside) in [("temperature", 283.14), ("temperature", 353.16),
+                ("pressure", 100001.0), ("phase-liquid", 0.0)]
+            {
+                assert!(pack.claims().query_typed(&claim.key,
+                    &point(claim, &[(axis, outside)]), SelectionPolicy::SingleClaimOnly).is_err(),
+                    "{name} must refuse {axis}={outside}");
+            }
+        }
+        // Identities apply at common source knots. Independent piecewise-linear
+        // interpolation of each property is not an exact thermodynamic EOS.
+        for i in 0..15 {
+            let temperature = 283.15 + 5.0 * f64::from(i);
+            let value = |name| sample(&pack, name, &[("temperature", temperature)]);
+            let rho = value("density");
+            let c = value("sound_speed");
+            let beta_t = value("isothermal_compressibility");
+            let beta_s = value("isentropic_compressibility");
+            let bulk = value("adiabatic_bulk_modulus");
+            let alpha = value("volumetric_thermal_expansion_coefficient");
+            let cp = value("specific_heat_capacity");
+            let cv = value("specific_heat_capacity_cv");
+            assert!((rho * c * c * beta_s - 1.0).abs() < 2e-14);
+            assert!((bulk * beta_s - 1.0).abs() < 2e-14);
+            assert!((beta_s / beta_t / (cv / cp) - 1.0).abs() < 2e-14);
+            let caloric_difference = temperature * alpha * alpha / (rho * beta_t);
+            assert!(((cp - cv) / caloric_difference - 1.0).abs() < 5e-11);
+        }
+    }
+
+    /// G3: the original sourced liquid drives real radiation and physical flow scaling.
+    #[test]
+    fn g3_sourced_water_drives_acoustics_and_fluid_scaling() {
+        use fs_bem::helmholtz::{Formulation, Medium, solve_radiation};
+        use fs_bem::panel3d::SpherePanels;
+        use fs_lbm::lattice3::AcousticScalingPlan;
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_material::fluid_acoustics::{
+            FluidAcousticParameter, FluidAcoustics, resolve_acoustic_liquid_state_with_requirements,
+            resolve_fluid_acoustic_state,
+        };
+        use fs_material::fluid_transport::FluidTransport;
+        use fs_material::liquid::LiquidPropertyRequirements;
+        use fs_material::liquid_temperature::LiquidViscosityBasis;
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+        };
+        use fs_math::c64::C64;
+
+        let (pack, _) = compile("water-liquid-iapws-sr6-08");
+        let original = NormalizedMaterialCardPack::new(MaterialStateId {
+            chemistry: "IAPWS ordinary water".into(), phase: "liquid".into(),
+            process: "SR6-08(2011), isobaric 0.1 MPa".into(), revision: 0,
+        }, pack).unwrap();
+        let card = original.card();
+        let requirement = |name| {
+            let claims = card.claims().claims_for(name);
+            assert_eq!(claims.len(), 1);
+            ScalarPropertyRequirement::try_with_key(&claims[0].1.key,
+                ScalarAdmissibility::StrictlyPositive).unwrap()
+        };
+        // Preserve the source pack's exact original keys and quantity semantics.
+        let liquid_requirements = LiquidPropertyRequirements::try_new(
+            requirement("density"), requirement("specific_heat_capacity"),
+            requirement("thermal_conductivity"), requirement("dynamic_viscosity"),
+            LiquidViscosityBasis::Dynamic,
+        ).unwrap();
+        let parameter = FluidAcousticParameter::sound_speed().unwrap();
+        let source = card.claims().claims_for("sound_speed")[0].1;
+        let sphere = SpherePanels::icosphere(1.0, 2).unwrap();
+        let velocity = vec![C64::ONE; sphere.centroids().len()];
+        let mut powers = Vec::new();
+        let mut identities = Vec::new();
+        for temperature in [293.15, 333.15] {
+            let query = point(source, &[("temperature", temperature)]);
+            let liquid = resolve_acoustic_liquid_state_with_requirements(card, &query, &parameter,
+                &liquid_requirements, MaterialPropertySelection::SingleClaimOnly).unwrap();
+            assert_eq!(liquid.material().card_identity(), card.content_hash());
+            assert_eq!(liquid.material().query(), query);
+            for property in liquid.material().properties() {
+                card.claims().verify_receipt(&property.answer().receipt).unwrap();
+            }
+            let acoustic = liquid.acoustic_state().unwrap();
+            let transport = liquid.transport_state().unwrap();
+            assert_eq!(acoustic.density_kg_m3().to_bits(), transport.density_kg_m3().to_bits());
+            let medium = Medium::from_material(&liquid).unwrap();
+            let scaling = AcousticScalingPlan::from_material(&liquid, 1e-4, 1.0, 0.05).unwrap();
+            assert!((scaling.dt_s * medium.sound_speed / (fs_lbm::CS2.sqrt() * 1e-4) - 1.0).abs() < 2e-14);
+            assert_eq!(scaling.nu_m2_s.to_bits(), transport.kinematic_viscosity_m2_s().to_bits());
+            let from_bulk = resolve_fluid_acoustic_state(card, &query, &requirement("density"),
+                &FluidAcousticParameter::adiabatic_bulk_modulus().unwrap(),
+                MaterialPropertySelection::SingleClaimOnly).unwrap();
+            assert!((from_bulk.state().sound_speed_m_s() / medium.sound_speed - 1.0).abs() < 2e-14);
+            // A 1 m pulsating sphere, unit peak normal velocity, same physical
+            // 50 Hz at each temperature. This changes k as the source c changes.
+            let k = core::f64::consts::TAU * 50.0 / medium.sound_speed;
+            let radiation = solve_radiation(&sphere, k, medium, &velocity,
+                Formulation::BurtonMiller).unwrap();
+            let analytic_power = core::f64::consts::TAU * medium.density * medium.sound_speed
+                * k * k / (1.0 + k * k);
+            assert!((radiation.radiated_power / analytic_power - 1.0).abs() < 0.05);
+            powers.push(radiation.radiated_power);
+            identities.push(liquid.acoustic().identity());
+        }
+        assert_ne!(identities[0], identities[1]);
+        assert!(powers[1] < 0.98 * powers[0]);
+    }
+
     fn check_claims(pack: &NormalizedPack) {
         assert!(pack.claims().claims_ordered().next().is_some());
         for (id, claim) in pack.claims().claims_ordered() {
@@ -3574,7 +3713,7 @@ mod common_material_acquisition {
             panic!("wrong property family")
         };
         assert_eq!(pack, original);
-        assert_eq!(pack.claims().claims_ordered().count(), 6);
+        assert_eq!(pack.claims().claims_ordered().count(), 11);
         check_claims(&pack);
 
         let equation = |t: f64| {
@@ -3772,7 +3911,7 @@ mod common_material_acquisition {
         );
         assert_eq!(
             run.stdout.matches("\"status\":\"supported\"").count(),
-            6,
+            11,
             "{}",
             run.stdout
         );

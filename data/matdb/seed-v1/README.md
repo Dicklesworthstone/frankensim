@@ -1619,21 +1619,49 @@ Each run retains command, stdout/stderr, physics diagnostics and exit status
 in the unique receipt directory printed at startup. This suite checks source
 transport and bounded numerical responses, not experimental qualification.
 
-`water-liquid-iapws-sr6-08` supplies five liquid-water curves (density, isobaric
-heat capacity, specific enthalpy, conductivity and dynamic viscosity), each
-with 15 knots from 283.15 to 353.15 K at exactly 100000 Pa. The source is
+`water-liquid-iapws-sr6-08` supplies eleven liquid-water curves: density,
+isobaric heat capacity, specific enthalpy, conductivity, dynamic viscosity,
+volumetric thermal expansion, sound speed, isothermal and isentropic
+compressibility, adiabatic bulk modulus and isochoric heat capacity. Each has
+15 knots from 283.15 to 353.15 K at exactly 100000 Pa. The source is
 [IAPWS SR6-08(2011)](https://iapws.org/documents/release/LiquidWater.download),
 which permits republication with attribution. The enthalpy convention is
 inherited from its Gibbs-energy equation, with an explicit query flag; liquid
-phase and pressure are also required. The reusable discovery request is
-[`liquid-water.json`](../../../examples/material-discovery/liquid-water.json).
-Linear interpolation adds sampled relative discrepancies of approximately
-0.00393%, 0.00788%, 0.00796%, 0.01888% and 0.38335%, respectively, against
-the source equations. These are numerical sampling results, separate from
-source uncertainty and not certified bounds. Independently interpolated
-enthalpy and heat capacity differ by at most 1.100 J/kg per 5 K interval
-under the integral consistency check, and 3.519 J/(kg K) under the derivative
-check. This bounded dataset does not supply boiling, steam, ice or a fluid solve.
+phase and pressure are also required. The reusable discovery request,
+[`liquid-water.json`](../../../examples/material-discovery/liquid-water.json),
+requests all eleven properties using the canonical liquid source names.
+
+For the original density, Cp, enthalpy, conductivity and viscosity curves,
+linear interpolation adds sampled relative discrepancies of approximately
+0.00393%, 0.00788%, 0.00796%, 0.01888% and 0.38335%, respectively.
+Independent enthalpy and heat-capacity interpolation differs by at most
+1.100 J/kg per 5 K interval under the integral consistency check and
+3.519 J/(kg K) under the derivative check. The original instantaneous
+expansion curve retains its independent Eq. (2) derivative and the existing
+thermal-flow integration; its sampled relative discrepancy is 0.83324715%.
+
+The five added acoustic/pressure curves use the same source equations and
+state. Their 99-probe-per-interval maximum relative interpolation
+discrepancies are 0.02005737% for sound speed, 0.06782908% for isothermal
+compressibility, 0.05598879% for isentropic compressibility, 0.04031909% for
+adiabatic bulk modulus and 0.00516373% for Cv. All reported interpolation
+discrepancies are sampled numerical results, separate from source
+uncertainty and not certified bounds. Sound-speed source uncertainty is
+0.005%; no distribution, confidence or independent uncertainty for derived
+quantities is invented.
+
+Thermodynamic identities hold at common source-evaluated knots, not exactly
+between independently interpolated redundant coefficients. A coherent
+acoustic consumer selects either sound speed or explicitly adiabatic modulus,
+then derives dependent coefficients from that choice and the same density.
+Compressibility is the local pressure derivative at 100000 Pa; it does not
+authorize finite-pressure extrapolation or an ideal-gas model for water.
+This bounded dataset does not supply cavitation, boiling, steam or ice.
+
+The material-pack regressions check independent SR6 Table 8 values, all
+common-knot thermodynamic identities, source-domain refusal and actual BEM
+radiation plus physical LBM acoustic scaling at two temperatures. Original
+thermal-flow and heat-history consumers remain on the same source pack.
 
 | Source family | Material records | What the records support |
 | --- | --- | --- |
