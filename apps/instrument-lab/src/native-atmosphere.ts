@@ -4,7 +4,7 @@ import { editNativeGasRegion, nativeGasRegions, type NativeGasRegion, type Nativ
 /** Source-data controls shared by wind and string performances, without a browser gas model. */
 export function createNativeAtmosphereControls(readSource: () => string, writeSource: (source:string) => void,
   draftChanged: () => void) {
-  const selection = el("select", {"aria-label":"Gas region in the native performance"});
+  const selection = el("select", {"aria-label":"Gas region in the native source"});
   const kind = el("select", {"aria-label":"Native gas model"});
   const kindLabels: Record<NativeGasValues["kind"], string> = {
     "dry-air":"Dry air — evolving physical gas",
@@ -21,7 +21,7 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
   const add = el("button", {type:"button", class:"btn"}, "Add species");
   const common = el("input", {type:"checkbox"});
   const commonLabel = el("label", {class:"small nw-decimation"}, common,
-    " Apply this absolute pressure to every editable region");
+    " Apply this absolute pressure to every editable region in this source");
   const apply = el("button", {type:"button", class:"btn primary"}, "Apply atmosphere");
   const cancel = el("button", {type:"button", class:"btn"}, "Discard changes");
   const status = el("p", {class:"small muted", role:"status", "aria-live":"polite"});
@@ -35,9 +35,9 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
       el("label", {}, "Absolute pressure (Pa)", pressure), humidityLabel),
     mixture, modelHelp, commonLabel,
     el("div", {class:"btn-row"}, apply, cancel), status);
-  const empty = el("p", {class:"small muted"}, "No editable primitive gas records were found. Source-pack references, inherited aliases and unsupported field declarations remain in the performance editor.");
+  const empty = el("p", {class:"small muted"}, "No editable primitive gas records were found. Source-pack references, inherited aliases and unsupported field declarations remain in the source editor.");
   const element = el("section", {class:"nw-gas-controls nw-atmosphere", "aria-label":"Edit physical atmosphere"},
-    el("p", {class:"small muted"}, "Change a region's temperature, absolute pressure or composition, then render to hear the native physics. Geometry, excitation and pressure-to-PCM scale stay in the performance. Apply or discard these edits before continuing."), fields, empty);
+    el("p", {class:"small muted"}, "Change a region's temperature, absolute pressure or composition, then render to hear the native physics. Geometry, excitation and pressure-to-PCM scale stay in the source. Apply or discard these edits before continuing."), fields, empty);
   let regions: NativeGasRegion[] = [], selected: NativeGasRegion | undefined;
   let snapshot = "", locked = false, dirty = false;
   let rows: {species:HTMLInputElement; fraction:HTMLInputElement; remove:HTMLButtonElement; element:HTMLElement}[] = [];
@@ -72,7 +72,7 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
           + (selected?.supportedKinds.includes("dry-air") ? " Resolved flow also requires an explicitly authored energy_solve record after fluid_limits. Remove it in the performance editor before switching to dry air." : "");
   };
   const changed = (): void => {
-    dirty = true; status.textContent = "Atmosphere changes are pending. Apply them to the performance or discard them.";
+    dirty = true; status.textContent = "Atmosphere changes are pending. Apply them to this source or discard them.";
     controls(); draftChanged();
   };
   const addRow = (value = {species:"", fraction:""}): void => {
@@ -130,9 +130,9 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
       dirty = false;
       writeSource(next);
       load();
-      status.textContent = "Atmosphere applied to the native performance. Render again to hear it.";
+      status.textContent = "Atmosphere applied to the native source. Render again to hear it.";
       draftChanged();
     } catch (error) { status.textContent = error instanceof Error ? error.message : String(error); }
   });
-  return {element, refresh, hasDraft:() => dirty, setDisabled(disabled:boolean) { locked = disabled; controls(); }};
+  return {element, refresh, hasRegions:() => regions.length > 0, hasDraft:() => dirty, setDisabled(disabled:boolean) { locked = disabled; controls(); }};
 }

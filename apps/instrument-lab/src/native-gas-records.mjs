@@ -11,15 +11,22 @@ const resolvedSchema = 'frankensim-resolved-dg-performance-v1';
 /** Locate only supported primitive records; aliases, packs and unknown forms stay untouched. */
 export function nativeGasRegions(source) {
   const regions = [], rows = [];
-  const resolved = sourceRows(source)[0] === resolvedSchema;
+  const records = sourceRows(source);
+  const resolved = records[0] === resolvedSchema;
+  // The finite-atmosphere owners read one original thermochemical record from
+  // an attached file, without a performance keyword or a second gas model.
+  const gasRecord = records.length === 1 && /^thermochemical(?:\s|$)/.test(records[0]);
   let line = 0;
   for (const match of source.matchAll(/[^\r\n]+|\r\n|\r|\n/g)) {
     if (/^[\r\n]/.test(match[0])) { line++; continue; }
-    const tokens = [...match[0].matchAll(/[^ \t\v\f]+/g)];
+    const bom = match.index === 0 && match[0].startsWith('\ufeff') ? 1 : 0;
+    const tokens = [...match[0].slice(bom).matchAll(/[^ \t\v\f]+/g)];
+    for (const token of tokens) token.index += bom;
     const words = tokens.map(token => token[0]);
     const key = words[0];
     if (key && !key.startsWith('#')) rows.push({start:match.index, line:line + 1, tokens, words});
-    let first = standalone.has(key) ? 1 : -1;
+    const bare = gasRecord && key === 'thermochemical';
+    let first = bare ? 0 : standalone.has(key) ? 1 : -1;
     const inherited = segments.has(key);
     if (inherited) {
       const marker = words.indexOf('gas');
@@ -28,7 +35,8 @@ export function nativeGasRegions(source) {
     if (first < 0 || first >= words.length) continue;
     const fields = words.slice(first);
     const resolvedPrimary = resolved && key === 'gas';
-    const supportedKinds = resolvedPrimary ? ['dry-air', 'thermochemical'] : ['moist-air', 'mixture', 'thermochemical'];
+    const supportedKinds = bare ? ['thermochemical']
+      : resolvedPrimary ? ['dry-air', 'thermochemical'] : ['moist-air', 'mixture', 'thermochemical'];
     let kind = fields[0], count, consumed, values, pressureIndex;
     if (kind === 'dry-air') {
       if (!resolvedPrimary || !finite(fields[1]) || !finite(fields[2])) continue;
@@ -61,7 +69,7 @@ export function nativeGasRegions(source) {
     const end = match.index + last.index + last[0].length;
     const pressureToken = pressureIndex === null ? null : tokens[pressureIndex];
     regions.push({source, start, end, line:line + 1, key, inherited, supportedKinds,
-      label:`${key}${inherited ? ' gas' : ''} · line ${line + 1}`, values,
+      label:`${bare ? 'Attached thermochemical gas' : key}${inherited ? ' gas' : ''} · line ${line + 1}`, values,
       pressureSpan:pressureToken ? [match.index + pressureToken.index, match.index + pressureToken.index + pressureToken[0].length] : null});
   }
   return [...regions, ...fieldStationRegions(source, rows, regions)].sort((a, b) => a.start - b.start);

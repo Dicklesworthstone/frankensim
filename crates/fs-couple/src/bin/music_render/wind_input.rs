@@ -436,12 +436,14 @@ pub(super) fn resolved_provenance(
             config.closure.filter_width_lu * law.dx_m, config.closure.maximum_eddy_to_molecular,
             config.turbulent_prandtl, system.zone().sgs_config().is_some())
     });
-    let selected_patch = system.coupled_patch().map(|patch| ("coupled_patch", patch,
-        "selected aperture pressure, volume flow and acoustic work feed the bore; complete face mass and energy include escaping flow; no exterior radiation observer on the remainder"))
-        .or_else(|| system.source_patch().map(|patch| ("source_patch", patch,
-        "selected aperture receives the declared source pressure or finite upstream duct; source work and upstream duct flow use only this aperture; complete face mass and energy include the independently driven remainder; no extra microphone source")));
-    let aperture = selected_patch.map_or_else(String::new, |(name, patch, scope)| {
-        let (kind, value, units, temperature) = match system.patch_background_drive().expect("explicit patch background") {
+    let aperture = [
+        (system.coupled_face_is_high(), "coupled_patch",
+            "selected aperture pressure, volume flow and acoustic work feed the bore; complete face mass and energy include escaping flow; no exterior radiation observer on the remainder"),
+        (!system.coupled_face_is_high(), "source_patch",
+            "selected aperture receives the declared source pressure or finite upstream duct; source work and upstream duct flow use only this aperture; complete face mass and energy include the independently driven remainder; no extra microphone source"),
+    ].into_iter().filter_map(|(high, name, scope)| {
+        let patch = system.zone().characteristic_patch_on(high)?;
+        let (kind, value, units, temperature) = match system.patch_background_drive_on(high).expect("explicit patch background") {
             fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(value) => ("prescribed-pressure-offset", value, "Pa", String::new()),
             fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(value) => ("incoming-characteristic", value, "m/s", String::new()),
             fs_lbm::nsf3::NsfBoundaryDrive::PressureTemperature { pressure_offset_pa, inflow_temperature_k } =>
@@ -449,10 +451,9 @@ pub(super) fn resolved_provenance(
                     format!(",\"inflow_temperature_k\":{inflow_temperature_k:e},\"temperature_scope\":\"prescribed only at inward flow; outgoing entropy remains fluid-owned\"")),
         };
         let open = system.zone().characteristic_axis().expect("original characteristic axis");
-        let (high, _) = system.zone().characteristic_patch().expect("declared original patch");
-        format!(",\"{name}\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"{temperature}}},\"scope\":\"{scope}\"}}",
-            open.axis, high, patch.start[0], patch.start[1], patch.end[0], patch.end[1])
-    });
+        Some(format!(",\"{name}\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"{temperature}}},\"scope\":\"{scope}\"}}",
+            open.axis, high, patch.start[0], patch.start[1], patch.end[0], patch.end[1]))
+    }).collect::<String>();
     let reservoir = system.zone().reservoir_aperture().map_or_else(String::new, |opening| {
         let state = opening.state;
         format!(",\"reservoir_aperture\":{{\"kind\":\"prescribed-exterior-ghost-state\",\"normal_axis\":{},\"high_face\":{},\"cell_count\":{},\"area_m2\":{:e},\"density_kg_m3\":{:e},\"velocity_m_s\":[{:e},{:e},{:e}],\"temperature_k\":{:e},\"mass_account\":{{\"field\":\"reservoir_mass_out_kg\",\"unit\":\"kg\",\"positive\":\"out of resolved fluid\"}},\"energy_account\":{{\"field\":\"flow.open_energy_j\",\"unit\":\"J\",\"positive\":\"into resolved fluid\"}},\"scope\":\"original material-owned prescribed reservoir on transverse wall tiles; separate streamed mass and signed open_energy_j; observation is selected independently; not a transparent acoustic boundary\"}}",

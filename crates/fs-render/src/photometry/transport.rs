@@ -22,7 +22,7 @@ use super::source::{
 /// `Homogeneous` retains the existing gray analytic fast path. The grid
 /// variants borrow accepted physical fields; their density is kg/m³ and their
 /// absorption/scattering coefficients are m²/kg, giving extinction in m⁻¹.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum PhotometricMedium<'a> {
     /// Spatially uniform, wavelength-independent absorption and scattering.
     Homogeneous(HomogeneousMedium),
@@ -33,14 +33,14 @@ pub enum PhotometricMedium<'a> {
 }
 
 impl PhotometricMedium<'_> {
-    pub(crate) fn homogeneous(self) -> Option<HomogeneousMedium> {
+    pub(crate) fn homogeneous(&self) -> Option<&HomogeneousMedium> {
         match self {
             Self::Homogeneous(medium) => Some(medium),
             _ => None,
         }
     }
 
-    pub(crate) fn image_refusal(self) -> Option<&'static str> {
+    pub(crate) fn image_refusal(&self) -> Option<&'static str> {
         match self {
             Self::Homogeneous(_) => None,
             Self::Scattering(grid) if grid.has_scattering() => Some(
@@ -57,7 +57,7 @@ impl PhotometricMedium<'_> {
     }
 
     pub(crate) fn transmittance(
-        self,
+        &self,
         cx: &Cx<'_>,
         origin: Point3,
         direction: Vec3,

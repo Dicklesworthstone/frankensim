@@ -30,6 +30,9 @@ mod point_sampling;
 #[path = "photometric_path/spectral_reference.rs"]
 mod spectral_reference;
 
+#[path = "photometric_path/tabulated_phase.rs"]
+mod tabulated_phase;
+
 use core::f64::consts::{FRAC_PI_2, PI};
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

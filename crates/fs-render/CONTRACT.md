@@ -528,8 +528,8 @@ differentiable lift). Pure Rust throughout.
 - **Physical participating cells (`tracer,volumes`):**
   `volumes::transport::scattering::ScatteringGrid` extends the same accepted
   borrowed density/temperature snapshot with independent mass-scattering
-  coefficients and a reciprocal isotropic, Henyey--Greenstein or unpolarized
-  Rayleigh phase law. Spectral extinction is `rho * (kappa_a + kappa_s)`.
+  coefficients and a reciprocal isotropic, Henyey--Greenstein, unpolarized
+  Rayleigh or tabulated phase law. Spectral extinction is `rho * (kappa_a + kappa_s)`.
   Exact cell crossings invert exponential free flight without fixed marching
   steps, density copies, global majorants or null-collision loops. A uniformly
   selected packet lane proposes distance; complete spectral-mixture densities
@@ -1695,7 +1695,8 @@ usable. Receiver endpoint exclusion is an explicit metre-valued tolerance and
 is not substituted for the physical transport distance.
 
 `HomogeneousMedium` reuses the volume transport/phase kernels with nonnegative
-inverse-metre absorption/scattering and isotropic, HG or Rayleigh scattering.
+inverse-metre absorption/scattering and isotropic, HG, Rayleigh or tabulated
+scattering. Its public `PhaseFunction` is the native volume owner's type.
 The single-scattering integrator analytically integrates camera-path extinction
 within midpoint panels and refines under an explicit panel budget. Its returned
 quadrature discrepancy is an estimate, never an enclosure. The scene image
@@ -1826,6 +1827,42 @@ to the camera. Both leg transmittances enter its spectral BRDF integral.
 The deterministic `LuminanceJob` accepts passive absorption grids but refuses
 physical-grid scattering and LTE emission; those require the path estimator
 below rather than a zero contribution presented as a complete image.
+
+### Tabulated angular scattering
+
+`volumes::transport::scattering::TabulatedPhase::try_new` accepts 2--4096
+strictly increasing `(cos_theta, relative_density)` knots covering exactly
+[-1,1]. Values are finite and nonnegative, with nonzero total mass. The density
+is linear in propagation-direction cosine, azimuthally symmetric and normalized
+with the physical solid-angle measure `2*pi*d(cos_theta)`. It is not a histogram
+of angular counts or interpolation in degrees. `PhaseFunction::tabulated`
+constructs the shared law used by both gray quadrature and spectral paths.
+Scattering strength still comes from gray `sigma_s` or native `rho*kappa_s`;
+the table supplies angular redistribution in sr^-1, not an extinction coefficient.
+
+Compensated trapezoid integration normalizes the represented angular law;
+analytic quadratic CDF inversion samples it with the same per-steradian PDF.
+Zero-density intervals retain their zero response and receive no samples.
+Unrepresentable positive mass, unresolved active intervals and invalid input
+refuse rather than being assigned a density floor. Floating-point endpoint
+repairs stay in the selected positive interval and evaluate the actual returned
+direction's PDF. The immutable table is shared through `Arc`; native phase
+sampling and point/finite-source/thermal NEE borrow it without per-vertex clones
+or allocation. Native medium identities include the normalized PDF and represented
+CDF. Existing analytic phase arithmetic, random addresses and identity bytes
+remain unchanged. Native scattering semantics is version 5.
+`PhaseFunction`, `HomogeneousMedium` and `PhotometricMedium` are now `Clone`
+rather than `Copy`; clone an owned medium explicitly when constructing two scenes.
+
+Photometry version 4 and path version 10 add this table support. The headless
+example accepts `--haze-phase CSV` in gray or spectral modes; the ordinary Rust
+interface needs no file parser. Tables are wavelength-independent declared
+angular data, not evidence of a measured aerosol or a particle-size model.
+Measurement, interpolation, angular-resolution and polarization errors remain
+unbounded; normalizing a table cannot strengthen `NoClaim` or turn sampling
+standard error into a total error bound. Focused tests use independent linear-law
+moments/CDFs, HG refinement, gray and two-layer spectral single-scattering
+integrals, finite-panel solid-angle integration, and progressive image/lux replay.
 
 ### Calibrated spectral fixture paths
 

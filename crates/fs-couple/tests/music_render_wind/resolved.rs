@@ -91,3 +91,42 @@ fn resolved_route_refuses_a_different_source_or_unqualified_acceptance_before_au
         assert!(!output.with_extension("provenance.json").exists());
     }
 }
+
+#[test]
+fn both_aperture_roles_survive_native_render_and_sidecar_on_either_face() {
+    let dir = directory();
+    for high in [false, true] {
+        let text = include_str!("../../examples/resolved-dg-split-aperture.performance")
+            .replace("output 2048 20", "output 4 20")
+            .replace("characteristic 0 high", if high { "characteristic 0 high" } else { "characteristic 0 low" })
+            .replace("coupled_patch 1 2 1 2 pressure 0",
+                "coupled_patch 1 2 1 2 characteristic 0\nsource_patch 0 2 0 1 pressure 0")
+            .replace("boundary pressure 3\nhold 128 20\nhold 256 -20\nhold 2048 0",
+                "boundary pressure 1\nhold 4 0");
+        let source = ResolvedDgFilePerformance::from_bytes(text.as_bytes(), 4,
+            Arc::new(CancelGate::new_clock_free())).unwrap();
+        assert_eq!(source.renderer().system().coupled_face_is_high(), high);
+        let mut renderer = source.into_renderer();
+        let mut pressure = [0.0; 4];
+        renderer.block(&mut pressure).unwrap();
+        let expected = encode_pcm16_wav(&pressure, 96000, 20.0).unwrap().0;
+        let input = dir.join(format!("two-apertures-{high}.performance"));
+        let output = dir.join(format!("two-apertures-{high}.wav"));
+        std::fs::write(&input, text).unwrap();
+        success(Command::new(env!("CARGO_BIN_EXE_music_render"))
+            .arg("resolved").arg(&input).arg(&output)
+            .args(["--block", "3", "--self-contained"]).output().unwrap());
+        assert_eq!(std::fs::read(&output).unwrap(), expected);
+        let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        let coupled = metadata.split("\"coupled_patch\":{").nth(1).unwrap()
+            .split("\"source_patch\":{").next().unwrap();
+        let source = metadata.split("\"source_patch\":{").nth(1).unwrap()
+            .split("\"external_boundary\":{").next().unwrap();
+        assert!(coupled.contains(&format!("\"high_face\":{high}")));
+        assert!(source.contains(&format!("\"high_face\":{}", !high)));
+        assert!(coupled.contains("\"start\":[1,1],\"end\":[2,2]"));
+        assert!(source.contains("\"start\":[0,0],\"end\":[2,1]"));
+        assert!(coupled.contains("\"kind\":\"incoming-characteristic\""));
+        assert!(source.contains("\"kind\":\"prescribed-pressure-offset\""));
+    }
+}

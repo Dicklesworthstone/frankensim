@@ -16,10 +16,10 @@ pub use execution::{
 };
 
 /// Bit-affecting physical free-flight, phase and survival-aware MIS semantics.
-// v4 extends directional LTE-source NEE to rough interfaces on their ambient
-// side, with each wavelength's actual Fresnel/microfacet proposal in MIS.
-// Cold/vacuum transport and its sampling streams remain unchanged.
-pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 4;
+// v5 adds normalized tabulated reciprocal phase functions with their exact
+// piecewise-linear angular CDF. Existing analytic laws, hash tags and random
+// streams remain unchanged; shared tables are borrowed at path vertices.
+pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 5;
 
 /// Progressive film bound to one immutable participating-medium snapshot.
 ///
@@ -235,10 +235,10 @@ impl<'view, 'field> PathMedium<'view, 'field> {
         }
     }
 
-    pub(super) fn phase(self) -> Option<PhaseFunction> {
+    pub(super) fn phase(self) -> Option<&'view PhaseFunction> {
         match self {
             Self::Absorbing(_) => None,
-            Self::Scattering(medium) => Some(medium.phase()),
+            Self::Scattering(medium) => Some(medium.phase_ref()),
         }
     }
 
@@ -345,7 +345,7 @@ pub(super) fn direct_contribution(
     depth: u32,
     medium: PathMedium<'_, '_>,
     incident_glass: Option<DielectricGlass>,
-    phase: PhaseFunction,
+    phase: &PhaseFunction,
     point: Point3,
     incoming_travel: Vec3,
     light: LightSample<'_>,

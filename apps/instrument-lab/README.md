@@ -142,6 +142,15 @@ nitrogen packs, choose **Frozen gas composition** and enter water identity `none
 The nozzle record retains its exact attached filename. A bonded scenario also
 requires each sleeve pack named in that scenario.
 
+Choose **Edit text…** on either attached gas record to use **Regional atmosphere**
+inside that source editor. Change temperature, absolute pressure or the declared
+species fractions, select **Apply atmosphere**, then **Apply source edit**.
+The initial atmosphere and nozzle reservoir remain independent physical sources;
+changing one does not rewrite the other. Attach the original model and transport
+packs for each newly introduced species. Save experiment retains the changed gas
+bytes, original path and source associations, and the native finite-gas owner
+performs the resulting thermodynamic and transport calculation.
+
 Change the original current/voltage drive, material pack, gas record, support
 condition or nozzle parameters, then render again. `electrical_feedback` selects
 the native bounded endpoint work solve; its work and residual controls stay in

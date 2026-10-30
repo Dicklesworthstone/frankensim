@@ -40,9 +40,9 @@ use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
 
 /// Version of the calibrated transport model and output interpretation.
-/// Version 3 partitions homogeneous haze quadrature at declared fixture
-/// angular boundaries. Version 2's published CIE observer remains in use.
-pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 3;
+/// Version 4 admits shared tabulated haze phase laws. Version 3's fixture
+/// angular partitions and version 2's published CIE observer remain in use.
+pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 4;
 
 /// Explicit geometric and output budgets for an offline calculation.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -27,7 +27,7 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 mod phase;
-pub use phase::{PhaseFunction, PhaseSample};
+pub use phase::{MAX_PHASE_KNOTS, PhaseFunction, PhaseSample, TabulatedPhase};
 
 /// Visible-band mass scattering coefficient in m²/kg, independently specified
 /// from absorption. The interpolation and admitted wavelength band are the
@@ -181,8 +181,14 @@ impl<'a> ScatteringGrid<'a> {
 
     /// The wavelength-independent, reciprocal angular scattering law.
     #[must_use]
-    pub const fn phase(&self) -> PhaseFunction {
-        self.phase
+    pub fn phase(&self) -> PhaseFunction {
+        self.phase.clone()
+    }
+
+    /// Borrow the phase law without cloning shared angular tables per vertex.
+    #[must_use]
+    pub const fn phase_ref(&self) -> &PhaseFunction {
+        &self.phase
     }
 
     fn coefficients<const N: usize>(

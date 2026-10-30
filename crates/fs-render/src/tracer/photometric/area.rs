@@ -64,7 +64,7 @@ pub(in crate::tracer) enum Receiver<'a> {
         incoming_ray: &'a Ray,
     },
     Phase {
-        phase: PhaseFunction,
+        phase: &'a PhaseFunction,
         incoming_travel: Vec3,
     },
     Probe {

@@ -3,6 +3,7 @@
 //! through a physical prism or wavelength-dependent diffraction.
 
 use super::*;
+use crate::spectral_reference::cie_reference_xyz;
 use fs_render::photometry::area::{ParaxialBeamSplitter, ProjectorBeam};
 
 type Beam = ([f64; 2], f64);
@@ -252,7 +253,7 @@ fn g1_finite_spectral_filters_preserve_passband_power_optics_and_absorption() {
         bins[12] = 1.0;
         bins[60] = 1.0;
         let spectrum = SourceSpectrum::try_from_bins(bins).unwrap();
-        let photopic = |bin| fs_render::spectral::cie_y(wavelength_nm(bin));
+        let photopic = |bin| cie_reference_xyz(wavelength_nm(bin))[1];
         let observer_sum = photopic(12) + photopic(60);
         for projected in [false, true] {
             let original = PhotometricAreaEmitter::try_new(
@@ -420,7 +421,7 @@ fn g1_filtered_splitter_haze_matches_independent_single_scattering() {
         let mut numerator = 0.0;
         let mut denominator = 0.0;
         for (bin, transmission) in filter.iter().enumerate() {
-            let weight = fs_render::spectral::cie_y(wavelength_nm(bin));
+            let weight = cie_reference_xyz(wavelength_nm(bin))[1];
             numerator += transmission * weight;
             denominator += weight;
         }
