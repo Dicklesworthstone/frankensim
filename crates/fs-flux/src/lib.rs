@@ -19,6 +19,9 @@ pub mod bdm;
 /// Newtonian circular-tube flow and gravity-aware capillary meniscus motion,
 /// each with an explicit quasisteady applicability boundary.
 pub mod capillary;
+/// Source-owned, conservative two-dimensional shock propagation and reflection.
+#[cfg(feature = "experimental-compressible")]
+pub mod compressible;
 #[cfg(feature = "continuum")]
 pub mod gas_film;
 #[cfg(feature = "quarter-wave")]

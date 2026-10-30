@@ -802,3 +802,58 @@ thermal evolution, viscoelastic memory or mixed-boundary constitutive tangent.
 Convergence is conditional and bounded by the caller's explicit solve budget;
 these finite fixtures do not establish continuum error bounds or production
 throughput.
+
+## Experimental multidimensional shock transport
+
+Feature `experimental-compressible` exposes `compressible::Euler2d` on an
+admitted `CartesianGrid`. This is the stationary, frozen-composition first
+multi-D rung of extension-plan §5.8 Tier 4. `fs-flux` owns spatial evolution;
+`fs-gas` owns the original NASA-9 thermodynamics, normal-face HLLC/HLL closure
+and exact one-sided reflecting-wall shock/rarefaction solve. No constant-gamma
+model replaces the retained variable-Cp source.
+
+The state evolves density, both momentum components and full referenced total
+energy, including both kinetic components. Each face is solved once and shared
+by its neighbouring cells. Unsplit MUSCL reconstructs density, two velocities
+and pressure with MC slopes and a common source-admissibility reduction; SSP
+RK2 integrates both directions together. The accepted face CFL is
+`dt*(max(a_x_left,a_x_right)/dx + max(a_y_lower,a_y_upper)/dy)` in every cell
+and both stages, including any HLL wave-speed expansion. Its caller-selected
+bound is at most 0.45. A CFL refusal halves the step without dropping order;
+an actual state-admissibility refusal retries at first order with a smaller
+step. No conservative state or source temperature is clipped.
+
+Axes may be independently periodic, transmissive or stationary reflecting.
+Periodic pairs reuse identical flux bits. Transmissive means zero-gradient
+continuation, not a nonreflecting subsonic outlet. Walls impose exact zero
+mass, tangential-momentum and energy flux and use nonlinear source-owned wall
+pressure. Grid depth converts areas, volumes, impulses and energies to coherent
+SI extensives; constructor admission also refuses overflow of extensive totals.
+
+Every accepted step retains compensated mass, vector momentum and energy
+balances plus the time-integrated outward exchange on EACH boundary face.
+The two RK stages supply these impulses. At a wall they are the force impulse
+on its support, allowing `fs-couple` to preserve a spatially varying shock load
+and its moment instead of sampling an endpoint or averaging the whole wall.
+Failed or cancelled steps preserve all cells, time, last report and accepted
+boundary impulses. Workspace is fallibly allocated at construction under the
+shared 1,048,576-cell cap and reused; accepted steps allocate no numerical
+workspace. Fixed-order cell/face loops poll cancellation at bounded boundaries.
+Parallel execution, SIMD throughput and cross-ISA determinism are unmeasured.
+
+Seven focused native regressions cover periodic uniform flow, source/geometry
+and extensive admission, planar Sod against the existing independently checked
+1-D owner, x/y rotation, nonlinear wall reflection and support impulse, a
+circular pressure blast, smooth oblique contact refinement and atomic refusal/
+cancellation/restart. Oblique-contact density L1 errors on 12²/24²/48² grids are
+3.449212181169e-3 / 8.636199681318e-4 / 2.117512986278e-4, giving observed orders
+1.998 and 2.028. The focused no-default-feature `fs-flux` library configuration
+passes 42 tests on the pinned nightly. These are manufactured/conformance
+results, not experimental validation or a production performance benchmark.
+
+This lane remains Estimated engineering shock capturing. It does not supply
+the separate fully discrete entropy/invariant-domain theorem, vacuum states,
+reacting/composition-changing 2-D flow, viscous/thermal shock structure,
+internal obstacles, curved/cut cells, moving meshes, reciprocal moving-wall
+FSI, turbulence or a shock adjoint. Unsupported shocked temperatures refuse
+against the original source interval instead of extrapolating it.

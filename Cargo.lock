@@ -1663,11 +1663,16 @@ dependencies = [
 name = "fs-flux"
 version = "0.0.1"
 dependencies = [
+ "fs-evidence",
+ "fs-gas",
  "fs-la",
+ "fs-matdb",
  "fs-material",
+ "fs-qty",
  "fs-solid",
  "fs-solver",
  "fs-sparse",
+ "fs-thermochem",
  "fs-time",
  "fs-tribo",
 ]

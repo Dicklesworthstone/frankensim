@@ -14,6 +14,7 @@ layer = "L3"
 default = ["continuum", "quarter-wave"]
 continuum = ["dep:fs-la", "dep:fs-material", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse", "dep:fs-time"]
 quarter-wave = []
+experimental-compressible = ["dep:fs-gas", "dep:fs-qty"]
 
 [dependencies]
 fs-tribo = { path = "../fs-tribo" }
@@ -23,6 +24,13 @@ fs-solid = { path = "../fs-solid", optional = true }
 fs-solver = { path = "../fs-solver", optional = true }
 fs-sparse = { path = "../fs-sparse", optional = true }
 fs-time = { path = "../fs-time", optional = true }
+fs-gas = { path = "../fs-gas", optional = true, features = ["experimental-euler"] }
+fs-qty = { path = "../fs-qty", optional = true }
+
+[dev-dependencies]
+fs-matdb = { path = "../fs-matdb" }
+fs-evidence = { path = "../fs-evidence" }
+fs-thermochem = { path = "../fs-thermochem" }
 
 [[test]]
 name = "ale_gcl"
