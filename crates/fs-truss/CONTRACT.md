@@ -108,11 +108,24 @@ prevent using a different ordering or temperature state during sizing.
 
 This is a frozen-state pin-jointed, symmetric-yield, solid-square model, not
 anisotropic/brittle failure, creep, thermally restrained strain or a mass-optimal
-layout objective. Self-weight remains an explicit load. The existing synchronous
+layout objective. Body acceleration remains an explicit physical input. The existing synchronous
 PDHG/refit/rod kernels retain their cancellation limitations; material admission
 and result publication poll `Cx`. `tests/material.rs` checks source-temperature
 substitution, heterogeneous optimal load-path changes, per-member Euler floors,
 snapped mass, unsupported states, malformed inputs and cancellation.
+
+`MaterialLayout::body_loads` derives uniform member mass and equivalent endpoint
+forces from those same source densities and actual sections. `solve_with_body_loads`
+closes the existing LP/refit/yield/Euler/catalog path against those sections' own
+body loads, always rebuilding from the immutable external load case. Acceptance
+requires unchanged catalog sections and topology plus a successful common sizing
+audit, so loads, mass, sections and equilibrium describe one state. The bounded
+fixed-point procedure can refuse nonconvergence or insufficient catalogs and does
+not establish a global optimum. Endpoint lumping preserves total force and first
+moment but does not resolve distributed bending or within-member axial stress
+gradients. Three `material_body_load` integration tests cover heterogeneous force
+and moment, density-driven section changes, and numerical/catalog/budget/cancellation
+refusals. Native execution remains unverified in the memory-limited authoring worker.
 
 1. Ground rules hold member-by-member and generation is bitwise
    reproducible. Exact-cap admission succeeds; cap-plus-one, malformed parallel

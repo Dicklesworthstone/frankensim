@@ -7,6 +7,9 @@
 //! It does not infer a code allowable from an ultimate strength, model creep or
 //! thermal strain, or add self-weight implicitly to the declared load case.
 
+/// Material mass, nodal body forces and consistent catalog self-weight design.
+pub mod body_load;
+
 use fs_exec::Cx;
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::state_point::{
@@ -135,12 +138,15 @@ pub struct MaterialLayout<'a> {
     ground: &'a GroundStructure,
     materials: &'a [TrussMaterial],
     assignments: &'a [usize],
+    case: LayoutCase,
+    limits: LayoutLimits,
     lp: LayoutLp,
     yield_scale_pa: f64,
 }
 
 /// Layout iterates and their physical volume. The numerical report uses the
 /// normalized objective; its certificates, if separately requested, also do.
+#[derive(Debug)]
 pub struct MaterialLayoutSolution {
     /// Split member forces `[tension | compression]` [N].
     pub forces: Vec<f64>,
@@ -242,6 +248,8 @@ impl<'a> MaterialLayout<'a> {
             ground,
             materials,
             assignments,
+            case: case.clone(),
+            limits,
             lp,
             yield_scale_pa,
         })
@@ -252,6 +260,13 @@ impl<'a> MaterialLayout<'a> {
     #[must_use]
     pub const fn lp(&self) -> &LayoutLp {
         &self.lp
+    }
+
+    /// Original applied loads and supports, including loads at supported nodes.
+    /// Body-load iterations always add to this immutable case once.
+    #[must_use]
+    pub const fn load_case(&self) -> &LayoutCase {
+        &self.case
     }
 
     /// Shared positive objective normalization [Pa].
