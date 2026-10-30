@@ -95,3 +95,82 @@ refinements against continuous ODEs gave approximately 2x error reduction per
 halving, consistent with the first-order split. The electrical reference uses
 equivalent prescribed Joule power, not execution of the Kirchhoff solver.
 These synthetic references do not compile/run Rust or validate measured alloys.
+
+## Several heated fluid-loaded bodies in one assembly
+
+`MaterialFluidFrame::thermoelastic_parts` now exposes the SAME cold source
+conversion at explicit component/connection offsets. The single-frame `new`
+constructor delegates to it. Each `FrameFluidThermoelasticParts` contains a
+physical `placement`, opaque source/thermal `binding`, every native component,
+and every original solid/fluid connection. Append the complete blocks without
+altering their contents. Add physical joints through the placement's existing
+`bind_ports` maps, then use `FrameFluidThermoelasticBinding::into_shared_system`.
+
+```rust,ignore
+let a = wet_a.thermoelastic_parts(
+    &state_a, &thermal, &network, &cells_a, config_a, 0, 0, &gate,
+)?;
+let b = wet_b.thermoelastic_parts(
+    &state_b, &thermal, &network, &cells_b, config_b,
+    a.components.len(), a.connections.len(), &gate,
+)?;
+let port_a = a.placement.bind_ports(&physical_a, projection_budget, &gate)?;
+let port_b = b.placement.bind_ports(&physical_b, projection_budget, &gate)?;
+let mut models = a.components;
+models.extend(b.components);
+let mut connections = a.connections;
+connections.extend(b.connections);
+connections.push(ModalConnection {
+    left: port_a.attachment(0)?, right: port_b.attachment(0)?,
+    stiffness_n_m: joint_k, damping_n_s_m: joint_c, rest_extension_m: rest,
+});
+let mechanical = CoupledModalSystem::new(models, connections, budget, &gate)?;
+let mut owner = FrameFluidThermoelasticBinding::into_shared_system(
+    vec![a.binding, b.binding], mechanical, &thermal, &gate,
+)?;
+let mut force = vec![0.0; owner.mechanical().mode_count()];
+port_a.accumulate_forces(owner.mechanical().components(), &efforts_a, &mut force, &gate)?;
+port_b.accumulate_forces(owner.mechanical().components(), &efforts_b, &mut force, &gate)?;
+let report = owner.step(&mut thermal, &force, controls, &energy_guesses, &gate)?;
+```
+
+All bindings borrow the SAME MaterialNetwork and own distinct whole caloric
+cells. Complete component and connection ranges may not overlap. The binding
+validates every initial fluid momentum/gauge, clock, limit, exact reciprocal
+column and source resistance before delegating to the original shared thermal
+owner. Omitting fluid branches or replacing their damping with a loss-factor
+fit refuses. Declarations are canonicalized by native component index.
+Different fluid Rust source types can share this owner: physical placements
+retain their typed original source models, while the bindings contain no fluid
+type parameter. No anonymous transport replacement or average material is made.
+
+The returned owner is the original `FrameThermoelasticSystem`, so its existing
+circuit, electrical-interface, field-storage and complete heat-network routes
+remain available. It executes ONE mechanical sample and ONE joint caloric
+residual, then publishes all source coefficients, fluid histories and heat
+states together. Source-frame dissipations heat only their actual layers;
+exterior fluid and unrouted joint loss remain separately accounted sinks.
+No new thermal solver, electrical solver or clock is introduced.
+
+Retain the placements for all physical observations/forces. In this assembly,
+`owner.frames()[i].basis()` is the original DRY source chart for provenance;
+raw native wet-normalized states must not be reconstructed through that basis.
+Use `placement.reconstruct_into`, `placement.physical_state`, or its bound port
+map. The original source model's frozen stiffness is not the accepted live law.
+Final native preparation owns the whole assembly budget; `config.prepared`
+applies only to the single-owner convenience constructor. Source eigensolves,
+quadrature and coordinate maps are not repeated on each thermal iteration, but
+this is not a native runtime speed or allocation-free-step qualification.
+
+Four focused Rust regression groups cover standalone/parts parity, heat-driven
+reciprocal motion of two bodies with independent SI internal-energy accounting,
+changed/omitted fluid ports or memory, and late two-body thermal refusal/retry.
+They are authored but UNEXECUTED; compilation and rustfmt remain unavailable.
+Independent NumPy/SciPy equations ran six 32-step material/fluid/connector cases
+and four time resolutions. All finite-cell and complete-energy checks passed;
+maximum cumulative discrepancy was 1.28e-13 J. A disconnected receiver stays
+still, an expansion-free control has no motion, and receiver-fluid density
+changes propagate into the coupled response. Refinement versus a 0.125 ms
+reference reduces displacement RMS error from 1.66e-6 to 7.04e-7 to 2.34e-7 m
+at 1/0.5/0.25 ms. These are synthetic reference equations, not Rust execution,
+continuous-time error bounds or validation of actual alloys and fluid regimes.

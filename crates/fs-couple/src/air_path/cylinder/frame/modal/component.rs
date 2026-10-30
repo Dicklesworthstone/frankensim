@@ -53,6 +53,22 @@ pub struct FrameFluidPlacement<'m, 'f, F> {
     period_s: f64,
 }
 
+impl<'m, 'f, F> FrameFluidCoordinates<'m, 'f, F> {
+    /// Shared cold placement seam for source constitutive owners. The caller
+    /// supplies its actual connection layout; the physical coordinate chart
+    /// and complete fluid state extent still come from the original source.
+    pub(crate) fn into_placement(self, component_start: usize,
+        layout: FrameFluidConnectionLayout, period_s: f64)
+        -> Result<FrameFluidPlacement<'m, 'f, F>> {
+        positive(period_s)?;
+        let count = 1 + usize::from(!self.source().memory_masses.is_empty());
+        let end = component_start.checked_add(count)
+            .ok_or_else(|| invalid("complete fluid placement extent overflow"))?;
+        Ok(FrameFluidPlacement { coordinates: self, components: component_start..end,
+            layout, period_s })
+    }
+}
+
 impl<'f, F> MaterialFluidFrame<'f, F> {
     /// Prepare the complete frozen frame/fluid component for the existing
     /// simultaneous time-domain/contact/radiation assembly. Nonzero structural
@@ -197,8 +213,7 @@ impl<'m, 'f, F> FrameFluidComponent<'m, 'f, F> {
         shift(&mut self.layout.material);
         for region in &mut self.layout.fluid_regions { shift(region); }
         let period_s = self.components[0].sample_period_s();
-        let placement = FrameFluidPlacement { coordinates: self.coordinates,
-            components: component_start..component_end, layout: self.layout, period_s };
+        let placement = self.coordinates.into_placement(component_start, self.layout, period_s)?;
         poll(gate)?;
         Ok((placement, self.components, self.connections))
     }
@@ -221,6 +236,7 @@ impl<'m, 'f, F> FrameFluidComponent<'m, 'f, F> {
 }
 
 impl<'m, 'f, F> FrameFluidPlacement<'m, 'f, F> {
+    pub(crate) fn into_coordinates(self) -> FrameFluidCoordinates<'m, 'f, F> { self.coordinates }
     pub const fn source(&self) -> &'m MaterialFluidFrame<'f, F> { self.coordinates.source() }
     pub fn component_range(&self) -> Range<usize> { self.components.clone() }
     pub fn structural_component(&self) -> usize { self.components.start }

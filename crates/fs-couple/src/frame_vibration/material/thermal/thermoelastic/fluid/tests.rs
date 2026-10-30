@@ -259,3 +259,5 @@ fn original_resistor_heat_drives_expansion_on_same_wet_frame_clock() {
         assert_eq!(owner.mechanical().samples_rendered(),8);
     });
 }
+
+mod shared;

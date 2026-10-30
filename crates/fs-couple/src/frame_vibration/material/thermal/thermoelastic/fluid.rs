@@ -13,6 +13,9 @@ use crate::modal_acoustic_time::ModalAcousticTimeBudget;
 use crate::material_circuit::MaterialCircuit;
 use fs_material::conductor::ElectricalPropertyBasis;
 
+mod assembly;
+pub use assembly::{FrameFluidThermoelasticBinding, FrameFluidThermoelasticParts};
+
 /// Cold preparation controls. The native budgets cover ALL structural modes,
 /// fluid-memory coordinates (including free position gauges), and source ports.
 pub struct FrameFluidThermoelasticConfig {
@@ -76,9 +79,9 @@ pub struct FrameFluidThermoelasticSystem<'m, 'f, 'n, 'a, F> {
 
 impl<'m, 'f, 'n, 'a, F> FrameFluidThermoelasticSystem<'m, 'f, 'n, 'a, F> {
     /// Cold-bind the original full frame/fluid state and every solid caloric
-    /// layer. Original source pins, reference state, initial displacement and
-    /// ALL fluid momenta survive. No eigensolve or Bessel quadrature is repeated.
-    /// A warm material-exchange event is not inferred from this constructor.
+    /// layer through the same parts/validation path used for shared assemblies.
+    /// Source pins, reference state and ALL fluid momenta survive. No eigensolve
+    /// or Bessel quadrature is repeated. This is not a warm material exchange.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         model: &'m MaterialFluidFrame<'f, F>,
@@ -90,57 +93,28 @@ impl<'m, 'f, 'n, 'a, F> FrameFluidThermoelasticSystem<'m, 'f, 'n, 'a, F> {
         gate: &CancelGate,
     ) -> FluidResult<Self> {
         check(gate)?;
-        positive(config.initial_energy_tolerance_j)?;
         let count = model.basis().modes().len();
-        // This source factory admits complete mass space and reconstructs its
-        // original K from layer laws BEFORE the full wet-coordinate congruence.
-        let mut component = model.basis().coupled_component(config.sample_rate_hz,
-            &vec![0.0; count], config.modal, config.maximum_projection_terms,
-            || gate.is_requested()).map_err(frame_error)?;
-        component.restore_states(&model.modal_states(initial_state)?).map_err(frame_error)?;
-        let (mut binding, _, mut definitions) = component.into_thermoelastic_parts(
-            thermal, source, destinations, config.maximum_absolute_strain, 0, 0,
-            config.coupling, gate)?;
-        let FrameFluidModalParts { coordinates, structural, memory, connections } =
-            model.modal_parts(initial_state, config.sample_rate_hz, config.modal,
-                definitions.len(), config.coupling, gate)?;
-        for definition in &mut definitions {
-            check(gate)?;
-            definition.left.shapes = coordinates.project_column(&definition.left.shapes)?;
-            definition.right.shapes = coordinates.project_column(&definition.right.shapes)?;
-        }
-        for member in &mut binding.members {
-            check(gate)?;
-            for column in &mut member.columns { *column = coordinates.project_column(column)?; }
-        }
-        // The source laws, reference lengths and initial temperature are the
-        // same. Re-evaluate using the actual transformed columns/state rather
-        // than transporting rounded free-energy/strain diagnostics blindly.
-        let mut states = Vec::with_capacity(binding.members.len());
-        for member in &binding.members {
-            states.push(resolve_member(member, &temperatures(&member.region, thermal)?,
-                structural.states(), structural.sample_period_s())?);
-        }
-        binding.states = states;
-        binding.initial_model = structural.clone();
-        binding.definitions = definitions.clone();
-        definitions.extend(connections);
-        let mut components = vec![structural];
-        if let Some(memory) = memory { components.push(memory); }
-        let mechanical = match config.prepared {
-            Some(budget) => CoupledModalSystem::new_prepared(components, definitions,
-                config.coupling, budget, gate),
-            None => CoupledModalSystem::new(components, definitions, config.coupling, gate),
+        let coupling = config.coupling;
+        let prepared = config.prepared;
+        let tolerance = config.initial_energy_tolerance_j;
+        let FrameFluidThermoelasticParts { placement, binding, components, connections } =
+            model.thermoelastic_parts(initial_state, thermal, source, destinations,
+                config, 0, 0, gate)?;
+        let mechanical = match prepared {
+            Some(budget) => CoupledModalSystem::new_prepared(components, connections,
+                coupling, budget, gate),
+            None => CoupledModalSystem::new(components, connections, coupling, gate),
         }.map_err(FrameThermalError::from)?;
         let original = model.system().hamiltonian(initial_state);
         let composed = mechanical.total_energy_j().map_err(FrameThermalError::from)?;
-        if finite(composed-original)?.abs() > config.initial_energy_tolerance_j {
+        if finite(composed-original)?.abs() > tolerance {
             return Err(invalid("complete fluid/thermoelastic binding changed original initial storage").into());
         }
         let total = mechanical.mode_count();
         let inner = binding.into_system(mechanical, thermal, gate)?;
         check(gate)?;
-        Ok(Self { coordinates, inner, dry_force: vec![0.0; count], native_force: vec![0.0; total] })
+        Ok(Self { coordinates: placement.into_coordinates(), inner,
+            dry_force: vec![0.0; count], native_force: vec![0.0; total] })
     }
 
     pub const fn source(&self) -> &'m MaterialFluidFrame<'f, F> { self.coordinates.source() }
