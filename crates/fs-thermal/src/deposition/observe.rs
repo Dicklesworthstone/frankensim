@@ -134,6 +134,57 @@ impl DepositionObserver for () {
 }
 
 impl<'a> DepositionSimulation<'a> {
+    /// Tighten a native explicit step for additional nonnegative thermal
+    /// conductances [W/K], without applying their heat a second time.
+    ///
+    /// Use the original caloric law's global dT/de bound and actual cell mass.
+    /// The worst additional decay rate is added harmonically to the rate budget
+    /// already represented by `proposed_s`; taking independent minima could
+    /// spend the same 0.8 monotonicity allowance twice. Omitted/zero rates leave
+    /// the proposed value bit-for-bit unchanged. This can be conservative when
+    /// the limiting cells differ or the user's maximum step dominates.
+    ///
+    /// Call after the native conductive bound and before event/end clipping.
+    /// This bounds frozen coefficients only; it does not bound a nonlinear
+    /// coefficient's temperature derivative or establish temporal accuracy.
+    pub fn limit_timestep_for_additional_conductances(
+        &self, proposed_s: f64, conductances_w_k: &BTreeMap<CellId, f64>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, DepositionError> {
+        checkpoint()?;
+        if !positive(proposed_s) || conductances_w_k.len() > self.cells.len() {
+            return Err(DepositionError::InvalidInput("invalid additional-conductance timestep request"));
+        }
+        let mut maximum_decay: f64 = 0.0;
+        for (index, (&id, &g)) in conductances_w_k.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            let cell = self.cells.get(&id)
+                .ok_or(DepositionError::InvalidInput("inactive additional-conductance cell"))?;
+            if !nonnegative(g) {
+                return Err(DepositionError::InvalidInput("additional conductance must be finite and nonnegative"));
+            }
+            let slope = self.material_temperature_slopes[&cell.material_id];
+            maximum_decay = maximum_decay.max(finite(g * slope / cell.mass_kg)?);
+        }
+        let next = if maximum_decay == 0.0 {
+            proposed_s
+        } else {
+            let extra_limit = 0.8 / maximum_decay;
+            // Equivalent to 1/(1/proposed + decay/0.8), avoiding overflow
+            // for very small/large representable positive step lengths.
+            if proposed_s <= extra_limit {
+                proposed_s / (1.0 + proposed_s * maximum_decay / 0.8)
+            } else {
+                extra_limit / (1.0 + extra_limit / proposed_s)
+            }
+        };
+        if !positive(next) || next > proposed_s {
+            return Err(DepositionError::Arithmetic);
+        }
+        checkpoint()?;
+        Ok(next)
+    }
+
     // Validate the complete generated field before changing any boundary. The
     // ordinary no-source path does not even add +0, preserving its arithmetic.
     pub(super) fn add_step_sources(&mut self, sources: &BTreeMap<CellId, f64>,

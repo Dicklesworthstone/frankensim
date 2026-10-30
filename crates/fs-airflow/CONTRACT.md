@@ -118,10 +118,16 @@ interval heat is a share of the existing external-heat audit, never a second
 energy addition. Endpoint source refusal or cancellation discards both proposed
 histories. Resolver cloning must preserve the native observer's rollback rules.
 
-This adapter inherits explicit staggering and source time-refinement requirements;
-the conduction CFL is not a nonlinear-convection stability guarantee. It does
-not evolve reservoir energy, change source policies or introduce another thermal
-integrator. `tests/material_cell_convection/film_source/observer.rs` compares
+The same start-state hA now tightens native subcycling through
+`DepositionSimulation::limit_timestep_for_additional_conductances`, using the
+original caloric slope bound and cell mass. Its additional decay rate composes
+harmonically with the already admitted step; independent minima would reuse the
+same monotonicity allowance. No heat is applied a second time. Pending
+conductances are invalidated at events, acceptance and a new advance.
+This adapter retains explicit staggering and time-refinement requirements;
+the frozen-coefficient bound is not a general nonlinear-stability guarantee.
+It does not evolve reservoir energy, change source policies or introduce
+another thermal integrator. `tests/material_cell_convection/film_source/observer.rs` compares
 independent finite-body updates with simultaneous native spatial conduction,
 event-clipped exposure changes, retained endpoint sources, interval heat accounts,
 late source-support refusal and cancellation.

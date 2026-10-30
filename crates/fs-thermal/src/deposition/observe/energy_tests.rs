@@ -348,3 +348,79 @@ fn g0_unrepresented_transfer_budget_accumulates_across_substeps() {
     assert_eq!(initial.time_s(), 0.0);
     assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, datum + 80.0);
 }
+
+#[test]
+fn additional_conductances_share_the_native_caloric_decay_allowance() {
+    let law = ReferencedPhase { datum: 0.0 };
+    let initial = prepare(&law, vec![
+        birth(1, 0.0, 20.0, 0.0), birth(2, 0.0, 40.0, 0.0),
+        TimedEvent { time_s: 0.0, event: Event::Contact(ThermalLink {
+            id: 7, a: CellId(1), b: CellId(2), area_m2: 0.2, conductance_w_k: 4.0,
+        }) },
+    ]);
+    let base = initial.heat_rates(10.0, &mut || Ok(())).unwrap().explicit_dt_s;
+    assert_eq!(base, 0.2);
+    let extra = BTreeMap::from([(CellId(1), 6.0)]);
+    let tightened = initial.limit_timestep_for_additional_conductances(
+        base, &extra, || Ok(()),
+    ).unwrap();
+    // C=1 J/K; total rate is 4+6, not max(4,6).
+    assert!((tightened - 0.8 / 10.0).abs() < 1e-15);
+    assert!(tightened < base.min(0.8 / 6.0));
+    let twice = initial.limit_timestep_for_additional_conductances(
+        tightened, &BTreeMap::from([(CellId(1), 2.0)]), || Ok(()),
+    ).unwrap();
+    assert!((twice - 0.8 / 12.0).abs() < 1e-15);
+    for empty in [BTreeMap::new(), BTreeMap::from([(CellId(1), 0.0)])] {
+        assert_eq!(initial.limit_timestep_for_additional_conductances(
+            base, &empty, || Ok(()),
+        ).unwrap().to_bits(), base.to_bits());
+    }
+    // The helper neither applies heat nor changes authored conductances.
+    assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, 20.0);
+    assert_eq!(initial.links()[&7].conductance_w_k, 4.0);
+}
+
+#[test]
+fn additional_conductance_bounds_refuse_invalid_inputs_and_preserve_zero_slope() {
+    let law = ReferencedPhase { datum: 0.0 };
+    let initial = prepare(&law, vec![birth(1, 0.0, 20.0, 0.0)]);
+    for values in [
+        BTreeMap::from([(CellId(9), 1.0)]),
+        BTreeMap::from([(CellId(1), -1.0)]),
+        BTreeMap::from([(CellId(1), f64::NAN)]),
+        BTreeMap::from([(CellId(1), f64::INFINITY)]),
+    ] {
+        assert!(initial.limit_timestep_for_additional_conductances(
+            1.0, &values, || Ok(()),
+        ).is_err());
+    }
+    for dt in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(initial.limit_timestep_for_additional_conductances(
+            dt, &BTreeMap::new(), || Ok(()),
+        ).is_err());
+    }
+    let extra = BTreeMap::from([(CellId(1), 6.0)]);
+    let mut calls = 0;
+    initial.limit_timestep_for_additional_conductances(1.0, &extra, || {
+        calls += 1; Ok(())
+    }).unwrap();
+    let mut at = 0;
+    assert_eq!(initial.limit_timestep_for_additional_conductances(1.0, &extra, || {
+        at += 1;
+        if at == calls { Err(DepositionError::Budget("additional conductance")) } else { Ok(()) }
+    }), Err(DepositionError::Budget("additional conductance")));
+    struct Flat;
+    impl ThermalLaw for Flat {
+        fn temperature_k(&self, _: f64) -> Result<f64, DepositionError> { Ok(364.0) }
+        fn maximum_temperature_slope(&self) -> f64 { 0.0 }
+    }
+    let flat = prepare(&Flat, vec![birth(1, 0.0, 20.0, 0.0)]);
+    assert_eq!(flat.limit_timestep_for_additional_conductances(
+        1.0, &extra, || Ok(()),
+    ).unwrap(), 1.0);
+    let tiny = initial.limit_timestep_for_additional_conductances(
+        1e308, &BTreeMap::from([(CellId(1), 1e308)]), || Ok(()),
+    ).unwrap();
+    assert!(tiny > 0.0 && tiny <= 0.8 / 1e308);
+}

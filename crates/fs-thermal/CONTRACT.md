@@ -551,6 +551,25 @@ regressions check original heat and actual-bath entropy plus refusal/rollback.
 The full pinned-main native thermal source passes 191 tests, with one existing
 ignored test; required workspace/DSR gates remain a separate unavailable check.
 
+## Additional material conductances on the native explicit timeline
+
+`DepositionSimulation::limit_timestep_for_additional_conductances` composes
+nonnegative extra W/K with an already admitted explicit step using the original
+cell masses and registered global caloric dT/de bounds. It adds the largest
+extra decay rate harmonically to the current rate allowance, rather than taking
+two independent CFL minima. An empty or zero map leaves the proposed step
+bit-for-bit unchanged; zero caloric slope adds no restriction. Unknown cells,
+invalid rates, unrepresentable steps and checkpoint failures refuse.
+
+This helper applies no heat and changes no thermal state or authored boundary.
+Call it before event clipping through the existing observer timestep hook.
+It can be conservative when different cells or a caller maximum step dominate.
+It bounds frozen heat-transfer coefficients, not their nonlinear derivatives
+or time-discretization error. Focused native regressions cover combined
+conductive/cooling limits, sequential composition, zero slopes and refusal.
+The airflow material observer uses the exact hA from its start-state source
+evaluation, so changing fluid data changes both cooling and native subcycling.
+
 ## Shared endpoint ambient and reservoir conductances
 
 `backward_euler::{BoundaryConductances, BoundaryStepCoefficients}` pass endpoint

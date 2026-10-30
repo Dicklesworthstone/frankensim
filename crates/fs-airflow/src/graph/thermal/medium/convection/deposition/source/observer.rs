@@ -33,8 +33,10 @@ use super::{
 /// cannot be rolled back by the native thermal owner.
 ///
 /// This follows the existing explicit timeline, not an implicit thermal solve.
-/// Conduction's CFL does not bound nonlinear convection: choose and refine
-/// `StepConfig::max_dt_s` for the convective source as well. Bindings must name
+/// Its start-state hA tightens the native conductive timestep through the same
+/// caloric slope/mass bound. This is only a frozen-coefficient bound, not a
+/// general nonlinear-stability or time-error guarantee: still refine
+/// `StepConfig::max_dt_s` for the convective source. Bindings must name
 /// active cells whenever sources are evaluated. Events invalidate the retained
 /// sample; the next substep reads the updated contact coverage and boundaries.
 pub struct SourceConvectionObserver<'b, R, F> {
@@ -43,6 +45,7 @@ pub struct SourceConvectionObserver<'b, R, F> {
     resolve: R,
     sample: Option<Arc<ResolvedCellConvectionSources<F>>>,
     source_epoch: Option<(f64, f64)>,
+    source_conductances_w_k: BTreeMap<CellId, f64>,
     external_heat_j: f64,
 }
 
@@ -56,6 +59,7 @@ impl<R: Clone, F> Clone for SourceConvectionObserver<'_, R, F> {
             resolve: self.resolve.clone(),
             sample: self.sample.clone(),
             source_epoch: self.source_epoch,
+            source_conductances_w_k: self.source_conductances_w_k.clone(),
             external_heat_j: self.external_heat_j,
         }
     }
@@ -71,6 +75,7 @@ impl<'b, R, F> SourceConvectionObserver<'b, R, F> {
             resolve,
             sample: None,
             source_epoch: None,
+            source_conductances_w_k: BTreeMap::new(),
             external_heat_j: 0.0,
         }
     }
@@ -118,6 +123,7 @@ where
 
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.source_epoch = None;
+        self.source_conductances_w_k.clear();
         self.external_heat_j = 0.0;
         Ok(())
     }
@@ -131,9 +137,33 @@ where
         let heat = evaluated.convection();
         let power_w = heat.total_heat_into_cells_w();
         let sources = heat.sources_w().clone();
+        let mut conductances = BTreeMap::new();
+        for sample in heat.samples() {
+            checkpoint()?;
+            let g = sample.evaluation.as_ref().map_or(0.0, |evaluation| {
+                evaluation.coefficient.value.value() * sample.exposed_area_m2
+            });
+            conductances.insert(sample.cell, g);
+        }
         checkpoint()?;
         self.source_epoch = Some((thermal.time_s(), power_w));
+        self.source_conductances_w_k = conductances;
         Ok(sources)
+    }
+
+    fn limit_timestep_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        proposed_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Self::Error> {
+        checkpoint()?;
+        if self.source_epoch.map(|(time, _)| time) != Some(thermal.time_s()) {
+            return Err(invalid("convection timestep lacks its current source epoch"));
+        }
+        Ok(thermal.limit_timestep_for_additional_conductances(
+            proposed_s, &self.source_conductances_w_k, checkpoint,
+        )?)
     }
 
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
@@ -141,6 +171,7 @@ where
         // Do not query an incomplete active set between those events.
         self.sample = None;
         self.source_epoch = None;
+        self.source_conductances_w_k.clear();
         Ok(())
     }
 
@@ -170,6 +201,7 @@ where
         self.sample = Some(Arc::new(sample));
         self.external_heat_j = external_heat_j;
         self.source_epoch = None;
+        self.source_conductances_w_k.clear();
         Ok(())
     }
 }

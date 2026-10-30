@@ -29,6 +29,28 @@ fn reference_step(t: &mut [f64; 2], dt: f64, area: f64, conductance: f64) -> f64
     dt * (q[0] + q[1])
 }
 
+// Independent subcycling: original conduction rate plus the separately bounded
+// convection rate, with event/end clipping AFTER the composed rate restriction.
+fn reference_advance(
+    t: &mut [f64; 2], duration: f64, maximum_dt: f64, area: f64, conductance: f64,
+) -> f64 {
+    let capacity = MASS * CP;
+    let native_dt = if conductance == 0.0 { maximum_dt }
+        else { maximum_dt.min(0.8 * capacity / conductance) };
+    let mut time = 0.0;
+    let mut heat = 0.0;
+    while time < duration {
+        let extra_rate = t.iter().map(|&wall| {
+            if wall == 300.0 { 0.0 }
+            else { area * expected_h(0.5, 0.01, wall, 0.5 * wall + 150.0) / capacity }
+        }).fold(0.0, f64::max);
+        let dt = (1.0 / (1.0 / native_dt + extra_rate / 0.8)).min(duration - time);
+        heat += reference_step(t, dt, area, conductance);
+        time += dt;
+    }
+    heat
+}
+
 #[test]
 fn g1_same_substeps_drive_material_convection_and_native_spatial_conduction() {
     let chart = curve();
@@ -62,12 +84,11 @@ fn g1_same_substeps_drive_material_convection_and_native_spatial_conduction() {
         .unwrap();
     let mut expected = [310.0, 290.0];
     let g = 0.002 / (0.01 / 0.5 + 0.01 / 0.5);
-    let q1 = reference_step(&mut expected, 0.02, 0.008, g);
-    let q2 = reference_step(&mut expected, 0.02, 0.008, g);
+    let expected_heat = reference_advance(&mut expected, 0.04, 0.02, 0.008, g);
     for (id, temperature) in IDS.into_iter().zip(expected) {
         near(next.temperature_k(id).unwrap(), temperature, 1e-9);
     }
-    near(audit.external_heat_j, q1 + q2, 1e-9);
+    near(audit.external_heat_j, expected_heat, 1e-9);
     near(
         accepted.first.external_heat_j(),
         audit.external_heat_j,
@@ -102,7 +123,7 @@ fn g1_same_substeps_drive_material_convection_and_native_spatial_conduction() {
     let (again, continued, audit2) = next
         .advance_observed(&accepted, 0.06, controls(0.02), || Ok(()))
         .unwrap();
-    let q3 = reference_step(&mut expected, 0.02, 0.008, g);
+    let q3 = reference_advance(&mut expected, 0.02, 0.02, 0.008, g);
     near(continued.first.external_heat_j(), q3, 1e-9);
     near(audit2.external_heat_j, q3, 1e-9);
     near(again.temperature_k(IDS[0]).unwrap(), expected[0], 1e-9);
@@ -176,8 +197,8 @@ fn g1_contact_events_change_the_exposed_area_at_the_original_event_time() {
         .unwrap();
     let mut expected = [310.0, 290.0];
     let mut heat = 0.0;
-    for (dt, area) in [(0.015, 0.008), (0.02, AREA), (0.005, AREA)] {
-        heat += reference_step(&mut expected, dt, area, 0.0);
+    for (duration, area) in [(0.015, 0.008), (0.025, AREA)] {
+        heat += reference_advance(&mut expected, duration, 0.02, area, 0.0);
     }
     for (id, temperature) in IDS.into_iter().zip(expected) {
         near(next.temperature_k(id).unwrap(), temperature, 1e-9);
@@ -194,7 +215,7 @@ fn g1_contact_events_change_the_exposed_area_at_the_original_event_time() {
     assert!(at_event.sample().is_none());
     near(
         at_event.external_heat_j(),
-        reference_step(&mut [310.0, 290.0], 0.015, 0.008, 0.0),
+        reference_advance(&mut [310.0, 290.0], 0.015, 0.02, 0.008, 0.0),
         1e-9,
     );
     assert!(thermal.links().contains_key(&5));
@@ -279,4 +300,95 @@ fn g0_endpoint_source_refusal_and_late_cancellation_publish_neither_history() {
             ConvectionSourceError::Thermal(DepositionError::Budget("convection checkpoint"))
         ))
     ));
+}
+
+#[test]
+fn forced_fluid_substitution_changes_native_subcycling_without_thermal_overshoot() {
+    let chart = curve();
+    let thermal = initial(&chart, [310.0, 290.0], 0.0, 0.002);
+    let saved = thermal.cells().clone();
+    let bindings = IDS.map(|cell| SourceConvectiveCell {
+        law: SourceCellConvectionLaw::Forced {
+            correlation: CorrelationId::FlatPlateLaminarAverage,
+            speed_m_s: 1.0,
+            settings: ForcedConvectionSettings::default(),
+        },
+        ..film(cell)
+    });
+    let conductivity = ConstantConductivity(0.5);
+    let conduction = ConductionObserver::new(
+        &thermal,
+        &[(MaterialId(0), &conductivity as &dyn ConductivityLaw)],
+        &[ConductiveLink {
+            link_id: 5, half_distances_m: [0.01; 2], contact_resistance_m2_k_w: 0.0,
+        }], &[], || Ok(()),
+    ).unwrap();
+    let mut counts = Vec::new();
+    for density in [250.0, 1000.0] {
+        let fluid = FluidTransportState::try_new(density, 4000.0, 0.5, 0.001).unwrap();
+        let convection = SourceConvectionObserver::new(
+            &bindings, 2, move |_: &SourceConvectiveCell, t: Temperature| {
+                ThermalFluidTransportState::try_new(fluid, t.value(), None)
+            },
+        );
+        let observer = CoupledObservers::new(convection, conduction.clone());
+        let (next, accepted, audit) = thermal.advance_observed(
+            &observer, 0.2, controls(1.0), || Ok(()),
+        ).unwrap();
+        // Independent laminar-plate correlation and symmetric two-cell balance.
+        let h = 0.664 * (density * 0.1 / 0.001).sqrt()
+            * (0.001_f64 * 4000.0 / 0.5).cbrt() * 0.5 / 0.1;
+        let g = 0.008 * h;
+        let link_g = 0.002 / (0.01 / 0.5 + 0.01 / 0.5);
+        let dt_bound = 1.0 / (1.0 + g / (0.8 * MASS * CP));
+        let mut contrast = 10.0;
+        let mut time = 0.0;
+        let mut steps = 0;
+        while time < 0.2 {
+            let dt = dt_bound.min(0.2 - time);
+            contrast *= 1.0 - dt * (g + 2.0 * link_g) / (MASS * CP);
+            time += dt;
+            steps += 1;
+        }
+        near(next.temperature_k(IDS[0]).unwrap(), 300.0 + contrast, 1e-10);
+        near(next.temperature_k(IDS[1]).unwrap(), 300.0 - contrast, 1e-10);
+        assert_eq!(audit.substeps, steps);
+        assert!(audit.substeps > 1);
+        assert!((300.0..310.0).contains(&next.temperature_k(IDS[0]).unwrap()));
+        assert!((290.0..300.0).contains(&next.temperature_k(IDS[1]).unwrap()));
+        near(accepted.first.external_heat_j(), audit.external_heat_j, 1e-10);
+        near(next.energy_j() - thermal.energy_j(), audit.external_heat_j, 1e-9);
+        assert!(matches!(
+            thermal.advance_observed_limited(&observer, 0.2, controls(1.0), 1, || Ok(())),
+            Err(fs_thermal::observers::ObserverCouplingError::Thermal(
+                DepositionError::Budget("thermal substeps")
+            ))
+        ));
+        counts.push(audit.substeps);
+    }
+    assert!(counts[1] > counts[0]);
+    assert_eq!(thermal.cells(), &saved);
+    assert_eq!(thermal.links()[&5].conductance_w_k, 0.0);
+}
+
+#[test]
+fn convection_step_bound_requires_a_current_source_and_is_invalidated_by_events() {
+    let chart = curve();
+    let thermal = initial(&chart, [310.0, 290.0], 0.0, 0.002);
+    let card = liquid_card(0.5, 0.01, 320.0);
+    let law = liquid_law(&card)
+        .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0)).unwrap();
+    let bindings = IDS.map(film);
+    let mut observer = SourceConvectionObserver::new(
+        &bindings, 2, |_: &SourceConvectiveCell, t: Temperature| law.at_temperature(t),
+    );
+    assert!(observer.limit_timestep_s(&thermal, 1.0, &mut || Ok(())).is_err());
+    observer.sources(&thermal, &mut || Ok(())).unwrap();
+    assert!(observer.limit_timestep_s(&thermal, 1.0, &mut || Ok(())).unwrap() < 1.0);
+    observer.event(&Event::Separation(5), &thermal).unwrap();
+    assert!(observer.limit_timestep_s(&thermal, 1.0, &mut || Ok(())).is_err());
+    observer.sources(&thermal, &mut || Ok(())).unwrap();
+    observer.begin().unwrap();
+    assert!(observer.limit_timestep_s(&thermal, 1.0, &mut || Ok(())).is_err());
+    assert_eq!(thermal.time_s(), 0.0);
 }
