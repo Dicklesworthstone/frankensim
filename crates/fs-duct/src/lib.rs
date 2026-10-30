@@ -640,8 +640,44 @@ fn helmholtz_wave_from_telegraph(z_series: C64, y_shunt: C64) -> (C64, C64) {
     (k, zc)
 }
 
+// The numerical wall-diffusion law needs these five coefficients, not an
+// ideal-gas EOS. `gamma` means the actual Cp/Cv ratio. Legacy gas callers
+// retain their original checked Pr arithmetic; generic fluids use the shared
+// material snapshot. Neither route constructs a gas from liquid coefficients.
+#[derive(Clone, Copy)]
+struct WallDiffusionInputs {
+    density: f64,
+    sound_speed: f64,
+    dynamic_viscosity: f64,
+    gamma: f64,
+    prandtl: f64,
+}
+
+impl WallDiffusionInputs {
+    fn from_gas(state: &GasState) -> Self {
+        Self {
+            density: state.density,
+            sound_speed: state.sound_speed,
+            dynamic_viscosity: state.dynamic_viscosity,
+            gamma: state.gamma,
+            prandtl: state.prandtl,
+        }
+    }
+}
+
 fn wide_tube_wave(
     state: &GasState,
+    radius: f64,
+    omega: f64,
+    k0: f64,
+    z0: f64,
+    refuse_narrow: bool,
+) -> Result<SegmentWave, DuctError> {
+    wide_tube_wave_from_inputs(&WallDiffusionInputs::from_gas(state), radius, omega, k0, z0, refuse_narrow)
+}
+
+fn wide_tube_wave_from_inputs(
+    state: &WallDiffusionInputs,
     radius: f64,
     omega: f64,
     k0: f64,
@@ -672,7 +708,11 @@ fn wide_tube_wave(
 
 /// Full Zwikker–Kosten `k` and `Zc` from `F(r_v)` at this frequency.
 fn bessel_wave(state: &GasState, radius: f64, omega: f64) -> Result<SegmentWave, DuctError> {
-    let (z_series, y_shunt, rv) = bessel_telegraph_pair(state, radius, omega)?;
+    bessel_wave_from_inputs(&WallDiffusionInputs::from_gas(state), radius, omega)
+}
+
+fn bessel_wave_from_inputs(state: &WallDiffusionInputs, radius: f64, omega: f64) -> Result<SegmentWave, DuctError> {
+    let (z_series, y_shunt, rv) = bessel_telegraph_pair_from_inputs(state, radius, omega)?;
     let (k, zc) = helmholtz_wave_from_telegraph(z_series, y_shunt);
     let area = core::f64::consts::PI * radius * radius;
     Ok(SegmentWave { wavenumber: k, characteristic_impedance: zc,
@@ -682,6 +722,10 @@ fn bessel_wave(state: &GasState, radius: f64, omega: f64) -> Result<SegmentWave,
 /// Exact per-length Z' and Y' before the square roots; retaining these
 /// avoids ill-conditioned recovery of the small inertive part from k*Zc.
 fn bessel_telegraph_pair(state: &GasState, radius: f64, omega: f64) -> Result<(C64, C64, f64), DuctError> {
+    bessel_telegraph_pair_from_inputs(&WallDiffusionInputs::from_gas(state), radius, omega)
+}
+
+fn bessel_telegraph_pair_from_inputs(state: &WallDiffusionInputs, radius: f64, omega: f64) -> Result<(C64, C64, f64), DuctError> {
     if ![radius,omega,state.density,state.sound_speed,state.dynamic_viscosity,state.prandtl]
         .iter().all(|v|v.is_finite() && *v>0.0)
         || !(state.gamma>=1.0 && state.gamma.is_finite()) {
@@ -694,9 +738,14 @@ fn bessel_telegraph_pair(state: &GasState, radius: f64, omega: f64) -> Result<(C
         });
     }
     let den = zk_one_minus_f(rv).map_err(|_| DuctError::BadParameter { what: "Bessel 1-F_v" })?;
-    let rt = rv * det::sqrt(state.prandtl);
-    let f_t =
-        zwikker_kosten_f(rt).map_err(|_| DuctError::BadParameter { what: "Bessel F_t" })?;
+    // Cp == Cv has no thermal-compression coupling. Do not request a thermal
+    // diffusion evaluation that cannot affect this physical response.
+    let f_t = if state.gamma == 1.0 {
+        C64::ZERO
+    } else {
+        let rt = rv * det::sqrt(state.prandtl);
+        zwikker_kosten_f(rt).map_err(|_| DuctError::BadParameter { what: "Bessel F_t" })?
+    };
     let area = core::f64::consts::PI * radius * radius;
     let jw = C64::new(0.0, omega);
     let z_series = jw.scale(state.density / area) / den;

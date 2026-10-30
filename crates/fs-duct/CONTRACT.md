@@ -8,7 +8,8 @@ cylinder/cone segment chains with Zwikker–Kosten wide-tube losses,
 low-`ka` radiation terminations, and input impedance. Generic by
 doctrine: instrument bores, mufflers, HVAC runs and waveguides are the
 same object, and every medium property derives from
-`fs_material::gas::GasState` — no hardcoded air.
+its `fs_material` gas owner or shared fluid acoustic/thermoviscous interface
+— no hardcoded air.
 
 ### Shared gas and liquid pressure-wave propagation
 
@@ -23,8 +24,9 @@ pressure/volume flow through the same acoustic interface as ideal mixtures.
 
 The fluid path reuses the exact cylinder/cone wave bases, the original stable
 scattering composer, and the same fourth-order Magnus profile integrator.
-Rigid, uniform-fluid cones use one exact spherical-wave block. Compliant
-cones use explicit `ConeSlices`; profiles retain their authored Riccati steps.
+Rigid, lossless, uniform-fluid cones use one exact spherical-wave block.
+Compliant or thermoviscous cones use explicit `ConeSlices`; profiles retain
+their authored Riccati steps.
 `WallModel::{Pin,Law}` supplies local storage/loss at the actual radius and
 surface slope. Thus fluid bulk compressibility and a source-owned wall law
 act through one pressure/volume-flow equation, rather than an output filter.
@@ -39,9 +41,9 @@ or profile step, publishing no partial chain. Existing block/condition limits
 apply. The caller retains the original material/query receipts; a numerical
 snapshot does not acquire additional source authority through this adapter.
 
-This is frozen, linear, lossless **bulk** acoustics with optional passive wall
-and terminal dissipation. It does not supply liquid viscothermal loss data,
-mean flow, cavitation, multiphase or finite-amplitude water hammer, a shell
+The lossless entry points require only density and adiabatic sound speed;
+wall and terminal dissipation remain optional. Neither the lossless nor the
+thermoviscous path supplies mean flow, cavitation, multiphase or finite-amplitude water hammer, a shell
 solve, or automatic liquid tone-hole radiation. Tone-hole branches refuse
 until their own boundary physics is explicitly represented. G1/G3 tests in
 `tests/fluid_acoustics.rs` compare native pressure/flow and matched travel
@@ -50,6 +52,41 @@ line formulas, check gas pressure scaling and the combined liquid/wall
 compliance equation, and retain existing gas response through mixed
 cylinder/cone/profile geometry. These are numerical model checks, not
 experimental qualification.
+
+`fluid::{segment_wave_with_loss,duct_chain_with_loss,input_impedance_load_with_loss}`
+adds the actual material's viscosity, conductivity and caloric ratio through
+`fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid`. A single
+coherent snapshot drives all local samples. Existing gas and generic fluid
+routes share the same Bessel/wide-tube numerical kernels; legacy gas callers
+retain their original checked gamma/Pr arithmetic and admission. The generic
+route never constructs a GasState from liquid coefficients or substitutes a
+gas EOS for the actual adiabatic modulus and Cp/Cv.
+
+The full cylindrical Zwikker–Kosten law uses the existing cancellation-free
+`1-F_v` and thermal `F_t` owners: in +i omega telegraph bookkeeping,
+`Z'=i omega rho/[A(1-F_v)]` and
+`Y'=i omega A/(rho c^2) [1+(Cp/Cv-1)F_t]`. The actual Cp/Cv controls the
+isothermal low-frequency compliance; viscosity controls Poiseuille resistance.
+Cp==Cv omits the uncoupled thermal evaluation exactly. No-slip, isothermal
+thermal boundaries, Newtonian fluid and the plane-wave approximation remain
+the model assumptions. Bulk viscosity and molecular absorption are not added.
+
+Generic `WideTube` requires viscous shear >=10 and, when Cp/Cv>1, thermal
+shear >=10 and `(Cp/Cv-1)/thermal_shear <=0.1`. This is an explicit conservative
+first-order approximation envelope, not a certified error bound. Low-Pr or
+strong caloric coupling can therefore require full `Bessel` even when the
+viscous layer is thin. The existing Bessel function domains remain binding.
+Lossy cones sample actual local radii on the declared slice axis; profiles
+sample both native Magnus nodes. The returned minimum shear covers all those
+actual evaluations. Boundary diffusion, mechanical wall loss and terminal
+absorption enter the same pressure/flow solve as separately owned physics.
+
+`tests/fluid_thermoviscous.rs` adds G1/G3 comparisons with independent
+Poiseuille and isothermal-compliance limits, the Kirchhoff wide-tube limit,
+loaded-line attenuation and power balance, viscosity/Cv substitutions,
+mixed geometry and existing gas/mixture responses, plus physical refusals for
+unsupported thermal approximations. Manufactured liquid inputs are numerical
+fixtures, not measured attenuation data or experimental qualification.
 
 ### Independent exterior gas
 

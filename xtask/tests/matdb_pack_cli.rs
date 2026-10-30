@@ -3384,11 +3384,15 @@ mod common_material_acquisition {
     fn g3_sourced_water_drives_acoustics_and_fluid_scaling() {
         use fs_bem::helmholtz::{Formulation, Medium, solve_radiation};
         use fs_bem::panel3d::SpherePanels;
+        use fs_duct::compose::ComposeOptions;
+        use fs_duct::{ConeSlices, Duct, LossModel, Segment, WallModel};
         use fs_lbm::lattice3::AcousticScalingPlan;
         use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
         use fs_material::fluid_acoustics::{
-            FluidAcousticParameter, FluidAcoustics, resolve_acoustic_liquid_state_with_requirements,
-            resolve_fluid_acoustic_state,
+            FluidAcousticParameter, FluidAcoustics, resolve_fluid_acoustic_state,
+        };
+        use fs_material::fluid_acoustics::thermoviscous::{
+            ThermoviscousFluid, resolve_thermoviscous_liquid_state_with_requirements,
         };
         use fs_material::fluid_transport::FluidTransport;
         use fs_material::liquid::LiquidPropertyRequirements;
@@ -3422,10 +3426,13 @@ mod common_material_acquisition {
         let velocity = vec![C64::ONE; sphere.centroids().len()];
         let mut powers = Vec::new();
         let mut identities = Vec::new();
+        let mut transmitted = Vec::new();
+        let pipe = Duct { segments: vec![Segment::Cylinder { radius: 0.0005, length: 2.0 }] };
         for temperature in [293.15, 333.15] {
             let query = point(source, &[("temperature", temperature)]);
-            let liquid = resolve_acoustic_liquid_state_with_requirements(card, &query, &parameter,
-                &liquid_requirements, MaterialPropertySelection::SingleClaimOnly).unwrap();
+            let liquid = resolve_thermoviscous_liquid_state_with_requirements(card, &query, &parameter,
+                &liquid_requirements, &requirement("specific_heat_capacity_cv"),
+                MaterialPropertySelection::SingleClaimOnly).unwrap();
             assert_eq!(liquid.material().card_identity(), card.content_hash());
             assert_eq!(liquid.material().query(), query);
             for property in liquid.material().properties() {
@@ -3451,10 +3458,34 @@ mod common_material_acquisition {
                 * k * k / (1.0 + k * k);
             assert!((radiation.radiated_power / analytic_power - 1.0).abs() < 0.05);
             powers.push(radiation.radiated_power);
-            identities.push(liquid.acoustic().identity());
+            identities.push(liquid.identity());
+
+            // The SAME original six claims now reach actual lossy pressure/flow
+            // propagation; no ideal-gas surrogate or independently fitted gamma.
+            let tuple = liquid.thermoviscous_state().unwrap();
+            assert_eq!(tuple.specific_heat_cv_j_kg_k(), liquid.material()
+                .property("specific_heat_capacity_cv").unwrap().value_si());
+            let omega = core::f64::consts::TAU * 1000.0;
+            let wave = fs_duct::fluid::segment_wave_with_loss(&liquid, 0.0005, omega,
+                LossModel::Bessel).unwrap();
+            let load = wave.characteristic_impedance;
+            let propagated = fs_duct::fluid::input_impedance_load_with_loss(
+                &pipe, &liquid, omega, LossModel::Bessel, Some(load), WallModel::Rigid,
+                ConeSlices::Auto, ComposeOptions::default(), || false).unwrap();
+            let amplitude = propagated.u_out_over_u_in.abs();
+            let expected = (-wave.wavenumber.im * 2.0).exp();
+            assert!((amplitude - expected).abs() < 3e-12);
+            assert!(amplitude > 0.0 && amplitude < 1.0);
+            assert!((propagated.z_in - load).abs() / load.abs() < 3e-12);
+            let absorbed_per_unit_flow = propagated.z_in.re - load.re * amplitude * amplitude;
+            assert!(absorbed_per_unit_flow > 0.0);
+            transmitted.push(amplitude);
         }
         assert_ne!(identities[0], identities[1]);
         assert!(powers[1] < 0.98 * powers[0]);
+        // Within this source's fixed-pressure liquid domain, heating lowers
+        // viscosity enough to reduce boundary-layer attenuation in this pipe.
+        assert!(transmitted[1] > transmitted[0]);
     }
 
     fn check_claims(pack: &NormalizedPack) {

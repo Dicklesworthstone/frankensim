@@ -1,9 +1,10 @@
 //! Small-signal duct propagation from the shared gas/liquid acoustic response.
 //!
 //! Density and adiabatic sound speed come from one original [`FluidAcoustics`]
-//! evaluation. The actual material may be a sourced liquid, an IF97 water
-//! state, or a real gas; no gas heat-capacity ratio, viscosity or atmospheric
-//! default is manufactured to fit that material into a gas-shaped API.
+//! evaluation. Lossy entry points use [`ThermoviscousFluid`] for the same
+//! state's viscosity, conductivity, Cp and actual Cp/Cv ratio. The material
+//! may be a sourced liquid or a real gas; no ideal-gas relation, viscosity or
+//! atmospheric default is manufactured to fit a gas-shaped API.
 //!
 //! Cylinders and rigid cones use the existing analytic wave bases. Smooth
 //! profiles use the existing fourth-order Magnus integrator, and complete
@@ -12,16 +13,19 @@
 //! actual radius and surface slope. Thus liquid compressibility, wall storage
 //! and wall dissipation all enter the same physical pressure/volume-flow port.
 //!
-//! Bulk propagation here is explicitly lossless and has no mean flow. A wall
-//! or supplied terminal impedance may dissipate energy. This does not assert
-//! liquid viscothermal losses, cavitation, nonlinear water hammer, multiphase
-//! acoustics or a shell model. Gas-only tone-hole radiation is not inferred for
-//! a liquid: those branches need their own explicit pressure/flow boundary.
+//! Lossless calls need only rho and c. Thermoviscous calls use the existing
+//! no-slip, isothermal-boundary Zwikker–Kosten model, with full Bessel or
+//! explicitly admitted wide-tube response. A separate compliant wall or
+//! terminal load may also dissipate energy. Mean flow, molecular/bulk-viscous
+//! absorption, cavitation, nonlinear water hammer, multiphase acoustics and
+//! shell dynamics are outside this model. Gas-only tone-hole radiation is not
+//! inferred for a liquid: those branches need their own pressure/flow boundary.
 //! The caller retains the source material and its original query receipts.
 
 use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain, TwoPort};
-use crate::{ConeSlices, Duct, DuctError, Segment, SegmentWave, WallModel};
+use crate::{ConeSlices, Duct, DuctError, LossModel, Segment, SegmentWave, WallModel};
 use fs_material::MaterialError;
+use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_math::c64::C64;
 
@@ -113,6 +117,85 @@ pub fn segment_wave<M: FluidAcoustics + ?Sized>(
     Ok(wave_from_state(&state, radius, omega)?)
 }
 
+/// Full Bessel or first-order wide-tube wall diffusion from one coherent
+/// material state. Cp/Cv is the actual caloric ratio, including for a liquid;
+/// no relation between that ratio, pressure and sound speed is imposed.
+/// The wide-tube path requires BOTH viscous and coupled thermal boundary
+/// layers to be thin, with a small coupled thermal correction. Use
+/// [`LossModel::Bessel`] outside that approximation.
+pub fn segment_wave_with_loss<M: ThermoviscousFluid + ?Sized>(
+    material: &M,
+    radius: f64,
+    omega: f64,
+    loss: LossModel,
+) -> Result<SegmentWave, FluidDuctError> {
+    let state = material.thermoviscous_state()?;
+    Ok(thermoviscous_wave_from_state(&state, radius, omega, loss)?)
+}
+
+fn thermoviscous_wave_from_state(
+    state: &ThermoviscousFluidState,
+    radius: f64,
+    omega: f64,
+    loss: LossModel,
+) -> Result<SegmentWave, DuctError> {
+    let acoustic = state.acoustic();
+    let base = wave_from_state(&acoustic, radius, omega)?;
+    if loss == LossModel::Lossless {
+        return Ok(base);
+    }
+    let transport = state.transport();
+    let inputs = crate::WallDiffusionInputs {
+        density: acoustic.density_kg_m3(),
+        sound_speed: acoustic.sound_speed_m_s(),
+        dynamic_viscosity: transport.dynamic_viscosity_pa_s(),
+        gamma: state.heat_capacity_ratio(),
+        prandtl: transport.prandtl(),
+    };
+    let wave = match loss {
+        LossModel::WideTube => {
+            let wave = crate::wide_tube_wave_from_inputs(
+                &inputs,
+                radius,
+                omega,
+                base.wavenumber.re,
+                base.characteristic_impedance.re,
+                true,
+            )?;
+            if !positive(wave.shear_number) {
+                return Err(bad("wide-tube viscous shear number must be representable"));
+            }
+            if inputs.gamma > 1.0 {
+                let thermal_shear = wave.shear_number * inputs.prandtl.sqrt();
+                if !positive(thermal_shear) || thermal_shear < crate::MIN_SHEAR_NUMBER {
+                    return Err(bad(
+                        "wide-tube thermal shear must reach MIN_SHEAR_NUMBER; use Bessel for a thick thermal layer",
+                    ));
+                }
+                if (inputs.gamma - 1.0) / thermal_shear > 1.0 / crate::MIN_SHEAR_NUMBER {
+                    return Err(bad(
+                        "wide-tube coupled thermal correction exceeds the first-order envelope; use Bessel",
+                    ));
+                }
+            }
+            wave
+        }
+        LossModel::Bessel => crate::bessel_wave_from_inputs(&inputs, radius, omega)?,
+        LossModel::Lossless => unreachable!("lossless response returned above"),
+    };
+    if [
+        wave.wavenumber,
+        wave.characteristic_impedance,
+        wave.specific_impedance,
+    ]
+    .iter()
+    .any(|value| !value.re.is_finite() || !value.im.is_finite())
+    {
+        return Err(bad("thermoviscous fluid wave is not representable"));
+    }
+    Ok(wave)
+}
+
 fn poll(cancelled: &mut impl FnMut() -> bool, completed_steps: usize) -> Result<(), DuctError> {
     if cancelled() {
         Err(DuctError::Cancelled { completed_steps })
@@ -149,44 +232,108 @@ pub fn duct_chain<M: FluidAcoustics + ?Sized>(
     options: ComposeOptions,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PreparedChain, FluidDuctError> {
+    admit_geometry(duct, options, &mut cancelled)?;
+    let state = material.acoustic_state()?;
+    Ok(chain_from_waves(
+        duct,
+        &state,
+        omega,
+        wall,
+        cone_slices,
+        options,
+        true,
+        &mut cancelled,
+        &mut |radius| wave_from_state(&state, radius, omega),
+    )?)
+}
+
+/// The same geometry and stable composer with material-driven viscosity and
+/// heat diffusion. Lossy cones use the caller's `cone_slices` even with rigid
+/// walls, because boundary-layer response varies with local radius. Profiles
+/// evaluate the same material law at both original Magnus quadrature radii.
+#[allow(clippy::too_many_arguments)]
+pub fn duct_chain_with_loss<M: ThermoviscousFluid + ?Sized>(
+    duct: &Duct,
+    material: &M,
+    omega: f64,
+    loss: LossModel,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreparedChain, FluidDuctError> {
+    admit_geometry(duct, options, &mut cancelled)?;
+    let state = material.thermoviscous_state()?;
+    Ok(chain_from_waves(
+        duct,
+        &state.acoustic(),
+        omega,
+        wall,
+        cone_slices,
+        options,
+        loss == LossModel::Lossless,
+        &mut cancelled,
+        &mut |radius| thermoviscous_wave_from_state(&state, radius, omega, loss),
+    )?)
+}
+
+fn admit_geometry(
+    duct: &Duct,
+    options: ComposeOptions,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), DuctError> {
     options.validate()?;
-    poll(&mut cancelled, 0)?;
-    let first = duct.segments.first().ok_or(DuctError::EmptyDuct)?;
+    poll(cancelled, 0)?;
+    if duct.segments.is_empty() {
+        return Err(DuctError::EmptyDuct);
+    }
     admit_blocks(0, duct.segments.len(), options.maximum_blocks)?;
     for segment in &duct.segments {
         segment.validate()?;
         if matches!(segment, Segment::ToneHole { .. }) {
-            return Err(bad("generic fluid branches need an explicit pressure/flow load; gas tone-hole radiation is not implied").into());
+            return Err(bad(
+                "generic fluid branches need an explicit pressure/flow load; gas tone-hole radiation is not implied",
+            ));
         }
     }
-    let state = material.acoustic_state()?;
-    let reference = wave_from_state(&state, first.inlet_radius(), omega)?
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chain_from_waves(
+    duct: &Duct,
+    state: &FluidAcousticState,
+    omega: f64,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    lossless_bulk: bool,
+    cancelled: &mut impl FnMut() -> bool,
+    wave_at: &mut impl FnMut(f64) -> Result<SegmentWave, DuctError>,
+) -> Result<PreparedChain, DuctError> {
+    let first = duct.segments.first().ok_or(DuctError::EmptyDuct)?;
+    let reference = wave_from_state(state, first.inlet_radius(), omega)?
         .characteristic_impedance
         .re;
     let mut blocks = Vec::new();
+    let mut min_shear_number = f64::INFINITY;
     for (index, segment) in duct.segments.iter().enumerate() {
-        poll(&mut cancelled, index)?;
+        poll(cancelled, index)?;
         match *segment {
             Segment::Profile { ref profile, steps } => {
                 admit_blocks(blocks.len(), steps.0, options.maximum_blocks)?;
-                let profile_reference = wave_from_state(&state, profile.inlet_radius(), omega)?
+                let profile_reference = wave_from_state(state, profile.inlet_radius(), omega)?
                     .characteristic_impedance
                     .re;
-                let (local, _) = crate::profile::profile_blocks_with_waves_controlled(
+                let (local, shear) = crate::profile::profile_blocks_with_waves_controlled(
                     profile,
                     steps,
                     profile_reference,
                     !wall.is_rigid(),
-                    &mut cancelled,
-                    &mut |radius, slant| {
-                        wall.apply(
-                            wave_from_state(&state, radius, omega)?,
-                            radius,
-                            omega,
-                            slant,
-                        )
-                    },
+                    cancelled,
+                    &mut |radius, slant| wall.apply(wave_at(radius)?, radius, omega, slant),
                 )?;
+                min_shear_number = min_shear_number.min(shear);
                 for matrix in local {
                     blocks.push(TwoPort::from_abcd(matrix, reference)?);
                 }
@@ -195,12 +342,12 @@ pub fn duct_chain<M: FluidAcoustics + ?Sized>(
                 inlet_radius,
                 outlet_radius,
                 length,
-            } if !wall.is_rigid() => {
+            } if !lossless_bulk || !wall.is_rigid() => {
                 let count = cone_slices.count(inlet_radius, outlet_radius)?;
                 admit_blocks(blocks.len(), count, options.maximum_blocks)?;
                 let dx = length / count as f64;
                 for i in 0..count {
-                    poll(&mut cancelled, i)?;
+                    poll(cancelled, i)?;
                     let ra =
                         inlet_radius + (outlet_radius - inlet_radius) * (i as f64 / count as f64);
                     let rb = inlet_radius
@@ -208,11 +355,12 @@ pub fn duct_chain<M: FluidAcoustics + ?Sized>(
                     let radius = f64::midpoint(ra, rb);
                     let slope = (rb - ra) / dx;
                     let wave = wall.apply(
-                        wave_from_state(&state, radius, omega)?,
+                        wave_at(radius)?,
                         radius,
                         omega,
                         (1.0 + slope * slope).sqrt(),
                     )?;
+                    min_shear_number = min_shear_number.min(wave.shear_number);
                     blocks.push(TwoPort::from_wave(
                         &Segment::Cone {
                             inlet_radius: ra,
@@ -227,8 +375,8 @@ pub fn duct_chain<M: FluidAcoustics + ?Sized>(
             Segment::Cylinder { .. } | Segment::Cone { .. } => {
                 admit_blocks(blocks.len(), 1, options.maximum_blocks)?;
                 let radius = segment.mean_radius();
-                let wave =
-                    wall.apply(wave_from_state(&state, radius, omega)?, radius, omega, 1.0)?;
+                let wave = wall.apply(wave_at(radius)?, radius, omega, 1.0)?;
+                min_shear_number = min_shear_number.min(wave.shear_number);
                 blocks.push(TwoPort::from_wave(segment, &wave, reference)?);
             }
             Segment::ToneHole { .. } => unreachable!("branch geometry refused before assembly"),
@@ -237,7 +385,7 @@ pub fn duct_chain<M: FluidAcoustics + ?Sized>(
     Ok(PreparedChain {
         blocks,
         reference_impedance: reference,
-        min_shear_number: f64::INFINITY,
+        min_shear_number,
     })
 }
 
@@ -260,9 +408,7 @@ pub fn input_impedance_load<M: FluidAcoustics + ?Sized>(
     options: ComposeOptions,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ChainResult, FluidDuctError> {
-    if load.is_some_and(|z| !z.re.is_finite() || !z.im.is_finite() || z.re < 0.0) {
-        return Err(bad("fluid duct terminal impedance must be finite and passive").into());
-    }
+    admit_load(load)?;
     let chain = duct_chain(
         duct,
         material,
@@ -278,4 +424,48 @@ pub fn input_impedance_load<M: FluidAcoustics + ?Sized>(
         options,
         &mut cancelled,
     )?)
+}
+
+/// Native pressure/flow transmission with full thermoviscous wall diffusion
+/// and an explicit passive terminal load. Loss ownership is unchanged:
+/// Zwikker–Kosten supplies fluid boundary diffusion, `wall` supplies its own
+/// mechanical dissipation, and the load supplies terminal absorption.
+#[allow(clippy::too_many_arguments)]
+pub fn input_impedance_load_with_loss<M: ThermoviscousFluid + ?Sized>(
+    duct: &Duct,
+    material: &M,
+    omega: f64,
+    loss: LossModel,
+    load: Option<C64>,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ChainResult, FluidDuctError> {
+    admit_load(load)?;
+    let chain = duct_chain_with_loss(
+        duct,
+        material,
+        omega,
+        loss,
+        wall,
+        cone_slices,
+        options,
+        &mut cancelled,
+    )?;
+    Ok(compose::compose_chain_controlled(
+        &chain.blocks,
+        load,
+        options,
+        &mut cancelled,
+    )?)
+}
+
+fn admit_load(load: Option<C64>) -> Result<(), DuctError> {
+    if load.is_some_and(|z| !z.re.is_finite() || !z.im.is_finite() || z.re < 0.0) {
+        return Err(bad(
+            "fluid duct terminal impedance must be finite and passive",
+        ));
+    }
+    Ok(())
 }
