@@ -286,3 +286,6 @@ mod dynamic;
 
 #[path = "thermoelastic/varying_coefficients.rs"]
 mod varying_coefficients;
+
+#[path = "thermoelastic/acoustic.rs"]
+mod acoustic;

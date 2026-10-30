@@ -64,6 +64,14 @@ impl<'s, 'm> DynamicThermoelasticSolid<'s, 'm> {
     pub fn step(&self) -> usize { self.motion.state().step }
     pub fn kinetic_energy_j(&self) -> f64 { self.motion.state().kinetic_energy_j }
 
+    /// Local entropy-constrained tangent at the actual accepted inertial state.
+    /// This does not advance motion or add heat feedback a second time.
+    pub fn adiabatic_state(
+        &self, cx: &Cx<'_>,
+    ) -> Result<super::acoustic::AdiabaticSolidState<'m>, ThermoelasticFeedbackError> {
+        super::acoustic::resolve(self.source, &self.laws, &self.state, &self.response.stress, cx)
+    }
+
     /// Full accepted displacement, velocity and acceleration in native node order.
     pub fn nodal_motion(
         &self, cx: &Cx<'_>,

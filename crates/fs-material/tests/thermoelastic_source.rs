@@ -248,3 +248,6 @@ fn g3_capacity_floor_includes_poisson_curvature_and_all_mandel_shears() {
     let card=source_card(0.0,0.0,0.0,0.0,false);
     assert_eq!(law(&card).minimum_heat_capacity_j_k(0.7).unwrap(),0.0);
 }
+
+#[path = "thermoelastic_source/acoustic.rs"]
+mod acoustic;

@@ -98,6 +98,9 @@ pub struct ResolvedThermoelastic {
 pub struct ThermoelasticState {
     pub elastic_strain_mandel:[f64;6],
     pub stress_mandel_pa:[f64;6],
+    /// Local d(sigma)/dT at fixed TOTAL Mandel strain [Pa/K].
+    /// This mixed derivative is work-conjugate to -d(entropy)/d(strain).
+    pub stress_temperature_derivative_mandel_pa_k:[f64;6],
     pub free_energy_j:f64,
     pub entropy_j_k:f64,
     pub internal_energy_j:f64,
@@ -320,6 +323,12 @@ impl ResolvedThermoelastic {
         let bulk_second=finite(4.0*self.poisson_slope_per_k*bulk_first/d)?;
         let shear_second=finite(-2.0*self.poisson_slope_per_k*shear_first/q)?;
         let alpha=self.expansion_per_k;
+        let stress_temperature_derivative_mandel_pa_k=core::array::from_fn(|k| {
+            if k<3 {
+                bulk_first*trace-3.0*bulk*alpha
+                    +2.0*shear_first*(elastic_strain_mandel[k]-mean)
+            } else {2.0*shear_first*elastic_strain_mandel[k]}
+        });
         let entropy_j_k=finite(volume_m3*(3.0*bulk*alpha*trace
             -0.5*bulk_first*trace*trace-shear_first*deviator_squared))?;
         let internal_energy_j=finite(self.temperature_k.mul_add(entropy_j_k,free_energy_j))?;
@@ -327,13 +336,18 @@ impl ResolvedThermoelastic {
             *((6.0*bulk_first*alpha+3.0*bulk*self.expansion_slope_per_k2)*trace
                 -9.0*bulk*alpha*alpha-0.5*bulk_second*trace*trace
                 -shear_second*deviator_squared))?;
-        if stress_mandel_pa.iter().any(|v|!v.is_finite()) || free_energy_j<0.0 {
+        if stress_mandel_pa.iter().chain(stress_temperature_derivative_mandel_pa_k.iter())
+            .any(|v|!v.is_finite()) || free_energy_j<0.0 {
             return Err(ThermoelasticError::Invalid("native thermoelastic response is unrepresentable"));
         }
-        Ok(ThermoelasticState {elastic_strain_mandel,stress_mandel_pa,free_energy_j,
+        Ok(ThermoelasticState {elastic_strain_mandel,stress_mandel_pa,
+            stress_temperature_derivative_mandel_pa_k,free_energy_j,
             entropy_j_k,internal_energy_j,heat_capacity_j_k})
     }
 }
 
 /// Source-derived two-temperature Hertz compliance and thermal derivatives.
 pub mod contact;
+
+/// Isentropic incremental stiffness from this same source thermal potential.
+pub mod acoustic;

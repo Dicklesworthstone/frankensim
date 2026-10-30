@@ -21,6 +21,9 @@
 /// Reciprocal finite heat coupled to the original inertial Newmark trajectory.
 pub mod dynamic;
 
+/// Local isentropic wave/modal tangent from the same accepted thermal history.
+pub mod acoustic;
+
 use super::*;
 use std::convert::Infallible;
 use fs_material::elastic::thermal::{
