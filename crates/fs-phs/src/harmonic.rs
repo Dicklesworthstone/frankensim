@@ -18,6 +18,8 @@ use fs_math::c64::C64;
 mod poles;
 pub use poles::{BeynOptions, HarmonicSpectrum, HarmonicSpectrumError, ResonanceRegion};
 pub use poles::{HarmonicPole, HarmonicPoleError, PoleOptions};
+/// Prepared physical port participation of complete descriptor modes.
+pub use poles::response;
 
 /// Hard ceiling of this explicitly dense frequency-domain path.
 pub const MAX_HARMONIC_DIMENSION: usize = 1024;

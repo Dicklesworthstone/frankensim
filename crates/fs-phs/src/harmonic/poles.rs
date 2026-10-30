@@ -13,6 +13,9 @@ pub use fs_la::nonlinear_eig::PoleOptions;
 mod spectrum;
 pub use spectrum::{BeynOptions, HarmonicSpectrum, HarmonicSpectrumError, ResonanceRegion};
 
+/// Physical port participation reuses the original pencil and mode observer.
+pub mod response;
+
 /// A local mode of exp(s t), including every original constraint and memory state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HarmonicPole {
