@@ -241,6 +241,76 @@ fn contact_ready(
     ).unwrap()
 }
 
+fn pressing_fiber_text() -> String {
+    include_str!("../fiber-contact.material-strings")
+        .replace("48000 4096", "48000 512")
+        .replace("forces retain", concat!(
+            "bow_fiber_motion 1 1000 0.001 1048576\n",
+            "bow_fiber_normal_program 0 0.1 20 0.01 1048576 4\n",
+            "fiber_normal_speed 64 -0.02\nfiber_normal_speed 128 0\n",
+            "fiber_normal_speed 192 0.02\nfiber_normal_speed 256 0\n",
+            "forces retain"))
+}
+
+#[test]
+fn normal_support_pressing_changes_solved_load_and_material_pressure_through_pcm() {
+    scoped(|cx, gate| {
+        let text = pressing_fiber_text();
+        let profile = include_str!("../fiber-contact.stops").replace("-0.000001", "0.000005");
+        let build = |density| input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(
+            cx, gate, None, Some(crate::stops::Profile::parse(profile.as_bytes()).unwrap()),
+            |name| Ok(if name == "fiber.fsmatpk" { fiber_pack(density, false) }
+                else { pack(name, 7800.0, 200_000.0, None) }),
+        ).unwrap();
+        let mut run = build(1300.0);
+        assert_eq!(run.performance.fiber_normal_support_program().unwrap().knots.len(), 4);
+        let mut output = Vec::new();
+        let (mut loaded, mut released, mut support_work) = (false, false, 0.0);
+        for sample in 1..=512 {
+            let mut pressure = [0.0];
+            run.performance.block(&mut pressure).unwrap();
+            output.push(pressure[0]);
+            let normal_motion = run.performance.fiber_support_frame().unwrap().normal.unwrap();
+            support_work += normal_motion.contact_translation_work_j.abs();
+            let system = run.performance.bank().system();
+            for (bow, contact) in system.last_frame().unwrap().ports.iter()
+                .zip(system.last_obstacle_frames().unwrap()) {
+                assert_eq!(bow.normal_force_n, contact.normal_force_n);
+                loaded |= bow.normal_force_n > 0.0;
+                released |= sample > 256 && bow.normal_force_n == 0.0;
+                if bow.normal_force_n == 0.0 { assert_eq!(bow.traction_n, 0.0); }
+            }
+        }
+        assert!(loaded && released && support_work > 0.0);
+        assert!(output.iter().any(|p| p.abs() > 1e-12));
+        assert_eq!(output, pressure(&mut build(1300.0), 37));
+        assert!(output.iter().zip(pressure(&mut build(5200.0), 128))
+            .any(|(a, b)| (a-b).abs() > 1e-12));
+        let mut wav = build(1300.0);
+        let (bytes, summary) = wav.write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        let (expected, clips) = fs_couple::pcm_wav::encode_pcm16_wav(
+            &output, wav.spec.rate, wav.spec.full_scale,
+        ).unwrap();
+        assert_eq!(bytes.into_inner(), expected);
+        assert_eq!(summary.clipped_samples, clips as u64);
+        assert_eq!(run.performance.fiber_support_frame(), wav.performance.fiber_support_frame());
+    });
+}
+
+#[test]
+fn normal_support_input_requires_an_explicit_frame_and_finite_motion() {
+    let text = pressing_fiber_text();
+    for (from, to) in [
+        ("bow_fiber_motion 1 1000 0.001 1048576\n", ""),
+        ("bow_fiber_normal_program 0 0.1 20", "bow_fiber_normal_program 0 0.1 1"),
+        ("fiber_normal_speed 128 0", "fiber_normal_speed 64 0"),
+        ("fiber_normal_speed 256 0", "fiber_normal_speed 513 0"),
+        ("fiber_normal_speed 192 0.02", "fiber_normal_speed 192 0.2"),
+    ] {
+        assert!(input::Spec::parse(text.replace(from, to).as_bytes()).is_err(), "{from}");
+    }
+}
+
 #[test]
 fn fiber_normal_contact_reaches_the_same_scheduled_pressure_and_pcm_history() {
     scoped(|cx, gate| {

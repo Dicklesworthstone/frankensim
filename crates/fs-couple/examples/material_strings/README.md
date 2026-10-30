@@ -333,9 +333,53 @@ Velocity, acceleration, translation at reversal extrema, and held final travel
 are checked before playback. The finite material hair span is also enforced by
 the original contact owner. Callback block size does not change this motion.
 
-Omitting both records retains the explicit constant-speed, frozen-station model
-used by the fixtures below. Neither selection establishes measured-instrument
-sound quality; the material, geometry and resolution still require validation.
+To press and withdraw the same fiber supports, add a normal velocity program
+after `bow_fiber_motion` or `bow_fiber_program` and its endpoints:
+
+```text
+bow_fiber_normal_program INITIAL_SPEED_M_S MAX_SPEED_M_S MAX_ACCELERATION_M_S2 MAX_ABS_TRANSLATION_M MAX_UPDATE_TERMS KNOTS
+fiber_normal_speed SAMPLE VELOCITY_M_S
+```
+
+For example, this 48 kHz program presses toward an initially separated string
+and returns to its original clearance over 256 mechanical intervals:
+
+```text
+bow_fiber_motion 1 1000 0.001 1048576
+bow_fiber_normal_program 0 0.1 20 0.01 1048576 4
+fiber_normal_speed 64 -0.02
+fiber_normal_speed 128 0
+fiber_normal_speed 192 0.02
+fiber_normal_speed 256 0
+```
+
+The tangential support velocity still comes from the original bow track in
+this example. Normal velocity uses the same linear interpolation, finite
+horizon and acceleration checks as `fiber_speed`. Its integral translates the
+original contact clearance, while its acceleration supplies the mass-projected
+inertial load to each cell's original transverse modes. Consequently changing
+fiber material, count, tension or geometry changes the resulting normal force
+and traction in the existing string/body/acoustic solve. The program supplies
+no normal-force envelope. Contact load remains zero during separation, and
+pressing work remains mechanical work rather than frictional heat. Independent
+stop-motion records must keep zero offset placeholders at these fiber contacts;
+other stops can retain their own motion.
+
+This is uniform translation of rigid supports along one common contact normal;
+it does not model bow-stick flexibility or a rotating normal frame. The material
+and dry-contact restrictions of the axial motion rung still apply. The report's
+`normal` field exposes normal travel, velocity, inertia and contact translation
+work. The top-level `FiberSupportFrame` energy, support work and inertial work
+include both translation directions. When replacing native support-frame work
+with laboratory support work, subtract `normal.contact_translation_work_j` from
+native obstacle work as well as `normal_attachment_work_j`; both shares are
+already included in the complete physical support work. No optional trajectory
+changes the physical sample clock or PCM observation path.
+
+Omitting the axial motion records retains the explicit constant-speed,
+frozen-station model used by the fixtures below. These motion selections do not
+establish measured-instrument sound quality; material, geometry and resolution
+still require validation.
 
 Each cell receives its quadrature share of the **original fiber count**, mass,
 axial stiffness, bending stiffness, tension and material losses. Independent

@@ -252,10 +252,20 @@ impl TensionedFiberRibbon {
     /// Normal modes have zero axial participation; cell refinement partitions
     /// the original fiber mass instead of adding any support inertia.
     pub fn axial_translation_participation(&self) -> Vec<f64> {
+        self.translation_participation(FiberDirection::Axial)
+    }
+    /// Mass projection of rigid support translation in either retained direction.
+    /// The normal projection uses the SAME original fiber mass as the axial one;
+    /// it is not a lumped bow mass. Only odd fixed-end sine modes participate.
+    pub fn translation_participation(&self, direction: FiberDirection) -> Vec<f64> {
         let scale = 2.0 * (0.5 * self.cell_line_density_kg_m * self.geometry.length_m).sqrt();
         let mut participation = vec![0.0; self.cell.modes().len()];
-        for mode in (1..=self.resolution.axial_modes).step_by(2) {
-            participation[mode - 1] = 2.0 * scale / (mode as f64 * core::f64::consts::PI);
+        let (start, count) = match direction {
+            FiberDirection::Axial => (0, self.resolution.axial_modes),
+            FiberDirection::Normal => (self.resolution.axial_modes, self.resolution.transverse_modes),
+        };
+        for mode in (1..=count).step_by(2) {
+            participation[start + mode - 1] = 2.0 * scale / (mode as f64 * core::f64::consts::PI);
         }
         participation
     }

@@ -20,7 +20,7 @@ use fs_exec::CancelGate;
 pub struct FiberSupportKnot {
     /// Positive elapsed samples. Sample 1 is the END of the first interval.
     pub sample: u64,
-    /// Signed axial speed of both fiber supports [m/s].
+    /// Signed speed of both fiber supports in the selected direction [m/s].
     pub velocity_m_s: f64,
 }
 
@@ -32,12 +32,12 @@ pub struct FiberSupportProgram {
     pub initial_velocity_m_s: f64,
     /// Strictly increasing physical endpoints, followed by a held final speed.
     pub knots: Vec<FiberSupportKnot>,
-    /// Maximum magnitude of the prescribed axial speed [m/s].
+    /// Maximum magnitude of the prescribed support speed [m/s].
     pub maximum_speed_m_s: f64,
     /// Maximum magnitude of each velocity segment's acceleration [m/s^2].
     pub maximum_acceleration_m_s2: f64,
     /// Bound absolute support translation from its initial position [m].
-    /// The original finite hair span independently limits the material crossing.
+    /// Axial motion also obeys the original finite hair span at each crossing.
     pub maximum_abs_translation_m: f64,
     /// Shared storage/work bound on authored velocity knots.
     pub max_knots: usize,
@@ -53,6 +53,27 @@ fn poll(gate: &CancelGate) -> Result<(), RenderError> {
     }
 }
 impl FiberSupportProgram {
+    /// Sample one physical endpoint without advancing a program cursor. Both
+    /// support directions use this interpolation and commit only after mechanics.
+    pub(crate) fn sample_from(&self, mut next: usize, endpoint: u64) -> (f64, usize) {
+        while self.knots.get(next).is_some_and(|k| k.sample < endpoint) {
+            next += 1;
+        }
+        let velocity = if let Some(right) = self.knots.get(next) {
+            if endpoint == right.sample {
+                right.velocity_m_s
+            } else {
+                let left = next.checked_sub(1).map(|i| self.knots[i]);
+                let start = left.map_or(0, |k| k.sample);
+                let initial = left.map_or(self.initial_velocity_m_s, |k| k.velocity_m_s);
+                initial + (right.velocity_m_s - initial) * (endpoint - start) as f64
+                    / (right.sample - start) as f64
+            }
+        } else {
+            self.knots[self.knots.len() - 1].velocity_m_s
+        };
+        (velocity, next)
+    }
     /// Admit every segment, including its interior turning point and the held
     /// final velocity. This can run before source-pack I/O.
     pub fn validate(&self, samples: u64, rate: u32, gate: &CancelGate) -> Result<(), RenderError> {
@@ -135,29 +156,7 @@ impl BoundFiberSupport {
         endpoint: u64,
         drives: &[FrictionDrive],
     ) -> Result<(), RenderError> {
-        let mut next = self.next;
-        while self
-            .source
-            .knots
-            .get(next)
-            .is_some_and(|k| k.sample < endpoint)
-        {
-            next += 1;
-        }
-        let velocity = if let Some(right) = self.source.knots.get(next) {
-            if endpoint == right.sample {
-                right.velocity_m_s
-            } else {
-                let left = next.checked_sub(1).map(|i| self.source.knots[i]);
-                let start = left.map_or(0, |k| k.sample);
-                let initial = left.map_or(self.source.initial_velocity_m_s, |k| k.velocity_m_s);
-                initial
-                    + (right.velocity_m_s - initial) * (endpoint - start) as f64
-                        / (right.sample - start) as f64
-            }
-        } else {
-            self.source.knots[self.source.knots.len() - 1].velocity_m_s
-        };
+        let (velocity, next) = self.source.sample_from(self.next, endpoint);
         if drives.len() != self.drives.len()
             || drives.iter().any(|d| d.speed_m_s != 0.0)
             || !velocity.is_finite()
@@ -237,5 +236,27 @@ impl MultiBowPerformance {
     /// Last accepted support state and laboratory mechanical/work conversion.
     pub fn fiber_support_frame(&self) -> Option<&FiberSupportFrame> {
         self.bank.fiber_support_frame()
+    }
+
+    /// Press and withdraw the actual fiber supports along their retained normal.
+    ///
+    /// Bind after axial support motion. The normal velocity program integrates
+    /// into physical support clearances AND source-mass-projected inertial loads;
+    /// each contact resolves its own reaction, including separation. It does not
+    /// prescribe a normal-force envelope. All fiber-contact normal directions
+    /// must agree. Independent stop paths keep zero entries at these contacts.
+    /// The existing simultaneous string/fiber/body solve and observers are used.
+    pub fn with_fiber_normal_support_program(
+        mut self, program: FiberSupportProgram, gate: &CancelGate,
+    ) -> Result<Self, RenderError> {
+        poll(gate)?;
+        self.validate_sample_count(0)?;
+        self.bank = self.bank.with_fiber_normal_support_program(program, self.config.samples, gate)?;
+        Ok(self)
+    }
+
+    /// Original normal support trajectory, separate from its solved contact load.
+    pub fn fiber_normal_support_program(&self) -> Option<&FiberSupportProgram> {
+        self.bank.fiber_normal_support_program()
     }
 }

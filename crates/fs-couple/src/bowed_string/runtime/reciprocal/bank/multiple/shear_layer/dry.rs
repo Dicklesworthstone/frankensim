@@ -126,6 +126,7 @@ impl MultiBowStringBank {
                 drives,
                 bow_stations,
                 normal.as_deref(),
+                offsets_m,
                 gate,
                 |system, step| {
                     let routes = dry
@@ -143,7 +144,7 @@ impl MultiBowStringBank {
                         step.geometry,
                         step.endpoints,
                         step.normal_geometry,
-                        offsets_m,
+                        step.stop_offsets_m,
                         step.config,
                         gate,
                         resolve,

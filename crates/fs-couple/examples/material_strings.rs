@@ -525,6 +525,9 @@ impl input::Spec {
         if let Some(program)=self.bow_fibers.as_ref().and_then(|fiber|fiber.support_program.as_ref()) {
             performance=performance.with_fiber_support_program(program.clone(),gate)?;
         }
+        if let Some(program)=self.bow_fibers.as_ref().and_then(|fiber|fiber.normal_program.as_ref()) {
+            performance=performance.with_fiber_normal_support_program(program.clone(),gate)?;
+        }
         if let Some(observer)=&self.plate_observer {
             performance=performance.with_material_plate_observer(observer.clone(),gate)?;
         }
@@ -862,6 +865,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     }
     if let Some(motion)=ready.performance.fiber_support_program() {
         eprintln!("bow_fiber_support_motion={motion:?}; material-derived frame inertia and laboratory kinetic correction");
+    }
+    if let Some(motion)=ready.performance.fiber_normal_support_program() {
+        eprintln!("bow_fiber_normal_support_motion={motion:?}; normal material inertia and solved contact load on the same physical clock");
     }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
     if let Some(memory)=ready.performance.bank().source().bank().material_shell_coating_relaxation() {

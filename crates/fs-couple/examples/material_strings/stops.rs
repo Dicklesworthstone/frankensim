@@ -345,7 +345,7 @@ impl Profile {
             for (index, entry) in self.entries.iter().enumerate() {
                 if matches!(entry.receiver, Receiver::Fiber(_))
                     && motion.knots.iter().any(|knot| knot.offsets_m[index] != 0.0) {
-                    return Err("moving fiber supports require their frame-acceleration forces; use frozen fiber clearance".into());
+                    return Err("moving fiber supports require their frame-acceleration forces; use bow_fiber_normal_program with zero independent offsets at fiber contacts".into());
                 }
             }
         }

@@ -23,6 +23,7 @@ pub struct Input {
     pub strain: Option<(FiberStrainLimits, NonlinearModalConfig)>,
     pub motion: Option<FiberSupportMotionLimits>,
     pub support_program: Option<FiberSupportProgram>,
+    pub normal_program: Option<FiberSupportProgram>,
 }
 impl Input {
     pub fn mode_count(&self, spec: &input::Spec) -> Result<usize> {
@@ -68,6 +69,12 @@ impl Input {
         }
         if let Some(limits) = self.motion {
             limits.validate()?;
+        }
+        if let Some(program) = &self.normal_program {
+            program.validate(spec.samples, spec.rate, &CancelGate::new_clock_free())?;
+            if self.motion.is_none() && self.support_program.is_none() {
+                return Err("normal fiber support requires an explicitly retained axial support frame".into());
+            }
         }
         if self.motion.is_some() || self.support_program.is_some() {
             if spec.contact_thermal || spec.friction.shear_layers().is_some() {

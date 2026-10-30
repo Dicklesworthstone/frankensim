@@ -14,6 +14,9 @@
 //! the inertial load. `FiberSupportFrame` additionally accounts for rigid
 //! translation and momentum cross terms in laboratory energy and support work.
 //! Refine time, span modes and width.
+pub mod normal;
+pub use normal::{FiberNormalSupportFrame, FiberNormalSupportKinematics};
+
 use super::super::stations::BowStationMotionLimits;
 use super::super::*;
 use crate::fiber_ribbon::FiberDirection;
@@ -65,13 +68,19 @@ pub struct FiberSupportFrame {
     pub velocity_m_s: f64,
     pub translation_m: f64,
     pub acceleration_m_s2: f64,
-    /// `-a sum Gamma_n delta_q_n`, already included in native external work [J].
+    /// Explicit normal translation, when separately prescribed. Its inertia
+    /// and kinetic correction are already included in the complete fields below.
+    pub normal: Option<FiberNormalSupportFrame>,
+    /// Sum of `-a sum Gamma_n delta_q_n` over the prescribed directions,
+    /// already included in native external work [J].
     pub inertial_coordinate_work_j: f64,
-    /// `V sum Gamma_n qdot_n + M V^2/2`, added to native storage [J].
+    /// Sum of `V sum Gamma_n qdot_n + M V^2/2` over the orthogonal support
+    /// directions, added to native storage [J].
     pub laboratory_kinetic_correction_j: f64,
     /// Native drive work + inertial work + change of kinetic correction [J].
-    /// Also includes `normal_attachment_work_j`. Other applied forces, string
-    /// station migration and normal support translations keep their own accounts.
+    /// Also includes `normal_attachment_work_j` and, if present,
+    /// `normal.contact_translation_work_j`. Other applied forces, string station
+    /// migration and independently driven stops keep their own accounts.
     pub support_work_j: f64,
     /// Normal-contact work from migration along the fibers [J]. Already part
     /// of native `obstacle_work_j` AND this frame's `support_work_j`; when using
@@ -88,6 +97,7 @@ pub(crate) struct FiberSupportState {
     force_start: usize,
     mass_kg: f64,
     normal_contacts: Vec<FiberNormalContact>,
+    normal: Option<normal::NormalSupportState>,
     last_frame: Option<FiberSupportFrame>,
 }
 #[derive(Clone, Copy)]
@@ -115,10 +125,14 @@ pub(crate) struct FiberSupportStep {
     normal_end_shape: Vec<f64>,
     normal_change_shape: Vec<f64>,
     normal_contacts: Vec<FiberNormalStep>,
+    normal: Option<normal::NormalSupportStep>,
     pub(crate) forces: Vec<f64>,
     pub(crate) drives: Vec<FrictionDrive>,
 }
 impl FiberSupportStep {
+    pub(crate) fn stop_offsets_m(&self) -> Option<&[f64]> {
+        self.normal.as_ref()?.offsets_m.as_deref()
+    }
     pub(crate) fn endpoint_geometry(
         &self,
         cell: usize,
@@ -381,6 +395,7 @@ impl MultiBowStringBank {
             force_start,
             mass_kg,
             normal_contacts,
+            normal: None,
             last_frame: None,
             accepted: FiberSupportKinematics {
                 velocity_m_s: initial_velocity_m_s,
@@ -433,6 +448,7 @@ impl FiberSupportState {
         system: &MultiFrictionModalSystem,
         external: &[f64],
         drives: &[FrictionDrive],
+        stop_offsets_m: Option<&[f64]>,
         gate: &CancelGate,
     ) -> Result<FiberSupportStep, ModalFrictionError> {
         let fiber = admit_sources(source)?;
@@ -539,6 +555,9 @@ impl FiberSupportState {
                 }
             }
         }
+        let normal = self.normal.as_ref().map(|normal| normal.prepare(
+            system, self.force_start, self.mass_kg, &mut forces, stop_offsets_m, gate,
+        )).transpose()?;
         let drives = drives
             .iter()
             .map(|drive| FrictionDrive {
@@ -568,6 +587,7 @@ impl FiberSupportState {
             normal_end_shape,
             normal_change_shape,
             normal_contacts,
+            normal,
             forces,
             drives,
         })
@@ -581,8 +601,8 @@ impl FiberSupportState {
         let (displacement, momentum) =
             self.moments(step.component_start, step.drives.len(), system);
         let velocity = step.accepted.velocity_m_s;
-        let correction = velocity * momentum + 0.5 * self.mass_kg * velocity * velocity;
-        let inertial_work =
+        let mut correction = velocity * momentum + 0.5 * self.mass_kg * velocity * velocity;
+        let mut inertial_work =
             -step.acceleration_m_s2 * (displacement - step.previous_displacement_moment);
         let normal_work = step
             .normal_contacts
@@ -605,6 +625,15 @@ impl FiberSupportState {
                     * (0.5 * normal.previous_transport_m + 0.5 * final_transport)
             })
             .sum::<f64>();
+        let mut previous_correction = step.previous_kinetic_correction_j;
+        let normal = self.normal.as_mut().zip(step.normal).map(|(state, candidate)| {
+            let (frame, previous) = state.accept(candidate, system, self.mass_kg);
+            correction += frame.laboratory_kinetic_correction_j;
+            inertial_work += frame.inertial_coordinate_work_j;
+            previous_correction += previous;
+            frame
+        });
+        let normal_translation_work = normal.map_or(0.0, |frame| frame.contact_translation_work_j);
         // Material-fiber banks have no lumped series-drive storage; retained
         // fiber modes already represent that compliance. Moving shear/thermal
         // patches remain inadmissible under this owner's transport restrictions.
@@ -618,10 +647,11 @@ impl FiberSupportState {
             velocity_m_s: velocity,
             translation_m: step.accepted.displacement_m,
             acceleration_m_s2: step.acceleration_m_s2,
+            normal,
             inertial_coordinate_work_j: inertial_work,
             laboratory_kinetic_correction_j: correction,
-            support_work_j: frame.drive_work_j + normal_work + inertial_work + correction
-                - step.previous_kinetic_correction_j,
+            support_work_j: frame.drive_work_j + normal_work + normal_translation_work
+                + inertial_work + correction - previous_correction,
             normal_attachment_work_j: normal_work,
             laboratory_mechanical_energy_j: laboratory_energy,
         });

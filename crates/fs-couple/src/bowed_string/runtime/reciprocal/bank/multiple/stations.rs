@@ -49,6 +49,7 @@ pub(super) struct BowGeometryStep<'a> {
     pub geometry: &'a [FrictionGeometry],
     pub endpoints: Option<&'a [FrictionEndpointGeometry]>,
     pub normal_geometry: Option<&'a [ObstacleGeometry]>,
+    pub stop_offsets_m: Option<&'a [f64]>,
     pub config: FrictionGeometryConfig,
     pub string_centres_m: &'a [f64],
     pub fiber_centre_m: Option<f64>,
@@ -240,22 +241,23 @@ impl MultiBowStringBank {
         normal_geometry: Option<&[ObstacleGeometry]>, stop_offsets_m: Option<&[f64]>,
         gate: &CancelGate,
     ) -> Result<&MultiFrictionFrame, ModalFrictionError> {
-        self.with_bow_geometry(external, drives, stations, normal_geometry, gate, |system, step| {
+        self.with_bow_geometry(external, drives, stations, normal_geometry, stop_offsets_m, gate, |system, step| {
             if let Some(endpoints) = step.endpoints {
                 system.step_with_friction_geometry_and_endpoints(step.external, step.drives,
-                    step.geometry, endpoints, step.normal_geometry, stop_offsets_m, step.config, gate)?;
+                    step.geometry, endpoints, step.normal_geometry, step.stop_offsets_m, step.config, gate)?;
             } else {
                 system.step_with_friction_geometry(step.external, step.drives, step.geometry,
-                    step.normal_geometry, stop_offsets_m, step.config, gate)?;
+                    step.normal_geometry, step.stop_offsets_m, step.config, gate)?;
             }
             Ok::<(), ModalFrictionError>(())
         })?;
         Ok(self.system.last_frame().expect("accepted bow geometry"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn with_bow_geometry<R, E: From<ModalFrictionError>>(
         &mut self, external: &[f64], drives: &[FrictionDrive], stations: Option<&[f64]>,
-        normal_geometry: Option<&[ObstacleGeometry]>, gate: &CancelGate,
+        normal_geometry: Option<&[ObstacleGeometry]>, stop_offsets_m: Option<&[f64]>, gate: &CancelGate,
         run: impl FnOnce(&mut MultiFrictionModalSystem, BowGeometryStep<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
         let (support, normal_stations, normal_geometry, geometry, endpoints, config, string_centres_m) =
@@ -276,7 +278,7 @@ impl MultiBowStringBank {
         }
         let limits = state.limits;
         let support = state.fiber_support.as_ref()
-            .map(|motion| motion.prepare(&self.source, &self.system, external, drives, gate))
+            .map(|motion| motion.prepare(&self.source, &self.system, external, drives, stop_offsets_m, gate))
             .transpose()?;
         for ((&end, &start), bow) in end.iter().zip(&state.accepted).zip(&self.source.bows) {
             let distance = (end - start) * self.cards[bow.location.string].length_m;
@@ -388,9 +390,10 @@ impl MultiBowStringBank {
         let fiber_centre_m = support.as_ref().map(|s| s.material_midpoint_m).or_else(||
             self.source.fiber_ribbon().map(|fiber|
                 fiber.station_fraction() * fiber.model().geometry().length_m));
+        let stop_offsets_m = support.as_ref().and_then(|s| s.stop_offsets_m()).or(stop_offsets_m);
         let result = run(&mut self.system, BowGeometryStep {
             external, drives, geometry: &geometry, endpoints: endpoints.as_deref(),
-            normal_geometry: normal_geometry.as_deref(), config,
+            normal_geometry: normal_geometry.as_deref(), stop_offsets_m, config,
             string_centres_m: &string_centres_m,
             fiber_centre_m,
         })?;
