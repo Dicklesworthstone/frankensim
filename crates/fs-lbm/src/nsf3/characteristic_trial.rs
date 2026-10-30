@@ -13,7 +13,7 @@ pub struct NsfCharacteristicTrial<'a, L: Lattice3<27>> {
     owner: &'a mut NsfGrid3<L>,
     candidate: NsfGrid3<L>,
     exchange: [NsfBoundaryExchange; 2],
-    patch_exchange: Option<NsfBoundaryExchange>,
+    patch_exchange: [Option<NsfBoundaryExchange>; 2],
     ledger: EnergyLedger,
     mass_before_kg: f64,
     energy_before_j: f64,
@@ -27,8 +27,18 @@ impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
     pub const fn grid(&self) -> &NsfGrid3<L> { &self.candidate }
     /// Summed mass, momentum, energy and work; pressure/flow are interval means.
     pub const fn boundary_exchange(&self) -> &[NsfBoundaryExchange; 2] { &self.exchange }
-    /// Selected aperture's original exchange; already included in its full face.
-    pub const fn patch_exchange(&self) -> Option<&NsfBoundaryExchange> { self.patch_exchange.as_ref() }
+    /// Original exchange when exactly one aperture is attached; `None` for zero
+    /// or two. Each aperture is already included in its complete face account.
+    pub const fn patch_exchange(&self) -> Option<&NsfBoundaryExchange> {
+        match &self.patch_exchange {
+            [Some(exchange), None] | [None, Some(exchange)] => Some(exchange),
+            _ => None,
+        }
+    }
+    /// Original interval exchange for the selected face's aperture.
+    pub const fn patch_exchange_on(&self, high: bool) -> Option<&NsfBoundaryExchange> {
+        self.patch_exchange[high as usize].as_ref()
+    }
     /// Original step accounts summed over this interval, with final storage and
     /// the interval total-energy residual. Viscous heat keeps its budget-remainder
     /// qualification; no independently resolved heat account is invented here.
@@ -86,7 +96,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         maximum_cell_steps: usize,
         cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
-        self.preview_boundary_interval_inner(drives, None, None, steps, maximum_cell_steps, cancelled)
+        self.preview_boundary_interval_inner(drives, [None; 2], None, steps, maximum_cell_steps, cancelled)
     }
 
     /// Preview a selected aperture control and its complementary face controls
@@ -96,7 +106,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &mut self, drives: [NsfBoundaryDrive; 2], patch_drive: NsfBoundaryDrive,
         steps: usize, maximum_cell_steps: usize, cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
-        self.preview_boundary_interval_inner(drives, Some(patch_drive), None, steps, maximum_cell_steps, cancelled)
+        let patch_drives = self.single_patch_controls(patch_drive)?;
+        self.preview_boundary_interval_inner(drives, patch_drives, None, steps, maximum_cell_steps, cancelled)
+    }
+
+    /// Preview independent aperture controls on the low and high faces, together
+    /// with their complementary face drives. `None` retains that face's accepted
+    /// aperture control. All original populations, work and material histories
+    /// are staged once; refusal or a dropped trial publishes no participant.
+    pub fn preview_boundary_interval_with_patches(
+        &mut self, drives: [NsfBoundaryDrive; 2],
+        patch_drives: [Option<NsfBoundaryDrive>; 2],
+        steps: usize, maximum_cell_steps: usize, cancelled: impl Fn() -> bool,
+    ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
+        self.preview_boundary_interval_inner(drives, patch_drives, None,
+            steps, maximum_cell_steps, cancelled)
     }
 
     /// Hold a new state at the original transverse reservoir while solving
@@ -108,12 +132,29 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         reservoir_state: NsfOpenState, steps: usize, maximum_cell_steps: usize,
         cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
-        self.preview_boundary_interval_inner(drives, patch_drive, Some(reservoir_state),
+        let patch_drives = match patch_drive {
+            Some(drive) => self.single_patch_controls(drive)?,
+            None => [None; 2],
+        };
+        self.preview_boundary_interval_inner(drives, patch_drives, Some(reservoir_state),
+            steps, maximum_cell_steps, cancelled)
+    }
+
+    /// The same two-aperture transaction with a proposed state at the original
+    /// transverse reservoir. No ghost, control or work account is published
+    /// until the complete original candidate is accepted.
+    pub fn preview_boundary_interval_with_patches_and_reservoir(
+        &mut self, drives: [NsfBoundaryDrive; 2],
+        patch_drives: [Option<NsfBoundaryDrive>; 2],
+        reservoir_state: NsfOpenState, steps: usize, maximum_cell_steps: usize,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
+        self.preview_boundary_interval_inner(drives, patch_drives, Some(reservoir_state),
             steps, maximum_cell_steps, cancelled)
     }
 
     fn preview_boundary_interval_inner(
-        &mut self, drives: [NsfBoundaryDrive; 2], patch_drive: Option<NsfBoundaryDrive>,
+        &mut self, drives: [NsfBoundaryDrive; 2], patch_drives: [Option<NsfBoundaryDrive>; 2],
         reservoir_state: Option<NsfOpenState>, steps: usize, maximum_cell_steps: usize,
         cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
@@ -132,12 +173,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         if let Some(state) = reservoir_state {
             candidate.set_reservoir_aperture_state(state)?;
         }
-        match patch_drive {
-            Some(drive) => candidate.set_boundary_drives_with_patch(drives, drive)?,
-            None => candidate.set_boundary_drives(drives)?,
-        }
+        candidate.set_boundary_drives_with_patches(drives, patch_drives)?;
         let mut exchange = [NsfBoundaryExchange::default(); 2];
-        let mut patch_exchange = candidate.characteristic_patch.map(|_| NsfBoundaryExchange::default());
+        let mut patch_exchange = candidate.characteristic_patch
+            .map(|patch| patch.map(|_| NsfBoundaryExchange::default()));
         let mut ledger = EnergyLedger::default();
         let mut reservoir_mass_out_kg = 0.0;
         let mut reservoir_exchange = candidate.empty_reservoir_exchange();
@@ -198,8 +237,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 total.mean_acoustic_pressure_pa += step.mean_acoustic_pressure_pa;
                 total.acoustic_pressure_work_out_j += step.acoustic_pressure_work_out_j;
             }
-            if let Some(total) = &mut patch_exchange {
-                let step = candidate.last_patch_exchange().expect("admitted characteristic patch");
+            for (side, total) in patch_exchange.iter_mut().enumerate() {
+                let Some(total) = total else { continue; };
+                let step = candidate.last_patch_exchange_on(side == 1)
+                    .expect("admitted characteristic patch");
                 total.mass_out_kg += step.mass_out_kg;
                 for a in 0..3 { total.momentum_out_kg_m_s[a] += step.momentum_out_kg_m_s[a]; }
                 total.total_energy_out_j += step.total_energy_out_j;
@@ -228,7 +269,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 - total.mean_acoustic_pressure_pa * total.normal_volume_flow_m3_s
                     * (steps as f64 * candidate.law.dt_s);
         }
-        if let Some(face) = &mut patch_exchange {
+        for face in patch_exchange.iter_mut().flatten() {
             face.mean_pressure_pa /= steps as f64;
             face.mean_acoustic_pressure_pa /= steps as f64;
             face.normal_volume_flow_m3_s /= steps as f64;
@@ -237,7 +278,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         ledger.residual_rel = (energy - energy_before_j - ledger.wall_heat_j
             - ledger.open_boundary_energy_j - ledger.open_energy_j - ledger.source_energy_j).abs()
             / energy_before_j.abs().max(energy.abs()).max(1e-300);
-        if exchange.iter().chain(patch_exchange.iter()).any(|face| ![
+        if exchange.iter().chain(patch_exchange.iter().flatten()).any(|face| ![
             face.mass_out_kg, face.total_energy_out_j, face.mean_pressure_pa,
             face.normal_volume_flow_m3_s, face.pressure_work_out_j,
             face.mean_acoustic_pressure_pa, face.acoustic_pressure_work_out_j,

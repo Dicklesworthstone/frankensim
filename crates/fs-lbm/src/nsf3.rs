@@ -563,7 +563,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     open: Option<NsfCharacteristicAxis>,
     characteristic_pressure_offset_pa: [Option<f64>; 2],
     characteristic_inflow_temperature_k: [Option<f64>; 2],
-    characteristic_patch: Option<CharacteristicPatchBinding>,
+    characteristic_patch: [Option<CharacteristicPatchBinding>; 2],
     open_faces: Option<OpenFaces>,
     reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
     reservoir_aperture: Option<open::BoundReservoirAperture>,
@@ -572,7 +572,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     last_reservoir_exchange: Option<NsfReservoirExchange>,
     open_out: BoundaryFlux,
     last_boundary_exchange: Option<[NsfBoundaryExchange; 2]>,
-    last_patch_exchange: Option<NsfBoundaryExchange>,
+    last_patch_exchange: [Option<NsfBoundaryExchange>; 2],
     steps: usize,
     cumulative: EnergyLedger,
     /// Velocity of the bounce-back wall at the low (index 0) and high (index 1) edge of each non-periodic axis.
@@ -765,7 +765,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             open: None,
             characteristic_pressure_offset_pa: [None; 2],
             characteristic_inflow_temperature_k: [None; 2],
-            characteristic_patch: None,
+            characteristic_patch: [None; 2],
             open_faces: None,
             reservoir_faces: [[None; 2]; 3],
             reservoir_aperture: None,
@@ -774,7 +774,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             last_reservoir_exchange: None,
             open_out: BoundaryFlux::default(),
             last_boundary_exchange: None,
-            last_patch_exchange: None,
+            last_patch_exchange: [None; 2],
             steps: 0,
             cumulative: EnergyLedger::default(),
             edge_velocity: [[[0.0; 3]; 2]; 3],
@@ -1278,7 +1278,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         open.total_out[1] += total;
                         open.internal_out[1] += internal;
                         if faces.is_some_and(|faces| faces.contains_patch(x, 1)) {
-                            open.patch_total_out += total;
+                            open.patch_total_out[1] += total;
                         }
                     } else if self.open_at(i, a, 1).is_some() {
                         open.prescribed_out += wall_flux(i, a, 1)?;
@@ -1294,7 +1294,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         open.total_out[0] -= total;
                         open.internal_out[0] -= internal;
                         if faces.is_some_and(|faces| faces.contains_patch(x, 0)) {
-                            open.patch_total_out -= total;
+                            open.patch_total_out[0] -= total;
                         }
                     } else if self.open_at(i, a, -1).is_some() {
                         open.prescribed_out -= wall_flux(i, a, -1)?;
@@ -1876,7 +1876,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             feed(self.e[i]);
         }
-        if let Some(patch) = self.characteristic_patch {
+        for patch in self.characteristic_patch.into_iter().flatten() {
             feed(1.0);
             feed(if patch.high { 1.0 } else { 0.0 });
             for bound in patch.shape.start.into_iter().chain(patch.shape.end) {

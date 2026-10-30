@@ -59,7 +59,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             .zone
             .characteristic_reference_gas(high)
             .map_err(NsfDgError::Flow)?;
-        let traces = if self.source_patch().is_some() { self.zone.open_patch_traces() }
+        let traces = if self.source_patch().is_some() { self.zone.open_patch_traces_on(high) }
             else { self.zone.open_boundary_traces(high) }
             .ok_or(NsfDgError::Input(
                 "upstream coupling requires original selected source quadrature",
@@ -128,16 +128,20 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 "upstream pressure rise is nonfinite or the horizon is exhausted",
             ));
         }
-        let patch = self.patch_boundary();
+        let patch = self.patch_boundaries();
         let side = usize::from(self.high);
         let other = 1 - side;
         let seeds = if self.source_patch().is_some() {
             let mut accepted = self.zone.boundary_drives().ok_or(NsfDgError::Input(
                 "two-sided coupling requires its original accepted boundary controls",
             ))?;
-            accepted[other] = self.zone.characteristic_patch_drive().ok_or(NsfDgError::Input(
-                "two-sided coupling lost its original aperture control",
-            ))?;
+            for face in 0..2 {
+                if patch[face].is_some() {
+                    accepted[face] = self.zone.characteristic_patch_drive_on(face != 0)
+                        .ok_or(NsfDgError::Input(
+                            "two-sided coupling lost an original aperture control"))?;
+                }
+            }
             accepted.map(|drive| Some(match drive {
                 NsfBoundaryDrive::IncomingCharacteristic(value) => value,
                 NsfBoundaryDrive::PressureOffset(_)
@@ -224,9 +228,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let main_inlet = self.load.inlet();
         let upstream_inlet = upstream.load.inlet();
         let faces = *fluid.boundary_exchange();
-        let patch_on_main = patch.is_some_and(|(patch_side, _)| patch_side == side);
-        let coupled_patch = fluid.patch_exchange().copied().filter(|_| patch_on_main);
-        let source_patch = fluid.patch_exchange().copied().filter(|_| !patch_on_main);
+        let coupled_patch = fluid.patch_exchange_on(side != 0).copied();
+        let source_patch = fluid.patch_exchange_on(other != 0).copied();
         let main_face = coupled_exchange(&fluid, side)?;
         let source_face = coupled_exchange(&fluid, other)?;
         let main = self

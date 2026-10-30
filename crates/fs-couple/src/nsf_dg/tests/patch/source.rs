@@ -198,3 +198,172 @@ fn source_aperture_refuses_wrong_face_and_upstream_whole_face_or_foreign_gas() {
         }
     }
 }
+
+const SOURCE_PATCH: NsfCharacteristicPatch = NsfCharacteristicPatch {
+    start: [0, 1], end: [1, 4],
+};
+const SOURCE_CELLS: usize = 3;
+const SOURCE_REMAINDER_PA: f64 = 0.375;
+
+fn dual_zone(high: bool, substeps: usize) -> NsfGrid3<D3q27> {
+    let mut zone = bare_zone(high, substeps);
+    let mut backgrounds = [NsfBoundaryDrive::PressureOffset(BACKGROUND_PA); 2];
+    backgrounds[usize::from(!high)] = NsfBoundaryDrive::PressureOffset(SOURCE_REMAINDER_PA);
+    zone.set_boundary_drives(backgrounds).unwrap();
+    zone.with_characteristic_patch(high, PATCH, backgrounds[usize::from(high)]).unwrap()
+        .with_characteristic_patch(!high, SOURCE_PATCH, backgrounds[usize::from(!high)]).unwrap()
+}
+
+fn dual_owner(high: bool, substeps: usize, upstream: bool) -> NsfDg<D3q27> {
+    let gate = CancelGate::new_clock_free();
+    let zone = dual_zone(high, substeps);
+    let main = load(&zone, reference(), PATCH_CELLS as f64, 1.0, DgBoundary::Matched);
+    let owner = NsfDg::new_on_patches(zone, main, high, budget(substeps), &gate).unwrap();
+    if upstream {
+        let source = load(owner.zone(), reference(), SOURCE_CELLS as f64, 1.0, DgBoundary::Closed);
+        owner.with_upstream_load(source, &gate).unwrap()
+    } else { owner }
+}
+
+#[test]
+fn independent_source_and_bore_apertures_replay_original_owners_and_separate_both_remainders() {
+    let gate = CancelGate::new_clock_free();
+    for high in [false, true] {
+        for substeps in [1, 3] {
+            for upstream in [false, true] {
+                let mut owner = dual_owner(high, substeps, upstream);
+                let mut fluid = dual_zone(high, substeps);
+                let mut main = load(&fluid, reference(), PATCH_CELLS as f64, 1.0, DgBoundary::Matched);
+                let mut source = load(&fluid, reference(), SOURCE_CELLS as f64, 1.0, DgBoundary::Closed);
+                let side = usize::from(high);
+                let other = 1 - side;
+                let mut shapes = [PATCH; 2]; shapes[other] = SOURCE_PATCH;
+                let mut counts = [PATCH_CELLS; 2]; counts[other] = SOURCE_CELLS;
+                let backgrounds = fluid.boundary_drives().unwrap();
+                assert_eq!(owner.source_patch(), Some(SOURCE_PATCH));
+                assert_eq!(owner.coupled_patch(), Some(PATCH));
+                assert_eq!(owner.patch_background_drive(), None);
+                assert_eq!(owner.area_m2(), PATCH_CELLS as f64 * fluid.law().dx_m.powi(2));
+                let mut escaped = [0.0_f64; 2];
+                for pressure in [2.0, 1.0, -0.1] {
+                    let mass = fluid.total_mass_kg();
+                    let energy = fluid.total_energy_j();
+                    let frame = if upstream { owner.step_with_upstream_pressure_rise(pressure, &gate) }
+                        else { owner.step_with_boundary(NsfBoundaryDrive::PressureOffset(pressure), &gate) }.unwrap();
+                    let mut drives = [Some(NsfBoundaryDrive::IncomingCharacteristic(frame.incoming_characteristic_m_s)); 2];
+                    drives[other] = Some(if let Some(upstream) = &frame.upstream {
+                        NsfBoundaryDrive::IncomingCharacteristic(upstream.incoming_characteristic_m_s)
+                    } else { NsfBoundaryDrive::PressureOffset(pressure) });
+                    fluid.set_boundary_drives_with_patches(backgrounds, drives).unwrap();
+                    // Independent trace quadrature; neither patch accumulator
+                    // nor root output supplies the expected pressure/flow/work.
+                    let mut expected = [[0.0; 3]; 2];
+                    for _ in 0..substeps {
+                        let before = [fluid.open_boundary_traces(false).unwrap(), fluid.open_boundary_traces(true).unwrap()];
+                        fluid.step().unwrap();
+                        for face in 0..2 {
+                            let after = fluid.open_boundary_traces(face != 0).unwrap();
+                            for (old, new) in before[face].iter().zip(after) {
+                                let patch = shapes[face];
+                                if (patch.start[0]..patch.end[0]).contains(&old.cell[1])
+                                    && (patch.start[1]..patch.end[1]).contains(&old.cell[2])
+                                {
+                                    expected[face][0] += 0.5 * (old.pressure_pa + new.pressure_pa);
+                                    expected[face][1] += 0.5 * (old.outward_normal_velocity_m_s + new.outward_normal_velocity_m_s) * old.area_m2;
+                                    expected[face][2] += 0.5 * ((old.pressure_pa - reference().pressure) * old.outward_normal_velocity_m_s
+                                        + (new.pressure_pa - reference().pressure) * new.outward_normal_velocity_m_s) * old.area_m2 * fluid.law().dt_s;
+                                } else {
+                                    let remainder = if face == side { BACKGROUND_PA } else { SOURCE_REMAINDER_PA };
+                                    assert_eq!(new.pressure_pa, reference().pressure + remainder);
+                                }
+                            }
+                        }
+                    }
+                    let mut patches = [frame.coupled_patch.unwrap(); 2]; patches[other] = frame.source_patch.unwrap();
+                    for face in 0..2 {
+                        let patch = patches[face];
+                        assert!((patch.mean_pressure_pa - expected[face][0] / (counts[face] * substeps) as f64).abs() < 1e-8);
+                        assert!((patch.normal_volume_flow_m3_s - expected[face][1] / substeps as f64).abs()
+                            < 1e-23 + 1e-11 * patch.normal_volume_flow_m3_s.abs());
+                        assert!((patch.acoustic_pressure_work_out_j - expected[face][2]).abs()
+                            < 1e-25 + 1e-11 * expected[face][2].abs());
+                        let remainder = if face == side { BACKGROUND_PA } else { SOURCE_REMAINDER_PA };
+                        let escape = frame.faces[face].normal_volume_flow_m3_s - patch.normal_volume_flow_m3_s;
+                        escaped[face] = escaped[face].max(escape.abs());
+                        let work = frame.faces[face].acoustic_pressure_work_out_j - patch.acoustic_pressure_work_out_j;
+                        let expected_work = remainder * escape * main.propagator().dt();
+                        let scale = frame.faces[face].acoustic_pressure_work_out_j.abs() + patch.acoustic_pressure_work_out_j.abs() + expected_work.abs();
+                        assert!((work - expected_work).abs() < 512.0 * f64::EPSILON * scale.max(1e-30));
+                        assert_eq!(owner.patch_background_drive_on(face != 0), Some(backgrounds[face]));
+                    }
+                    assert_eq!(frame.inlet_flow_m3_s, patches[side].normal_volume_flow_m3_s);
+                    main.preview_step(frame.inlet_flow_m3_s).unwrap().accept();
+                    if let Some(upstream) = &frame.upstream {
+                        assert_eq!(upstream.inlet_flow_m3_s, patches[other].normal_volume_flow_m3_s);
+                        let candidate = source.preview_step(upstream.inlet_flow_m3_s).unwrap();
+                        let work = candidate.inlet_work_j(); candidate.accept();
+                        assert_eq!(upstream.source_work_j, -pressure * (upstream.inlet_flow_m3_s * source.propagator().dt()));
+                        assert_eq!(upstream.acoustic_work_residual_j,
+                            patches[other].acoustic_pressure_work_out_j + upstream.source_work_j - work);
+                        assert_eq!(owner.upstream_load().unwrap().state(), source.state());
+                    }
+                    assert_eq!(owner.zone().state_hash(), fluid.state_hash());
+                    assert_eq!(owner.load().state(), main.state());
+                    assert!((frame.flow_mass_change_kg + frame.faces.iter().map(|f| f.mass_out_kg).sum::<f64>()).abs() < 3e-12 * mass);
+                    assert!((frame.flow_energy_change_j + frame.faces.iter().map(|f| f.total_energy_out_j).sum::<f64>()).abs() < 3e-12 * energy);
+                }
+                assert!(escaped.into_iter().all(|flow| flow > 1e-13));
+            }
+        }
+    }
+}
+
+#[test]
+fn dual_aperture_refusal_preserves_both_controls_fluxes_and_acoustic_histories() {
+    let gate = CancelGate::new_clock_free();
+    let mut model = dual_owner(true, 3, true);
+    model.step_with_upstream_pressure_rise(2.0, &gate).unwrap();
+    let snapshot = |m: &NsfDg<D3q27>| (
+        m.zone().state_hash(), m.zone().cumulative_ledger(), m.zone().boundary_drives(),
+        [m.zone().characteristic_patch_drive_on(false), m.zone().characteristic_patch_drive_on(true)],
+        [m.zone().last_patch_exchange_on(false).copied(), m.zone().last_patch_exchange_on(true).copied()],
+        m.load().state().clone(), m.upstream_load().unwrap().state().clone(), m.accepted_steps(),
+    );
+    let before = snapshot(&model);
+    model.limits.projection_absolute_tolerance_j = 0.0;
+    model.limits.projection_relative_tolerance = 0.0;
+    assert!(matches!(model.step_with_upstream_pressure_rise(1.5, &gate), Err(NsfDgError::Projection { .. })));
+    assert_eq!(snapshot(&model), before);
+    model.limits.projection_relative_tolerance = 1.0;
+    let cancelled = CancelGate::new_clock_free(); cancelled.request();
+    assert!(matches!(model.step_with_upstream_pressure_rise(1.5, &cancelled), Err(NsfDgError::Cancelled)));
+    assert_eq!(snapshot(&model), before);
+    let mut uninterrupted = dual_owner(true, 3, true);
+    uninterrupted.step_with_upstream_pressure_rise(2.0, &gate).unwrap();
+    model.step_with_upstream_pressure_rise(1.5, &gate).unwrap();
+    uninterrupted.step_with_upstream_pressure_rise(1.5, &gate).unwrap();
+    assert_eq!(snapshot(&model), snapshot(&uninterrupted));
+}
+
+#[test]
+fn dual_apertures_require_explicit_roles_and_each_loads_actual_area() {
+    let gate = CancelGate::new_clock_free();
+    for high in [false, true] {
+        for role in 0..3 {
+            let zone = dual_zone(high, 1);
+            let main = load(&zone, reference(), PATCH_CELLS as f64, 1.0, DgBoundary::Matched);
+            let result = match role {
+                0 => NsfDg::new(zone, main, high, budget(1), &gate),
+                1 => NsfDg::new_on_patch(zone, main, high, budget(1), &gate),
+                _ => NsfDg::new_with_source_patch(zone, main, high, budget(1), &gate),
+            };
+            assert!(matches!(result, Err(NsfDgError::Input(_))));
+        }
+        let zone = dual_zone(high, 1);
+        let main = load(&zone, reference(), FACE_CELLS as f64, 1.0, DgBoundary::Matched);
+        assert!(matches!(NsfDg::new_on_patches(zone, main, high, budget(1), &gate), Err(NsfDgError::Input(_))));
+        let model = dual_owner(high, 1, false);
+        let source = load(model.zone(), reference(), PATCH_CELLS as f64, 1.0, DgBoundary::Closed);
+        assert!(matches!(model.with_upstream_load(source, &gate), Err(NsfDgError::Input(_))));
+    }
+}

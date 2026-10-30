@@ -137,7 +137,7 @@ pub(super) struct BoundaryFlux {
     pub total_out: [f64; 2],
     pub internal_out: [f64; 2],
     pub prescribed_out: f64,
-    pub patch_total_out: f64,
+    pub patch_total_out: [f64; 2],
     /// Localized reservoir moments from this original FV predictor evaluation.
     /// Pressure sums use identical tile areas; work rates use avg(p*u), not
     /// the product of separately interpolated pressure and velocity.
@@ -160,7 +160,7 @@ pub(super) struct OpenFace {
 pub(super) struct OpenFaces {
     axis: usize,
     values: [Vec<OpenFace>; 2],
-    patch: Option<CharacteristicPatchBinding>,
+    patch: [Option<CharacteristicPatchBinding>; 2],
 }
 
 pub(super) struct IncomingPopulations {
@@ -232,7 +232,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ));
             }
         }
-        self.rebind_characteristics(open, [None; 2], [None; 2], None)?;
+        self.rebind_characteristics(open, [None; 2], [None; 2], [None; 2])?;
         Ok(self)
     }
 
@@ -254,14 +254,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// retains that reference unless an explicit inflow temperature is supplied;
     /// outflow retains the adjacent cell. Pressure, temperature, Mach and source-domain
     /// refusals apply before any physical state or control is published.
-    /// An attached aperture retains its own drive; these controls apply to the
-    /// complementary cells of its face and every cell of the opposite face.
+    /// Each attached aperture retains its own drive; these controls apply to
+    /// the complementary cells of each face.
     pub fn set_boundary_drives(&mut self, drives: [NsfBoundaryDrive; 2]) -> Result<(), NsfError> {
         self.set_boundary_drives_with_binding(drives, self.characteristic_patch)
     }
 
     fn set_boundary_drives_with_binding(
-        &mut self, drives: [NsfBoundaryDrive; 2], patch: Option<CharacteristicPatchBinding>,
+        &mut self, drives: [NsfBoundaryDrive; 2], patch: [Option<CharacteristicPatchBinding>; 2],
     ) -> Result<(), NsfError> {
         let mut open = self
             .open
@@ -406,7 +406,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     fn rebind_characteristics(
         &mut self, open: NsfCharacteristicAxis, pressure_offset_pa: [Option<f64>; 2],
         inflow_temperature_k: [Option<f64>; 2],
-        patch: Option<CharacteristicPatchBinding>,
+        patch: [Option<CharacteristicPatchBinding>; 2],
     ) -> Result<(), NsfError> {
         let bound = open.maximum_relative_perturbation;
         if !bound.is_finite() || bound <= 0.0 || bound > 0.1 {
@@ -445,7 +445,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.wall_out = wall;
         self.open_out = flux;
         self.last_boundary_exchange = None;
-        self.last_patch_exchange = None;
+        self.last_patch_exchange = [None; 2];
         Ok(())
     }
 
@@ -454,7 +454,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         open: Option<&NsfCharacteristicAxis>,
         pressure_offset_pa: [Option<f64>; 2],
         inflow_temperature_k: [Option<f64>; 2],
-        patch: Option<CharacteristicPatchBinding>,
+        patch: [Option<CharacteristicPatchBinding>; 2],
         rho: &[f64],
         u: &[[f64; 3]],
         theta: &[f64],
@@ -517,7 +517,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     "characteristic inflow temperature requires an explicit pressure control",
                 ))?, temperature)?;
             }
-            if let Some(patch) = patch.filter(|patch| usize::from(patch.high) == side) {
+            if let Some(patch) = patch[side] {
                 if let NsfBoundaryDrive::PressureTemperature {
                     pressure_offset_pa, inflow_temperature_k,
                 } = patch.drive {
@@ -534,7 +534,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 let ui = u[i].map(|v| v * velocity_unit);
                 let outgoing =
                     sign * ui[open.axis] - normal_reference + (pi - reference.pressure) / impedance;
-                let (incoming, pressure_offset, inflow_temperature) = match patch.filter(|patch|
+                let (incoming, pressure_offset, inflow_temperature) = match patch[side].filter(|patch|
                     usize::from(patch.high) == side && patch.shape.contains(x, open.axis))
                 {
                     Some(patch) => match patch.drive {
@@ -756,11 +756,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &self,
         post: &[[f64; Q]],
         incoming: Option<&IncomingPopulations>,
-    ) -> Option<([LinkExchange; 2], Option<LinkExchange>)> {
+    ) -> Option<([LinkExchange; 2], [Option<LinkExchange>; 2])> {
         let incoming = incoming?;
         let axis = incoming.axis;
         let mut result = [LinkExchange::default(); 2];
-        let mut patch_exchange = self.characteristic_patch.map(|_| LinkExchange::default());
+        let mut patch_exchange = self.characteristic_patch.map(|patch| patch.map(|_| LinkExchange::default()));
         for (side, output) in result.iter_mut().enumerate() {
             let sign = if side == 0 { -1 } else { 1 };
             let edge = if side == 0 {
@@ -788,10 +788,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     for a in 0..3 {
                         output.momentum[a] += f64::from(c[a]) * exchanged;
                     }
-                    if self.characteristic_patch.is_some_and(|patch|
-                        usize::from(patch.high) == side && patch.shape.contains(x, axis))
+                    if self.characteristic_patch[side].is_some_and(|patch|
+                        patch.shape.contains(x, axis))
                     {
-                        let patch = patch_exchange.as_mut().expect("selected patch");
+                        let patch = patch_exchange[side].as_mut().expect("selected patch");
                         patch.mass += exchanged;
                         for a in 0..3 {
                             patch.momentum[a] += f64::from(c[a]) * exchanged;
@@ -805,7 +805,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     pub(super) fn finish_boundary_exchange(
         &self,
-        links: Option<([LinkExchange; 2], Option<LinkExchange>)>,
+        links: Option<([LinkExchange; 2], [Option<LinkExchange>; 2])>,
         before: Option<&OpenFaces>,
         after: Option<&OpenFaces>,
         flux_after: BoundaryFlux,

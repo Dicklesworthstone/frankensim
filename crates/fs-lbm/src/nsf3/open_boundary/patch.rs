@@ -1,8 +1,11 @@
-//! A separately driven aperture within one original characteristic face.
-//! The complementary face cells retain their explicit whole-face drive. All
+//! Independently driven apertures within the original characteristic faces.
+//! Complementary face cells retain their explicit whole-face drives. All
 //! reconstruction, incoming populations and FV fluxes still have one owner.
 
 use super::*;
+
+#[cfg(test)]
+mod tests;
 
 /// Half-open cell bounds on the two increasing Cartesian axes other than the
 /// characteristic axis. Bounds select original boundary quadrature cells;
@@ -54,14 +57,13 @@ pub(in crate::nsf3) struct CharacteristicPatchBinding {
 
 impl OpenFaces {
     pub(in crate::nsf3) fn contains_patch(&self, cell: [usize; 3], side: usize) -> bool {
-        self.patch.is_some_and(|patch| {
-            usize::from(patch.high) == side && patch.shape.contains(cell, self.axis)
-        })
+        self.patch[side].is_some_and(|patch| patch.shape.contains(cell, self.axis))
     }
 }
 
 impl<L: Lattice3<27>> NsfGrid3<L> {
-    /// Bind one rectangular aperture before the first step. Other cells keep
+    /// Bind one rectangular aperture on the selected face before the first
+    /// step. Each face may own one independent aperture. Other cells keep
     /// the original face control, including an explicitly selected ambient
     /// pressure. The patch shares that face's material/reference state and
     /// original two-cell fluid collar. This does not introduce a side wall,
@@ -76,34 +78,65 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let open = self.open.ok_or(NsfError::Input(
             "a patch requires an original characteristic axis",
         ))?;
-        if self.steps != 0 || self.characteristic_patch.is_some() || !drive.is_finite() {
+        let side = usize::from(high);
+        if self.steps != 0 || self.characteristic_patch[side].is_some() || !drive.is_finite() {
             return Err(NsfError::Input(
-                "one cold characteristic patch requires a finite drive",
+                "each face admits one cold characteristic patch with a finite drive",
             ));
         }
         patch.validate(self.spec.dims, open.axis)?;
+        let mut patches = self.characteristic_patch;
+        patches[side] = Some(CharacteristicPatchBinding { high, shape: patch, drive });
         self.rebind_characteristics(
             open,
             self.characteristic_pressure_offset_pa,
             self.characteristic_inflow_temperature_k,
-            Some(CharacteristicPatchBinding {
-                high,
-                shape: patch,
-                drive,
-            }),
+            patches,
         )?;
         Ok(self)
     }
 
-    /// Selected face and original quadrature-cell bounds.
+    /// Selected face and original quadrature-cell bounds when exactly one
+    /// aperture is attached. Returns `None` for zero or two apertures; use
+    /// [`Self::characteristic_patch_on`] to address both faces explicitly.
     pub fn characteristic_patch(&self) -> Option<(bool, NsfCharacteristicPatch)> {
-        self.characteristic_patch
-            .map(|patch| (patch.high, patch.shape))
+        let side = self.sole_patch_side()?;
+        self.characteristic_patch[side].map(|patch| (patch.high, patch.shape))
     }
 
-    /// Accepted aperture control. Whole-face controls describe the complement.
+    /// Original quadrature-cell bounds of the selected face's aperture.
+    pub fn characteristic_patch_on(&self, high: bool) -> Option<NsfCharacteristicPatch> {
+        self.characteristic_patch[usize::from(high)].map(|patch| patch.shape)
+    }
+
+    fn sole_patch_side(&self) -> Option<usize> {
+        match self.characteristic_patch {
+            [Some(_), None] => Some(0),
+            [None, Some(_)] => Some(1),
+            _ => None,
+        }
+    }
+
+    pub(in crate::nsf3) fn single_patch_controls(
+        &self, drive: NsfBoundaryDrive,
+    ) -> Result<[Option<NsfBoundaryDrive>; 2], NsfError> {
+        let side = self.sole_patch_side().ok_or(NsfError::Input(
+            "a singular patch control requires exactly one attached aperture",
+        ))?;
+        let mut controls = [None; 2];
+        controls[side] = Some(drive);
+        Ok(controls)
+    }
+
+    /// Accepted control when exactly one aperture is attached; `None` for zero
+    /// or two. Whole-face controls describe the complementary cells.
     pub fn characteristic_patch_drive(&self) -> Option<NsfBoundaryDrive> {
-        self.characteristic_patch.map(|patch| patch.drive)
+        self.characteristic_patch_drive_on(self.sole_patch_side()? == 1)
+    }
+
+    /// Accepted aperture control on the selected original face.
+    pub fn characteristic_patch_drive_on(&self, high: bool) -> Option<NsfBoundaryDrive> {
+        self.characteristic_patch[usize::from(high)].map(|patch| patch.drive)
     }
 
     /// Atomically change both whole-face drives and the existing patch drive.
@@ -114,19 +147,43 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         drives: [NsfBoundaryDrive; 2],
         drive: NsfBoundaryDrive,
     ) -> Result<(), NsfError> {
-        let mut patch = self
-            .characteristic_patch
-            .ok_or(NsfError::Input("no characteristic patch is attached"))?;
-        if !drive.is_finite() {
-            return Err(NsfError::Input("characteristic patch drive must be finite"));
-        }
-        patch.drive = drive;
-        self.set_boundary_drives_with_binding(drives, Some(patch))
+        let controls = self.single_patch_controls(drive)?;
+        self.set_boundary_drives_with_patches(drives, controls)
     }
 
-    /// Original accepted traces restricted to the aperture, in original order.
+    /// Atomically change both complementary face drives and explicitly selected
+    /// aperture drives. Entries are low then high; `None` retains the accepted
+    /// aperture control and `Some` requires an aperture on that face. Invalid
+    /// data on either face publishes no boundary, population or energy history.
+    pub fn set_boundary_drives_with_patches(
+        &mut self,
+        drives: [NsfBoundaryDrive; 2],
+        patch_drives: [Option<NsfBoundaryDrive>; 2],
+    ) -> Result<(), NsfError> {
+        let mut patches = self.characteristic_patch;
+        for (patch, drive) in patches.iter_mut().zip(patch_drives) {
+            if let Some(drive) = drive {
+                if !drive.is_finite() {
+                    return Err(NsfError::Input("characteristic patch drive must be finite"));
+                }
+                let patch = patch.as_mut().ok_or(NsfError::Input(
+                    "a selected patch drive requires an aperture on the same face",
+                ))?;
+                patch.drive = drive;
+            }
+        }
+        self.set_boundary_drives_with_binding(drives, patches)
+    }
+
+    /// Original traces when exactly one aperture is attached; `None` for zero
+    /// or two. Use [`Self::open_patch_traces_on`] for explicit face selection.
     pub fn open_patch_traces(&self) -> Option<Vec<NsfBoundaryTrace>> {
-        let patch = self.characteristic_patch?;
+        self.open_patch_traces_on(self.sole_patch_side()? == 1)
+    }
+
+    /// Original accepted traces restricted to one face's aperture, in original order.
+    pub fn open_patch_traces_on(&self, high: bool) -> Option<Vec<NsfBoundaryTrace>> {
+        let patch = self.characteristic_patch[usize::from(high)]?;
         let axis = self.open.as_ref()?.axis;
         Some(
             self.open_boundary_traces(patch.high)?
@@ -138,22 +195,44 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     /// Aperture exchange from the last accepted step. Whole-face accounts
     /// already include this exchange; adding it again would double count it.
+    /// Returns `None` if both faces carry apertures; use the explicit face accessor.
     pub const fn last_patch_exchange(&self) -> Option<&NsfBoundaryExchange> {
-        self.last_patch_exchange.as_ref()
+        match &self.last_patch_exchange {
+            [Some(exchange), None] | [None, Some(exchange)] => Some(exchange),
+            _ => None,
+        }
+    }
+
+    /// Last accepted aperture exchange on the selected face, already included
+    /// in that face's complete boundary account.
+    pub const fn last_patch_exchange_on(&self, high: bool) -> Option<&NsfBoundaryExchange> {
+        self.last_patch_exchange[high as usize].as_ref()
     }
 
     pub(in crate::nsf3) fn finish_patch_exchange(
         &self,
-        links: Option<([LinkExchange; 2], Option<LinkExchange>)>,
+        links: Option<([LinkExchange; 2], [Option<LinkExchange>; 2])>,
+        before: Option<&OpenFaces>,
+        after: Option<&OpenFaces>,
+        flux_after: BoundaryFlux,
+    ) -> [Option<NsfBoundaryExchange>; 2] {
+        std::array::from_fn(|side| self.finish_patch_exchange_on(
+            side, links, before, after, flux_after,
+        ))
+    }
+
+    fn finish_patch_exchange_on(
+        &self,
+        side: usize,
+        links: Option<([LinkExchange; 2], [Option<LinkExchange>; 2])>,
         before: Option<&OpenFaces>,
         after: Option<&OpenFaces>,
         flux_after: BoundaryFlux,
     ) -> Option<NsfBoundaryExchange> {
-        let patch = self.characteristic_patch?;
-        let link = links?.1?;
+        let patch = self.characteristic_patch[side]?;
+        let link = links?.1[side]?;
         let (before, after) = (before?, after?);
         let axis = before.axis;
-        let side = usize::from(patch.high);
         let sign = if patch.high { 1.0 } else { -1.0 };
         let edge = if patch.high {
             self.spec.dims[axis] - 1
@@ -168,7 +247,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             mass_out_kg: link.mass * mass_unit,
             momentum_out_kg_m_s: link.momentum.map(|p| p * mass_unit * velocity_unit),
             total_energy_out_j: 0.5
-                * (self.open_out.patch_total_out + flux_after.patch_total_out)
+                * (self.open_out.patch_total_out[side] + flux_after.patch_total_out[side])
                 * self.law.energy_unit_j(),
             ..NsfBoundaryExchange::default()
         };

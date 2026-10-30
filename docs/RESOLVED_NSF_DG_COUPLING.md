@@ -53,7 +53,7 @@ both duct histories publish together only after all checks succeed.
 
 ### Localized source and finite upstream aperture
 
-`NsfDg::new_with_source_patch` places the grid's one original patch on the
+`NsfDg::new_with_source_patch` selects one original patch on the
 source face, opposite the main DG bore. The prescribed boundary history then
 acts only on that aperture. Its surrounding cells retain their independently
 declared pressure or characteristic, while the complete downstream face feeds
@@ -65,8 +65,9 @@ are solved on the same original fluid interval. Upstream flow, source work and
 projection checks use only the selected source quadrature; escaping flow in
 the remainder is never sent into that duct. `NsfDgFrame::source_patch` retains
 this exchange separately from `coupled_patch`. Both are already included in
-their complete face accounts. The original grid admits one characteristic
-patch, so source and bore patches cannot be declared simultaneously.
+their complete face accounts. Use `NsfDg::new_on_patches` when the grid declares
+both a source patch and a bore patch; neither acoustic load then absorbs the
+other cells on its face.
 
 The source-aperture roots test the accepted incoming controls and the preceding
 conditional main-face root as initial guesses. Every trial still consumes the
@@ -559,12 +560,14 @@ Alternatives use the same original parsers and owners:
   `examples/resolved-dg-split-aperture.performance` and Instrument Lab starter
   exercise the native aperture, surrounding ambient condition and bore-outlet
   microphone together. This coarse manufactured fixture is not flute geometry.
-- `source_patch START0 END0 START1 END1 pressure PA` instead selects the same
+- `source_patch START0 END0 START1 END1 pressure PA` selects an independent
   original patch on the opposite source face. The `boundary` history drives
   those cells; the remainder retains `pressure PA` or `characteristic M_S`.
-  The main DG inlet must match its complete face. If `upstream_dg` is present,
-  its inlet must match the selected source area. Only one of `source_patch`
-  and `coupled_patch` may appear; neither record changes the original grid.
+  The main DG inlet must match the selected bore patch, or its complete face
+  when no bore patch is declared. If `upstream_dg` is present, its inlet must
+  match the selected source area. One source and one coupled declaration may
+  appear in either order; duplicate roles refuse, including mixed indexed/SI
+  declarations. Neither record changes the original grid.
 - `gas thermochemical T_K P_PA mole|mass COUNT ID FRACTION ...` selects a complete
   source-backed thermochemical model. An `energy_solve ENERGY_J_KG_TOL MAXITER`
   record is then mandatory immediately after `fluid_limits`. Source packs and
@@ -842,7 +845,8 @@ reservoir_aperture_m AXIS low|high RHO VX VY VZ T A0 A1 B0 B1
 reservoir_aperture_m AXIS low|high reference A0 A1 B0 B1
 ```
 
-Only one characteristic patch is allowed. Its remainder can use the same
+One characteristic patch per face is allowed. Source and bore patches may
+coexist and have different areas. Each remainder can use the same independent
 `pressure`, `pressure-temperature`, or `characteristic` controls as the indexed
 form. A and B are the two **increasing Cartesian axes other than the normal**:
 for normal y they are x,z. Bounds are half-open and select original face-tile
@@ -905,3 +909,29 @@ The focused original-owner tests check oblique cylinders, reversed endpoints,
 finite caps, hollow-passage subtraction and independent analytic volume changes
 on three grid rungs. This is bounded manufactured-geometry evidence, not a
 universal convergence or real-flute qualification.
+
+### Independent source and bore openings
+
+`NsfDg::new_on_patches` requires one original characteristic patch on each
+axial face. Their rectangles, areas, aperture drives and surrounding boundary
+laws remain independent. The existing prescribed-source, finite-upstream and
+reciprocal reservoir-radiation paths all use these same two selected traces.
+Every selected duct still requires exact source-gas, area and clock admission.
+
+The original grid exposes `characteristic_patch_on(high)`,
+`characteristic_patch_drive_on(high)`, `open_patch_traces_on(high)` and
+`last_patch_exchange_on(high)`; trials expose `patch_exchange_on(high)`.
+`set_boundary_drives_with_patches` and the two plural preview methods carry
+one optional patch control per physical low/high face. An omitted control
+retains that face's current patch drive; a supplied control requires a patch.
+The singular accessors return `None` with two patches, and singular operations
+that would ambiguously change one patch refuse.
+
+The original coupled root, NSF update and DG propagators are retained. Each
+patch's flow and pressure-work enter only its own acoustic projection. Full-face
+mass and total-energy accounts already include both patches and their separate
+remainders; do not add selected-patch accounts to those totals again. All owners
+and controls publish together after the original pressure, work and cancellation
+checks. The unchanged characteristic-collar, projection, flow-reversal and
+frozen-composition limits still apply. Two apertures do not establish resolved
+lip anatomy, full bore heat/species transport or qualified flute sound.

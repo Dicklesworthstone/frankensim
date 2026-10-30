@@ -165,7 +165,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let limits = self.limits;
         let side = usize::from(self.high);
         let other = 1-side;
-        let patch = self.patch_boundary();
+        let patch = self.patch_boundaries();
         let reference = self.reference;
         let mut evaluations = 0usize;
         let mut last_residual = 0.0;
@@ -239,9 +239,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
         if let Some(value) = upstream_incoming { drives[other] = NsfBoundaryDrive::IncomingCharacteristic(value); }
         let fluid = preview(zone, drives, side, patch, pressure_offset, temperature, limits, gate)?;
         let faces = *fluid.boundary_exchange();
-        let patch_on_main = patch.is_some_and(|(patch_side, _)| patch_side == side);
-        let coupled_patch = fluid.patch_exchange().copied().filter(|_| patch_on_main);
-        let source_patch = fluid.patch_exchange().copied().filter(|_| !patch_on_main);
+        let coupled_patch = fluid.patch_exchange_on(side != 0).copied();
+        let source_patch = fluid.patch_exchange_on(other != 0).copied();
         let bore = coupled_exchange(&fluid, side)?;
         let source_face = coupled_exchange(&fluid, other)?;
         let mouth = exchange(&fluid)?;
@@ -329,7 +328,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
 
 fn preview<'a, L: Lattice3<27>>(
     zone: &'a mut NsfGrid3<L>, drives: [NsfBoundaryDrive; 2], side: usize,
-    patch: Option<(usize, NsfBoundaryDrive)>, pressure_offset: f64, temperature: f64,
+    patch: [Option<NsfBoundaryDrive>; 2], pressure_offset: f64, temperature: f64,
     limits: NsfDgLimits, gate: &CancelGate,
 ) -> Result<NsfCharacteristicTrial<'a, L>, NsfDgError> {
     let reference = zone.characteristic_reference_gas(side == 1).map_err(NsfDgError::Flow)?;

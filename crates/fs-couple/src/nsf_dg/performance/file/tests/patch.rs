@@ -159,3 +159,52 @@ fn both_native_apertures_share_one_flow_owner_and_keep_the_selected_bore_flux() 
         assert!(balance.abs() / initial_mass < 2e-11);
     }
 }
+
+#[test]
+fn independent_native_source_and_bore_patches_replay_si_geometry_at_any_callback_size() {
+    let gas = reference(100000.0);
+    let dx = (3.0 * gas.specific_gas_constant * gas.temperature).sqrt() / f64::from(RATE);
+    for high in [false, true] {
+        let text = input(-0.25)
+            .replace("characteristic 0 high", if high { "characteristic 0 high" } else { "characteristic 0 low" })
+            .replace("initial rest", "source_patch 0 2 0 1 pressure 0.375\ninitial rest");
+        let physical = text
+            .replace("coupled_patch 1 2 1 2 pressure -0.25",
+                &format!("coupled_patch_m {dx:.17e} {:.17e} {dx:.17e} {:.17e} pressure -0.25", 2.0*dx, 2.0*dx))
+            .replace("source_patch 0 2 0 1 pressure 0.375",
+                &format!("source_patch_m 0 {:.17e} 0 {dx:.17e} pressure 0.375", 2.0*dx));
+        let file = read(&text, 8);
+        assert_eq!(file.renderer().system().coupled_patch(), Some(NsfCharacteristicPatch { start: [1, 1], end: [2, 2] }));
+        assert_eq!(file.renderer().system().source_patch(), Some(NsfCharacteristicPatch { start: [0, 0], end: [2, 1] }));
+        let (whole, a) = render(file, 8);
+        let (parts, b) = render(read(&physical, 3), 3);
+        assert_eq!(whole, parts);
+        assert_eq!(a.system().zone().state_hash(), b.system().zone().state_hash());
+        assert_eq!(a.system().load().state(), b.system().load().state());
+        let frame = a.last_frame().unwrap();
+        assert_eq!(frame.inlet_flow_m3_s, frame.coupled_patch.unwrap().normal_volume_flow_m3_s);
+        assert_ne!(frame.inlet_flow_m3_s, frame.faces[usize::from(high)].normal_volume_flow_m3_s);
+        assert_ne!(frame.source_patch.unwrap().normal_volume_flow_m3_s,
+            frame.faces[usize::from(!high)].normal_volume_flow_m3_s);
+        assert_eq!(a.system().patch_background_drive_on(high), Some(NsfBoundaryDrive::PressureOffset(-0.25)));
+        assert_eq!(a.system().patch_background_drive_on(!high), Some(NsfBoundaryDrive::PressureOffset(0.375)));
+        let reversed = text.replace(
+            "coupled_patch 1 2 1 2 pressure -0.25\nsource_patch 0 2 0 1 pressure 0.375",
+            "source_patch 0 2 0 1 pressure 0.375\ncoupled_patch 1 2 1 2 pressure -0.25");
+        let (reordered, c) = render(read(&reversed, 8), 8);
+        assert_eq!(whole, reordered);
+        assert_eq!(a.system().zone().state_hash(), c.system().zone().state_hash());
+    }
+}
+
+#[test]
+fn native_dual_apertures_refuse_repeated_roles_including_mixed_units() {
+    for duplicate in ["coupled_patch 0 1 0 1 pressure 0",
+        "source_patch 0 1 0 1 pressure 0", "source_patch_m 0 0.001 0 0.001 pressure 0"]
+    {
+        let text = input(-0.25).replace("initial rest",
+            &format!("source_patch 0 2 0 1 pressure 0.375\n{duplicate}\ninitial rest"));
+        assert!(ResolvedDgFilePerformance::from_bytes(text.as_bytes(), 8,
+            Arc::new(CancelGate::new_clock_free())).is_err());
+    }
+}

@@ -243,7 +243,7 @@ pub struct NsfDg<L: Lattice3<27>> {
     area_m2: f64,
     steps: u64,
     upstream: Option<upstream::UpstreamLoad>,
-    patch_background: Option<NsfBoundaryDrive>,
+    patch_background: [Option<NsfBoundaryDrive>; 2],
     reservoir_radiation: Option<reservoir::ReservoirRadiation>,
 }
 
@@ -264,7 +264,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         zone: NsfGrid3<L>, load: DgPortLoad, high: bool,
         limits: NsfDgLimits, gate: &CancelGate,
     ) -> Result<Self, NsfDgError> {
-        Self::bind(zone, load, high, limits, gate, None)
+        Self::bind(zone, load, high, limits, gate, [false; 2])
     }
 
     /// Couple the grid's explicitly declared rectangular aperture patch to the
@@ -281,7 +281,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
         zone: NsfGrid3<L>, load: DgPortLoad, high: bool,
         limits: NsfDgLimits, gate: &CancelGate,
     ) -> Result<Self, NsfDgError> {
-        Self::bind(zone, load, high, limits, gate, Some(high))
+        let mut selected = [false; 2];
+        selected[usize::from(high)] = true;
+        Self::bind(zone, load, high, limits, gate, selected)
     }
 
     /// Drive the original aperture on the OTHER face while the main DG bore
@@ -289,20 +291,35 @@ impl<L: Lattice3<27>> NsfDg<L> {
     /// receive each prescribed pressure/characteristic or finite upstream load.
     /// The surrounding cells retain their independently declared boundary drive.
     ///
-    /// The grid still owns exactly one patch. This constructor cannot silently
-    /// reinterpret a downstream patch as an upstream source. A subsequent
+    /// This constructor selects only the source patch and refuses an additional
+    /// downstream patch. Use [`Self::new_on_patches`] to select both. A subsequent
     /// [`Self::with_upstream_load`] matches that duct to the selected source area,
     /// not the whole face; all three original candidates are committed together.
     pub fn new_with_source_patch(
         zone: NsfGrid3<L>, load: DgPortLoad, high: bool,
         limits: NsfDgLimits, gate: &CancelGate,
     ) -> Result<Self, NsfDgError> {
-        Self::bind(zone, load, high, limits, gate, Some(!high))
+        let mut selected = [false; 2];
+        selected[usize::from(!high)] = true;
+        Self::bind(zone, load, high, limits, gate, selected)
+    }
+
+    /// Couple independent finite source and bore openings on opposite faces.
+    /// Each face must carry its own original characteristic patch. The main
+    /// bore receives only its selected downstream area; a prescribed source
+    /// or finite upstream duct receives only the other selected area. Both
+    /// remainders retain their independent boundary laws and full-face fluxes.
+    /// The same original NSF/DG solve and work tolerances apply to both patches.
+    pub fn new_on_patches(
+        zone: NsfGrid3<L>, load: DgPortLoad, high: bool,
+        limits: NsfDgLimits, gate: &CancelGate,
+    ) -> Result<Self, NsfDgError> {
+        Self::bind(zone, load, high, limits, gate, [true; 2])
     }
 
     fn bind(
         zone: NsfGrid3<L>, load: DgPortLoad, high: bool,
-        limits: NsfDgLimits, gate: &CancelGate, selected_patch_high: Option<bool>,
+        limits: NsfDgLimits, gate: &CancelGate, selected_patches: [bool; 2],
     ) -> Result<Self, NsfDgError> {
         poll(gate)?;
         if limits.maximum_cells == 0 || zone.cell_count() > limits.maximum_cells {
@@ -311,15 +328,17 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let open = zone.characteristic_axis().ok_or(NsfDgError::Input(
             "resolved coupling requires the original characteristic axis"))?;
         let reference = zone.characteristic_reference_gas(high).map_err(NsfDgError::Flow)?;
-        let patch_background = match (selected_patch_high, zone.characteristic_patch()) {
-            (Some(selected), Some((patch_high, _))) if patch_high == selected => Some(
-                zone.boundary_drives().ok_or(NsfDgError::Input(
-                    "aperture coupling requires the original surrounding boundary drive"))?[usize::from(patch_high)]),
-            (None, None) => None,
-            _ => return Err(NsfDgError::Input(
-                "select the declared aperture explicitly on its source or coupled face; whole-face coupling cannot hide a patch")),
-        };
-        let traces = if selected_patch_high == Some(high) { zone.open_patch_traces() }
+        let drives = zone.boundary_drives().ok_or(NsfDgError::Input(
+            "aperture coupling requires the original surrounding boundary drives"))?;
+        let mut patch_background = [None; 2];
+        for side in 0..2 {
+            if selected_patches[side] != zone.characteristic_patch_on(side != 0).is_some() {
+                return Err(NsfDgError::Input(
+                    "select every declared source or coupled aperture explicitly; a whole-face role cannot hide a patch"));
+            }
+            if selected_patches[side] { patch_background[side] = Some(drives[side]); }
+        }
+        let traces = if selected_patches[usize::from(high)] { zone.open_patch_traces_on(high) }
             else { zone.open_boundary_traces(high) }
             .ok_or(NsfDgError::Input("resolved coupling requires original interface quadrature"))?;
         // The original Cartesian face has one identical area per trace. A
@@ -351,23 +370,26 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub const fn area_m2(&self) -> f64 { self.area_m2 }
     /// Original downstream aperture bounds, if explicitly selected for the bore.
     pub fn coupled_patch(&self) -> Option<NsfCharacteristicPatch> {
-        self.zone.characteristic_patch().filter(|(high, _)| *high == self.high)
-            .map(|(_, patch)| patch)
+        self.zone.characteristic_patch_on(self.high)
     }
     /// Original source aperture bounds, if explicitly selected on the other face.
     pub fn source_patch(&self) -> Option<NsfCharacteristicPatch> {
-        self.zone.characteristic_patch().filter(|(high, _)| *high != self.high)
-            .map(|(_, patch)| patch)
+        self.zone.characteristic_patch_on(!self.high)
     }
-    /// Original drive retained on the uncoupled remainder of a patched face.
+    /// Original remainder drive when exactly one face is patched. Returns
+    /// `None` for zero or two patches; use the per-face accessor in that case.
     pub const fn patch_background_drive(&self) -> Option<NsfBoundaryDrive> {
-        self.patch_background
+        match self.patch_background {
+            [Some(drive), None] | [None, Some(drive)] => Some(drive),
+            _ => None,
+        }
     }
-    fn patch_boundary(&self) -> Option<(usize, NsfBoundaryDrive)> {
-        self.patch_background.map(|background| {
-            let (high, _) = self.zone.characteristic_patch().expect("bound original aperture");
-            (usize::from(high), background)
-        })
+    /// Independent original boundary law on this physical face's remainder.
+    pub const fn patch_background_drive_on(&self, high: bool) -> Option<NsfBoundaryDrive> {
+        self.patch_background[high as usize]
+    }
+    fn patch_boundaries(&self) -> [Option<NsfBoundaryDrive>; 2] {
+        self.patch_background
     }
     /// Original explicit numerical limits.
     pub const fn limits(&self) -> &NsfDgLimits { &self.limits }
@@ -451,7 +473,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let relation = self.load.port_response().map_err(NsfDgError::Acoustic)?;
         let limits = self.limits;
         let side = usize::from(self.high);
-        let patch = self.patch_boundary();
+        let patch = self.patch_boundaries();
         let mut bracket = limits.incoming_bracket_m_s;
         let mut values = [0.0; 2];
         let mut incoming = bracket[0];
@@ -522,22 +544,21 @@ impl<L: Lattice3<27>> NsfDg<L> {
 
 fn preview_interval<'a, L: Lattice3<27>>(
     zone: &'a mut NsfGrid3<L>, mut drives: [NsfBoundaryDrive; 2],
-    patch: Option<(usize, NsfBoundaryDrive)>, reservoir_state: Option<NsfOpenState>,
+    patches: [Option<NsfBoundaryDrive>; 2], reservoir_state: Option<NsfOpenState>,
     limits: NsfDgLimits, gate: &CancelGate,
 ) -> Result<NsfCharacteristicTrial<'a, L>, NsfDgError> {
-    let patch_drive = patch.map(|(side, background)| {
-        let aperture = drives[side];
-        drives[side] = background;
-        aperture
-    });
+    let mut patch_drives = [None; 2];
+    for side in 0..2 {
+        if let Some(background) = patches[side] {
+            patch_drives[side] = Some(drives[side]);
+            drives[side] = background;
+        }
+    }
     let result = if let Some(state) = reservoir_state {
-        zone.preview_boundary_interval_with_reservoir(drives, patch_drive, state,
+        zone.preview_boundary_interval_with_patches_and_reservoir(drives, patch_drives, state,
             limits.substeps, limits.maximum_cell_steps, || gate.is_requested())
-    } else if let Some(aperture) = patch_drive {
-        zone.preview_boundary_interval_with_patch(drives, aperture, limits.substeps,
-            limits.maximum_cell_steps, || gate.is_requested())
     } else {
-        zone.preview_boundary_interval(drives, limits.substeps,
+        zone.preview_boundary_interval_with_patches(drives, patch_drives, limits.substeps,
             limits.maximum_cell_steps, || gate.is_requested())
     };
     result.map_err(|error| if gate.is_requested() { NsfDgError::Cancelled }
@@ -547,8 +568,8 @@ fn preview_interval<'a, L: Lattice3<27>>(
 fn coupled_exchange<L: Lattice3<27>>(
     trial: &NsfCharacteristicTrial<'_, L>, side: usize,
 ) -> Result<NsfBoundaryExchange, NsfDgError> {
-    if trial.grid().characteristic_patch().is_some_and(|(high, _)| usize::from(high) == side) {
-        trial.patch_exchange().copied().ok_or(NsfDgError::Input(
+    if trial.grid().characteristic_patch_on(side != 0).is_some() {
+        trial.patch_exchange_on(side != 0).copied().ok_or(NsfDgError::Input(
             "original aperture exchange disappeared during the coupled trial"))
     } else { Ok(trial.boundary_exchange()[side]) }
 }
@@ -590,10 +611,8 @@ fn accept_candidate<L: Lattice3<27>>(
         return Err(NsfDgError::Projection { residual_j: work_residual, allowance_j: allowance });
     }
     let faces = *fluid.boundary_exchange();
-    let patch_on_main = fluid.grid().characteristic_patch()
-        .is_some_and(|(high, _)| usize::from(high) == side);
-    let coupled_patch = fluid.patch_exchange().copied().filter(|_| patch_on_main);
-    let source_patch = fluid.patch_exchange().copied().filter(|_| !patch_on_main);
+    let coupled_patch = fluid.patch_exchange_on(side != 0).copied();
+    let source_patch = fluid.patch_exchange_on(side == 0).copied();
     let reservoir_mass_out_kg = fluid.reservoir_mass_out_kg();
     let reservoir_flows = fluid.reservoir_flows().to_vec();
     let flow = *fluid.energy_ledger();
