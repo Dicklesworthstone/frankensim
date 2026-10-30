@@ -1,0 +1,89 @@
+# Voice performance: Tom et al. (1999) /a/ tract of a trained male singer, condition speech_comf, fold card of the licensed
+# two-mass pack, cited yielding wall, target note C3 (130.81 Hz). Every number below is cited. UNKNOWN marks a
+# quantity no cited source gives; none is fitted to a recording.
+#
+# TRACT: Tom, K., Titze, I. R., Hoffman, E. A., and Story, B. H. (1999). 3-D vocal tract imaging and formant structure:
+#   varying vocal register, pitch and loudness. NCVS Status and Progress Report 14:101-112 (National Center for Voice and
+#   Speech; free PDF). Journal version: J. Acoust. Soc. Am. 109(2):742-747 (2001), doi:10.1121/1.1332380 (not read: paywalled).
+#   Subject: one 45-year-old male, Western classical training (12 years as a baritone, 6 as a countertenor), EBCT (electron-beam
+#   CT, 0.410 mm pixels, 3 mm axial slices), supine. Condition: spoken /a/, CHEST register, self-selected comfortable pitch B-flat2 (117 Hz) and loudness.
+#   Areas: Table III column speech_comf, sections 1-44 glottis to lips, printed cm^2 digits scaled by e-4 (to m^2), transcribed
+#   from the OCR of the scanned report and checked against the page image (tom1999-table-III-area-functions.tsv).
+#   LENGTH: Table III is normalized to 17.46 cm (44 x 0.396825 cm). Table IV gives the measured length of this condition,
+#   17.39 cm; the section length here is 17.39 cm / 44, which undoes the axial normalization (areas are unchanged by it).
+#   LIMITS: (1) the sung conditions are FALSETTO, while the fold below is a modal two-mass card; (2) no piriform sinus: the
+#   voice grammar has no side branch and the report does not print where the branch (Table V) attaches; (3) supine;
+#   (4) one singer, vowel /a/ only.
+#   Same-specimen check (computed, not measured): the authors' wave-reflection model with the sinus at 17.46 cm gives
+#   F1-F4 543 993 2585 3747 Hz (Table VII). This file's passive tract (flanged, wall, no sinus) was predicted offline before the
+#   render at F1-F5 562 1024 2641 3838 4646 Hz; the render sidecar (passive_tract_formants_hz) gives 563 1027 2643 3840 Hz.
+#   The missing sinus is the main gap to Table VII (F1 +3.5 %).
+#
+# FOLD, FLOW LAW, WALL, GAS, MICROPHONE, LEVEL, MECHANICS: identical to story2008-a-C3-flanagan.performance (see its
+#   header for every citation): Ishizaka-Flanagan two-mass pack in the Steinecke-Herzel form with the Poiseuille drop,
+#   damping ratio 0.1 AUTHORED ESTIMATE; Flanagan wall via Birkholz, Haesner and Kuerbis (ICASSP 2022), K ASSUMED;
+#   saturated air at 310.15 K; flanged mouth; 0.30 m at 45 deg; 96 kHz mechanics clock.
+# SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 900 Pa x q (tests/vowel_gates.rs vw-002 rule). Ramp 60 ms, hold, 150 ms release.
+# PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 0.544097. q was
+#   iterated on the EMERGENT f0 of the radiated pressure (autocorrelation over 0.5-1.5 s of a 1.5 s trial render, same
+#   binary) until it was within 3 cents of C3 = 130.81 Hz (A4 = 440 Hz). No recording enters. Trace
+#   from the Story /a/ C3 q:
+#     q 0.459164: f0 121.36 Hz (-129.8 c) -> q 0.533469: f0 129.68 Hz (-15.1 c) -> q 0.544097: f0 130.82 Hz (+0.1 c)
+frankensim-voice-performance-v1
+audio 48000 144000 2
+full_scale_pa 4.0
+ambient moist_air 310.15 101325 1.0
+fold two_mass 0.000125 2.5e-05 43.5277 4.35277 13.6024 0.1 3.57e-4 1.4e-2 2.5e-3
+termination flanged
+tract_wall 15 1.48e+06 1.6e4
+tract_source tom-1999-ncvs-14-101-table-III-speech-comf
+tract_licence published measurements transcribed with citation (Tom et al. 1999 Tables III and IV); redistribution terms unconfirmed, owner to decide
+microphone 0.212132 0 0.212132 16 64 8000
+subglottal 0 0
+subglottal 0.06 489.687
+subglottal 2.85 489.687
+subglottal 3 0
+section 0.88e-4 0.3952273e-2
+section 0.69e-4 0.3952273e-2
+section 0.68e-4 0.3952273e-2
+section 1.18e-4 0.3952273e-2
+section 1.59e-4 0.3952273e-2
+section 2.23e-4 0.3952273e-2
+section 3.12e-4 0.3952273e-2
+section 3.97e-4 0.3952273e-2
+section 3.67e-4 0.3952273e-2
+section 2.73e-4 0.3952273e-2
+section 1.76e-4 0.3952273e-2
+section 1.23e-4 0.3952273e-2
+section 0.74e-4 0.3952273e-2
+section 0.58e-4 0.3952273e-2
+section 1.01e-4 0.3952273e-2
+section 0.84e-4 0.3952273e-2
+section 0.56e-4 0.3952273e-2
+section 0.64e-4 0.3952273e-2
+section 0.60e-4 0.3952273e-2
+section 0.86e-4 0.3952273e-2
+section 1.35e-4 0.3952273e-2
+section 1.61e-4 0.3952273e-2
+section 0.85e-4 0.3952273e-2
+section 1.53e-4 0.3952273e-2
+section 2.24e-4 0.3952273e-2
+section 2.44e-4 0.3952273e-2
+section 2.53e-4 0.3952273e-2
+section 2.86e-4 0.3952273e-2
+section 3.17e-4 0.3952273e-2
+section 3.81e-4 0.3952273e-2
+section 4.28e-4 0.3952273e-2
+section 4.31e-4 0.3952273e-2
+section 4.81e-4 0.3952273e-2
+section 5.07e-4 0.3952273e-2
+section 5.33e-4 0.3952273e-2
+section 5.62e-4 0.3952273e-2
+section 5.42e-4 0.3952273e-2
+section 4.91e-4 0.3952273e-2
+section 4.54e-4 0.3952273e-2
+section 4.13e-4 0.3952273e-2
+section 3.40e-4 0.3952273e-2
+section 2.70e-4 0.3952273e-2
+section 1.86e-4 0.3952273e-2
+section 1.09e-4 0.3952273e-2

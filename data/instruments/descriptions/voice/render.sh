@@ -25,3 +25,6 @@ for d in a-Ds3 e-Ds3 i-Ds3 o-Ds3 a-A3 a-D4 a-Ds3-wall u-Ds3 u-Ds3-r1 a-Ds3-r1 \
          e-C4-flanagan-r4 i-C4-flanagan-r4 o-C4-flanagan-r4 u-C4-flanagan-r4 o-F4-flanagan-r4; do
   "$BIN" voice "data/instruments/descriptions/voice/story2008-$d.performance" "$OUT/story2008-$d.wav"
 done
+# /a/ at C3 with the spoken tract of the trained singer of Tom, Titze, Hoffman and Story (1999) (bead pexfp.325.2): only the
+# tract differs from story2008-a-C3-flanagan. His sung (falsetto) and spoken tracts at C4 and F4 graded lower and are not kept.
+"$BIN" voice data/instruments/descriptions/voice/tom1999-a-C3-speech-comf-flanagan.performance "$OUT/tom1999-a-C3-speech-comf-flanagan.wav"
