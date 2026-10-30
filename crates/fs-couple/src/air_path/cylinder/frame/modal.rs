@@ -10,6 +10,9 @@ use crate::render::schedule::force::coupled::{ModalAttachment, ModalConnection, 
 use fs_la::factor::Cholesky;
 use fs_math::c64::C64;
 
+/// Original source longitudinal relaxation on the complete native assembly.
+pub mod relaxation;
+
 mod component;
 pub use component::{
     FrameFluidComponent, FrameFluidConnectionLayout, FrameFluidPlacement, FrameFluidPortMap,
