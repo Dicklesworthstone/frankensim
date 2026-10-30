@@ -523,3 +523,35 @@ fn from_eigen(axis: [f64; 2], x: [f64; 2]) -> [f64; 2] {
         axis[1] * x[0] + axis[0] * x[1],
     ]
 }
+
+/// Shared bounded quadrature for a linearly evolving velocity. The driven
+/// owner supplies its physical duration; these are unsigned path estimates.
+pub(super) fn linear_velocity_path(
+    before: [f64; 2],
+    after: [f64; 2],
+    dt_s: f64,
+    controls: EllipticRelaxationControls,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(f64, f64, usize), EllipticRelaxationError> {
+    let mut work = Work {
+        controls,
+        evaluations: 0,
+        cancelled,
+    };
+    let (integral, error) = work.integrate(
+        &|x| {
+            [
+                0.0,
+                0.0,
+                0.0,
+                dt_s * length([
+                    before[0] * (1.0 - x) + after[0] * x,
+                    before[1] * (1.0 - x) + after[1] * x,
+                ]),
+            ]
+        },
+        0.0,
+        1.0,
+    )?;
+    Ok((integral[3], error[3], work.evaluations))
+}

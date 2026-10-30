@@ -33,6 +33,9 @@ pub use compliance::SymmetricTangentialCompliance;
 /// Continuous held-load relaxation with finite slip-arrest events.
 pub mod relaxation;
 
+/// Driven static hold, breakaway and bounded directional sliding evolution.
+pub mod driven;
+
 /// Constant static/kinetic principal coefficients and an initial texture axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EllipticCoulomb {

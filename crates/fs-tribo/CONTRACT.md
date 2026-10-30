@@ -3,6 +3,37 @@
 > Status: `frankensim-ext-tribo-dry-baseline-tgbj` baseline. This is not an
 > admitted material-data result or an Euler-disc validation result.
 
+## Driven directional friction and retained rest
+
+`EllipticCoulomb::advance_driven` evolves the same associated static/kinetic
+ellipses under explicit held tangential acceleration and the original full SPD
+body mobility. The caller carries a separate accepted Resting/Sliding mode.
+Resting validates an explicit actual-velocity residual and uses the complete
+static ellipse to hold the load; sliding never becomes rest through a speed
+cutoff. Superstatic drive breaks away onto the kinetic branch.
+
+Zero drive reuses the original continuous relaxation. Constant-direction
+segments resolve stop, hold and restart analytically. General changing-direction
+motion uses bounded first-order endpoint-Coulomb substeps with the existing
+matrix projection. Held traction opposes the whole accepted linear-velocity
+segment. Its endpoint arrests are timestep-resolved, not exact continuous
+events. Ambiguous capture outside the kinetic ellipse is conservatively refined
+or refused; this is not a theorem excluding all anisotropic arrests.
+
+The report separates net displacement, unsigned travel, traction impulse,
+physical friction heat, supplied drive work and effective kinetic change.
+Heat is traction work along the accepted displacement, and the independent
+balance is `delta K + D - W_drive`. No numerical energy defect becomes heat.
+Force, projection, substep and original quadrature budgets remain explicit;
+failed or cancelled proposals publish no native history.
+
+Six driven test groups exercise full-matrix static hold and breakaway, exact
+stop/hold/reversal, changing-direction convergence against an independent RK4
+reference, isotropic transverse hysteresis, frame covariance, zero-drive and
+frictionless-axis limits, and atomic refusal. Curved motion requires refinement
+of `maximum_step_s`; source/thermal refresh needs a separate outer refinement.
+The leaf supplies no evolving pose, normal-load law or material measurements.
+
 ## Finite-arrest quadrature with ordinary anisotropy
 
 The full-stop integration chart in `EllipticCoulomb::relax_velocity` uses
