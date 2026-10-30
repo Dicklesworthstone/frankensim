@@ -16029,15 +16029,23 @@ zero expansion keeps the original state extent and trajectory. A stationary
 coordinate may drift only within the declared floating-point roundoff budget;
 its endpoint is never renormalized or its work/loss recomputed to hide error.
 
-Entropy includes equilibrium and Maxwell V*alpha:sigma terms; the shared finite
-heat driver receives native dashpot loss plus signed reversible exchange and
-checks physical K+U, where U=psi+T*S. Actual caloric receiver mass and the complete
-instantaneous tensor enter C_eff=m*dh/dT-T*sum[V*alpha:C_inst:alpha], which must
-remain positive over each chart segment. Constant source alpha and stored
-tensors are required over the full admitted interval; supported source-dependent
-relaxation times remain active. Combined varying stiffness/expansion, Kelvin
-thermal strain rates, finite deformation and phase mechanics remain outside
-this bounded reciprocal model.
+Entropy includes both source-affine stiffness derivatives and equilibrium/
+Maxwell expansion terms; the shared finite heat driver receives native dashpot
+loss plus signed reversible exchange and checks physical K+U, with U=psi+T*S.
+Constant source alpha may now accompany affine stored tensors over the complete
+admitted interval. The existing source-law owner admits every selected stiffness
+knot; source-dependent relaxation times remain active.
+
+Actual caloric receiver mass must keep a conservative lower bound on
+C_eff=m*dh/dT-T*psi_TT positive on every chart segment. The mechanical curvature
+includes alpha:C_inst:alpha, -2 alpha:C_eq':e and -2 sum alpha:C_j':q_j.
+The complete interval bound uses the original Mandel elastic-strain limit and
+a separately enforced 2L envelope for varying Maxwell spring strain. Accepted,
+rebound and final thermal states use that same memory admission. A failed
+sufficient bound refuses without claiming that every individual state is
+unstable. Constant tensors and zero alpha retain their original paths.
+Varying alpha, non-affine stored tensors, Kelvin thermal strain rates, finite
+deformation and phase mechanics remain outside this bounded reciprocal model.
 
 Five native regressions cover two continuing heated Maxwell intervals, rotated
 orthotropic expansion, zero-alpha compatibility, source/capacity/reference/
@@ -16046,3 +16054,9 @@ Pinned syntax/whitespace checks and an independent physical-coordinate RK4 plus
 scalar enthalpy reference passed. Actual stationary-coordinate propagation and
 its runtime tolerance still require native execution; no experimental authority
 is inferred from the synthetic reference.
+
+Three additional regressions exercise continuing affine stiffness/expansion
+with retained Maxwell memory, a caloric capacity that passes the old constant-C
+check but fails the combined bound, and excessive hidden spring strain.
+Independent physical-coordinate RK4 plus enthalpy references were executed;
+these new Rust tests were not compiled or run in the unavailable native runtime.

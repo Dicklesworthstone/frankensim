@@ -3,6 +3,7 @@ use super::*;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{ClaimSelection, PropertyKey, QueryPoint};
 use fs_material::state_point::MaterialPropertySelection;
+use fs_material::visco_tensor::source::thermal::TensorTemperatureDerivative;
 use fs_solid::linear3::source::{ThermalExpansionModel, ThermalExpansionSource};
 use fs_solid::linear3::{TetElasticMaterial, TetThermalStrainState};
 
@@ -60,9 +61,12 @@ pub(super) fn prepare<E>(
     thermal: &DepositionSimulation<'_>,
     cells: &[RelaxationThermalCell<'_>],
     bindings: &[ThermalExpansionCell<'_>],
+    derivatives: &[TensorTemperatureDerivative],
+    temperatures_k: &[f64],
     gate: &CancelGate,
 ) -> Result<PreparedExpansion, Error<E>> {
-    if bindings.len() != cells.len() {
+    if bindings.len() != cells.len() || derivatives.len() != cells.len()
+        || temperatures_k.len() != cells.len() {
         return Err(invalid(
             "complete expansion sources per original element required",
         ));
@@ -78,15 +82,9 @@ pub(super) fn prepare<E>(
     let mut expected = Vec::with_capacity(cells.len());
     for ((source, cell), binding) in sources.iter().zip(cells).zip(bindings) {
         check(gate)?;
-        // Reuse the native constant-storage admission over ALL original knots.
-        source
-            .material
-            .admit_thermal_relaxation(
-                cell.point.material,
-                cell.point.temperature_axis,
-                cell.temperature_interval_k,
-            )
-            .map_err(|e| solid(SolidError::MaterialSource(e)))?;
+        // The common caller already admitted the original affine stored
+        // tensors over every selected source knot and retained their derivatives.
+        // Expansion still requires its own complete constant-alpha source proof.
         if cell.point.temperature_axis != "T" || binding.mesh_frame.0 == [0; 32] {
             return Err(invalid(
                 "native integrated expansion requires its T coordinate and a named mesh frame",
@@ -191,7 +189,9 @@ pub(super) fn prepare<E>(
         coefficients[element] = finite(
             coefficients[element]
                 + point
-                    .expansion_capacity_coefficient_j_k2(prepared.alpha_mandel[element])
+                    .affine_expansion_capacity_bound_j_k2(
+                        &derivatives[element], temperatures_k[element], prepared.alpha_mandel[element],
+                    )
                     .map_err(|e| {
                         solid(SolidError::Dynamics(
                             crate::tensor_material::TensorMaterialError::Material(e),
@@ -201,7 +201,9 @@ pub(super) fn prepare<E>(
     }
     // The actual caloric owner is piecewise linear in h(T). Check its positive
     // fixed-strain total capacity on every segment, including the hottest end.
-    // C_eff = mass*dh/dT - T*V*alpha:(C_eq + sum C_j):alpha.
+    // C_eff = mass*dh/dT - T*psi_TT. The coefficient bounds the COMPLETE
+    // affine tensor/free-strain curvature over all admitted temperatures and
+    // strains, including each varying Maxwell spring's enforced 2L envelope.
     for (cell, coefficient) in cells.iter().zip(coefficients) {
         check(gate)?;
         let [low, high] = cell.temperature_interval_k;
@@ -218,7 +220,7 @@ pub(super) fn prepare<E>(
                 - high.min(b.temperature_k) * coefficient;
             if !capacity.is_finite() || capacity <= 0.0 {
                 return Err(invalid(
-                    "thermal expansion makes the total fixed-strain heat capacity nonpositive",
+                    "affine stiffness/expansion cannot establish positive total fixed-strain heat capacity over its admitted domain",
                 ));
             }
         }

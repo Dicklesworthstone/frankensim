@@ -79,4 +79,70 @@ impl ProjectedTensorProny {
         }
         Ok(value)
     }
+
+    /// Conservative upper bound on the mechanical psi_TT contribution [J/K^2]
+    /// for affine stored tensors and constant stress-free derivative alpha.
+    ///
+    /// The caller owns the original source identity/frame and must supply the
+    /// temperature at which THIS point's tensors were resolved. At fixed total
+    /// and viscous strains,
+    /// psi_TT/V = alpha:C_inst:alpha - 2 alpha:C_eq':e
+    ///            - 2 sum_j alpha:C_j':q_j.
+    /// Native strain admission bounds ||e|| by L. Every varying branch used
+    /// with expansion is separately admitted with ||q_j|| <= 2L by the shared
+    /// thermal-state evaluator. Absolute matrix arithmetic bounds these terms
+    /// over the COMPLETE source interval, without sampling candidate strains.
+    pub fn affine_expansion_capacity_bound_j_k2(
+        &self,
+        derivative: &source::thermal::TensorTemperatureDerivative,
+        temperature_k: f64,
+        alpha_mandel: Voigt,
+    ) -> Result<f64> {
+        if !finite(&alpha_mandel)
+            || !temperature_k.is_finite()
+            || !(derivative.interval_k[0]..=derivative.interval_k[1]).contains(&temperature_k)
+            || derivative.branches_pa_k.len() != self.model.branches.len()
+        {
+            return Err(invalid("affine expansion capacity needs the matching bounded source state"));
+        }
+        let varying = derivative.equilibrium_pa_k.iter().flatten()
+            .chain(derivative.branches_pa_k.iter().flatten().flatten())
+            .any(|v| *v != 0.0);
+        if !varying {
+            return self.expansion_capacity_coefficient_j_k2(alpha_mandel);
+        }
+        let [low, high] = derivative.interval_k;
+        let alpha = alpha_mandel.map(f64::abs);
+        let strain_limit = self.model.maximum_strain_norm();
+        let bound = |tensor: &Tangent6, slope: &Tangent6, strain_bound: f64| -> Result<f64> {
+            let mut storage = 0.0;
+            let mut cross = 0.0;
+            for i in 0..6 {
+                for j in 0..6 {
+                    let a = (low - temperature_k).mul_add(slope[i][j], tensor[i][j]);
+                    let b = (high - temperature_k).mul_add(slope[i][j], tensor[i][j]);
+                    if !a.is_finite() || !b.is_finite() || !slope[i][j].is_finite() {
+                        return Err(invalid("affine expansion endpoint tensor overflows"));
+                    }
+                    storage += alpha[i] * alpha[j] * a.abs().max(b.abs());
+                    // Each strain component is bounded by its native Mandel norm.
+                    cross += alpha[i] * slope[i][j].abs();
+                }
+            }
+            let value = storage + 2.0 * strain_bound * cross;
+            if !value.is_finite() || value < 0.0 {
+                return Err(invalid("affine expansion capacity bound overflows"));
+            }
+            Ok(value)
+        };
+        let mut value = bound(&self.model.c_eq, &derivative.equilibrium_pa_k, strain_limit)?;
+        for (branch, slope) in self.model.branches.iter().zip(&derivative.branches_pa_k) {
+            value += bound(&branch.c_pa, slope, 2.0 * strain_limit)?;
+        }
+        value *= self.volume_m3;
+        if !value.is_finite() || value < 0.0 {
+            return Err(invalid("affine expansion volume-scaled capacity bound overflows"));
+        }
+        Ok(value)
+    }
 }

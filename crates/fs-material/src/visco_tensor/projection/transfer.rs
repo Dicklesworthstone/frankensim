@@ -238,6 +238,13 @@ impl ProjectedTensorProny {
             if slope.iter().flatten().any(|v| *v != 0.0) {
                 let rows = branch.resolved_gram_rows(&self.model.factors[index]);
                 let q = recover_strain(&branch.c_pa, &rows, z, root, relative_memory_tolerance)?;
+                if alpha_mandel.iter().any(|v| *v != 0.0) {
+                    // The combined capacity bound assumes ||q|| <= 2L.
+                    // Use the SAME native Mandel-norm admission as total and
+                    // equilibrium elastic strain, scaled by one half.
+                    self.model.validate_mandel_strain(&q.map(|v| 0.5 * v))
+                        .map_err(|_| invalid("affine expansion Maxwell spring strain exceeds its 2L thermal envelope"))?;
+                }
                 entropy_j_k -= 0.5 * self.volume_m3 * dot(&q, &apply(slope, &q));
             }
         }

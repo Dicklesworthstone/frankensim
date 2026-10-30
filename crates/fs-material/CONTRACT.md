@@ -5620,6 +5620,17 @@ constrained directions absent from a reduced displacement basis. Source-driven
 coupling admits positive total fixed-strain caloric capacity on every supported
 chart segment; material uncertainty and source coverage remain separate.
 
+The affine-stiffness/constant-alpha combination uses
+`affine_expansion_capacity_bound_j_k2` on the original projected material
+point and source derivative. At fixed total and viscous strains its curvature
+is V*[alpha:C_inst:alpha - 2 alpha:C_eq':e - 2 sum alpha:C_j':q_j].
+Absolute endpoint matrix bounds cover the complete affine temperature interval,
+with the original Mandel limit L for equilibrium elastic strain and 2L for
+each varying Maxwell spring. The shared thermal-state evaluator enforces that
+memory envelope whenever expansion consumes it; accepted, rebound and final
+states use the same check. Constant tensors retain their original coefficient,
+and zero alpha retains the original affine-C state admission.
+
 Focused coupling regressions retain nonzero and singular Maxwell memory,
 rotated expansion, zero-alpha compatibility and source/domain refusals. They
 are authored but unrun here; syntax review and independent physical-coordinate

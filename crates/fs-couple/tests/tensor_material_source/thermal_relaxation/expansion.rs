@@ -1,4 +1,6 @@
 //! G1/G3/G4: actual source heating, reciprocal inertia and retained Maxwell strain.
+mod affine;
+
 use super::*;
 use fs_blake3::ContentHash;
 use fs_couple::tensor_material::solid::thermal::relaxation::{
@@ -390,7 +392,8 @@ fn unsupported_expansion_thermodynamics_and_late_cancellation_publish_nothing() 
                 claim.value = PropertyValue::Curve {
                     abscissa: "T".into(),
                     abscissa_dims: fs_qty::Temperature::DIMS,
-                    knots: vec![(280.0, v * 0.9), (300.0, v), (330.0, v * 1.15)],
+                    knots: vec![(280.0, v * 0.9), (300.0, v),
+                        (330.0, if invalid_case == "stiffness" { v * 1.16 } else { v * 1.15 })],
                     dims,
                 };
                 claim.interpolation = InterpolationPolicy::LinearInside;

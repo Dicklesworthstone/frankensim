@@ -342,17 +342,17 @@ impl<'s> TensorSolidHistory<'_, 's> {
     /// Every interval preserves viscous strain when free strain changes; it
     /// never reinitializes branch history or replaces motion by equilibrium.
     ///
-    /// The admitted model has constant stored tensors and constant alpha over
-    /// the complete source interval, with source-dependent tau(T) allowed.
-    /// The native PHS carries .5*(e-e_th):C:(e-e_th) as affine quadratic storage;
-    /// S=V*alpha:sigma includes every branch and U=psi+T*S closes caloric energy.
-    /// The actual caloric chart must keep mass*dh/dT-T*V*alpha:C_inst:alpha > 0.
+    /// The admitted model has source-affine stored tensors and constant alpha
+    /// over the complete source interval; source-dependent tau(T) stays active.
+    /// Native PHS storage and retained Maxwell memory supply psi, S=-psi_T and
+    /// U=psi+T*S. The actual caloric mass*dh/dT must exceed a conservative
+    /// full-interval bound on T*psi_TT over the original strain/memory domain.
     /// Thermal force is internal, never counted as external port work.
     ///
     /// This is the existing first-order endpoint split on fixed reference
     /// geometry and mass, with small total/elastic/free strains. Varying alpha,
-    /// varying stored tensors with expansion, Kelvin thermal strain-rate work,
-    /// finite deformation and phase transitions require another admitted model.
+    /// nonlinear stored tensors, Kelvin thermal strain-rate work, finite
+    /// deformation and phase transitions require another admitted model.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_expanding_thermal_candidate<'t, S, E>(
         &self,
@@ -557,7 +557,9 @@ impl<'s> TensorSolidHistory<'_, 's> {
             }
         }
         let expansion_model = expansion
-            .map(|bindings| expansion::prepare(self, thermal, cells, bindings, gate))
+            .map(|bindings| expansion::prepare(
+                self, thermal, cells, bindings, &derivatives, &temperatures_before, gate,
+            ))
             .transpose()?;
         let cards: Vec<_> = cells.iter().map(|b| b.point.material).collect();
         let before_states = affine
