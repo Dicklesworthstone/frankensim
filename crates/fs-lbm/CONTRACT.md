@@ -4948,3 +4948,29 @@ rotating or recoiling walls, thermal allocation and complete moving-wall fluid
 displacement remain outside it. The original midpoint damping is not L-stable
 and does not establish temporal resolution of arbitrarily stiff gap dynamics.
 The broad moving-boundary bead remains open.
+
+
+## Surface-reservoir heat through flow and feedback adapters
+
+The native material-flow advection, sourced-liquid, momentum-feedback,
+electrical-feedback, magnetohydrodynamic-feedback and environment-feedback
+observers forward the original inner observer's `reservoir_conductances`
+hook. State-dependent half-cell and film resistance therefore reaches the
+same thermal substep as internal conductance and advective enthalpy. Authored
+reservoir temperature/area and original error mappings remain intact; a
+missing prepared flow epoch refuses through the existing error path.
+
+The original thermal owner installs these coefficients only for actual heat
+and entropy evaluation and restores authored boundaries before publication.
+No added heat source, duplicate bath credit, independent flux approximation
+or new thermal integrator is introduced. Source-only electrical adapters
+continue to compose physical observers through `CoupledObservers`.
+
+A focused native-flow regression uses actual face mass routes, `Advected`,
+the geometric `ConductionObserver` and the original thermal timeline. An
+independent accepted-interval donor recursion verifies state-dependent bath
+conductance, final enthalpy/temperature, bath heat minus outlet enthalpy export,
+actual-bath entropy, fixed mass, authored-boundary restoration and rollback
+after late cancellation. Four original-source tests pass in the bounded
+native composition. The other five forwarding methods retain their existing
+adjacent delegation/error patterns; this is not a full fs-lbm/workspace build.
