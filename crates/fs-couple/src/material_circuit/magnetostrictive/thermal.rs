@@ -21,12 +21,14 @@
 
 use super::{MagnetostrictiveCircuit, MagnetostrictiveCircuitError, MagnetostrictiveCircuitStep};
 use crate::circuit_enthalpy::{
-    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
+    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients, DrivenCoefficients,
     DriverAccount, ThermalDriver, cell_driver_candidate,
     material::{
         MaterialNetwork, MaterialNetworkError, MaterialNetworkSample, PreparedMaterialNetwork,
     },
 };
+use crate::circuit_enthalpy::contacts::heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork};
+use fs_exec::Cx;
 use crate::magnetostrictive::{MagnetostrictiveCouplingError, MagnetostrictiveRod};
 use crate::material_circuit::MaterialCircuitError;
 use fs_material::conductor::{ElectricalPropertyBasis, ResolvedConductor};
@@ -38,6 +40,7 @@ use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 pub enum MagnetostrictiveThermalError {
     Material(MaterialNetworkError),
     Magnetic(MagnetostrictiveCircuitError),
+    Heat(HeatNetworkError),
 }
 impl core::fmt::Display for MagnetostrictiveThermalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -64,6 +67,12 @@ fn magnetic(error: MagnetostrictiveCircuitError) -> Error {
             MagnetostrictiveCouplingError::Cancelled,
         ) => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(MagnetostrictiveThermalError::Magnetic(other)),
+    }
+}
+fn heat(error: HeatNetworkError) -> Error {
+    match error {
+        HeatNetworkError::Cancelled => CircuitEnthalpyError::Cancelled,
+        other => CircuitEnthalpyError::Source(MagnetostrictiveThermalError::Heat(other)),
     }
 }
 
@@ -254,6 +263,65 @@ impl<'n, 'a> ThermalMagnetostrictiveCircuit<'n, 'a> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a>, Error> {
         let cancel = RefCell::new(cancelled);
+        self.step_resolved_candidate(thermal, target_s, total_voltage_v, force_increment_n,
+            controls, initial_energy_increments_j, |state| {
+                self.prepared.resolve(state, || (*cancel.borrow_mut())()).map_err(material)
+            }, || (*cancel.borrow_mut())())
+    }
+
+    /// Couple the original biased actuator to the complete material heat assembly.
+    ///
+    /// Source-pinned thermal contacts, integrated layer conduction and enclosure
+    /// radiation all see the SAME proposed winding and recipient temperatures as
+    /// the actual total-current Joule heat and reciprocal rod/circuit motion.
+    /// The accepted winding source must exactly match this original coil; another
+    /// winding, branch or heat destination cannot replace it through this entry.
+    /// Retain the prepared heat network between calls to preserve all source pins.
+    ///
+    /// Closed-enclosure radiation is internal exchange. Its roundoff-net power
+    /// remains in the native source report, with an additional whole-system gate;
+    /// external heat is `non_electrical_heat_j - dt * radiation_net_power_w()`.
+    /// The original fixed biased core, stationary winding, small-signal mechanics
+    /// and first-order endpoint thermal limits remain. Electrical interface losses
+    /// need a circuit contact owner and are refused rather than silently dropped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_candidate_with_heat_network<'t>(
+        &self, cx: &Cx<'_>, prepared: &PreparedHeatNetwork<'_, '_>,
+        thermal: &DepositionSimulation<'t>, target_s: f64, total_voltage_v: f64,
+        force_increment_n: f64, controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a, HeatNetworkSample>, Error> {
+        cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
+        let network = prepared.field_material_network().map_err(heat)?;
+        if network.resistors.len() != 1 || network.resistors[0].destination.branch != 0
+            || network.resistors[0].destination.cell != self.coil_cell {
+            return Err(invalid("complete heat network must retain the original winding branch and receiver"));
+        }
+        let candidate = self.step_resolved_candidate(thermal, target_s, total_voltage_v,
+            force_increment_n, controls, initial_energy_increments_j, |state| {
+                let coefficients = prepared.resolve(cx, state).map_err(heat)?;
+                if !coefficients.contacts.is_empty() {
+                    return Err(invalid("biased actuator cannot discard electrical contact heat"));
+                }
+                Ok(coefficients.bulk)
+            }, || cx.checkpoint().is_err())?;
+        crate::circuit_enthalpy::contacts::heat::closed_balance(target_s - thermal.time_s(),
+            candidate.report.total_energy_residual_j, &candidate.report.source,
+            controls.total_energy_tolerance_j).map_err(heat)?;
+        cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
+        Ok(candidate)
+    }
+
+    // Both entries retain one biased-work calculation and one enthalpy residual.
+    #[allow(clippy::too_many_arguments)]
+    fn step_resolved_candidate<'t, S>(
+        &self, thermal: &DepositionSimulation<'t>, target_s: f64, total_voltage_v: f64,
+        force_increment_n: f64, controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a, S>, Error> {
+        let cancel = RefCell::new(cancelled);
         let check = || {
             if (*cancel.borrow_mut())() {
                 Err(CircuitEnthalpyError::Cancelled)
@@ -278,11 +346,9 @@ impl<'n, 'a> ThermalMagnetostrictiveCircuit<'n, 'a> {
                 "matching clocks, positive interval and finite voltage/force/work controls required",
             ));
         }
-        let initial = self
-            .prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        if initial.resistors[0].conductor != self.coil {
+        let initial = resolve(thermal)?;
+        if initial.resistors.len() != 1 || initial.resistors[0].branch != 0
+            || initial.resistors[0].conductor != self.coil {
             return Err(invalid(
                 "accepted winding source must match the actual thermal endpoint",
             ));
@@ -297,10 +363,10 @@ impl<'n, 'a> ThermalMagnetostrictiveCircuit<'n, 'a> {
             initial_energy_increments_j,
             |state, _remaining| {
                 check()?;
-                let coefficients = self
-                    .prepared
-                    .resolve(state, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
+                let coefficients = resolve(state)?;
+                if coefficients.resistors.len() != 1 || coefficients.resistors[0].branch != 0 {
+                    return Err(invalid("trial requires exactly the original winding branch"));
+                }
                 let coil = coefficients.resistors[0].conductor.clone();
                 let resistance = coil.resistance_ohm();
                 let increment_v = total_voltage_v - resistance * bias;
@@ -429,12 +495,12 @@ impl<'n, 'a> ThermalDriver for ThermalCandidate<'n, 'a> {
 }
 
 /// Jointly accepted rod/circuit and finite winding thermal histories.
-pub struct MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a> {
+pub struct MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     driver: ThermalMagnetostrictiveCircuit<'n, 'a>,
-    report: CircuitEnthalpyReport<MaterialNetworkSample, MagnetostrictiveThermalStep>,
+    report: CircuitEnthalpyReport<S, MagnetostrictiveThermalStep>,
 }
-impl<'t, 'n, 'a> MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a> {
+impl<'t, 'n, 'a, S> MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a, S> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
@@ -443,7 +509,7 @@ impl<'t, 'n, 'a> MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a> {
     }
     pub const fn report(
         &self,
-    ) -> &CircuitEnthalpyReport<MaterialNetworkSample, MagnetostrictiveThermalStep> {
+    ) -> &CircuitEnthalpyReport<S, MagnetostrictiveThermalStep> {
         &self.report
     }
     pub fn into_parts(
@@ -451,7 +517,7 @@ impl<'t, 'n, 'a> MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a> {
     ) -> (
         DepositionSimulation<'t>,
         ThermalMagnetostrictiveCircuit<'n, 'a>,
-        CircuitEnthalpyReport<MaterialNetworkSample, MagnetostrictiveThermalStep>,
+        CircuitEnthalpyReport<S, MagnetostrictiveThermalStep>,
     ) {
         (self.thermal, self.driver, self.report)
     }

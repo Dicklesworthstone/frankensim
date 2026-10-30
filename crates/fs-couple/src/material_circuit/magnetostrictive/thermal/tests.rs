@@ -24,6 +24,8 @@ use fs_qty::{Density, QuantitySpec, Temperature};
 use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::*;
 
+mod heat;
+
 const COIL: CellId = CellId(41);
 const MASS: f64 = 0.001;
 const CAPACITY: f64 = 0.01;
