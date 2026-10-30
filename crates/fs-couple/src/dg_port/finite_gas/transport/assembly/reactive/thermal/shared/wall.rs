@@ -11,14 +11,15 @@ use super::{
 };
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::wall::material::{
-    FiniteGasDgBinding, FiniteGasDgError, FiniteGasDgTransportError, MaterialWallDg,
+    FiniteGasDgBinding, FiniteGasDgError, FiniteGasDgNode, FiniteGasDgTransportError,
+    LocalMaterialWall,
 };
 use fs_duct::dg::DgWallMaterialUpdate;
 use fs_material::state_point::DENSITY_PROPERTY;
 use fs_phs::linear_exact::DenseExponentialBudget;
 use std::collections::BTreeMap;
 
-/// Bind an original uniform isotropic wall to this thermal body.
+/// Bind an original uniform or regional material wall to this thermal body.
 /// Geometry, density, mass, restraint and source claims remain fixed. The native
 /// displacement/momentum/history transfer supplies signed material work. Elastic,
 /// Kelvin viscosity and source-pair Maxwell memory retain their original laws.
@@ -32,14 +33,40 @@ pub struct SharedFiniteGasAcousticWallSolve {
     pub dissipation_heat: Option<DenseExponentialBudget>,
 }
 
-/// The actual endpoint material and native zero-duration wall intervention.
+/// Original source layout at the common thermal endpoint. Regional receipts
+/// retain original DG element order; no averaged or representative card is made.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SharedFiniteGasAcousticWallMaterials {
+    Uniform(ResolvedMaterialStatePoint),
+    Regional(Vec<ResolvedMaterialStatePoint>),
+}
+
+/// Actual endpoint sources and the native zero-duration wall intervention.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharedFiniteGasAcousticWallStep {
-    pub material: ResolvedMaterialStatePoint,
+    pub materials: SharedFiniteGasAcousticWallMaterials,
     pub native: DgWallMaterialUpdate,
     /// Original solid-only source integral deposited in the finite body [J].
     /// Gas boundary-layer, molecular, terminal and numerical loss are excluded.
     pub dissipated_heat_j: f64,
+}
+
+impl SharedFiniteGasAcousticWallStep {
+    /// The unchanged uniform source receipt, when the original binding is uniform.
+    pub fn uniform_material(&self) -> Option<&ResolvedMaterialStatePoint> {
+        match &self.materials {
+            SharedFiniteGasAcousticWallMaterials::Uniform(material) => Some(material),
+            SharedFiniteGasAcousticWallMaterials::Regional(_) => None,
+        }
+    }
+
+    /// Every original element's source receipt, when the binding is regional.
+    pub fn regional_materials(&self) -> Option<&[ResolvedMaterialStatePoint]> {
+        match &self.materials {
+            SharedFiniteGasAcousticWallMaterials::Uniform(_) => None,
+            SharedFiniteGasAcousticWallMaterials::Regional(materials) => Some(materials),
+        }
+    }
 }
 
 fn native_error(parcel: u64, error: AcousticRealizeError) -> Error {
@@ -52,21 +79,16 @@ fn native_error(parcel: u64, error: AcousticRealizeError) -> Error {
     }
 }
 
-fn uniform(
+fn wall_node(
     nodes: &BTreeMap<u64, FiniteGasAcousticNode>,
     id: u64,
-) -> Result<&MaterialWallDg, Error> {
+) -> Result<&FiniteGasDgNode, Error> {
     let Some(FiniteGasAcousticNode::Wall(node)) = nodes.get(&id) else {
         return Err(Error::Invalid(
             "thermal wall work requires an original wall-DG owner",
         ));
     };
-    let FiniteGasDgBinding::Uniform(wall) = &node.binding else {
-        return Err(Error::Invalid(
-            "shared-body wall feedback currently requires one uniform wall source",
-        ));
-    };
-    Ok(wall)
+    Ok(node)
 }
 
 fn same_density(a: f64, b: f64) -> bool {
@@ -83,6 +105,60 @@ fn admit_phase(state: EquilibriumPhaseState, density: f64) -> Result<(), Error> 
     if state.liquid_mass_fraction() != 0.0 || !same_density(state.bulk_density_kg_m3(), density) {
         return Err(Error::Invalid(
             "fixed-geometry thermal wall feedback requires an all-solid constant-density body",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_inventory(
+    id: u64,
+    source: &LocalMaterialWall,
+    radius: f64,
+    length: f64,
+    port: &SharedFiniteGasAcousticThermalPort<'_>,
+    body: UniformEnthalpyStepInput<'_>,
+    volume: &mut Sum,
+    mass: &mut Sum,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), Error> {
+    // Each element uses its own original query and source claims. The one
+    // thermal body still requires its original card and fixed density.
+    let original = source
+        .at_temperature_pinned(
+            port.layers.material,
+            port.layers.temperature_axis,
+            body.initial.temperature_k(),
+            body.initial.temperature_k(),
+            cancelled,
+        )
+        .map_err(|error| native_error(id, error))?;
+    let density = original
+        .material()
+        .property(DENSITY_PROPERTY)
+        .ok_or(Error::Invalid(
+            "original thermal wall has no density source",
+        ))?
+        .value_si();
+    if !same_density(density, body.mass_kg / body.volume_m3) {
+        return Err(Error::Invalid(
+            "thermal inventory density must match its original modeled wall material",
+        ));
+    }
+    // This is the original native thin-membrane measure. The uniform branch
+    // retains its former total-length arithmetic; regions use their own length.
+    let wall_volume = core::f64::consts::TAU * radius * length * original.thickness_m();
+    let wall_mass = wall_volume * density;
+    if !positive(wall_volume) || !positive(wall_mass) {
+        return Err(Error::Invalid("thermal wall inventory is unrepresentable"));
+    }
+    volume.add(wall_volume)?;
+    mass.add(wall_mass)?;
+    if !within_inventory(volume.value, body.volume_m3)
+        || !within_inventory(mass.value, body.mass_kg)
+    {
+        return Err(Error::Invalid(
+            "shared thermal body cannot contain less material than its selected native walls",
         ));
     }
     Ok(())
@@ -112,53 +188,48 @@ pub(super) fn admit(
                 "thermal wall feedback requires a finite nonnegative native work allowance",
             ));
         }
-        let wall = uniform(nodes, id)?;
-        // The same helper checks initial temperature, card, isotropic source
-        // model, complete pinned query bundle and fixed material density.
-        let original = wall
-            .wall()
-            .at_temperature_pinned(
-                port.layers.material,
-                port.layers.temperature_axis,
-                body.initial.temperature_k(),
-                body.initial.temperature_k(),
+        let node = wall_node(nodes, id)?;
+        let duct = node.binding.duct();
+        let radius = duct.uniform_circular_radius_m().ok_or(Error::Invalid(
+            "thermal wall work requires its original circular fixed geometry",
+        ))?;
+        match &node.binding {
+            FiniteGasDgBinding::Uniform(wall) => admit_inventory(
+                id,
+                wall.wall(),
+                radius,
+                duct.total_length(),
+                port,
+                body,
+                &mut volume,
+                &mut mass,
                 cancelled,
-            )
-            .map_err(|error| native_error(id, error))?;
-        let density = original
-            .material()
-            .property(DENSITY_PROPERTY)
-            .ok_or(Error::Invalid(
-                "original thermal wall has no density source",
-            ))?
-            .value_si();
-        if !same_density(density, body_density) {
-            return Err(Error::Invalid(
-                "thermal inventory density must match its original modeled wall material",
-            ));
-        }
-        let radius = wall
-            .duct()
-            .uniform_circular_radius_m()
-            .ok_or(Error::Invalid(
-                "thermal wall work requires its original circular fixed geometry",
-            ))?;
-        // This is the same thin-membrane measure used by native surface inertia,
-        // not a second solid geometry or a changed acoustic volume.
-        let wall_volume =
-            core::f64::consts::TAU * radius * wall.duct().total_length() * original.thickness_m();
-        let wall_mass = wall_volume * density;
-        if !positive(wall_volume) || !positive(wall_mass) {
-            return Err(Error::Invalid("thermal wall inventory is unrepresentable"));
-        }
-        volume.add(wall_volume)?;
-        mass.add(wall_mass)?;
-        if !within_inventory(volume.value, body.volume_m3)
-            || !within_inventory(mass.value, body.mass_kg)
-        {
-            return Err(Error::Invalid(
-                "shared thermal body cannot contain less material than its selected native walls",
-            ));
+            )?,
+            FiniteGasDgBinding::Regional(wall) => {
+                let positions = duct.node_positions();
+                let local = duct.mesh().order + 1;
+                if wall.walls().len() != duct.mesh().elements || wall.walls().is_empty() {
+                    return Err(Error::Invalid(
+                        "thermal wall regions must retain every original element",
+                    ));
+                }
+                for (element, source) in wall.walls().iter().enumerate() {
+                    poll(cancelled)?;
+                    let base = element * local;
+                    let length = positions[base + local - 1] - positions[base];
+                    admit_inventory(
+                        id,
+                        source,
+                        radius,
+                        length,
+                        port,
+                        body,
+                        &mut volume,
+                        &mut mass,
+                        cancelled,
+                    )?;
+                }
+            }
         }
     }
     poll(cancelled)?;
@@ -185,10 +256,7 @@ pub(super) fn prepare_heat(
             continue;
         };
         poll(cancelled)?;
-        let wall = uniform(nodes, id)?;
-        let Some(FiniteGasAcousticNode::Wall(node)) = nodes.get(&id) else {
-            return Err(Error::Invalid("wall heat lost its admitted original owner"));
-        };
+        let node = wall_node(nodes, id)?;
         let input = inputs.get(&id).ok_or(Error::Invalid(
             "wall heat requires the original acoustic input",
         ))?;
@@ -202,7 +270,8 @@ pub(super) fn prepare_heat(
                 },
             )
         };
-        let channel = wall
+        let channel = node
+            .binding
             .duct()
             .prepare_compliant_wall_heat(&node.propagator, budget, cancelled)
             .map_err(convert)?;
@@ -248,47 +317,83 @@ pub(super) fn apply(
     for (&id, port) in ports {
         let Some(controls) = port.wall else { continue };
         poll(cancelled)?;
-        let original = uniform(original_nodes, id)?;
-        let replacement = original
-            .wall()
-            .at_temperature_pinned(
-                port.layers.material,
-                port.layers.temperature_axis,
-                body.initial.temperature_k(),
-                state.temperature_k(),
-                cancelled,
-            )
-            .map_err(|error| native_error(id, error))?;
-        let material = replacement.material().clone();
+        let original = wall_node(original_nodes, id)?;
         let Some(FiniteGasAcousticNode::Wall(node)) = next_nodes.get_mut(&id) else {
             return Err(Error::Invalid(
                 "thermal trial lost its original wall-DG owner",
             ));
         };
-        let FiniteGasDgBinding::Uniform(wall) = &mut node.binding else {
-            return Err(Error::Invalid(
-                "thermal trial changed its original wall source layout",
-            ));
+        let mut refresh = |source: &LocalMaterialWall| {
+            source
+                .at_temperature_pinned(
+                    port.layers.material,
+                    port.layers.temperature_axis,
+                    body.initial.temperature_k(),
+                    state.temperature_k(),
+                    cancelled,
+                )
+                .map_err(|error| native_error(id, error))
         };
-        if wall.wall() != original.wall() {
-            return Err(Error::Invalid(
-                "gas trial changed the thermal wall's original material source",
-            ));
-        }
-        let native = wall
-            .rebind_controlled(
-                replacement,
-                &mut node.state,
-                &mut node.propagator,
-                controls.maximum_absolute_parameter_work_j,
-                cancelled,
-            )
-            .map_err(|error| native_error(id, error))?;
+        let (materials, native) = match (&original.binding, &mut node.binding) {
+            (FiniteGasDgBinding::Uniform(original), FiniteGasDgBinding::Uniform(wall)) => {
+                if wall.wall() != original.wall() {
+                    return Err(Error::Invalid(
+                        "gas trial changed the thermal wall's original material source",
+                    ));
+                }
+                let replacement = refresh(original.wall())?;
+                let materials =
+                    SharedFiniteGasAcousticWallMaterials::Uniform(replacement.material().clone());
+                let native = wall
+                    .rebind_controlled(
+                        replacement,
+                        &mut node.state,
+                        &mut node.propagator,
+                        controls.maximum_absolute_parameter_work_j,
+                        cancelled,
+                    )
+                    .map_err(|error| native_error(id, error))?;
+                (materials, native)
+            }
+            (FiniteGasDgBinding::Regional(original), FiniteGasDgBinding::Regional(wall)) => {
+                if wall.walls() != original.walls() {
+                    return Err(Error::Invalid(
+                        "gas trial changed an original regional wall source",
+                    ));
+                }
+                let replacements = original
+                    .walls()
+                    .iter()
+                    .map(&mut refresh)
+                    .collect::<Result<Vec<_>, Error>>()?;
+                let materials = SharedFiniteGasAcousticWallMaterials::Regional(
+                    replacements
+                        .iter()
+                        .map(|source| source.material().clone())
+                        .collect(),
+                );
+                let native = wall
+                    .rebind_controlled(
+                        replacements,
+                        &mut node.state,
+                        &mut node.propagator,
+                        controls.maximum_absolute_parameter_work_j,
+                        cancelled,
+                    )
+                    .map_err(|error| native_error(id, error))?;
+                (materials, native)
+            }
+            _ => {
+                return Err(Error::Invalid(
+                    "thermal trial changed its original wall source layout",
+                ));
+            }
+        };
         work.add(native.parameter_work_j)?;
         steps.insert(
             id,
             SharedFiniteGasAcousticWallStep {
-                material,
+                materials,
                 native,
                 dissipated_heat_j: heat.by_wall.get(&id).copied().unwrap_or(0.0),
             },

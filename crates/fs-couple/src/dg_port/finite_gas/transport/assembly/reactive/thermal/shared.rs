@@ -22,7 +22,10 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 mod wall;
-pub use wall::{SharedFiniteGasAcousticWallSolve, SharedFiniteGasAcousticWallStep};
+pub use wall::{
+    SharedFiniteGasAcousticWallMaterials, SharedFiniteGasAcousticWallSolve,
+    SharedFiniteGasAcousticWallStep,
+};
 
 /// Hard work limit for all gas endpoint evaluations in one shared-body step.
 pub const MAX_SHARED_THERMAL_ENDPOINT_EVALUATIONS: usize = 1_000_000;
@@ -33,7 +36,7 @@ pub struct SharedFiniteGasAcousticThermalPort<'a> {
     pub layers: MaterialConductionLayers<'a>,
     /// Signed heat into this gas, independently bracketed from the body's net.
     pub exchange: HeatExchangeSolve,
-    /// Optional endpoint material refresh of this original uniform material wall.
+    /// Optional endpoint material refresh of this original uniform/regional wall.
     /// Its signed mechanical storage change is paid by the shared body, separately
     /// from contact heat. Its native solid dissipation may explicitly heat the
     /// same body. None preserves the existing frozen-wall path.
@@ -532,9 +535,10 @@ impl FiniteGasTransportEvolution for SharedEvolution<'_, '_, '_> {
 /// Only after ALL contacts have been evaluated can the net-body residual accept;
 /// opposite hot/cold transfers survive even with zero net heat and unchanged body
 /// temperature. Initial conductivity claims remain pinned through all trials.
-/// Selected original uniform isotropic walls then resolve that same body endpoint
-/// and transfer native displacement/momentum and Maxwell histories at fixed
-/// geometry. Their signed material work joins contact heat in the body residual.
+/// Selected original uniform or regional walls resolve that same body endpoint
+/// and transfer native displacement/momentum and admitted material histories at
+/// fixed geometry. Each original section retains its source, thickness, restraint
+/// and principal axes. Signed material work joins contact heat in the residual.
 /// An opted-in physical Kelvin/Maxwell source heats that body once, integrated
 /// on the original complete frozen sample before any endpoint trials.
 ///

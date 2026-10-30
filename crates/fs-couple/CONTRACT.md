@@ -9948,7 +9948,7 @@ reported contact heat has already been applied.
 This remains a uniform-body, fixed-geometry, negligible-solid-pV-work model
 with effective conduction layers and the existing first-order transport split.
 It does not supply spatial solid gradients, thermal deformation, aperture
-updates or general acoustic-loss partition. Explicit uniform material-wall
+updates or general acoustic-loss partition. Explicit material-wall
 feedback and selected molecular source heating use the original owners
 described below. The G1/G4
 regressions cover opposite nonzero contacts with zero net heat against an
@@ -9959,15 +9959,30 @@ are formatter/source checked; native execution remains unverified.
 ## Finite-body temperature feedback and original acoustic-wall self-heating
 
 Each shared-body thermal port may select `SharedFiniteGasAcousticWallSolve`
-to refresh its original uniform isotropic wall at the solved body temperature.
-Elastic, Young-viscosity Kelvin--Voigt and source-pair Maxwell laws retain the
-complete original material bundle, selected claims, card identity and every
-non-temperature condition. Native `MaterialWallDg::rebind_controlled` retains
+to refresh its original uniform or regional wall at the solved body temperature.
+Isotropic elastic, Young-viscosity Kelvin--Voigt and source-pair Maxwell laws,
+plus principal-aligned orthotropic elastic/proportional Kelvin--Voigt laws,
+retain their complete original material bundles, selected claims, card identity
+and every non-temperature condition. The original material-wall rebind retains
 displacement, conjugate momentum and acoustic history. Each Maxwell arm keeps
 its physical spring extension and viscous offset under the original source
 correspondence; no arm is recreated, reset or matched by coefficient value.
 A relaxation-time-only change affects subsequent loss without instantaneous
 parameter work.
+
+Each regional source keeps its original element, thickness, restraint, query
+conditions and loss model. Inventory sums the native element length times its
+own thickness and circumference; it never charges total duct length to every
+region. All sections share the body's one caloric chart, card and endpoint
+temperature. This is mechanically heterogeneous wall response without spatial
+thermal gradients or an inferred multi-material heat-capacity mixture. Native
+regional rebinding transfers the complete source list in one transaction.
+
+Orthotropic refresh reuses the original principal hoop/axial axes and exact
+normal-compliance reduction. An explicit proportional-viscosity time retains
+its original property role; normal-plane tensor viscosity and generated axial
+memory cannot silently become proportional damping. Source positivity and
+fixed density are checked at every candidate temperature.
 
 The optional `dissipation_heat` budget selects the original solid Kelvin/Maxwell
 source for deposition into this same finite body. After original-owner and
@@ -9984,7 +9999,11 @@ wall at that same body temperature through the existing native transfer.
 
 Reports retain each material receipt, native intervention and deposited wall
 heat, together with total wall heat/work and independently measured final
-acoustic storage. The transport report remains the preceding gas/acoustic
+acoustic storage. `SharedFiniteGasAcousticWallStep.materials` explicitly holds
+`Uniform` or `Regional` receipts; regional entries follow original element
+order. `uniform_material()` and `regional_materials()` expose the corresponding
+layout. No first-element proxy, averaged material, or inferred regional heat/work
+partition is reported. The transport report remains the preceding gas/acoustic
 substage, which exports `D-M`. The enclosing report exports `D-M-H_wall`.
 Each original owner's source heat is checked against its own native decrement
 minus internal molecular heat and its explicit energy allowance. Remainders
@@ -9996,15 +10015,16 @@ density, fixed geometry/thickness/restraint and sufficient shared-body wall
 inventory remain required. Each wall has an explicit parameter-work cap and
 opted-in heat has an explicit complete-state integration budget. Source-arm
 activation/removal, authored spectra without property identities, generated
-normal-plane memory, anisotropy, regional thermal bindings, phase change and
-density changes refuse. Thermal expansion and a thermoelastic entropy model
+normal-plane viscosity/memory, off-axis material frames, independent regional
+temperatures, multi-card thermal mixtures, phase change and density changes refuse. Thermal expansion and a thermoelastic entropy model
 remain outside this bounded path. The original frozen-sample, first-order
 split and source domains still apply.
 
 Failures and cancellation publish no partial body, gas, wall or history state.
 Zero internal source heat preserves the previous body arithmetic. Authored
 regressions cover signed work, self-heating, retained Maxwell memory, changing
-subsequent response, source pins, opt-out and atomic refusal/retry. Formatter,
+subsequent response, source pins, regional inventories and receipts, directional
+restraint/viscosity, opt-out and atomic refusal/retry. Formatter,
 parser and bounded source checks are distinct from native runtime validation;
 native compilation and execution remain unverified.
 

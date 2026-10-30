@@ -1,5 +1,6 @@
 //! Finite body enthalpy pays the original vibrating wall's elastic material work.
 //! These authored laws are regression fixtures, not measured material data.
+#[path = "wall/memory.rs"]
 mod memory;
 
 use super::*;
@@ -432,9 +433,10 @@ fn g1_finite_body_pays_signed_elastic_work_without_inventing_contact_heat() {
         }
         assert_eq!(updated.state.step_count(), native.state.step_count());
         assert_eq!(updated.propagator.dt(), native.propagator.dt());
-        assert_eq!(update.material, *wall_source(candidate.nodes()).material());
+        let material = update.uniform_material().unwrap();
+        assert_eq!(material, wall_source(candidate.nodes()).material());
         assert_eq!(
-            update.material.query_point(),
+            material.query_point(),
             body_point(temperature)
                 .axes()
                 .iter()
@@ -443,13 +445,7 @@ fn g1_finite_body_pays_signed_elastic_work_without_inventing_contact_heat() {
         );
         for name in ["density", "young_modulus", "poisson_ratio"] {
             assert_eq!(
-                update
-                    .material
-                    .property(name)
-                    .unwrap()
-                    .answer()
-                    .receipt
-                    .selected,
+                material.property(name).unwrap().answer().receipt.selected,
                 wall_source(&nodes)
                     .material()
                     .property(name)
@@ -460,20 +456,13 @@ fn g1_finite_body_pays_signed_elastic_work_without_inventing_contact_heat() {
             );
         }
         assert!(
-            (update
-                .material
-                .property("young_modulus")
-                .unwrap()
-                .value_si()
-                - young(temperature))
-            .abs()
+            (material.property("young_modulus").unwrap().value_si() - young(temperature)).abs()
                 < 1e-6
         );
-        assert_eq!(update.material.card_identity(), card.content_hash());
+        assert_eq!(material.card_identity(), card.content_hash());
         if delta_t > 0.0 {
             assert_eq!(
-                update
-                    .material
+                material
                     .property("young_modulus")
                     .unwrap()
                     .answer()

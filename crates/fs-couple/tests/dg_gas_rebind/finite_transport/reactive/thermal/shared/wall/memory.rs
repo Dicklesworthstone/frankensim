@@ -412,7 +412,7 @@ fn g1_original_maxwell_heat_warms_one_body_and_preserves_physical_memory() {
         after_node.state.cumulative_dissipated_j(),
         wall_node(frozen.nodes()).state.cumulative_dissipated_j()
     );
-    let material = &step.wall_updates[&30].material;
+    let material = step.wall_updates[&30].uniform_material().unwrap();
     assert_eq!(material.query(), body_point(new_temperature));
     for name in ["young_modulus", "arm_modulus", "arm_time"] {
         assert_eq!(
