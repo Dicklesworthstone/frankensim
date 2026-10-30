@@ -208,10 +208,14 @@ impl CoupledModalSystem {
             .map_err(|e| duct_error(e, gate))?;
         let n = self.mode_count();
         let terminal_ports = terminal.map_or(&[][..], |(_, ports)| ports);
+        let sealed = branches
+            .iter()
+            .filter(|branch| branch.duct().outlet() == DgBoundary::Closed)
+            .count();
         if flow_column.len() != n
             || flow_column.iter().any(|b| !b.is_finite())
             || !flow_column.iter().any(|b| *b != 0.0)
-            || view.ports().len() != terminal_ports.len() + 1
+            || view.ports().len() != terminal_ports.len() + 1 + sealed
             || terminal.is_some_and(|(owner, ports)| owner.ports() != ports.len())
             || terminal_ports
                 .iter()
@@ -239,16 +243,17 @@ impl CoupledModalSystem {
             original
                 .admit_frequency(omega_rad_s)
                 .map_err(|e| duct_error(e, gate))?;
-            let (DgBoundary::Port(branch_inlet), DgBoundary::Port(branch_outlet)) =
-                (branch.duct().inlet(), branch.duct().outlet())
-            else {
-                return Err(
-                    invalid("continuous finite branch lost its original two flow ports").into(),
-                );
+            let DgBoundary::Port(branch_inlet) = branch.duct().inlet() else {
+                return Err(invalid("continuous finite branch lost its original inlet flow port").into());
             };
-            if original.ports().len() != 2
-                || branch_inlet == branch_outlet
-                || !terminal_ports.contains(&branch.port())
+            let branch_outlet = match branch.duct().outlet() {
+                DgBoundary::Port(outlet) => Some(outlet),
+                DgBoundary::Closed => None,
+                _ => return Err(invalid("continuous finite branch lost its admitted distal boundary").into()),
+            };
+            if original.ports().len() != 1 + usize::from(branch_outlet.is_some())
+                || branch_outlet == Some(branch_inlet)
+                || terminal_ports.contains(&branch.port()) != branch_outlet.is_some()
                 || branches[..index]
                     .iter()
                     .any(|other| other.port() == branch.port())
@@ -282,7 +287,8 @@ impl CoupledModalSystem {
                         Some(index) => (
                             &branch_views[index],
                             branch_offsets[index],
-                            branch_ports[index].1,
+                            branch_ports[index].1.ok_or_else(||
+                                invalid("sealed branch cannot occupy an exterior harmonic channel"))?,
                         ),
                         None => (&view, 0, *id),
                     };
@@ -419,6 +425,11 @@ impl CoupledModalSystem {
             };
             inflows.push((id, -outward));
         }
+        for (index, branch) in branches.iter().enumerate() {
+            if branch_ports[index].1.is_none() {
+                inflows.push((branch.port(), -state[junction_offset + index]));
+            }
+        }
         let terminal = terminal_source
             .as_ref()
             .map(|load| {
@@ -465,17 +476,14 @@ impl CoupledModalSystem {
         for (index, (branch, original)) in branches.iter().zip(&branch_views).enumerate() {
             poll(Some(gate))?;
             let local_offset = offset + branch_offsets[index];
-            let terminal_index = terminal_ports
-                .iter()
-                .position(|id| *id == branch.port())
-                .ok_or_else(|| {
-                    invalid("continuous branch observation lost its terminal channel")
-                })?;
             let junction_flow = state[junction_offset + index];
-            let inputs = [
-                (branch_ports[index].0, junction_flow),
-                (branch_ports[index].1, -state[flow_offset + terminal_index]),
-            ];
+            let mut inputs = vec![(branch_ports[index].0, junction_flow)];
+            if let Some(outlet) = branch_ports[index].1 {
+                let terminal_index = terminal_ports.iter()
+                    .position(|id| *id == branch.port())
+                    .ok_or_else(|| invalid("continuous branch observation lost its terminal channel"))?;
+                inputs.push((outlet, -state[flow_offset + terminal_index]));
+            }
             let response = original
                 .observe_harmonic(
                     omega_rad_s,

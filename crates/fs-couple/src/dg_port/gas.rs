@@ -475,11 +475,13 @@ impl DgPortLoad {
                     .inlet
                     .impedance_pa_s_m3
             }
+            _ if branch_coupling.is_none() => propagator.port_response(state, self.inlet)
+                .map_err(duct_error)?.impedance_pa_s_m3,
             _ => {
-                propagator
-                    .port_response(state, self.inlet)
-                    .map_err(duct_error)?
-                    .impedance_pa_s_m3
+                if response.ports != [self.inlet] {
+                    return Err(invalid("live DG inlet-only response lost sealed branch ownership"));
+                }
+                response.impedance_pa_s_m3[0]
             }
         };
         if !impedance.is_finite() || impedance <= 0.0 {

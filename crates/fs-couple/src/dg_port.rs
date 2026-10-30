@@ -312,15 +312,26 @@ impl DgPortLoad {
     pub fn port_response(&self) -> Result<DgPortResponse, AcousticRealizeError> {
         match &self.terminal {
             Some(terminal) => Ok(self.terminal_relation(terminal)?.inlet),
-            None => self.propagator.port_response(&self.state, self.inlet)
-                .map_err(AcousticRealizeError::Duct),
+            None if self.branch_coupling.is_none() => self.propagator
+                .port_response(&self.state, self.inlet).map_err(AcousticRealizeError::Duct),
+            None => {
+                let response = self.multiport_response()?;
+                if response.ports != [self.inlet] {
+                    return Err(invalid("DG inlet-only response lost its sealed branch ownership"));
+                }
+                Ok(DgPortResponse {
+                    history_pressure_pa: response.history_pressure_pa[0],
+                    impedance_pa_s_m3: response.impedance_pa_s_m3[0],
+                })
+            },
         }
     }
 
     /// Retain private DG and terminal candidates until the nonlinear participant
     /// validates its own state and work. Dropping this trial publishes nothing.
     pub(crate) fn preview_step(
-        &mut self, volume_flow_m3_s: f64,
+        &mut self,
+        volume_flow_m3_s: f64,
     ) -> Result<DgPortTrial<'_>, AcousticRealizeError> {
         if !volume_flow_m3_s.is_finite() {
             return Err(invalid("DG inlet flow must be finite"));
@@ -355,7 +366,7 @@ impl DgPortLoad {
         let mut output = self.propagator.step(&mut state, &main_inputs)
             .map_err(AcousticRealizeError::Duct)?;
         self.propagator.sync_nodal(&mut state).map_err(AcousticRealizeError::Duct)?;
-        branch::validate_candidate(&state, &output, inputs.len())?;
+        branch::validate_candidate(&state, &output, main_inputs.len())?;
         let (branch_states, branch_frames, original_pressure_scales) =
             self.step_branches(&inputs, &main_inputs, &junction_flows, &mut output)?;
         if !branch_frames.is_empty() { branch::validate_candidate(&state, &output, inputs.len())?; }
@@ -511,4 +522,3 @@ mod tests;
 mod terminal_tests;
 #[cfg(test)]
 mod terminal_group_tests;
-

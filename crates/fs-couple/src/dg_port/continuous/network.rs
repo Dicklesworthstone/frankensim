@@ -121,7 +121,12 @@ impl DgPortLoad {
             ));
         }
         let original = self.duct.continuous_operator();
-        if original.ports().len() != 1 + self.terminal_ports().len()
+        let sealed = self
+            .branches
+            .iter()
+            .filter(|branch| branch.duct().outlet() == DgBoundary::Closed)
+            .count();
+        if original.ports().len() != 1 + self.terminal_ports().len() + sealed
             || self
                 .terminal
                 .as_ref()
@@ -133,10 +138,11 @@ impl DgPortLoad {
         }
         let mut dimension = original.dimension();
         for branch in &self.branches {
+            let sealed = branch.duct().outlet() == DgBoundary::Closed;
             if branch.propagator().dt().to_bits() != self.propagator.dt().to_bits()
                 || branch.state().step_count() != self.state.step_count()
-                || branch.duct().continuous_operator().ports().len() != 2
-                || !self.terminal_ports().contains(&branch.port())
+                || branch.duct().continuous_operator().ports().len() != if sealed { 1 } else { 2 }
+                || self.terminal_ports().contains(&branch.port()) == sealed
             {
                 return Err(invalid(
                     "continuous branch lost its original ports or shared accepted clock",

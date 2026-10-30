@@ -7765,13 +7765,23 @@ is made by these synthetic constitutive tests.
 
 ## Finite DG side branches
 
-`DgPortLoad::new_with_terminal_branches` joins original two-port `DgDuct` branches to distinct existing bore side ports. Each branch retains its actual geometry, material gas, viscothermal memory, original propagator and state. Junction mean pressure is common and held volume flows are opposite. The constant junction matrix is eliminated through the existing prepared LU; the resulting complete external mean-port response enters the unchanged terminal MIMO coupling with every cross term retained.
+`DgPortLoad::new_with_terminal_branches` joins original `DgDuct` branches to distinct existing bore side ports. Each branch has an inlet port and either an outlet port or an exact rigid distal closure. Each retains its actual geometry, material gas, viscothermal memory, original propagator and state. Junction mean pressure is common and held volume flows are opposite. The constant junction matrix is eliminated through the existing prepared LU; the resulting complete external mean-port response enters the unchanged terminal MIMO coupling with every cross term retained.
 
 External IDs remain the authored bore-side IDs, but terminal pressure, work and microphone flow belong to the actual branch outlets. `DgBranchFrame` separately exposes junction flow, both independently integrated pressure/work observations and the original branch step. Compressible branch storage permits different junction and outlet flows; neither is substituted for the other.
 
 Bore, branch and rational histories publish together only after every original candidate and signed junction/terminal work check accepts. Main `state()` retains its original meaning; `branches()` exposes the independent states. `stored_energy_j`, cumulative loss and coupled-source ledgers sum every original DG owner once. Rational terminal exchange is reported separately without fabricating a storage function.
 
-Cold admission requires complete terminal ownership, two-port branches without nested side ports, common equilibrium junction pressure, a common clock, resolved native wall bands and a combined acoustic-plus-memory DOF allowance before exponentials. Different coherent gas compositions at the junction are permitted. An empty branch list preserves existing scalar and multiport arithmetic. This is a finite one-dimensional duct attached at a zero-volume point junction: it does not add three-dimensional entrance/jet flow, moving pads, or a continuous-time joint exponential. Coupling-clock, spatial and wall-fit refinement remain separate qualifications.
+Cold admission requires complete terminal ownership, branches without nested side ports, common equilibrium junction pressure, a common clock, resolved native wall bands and a combined acoustic-plus-memory DOF allowance before exponentials. Different coherent gas compositions at the junction are permitted. An empty branch list preserves existing scalar and multiport arithmetic. This is a finite one-dimensional duct attached at a zero-volume point junction: it does not add three-dimensional entrance/jet flow or moving pads. The held-flow backend is not a continuous-time joint exponential. Coupling-clock, spatial and wall-fit refinement remain separate qualifications.
+
+A rigidly sealed finite branch remains a dynamic internal volume. Its original
+closed DG boundary contributes no exterior port, pressure frame or radiation
+row. Its inlet stays in the full junction solve, and all stored energy,
+viscothermal memory and independently checked junction work remain in the
+aggregate account. `new_with_closed_branches` also supports a bore with only
+its source inlet and no rational exterior. Continuous modal/DG evolution,
+harmonic response and live regional gas rebinding retain this same topology.
+This is a fixed seal: moving pads, opening a live seal and seal leakage require
+their own physical owners.
 
 
 ## Finite material-gas chimneys in authored DG instruments
@@ -7785,6 +7795,18 @@ viscothermal memory and gas dependence. Parent wall poles, band and tolerance
 apply to each branch; the common state allowance covers the main bore and all
 chimneys before any propagator or radiation fit is constructed. Full
 thermochemical receipts remain in the existing source record collection.
+
+The parser admits up to `MAX_DG_SIDE_PORTS` (32) distinct internal side
+attachments. A `dg_terminal_closed` on a finite chimney selects its original
+rigid distal DG boundary before the exterior is baked. Only actual radiating
+openings count against the existing eight-aperture radiation ceiling; omitted
+seals do not create artificial zero-flow exterior rows. Closed flush channels
+retain their existing terminal-channel semantics. The complete internal DOF
+budget still counts every sealed chimney. Synthetic regressions compare this
+topology against explicit zero-flow termination, retain mixed mutual radiation,
+exercise continuous resonance and render nine authored chimneys through the
+existing source and microphone owners. They do not qualify full flute geometry
+or instrument realism.
 
 `new_with_computed_baffled_branches` binds the actual branch outlet area and
 gas to the original complete radiation matrix. The source retains every

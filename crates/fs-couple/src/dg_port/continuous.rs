@@ -321,6 +321,15 @@ impl DgPortLoad {
                 port_work_residual_j: residual,
             });
         }
+        for (branch, junction) in self.branches.iter().zip(junctions) {
+            if branch.duct().outlet() == DgBoundary::Closed {
+                ports.push(DgTrajectoryPort {
+                    id: branch.port(),
+                    pressure_impulse_pa_s: junction.bore_pressure_impulse_pa_s,
+                    work_into_duct_j: -junction.bore_work_j,
+                });
+            }
+        }
         let original = self.duct.continuous_operator();
         let main_dimension = original.dimension();
         let (state, mut output) = original
@@ -339,19 +348,30 @@ impl DgPortLoad {
         let mut branch_frames = Vec::with_capacity(self.branches.len());
         let mut offset = main_dimension;
         for (index, (branch, junction)) in self.branches.iter().zip(junctions).enumerate() {
-            let (DgBoundary::Port(inlet), DgBoundary::Port(outlet)) =
-                (branch.duct().inlet(), branch.duct().outlet())
-            else {
-                return Err(invalid(
-                    "continuous branch lost its two original flow ports",
-                ));
+            let DgBoundary::Port(inlet) = branch.duct().inlet() else {
+                return Err(invalid("continuous branch lost its original inlet flow port"));
             };
-            let terminal_index = self
-                .terminal_ports()
-                .iter()
-                .position(|id| *id == branch.port())
-                .ok_or_else(|| invalid("continuous branch has no original distal terminal"))?;
-            let external = &terminals[terminal_index];
+            let mut branch_ports = vec![DgTrajectoryPort {
+                id: inlet,
+                pressure_impulse_pa_s: junction.branch_pressure_impulse_pa_s,
+                work_into_duct_j: junction.branch_work_j,
+            }];
+            let outlet = match branch.duct().outlet() {
+                DgBoundary::Port(outlet) => {
+                    let terminal_index = self.terminal_ports().iter()
+                        .position(|id| *id == branch.port())
+                        .ok_or_else(|| invalid("continuous branch has no original distal terminal"))?;
+                    let external = &terminals[terminal_index];
+                    branch_ports.push(DgTrajectoryPort {
+                        id: outlet,
+                        pressure_impulse_pa_s: external.pressure_impulse_pa_s,
+                        work_into_duct_j: -external.port_work_j,
+                    });
+                    Some(outlet)
+                },
+                DgBoundary::Closed => None,
+                _ => return Err(invalid("continuous branch lost its admitted distal boundary")),
+            };
             let view = branch.duct().continuous_operator();
             let end = offset + view.dimension();
             let (branch_state, branch_output) = view
@@ -359,18 +379,7 @@ impl DgPortLoad {
                     branch.state(),
                     endpoint[offset..end].to_vec(),
                     dt,
-                    &[
-                        DgTrajectoryPort {
-                            id: inlet,
-                            pressure_impulse_pa_s: junction.branch_pressure_impulse_pa_s,
-                            work_into_duct_j: junction.branch_work_j,
-                        },
-                        DgTrajectoryPort {
-                            id: outlet,
-                            pressure_impulse_pa_s: external.pressure_impulse_pa_s,
-                            work_into_duct_j: -external.port_work_j,
-                        },
-                    ],
+                    &branch_ports,
                     owner_losses[index + 1],
                     absolute_tolerance_j,
                     relative_tolerance,
@@ -434,22 +443,17 @@ impl DgPortLoad {
                     "continuous junction violates original pressure continuity or integrated work",
                 ));
             }
-            let distal = *branch_output
-                .port_outputs
-                .iter()
-                .find(|port| port.id == outlet)
-                .ok_or_else(|| {
-                    invalid("continuous branch omitted its original distal observation")
-                })?;
-            let external_port = output
-                .port_outputs
-                .iter_mut()
-                .find(|port| port.id == branch.port())
-                .ok_or_else(|| invalid("continuous branch lost its external channel identity"))?;
-            *external_port = fs_duct::dg::PortOutput {
-                id: branch.port(),
-                ..distal
-            };
+            if let Some(outlet) = outlet {
+                let distal = *branch_output.port_outputs.iter()
+                    .find(|port| port.id == outlet)
+                    .ok_or_else(|| invalid("continuous branch omitted its original distal observation"))?;
+                let external_port = output.port_outputs.iter_mut()
+                    .find(|port| port.id == branch.port())
+                    .ok_or_else(|| invalid("continuous branch lost its external channel identity"))?;
+                *external_port = fs_duct::dg::PortOutput { id: branch.port(), ..distal };
+            } else {
+                output.port_outputs.retain(|port| port.id != branch.port());
+            }
             let ledger = &branch_output.ledger;
             output.ledger.stored_energy_j += ledger.stored_energy_j;
             output.ledger.port_work_step_j += ledger.port_work_step_j;
@@ -476,7 +480,7 @@ impl DgPortLoad {
                 / (output.ledger.cumulative_port_work_j.abs()
                     + output.ledger.cumulative_parameter_work_j.abs())
                 .max(1e-300);
-            branch::validate_candidate(&state, &output, original.ports().len())?;
+            branch::validate_candidate(&state, &output, self.terminal_ports().len() + 1)?;
         }
         let terminal_frame = match self.duct.outlet() {
             DgBoundary::Port(id) => terminal_frames.iter().find(|f| f.port == id).copied(),

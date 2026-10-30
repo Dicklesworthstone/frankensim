@@ -9,22 +9,24 @@ use super::{
     MAX_DG_TERMINAL_TRANSVERSE_CELLS,
 };
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::bernoulli_aperture::radiation::environment::multiport::bake::MAX_BAFFLED_MIMO_PORTS;
 use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationInputError;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
-use crate::bernoulli_aperture::radiation::environment::multiport::bake::MAX_BAFFLED_MIMO_PORTS;
 use crate::pcm_wav::baffled::openings::CircularOpening;
 use fs_duct::dg::{
     DgBoundary, DgDuct, DgMesh, DgSidePort, DgWallResolution, MAX_DG_ELEMENTS, MAX_DG_ORDER,
-    MAX_DG_PROPAGATOR_DOFS, PortId,
+    MAX_DG_PROPAGATOR_DOFS, MAX_DG_SIDE_PORTS, PortId,
 };
 use fs_duct::profile::gas_field::GasFieldDuctError;
 use fs_duct::{Duct, Segment};
 use fs_exec::CancelGate;
 use fs_matdb::QueryPoint;
 use fs_material::gas::GasState;
-use fs_material::gas_field::{AxialGasField, MAX_FIELD_STATIONS};
 use fs_material::gas_field::input::PrimitiveGasColumns;
-use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
+use fs_material::gas_field::{AxialGasField, MAX_FIELD_STATIONS};
+use fs_material::gas_species::input::{
+    GasInputError, GasRecord, ThermochemicalSources, read_gas_record,
+};
 use std::str::SplitAsciiWhitespace;
 
 /// Shared source-backed solid wall declaration for every authored DG wind path.
@@ -165,8 +167,10 @@ impl DgSourceInput {
     /// sources. Bore/exterior equilibrium pressures must agree. The original
     /// bake covers mechanical Nyquist, independent of the microphone band.
     ///
-    /// Before dg_radiation, optional dg_side_openings COUNT declares up to seven
-    /// additional flush circular openings, followed by exactly COUNT rows:
+    /// Before dg_radiation, optional dg_side_openings COUNT declares up to the
+    /// original DG side-port budget (32), followed by exactly COUNT rows.
+    /// At most eight actual exterior openings, including the axial outlet,
+    /// can share the current radiation owner. A flush circular opening uses:
     /// dg_side_opening PORT_ID DOWNSTREAM_ELEMENT X_M Y_M RADIUS_M
     /// Each selects an existing interior mesh face, a unique ID above 1, and
     /// independent physical opening geometry in the common rigid baffle. Its
@@ -188,6 +192,8 @@ impl DgSourceInput {
     /// dg_terminal_closed PORT_ID
     /// dg_terminal_slit PORT_ID WIDTH_M HEIGHT_M LENGTH_M CELLS MAX_MACH
     /// dg_terminal_circular PORT_ID RADIUS_M LENGTH_M CELLS MAX_MACH
+    /// A closed finite chimney retains its complete DG volume and wall memory
+    /// with a rigid distal boundary, and consumes no exterior matrix row.
     /// Omitted ports remain directly connected to the full exterior matrix.
     /// Each passage uses the actual terminal gas and the original unsteady transverse
     /// momentum owner. Its fluid memory has a separate explicit cell budget;
@@ -323,7 +329,7 @@ impl DgSourceInput {
             if fields.clone().next() == Some("dg_side_openings") {
                 let mut row = Row { line: radiation_line, fields: &mut fields };
                 row.word()?;
-                let count = row.count(MAX_BAFFLED_MIMO_PORTS - 1)?;
+                let count = row.count(MAX_DG_SIDE_PORTS)?;
                 row.finish()?;
                 source.side_openings.reserve(count);
                 for _ in 0..count {
@@ -435,6 +441,12 @@ impl DgSourceInput {
                     source.terminal_channels.push(channel);
                 }
                 (radiation_line, fields) = next_row()?;
+            }
+            let radiating = source.side_openings.len() + 1 - source.chimneys.iter()
+                .filter(|chimney| source.closed_chimney(chimney.port)).count();
+            if radiating > MAX_BAFFLED_MIMO_PORTS {
+                return Err(bad(radiation_line,
+                    "unsealed DG openings exceed the exterior radiation aperture budget").into());
             }
             let mut row = Row { line: radiation_line, fields: &mut fields };
             if row.word()? != "dg_radiation" || row.word()? != "computed-baffled" {
@@ -559,15 +571,25 @@ impl DgSourceInput {
         self.radiation.as_ref().map(|(_, record)| record)
     }
 
+    fn closed_chimney(&self, port: PortId) -> bool {
+        self.chimneys.iter().any(|chimney| chimney.port == port)
+            && self.terminal_channels.iter().any(|channel| {
+                channel.port == port && matches!(channel.kind, DgTerminalChannelKind::Closed)
+            })
+    }
+
     fn prepare_chimneys(&self, gate: &CancelGate) -> Result<Vec<DgBranch>, DgSourceError> {
         self.chimneys.iter().map(|chimney| {
             checkpoint(gate, self.line)?;
             let geometry = Duct { segments: vec![Segment::Cylinder {
                 radius: chimney.radius_m, length: chimney.length_m,
             }] };
+            let outlet = if self.closed_chimney(chimney.port) {
+                DgBoundary::Closed
+            } else { DgBoundary::Port(PortId(1)) };
             let duct = DgDuct::new(
                 &geometry, chimney.gas.state(), chimney.mesh,
-                DgBoundary::Port(PortId(0)), DgBoundary::Port(PortId(1)),
+                DgBoundary::Port(PortId(0)), outlet,
             ).and_then(|duct| duct.with_viscothermal(
                 self.poles, self.band_hz, self.maximum_relative_error,
             )).map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?;
@@ -621,7 +643,10 @@ impl DgSourceInput {
     }
 
     fn prepare_with_solid_wall(
-        self, ambient: &GasState, dt: f64, gate: &CancelGate,
+        self,
+        ambient: &GasState,
+        dt: f64,
+        gate: &CancelGate,
         wall_band_hz: Option<[f64; 2]>,
         bind_wall: impl FnOnce(DgDuct) -> Result<DgDuct, DgSourceError>,
         bind_branches: impl FnOnce(Vec<DgBranch>) -> Result<Vec<DgBranch>, DgSourceError>,
@@ -673,13 +698,20 @@ impl DgSourceInput {
         let owner = bind_wall(owner)?;
         checkpoint(gate, self.line)?;
         let branches = bind_branches(self.prepare_chimneys(gate)?)?;
+        let sealed: Vec<_> = branches
+            .iter()
+            .filter(|branch| branch.duct.outlet() == DgBoundary::Closed)
+            .map(|branch| branch.port)
+            .collect();
         let load = if let Some((controls, exterior)) = self.radiation {
             let mut openings = Vec::with_capacity(self.side_openings.len() + 1);
             openings.push((PortId(1), CircularOpening {
                 center_m: [0.0; 2],
                 radius_m: fs_math::det::sqrt(owner.outlet_area_m2() / core::f64::consts::PI),
             }));
-            openings.extend(self.side_openings.iter().map(|(port, aperture)| (port.id, *aperture)));
+            openings.extend(self.side_openings.iter()
+                .filter(|(port, _)| !sealed.contains(&port.id))
+                .map(|(port, aperture)| (port.id, *aperture)));
             DgPortLoad::new_with_computed_baffled_branches_at_dt(
                 owner, dt, self.exponential_tolerance, self.maximum_dofs,
                 &exterior, controls, &openings, branches, gate,
@@ -689,7 +721,12 @@ impl DgSourceInput {
                 .map_err(DgSourceError::Physics)?
         };
         checkpoint(gate, self.line)?;
-        load.with_terminal_channels(self.terminal_channels, self.maximum_terminal_transverse_cells)
+        let terminal_channels = self
+            .terminal_channels
+            .into_iter()
+            .filter(|channel| !sealed.contains(&channel.port))
+            .collect();
+        load.with_terminal_channels(terminal_channels, self.maximum_terminal_transverse_cells)
             .map_err(DgSourceError::Physics)
     }
 }

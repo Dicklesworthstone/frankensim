@@ -6,7 +6,8 @@ use crate::dg_port::terminal::TerminalSolve;
 pub(in crate::dg_port) struct BranchCoupling {
     pub(super) main_indices: Vec<usize>,
     pub(super) branch_inlets: Vec<usize>,
-    pub(super) branch_outlets: Vec<usize>,
+    pub(super) branch_outlets: Vec<Option<usize>>,
+    external_indices: Vec<usize>,
     ports: Vec<PortId>,
     solve: TerminalSolve,
     // x = A^-1(H_main,j - H_branch,in) + transfer * q_external.
@@ -21,7 +22,19 @@ impl BranchCoupling {
         main: &DgMultiportResponse,
         branches: &[DgBranchLoad],
     ) -> Result<Self, AcousticRealizeError> {
-        let n = main.ports.len();
+        let original_count = main.ports.len();
+        let external_indices: Vec<_> = main
+            .ports
+            .iter()
+            .enumerate()
+            .filter_map(|(index, port)| {
+                (!branches
+                    .iter()
+                    .any(|branch| branch.port == *port && branch.outlet.is_none()))
+                .then_some(index)
+            })
+            .collect();
+        let n = external_indices.len();
         let b = branches.len();
         let responses = responses(branches)?;
         let mut main_indices = Vec::with_capacity(b);
@@ -32,8 +45,9 @@ impl BranchCoupling {
                 .ok_or_else(|| invalid("DG branch junction is missing from the original bore basis"))?);
             branch_inlets.push(response.ports.iter().position(|id| *id == branch.inlet)
                 .ok_or_else(|| invalid("DG branch omitted its original inlet"))?);
-            branch_outlets.push(response.ports.iter().position(|id| *id == branch.outlet)
-                .ok_or_else(|| invalid("DG branch omitted its original outlet"))?);
+            branch_outlets.push(branch.outlet.map(|outlet|
+                response.ports.iter().position(|id| *id == outlet)
+                    .ok_or_else(|| invalid("DG branch omitted its original outlet"))).transpose()?);
         }
         let mut matrix = vec![0.0; b * b];
         let mut input = vec![0.0; b * n];
@@ -41,38 +55,43 @@ impl BranchCoupling {
         let mut impedance = vec![0.0; n * n];
         for row in 0..b {
             let branch = &responses[row];
+            let width = branch.ports.len();
             let inlet = branch_inlets[row];
             let outlet = branch_outlets[row];
             for col in 0..b {
                 matrix[row * b + col] = main.impedance_pa_s_m3[
-                    main_indices[row] * n + main_indices[col]];
+                    main_indices[row] * original_count + main_indices[col]];
                 if row == col {
-                    matrix[row * b + col] += branch.impedance_pa_s_m3[2 * inlet + inlet];
+                    matrix[row * b + col] += branch.impedance_pa_s_m3[width * inlet + inlet];
                 }
             }
             for col in 0..n {
-                input[row * n + col] = match main_indices.iter().position(|&i| i == col) {
-                    Some(index) if index == row => -branch.impedance_pa_s_m3[2 * inlet + outlet],
+                input[row * n + col] = match main_indices.iter().position(|&i| i == external_indices[col]) {
+                    Some(index) if index == row => -branch.impedance_pa_s_m3[
+                        width * inlet + outlet.ok_or_else(|| invalid("sealed DG branch acquired an exterior column"))?],
                     Some(_) => 0.0,
-                    None => main.impedance_pa_s_m3[main_indices[row] * n + col],
+                    None => main.impedance_pa_s_m3[main_indices[row] * original_count + external_indices[col]],
                 };
             }
         }
         for row in 0..n {
-            if let Some(index) = main_indices.iter().position(|&i| i == row) {
+            if let Some(index) = main_indices.iter().position(|&i| i == external_indices[row]) {
                 let branch = &responses[index];
+                let width = branch.ports.len();
                 let inlet = branch_inlets[index];
-                let outlet = branch_outlets[index];
-                output[row * b + index] = branch.impedance_pa_s_m3[2 * outlet + inlet];
-                impedance[row * n + row] = branch.impedance_pa_s_m3[2 * outlet + outlet];
+                let outlet = branch_outlets[index]
+                    .ok_or_else(|| invalid("sealed DG branch acquired an exterior row"))?;
+                output[row * b + index] = branch.impedance_pa_s_m3[width * outlet + inlet];
+                impedance[row * n + row] = branch.impedance_pa_s_m3[width * outlet + outlet];
             } else {
                 for col in 0..b {
                     output[row * b + col] =
-                        -main.impedance_pa_s_m3[row * n + main_indices[col]];
+                        -main.impedance_pa_s_m3[external_indices[row] * original_count + main_indices[col]];
                 }
                 for col in 0..n {
-                    if !main_indices.contains(&col) {
-                        impedance[row * n + col] = main.impedance_pa_s_m3[row * n + col];
+                    if !main_indices.contains(&external_indices[col]) {
+                        impedance[row * n + col] = main.impedance_pa_s_m3[
+                            external_indices[row] * original_count + external_indices[col]];
                     }
                 }
             }
@@ -98,7 +117,8 @@ impl BranchCoupling {
             return Err(invalid("DG branch condensation left the finite passive mean-port domain"));
         }
         Ok(Self {
-            main_indices, branch_inlets, branch_outlets, ports: main.ports.clone(),
+            ports: external_indices.iter().map(|&index| main.ports[index]).collect(),
+            main_indices, branch_inlets, branch_outlets, external_indices,
             solve, transfer, output, impedance,
         })
     }
@@ -113,15 +133,25 @@ impl BranchCoupling {
     }
 
     pub(in crate::dg_port) fn response(
-        &self, main: DgMultiportResponse, branches: &[DgBranchLoad],
+        &self,
+        main: DgMultiportResponse,
+        branches: &[DgBranchLoad],
     ) -> Result<DgMultiportResponse, AcousticRealizeError> {
         let branches = responses(branches)?;
         let history = self.junction_history(&main, &branches)?;
         let b = branches.len();
-        let mut pressure = main.history_pressure_pa;
-        for (i, &slot) in self.main_indices.iter().enumerate() {
-            pressure[slot] = branches[i].history_pressure_pa[self.branch_outlets[i]];
-        }
+        let mut pressure: Vec<_> = self
+            .external_indices
+            .iter()
+            .map(|&original| {
+                if let Some(index) = self.main_indices.iter().position(|&slot| slot == original) {
+                    branches[index].history_pressure_pa[self.branch_outlets[index]
+                        .expect("only unsealed branches have exterior rows")]
+                } else {
+                    main.history_pressure_pa[original]
+                }
+            })
+            .collect();
         for (row, value) in pressure.iter_mut().enumerate() {
             for junction in 0..b {
                 *value += self.output[row * b + junction] * history[junction];

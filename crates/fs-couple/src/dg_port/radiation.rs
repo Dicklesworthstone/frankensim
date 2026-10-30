@@ -209,15 +209,20 @@ fn admit_openings(
     openings: &[(PortId, CircularOpening)],
 ) -> Result<(), AcousticRealizeError> {
     use crate::bernoulli_aperture::radiation::environment::multiport::bake::MAX_BAFFLED_MIMO_PORTS;
+    let sealed = branches
+        .iter()
+        .filter(|branch| branch.duct.outlet() == DgBoundary::Closed)
+        .count();
     let expected = duct.side_ports().len()
-        + usize::from(matches!(duct.outlet(), DgBoundary::Port(_)));
+        + usize::from(matches!(duct.outlet(), DgBoundary::Port(_))) - sealed;
     if openings.is_empty() || openings.len() > MAX_BAFFLED_MIMO_PORTS
         || openings.len() != expected
     {
-        return Err(invalid("computed DG radiation must bind every non-inlet port within the original aperture budget"));
+        return Err(invalid("computed DG radiation must bind every unsealed non-inlet port within the original aperture budget"));
     }
     for (index, (port, aperture)) in openings.iter().enumerate() {
         if duct.inlet() == DgBoundary::Port(*port)
+            || branches.iter().any(|branch| branch.port == *port && branch.duct.outlet() == DgBoundary::Closed)
             || openings[..index].iter().any(|(other, _)| other == port)
             || !aperture.radius_m.is_finite() || aperture.radius_m <= 0.0
             || !aperture.center_m.iter().all(|value| value.is_finite())

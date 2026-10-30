@@ -18,8 +18,9 @@ pub struct DgBranch {
     /// Stable external channel ID. After attachment it denotes the branch's
     /// OUTER outlet, while the same original bore ID is its internal junction.
     pub port: PortId,
-    /// Exactly two flow ports: original inlet and outlet. Local PortIds belong
-    /// to this duct and may coincide with IDs on other independently owned ducts.
+    /// One inlet flow port and either an outlet flow port or an exact rigid
+    /// closure. A sealed branch retains all acoustic and wall-memory state but
+    /// has no exterior radiation channel. Local PortIds belong to this duct.
     /// Side ports on a branch are refused by this bounded star topology.
     pub duct: DgDuct,
 }
@@ -32,7 +33,7 @@ pub struct DgBranchLoad {
     propagator: DgPropagator,
     pub(super) state: DgState,
     inlet: PortId,
-    outlet: PortId,
+    outlet: Option<PortId>,
 }
 impl DgBranchLoad {
     #[must_use]
@@ -62,11 +63,24 @@ impl DgBranchLoad {
     }
 
     pub(super) fn prepare(
-        source: DgBranch, dt: f64, tolerance: f64,
+        source: DgBranch,
+        dt: f64,
+        tolerance: f64,
     ) -> Result<Self, AcousticRealizeError> {
-        let (DgBoundary::Port(inlet), DgBoundary::Port(outlet)) =
-            (source.duct.inlet(), source.duct.outlet())
-        else { return Err(invalid("DG finite branch requires original inlet and outlet flow ports")); };
+        let DgBoundary::Port(inlet) = source.duct.inlet() else {
+            return Err(invalid(
+                "DG finite branch requires its original inlet flow port",
+            ));
+        };
+        let outlet = match source.duct.outlet() {
+            DgBoundary::Port(port) => Some(port),
+            DgBoundary::Closed => None,
+            _ => {
+                return Err(invalid(
+                    "DG finite branch requires an outlet flow port or exact closure",
+                ));
+            }
+        };
         let propagator = source.duct.propagator(dt, tolerance)
             .map_err(AcousticRealizeError::Duct)?;
         let state = source.duct.zero_state();
@@ -94,11 +108,33 @@ pub struct DgBranchFrame {
 }
 
 impl DgPortLoad {
+    /// Attach sealed finite branches to a bore with no radiating flow ports.
+    /// All branch volumes and original propagation states remain in the source
+    /// load, including their same-step junction feedback and signed work.
+    pub fn new_with_closed_branches(
+        duct: DgDuct,
+        time_step_s: f64,
+        exponential_tolerance: f64,
+        maximum_dofs: usize,
+        branches: Vec<DgBranch>,
+    ) -> Result<Self, AcousticRealizeError> {
+        Self::prepare(
+            duct,
+            time_step_s,
+            exponential_tolerance,
+            maximum_dofs,
+            Vec::new(),
+            None,
+            branches,
+        )
+    }
+
     /// Attach finite original DG ducts before the complete exterior MIMO load.
     ///
     /// The original bore side-port IDs remain the external load channel IDs;
     /// their pressures and flows now belong to the branch OUTLETS. Every bore
-    /// port except the source inlet is still explicitly owned by the one load.
+    /// unsealed port except the source inlet is explicitly owned by the load.
+    /// Sealed branch junctions remain internal and consume no exterior row.
     /// Unattached side ports remain flush point apertures.
     ///
     /// All ducts advance on one clock. The complete acoustic and wall-state
@@ -188,7 +224,8 @@ impl DgPortLoad {
 
     // The caller owns all private candidates; no step below publishes state.
     pub(super) fn branch_inputs(
-        &self, external: &[PortInput],
+        &self,
+        external: &[PortInput],
     ) -> Result<(Vec<PortInput>, Vec<f64>), AcousticRealizeError> {
         let Some(coupling) = &self.branch_coupling else {
             return Ok((external.to_vec(), Vec::new()));
@@ -197,17 +234,32 @@ impl DgPortLoad {
             .map_err(AcousticRealizeError::Duct)?;
         let branches = coupling::responses(&self.branches)?;
         let flows = coupling.flows(&main, &branches, external)?;
-        let mut inputs = external.to_vec();
-        for (branch, &flow) in self.branches.iter().zip(&flows) {
-            let input = inputs.iter_mut().find(|input| input.id == branch.port)
-                .ok_or_else(|| invalid("DG branch has no owned exterior channel"))?;
-            input.effort = -flow;
-        }
+        let inputs = main
+            .ports
+            .iter()
+            .map(|&id| {
+                if let Some(index) = self.branches.iter().position(|branch| branch.port == id) {
+                    Ok(PortInput {
+                        id,
+                        effort: -flows[index],
+                    })
+                } else {
+                    external
+                        .iter()
+                        .find(|input| input.id == id)
+                        .copied()
+                        .ok_or_else(|| invalid("DG bore has no owned exterior channel"))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok((inputs, flows))
     }
 
     pub(super) fn step_branches(
-        &self, external: &[PortInput], main_inputs: &[PortInput], junction_flows: &[f64],
+        &self,
+        external: &[PortInput],
+        main_inputs: &[PortInput],
+        junction_flows: &[f64],
         output: &mut DgStepOutput,
     ) -> Result<(Vec<DgState>, Vec<DgBranchFrame>, Vec<f64>), AcousticRealizeError> {
         if self.branches.is_empty() { return Ok((Vec::new(), Vec::new(), Vec::new())); }
@@ -218,19 +270,19 @@ impl DgPortLoad {
         let mut states = Vec::with_capacity(self.branches.len());
         let mut frames = Vec::with_capacity(self.branches.len());
         for (branch, &flow) in self.branches.iter().zip(junction_flows) {
-            let distal = external.iter().find(|input| input.id == branch.port)
-                .ok_or_else(|| invalid("DG branch exterior flow was omitted"))?;
-            let inputs = [
-                PortInput { id: branch.inlet, effort: flow },
-                PortInput { id: branch.outlet, effort: distal.effort },
-            ];
+            let mut inputs = vec![PortInput { id: branch.inlet, effort: flow }];
+            if let Some(outlet) = branch.outlet {
+                let distal = external.iter().find(|input| input.id == branch.port)
+                    .ok_or_else(|| invalid("DG branch exterior flow was omitted"))?;
+                inputs.push(PortInput { id: outlet, effort: distal.effort });
+            }
             let response = branch.propagator.multiport_response(&branch.state)
                 .map_err(AcousticRealizeError::Duct)?;
             let mut state = branch.state.clone();
             let step = branch.propagator.step(&mut state, &inputs)
                 .map_err(AcousticRealizeError::Duct)?;
             branch.propagator.sync_nodal(&mut state).map_err(AcousticRealizeError::Duct)?;
-            validate_candidate(&state, &step, 2)?;
+            validate_candidate(&state, &step, inputs.len())?;
             if step.ledger.step != output.ledger.step {
                 return Err(invalid("DG branch and bore clocks diverged"));
             }
@@ -254,12 +306,18 @@ impl DgPortLoad {
             }
             let external_slot = main_response.ports.iter().position(|id| *id == branch.port)
                 .ok_or_else(|| invalid("DG branch lost its original external pressure basis"))?;
-            original_pressure_scales[external_slot] = pressure_scale(&response, branch.outlet, &inputs)?;
-            let distal_port = *step.port_outputs.iter().find(|port| port.id == branch.outlet)
-                .ok_or_else(|| invalid("DG branch omitted its exterior output"))?;
-            let port = output.port_outputs.iter_mut().find(|port| port.id == branch.port)
-                .ok_or_else(|| invalid("DG branch lost its external channel identity"))?;
-            *port = PortOutput { id: branch.port, ..distal_port };
+            if let Some(outlet) = branch.outlet {
+                original_pressure_scales[external_slot] = pressure_scale(&response, outlet, &inputs)?;
+                let distal_port = *step.port_outputs.iter().find(|port| port.id == outlet)
+                    .ok_or_else(|| invalid("DG branch omitted its exterior output"))?;
+                let port = output.port_outputs.iter_mut().find(|port| port.id == branch.port)
+                    .ok_or_else(|| invalid("DG branch lost its external channel identity"))?;
+                *port = PortOutput { id: branch.port, ..distal_port };
+            } else {
+                // The inlet exchange remains in DgBranchFrame; a rigid distal
+                // wall contributes no fictitious exterior pressure/flow row.
+                output.port_outputs.retain(|port| port.id != branch.port);
+            }
             let ledger = &step.ledger;
             output.ledger.stored_energy_j += ledger.stored_energy_j;
             output.ledger.port_work_step_j += ledger.port_work_step_j;
@@ -279,12 +337,27 @@ impl DgPortLoad {
         output.ledger.relative_energy_drift = output.ledger.energy_balance_residual_j.abs()
             / (output.ledger.cumulative_port_work_j.abs()
                 + output.ledger.cumulative_parameter_work_j.abs()).max(1e-300);
+        let original_pressure_scales = main_response
+            .ports
+            .iter()
+            .zip(original_pressure_scales)
+            .filter_map(|(port, scale)| {
+                (!self
+                    .branches
+                    .iter()
+                    .any(|branch| branch.port == *port && branch.outlet.is_none()))
+                .then_some(scale)
+            })
+            .collect();
         Ok((states, frames, original_pressure_scales))
     }
 }
 
 pub(super) fn admit_sources(
-    main: &DgDuct, branches: &[DgBranch], dt: f64, maximum_dofs: usize,
+    main: &DgDuct,
+    branches: &[DgBranch],
+    dt: f64,
+    maximum_dofs: usize,
 ) -> Result<(), AcousticRealizeError> {
     let mut total = main.total_dofs();
     for (index, branch) in branches.iter().enumerate() {
@@ -293,9 +366,9 @@ pub(super) fn admit_sources(
             || !branch.duct.side_ports().is_empty()
             || branch.duct.inlet() == branch.duct.outlet()
             || !matches!((branch.duct.inlet(), branch.duct.outlet()),
-                (DgBoundary::Port(_), DgBoundary::Port(_)))
+                (DgBoundary::Port(_), DgBoundary::Port(_) | DgBoundary::Closed))
         {
-            return Err(invalid("DG branches require distinct original side junctions and two-port ducts"));
+            return Err(invalid("DG branches require distinct original side junctions and a port or closed distal boundary"));
         }
         let source = main.side_port_source(branch.port)
             .map_err(|_| invalid("DG branch junction has no original local material source"))?;
@@ -353,4 +426,3 @@ pub(super) fn validate_candidate(
 
 #[cfg(test)]
 mod tests;
-
