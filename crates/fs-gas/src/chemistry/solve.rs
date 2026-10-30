@@ -22,10 +22,9 @@ pub(super) struct Reactor {
     nu: Vec<f64>,
     state: StateWorkspace,
     trial: Vec<f64>,
-    matrix: Vec<f64>,
     residual: Vec<f64>,
     delta: Vec<f64>,
-    row_scale: Vec<f64>,
+    newton: NewtonWorkspace,
     temperature_extent_derivatives: Vec<f64>,
     pub stats: Statistics,
 }
@@ -58,10 +57,9 @@ impl Reactor {
                 kinetics,
             },
             trial: zeros(nr)?,
-            matrix: zeros(nr * nr)?,
             residual: zeros(nr)?,
             delta: zeros(nr)?,
-            row_scale: zeros(nr)?,
+            newton: NewtonWorkspace::new(ns, nr)?,
             temperature_extent_derivatives: zeros(nr)?,
             stats: Statistics::default(),
         })
@@ -196,25 +194,15 @@ impl Reactor {
                 self.temperature_extent_derivatives[k] =
                     -du.value() / state.heat_capacity_v_density_j_m3_k;
             }
-            let jac = self.state.kinetics.rate_jacobian();
-            let dt = self.state.kinetics.temperature_derivatives();
-            for j in 0..nr {
-                for k in 0..nr {
-                    let mut derivative = Sum::default();
-                    for i in 0..ns {
-                        derivative.add(jac[j * ns + i] * self.nu[i * nr + k]);
-                    }
-                    derivative.add(dt[j] * self.temperature_extent_derivatives[k]);
-                    self.matrix[j * nr + k] =
-                        if j == k { 1.0 } else { 0.0 } - step * derivative.value();
-                }
-                self.delta[j] = -self.residual[j];
-            }
-            solve_linear(
-                &mut self.matrix,
+            self.newton.solve(
+                &self.nu,
+                self.state.kinetics.rate_jacobian(),
+                self.state.kinetics.temperature_derivatives(),
+                &self.temperature_extent_derivatives,
+                state.temperature.value(),
+                step,
+                &self.residual,
                 &mut self.delta,
-                &mut self.row_scale,
-                nr,
                 cancelled,
             )?;
             let mut fraction = 1.0;
@@ -292,6 +280,290 @@ impl Reactor {
             }
         }
         Err(failed(step, "implicit Newton iteration budget exhausted"))
+    }
+}
+
+/// Bounded factorization of the smaller equivalent Newton system. State is
+/// always reconstructed from every original reaction extent, including cycles
+/// and duplicate reaction directions; no stoichiometric rank cutoff is used.
+pub(super) struct NewtonWorkspace {
+    dimension: usize,
+    matrix: Vec<f64>,
+    rhs: Vec<f64>,
+    row_scale: Vec<f64>,
+    refinement_residual: Vec<f64>,
+    refinement_delta: Vec<f64>,
+}
+
+impl NewtonWorkspace {
+    pub(super) fn new(ns: usize, nr: usize) -> Result<Self, IsochoricKineticsError> {
+        Self::with_dimension(nr.min(ns + 1), nr)
+    }
+
+    fn with_dimension(dimension: usize, nr: usize) -> Result<Self, IsochoricKineticsError> {
+        let refinement = if dimension < nr { nr } else { 0 };
+        Ok(Self {
+            dimension,
+            matrix: zeros(dimension * dimension)?,
+            rhs: zeros(dimension)?,
+            row_scale: zeros(dimension)?,
+            refinement_residual: zeros(refinement)?,
+            refinement_delta: zeros(refinement)?,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn full_extent(nr: usize) -> Result<Self, IsochoricKineticsError> {
+        Self::with_dimension(nr, nr)
+    }
+
+    #[cfg(test)]
+    pub(super) fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn solve(
+        &mut self,
+        nu: &[f64],
+        concentration_derivatives: &[f64],
+        temperature_derivatives: &[f64],
+        temperature_extent_derivatives: &[f64],
+        temperature_scale: f64,
+        step: f64,
+        residual: &[f64],
+        delta: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), IsochoricKineticsError> {
+        let equation = NewtonEquation {
+            nu,
+            concentration_derivatives,
+            temperature_derivatives,
+            temperature_extent_derivatives,
+            temperature_scale,
+            step,
+            residual,
+        };
+        if self.dimension == residual.len() {
+            equation.direct(
+                &mut self.matrix,
+                &mut self.rhs,
+                &mut self.row_scale,
+                delta,
+                cancelled,
+            )?;
+            return Ok(());
+        }
+        equation.reduced(
+            &mut self.matrix,
+            &mut self.rhs,
+            &mut self.row_scale,
+            delta,
+            cancelled,
+        )?;
+        // Recovering extent corrections as b + h U y can cancel large stiff
+        // terms. Check the original extent equation, with at most two residual
+        // corrections. This uses the same prepared storage and never accepts a
+        // reduced solve solely because its smaller matrix was nonsingular.
+        for refinement in 0..=2 {
+            if equation.check_correction(
+                delta,
+                &mut self.rhs,
+                &mut self.row_scale,
+                &mut self.refinement_residual,
+                cancelled,
+            )? {
+                return Ok(());
+            }
+            if refinement == 2 {
+                break;
+            }
+            NewtonEquation {
+                residual: &self.refinement_residual,
+                ..equation
+            }
+            .reduced(
+                &mut self.matrix,
+                &mut self.rhs,
+                &mut self.row_scale,
+                &mut self.refinement_delta,
+                cancelled,
+            )?;
+            for (value, correction) in delta.iter_mut().zip(&self.refinement_delta) {
+                *value += correction;
+            }
+        }
+        Err(failed(
+            step,
+            "reduced Newton correction exceeds the original linear residual gate",
+        ))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NewtonEquation<'a> {
+    nu: &'a [f64],
+    concentration_derivatives: &'a [f64],
+    temperature_derivatives: &'a [f64],
+    temperature_extent_derivatives: &'a [f64],
+    temperature_scale: f64,
+    step: f64,
+    residual: &'a [f64],
+}
+
+impl NewtonEquation<'_> {
+    fn direct(
+        self,
+        matrix: &mut [f64],
+        rhs: &mut [f64],
+        row_scale: &mut [f64],
+        delta: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), IsochoricKineticsError> {
+        let nr = self.residual.len();
+        let ns = self.nu.len() / nr;
+        for j in 0..nr {
+            poll(cancelled)?;
+            for k in 0..nr {
+                let mut derivative = Sum::default();
+                for i in 0..ns {
+                    derivative
+                        .add(self.concentration_derivatives[j * ns + i] * self.nu[i * nr + k]);
+                }
+                derivative
+                    .add(self.temperature_derivatives[j] * self.temperature_extent_derivatives[k]);
+                matrix[j * nr + k] =
+                    if j == k { 1.0 } else { 0.0 } - self.step * derivative.value();
+            }
+            rhs[j] = -self.residual[j];
+        }
+        solve_linear(matrix, rhs, row_scale, nr, cancelled)?;
+        delta.copy_from_slice(rhs);
+        Ok(())
+    }
+
+    fn reduced(
+        self,
+        matrix: &mut [f64],
+        rhs: &mut [f64],
+        row_scale: &mut [f64],
+        delta: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), IsochoricKineticsError> {
+        let nr = self.residual.len();
+        let ns = self.nu.len() / nr;
+        let n = ns + 1;
+        // J = I - h U V, U = [dr/dc, T dr/dT],
+        // V = [N; (dT/dxi)/T]. Solve (I - h V U)y = -V F,
+        // then delta_xi = -F + h U y. The final coordinate is scaled
+        // temperature, not an independently advanced state. Keeping dT/dxi
+        // from the original compensated stoichiometric energy sum avoids
+        // differentiating arbitrary elemental reference energies off the
+        // conserved composition manifold. No inverse or rank test on N occurs.
+        for i in 0..n {
+            poll(cancelled)?;
+            let mut projected = Sum::default();
+            for j in 0..nr {
+                let v = if i < ns {
+                    self.nu[i * nr + j]
+                } else {
+                    self.temperature_extent_derivatives[j] / self.temperature_scale
+                };
+                projected.add(-v * self.residual[j]);
+            }
+            rhs[i] = projected.value();
+            for k in 0..n {
+                let mut derivative = Sum::default();
+                for j in 0..nr {
+                    let v = if i < ns {
+                        self.nu[i * nr + j]
+                    } else {
+                        self.temperature_extent_derivatives[j] / self.temperature_scale
+                    };
+                    let u = if k < ns {
+                        self.concentration_derivatives[j * ns + k]
+                    } else {
+                        self.temperature_derivatives[j] * self.temperature_scale
+                    };
+                    derivative.add(v * u);
+                }
+                matrix[i * n + k] = if i == k { 1.0 } else { 0.0 } - self.step * derivative.value();
+            }
+        }
+        solve_linear(matrix, rhs, row_scale, n, cancelled)?;
+        for j in 0..nr {
+            poll(cancelled)?;
+            let mut derivative = Sum::default();
+            for i in 0..ns {
+                derivative.add(self.concentration_derivatives[j * ns + i] * rhs[i]);
+            }
+            derivative.add(self.temperature_derivatives[j] * (self.temperature_scale * rhs[ns]));
+            let mut correction = Sum::default();
+            correction.add(-self.residual[j]);
+            correction.add(self.step * derivative.value());
+            delta[j] = correction.value();
+        }
+        Ok(())
+    }
+
+    /// Componentwise backward residual in the original unscaled extent
+    /// equation. This is a linear arithmetic gate, not a nonlinear error bound.
+    fn check_correction(
+        self,
+        delta: &[f64],
+        projected: &mut [f64],
+        projected_magnitude: &mut [f64],
+        defect: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, IsochoricKineticsError> {
+        let nr = self.residual.len();
+        let ns = self.nu.len() / nr;
+        for i in 0..=ns {
+            poll(cancelled)?;
+            let mut value = Sum::default();
+            let mut magnitude = Sum::default();
+            for j in 0..nr {
+                let term = if i < ns {
+                    self.nu[i * nr + j]
+                } else {
+                    self.temperature_extent_derivatives[j]
+                } * delta[j];
+                value.add(term);
+                magnitude.add(term.abs());
+            }
+            projected[i] = value.value();
+            projected_magnitude[i] = magnitude.value();
+        }
+        let tolerance = 64.0 * f64::EPSILON * (ns + nr + 1) as f64;
+        let mut closed = true;
+        for j in 0..nr {
+            poll(cancelled)?;
+            let mut derivative = Sum::default();
+            let mut magnitude = Sum::default();
+            for i in 0..ns {
+                let term = self.concentration_derivatives[j * ns + i] * projected[i];
+                derivative.add(term);
+                // Retain |N| |delta|, not |N delta|: reaction cycles may
+                // cancel in species space while their rounding scale remains
+                // large in the original extent equation.
+                magnitude
+                    .add(self.concentration_derivatives[j * ns + i].abs() * projected_magnitude[i]);
+            }
+            let thermal = self.temperature_derivatives[j] * projected[ns];
+            derivative.add(thermal);
+            magnitude.add(self.temperature_derivatives[j].abs() * projected_magnitude[ns]);
+            let mut residual = Sum::default();
+            residual.add(self.residual[j]);
+            residual.add(delta[j]);
+            residual.add(-self.step * derivative.value());
+            defect[j] = residual.value();
+            let scale = self.residual[j].abs() + delta[j].abs() + self.step * magnitude.value();
+            if !defect[j].is_finite() || !scale.is_finite() {
+                return Err(failed(self.step, "non-finite reduced Newton correction"));
+            }
+            closed &= defect[j].abs() <= tolerance * scale;
+        }
+        Ok(closed)
     }
 }
 
@@ -435,7 +707,7 @@ fn resolve(
     })
 }
 
-// Purpose-specific bounded dense Newton solve (at most128reaction extents).
+// Purpose-specific bounded dense Newton solve (at most128 unknowns).
 // Scaled partial pivoting is deterministic; it refuses unresolved pivots and
 // nonfinite arithmetic. The nonlinear residual remains the acceptance owner.
 fn solve_linear(

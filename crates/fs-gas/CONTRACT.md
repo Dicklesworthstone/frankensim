@@ -1157,3 +1157,31 @@ work, disabled/absent layers, trial replay, formation-reference invariance,
 source/domain/work refusals, post-relaxation domain rejection and late
 cancellation. All 23 focused native compartment tests passed; that is separate
 from the unavailable full-workspace DSR gate.
+
+## Reduced finite-rate Newton system and independent hydrogen reactors
+
+The original extent integrator selects the smaller of the full reaction
+matrix and an equivalent species-plus-temperature Schur system. With ten
+species and 29 reactions it factors 11 rather than 29 unknowns. The additional
+thermal coordinate retains the original compensated temperature derivative
+with respect to each reaction extent, preserving elemental energy-reference
+invariance. Every reaction extent is reconstructed, and bounded residual
+correction checks the solution against the original full linear equations.
+The original pivoting, positive-amount, caloric-domain, nonlinear, energy,
+element/charge, entropy, local-error, retry and cancellation checks still apply.
+No measured wall-clock speedup or higher integration order is implied.
+
+Five focused reduced-system cases compare independent full/reduced equations,
+stiff cancellation recovery, exothermic conservation, elemental datum shifts,
+and deterministic workspace reuse. The original gas library passes 151 tests.
+A further independent Cantera 3.2.0 test uses the complete sourced hydrogen
+mechanism, continuous calorics, no radical seed, 1 litre at 101325 Pa and
+H2:O2:N2 = 1:1:3.76. Initial 1000 K advanced 1 ms and 1200 K advanced 0.1 ms
+agree with Cantera within 3 K, 0.2% pressure and 0.5% + 1e-12 mol per species;
+physical internal energy agrees within 2e-8 J and atom/mass inventories close.
+For the 1200 K case, tightening local relative tolerance from 2e-4 to 2e-6
+reduces the combined temperature/species endpoint error by over 70%.
+`data/reference/thermochem/hydrogen_cantera32.py` reproduces the independent
+reference using a separately installed, pinned development-only Cantera.
+These are numerical source/integration comparisons, not experimental ignition
+validation, a fully discrete coupled entropy theorem, or a second-order claim.

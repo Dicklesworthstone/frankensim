@@ -16,6 +16,10 @@ use std::collections::BTreeMap;
 
 #[path = "tests/prepared.rs"]
 mod prepared;
+#[path = "tests/reduced.rs"]
+mod reduced;
+#[path = "tests/hydrogen.rs"]
+mod hydrogen;
 
 fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()
