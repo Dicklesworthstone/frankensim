@@ -11,6 +11,10 @@
 //! geometry, composition and caloric constraints are required. No phase change,
 //! moisture evolution, expansion work or automatic coupon matching is inferred.
 
+/// Exact sparse energy-coordinate tangents on the original implicit residual.
+#[path = "transient/implicit.rs"]
+pub mod implicit;
+
 use super::{LayerStackSourceQuery, PreparedLayerStackConduction};
 use crate::thermal::{
     conduction::{LayerConductionConfig, LayerConductionResponse, TwoLayerConduction},

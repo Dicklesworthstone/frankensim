@@ -4967,3 +4967,44 @@ cancellation/domain atomicity. The complete original fs-thermal library,
 the freezing material namespace and the executable example build and run
 without numerical stubs. Full workspace/DSR verification remains unavailable
 because the required sibling constellation checkouts and DSR runner are absent.
+
+## Sparse implicit tangents for layered thermal bodies (2026-10-29)
+
+`thermal::transport::stack::transient::implicit::LayeredThermalStep` evaluates
+the existing `BackwardEulerStep` residual and attaches a derivative of that
+same material-backed candidate. Its unknowns are cell energy increments in
+the original owner's CellId order. For `R = delta_E - dt Q(T(E))`, the retained
+operator is `J = I - dt (dQ/dT) diag(1/C)`, using original per-cell capacity and
+physical endpoint derivatives of integrated conductivity/contact flux.
+Secant conductance is not substituted for a Newton derivative.
+
+The operator admits exactly its bound body cells and links. Authored constant
+cell powers, convection on the original exposed areas, and reservoir exchange
+remain with the original heat-rate owner. Its boundary slopes include reservoir
+coverage and fixed convection/conductance. Pending event admission and target
+left-limit semantics remain those of `BackwardEulerStep`; larger coupled graphs
+continue to use the existing coefficient adapter and their complete Jacobian.
+
+Only three diagonals are retained. Tangent assembly and matrix actions require
+O(cells) storage/work after material flux evaluation. Forward, transpose and
+Jacobi inverse-diagonal actions allocate nothing and validate arithmetic and
+cancellation before publishing their bounded output. Unequal capacities and
+nonlinear conductivity generally make the operator nonsymmetric; the transpose
+uses the actual opposite diagonals. Every tangent is bound to its exact trial,
+with original temperatures, capacities and link responses available for clients.
+
+The existing thermal trial still owns residuals, optional entropy and independent
+local/total joule acceptance. This addition supplies no new nonlinear solver,
+time integrator, trajectory adjoint, condition-number certificate or automatic
+time-step accuracy claim. The existing `fs-la` prepared LU is used only by the
+focused integration test's bounded small-system Newton iteration.
+
+All four tests in `xtask/tests/material_layered_implicit.rs` pass. Independent
+constant coefficients include sources, convection and reservoir coverage;
+nonlinear finite differences verify the full energy-coordinate matrix and the
+transpose inner-product identity. Invalid/cancelled matrix actions preserve
+outputs. An actual six-cell FSRI wall converges at a 3,000-second implicit step
+and passes original energy/entropy acceptance; material substitution changes
+the endpoint. This establishes algebraic convergence at that step, separately
+from time-discretization accuracy. Scope, source, event, identity, overflow and
+cancellation refusals preserve the initial timeline.

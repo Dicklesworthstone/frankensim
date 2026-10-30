@@ -26,6 +26,7 @@ fs-conduction = { path = "../crates/fs-conduction" }
 fs-couple = { path = "../crates/fs-couple" }
 fs-duct = { path = "../crates/fs-duct" }
 fs-exec = { path = "../crates/fs-exec" }
+fs-la = { path = "../crates/fs-la" }
 fs-lbm = { path = "../crates/fs-lbm" }
 fs-matdb-store = { path = "../crates/fs-matdb-store" }
 fs-material = { path = "../crates/fs-material" }
