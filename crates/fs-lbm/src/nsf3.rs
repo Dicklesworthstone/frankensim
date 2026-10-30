@@ -28,6 +28,11 @@
 //! frozen; no reaction, species diffusion or phase conversion is implied.
 //! The original GasSpec arithmetic and qualification remain separate from
 //! physical validation of this source-driven extension.
+//! NamedMixtureNsfGas uses the same local material path with the original
+//! named near-ambient species law: its source-declared constant cp supplies
+//! sensible energy `(cp - R) T`, and its Wilke/WMS transport is evaluated at
+//! every actual T/p. The original named-model domain and water-saturation
+//! refusals apply; composition remains fixed throughout the grid.
 //!
 //! WHY NOT THE TEMPERATURE-CORRECTED EQUILIBRIUM. The first formulation put `theta - theta0` into the
 //! equilibrium (Hermite expansion through third order). Its Bloch-linearised one-step matrix has a real
@@ -66,7 +71,7 @@ use fs_material::gas::GasSpec;
 use material::NsfCellMaterial;
 
 mod material;
-pub use material::{NsfGasMedium, ThermochemicalNsfGas};
+pub use material::{NamedMixtureNsfGas, NsfGasMedium, ThermochemicalNsfGas};
 mod sgs;
 pub use sgs::{NsfSgsConfig, NsfSgsTransport};
 mod open;
@@ -193,7 +198,7 @@ pub struct NsfSpec<G = GasSpec, S = &'static str> {
     /// Periodic axes; a non-periodic face initially has a halfway bounce-back
     /// wall. `with_characteristic_axis` can open one complete axis cold.
     pub periodic: [bool; 3],
-    /// Gas law: legacy GasSpec or source-owned ThermochemicalNsfGas.
+    /// Gas law: GasSpec, NamedMixtureNsfGas or source-owned ThermochemicalNsfGas.
     pub gas: G,
     /// Reference temperature [K] and pressure [Pa] (lattice density 1, `theta0 = 1/3`).
     pub temperature_k: f64,
@@ -693,7 +698,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             kappa,
             source_reference_transport: match &spec.gas {
                 NsfGasMedium::CaloricallyPerfect(_) => None,
-                NsfGasMedium::Thermochemical(_) => Some([
+                NsfGasMedium::NamedMixture(_) | NsfGasMedium::Thermochemical(_) => Some([
                     state.dynamic_viscosity * sc,
                     state.thermal_conductivity * sc / r,
                 ]),
@@ -714,7 +719,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mut e = vec![cv * THETA0; n];
         let mut material = match &spec.gas {
             NsfGasMedium::CaloricallyPerfect(_) => Vec::new(),
-            NsfGasMedium::Thermochemical(_) => vec![None; n],
+            NsfGasMedium::NamedMixture(_) | NsfGasMedium::Thermochemical(_) => vec![None; n],
         };
         for i in 0..n {
             let x = at(i);
@@ -1519,6 +1524,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         // Preserve the original division/order exactly.
                         th_new[i] = (e1[i] - ke) / (rho1[i] * cv);
                     }
+                    NsfGasMedium::NamedMixture(source) => {
+                        let (theta, local) =
+                            source.reconstruct(&self.law, rho1[i], (e1[i] - ke) / rho1[i])?;
+                        th_new[i] = theta;
+                        material_new[i] = Some(local);
+                    }
                     NsfGasMedium::Thermochemical(source) => {
                         let (theta, local) =
                             source.reconstruct(&self.law, rho1[i], (e1[i] - ke) / rho1[i])?;
@@ -1827,11 +1838,31 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &self.spec.gas
     }
 
+    /// Evaluate the retained gas law at an accepted cell's actual T/p.
+    /// Named-mixture and NASA9 flow use these same original local laws; the
+    /// legacy GasSpec path retains its separately documented transport table.
+    /// Solid and out-of-grid cells refuse.
+    pub fn gas_state(&self, x: [usize; 3]) -> Result<fs_material::gas::GasState, NsfError> {
+        if x.iter().zip(self.spec.dims).any(|(&i, n)| i >= n) {
+            return Err(NsfError::Input("material state cell outside the grid"));
+        }
+        let i = self.index(x);
+        if self.solid[i] {
+            return Err(NsfError::Input("solid cell has no gas material state"));
+        }
+        let (rho, _) = raw_moments::<L>(&self.f[i]);
+        self.spec.gas.at(
+            self.law.kelvin_of_theta(self.theta[i]),
+            self.law.pressure_pa(rho, self.theta[i]),
+        )
+    }
+
     /// Re-evaluate the original source at this accepted cell's actual density
     /// and temperature. The returned receipt includes the same local EOS,
     /// heat capacities, sound speed and transport used by the flow.
     ///
-    /// Returns None for the legacy GasSpec path. Solid/out-of-grid cells refuse.
+    /// Returns None for GasSpec and named mixtures, which have no NASA9 receipt.
+    /// Solid/out-of-grid cells refuse.
     /// No material selection, composition or fixed query coordinate is changed.
     pub fn thermochemical_state(
         &self,

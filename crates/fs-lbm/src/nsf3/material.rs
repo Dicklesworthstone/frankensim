@@ -1,13 +1,119 @@
 //! Frozen-composition material closure of the existing NSF solver.
 //!
-//! The original NASA9 and transport owners evaluate every actual cell/face
-//! state. No table or constant gamma replaces their caloric inversion.
+//! The original named-mixture or NASA9 and transport owners evaluate every
+//! actual cell/face state. The named near-ambient model has constant source
+//! heat capacities; NASA9 retains its original variable-cv caloric inversion.
 
 use super::{MAX_VERIFIED_LATTICE_VISCOSITY, NsfError, NsfLaw, NsfSpec};
 use fs_matdb::QueryPoint;
 use fs_material::gas::{GasSpec, GasState};
+use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use fs_material::thermochemical_gas::{ResolvedThermochemicalGasState, ThermochemicalGasModel};
+use fs_qty::semantic::Composition;
+
+/// Original named species and composition of a frozen near-ambient mixture.
+///
+/// EOS, viscosity and conductivity use `resolve_gas_mixture` at every actual
+/// cell/face T/p. Its heat capacities are explicitly frozen at 298.15 K, so
+/// the conserved sensible energy is `(cp - R) T`, with cp and R from that
+/// same source. No effective single-species GasSpec is fitted or substituted.
+/// The original [273.15, 323.15] K / [10000, 200000] Pa domain and liquid-water
+/// saturation refusal remain active. No species transport or phase change is
+/// implied; the supplied bulk/shear ratio remains an independent input.
+#[derive(Clone, Debug)]
+pub struct NamedMixtureNsfGas {
+    species: Vec<GasSpecies>,
+    composition: Composition,
+    reference: GasState,
+}
+
+impl NamedMixtureNsfGas {
+    /// Retain the declared species order and mass/mole composition basis.
+    /// The reference T/p must also be used by the receiving NSF specification.
+    ///
+    /// # Errors
+    /// Any composition, material-domain or water-phase refusal of the original
+    /// named-mixture owner. No coefficients or fractions are repaired here.
+    pub fn new(
+        species: Vec<GasSpecies>,
+        composition: Composition,
+        temperature_k: f64,
+        pressure_pa: f64,
+    ) -> Result<Self, NsfError> {
+        let reference = resolve_gas_mixture(&species, &composition, temperature_k, pressure_pa)
+            .map_err(gas_error)?;
+        Ok(Self { species, composition, reference })
+    }
+
+    /// Canonical named species in the caller's declared order.
+    #[must_use]
+    pub fn species(&self) -> &[GasSpecies] {
+        &self.species
+    }
+
+    /// Original composition, including its declared mass/mole basis.
+    #[must_use]
+    pub const fn composition(&self) -> &Composition {
+        &self.composition
+    }
+
+    /// Source-evaluated reference, suitable for the coupled duct and reservoir.
+    #[must_use]
+    pub const fn reference_state(&self) -> &GasState {
+        &self.reference
+    }
+
+    /// Evaluate the retained original named-mixture law at actual T/p.
+    ///
+    /// # Errors
+    /// Original domain, composition or water-saturation refusals.
+    pub fn at(&self, temperature_k: f64, pressure_pa: f64) -> Result<GasState, NsfError> {
+        resolve_gas_mixture(&self.species, &self.composition, temperature_k, pressure_pa)
+            .map_err(gas_error)
+    }
+
+    fn cell(
+        &self,
+        law: &NsfLaw,
+        density_lattice: f64,
+        theta: f64,
+    ) -> Result<NsfCellMaterial, NsfError> {
+        let state = self.at(
+            law.kelvin_of_theta(theta),
+            law.pressure_pa(density_lattice, theta),
+        )?;
+        let mu_lattice = state.dynamic_viscosity * law.transport_scale();
+        let nu = mu_lattice / density_lattice;
+        if !nu.is_finite() || nu <= 0.0 || nu > MAX_VERIFIED_LATTICE_VISCOSITY {
+            return Err(NsfError::Viscosity {
+                observed: nu,
+                maximum: MAX_VERIFIED_LATTICE_VISCOSITY,
+            });
+        }
+        let cv = state.specific_heat_cp - state.specific_gas_constant;
+        let sensible_energy_lattice = cv * state.temperature / law.specific_energy_unit_j_kg();
+        if !sensible_energy_lattice.is_finite() {
+            return Err(NsfError::Input("unrepresentable sensible mixture energy"));
+        }
+        Ok(NsfCellMaterial { state, mu_lattice, sensible_energy_lattice })
+    }
+
+    pub(super) fn reconstruct(
+        &self,
+        law: &NsfLaw,
+        density_lattice: f64,
+        sensible_energy_lattice: f64,
+    ) -> Result<(f64, NsfCellMaterial), NsfError> {
+        // This analytic inversion is the named source's constant-cv law,
+        // not a reference-cv approximation to the separate NASA9 model.
+        let cv = self.reference.specific_heat_cp - self.reference.specific_gas_constant;
+        let temperature = sensible_energy_lattice * law.specific_energy_unit_j_kg() / cv;
+        let theta = law.theta_of_kelvin(temperature);
+        let material = self.cell(law, density_lattice, theta)?;
+        Ok((theta, material))
+    }
+}
 
 /// Original source laws and typed conditions of one frozen-composition gas.
 ///
@@ -155,6 +261,8 @@ impl ThermochemicalNsfGas {
 pub enum NsfGasMedium {
     /// Existing constant-cv GasSpec path, with its original arithmetic.
     CaloricallyPerfect(GasSpec),
+    /// Original frozen named mixture, with per-state domain/phase admission.
+    NamedMixture(NamedMixtureNsfGas),
     /// Source-owned NASA9 caloric properties and local transport.
     Thermochemical(ThermochemicalNsfGas),
 }
@@ -167,6 +275,11 @@ impl From<GasSpec> for NsfGasMedium {
 impl From<ThermochemicalNsfGas> for NsfGasMedium {
     fn from(value: ThermochemicalNsfGas) -> Self {
         Self::Thermochemical(value)
+    }
+}
+impl From<NamedMixtureNsfGas> for NsfGasMedium {
+    fn from(value: NamedMixtureNsfGas) -> Self {
+        Self::NamedMixture(value)
     }
 }
 
@@ -184,6 +297,15 @@ fn gas_error(error: impl core::fmt::Display) -> NsfError {
 
 impl NsfGasMedium {
     pub(super) fn reference(&self, spec: &NsfSpec<Self, String>) -> Result<GasState, NsfError> {
+        if let Self::NamedMixture(source) = self {
+            if source.reference.temperature != spec.temperature_k
+                || source.reference.pressure != spec.pressure_pa
+            {
+                return Err(NsfError::Input(
+                    "named mixture reference T/p must match the NSF reference",
+                ));
+            }
+        }
         if let Self::Thermochemical(source) = self {
             let controls = source.energy_solve;
             if source.reference.temperature != spec.temperature_k
@@ -206,6 +328,7 @@ impl NsfGasMedium {
             Self::CaloricallyPerfect(gas) => {
                 GasState::try_new(gas, temperature_k, pressure_pa).map_err(gas_error)
             }
+            Self::NamedMixture(source) => source.at(temperature_k, pressure_pa),
             Self::Thermochemical(source) => Ok(*source.at(temperature_k, pressure_pa)?.state()),
         }
     }
@@ -231,6 +354,7 @@ impl NsfGasMedium {
                 }
                 Ok(None)
             }
+            Self::NamedMixture(source) => source.cell(law, density_lattice, theta).map(Some),
             Self::Thermochemical(source) => {
                 let temperature = law.kelvin_of_theta(theta);
                 let pressure = law.pressure_pa(density_lattice, theta);
@@ -247,7 +371,7 @@ impl NsfGasMedium {
         theta: f64,
     ) -> Result<Option<ResolvedThermochemicalGasState>, NsfError> {
         match self {
-            Self::CaloricallyPerfect(_) => Ok(None),
+            Self::CaloricallyPerfect(_) | Self::NamedMixture(_) => Ok(None),
             Self::Thermochemical(source) => {
                 let temperature = law.kelvin_of_theta(theta);
                 let pressure = law.pressure_pa(density_lattice, theta);
@@ -264,6 +388,10 @@ impl NsfGasMedium {
     ) -> Result<f64, NsfError> {
         match self {
             Self::CaloricallyPerfect(_) => Ok(law.kappa_lattice(theta)),
+            Self::NamedMixture(source) => {
+                let state = source.at(law.kelvin_of_theta(theta), pressure_pa)?;
+                Ok(state.thermal_conductivity * law.transport_scale() / law.gas_constant)
+            }
             Self::Thermochemical(source) => {
                 let state = source.at(law.kelvin_of_theta(theta), pressure_pa)?;
                 Ok(state.state().thermal_conductivity * law.transport_scale() / law.gas_constant)

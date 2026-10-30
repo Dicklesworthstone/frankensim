@@ -1,14 +1,19 @@
-//! Direct behavior regressions of the existing NSF solver with manufactured
-//! NASA9/transport source data. These are not experimental gas validation.
+//! Direct behavior regressions of the existing NSF solver with the original
+//! named-mixture law and manufactured NASA9/transport source data. These are
+//! integration and conservation checks, not experimental gas validation.
 #[path = "nsf3_thermochemical/source.rs"]
 mod source;
 
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{
-    NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfSpec, ThermochemicalNsfGas, WallThermal,
+    NamedMixtureNsfGas, NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfSgsConfig, NsfSpec,
+    ThermochemicalNsfGas, WallThermal,
 };
+use fs_lbm::sgs3::{SgsConfig, SgsModel, SgsUse};
 use fs_material::gas::GasSpec;
+use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
+use fs_qty::semantic::{Composition, CompositionBasis};
 
 fn controls() -> GasEnergySolve {
     GasEnergySolve {
@@ -436,4 +441,196 @@ fn mass_source_energy_is_a_supply_not_dissipation() {
     assert!((density - 1.0 - mass).abs() < 1e-12);
     assert!((actual_velocity[0] - velocity).abs() < 1e-12);
     assert!((temperature - 300.0).abs() < 1e-8);
+}
+
+fn named_gas() -> NamedMixtureNsfGas {
+    NamedMixtureNsfGas::new(
+        vec![GasSpecies::Nitrogen, GasSpecies::Oxygen, GasSpecies::CarbonDioxide,
+            GasSpecies::WaterVapor],
+        Composition::new(CompositionBasis::MoleFraction, vec![0.755, 0.21, 0.025, 0.01]).unwrap(),
+        300.0,
+        100000.0,
+    ).unwrap()
+}
+
+fn named_spec(gas: NamedMixtureNsfGas) -> NsfSpec<NamedMixtureNsfGas> {
+    let mut input = spec(gas);
+    input.temperature_window_k = [285.0, 320.0];
+    input
+}
+
+#[test]
+fn g0_named_mixture_keeps_species_mass_basis_and_original_local_material() {
+    let species = vec![GasSpecies::Helium, GasSpecies::Oxygen, GasSpecies::CarbonDioxide];
+    let composition = Composition::new(CompositionBasis::MassFraction, vec![0.4, 0.5, 0.1]).unwrap();
+    let source = NamedMixtureNsfGas::new(species.clone(), composition.clone(), 300.0, 100000.0).unwrap();
+    let reference = resolve_gas_mixture(&species, &composition, 300.0, 100000.0).unwrap();
+    assert_eq!(source.reference_state(), &reference);
+    let grid = NsfGrid3::<D3q27>::new(named_spec(source), |x| x[2] == 1, varying).unwrap();
+    let NsfGasMedium::NamedMixture(retained) = grid.medium() else {
+        panic!("the grid must retain the original named-mixture owner");
+    };
+    assert_eq!(retained.species(), species.as_slice());
+    assert_eq!(retained.composition(), &composition);
+    assert_eq!(grid.law().gas_constant, reference.specific_gas_constant);
+    assert_eq!(grid.law().rho_ref_kg_m3, reference.density);
+    for x in 0..8 {
+        let state = grid.gas_state([x, 0, 0]).unwrap();
+        let expected = resolve_gas_mixture(&species, &composition, state.temperature, state.pressure).unwrap();
+        assert_eq!(state, expected);
+        let density = grid.cell([x, 0, 0]).0 * grid.law().rho_ref_kg_m3;
+        assert!((state.density / density - 1.0).abs() < 1e-14);
+        assert!(grid.thermochemical_state([x, 0, 0]).unwrap().is_none());
+    }
+    assert!(grid.gas_state([0, 0, 1]).is_err());
+    assert!(grid.gas_state([8, 0, 0]).is_err());
+}
+
+#[test]
+fn g1_g5_named_mixture_heating_closes_source_cv_energy_and_replays_across_workers() {
+    let reference = *named_gas().reference_state();
+    let cv = reference.specific_heat_cp - reference.specific_gas_constant;
+    let heat_per_mass = 2.0 * cv;
+    let source_energy = heat_per_mass / (3.0 * reference.specific_gas_constant * reference.temperature);
+    let mut replay = None;
+    for (workers, transport_points) in [(1, 2), (3, 17)] {
+        let mut input = named_spec(named_gas());
+        input.workers = workers;
+        input.transport_points = transport_points;
+        let mut grid = NsfGrid3::<D3q27>::new_with_sources(
+            input,
+            |_| false,
+            |_| (1.0, [0.0; 3], 300.0),
+            Some(Box::new(move |_, _| (0.0, [0.0; 3], source_energy))),
+        ).unwrap();
+        let initial = grid.total_energy_j();
+        let mass = 32.0 * reference.density * grid.law().dx_m.powi(3);
+        for _ in 0..4 {
+            assert!(grid.step().unwrap().residual_rel < 1e-12);
+        }
+        let state = grid.gas_state([0, 0, 0]).unwrap();
+        assert!((state.temperature - 308.0).abs() < 1e-9);
+        assert!((grid.total_energy_j() - initial - mass * 4.0 * heat_per_mass).abs() < 1e-12 * initial);
+        assert!((state.pressure / reference.pressure - 308.0 / 300.0).abs() < 1e-12);
+        assert_eq!(state.specific_heat_cp, reference.specific_heat_cp);
+        assert_eq!(state.specific_gas_constant, reference.specific_gas_constant);
+        assert!(state.dynamic_viscosity > reference.dynamic_viscosity);
+        assert!(state.thermal_conductivity > reference.thermal_conductivity);
+        assert!(state.sound_speed > reference.sound_speed);
+        let result = (grid.state_hash(), grid.cumulative_ledger());
+        if let Some(expected) = replay { assert_eq!(result, expected); }
+        replay = Some(result);
+    }
+}
+
+#[test]
+fn g1_g5_named_mixture_local_transport_and_sgs_heat_ignore_diagnostic_table_spacing() {
+    let mut grids = Vec::new();
+    for (workers, transport_points) in [(1, 2), (3, 17)] {
+        let mut input = named_spec(named_gas());
+        input.workers = workers;
+        input.transport_points = transport_points;
+        grids.push(NsfGrid3::<D3q27>::new(input, |_| false, |x| {
+            let phase = core::f64::consts::TAU * (x[0] as f64 + 0.5) / 8.0;
+            let temperature = 300.0 + 3.0 * phase.cos();
+            (300.0 / temperature, [0.0, 0.02 * phase.sin(), 0.0], temperature)
+        }).unwrap().with_sgs(NsfSgsConfig {
+            closure: SgsConfig {
+                model: SgsModel::Smagorinsky { cs: 0.17 },
+                filter_width_lu: 1.0,
+                maximum_eddy_to_molecular: 10.0,
+                usage: SgsUse::Exploration,
+            },
+            turbulent_prandtl: 0.85,
+        }).unwrap());
+    }
+    let initial = grids[0].total_energy_j();
+    for _ in 0..4 {
+        assert_eq!(grids[0].state_hash(), grids[1].state_hash());
+        for x in 0..8 {
+            let location = [x, 0, 0];
+            let state = grids[0].gas_state(location).unwrap();
+            let density = grids[0].cell(location).0;
+            let transport = grids[0].sgs_transport(location).unwrap().unwrap();
+            assert!(transport.eddy_viscosity_lu > 0.0);
+            let expected = density * state.specific_heat_cp / state.specific_gas_constant
+                * transport.eddy_viscosity_lu / 0.85;
+            assert!((transport.turbulent_conductivity_lu / expected - 1.0).abs() < 1e-12);
+        }
+        let a = grids[0].step().unwrap();
+        let b = grids[1].step().unwrap();
+        assert_eq!(a, b);
+        assert!(a.residual_rel < 1e-12);
+        assert!((grids[0].total_energy_j() / initial - 1.0).abs() < 2e-12);
+    }
+    assert_eq!(grids[0].state_hash(), grids[1].state_hash());
+}
+
+#[test]
+fn g1_named_mixture_warm_open_flow_uses_the_same_sensible_energy() {
+    let mut input = named_spec(named_gas());
+    input.periodic[0] = false;
+    let mut grid = NsfGrid3::<D3q27>::new(
+        input, |_| false, |_| (300.0 / 305.0, [0.02, 0.0, 0.0], 305.0),
+    ).unwrap();
+    let exterior = NsfOpenState {
+        density_kg_m3: grid.law().rho_ref_kg_m3 * 300.0 / 305.0,
+        velocity_m_s: [0.02 * grid.law().dx_m / grid.law().dt_s, 0.0, 0.0],
+        temperature_k: 305.0,
+    };
+    for high in [false, true] { grid.set_open_face(0, high, Some(exterior)).unwrap(); }
+    for _ in 0..8 { assert!(grid.step().unwrap().residual_rel < 1e-12); }
+    for x in 0..8 {
+        let (density, velocity, temperature) = grid.cell([x, 0, 0]);
+        assert!((density - 300.0 / 305.0).abs() < 1e-10);
+        assert!((velocity[0] - 0.02).abs() < 1e-10);
+        assert!((temperature - 305.0).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn g4_named_mixture_domain_and_condensation_refuse_without_publishing() {
+    let gas = named_gas();
+    for (temperature, pressure) in [(270.0, 100000.0), (330.0, 100000.0),
+        (300.0, 9000.0), (300.0, 210000.0)] {
+        assert!(matches!(gas.at(temperature, pressure), Err(NsfError::Gas(_))));
+    }
+    let mut input = named_spec(gas.clone());
+    input.temperature_k = 301.0;
+    assert!(matches!(NsfGrid3::<D3q27>::new(input, |_| false, |_| (1.0, [0.0; 3], 301.0)),
+        Err(NsfError::Input(_))));
+    let mut input = named_spec(gas.clone());
+    input.temperature_window_k[0] = 270.0;
+    assert!(matches!(NsfGrid3::<D3q27>::new(input, |_| false, |_| (1.0, [0.0; 3], 300.0)),
+        Err(NsfError::Gas(_))));
+    assert!(matches!(NsfGrid3::<D3q27>::new(named_spec(gas.clone()), |_| false,
+        |_| (2.1, [0.0; 3], 300.0)), Err(NsfError::Gas(_))));
+
+    let reference = gas.reference_state();
+    let excessive_heat = 30.0 * (reference.specific_heat_cp - reference.specific_gas_constant)
+        / (3.0 * reference.specific_gas_constant * reference.temperature);
+    let mut grid = NsfGrid3::<D3q27>::new_with_sources(named_spec(gas), |_| false,
+        |_| (1.0, [0.0; 3], 300.0),
+        Some(Box::new(move |_, _| (0.0, [0.0; 3], excessive_heat))),
+    ).unwrap();
+    let before = (grid.state_hash(), grid.cumulative_ledger(), grid.steps());
+    assert!(matches!(grid.step(), Err(NsfError::Gas(_))));
+    assert_eq!((grid.state_hash(), grid.cumulative_ledger(), grid.steps()), before);
+
+    let wet = NamedMixtureNsfGas::new(
+        vec![GasSpecies::Nitrogen, GasSpecies::WaterVapor],
+        Composition::new(CompositionBasis::MoleFraction, vec![0.97, 0.03]).unwrap(),
+        300.0, 100000.0,
+    ).unwrap();
+    let mut input = named_spec(wet);
+    input.temperature_window_k = [299.0, 310.0];
+    input.periodic[0] = false;
+    let mut grid = NsfGrid3::<D3q27>::new(input, |_| false, |_| (1.0, [0.0; 3], 300.0)).unwrap();
+    let before = grid.state_hash();
+    let compressed = NsfOpenState {
+        density_kg_m3: 1.3 * grid.law().rho_ref_kg_m3,
+        velocity_m_s: [0.0; 3], temperature_k: 300.0,
+    };
+    assert!(matches!(grid.set_open_face(0, false, Some(compressed)), Err(NsfError::Gas(_))));
+    assert_eq!(grid.state_hash(), before);
 }
