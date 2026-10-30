@@ -204,6 +204,42 @@ impl<'a> ObjectiveCohesivePoint<'a> {
         dt_s: f64,
         config: ObjectiveCohesiveConfig,
     ) -> Result<ObjectiveCohesiveStep<'a>, ObjectiveCohesiveError> {
+        self.trial_resolved_with_compression(frame, separation_world_m, jump_m, dt_s, config, false)
+            .map(|(step, _)| step)
+    }
+
+    /// The same physical trial plus the original analytic path mean of damage
+    /// times compressive pressure [Pa]. No second material state is advanced.
+    pub fn trial_with_damage_weighted_compression(
+        &self,
+        frame: UnitQuaternion,
+        separation_world_m: Vec3,
+        dt_s: f64,
+        config: ObjectiveCohesiveConfig,
+    ) -> Result<(ObjectiveCohesiveStep<'a>, f64), ObjectiveCohesiveError> {
+        finite_vector(separation_world_m)?;
+        let jump = frame
+            .rotate_world_to_body(separation_world_m)
+            .sub(self.reference_offset_m);
+        self.trial_resolved_with_compression(
+            frame,
+            separation_world_m,
+            array(jump),
+            dt_s,
+            config,
+            true,
+        )
+    }
+
+    fn trial_resolved_with_compression(
+        &self,
+        frame: UnitQuaternion,
+        separation_world_m: Vec3,
+        jump_m: [f64; 3],
+        dt_s: f64,
+        config: ObjectiveCohesiveConfig,
+        compression: bool,
+    ) -> Result<(ObjectiveCohesiveStep<'a>, f64), ObjectiveCohesiveError> {
         validate_config(config)?;
         let cayley = cayley_increment(self.frame, frame, config.maximum_cayley_increment)?;
         let delta_d = separation_world_m.sub(self.separation_world_m);
@@ -229,11 +265,21 @@ impl<'a> ObjectiveCohesivePoint<'a> {
                 tolerance_m: config.kinematic_tolerance_m,
             });
         }
-        let (material, mean_traction_pa) = self.material.trial_over_time_with_mean_traction(
-            jump_m,
-            dt_s,
-            config.material_energy_tolerance_j_m2,
-        )?;
+        let (material, mean_traction_pa, damaged_pressure) = if compression {
+            self.material
+                .trial_over_time_with_damage_weighted_compression(
+                    jump_m,
+                    dt_s,
+                    config.material_energy_tolerance_j_m2,
+                )?
+        } else {
+            let (material, mean) = self.material.trial_over_time_with_mean_traction(
+                jump_m,
+                dt_s,
+                config.material_energy_tolerance_j_m2,
+            )?;
+            (material, mean, 0.0)
+        };
         let local_force = vector(mean_traction_pa).scale(self.area_m2);
         let force = self
             .frame
@@ -254,22 +300,25 @@ impl<'a> ObjectiveCohesivePoint<'a> {
                 tolerance_j: config.spatial_work_tolerance_j,
             });
         }
-        Ok(ObjectiveCohesiveStep {
-            point: Self {
-                material: material.equilibrium.point,
-                frame,
-                separation_world_m,
-                ..*self
+        Ok((
+            ObjectiveCohesiveStep {
+                point: Self {
+                    material: material.equilibrium.point,
+                    frame,
+                    separation_world_m,
+                    ..*self
+                },
+                material,
+                mean_traction_pa,
+                discrete_wrench,
+                endpoint_wrench,
+                cayley_increment_world: cayley,
+                kinematic_residual_m: residual,
+                spatial_work_j,
+                work_defect_j,
             },
-            material,
-            mean_traction_pa,
-            discrete_wrench,
-            endpoint_wrench,
-            cayley_increment_world: cayley,
-            kinematic_residual_m: residual,
-            spatial_work_j,
-            work_defect_j,
-        })
+            damaged_pressure,
+        ))
     }
 }
 

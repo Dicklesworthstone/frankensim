@@ -13584,3 +13584,57 @@ retains the original connected, acute-angle, nonpositive-pressure, quasistatic
 liquid scope. This owner does not model liquid exchange/coalescence between
 bridges, changing contact geometry, bridge rupture, liquid inertia, evaporation,
 thermal deposition or exact within-sample trajectories.
+
+
+## Damaged-area friction on original rotating rigid cohesive patches
+
+`cohesive_contact::rigid::RigidCohesiveSystem::enable_damaged_area_friction`
+attaches one original `ResidualCoulombSource` to each existing bonded site,
+without replacing either native body, changing its full inertia, resetting
+damage/history or advancing the physical clock. Original ordered surface cards,
+query conditions and material assignments must agree. The explicit constitutive
+selection is the shared damaged-area rigid Coulomb mixture: each tangent disk
+has capacity `mu * area * integral(damage * compression_pressure)`, evaluated
+analytically on the same original material path. Tensile cohesive traction,
+surviving viscosity and endpoint damage are not substitutes for that measure.
+
+Two local tangent-force unknowns per site join the original twelve body-wrench
+unknowns. Every disk, body pose and material point is solved simultaneously.
+Static capture uses the shared law's static coefficient, or kinetic capture
+when already sliding; a yielded capture solution resolves the entire patch at
+its kinetic coefficients. Numerical cone scaling introduces no elastic spring.
+Prepared damped least-squares Newton corrections admit redundant sticking sites
+without changing physical compliance or the final force equations. Individual
+reactions may be a numerical representative of an indeterminate distribution;
+neither their uniqueness nor global softening-branch stability is claimed.
+
+Friction force uses the original arithmetic rotation-average pullback and its
+balancing frame couple. Actual native linear/angular momentum and kinetic plus
+gravity work therefore use the same finite-rotation geometry as each original
+cohesive point. The shared constitutive audit independently checks the actual
+local displacement, full two-dimensional Coulomb disk and dissipation; a second
+spatial audit checks its objective work. Fracture, surviving bond viscosity and
+friction losses remain separate, and friction is not automatically called heat.
+The original surface compression energy is counted once. Complete failure
+retains physical fragments and residual friction on reclosure, with no healing
+or invented bond creation.
+
+Site count bounds dimension at 140. Dense Jacobian, factorization and site
+scratch are allocated at admission; no per-step friction buffer allocation is
+required. Physical evaluations are linear in site count, while the joint
+numerical differentiation and dense solve have their explicit bounded costs.
+All probes, branch switches and final material audits share the original work
+ceilings and cancellation gate. Bodies, all bond/friction states, observations
+and clock publish only after the complete original audit; a refusal preserves
+all accepted state and deterministic retry.
+
+Eight focused G1/G3/G4 tests cover static holding between the static and kinetic
+thresholds, an analytical two-tangent sliding trajectory, partial-damage area
+scaling, independent quadrature through progressive fracture, distinct fracture/
+viscous/friction losses, redundant quadrature partition, rotating spread patches
+with full inertia, source/cancellation/late-energy rollback, and open/zero-friction
+reduction to the original native dynamics. A resolved incoming slip cannot be
+silently reflected by a zero-displacement midpoint capture: that case refuses
+with a step-subdivision request. Exact stopping times, general intrastep reversals,
+contact discovery, changing attachment topology, wear/heat deposition and
+arbitrary moving fracture-surface material reselection remain outside this owner.

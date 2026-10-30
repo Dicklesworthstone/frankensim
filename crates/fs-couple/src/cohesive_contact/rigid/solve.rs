@@ -4,20 +4,21 @@ use fs_mbd::StepReceipt;
 
 #[derive(Clone, Copy)]
 pub(super) struct Work {
-    evaluations: usize,
-    material_evaluations: usize,
+    pub(super) evaluations: usize,
+    pub(super) material_evaluations: usize,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct Evaluation {
     pub(super) receipts: [StepReceipt; 2],
-    residual: [f64; 12],
-    expected: [f64; 12],
+    pub(super) residual: [f64; 12],
+    pub(super) expected: [f64; 12],
     contact: [RigidCohesiveLoad; 2],
     cayley: [Vec3; 2],
     storage: f64,
     fracture: f64,
     viscous: f64,
+    pub(super) friction: f64,
     spatial_work: f64,
 }
 
@@ -32,7 +33,7 @@ impl RigidCohesiveSystem<'_> {
             material_evaluations: 0,
         };
         let mut x = pack(self.last_wrenches);
-        let mut value = self.evaluate(x, loads, &mut work, gate)?;
+        let mut value = self.evaluate(x, loads, None, &mut work, gate)?;
         let mut matrix = [0.0; 144];
         let mut rhs = [0.0; 12];
         let mut correction = [0.0; 12];
@@ -72,11 +73,11 @@ impl RigidCohesiveSystem<'_> {
                 let mut low_x = x;
                 high_x[j] += increment;
                 low_x[j] -= increment;
-                let high = self.evaluate(high_x, loads, &mut work, gate);
+                let high = self.evaluate(high_x, loads, None, &mut work, gate);
                 if let Err(ref refusal) = high {
                     terminal(refusal)?;
                 }
-                let low = self.evaluate(low_x, loads, &mut work, gate);
+                let low = self.evaluate(low_x, loads, None, &mut work, gate);
                 if let Err(ref refusal) = low {
                     terminal(refusal)?;
                 }
@@ -105,7 +106,7 @@ impl RigidCohesiveSystem<'_> {
             let mut accepted = false;
             for _ in 0..self.config.maximum_backtracks {
                 let trial_x = core::array::from_fn(|i| x[i] + fraction * scale[i] * correction[i]);
-                match self.evaluate(trial_x, loads, &mut work, gate) {
+                match self.evaluate(trial_x, loads, None, &mut work, gate) {
                     Ok(trial) if self.scaled_residual(trial_x, trial)? < error => {
                         x = trial_x;
                         value = trial;
@@ -145,10 +146,11 @@ impl RigidCohesiveSystem<'_> {
         Ok(worst)
     }
 
-    fn evaluate(
+    pub(super) fn evaluate(
         &mut self,
         x: [f64; 12],
         loads: [RigidCohesiveLoad; 2],
+        friction_forces: Option<&[[f64; 2]]>,
         work: &mut Work,
         gate: Option<&CancelGate>,
     ) -> Result<Evaluation, RigidCohesiveError> {
@@ -191,6 +193,7 @@ impl RigidCohesiveSystem<'_> {
         let mut storage = 0.0;
         let mut fracture = 0.0;
         let mut viscous = 0.0;
+        let mut friction_loss = 0.0;
         let mut spatial_work = 0.0;
         for (index, site) in self.sites.iter().enumerate() {
             poll(gate)?;
@@ -201,15 +204,31 @@ impl RigidCohesiveSystem<'_> {
             }
             work.material_evaluations += 1;
             let frame = compose(after[0].pose().orientation(), site.frame_in_a)?;
-            let trial = site.point.trial(
-                frame,
-                separation(&after, site.arms_body_m)?,
-                self.dt_s,
-                self.config.objective,
-            )?;
+            let new_separation = separation(&after, site.arms_body_m)?;
+            let (trial, pressure) = if friction_forces.is_some() {
+                site.point.trial_with_damage_weighted_compression(
+                    frame,
+                    new_separation,
+                    self.dt_s,
+                    self.config.objective,
+                )?
+            } else {
+                (
+                    site.point
+                        .trial(frame, new_separation, self.dt_s, self.config.objective)?,
+                    0.0,
+                )
+            };
             let numerical = trial.numerical();
-            let force = numerical.discrete_wrench.force_on_a_n;
-            let couple = numerical.discrete_wrench.frame_couple_n_m;
+            let mut force = numerical.discrete_wrench.force_on_a_n;
+            let mut couple = numerical.discrete_wrench.frame_couple_n_m;
+            if let Some(forces) = friction_forces {
+                let friction = friction::Trial::new(site, numerical, pressure, forces[index])?;
+                force = force.add(friction.frame.force_on_a_n);
+                couple = couple.add(friction.frame.frame_couple_on_a_n_m);
+                friction_loss += friction.frame.spatial_work_j;
+                self.staged_friction[index] = friction;
+            }
             for body in 0..2 {
                 let arm = before[body]
                     .pose()
@@ -251,12 +270,13 @@ impl RigidCohesiveSystem<'_> {
         }
         let expected = pack(expected);
         let residual = core::array::from_fn(|i| x[i] - expected[i]);
-        for value in
-            expected
-                .into_iter()
-                .chain(residual)
-                .chain([storage, fracture, viscous, spatial_work])
-        {
+        for value in expected.into_iter().chain(residual).chain([
+            storage,
+            fracture,
+            viscous,
+            friction_loss,
+            spatial_work,
+        ]) {
             finite(value)?;
         }
         Ok(Evaluation {
@@ -268,6 +288,7 @@ impl RigidCohesiveSystem<'_> {
             storage,
             fracture,
             viscous,
+            friction: friction_loss,
             spatial_work,
         })
     }
@@ -355,7 +376,7 @@ impl RigidCohesiveSystem<'_> {
                 torque_error = torque_error.max(trial.residual[6 * body + 3 + axis].abs());
             }
         }
-        for (site, staged) in self.sites.iter().zip(&self.staged_sites) {
+        for (index, (site, staged)) in self.sites.iter().zip(&self.staged_sites).enumerate() {
             poll(gate)?;
             let value = staged
                 .as_ref()
@@ -363,7 +384,16 @@ impl RigidCohesiveSystem<'_> {
                 .numerical();
             bound(
                 "site mean force",
-                norm(value.discrete_wrench.force_on_a_n),
+                norm(
+                    value
+                        .discrete_wrench
+                        .force_on_a_n
+                        .add(if self.friction.is_some() {
+                            self.staged_friction[index].frame.force_on_a_n
+                        } else {
+                            Vec3::ZERO
+                        }),
+                ),
                 self.config.maximum_site_force_n,
             )?;
             let previous = site.point.numerical().material().jump_m();
@@ -380,7 +410,10 @@ impl RigidCohesiveSystem<'_> {
         finite(external_work)?;
         let old_energy = self.total_energy_j()?;
         let energy_residual = finite(
-            mechanical + trial.storage - old_energy + trial.fracture + trial.viscous
+            mechanical + trial.storage - old_energy
+                + trial.fracture
+                + trial.viscous
+                + trial.friction
                 - external_work,
         )?;
         let energy_tolerance = finite(
@@ -391,7 +424,8 @@ impl RigidCohesiveSystem<'_> {
                         + trial.storage.abs()
                         + external_work.abs()
                         + trial.fracture
-                        + trial.viscous),
+                        + trial.viscous
+                        + trial.friction),
         )?;
         balance(
             "actual rigid/cohesive energy",
@@ -429,6 +463,7 @@ impl RigidCohesiveSystem<'_> {
             external_work_j: external_work,
             fracture_dissipation_j: trial.fracture,
             viscous_dissipation_j: trial.viscous,
+            friction_dissipation_j: trial.friction,
             cohesive_spatial_work_j: trial.spatial_work,
             energy_residual_j: energy_residual,
             energy_tolerance_j: energy_tolerance,
@@ -447,7 +482,7 @@ impl RigidCohesiveSystem<'_> {
     }
 }
 
-fn pack(wrenches: [Wrench; 2]) -> [f64; 12] {
+pub(super) fn pack(wrenches: [Wrench; 2]) -> [f64; 12] {
     let mut packed = [0.0; 12];
     for (body, wrench) in wrenches.into_iter().enumerate() {
         packed[6 * body..6 * body + 6].copy_from_slice(&[
@@ -461,13 +496,13 @@ fn pack(wrenches: [Wrench; 2]) -> [f64; 12] {
     }
     packed
 }
-fn unpack(x: [f64; 12]) -> [Wrench; 2] {
+pub(super) fn unpack(x: [f64; 12]) -> [Wrench; 2] {
     core::array::from_fn(|body| Wrench {
         force_world: Vec3::new(x[6 * body], x[6 * body + 1], x[6 * body + 2]),
         torque_body: Vec3::new(x[6 * body + 3], x[6 * body + 4], x[6 * body + 5]),
     })
 }
-fn terminal(error: &RigidCohesiveError) -> Result<(), RigidCohesiveError> {
+pub(super) fn terminal(error: &RigidCohesiveError) -> Result<(), RigidCohesiveError> {
     match error {
         RigidCohesiveError::Cancelled | RigidCohesiveError::Budget(_) => Err(error.clone()),
         _ => Ok(()),

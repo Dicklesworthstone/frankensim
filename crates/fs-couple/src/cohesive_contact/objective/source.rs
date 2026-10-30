@@ -116,6 +116,31 @@ impl<'a> SourceBoundObjectiveCohesivePoint<'a> {
             source: self.source,
         })
     }
+
+    /// Preserve the original source while evaluating the same objective trial
+    /// and its analytic damaged-area compression measure [Pa].
+    pub fn trial_with_damage_weighted_compression(
+        &self,
+        frame: UnitQuaternion,
+        separation_world_m: Vec3,
+        dt_s: f64,
+        config: ObjectiveCohesiveConfig,
+    ) -> Result<(SourceBoundObjectiveCohesiveStep<'a>, f64), SourceBoundObjectiveCohesiveError>
+    {
+        let (numerical, pressure) = self.point.trial_with_damage_weighted_compression(
+            frame,
+            separation_world_m,
+            dt_s,
+            config,
+        )?;
+        Ok((
+            SourceBoundObjectiveCohesiveStep {
+                numerical,
+                source: self.source,
+            },
+            pressure,
+        ))
+    }
 }
 
 #[cfg(test)]

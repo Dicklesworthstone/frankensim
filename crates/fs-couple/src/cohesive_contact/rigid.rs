@@ -2,10 +2,11 @@
 //!
 //! Each source-bound material point keeps its original area, damage, viscosity,
 //! body attachment arms and a frame fixed in body A. All sites participate in
-//! one twelve-variable wrench solve through the original `fs-mbd` inertia and
-//! Cayley midpoint integrator. No independently moving quadrature masses or
-//! substitute contact springs are introduced. Work per nonlinear evaluation is
-//! linear in the number of sites; the prepared dense solve remains 12 by 12.
+//! one wrench solve through the original `fs-mbd` inertia and Cayley midpoint
+//! integrator. No independently moving quadrature masses or substitute contact
+//! springs are introduced. Work per physical evaluation is linear in the number
+//! of sites. The cohesive solve has twelve unknowns; optional damaged-area
+//! friction adds two tangent efforts per site and a joint disk residual.
 //!
 //! The original objective constitutive owner supplies the actual local-path
 //! mean force F and frame couple M. With midpoint spatial arms r_a, r_b, the
@@ -20,7 +21,8 @@
 //! modifies only reusable scratch. Source conditions and attachment topology
 //! stay fixed. Complete failure preserves the fragments and irreversible
 //! history; the original normal compression penalty allows frictionless
-//! reclosure. No bond creation, healing, collision search, damaged-area friction,
+//! reclosure. Optional sourced damaged-area friction is solved jointly with
+//! these same bodies. No bond creation, healing, collision search,
 //! global softening-branch uniqueness or exact intrastep trajectory is claimed.
 
 use super::objective::{
@@ -38,7 +40,11 @@ use fs_mbd::{
     Vec3, Wrench,
 };
 
+mod friction;
 mod solve;
+pub use friction::{
+    RigidDamageFrictionConfig, RigidDamageFrictionSite, RigidDamageFrictionSiteFrame,
+};
 
 /// The same physical state bounds apply at admission and after each real step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -214,12 +220,15 @@ impl RigidCohesiveLoad {
 pub struct RigidCohesiveSiteFrame {
     pub jump_m: [f64; 3],
     pub damage: f64,
+    /// Original cohesive effort; additional friction efforts are below.
     pub discrete_force_on_a_n: Vec3,
     pub frame_couple_on_a_n_m: Vec3,
     pub stored_energy_j: f64,
     pub fracture_dissipation_j: f64,
     pub viscous_dissipation_j: f64,
     pub spatial_work_j: f64,
+    /// Original source and actual objective friction work, when enabled.
+    pub friction: Option<RigidDamageFrictionSiteFrame>,
 }
 
 /// Independent work, storage and momentum checks on actual native successors.
@@ -233,6 +242,7 @@ pub struct RigidCohesiveFrame {
     pub external_work_j: f64,
     pub fracture_dissipation_j: f64,
     pub viscous_dissipation_j: f64,
+    pub friction_dissipation_j: f64,
     pub cohesive_spatial_work_j: f64,
     pub energy_residual_j: f64,
     pub energy_tolerance_j: f64,
@@ -257,6 +267,7 @@ pub enum RigidCohesiveError {
     Source(SourceBoundObjectiveCohesiveError),
     Objective(ObjectiveCohesiveError),
     Factor(LuWorkspaceError),
+    Friction(super::frictional_damage::DamageFrictionError),
     Cancelled,
     Budget(&'static str),
     Range {
@@ -300,6 +311,11 @@ impl From<LuWorkspaceError> for RigidCohesiveError {
         Self::Factor(value)
     }
 }
+impl From<super::frictional_damage::DamageFrictionError> for RigidCohesiveError {
+    fn from(value: super::frictional_damage::DamageFrictionError) -> Self {
+        Self::Friction(value)
+    }
+}
 
 /// One accepted physical clock and reusable scratch for the complete pair.
 pub struct RigidCohesiveSystem<'a> {
@@ -315,6 +331,8 @@ pub struct RigidCohesiveSystem<'a> {
     site_frames: Vec<Option<RigidCohesiveSiteFrame>>,
     last_wrenches: [Wrench; 2],
     last_frame: Option<RigidCohesiveFrame>,
+    friction: Option<friction::Friction<'a>>,
+    staged_friction: Vec<friction::Trial>,
 }
 impl<'a> RigidCohesiveSystem<'a> {
     pub fn new(
@@ -384,6 +402,8 @@ impl<'a> RigidCohesiveSystem<'a> {
             site_frames,
             last_wrenches: [Wrench::ZERO; 2],
             last_frame: None,
+            friction: None,
+            staged_friction: Vec::new(),
         };
         finite(system.total_energy_j()?)?;
         poll(Some(gate))?;
@@ -465,7 +485,16 @@ impl<'a> RigidCohesiveSystem<'a> {
         if next_time <= self.time_s {
             return Err(RigidCohesiveError::Budget("clock resolution"));
         }
-        let (candidate, wrenches, iterations, work) = self.solve(loads, gate)?;
+        // Scratch is temporarily moved only to allow the joint solver to use
+        // the original native evaluator; restore it on every Result path.
+        let solved = if let Some(mut friction) = self.friction.take() {
+            let solved = friction.solve(self, loads, gate);
+            self.friction = Some(friction);
+            solved
+        } else {
+            self.solve(loads, gate)
+        };
+        let (candidate, wrenches, iterations, work) = solved?;
         let frame = self.audit(
             candidate, wrenches, loads, next_step, next_time, iterations, work, gate,
         )?;
@@ -495,7 +524,14 @@ impl<'a> RigidCohesiveSystem<'a> {
                 viscous_dissipation_j: numerical.point.area_m2()
                     * numerical.material.viscous_dissipated_j_m2,
                 spatial_work_j: numerical.spatial_work_j,
+                friction: self
+                    .friction
+                    .as_ref()
+                    .map(|_| self.staged_friction[index].frame),
             });
+        }
+        if let Some(friction) = &mut self.friction {
+            friction.publish();
         }
         self.steps = next_step;
         self.time_s = next_time;
