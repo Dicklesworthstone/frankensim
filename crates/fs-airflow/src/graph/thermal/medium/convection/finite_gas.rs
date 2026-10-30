@@ -6,6 +6,9 @@
 //! transfer, body enthalpy (including latent heat), gas energy and any wall momentum.
 //! No fixed-temperature reservoir, second gas law, or convection integrator.
 
+/// Source-pinned film properties on the same finite gas/body heat residual.
+pub mod film;
+
 /// Multiple finite gases and convective patches on the existing circuit/thermal assembly.
 pub mod network;
 /// Buoyancy-driven vertical-plate heat exchange at actual gas/body states.

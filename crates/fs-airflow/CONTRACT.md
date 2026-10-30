@@ -246,6 +246,27 @@ phase, resolve boundary layers, or claim experimental accuracy. Hydraulic
 `dp*Q` is reported separately and neglected in the thermal equation; it is not
 silently added to wall heat or enthalpy.
 
+### Source-preserving film properties in finite gas/body coupling
+
+`finite_gas::film::FilmGasSurface` evaluates forced or natural convection at
+the mean of the actual bulk gas and wall temperatures, while the existing
+finite-gas/body/piston residual owns both heat debits, gas pressure work and
+mechanical motion. The film state supplies properties only; the original bulk
+gas retains mass, energy, composition and acoustic state. Rayleigh forcing and
+signed exchange retain the full wall-to-bulk temperature difference.
+
+`ThermochemicalGasModel::evaluate_temperature_from_snapshot` reconstructs
+the actual active species and declared composition basis from the snapshot,
+pins its original transport claims, and admits the original caloric sources
+before changing property temperature at unchanged bulk pressure. A source bank
+may have different initial fractions or additional inactive species, but cannot
+substitute material cards, caloric laws or source packs. Source-domain failures
+remain failures. This path retains the original dilute ideal-gas, correlation,
+uniform-cell and temporal-refinement limits; it adds no finite film store,
+boundary-layer solver or chemical evolution. Focused finite-gas regressions
+exercise mixed and pure species, mass-basis preservation, independent film
+Rayleigh/heat algebra, actual piston/body energy closure and atomic refusal.
+
 ### Natural convection in finite gas and coupled surface networks
 
 `medium::convection::finite_gas::NaturalGasSurface` evaluates the shared

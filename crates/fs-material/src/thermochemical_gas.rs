@@ -13,6 +13,8 @@
 //! chemical-equilibrium sound speed, molecular relaxation, condensation and
 //! real-gas effects are NOT modeled. The legacy USSA gas evaluator is unchanged.
 
+mod temperature;
+
 /// Conservative density/energy reconstruction and closed-volume gas heating.
 pub mod energy;
 /// Explicit nonideal mechanical/phase binding over the same canonical species.

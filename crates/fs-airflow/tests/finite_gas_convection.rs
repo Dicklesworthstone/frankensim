@@ -1,4 +1,6 @@
 //! G0/G1/G3: real material packs, original correlation and finite heat/motion solver.
+#[path = "finite_gas_convection/film.rs"]
+mod film;
 #[path = "finite_gas_convection/source.rs"]
 mod source;
 #[path = "finite_gas_convection/uniform.rs"]
