@@ -22,6 +22,7 @@ pub struct PreparedMaterialNetwork<'n, 'a> {
     pub(super) network: &'n MaterialNetwork<'a>,
     pub(super) bases: BTreeMap<usize, ElectricalPropertyBasis>,
     pub(super) pins: BTreeMap<CellId, MaterialPropertySelection>,
+    pub(super) directional: Option<directional::DirectionalPlan>,
 }
 
 impl PreparedMaterialNetwork<'_, '_> {
@@ -37,6 +38,7 @@ impl PreparedMaterialNetwork<'_, '_> {
             &self.bases,
             Some(&self.pins),
             None,
+            self.directional.as_ref(),
             cancelled,
         )
     }
@@ -56,8 +58,15 @@ impl PreparedMaterialNetwork<'_, '_> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
         self.network.resolve_bound_with_links(
-            thermal, &self.bases, Some(&self.pins), None, Some(additional_links), cancelled,
+            thermal, &self.bases, Some(&self.pins), None, Some(additional_links),
+            self.directional.as_ref(), cancelled,
         )
+    }
+
+    /// Retained physical gradient directions and principal material roles.
+    /// Actual values/claim receipts remain in the same resolved cell snapshots.
+    pub fn directional_conduction(&self) -> impl Iterator<Item = &DirectionalConductionLink> {
+        self.directional.iter().flat_map(|plan| plan.bindings())
     }
 }
 
@@ -91,6 +100,46 @@ impl<'a> MaterialNetwork<'a> {
         self.prepare_bound(thermal, bases, None, cancelled)
     }
 
+    /// Pin principal conductivity sources before the first thermal evaluation.
+    /// Anisotropic-only cells need no scalar fallback. Original link endpoints,
+    /// areas and half-cell lengths stay authoritative; every trial re-evaluates
+    /// the same principal claims at its actual temperature/phase. The original
+    /// one-dimensional link assumes the declared temperature-gradient direction,
+    /// giving n^T K n; arbitrary anisotropic lateral boundary conditions need
+    /// the spatial heat owner. Source-domain exits refuse instead of extrapolate.
+    /// Descriptors are owned; the returned lifetime is only the original network.
+    pub fn prepare_with_directional_conduction<'n>(
+        &'n self, thermal: &DepositionSimulation<'_>,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        links: &[DirectionalConductionLink], mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
+        if cancelled() { return Err(DepositionError::Cancelled.into()); }
+        let bases = self.basis_plan(electrical_bases)?;
+        let directional = if links.is_empty() { None } else {
+            Some(directional::DirectionalPlan::new(self, thermal, links, &mut cancelled)?)
+        };
+        self.prepare_bound_with_links(thermal, bases, None, None, directional, cancelled)
+    }
+
+    /// Prepare oriented material conduction alongside other physical link
+    /// owners. Directional declarations may name only the original Fourier
+    /// bindings; `additional_links` must partition all remaining native links.
+    /// Subsequent `resolve_with_link_conductances` calls retain the same
+    /// principal claims and orientations while receiving fresh external G.
+    pub fn prepare_with_directional_conduction_and_link_conductances<'n>(
+        &'n self, thermal: &DepositionSimulation<'_>,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        links: &[DirectionalConductionLink], additional_links: &BTreeMap<u64, f64>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
+        if cancelled() { return Err(DepositionError::Cancelled.into()); }
+        let bases = self.basis_plan(electrical_bases)?;
+        let directional = if links.is_empty() { None } else {
+            Some(directional::DirectionalPlan::new(self, thermal, links, &mut cancelled)?)
+        };
+        self.prepare_bound_with_links(thermal, bases, None, Some(additional_links), directional, cancelled)
+    }
+
     /// Select original material claims while another physical owner supplies
     /// the remaining native links. Their coefficients must be re-resolved and
     /// supplied to `resolve_with_link_conductances` at every trial. Ordinary
@@ -105,7 +154,7 @@ impl<'a> MaterialNetwork<'a> {
     ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
         if cancelled() { return Err(DepositionError::Cancelled.into()); }
         let bases = self.basis_plan(electrical_bases)?;
-        self.prepare_bound_with_links(thermal, bases, None, Some(additional_links), cancelled)
+        self.prepare_bound_with_links(thermal, bases, None, Some(additional_links), None, cancelled)
     }
 
     // Share the original pin-selection owner with explicitly coupled electrical
@@ -117,19 +166,20 @@ impl<'a> MaterialNetwork<'a> {
         electrical_axes: Option<&ElectricalAxes>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
-        self.prepare_bound_with_links(thermal, bases, electrical_axes, None, cancelled)
+        self.prepare_bound_with_links(thermal, bases, electrical_axes, None, None, cancelled)
     }
 
-    fn prepare_bound_with_links<'n>(
+    pub(super) fn prepare_bound_with_links<'n>(
         &'n self,
         thermal: &DepositionSimulation<'_>,
         bases: BTreeMap<usize, ElectricalPropertyBasis>,
         electrical_axes: Option<&ElectricalAxes>,
         additional_links: Option<&BTreeMap<u64, f64>>,
+        directional: Option<directional::DirectionalPlan>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
         let initial = self.resolve_bound_with_links(
-            thermal, &bases, None, electrical_axes, additional_links, &mut cancelled,
+            thermal, &bases, None, electrical_axes, additional_links, directional.as_ref(), &mut cancelled,
         )?;
         let selection = |material: &ResolvedMaterialStatePoint| {
             MaterialPropertySelection::PinnedByProperty(material.properties().iter()
@@ -149,7 +199,7 @@ impl<'a> MaterialNetwork<'a> {
             pins.insert(binding.destination.cell, selection(resistor.conductor.material()));
         }
         if cancelled() { return Err(DepositionError::Cancelled.into()); }
-        Ok(PreparedMaterialNetwork { network: self, bases, pins })
+        Ok(PreparedMaterialNetwork { network: self, bases, pins, directional })
     }
 }
 

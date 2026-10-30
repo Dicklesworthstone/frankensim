@@ -3,6 +3,8 @@
 mod common;
 #[path = "circuit_material_network/expansion.rs"]
 mod expansion;
+#[path = "circuit_material_network/directional.rs"]
+mod directional;
 use common::*;
 use fs_couple::circuit_enthalpy::material::*;
 use fs_couple::cavity_phs::piston::thermal::source::ThermalMaterialPoint;

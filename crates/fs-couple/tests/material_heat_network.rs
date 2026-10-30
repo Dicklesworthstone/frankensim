@@ -1,6 +1,8 @@
 //! Same material assembly through real electrical, contact and radiation owners.
 #[path = "material_heat_network/layers.rs"]
 mod layers;
+#[path = "material_heat_network/directional.rs"]
+mod directional;
 #[path = "../../fs-conduction/tests/radiation_material/common.rs"]
 mod common;
 use common::*;
@@ -30,7 +32,10 @@ fn source(e: f64, r: f64) -> MaterialCard {
     let card = card(e, e);
     let mut claims = card.claims().clone();
     for (name, dims, a, b) in [("electrical_resistivity", ELECTRICAL_RESISTIVITY_DIMS, r, 2.0*r),
-        ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 1.0, 2.0)] {
+        ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 1.0, 2.0),
+        ("k_principal_1", THERMAL_CONDUCTIVITY_DIMS, 1.0, 2.0),
+        ("k_principal_2", THERMAL_CONDUCTIVITY_DIMS, 4.0, 8.0),
+        ("k_principal_3", THERMAL_CONDUCTIVITY_DIMS, 9.0, 18.0)] {
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
             value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
                 knots: vec![(300.0,a),(500.0,b)], dims },

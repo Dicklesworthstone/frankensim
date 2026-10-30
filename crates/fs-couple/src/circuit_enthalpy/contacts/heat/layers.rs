@@ -30,37 +30,11 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
     /// layers, arbitrary tensor heat flow, or phase-boundary propagation.
     /// Source-domain exits and cancellation refuse the whole coupled candidate.
     pub fn with_integrated_conduction(
-        self,
-        cx: &Cx<'_>,
-        thermal: &DepositionSimulation<'_>,
-        model: &'n PreparedLayerConduction<'n, 'a>,
-        controls: LayerConductionConfig,
-    ) -> Result<Self, HeatNetworkError> {
-        self.with_integrated_conduction_bound(cx, thermal, model, controls, None)
-    }
-
-    /// Adopt the original integrated layer laws while another physical owner
-    /// supplies disjoint native links. The same correspondence checks apply;
-    /// only ordinary Fourier links can be replaced by integrated conduction.
-    /// Additional coefficients are admission inputs, never cached state.
-    pub fn with_integrated_conduction_and_link_conductances(
-        self,
-        cx: &Cx<'_>,
-        thermal: &DepositionSimulation<'_>,
-        model: &'n PreparedLayerConduction<'n, 'a>,
-        controls: LayerConductionConfig,
-        additional_links: &BTreeMap<u64, f64>,
-    ) -> Result<Self, HeatNetworkError> {
-        self.with_integrated_conduction_bound(cx, thermal, model, controls, Some(additional_links))
-    }
-
-    fn with_integrated_conduction_bound(
         mut self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
         model: &'n PreparedLayerConduction<'n, 'a>,
         controls: LayerConductionConfig,
-        additional_links: Option<&BTreeMap<u64, f64>>,
     ) -> Result<Self, HeatNetworkError> {
         check(cx)?;
         if self.integrated_conduction.is_some() || model.bindings().len() == 0 {
@@ -68,10 +42,10 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
                 "one nonempty integrated conduction binding is required",
             ));
         }
-        let initial = self.resolve_with_optional_links(cx, thermal, additional_links)?;
+        let initial = self.resolve(cx, thermal)?;
         self.admit_integrated_conduction(cx, thermal, model, &initial.bulk.source)?;
         self.integrated_conduction = Some(IntegratedConduction { model, controls });
-        self.resolve_with_optional_links(cx, thermal, additional_links)?;
+        self.resolve(cx, thermal)?;
         check(cx)?;
         Ok(self)
     }
@@ -91,6 +65,11 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
         let bulk = self.network.electrical.bulk;
         for binding in model.bindings() {
             check(cx)?;
+            if self.electrical.directional_conduction().any(|link| link.link == binding.link) {
+                return Err(invalid(
+                    "an isotropic integrated layer cannot replace an explicitly directional conductivity link",
+                ));
+            }
             if self
                 .thermal_contacts
                 .iter()

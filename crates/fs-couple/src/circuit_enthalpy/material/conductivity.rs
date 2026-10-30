@@ -171,6 +171,7 @@ impl<'a> MaterialNetwork<'a> {
         thermal: &DepositionSimulation<'_>,
         electrical: &[ConductivitySample],
         coefficients: StepCoefficients<MaterialNetworkSample>,
+        directional: Option<&directional::DirectionalPlan>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
         check_cancelled(&mut cancelled)?;
@@ -208,7 +209,7 @@ impl<'a> MaterialNetwork<'a> {
             }
         }
         let (conductances_w_k, links) =
-            self.resolve_links(thermal, &bindings, &samples, &mut || {
+            self.resolve_links(thermal, &bindings, &samples, directional, &mut || {
                 if cancelled() {
                     Err(DepositionError::Cancelled)
                 } else {
@@ -238,10 +239,27 @@ impl<'a> MaterialNetwork<'a> {
         &'n self,
         thermal: &DepositionSimulation<'_>,
         responses: &[CellConductionResponse<'_>],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
+        self.prepare_conductivity_with_directional_conduction(thermal, responses, &[], cancelled)
+    }
+
+    /// Bind principal conductivity roles to the same live E/J material bundles
+    /// used by the original electrical response solver. All three principal
+    /// claims are re-evaluated at solved field/current and trial thermal state;
+    /// only the declared one-dimensional gradient projection is added.
+    pub fn prepare_conductivity_with_directional_conduction<'n>(
+        &'n self,
+        thermal: &DepositionSimulation<'_>,
+        responses: &[CellConductionResponse<'_>],
+        links: &[DirectionalConductionLink],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
         let plan = response_plan(self, responses, &mut cancelled)?;
-        self.prepare_bound(thermal, plan.bases, Some(&plan.axes), cancelled)
+        let directional = if links.is_empty() { None } else {
+            Some(directional::DirectionalPlan::new(self, thermal, links, &mut cancelled)?)
+        };
+        self.prepare_bound_with_links(thermal, plan.bases, Some(&plan.axes), None, directional, cancelled)
     }
 }
 
@@ -272,6 +290,7 @@ impl PreparedMaterialNetwork<'_, '_> {
             &self.bases,
             Some(&self.pins),
             Some(&plan.axes),
+            self.directional.as_ref(),
             cancelled,
         )
     }
@@ -337,14 +356,14 @@ impl PreparedMaterialNetwork<'_, '_> {
                     &self.bases,
                     Some(&self.pins),
                     Some(&plan.axes),
+                    self.directional.as_ref(),
                     || (*cancel.borrow_mut())(),
                 )
             },
             |state, electrical, coefficients| {
                 self.network
-                    .resolve_conductivity_transport(state, &electrical.evaluated, coefficients, || {
-                        (*cancel.borrow_mut())()
-                    })
+                    .resolve_conductivity_transport(state, &electrical.evaluated, coefficients,
+                        self.directional.as_ref(), || (*cancel.borrow_mut())())
             },
             || (*cancel.borrow_mut())(),
         );
@@ -390,9 +409,10 @@ impl PreparedMaterialNetwork<'_, '_> {
             FieldMotionEnthalpyInput { motion, ports, external_force_n, destinations: &destinations },
             &plan.sources, controls, conductivity, guess_j,
             |state| self.network.resolve_bound(state, &self.bases, Some(&self.pins),
-                Some(&plan.axes), || (*cancel.borrow_mut())()),
+                Some(&plan.axes), self.directional.as_ref(), || (*cancel.borrow_mut())()),
             |state, electrical, coefficients| self.network.resolve_conductivity_transport(
-                state, &electrical.evaluated, coefficients, || (*cancel.borrow_mut())()),
+                state, &electrical.evaluated, coefficients, self.directional.as_ref(),
+                || (*cancel.borrow_mut())()),
             || (*cancel.borrow_mut())());
         match result {
             Err(CircuitEnthalpyError::Source(MaterialNetworkError::Thermal(

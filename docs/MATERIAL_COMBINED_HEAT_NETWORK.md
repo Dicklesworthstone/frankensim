@@ -40,6 +40,44 @@ coverage admission. All original source receipts and per-mechanism reports are
 available in `report.source.material`; the complete bulk material snapshots
 remain in its `material` member for downstream consumers.
 
+## Directional heat conduction
+
+For an orthotropic material, declare `DirectionalConductionLink` records from
+`circuit_enthalpy::material` and use
+`assembly.prepare_with_directional_conduction(&cx, &thermal, &directions)`.
+Each original link side supplies three principal conductivity property keys,
+their explicit selection policy, a nonzero material-frame identity, and a unit
+temperature-gradient direction expressed in those material axes. All links
+touching one cell must agree on its principal roles, selected claims and frame;
+their directions can differ. Link endpoint order, area and half-cell distances
+remain with the original thermal geometry.
+
+The projected coefficient is `k_n(T) = sum_i n_i^2 k_i(T)`. Both sides enter the
+existing series-resistance law, followed by any declared thermal contact.
+Principal claims are selected once, retained through source continuation, and
+queried at every candidate cell state alongside its electrical properties.
+The normal material sample carries all three principal receipts and the applied
+link coefficients. An orthotropic-only cell can set its legacy scalar
+`MaterialCell::conductivity` binding to `None`; no substitute scalar is invented.
+Changing orientation or principal conductivity data therefore changes heat,
+temperature-dependent resistance and the original coupled electrical history.
+
+This also composes with electrical interfaces and enclosure radiation through
+the same prepared heat network. For additional links supplied by another
+physical owner, use
+`prepare_with_directional_conduction_and_link_conductances` and continue to
+provide their live values through `resolve_with_link_conductances`. Such links
+must be disjoint from the oriented Fourier bindings. A source-integrated
+isotropic layer cannot replace an explicitly directional link; it can still
+serve other links in the same assembly.
+
+This is a one-dimensional link/Galerkin reduction with a declared gradient
+direction. It does not solve arbitrary three-dimensional anisotropic flow or
+the transverse gradients of a generally oriented insulated rod. Those require
+the spatial tensor-conduction owner. Source intervals, nonnegative principal
+conductivities, unit directions and unchanged material endpoints remain explicit
+admission conditions.
+
 ## Energy and scope
 
 The standard circuit/enthalpy report preserves the actual source arithmetic,

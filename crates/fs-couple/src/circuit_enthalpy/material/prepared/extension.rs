@@ -57,6 +57,11 @@ impl PreparedMaterialNetwork<'_, '_> {
     ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
         let invalid = MaterialNetworkError::Invalid;
         if cancelled() { return Err(DepositionError::Cancelled.into()); }
+        let directional = if let Some(plan) = &self.directional {
+            let mut check = || if cancelled() { Err(DepositionError::Cancelled) } else { Ok(()) };
+            plan.admit_topology(thermal, &mut check)?;
+            plan.retained_bindings(&self.pins, &mut check)?
+        } else { Vec::new() };
         if network.resistors.len() != self.network.resistors.len() {
             return Err(invalid("extension cannot add or remove electrical branches"));
         }
@@ -137,12 +142,14 @@ impl PreparedMaterialNetwork<'_, '_> {
         // computes a fresh complete state. No substitute conductivity evaluator.
         let stage = MaterialNetwork { cells: &staged, resistors: &resistors, links: network.links };
         let electrical_bases = self.bases.iter().map(|(&branch, &basis)| (branch, basis)).collect::<Vec<_>>();
-        let prepared = stage.prepare_with_bases(thermal, &electrical_bases, &mut cancelled)?;
+        let prepared = stage.prepare_with_directional_conduction(
+            thermal, &electrical_bases, &directional, &mut cancelled)?;
         let pins = prepared.pins;
         let bases = prepared.bases;
+        let directional = prepared.directional;
         if cancelled() { return Err(DepositionError::Cancelled.into()); }
         // Keep only owned claim choices, never a borrow of the temporary stage.
-        Ok(PreparedMaterialNetwork { network, bases, pins })
+        Ok(PreparedMaterialNetwork { network, bases, pins, directional })
     }
 
     // A complete old bundle can contain both electrical and thermal properties.

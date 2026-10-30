@@ -1,7 +1,7 @@
 //! Keep selected interface and bulk claims through one composed physical solve.
 //! Values remain live: no temperature, resistance or conductivity is cached.
 use super::*;
-use crate::circuit_enthalpy::material::PreparedMaterialNetwork;
+use crate::circuit_enthalpy::material::{DirectionalConductionLink, PreparedMaterialNetwork};
 
 mod extension;
 mod field_storage;
@@ -18,6 +18,11 @@ pub struct PreparedElectricalContactNetwork<'n,'a> {
     geometry:BTreeMap<u64,([CellId;2],f64)>,
 }
 impl PreparedElectricalContactNetwork<'_,'_> {
+    /// Original principal source roles, material frames and link directions.
+    pub fn directional_conduction(&self) -> impl Iterator<Item = &DirectionalConductionLink> {
+        self.bulk.directional_conduction()
+    }
+
     /// Original bulk heat destinations, without a second caller-authored map.
     pub fn resistor_destinations(&self) -> Vec<ResistorCell> {
         self.bulk.resistor_destinations()
@@ -61,7 +66,7 @@ impl<'a> ElectricalContactNetwork<'a> {
     /// Cancellation returns no partially prepared object or physical endpoint.
     pub fn prepare<'n>(&'n self,thermal:&DepositionSimulation<'_>,cancelled:impl FnMut()->bool)
         ->Result<PreparedElectricalContactNetwork<'n,'a>,ElectricalContactNetworkError> {
-        self.prepare_with_optional_links(thermal, None, cancelled)
+        self.prepare_with_optional_links(thermal, &[], None, cancelled)
     }
 
     /// Retain the same original electrical and interface source selections for
@@ -71,21 +76,43 @@ impl<'a> ElectricalContactNetwork<'a> {
         &'n self, thermal: &DepositionSimulation<'_>,
         additional_links: &BTreeMap<u64, f64>, cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedElectricalContactNetwork<'n, 'a>, ElectricalContactNetworkError> {
-        self.prepare_with_optional_links(thermal, Some(additional_links), cancelled)
+        self.prepare_with_optional_links(thermal, &[], Some(additional_links), cancelled)
+    }
+
+    /// Source principal conductivities in each declared link direction while
+    /// retaining the original electrical contact laws and heat destinations.
+    /// Direction descriptors are data; all values are re-queried at trial T.
+    pub fn prepare_with_directional_conduction<'n>(
+        &'n self, thermal: &DepositionSimulation<'_>,
+        directions: &[DirectionalConductionLink], cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedElectricalContactNetwork<'n, 'a>, ElectricalContactNetworkError> {
+        self.prepare_with_optional_links(thermal, directions, None, cancelled)
+    }
+
+    /// Combine oriented bulk links and disjoint links owned by other physical
+    /// mechanisms, such as finite-fluid convection, on the same source timeline.
+    pub fn prepare_with_directional_conduction_and_link_conductances<'n>(
+        &'n self, thermal: &DepositionSimulation<'_>,
+        directions: &[DirectionalConductionLink], additional_links: &BTreeMap<u64, f64>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedElectricalContactNetwork<'n, 'a>, ElectricalContactNetworkError> {
+        self.prepare_with_optional_links(thermal, directions, Some(additional_links), cancelled)
     }
 
     fn prepare_with_optional_links<'n>(
         &'n self, thermal: &DepositionSimulation<'_>,
+        directions: &[DirectionalConductionLink],
         additional_links: Option<&BTreeMap<u64, f64>>, mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedElectricalContactNetwork<'n, 'a>, ElectricalContactNetworkError> {
         use ElectricalContactNetworkError as Error;
         if cancelled() {return Err(Error::Thermal(DepositionError::Cancelled));}
         self.routes(thermal)?;
         let bulk = match additional_links {
-            Some(links) => self.bulk.prepare_with_link_conductances(
-                thermal, self.electrical_bases, links, &mut cancelled,
+            Some(links) => self.bulk.prepare_with_directional_conduction_and_link_conductances(
+                thermal, self.electrical_bases, directions, links, &mut cancelled,
             ),
-            None => self.bulk.prepare_with_bases(thermal, self.electrical_bases, &mut cancelled),
+            None => self.bulk.prepare_with_directional_conduction(
+                thermal, self.electrical_bases, directions, &mut cancelled),
         }.map_err(Error::Bulk)?;
         let sample = match additional_links {
             Some(links) => bulk.resolve_with_link_conductances(thermal, links, &mut cancelled),

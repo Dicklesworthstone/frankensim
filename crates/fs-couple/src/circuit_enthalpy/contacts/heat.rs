@@ -7,7 +7,7 @@ use super::material::{ElectricalContactNetwork, ElectricalContactNetworkError,
 use super::{CircuitEnthalpyCandidate, CircuitEnthalpyError, CircuitEnthalpyInput,
     CircuitEnthalpySolve, CircuitThermalCoefficients, ContactThermalCoefficients,
     ContactThermalSample, DepositionError, DepositionSimulation, MaterialCircuit};
-use crate::circuit_enthalpy::material::{MaterialNetworkError, MaterialNetworkSample};
+use crate::circuit_enthalpy::material::{DirectionalConductionLink, MaterialNetworkError, MaterialNetworkSample};
 use fs_conduction::ConductionError;
 use fs_conduction::transient::deposition::contact::{
     ContactLinkSample, MaterialContactLink, apply_material_contacts};
@@ -163,6 +163,39 @@ impl<'a> MaterialHeatNetwork<'a> {
         check(cx)?;
         let electrical = self.electrical.prepare_with_link_conductances(
             thermal, additional_links, || cx.checkpoint().is_err(),
+        )?;
+        self.prepare_bound_with_links(cx, thermal, electrical, self.thermal_contacts,
+            self.radiation.map_or(&[], |radiation| radiation.cells), Some(additional_links))
+    }
+
+    /// Prepare material-axis conductivity on the original Fourier links, with
+    /// the same electrical contacts, thermal interfaces and enclosure radiation.
+    /// Each side supplies its principal source roles and unit gradient direction;
+    /// the material resolver owns projection and source continuity. This is a
+    /// declared one-dimensional link reduction, not a general 3-D heat solution.
+    pub fn prepare_with_directional_conduction<'n>(
+        &'n self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        directions: &[DirectionalConductionLink],
+    ) -> Result<PreparedHeatNetwork<'n, 'a>, HeatNetworkError> {
+        check(cx)?;
+        let electrical = self.electrical.prepare_with_directional_conduction(
+            thermal, directions, || cx.checkpoint().is_err(),
+        )?;
+        self.prepare_bound(cx, thermal, electrical, self.thermal_contacts,
+            self.radiation.map_or(&[], |radiation| radiation.cells))
+    }
+
+    /// Compose oriented Fourier conduction with additional physical link laws.
+    /// Their link IDs must be disjoint. Future trial values still enter through
+    /// `resolve_with_link_conductances`; the original material axes and selected
+    /// conductivity claims remain attached to this prepared heat assembly.
+    pub fn prepare_with_directional_conduction_and_link_conductances<'n>(
+        &'n self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        directions: &[DirectionalConductionLink], additional_links: &BTreeMap<u64, f64>,
+    ) -> Result<PreparedHeatNetwork<'n, 'a>, HeatNetworkError> {
+        check(cx)?;
+        let electrical = self.electrical.prepare_with_directional_conduction_and_link_conductances(
+            thermal, directions, additional_links, || cx.checkpoint().is_err(),
         )?;
         self.prepare_bound_with_links(cx, thermal, electrical, self.thermal_contacts,
             self.radiation.map_or(&[], |radiation| radiation.cells), Some(additional_links))

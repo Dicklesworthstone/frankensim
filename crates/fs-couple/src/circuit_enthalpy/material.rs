@@ -1,11 +1,13 @@
 //! Data-only bindings from the SAME caloric cards to circuit and heat transport.
 //! This module owns no material or stepping law. It queries the existing
-//! ThermalMaterialPoint and MaterialOhmicBody, then lowers scalar conduction
-//! across caller-declared uniform half-cell distances.
+//! ThermalMaterialPoint and MaterialOhmicBody, then lowers scalar or explicitly
+//! oriented principal conduction across declared uniform half-cell distances.
 
 mod prepared;
 pub mod conductivity;
+mod directional;
 pub use conductivity::CellConductionResponse;
+pub use directional::{DirectionalConductionLink, DirectionalConductionSide};
 pub use prepared::{
     ConductorFreeExpansion, ExpandingBoundary, ExpandingBoundarySample,
     ExpandingMaterialNetwork, ExpandingNetworkSample, MaterialTransportObserver,
@@ -35,8 +37,9 @@ pub struct MaterialCell<'a> {
     pub curve: &'a EquilibriumEnthalpyPhaseCurve,
     /// Card and physical coordinates; T and declared phase fraction evolve.
     pub point: ThermalMaterialPoint<'a>,
-    /// Conductivity key and explicit claim selection. Required for linked cells;
-    /// None does not imply insulation, nor an inferred material conductivity.
+    /// Scalar conductivity key and explicit claim selection. A linked side needs
+    /// this binding or an explicit prepared directional binding. None does not
+    /// imply insulation, nor an inferred material conductivity.
     pub conductivity: Option<(&'a PropertyKey, MaterialPropertySelection)>,
 }
 /// One whole-cell uniform electrical branch; no independent ideal drive.
@@ -110,7 +113,7 @@ pub struct LinkMaterialSample {
     pub link: u64,
     /// Endpoints in original link order, not sorted circuit branch order.
     pub cells: [CellId;2],
-    /// Actual conductivity pair [W/(m K)] at those endpoint phase states.
+    /// Actual scalar or n^T K n pair [W/(m K)] at those endpoint phase states.
     pub conductivity_w_m_k: [f64;2],
     /// Resulting total conductance [W/K].
     pub conductance_w_k: f64,
@@ -149,7 +152,7 @@ impl MaterialNetwork<'_> {
         -> Result<CircuitThermalCoefficients<MaterialNetworkSample>,MaterialNetworkError> {
         if cancelled() {return Err(MaterialNetworkError::Thermal(DepositionError::Cancelled));}
         let bases=self.basis_plan(electrical_bases)?;
-        self.resolve_bound(thermal,&bases,None,None,cancelled)
+        self.resolve_bound(thermal,&bases,None,None,None,cancelled)
     }
 
     fn basis_plan(&self, electrical_bases:&[(usize,ElectricalPropertyBasis)])
@@ -172,9 +175,10 @@ impl MaterialNetwork<'_> {
         bases: &BTreeMap<usize, ElectricalPropertyBasis>,
         pinned: Option<&BTreeMap<CellId, MaterialPropertySelection>>,
         electrical_axes: Option<&ElectricalAxes>,
+        directional: Option<&directional::DirectionalPlan>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
-        self.resolve_bound_with_links(thermal, bases, pinned, electrical_axes, None, cancelled)
+        self.resolve_bound_with_links(thermal, bases, pinned, electrical_axes, None, directional, cancelled)
     }
 
     // Additional physical link owners supply their actual step-local G here.
@@ -186,11 +190,13 @@ impl MaterialNetwork<'_> {
         pinned: Option<&BTreeMap<CellId, MaterialPropertySelection>>,
         electrical_axes: Option<&ElectricalAxes>,
         additional_links: Option<&BTreeMap<u64, f64>>,
+        directional: Option<&directional::DirectionalPlan>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
         let invalid=MaterialNetworkError::Invalid;
         let mut check=|| if cancelled() {Err(DepositionError::Cancelled)} else {Ok(())};
         check()?;
+        if let Some(directional) = directional { directional.admit_topology(thermal, &mut check)?; }
         if self.cells.len()!=thermal.cells().len()
             || self.links.len().checked_add(additional_links.map_or(0, BTreeMap::len))
                 != Some(thermal.links().len())
@@ -256,6 +262,9 @@ impl MaterialNetwork<'_> {
                     .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
                 requested.push((requirement,resistor.selection.clone()));
             }
+            let has_directional = if let Some(directional) = directional {
+                directional.requests(binding.cell, &mut requested)?
+            } else { false };
             let conductivity=if requested.is_empty() {None} else {
                 let selection=if let Some(pins)=pinned {
                     pins.get(&binding.cell).ok_or(invalid("initial transport source pins are absent"))?.clone()
@@ -282,7 +291,7 @@ impl MaterialNetwork<'_> {
                         .admit_static_with_axes(property, &operating_axes)
                         .map_err(MaterialNetworkError::Material)?;
                 }
-                let conductivity=binding.conductivity.as_ref().map(|_|material.clone());
+                let conductivity=(binding.conductivity.is_some() || has_directional).then(|| material.clone());
                 materials.insert(binding.cell,material);
                 conductivity
             };
@@ -309,7 +318,7 @@ impl MaterialNetwork<'_> {
                 .map_err(MaterialNetworkError::Conductor)?;
             resistors.push(MaterialResistor {branch:d.branch,conductor});
         }
-        let (mut conductances, links) = self.resolve_links(thermal, &bindings, &samples, &mut check)?;
+        let (mut conductances, links) = self.resolve_links(thermal, &bindings, &samples, directional, &mut check)?;
         if let Some(additional) = additional_links {
             for (&id, &conductance) in additional {
                 check()?;
@@ -336,6 +345,7 @@ impl MaterialNetwork<'_> {
         thermal: &DepositionSimulation<'_>,
         bindings: &BTreeMap<CellId, &MaterialCell<'_>>,
         samples: &BTreeMap<CellId, CellMaterialSample>,
+        directional: Option<&directional::DirectionalPlan>,
         check: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(BTreeMap<u64, f64>, Vec<LinkMaterialSample>), MaterialNetworkError> {
         let invalid = MaterialNetworkError::Invalid;
@@ -359,19 +369,22 @@ impl MaterialNetwork<'_> {
             }
             let mut k = [0.0; 2];
             for (i, id) in [link.a, link.b].into_iter().enumerate() {
+                let material = samples.get(&id)
+                    .ok_or(invalid("linked material sample is absent"))?.conductivity.as_ref()
+                    .ok_or(invalid("linked conductivity is absent"))?;
+                if let Some(directional) = directional {
+                    if let Some(projected) = directional.project(source.link, i, material)? {
+                        k[i] = projected;
+                        continue;
+                    }
+                }
                 let (key, _) = bindings
                     .get(&id)
                     .ok_or(invalid("linked cell has no material binding"))?
                     .conductivity
                     .as_ref()
                     .ok_or(invalid("linked cell has no conductivity binding"))?;
-                k[i] = samples
-                    .get(&id)
-                    .ok_or(invalid("linked material sample is absent"))?
-                    .conductivity
-                    .as_ref()
-                    .ok_or(invalid("linked conductivity is absent"))?
-                    .property(key.name())
+                k[i] = material.property(key.name())
                     .ok_or(invalid("linked conductivity key is absent"))?
                     .value_si();
             }
