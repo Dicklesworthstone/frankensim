@@ -12,6 +12,8 @@
 
 /// Reciprocal electrical force and back-emf under the same acoustic load.
 pub mod electrical;
+/// Native gas transport and finite thermal capacity on the acoustic regions.
+pub mod finite_gas;
 /// One finite material/phase body exchanging heat under the same acoustic load.
 pub mod thermal;
 /// Original metering and shared finite-body heat on the same loaded motion.
@@ -94,7 +96,10 @@ pub struct AcousticMotionStep {
     pub acoustic_storage_change_j: f64,
     pub acoustic_dissipated_j: f64,
     pub terminal_work_j: f64,
-    /// Sum of original storage + dissipation + exterior work - inlet work [J].
+    /// Work received from finite regional gas when updating the native operator [J].
+    /// Zero for the ordinary frozen-medium motion path; internal to finite-gas coupling.
+    pub parameter_work_j: f64,
+    /// Storage + dissipation + exterior work - inlet work - parameter work [J].
     pub acoustic_energy_residual_j: f64,
     /// ACTUAL mechanical work plus all original DG inlet work [J].
     pub transfer_residual_j: f64,
@@ -330,6 +335,7 @@ pub(super) fn finish<E>(
             acoustic_storage_change_j: storage_change,
             acoustic_dissipated_j: dissipated,
             terminal_work_j: terminal_work,
+            parameter_work_j: 0.0,
             acoustic_energy_residual_j: acoustic_residual,
             transfer_residual_j: transfer,
             faces: reports,

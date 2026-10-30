@@ -8998,6 +8998,57 @@ independent paired-blade motion, exact retry after source refusal or final
 cancellation, and rejection of an unowned second inventory. Native execution
 and measured physical validation remain separate gates.
 
+## Finite regional gas transport on shared acoustic motion
+
+`DoubleActingGasPiston::transported_acoustic_candidate` binds each additional
+acoustic face to one distinct finite regional gas inventory. Additional
+unbound parcels are finite reservoirs. The existing material transaction owns
+nozzle, diffusion, porous and membrane transport over one original snapshot;
+each mechanism retains its native species, partial-enthalpy and endpoint
+driving-force gates. Acoustic displacement flow is never a material mass flow.
+
+The original shared-wall candidate first resolves all acoustic reactions and
+advances every complete load once in its initial medium. A private staged node
+then delegates to `dg_port::finite_gas::prepare_after_step` inside the existing
+transport transaction. Gas-work trials reuse the same transported inventories
+and already-marched acoustic endpoints. Native operator rebinding supplies the
+actual parameter work, which is debited from each finite gas. No piston,
+acoustic branch, terminal channel or exterior history is replayed by that solve.
+
+Admission requires unique parcel bindings, complete original gas-source
+agreement, the actual fixed circular-bore inventory including main-gas terminal
+passages, and the original common clock and work limits. Caller input ports
+must be empty; only the solved displacement supplies the native inlet flow.
+Independent branch gases retain their original separate sources. Every
+endpoint remains private through final transport driving-force, extensive
+mass/energy and cancellation checks.
+
+`FiniteGasAcousticCandidate<N>` preserves the original native candidate,
+regional parcels and complete loads keyed by the original parcel IDs. Its
+report retains face order, native transport reports and actual interval force,
+pressure and work. Refreshed endpoint pressure/storage and
+`AcousticMotionStep::parameter_work_j` use the final gas; the interval
+integrals retain the initial medium. The updated acoustic balance subtracts
+native parameter work. The enclosing residual replaces the original frozen
+acoustic residual with the native gas/transport/acoustic residual, so neither
+propagation work, transported enthalpy nor operator work is counted twice.
+
+This is the existing first-order frozen-medium partition on distinct,
+fixed-volume, well-mixed acoustic regions. Their updated operators change the
+next interval's shared-wall reaction. The regions are separate from the two
+moving-volume piston chambers; uncompensated mean-pressure forces require an
+authored external force or balanced reference. It does not implement a
+continuous heterogeneous through-flow scattering law, changing acoustic
+geometry, jet noise or implicit deposition of acoustic loss into gas heat.
+
+Focused regressions exercise native transport/species conservation, independent
+extensive energy, one-step clock/history continuation, thermal reaction on the
+next interval, admission, late cancellation and exact retry. These tests are
+authored but unexecuted: DSR/RCH and the pinned toolchain are unavailable,
+and all seven required constellation checkouts are missing. The available
+cached rustfmt parsed and formatted the changed sources. This is source-level
+evidence, not compilation or numerical proof.
+
 ## Acoustic loading through finite electrothermal material networks
 
 `DoubleActingGasPiston::electroacoustic_network_candidate` closes the same
