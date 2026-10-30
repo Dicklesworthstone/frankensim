@@ -8,6 +8,7 @@ use fs_flux::compressible::mixture::{
 };
 use fs_flux::compressible::spatial::mixture::{
     MAX_MIXTURE_WORKSPACE_BYTES, MixtureEuler3d,
+    molecular::{MolecularTransport3d, SpatialTransport},
     reactive::{ReactingEuler3d, ReactiveStepControl},
     state_into,
 };
@@ -533,6 +534,149 @@ fn reacting_wall_loading_uses_the_complete_accepted_interval_and_not_endpoint_pr
             .unwrap(),
         accepted
     );
+}
+
+#[test]
+fn spatial_reacting_molecular_traction_retains_signed_support_and_three_dimensional_footprint() {
+    let input = field(source(3.5, 15.0), CLOSED, true);
+    let law = ConstantTransport::new(
+        input.gas().source().clone(),
+        "manufactured-spatial-reacting-wall-traction",
+        1,
+        TransportDomain {
+            minimum_temperature_k: 0.001,
+            maximum_temperature_k: 100.0,
+            minimum_pressure_pa: 1e-8,
+            maximum_pressure_pa: 1e8,
+        },
+        TransportCoefficients {
+            dynamic_viscosity: DynViscosity::new(4.0),
+            bulk_viscosity: DynViscosity::new(0.03),
+            thermal_conductivity: ThermalConductivityQuantityV1::new(0.01),
+        },
+        vec![0.0, 0.02, 0.02, 0.0],
+    )
+    .unwrap();
+    let source = SpatialTransport::new(input.gas().clone(), law, || false).unwrap();
+    let mut molecular =
+        MolecularTransport3d::new(&input, source, MAX_MIXTURE_WORKSPACE_BYTES, || false).unwrap();
+    let mechanism = kinetics(input.gas().source().clone());
+    let mut flow = ReactingEuler3d::new(
+        input,
+        mechanism,
+        chemistry(),
+        MAX_MIXTURE_WORKSPACE_BYTES,
+        || false,
+    )
+    .unwrap();
+    let bytes = flow.workspace_bytes() + molecular.workspace_bytes();
+    let report = flow
+        .step_with_dissipation(
+            &mut molecular,
+            Time::new(1e-4),
+            ReactiveStepControl {
+                transport: controls(),
+                ..ReactiveStepControl::default()
+            },
+            DissipationControl::default(),
+            bytes,
+            || false,
+        )
+        .unwrap();
+    assert!(report.chemistry.species_change_kg[1] > 0.0);
+    let split = report.dissipation.unwrap();
+    assert_eq!(split.first.elapsed.value(), 0.5 * report.elapsed.value());
+    assert_eq!(split.second.elapsed, split.first.elapsed);
+    let left = WallTractionImpulse::from_reacting_euler3d(&flow, BoundarySide::XMin, 0, AXES, 0.0)
+        .unwrap();
+    let right = WallTractionImpulse::from_reacting_euler3d(&flow, BoundarySide::XMax, 0, AXES, 0.0)
+        .unwrap();
+    assert!(left.gas_traction_impulse_pa_s() < 0.0);
+    assert!(right.gas_traction_impulse_pa_s() > 0.0);
+    // Even the compressive side is total stress; a positive value does not
+    // make a molecular traction interchangeable with thermodynamic pressure.
+    for side in [BoundarySide::XMin, BoundarySide::XMax] {
+        assert!(WallPressureImpulse::from_reacting_euler3d(&flow, side, 0, AXES, 0.0).is_err());
+    }
+    let mut support = [0.0; 3];
+    for side in BoundarySide::ALL {
+        for face in 0..flow.flow().grid().face_count(side) {
+            let traction =
+                WallTractionImpulse::from_reacting_euler3d(&flow, side, face, AXES, 0.0).unwrap();
+            let raw = flow.boundary_impulses(side).nth(face).unwrap();
+            assert_eq!(traction.duration_s(), report.elapsed.value());
+            assert_eq!(traction.end_time_s(), flow.flow().time().value());
+            close(
+                traction.gas_traction_impulse_pa_s() * traction.area_m2(),
+                side.sign() * raw.momentum[side.axis()],
+            );
+            for axis in 0..3 {
+                support[axis] += traction.outward_normal()[axis]
+                    * traction.area_m2()
+                    * traction.gas_traction_impulse_pa_s();
+            }
+        }
+    }
+    let change = rotate(core::array::from_fn(|axis| {
+        report.after.momentum[axis] - report.before.momentum[axis]
+    }));
+    for axis in 0..3 {
+        close(change[axis] + support[axis], 0.0);
+        close(
+            report.boundary_change.momentum[axis],
+            report.transport.boundary_change.momentum[axis]
+                + split.first.boundary_change.momentum[axis]
+                + split.second.boundary_change.momentum[axis],
+        );
+    }
+    let exterior = 0.2;
+    let impulses = (0..4)
+        .map(|face| {
+            WallTractionImpulse::from_reacting_euler3d(
+                &flow,
+                BoundarySide::XMax,
+                face,
+                AXES,
+                exterior,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let load = footprint()
+        .project_tractions(&impulses, translated([2.0, 0.5, 0.5]), || false)
+        .unwrap();
+    let dt = report.elapsed.value();
+    let (mut total, mut moment, mut work) = (0.0, [0.0; 3], 0.0);
+    for (face, raw) in flow.boundary_impulses(BoundarySide::XMax).enumerate() {
+        let middle = flow
+            .flow()
+            .boundary_impulses(BoundarySide::XMax)
+            .nth(face)
+            .unwrap();
+        assert!((raw.momentum[0] - middle.momentum[0]).abs() > 1e-5);
+        let y = 0.25 + 0.5 * (face % 2) as f64;
+        let z = 0.25 + 0.5 * (face / 2) as f64;
+        let net = raw.momentum[0] - exterior * 0.25 * dt;
+        total += net;
+        moment[1] += (z - 0.5) * net;
+        moment[2] -= (y - 0.5) * net;
+        work += net / dt * (1.0 + 2.0 * y + 3.0 * z);
+    }
+    assert!(moment[1] > 0.0 && moment[2] < 0.0);
+    let resultant = rotate([total, 0.0, 0.0]);
+    let angular = rotate(moment);
+    for axis in 0..3 {
+        close(load.resultant_impulse_n_s[axis], resultant[axis]);
+        close(load.angular_impulse_n_m_s[axis], angular[axis]);
+        close(
+            load.exterior_impulse_n_s[axis],
+            -AXES[0][axis] * exterior * dt,
+        );
+    }
+    let displacement = (0..9)
+        .map(|i| rotate([1.0 + (i % 3) as f64 + 1.5 * (i / 3) as f64, 0.0, 0.0]))
+        .collect::<Vec<_>>();
+    close(load.virtual_work_j(&displacement).unwrap(), work);
 }
 
 #[test]

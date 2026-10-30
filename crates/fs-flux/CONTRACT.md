@@ -1285,19 +1285,26 @@ each local chemical update. Changes in chemical reference energy enter the
 stored sensible gauge exactly once; temperature, pressure and sound speed then
 feed the next original conservative wave solve.
 
-Every accepted interval is chemistry(dt/2), unsplit waves(dt), chemistry(dt/2).
-If heating increases wave speed enough to shorten the middle step, the whole
-trial restarts from the original accepted field at that duration. Source or
-work refusal likewise retries only within explicit bounds. A final poll
-precedes the single field/report publication; cancellation leaves original
-cells, clock, both reports and per-face loads intact. Chemistry has no face
-flux, so the original accepted wave impulses represent the complete outer
-boundary exchange. Endpoint pressure times duration is not substituted.
+The original `step` composes chemistry(dt/2), unsplit waves(dt), chemistry(dt/2).
+`step_with_dissipation` adds the original molecular operator before and after
+that split: D(dt/2), C(dt/2), A(dt), C(dt/2), D(dt/2). Actual evolving species,
+temperature and pressure reach the original molecular law. If heating changes
+the acoustic interval, all phases restart from the accepted field at the same
+shorter duration. Source or work refusal retries only within explicit bounds.
+The final molecular temperature must also remain inside the chemistry source
+interval. A final poll precedes field/report/load publication; cancellation
+preserves both flow and molecular owners' accepted reports and face transfers.
+Chemistry is local. Complete boundary exchanges sum both molecular halves and
+the wave stage; neither endpoint pressure nor the middle wave load substitutes
+for the full interval. The molecular owner's own report describes the second
+half, while the outer report retains both halves and their physical balances.
 
 Two prepared complete field workspaces and one original prepared reactor are
 reused. The total admitted numerical byte budget includes both fields, excess
-input-vector capacity and actual kinetics/Newton/chemistry buffer capacities,
-under the shared 1 GiB ceiling. Immutable source data, prepared caloric
+input-vector capacity, combined boundary buffers, actual kinetics/Newton/
+chemistry buffers and the molecular operator when enabled, under the shared
+1 GiB ceiling. Actual capacity follows O(1) state-buffer exchanges between all
+three owners. Immutable source data, prepared caloric
 coefficients, fixed-size owners and bounded stack scratch are excluded.
 `with_chemistry` consumes an already prepared source without rebuilding it.
 Accepted source reductions are compensated in fixed cell/species order.
@@ -1339,9 +1346,19 @@ not experimentally validated flame or detonation predictions.
 The selected backward Euler or SDIRK2 source method remains explicit.
 Symmetric ordering alone is not a coupled temporal-order or entropy proof;
 shock limiting and first-order retries may reduce observed order. This
-stationary inviscid reacting rung does not supply molecular species diffusion,
-moving-domain GCL/remap, wall heat transfer, physical flame/detonation thickness,
+stationary reacting rung does not supply moving-domain GCL/remap, wall heat
+transfer, physical flame/detonation thickness,
 turbulence, reciprocal FSI or experimental ignition/detonation validation.
+
+Three additional reacting molecular regression groups recover the original
+uniform chemical solution with heat-driven CFL restarts; refine a complete
+three-axis reaction/advection/diffusion solution against analytic cell averages;
+and retain every phase's support load, complete source/energy balances, excess
+capacity, work refusal and final-cancellation replay. The analytic L1 errors
+on 12³/24³ cells are 8.09463491e-4 and 1.04199187e-4. This observed refinement
+does not imply a general third-order method. The integrated source suite passes
+207 gas tests and all 98 focused flux tests (20 spatial-mixture plus 78 other
+cases); the repository-level DSR gate remains a separate unavailable check.
 
 ### Three-dimensional evolving-species molecular transport
 

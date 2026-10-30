@@ -176,6 +176,8 @@ impl WallPressureImpulse {
     /// The middle transport report does not describe the final reacting state,
     /// and endpoint pressure times duration is not the accepted wall impulse.
     /// Only reflecting stationary adiabatic slip faces are admitted.
+    /// Molecular intervals require [`WallTractionImpulse::from_reacting_euler3d`]
+    /// because their complete normal traction includes signed viscous stress.
     pub fn from_reacting_euler3d(
         flow: &ReactingEuler3d,
         side: SpatialSide,
@@ -188,6 +190,11 @@ impl WallPressureImpulse {
         let report = flow
             .last_step()
             .ok_or(Error::Invalid("no complete reacting wall interval"))?;
+        if report.dissipation.is_some() {
+            return Err(Error::Invalid(
+                "molecular wall stress requires signed traction, not pressure",
+            ));
+        }
         let impulse = flow
             .boundary_impulses(side)
             .nth(face)
@@ -269,6 +276,47 @@ impl WallPressureImpulse {
 }
 
 impl WallTractionImpulse {
+    /// Full signed normal traction from one accepted volumetric reacting face.
+    ///
+    /// Both molecular half intervals and the complete wave interval contribute
+    /// to the same physical face account. Its `p - tau_nn` impulse may be
+    /// tensile, and retains the outer duration, clock, area and face ordering.
+    /// Local chemistry has no wall flux. Each individual species transfer,
+    /// transverse traction and stationary-wall energy transfer must be zero.
+    pub fn from_reacting_euler3d(
+        flow: &ReactingEuler3d,
+        side: SpatialSide,
+        face: usize,
+        axes: [[f64; 3]; 3],
+        exterior_pressure_pa: f64,
+    ) -> Result<Self, Error> {
+        let accepted = flow.flow();
+        let (axis, sign, normal) = spatial_frame(accepted.boundaries(), side, axes)?;
+        let report = flow
+            .last_step()
+            .ok_or(Error::Invalid("no complete reacting wall interval"))?;
+        let impulse = flow
+            .boundary_impulses(side)
+            .nth(face)
+            .ok_or(Error::Invalid(
+                "wall face index outside the original Cartesian side",
+            ))?;
+        species_normal_only(
+            impulse.species_masses,
+            impulse.energy,
+            impulse.momentum,
+            axis,
+        )?;
+        Self::new(
+            report.elapsed.value(),
+            accepted.time().value(),
+            accepted.grid().face_area(side),
+            normal,
+            sign * impulse.momentum[axis],
+            exterior_pressure_pa,
+        )
+    }
+
     /// Full signed normal traction from the accepted planar reacting interval.
     ///
     /// When molecular transport is enabled, this retains BOTH molecular half

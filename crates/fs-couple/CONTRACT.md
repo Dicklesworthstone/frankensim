@@ -14327,8 +14327,8 @@ faces refuse support-pressure interpretation. Exterior pressure is subtracted
 once over the same accepted area and interval. Existing signed molecular
 traction adapters retain their separate `p - tau_nn` semantics.
 
-`WallTractionImpulse::from_reacting_euler2d` also consumes the original complete
-molecular/reaction/wave/reaction/molecular interval. Both molecular halves and
+`WallTractionImpulse::{from_reacting_euler2d, from_reacting_euler3d}` also consume
+the original complete molecular/reaction/wave/reaction/molecular interval. Both molecular halves and
 the wave stage contribute their actual accepted face transfers, duration and
 clock; the signed normal traction can be tensile. It admits inviscid reacting
 intervals as the zero-viscous case. The pressure-only reacting adapter refuses
@@ -14344,6 +14344,13 @@ momentum balance, boundary refusal and cancelled-step retention/replay.
 The reacting molecular case separately retains tensile and compressive faces,
 both molecular halves, exterior pressure, P1 virtual work and the previous
 accepted flow/operator reports after cancellation.
+The volumetric molecular fixture additionally preserves all three support
+components and both nonuniform footprint moments under a rotated structural
+embedding. Its actual complete face loads differ from the middle wave loads;
+positive net traction still refuses the pressure-only adapter. Original
+three-dimensional Maxwell--Stefan, heat and full viscous-stress transport and
+finite-rate reactions run before projecting those loads. Exterior pressure is
+subtracted once, and the original P1 projection retains affine virtual work.
 No new gas/source solver, interpolation or inferred geometry correspondence
 is introduced. This remains a one-way load transfer from stationary gas walls;
 reciprocal moving-wall work, fluid/structure feedback, fracture and material

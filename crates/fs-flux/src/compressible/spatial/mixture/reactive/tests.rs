@@ -24,6 +24,8 @@ const WALLS: AxisBoundaries = AxisBoundaries::Ends {
     upper: BoundaryCondition::Reflecting,
 };
 
+mod molecular;
+
 fn mechanism(heat: f64, rate: f64, reference: f64) -> (MixtureGas, IdealGasKineticsV1) {
     let gas = make_gas(vec![
         source("A", R, 3.5, 0.0, reference),

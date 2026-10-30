@@ -3,13 +3,20 @@
 //! The source-owned prepared reactor advances every cell at fixed volume and
 //! all three momenta. Chemistry/waves/chemistry use one actual accepted time
 //! interval; heat-release-induced CFL reductions restart the complete trial.
-//! This stationary inviscid engineering lane does not model diffusion, moving
-//! boundaries, physical detonation thickness or a fully discrete entropy law.
+//! Optional source-owned molecular half intervals add species diffusion,
+//! Fourier heat and full three-dimensional viscous work. Moving boundaries,
+//! resolved physical detonation thickness and a fully discrete entropy law
+//! remain separate capabilities.
 
 use super::super::{BoundarySide, StepControl};
-use super::{BoundaryImpulse, MixtureEuler3d, StepReport, Totals, allocated, cell, checked_totals};
+use super::molecular::{DissipationControl, MolecularReport, MolecularTransport3d, TransportLaw};
+use super::{
+    BoundaryImpulse, MixtureEuler3d, StepReport, Totals, allocated, boundary_view, cell,
+    checked_totals, sum_rows,
+};
 pub use fs_gas::chemistry::IsochoricKineticsSolve;
 use fs_gas::multicomponent::MAX_SPECIES;
+use fs_gas::multicomponent::dissipation::ConstantTransport;
 pub use fs_gas::multicomponent::reactive::{
     CellChemistry, ChemistryReport, IdealGasKineticsV1, ReactiveError,
 };
@@ -43,6 +50,8 @@ pub struct ReactiveStepReport3d {
     pub transport: StepReport,
     /// Accepted source changes and work over both chemistry halves.
     pub chemistry: ChemistryReport,
+    /// Original molecular half intervals when explicitly composed with chemistry.
+    pub dissipation: Option<SplitDissipationReport3d>,
     /// Original complete field totals.
     pub before: Totals,
     /// Final complete field totals.
@@ -59,6 +68,15 @@ pub struct ReactiveStepReport3d {
     pub absolute_energy_residual_j: f64,
 }
 
+/// Molecular evolution before and after the accepted chemistry/wave split.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitDissipationReport3d {
+    /// Complete molecular half interval before chemistry and shock transport.
+    pub first: MolecularReport,
+    /// Complete molecular half interval after chemistry and shock transport.
+    pub second: MolecularReport,
+}
+
 /// Atomic conservative three-dimensional reacting compressible gas.
 ///
 /// Two preallocated fields and one source-owned prepared cell reactor are
@@ -70,14 +88,14 @@ pub struct ReactingEuler3d {
     accepted: MixtureEuler3d,
     trial: MixtureEuler3d,
     reactor: CellChemistry,
-    field_workspace_bytes: usize,
-    workspace_bytes: usize,
+    boundary_impulses: Vec<f64>,
+    boundary_trial: Vec<f64>,
     last_step: Option<ReactiveStepReport3d>,
 }
 
 impl ReactingEuler3d {
-    /// Buffer bytes for both accepted/trial fields, including the accepted
-    /// input's excess capacity. The original immutable gas/mechanism models,
+    /// Buffer bytes for both accepted/trial fields and combined boundary
+    /// transfers, including the accepted input's excess capacity. Immutable gas/mechanism models,
     /// bounded reactor workspace and fixed-size reports are excluded.
     pub fn required_field_workspace_bytes(flow: &MixtureEuler3d) -> Result<usize, ReactiveError> {
         flow.workspace_bytes()
@@ -85,6 +103,13 @@ impl ReactingEuler3d {
                 flow.gas(),
                 flow.grid(),
             )?)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    flow.boundary_impulses
+                        .len()
+                        .checked_mul(2 * size_of::<f64>())?,
+                )
+            })
             .ok_or(ReactiveError::Invalid(
                 "reacting spatial workspace size overflow",
             ))
@@ -133,7 +158,6 @@ impl ReactingEuler3d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ReactiveError> {
         poll(&mut cancelled)?;
-        let field_workspace_bytes = Self::required_field_workspace_bytes(&flow)?;
         let workspace_bytes = Self::required_workspace_bytes(&flow, &reactor)?;
         if workspace_bytes > maximum_workspace_bytes
             || workspace_bytes > super::MAX_MIXTURE_WORKSPACE_BYTES
@@ -165,17 +189,24 @@ impl ReactingEuler3d {
             *flow.grid(),
             cells,
             flow.boundaries(),
-            maximum_workspace_bytes - flow.workspace_bytes() - reactor.workspace_bytes(),
+            MixtureEuler3d::required_workspace_bytes(flow.gas(), flow.grid())?,
             &mut cancelled,
         )?;
         copy_physical(&flow, &mut trial, &mut cancelled)?;
+        let mut boundary_impulses = allocated(flow.boundary_impulses.len(), 0.0)?;
+        copy_field(
+            &flow.boundary_impulses,
+            &mut boundary_impulses,
+            &mut cancelled,
+        )?;
+        let boundary_trial = allocated(flow.boundary_impulses.len(), 0.0)?;
         poll(&mut cancelled)?;
         Ok(Self {
             accepted: flow,
             trial,
             reactor,
-            field_workspace_bytes,
-            workspace_bytes,
+            boundary_impulses,
+            boundary_trial,
             last_step: None,
         })
     }
@@ -196,14 +227,18 @@ impl ReactingEuler3d {
         self.reactor.controls()
     }
 
-    /// Admitted accepted-plus-trial field-buffer bytes.
-    pub const fn field_workspace_bytes(&self) -> usize {
-        self.field_workspace_bytes
+    /// Actual accepted/trial field and complete-boundary buffer capacities.
+    /// Excess input capacity follows its current owner during molecular swaps.
+    pub fn field_workspace_bytes(&self) -> usize {
+        self.accepted.workspace_bytes()
+            + self.trial.workspace_bytes()
+            + (self.boundary_impulses.capacity() + self.boundary_trial.capacity())
+                * size_of::<f64>()
     }
 
     /// Complete admitted numerical heap capacity, including chemistry buffers.
-    pub const fn workspace_bytes(&self) -> usize {
-        self.workspace_bytes
+    pub fn workspace_bytes(&self) -> usize {
+        self.field_workspace_bytes() + self.reactor.workspace_bytes()
     }
 
     /// Last completely published reacting interval.
@@ -212,12 +247,18 @@ impl ReactingEuler3d {
     }
 
     /// Complete outward face transfer, in the original physical face order.
-    /// The two local chemistry stages have exactly zero boundary flux.
+    /// Includes both molecular halves when enabled. Local chemistry has no
+    /// face flux; the borrowed field retains only the middle wave-stage loads.
     pub fn boundary_impulses(
         &self,
         side: BoundarySide,
     ) -> impl ExactSizeIterator<Item = BoundaryImpulse<'_>> {
-        self.accepted.boundary_impulses(side)
+        boundary_view(
+            &self.boundary_impulses,
+            self.accepted.grid(),
+            self.accepted.gas().species_count(),
+            side,
+        )
     }
 
     /// Release the complete accepted conservative field.
@@ -230,9 +271,71 @@ impl ReactingEuler3d {
         &mut self,
         maximum_duration: Time,
         controls: ReactiveStepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport3d, ReactiveError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration,
+            controls,
+            None,
+            DissipationControl::default(),
+            super::MAX_MIXTURE_WORKSPACE_BYTES,
+            cancelled,
+        )
+    }
+
+    /// Compose D(dt/2), C(dt/2), A(dt), C(dt/2), D(dt/2) atomically.
+    ///
+    /// Every phase uses the same original species, reference energies and
+    /// accepted duration. Heat-driven acoustic shortening repeats the whole
+    /// trial. The explicit budget covers this owner and the molecular operator
+    /// together. A failure preserves both owners' accepted reports and loads.
+    /// The operator's report after success describes the second molecular half;
+    /// this owner's report and face transfers cover the complete interval.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation<L: TransportLaw>(
+        &mut self,
+        operator: &mut MolecularTransport3d<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        maximum_workspace_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport3d, ReactiveError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            maximum_workspace_bytes,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_impl<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        mut operator: Option<&mut MolecularTransport3d<L>>,
+        dissipation_controls: DissipationControl,
+        maximum_workspace_bytes: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveStepReport3d, ReactiveError> {
         poll(&mut cancelled)?;
+        let bytes = self
+            .workspace_bytes()
+            .checked_add(operator.as_ref().map_or(0, |op| op.workspace_bytes()))
+            .ok_or(ReactiveError::Invalid(
+                "reacting spatial molecular workspace size overflow",
+            ))?;
+        if bytes > maximum_workspace_bytes || bytes > super::MAX_MIXTURE_WORKSPACE_BYTES {
+            return Err(ReactiveError::Invalid(
+                "reacting spatial molecular total workspace budget",
+            ));
+        }
+        if operator.is_some() {
+            dissipation_controls.validate()?;
+        }
         if !positive(maximum_duration.value())
             || controls.maximum_coupling_retries > 32
             || !positive(controls.transport.cfl)
@@ -279,6 +382,24 @@ impl ReactingEuler3d {
             let mut chemistry = ChemistryAccumulator::default();
             let mut shortened = None;
             let attempt = (|| {
+                let first = match operator.as_deref_mut() {
+                    Some(operator) => {
+                        let report = operator.advance_unpublished(
+                            &mut self.trial,
+                            Time::new(0.5 * dt),
+                            dissipation_controls,
+                            maximum_workspace_bytes,
+                            &mut cancelled,
+                        )?;
+                        copy_field(
+                            operator.trial_impulses(),
+                            &mut self.boundary_trial,
+                            &mut cancelled,
+                        )?;
+                        Some(report)
+                    }
+                    None => None,
+                };
                 react_cells(
                     &mut self.trial,
                     &mut self.reactor,
@@ -295,6 +416,19 @@ impl ReactingEuler3d {
                         "wave CFL shortened the reacting interval",
                     ));
                 }
+                if first.is_some() {
+                    add_impulses(
+                        &self.trial.boundary_impulses,
+                        &mut self.boundary_trial,
+                        &mut cancelled,
+                    )?;
+                } else {
+                    copy_field(
+                        &self.trial.boundary_impulses,
+                        &mut self.boundary_trial,
+                        &mut cancelled,
+                    )?;
+                }
                 react_cells(
                     &mut self.trial,
                     &mut self.reactor,
@@ -302,10 +436,45 @@ impl ReactingEuler3d {
                     &mut chemistry,
                     &mut cancelled,
                 )?;
+                let second = match operator.as_deref_mut() {
+                    Some(operator) => {
+                        let report = operator.advance_unpublished(
+                            &mut self.trial,
+                            Time::new(0.5 * dt),
+                            dissipation_controls,
+                            maximum_workspace_bytes,
+                            &mut cancelled,
+                        )?;
+                        add_impulses(
+                            operator.trial_impulses(),
+                            &mut self.boundary_trial,
+                            &mut cancelled,
+                        )?;
+                        // Viscous heating must also remain inside the chemical
+                        // source interval, which may be narrower than the gas's.
+                        let control = self.reactor.controls();
+                        for q in self.trial.states.chunks_exact(width) {
+                            let p = cell(q, n).primitive(&self.trial.gas, &mut cancelled)?;
+                            if !(control.minimum_temperature_k..=control.maximum_temperature_k)
+                                .contains(&p.temperature)
+                            {
+                                return Err(ReactiveError::Invalid(
+                                    "final molecular state is outside chemistry interval",
+                                ));
+                            }
+                        }
+                        Some(report)
+                    }
+                    None => None,
+                };
+                let dissipation = first
+                    .zip(second)
+                    .map(|(first, second)| SplitDissipationReport3d { first, second });
                 let after =
                     checked_totals(&self.trial.states, &self.trial.grid, n, &mut cancelled)?;
                 let chemistry = chemistry.report;
-                let boundary_change = transport.boundary_change;
+                let outward = sum_rows(&self.boundary_trial, width, 1.0, &mut cancelled)?;
+                let boundary_change = Totals::from_row(&outward.map(|value| -value), n);
                 let mut delta = [0.0; MAX_SPECIES + 4];
                 for d in 0..width {
                     delta[d] =
@@ -332,6 +501,7 @@ impl ReactingEuler3d {
                     coupling_retries: retry,
                     transport,
                     chemistry,
+                    dissipation,
                     before,
                     after,
                     boundary_change,
@@ -345,6 +515,12 @@ impl ReactingEuler3d {
             match attempt {
                 Ok(report) => {
                     std::mem::swap(&mut self.accepted, &mut self.trial);
+                    std::mem::swap(&mut self.boundary_impulses, &mut self.boundary_trial);
+                    if let (Some(operator), Some(dissipation)) =
+                        (operator.as_deref_mut(), report.dissipation)
+                    {
+                        operator.publish(dissipation.second);
+                    }
                     self.last_step = Some(report);
                     return Ok(report);
                 }
@@ -389,6 +565,20 @@ fn copy_physical(
     )?;
     target.time = source.time;
     target.last_step = source.last_step;
+    Ok(())
+}
+
+fn add_impulses(
+    source: &[f64],
+    target: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ReactiveError> {
+    for (source, target) in source.chunks(4096).zip(target.chunks_mut(4096)) {
+        poll(cancelled)?;
+        for (source, target) in source.iter().zip(target) {
+            *target += source;
+        }
+    }
     Ok(())
 }
 
