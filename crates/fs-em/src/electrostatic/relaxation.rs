@@ -179,6 +179,11 @@ fn dielectric<C: PlanarConductorMaterial>(
     limits: WeightedAssemblyLimits,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PlanarElectrostatics, Error> {
+    if !conduction.contacts().is_empty() {
+        return Err(Error::Invalid(
+            "electrical contact charge and heat evolution require an owned surface law",
+        ));
+    }
     if laws.len() != conduction.conductors().len() || laws.len() > limits.max_cells
         || thermal_laws.is_some_and(|thermal| thermal.len() != laws.len()) {
         return Err(Error::Invalid("one bounded dielectric source law per original conductor cell required"));

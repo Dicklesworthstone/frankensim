@@ -361,6 +361,11 @@ impl ConductionThermalNetwork<'_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<f64, Error> {
+        if !problem.contacts().is_empty() {
+            return Err(invalid(
+                "electrical contact heat evolution is unsupported without a surface heat partition and source refresh",
+            ));
+        }
         self.admit_mesh_step(
             thermal,
             target_s,

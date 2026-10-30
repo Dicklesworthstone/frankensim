@@ -6,8 +6,10 @@
 //! algebra and electrode geometry; its charge/storage law is not reused here.
 //!
 //! This is a stationary symmetric Ohmic model with fixed geometry and material
-//! state. Induction, displacement current, contacts, Hall response and nonlinear
-//! field-dependent conduction require their own models. A changed temperature
+//! state. Source-backed matching contacts use the same field operator through
+//! [`PlanarConduction::new_with_contacts`]. Induction, displacement current,
+//! Hall response and nonlinear field-dependent conduction require their own
+//! models. A changed temperature
 //! or material must be resolved and prepared again, not substituted into an
 //! already accepted field. No electrical storage or thermal evolution is added.
 //! The separate [`crate::electrostatic::relaxation`] owner composes these same
@@ -15,6 +17,8 @@
 //! The [`motion`] owner uses the same source conductivity and charge operator
 //! for prescribed in-plane velocity in an imposed normal magnetic field.
 
+mod contact;
+pub use contact::{ConductionContact, ConductionContactResponse};
 pub mod motion;
 /// Memoryless source response at the actual spatial electric/current fields.
 pub mod response;
@@ -30,7 +34,7 @@ use fs_phs::circuit::Branch;
 use fs_rep_mesh::{Metric2, TriComplex2};
 use fs_solver::{CheckedCgConfig, SolveReport};
 use fs_sparse::Csr;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::planar::gradients;
 use crate::scalar_potential::{self, PotentialError};
@@ -116,6 +120,9 @@ pub struct PlanarConduction<C = ResolvedConductorState> {
     conductivity: Vec<PlanarConductivity>,
     conductivity_s_m: Vec<f64>,
     stiffness: Csr,
+    contacts: Vec<ConductionContact>,
+    contact_conductance_s: Vec<f64>,
+    contact_edges: BTreeSet<[usize; 2]>,
 }
 
 // One original Ohmic cell law for steady balance and retained charge dynamics.
@@ -243,6 +250,9 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             conductivity,
             conductivity_s_m,
             stiffness,
+            contacts: Vec::new(),
+            contact_conductance_s: Vec::new(),
+            contact_edges: BTreeSet::new(),
         })
     }
 
@@ -295,8 +305,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     ) -> Result<ConductionField<'_, C>, ConductionError> {
         poll(cancelled)?;
         self.validate_controls(boundary_voltage_v.len(), controls)?;
-        let prescribed =
-            scalar_potential::prescribed_boundary(&self.mesh, boundary_voltage_v, cancelled)?;
+        let prescribed = self.prescribed_boundary(boundary_voltage_v, cancelled)?;
         let applied = self.current_loads(current_traces, &prescribed, cancelled)?;
         let rhs: Vec<_> = applied.iter().map(|load| load.unwrap_or(0.0)).collect();
         let (voltage, report) = scalar_potential::solve(
@@ -457,13 +466,14 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             vertices.sort_unstable();
             if !current.inward_current_density_a_m2.is_finite()
                 || !exterior.contains_key(&vertices)
+                || self.is_contact_edge(vertices)
                 || ordered
                     .insert(vertices, current.inward_current_density_a_m2)
                     .is_some()
                 || (prescribed[vertices[0]].is_some() && prescribed[vertices[1]].is_some())
             {
                 return Err(ConductionError::Invalid(
-                    "current traces need distinct exterior edges without a prescribed voltage trace",
+                    "current traces need distinct exterior edges without a contact or prescribed voltage trace",
                 ));
             }
         }
@@ -579,8 +589,12 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             electric_field_v_m,
             current_density_a_m2,
             cell_power_w,
-            power_w,
+            mut power_w,
         } = self.cell_response(&voltage, cancelled)?;
+        let contact_response = self.contact_response(&voltage, cancelled)?;
+        for contact in &contact_response {
+            power_w = finite(power_w + contact.power_w)?;
+        }
         let boundary = self.boundary_response(
             &voltage,
             prescribed,
@@ -597,6 +611,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             electric_field_v_m,
             current_density_a_m2,
             cell_power_w,
+            contact_response,
             power_w,
             nodal_boundary_current_a: boundary.nodal_boundary_current_a,
             nodal_applied_current_a: applied,
@@ -682,7 +697,8 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
 
     /// Extract the original geometry's two-terminal resistance. One volt drives
     /// disjoint complete electrode traces; other exterior edges are insulated.
-    /// Integrated E.J must agree with independently summed terminal current.
+    /// Integrated bulk E.J plus contact heat must agree with independently
+    /// summed terminal current.
     pub fn resistance(
         &self,
         positive_terminal: &[usize],
@@ -747,6 +763,7 @@ pub struct ConductionField<'a, C = ResolvedConductorState> {
     electric_field_v_m: Vec<[f64; 2]>,
     current_density_a_m2: Vec<[f64; 2]>,
     cell_power_w: Vec<f64>,
+    contact_response: Vec<ConductionContactResponse>,
     power_w: f64,
     nodal_boundary_current_a: Vec<Option<f64>>,
     nodal_applied_current_a: Vec<Option<f64>>,
@@ -770,10 +787,16 @@ impl<C: PlanarConductorMaterial> ConductionField<'_, C> {
     pub fn current_density_a_m2(&self) -> &[[f64; 2]] {
         &self.current_density_a_m2
     }
-    /// Physical irreversible heat rate, integrated over each extruded cell [W].
+    /// Bulk irreversible heat rate, integrated over each extruded cell [W].
+    /// Surface contact heat is reported separately by `contact_response`.
     pub fn cell_power_w(&self) -> &[f64] {
         &self.cell_power_w
     }
+    /// Source-ordered surface current and heat, in `problem().contacts()` order.
+    pub fn contact_response(&self) -> &[ConductionContactResponse] {
+        &self.contact_response
+    }
+    /// Total irreversible heat in bulk cells and electrical contacts [W].
     pub fn power_w(&self) -> f64 {
         self.power_w
     }
@@ -828,8 +851,9 @@ impl<'a, C: PlanarConductorMaterial> PlanarResistance<'a, C> {
 
     /// Recover spatial current and heat at the native circuit's actual branch
     /// voltage without another field solve. For a midpoint circuit step use
-    /// its midpoint voltage; dt*cell_power then partitions that SAME resistor
-    /// heat. Do not also debit it as an additional circuit loss.
+    /// its midpoint voltage; dt times the bulk and separate contact powers
+    /// accounts for that SAME resistor heat. Surface heat requires an explicit
+    /// receiving thermal partition; do not also debit it as a circuit loss.
     ///
     /// Negative voltages reverse current but preserve nonnegative heating.
     /// Zero represents the negative terminal's reference. Actual-drive current

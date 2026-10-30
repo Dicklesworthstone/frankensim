@@ -187,6 +187,11 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
         if cancelled() {
             return Err(CircuitEnthalpyError::Cancelled);
         }
+        if !problem.contacts().is_empty() {
+            return Err(invalid(
+                "electrical contact heat evolution is unsupported without a surface heat partition and source refresh",
+            ));
+        }
         admit_graph(&graph)?;
         if !time_s.is_finite()
             || time_s < 0.0

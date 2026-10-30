@@ -388,6 +388,18 @@ impl PlanarMagnetostatics {
         boundary_potential_wb_m: &[(usize, f64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<Option<f64>>, MagneticError> {
+        let prescribed = Self::admit_mesh_traces(mesh, boundary_potential_wb_m, cancelled)?;
+        Self::admit_mesh_gauges(mesh, &prescribed, cancelled)?;
+        Ok(prescribed)
+    }
+
+    // Physical trace admission is shared with conduction interfaces, whose
+    // positive surface conductance can connect otherwise separate mesh pieces.
+    pub(crate) fn admit_mesh_traces(
+        mesh: &TriComplex2,
+        boundary_potential_wb_m: &[(usize, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<Option<f64>>, MagneticError> {
         let n = mesh.vertices().len();
         let trace = mesh
             .boundary_trace()
@@ -430,7 +442,6 @@ impl PlanarMagnetostatics {
                 "prescribed potentials must cover exterior edges, not isolated points",
             ));
         }
-        Self::admit_mesh_gauges(mesh, &prescribed, cancelled)?;
         Ok(prescribed)
     }
 

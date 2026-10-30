@@ -458,9 +458,38 @@ conductor law; no material-name branch or inferred unit-length wire enters.
 Frequency-, field-, strain- or rate-bounded sources refuse the stationary scalar
 model. The mesh and state remain fixed during each solve. Insulating regions
 must be represented by the conductor domain's actual boundary, not artificial
-small positive conductivities. Floating unknown-potential electrodes, interface
-resistance, anisotropy, nonlinear conduction, displacement current, induction,
+small positive conductivities. Floating unknown-potential electrodes, nonlinear
+conduction, displacement current, induction,
 Hall effects and geometry/thermal evolution are outside this admission.
+
+`PlanarConduction::new_with_contacts` adds source-backed zero-thickness Ohmic
+interfaces to that SAME native stiffness. Each `ConductionContact` binds two
+distinct original exterior edges with exactly coincident paired endpoints and
+opposite adjacent cell interiors to a complete `ResolvedElectricalInterface`.
+The ordered source material states must match those cells, including revision.
+The source must support finite positive R'' at static external conditions;
+pressure or material changes act through source data and a new preparation.
+Explicit zero resistance requires shared mesh vertices rather than a penalty.
+
+The contact law is `J_n = (V_a - V_b)/R''`. Its exact P1 trace matrix is
+`A/(6 R'') * [[2,1],[1,2]]`, assembled with equal/opposite side blocks using
+actual extruded edge area. Contacts connect component gauges; a voltage trace
+can therefore anchor another body through the interface. Internal contact
+edges cannot also be external voltage/current electrodes. Duplicate or
+nonmatching interfaces refuse before publication.
+
+`ConductionField::contact_response` retains endpoint voltage jumps/current
+densities, signed integrated current and exact nonnegative surface Joule power.
+`cell_power_w` remains bulk heat; `power_w` is bulk PLUS surface heat, checked
+against the same independent terminal work. Native current drive, two-terminal
+resistance and circuit-voltage reconstruction all use this operator and total
+loss. Surface heat is not silently assigned to either neighboring bulk cell.
+Moving-contact, dielectric charge evolution and the bulk-only enthalpy/circuit
+adapters explicitly refuse these contacts until their surface work, charge and
+heat-partition evolution is owned. Static field/circuit resistance extraction
+is supported. `tests/conduction/contacts.rs` checks analytic series resistance,
+pressure and bulk substitutions, current-controlled contact connectivity,
+nonuniform surface quadrature, total Joule balance and unsupported interfaces.
 
 Existing mesh/assembly and Krylov budgets bound work; cancellation is polled
 during material admission, assembly, elimination, field/heat recovery and branch

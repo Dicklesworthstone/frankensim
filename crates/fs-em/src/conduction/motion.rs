@@ -50,6 +50,11 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MovingConductionField<'_, C>, ConductionError> {
         poll(cancelled)?;
+        if !self.contacts().is_empty() {
+            return Err(ConductionError::Invalid(
+                "moving electrical contacts require an owned surface work and heat law",
+            ));
+        }
         self.validate_controls(boundary_voltage_v.len(), controls)?;
         let cells = self.mesh.faces().len();
         if motion.velocity_m_s.len() != cells || motion.normal_flux_density_t.len() != cells {
