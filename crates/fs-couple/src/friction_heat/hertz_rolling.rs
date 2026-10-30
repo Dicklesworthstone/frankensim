@@ -6,6 +6,8 @@
 //! are resolved at interface temperature, while the original rolling card is
 //! admitted at the sphere's actual bulk temperature. Nothing publishes early.
 
+pub mod multiple;
+
 use super::hertz::{RigidHertzHeatContact, RigidHertzHeatSource, validate_geometry};
 use super::network::{
     FrictionHeatNetworkInput, FrictionHeatNetworkReport, FrictionHeatNetworkStep,

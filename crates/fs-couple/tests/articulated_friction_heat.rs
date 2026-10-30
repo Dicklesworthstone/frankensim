@@ -7,6 +7,8 @@ mod hertz;
 mod hertz_multiple;
 #[path = "articulated_friction_heat/hertz_rolling.rs"]
 mod hertz_rolling;
+#[path = "articulated_friction_heat/hertz_rolling_multiple.rs"]
+mod hertz_rolling_multiple;
 
 use fs_contact::interface_binding::bind_dry_interface_system_card;
 use fs_contact::interface_binding::thermal_friction::{

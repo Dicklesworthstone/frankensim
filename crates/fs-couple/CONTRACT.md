@@ -13033,3 +13033,58 @@ drive/surface maps, zero-blow silence and warm-memory response, render-length pr
 identity, same-window aperture pressure/flow against independent physical RK4,
 and preservation of the nonlinear clock refusal. These are numerical/structural
 checks, not measured-instrument, complete workspace or real-time qualification.
+
+## Simultaneous Hertz surface and material rolling bulk heat islands — v0
+
+`friction_heat::hertz_rolling::multiple::propose_rigid_hertz_rolling_island_heat`
+joins one immutable prepared native five-coordinate contact island to the
+original finite enthalpy network. Each original surface-friction source is
+resolved at its own solved common-interface temperature and explicit pressure.
+Each original constant-coefficient rolling material card is admitted at its
+deforming sphere's actual bulk temperature. Interface identity must agree
+between the original rolling and surface-friction owners.
+
+Every patch routes its surface dissipation once through its distinct original
+thermal link. Bulk losses from multiple patches on the same sphere are summed
+into one original sphere cell, retaining one heat capacity. Different spheres
+retain distinct bulk temperatures, inventories and heat destinations. Admission
+requires the native whole-sphere mass, declared body/material identities, the
+correct original route side and a caloric centre coincident with the native COM.
+Conflicting mappings, a shared inventory for different spheres, duplicate
+active sphere cells and duplicate thermal links refuse. Canonical permutations
+between original patch IDs, thermal links and unique sphere bodies are
+prepared once and retained throughout the nonlinear solve.
+
+The original thermal network retains ordinary conduction and authored outside
+heat. Signed outside heat is measured before injecting internal bulk rolling
+loss, preserving its physical boundary and small signed contributions. Every
+trial starts from unchanged accepted native momenta, original rolling histories
+and caloric state over the same actual representable interval. The callback
+supplies original endpoint conductivities and other heat only; interface work
+and bulk work have distinct original owners and destinations.
+
+Acceptance independently checks actual
+`Delta H - Q_outside - sum(D_surface) - sum(D_bulk)`,
+`Delta K + Delta H - Q_outside`, and the original native/network residual sum.
+Only a complete mechanical/history/source/thermal candidate is returned.
+Source failures, late audits, exhausted trials and cancellation leave accepted
+owners unchanged and permit exact retry. Original cell/unknown, trial,
+nonlinear, mechanical and physical-residual budgets remain explicit.
+
+This retains frozen normal loads and poses, independent nonoverlapping local
+sphere-deformation fields, the original rolling-card applicability box, one
+uniform caloric sphere cell, and common-face backward-Euler transport.
+Temperature admission does not create temperature-dependent viscosity.
+It adds no spatial thermal validity, retained partial-slip memory, entropy
+classification of injected bulk work, root-uniqueness or experimental claim.
+
+Six focused G1/G3/G4 groups in
+`tests/articulated_friction_heat/hertz_rolling_multiple.rs` use independent
+coupled torque equations and a two-face thermal root, check one shared sphere
+inventory, Hertz-induced rolling from rest, distinct original source
+temperatures, signed outside heat and exact patch permutations. They also
+check stationary conduction, zero viscosity, invalid inventories/interfaces,
+late source failure/cancellation/budget retry, and two distinct deforming
+spheres with nontrivial native/patch/link ordering and independent per-cell
+heat destinations. All 23 existing groups in the original articulated-friction
+heat test target continue to pass, for 29 groups in that target.
