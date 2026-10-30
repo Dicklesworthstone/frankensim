@@ -20,9 +20,10 @@ use fs_exec::CancelGate;
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{
     NsfBoundaryDrive, NsfCharacteristicAxis, NsfCharacteristicBoundary, NsfCharacteristicPatch,
-    NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfReservoirAperture, NsfSpec,
+    NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfReservoirAperture, NsfSgsConfig, NsfSpec,
     ThermochemicalNsfGas, WallThermal,
 };
+use fs_lbm::sgs3::{SgsConfig, SgsModel, SgsUse};
 use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::gas_species::input::{
@@ -129,6 +130,9 @@ pub struct ResolvedDgPerformanceInfo {
     pub boundary_segments: usize,
     /// Original physical NSF/DG intervals required for the observation window.
     pub physical_intervals: u64,
+    /// Explicit exploratory transport declaration; zero coefficients retain
+    /// the molecular trajectory but remain visible as a declared control.
+    pub sgs: Option<NsfSgsConfig>,
 }
 
 /// The retained owners, not a baked recording or separate synthesis engine.
@@ -246,6 +250,30 @@ impl ResolvedDgFilePerformance {
             _ => return Err(bad(row.line, "wall requires adiabatic or isothermal T")),
         };
         row.end()?;
+        let sgs = if rows.next_is("sgs") {
+            let mut row = rows.row("sgs")?;
+            if row.word()? != "exploration" {
+                return Err(bad(row.line, "SGS is an explicit exploration closure, not an acceptance render"));
+            }
+            let kind = row.word()?;
+            let coefficient = row.scalar()?;
+            let model = match kind {
+                "smagorinsky" => SgsModel::Smagorinsky { cs: coefficient },
+                "wale" => SgsModel::Wale { cw: coefficient },
+                "vreman" => SgsModel::Vreman { cv: coefficient },
+                _ => return Err(bad(row.line, "SGS requires smagorinsky, wale or vreman")),
+            };
+            let config = NsfSgsConfig {
+                closure: SgsConfig {
+                    model, filter_width_lu: row.scalar()?,
+                    maximum_eddy_to_molecular: row.scalar()?, usage: SgsUse::Exploration,
+                },
+                turbulent_prandtl: row.scalar()?,
+            };
+            row.end()?;
+            config.validate().map_err(ResolvedDgInputError::Flow)?;
+            Some(config)
+        } else { None };
         let mut row = rows.row("characteristic")?;
         let axis: usize = row.number()?;
         let high = match row.word()? { "low" => false, "high" => true,
@@ -462,6 +490,9 @@ impl ResolvedDgFilePerformance {
         if let Some(aperture) = reservoir_aperture {
             zone = zone.with_reservoir_aperture(aperture).map_err(ResolvedDgInputError::Flow)?;
         }
+        if let Some(config) = sgs {
+            zone = zone.with_sgs(config).map_err(ResolvedDgInputError::Flow)?;
+        }
         poll(&gate)?;
         let load = source.prepare_with_material_wall_layout(&gas, dt, &gate, &wall)?;
         let mut system = if coupled_patch.is_some() {
@@ -486,6 +517,7 @@ impl ResolvedDgFilePerformance {
                 sample_rate_hz, samples: samples as u64, full_scale_pa, dimensions: dims,
                 solid_cells, initial_state_cells, boundary_segments,
                 physical_intervals: physical_intervals as u64,
+                sgs,
             }, renderer, gas_records, wall, upstream_wall,
         })
     }

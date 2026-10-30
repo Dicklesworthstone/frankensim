@@ -1598,8 +1598,17 @@ Transport is refreshed from the force-corrected velocity in the existing
 predictor and accepted endpoint. Periodic derivatives are centred; solid and
 domain-wall derivatives use actual halfway wall values, including prescribed
 wall motion. Impermeable wall heat transfer retains its molecular half-cell
-resistance, with zero modeled wall heat flux. Characteristic and prescribed
-reservoir faces refuse active SGS in either configuration order. The existing
+resistance, with zero modeled wall heat flux. Characteristic faces use their
+original reconstructed half-cell velocity, while a localized transverse
+reservoir aperture uses its original ghost velocity one full spacing away.
+The same predictor faces feed SGS, thermal-pressure forcing and energy flux.
+Adjacent algebraic conductivity is extrapolated to either opening (zero
+normal gradient of the modeled transport coefficient); temperature differences
+retain their original half-cell or full-cell distances. Modeled conduction
+and stress work enter the existing total-energy and open-boundary accounts,
+including selected characteristic patches. Rebinding controls refreshes SGS
+and conservative history atomically; rejected/dropped trials retain both.
+Complete prescribed-reservoir faces still refuse active SGS. The existing
 Mach, temperature and total-viscosity envelope remains in force; ratio-cap
 violations refuse rather than clip. Zero coefficient preserves molecular
 arithmetic, and acceptance-render use remains forbidden.
@@ -1607,7 +1616,9 @@ arithmetic, and acceptance-render use remains forbidden.
 `sgs_transport` exposes accepted-cell eddy viscosity and conductivity. Focused
 tests cover moving-wall gradients, independent bulk relaxation, conservative
 heat diffusion, closed energy, worker identity, exact zero control, fixed-Re
-closure refinement, NASA9 heat capacity and admission failures. These are
+closure refinement, NASA9 heat capacity, uniform throughflow without spurious
+open-face wall shear, reservoir gradients, open heat flux, complete
+mass/energy exchange and transactional admission failures. These are
 algebraic low-Mach transport integrations, not a new compressible-turbulence
 qualification: no SGS kinetic-energy equation, isotropic SGS pressure,
 pressure-dilatation, shocklet closure or thermal wall function is supplied.

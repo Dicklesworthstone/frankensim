@@ -243,7 +243,7 @@ fn fixed_physical_shear_refinement_removes_modeled_transport() {
 }
 
 #[test]
-fn refusals_keep_open_and_excess_transport_out_of_the_owner() {
+fn refusals_keep_complete_reservoirs_and_excess_transport_out_of_the_owner() {
     let make = || {
         NsfGrid3::<D3q27>::new(
             spec([6, 4, 4], [false, true, true], WallThermal::Adiabatic),
@@ -253,31 +253,6 @@ fn refusals_keep_open_and_excess_transport_out_of_the_owner() {
         .unwrap()
     };
     let config = config(SgsModel::Smagorinsky { cs: 0.17 });
-    let face = NsfCharacteristicBoundary {
-        reference_pressure_pa: 101_325.0,
-        reference_temperature_k: 293.15,
-        reference_velocity_m_s: [0.0; 3],
-        incoming_characteristic_m_s: 0.0,
-    };
-    let open = NsfCharacteristicAxis {
-        axis: 0,
-        faces: [face; 2],
-        maximum_relative_perturbation: 0.05,
-    };
-    assert!(
-        make()
-            .with_sgs(config)
-            .unwrap()
-            .with_characteristic_axis(open)
-            .is_err()
-    );
-    assert!(
-        make()
-            .with_characteristic_axis(open)
-            .unwrap()
-            .with_sgs(config)
-            .is_err()
-    );
     let reservoir = NsfOpenState {
         density_kg_m3: make().law.rho_ref_kg_m3,
         velocity_m_s: [0.0; 3],
@@ -318,3 +293,5 @@ fn refusals_keep_open_and_excess_transport_out_of_the_owner() {
     bad_heat.turbulent_prandtl = 0.0;
     assert!(matches!(make().with_sgs(bad_heat), Err(NsfError::Input(_))));
 }
+
+mod open;

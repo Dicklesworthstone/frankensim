@@ -84,11 +84,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             "a localized reservoir aperture requires an attached characteristic axis",
         ))?;
         if self.steps != 0 || self.reservoir_aperture.is_some() || self.sources.is_some()
-            || self.sgs.is_some() || self.moving_walls
+            || self.moving_walls
             || self.reservoir_faces.iter().flatten().any(Option::is_some)
         {
             return Err(NsfError::Input(
-                "one reservoir aperture requires a cold molecular grid with stationary boundaries",
+                "one reservoir aperture requires a cold grid with stationary boundaries",
             ));
         }
         if source.axis >= 3 || source.axis == open.axis || self.spec.periodic[source.axis]

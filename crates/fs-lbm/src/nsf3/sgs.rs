@@ -47,8 +47,9 @@ pub struct NsfSgsTransport {
 impl<L: Lattice3<27>> NsfGrid3<L> {
     /// Attach an explicit exploratory closure and restart the current
     /// conservative flux history. Periodic faces, stationary solids and
-    /// stationary/moving halfway walls are supported. Characteristic and
-    /// prescribed-reservoir boundaries refuse in either configuration order.
+    /// stationary/moving halfway walls, characteristic faces and their localized
+    /// transverse reservoir aperture are supported. Complete prescribed-reservoir
+    /// faces remain unsupported in either configuration order.
     /// The zero-coefficient control leaves the molecular trajectory unchanged.
     ///
     /// All existing gas/Mach/temperature bounds still apply; the *total*
@@ -58,6 +59,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// No wall function is supplied: near-wall flow must be resolved. The
     /// modeled heat flux vanishes at an impermeable wall; the source-owned
     /// molecular half-cell heat resistance remains the wall heat-transfer law.
+    /// At an open face the adjacent algebraic conductivity is extrapolated
+    /// normally, and its heat flux uses the original face/ghost temperature.
+    /// This is an explicit zero-normal-gradient transport boundary rung, not a
+    /// supplied turbulent inflow spectrum or a transparency qualification.
     pub fn with_sgs(mut self, config: NsfSgsConfig) -> Result<Self, NsfError> {
         config.validate()?;
         let coefficient = match config.closure.model {
@@ -73,15 +78,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             return Ok(self);
         }
-        if self.open.is_some() || self.reservoir_faces.iter().flatten().any(Option::is_some) {
+        if self.reservoir_faces.iter().flatten().any(Option::is_some) {
             return Err(NsfError::Input(
-                "NSF SGS requires periodic or impermeable halfway boundaries",
+                "NSF SGS does not support complete prescribed-reservoir faces",
             ));
         }
         self.sgs = Some(config);
         let (rho, mom) = self.macro_fields(&self.f);
         let velocity = self.velocity_field(&rho, &mom, &self.force);
-        let transport = self.sgs_field(&rho, &velocity, &self.theta, &self.material)?;
+        let transport = self.sgs_field(
+            &rho,
+            &velocity,
+            &self.theta,
+            &self.material,
+            self.open_faces.as_ref(),
+        )?;
         let stress = self.stress_field(
             &self.f,
             &self.force,
@@ -97,7 +108,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             &self.theta,
             &stress,
             &transport,
-            None,
+            self.open_faces.as_ref(),
         )?;
         self.sgs_transport = transport;
         self.div = div;
@@ -153,6 +164,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         velocity: &[[f64; 3]],
         theta: &[f64],
         material: &[Option<NsfCellMaterial>],
+        faces: Option<&OpenFaces>,
     ) -> Result<Vec<NsfSgsTransport>, NsfError> {
         let Some(config) = self.sgs else {
             return Ok(Vec::new());
@@ -173,7 +185,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let eddy = eddy_viscosity(
                 config.closure.model,
                 config.closure.filter_width_lu,
-                self.sgs_gradient(i, velocity),
+                self.sgs_gradient(i, velocity, faces),
             )
             .map_err(NsfError::Sgs)?;
             let ratio = eddy / molecular;
@@ -205,13 +217,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         out.into_iter().collect()
     }
 
-    // Second-order centred differences in fluid. At a halfway wall use the
-    // actual Dirichlet wall value, this centre and the opposite fluid centre:
-    // the quadratic derivative is exact, including a translating Couette wall.
-    fn sgs_gradient(&self, i: usize, velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
+    // Second-order centred differences in fluid or across a full-spacing
+    // prescribed ghost. At a halfway wall/characteristic face use its actual
+    // velocity, this centre and the opposite fluid centre: the quadratic
+    // derivative is exact. An open face is never treated as a no-slip wall.
+    fn sgs_gradient(
+        &self,
+        i: usize,
+        velocity: &[[f64; 3]],
+        faces: Option<&OpenFaces>,
+    ) -> [[f64; 3]; 3] {
         let x = self.at(i);
         let wall = |axis, side| {
-            if self.shifted(x, axis, side).is_none() {
+            if let Some(face) = self.characteristic_face(faces, i, axis, side) {
+                face.u
+            } else if self.shifted(x, axis, side).is_none() {
                 self.edge_velocity[axis][usize::from(side > 0)]
             } else {
                 [0.0; 3]
@@ -237,13 +257,21 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         0.5 * (velocity[high][component] - velocity[low][component])
                     }
                     (None, Some(high)) => {
-                        velocity[i][component] + velocity[high][component] / 3.0
-                            - (4.0 / 3.0) * wall_low[component]
+                        if let Some(ghost) = self.open_at(i, axis, -1) {
+                            0.5 * (velocity[high][component] - ghost.u[component])
+                        } else {
+                            velocity[i][component] + velocity[high][component] / 3.0
+                                - (4.0 / 3.0) * wall_low[component]
+                        }
                     }
                     (Some(low), None) => {
-                        (4.0 / 3.0) * wall_high[component]
-                            - velocity[i][component]
-                            - velocity[low][component] / 3.0
+                        if let Some(ghost) = self.open_at(i, axis, 1) {
+                            0.5 * (ghost.u[component] - velocity[low][component])
+                        } else {
+                            (4.0 / 3.0) * wall_high[component]
+                                - velocity[i][component]
+                                - velocity[low][component] / 3.0
+                        }
                     }
                     (None, None) => wall_high[component] - wall_low[component],
                 };

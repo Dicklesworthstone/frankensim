@@ -911,7 +911,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .any(|u| u.iter().any(|&v| v != 0.0));
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
-        let transport = match self.sgs_field(&rho, &u, &self.theta, &self.material) {
+        let transport = match self.sgs_field(
+            &rho, &u, &self.theta, &self.material, self.open_faces.as_ref(),
+        ) {
             Ok(transport) => transport,
             Err(error) => {
                 self.edge_velocity = old_edge_velocity;
@@ -1180,7 +1182,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let wall_flux = |i: usize, a: usize, s: i64| -> Result<f64, NsfError> {
             if let Some(face) = self.characteristic_face(faces, i, a, s) {
                 return self
-                    .open_energy_flux(face, i, a, s, rho, theta, sig)
+                    .open_energy_flux(face, i, a, s, rho, theta, sig, transport)
                     .map(|f| f.0);
             }
             if let Some(b) = self.open_at(i, a, s) {
@@ -1192,12 +1194,18 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 };
                 let stress_work = row[0] * b.u[0] + row[1] * b.u[1] + row[2] * b.u[2];
                 let gb = (b.energy + b.rho * b.theta) * b.u[a] - stress_work;
-                let k = self.spec.gas.face_conductivity(
+                let mut k = self.spec.gas.face_conductivity(
                     &self.law,
                     0.5 * (theta[i] + b.theta),
                     0.5 * (self.law.pressure_pa(rho[i], theta[i])
                         + self.law.pressure_pa(b.rho, b.theta)),
                 )?;
+                // Extrapolate adjacent SGS transport to the prescribed ghost.
+                // The original full-cell temperature difference and one shared
+                // face flux still own both storage change and open energy.
+                if let Some(local) = transport.get(i) {
+                    k += local.turbulent_conductivity_lu;
+                }
                 return Ok(0.5 * (g[i][a] + gb) - (s as f64) * k * (b.theta - theta[i]));
             }
             let heat = match wall_theta {
@@ -1260,7 +1268,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if self.fluid_at(x, a, 1).is_none() {
                     if let Some(face) = self.characteristic_face(faces, i, a, 1) {
                         let (total, internal) =
-                            self.open_energy_flux(face, i, a, 1, rho, theta, sig)?;
+                            self.open_energy_flux(face, i, a, 1, rho, theta, sig, transport)?;
                         open.total_out[1] += total;
                         open.internal_out[1] += internal;
                         if faces.is_some_and(|faces| faces.contains_patch(x, 1)) {
@@ -1275,7 +1283,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if self.fluid_at(x, a, -1).is_none() {
                     if let Some(face) = self.characteristic_face(faces, i, a, -1) {
                         let (total, internal) =
-                            self.open_energy_flux(face, i, a, -1, rho, theta, sig)?;
+                            self.open_energy_flux(face, i, a, -1, rho, theta, sig, transport)?;
                         open.total_out[0] -= total;
                         open.internal_out[0] -= internal;
                         if faces.is_some_and(|faces| faces.contains_patch(x, 0)) {
@@ -1446,7 +1454,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             let u1 = self.velocity_field(&rho1, &mom1, &f1);
             let trial_material = self.material_field(&rho1, &th1)?;
-            let trial_transport = self.sgs_field(&rho1, &u1, &th1, &trial_material)?;
+            let trial_transport =
+                self.sgs_field(&rho1, &u1, &th1, &trial_material, faces1.as_ref())?;
             let et_trial: Vec<f64> = (0..n)
                 .map(|i| {
                     let internal = trial_material
@@ -1540,13 +1549,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // The last corrector changes temperature after faces1 was evaluated.
         // Admit the actual endpoint too, without replacing the common
         // predictor faces that supplied its force and conservative FV flux.
-        let _ = self.resolve_open_faces(
+        let endpoint_faces = self.resolve_open_faces(
             self.open.as_ref(), self.characteristic_pressure_offset_pa,
             self.characteristic_patch, &rho1, &u1, &th1,
         )?;
         // The next collision must use the actual accepted force-corrected
         // velocity and source state, after the final temperature corrector.
-        let transport_new = self.sgs_field(&rho1, &u1, &th1, &material_new)?;
+        let transport_new =
+            self.sgs_field(&rho1, &u1, &th1, &material_new, endpoint_faces.as_ref())?;
         let unit = self.law.energy_unit_j();
         let (mut ke0, mut ke1, mut e_old, mut e_new, mut pw) = (0.0, 0.0, 0.0, 0.0, 0.0);
         for i in 0..n {

@@ -10,6 +10,7 @@ mod molecular;
 mod patch;
 mod reservoir;
 mod aperture;
+mod sgs;
 
 #[path = "../../../render/schedule/reed/field_input/tests/support.rs"]
 mod support;

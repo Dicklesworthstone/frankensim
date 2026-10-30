@@ -423,6 +423,17 @@ pub(super) fn resolved_provenance(
     let solid_wall = dg_wall_provenance(p.wall_layout());
     let radiation = super::duct_metadata::dg_radiation_provenance(load);
     let propagation = super::duct_metadata::observer_gas_provenance(renderer.observer_gas());
+    let sgs = info.sgs.map_or_else(|| ",\"sgs\":null".into(), |config| {
+        let model = match config.closure.model {
+            fs_lbm::sgs3::SgsModel::Smagorinsky { .. } => "smagorinsky",
+            fs_lbm::sgs3::SgsModel::Wale { .. } => "wale",
+            fs_lbm::sgs3::SgsModel::Vreman { .. } => "vreman",
+        };
+        format!(",\"sgs\":{{\"usage\":\"exploration\",\"model\":\"{model}\",\"coefficient\":{:e},\"filter_width_lu\":{:e},\"filter_width_m\":{:e},\"maximum_eddy_to_molecular\":{:e},\"turbulent_prandtl\":{:e},\"active\":{},\"scope\":\"original NSF deviatoric stress and conservative heat transport; open-face gradients use the original characteristic or reservoir state; no synthetic noise or turbulence qualification\"}}",
+            config.closure.model.coefficient(), config.closure.filter_width_lu,
+            config.closure.filter_width_lu * law.dx_m, config.closure.maximum_eddy_to_molecular,
+            config.turbulent_prandtl, system.zone().sgs_config().is_some())
+    });
     let aperture = system.coupled_patch().map_or_else(String::new, |patch| {
         let (kind, value, units) = match system.patch_background_drive().expect("explicit patch background") {
             fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(value) => ("prescribed-pressure-offset", value, "Pa"),
@@ -459,7 +470,7 @@ pub(super) fn resolved_provenance(
         load.propagator().dt(), info.physical_intervals,
         load.propagator().dt() * info.physical_intervals as f64,
         info.sample_rate_hz, info.samples, info.samples as f64 / f64::from(info.sample_rate_hz));
-    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{aperture}{reservoir}{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}}}",
+    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{sgs}{aperture}{reservoir}{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}}}",
         info.input_hash.to_hex(), info.dimensions[0], info.dimensions[1], info.dimensions[2],
         info.solid_cells, info.initial_state_cells, info.boundary_segments, law.dx_m, law.dt_s,
         limits.substeps, law.bulk_to_shear_ratio, json_string(system.zone().bulk_ratio_source()),

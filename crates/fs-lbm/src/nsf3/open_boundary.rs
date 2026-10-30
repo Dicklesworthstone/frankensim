@@ -18,7 +18,7 @@
 //! The normal boundary stencil is first order. Oblique transparency, a
 //! <-40 dB reflection bound and resolved instrument accuracy are unqualified.
 
-use super::{NsfError, NsfGrid3, Q, THETA0, check_state, equilibrium};
+use super::{NsfError, NsfGrid3, NsfSgsTransport, Q, THETA0, check_state, equilibrium};
 use crate::lattice3::Lattice3;
 
 mod patch;
@@ -186,11 +186,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         mut self,
         open: NsfCharacteristicAxis,
     ) -> Result<Self, NsfError> {
-        if self.sgs.is_some() {
-            return Err(NsfError::Input(
-                "NSF SGS does not support characteristic faces",
-            ));
-        }
         if self.reservoir_faces.iter().flatten().any(Option::is_some) {
             return Err(NsfError::Input(
                 "characteristic and prescribed reservoir faces are exclusive",
@@ -398,15 +393,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 std::array::from_fn(|a| self.force[i][a] - force[i][a]),
             );
         }
-        let sig = self.stress_field(&f, &force, &rho, &self.theta, &self.material, &[]);
+        let transport = self.sgs_field(&rho, &u, &self.theta, &self.material, faces.as_ref())?;
+        let sig = self.stress_field(&f, &force, &rho, &self.theta, &self.material, &transport);
         let (div, wall, flux) =
-            self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &[], faces.as_ref())?;
+            self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &transport, faces.as_ref())?;
         self.open = Some(open);
         self.characteristic_pressure_offset_pa = pressure_offset_pa;
         self.characteristic_patch = patch;
         self.open_faces = faces;
         self.f = f;
         self.force = force;
+        self.sgs_transport = transport;
         self.div = div;
         self.wall_out = wall;
         self.open_out = flux;
@@ -597,12 +594,18 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         rho: &[f64],
         theta: &[f64],
         sig: &[[f64; 6]],
+        transport: &[NsfSgsTransport],
     ) -> Result<(f64, f64), NsfError> {
-        let k = self.spec.gas.face_conductivity(
+        let mut k = self.spec.gas.face_conductivity(
             &self.law,
             0.5 * (theta[i] + face.theta),
             0.5 * (self.law.pressure_pa(rho[i], theta[i]) + face.pressure_pa),
         )?;
+        // The modeled coefficient is extrapolated from this adjacent cell;
+        // the original characteristic temperature owns the half-cell gradient.
+        if let Some(local) = transport.get(i) {
+            k += local.turbulent_conductivity_lu;
+        }
         let heat = -2.0 * k * direction as f64 * (face.theta - theta[i]);
         let s = sig[i];
         let row = match axis {

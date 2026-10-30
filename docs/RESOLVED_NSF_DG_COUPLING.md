@@ -52,9 +52,9 @@ carry the finite upstream acoustic load. Patch controls, fields, exchanges and
 both duct histories publish together only after all checks succeed.
 
 This enables a split boundary topology, not a complete flute mouth. It does not
-create a labium wall at the patch edge, resolve an unmeshed jet, remove the
-original first-order plane-normal characteristic approximation, or admit SGS
-through open boundaries. The complement remains an ideal prescribed boundary;
+create a labium wall at the patch edge, resolve an unmeshed jet, or remove the
+original first-order plane-normal characteristic approximation.
+The complement remains an ideal prescribed boundary;
 escaping flow has no separate exterior-radiation observer or mutual radiation
 reaction. Current pressure playback still observes the main DG bore. Geometry,
 source-flow, interface and acoustic convergence remain required.
@@ -104,6 +104,32 @@ tests in `nsf_dg/performance/file/tests/aperture.rs` check original fluid/duct
 replay, retained thermochemical sources and finite-upstream feedback together
 with the opening. Numerical/interface regressions do not qualify a physical
 mouth or its acoustic transparency.
+
+### Explicit subgrid transport through open boundaries
+
+The same NSF volume can carry an explicitly declared Smagorinsky, WALE or
+Vreman exploration closure with characteristic faces, a selected bore patch
+and a transverse reservoir aperture. Missing open neighbors use the original
+reconstructed characteristic face state or prescribed reservoir ghost state,
+at their actual half-cell or full-cell spacing. They are not treated as
+impermeable walls. The local modeled shear transport reaches the original
+collision and stress-work calculation, and modeled conductivity reaches the
+same conservative open-face heat flux. Boundary-control rebinding and rejected
+coupled trials preserve these fields together with the original fluid state.
+
+Every coefficient, filter width, viscosity-ratio bound and turbulent Prandtl
+number is explicit. Bounds refuse excess transport; they never clamp it.
+Omitting the declaration keeps molecular transport. A zero coefficient keeps
+the identical molecular trajectory and remains visible in native input
+metadata as a disabled control. Complete prescribed reservoir faces retain
+their separate unsupported-SGS refusal; this integration admits the localized
+transverse aperture used by the resolved source.
+
+These algebraic closures supply no fluctuating noise source, SGS kinetic-energy
+equation or transition prediction. They remain exploration tools: the native
+reader requires the `exploration` token and the source remains ineligible for
+acceptance renders. Filter, geometry, source-flow and interface convergence are
+still required; enabling a closure does not qualify a turbulent flute jet.
 
 ### Physical pressure control
 
@@ -350,6 +376,7 @@ grid NX NY NZ DX_M PERIODIC_X PERIODIC_Y PERIODIC_Z
 fluid_limits MAX_CELLS TMIN_K TMAX_K MAX_MACH MAX_TEMPERATURE_RATIO TRANSPORT_POINTS WORKERS
 bulk_viscosity BULK_TO_SHEAR_RATIO SOURCE_TOKEN
 wall adiabatic
+[optional sgs exploration MODEL COEFFICIENT FILTER_WIDTH_LU MAX_EDDY_TO_MOLECULAR TURBULENT_PRANDTL]
 characteristic AXIS low|high MAX_RELATIVE_PERTURBATION
 [optional coupled_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
 [optional reservoir_aperture AXIS low|high DENSITY_KG_M3 VX_M_S VY_M_S VZ_M_S TEMPERATURE_K COUNT]
@@ -378,6 +405,12 @@ end
 
 Alternatives use the same original parsers and owners:
 
+- `sgs exploration smagorinsky|wale|vreman C DELTA RATIO PR_T` attaches the
+  original `NsfSgsConfig` after the declared openings. `C` is the model's own
+  coefficient (Vreman uses `c`, not its square root); `DELTA` is in original
+  lattice cells, so its physical width is `DELTA * DX_M`. `RATIO` bounds modeled
+  over molecular viscosity and `PR_T` controls modeled heat diffusion. No
+  values are inferred from the instrument name or desired sound.
 - `coupled_patch START0 END0 START1 END1 pressure PA` selects an explicit bore
   aperture immediately after `characteristic`; `characteristic M_S` can replace
   `pressure PA` for an incoming-wave condition on its remainder. Cell bounds are
