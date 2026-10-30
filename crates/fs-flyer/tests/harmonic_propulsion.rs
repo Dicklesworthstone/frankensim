@@ -1,5 +1,6 @@
 //! G0/G1/G3: asymmetric wake memory in the actual aircraft/shaft trajectory.
 use fs_airscrew::dynamic_inflow::first_harmonic::HarmonicInduction;
+use fs_airscrew::dynamic_inflow::first_harmonic::skew::SkewInflowControls;
 use fs_flyer::aircraft::wright_openloop_v1;
 use fs_flyer::spine::SixDofState;
 use fs_flyer::spine::rotors::geared::{GearedAssembly, GearedRotor, GearedState};
@@ -344,6 +345,226 @@ fn shaft_axis_conventions_and_late_refusal_preserve_complete_state() {
     assert_eq!(sa, initial(&aa));
     let run = || {
         ma.step(&sa, 0.0, 0.004, ZERO, |t, _| Ok(inputs(t)), |_, _| Ok(ZERO))
+            .unwrap()
+    };
+    assert_eq!(run(), run());
+}
+
+fn turning_wind(t: f64, p: [f64; 3]) -> [f64; 3] {
+    // A resolved gust within the original wing's admitted forward-flight lane.
+    [0.02 * p[1], 0.5 * (20.0 * t).sin(), 0.1 * (20.0 * t).cos()]
+}
+
+fn skew_initial(assembly: &GearedAssembly<2>) -> HarmonicState {
+    let mut state = initial(assembly);
+    state.motion.rigid.vel_mps[2] = 1.5;
+    state
+}
+
+#[test]
+fn skew_transport_drives_real_turning_aircraft_without_duplicating_aerodynamic_loads() {
+    let design = wright_openloop_v1();
+    let assembly = assembly(design.gross_mass_kg, false);
+    let base = GearedPropulsion::new_spatial(&design, &assembly, mounts(false)).unwrap();
+    let model =
+        HarmonicPropulsion::new_skewed(&base, RHO, 32, SkewInflowControls::default()).unwrap();
+    let normal = HarmonicPropulsion::new(&base, RHO, 32).unwrap();
+    let before = skew_initial(&assembly);
+    let mut state = before;
+    let origin = [-5.0, 3.0, 2.0];
+    let start = model
+        .evaluate(&before, inputs(0.0), &|p| Ok(turning_wind(0.0, p)))
+        .unwrap();
+    let old = normal
+        .evaluate(&before, inputs(0.0), &|p| Ok(turning_wind(0.0, p)))
+        .unwrap();
+    assert_eq!(start.loads, old.loads); // Same physical section state; different wake derivative.
+    assert_ne!(start.aerodynamics.wake_rate, old.aerodynamics.wake_rate);
+    assert!(start.aerodynamics.skew_transport.is_some());
+    let p0 = v(before.motion.rigid.vel_mps).scale(assembly.mass_kg());
+    let l0 = angular_momentum(&assembly, &before.motion, origin);
+    let mut dp = Vec3::default();
+    let mut dl = Vec3::default();
+    let mut max_modal: f64 = 0.0;
+    let mut max_energy: f64 = 0.0;
+    let mut maximum_iterations = 0;
+    let mut cross_work = 0.0;
+    let mut changed_direction = false;
+    for tick in 0..24 {
+        let step = model
+            .step(
+                &state,
+                tick as f64 * 0.004,
+                0.004,
+                origin,
+                |t, _| Ok(inputs(t)),
+                |t, p| Ok(turning_wind(t, p)),
+            )
+            .unwrap();
+        dp = dp + v(step.motion.external_linear_impulse_world);
+        dl = dl + v(step.motion.external_angular_impulse_world);
+        for k in 0..2 {
+            let wake = step.skew_inflow.unwrap()[k];
+            assert_eq!(wake.modal, step.inflow[k]);
+            maximum_iterations = maximum_iterations.max(wake.iterations);
+            max_modal = max_modal.max(v(wake.modal.momentum_residual_ns).norm());
+            max_energy = max_energy.max(wake.modal.energy_residual_j.abs());
+            cross_work += wake.cross_transport_work_j;
+            assert!(
+                (wake.diagonal_transport_work_j + wake.cross_transport_work_j
+                    - wake.modal.transport_work_j)
+                    .abs()
+                    < 2e-13
+            );
+            assert!(wake.modal.frame_work_j.abs() < 1e-15);
+            let a = start.aerodynamics.skew_transport.unwrap()[k]
+                .downstream
+                .unwrap();
+            let b = step.midpoint.aerodynamics.skew_transport.unwrap()[k]
+                .downstream
+                .unwrap();
+            changed_direction |= a[0] * b[0] + a[1] * b[1] < 0.99;
+        }
+        state = step.state;
+    }
+    let p_defect = (v(state.motion.rigid.vel_mps).scale(assembly.mass_kg()) - p0 - dp).norm();
+    let l_defect = (angular_momentum(&assembly, &state.motion, origin) - l0 - dl).norm();
+    println!(
+        "turning skew propulsion: P={p_defect:e}, L={l_defect:e}, modal={max_modal:e}, energy={max_energy:e}, iterations={maximum_iterations}, signed cross work={cross_work:e}"
+    );
+    assert!(p_defect < 2e-9);
+    assert!(l_defect < 2e-8);
+    assert!(max_modal < 2e-9);
+    assert!(max_energy < 2e-9);
+    assert!(changed_direction);
+    assert!(cross_work.abs() > 1e-5);
+    assert!((state.induction[0].first_mps[0] - before.induction[0].first_mps[0]).abs() > 0.01);
+}
+
+fn integrate_turning(
+    model: &HarmonicPropulsion<'_, '_, 2>,
+    start: HarmonicState,
+    n: usize,
+) -> (HarmonicState, f64) {
+    let mut state = start;
+    let mut work = 0.0;
+    // A smooth admitted 6 ms window. The original cold-start wing solver
+    // can refuse later refined states; no wing tolerance or fallback is changed.
+    let dt = 0.006 / n as f64;
+    for tick in 0..n {
+        let step = model
+            .step(
+                &state,
+                tick as f64 * dt,
+                dt,
+                ZERO,
+                |t, _| Ok(inputs(t)),
+                |t, p| Ok(turning_wind(t, p)),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "turning trajectory n={n}, tick={tick}, t={}: {error:?}",
+                    tick as f64 * dt
+                )
+            });
+        work += step
+            .coupling_work_residual_j
+            .into_iter()
+            .map(f64::abs)
+            .sum::<f64>();
+        state = step.state;
+    }
+    (state, work)
+}
+
+#[test]
+fn turning_skew_state_and_source_work_refine_with_exact_shaft_sign_parity() {
+    let design = wright_openloop_v1();
+    let aa = assembly(design.gross_mass_kg, false);
+    let ab = assembly(design.gross_mass_kg, true);
+    let ba = GearedPropulsion::new_spatial(&design, &aa, mounts(false)).unwrap();
+    let bb = GearedPropulsion::new_spatial(&design, &ab, mounts(true)).unwrap();
+    let ma = HarmonicPropulsion::new_skewed(&ba, RHO, 32, SkewInflowControls::default()).unwrap();
+    let mb = HarmonicPropulsion::new_skewed(&bb, RHO, 32, SkewInflowControls::default()).unwrap();
+    let start = skew_initial(&aa);
+    let reference = integrate_turning(&ma, start, 256).0;
+    let runs = [
+        integrate_turning(&ma, start, 8),
+        integrate_turning(&ma, start, 16),
+        integrate_turning(&ma, start, 32),
+    ];
+    assert_eq!(runs[0], integrate_turning(&mb, skew_initial(&ab), 8));
+    let errors = runs.each_ref().map(|r| distance(&r.0, &reference));
+    let work = runs.each_ref().map(|r| r.1);
+    println!("turning coupled skew errors: {errors:?}; coupling work defects: {work:?}");
+    for pair in errors.windows(2) {
+        assert!((3.4..4.7).contains(&(pair[0] / pair[1])));
+    }
+    for pair in work.windows(2) {
+        assert!((3.4..4.7).contains(&(pair[0] / pair[1])));
+    }
+}
+
+#[test]
+fn exhausted_skew_solve_and_late_aircraft_load_refusal_preserve_the_input_state() {
+    let design = wright_openloop_v1();
+    let assembly = assembly(design.gross_mass_kg, false);
+    let base = GearedPropulsion::new_spatial(&design, &assembly, mounts(false)).unwrap();
+    let state = initial(&assembly);
+    let tiny = HarmonicPropulsion::new_skewed(
+        &base,
+        RHO,
+        32,
+        SkewInflowControls {
+            maximum_iterations: 1,
+            ..SkewInflowControls::default()
+        },
+    )
+    .unwrap();
+    let error = tiny
+        .step(
+            &state,
+            0.0,
+            0.01,
+            ZERO,
+            |t, _| Ok(inputs(t)),
+            |t, p| Ok(turning_wind(t, p)),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "skew-inflow-unresolved");
+    let model =
+        HarmonicPropulsion::new_skewed(&base, RHO, 32, SkewInflowControls::default()).unwrap();
+    let mut count = 0;
+    let error = model
+        .step(
+            &state,
+            0.0,
+            0.004,
+            ZERO,
+            |t, _| {
+                count += 1;
+                let mut i = inputs(t);
+                if count == 2 {
+                    i.density_kg_m3 = 1.0;
+                }
+                Ok(i)
+            },
+            |t, p| Ok(turning_wind(t, p)),
+        )
+        .unwrap_err();
+    assert_eq!(count, 2);
+    assert_eq!(error.code, "harmonic-propulsion-invalid");
+    assert_eq!(state, initial(&assembly));
+    let run = || {
+        model
+            .step(
+                &state,
+                0.0,
+                0.004,
+                ZERO,
+                |t, _| Ok(inputs(t)),
+                |t, p| Ok(turning_wind(t, p)),
+            )
             .unwrap()
     };
     assert_eq!(run(), run());

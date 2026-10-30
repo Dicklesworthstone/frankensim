@@ -6,13 +6,16 @@
 //! lane is Estimated: it does not certify entropy stability, shock thickness,
 //! turbulence, reactions, moving geometry or a shock adjoint.
 
-use super::cartesian::{StageStats, check_cfl, mc};
+use super::cartesian::{StageStats, check_cfl};
 pub use super::{AxisBoundaries, BoundaryCondition, Error, FrozenGas, Reconstruction, StepControl};
 use super::{allocated, poll, positive, sum_arrays};
 use fs_gas::dynamics::{MAX_EULER_CELLS, SpatialConserved, SpatialFaceFlux, SpatialPrimitive};
 use fs_qty::Time;
 
+mod cartesian;
 mod evolve;
+/// Conservative evolution of every original species in a volumetric field.
+pub mod mixture;
 /// Source-owned molecular stress and heat transport for the volumetric field.
 pub mod molecular;
 

@@ -257,3 +257,76 @@ domain/late-endpoint refusals. Harmonic response errors at 16/32/64 steps are
 `2.4097506965e-4`, `6.0192955857e-5`, `1.5045067779e-5`. These focused native
 results do not establish a full Cargo/DSR, cross-platform or physical
 calibration gate.
+
+## First harmonic skew-flow transport in fixed disk coordinates
+
+`dynamic_inflow::first_harmonic::skew` extends the existing physical modal
+owner with `skew_transport`, `rate_skewed` and `step_skewed_held`. This
+explicit selection implements the full first harmonic nonrigid-wake gain
+in Chen, NASA TM-102219, equations (13b), (14), (17), (18) and the wind-axis
+qualification after (16):
+<https://ntrs.nasa.gov/api/citations/19900006622/downloads/19900006622.pdf>.
+The original normal-flow API and its exact zero-crossflow arithmetic remain.
+This extension supersedes only the earlier absence of general skew transport;
+it does not change the original apparent masses, blade law or modal ports.
+
+Incident velocity is material velocity relative to air, without self
+induction, expressed in the original disk basis. Let `Vt` be its transverse
+magnitude, `Va` its normal component, `u0` the current mean induction,
+`U=hypot(Vt,Va+u0)`, `c=(Va+u0)/U`, `Vm=U+c*u0`,
+`X=tan(chi/2)=Vt/(U+Va+u0)` and `a=15 pi/64`. With the original positive
+power-conjugate forces `Q=[T,-M dot e2/R,M dot e1/R]`, the source gain in
+mean/downstream/crosswind order is
+`H=[[1/(2U),-aX/Vm,0],[aX/U,4c/(Vm(1+c)),0],[0,0,4/(Vm(1+c))]]`.
+The dimensional transport is `rho A H^-1`, in `N s/m`, and acts on total
+modal induction. The uncorrected mean apparent mass and total forcing are
+used; perturbation-only corrections are not applied. In particular, pure
+thrust produces `h_down/u0=(15 pi/32) X` from the actual gain matrix.
+
+Downstream is opposite the incident transverse material-relative velocity:
+positive downstream mode means greater induction on the trailing side.
+The generally nonsymmetric operator is rotated into the fixed disk basis;
+it is neither transposed nor symmetrized. The stored harmonic vector does
+not rotate with advance direction, including reversal through zero
+crossflow. The original carrier-axis tangent-frame term remains separate
+and has zero power in real arithmetic. Apparent air mass is never added to
+solid inertia. Modal balances remain distinct from a world-fluid momentum
+account.
+
+The physical midpoint equation uses the transport evaluated at its solved
+midpoint mean. Each coefficient iteration solves an analytic two-mode block
+and mean Schur equation with constant storage. Controls admit 1--64
+iterations, finite positive absolute tolerance and relative tolerance at
+most `1e-3`; defaults are 32, `1e-12 m/s`, and `1e-11`. Acceptance checks the
+original three residual equations against the declared tolerance, not
+successive iterate changes. Initial, midpoint and final domain checks
+remain: `Va>=0`, the native moderate-braking bound `u0>=-0.4 Va`, and
+whole-disk nonnegative normal throughflow. Singular/overflowing algebra,
+inadmissible states and unresolved iteration caps refuse without a partial
+state. This local bounded iteration is not a global root-uniqueness claim.
+
+`SkewInflowStep` exposes the actual source operator, iteration count,
+midpoint residual, original modal impulse/work ledger, and separate diagonal
+and signed cross transport work in physical wind coordinates. Their sum is
+the actual `u dot (rho A H^-1 u) dt`. The off-diagonal contribution can be
+negative and is not friction or heat; no skew passivity or total fluid/body
+energy theorem is asserted. Frame work and numerical residuals remain
+explicit. The original normal origin uses its analytic path without a
+singular wind-direction choice.
+
+Six native cases in `tests/skew_inflow.rs` verify the independent primary
+gain against the production inverse, both coupling signs, pure-thrust
+downstream equilibrium, exact normal-path parity, vanishing crossflow,
+turning/reversing wind and disk-reference covariance, bounded and late
+refusals, and nonlinear refinement against an independent 8192-step RK4
+oracle that solves the source gain by pivoted elimination. Errors at
+16/32/64 steps are `3.27458e-4`, `8.18122e-5`, `2.04498e-5`; the respective
+largest coefficient iteration counts are 6, 5, 5. Work/impulse checks use
+actual accepted states and the complete nonsymmetric operator.
+
+The normal-throughflow restriction remains even in skew flow; no reverse
+throughflow, vortex-ring or windmill-brake branch is introduced. Higher
+spatial modes, swirl, flapping/cyclic pitch, radial-flow section forces,
+wake contraction, ground effect, transported skewed far-wake geometry and
+physical calibration remain outside the model. Native verification is not
+a full Cargo/DSR, cross-platform, browser or real-time gate.

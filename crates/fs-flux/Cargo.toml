@@ -77,5 +77,10 @@ name = "shock_box_3d"
 path = "examples/shock_box_3d.rs"
 required-features = ["experimental-compressible"]
 
+[[example]]
+name = "mixture_shock_box_3d"
+path = "examples/mixture_shock_box_3d.rs"
+required-features = ["experimental-compressible"]
+
 [lints]
 workspace = true

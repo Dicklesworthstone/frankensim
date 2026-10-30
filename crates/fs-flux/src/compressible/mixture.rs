@@ -718,7 +718,7 @@ fn cell(q: &[f64], n: usize) -> Cell<'_> {
         energy: q[n + 2],
     }
 }
-fn sum(values: impl Iterator<Item = f64>) -> f64 {
+pub(super) fn sum(values: impl Iterator<Item = f64>) -> f64 {
     let (mut total, mut correction) = (0.0, 0.0);
     for value in values {
         let y = value - correction;
@@ -761,7 +761,7 @@ fn checked_totals(
         n,
     ))
 }
-fn allocated<T: Clone>(count: usize, value: T) -> Result<Vec<T>, Error> {
+pub(super) fn allocated<T: Clone>(count: usize, value: T) -> Result<Vec<T>, Error> {
     let mut result = Vec::new();
     result
         .try_reserve_exact(count)
@@ -771,4 +771,4 @@ fn allocated<T: Clone>(count: usize, value: T) -> Result<Vec<T>, Error> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
