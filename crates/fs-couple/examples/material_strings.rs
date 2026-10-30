@@ -312,6 +312,8 @@ impl input::Spec {
         let memory = self.string_memory_states()?
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
             .and_then(|n| n.checked_add(profile.as_ref().map_or(0, |body| body.material_memory_states_for(&self))))
+            .and_then(|n| n.checked_add(self.bow_fibers.as_ref()
+                .and_then(|fibers| fibers.memory.as_ref()).map_or(0, |memory| memory.max_states)))
             .ok_or("complete material memory extent overflow")?;
         // A prepared owner keeps the skin load's poles as its air bank beside the transition, charged to the prepared
         // byte and work budget (the library's own split); only the exact owner holds them in its state.
@@ -326,7 +328,7 @@ impl input::Spec {
                 .and_then(|d| settings.network.max_setup_terms.checked_add(d))
                 .ok_or("complete material setup work overflow")?;
             if (memory > 256 && self.prepared_linear.is_none()) || terms > input::MAX_WORK as usize {
-                return Err("complete string/body memory exceeds the original state or setup-work ceiling".into());
+                return Err("complete material memory exceeds the original state or setup-work ceiling".into());
             }
             settings.network.max_setup_terms = terms;
         }

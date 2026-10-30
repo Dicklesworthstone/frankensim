@@ -21,6 +21,16 @@ use crate::fiber_ribbon::{FiberDirection, TensionedFiberRibbon};
 use crate::render::schedule::force::coupled::ModalAttachment;
 use crate::render::schedule::force::coupled::contact::friction::multiple::surfaces::FrictionSurfaceAttachment;
 
+fn fiber_memory_error(error: crate::fiber_ribbon::FiberRibbonError) -> ReciprocalStringError {
+    match error {
+        crate::fiber_ribbon::FiberRibbonError::Invalid(what) => invalid(what),
+        crate::fiber_ribbon::FiberRibbonError::Cancelled => ReciprocalStringError::Network(
+            crate::render::schedule::force::coupled::ModalCouplingError::Cancelled),
+        error => ReciprocalStringError::Material(
+            crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string())),
+    }
+}
+
 /// Translating fiber supports, their inertial loads and moving material contact.
 pub mod motion;
 
@@ -146,6 +156,9 @@ impl ReciprocalStringBank {
     /// in the original exact mechanical owner. Opposite tangential reactions
     /// stretch the fibers and feed back into each string contact in the SAME
     /// joint solve; their material losses enter the existing energy account.
+    /// Selected fiber Young spectra append real first-order material histories
+    /// to that same owner in both axial and bending directions. Existing
+    /// string/body/cavity histories remain an unchanged prefix.
     /// No post-filter or independently stepped bow is used. The original body,
     /// cavity, radiation, material memory and nonlinear strain storage remain
     /// attached. Appended fiber modes leave the original string and retained
@@ -185,9 +198,20 @@ impl ReciprocalStringBank {
         let normal_shapes = ribbon.displacement_map(station_fraction, FiberDirection::Normal)
             .map_err(|_| invalid("invalid normal fiber contact map"))?;
         let component_start = self.system.components().len();
+        let first_fiber_mode = self.system.mode_count();
         let string_count = self.cards.len();
         self.system = self.system.with_internal_components(ribbon.cell_models(), gate)
             .map_err(ReciprocalStringError::Friction)?;
+        if let Some(memory) = ribbon.material_relaxation() {
+            let branches = memory.branches(first_fiber_mode, self.system.mode_count(), gate)
+                .map_err(fiber_memory_error)?;
+            self.system = self.system.with_additional_material_relaxation(branches, None, gate)
+                .map_err(ReciprocalStringError::Friction)?;
+            memory.validate_band(self.system.linear_frequency_upper_bound_rad_s(),
+                self.system.sample_period_s()).map_err(fiber_memory_error)?;
+            self.source.validate_body_memory_frequencies(&self.system, gate)?;
+            self.source.validate_material_bridge_frequencies(&self.system, gate)?;
+        }
         if let Some((bindings, config)) = ribbon.strain_bindings(component_start) {
             self.system = self.system.with_mapped_nonlinear_potentials(bindings, config, gate)
                 .map_err(ReciprocalStringError::Friction)?;

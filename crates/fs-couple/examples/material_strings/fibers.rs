@@ -6,9 +6,53 @@ pub use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performanc
 pub use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::ribbon::motion::FiberSupportMotionLimits;
 pub use fs_couple::fiber_ribbon::strain::FiberStrainLimits;
 use fs_couple::fiber_ribbon::{FiberRibbonGeometry, FiberRibbonResolution, TensionedFiberRibbon};
+use fs_material::section::relaxation::{
+    LayerRelaxationProperties, MAX_SECTION_RELAXATION_BRANCHES,
+};
 use fs_material::section::{
     ConcentricElasticSection, ConcentricMaterialLayer, axial::YOUNG_VISCOSITY_PROPERTY,
 };
+use fs_qty::Time;
+
+/// Source roles for the fiber's isotropic Young relaxation spectrum. The same
+/// law acts on axial extension and bending; these are not independent loss fits.
+#[derive(Clone, Debug)]
+pub struct Memory {
+    pub properties: LayerRelaxationProperties,
+    pub max_states: usize,
+}
+
+impl Memory {
+    fn requirements(&self) -> Result<Vec<Requirement>> {
+        if self.max_states == 0 || self.properties.branches.len() > MAX_SECTION_RELAXATION_BRANCHES
+        {
+            return Err(
+                "fiber memory needs a positive history budget and bounded source arms".into(),
+            );
+        }
+        let mut requirements = vec![Requirement::try_new(
+            &self.properties.equilibrium_modulus,
+            Pressure::DIMS,
+            Admit::StrictlyPositive,
+        )?];
+        for (index, (modulus, time)) in self.properties.branches.iter().enumerate() {
+            if self.properties.branches[..index].contains(&(modulus.clone(), time.clone())) {
+                return Err("fiber memory repeats a source-property pair".into());
+            }
+            requirements.push(Requirement::try_new(
+                modulus,
+                Pressure::DIMS,
+                Admit::NonNegative,
+            )?);
+            requirements.push(Requirement::try_new(
+                time,
+                Time::DIMS,
+                Admit::StrictlyPositive,
+            )?);
+        }
+        Ok(requirements)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Input {
@@ -20,6 +64,7 @@ pub struct Input {
     pub station_fraction: f64,
     pub axial_modes: usize,
     pub transverse_modes: usize,
+    pub memory: Option<Memory>,
     pub strain: Option<(FiberStrainLimits, NonlinearModalConfig)>,
     pub motion: Option<FiberSupportMotionLimits>,
     pub support_program: Option<FiberSupportProgram>,
@@ -39,6 +84,12 @@ impl Input {
                 "bow_fibers requires positive span modes/fiber count and interior fiber station"
                     .into(),
             );
+        }
+        if let Some(memory) = &self.memory {
+            memory.requirements()?;
+            if self.strain.is_some() {
+                return Err("fiber relaxation requires linear strain; nonlinear material-history transport is not available".into());
+            }
         }
         if let Some((limits, config)) = self.strain {
             limits.validate()?;
@@ -73,7 +124,10 @@ impl Input {
         if let Some(program) = &self.normal_program {
             program.validate(spec.samples, spec.rate, &CancelGate::new_clock_free())?;
             if self.motion.is_none() && self.support_program.is_none() {
-                return Err("normal fiber support requires an explicitly retained axial support frame".into());
+                return Err(
+                    "normal fiber support requires an explicitly retained axial support frame"
+                        .into(),
+                );
             }
         }
         if self.motion.is_some() || self.support_program.is_some() {
@@ -121,7 +175,7 @@ impl Input {
     ) -> Result<TensionedFiberRibbon> {
         self.mode_count(spec)?;
         poll(gate)?;
-        let requirements = [
+        let mut requirements = vec![
             Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
             Requirement::try_new("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?,
             Requirement::try_new(ETA, DynViscosity::DIMS, Admit::NonNegative)?,
@@ -131,6 +185,23 @@ impl Input {
                 Admit::NonNegative,
             )?,
         ];
+        if let Some(memory) = &self.memory {
+            for requirement in memory.requirements()? {
+                // The equilibrium selector may explicitly name young_modulus.
+                // Keep one requirement per identical source role, while refusing
+                // an alias that assigns incompatible physical quantities.
+                if let Some(existing) = requirements
+                    .iter()
+                    .find(|existing| existing.name() == requirement.name())
+                {
+                    if existing != &requirement {
+                        return Err("fiber memory source roles conflict with the original material requirements".into());
+                    }
+                } else {
+                    requirements.push(requirement);
+                }
+            }
+        }
         let material = resolve_properties(&self.pack, catalog, loader, spec, &requirements)?;
         let section = ConcentricElasticSection::try_new(
             0.0,
@@ -142,6 +213,15 @@ impl Input {
         let (width_m, cells) = spec
             .bow_ribbon
             .ok_or("bow_fibers requires a physical ribbon")?;
+        let memory = self
+            .memory
+            .as_ref()
+            .map(|binding| {
+                section
+                    .clone()
+                    .with_prony_bending(std::slice::from_ref(&binding.properties))
+            })
+            .transpose()?;
         let ribbon = TensionedFiberRibbon::try_new(
             FiberRibbonGeometry {
                 length_m: self.length_m,
@@ -162,6 +242,12 @@ impl Input {
             modal_budget(),
             gate,
         )?;
+        let ribbon = match (&self.memory, memory) {
+            (Some(binding), Some(memory)) => {
+                ribbon.with_material_relaxation(memory, binding.max_states, gate)?
+            }
+            _ => ribbon,
+        };
         match self.strain {
             Some((limits, config)) => Ok(ribbon.with_axial_transverse_strain(limits, config)?),
             None => Ok(ribbon),

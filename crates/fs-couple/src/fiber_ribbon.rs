@@ -15,8 +15,11 @@
 //! `with_axial_transverse_strain` adds the existing moderate-slope extensional
 //! law to the SAME contact solver, so normal deflection changes fiber tension
 //! and axial waves. Both rungs omit stick camber/flexure, fiber-to-fiber contact,
-//! large rotations, air drag and thermal rosin. Fixed-state Kelvin--Voigt
-//! coefficients require explicit source data;
+//! large rotations, air drag and thermal rosin. The separate explicit
+//! `with_material_relaxation` binding retains each source Young-modulus arm
+//! in both axial and bending response, through the same coupled contact owner.
+//! It admits linear strain only; nonlinear hereditary strain is not inferred.
+//! Fixed-state Kelvin--Voigt coefficients require explicit source data;
 //! missing loss is never replaced with an invented Q. Refine BOTH the span
 //! modes and ribbon cells; the sample-rate owner refuses unresolved modes.
 
@@ -31,6 +34,8 @@ use fs_math::{c64::C64, det};
 
 /// Conservative coupling of fiber extension and normal deflection.
 pub mod strain;
+/// Source-bound hereditary Young response in both retained fiber directions.
+pub mod relaxation;
 
 /// Dimensions and fixed pre-tension of the original physical fiber bundle.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,6 +102,7 @@ pub struct TensionedFiberRibbon {
     cell: ModalAcousticTimeModel,
     cell_line_density_kg_m: f64,
     strain: Option<strain::FiberStrain>,
+    relaxation: Option<relaxation::FiberRibbonRelaxation>,
 }
 
 impl TensionedFiberRibbon {
@@ -214,6 +220,7 @@ impl TensionedFiberRibbon {
             cell,
             cell_line_density_kg_m,
             strain: None,
+            relaxation: None,
         })
     }
 

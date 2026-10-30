@@ -87,9 +87,9 @@ impl TensionedFiberRibbon {
         config: NonlinearModalConfig,
     ) -> Result<Self, FiberRibbonError> {
         limits.validate()?;
-        if self.strain.is_some() || config.validate().is_err() {
+        if self.strain.is_some() || self.relaxation.is_some() || config.validate().is_err() {
             return Err(FiberRibbonError::Invalid(
-                "fiber strain needs one cold binding and finite slope, strain and solve bounds",
+                "fiber strain needs one cold binding, no linearized material history, and finite slope, strain and solve bounds",
             ));
         }
         let share = self.geometry.fiber_count as f64 / self.resolution.cells as f64;

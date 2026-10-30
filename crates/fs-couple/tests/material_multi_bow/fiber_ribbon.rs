@@ -12,6 +12,8 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::f
 
 #[path = "fiber_normal_motion.rs"]
 mod normal_motion;
+#[path = "fiber_relaxation.rs"]
+mod relaxation;
 
 fn support_program(knots: &[(u64, f64)]) -> FiberSupportProgram {
     FiberSupportProgram { initial_velocity_m_s: 0.0,

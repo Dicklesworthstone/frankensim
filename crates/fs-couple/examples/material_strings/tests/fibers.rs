@@ -53,6 +53,100 @@ fn fiber_spec() -> input::Spec {
     .unwrap()
 }
 
+fn memory_text() -> String {
+    include_str!("../fiber-ribbon.material-strings")
+        .replace("48000 4096", "48000 256")
+        .replace("forces retain", concat!(
+            "bow_fiber_memory 24 young_modulus 2 fiber_delta_fast fiber_tau_fast ",
+            "fiber_delta_slow fiber_tau_slow\nforces retain"))
+}
+
+fn memory_pack(delta: f64, omit_time: bool) -> NormalizedPack {
+    let mut claims = fiber_pack(1300.0, false).claims().clone();
+    for (key, dims, value) in [
+        ("fiber_delta_fast", Pressure::DIMS, delta),
+        ("fiber_tau_fast", fs_qty::Time::DIMS, 0.0004),
+        ("fiber_delta_slow", Pressure::DIMS, 0.5 * delta),
+        ("fiber_tau_slow", fs_qty::Time::DIMS, 0.006),
+    ] {
+        if omit_time && key == "fiber_tau_slow" {
+            continue;
+        }
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(key, dims),
+            value: PropertyValue::Scalar { value, dims },
+            validity: ValidityDomain::unconstrained()
+                .with("T", 280.0, 320.0).with("omega", 0.0, 200_000.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![],
+            provenance: Provenance {
+                source: "manufactured isotropic fiber relaxation; not measured horsehair".into(),
+                license: "CC0-1.0".into(),
+                artifact: Some(fs_blake3::ContentHash([12; 32])),
+            },
+        }).unwrap();
+    }
+    let pack = NormalizedPack::new("synthetic-relaxing-fiber", "fixture",
+        fs_blake3::ContentHash([12; 32]), "manufactured freely redistributable data",
+        claims, vec![], vec![]).unwrap();
+    NormalizedPack::from_bytes(&pack.to_bytes()).unwrap()
+}
+
+#[test]
+fn declared_fiber_spectrum_reaches_contact_memory_pressure_and_streamed_wav() {
+    scoped(|cx, gate| {
+        let make = |delta| input::Spec::parse(memory_text().as_bytes()).unwrap()
+            .compile(cx, gate, |name| Ok(if name == "fiber.fsmatpk" {
+                memory_pack(delta, false)
+            } else { pack(name, 7800.0, 200_000.0, None) })).unwrap();
+        let mut soft = make(0.6e9);
+        let mut stiff = make(3e9);
+        assert_eq!(soft.spec.bytes, stiff.spec.bytes);
+        let model = soft.performance.bank().source().fiber_ribbon().unwrap().model();
+        let memory = model.material_relaxation().unwrap();
+        assert_eq!(memory.memory_states(), 24);
+        assert_eq!(memory.source().properties()[0].branches.len(), 2);
+        assert_eq!(memory.source().branches()[0].relaxation_time_s, 0.0004);
+        assert_eq!(memory.source().branches()[1].relaxation_time_s, 0.006);
+        let expected = pressure(&mut soft, 37);
+        let changed = pressure(&mut stiff, 128);
+        assert!(expected.iter().any(|v| v.abs() > 1e-12));
+        assert!(expected.iter().zip(changed).any(|(a, b)| (a - b).abs() > 1e-12));
+        let last = soft.performance.bank().system().last_frame().unwrap();
+        assert!(last.energy_residual_j.abs() <= last.energy_tolerance_j);
+        let (encoded, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&expected, 48000, 0.01).unwrap();
+        let mut streamed = make(0.6e9);
+        let (output, summary) = streamed.write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        assert_eq!(output.into_inner(), encoded);
+        assert_eq!(summary.clipped_samples, clips as u64);
+    });
+}
+
+#[test]
+fn missing_fiber_spectrum_or_insufficient_history_budget_cannot_render() {
+    scoped(|cx, gate| {
+        for (text, omit_time) in [
+            (memory_text(), true),
+            (memory_text().replace("bow_fiber_memory 24", "bow_fiber_memory 23"), false),
+        ] {
+            let result = input::Spec::parse(text.as_bytes()).unwrap()
+                .compile(cx, gate, |name| Ok(if name == "fiber.fsmatpk" {
+                    memory_pack(0.6e9, omit_time)
+                } else { pack(name, 7800.0, 200_000.0, None) }));
+            assert!(result.is_err());
+        }
+    });
+    for (from, to) in [
+        ("bow_fiber_memory 24", "bow_fiber_memory 0"),
+        ("bow_fiber_memory 24", "bow_fiber_memory 257"),
+        ("fiber_delta_slow fiber_tau_slow", "fiber_delta_fast fiber_tau_fast"),
+        ("forces retain", "bow_fiber_strain 0.2 0.1 64 1000 1e-10 1e-8\nforces retain"),
+    ] {
+        assert!(input::Spec::parse(memory_text().replace(from, to).as_bytes()).is_err(), "{to}");
+    }
+}
+
 fn ready(cx: &Cx<'_>, gate: &CancelGate, density: f64) -> Ready {
     fiber_spec()
         .compile(cx, gate, |name| {

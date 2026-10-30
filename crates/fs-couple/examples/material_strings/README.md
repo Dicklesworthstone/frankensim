@@ -261,8 +261,34 @@ The optional record follows `bow_ribbon WIDTH_M CELLS`:
 bow_fibers PACK RADIUS_M LENGTH_M FIBER_COUNT TOTAL_TENSION_N CONTACT_FRACTION AXIAL_MODES NORMAL_MODES
 ```
 
+An independently characterized isotropic Young relaxation spectrum can be
+attached immediately after `bow_fibers`:
+
+```text
+bow_fiber_memory MAX_STATES EQUILIBRIUM_MODULUS_PROPERTY ARMS DELTA_E_PROPERTY TAU_PROPERTY ...
+```
+
+Every property is resolved from the **same fiber pack and state**. Moduli have
+units Pa and times have units s. The equilibrium modulus must equal the pack's
+`young_modulus`. The original section owner retains each modulus increment and
+relaxation time; the fiber owner projects that one law into axial extension and
+bending, and the original simultaneous contact solver advances its histories.
+Changing these source data changes traction, slip, string/body response and the
+emitted pressure. No spectrum is estimated from the requested sound.
+
+`MAX_STATES` bounds the complete ribbon history (cells × retained modes ×
+positive material arms), with a ceiling of 256; it does not cap or discard modes.
+The source must explicitly support the transient frequency range and the
+physical clock must resolve the selected relaxation times. Kelvin–Voigt
+viscosities remain explicitly sourced parallel mechanisms; they are not inferred
+from the relaxation spectrum. This linear-strain law cannot yet be combined
+with `bow_fiber_strain`, whose nonlinear strain history requires a different
+constitutive coupling. Missing or incompatible source data refuse before WAV
+creation. The measured horsehair pack cited below does not supply this spectrum;
+the executable tests use plainly identified manufactured material data.
+
 For an accelerating or reversing stroke, explicitly add this record after
-`bow_fibers` and optional `bow_fiber_strain`:
+`bow_fibers` and optional `bow_fiber_memory` or `bow_fiber_strain`:
 
 ```text
 bow_fiber_motion MAX_SPEED_M_S MAX_ACCELERATION_M_S2 MAX_STEP_M MAX_UPDATE_TERMS

@@ -868,9 +868,27 @@ impl Spec {
                 length_m: row.positive()?, fiber_count: row.count(1 << 24)?,
                 tension_n: row.positive()?, station_fraction: row.scalar()?,
                 axial_modes: row.count(MAX_MODES)?, transverse_modes: row.count(MAX_MODES)?,
-                strain: None, motion: None, support_program: None, normal_program: None,
+                memory: None, strain: None, motion: None, support_program: None, normal_program: None,
             };
             row.end()?;
+            if r.lines.clone().next()
+                .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_fiber_memory") {
+                let mut row = r.row("bow_fiber_memory")?;
+                let max_states = row.count(256)?;
+                let equilibrium_modulus = row.word()?.to_string();
+                let count = row.count(fs_material::section::relaxation::MAX_SECTION_RELAXATION_BRANCHES)?;
+                let mut branches = Vec::with_capacity(count);
+                for _ in 0..count {
+                    branches.push((row.word()?.to_string(), row.word()?.to_string()));
+                }
+                row.end()?;
+                input.memory = Some(fibers::Memory {
+                    properties: fs_material::section::relaxation::LayerRelaxationProperties {
+                        equilibrium_modulus, branches,
+                    },
+                    max_states,
+                });
+            }
             if r.lines.clone().next()
                 .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_fiber_strain") {
                 let mut row = r.row("bow_fiber_strain")?;
