@@ -127,6 +127,8 @@ impl ImpactSystem {
 // Continuous local analysis is isolated from the existing refresh transaction.
 // The original contact owner supplies every coefficient and physical callback.
 mod resonance {
+    mod stationary;
+
     use super::{ImpactError, ImpactSystem, LiveContactStorage, invalid};
     use fs_phs::harmonic::HarmonicError;
     use fs_phs::harmonic::equilibrium::{EquilibriumLinearization, EquilibriumPoint,
@@ -191,41 +193,18 @@ mod resonance {
             max_loss_tangent_actions:usize,mut cancelled:impl FnMut()->bool,
         )->Result<EquilibriumLinearization,ImpactError> {
             if cancelled() {return Err(ImpactError::Cancelled);}
-            if point.state.len()!=self.x.len() || point.input.len()!=self.modes
-                || point.state.iter().chain(point.input).any(|x|!x.is_finite())
-                || point.input.iter().any(|f|f.abs()>self.config.maximum_generalized_force) {
-                return Err(invalid("resonance point requires complete finite coordinates and admitted force"));
-            }
-            if !self.pads.is_empty() {
-                return Err(invalid("irreversible felt histories need a smooth explicit-state linearization"));
-            }
             if point.state.len()>budget.harmonic.max_dimension
-                || point.state.len()>budget.max_hessian_actions {
+                || point.state.len()>budget.max_hessian_actions
+                || point.state.len()>fs_phs::harmonic::MAX_HARMONIC_DIMENSION {
                 return Err(invalid("complete mechanical resonance state exceeds its declared capacity"));
             }
             let has_loss=self.has_nonlinear_dissipation();
             if has_loss && point.state.len()>max_loss_tangent_actions {
                 return Err(invalid("complete nonlinear-loss tangent exceeds its action capacity"));
             }
-            self.mechanical.validate_rigid_motion(point.state)?;
-            for (_,offset,film) in &self.membranes {film.observe_interleaved(point.state,*offset)?;}
-            for (_,offset,string) in &self.strings {string.observe_interleaved(point.state,*offset)?;}
-            for (_,offset,support) in &self.supports {support.observe_interleaved(point.state,*offset)?;}
-            self.validate_squeeze_configuration(point.state)?;
-            let energy=self.system.hamiltonian(point.state);
-            if !energy.is_finite() || energy<0. || energy>self.config.maximum_energy_j {
-                return Err(invalid("resonance point exceeds original physical energy admission"));
-            }
             let mut effort=vec![f64::NAN;point.state.len()];
-            self.system.storage().gradient(point.state,&mut effort);
+            self.admit_resonance_state(point.state,point.input,&mut effort)?;
             if cancelled() {return Err(ImpactError::Cancelled);}
-            if effort.iter().any(|x|!x.is_finite()) {
-                return Err(invalid("original resonance-point effort is not representable"));
-            }
-            self.validate_material_contacts(point.state,&effort)?;
-            if !self.contact.has_two_sided_contact_tangent(point.state,&effort) {
-                return Err(invalid("contact point lacks a two-sided local storage/loss derivative"));
-            }
             let hessian=|x:&[f64],d:&[f64],out:&mut[f64]|self.hessian_vector(x,d,out);
             let result=if has_loss {
                 let flow=|x:&[f64],e:&[f64],out:&mut[f64]|self.dissipative_flow_into(x,e,out);
