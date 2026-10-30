@@ -1838,6 +1838,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &self.spec.gas
     }
 
+    /// Authored temperature limits of this run, also used by finite sources.
+    #[must_use]
+    pub const fn temperature_window_k(&self) -> [f64; 2] {
+        self.spec.temperature_window_k
+    }
+
     /// Evaluate the retained gas law at an accepted cell's actual T/p.
     /// Named-mixture and NASA9 flow use these same original local laws; the
     /// legacy GasSpec path retains its separately documented transport table.

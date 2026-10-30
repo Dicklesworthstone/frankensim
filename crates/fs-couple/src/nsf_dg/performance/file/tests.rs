@@ -16,6 +16,7 @@ mod source_patch;
 mod reservoir;
 mod reservoirs;
 mod finite_reservoir;
+mod finite_mixtures;
 mod flue_geometry;
 mod geometry;
 mod aperture;

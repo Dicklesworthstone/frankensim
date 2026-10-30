@@ -521,12 +521,17 @@ pub(super) fn resolved_provenance(
             format!("{boundary},\"driven_reservoir_aperture\":0"),
         _ => boundary.to_string(),
     };
-    let finite_reservoir = system.finite_reservoir().map_or_else(String::new, |parcel| {
-        let aperture = system.finite_reservoir_aperture().expect("bound finite source");
+    let finite_reservoir = system.finite_reservoir_inventory().map_or_else(String::new, |parcel| {
+        let aperture = parcel.aperture;
         let limits = system.finite_reservoir_limits().expect("bound finite source limits");
-        let gas = super::duct_metadata::gas_state(parcel.state().state());
-        format!(",\"finite_reservoir\":{{\"aperture\":{aperture},\"volume_m3\":{:e},\"mass_kg\":{:e},\"gas\":{gas},\"maximum_relative_mass_exchange\":{:e},\"maximum_relative_energy_exchange\":{:e},\"mass_absolute_tolerance_kg\":{:e},\"energy_absolute_tolerance_j\":{:e},\"relative_tolerance\":{:e},\"scope\":\"same original frozen thermochemical model; rigid well-mixed chamber thermalizes incoming kinetic energy; original substep exchange variations bound hidden withdrawal and energy excursions; complete FV energy includes work already; no stored source momentum, mechanical breathing effort, pump, or mean transport into acoustic ducts\"}}",
-            parcel.volume_m3(), parcel.mass_kg(), limits.maximum_relative_mass_exchange,
+        let gas = super::duct_metadata::gas_state(&parcel.gas);
+        let source_kind = match parcel.source_kind {
+            fs_couple::nsf_dg::NsfFiniteReservoirSource::Thermochemical => "thermochemical",
+            fs_couple::nsf_dg::NsfFiniteReservoirSource::NamedMixture => "named-mixture",
+        };
+        format!(",\"finite_reservoir\":{{\"aperture\":{aperture},\"source_kind\":\"{source_kind}\",\"volume_m3\":{:e},\"mass_kg\":{:e},\"gas\":{gas},\"sensible_energy_j\":{:e},\"energy_reference_j_kg\":{:e},\"maximum_relative_mass_exchange\":{:e},\"maximum_relative_energy_exchange\":{:e},\"mass_absolute_tolerance_kg\":{:e},\"energy_absolute_tolerance_j\":{:e},\"relative_tolerance\":{:e},\"scope\":\"same original frozen named-mixture or thermochemical law; rigid well-mixed chamber thermalizes incoming kinetic energy; original substep exchange variations bound hidden withdrawal and energy excursions; complete FV energy includes work already; no stored source momentum, mechanical breathing effort, pump, or mean transport into acoustic ducts\"}}",
+            parcel.volume_m3, parcel.mass_kg, parcel.sensible_energy_j,
+            parcel.energy_reference_j_kg, limits.maximum_relative_mass_exchange,
             limits.maximum_relative_energy_exchange, limits.mass_absolute_tolerance_kg,
             limits.energy_absolute_tolerance_j, limits.relative_tolerance)
     });

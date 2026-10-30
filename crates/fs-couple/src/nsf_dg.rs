@@ -33,7 +33,8 @@ pub use upstream::NsfDgUpstreamFrame;
 mod reservoir;
 pub use reservoir::{NsfDgReservoirFrame, NsfDgReservoirRadiation};
 mod finite_reservoir;
-pub use finite_reservoir::{NsfFiniteReservoirFrame, NsfFiniteReservoirLimits};
+pub use finite_reservoir::{NsfFiniteReservoirFrame, NsfFiniteReservoirInventory,
+    NsfFiniteReservoirLimits, NsfFiniteReservoirSource};
 
 /// Physical drive location and units remain explicit in the coupled source.
 #[derive(Clone, Copy, Debug, PartialEq)]

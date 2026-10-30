@@ -1,4 +1,4 @@
-//! Finite rigid thermochemical storage at one original NSF reservoir opening.
+//! Finite rigid gas storage at one original NSF reservoir opening.
 //!
 //! The accepted chamber pressure and temperature are held through one complete
 //! fluid/acoustic interval. Its actual streamed mass and conservative total
@@ -7,11 +7,12 @@
 //! mean transport into the acoustic bore, or separate acoustic work is added.
 
 use super::*;
-use fs_lbm::nsf3::{NsfGasMedium, NsfReservoirExchange};
+use fs_lbm::nsf3::NsfReservoirExchange;
 use fs_material::thermochemical_gas::energy::{
-    GasEnergyError, GasEnergySolve, parcel::ClosedGasParcel,
+    GasEnergyError, parcel::ClosedGasParcel,
 };
-use fs_qty::Temperature;
+mod inventory;
+use inventory::Inventory;
 
 /// Explicit inventory-movement and conservation limits for the held-source step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,6 +57,29 @@ impl NsfFiniteReservoirLimits {
     }
 }
 
+/// Retained source family of a finite frozen-composition reservoir.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NsfFiniteReservoirSource {
+    /// Original NASA9 calorics, transport sources and ClosedGasParcel.
+    Thermochemical,
+    /// Original bounded named mixture with its declared constant heat capacity.
+    NamedMixture,
+}
+
+/// Accepted finite storage shared by named-mixture and thermochemical sources.
+/// This numerical view does not replace the retained material/composition owner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NsfFiniteReservoirInventory {
+    pub aperture: usize,
+    pub volume_m3: f64,
+    pub mass_kg: f64,
+    pub gas: GasState,
+    /// Same sensible chart as the original NSF total-energy flux [J].
+    pub sensible_energy_j: f64,
+    pub energy_reference_j_kg: f64,
+    pub source_kind: NsfFiniteReservoirSource,
+}
+
 /// Accepted chamber storage and the original source exchange that changed it.
 /// Positive source mass/energy leaves NSF and enters this rigid chamber.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,7 +97,7 @@ pub struct NsfFiniteReservoirFrame {
     /// Storage in the same fixed sensible chart as the NSF total energy.
     pub initial_sensible_energy_j: f64,
     pub final_sensible_energy_j: f64,
-    /// Original NASA internal-energy increment plus actual mass change times
+    /// Original source internal-energy increment plus actual mass change times
     /// original sensible specific energy; no absolute formation subtraction.
     pub sensible_energy_change_j: f64,
     pub energy_residual_j: f64,
@@ -81,19 +105,18 @@ pub struct NsfFiniteReservoirFrame {
     /// Includes pressure work, advection, conduction and viscous work already.
     /// Acoustic pressure work is a diagnostic subset, never a second debit.
     pub source_exchange: NsfReservoirExchange,
+    /// Zero for the named source's analytic constant-Cv reconstruction.
     pub caloric_iterations: usize,
 }
 
 pub(super) struct FiniteReservoir {
     pub(super) aperture: usize,
-    gas: ClosedGasParcel,
+    gas: Inventory,
     limits: NsfFiniteReservoirLimits,
-    energy_solve: GasEnergySolve,
-    energy_reference_j_kg: f64,
 }
 
 pub(super) struct Candidate {
-    gas: ClosedGasParcel,
+    gas: Inventory,
     frame: NsfFiniteReservoirFrame,
 }
 
@@ -109,8 +132,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
     /// Attach one finite rigid source to an existing quiescent transverse opening.
     ///
     /// Its initial density and temperature come from that opening. The SAME
-    /// thermochemical medium supplies pressure, composition, caloric reference
-    /// and all transport properties. No legacy constant-cv replacement is used.
+    /// named-mixture or thermochemical medium supplies pressure, composition,
+    /// caloric reference and all transport properties. Source laws stay intact.
     /// Only FiniteReservoir drives are admitted while this owner is attached.
     /// A distinct opening may retain passive radiation in either binding order.
     ///
@@ -141,28 +164,11 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 "a quiescent finite rigid reservoir cannot prescribe ghost momentum",
             ));
         }
-        let NsfGasMedium::Thermochemical(source) = self.zone.medium() else {
-            return Err(NsfDgError::Input(
-                "finite reservoir requires the original thermochemical NSF medium",
-            ));
-        };
-        let point = source.context().clone().with("temperature", opening.state.temperature_k)
-            .map_err(|_| NsfDgError::Input("finite reservoir temperature coordinate is invalid"))?;
-        // A zero original-law energy increment reconstructs pressure from the
-        // authored density and temperature without introducing another EOS.
-        let solved = source.model().reconstruct_density_internal_energy_increment(
-            &point, opening.state.density_kg_m3, 0.0, source.energy_solve(),
-            || gate.is_requested(),
-        ).map_err(material)?;
-        let point = point.with("temperature", solved.state().state().temperature)
-            .and_then(|p| p.with("pressure", solved.state().state().pressure))
-            .map_err(|_| NsfDgError::Input("finite reservoir source coordinates are invalid"))?;
-        let gas = ClosedGasParcel::new(source.model().clone(), point, volume_m3)
-            .map_err(material)?;
+        let gas = Inventory::new(self.zone.medium(), opening.state, volume_m3,
+            self.zone.temperature_window_k(), gate)?;
         let authored_mass = opening.state.density_kg_m3 * volume_m3;
         let mass_residual = gas.mass_kg() - authored_mass;
-        let sensible = gas.state().specific_internal_energy_j_kg()
-            - source.energy_reference_j_kg();
+        let sensible = gas.sensible_specific_energy_j_kg();
         let storage = gas.mass_kg() * sensible;
         if ![authored_mass, mass_residual, sensible, storage].into_iter().all(f64::is_finite)
             || authored_mass <= 0.0 || storage == 0.0
@@ -173,16 +179,29 @@ impl<L: Lattice3<27>> NsfDg<L> {
             ));
         }
         poll(gate)?;
-        self.finite_reservoir = Some(FiniteReservoir {
-            aperture, gas, limits, energy_solve: source.energy_solve(),
-            energy_reference_j_kg: source.energy_reference_j_kg(),
-        });
+        self.finite_reservoir = Some(FiniteReservoir { aperture, gas, limits });
         Ok(self)
     }
 
-    /// Accepted original material inventory; failed trials leave it unchanged.
+    /// Accepted original NASA9 parcel; None for a named-mixture inventory.
+    /// Use finite_reservoir_inventory for either source family. Failed trials
+    /// leave both forms of retained storage unchanged.
     pub fn finite_reservoir(&self) -> Option<&ClosedGasParcel> {
-        self.finite_reservoir.as_ref().map(|owner| &owner.gas)
+        self.finite_reservoir.as_ref().and_then(|owner| owner.gas.thermochemical())
+    }
+
+    /// Accepted finite storage and its source family, without losing named gas
+    /// inventories merely because they do not have a NASA9 parcel receipt.
+    pub fn finite_reservoir_inventory(&self) -> Option<NsfFiniteReservoirInventory> {
+        self.finite_reservoir.as_ref().map(|owner| NsfFiniteReservoirInventory {
+            aperture: owner.aperture,
+            volume_m3: owner.gas.volume_m3(),
+            mass_kg: owner.gas.mass_kg(),
+            gas: *owner.gas.state(),
+            sensible_energy_j: owner.gas.mass_kg() * owner.gas.sensible_specific_energy_j_kg(),
+            energy_reference_j_kg: owner.gas.energy_reference_j_kg(),
+            source_kind: owner.gas.source_kind(),
+        })
     }
 
     pub fn finite_reservoir_aperture(&self) -> Option<usize> {
@@ -214,7 +233,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
     ) -> Result<NsfOpenState, NsfDgError> {
         self.admit_finite_reservoir_drive(NsfDgDrive::FiniteReservoir { aperture })?;
         let gas = self.finite_reservoir.as_ref()
-            .expect("admitted finite reservoir").gas.state().state();
+            .expect("admitted finite reservoir").gas.state();
         self.zone.reservoir_aperture_state_for(aperture, gas.pressure, gas.temperature)
             .map_err(NsfDgError::Flow)
     }
@@ -244,7 +263,7 @@ fn admit_envelope(
     poll(gate)?;
     let old = &owner.gas;
     let mass = old.mass_kg();
-    let sensible = old.state().specific_internal_energy_j_kg() - owner.energy_reference_j_kg;
+    let sensible = old.sensible_specific_energy_j_kg();
     let energy = mass * sensible;
     let dm = exchange.mass_out_kg;
     let de = exchange.total_energy_out_j;
@@ -272,19 +291,14 @@ fn admit_envelope(
     let high_mass = (mass + mass_variation).next_up();
     let low_energy = (energy - energy_variation).next_down();
     let high_energy = (energy + energy_variation).next_up();
-    let temperature = old.state().state().temperature;
-    let lower_change = old.model().thermodynamics().specific_internal_energy_change(
-        Temperature::new(temperature),
-        Temperature::new(owner.energy_solve.minimum_temperature_k),
-    ).map_err(|_| NsfDgError::Input(
+    let temperature = old.state().temperature;
+    let window = old.temperature_window_k();
+    let lower_change = old.specific_energy_change(temperature, window[0],
         "original caloric source refused the finite reservoir lower energy envelope",
-    ))?.value();
-    let upper_change = old.model().thermodynamics().specific_internal_energy_change(
-        Temperature::new(temperature),
-        Temperature::new(owner.energy_solve.maximum_temperature_k),
-    ).map_err(|_| NsfDgError::Input(
+    )?;
+    let upper_change = old.specific_energy_change(temperature, window[1],
         "original caloric source refused the finite reservoir upper energy envelope",
-    ))?.value();
+    )?;
     let lower = sensible + lower_change;
     let upper = sensible + upper_change;
     if ![low_mass, high_mass, low_energy, high_energy, lower, upper]
@@ -301,6 +315,7 @@ fn admit_envelope(
             "finite reservoir substep envelope can leave its original caloric branch; refine the interval",
         ));
     }
+    old.admit_domain_envelope(low_mass, high_mass, low_energy, high_energy, gate)?;
     poll(gate)?;
     Ok((sensible, energy))
 }
@@ -314,12 +329,7 @@ pub(super) fn prepare<L: Lattice3<27>>(
 ) -> Result<Option<Candidate>, NsfDgError> {
     let Some(owner) = owner else { return Ok(None); };
     poll(gate)?;
-    let NsfGasMedium::Thermochemical(source) = fluid.grid().medium() else {
-        return Err(NsfDgError::Input("finite reservoir lost its original thermochemical medium"));
-    };
-    if owner.gas.model() != source.model()
-        || owner.energy_reference_j_kg.to_bits() != source.energy_reference_j_kg().to_bits()
-        || owner.energy_solve != source.energy_solve()
+    if !owner.gas.matches_source(fluid.grid().medium(), fluid.grid().temperature_window_k())
     {
         return Err(NsfDgError::Input("finite reservoir and NSF must retain identical source laws and energy reference"));
     }
@@ -351,25 +361,19 @@ pub(super) fn prepare<L: Lattice3<27>>(
         {
             return Err(NsfDgError::Input("finite reservoir thermal increment is unrepresentable"));
         }
-        let solved = old.model().reconstruct_density_internal_energy_increment(
-            old.point(), target_mass / old.volume_m3(), change, owner.energy_solve,
-            || gate.is_requested(),
-        ).map_err(material)?;
-        let point = old.point().clone().with("temperature", solved.state().state().temperature)
-            .and_then(|p| p.with("pressure", solved.state().state().pressure))
-            .map_err(|_| NsfDgError::Input("finite reservoir endpoint coordinates are invalid"))?;
-        let next = ClosedGasParcel::new(old.model().clone(), point, old.volume_m3())
-            .map_err(material)?;
-        (next, solved.iterations())
+        old.reconstruct_energy_change(target_mass, change, gate)?
     };
+    // Admit the next held ghost through the same NSF owner before publishing
+    // storage. Material support alone does not imply the grid's local
+    // viscosity, temperature-ratio or Mach admission at the new density.
+    fluid.grid().reservoir_aperture_state_for(
+        owner.aperture, gas.state().pressure, gas.state().temperature,
+    ).map_err(NsfDgError::Flow)?;
     let mass_change = gas.mass_kg() - old.mass_kg();
     let mass_residual = mass_change - dm;
-    let du = old.model().thermodynamics().specific_internal_energy_change(
-        Temperature::new(old.state().state().temperature),
-        Temperature::new(gas.state().state().temperature),
-    ).map_err(|_| NsfDgError::Input(
+    let du = old.specific_energy_change(old.state().temperature, gas.state().temperature,
         "original caloric source refused the finite reservoir storage audit",
-    ))?.value();
+    )?;
     let stored = gas.mass_kg() * du + mass_change * sensible;
     let final_energy = gas.mass_kg() * (sensible + du);
     let energy_residual = stored - de;
@@ -397,15 +401,15 @@ pub(super) fn prepare<L: Lattice3<27>>(
         final_mass_kg: gas.mass_kg(),
         mass_change_kg: mass_change,
         mass_residual_kg: mass_residual,
-        initial_pressure_pa: old.state().state().pressure,
-        final_pressure_pa: gas.state().state().pressure,
-        initial_temperature_k: old.state().state().temperature,
-        final_temperature_k: gas.state().state().temperature,
+        initial_pressure_pa: old.state().pressure,
+        final_pressure_pa: gas.state().pressure,
+        initial_temperature_k: old.state().temperature,
+        final_temperature_k: gas.state().temperature,
         initial_sensible_energy_j: energy,
         final_sensible_energy_j: final_energy,
         sensible_energy_change_j: stored,
         energy_residual_j: energy_residual,
-        energy_reference_j_kg: owner.energy_reference_j_kg,
+        energy_reference_j_kg: old.energy_reference_j_kg(),
         source_exchange: exchange,
         caloric_iterations: iterations,
     };

@@ -1110,15 +1110,21 @@ with a finite rigid chamber. Attach it with
 `NsfDg::with_finite_reservoir(aperture, volume_m3, limits, gate)`, then advance
 with `NsfDgDrive::FiniteReservoir { aperture }`. The initial inventory comes
 from that opening's original density and temperature and the **same frozen
-thermochemical source model** owned by the NSF grid. The legacy constant-caloric
-dry-air medium is not interchangeable with this original NASA9 law and refuses.
+named-mixture or thermochemical source law** owned by the NSF grid. Named gas
+uses its retained species/composition and original constant heat capacities;
+NASA9 keeps its original variable-capacity law and bounded caloric inverse.
+The legacy scalar `GasSpec` medium still refuses this source-owned inventory.
 
 The chamber's accepted pressure and temperature drive the original reservoir
 ghost during the next complete NSF/DG interval. Actual streamed mass and the
-original conservative FV total-energy exchange update its `ClosedGasParcel`.
-Both directions and nonzero energy with zero net mass use the same original
-caloric inverse; no discharge coefficient, authored jet speed, or replacement
-EOS enters this connection. Incoming kinetic energy thermalizes in the
+original conservative FV total-energy exchange update its retained inventory.
+Thermochemical inventory remains the original `ClosedGasParcel`. Named inventory
+retains `NamedMixtureNsfGas`, fixed volume and an actual source-resolved state;
+its sensible energy is exactly `m (cp - R) T`, with zero formation offset. Both
+exchange directions and nonzero energy with zero net mass use that same law.
+The named temperature increment is `(dE - dm * u_old) / (m_new * cv)`, followed
+by the original mixture's actual-temperature/pressure evaluation. No discharge
+coefficient, authored jet speed, fitted gas or replacement EOS enters this connection. Incoming kinetic energy thermalizes in the
 quiescent well-mixed chamber. Its rigid support carries the unmodeled momentum
 reaction; this owner provides mass and energy storage, not resolved chamber
 momentum or player anatomy.
@@ -1195,12 +1201,30 @@ caloric temperature bracket. A short withdrawal followed by reverse flow
 therefore cannot hide depletion or an unsupported temperature behind a small
 net exchange. Nonzero increments that cannot change the represented inventory
 refuse instead of silently disappearing. Zero net mass and energy preserve an
-exact parcel clone after the movement checks.
+exact inventory clone after the movement checks.
 
-Library callers inspect `finite_reservoir()`, `finite_reservoir_limits()`,
+For a named source, the outward-rounded mass/energy envelope also bounds
+all possible prefix temperatures and pressures. Its most conservative
+low-temperature/high-pressure corner is checked through the original mixture
+owner, preserving water-saturation and material-pressure refusals even when
+the final net exchange returns toward the initial state. Both envelope and
+accepted endpoint must remain within the receiving NSF grid's authored
+temperature window. The reconstructed endpoint also passes the original NSF
+reservoir-ghost admission, including its local viscosity and temperature-change
+limits, before it can become the next interval's source. These checks precede
+publication; a refused source cannot leave the fluid, either acoustic duct or
+its accepted inventory advanced.
+
+Library callers inspect `finite_reservoir_inventory()`, `finite_reservoir_limits()`,
 and `NsfDgFrame::finite_reservoir` for accepted mass, pressure, temperature,
-source exchange, sensible storage change and conservation residuals. Native
-metadata retains the chamber volume, source identity, limits and partition.
+source exchange, sensible storage change and conservation residuals. The common
+inventory snapshot also identifies its named-mixture or thermochemical source
+and retains the sensible energy and energy reference. The existing
+`finite_reservoir()` accessor remains the NASA9 `ClosedGasParcel` view and
+returns `None` for a named inventory; use the common snapshot or aperture getter
+when testing whether any finite source is attached. Native metadata reports both
+source kinds through the common snapshot, with the chamber volume, limits and
+partition.
 
 This is an **explicit first-order source partition**: pressure and temperature
 are held over each coupled physical interval, then updated. Refine that interval
