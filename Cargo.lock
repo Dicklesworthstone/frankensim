@@ -2065,6 +2065,7 @@ dependencies = [
  "fs-contact",
  "fs-exec",
  "fs-ga",
+ "fs-la",
  "fs-math",
  "fs-solver",
  "fs-time",

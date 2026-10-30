@@ -2034,3 +2034,133 @@ trajectory comparison on the changing-geometry tree gives `5.97471e-3,
 fixtures and focused original-source native checks, not a full Cargo/DSR gate,
 cross-platform qualification, runtime benchmark or experimental calibration.
 The broader `frankensim-ext-mbd-core-vqqt` remains open.
+
+### Finite spatial bushings on original material frames
+
+`articulated::motion::spatial_loads::bushing` adds anisotropic translational and
+finite-rotation Kelvin--Voigt elements between distinct original link frames.
+`evaluate_bushing_forces` exposes the original body-frame wrenches, storage,
+internal power and nonnegative damping loss. Translation strain is the B-origin
+offset expressed in A minus its declared rest offset. Rotational strain is the
+principal SO(3) logarithm of A-from-B, with the desired rest orientation encoded
+by the material frames. Nonnegative diagonal coefficients permit inactive axes
+without inventing a small stiffness. This does not infer cross-axis constitutive
+coupling, rigid six-axis joints, contact, plasticity, or moving rest commands.
+
+The native inverse SO(3) left Jacobian maps relative angular velocity to the
+actual rotation-vector rate; its transpose maps conjugate strain force to the
+physical couple. The translation law supplies the additional A-side `d cross F`
+couple required by the rotating anisotropic frame. Combined forces and moments
+are internal and cancel in world coordinates. Relative rates cancel common base
+translation and rotation algebraically before evaluating constitutive forces.
+No internal bushing rounding is reclassified as an external momentum source.
+
+`step_free_floating_bushings` reevaluates the same law at original explicit Lie
+midpoint stages. `step_free_floating_bushings_implicit` uses the existing native
+Newton--Krylov midpoint solve, original ABA and locked-inertia reconstruction;
+it does not introduce a second dynamics engine or a generalized mass matrix.
+Both compose with held joint efforts, world point loads, gravity and finite
+axial connections. Storage and loss fields include all active finite elements;
+actual kinetic/storage/work defects remain visible. Empty bushing lists retain
+the original integrator results exactly. Evaluation is O(links+elements), with
+the existing bounds of 16,384 combined loads and 4,096 links, and cancellation polls.
+
+Active rotational elements refuse the principal-log chart boundary at pi minus
+one microradian. Initial, midpoint and endpoint checks do not enclose the entire
+continuous path or authorize a traversal through that cut. Pure translational
+elements do not impose a spurious rotational chart restriction. Implicit linear
+stability does not establish phase accuracy, L-stability, nonlinear passivity or
+a uniquely selected nonlinear trajectory. Independent finite-difference energy
+gradients, spatial moment/virtual-work identities, large common rigid motion,
+analytic stiff translational/torsional recoil, combined-tree refinement and
+late-cancellation/retry fixtures exercise the actual public consumers.
+
+## Rigid bilateral distance-loop motion with native reactions
+
+`articulated::motion::spatial_loads::implicit::distance` advances freely moving
+articulated trees with declared positive rigid distances between original link
+material points. `step_free_floating_distance_loops` admits the same external
+loads and finite axial elements as the implicit lane;
+`step_free_floating_distance_loops_with_bushings` composes rigid loops and the
+finite spatial bushings in one simultaneous solve. Its empty-bushing path is
+exactly the plain operation. No mass is clamped, rigid distance is not represented
+by a large spring, and a finite bushing's storage or damping is not erased by a
+simultaneous rigid loop.
+
+The step uses a SHAKE/RATTLE-style position/hidden-constraint construction:
+initial central constraint impulses, the original implicit Lie midpoint, and
+final central tangent impulses. Initial impulse magnitudes and midpoint rates
+are solved together with the existing Newton--Krylov/numerical-Jacobian owners;
+there is no nested nonlinear trajectory integration. Cached native inverse-mass
+columns give the initial joint-rate response. Total momenta still use the native
+locked-inertia map; internal central constraint impulses have no physical net
+external force or couple. The converged initial magnitudes are then applied by
+`apply_free_floating_impulses`, and the nonlinear equations are independently
+rechecked using that actual summed response and actual spatial momenta. The
+endpoint velocity correction uses the original free-floating mobility, including
+all link inertias, COM offsets, levers, joints and base recoil. It also passes
+through the original impulse owner. Positions are never snapped or projected.
+
+Input positions **and** velocities must already satisfy the requested physical
+distance/tangency tolerances. Both are checked again on the final returned
+state. The endpoint tangent solve is a bounded dense Cholesky of the constraint
+mobility, not a dense generalized mass matrix. The mobility must be reciprocal,
+positive and independently reacting: diagonal response is compared with the
+same free endpoint bodies, and the unit-diagonal matrix must have resolved
+Cholesky pivots. The chosen dimensionless floor must be at least 4096 machine
+epsilons. Redundant, already imposed, insufficiently regular or singular loops
+refuse with the stage and constraint index; the implementation does not select
+arbitrary redundant reactions. These floating admissions are not certified
+rank/conditioning or a manifold-distance enclosure.
+
+At most 32 loops and 4096 links are admitted. Initial response preparation costs
+O(loops*links), with O(loops*joints) cached storage. Each nonlinear residual adds
+one original FK endpoint pass to the native midpoint work. Only the at-most
+32-by-32 constraint mobility is factored; endpoint response columns are not
+retained. Original bounded Newton work, scaled physical rates, stencil refusals
+and cancellation remain authoritative, including the final actual-impulse
+verification. Late nonlinear budget exhaustion, invalid final geometry, failed
+endpoint regularity or cancellation returns no advanced state.
+
+`DistanceLoopStep.state_after` is the final constrained state. Its `midpoint`
+field explicitly contains the intermediate smooth step before the final tangent
+impulse. Both full native impulse responses, signed per-loop impulses, actual
+position and velocity residuals, nonlinear history, consumed residual work and
+mobility pivots are retained. The initial and final impulse work use actual
+average pre/post event velocities, including the quadratic impulse term. Their
+sum remains visible as `constraint_impulse_work`; it is a finite-step constraint
+work defect, not friction heat or an omitted energy source. The complete
+`mechanical_work_residual` is actual kinetic-plus-finite-attachment storage change
+plus modeled damping loss minus external and actuator work. It closes against
+the smooth residual and both native impulse work/residuals. Actual world linear
+and orbital-plus-spin angular momentum defects are reported independently.
+
+The construction follows the distinction between primary and hidden constraints
+in McLachlan, Modin, Verdier and Wilkins, *Geometric Generalisations of SHAKE and
+RATTLE*, <https://arxiv.org/abs/1207.3367>. The underlying native Lie midpoint is
+not asserted symplectic, so this composition does not inherit that theorem or an
+energy-exactness claim. Intermediate drift states need not lie on the constraint
+manifold. There is no continuous-path or collision guarantee, automatic assembly,
+nonholonomic rolling, general gear/joint loop, redundancy resolution, nonlinear
+branch certificate, interval enclosure, physical calibration or adjoint.
+
+Eight new focused groups pass: an independently solved loaded rigid slider with
+both exact reaction impulses; a closed rotating triangle checked against an
+independently assembled full-inertia one-joint reduction; nonlinear circular
+loop material geometry and velocity reconstructed in world coordinates; two
+simultaneous shared-link loops and permutation; scene covariance; inconsistent,
+redundant and already imposed constraints; late cancellation, final-evaluation
+budget and deterministic retry; and rigid circular support combined with
+anisotropic finite bushing stiffness/damping. Triangle state errors refine as
+`3.09730e-6, 7.74030e-7, 1.93190e-7`, with mechanical work defects
+`2.72326e-8, 7.00372e-9, 1.73603e-9 J`. Forty nonlinear circular steps have maximum
+observed world gap `2.22e-16 m` and range rate `2.82e-16 m/s`; their nonzero net
+constraint work `6.40818e-6 J` is retained. The combined bushing case retains
+`0.0994186 J` damping loss separately from `1.14822e-4 J` mechanical defect.
+
+All 36 combined native cases pass: eight new loop groups, six new spatial-bushing
+groups, seven existing implicit-connection groups, seven existing spatial-load
+groups and eight original articulated-motion groups. These are focused
+original-source checks, not a full Cargo/DSR gate, cross-platform proof,
+performance qualification or general multibody lane completion. The broader
+`frankensim-ext-mbd-core-vqqt` remains open.

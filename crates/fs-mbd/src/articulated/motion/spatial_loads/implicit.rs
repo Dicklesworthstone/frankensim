@@ -15,6 +15,9 @@
 //! the original MOOSE implementation:
 //! <https://mooseframework.inl.gov/docs/doxygen/moose/classImplicitMidpoint.html>.
 
+/// Regular bilateral distance loops with position and velocity closure.
+pub mod distance;
+
 use super::super::{
     ArticulatedModel, EvaluatedStep, FreeFloatingBaseState, FreeFloatingMotionError,
     FreeFloatingMotionState, FreeFloatingMotionStep, MAX_FREE_FLOATING_STEP_LINKS,
@@ -22,7 +25,7 @@ use super::super::{
     free_floating_forward_dynamics, free_floating_momentum, poll, rotate,
     validate_external_wrenches, validate_forward_dynamics_header, validate_slice, validate_vec3,
 };
-use super::{SpatialMotionLoads, SpatialMotionStep, admit, evaluate, finish_spatial};
+use super::{SpatialMotionLoads, SpatialMotionStep, bushing, evaluate, finish_with_bushings};
 use crate::articulated::{ArticulatedError, JointKind};
 use fs_ga::GaError;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
@@ -159,6 +162,18 @@ pub fn step_free_floating_spatial_implicit(
     loads: SpatialMotionLoads<'_>,
     duration: f64,
     config: ImplicitSpatialConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
+    step_with_bushings(model, state, loads, &[], duration, config, cancelled)
+}
+
+pub(super) fn step_with_bushings(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[bushing::SpatialBushing],
+    duration: f64,
+    config: ImplicitSpatialConfig,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ImplicitSpatialStep, ImplicitSpatialError> {
     poll(&mut cancelled)?;
@@ -184,10 +199,11 @@ pub fn step_free_floating_spatial_implicit(
         loads.held.external_body_wrench,
     )?;
     validate_external_wrenches(loads.held.external_body_wrench)?;
-    admit(model, loads, &mut cancelled)?;
+    bushing::admit(model, loads, bushings, &mut cancelled)?;
     let initial_map = MomentumMap::new(model, state, &mut cancelled)?;
     let initial = initial_map.coordinates(state.base)?;
-    let initial_load = evaluate(&initial_map, state.base, loads, &mut cancelled)?.load;
+    let initial_load =
+        bushing::evaluate(&initial_map, state.base, loads, bushings, &mut cancelled)?.load;
     let momentum_before = free_floating_momentum(
         model,
         state.base,
@@ -219,6 +235,7 @@ pub fn step_free_floating_spatial_implicit(
         model,
         state,
         loads,
+        bushings,
         duration,
         initial,
         mass: initial_map.mass(),
@@ -297,6 +314,54 @@ pub fn step_free_floating_spatial_implicit(
     )
     .scale(config.angular_velocity_scale);
     let mut cancel = cancelled.borrow_mut();
+    let spatial = finish_midpoint(
+        model,
+        state,
+        loads,
+        duration,
+        MidpointInitial {
+            map: initial_map,
+            coordinates: initial,
+            load: initial_load,
+            momentum: momentum_before,
+        },
+        midpoint,
+        bushings,
+        &mut *cancel,
+    )?;
+    Ok(ImplicitSpatialStep {
+        spatial,
+        nonlinear: report,
+        residual_evaluations: evaluations.get(),
+        scaled_residual_norm: residual_norm,
+        joint_velocity_residual,
+        angular_velocity_residual,
+    })
+}
+
+struct MidpointInitial {
+    map: MomentumMap,
+    coordinates: MomentumCoordinates,
+    load: StageLoad,
+    momentum: crate::articulated::ArticulatedMomentum,
+}
+
+fn finish_midpoint(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    duration: f64,
+    initial: MidpointInitial,
+    midpoint: MidpointEvaluation,
+    bushings: &[bushing::SpatialBushing],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SpatialMotionStep, ImplicitSpatialError> {
+    let MidpointInitial {
+        map: initial_map,
+        coordinates: initial,
+        load: initial_load,
+        momentum: momentum_before,
+    } = initial;
     let load = midpoint.load;
     let linear_impulse = load.force_world.scale(duration);
     let angular_impulse = (load.torque_com_world
@@ -329,9 +394,9 @@ pub fn step_free_floating_spatial_implicit(
         midpoint.trial_angular,
         duration,
     )?;
-    let final_map = MomentumMap::new(model, &state_after, &mut *cancel)?;
+    let final_map = MomentumMap::new(model, &state_after, cancelled)?;
     state_after.base = final_map.reconstruct(final_rotation, final_coordinates)?;
-    poll(&mut *cancel)?;
+    poll(cancelled)?;
     let momentum_after = free_floating_momentum(
         model,
         state_after.base,
@@ -370,7 +435,7 @@ pub fn step_free_floating_spatial_implicit(
         ],
         "implicit_spatial.work",
     )?;
-    let spatial = finish_spatial(
+    let spatial = finish_with_bushings(
         model,
         EvaluatedStep {
             stored_energy_before: initial_load.stored_energy,
@@ -390,22 +455,17 @@ pub fn step_free_floating_spatial_implicit(
             },
         },
         loads,
-        &mut *cancel,
+        bushings,
+        cancelled,
     )?;
-    Ok(ImplicitSpatialStep {
-        spatial,
-        nonlinear: report,
-        residual_evaluations: evaluations.get(),
-        scaled_residual_norm: residual_norm,
-        joint_velocity_residual,
-        angular_velocity_residual,
-    })
+    Ok(spatial)
 }
 
 struct MidpointEquations<'a> {
     model: &'a ArticulatedModel,
     state: &'a FreeFloatingMotionState,
     loads: SpatialMotionLoads<'a>,
+    bushings: &'a [bushing::SpatialBushing],
     duration: f64,
     initial: MomentumCoordinates,
     mass: f64,
@@ -472,7 +532,7 @@ impl MidpointEquations<'_> {
             angular_com_world: self.initial.angular_com_world + torque_com_world.scale(half),
         };
         state.base = map.reconstruct(rotation, coordinates)?;
-        let stage = evaluate(&map, state.base, self.loads, cancelled)?;
+        let stage = bushing::evaluate(&map, state.base, self.loads, self.bushings, cancelled)?;
         poll(cancelled)?;
         let dynamics = free_floating_forward_dynamics(
             self.model,

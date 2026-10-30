@@ -9,6 +9,9 @@
 /// Simultaneously implicit finite attachments with native momentum reconstruction.
 pub mod implicit;
 
+/// Anisotropic finite-rotation bushings on original material attachment frames.
+pub mod bushing;
+
 use super::{
     ArticulatedModel, Cow, EvaluatedStage, FreeFloatingBaseState, FreeFloatingMotionError,
     FreeFloatingMotionLoads, FreeFloatingMotionState, FreeFloatingMotionStep, MomentumMap, Vec3,
@@ -70,12 +73,15 @@ pub struct SpatialMotionStep {
     /// Original native state and impulse/work accounting. External work and
     /// impulse exclude the internal connections; their work has its own field.
     pub motion: FreeFloatingMotionStep,
-    /// Sum of k (length-rest_length)^2 / 2 at the actual supplied state, in J.
+    /// Finite-connection storage at the supplied state, in J. The axial lane
+    /// sums k (length-rest_length)^2 / 2; the bushing lane also includes its
+    /// translational and finite-rotation quadratic storage.
     pub stored_energy_before: f64,
     /// The same storage at the actual returned state, in J.
     pub stored_energy_after: f64,
-    /// Nonnegative midpoint quadrature of c length_rate^2, in J. This is not an
-    /// exact continuous loss integral or an assigned thermal destination.
+    /// Nonnegative midpoint damping-loss quadrature, in J: c length_rate^2
+    /// for axial links, plus the bushing strain-rate quadratic forms when used.
+    /// This is not an exact continuous integral or an assigned thermal destination.
     pub dissipated_energy: f64,
     /// Connection work + actual stored-energy change + quadrature loss, in J.
     /// This finite-step storage/work defect is not physical dissipation.
@@ -123,8 +129,18 @@ fn finish_spatial(
     loads: SpatialMotionLoads<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
+    finish_with_bushings(model, evaluated, loads, &[], cancelled)
+}
+
+fn finish_with_bushings(
+    model: &ArticulatedModel,
+    evaluated: super::EvaluatedStep,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[bushing::SpatialBushing],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
     let mut stored_energy_after = 0.0;
-    if !loads.connections.is_empty() {
+    if !loads.connections.is_empty() || !bushings.is_empty() {
         let final_map = MomentumMap::new(model, &evaluated.step.state_after, cancelled)?;
         for (i, connection) in loads.connections.iter().enumerate() {
             if i % 64 == 0 {
@@ -133,6 +149,7 @@ fn finish_spatial(
             let (_, length) = separation(&final_map, *connection)?;
             stored_energy_after += storage(*connection, length);
         }
+        stored_energy_after += bushing::stored_energy(&final_map, bushings, cancelled)?;
     }
     let connection_work_residual = evaluated.step.internal_body_work + stored_energy_after
         - evaluated.stored_energy_before
