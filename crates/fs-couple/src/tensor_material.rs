@@ -31,6 +31,9 @@ use inertia::Inertia;
 mod heat;
 pub use heat::MaterialHeatStep;
 
+mod rebind;
+pub use rebind::MaterialChangeBudget;
+
 mod plane_stress;
 pub use plane_stress::{
     DescriptorPlaneStressBody, DescriptorPlaneStressHistory, DescriptorPlaneStressPoint,
@@ -237,7 +240,7 @@ impl TensorMaterialBody {
         }
         self.admit_state(&state)?;poll(gate)?;
         let initial_energy=self.system.hamiltonian(&state);
-        Ok(TensorMaterialHistory {body:self,state,time:0.0,steps:0,work:0.0,heat:0.0,initial_energy})
+        Ok(TensorMaterialHistory {body:self,state,time:0.0,steps:0,work:0.0,parameter_work:0.0,heat:0.0,initial_energy})
     }
 }
 
@@ -261,8 +264,9 @@ fn full_3d_extent(n:usize,points:&[ProjectedTensorProny],budget:TensorMaterialBu
     Ok(states)
 }
 
-/// Accepted state borrows its immutable body; memory cannot be rebound to a
-/// different material. Cloning explicitly forks the complete accepted history.
+/// Accepted state borrows its immutable body. Source-controlled continuation
+/// can rebuild that body while preserving physical memory and accounting for
+/// external coefficient work. Cloning forks the complete accepted history.
 #[derive(Clone)]
 pub struct TensorMaterialHistory<'a> {
     body:&'a TensorMaterialBody,
@@ -270,6 +274,7 @@ pub struct TensorMaterialHistory<'a> {
     time:f64,
     steps:u64,
     work:f64,
+    parameter_work:f64,
     heat:f64,
     initial_energy:f64,
 }
@@ -291,12 +296,16 @@ impl TensorMaterialHistory<'_> {
     pub fn steps(&self)->u64 {self.steps}
     /// Current kinetic + equilibrium + recoverable branch energy [J].
     pub fn stored_energy_j(&self)->f64 {self.body.system.hamiltonian(&self.state)}
-    /// Integrated externally supplied work since initialization [J].
+    /// Integrated force-port work since initialization [J]. Source-coefficient
+    /// work is retained separately by `parameter_work_j`.
     pub fn supplied_work_j(&self)->f64 {self.work}
+    /// Signed external work from admitted source-coefficient changes at fixed
+    /// displacement and physical Maxwell spring strains. Never thermal heat.
+    pub fn parameter_work_j(&self)->f64 {self.parameter_work}
     /// Independently integrated material dashpot heat since initialization [J].
     pub fn dissipated_heat_j(&self)->f64 {self.heat}
     /// Complete history balance, not a correction applied to any channel [J].
-    pub fn balance_residual_j(&self)->f64 {self.stored_energy_j()-self.initial_energy+self.heat-self.work}
+    pub fn balance_residual_j(&self)->f64 {self.stored_energy_j()-self.initial_energy+self.heat-self.work-self.parameter_work}
 
     /// Advance the full coupled system under a constant force during dt.
     /// The existing exact-ZOH propagator owns state, work and heat integration.

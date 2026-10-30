@@ -5,6 +5,8 @@
 
 /// Physical element loss deposited on the original finite thermal timeline.
 pub mod thermal;
+/// Exact source queries and memory-preserving operator rebuilding.
+pub mod source;
 
 use super::*;
 use fs_solid::linear3::visco::{ProjectedViscoSolid, ViscoElementError};
@@ -13,12 +15,14 @@ use fs_solid::linear3::visco::{ProjectedViscoSolid, ViscoElementError};
 pub enum SolidError {
     Source(ViscoElementError),
     Dynamics(TensorMaterialError),
+    MaterialSource(fs_material::visco_tensor::source::TensorSourceError),
 }
 impl core::fmt::Display for SolidError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(e) => write!(f, "tensor solid source: {e}"),
             Self::Dynamics(e) => write!(f, "tensor solid dynamics: {e}"),
+            Self::MaterialSource(e) => write!(f, "tensor solid material source: {e}"),
         }
     }
 }
@@ -29,14 +33,19 @@ impl From<TensorMaterialError> for SolidError {
 impl From<ViscoElementError> for SolidError {
     fn from(e: ViscoElementError) -> Self { Self::Source(e) }
 }
+impl From<fs_material::visco_tensor::source::TensorSourceError> for SolidError {
+    fn from(e: fs_material::visco_tensor::source::TensorSourceError) -> Self { Self::MaterialSource(e) }
+}
 type SolidResult<T> = core::result::Result<T, SolidError>;
 
 /// One fixed source solid/basis and its existing full-memory dynamics owner.
-/// All original material factor rows survive; the dense capacity never
-/// silently removes a point, mode or branch. Temperature/composition are frozen.
+/// All original material factor rows survive; the dense capacity never removes
+/// a point, mode or branch. Coefficients are fixed during each native interval;
+/// source-bound continuation can rebuild them at accepted interval boundaries.
 pub struct TensorSolidBody<'s> {
     projection: ProjectedViscoSolid<'s>,
     body: TensorMaterialBody,
+    sources: Option<Vec<source::SolidMaterialSource>>,
 }
 impl<'s> TensorSolidBody<'s> {
     pub fn new(
@@ -49,7 +58,7 @@ impl<'s> TensorSolidBody<'s> {
             projection.coordinates(), projection.mass_matrix_kg().to_vec(),
             projection.material_points().to_vec(), budget, gate,
         )?;
-        Ok(Self { projection, body })
+        Ok(Self { projection, body, sources:None })
     }
     pub fn projection(&self) -> &ProjectedViscoSolid<'s> { &self.projection }
     pub fn body(&self) -> &TensorMaterialBody { &self.body }

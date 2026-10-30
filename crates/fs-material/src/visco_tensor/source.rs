@@ -109,6 +109,13 @@ impl ResolvedTensorMaterial {
             Admit::StrictlyPositive,
         )?);
         let state = resolve_material_state_point(card, point, &requirements, selection)?;
+        Self::from_state(state, properties)
+    }
+
+    fn from_state(
+        state: ResolvedMaterialStatePoint,
+        properties: TensorPronyProperties,
+    ) -> Result<Self> {
         let density = state.property("density").expect("resolved source density");
         if density.requirement().quantity() != QuantitySpec::dimensional(Density::DIMS)
             || !density.is_constant_at_fixed_temperature()
@@ -133,6 +140,17 @@ impl ResolvedTensorMaterial {
             law,
             density_kg_m3,
         })
+    }
+
+    /// Re-evaluate the SAME complete source selection at another physical
+    /// endpoint. This rebuilds tensors and relaxation times; it never transfers
+    /// constitutive history, changes specimen mass, or supplies thermal work.
+    /// Those operations belong to the consuming evolution owner.
+    pub fn at_query_point(&self, card: &MaterialCard, point: &QueryPoint) -> Result<Self> {
+        Self::from_state(
+            self.state.at_query_point(card, point)?,
+            self.properties.clone(),
+        )
     }
 
     /// Original same-card query, property selections and receipts.

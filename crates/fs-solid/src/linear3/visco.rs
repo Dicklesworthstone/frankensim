@@ -176,6 +176,8 @@ struct IntegrationPoint {
 struct Element {
     dofs: Vec<usize>,
     law: TensorProny,
+    density_kg_m3: f64,
+    material_state_identity: [u8; 32],
     points: Vec<IntegrationPoint>,
 }
 
@@ -488,6 +490,8 @@ impl ViscoElements {
                             .flat_map(|n| [3 * n, 3 * n + 1, 3 * n + 2])
                             .collect(),
                         law: field.at(e).law.clone(),
+                        density_kg_m3: field.at(e).density_kg_m3,
+                        material_state_identity: field.at(e).material_state_identity,
                         points: vec![IntegrationPoint {
                             b: (0..12).map(|j| core::array::from_fn(|i| b[i][j])).collect(),
                             volume_m3: g.volume,
@@ -525,6 +529,8 @@ impl ViscoElements {
                             .flat_map(|n| [3 * n, 3 * n + 1, 3 * n + 2])
                             .collect(),
                         law: field.at(e).law.clone(),
+                        density_kg_m3: field.at(e).density_kg_m3,
+                        material_state_identity: field.at(e).material_state_identity,
                         points: p,
                     });
                 }
@@ -541,6 +547,16 @@ impl ViscoElements {
     /// Canonical equilibrium elastic pencil, including consistent mass.
     pub fn equilibrium(&self) -> &TetElasticAssembly {
         &self.equilibrium
+    }
+
+    /// Original material, reference density and source identity for an element.
+    /// This is the material that assembled the retained reference mass matrix.
+    pub fn reference_material(&self, element: usize) -> Option<TetViscoMaterial> {
+        self.elements.get(element).map(|e| TetViscoMaterial {
+            law: e.law.clone(),
+            density_kg_m3: e.density_kg_m3,
+            material_state_identity: e.material_state_identity,
+        })
     }
 
     /// Count charged to the caller's state budget.

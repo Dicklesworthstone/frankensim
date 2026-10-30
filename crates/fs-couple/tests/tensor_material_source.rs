@@ -1,6 +1,9 @@
 //! G1/G3/G4: same source coefficients drive real inertia, motion and material heat.
 //! Manufactured constitutive cards; no measured-material validation is claimed.
 
+#[path = "tensor_material_source/continuation.rs"]
+mod tensor_continuation;
+
 use fs_couple::tensor_material::{
     InitialMemory, TensorMaterialBudget,
     membrane::{

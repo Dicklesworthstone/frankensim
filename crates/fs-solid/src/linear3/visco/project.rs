@@ -29,7 +29,9 @@ pub struct ProjectedViscoSolid<'a> {
     points: Vec<ProjectedTensorProny>,
     point_elements: Vec<usize>,
 }
-impl ProjectedViscoSolid<'_> {
+impl<'s> ProjectedViscoSolid<'s> {
+    /// Original mesh and reference assembly. After a material rebuild, current
+    /// constitutive operators are `material_points()`, not this old stiffness.
     pub fn source(&self) -> &ViscoElements { self.source }
     pub fn coordinates(&self) -> usize { self.basis.len() }
     /// Original columns in the source assembly's canonical free-DOF order.
@@ -41,6 +43,47 @@ impl ProjectedViscoSolid<'_> {
     /// Element index for each retained quadrature point.
     pub fn point_elements(&self) -> &[usize] { &self.point_elements }
     pub fn element_count(&self) -> usize { self.source.elements.len() }
+
+    /// Rebuild material operators on the SAME reference geometry, support map,
+    /// complete basis, positive quadrature and consistent mass. No basis change
+    /// or internal-variable transfer is inferred. The coupling owner must bind
+    /// the replacement laws to their original source and transfer live history.
+    pub fn with_element_laws(
+        &self, laws: &[TensorProny], budget: SolidProjectionBudget, gate: &CancelGate,
+    ) -> Result<ProjectedViscoSolid<'s>, ViscoElementError> {
+        poll_map(gate)?;
+        let n = self.coordinates();
+        if laws.len() != self.element_count() || n > budget.max_coordinates
+            || !(1..=256).contains(&budget.max_coordinates)
+            || self.points.len() > budget.max_material_points
+            || checked_mul(n, self.source.equilibrium.free_dofs.len())? > budget.max_basis_scalars {
+            return Err(invalid("material rebuild requires complete element laws and original projection capacity"));
+        }
+        let mut work = 0;
+        for &element in &self.point_elements {
+            work = checked_add(work, material_work(n, &laws[element])?)?;
+        }
+        if work > budget.max_scalar_terms {
+            return Err(invalid("material rebuild exceeds projection work capacity"));
+        }
+        let mut points = Vec::with_capacity(self.points.len());
+        for (old, &element) in self.points.iter().zip(&self.point_elements) {
+            poll_map(gate)?;
+            points.push(laws[element].project_strain(
+                old.strain_columns(), old.volume_m3(),
+                TensorProjectionBudget {
+                    max_coordinates: budget.max_coordinates,
+                    max_scalar_terms: material_work(n, &laws[element])?,
+                },
+                || gate.is_requested(),
+            ).map_err(ViscoElementError::Projection)?);
+        }
+        poll_map(gate)?;
+        Ok(ProjectedViscoSolid {
+            source: self.source, basis: self.basis.clone(), mass_kg: self.mass_kg.clone(),
+            points, point_elements: self.point_elements.clone(),
+        })
+    }
 
     /// Apply the SAME basis transpose to a full node-major force field.
     /// Fixed rows do no virtual work. The returned generalized force is

@@ -3,6 +3,8 @@
 //! fixed-kinematics quadrature, NOT plane-stress elimination or a loss fit.
 use super::*;
 
+mod transfer;
+
 /// Cold projection limits; all columns and all six rows of every branch survive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TensorProjectionBudget {
