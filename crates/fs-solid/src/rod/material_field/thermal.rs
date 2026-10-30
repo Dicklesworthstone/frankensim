@@ -19,7 +19,7 @@ use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
 /// Temperature-only refresh of all section properties from pinned material cards.
 pub mod source;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ThermalField {
     sections: Vec<ConcentricThermoelasticSection>,
     limit: f64,

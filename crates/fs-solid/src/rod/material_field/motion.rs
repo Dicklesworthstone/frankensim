@@ -19,6 +19,9 @@ use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
 pub mod environment;
 pub use environment::RodBodyLoads;
 
+/// Temperature-only source updates retaining the original dynamic inventory.
+pub mod thermal;
+
 pub mod spatial {
 //! Reference centroid and full rotary tensor for eccentric rod attachments.
 //!

@@ -354,6 +354,10 @@ use inertia::KineticFrame;
 pub mod environment;
 pub use environment::RodFluidRefresh;
 
+/// Prescribed section temperatures on the original continuing trajectory.
+pub mod thermal;
+pub use thermal::RodThermalRefresh;
+
 /// A force AT the material node and a pure couple held in the WORLD frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RodNodalWrench {

@@ -19,6 +19,9 @@ use fs_solid::rod::material_field::tension::{MaterialTensionLink,TensionLinkAtta
 #[path = "rod_motion/environment.rs"]
 mod environment;
 
+#[path = "rod_motion/thermal.rs"]
+mod thermal;
+
 fn section(scale:f64)->ConcentricShearSection {
     let mut claims=ClaimSet::new();let mut requirements=Vec::new();
     for (name,value,dims) in [("density",1000.0,Density::DIMS),
