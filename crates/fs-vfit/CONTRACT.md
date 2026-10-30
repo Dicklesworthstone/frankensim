@@ -261,6 +261,17 @@ radiation fit or a runtime/accuracy claim for a particular instrument.
 - It refuses unstable models, and models whose `E` is not symmetric PSD or
   whose `R0` is indefinite.
 
+`repair_mimo_passivity_with_budget` runs the same residue repair with an explicit
+working-payload byte allowance. It reserves original model/certification scratch
+before preparation, checks retained gradients before each added constraint, and
+checks the active Gram, LU and blocked-update workspace before each solve. Byte
+arithmetic saturates before comparison; exhaustion returns `MemoryBudget` without
+publishing a partial model or dropping constraints. Caller-owned source samples,
+models and allocator bookkeeping remain separate. The existing unbounded entry
+points retain their behavior. G0 tests cover initial/constraint/active-workspace
+budget refusals, cap/cap-1, oversized arithmetic and exact agreement with the
+original repaired model and perturbation report when the allowance suffices.
+
 `repair_mimo_passivity` moves residues only.
 - Each `(frequency, eigenvector)` pair is an exact linear constraint on the
   Rayleigh quotient, anchored on the original model.

@@ -1131,13 +1131,23 @@ fn rayleigh_gradient(model: &MimoModel, delays: Option<&[f64]>, omega: f64, v: &
 
 /// Minimize `||delta||^2` subject to `rows[j] . delta >= rhs[j]` by an
 /// active set of KKT equality solves (the SISO repair's QP shape).
-fn qp_min_norm(rows: &[Vec<f64>], rhs: &[f64], nv: usize) -> Vec<f64> {
+fn qp_min_norm(
+    rows: &[Vec<f64>],
+    rhs: &[f64],
+    nv: usize,
+    budget: RepairBudget,
+) -> Result<Vec<f64>, PassivityError> {
+    budget.check(nv, rows.len(), rhs.iter().filter(|&&r| r > 0.0).count())?;
     let mut active: Vec<usize> = (0..rows.len()).filter(|&j| rhs[j] > 0.0).collect();
     let mut delta = vec![0.0; nv];
     for _ in 0..(4 * rows.len() + 8) {
         delta = vec![0.0; nv];
         if !active.is_empty() {
             let na = active.len();
+            // The active set can grow after a violated constraint is added.
+            // Account for Gram, LU and its blocked trailing-update scratch
+            // before allocation, with retained constraint rows still live.
+            budget.check(nv, rows.len(), na)?;
             let mut gram = vec![0.0; na * na];
             for (i, &ri) in active.iter().enumerate() {
                 for (j, &rj) in active.iter().enumerate() {
@@ -1176,7 +1186,87 @@ fn qp_min_norm(rows: &[Vec<f64>], rhs: &[f64], nv: usize) -> Vec<f64> {
             None => break,
         }
     }
-    delta
+    Ok(delta)
+}
+
+#[derive(Clone, Copy)]
+struct RepairBudget {
+    fixed_bytes: u128,
+    allowed: Option<usize>,
+}
+
+impl RepairBudget {
+    fn new(model: &MimoModel, allowed: Option<usize>) -> Self {
+        let n = model.ports as u128;
+        let order = model.order() as u128;
+        let states = n.saturating_mul(order);
+        let entries = if model.reciprocal {
+            n.saturating_mul(n + 1) / 2
+        } else {
+            n.saturating_mul(n)
+        };
+        let coordinates = order.saturating_mul(entries);
+        // Fixed upper allowance for original/current model payloads, coordinate
+        // vectors, Hermitian/Hamiltonian matrices and their eigensolver copies,
+        // all bounded certification frequency lists, and allocator growth of
+        // these Vec payloads. Caller-retained input models are not included.
+        let fixed = 64_u128
+            .saturating_mul(states.saturating_mul(states))
+            .saturating_add(
+                64_u128
+                    .saturating_mul(n.saturating_mul(n))
+                    .saturating_mul(order + 1),
+            )
+            .saturating_add(32_u128.saturating_mul(coordinates))
+            .saturating_add(
+                32_u128.saturating_mul(
+                    2000_u128
+                        .saturating_add(32 * order)
+                        .saturating_add(states.saturating_mul(4)),
+                ),
+            )
+            .saturating_add(4096);
+        // The original blocked LU also calls GEMM, whose fixed MC/KC/NC
+        // packing buffers occupy 1.25 MiB independently of active-set size.
+        Self {
+            fixed_bytes: fixed.saturating_mul(8).saturating_add(2 * 1024 * 1024),
+            allowed,
+        }
+    }
+
+    fn required(self, nv: usize, rows: usize, active: usize) -> u128 {
+        let (nv, rows, active) = (nv as u128, rows as u128, active as u128);
+        // Gradient Vec capacities may be twice their lengths. Header/value
+        // growth, rhs, active indices, multipliers and LU permutations retain
+        // separate allowance. Gram, LU and its blocked update require at most
+        // three active^2 buffers; four retain a conservative upper allowance.
+        let scalars = 2_u128
+            .saturating_mul(rows)
+            .saturating_mul(nv)
+            .saturating_add(4_u128.saturating_mul(active).saturating_mul(active))
+            .saturating_add(12_u128.saturating_mul(rows))
+            .saturating_add(4_u128.saturating_mul(nv));
+        self.fixed_bytes
+            .saturating_add(8_u128.saturating_mul(scalars))
+            .saturating_add(
+                4_u128
+                    .saturating_mul(rows)
+                    .saturating_mul(core::mem::size_of::<Vec<f64>>() as u128),
+            )
+    }
+
+    fn check(self, nv: usize, rows: usize, active: usize) -> Result<(), PassivityError> {
+        if let Some(allowed) = self.allowed {
+            let required = self.required(nv, rows, active);
+            if required > allowed as u128 {
+                return Err(PassivityError::MemoryBudget {
+                    required_bytes: usize::try_from(required).unwrap_or(usize::MAX),
+                    allowed_bytes: allowed,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Residue-perturbation passivity repair with poles, `D` and `E` fixed.
@@ -1188,7 +1278,27 @@ pub fn repair_mimo_passivity(
     model: &MimoModel,
     band: (f64, f64),
 ) -> Result<(MimoModel, MimoRepairReport), PassivityError> {
-    repair_with(model, None, band)
+    repair_with(model, None, band, None)
+}
+
+/// The original residue repair with an explicit working-payload byte budget.
+///
+/// The conservative allowance covers model/certification scratch, accumulated
+/// gradient rows and the active Gram/LU pair. It is checked before initial
+/// preparation, before retaining each new constraint, and before each active
+/// solve. Caller-owned source samples/models and allocator bookkeeping are
+/// separate. Exhaustion returns [`PassivityError::MemoryBudget`] with no
+/// partially repaired model; constraints are never dropped to meet a budget.
+///
+/// # Errors
+/// The original repair errors, or [`PassivityError::MemoryBudget`] before an
+/// allocation would exceed the declared working-payload allowance.
+pub fn repair_mimo_passivity_with_budget(
+    model: &MimoModel,
+    band: (f64, f64),
+    max_working_bytes: usize,
+) -> Result<(MimoModel, MimoRepairReport), PassivityError> {
+    repair_with(model, None, band, Some(max_working_bytes))
 }
 
 /// [`repair_mimo_passivity`] for a delayed model: the same residue QP with
@@ -1201,7 +1311,7 @@ pub fn repair_delayed_mimo_passivity(
     delayed: &DelayedMimoModel,
     band: (f64, f64),
 ) -> Result<(DelayedMimoModel, MimoRepairReport), PassivityError> {
-    let (model, report) = repair_with(&delayed.model, Some(&delayed.delays), band)?;
+    let (model, report) = repair_with(&delayed.model, Some(&delayed.delays), band, None)?;
     Ok((
         DelayedMimoModel {
             delays: delayed.delays.clone(),
@@ -1215,8 +1325,11 @@ fn repair_with(
     model: &MimoModel,
     delays: Option<&[f64]>,
     band: (f64, f64),
+    max_working_bytes: Option<usize>,
 ) -> Result<(MimoModel, MimoRepairReport), PassivityError> {
     const MAX_ROUNDS: usize = 12;
+    let budget = RepairBudget::new(model, max_working_bytes);
+    budget.check(0, 0, 0)?;
     let restore = |m: &MimoModel| DelayedMimoModel {
         delays: delays.map_or_else(|| vec![0.0; m.ports * m.ports], <[f64]>::to_vec),
         model: m.clone(),
@@ -1272,6 +1385,7 @@ fn repair_with(
             let (vals, vecs) = hermitian_part(&eval(&current, w), model.ports);
             for (lam, v) in vals.iter().zip(&vecs) {
                 if *lam < margin {
+                    budget.check(base.len(), rows.len().saturating_add(1), 0)?;
                     let z0 = eval(model, w);
                     let n = model.ports;
                     let mut quotient = C64::ZERO;
@@ -1287,7 +1401,7 @@ fn repair_with(
             }
         }
         let rhs: Vec<f64> = values.iter().map(|&v| margin - v).collect();
-        let delta = qp_min_norm(&rows, &rhs, base.len());
+        let delta = qp_min_norm(&rows, &rhs, base.len(), budget)?;
         let x: Vec<f64> = base.iter().zip(&delta).map(|(a, d)| a + d).collect();
         current = with_coords(model, &x);
     }

@@ -74,6 +74,13 @@ pub enum PassivityError {
         /// Outer certification rounds attempted.
         rounds: usize,
     },
+    /// The bounded repair would exceed its declared working-payload allowance.
+    MemoryBudget {
+        /// Conservative required bytes, saturated at `usize::MAX` on overflow.
+        required_bytes: usize,
+        /// Caller-supplied working-payload allowance in bytes.
+        allowed_bytes: usize,
+    },
     /// Asymptotic terms negative (`d < 0` or `e < 0`) — the LS solve
     /// should have prevented this; refuse rather than repair silently.
     NegativeAsymptote,
@@ -87,6 +94,13 @@ impl core::fmt::Display for PassivityError {
             PassivityError::RepairFailed { rounds } => {
                 write!(f, "passivity repair failed after {rounds} rounds")
             }
+            PassivityError::MemoryBudget {
+                required_bytes,
+                allowed_bytes,
+            } => write!(
+                f,
+                "passivity repair needs {required_bytes} working bytes, allowance is {allowed_bytes}"
+            ),
             PassivityError::NegativeAsymptote => write!(f, "negative d or e asymptote"),
         }
     }

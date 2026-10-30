@@ -381,6 +381,78 @@ fn mimo_passivity_certifies_passive_and_repairs_a_planted_violation_g1() {
 }
 
 #[test]
+fn bounded_residue_repair_refuses_scratch_exhaustion_and_preserves_original_solution_g0() {
+    let mut active = passive_model(0.5);
+    for slot in [1, 3] {
+        active.residues[1][slot] = active.residues[1][slot] + C64::new(-40.0, 15.0);
+    }
+    let original = active.clone();
+    let fixed = RepairBudget::new(&active, None).required(0, 0, 0) as usize;
+    assert!(
+        matches!(repair_mimo_passivity_with_budget(&active, (100.0, 10_000.0), fixed - 1),
+        Err(PassivityError::MemoryBudget { required_bytes, allowed_bytes })
+            if required_bytes == fixed && allowed_bytes == fixed - 1)
+    );
+    // Enough for the original certification/model scratch, but no added
+    // constraint: refuse before retaining the first gradient, never truncate it.
+    assert!(
+        matches!(repair_mimo_passivity_with_budget(&active, (100.0, 10_000.0), fixed),
+        Err(PassivityError::MemoryBudget { required_bytes, allowed_bytes })
+            if required_bytes > fixed && allowed_bytes == fixed)
+    );
+    let (bounded, report) =
+        repair_mimo_passivity_with_budget(&active, (100.0, 10_000.0), 8 * 1024 * 1024).unwrap();
+    let (unbounded, old_report) = repair_mimo_passivity(&active, (100.0, 10_000.0)).unwrap();
+    assert_eq!(bounded, unbounded);
+    assert_eq!(report.rounds, old_report.rounds);
+    assert_eq!(
+        report.relative_perturbation.to_bits(),
+        old_report.relative_perturbation.to_bits()
+    );
+    assert_eq!(
+        report.max_relative_change.to_bits(),
+        old_report.max_relative_change.to_bits()
+    );
+    assert!(report.certificate.passive);
+    assert_eq!(active, original);
+
+    // The active solve has its own cap/cap-1 gate while all rows stay live.
+    let rows = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+    let rhs = [1.0, 1.0];
+    let base = RepairBudget {
+        fixed_bytes: 0,
+        allowed: None,
+    };
+    let needed = base.required(2, rows.len(), 2) as usize;
+    let admitted = RepairBudget {
+        allowed: Some(needed),
+        ..base
+    };
+    assert!(
+        qp_min_norm(&rows, &rhs, 2, admitted)
+            .unwrap()
+            .iter()
+            .all(|x| (x - 1.0).abs() < 2e-14)
+    );
+    assert!(
+        matches!(qp_min_norm(&rows, &rhs, 2, RepairBudget { allowed: Some(needed - 1), ..base }),
+        Err(PassivityError::MemoryBudget { required_bytes, allowed_bytes })
+            if required_bytes == needed && allowed_bytes == needed - 1)
+    );
+    assert!(matches!(
+        RepairBudget {
+            allowed: Some(usize::MAX),
+            ..base
+        }
+        .check(usize::MAX, usize::MAX, usize::MAX),
+        Err(PassivityError::MemoryBudget {
+            required_bytes: usize::MAX,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn mimo_refusals_g0() {
     let omega = band();
     let truth = passive_model(1.0);
