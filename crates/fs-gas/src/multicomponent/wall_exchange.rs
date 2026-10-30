@@ -154,6 +154,19 @@ pub enum WallExchangeError {
     Invalid(&'static str),
     /// Original caloric/source admission refused.
     Flow(FlowError),
+    /// Original source-bound molecular or material transport law refused.
+    Transport(super::dissipation::DissipationError),
+    /// Actual cell state is outside the declared developed-wall approximation.
+    TransportDomain {
+        /// Physical quantity whose applicability interval was exceeded.
+        quantity: &'static str,
+        /// Actual dimensionless Reynolds or Mach number.
+        value: f64,
+        /// Inclusive lower applicability bound.
+        minimum: f64,
+        /// Inclusive upper applicability bound.
+        maximum: f64,
+    },
     /// Original heat equation did not meet the requested iteration budget.
     TemperatureIterations,
     /// Actual published gas/wall storage or heat flux exceeded its budget.
@@ -177,6 +190,14 @@ impl From<FlowError> for WallExchangeError {
         match value {
             FlowError::Cancelled => Self::Cancelled,
             other => Self::Flow(other),
+        }
+    }
+}
+impl From<super::dissipation::DissipationError> for WallExchangeError {
+    fn from(value: super::dissipation::DissipationError) -> Self {
+        match value {
+            super::dissipation::DissipationError::Cancelled => Self::Cancelled,
+            other => Self::Transport(other),
         }
     }
 }

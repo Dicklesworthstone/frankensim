@@ -541,7 +541,7 @@ fn wall_face<L: TransportLaw>(
     Ok(rate)
 }
 
-pub(super) fn fractions(
+pub(crate) fn fractions(
     gas: &MixtureGas,
     densities: &[f64],
     out: &mut [f64],

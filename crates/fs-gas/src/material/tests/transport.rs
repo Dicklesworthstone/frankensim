@@ -12,6 +12,8 @@ use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 use std::cell::Cell;
 use std::rc::Rc;
 
+mod wall;
+
 fn card(name: &str, mu: f64, k: f64, maximum_temperature: f64) -> SpeciesTransportMaterial {
     let mut claims = ClaimSet::new();
     for (property, dims, value) in [

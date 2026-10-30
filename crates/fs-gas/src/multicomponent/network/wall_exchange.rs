@@ -9,6 +9,8 @@
 //! changes no species or flow clock and publishes all gas cells and walls
 //! together. Composing owners retain candidate wall temperatures through both
 //! halves and discard them when the complete wave/reaction step is retried.
+//! An optional original-source transport binding refreshes developed circular
+//! branch drag and conductance from each cell's current mixture at every half.
 
 use super::MixtureNetwork1d;
 use crate::multicomponent::wall_exchange::{
@@ -17,6 +19,10 @@ use crate::multicomponent::wall_exchange::{
 };
 use crate::multicomponent::{Cell, Mesh1d, MixtureGas, allocated, sum};
 use fs_qty::Time;
+
+mod transport;
+pub use transport::CircularLaminarWall;
+use transport::CircularWallTransport;
 
 /// Source-only exchanges over a complete interval, or both composed wall halves.
 ///
@@ -65,6 +71,8 @@ struct BranchShape {
 /// physical wall between multiple cells requires an additional thermal owner.
 /// Drag coefficients are frozen during each source interval. Plenums have no
 /// bulk momentum and therefore admit only `WallDrag::None`.
+/// [`Self::with_circular_laminar_transport`] derives selected branch coefficients
+/// from current source-owned gas properties instead of retaining authored values.
 pub struct NetworkWallOperator {
     gas: MixtureGas,
     branches: Vec<BranchShape>,
@@ -79,6 +87,7 @@ pub struct NetworkWallOperator {
     last_report: Option<NetworkWallReport>,
     trial_report: Option<NetworkWallReport>,
     trial_active: bool,
+    transport: Option<CircularWallTransport>,
 }
 
 impl NetworkWallOperator {
@@ -169,6 +178,7 @@ impl NetworkWallOperator {
             last_report: None,
             trial_report: None,
             trial_active: false,
+            transport: None,
         };
         poll(&mut cancelled)?;
         Ok(result)
@@ -180,6 +190,8 @@ impl NetworkWallOperator {
     }
 
     /// Accepted wall states along one branch in its original mesh order.
+    /// Bound transport branches report the coefficients used in the last accepted
+    /// source half; each following half resolves them again from its actual gas.
     pub fn branch_contacts(&self, branch: usize) -> Option<&[WallContact]> {
         self.branches.get(branch).map(|shape| {
             &self.contacts[shape.start..shape.start + shape.mesh.cell_count()]
@@ -290,15 +302,32 @@ impl NetworkWallOperator {
                     momentum: values[n],
                     energy: values[n + 1],
                 };
+                let contact = match self.transport.as_mut() {
+                    Some(transport) => transport.resolve(
+                        &self.gas, branch_index, state, shape.mesh.volumes()[i],
+                        self.candidate_contacts[index], cancelled,
+                    )?,
+                    None => self.candidate_contacts[index],
+                };
                 let update = exchange_cell(
                     &self.gas,
                     state,
                     shape.mesh.volumes()[i],
                     duration,
-                    self.candidate_contacts[index],
+                    contact,
                     controls,
                     &mut *cancelled,
                 )?;
+                if let Some(transport) = self.transport.as_mut() {
+                    // A frozen-coefficient source step must also leave an
+                    // endpoint supported by the original material/domain.
+                    transport.resolve(
+                        &self.gas, branch_index,
+                        Cell { partial_densities: state.partial_densities,
+                            momentum: update.momentum, energy: update.energy },
+                        shape.mesh.volumes()[i], update.contact, cancelled,
+                    )?;
+                }
                 self.candidate_states[index] = [update.momentum, update.energy];
                 self.candidate_contacts[index] = update.contact;
                 balance.add(update.report)?;

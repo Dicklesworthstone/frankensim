@@ -1133,6 +1133,50 @@ physical-consumer pass is claimed for this extension.
 
 ## Wall sources composed with molecular and reacting networks
 
+### Current material state in developed pipe-wall losses
+
+`NetworkWallOperator::with_circular_laminar_transport` binds the existing
+`TransportLaw` (including source-card `MaterialTransport` and original kinetic
+transport) to selected circular branches. Full caloric/species-source identity
+must match the network. At every wall source half it obtains temperature,
+pressure, density and composition from the actual conservative cell, reuses the
+original molecular mole-fraction closure, and queries the same source-owned
+viscosity and conductivity. Thus new reaction products, changed inlet mixtures,
+pressure or thermal evolution change wall drag and cooling without a caller
+re-entering property scalars or a separate reacting-wall solver.
+
+The declared `CircularLaminarWall` supplies diameter, Nusselt number, supported
+Reynolds interval (within 0..2300), and maximum Mach (at most 0.3). Diameter and
+cell volumes must agree with the original constant-area circular mesh. Drag is
+`32 mu/(rho D²)`; complete cell conductance is `Nu k (4 V/D)/D`, where `4 V/D`
+is that cell's wetted area. The Nusselt number and fully developed applicability
+are explicit engineering inputs, not values inferred from a gas name. This
+closure does not establish entrance length, negligible axial conduction,
+high-frequency oscillatory boundary layers, turbulent flow or a measured pipe
+correlation. Source coefficients are evaluated at bulk gas temperature and
+frozen during each source half; that constitutive lag remains first order.
+
+Both source-step endpoints must satisfy the original property law and declared
+Reynolds/Mach limits. A changed product outside its material-card domain rejects
+the complete trial, including earlier cells, wall temperatures, reaction updates
+and reports. The existing exponential drag, implicit finite-wall thermal solve,
+species conservation, support impulse and energy accounting remain unchanged.
+No molecular or chemical heat source is added twice. Finite wall heat capacity
+is still an explicitly authored constant; this binding updates gas-side
+transport, not solid-wall calorics. Unbound branches and stationary plenums
+retain the existing explicitly authored contacts. Original law workspaces may
+change during refused trials, but carry no accepted physical state.
+
+Focused G1/G3 regressions check independent drag/finite-wall heat equations,
+density and transport-data substitution, exact caloric-source and geometry
+admission, heated-endpoint rollback, and positive reaction-product refresh
+through `ReactingNetwork1d::step_with_wall`. An original material-card refusal
+after reaction also checks whole-network/finite-wall rollback. These are
+manufactured numerical integration tests, not experimental combustion or
+convection validation.
+
+### Existing source composition
+
 `DissipatingNetwork1d::step_with_wall` performs W/2, D/2, A, D/2, W/2.
 `ReactingNetwork1d::step_with_wall` performs W/2, C/2, A, C/2, W/2;
 `step_with_dissipation_and_wall` surrounds the existing D/2, C/2, A, C/2, D/2
