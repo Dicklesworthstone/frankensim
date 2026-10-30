@@ -239,6 +239,20 @@ channels retain their signed feedthrough instead of absorbing it into shapes.
 `MimoModel::state_space` is the scalar block realization times the port
 identity. `MimoStateSpace::eval` is the independent parity route.
 
+Shared-pole relocation eliminates each response's unconstrained numerator by
+column-equilibrated Householder QR before stacking the common denominator.
+For F frequencies, R responses and pole order p, the stacked matrix has at most
+`2 F R + 1` rows and `p + 1` columns; four feedthrough-selection QR factors use
+at most `8 F (p + 2)` additional doubles. All original mutual responses, frequency
+weights, the relaxed normalization row and fixed-direct sigma re-solve remain
+in the same least-squares objective. No normal equations or response truncation
+are used. A numerically rank-deficient normalized local basis returns
+`VfError::SigmaCollapse`; projection never discards an unresolved local direction.
+G0 tests compare the projected and original dense solves, including mixed direct
+and improper terms and both signs of the fixed-direct fallback. The G1 synthetic
+33-port test checks every mutual response and exact replay; it is not a physical
+radiation fit or a runtime/accuracy claim for a particular instrument.
+
 `check_mimo_passivity` tests `Z + Z^H >= 0`.
 - It uses the dense log grid plus the impedance Hamiltonian
   `[[A - B R0^-1 C, -B R0^-1 B^T], [C^T R0^-1 C, -(A - B R0^-1 C)^T]]` with

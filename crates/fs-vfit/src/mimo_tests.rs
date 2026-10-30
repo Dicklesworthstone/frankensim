@@ -1,5 +1,214 @@
 use super::*;
 
+// Independent dense form of the original response-local numerator/shared-sigma
+// least-squares problem, retained only as a small equivalence oracle.
+fn dense_sigma_system(
+    omega: &[f64],
+    h: &[Vec<C64>],
+    weights: &[f64],
+    terms: &[PoleTerm],
+    options: &[FitOptions],
+) -> (Vec<f64>, usize, usize) {
+    let order: usize = terms.iter().map(PoleTerm::state_dim).sum();
+    let local: usize = options
+        .iter()
+        .map(|o| order + usize::from(o.fit_d) + usize::from(o.fit_e))
+        .sum();
+    let columns = local + order + 1;
+    let rows = 2 * omega.len() * h.len() + 1;
+    let mut a = vec![0.0; rows * columns];
+    let mut offset = 0;
+    for (channel, (values, opts)) in h.iter().zip(options).enumerate() {
+        for (i, (&w, &weight)) in omega.iter().zip(weights).enumerate() {
+            let basis = basis_columns(terms, C64::new(0.0, w));
+            let re = 2 * (channel * omega.len() + i);
+            for (k, phi) in basis.iter().enumerate() {
+                a[re * columns + offset + k] = weight * phi.re;
+                a[(re + 1) * columns + offset + k] = weight * phi.im;
+                let sigma = -(values[i] * *phi);
+                a[re * columns + local + k] = weight * sigma.re;
+                a[(re + 1) * columns + local + k] = weight * sigma.im;
+            }
+            if opts.fit_d {
+                a[re * columns + offset + order] = weight;
+            }
+            if opts.fit_e {
+                a[(re + 1) * columns + offset + order + usize::from(opts.fit_d)] = weight * w;
+            }
+            a[re * columns + columns - 1] = -weight * values[i].re;
+            a[(re + 1) * columns + columns - 1] = -weight * values[i].im;
+        }
+        offset += order + usize::from(opts.fit_d) + usize::from(opts.fit_e);
+    }
+    let mean_weight = weights.iter().sum::<f64>() / weights.len() as f64;
+    for &w in omega {
+        for (k, phi) in basis_columns(terms, C64::new(0.0, w)).iter().enumerate() {
+            a[(rows - 1) * columns + local + k] += mean_weight * phi.re;
+        }
+        a[rows * columns - 1] += mean_weight;
+    }
+    (a, rows, columns)
+}
+
+#[test]
+fn projected_shared_sigma_matches_dense_mixed_feedthrough_and_fixed_direct_g0() {
+    let omega: Vec<_> = (0..40)
+        .map(|i| 0.3 * det::exp(det::ln(300.0) * i as f64 / 39.0))
+        .collect();
+    let weights: Vec<_> = (0..omega.len())
+        .map(|i| 1.0 / (1.0 + 0.2 * i as f64))
+        .collect();
+    let terms = [
+        PoleTerm::Real {
+            pole: -2.0,
+            residue: 0.0,
+        },
+        PoleTerm::Pair {
+            pole: C64::new(-1.0, 8.0),
+            residue: C64::ZERO,
+        },
+    ];
+    let options: Vec<_> = (0..4)
+        .map(|i| FitOptions {
+            fit_d: i & 1 != 0,
+            fit_e: i & 2 != 0,
+            ..FitOptions::new(3)
+        })
+        .collect();
+    let h: Vec<Vec<_>> = options
+        .iter()
+        .enumerate()
+        .map(|(j, opts)| {
+            omega
+                .iter()
+                .map(|&w| {
+                    let s = C64::new(0.0, w);
+                    let mut z = C64::ZERO;
+                    for (k, pole) in [5.0, 13.0, 60.0].into_iter().enumerate() {
+                        z = z
+                            + (s + C64::from_re(pole))
+                                .recip()
+                                .scale((j + 1 + k * k) as f64);
+                    }
+                    if opts.fit_d {
+                        z = z + C64::from_re(0.15 * (j + 1) as f64);
+                    }
+                    if opts.fit_e {
+                        z = z + s.scale(0.002 * (j + 1) as f64);
+                    }
+                    z
+                })
+                .collect()
+        })
+        .collect();
+    let (projected, rows) = projected_sigma_system(&omega, &h, &weights, &terms, &options).unwrap();
+    let (dense, dense_rows, dense_columns) =
+        dense_sigma_system(&omega, &h, &weights, &terms, &options);
+    let columns = 4;
+    let target = weights.iter().sum::<f64>();
+    let mut rhs = vec![0.0; rows];
+    rhs[rows - 1] = target;
+    let mut dense_rhs = vec![0.0; dense_rows];
+    dense_rhs[dense_rows - 1] = target;
+    let sigma = solve_ls_equilibrated(&mut projected.clone(), rows, columns, &rhs);
+    let original = solve_ls_equilibrated(&mut dense.clone(), dense_rows, dense_columns, &dense_rhs);
+    let compare = |actual: &[f64], expected: &[f64]| {
+        for (a, b) in actual.iter().zip(expected) {
+            assert!(
+                (a - b).abs() <= 2e-9 * a.abs().max(b.abs()).max(1e-20),
+                "{a:e} != {b:e}"
+            );
+        }
+    };
+    compare(&sigma, &original[dense_columns - columns..]);
+    // Both signs exercise the actual sample-only solve used when the relaxed
+    // direct term collapses; the normalization row is excluded in both forms.
+    for direct in [-1e-12, 1e-12] {
+        let sigma = fixed_sigma_direct(
+            &projected[..(rows - 1) * columns],
+            rows - 1,
+            columns,
+            direct,
+        );
+        let original = fixed_sigma_direct(
+            &dense[..(dense_rows - 1) * dense_columns],
+            dense_rows - 1,
+            dense_columns,
+            direct,
+        );
+        compare(&sigma, &original[dense_columns - columns..]);
+    }
+    // Projection cannot discard an unresolved local rank direction.
+    assert!(matches!(
+        projected_sigma_system(&vec![1.0; omega.len()], &h, &weights, &terms, &options),
+        Err(VfError::SigmaCollapse)
+    ));
+}
+
+#[test]
+fn full_thirty_three_port_fit_retains_every_mutual_response_g1() {
+    let ports = 33;
+    let (pair, residue) = rlc(900.0, 0.09, 2.0);
+    let truth = MimoModel {
+        ports,
+        poles: vec![
+            PoleTerm::Real {
+                pole: -80.0,
+                residue: 0.0,
+            },
+            PoleTerm::Pair {
+                pole: pair,
+                residue: C64::ZERO,
+            },
+        ],
+        residues: vec![
+            (0..ports * ports)
+                .map(|i| {
+                    C64::from_re(
+                        40.0 * (1 + i / ports) as f64 * (1 + i % ports) as f64
+                            / (ports * ports) as f64,
+                    )
+                })
+                .collect(),
+            (0..ports * ports)
+                .map(|i| {
+                    residue.scale(
+                        (1.0 + (i / ports) as f64 / ports as f64)
+                            * (1.0 + (i % ports) as f64 / ports as f64),
+                    )
+                })
+                .collect(),
+        ],
+        d: (0..ports * ports)
+            .map(|i| if i / ports == i % ports { 0.5 } else { 0.0 })
+            .collect(),
+        e: vec![0.0; ports * ports],
+        reciprocal: true,
+    };
+    let omega: Vec<_> = (0..48)
+        .map(|i| 10.0 * det::exp(det::ln(300.0) * i as f64 / 47.0))
+        .collect();
+    let data: Vec<_> = omega.iter().map(|&w| truth.eval_iw(w)).collect();
+    let opts = FitOptions {
+        iterations: 12,
+        fit_e: false,
+        ..FitOptions::new(3)
+    };
+    let (fit, report) = mimo_vector_fit(&omega, &data, ports, &opts, true).unwrap();
+    assert!(fit.is_stable() && fit.reciprocal);
+    assert!(report.max_relative_error < 2e-9, "{report:?}");
+    for &w in &[13.0, 73.0, 517.0, 893.0, 1703.0, 2900.0] {
+        for (a, b) in fit.eval_iw(w).iter().zip(truth.eval_iw(w)) {
+            assert!(
+                (*a - b).abs() <= 2e-8 * b.abs(),
+                "missing or changed mutual response at {w}: {a:?} vs {b:?}"
+            );
+        }
+    }
+    let (repeat, _) = mimo_vector_fit(&omega, &data, ports, &opts, true).unwrap();
+    assert_eq!(fit, repeat);
+}
+
 /// Parallel-RLC impedance `2 zeta w0 g s / (s^2 + 2 zeta w0 s + w0^2)`: a
 /// positive-real scalar, returned as its stored pole and residue.
 fn rlc(w0: f64, zeta: f64, g: f64) -> (C64, C64) {
@@ -303,7 +512,10 @@ fn sampled_grid_reads_a_zero_dc_resistance_against_the_direct_term_floor() {
     // DC resistance is zero up to an O(1e8) cancellation, positive above DC.
     let model = |delta: f64| MimoModel {
         ports: 1,
-        poles: vec![PoleTerm::Real { pole: -1.0e6, residue: 0.0 }],
+        poles: vec![PoleTerm::Real {
+            pole: -1.0e6,
+            residue: 0.0,
+        }],
         residues: vec![vec![C64::from_re(-(1.0e8 + delta) * 1.0e6)]],
         d: vec![1.0e8],
         e: vec![0.0],
@@ -314,7 +526,10 @@ fn sampled_grid_reads_a_zero_dc_resistance_against_the_direct_term_floor() {
         let zoh = model(delta).zoh(1.0 / 96_000.0).unwrap();
         for report in [zoh.sampled_passivity(129), zoh.mean_sampled_passivity(129)] {
             assert_eq!(report.passive, passive, "delta {delta}: {report:?}");
-            assert!((report.worst.0 + 2.0 * delta).abs() < 1.0e-6, "raw worst kept: {report:?}");
+            assert!(
+                (report.worst.0 + 2.0 * delta).abs() < 1.0e-6,
+                "raw worst kept: {report:?}"
+            );
             if !passive {
                 assert_eq!(report.violation_freqs, [0.0]);
             }
@@ -330,8 +545,14 @@ fn passivity_certificate_sees_a_negative_dc_resistance_below_its_grid() {
     let model = |r: f64| MimoModel {
         ports: 1,
         poles: vec![
-            PoleTerm::Real { pole: -1.0, residue: 0.0 },
-            PoleTerm::Real { pole: -100.0, residue: 0.0 },
+            PoleTerm::Real {
+                pole: -1.0,
+                residue: 0.0,
+            },
+            PoleTerm::Real {
+                pole: -100.0,
+                residue: 0.0,
+            },
         ],
         residues: vec![vec![C64::from_re(r)], vec![C64::from_re(50.0)]],
         d: vec![0.0],
@@ -345,7 +566,10 @@ fn passivity_certificate_sees_a_negative_dc_resistance_below_its_grid() {
     assert_eq!(report.class, CertificateClass::GridOnly);
     assert!(!report.passive, "{report:?}");
     assert_eq!(report.violation_freqs, [0.0]);
-    assert!((report.worst.0 + 1.0).abs() < 1e-12 && report.worst.1 == 0.0, "{report:?}");
+    assert!(
+        (report.worst.0 + 1.0).abs() < 1e-12 && report.worst.1 == 0.0,
+        "{report:?}"
+    );
     // The residue repair can act on that DC violation.
     let (repaired, repair) = repair_mimo_passivity(&model(-1.0), band).unwrap();
     assert!(repair.certificate.passive, "{repair:?}");

@@ -27,7 +27,7 @@ use crate::vf::{
 };
 use fs_la::eigen::jacobi_eigh;
 use fs_la::eigen_complex::{EigFailure, eig, lu_complex};
-use fs_la::factor::lu;
+use fs_la::factor::{Qr, lu, qr};
 use fs_math::{c64::C64, det};
 
 /// Shared bounded admission and original exact ZOH runtime for causal loads.
@@ -587,9 +587,107 @@ fn fit_shared(
     ))
 }
 
-/// One relocation with a sigma shared by every response: the stacked
-/// version of the SISO relaxed system (same column layout per response,
-/// with each response's own direct and improper columns).
+/// Eliminate each response's numerator before stacking the shared sigma.
+/// For `A_j x_j + B_j sigma`, orthogonal projection leaves
+/// `Q_j[:, width_j..]^T B_j sigma`; the removed upper rows can be solved
+/// exactly for that response's unconstrained numerator. This preserves the
+/// weighted least-squares objective without a matrix containing every local
+/// numerator column, and never squares its condition number.
+fn projected_sigma_system(
+    omega: &[f64],
+    h: &[Vec<C64>],
+    weights: &[f64],
+    terms: &[PoleTerm],
+    per_entry: &[FitOptions],
+) -> Result<(Vec<f64>, usize), VfError> {
+    let order: usize = terms.iter().map(PoleTerm::state_dim).sum();
+    let columns = order + 1;
+    let local_rows = 2 * omega.len();
+    let rows = per_entry
+        .iter()
+        .map(|o| local_rows - order - usize::from(o.fit_d) - usize::from(o.fit_e))
+        .sum::<usize>()
+        + 1;
+    let mut system = vec![0.0; rows * columns];
+    let basis: Vec<_> = omega
+        .iter()
+        .map(|&w| basis_columns(terms, C64::new(0.0, w)))
+        .collect();
+    // The local basis depends only on the two feedthrough selections, not on
+    // response data. At most four original QR factors are retained per solve.
+    let mut projections: [Option<(usize, Qr)>; 4] = [None, None, None, None];
+    let mut column = vec![0.0; local_rows];
+    let mut start = 0;
+    for (response, opts) in h.iter().zip(per_entry) {
+        let key = usize::from(opts.fit_d) + 2 * usize::from(opts.fit_e);
+        if projections[key].is_none() {
+            let width = order + usize::from(opts.fit_d) + usize::from(opts.fit_e);
+            let mut local = vec![0.0; local_rows * width];
+            for (i, (&w, &wt)) in omega.iter().zip(weights).enumerate() {
+                for (k, phi) in basis[i].iter().enumerate() {
+                    local[2 * i * width + k] = wt * phi.re;
+                    local[(2 * i + 1) * width + k] = wt * phi.im;
+                }
+                if opts.fit_d {
+                    local[2 * i * width + order] = wt;
+                }
+                if opts.fit_e {
+                    local[(2 * i + 1) * width + order + usize::from(opts.fit_d)] = wt * w;
+                }
+            }
+            // Scaling a local unknown changes no column space. Normalize
+            // before QR just as in the original stacked equilibrated solve.
+            for k in 0..width {
+                let norm =
+                    (0..local_rows).fold(0.0, |norm, row| det::hypot(norm, local[row * width + k]));
+                if !norm.is_finite() || norm == 0.0 {
+                    return Err(VfError::SigmaCollapse);
+                }
+                for row in 0..local_rows {
+                    local[row * width + k] /= norm;
+                }
+            }
+            let projection = qr(&local, local_rows, width);
+            // Discarding a row of a rank-deficient local factor would remove
+            // part of the sigma objective. Refuse instead of silently doing so.
+            let rank_floor = 64.0 * f64::EPSILON * det::sqrt(local_rows as f64);
+            if (0..width)
+                .any(|k| !projection.r(k, k).is_finite() || projection.r(k, k).abs() <= rank_floor)
+            {
+                return Err(VfError::SigmaCollapse);
+            }
+            projections[key] = Some((width, projection));
+        }
+        let (width, projection) = projections[key].as_ref().expect("prepared local basis");
+        let retained = local_rows - width;
+        for k in 0..columns {
+            for (i, (&value, &wt)) in response.iter().zip(weights).enumerate() {
+                let value = if k == order {
+                    -value
+                } else {
+                    -(value * basis[i][k])
+                };
+                column[2 * i] = wt * value.re;
+                column[2 * i + 1] = wt * value.im;
+            }
+            projection.apply_qt(&mut column);
+            for row in 0..retained {
+                system[(start + row) * columns + k] = column[width + row];
+            }
+        }
+        start += retained;
+    }
+    let mean_wt = weights.iter().sum::<f64>() / weights.len() as f64;
+    for sample in &basis {
+        for (k, phi) in sample.iter().enumerate() {
+            system[(rows - 1) * columns + k] += mean_wt * phi.re;
+        }
+        system[rows * columns - 1] += mean_wt;
+    }
+    Ok((system, rows))
+}
+
+/// One relocation with the same relaxed sigma shared by every response.
 fn relocate_shared(
     omega: &[f64],
     h: &[Vec<C64>],
@@ -598,55 +696,16 @@ fn relocate_shared(
     per_entry: &[FitOptions],
 ) -> Result<(Vec<PoleTerm>, f64), VfError> {
     let order: usize = terms.iter().map(PoleTerm::state_dim).sum();
-    let widths: Vec<usize> = per_entry
-        .iter()
-        .map(|o| order + usize::from(o.fit_d) + usize::from(o.fit_e))
-        .collect();
-    let offsets: Vec<usize> = widths
-        .iter()
-        .scan(0, |at, &w| {
-            *at += w;
-            Some(*at - w)
-        })
-        .collect();
-    let responses = h.len();
-    let sigma0: usize = widths.iter().sum();
-    let ncols = sigma0 + order + 1;
-    let nrows = 2 * omega.len() * responses + 1;
-    let mut a = vec![0.0f64; nrows * ncols];
+    let ncols = order + 1;
+    let (mut a, nrows) = projected_sigma_system(omega, h, weights, terms, per_entry)?;
     let mut rhs = vec![0.0f64; nrows];
     let mean_wt = weights.iter().sum::<f64>() / weights.len() as f64;
-    for (i, (&w, &wt)) in omega.iter().zip(weights).enumerate() {
-        let cols = basis_columns(terms, C64::new(0.0, w));
-        for (j, hj) in h.iter().enumerate() {
-            let hv = hj[i];
-            let (r_re, r_im) = (2 * (j * omega.len() + i), 2 * (j * omega.len() + i) + 1);
-            let (model0, opts) = (offsets[j], &per_entry[j]);
-            for (k, &phi) in cols.iter().enumerate() {
-                a[r_re * ncols + model0 + k] = wt * phi.re;
-                a[r_im * ncols + model0 + k] = wt * phi.im;
-                let m = -(hv * phi);
-                a[r_re * ncols + sigma0 + k] = wt * m.re;
-                a[r_im * ncols + sigma0 + k] = wt * m.im;
-            }
-            if opts.fit_d {
-                a[r_re * ncols + model0 + order] = wt;
-            }
-            if opts.fit_e {
-                a[r_im * ncols + model0 + order + usize::from(opts.fit_d)] = wt * w;
-            }
-            a[r_re * ncols + ncols - 1] = wt * -hv.re;
-            a[r_im * ncols + ncols - 1] = wt * -hv.im;
-        }
-        let last = nrows - 1;
-        for (k, &phi) in cols.iter().enumerate() {
-            a[last * ncols + sigma0 + k] += mean_wt * phi.re;
-        }
-        a[last * ncols + ncols - 1] += mean_wt;
-    }
     rhs[nrows - 1] = mean_wt * omega.len() as f64;
     let sample_rows = a[..(nrows - 1) * ncols].to_vec();
     let mut x = solve_ls_equilibrated(&mut a, nrows, ncols, &rhs);
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(VfError::SigmaCollapse);
+    }
     let mut d_tilde = x[ncols - 1];
     let floor = 1.0e-12_f64;
     if d_tilde.abs() < floor {
@@ -660,7 +719,7 @@ fn relocate_shared(
         }
     }
     let sigma = crate::model::RationalModel {
-        terms: terms_with_residues(terms, &x[sigma0..sigma0 + order]),
+        terms: terms_with_residues(terms, &x[..order]),
         d: d_tilde,
         e: 0.0,
     };
@@ -1521,7 +1580,11 @@ impl MimoZoh {
 
     fn output_sampled_passivity(&self, points: usize, mean: bool) -> MimoPassivityReport {
         assert!(points >= 2, "passivity grid needs DC and Nyquist");
-        let scale = self.d.iter().chain(&self.mean_d).chain(&self.e)
+        let scale = self
+            .d
+            .iter()
+            .chain(&self.mean_d)
+            .chain(&self.e)
             .fold(0.0f64, |m, v| m.max(v.abs()));
         let floor = -1.0e-12 * scale;
         let mut worst = (f64::INFINITY, 0.0);
