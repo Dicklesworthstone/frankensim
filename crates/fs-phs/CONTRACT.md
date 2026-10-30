@@ -1090,3 +1090,7 @@ cancellation. Smooth state errors for 8/16/32 steps are approximately
 A 1,000-step full nonlinear warm probe observes zero owner allocations. The
 original eight physical-heat, four scattering and four prepared exact-flow tests
 also pass after the shared heat extension. These are bounded numerical checks.
+
+## Source-square heat on an unchanged linear trajectory
+
+`linear_exact::PreparedSourceLoss` observes `x'=A*x+B*u` under held inputs and integrates the explicitly supplied positive source square `||S*x(t)||²`. It reuses the existing positive Gauss/QR integration kernel without reconstructing a different generator or advancing physical state. The prepared integral retains the exact generator, input map, source rows and duration. The complete doubled observation dimension is capped at 256 with explicit dense-byte/work admission; no state is truncated. Warm evaluation is a positive quadratic contraction with cancellation checks. Source-row meaning and complete domain energy admission remain the caller's responsibility; no passivity claim for arbitrary A is inferred. `tests/source_loss.rs` contains analytic forced and silent-mode cases, independent nonnormal-trajectory quadrature, and budget/nonfinite/cancellation refusals. These new cases have not yet been executed in the authoring environment because compilation of the unchanged pinned runtime dependency was killed and the shared filesystem filled.

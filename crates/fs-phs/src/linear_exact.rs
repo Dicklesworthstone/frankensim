@@ -26,6 +26,7 @@ use gramian::{accumulate, identity, product};
 /// Cold caching of the same complete quadratic trajectory and its integrals.
 pub mod prepared;
 mod prepared_zoh;
+mod source_loss;
 pub(crate) mod positive_heat;
 mod scattering;
 mod common_flow_zoh;
@@ -33,6 +34,7 @@ mod nonlinear;
 pub use common_flow_zoh::PreparedCommonFlowZoh;
 pub use nonlinear::PreparedNonlinearZoh;
 pub use prepared_zoh::PreparedExactZoh;
+pub use source_loss::PreparedSourceLoss;
 pub use scattering::{PreparedScatteringZoh, ScatteringStep, ScatteringStepRecord};
 pub(crate) use prepared_zoh::energetic_scale;
 

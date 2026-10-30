@@ -102,31 +102,7 @@ impl PositiveHeat {
         let balanced = product(&product(&forward, &original, n), &inverse, n);
         let effort = product(&split.quadratic.matrix, &inverse, n);
         let loss_map = product(&resistance_root, &effort, n);
-        let mut rate = 1.0_f64;
-        for i in 0..n {
-            rate = rate
-                .max((0..n).map(|j| balanced[i * n + j].abs()).sum())
-                .max((0..n).map(|j| balanced[j * n + i].abs()).sum());
-        }
-        if !rate.is_finite() {
-            return Err(refuse("positive heat coordinate rate is nonfinite"));
-        }
-        let root_rate = det::sqrt(rate);
-        let mut generator = vec![0.0; d * d];
-        let mut factor = vec![0.0; d * d];
-        for i in 0..n {
-            factor[i * d + i] = root_rate;
-            for j in 0..n {
-                generator[i * d + n + j] = root_rate * loss_map[i * n + j];
-                generator[(n + i) * d + n + j] = balanced[i * n + j];
-            }
-        }
-        // For held u, f=x' obeys f'=A f, even when A is singular. With
-        // a=sqrt(R) grad(H)/sqrt(rate), b=T f/rate, a'=sqrt(rate) L b
-        // and b'=T A T^-1 b. No static solve or equilibrium shift is needed.
-        // This retains the complete trajectory but forms source/internal-force
-        // cancellation BEFORE the heat square, keeping static modes silent.
-        let root = integral_root(&generator, &factor, d, dt)?;
+        let (rate, root) = source_integral(&balanced, &loss_map, n, dt)?;
         Ok(Self {
             n,
             m,
@@ -290,6 +266,36 @@ impl PositiveHeat {
         }
         Ok(value)
     }
+}
+
+/// Common positive integral for an unchanged linear generator and original
+/// squared output. For held input, f=x' obeys f'=A f even when A is singular.
+/// With a=S*x/sqrt(rate), b=f/rate, a'=sqrt(rate)*S*b and b'=A*b.
+/// The initial source/internal-force cancellation occurs before squaring.
+pub(super) fn source_integral(
+    flow: &[f64], loss_map: &[f64], n: usize, dt: f64,
+) -> Result<(f64, Vec<f64>), PhsError> {
+    let d = 2 * n;
+    let mut rate = 1.0_f64;
+    for i in 0..n {
+        rate = rate
+            .max((0..n).map(|j| flow[i * n + j].abs()).sum())
+            .max((0..n).map(|j| flow[j * n + i].abs()).sum());
+    }
+    if !rate.is_finite() {
+        return Err(refuse("positive heat coordinate rate is nonfinite"));
+    }
+    let root_rate = det::sqrt(rate);
+    let mut generator = vec![0.0; d * d];
+    let mut factor = vec![0.0; d * d];
+    for i in 0..n {
+        factor[i * d + i] = root_rate;
+        for j in 0..n {
+            generator[i * d + n + j] = root_rate * loss_map[i * n + j];
+            generator[(n + i) * d + n + j] = flow[i * n + j];
+        }
+    }
+    Ok((rate, integral_root(&generator, &factor, d, dt)?))
 }
 
 // Exact zero entries separate independent resistance components. A general
