@@ -12,6 +12,9 @@
 //! available to outgoing transport next interval. It does not resolve a flame,
 //! chemical acoustic relaxation, or acoustic continuity across a restriction.
 
+/// Reciprocal finite material heat exchange in the same reacting acoustic step.
+pub mod thermal;
+
 use super::{FiniteGasAcousticInput, FiniteGasAcousticNode, FiniteGasAcousticStep};
 use crate::bernoulli_aperture::wall::material::{
     FiniteGasDgTransportError, FiniteGasDgTransportInput, FiniteGasDgTransportSolve,
@@ -348,11 +351,11 @@ impl Sum {
     }
 }
 
-fn species_residual(
+fn species_residual<'a>(
     initial: &BTreeMap<u64, ClosedGasParcel>,
     final_parcels: &BTreeMap<u64, ClosedGasParcel>,
     reactions: &BTreeMap<u64, FiniteGasAcousticReaction<'_>>,
-    step: &ReactiveFiniteGasAcousticTransportStep,
+    mut reaction_step: impl FnMut(u64) -> Option<&'a BoundaryGasReactionStep>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, Error> {
     let mut residuals: BTreeMap<SpeciesId, Sum> = BTreeMap::new();
@@ -393,7 +396,7 @@ fn species_residual(
     }
     for &id in reactions.keys() {
         poll(cancelled)?;
-        let reaction = step.reaction(id).ok_or(Error::Invalid(
+        let reaction = reaction_step(id).ok_or(Error::Invalid(
             "complete endpoint lost an original chemical binding",
         ))?;
         for species in &reaction.reaction.species {
@@ -458,8 +461,13 @@ pub fn finite_gas_reacting_acoustic_transport_candidate_with_paths<C: FnMut() ->
         transport,
         maximum_species_residual_mol: 0.0,
     };
-    step.maximum_species_residual_mol =
-        species_residual(parcels, &next_parcels, reactions, &step, cancelled)?;
+    step.maximum_species_residual_mol = species_residual(
+        parcels,
+        &next_parcels,
+        reactions,
+        |id| step.reaction(id),
+        cancelled,
+    )?;
     if step.maximum_species_residual_mol > controls.species_tolerance_mol {
         return Err(Error::SpeciesBalance {
             maximum_residual_mol: step.maximum_species_residual_mol,

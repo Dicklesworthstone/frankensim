@@ -9487,6 +9487,55 @@ compilation and execution remain unverified because the available Cargo build
 cannot load required sibling dependency sources. Experimental validation remains
 a separate gate; no measured combustion or sound-accuracy claim is made.
 
+## Finite material heat in reacting acoustic assemblies
+
+`dg_port::finite_gas::transport::assembly::reactive::thermal` connects distinct
+finite material bodies to the same mixed acoustic transport transaction.
+Sparse thermal and reaction bindings are independent: a wall-DG volume, complete
+passive load, moving aperture or plain reservoir may exchange heat with its own
+uniform body, with or without chemistry. The accepted body-state map and each
+binding's initial phase state must agree exactly. Original enthalpy and layer
+conductivity must come from the same material card, and the contact area cannot
+exceed the body's declared exposed area. The original graph budget applies
+before any material source is evaluated.
+
+The existing bounded scalar feedback owner solves
+`Q = dt G(T_body,end - T_gas,end)`. Every heat and acoustic-work probe restarts
+the same accepted body and the single transported gas snapshot. The original
+phase chart gives `H_end - H_start = Q_body,external - Q`; the original caloric
+or implicit chemistry endpoint receives `Q_gas,external + Q` and separate
+gas-to-wave work. `MaterialConductionLayers` resolves its existing series
+resistance law at both endpoints' temperatures, retaining the conductivity
+claim selected before transport. Heat, formation energy and mechanical work
+are never substituted for one another.
+
+The gas/acoustic subaccount includes the actual heat across its gas boundary.
+The enclosing account adds measured finite-body enthalpy changes and only the
+original external heat sources: the interface Q cancels once. Native exterior
+work, storage and exported losses remain unchanged. Local body and gas/body
+energy gates, accepted heat direction, final transport driving forces, chemical
+entropy, whole-network species and total energy admission all remain active.
+Only the accepted work trial supplies the retained body/source report. Preview
+does not mutate state; accepted publication changes gas, native acoustic owners
+and body states together after a final cancellation check. Returned Q is already
+applied and must not be deposited again.
+
+These are distinct uniform thermal stores with fixed effective layer geometry
+and negligible solid pV work. They do not automatically change an aperture's
+mechanics, wall stiffness, dimensions, or acoustic-loss heat partition. A body
+shared by several gas volumes requires a shared thermal-network owner, not
+duplicate map entries. Phase follows the original chart without claiming melt
+motion or structural recoupling. Uniform-body validity and material/density/
+geometry consistency remain explicit caller obligations. Transport and frozen-
+medium acoustic sampling retain the existing first-order split; source-root
+convergence is not a temporal-error estimate or a uniqueness theorem.
+
+Focused G1/G3/G4 regressions use the existing warm passive-load and paired-
+aperture fixture, a source-bound finite material store, independent energy and
+two-capacity backward-Euler references, exact empty-binding reduction, and
+atomic refusal/cancellation with deterministic retry. These are synthetic
+implementation checks, not experimental material or acoustic validation.
+
 ## Continuing spatial dielectric charge through thermal phase change
 
 `ConductionThermalNetwork::step_dielectric_candidate` connects the native

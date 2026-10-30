@@ -101,6 +101,8 @@ pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>, R =
     pub gas_storage_change_j: f64,
     /// Complete bound-node storage, including moving-source mechanics when present.
     pub acoustic_storage_change_j: f64,
+    /// Actual heat into the gas boundary. A thermal companion's reciprocal
+    /// transfer is included here and cancels only in its enclosing body account.
     pub supplied_heat_j: f64,
     /// Net external work into bound nodes, including mechanical drives and
     /// subtracting signed exterior exchange. Internal source/load work cancels.
@@ -111,7 +113,7 @@ pub struct FiniteGasDgTransportStep<A = FiniteGasDgStep<GasCompositionStep>, R =
     /// Internal gas-to-wave transfer, already included in the storage changes.
     pub parameter_work_j: f64,
     pub total_mass_residual_kg: f64,
-    /// Gas + complete bound-node storage + native loss - external heat - port work.
+    /// Gas + complete bound-node storage + native loss - supplied gas heat - port work.
     /// Internal enthalpy transfer and gas-to-wave work are not added again.
     pub combined_energy_residual_j: f64,
 }
@@ -260,7 +262,7 @@ impl FiniteGasTransportNode for FiniteGasDgNode {
     fn source<S>(step: &Self::Step<S>) -> &S { &step.background }
 }
 
-/// Only the post-transport caloric/chemical endpoint varies. The transaction
+/// Only the post-transport caloric/chemical/thermal endpoint varies. The transaction
 /// retains ownership of transport, native work feedback and complete accounts.
 pub(crate) trait FiniteGasTransportEvolution {
     type Source;
@@ -283,6 +285,18 @@ pub(crate) trait FiniteGasTransportEvolution {
         &self, id: u64, gas: &ClosedGasParcel, input: &FiniteGasDgTransportInput,
         duration_s: f64, cancelled: &mut C,
     ) -> Result<(ClosedGasParcel, Self::Reservoir), Self::Error>;
+
+    /// Actual heat crossing the gas boundary at this endpoint. A finite thermal
+    /// companion includes its reciprocal Q here; its enclosing owner must then
+    /// account for the companion's storage and cancel Q as an internal transfer.
+    /// Mechanical work and transported enthalpy retain their separate accounts.
+    fn node_supplied_heat_j(
+        &self, input: &FiniteGasDgTransportInput, _: &Self::Source,
+    ) -> f64 { input.supplied_heat_j }
+
+    fn reservoir_supplied_heat_j(
+        &self, input: &FiniteGasDgTransportInput, _: &Self::Reservoir,
+    ) -> f64 { input.supplied_heat_j }
 
     /// Apply physical endpoint gates after the native work residual has closed.
     fn admit_node_endpoint(&self, id: u64, source: &Self::Source) -> Result<(), Self::Error>;
@@ -477,7 +491,7 @@ pub(crate) fn finite_gas_transport_candidate_with_paths<N: FiniteGasTransportNod
 }
 
 /// The single transport/work/accounting transaction with an original physical
-/// endpoint owner. Chemistry changes only this endpoint calculation; native
+/// endpoint owner. Chemistry and finite heat exchange change this endpoint; native
 /// transport still runs once, and no trial can consume an accepted inventory.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finite_gas_transport_candidate_with_evolution<
@@ -538,7 +552,6 @@ pub(crate) fn finite_gas_transport_candidate_with_evolution<
     for (&id, node_input) in inputs {
         check(cancelled)?;
         let input = N::transport_input(node_input, nodes.contains_key(&id)).map_err(Error::Invalid)?;
-        heat.add(input.supplied_heat_j)?;
         if let Some(node) = next_nodes.get_mut(&id) {
             let transported_gas = &transported[&id];
             let enthalpy = transport.exchange.parcels.iter().find(|row| row.id == id)
@@ -550,8 +563,9 @@ pub(crate) fn finite_gas_transport_candidate_with_evolution<
                 let (endpoint, source) = evolution.node_candidate(
                     id, transported_gas, input, duration_s, work, cancel,
                 )?;
+                let supplied_heat_j = evolution.node_supplied_heat_j(input, &source);
                 Ok::<_, T::Error>(FiniteGasDgBackground {
-                    gas: endpoint, supplied_heat_j: input.supplied_heat_j,
+                    gas: endpoint, supplied_heat_j,
                     transported_enthalpy_j: enthalpy, source,
                 })
             };
@@ -559,6 +573,7 @@ pub(crate) fn finite_gas_transport_candidate_with_evolution<
                 .map_err(|error| acoustic_error::<T>(id, error))?;
             evolution.admit_node_endpoint(id, N::source::<T::Source>(&step))
                 .map_err(|error| gas_error::<T>(id, error))?;
+            heat.add(evolution.node_supplied_heat_j(input, N::source::<T::Source>(&step)))?;
             let [net_port_work, acoustic_loss, gas_work] = N::accounts::<T::Source>(&step);
             port_work.add(net_port_work)?;
             losses.add(acoustic_loss)?;
@@ -569,6 +584,7 @@ pub(crate) fn finite_gas_transport_candidate_with_evolution<
             let (gas, step) = evolution.reservoir_candidate(
                 id, &transported[&id], input, duration_s, cancelled,
             ).map_err(|error| gas_error::<T>(id, error))?;
+            heat.add(evolution.reservoir_supplied_heat_j(input, &step))?;
             next_parcels.insert(id, gas);
             reservoirs.insert(id, step);
         }
