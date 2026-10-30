@@ -23,6 +23,8 @@ pub mod rand_nla;
 /// Reusable dense solves for repeated small nonlinear systems.
 pub mod prepared_lu;
 pub use prepared_lu::{LuWorkspace, LuWorkspaceError};
+/// Reusable linear-work structured solves with adjacent partial pivoting.
+pub mod tridiagonal;
 
 pub use gemm::{
     GEMM_BUILD_FINGERPRINT, GEMM_DEPGRAPH_RECEIPT, GEMM_DEPGRAPH_RECEIPT_DIGEST,

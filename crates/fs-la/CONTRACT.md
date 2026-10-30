@@ -822,3 +822,33 @@ regressions. Nested quadrature and residuals are numerical evidence, not
 interval enclosures or a rigorous completeness certificate. Two moments cannot
 resolve more modes than the available probe rank, dependent eigendirections,
 or unresolved repeated/defective poles; such cases refuse.
+
+
+## Structured tridiagonal solves
+
+`tridiagonal::TridiagonalWorkspace` owns reusable O(n) factors and RHS scratch
+for real tridiagonal matrices. Adjacent partial pivoting selects the larger
+current diagonal/subdiagonal magnitude, retaining the current row on a tie.
+Row swaps retain their second superdiagonal. Factorization and substitution
+use fixed scalar order and fused multiply-add; no allocation occurs after
+fallible workspace construction. Factors can serve multiple right-hand sides.
+The numerical storage and work remain linear in dimension.
+
+Inputs must have exact n-1/n/n-1 matrix lengths and n-entry right-hand sides.
+Empty and scalar systems are supported. Unrepresentable extents, allocation
+failure, nonfinite input/intermediates, exactly zero pivots, missing factors
+and cancellation have explicit errors. There is no arbitrary small-pivot
+threshold. A rejected replacement factorization invalidates earlier factors.
+A rejected solve retains valid factors and leaves the caller's output or
+in-place RHS bit-for-bit unchanged. Cancellation is polled at start/end and
+at most 128 rows apart; the final checked output copy is an uninterrupted
+publication step.
+
+This native safe Rust implementation supplies no condition estimate, matrix
+scaling, iterative refinement or forward-error certificate. Its physical or
+nonlinear caller must still check the original residual and its own acceptance
+criteria. Five focused original-source tests exercise adjacent pivots, the
+second superdiagonal, original-system residuals, repeated RHS/refactor reuse,
+empty/scalar/tiny-unit systems, singular/nonfinite refusal and every observed
+cancellation boundary. The bounded native test run passes; it is not a claim
+that the full workspace dependency/build gates ran.
