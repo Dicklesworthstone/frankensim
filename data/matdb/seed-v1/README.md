@@ -4124,3 +4124,57 @@ MDF's conductivity support, and beryllium heating without density or conductivit
 Full workspace compilation remains unavailable because required sibling
 repositories are missing; the results concern the actual compiler and focused
 production modules, not full coupled or experimental qualification.
+
+## Cryogenic alloys, Kevlar, balsa and multilayer conduction (2026-10-29)
+
+This increment adds **11 profiles, 31 property claims, 4,059 numerical values
+and 47 source observations**: six alloy references and five composite/nonmetal
+references. Values comprise 4,052 curve knots, five expansion plateaus and two
+nominal balsa-density scalars.
+
+| Profile | Claims | Source-supported additions |
+| --- | ---: | --- |
+| [304L stainless](stainless-304l-nist-thermal-reference/manifest.tsv) | 4 | Conductivity, specific heat and finite expansion |
+| [310 stainless](stainless-310-nist-thermal-reference/manifest.tsv) | 6 | Conductivity, two specific-heat branches, modulus and finite expansion |
+| [Titanium 15-3-3-3](titanium-15-3-3-3-nist-thermal-reference/manifest.tsv) | 1 | Conductivity 1.4–300 K |
+| [Beryllium copper](beryllium-copper-nist-thermal-reference/manifest.tsv) | 3 | Conductivity and finite expansion; grade unspecified |
+| [Fe2.25Ni steel](nickel-steel-fe2p25ni-nist-thermal-reference/manifest.tsv) | 5 | Conductivity, specific heat, modulus and finite expansion |
+| [Fe5Ni steel](nickel-steel-fe5ni-nist-thermal-reference/manifest.tsv) | 5 | Conductivity, specific heat, modulus and finite expansion |
+| [Kevlar 49 fiber](kevlar49-fiber-nist-thermal-reference/manifest.tsv) | 1 | Conductivity 0.1–291 K |
+| [Kevlar 49 composite](kevlar49-composite-nist-thermal-reference/manifest.tsv) | 1 | Separate composite conductivity 6–302 K |
+| [Balsa, 6 lb/ft3 column](balsa-6lb-ft3-nist-thermal-reference/manifest.tsv) | 2 | Conductivity 88–300 K and nominal column density |
+| [Balsa, 11 lb/ft3 column](balsa-11lb-ft3-nist-thermal-reference/manifest.tsv) | 2 | Separate conductivity 88–300 K and nominal column density |
+| [Apiezon N](apiezon-n-nist-thermal-reference/manifest.tsv) | 1 | Specific heat 2–200 K |
+
+Original data/equation intersections bound every fit. In particular, 304L
+specific heat stops at 20 K, beryllium-copper conductivity at 80 K, and
+nickel-steel expansion at 265 K despite its L293 denominator. The 310
+specific-heat fits require explicit branch selection at their shared 47 K
+endpoint. Five expansion plateau/polynomial pairs exclude the source's
+unspecified exact joins. Fitted residuals, source-label conflicts and unknown
+caloric constraints remain visible; repeated nickel-steel equations do not
+establish independent replication. No beryllium-copper grade, titanium-alloy
+equivalence, missing density or missing modulus is inferred.
+
+Kevlar fiber and composite remain distinct; resin fraction, cure and orientation
+are unspecified. Balsa grain direction is unknown and its density columns are
+metadata, not density-versus-temperature laws. Apiezon and alloy specific-heat
+sources do not identify Cp versus Cv; sensible-storage use is an explicit model
+choice. Sampled interpolation comparisons do not certify continuous error or
+measurement uncertainty.
+
+`PreparedLayerStackConduction` now prepares **1–64 ordered planar layers** with
+each source's temperature-dependent conductivity, thickness and complete query
+context, a common area, and explicit interlayer contact resistances in m2 K/W.
+It preserves original knots and receipts, intersects temperature support, and
+returns heat flow, interface temperatures and endpoint derivatives. Layer
+order and contacts remain part of the prepared identity. The quasi-steady
+conduction path connects to the existing conservative thermal owner; endpoint
+storage remains separately declared.
+
+All **10 focused native tests pass**: three alloy, three composite and four
+stack tests. They cover actual pack compilation, source-equation oracles,
+context/domain refusals, capacity-only heating, finite geometry, nonlinear
+multilayer flux and a real FSRI gypsum/mineral-wool/plywood stack coupled to
+the original implicit energy and sensible-entropy accounting. Full workspace
+Cargo validation remains blocked by seven missing sibling repositories.

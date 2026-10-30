@@ -886,3 +886,38 @@ layer conduction, conditioned-material substitution, capacity-only heating and
 the unchanged volumetric timeline. Workspace Cargo validation remains blocked
 by the seven missing required sibling repositories; the broad material-reality
 program remains open beyond these bounded capabilities.
+
+## 2026-10-29 cryogenic alloy, composite and multilayer conduction increment
+
+Added **11 profiles / 31 property claims / 4,059 numerical values / 47 source
+observations**. Six NIST alloys add 24 claims: 304L and 310 stainless,
+titanium 15-3-3-3, grade-unspecified beryllium copper, Fe2.25Ni and Fe5Ni.
+Separate Kevlar 49 fiber/composite references, two balsa density columns and
+Apiezon N add seven claims. Exact profiles and supported responses are in the
+[seed catalog](../data/matdb/seed-v1/README.md#cryogenic-alloys-kevlar-balsa-and-multilayer-conduction-2026-10-29).
+
+Source data/equation intersections, finite-expansion denominators, excluded
+plateau joins and 310's explicitly selected specific-heat branches remain
+intact. Unknown processing, direction, caloric constraint and specimen matching
+are retained. Repeated nickel-steel coefficients are not independent
+replication. Kevlar fiber/composite identity and unknown resin/cure details
+remain separate; balsa grain direction is unspecified and nominal densities
+are source-column metadata. No missing density, modulus, alloy equivalence or
+Cp-to-Cv conversion is supplied. Numerical sampling checks are not measurement
+uncertainties or certified continuous error bounds.
+
+`PreparedLayerStackConduction` extends sourced conduction to **1–64 ordered
+planar layers**, each with its own bounded temperature-dependent conductivity
+and thickness, a shared area, and explicit contact resistances. Preparation
+retains each original source line and context without a common resampling grid
+or invented effective conductivity. The solver resolves interface temperatures,
+heat flow and endpoint derivatives. This quasi-steady path uses the existing
+thermal integration owner with separately declared endpoint heat storage.
+
+All **10 focused native tests pass: three alloy, three composite and four
+stack tests**. Beyond compiler/receipt/source checks and refusal cases, they
+exercise actual material substitutions, sensible heating and finite expansion,
+nonlinear multilayer transport, and FSRI gypsum/mineral-wool/plywood coupled
+to the original implicit energy and sensible-entropy accounting. Full workspace
+Cargo validation remains unavailable because seven required sibling repositories
+are missing; these are bounded production-module results.

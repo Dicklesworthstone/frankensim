@@ -1,0 +1,20 @@
+frankensim.matdb-manifest.v3
+pack_id	nickel-steel-fe5ni-nist-thermal-reference
+redistribution	permitted	Attributed numerical fits from unmarked NIST public-information pages and independently sampled evaluations; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	National Institute of Standards and Technology, Cryogenic Material Properties: nickel-steel-fe5ni; https://trc.nist.gov/cryogenics/materials/NickelSteel/NickelSteel_Fe5.0Ni%29_rev.htm; references https://trc.nist.gov/cryogenics/materials/references.htm; accessed 2026-10-29.
+license	NIST-Public-Information-Attribution-Requested
+source	nist-alloy-thermal-completion	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat	specific-heat-capacity	dimensional
+property	young_modulus	young-modulus	dimensional
+property	linear_expansion	linear-expansion-relative-to-293k	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference	engineering-reference-model	dimensional
+axis	family	source-family-nist-nickel-steel-fe5ni	dimensional
+axis	process	source-processing-known	dimensional
+axis	pressure	source-pressure-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	orientation	source-orientation-known	dimensional
+axis	form	source-product-form-known	dimensional
+axis	temper	source-temper-known	dimensional
+axis	caloric_constraint	source-caloric-constraint-known	dimensional
