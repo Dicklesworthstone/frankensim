@@ -147,7 +147,7 @@ fn authored_flush_side_openings_keep_original_faces_ids_and_independent_areas() 
     assert!(read(&baffled_tube_input(RADIATION_EXTERIOR)).unwrap().side_openings.is_empty());
     for invalid in [
         text.replace("dg_side_openings 1", "dg_side_openings 0"),
-        text.replace("dg_side_openings 1", "dg_side_openings 8"),
+        text.replace("dg_side_openings 1", "dg_side_openings 33"),
         text.replace("dg_side_opening 7 1", "dg_side_opening 0 1"),
         text.replace("dg_side_opening 7 1", "dg_side_opening 1 1"),
         text.replace("dg_side_opening 7 1", "dg_side_opening 7 0"),
@@ -285,4 +285,6 @@ fn g0_baffled_input_refuses_missing_malformed_extra_fields_and_static_pressure_j
 mod chimneys;
 
 mod terminal_channels;
+
+mod many_ports;
 

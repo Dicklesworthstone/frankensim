@@ -33,6 +33,9 @@ use fs_math::{c64::C64, det};
 /// Shared bounded admission and original exact ZOH runtime for causal loads.
 pub mod load;
 
+mod relocation;
+pub use relocation::shared_pole_relocation_scratch_bytes;
+
 /// A real multiport rational impedance with shared poles.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MimoModel {

@@ -190,8 +190,8 @@ impl DgSourceInput {
     ///
     /// Before dg_radiation, optional dg_side_openings COUNT declares up to the
     /// original DG side-port budget (32), followed by exactly COUNT rows.
-    /// At most eight actual exterior openings, including the axial outlet,
-    /// can share the current radiation owner. A flush circular opening uses:
+    /// Up to 33 actual exterior openings, including the axial outlet, can share
+    /// the radiation owner within its original state/memory budgets. A flush circular opening uses:
     /// dg_side_opening PORT_ID DOWNSTREAM_ELEMENT X_M Y_M RADIUS_M
     /// Each selects an existing interior mesh face, a unique ID above 1, and
     /// independent physical opening geometry in the common rigid baffle. Its

@@ -45,6 +45,7 @@ pub struct DrivenMouthSurface {
 struct MixedSurface {
     surface: PreparedSurface,
     ports: usize,
+    scratch_bytes: usize,
 }
 
 impl MixedSurface {
@@ -152,7 +153,7 @@ impl MixedSurface {
                 return Err(invalid("mixed source exceeds five-percent exact static aperture-inertia error; refine its cells"));
             }
         }
-        Ok(Self { surface, ports })
+        Ok(Self { surface, ports, scratch_bytes: surface_bytes as usize })
     }
 
     fn rows(&self, gas: &GasState, hz: &[f64], gate: &CancelGate)
@@ -189,8 +190,14 @@ pub(crate) fn bake_driven_mouth(
     poll(gate)?;
     admit_common(exterior, terminals.len() + 1, mechanics_rate_hz, band_hz, options, limits)?;
     let surface = MixedSurface::new(mouth, terminals, exterior, band_hz, options, gate)?;
+    // The retained surface coexists with both fitting and residue repair.
+    // Keep its allocation out of the shared owner's remaining allowance.
+    let fit_options = BaffledMimoBakeOptions {
+        max_fit_memory_bytes: options.max_fit_memory_bytes - surface.scratch_bytes,
+        ..options
+    };
     let (model, report) = fit_source(terminals.len() + 1, mechanics_rate_hz, band_hz,
-        options, limits, gate, |hz, gate| surface.rows(exterior, hz, gate))?;
+        fit_options, limits, gate, |hz, gate| surface.rows(exterior, hz, gate))?;
     let mut hash = DomainHasher::new("org.frankensim.fs-couple.mixed-baffled-flow-source.v1");
     hash.update(&declaration(exterior, terminals, mechanics_rate_hz, band_hz));
     for value in mouth.center_m.into_iter().chain(mouth.size_m) { scalar(&mut hash, value); }

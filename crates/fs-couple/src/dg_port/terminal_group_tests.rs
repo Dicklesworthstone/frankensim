@@ -12,6 +12,8 @@ const INLET: PortId = PortId(7);
 const OUTLET: PortId = PortId(3);
 const SIDE: PortId = PortId(11);
 
+mod many_ports;
+
 fn duct(walls: bool, side: bool, outlet: DgBoundary) -> DgDuct {
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap();
     let mut duct = DgDuct::new(

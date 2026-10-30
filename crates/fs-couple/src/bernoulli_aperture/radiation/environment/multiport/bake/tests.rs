@@ -149,3 +149,36 @@ fn source_refuses_short_band_over_budget_geometry_and_cancellation_before_fittin
     assert!(matches!(bake_baffled_mimo(gas, &openings, 8000, [20.0, 4000.0],
         opts, runtime, &gate), Err(BaffledMimoBakeError::Cancelled)));
 }
+
+#[test]
+fn full_seventeen_opening_radiation_fits_the_existing_memory_and_state_envelopes() {
+    let openings: Vec<_> = (0..17).map(|i| CircularOpening {
+        center_m: [0.015 * f64::from(i), 0.0], radius_m: 0.001,
+    }).collect();
+    let options = options();
+    let mut runtime = limits();
+    runtime.max_states = 204;
+    admit(&gas(), &openings, 8000, [20.0, 4000.0], options, runtime).unwrap();
+    let required = fit_scratch_bytes(openings.len(), options);
+    assert!(required < 32 * 1024 * 1024, "{required}");
+    let mut short = options;
+    short.max_fit_memory_bytes = required - 1;
+    assert!(matches!(admit(&gas(), &openings, 8000, [20.0, 4000.0], short, runtime),
+        Err(BaffledMimoBakeError::Memory { kind: "fit scratch", .. })));
+    runtime.max_states = 203;
+    assert!(admit(&gas(), &openings, 8000, [20.0, 4000.0], options, runtime).is_err());
+
+    // Source rows still come from every original physical self/mutual pair.
+    let rows = sample_rows(&pistons(&openings), &gas(), &[1000.0],
+        &CancelGate::new_clock_free()).unwrap();
+    let matrix = &rows[0];
+    assert_eq!(matrix.len(), 17 * 17);
+    for i in 0..17 {
+        assert!(matrix[i * 17 + i].re > 0.0);
+        for j in 0..17 {
+            assert!(matrix[i * 17 + j].abs() > 0.0);
+            assert!((matrix[i * 17 + j] - matrix[j * 17 + i]).abs()
+                < 1e-12 * matrix[i * 17 + j].abs());
+        }
+    }
+}

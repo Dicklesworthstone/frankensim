@@ -30,11 +30,14 @@ use fs_math::{c64::C64, det};
 use fs_vfit::{FitOptions, PoleTerm, WeightPreset};
 use fs_vfit::causality::{CausalityError, CausalityOptions, check_mimo_causality};
 use fs_vfit::mimo::{
-    MimoModel, MimoPassivityReport, check_mimo_passivity, mimo_vector_fit, repair_mimo_passivity,
+    MimoModel, MimoPassivityReport, check_mimo_passivity, mimo_vector_fit,
+    repair_mimo_passivity_with_budget, shared_pole_relocation_scratch_bytes,
 };
 
-/// Maximum circular openings admitted by this bounded dense cold-build route.
-pub const MAX_BAFFLED_MIMO_PORTS: usize = 8;
+/// A complete bounded DG side-port set plus its axial outlet. Every opening
+/// retains all mutual terms; the shared fitter eliminates local numerators
+/// before solving its common denominator for larger arrays.
+pub const MAX_BAFFLED_MIMO_PORTS: usize = fs_duct::dg::MAX_DG_SIDE_PORTS + 1;
 /// Maximum rows in each fitting, causality or withheld frequency sweep.
 pub const MAX_BAFFLED_MIMO_FREQUENCIES: usize = 513;
 /// Maximum admitted allowance for the dense fitting and certification scratch.
@@ -258,7 +261,10 @@ fn fit_source(
                 (model, training_error, held_error)
             } else {
                 // M2.5-W3b residue repair, counted in the operator-error budget.
-                let (repaired, repair) = repair_mimo_passivity(&model, band).map_err(|e|
+                let available = options.max_fit_memory_bytes
+                    .saturating_sub(source_and_passivity_scratch_bytes(n, options));
+                let (repaired, repair) = repair_mimo_passivity_with_budget(
+                    &model, band, available).map_err(|e|
                     format!("unchanged continuous fit is not passive and its residue repair refused: {e}"))?;
                 rung.repair_relative_change = Some(repair.max_relative_change);
                 if !finite_model(&repaired)
@@ -356,8 +362,8 @@ fn admit_common(gas: &GasState, n: usize, rate: u32, band: [f64; 2],
     {
         return Err(invalid("source, full-clock band, three-order ladder or explicit resource limits are inadmissible"));
     }
-    // The shared VF stacks one response per upper-triangle entry. Account for
-    // the matrix, equilibrated QR copy, vectors and dense eigensolve scratch
+    // The shared VF keeps every upper-triangle response. Account for its
+    // channel elimination, equilibrated QR, vectors and dense eigensolve scratch
     // BEFORE either the source sweep or the fitter can allocate it. Hard caps
     // above keep every product representable on wasm32.
     let states = order * n;
@@ -380,11 +386,16 @@ fn admit_common(gas: &GasState, n: usize, rate: u32, band: [f64; 2],
 fn fit_scratch_bytes(n: usize, opts: BaffledMimoBakeOptions) -> usize {
     let order = opts.orders[2];
     let responses = n * (n + 1) / 2;
-    let rows = 2 * opts.frequency_samples * responses + 1;
-    let columns = responses * (order + 1) + order + 1;
-    let states = order * n;
-    8 * (4 * rows * columns + 8 * columns * columns
-        + 32 * states * states + 16 * opts.frequency_samples * n * n) + 1024 * 1024
+    let fit = FitOptions { order, iterations: opts.fit_iterations,
+        weights: WeightPreset::InverseMagnitude, fit_d: true, fit_e: false };
+    shared_pole_relocation_scratch_bytes(opts.frequency_samples, responses, &fit)
+        .and_then(|relocation| relocation.checked_add(source_and_passivity_scratch_bytes(n, opts)))
+        .unwrap_or(usize::MAX)
+}
+
+fn source_and_passivity_scratch_bytes(n: usize, opts: BaffledMimoBakeOptions) -> usize {
+    let states = opts.orders[2] * n;
+    8 * (32 * states * states + 16 * opts.frequency_samples * n * n) + 1024 * 1024
 }
 
 fn sample_rows(pistons: &[BaffledPiston], gas: &GasState, hz: &[f64], gate: &CancelGate)

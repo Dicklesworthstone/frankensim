@@ -56,7 +56,7 @@ These are explicit numerical choices, in order:
 | `2 100 1e-8` | Causality subtractions, assumed high-frequency tail bound ratio and relative source-data tolerance. |
 | `64 1048576 257` | Maximum real states, runtime memory bytes and interval-mean sampled-passivity grid points. |
 
-At most eight separated circular openings, 513 frequencies, 64 shared poles
+At most 33 separated circular openings, 513 frequencies, 64 shared poles
 per order and 256 real states are admitted. Requested working memory is capped
 at 512 MiB, independently of the terminal's retained memory. The complete
 three-order scratch requirement is admitted before the source sweep. Failed
@@ -64,6 +64,18 @@ quadrature, causality, fit accuracy or passivity returns a construction error;
 the runtime does not clip residues, add damping or fall back to independent
 openings. A numerically more accurate higher order can still fail passivity.
 Each attempted order and its actual refusal are retained in the CLI sidecar.
+
+Large arrays retain every mutual response while the original shared vector
+fitter eliminates each response's local numerator with Householder QR before
+solving one common denominator. Every array uses that same projected solver,
+including its local rank admission. For 17 openings, 65 samples and
+orders 4/8/12, the conservative source/fitting scratch estimate is 22,508,704
+bytes, down from 1,544,916,032 bytes for the previous dense global solve. The
+order-12 realization has 204 real states, so it still needs an explicitly
+sufficient runtime-state allowance. Passivity repair receives the remaining working allowance for its model,
+certification, constraint and KKT storage and refuses excess storage without dropping
+constraints. These capacity changes do not relax accuracy, causality or
+passivity requirements.
 
 The physical image is uniform circular apertures in an infinite rigid baffle
 and homogeneous inviscid exterior gas. The force/velocity matrix is converted

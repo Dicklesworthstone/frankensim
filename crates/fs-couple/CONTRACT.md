@@ -7667,8 +7667,10 @@ flow exactly once, with buffers allocated at construction.
 
 The shared `dg_tube`/`dg_bore` input admits optional `dg_side_openings COUNT`
 before `dg_radiation`, followed by `dg_side_opening PORT_ID DOWNSTREAM_ELEMENT
-X_M Y_M RADIUS_M`. IDs exceed 1; faces and IDs are unique. The computed source's
-existing eight-opening cap permits seven side openings plus the axial outlet.
+X_M Y_M RADIUS_M`. IDs exceed 1; faces and IDs are unique. Native input admits
+32 side openings plus the axial outlet, matching the original DG owner;
+computed radiation retains all mutual terms through the shared channel-QR
+fitter, subject to the original frequency, runtime-state and memory allowances.
 The original element face is explicit: no station snapping occurs. These are
 zero-volume flush plane-wave junctions in one infinite rigid baffle, without
 finite chimneys, moving pads or free-field instrument-body scattering. Flue
