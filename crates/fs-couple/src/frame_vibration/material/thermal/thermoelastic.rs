@@ -36,6 +36,8 @@
 mod assembly;
 mod connection_heat;
 mod electrical;
+mod heat;
+pub use heat::{FrameHeatError, FrameHeatInput, FrameHeatTransfer};
 pub use assembly::{FrameThermoelasticBinding, FrameThermoelasticFrame};
 pub use connection_heat::{FrameConnectionHeat, FrameConnectionHeatDestination};
 pub use electrical::{FrameElectricalInput, FrameFieldStorageReport};
@@ -112,6 +114,8 @@ pub struct FrameThermoelasticEntropy {
     pub field_temporal_defect_j_k: f64,
     pub reservoir_entropy_input_j_k: f64,
     pub conduction_generation_j_k: f64,
+    /// Signed internal sum Q_radiation/T_endpoint, not authored source entropy.
+    pub radiation_exchange_entropy_j_k: f64,
     /// All deposited material/connector loss and, when bound, Joule loss over
     /// the actual receiving endpoint Kelvin. Reversible heat is separate.
     pub material_loss_generation_j_k: f64,
@@ -135,6 +139,10 @@ pub struct FrameThermoelasticReport {
     pub field_storage: Option<FrameFieldStorageReport>,
     pub thermal: EnergyAudit,
     pub source: MaterialNetworkSample,
+    /// Complete optional interface/layer/radiative calculation at the accepted endpoint.
+    pub heat_transfer: Option<FrameHeatTransfer>,
+    /// Uncorrected numerical net of the closed enclosure, excluded from supply.
+    pub closed_radiation_net_j: f64,
     pub members: Vec<FrameThermoelasticMemberState>,
     pub layers: Vec<FrameThermoelasticLayerExchange>,
     /// Original non-frame connection losses routed into explicit caloric cells.
@@ -643,7 +651,7 @@ impl FrameThermoelasticSystem<'_, '_> {
         energy_guess_j: &[f64],
         gate: &CancelGate,
     ) -> Result<FrameThermoelasticReport> {
-        self.step_inner(thermal, external_modal_forces, None, controls, energy_guess_j, gate)
+        self.step_inner(thermal, external_modal_forces, None, None, controls, energy_guess_j, gate)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -652,6 +660,7 @@ impl FrameThermoelasticSystem<'_, '_> {
         thermal: &mut DepositionSimulation<'_>,
         external_modal_forces: &[f64],
         electrical_input: Option<FrameElectricalInput<'_>>,
+        heat: Option<&heat::Trial<'_, '_, '_, '_>>,
         controls: FrameThermalSolve,
         energy_guess_j: &[f64],
         gate: &CancelGate,
@@ -759,17 +768,30 @@ impl FrameThermoelasticSystem<'_, '_> {
                     thermal, target, controls.driver(), energy_guess_j,
                     |trial, _remaining| {
                         check(gate)?;
+                        let (resolved, heat_transfer) = match heat {
+                            Some(heat) => {
+                                let (coefficients, transfer) = heat.resolve(trial, gate)?;
+                                (electrical::advance_resolved(electrical.as_ref(), electrical_input,
+                                    field_prepared.as_ref(), coefficients, trial, dt_heat,
+                                    controls.total_energy_tolerance_j, gate)?, Some(transfer))
+                            }
+                            None => (electrical::resolve(
+                                electrical.as_ref(), electrical_input, prepared, field_prepared.as_ref(),
+                                trial, dt_heat, controls.total_energy_tolerance_j, gate,
+                            )?, None),
+                        };
                         let electrical::ResolvedElectrical {
                             bulk: mut network_source, circuit, field_storage, reversible_sources,
-                        } = electrical::resolve(
-                            electrical.as_ref(), electrical_input, prepared, field_prepared.as_ref(),
-                            trial, dt_heat, controls.total_energy_tolerance_j, gate,
-                        )?;
+                        } = resolved;
                         // Capture independent sources before adding signed reversible exchange.
                         let mut independent_entropy = 0.0;
                         let mut has_independent = false;
                         for (&id, cell) in trial.cells() {
-                            for power in [cell.boundary.source_w, network_source.sources_w.get(&id).copied().unwrap_or(0.0)] {
+                            // Radiation is already present in the native source map but is
+                            // internal transfer, not independent external heating.
+                            let radiative = heat_transfer.as_ref().map_or(0.0, |h| h.cell_power_w(id));
+                            let independent = finite(network_source.sources_w.get(&id).copied().unwrap_or(0.0) - radiative)?;
+                            for power in [cell.boundary.source_w, independent] {
                                 if power != 0.0 { has_independent = true; }
                                 independent_entropy = finite(independent_entropy+dt_heat*power/trial.temperature_k(id)?)?;
                             }
@@ -814,7 +836,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                             circuit: electrical::Driver::new(MechanicalCandidate { frame: frame.clone(), stored_before_j: before,
                                 material_heat_j, outside_loss_j: outside }, circuit)?,
                             sources_w: network_source.sources_w, conductances_w_k: network_source.conductances_w_k,
-                            source: (network_source.source, next_states, exchanges, independent_entropy, has_independent, field_storage),
+                            source: (network_source.source, next_states, exchanges, independent_entropy, has_independent, field_storage, heat_transfer),
                             circuit_trials: 1,
                         })
                     },
@@ -837,7 +859,11 @@ impl FrameThermoelasticSystem<'_, '_> {
 
                 let electrical_work = electrical_report.as_ref().map_or(0.0, |step| step.native.supplied);
                 let electrical_heat = electrical_report.as_ref().map_or(0.0, |step| step.heat_j);
-                let (source, next_states, layers, independent_entropy, has_independent, field_storage) = audit.source;
+                let (source, next_states, layers, independent_entropy, has_independent, field_storage, heat_transfer) = audit.source;
+                let (closed_radiation_net_j, radiation_entropy) = match &heat_transfer {
+                    Some(transfer) => transfer.exchange(&candidate, dt_heat, gate)?,
+                    None => (0.0, 0.0),
+                };
                 let electrical_storage_change = match &field_storage {
                     Some(field) => finite(field.internal_energy_j[1] - field.internal_energy_j[0])?,
                     None => electrical_report.as_ref().map_or(0.0,
@@ -917,7 +943,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                     return Err(invalid("native endpoint stiffness work and original thermoelastic potential disagree"));
                 }
                 let reversible_heat_j = sum(layers.iter().map(|l| l.reversible_heat_j))?;
-                let external_heat = finite(audit.non_electrical_heat_j-reversible_heat_j-field_heat)?;
+                let external_heat = finite(audit.non_electrical_heat_j-reversible_heat_j-field_heat-closed_radiation_net_j)?;
                 let internal_after = finite(frame.total_energy_j()+parameter_work_j
                     +sum(next_states.iter().flat_map(|s| s.layers.iter().map(|l| l.temperature_k*l.entropy_j_k)))?)?;
                 let residual = finite(internal_after-internal_before+audit.thermal.stored_energy_change_j
@@ -938,6 +964,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                     field_temporal_defect_j_k: field_split,
                     reservoir_entropy_input_j_k: e.reservoir_entropy_input_j_k,
                     conduction_generation_j_k: e.conduction_generation_j_k,
+                    radiation_exchange_entropy_j_k: radiation_entropy,
                     material_loss_generation_j_k: e.electrical_loss_generation_j_k,
                     unclassified_source_at_cell_j_k: independent_entropy, has_unclassified_sources: has_independent,
                     reversible_transfer_entropy_j_k: reversible_entropy,
@@ -946,12 +973,12 @@ impl FrameThermoelasticSystem<'_, '_> {
                     algebraic_residual_j_k: e.algebraic_residual_j_k,
                     accounting_residual_j_k: sum([e.thermal_storage_change_j_k, mechanical_entropy, field_entropy,
                         -e.reservoir_entropy_input_j_k, -e.conduction_generation_j_k,
-                        -e.electrical_loss_generation_j_k, -independent_entropy, -e.temporal_defect_j_k,
+                        -e.electrical_loss_generation_j_k, -independent_entropy, -radiation_entropy, -e.temporal_defect_j_k,
                         -split, -field_split, -e.algebraic_residual_j_k])?,
                 };
                 let report = FrameThermoelasticReport {
                     mechanical: mechanical_report, electrical: electrical_report, field_storage,
-                    thermal: audit.thermal, source, members: next_states.clone(),
+                    thermal: audit.thermal, source, heat_transfer, closed_radiation_net_j, members: next_states.clone(),
                     layers, connection_heat: loss_account.receivers, entropy, parameter_work_j, reversible_heat_j,
                     deposited_material_heat_j: material_heat_j, deposited_joule_heat_j: electrical_heat,
                     external_thermal_heat_j: external_heat, external_mechanical_loss_j: outside,
@@ -960,6 +987,9 @@ impl FrameThermoelasticSystem<'_, '_> {
                     nonlinear: audit.nonlinear, material_trials: audit.circuit_trials,
                     maximum_cell_residual_j: audit.maximum_cell_residual_j,
                 };
+                // Both execution authorities must admit BEFORE native mechanics
+                // publishes. No fallible thermal/source check follows publication.
+                if let Some(heat) = heat { heat.checkpoint(gate)?; }
                 Ok((candidate, report, update, next_states, next_circuit))
             },
         )?;

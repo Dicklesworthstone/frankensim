@@ -30,6 +30,7 @@ pub struct FrameFluidThermoelasticConfig {
 pub enum FrameFluidThermoelasticError {
     Thermal(FrameThermalError),
     Fluid(FrameFluidError),
+    Heat(FrameHeatError),
 }
 impl core::fmt::Display for FrameFluidThermoelasticError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -42,6 +43,11 @@ impl From<FrameThermalError> for FrameFluidThermoelasticError {
 }
 impl From<FrameFluidError> for FrameFluidThermoelasticError {
     fn from(e: FrameFluidError) -> Self { Self::Fluid(e) }
+}
+impl From<FrameHeatError> for FrameFluidThermoelasticError {
+    fn from(e: FrameHeatError) -> Self {
+        match e { FrameHeatError::Frame(error) => Self::Thermal(error), other => Self::Heat(other) }
+    }
 }
 type FluidResult<T> = core::result::Result<T, FrameFluidThermoelasticError>;
 fn frame_error(e: FrameVibrationError) -> FrameFluidThermoelasticError {
@@ -207,6 +213,52 @@ impl<'m, 'f, 'n, 'a, F> FrameFluidThermoelasticSystem<'m, 'f, 'n, 'a, F> {
         self.inner = self.inner.with_material_circuit(thermal, source, circuit, bases, gate)?;
         Ok(self)
     }
+    /// Preserve the full exterior memory while admitting source-bound electrical
+    /// interfaces and their original two-sided thermal receivers.
+    pub fn with_material_contact_circuit(mut self, thermal: &DepositionSimulation<'_>,
+        source: &'n crate::circuit_enthalpy::contacts::material::ElectricalContactNetwork<'a>,
+        circuit: MaterialCircuit, gate: &CancelGate) -> FluidResult<Self> {
+        self.inner = self.inner.with_material_contact_circuit(thermal, source, circuit, gate)?;
+        Ok(self)
+    }
+
+    /// Material C(T)/L(T) uses the same full-inertia frame/circuit/heat owner.
+    /// This changes material response, not geometry or exterior transport.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_material_field_circuit(mut self, thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>, circuit: MaterialCircuit,
+        bases: &[(usize, ElectricalPropertyBasis)],
+        fields: Vec<crate::circuit_enthalpy::field_storage::FieldThermalBinding>,
+        gate: &CancelGate) -> FluidResult<Self> {
+        self.inner = self.inner.with_material_field_circuit(thermal, source, circuit, bases, fields, gate)?;
+        Ok(self)
+    }
+
+    /// Same source-dependent field storage with original electrical interfaces.
+    pub fn with_material_contact_field_circuit(mut self, thermal: &DepositionSimulation<'_>,
+        source: &'n crate::circuit_enthalpy::contacts::material::ElectricalContactNetwork<'a>,
+        circuit: MaterialCircuit,
+        fields: Vec<crate::circuit_enthalpy::field_storage::FieldThermalBinding>,
+        gate: &CancelGate) -> FluidResult<Self> {
+        self.inner = self.inner.with_material_contact_field_circuit(thermal, source, circuit, fields, gate)?;
+        Ok(self)
+    }
+
+    /// Full material heat transport acts on the same original fluid-loaded
+    /// motion. Forces retain the original work-conjugate coordinate transform;
+    /// source and finite heat checks finish before any native state publishes.
+    /// The existing exterior fluid remains a held transport model and its loss
+    /// remains an external sink, not radiation or caloric heat in the solids.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_heat_network(&mut self, thermal: &mut DepositionSimulation<'_>,
+        nodal_force: &[f64], heat: FrameHeatInput<'_, '_, '_, '_>,
+        electrical: Option<FrameElectricalInput<'_>>, controls: FrameThermalSolve,
+        energy_guess_j: &[f64], gate: &CancelGate) -> FluidResult<FrameThermoelasticReport> {
+        self.project_forces(nodal_force, gate)?;
+        Ok(self.inner.step_heat_network(thermal, &self.native_force, heat, electrical,
+            controls, energy_guess_j, gate)?)
+    }
+
     pub fn electrical(&self) -> Option<&MaterialCircuit> { self.inner.electrical() }
     /// Electrical work, solid caloric storage, thermoelastic work and fluid
     /// memory are accepted on the original SINGLE transaction boundary.

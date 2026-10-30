@@ -110,7 +110,7 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
         energy_guess_j: &[f64],
         gate: &CancelGate,
     ) -> Result<FrameThermoelasticReport> {
-        self.step_inner(thermal, external_modal_forces, Some(input), controls, energy_guess_j, gate)
+        self.step_inner(thermal, external_modal_forces, Some(input), None, controls, energy_guess_j, gate)
     }
 }
 
@@ -214,21 +214,43 @@ pub(super) fn resolve(
     gate: &CancelGate,
 ) -> Result<ResolvedElectrical> {
     check(gate)?;
+    let coefficients = match binding {
+        Some(binding) => match &binding.contacts {
+            Some(source) => source.prepared.resolve(trial, || gate.is_requested())
+                .map_err(contact::source_error)?,
+            None => crate::circuit_enthalpy::contacts::ContactThermalCoefficients {
+                bulk: prepared.resolve(trial, || gate.is_requested()).map_err(network)?,
+                contacts: Vec::new(),
+            },
+        },
+        None => crate::circuit_enthalpy::contacts::ContactThermalCoefficients {
+            bulk: prepared.resolve(trial, || gate.is_requested()).map_err(network)?,
+            contacts: Vec::new(),
+        },
+    };
+    advance_resolved(binding, input, fields, coefficients, trial, dt, tolerance_j, gate)
+}
+
+// Source resolution is separable from native electrical evolution so a complete
+// heat network can supply the SAME thermal trial without repeating bulk work.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_resolved(
+    binding: Option<&Binding<'_, '_>>,
+    input: Option<FrameElectricalInput<'_>>,
+    fields: Option<&PreparedFieldThermal<'_>>,
+    coefficients: crate::circuit_enthalpy::contacts::ContactThermalCoefficients<MaterialNetworkSample>,
+    trial: &DepositionSimulation<'_>,
+    dt: f64,
+    tolerance_j: f64,
+    gate: &CancelGate,
+) -> Result<ResolvedElectrical> {
+    check(gate)?;
+    let crate::circuit_enthalpy::contacts::ContactThermalCoefficients { bulk, contacts } = coefficients;
     match (binding, input) {
-        (Some(binding), Some(input)) => {
-            let (bulk, contacts) = match &binding.contacts {
-                Some(source) => {
-                    let value = source.prepared.resolve(trial, || gate.is_requested())
-                        .map_err(contact::source_error)?;
-                    (value.bulk, value.contacts)
-                }
-                None => (prepared.resolve(trial, || gate.is_requested()).map_err(network)?, Vec::new()),
-            };
-            field::advance(binding, input, fields, bulk, contacts, trial, dt, tolerance_j, gate)
-        }
+        (Some(binding), Some(input)) =>
+            field::advance(binding, input, fields, bulk, contacts, trial, dt, tolerance_j, gate),
         (None, None) => {
-            let bulk = prepared.resolve(trial, || gate.is_requested()).map_err(network)?;
-            if !bulk.resistors.is_empty() || fields.is_some() {
+            if !bulk.resistors.is_empty() || !contacts.is_empty() || fields.is_some() {
                 return Err(invalid("frame electrical sources lack their original coupled owner"));
             }
             Ok(ResolvedElectrical { bulk, circuit: None, field_storage: None,
@@ -236,4 +258,49 @@ pub(super) fn resolve(
         }
         _ => Err(invalid("frame electrical sources and held inputs disagree")),
     }
+}
+
+// Full heat transport may replace the coefficient evaluator, never the accepted
+// electrical specimen or its physical heat partitions. Keep original maps on
+// the native owner and compare before any speculative mechanical step.
+pub(super) fn admit_heat_sources<S>(
+    binding: Option<&Binding<'_, '_>>,
+    coefficients: &mut crate::circuit_enthalpy::contacts::ContactThermalCoefficients<S>,
+    destinations: &[crate::circuit_enthalpy::ResistorCell],
+    routes: &[crate::circuit_enthalpy::contacts::ContactHeatCells],
+    thermal: &DepositionSimulation<'_>,
+    gate: &CancelGate,
+) -> Result<()> {
+    check(gate)?;
+    match binding {
+        Some(binding) => {
+            crate::circuit_enthalpy::field_storage::admit_circuit_sources(
+                &binding.circuit, &mut coefficients.bulk.resistors, &mut coefficients.contacts,
+                || gate.is_requested(),
+            )?;
+            let map: BTreeMap<_, _> = destinations.iter().map(|r| (r.branch, r.cell)).collect();
+            if map.len() != destinations.len() || map != binding.destinations {
+                return Err(invalid("complete heat network changed original resistor receivers"));
+            }
+            let routes = crate::circuit_enthalpy::contacts::admit_routes(
+                thermal, &binding.circuit, routes, || {
+                    if gate.is_requested() { Err(DepositionError::Cancelled) } else { Ok(()) }
+                },
+            )?;
+            let same = match &binding.contacts {
+                Some(original) => routes == original.routes,
+                None => routes.is_empty(),
+            };
+            if !same {
+                return Err(invalid("complete heat network changed original contact heat partitions"));
+            }
+        }
+        None => {
+            if !coefficients.bulk.resistors.is_empty() || !coefficients.contacts.is_empty()
+                || !destinations.is_empty() || !routes.is_empty() {
+                return Err(invalid("unpowered frame cannot discard heat-network electrical work"));
+            }
+        }
+    }
+    check(gate)
 }

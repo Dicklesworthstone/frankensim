@@ -636,38 +636,8 @@ pub(crate) fn driven_candidate<'m, S, E: From<FieldThermalError>>(
     check(&cancel).map_err(map_field_error)?;
     super::admit_driver_unknowns(thermal, controls, guess_j)?;
     let mut initial = resolve(thermal)?;
-    initial.bulk.resistors.sort_unstable_by_key(|r| r.branch);
-    // Source pinning changes policy receipts, not physical material state.
-    // Keep the original exact source, complete key, basis and geometry checks.
-    if initial.bulk.resistors.len() != circuit.resistors().len()
-        || initial.bulk.resistors.iter().zip(circuit.resistors()).any(|(a, b)| {
-            let x = &a.conductor;
-            let y = &b.conductor;
-            a.branch != b.branch || x.source_basis() != y.source_basis()
-                || x.source_key() != y.source_key()
-                || x.length_m().to_bits() != y.length_m().to_bits()
-                || x.area_m2().to_bits() != y.area_m2().to_bits()
-                || x.resistance_ohm().to_bits() != y.resistance_ohm().to_bits()
-                || !same_material(x.material(), y.material())
-        }) {
-        return Err(CircuitEnthalpyError::Invalid(
-            "field circuit must retain its original bulk sources and geometry",
-        ));
-    }
-    super::contacts::admit_sources(circuit, &initial.contacts, || (*cancel.borrow_mut())())?;
-    initial.contacts.sort_unstable_by_key(|contact| contact.id());
-    for (actual, expected) in circuit.contacts().iter().zip(&initial.contacts) {
-        check(&cancel).map_err(map_field_error)?;
-        if actual.id() != expected.id() || actual.branch() != expected.branch()
-            || actual.area_m2().to_bits() != expected.area_m2().to_bits()
-            || actual.resistance_ohm().to_bits() != expected.resistance_ohm().to_bits()
-            || actual.source().resolved().query() != expected.source().resolved().query()
-        {
-            return Err(CircuitEnthalpyError::Invalid(
-                "field circuit and original interface state or geometry disagree",
-            ));
-        }
-    }
+    admit_circuit_sources(circuit, &mut initial.bulk.resistors, &mut initial.contacts,
+        || (*cancel.borrow_mut())())?;
     let fields = PreparedFieldThermal::new(material, thermal, circuit.into(), bindings, &cancel)
         .map_err(map_field_error)?;
     let dt = target_s - thermal.time_s();
@@ -718,4 +688,50 @@ fn map_field_error<E: From<FieldThermalError>>(error: Error) -> CircuitEnthalpyE
         CircuitEnthalpyError::CircuitBudget => CircuitEnthalpyError::CircuitBudget,
         CircuitEnthalpyError::Cancelled => CircuitEnthalpyError::Cancelled,
     }
+}
+
+// Shared physical-state admission for composition with other original owners.
+// Policy receipts may become pins, but selected laws, coordinates and geometry
+// cannot silently change at the accepted boundary. This performs no time step.
+pub(crate) fn admit_circuit_sources<E>(
+    circuit: &MaterialCircuit,
+    resistors: &mut [crate::material_circuit::MaterialResistor],
+    contacts: &mut [crate::material_circuit::contacts::SeriesElectricalContact],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(), CircuitEnthalpyError<E>> {
+    if cancelled() { return Err(CircuitEnthalpyError::Cancelled); }
+    resistors.sort_unstable_by_key(|r| r.branch);
+    // Source pinning changes policy receipts, not physical material state.
+    // Keep the original exact source, complete key, basis and geometry checks.
+    if resistors.len() != circuit.resistors().len()
+        || resistors.iter().zip(circuit.resistors()).any(|(a, b)| {
+            let x = &a.conductor;
+            let y = &b.conductor;
+            a.branch != b.branch || x.source_basis() != y.source_basis()
+                || x.source_key() != y.source_key()
+                || x.length_m().to_bits() != y.length_m().to_bits()
+                || x.area_m2().to_bits() != y.area_m2().to_bits()
+                || x.resistance_ohm().to_bits() != y.resistance_ohm().to_bits()
+                || !same_material(x.material(), y.material())
+        }) {
+        return Err(CircuitEnthalpyError::Invalid(
+            "field circuit must retain its original bulk sources and geometry",
+        ));
+    }
+    super::contacts::admit_sources(circuit, contacts, &mut cancelled)?;
+    contacts.sort_unstable_by_key(|contact| contact.id());
+    for (actual, expected) in circuit.contacts().iter().zip(contacts.iter()) {
+        if cancelled() { return Err(CircuitEnthalpyError::Cancelled); }
+        if actual.id() != expected.id() || actual.branch() != expected.branch()
+            || actual.area_m2().to_bits() != expected.area_m2().to_bits()
+            || actual.resistance_ohm().to_bits() != expected.resistance_ohm().to_bits()
+            || actual.source().resolved().query() != expected.source().resolved().query()
+        {
+            return Err(CircuitEnthalpyError::Invalid(
+                "field circuit and original interface state or geometry disagree",
+            ));
+        }
+    }
+    if cancelled() { return Err(CircuitEnthalpyError::Cancelled); }
+    Ok(())
 }

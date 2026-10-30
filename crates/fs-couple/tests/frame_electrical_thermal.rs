@@ -2,6 +2,8 @@
 //! Manufactured SI fixtures; not experimental validation of a measured alloy.
 #[path = "frame_electrical_thermal/contacts.rs"]
 mod contacts;
+#[path = "frame_electrical_thermal/heat.rs"]
+mod heat;
 
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, ResistorCell,

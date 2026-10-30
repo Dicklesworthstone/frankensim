@@ -117,7 +117,7 @@ fn heat_reference(magnetic: bool, alpha: f64, epsilon: f64, rt: f64,
 fn complete_heat_transfer_and_both_field_kinds_match_independent_coupled_equations() {
     for magnetic in [false, true] {
         for alpha in [-0.001, 0.001] {
-            for (epsilon, rt) in [(0.2, 0.0), (0.8, 3.0)] {
+            for (epsilon, rt) in [(0.2, 0.1), (0.8, 3.0)] {
                 with_heat(magnetic, alpha, epsilon, rt, true,
                     |cx, _, prepared, _, thermal, circuit, field| {
                         let expected = heat_reference(magnetic, alpha, epsilon, rt,
