@@ -32,6 +32,8 @@ pub(super) struct PreparedLayerTemperatures {
 
 /// Finite caloric cells, original relaxation heat and rate feedback on one clock.
 pub mod heat;
+/// Atomic conditions across several original frame-material bindings.
+pub mod shared;
 
 impl<F> FrameRelaxationBinding<'_, '_, F> {
     /// Re-evaluate the SAME layer claims at prescribed temperatures and update
@@ -61,10 +63,7 @@ impl<F> FrameRelaxationBinding<'_, '_, F> {
         layers: &[FrameRelaxationLayerTemperature<'_>],
         gate: &CancelGate,
     ) -> Result<MaterialRelaxationTimeReport> {
-        let prepared = self.prepare_layer_temperatures(mechanical, layers, gate)?;
-        let report = mechanical.set_material_relaxation_times(&prepared.updates, gate)?;
-        self.install_layer_temperatures(prepared);
-        Ok(report)
+        shared::set_layer_temperatures(std::slice::from_mut(self), mechanical, &[layers], gate)
     }
 
     pub(super) fn prepare_layer_temperatures(

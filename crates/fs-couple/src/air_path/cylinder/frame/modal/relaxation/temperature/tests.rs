@@ -194,3 +194,5 @@ fn unchanged_rates_refresh_original_receipts_but_curve_storage_and_stale_native_
     assert!(binding2.set_layer_temperatures(&mut system2,&temperatures(&curved,[300.0,300.0]),&gate).is_err());
     assert_eq!(system2.samples_rendered(),0);
 }
+
+mod shared;
