@@ -10,6 +10,8 @@ use super::*;
 use crate::volumes::transport::timeline::MediumTimeline;
 
 mod execution;
+#[cfg(feature = "volumes")]
+mod media;
 pub use execution::{
     SceneExposureFilm, render_scene_exposure, render_scene_exposure_range,
     render_scene_exposure_range_with_execution, render_scene_exposure_with_execution,
@@ -73,6 +75,23 @@ pub enum SceneExposureError {
     TimeOutsideExposure,
     /// The complete shutter is not covered by the accepted scene history.
     ShutterOutsideHistory,
+    /// Every supplied scene frame requires exactly one physical field owner.
+    #[cfg(feature = "volumes")]
+    MediumFrameCount {
+        /// Number of supplied scene frames.
+        expected: usize,
+        /// Number of supplied field owners.
+        actual: usize,
+    },
+    /// Primitive IDs must be bound to the exact accepted geometry owner.
+    #[cfg(feature = "volumes")]
+    MediumSceneMismatch {
+        /// Frame with a different scene than its physical field owner.
+        index: usize,
+    },
+    /// Per-frame owners and an independent ambient timeline cannot both own it.
+    #[cfg(feature = "volumes")]
+    ConflictingMediumOwners,
 }
 
 impl core::fmt::Display for SceneExposureError {
@@ -107,6 +126,10 @@ pub struct SceneExposure<'a> {
     pub(super) camera: CameraPath<'a>,
     #[cfg(feature = "volumes")]
     pub(super) medium: Option<MediumInput<'a, 'a>>,
+    #[cfg(feature = "volumes")]
+    pub(super) scene_media: Option<&'a [&'a SceneMedia<'a, 'a>]>,
+    #[cfg(feature = "volumes")]
+    scene_media_identity: Option<ContentHash>,
     history_identity: ContentHash,
     camera_identity: Option<ContentHash>,
 }
@@ -228,6 +251,10 @@ impl<'a> SceneExposure<'a> {
             camera: CameraPath::Legacy,
             #[cfg(feature = "volumes")]
             medium: None,
+            #[cfg(feature = "volumes")]
+            scene_media: None,
+            #[cfg(feature = "volumes")]
+            scene_media_identity: None,
             history_identity: hash.finalize(),
             camera_identity: None,
         })
@@ -255,6 +282,10 @@ impl<'a> SceneExposure<'a> {
         cx: &Cx<'_>,
         history: &'a MediumTimeline<'a, 'a>,
     ) -> Result<Self, TracerError> {
+        cx.checkpoint()?;
+        if self.scene_media.is_some() {
+            return Err(SceneExposureError::ConflictingMediumOwners.into());
+        }
         history.admit_shutter(cx, self.shutter)?;
         self.medium = Some(MediumInput::Timeline(history));
         Ok(self)
@@ -305,6 +336,13 @@ impl<'a> SceneExposure<'a> {
             }
             None => hash.update(&[0]),
         }
+        // Preserve the existing unbound exposure identity. A bound history
+        // adds a distinct suffix computed once from its accepted field owners.
+        #[cfg(feature = "volumes")]
+        if let Some(identity) = self.scene_media_identity {
+            hash.update(&[4]);
+            hash.update(identity.as_bytes());
+        }
         hash.finalize()
     }
 
@@ -323,6 +361,10 @@ impl<'a> SceneExposure<'a> {
             return Err(SceneExposureError::TimeOutsideExposure.into());
         }
         let index = self.frame_index(absolute_time_s);
+        #[cfg(feature = "volumes")]
+        if let Some(media) = self.scene_media {
+            return Ok((self.frames[index].scene, &media[index].lighting));
+        }
         let lighting = self.lighting[index]
             .as_ref()
             .ok_or(TracerError::InvalidInput)?;

@@ -651,6 +651,20 @@ differentiable lift). Pure Rust throughout.
   atomic publication. Focused tests exercise independent Planck/reflection
   integration, per-sample frozen-state lighting oracles, topology changes,
   medium/moving-source clock coherence, exact execution replay and rollback.
+  With `volumes`, `with_scene_media` attaches one already-admitted `SceneMedia`
+  owner to every supplied frame. Primitive-index bindings must borrow that
+  frame's exact scene; mismatched geometry and competing ambient-timeline
+  ownership are refused. The same shutter lookup selects geometry, ambient and
+  interior density/temperature, coefficients, phase functions and refractive
+  owners. Accepted frames may change topology or primitive numbering without
+  carrying the prior frame's field bindings into the next state. The exposure
+  borrows each owner's prepared lighting and releases its duplicate hierarchy
+  metadata. Media continuity is hashed once at attachment; lookup and progressive
+  append do not rehash cell fields or rebuild proposals. Tests compare every
+  sampled state with independent frozen-scene paths, exercise exact internal
+  and final endpoints, and verify cinematic-camera, tile and progressive replay
+  plus changed-field/cancellation rollback. These per-frame owners hold static
+  world-space fields; continuously moving interior grids remain unsupported.
   This is quasi-static uniform exposure rendering; adaptive/AOV history and
   finite light travel time are outside this entry point's contract.
 - **Physical volume-source lighting (`tracer,volumes`):**
@@ -663,10 +677,11 @@ differentiable lift). Pure Rust throughout.
   marginalize radius into the complete solid-angle PDF, including cells behind
   occluders, while source radiance is integrated only up to the first surface.
   This removes the point estimator's inverse-square near-field singularity
-  without a distance clamp. Ambient opaque and phase vertices, and the ambient
-  side of rough dielectric interfaces, sample this source alongside existing
-  lights. Rough reflection and transmission use the actual wavelength-dependent
-  Fresnel, visible-normal density and radiance eta factors. Dispersive suffixes
+  without a distance clamp. Opaque and phase vertices sample their active
+  region's source alongside existing lights; rough dielectric interfaces sample
+  each emitting side's explicit region. Rough reflection and transmission use
+  the actual wavelength-dependent Fresnel, visible-normal density and radiance
+  eta factors. Dispersive suffixes
   retain each lane's own competing density; an interior-facing connection never
   integrates the displaced ambient grid. Complementary balance/power MIS weights
   the source integral before the stochastic free-flight outcome; surface-light survival

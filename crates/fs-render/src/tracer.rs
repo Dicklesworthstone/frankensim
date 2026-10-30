@@ -9963,9 +9963,25 @@ fn trace_pixel_sample_with_scene_exposure(
             interval.sample_for_stream(settings.seed, u64::from(pixel), u64::from(sample));
         (interval, normalized)
     });
+    // Physical owners use exactly the geometry frame's accepted clock. The
+    // lookup happens once per primary sample; recursive continuations retain
+    // the selected owner, including its ambient field and prepared lighting.
+    #[cfg(feature = "volumes")]
+    let scene_media = match scene_exposure {
+        Some(exposure) => {
+            let (interval, normalized) = sampled_time.ok_or(TracerError::InvalidInput)?;
+            exposure.media_at_time(interval.time_at(normalized))?
+        }
+        None => scene_media,
+    };
     // Select before caching moving geometry and keep this state for the entire
     // path, including all spectral/Fresnel continuations and light proposals.
     let (scene, lighting) = match scene_exposure {
+        #[cfg(feature = "volumes")]
+        Some(_) if scene_media.is_some() => {
+            let media = scene_media.ok_or(TracerError::InvalidInput)?;
+            (media.scene, &media.lighting)
+        }
         Some(exposure) => {
             let (interval, normalized) = sampled_time.ok_or(TracerError::InvalidInput)?;
             exposure.at_time(interval.time_at(normalized))?
@@ -9998,16 +10014,19 @@ fn trace_pixel_sample_with_scene_exposure(
         None => None,
     };
     #[cfg(feature = "volumes")]
-    let medium = medium
-        .map(|source| {
-            source.at_time(
-                ray_time
-                    .as_ref()
-                    .map(|time| time.interval.time_at(time.normalized)),
-            )
-        })
-        .transpose()?
-        .flatten();
+    let medium = match scene_media {
+        Some(media) => media.ambient_path(),
+        None => medium
+            .map(|source| {
+                source.at_time(
+                    ray_time
+                        .as_ref()
+                        .map(|time| time.interval.time_at(time.normalized)),
+                )
+            })
+            .transpose()?
+            .flatten(),
+    };
     trace_path_with_regions(
         scene,
         lighting,

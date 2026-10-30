@@ -1,6 +1,9 @@
 //! G1/G3/G4/G5: physical cell transport belongs to the active glass interior.
 #![cfg(all(feature = "tracer", feature = "volumes"))]
 
+#[path = "scene_media/exposure.rs"]
+mod exposure;
+
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, RunId, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::charts::TriMesh;
