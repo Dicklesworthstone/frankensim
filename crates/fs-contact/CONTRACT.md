@@ -1278,3 +1278,11 @@ cover independent volume/force/energy references, source asymmetry, every
 active set, plate exchange, symmetric reduction, ODE refinement and atomic
 refusals. Both models retain connected two-dimensional, acute-angle, frozen
 source applicability; they do not resolve bulk liquid flow or pinch-off.
+
+## Dynamic circular contact lines on actual axisymmetric liquid bridges
+
+`axisymmetric::contact_line::SourceAxisymmetricContactLineBridge` retains the original liquid and both ordered wetting sources while evolving a genuine circular footprint. This initial branch requires equal Young angle, line friction and advancing/receding thresholds on the two surfaces. The original Young--Laplace first integral and quadrature supply fixed-volume shape, pressure and surface area; no toroidal or planar substitute is used.
+
+Inverse gap/radius geometry has analytic first variations and a reciprocal Hessian. A symmetric discrete gradient and actual circular-perimeter resistance exchange normal work with surface storage, viscous line loss and pinning loss. Canonical physical coordinates retain separate geometric residuals, and shape/force/work estimates must fit explicit numerical budgets. Bounded local solves and actual-source mechanical continuation share the existing dynamic load-line owner.
+
+Six focused test groups cover original Young-equilibrium reduction, independent radial-graph shape integration and first variations, physical perimeter losses and eventual pinning, analytic implicit tangent, second-order refinement against independent shooting/RK4, source/domain restrictions and atomic refusal. Liquid motion remains quasistatic and line-friction dominated; unequal circular footprints, bulk-flow inertia/dissipation, topology changes and full 3-D stability remain outside this branch.

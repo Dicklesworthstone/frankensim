@@ -49,6 +49,9 @@ mod numerics;
 /// Work-conjugate coupling to the original mechanical held-force compliance.
 pub mod load_line;
 
+/// Finite-rate circular contact-line motion on the original Young--Laplace shape.
+pub mod contact_line;
+
 /// Explicit suction branch; q=-Delta_p*a/gamma, a the actual neck radius.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AxisymmetricBranch {
