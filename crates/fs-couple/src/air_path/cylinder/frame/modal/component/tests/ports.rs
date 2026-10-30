@@ -110,7 +110,7 @@ fn two_original_wet_bodies_exchange_reciprocal_force_in_one_complete_native_step
         a_port.accumulate_forces(network.components(),&effort[..1],&mut force,&gate).unwrap();
         b_port.accumulate_forces(network.components(),&effort[1..],&mut force,&gate).unwrap();
         let expected=exact.step(&state,&effort).unwrap();
-        let actual=network.step(&force,&gate).unwrap();
+        let actual=network.step_under_gate(&force,&gate).unwrap().clone();
         let mut recovered=a_map.physical_state(network.components(),&gate).unwrap();
         recovered.extend(b_map.physical_state(network.components(),&gate).unwrap());
         for (x,y) in recovered.iter().zip(&expected.x) {near(*x,*y);}

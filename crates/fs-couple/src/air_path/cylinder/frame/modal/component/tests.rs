@@ -108,7 +108,7 @@ fn original_complete_phs_trajectory_work_and_loss_match_shared_native_assembly()
             model.basis().project_force_into(&nodal, [0.0;2], &mut dry_force, ||false).unwrap();
             force[..m].copy_from_slice(&placement.project_nodal_force(&nodal, &gate).unwrap());
             let reference = exact.step(&state, &dry_force).unwrap();
-            let actual = network.step(&force, &gate).unwrap();
+            let actual = network.step_under_gate(&force, &gate).unwrap().clone();
             for (&a, b) in reference.x.iter().zip(placement.physical_state(network.components(), &gate).unwrap()) { near(a,b); }
             near(actual.external_work_j, reference.supplied);
             near(actual.total_dissipation_j(), reference.dissipated);
@@ -162,7 +162,7 @@ fn dry_component_is_the_same_source_damped_frame_without_artificial_memory() {
     assert_eq!(map.fluid_component(),None);
     assert!(map.connections().fluid_regions.is_empty());
     for _ in 0..8 {
-        network.step(&[0.01], &gate).unwrap(); original.step(&[0.01], &gate).unwrap();
+        network.step_under_gate(&[0.01], &gate).unwrap(); original.step_under_gate(&[0.01], &gate).unwrap();
         let actual = map.physical_state(network.components(), &gate).unwrap();
         near(actual[0], original.components()[0].states()[0].displacement_m_sqrt_kg);
         near(actual[1], original.components()[0].states()[0].velocity_m_sqrt_kg_per_s);
@@ -181,7 +181,7 @@ fn data_only_solid_and_exterior_substitutions_change_native_forced_motion() {
         let gate=CancelGate::new_clock_free();
         let mut force=vec![0.0;network.mode_count()];
         force[0]=map.project_nodal_force(&[0.0,0.0,0.0,0.0,0.01,0.0],&gate).unwrap()[0];
-        for _ in 0..24 { network.step(&force,&gate).unwrap(); }
+        for _ in 0..24 { network.step_under_gate(&force,&gate).unwrap(); }
         let (mut u,mut v)=([0.0;6],[0.0;6]);
         map.reconstruct_into(network.components(),&mut u,&mut v,&gate).unwrap();
         outputs.push(u[4]);
@@ -204,13 +204,13 @@ fn refusal_cancellation_and_retry_do_not_reset_source_or_any_memory() {
     let before=map.physical_state(network.components(),&gate).unwrap();
     let force=vec![0.0;network.mode_count()];
     let mut bad=force.clone();bad[0]=1e100;
-    assert!(network.step(&bad,&gate).is_err());
+    assert!(network.step_under_gate(&bad,&gate).is_err());
     assert_eq!(map.physical_state(network.components(),&gate).unwrap(),before);
     assert_eq!(network.samples_rendered(),0);
     let cancelled=CancelGate::new_clock_free();cancelled.request();
-    assert!(network.step(&force,&cancelled).is_err());
+    assert!(network.step_under_gate(&force,&cancelled).is_err());
     assert!(map.reconstruct_into(network.components(),&mut [0.0;6],&mut [0.0;6],&cancelled).is_err());
-    let a=network.step(&force,&gate).unwrap();let b=control.step(&force,&gate).unwrap();
+    let a=network.step_under_gate(&force,&gate).unwrap();let b=control.step_under_gate(&force,&gate).unwrap();
     assert_eq!(a,b);
     assert_eq!(map.physical_state(network.components(),&gate).unwrap(),control_map.physical_state(control.components(),&gate).unwrap());
     assert_eq!(state,saved);

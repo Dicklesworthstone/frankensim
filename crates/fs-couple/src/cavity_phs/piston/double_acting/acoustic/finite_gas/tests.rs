@@ -178,6 +178,37 @@ fn species_mass(parcels: &Parcels, index: usize) -> f64 {
 }
 
 #[test]
+fn staged_complete_load_refuses_unowned_molecular_heat_before_caloric_trials() {
+    let (parcels, loads, inputs) = fixture(acoustic_fixture::forcing().duration_s);
+    let original = &loads[&10];
+    let mut marched = original.clone();
+    let output = marched.preview_step(0.0).unwrap().accept();
+    let mut staged = StagedPort {
+        original,
+        marched: &marched,
+        output: &output,
+        endpoint: None,
+    };
+    let mut gas = parcels[&10].clone();
+    for heat in [1e-6, -1e-6, f64::NAN, f64::INFINITY] {
+        let result = staged.advance::<(), (), _>(
+            &mut gas,
+            &inputs[&10],
+            heat,
+            |_, _, _, _| panic!("unowned molecular heat reached a caloric trial"),
+            &mut || false,
+        );
+        assert!(matches!(result, Err(FiniteGasDgError::Invalid(
+            "complete passive loads do not own the source-wall molecular heat integral"
+        ))));
+        assert_eq!(gas, parcels[&10]);
+        assert!(staged.endpoint.is_none());
+        assert_eq!(staged.current().state(), original.state());
+        assert_eq!(marched.state().step_count(), original.state().step_count() + 1);
+    }
+}
+
+#[test]
 fn one_transport_snapshot_and_one_shared_motion_close_the_actual_enclosure() {
     let input = acoustic_fixture::forcing();
     let live = acoustic_fixture::pair(0.03);

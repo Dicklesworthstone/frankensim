@@ -380,6 +380,7 @@ pub(super) fn step_with_contact_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reed_bore::{FastSolveStats, ReedSolverMode};
     use crate::unilateral_contact::slit_lay;
 
     fn reed() -> BeatingReed {

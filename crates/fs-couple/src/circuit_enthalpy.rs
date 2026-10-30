@@ -432,7 +432,7 @@ pub(crate) fn coupled_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver
     }, with_entropy, || (*cancel.borrow_mut())())
 }
 
-fn admit_driver_unknowns<E>(
+pub(crate) fn admit_driver_unknowns<E>(
     thermal: &DepositionSimulation<'_>, controls: CircuitEnthalpySolve,
     initial_energy_increments_j: &[f64],
 ) -> Result<(), CircuitEnthalpyError<E>> {

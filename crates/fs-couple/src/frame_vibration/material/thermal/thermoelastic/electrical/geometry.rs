@@ -215,7 +215,7 @@ impl FrameThermoelasticSystem<'_, '_> {
         self.electrical.as_ref().map_or(&[], |binding| binding.conductor_geometry.as_slice())
     }
 
-    pub(super) fn refresh_conductor_geometry(
+    pub(in super::super) fn refresh_conductor_geometry(
         &mut self, gate: &CancelGate,
     ) -> Result<Option<Vec<FrameConductorGeometry>>> {
         check(gate)?;
@@ -229,7 +229,7 @@ impl FrameThermoelasticSystem<'_, '_> {
         Ok(Some(previous))
     }
 
-    pub(super) fn restore_conductor_geometry(
+    pub(in super::super) fn restore_conductor_geometry(
         &mut self, previous: Option<Vec<FrameConductorGeometry>>,
     ) {
         if let (Some(binding), Some(previous)) = (&mut self.electrical, previous) {
