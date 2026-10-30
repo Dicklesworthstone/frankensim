@@ -17,6 +17,44 @@ use fs_material::thermal::source::{
     EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, ThermalMaterialPoint,
 };
 
+mod body;
+pub(super) use body::BodyRadiation;
+pub use body::{
+    FreeSurfaceBodyRadiationExchange, FreeSurfaceBodyRadiationFace, FreeSurfaceBodyRadiationSample,
+};
+
+pub(super) fn admit_emissivity(value: f64) -> Result<(), Error> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(Error::Invalid(
+            "total hemispherical emissivity must lie in [0,1]",
+        ));
+    }
+    Ok(())
+}
+
+// One fourth-power kernel for source-backed solid and liquid surfaces. The
+// exact positive secant preserves small fluxes near thermal equilibrium and
+// participates in the same combined thermal CFL as all other heat paths.
+fn radiant_conductance(
+    emissivity: f64,
+    area: f64,
+    temperature: f64,
+    bath: f64,
+) -> Result<f64, Error> {
+    if area == 0.0 || emissivity == 0.0 {
+        return Ok(0.0);
+    }
+    let value = environment::finite(
+        (emissivity * STEFAN_BOLTZMANN * area)
+            * (temperature + bath)
+            * (temperature * temperature + bath * bath),
+    )?;
+    if value <= 0.0 {
+        return Err(Error::Invalid("radiant conductance is unrepresentable"));
+    }
+    Ok(value)
+}
+
 /// The explicitly selected diffuse-gray surface law. Geometry and radiation
 /// reservoirs remain boundary data; a material law follows the original liquid.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,11 +183,7 @@ impl FreeSurfaceEmissivity {
         }
         .admit_static(emissivity)?;
         let value = emissivity.value_si();
-        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-            return Err(Error::Invalid(
-                "material total hemispherical emissivity must lie in [0,1]",
-            ));
-        }
+        admit_emissivity(value)?;
         Ok((value, Some(emissivity.clone())))
     }
 }
@@ -331,22 +365,8 @@ impl Conduction<'_, '_> {
                     face.emissivity.resolve(self.law, &liquid, temperature)?
                 }
             };
-            // Factoring preserves small fluxes near equilibrium. No difference
-            // of almost equal fourth powers and no empirical clipping occurs.
-            let conductance = if face.area_m2 == 0.0 || emissivity == 0.0 {
-                0.0
-            } else {
-                let bath = face.surroundings_k;
-                let value = environment::finite(
-                    (emissivity * STEFAN_BOLTZMANN * face.area_m2)
-                        * (temperature + bath)
-                        * (temperature * temperature + bath * bath),
-                )?;
-                if value <= 0.0 {
-                    return Err(Error::Invalid("radiant conductance is unrepresentable"));
-                }
-                value
-            };
+            let conductance =
+                radiant_conductance(emissivity, face.area_m2, temperature, face.surroundings_k)?;
             samples.push(FreeSurfaceRadiationSample {
                 face,
                 liquid_temperature_k: temperature,

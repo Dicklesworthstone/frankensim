@@ -167,6 +167,22 @@ temperature, with the initial source claim pinned throughout its lifetime.
 Changing material data changes the actual contact heat, subsequent liquid
 viscosity/buoyancy and native VOF populations.
 
+`with_radiation_faces` also binds canonical total hemispherical emissivity from
+that original solid card. Its selected claim joins the pinned conductivity
+bundle and refreshes at each actual caloric state; known zero is reflecting,
+while missing or unsupported data refuses. Explicit dry wall patches use the
+same diffuse-gray fourth-power kernel as liquid radiation. Their areas fit the
+remaining solid surface after contact coverage; gas films may share a patch.
+All paths use the same source timeline and summed capacity-based timestep
+bound. `body_radiation` and `heat_from_radiation_j` report the external radiant
+supply separately from internal contact and finite-gas heat. The gas never
+receives an opposite debit for the prescribed radiant bath. Source-only wall
+swaps therefore reach liquid enthalpy, viscosity and native populations.
+G1/G3/G4 regressions in `conduction/atmosphere/solid/radiation.rs` check an
+independent four-store balance, finite-capacity subcycling and atomic refusal.
+The fixed-wall, uniform-cell, opaque-gray approximation does not add melting,
+resolved solid boundary layers, spectral/participating-gas radiation or visibility.
+
 Finite wall cells may also retain explicit `FreeSurfaceBodyLink` geometry
 through `with_conduction_links`. Each unordered solid pair is declared once,
 with its actual shared area and two thermal-centroid distances. All existing
@@ -5158,7 +5174,7 @@ capacity bound includes all liquid and solid films together.
 
 `body_environment` reports direct gas/solid heat and actual source samples.
 `FreeSurfaceBodyExchange::heat_from_gas_j` is distinct from its
-`heat_to_liquid_j = heat_from_gas_j - solid_storage_change`. Direct gas/solid
+`heat_to_liquid_j = heat_from_gas_j + heat_from_radiation_j - solid_storage_change`. Direct gas/solid
 exchange never enters the liquid's external-heat account. The finite-gas audit
 closes actual liquid, solid and gas storage, retaining molecular and electrical
 heat in their existing accounts. All native VOF, material, thermal, geometry,

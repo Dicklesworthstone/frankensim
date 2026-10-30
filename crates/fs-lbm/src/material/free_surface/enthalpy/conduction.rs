@@ -28,6 +28,7 @@ pub use environment::{
 /// Gray surface radiation sharing the original thermal and native VOF interval.
 pub mod radiation;
 pub use radiation::{
+    FreeSurfaceBodyRadiationExchange, FreeSurfaceBodyRadiationFace, FreeSurfaceBodyRadiationSample,
     FreeSurfaceEmissivity, FreeSurfaceRadiationExchange, FreeSurfaceRadiationFace,
     FreeSurfaceRadiationSample,
 };
@@ -117,6 +118,8 @@ pub struct FreeSurfaceConductionReport {
     pub finite_gas: Option<FreeSurfaceFiniteGasExchange>,
     /// Direct finite-atmosphere/solid exchange on this same thermal timeline.
     pub body_environment: Option<FreeSurfaceBodyGasExchange>,
+    /// External radiant supply to finite solids on this same accepted interval.
+    pub body_radiation: Option<FreeSurfaceBodyRadiationExchange>,
     /// Actual native electrode supply and Joule heat, counted once in external heat.
     pub electrical: Option<FreeSurfaceElectricalExchange>,
 }
@@ -187,6 +190,7 @@ struct Conduction<'a, 'm> {
     implicit_surface_report: Option<FreeSurfaceImplicitReport>,
     finite_atmosphere: Option<atmosphere::FiniteAtmosphere>,
     body_atmosphere: atmosphere::BodyAtmosphere,
+    body_radiation: radiation::BodyRadiation,
     electrical: Option<electrical::ElectricalTimeline>,
 }
 
@@ -399,6 +403,14 @@ impl DepositionObserver for Conduction<'_, '_> {
             let watts = powers.entry(id).or_insert(0.0);
             *watts = environment::finite(*watts + sample.heat_into_liquid_w)?;
         }
+        self.body_radiation.last = self.sample_body_radiation(thermal, check)?;
+        for (&(index, _), sample) in self.body_radiation.faces.iter()
+            .zip(&self.body_radiation.last)
+        {
+            check()?;
+            let watts = powers.entry(self.body_ids[index]).or_insert(0.0);
+            *watts = environment::finite(*watts + sample.heat_into_solid_w)?;
+        }
         self.surface_last = self.sample_surfaces(thermal, check)?;
         if self.surface_reference.is_empty() {
             self.surface_reference = self.surface_last.clone();
@@ -510,6 +522,15 @@ impl DepositionObserver for Conduction<'_, '_> {
                 environment::finite(self.radiation_absolute_heat_j + heat.abs())?;
         }
         self.radiation_endpoint = self.sample_radiation(thermal, check)?;
+        for sample in &self.body_radiation.last {
+            check()?;
+            let heat = environment::finite(duration_s * sample.heat_into_solid_w)?;
+            self.body_radiation.heat_j = environment::finite(self.body_radiation.heat_j + heat)?;
+            self.body_radiation.absolute_heat_j = environment::finite(
+                self.body_radiation.absolute_heat_j + heat.abs(),
+            )?;
+        }
+        self.body_radiation.endpoint = self.sample_body_radiation(thermal, check)?;
         self.surface_endpoint = self.sample_surfaces(thermal, check)?;
         Ok(())
     }
@@ -714,11 +735,14 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             .saturating_add(surfaces.len());
         let mut solid_link_count = 0usize;
         let mut solid_gas_count = 0usize;
+        let mut solid_radiation_count = 0usize;
         for body in bodies.iter() {
             poll(gate)?;
             solid_link_count = solid_link_count.saturating_add(body.conduction_links().len());
             solid_gas_count = solid_gas_count.saturating_add(body.gas_faces().len());
+            solid_radiation_count = solid_radiation_count.saturating_add(body.radiation_faces().len());
             if other_faces.saturating_add(solid_link_count).saturating_add(solid_gas_count)
+                .saturating_add(solid_radiation_count)
                 > controls.maximum_faces
             {
                 return Err(Error::Invalid(
@@ -964,6 +988,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             bodies, finite_atmosphere.is_some(), dx, gate,
         )?;
         let radiation_endpoints = self.admit_radiation(radiation, &cell_id, dx, gate)?;
+        let body_radiation = self.admit_body_radiation(bodies, dx, gate)?;
         let surface_endpoints = self.admit_surfaces(surfaces, surface_solve, &cell_id, dx, gate)?;
         let mut powers = BTreeMap::new();
         let mut absolute_heat = 0.0;
@@ -1079,7 +1104,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             maximum_surface_patches: controls.maximum_faces
                 - (other_faces - surfaces.len())
                 - solid_link_count
-                - solid_gas_count,
+                - solid_gas_count
+                - solid_radiation_count,
             surface_stress,
             surface_endpoints,
             surface_last: Vec::new(),
@@ -1093,6 +1119,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             implicit_surface_report: None,
             finite_atmosphere: finite_atmosphere.as_deref().cloned(),
             body_atmosphere,
+            body_radiation,
             electrical,
         };
         #[cfg(feature = "implicit-enthalpy-coupling")]
@@ -1126,6 +1153,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             && radiation.is_empty()
             && surfaces.is_empty()
             && observer.body_atmosphere.faces.is_empty()
+            && observer.body_radiation.faces.is_empty()
             && electrical_report.is_none()
         {
             audit.external_heat_j
@@ -1133,10 +1161,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             let defect =
                 audit.external_heat_j - external_heat - viscous_heat - observer.environment_heat_j
                     - observer.radiation_heat_j - observer.surface_gas_heat_j
-                    - observer.surface_radiant_heat_j - joule_heat - observer.body_atmosphere.heat_j;
+                    - observer.surface_radiant_heat_j - joule_heat - observer.body_atmosphere.heat_j
+                    - observer.body_radiation.heat_j;
             if !defect.is_finite() || defect.abs() > controls.energy_tolerance_j {
                 return Err(Error::Invalid(
-                    "authored, molecular, electrical, gas-film and radiant liquid heat do not close",
+                    "authored, molecular, electrical, gas-film and radiant condensed heat do not close",
                 ));
             }
             external_heat + observer.environment_heat_j + observer.radiation_heat_j
@@ -1156,7 +1185,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             return Err(Error::Invalid("finite solid endpoint enthalpy overflows"));
         }
         let body_heat = if bodies.is_empty() { 0.0 } else {
-            observer.body_atmosphere.heat_j - body_change
+            observer.body_atmosphere.heat_j + observer.body_radiation.heat_j - body_change
         };
         if observer.body_states_endpoint.len() != bodies.len() {
             return Err(Error::Invalid(
@@ -1169,6 +1198,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             + observer.radiation_absolute_heat_j
             + observer.surface_absolute_heat_j
             + observer.body_atmosphere.absolute_heat_j
+            + observer.body_radiation.absolute_heat_j
             + joule_heat;
         let flow = if surface_stress {
             let surface = self.thermocapillary.expect("admitted surface-stress geometry");
@@ -1242,6 +1272,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             enthalpy_after_j: body_after,
             heat_to_liquid_j: body_heat,
             heat_from_gas_j: observer.body_atmosphere.heat_j,
+            heat_from_radiation_j: observer.body_radiation.heat_j,
             combined_balance_defect_j: flow.balance_defect_j,
             last_applied: body_last,
             thermal_endpoint: body_endpoint,
@@ -1255,8 +1286,16 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 thermal_endpoint: observer.body_atmosphere.endpoint,
             },
         );
+        let body_radiation = (!observer.body_radiation.faces.is_empty()).then_some(
+            FreeSurfaceBodyRadiationExchange {
+                heat_to_solids_j: observer.body_radiation.heat_j,
+                last_applied: observer.body_radiation.last,
+                thermal_endpoint: observer.body_radiation.endpoint,
+            },
+        );
         Ok(FreeSurfaceConductionReport {
             body_environment,
+            body_radiation,
             thermal: audit,
             flow,
             last_applied,

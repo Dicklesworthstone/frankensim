@@ -6,8 +6,8 @@ use super::*;
 use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel};
 
 mod body;
-pub use body::{FreeSurfaceBodyGasExchange, FreeSurfaceBodyGasFace, FreeSurfaceBodyGasSample};
 pub(super) use body::BodyAtmosphere;
+pub use body::{FreeSurfaceBodyGasExchange, FreeSurfaceBodyGasFace, FreeSurfaceBodyGasSample};
 
 /// Finite gas account over one accepted native VOF/enthalpy interval.
 ///
@@ -39,7 +39,10 @@ pub(super) struct FiniteAtmosphere {
 }
 
 impl FiniteAtmosphere {
-    pub(super) fn try_new(parcel: &IsochoricGasParcel, controls: GasEnergySolve) -> Result<Self, Error> {
+    pub(super) fn try_new(
+        parcel: &IsochoricGasParcel,
+        controls: GasEnergySolve,
+    ) -> Result<Self, Error> {
         let temperature_slope = parcel
             .model()
             .maximum_isochoric_temperature_slope(controls)?;
@@ -137,6 +140,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// Walls with `with_gas_faces` exchange directly with this SAME gas parcel.
     /// Every solid has its own sourced conductivity and caloric capacity; one
     /// aggregate opposite gas debit includes solid and liquid films together.
+    /// Attached wall radiation supplies external heat to its original finite
+    /// solid; it is never included in that opposite gas debit.
     ///
     /// The well-mixed gas has fixed mass, composition and volume. Each actual
     /// thermal substep deposits aggregate opposite liquid/solid joules into its original NASA-9
@@ -151,7 +156,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// lattice compressibility never supplies a physical gas-volume change.
     /// This supplies no gas
     /// momentum, pressure traction, evaporation/species transfer, reaction,
-    /// radiation, moving solid or phase-density handoff. Film thickness is
+    /// participating-gas radiation, moving solid or phase-density handoff. Film thickness is
     /// explicit; neither a gas name nor fill fraction invents convection.
     ///
     /// `interfaces` retain existing ordered liquid/wall contact laws. Optional

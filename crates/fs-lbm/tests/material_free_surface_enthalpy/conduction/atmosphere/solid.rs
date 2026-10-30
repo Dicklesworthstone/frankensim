@@ -2,6 +2,9 @@
 use super::*;
 use fs_lbm::material::free_surface::enthalpy::conduction::FreeSurfaceBodyGasFace;
 
+#[path = "solid/radiation.rs"]
+mod radiation;
+
 fn solid_face() -> FreeSurfaceBodyGasFace {
     FreeSurfaceBodyGasFace {
         wall: [-1, 0, 3],

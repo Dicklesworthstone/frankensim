@@ -11,7 +11,9 @@ use fs_material::state_point::{
     MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
     ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point,
 };
-use fs_material::thermal::source::ThermalMaterialPoint;
+use fs_material::thermal::source::{
+    EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, ThermalMaterialPoint,
+};
 use fs_qty::QuantitySpec;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
@@ -30,11 +32,12 @@ pub struct FreeSurfaceThermalBody<'m> {
     geometry: CellGeometry,
     mass_kg: f64,
     specific_h_j_kg: f64,
-    requirement: ScalarPropertyRequirement,
+    requirements: Vec<ScalarPropertyRequirement>,
     selection: MaterialPropertySelection,
     material: ResolvedMaterialStatePoint,
     conduction_links: Vec<FreeSurfaceBodyLink>,
     gas_faces: Vec<atmosphere::FreeSurfaceBodyGasFace>,
+    radiation_faces: Vec<radiation::FreeSurfaceBodyRadiationFace>,
 }
 
 /// One declared solid/solid face, owned by the cell on its first side.
@@ -110,8 +113,11 @@ pub struct FreeSurfaceBodyExchange {
     /// Direct signed heat from the SAME finite atmosphere into these solids.
     /// This is distinct from `heat_to_liquid_j`; never debit the gas twice.
     pub heat_from_gas_j: f64,
+    /// External radiant heat deposited in the solid, before any contact transfer.
+    pub heat_from_radiation_j: f64,
     /// `H_liquid_delta + H_solid_delta - liquid_external_heat - viscous_heat
-    /// - heat_from_gas` [J]. Gas exchange is internal when gas is included.
+    /// - heat_from_gas - heat_from_radiation` [J]. Gas exchange is internal
+    /// when gas is included; prescribed radiant surroundings remain external.
     pub combined_balance_defect_j: f64,
     /// Source/conductance samples used by the final thermal substep.
     pub last_applied: Vec<FreeSurfaceBodyContactSample>,
@@ -186,11 +192,12 @@ impl<'m> FreeSurfaceThermalBody<'m> {
             geometry,
             mass_kg: density * geometry.volume_m3,
             specific_h_j_kg,
-            requirement,
+            requirements: vec![requirement],
             selection,
             material,
             conduction_links: Vec::new(),
             gas_faces: Vec::new(),
+            radiation_faces: Vec::new(),
         };
         // The common owner admits geometry, extensive storage and the actual
         // borrowed caloric law; there is no separate wall thermal integrator.
@@ -258,6 +265,71 @@ impl<'m> FreeSurfaceThermalBody<'m> {
         &self.gas_faces
     }
 
+    /// Attach exposed diffuse-gray patches and select emissivity from this
+    /// body's ORIGINAL material at its actual accepted caloric state.
+    ///
+    /// The canonical total hemispherical emissivity joins the conductivity
+    /// bundle. Both selected claims are pinned for every later substep and
+    /// endpoint, retaining all original nonthermal query coordinates. A known
+    /// zero is a reflecting surface; absent data never becomes a guessed value.
+    /// This one-time attachment cannot silently replace an already pinned law.
+    /// Geometry and aggregate exposed-area/work budgets are checked by the
+    /// shared timeline. Gas films may use the same patch in parallel.
+    pub fn with_radiation_faces(
+        mut self,
+        faces: Vec<radiation::FreeSurfaceBodyRadiationFace>,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, Error> {
+        if self
+            .requirements
+            .iter()
+            .any(|r| r.name() == SURFACE_EMISSIVITY_PROPERTY)
+        {
+            return Err(Error::Invalid(
+                "finite wall emissivity is already source-bound",
+            ));
+        }
+        let requirement = ScalarPropertyRequirement::try_new(
+            SURFACE_EMISSIVITY_PROPERTY,
+            EMISSIVITY_DIMS,
+            ScalarAdmissibility::NonNegative,
+        )?;
+        let point = self.source.at(self
+            .caloric
+            .state_at_specific_enthalpy(self.specific_h_j_kg)?)?;
+        let emissivity = resolve_material_state_point(
+            self.source.material,
+            &point,
+            std::slice::from_ref(&requirement),
+            selection,
+        )?;
+        let mut pinned: Vec<_> = self
+            .material
+            .properties()
+            .iter()
+            .map(|p| {
+                (
+                    p.requirement().name().to_owned(),
+                    p.answer().receipt.selected,
+                )
+            })
+            .collect();
+        pinned.push((
+            SURFACE_EMISSIVITY_PROPERTY.into(),
+            emissivity.properties()[0].answer().receipt.selected,
+        ));
+        self.requirements.push(requirement);
+        self.selection = MaterialPropertySelection::PinnedByProperty(pinned);
+        self.material = self.resolve(self.specific_h_j_kg)?;
+        self.radiation_faces = faces;
+        Ok(self)
+    }
+
+    /// Explicit exposed geometry on the body's retained emissivity law.
+    pub fn radiation_faces(&self) -> &[radiation::FreeSurfaceBodyRadiationFace] {
+        &self.radiation_faces
+    }
+
     /// Fixed mass from the original chart density and cell volume [kg].
     pub const fn mass_kg(&self) -> f64 {
         self.mass_kg
@@ -270,7 +342,7 @@ impl<'m> FreeSurfaceThermalBody<'m> {
     pub fn enthalpy_j(&self) -> f64 {
         self.mass_kg * self.specific_h_j_kg
     }
-    /// Original conductivity source and usage receipt at accepted temperature.
+    /// Original conductivity and any attached emissivity at accepted temperature.
     pub const fn material(&self) -> &ResolvedMaterialStatePoint {
         &self.material
     }
@@ -315,16 +387,21 @@ impl<'m> FreeSurfaceThermalBody<'m> {
         let material = resolve_material_state_point(
             self.source.material,
             &point,
-            std::slice::from_ref(&self.requirement),
+            &self.requirements,
             self.selection.clone(),
         )?;
-        self.source.admit_static(&material.properties()[0])?;
+        for property in material.properties() {
+            self.source.admit_static(property)?;
+        }
+        if let Some(emissivity) = material.property(SURFACE_EMISSIVITY_PROPERTY) {
+            radiation::admit_emissivity(emissivity.value_si())?;
+        }
         Ok(material)
     }
 
     pub(super) fn conductivity(&self, material: &ResolvedMaterialStatePoint) -> f64 {
         material
-            .property(self.requirement.name())
+            .property(self.requirements[0].name())
             .expect("required conductivity")
             .value_si()
     }
@@ -338,7 +415,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// explicitly neglected; material half-cell resistances are in series.
     ///
     /// All source/conduction checks and the native flow candidate must succeed
-    /// before either participant changes. Pair heat is internal. Fixed solid
+    /// before either participant changes. Pair heat is internal. Attached
+    /// radiant wall patches supply separately reported external heat on this
+    /// same timeline. Fixed solid
     /// geometry, pure liquid, neglected capillarity and the original first-order
     /// thermal/flow split remain. This is not a finite-strain or melting handoff.
     pub fn step_with_body_conduction(

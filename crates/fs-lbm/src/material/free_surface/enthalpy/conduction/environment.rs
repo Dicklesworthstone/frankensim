@@ -221,18 +221,19 @@ impl Conduction<'_, '_> {
             let h = thermal.cells()[&id].specific_h_j_kg;
             let liquid = self.sample_liquid(id, h, check)?;
             let temperature = thermal.temperature_k(id)?;
-            let (model, context) = self.finite_atmosphere.as_ref().map_or(
-                (contact.model, contact.context),
-                |gas| (gas.parcel.model(), gas.parcel.point()),
-            );
+            let (model, context) = self
+                .finite_atmosphere
+                .as_ref()
+                .map_or((contact.model, contact.context), |gas| {
+                    (gas.parcel.model(), gas.parcel.point())
+                });
             let bath = context.axes()["temperature"];
             let film = 0.5 * temperature + 0.5 * bath;
             let point = context
                 .clone()
                 .with("temperature", film)
                 .map_err(|_| Error::Invalid("invalid environmental film temperature"))?;
-            let gas = model.evaluate(&point)
-                .map_err(MaterialLbmError::from)?;
+            let gas = model.evaluate(&point).map_err(MaterialLbmError::from)?;
             if self
                 .environment_reference
                 .get(index)
@@ -284,11 +285,7 @@ impl Conduction<'_, '_> {
             let g = outgoing.entry(id).or_insert(0.0);
             *g = finite(*g + sample.conductance_w_k)?;
         }
-        for (&id, sample) in self
-            .radiation_endpoints
-            .iter()
-            .zip(&self.radiation_last)
-        {
+        for (&id, sample) in self.radiation_endpoints.iter().zip(&self.radiation_last) {
             check()?;
             if sample.conductance_w_k != 0.0 {
                 let g = outgoing.entry(id).or_insert(0.0);
@@ -300,8 +297,21 @@ impl Conduction<'_, '_> {
             let g = outgoing.entry(id).or_insert(0.0);
             *g = finite(*g + sample.liquid_decay_conductance_w_k)?;
         }
-        for (&(body, _), sample) in self.body_atmosphere.faces.iter()
+        for (&(body, _), sample) in self
+            .body_atmosphere
+            .faces
+            .iter()
             .zip(&self.body_atmosphere.last)
+        {
+            check()?;
+            let g = outgoing.entry(self.body_ids[body]).or_insert(0.0);
+            *g = finite(*g + sample.conductance_w_k)?;
+        }
+        for (&(body, _), sample) in self
+            .body_radiation
+            .faces
+            .iter()
+            .zip(&self.body_radiation.last)
         {
             check()?;
             let g = outgoing.entry(self.body_ids[body]).or_insert(0.0);
