@@ -14175,3 +14175,44 @@ walls change the exported block while the original wall work closes. Typed
 source-medium mismatch, unrequested mode truncation, invalid references and
 cancellation refuse. These are composition checks, not acceptance of an actual
 tone-hole/bend/pad geometry or proof of sufficient evanescent/trace resolution.
+
+## Species-dependent and reacting shock loads on structural surfaces
+
+`WallPressureImpulse::{from_mixture_euler2d, from_mixture_euler3d,
+from_reacting_euler2d, from_reacting_euler3d}` consume the actual accepted
+per-face transfers of the original evolving-species fields. The complete
+reactive owner's report supplies its accepted physical interval; the middle
+advection report and final pressure are not substitutes for integrated wall
+impulse. Local chemistry changes the gas state without introducing a separate
+boundary flux. The source grid retains the physical face area, ordering and
+clock, and the caller supplies the explicit orthonormal structural embedding.
+
+All Cartesian pressure adapters share one accepted-face admission. Reflecting
+stationary adiabatic slip faces must transfer zero mass for every species
+individually, zero energy and zero tangential momentum. Equal-and-opposite
+species counterflow cannot masquerade as a sealed wall. Open and periodic
+faces refuse support-pressure interpretation. Exterior pressure is subtracted
+once over the same accepted area and interval. Existing signed molecular
+traction adapters retain their separate `p - tau_nn` semantics.
+
+`WallTractionImpulse::from_reacting_euler2d` also consumes the original complete
+molecular/reaction/wave/reaction/molecular interval. Both molecular halves and
+the wave stage contribute their actual accepted face transfers, duration and
+clock; the signed normal traction can be tensile. It admits inviscid reacting
+intervals as the zero-viscous case. The pressure-only reacting adapter refuses
+every interval with a molecular report, including compressive net traction,
+so a total `p - tau_nn` load cannot be mislabeled thermodynamic pressure.
+
+The original `ShockLoadSurface` projection then preserves nodal force impulse,
+resultant, both tangential pressure-footprint moments and affine P1 virtual
+work. Four focused test groups exercise a rotated nonuniform 3-D mixture
+footprint, planar mixture and reacting supports, actual exothermic 3-D wave
+loads that differ from endpoint-pressure estimates, complete fluid/support
+momentum balance, boundary refusal and cancelled-step retention/replay.
+The reacting molecular case separately retains tensile and compressive faces,
+both molecular halves, exterior pressure, P1 virtual work and the previous
+accepted flow/operator reports after cancellation.
+No new gas/source solver, interpolation or inferred geometry correspondence
+is introduced. This remains a one-way load transfer from stationary gas walls;
+reciprocal moving-wall work, fluid/structure feedback, fracture and material
+shock validation require their own admitted physics.

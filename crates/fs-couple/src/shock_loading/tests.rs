@@ -1,5 +1,7 @@
 //! G0/G1/G3: source-owned reflected shocks, original pressure ports and modal motion.
 #[cfg(feature = "experimental-compressible")]
+mod mixture;
+#[cfg(feature = "experimental-compressible")]
 mod molecular;
 #[cfg(feature = "experimental-compressible")]
 mod spatial;
