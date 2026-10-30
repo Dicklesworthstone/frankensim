@@ -15,7 +15,7 @@
 //! the original MOOSE implementation:
 //! <https://mooseframework.inl.gov/docs/doxygen/moose/classImplicitMidpoint.html>.
 
-/// Regular bilateral distance loops with position and velocity closure.
+/// Regular rigid distance and spherical/ball loops with position and velocity closure.
 pub mod distance;
 
 use super::super::{

@@ -2297,3 +2297,61 @@ exercise preservation of the original friction and prescribed-support paths.
 This supplies instantaneous distance-constrained impacts, not continuous
 cross-tree integration, spherical/weld impact closure, CCD, finite-patch spin
 friction, compliant history or a unique-reaction guarantee.
+
+### Spherical point closures mixed with rigid distance loops
+
+`articulated::motion::spatial_loads::implicit::distance` now admits
+`PointCoincidenceLoop` and `BilateralLoop::{Distance, PointCoincidence}` through
+`step_free_floating_bilateral_loops` and its `_with_bushings` entry point.
+A spherical closure keeps two original material points coincident while
+permitting relative rotations. Distance-only APIs delegate to the same engine;
+their original config, result and error names alias the common bilateral types.
+Mixed closures share the original nonlinear midpoint equations, native floating
+mobility, actual summed reaction impulses, finite bushing storage/loss and work.
+
+Point rows use exact objective coordinates `g = R_A^T (x_B-x_A)` and
+`gdot = R_A^T (v_B-v_A-omega_A cross (x_B-x_A))`. An impulse lambda in A's
+material frame applies `F=R_A*lambda` to B, `-F` to A, and the A-side couple
+`-(x_B-x_A) cross F`. That couple is the true differential of the moving
+material frame. It enters the same mobility, native impulse application and
+quadratic work account, preserving internal linear and orbital-plus-spin
+angular momentum even for an admitted nonzero gap. It vanishes at coincidence.
+It is not a later angular-momentum correction or a penalty torque.
+
+`BilateralRow` maps each scalar reaction back to its input constraint and point
+component. `PointClosureResidual` retains material-frame separation/rate and
+actual world separation/relative velocity. Initial and final point norms,
+objective-rate norms and physical relative-velocity norms must all satisfy
+their explicit tolerances. A small gap spinning rapidly cannot pass by having
+zero material-frame rate alone. Initial/final geometric couple impulses and
+their actual event work are returned; that work is already included in the
+complete reaction work and must not be counted twice.
+
+Cached initial native response columns carry their actual rounded force and
+COM-moment resultants into the trial momentum coordinates. Acceptance still
+reapplies the accumulated native impulse and reevaluates the actual midpoint
+equations. Results expose external-only momentum defects, actual reaction
+resultants, and balances after subtracting those resultants. Endpoint impulses
+use the endpoint mobility and are checked against the actual returned state.
+No geometric projection, dense generalized mass matrix, frozen base or second
+trajectory solver is introduced.
+
+The existing bounds are 4096 original links and 32 independent scalar rows;
+each point closure consumes three rows. Free-endpoint mobility and normalized
+SPD pivot admission refuse already-imposed, redundant, dependent or unresolved
+rows without dropping components or assigning arbitrary reactions. Nonlinear
+work budgets, geometry/source failures and cancellation remain atomic. This
+regular independent-constraint slice does not supply automatic assembly,
+general hinge/weld/gear closure, nonholonomic rolling or constraint redundancy.
+Intermediate drifts need not stay on the manifold; finite reaction work and
+integration defects remain explicit, without general exact-energy or
+symplecticity claims.
+
+The seven integration groups in `tests/articulated_point_loops.rs` compare an
+independently reduced full-inertia ball mechanism, multiple simultaneous point
+closures plus a distance, a nonlinear crank/carriage closure with a rotational
+bushing, finite-gap geometric-couple work, covariance and physical-rate/rank/
+budget/cancellation refusal. The private row-law unit case independently
+differences all twelve endpoint pose directions and checks common-motion
+invariance and internal force/moment cancellation. All 44 focused cases passed,
+including the 36 existing distance/bushing/spatial/motion regressions.
