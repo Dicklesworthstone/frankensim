@@ -12,6 +12,7 @@
 //! error does not bound that omission, source calibration, spectral/observer
 //! error, geometric error or pixel integration. Total error remains unknown.
 
+use crate::camera::PhysicalCamera;
 use crate::tracer::photometric::FixtureTransport;
 use crate::tracer::{AdaptivePixelAccumulator, RenderExecutionConfig, Sampler, Scene, Settings};
 use fs_exec::Cx;
@@ -20,6 +21,8 @@ use super::area::PhotometricEmitters;
 use super::source::PhotometricSource;
 use super::{PhotometryError, TransportOptions};
 
+#[cfg(test)]
+mod camera_tests;
 mod execution;
 mod illuminance;
 pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIlluminanceJob};
@@ -28,10 +31,10 @@ pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIllumina
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
-/// Version 6 adds optional receiver-dependent point-fixture sampling. The
-/// default complete source sum and all existing path streams remain unchanged.
+/// Version 7 adds an explicit native physical camera with sampled pupils. The
+/// legacy camera, complete source sum and all existing path streams remain unchanged.
 /// Active point fixtures with glass still require missing specular connections.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 6;
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 7;
 
 /// Maximum sampled point-fixture connections at one surface or volume vertex.
 /// The bounded proposal storage is local to that path, with no per-vertex heap
@@ -162,6 +165,45 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
         settings: Settings,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
+        Self::new_with_camera_choice(scene, None, emitters, medium, options, settings, cx)
+    }
+
+    /// Admit an explicit physical camera for calibrated spectral path images.
+    ///
+    /// The native camera supplies pose, vertical projection, axial focus and a
+    /// pinhole, circular or bladed pupil. `Scene::camera` is unused, including
+    /// during admission. Raster and wavelength streams are unchanged; pupil
+    /// samples use the native independent camera-lens stream. A compatible
+    /// pinhole therefore retains the legacy image bits.
+    ///
+    /// The result is luminance averaged over each pixel and uniformly over
+    /// the pupil, in cd/m². Aperture area, ISO and exposure metadata do not
+    /// multiply it: this is not sensor irradiance or calibrated exposure.
+    /// Every pupil origin must lie in the ambient medium, as for the existing
+    /// pinhole path. The camera is static; shutter animation is not implied.
+    /// Finite sources, glass and physical media retain the admission rules of
+    /// [`Self::new_with_emitters`].
+    pub fn new_with_camera(
+        scene: &'scene Scene,
+        camera: &'scene PhysicalCamera,
+        emitters: PhotometricEmitters<'scene>,
+        medium: PathMedium<'scene, 'field>,
+        options: TransportOptions,
+        settings: Settings,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::new_with_camera_choice(scene, Some(camera), emitters, medium, options, settings, cx)
+    }
+
+    fn new_with_camera_choice(
+        scene: &'scene Scene,
+        camera: Option<&'scene PhysicalCamera>,
+        emitters: PhotometricEmitters<'scene>,
+        medium: PathMedium<'scene, 'field>,
+        options: TransportOptions,
+        settings: Settings,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
         cx.checkpoint()?;
         if settings.width == 0 || settings.height == 0 || settings.spp == 0 {
             return Err(PhotometryError::InvalidOptions);
@@ -176,9 +218,14 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
         let target = count_u64
             .checked_mul(u64::from(settings.spp))
             .ok_or(PhotometryError::OutputBudgetExceeded)?;
-        let transport = FixtureTransport::try_new_with_emitters(
-            scene, emitters, medium, options, settings, cx,
-        )?;
+        let transport = match camera {
+            Some(camera) => FixtureTransport::try_new_with_camera(
+                scene, camera, emitters, medium, options, settings, cx,
+            )?,
+            None => FixtureTransport::try_new_with_emitters(
+                scene, emitters, medium, options, settings, cx,
+            )?,
+        };
         let mut moments = Vec::new();
         moments
             .try_reserve_exact(count)

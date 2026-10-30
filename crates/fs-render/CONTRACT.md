@@ -1767,11 +1767,36 @@ The admitted scene uses native meshes/rigid mesh instances and spectral
 materials, with the finite-source glass extension described below. Relative
 area/environment/material emission refuses at this SI
 boundary. Borrowed physical grids supply spectral attenuation, scattering and
-their already calibrated LTE radiance. The camera is the existing pinhole
-`Scene::camera`. With fixtures present, hero wavelengths use the same 80-bin
+their already calibrated LTE radiance. Existing constructors retain the pinhole
+`Scene::camera`; `PathLuminanceJob::new_with_camera` instead borrows an explicit
+native `PhysicalCamera` and ignores the unused legacy camera. With fixtures
+present, hero wavelengths use the same 80-bin
 midpoints as source normalization, and XYZ accumulation uses 683 rather than
 the legacy display-white normalization. Y therefore reports cd/m². The old
 entry points pass no fixture context and retain their previous arithmetic.
+
+The explicit physical camera supports focal length plus active vertical sensor
+height, axial focus distance, and circular or regular bladed pupils through the
+original thin-lens ray generator. Image dimensions declare aspect ratio. Lens
+draws use the native independent Philox camera-lens domain at the same absolute
+pixel/sample address; they do not consume wavelength, fixture, phase or BSDF
+draws. An equivalent legacy-compatible pinhole preserves the original image
+bits. The complete sampled ray starts at its actual pupil point, including its
+medium attenuation, geometry visibility and subsequent spectral transport.
+Every pupil origin must be in the ambient dielectric medium, as for the
+existing pinhole entry; an enclosing glass interior is not initialized.
+
+These values are pixel- and pupil-averaged luminance in cd/m², without an
+aperture-area or f-number brightness multiplier. Focal length, sensor size,
+focus and pupil shape affect the measured rays; ISO and exposure compensation
+remain metadata and do not scale absolute luminance. Sensor irradiance,
+photographic exposure, vignetting, diffraction, camera animation and a shutter
+integral are not supplied by this static calibrated entry. Whole-path IID
+standard error includes pupil sampling variability, while the existing unknown
+total-error and Owen–Sobol no-IID-claim policies remain in force. The borrowed
+camera stays fixed across progressive passes, cancellation and worker counts.
+Fixture-path semantics version 7 adds this explicit camera admission while
+retaining the existing constructor streams and source-connection policies.
 
 The default point-fixture policy remains the complete source sum. The optional
 receiver-dependent connection policy below samples that sum without changing
@@ -1794,6 +1819,8 @@ refuse point-source exclusion-radius crossings before free-flight sampling.
 The `photometric_stage --paths` example shares ordinary fixture/scene data with
 the direct calculation and renders reflections plus multiple scattering through
 a borrowed heterogeneous, spectrally absorbing field.
+Appending `--camera-lens 50 24 2.8 12` supplies a 50 mm lens, 24 mm active sensor
+height, f/2.8 circular pupil and 12 m axial focus distance to that same path job.
 
 ### Surface illuminance with reflected and volume transport
 

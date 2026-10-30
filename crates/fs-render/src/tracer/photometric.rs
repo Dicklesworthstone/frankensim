@@ -61,6 +61,7 @@ struct FixtureSegment {
 /// assets are borrowed, including the original mesh BVHs and physical cells.
 pub(crate) struct FixtureTransport<'scene, 'field> {
     scene: &'scene Scene,
+    camera: Option<&'scene PhysicalCamera>,
     direct_scene: PhotometricScene<'scene>,
     fixtures: FixtureLighting<'scene>,
     lighting: SceneLighting<'scene>,
@@ -81,6 +82,22 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
         Self::try_admit(scene, emitters, medium, options, settings, true, cx)
+    }
+
+    pub(crate) fn try_new_with_camera(
+        scene: &'scene Scene,
+        camera: &'scene PhysicalCamera,
+        emitters: PhotometricEmitters<'scene>,
+        medium: FixtureMedium<'scene, 'field>,
+        options: TransportOptions,
+        settings: Settings,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        // PhysicalCamera is immutable and already validated by its constructors.
+        // Do not read the unused legacy camera during scene admission.
+        let mut transport = Self::try_admit(scene, emitters, medium, options, settings, false, cx)?;
+        transport.camera = Some(camera);
+        Ok(transport)
     }
 
     /// Admit probe addresses without reading or validating the unused camera.
@@ -189,6 +206,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         cx.checkpoint()?;
         Ok(Self {
             scene,
+            camera: None,
             direct_scene,
             fixtures: FixtureLighting {
                 sources,
@@ -242,6 +260,50 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         let (jx, jy, ul) =
             pixel_dims(&self.settings, self.sobol.as_ref(), self.key, pixel, sample)?;
         let render_cx = cx.with_stream_seed(self.settings.seed);
+        let initial_state = if let Some(camera) = self.camera {
+            let px = pixel % self.settings.width;
+            let py = pixel / self.settings.width;
+            let (width, height) = (
+                f64::from(self.settings.width),
+                f64::from(self.settings.height),
+            );
+            let half_tan = camera.projection().vertical_half_tan();
+            let x_tan = (2.0 * (f64::from(px) + jx) / width - 1.0)
+                * self.settings.camera_aspect()
+                * half_tan;
+            let y_tan = (1.0 - 2.0 * (f64::from(py) + jy) / height) * half_tan;
+            let ray = camera.generate_ray_from_tangent_offsets(
+                &render_cx,
+                x_tan,
+                y_tan,
+                camera_lens_sample(self.key, pixel, sample)?,
+            )?;
+            // Begin at the actual pupil point for geometry and every physical
+            // medium segment. Neither an aperture PDF nor exposure metadata
+            // scales this normalized pupil average of incoming radiance.
+            Some(SpectralPathState {
+                ray,
+                throughput: [1.0; PACKET],
+                previous_bsdf: None,
+                prev_origin: ray.origin,
+                segment_origin: ray.origin,
+                medium_stack: MediumStack::new(),
+                rng: PathRng {
+                    pixel,
+                    sample,
+                    dim: 1,
+                    key: self.key,
+                    qmc_depth: 0,
+                    qmc_values: [0.0; PATH_QMC_DIMENSIONS],
+                    qmc_valid: false,
+                },
+                next_depth: 0,
+                active_lane: None,
+                remaining_smooth_dielectric_splits: SMOOTH_DIELECTRIC_SPLIT_BUDGET,
+            })
+        } else {
+            None
+        };
         let result = trace_path_with_emitters(
             self.scene,
             &self.lighting,
@@ -257,7 +319,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             CameraPath::Legacy,
             false,
             self.path_sobol.as_ref(),
-            None,
+            initial_state,
             self.medium,
             Some(&self.fixtures),
         )?;

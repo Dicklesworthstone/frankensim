@@ -13,6 +13,9 @@
 //! an ideal thin lens focused at 5 metres; changing that distance defocuses it.
 //! Append `--point-connections 4` to sample at most four point-fixture
 //! connections per path vertex; direct calculation-grid lux remains exact.
+//! Append `--camera-lens 50 24 2.8 12` to `--paths` for a 50 mm focal length,
+//! 24 mm active sensor height, f/2.8 aperture and 12 m axial focus distance.
+//! The image remains pupil-averaged luminance; exposure is not applied.
 //! These declared fixture profiles and gray haze are examples, not measurements.
 
 use std::error::Error;
@@ -47,12 +50,13 @@ use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbso
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--projector-focus METRES] [--point-connections K] [--workers N]; options require a path mode";
+    const USAGE: &str = "usage: photometric_stage [--csv | --paths | --total-csv] [--panels] [--projector-focus METRES] [--point-connections K] [--workers N] [--camera-lens FOCAL_MM SENSOR_HEIGHT_MM F_NUMBER FOCUS_M]; options require a path mode; camera lens requires --paths";
     let mode = args.first().map_or("", String::as_str);
     let mut workers = None;
     let mut panels = false;
     let mut projector_focus_m = None;
     let mut point_connections = None;
+    let mut camera_lens = None;
     let mut extra = args.get(1..).unwrap_or_default().iter();
     while let Some(flag) = extra.next() {
         match flag.as_str() {
@@ -76,6 +80,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 projector_focus_m = Some(distance);
             }
+            "--camera-lens" if camera_lens.is_none() => {
+                let focal_m = extra.next().ok_or(USAGE)?.parse::<f64>()? * 0.001;
+                let sensor_height_m = extra.next().ok_or(USAGE)?.parse::<f64>()? * 0.001;
+                let f_number = extra.next().ok_or(USAGE)?.parse::<f64>()?;
+                let focus_m = extra.next().ok_or(USAGE)?.parse::<f64>()?;
+                if !focus_m.is_finite() || focus_m <= 0.0 {
+                    return Err("camera focus must be a finite positive distance in metres".into());
+                }
+                camera_lens = Some((
+                    CameraProjection::try_focal_sensor(focal_m, sensor_height_m)?,
+                    Aperture::try_from_f_number(focal_m, f_number)?,
+                    focus_m,
+                ));
+            }
             _ => return Err(USAGE.into()),
         }
     }
@@ -89,6 +107,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if (workers.is_some() || panels || projector_focus_m.is_some() || point_connections.is_some())
         && !(paths || total_csv)
     {
+        return Err(USAGE.into());
+    }
+    if camera_lens.is_some() && !paths {
         return Err(USAGE.into());
     }
     let execution = workers
@@ -117,6 +138,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             panels,
             projector_focus_m,
             point_connections,
+            camera_lens,
             execution.as_ref(),
         )
     })
@@ -130,6 +152,7 @@ fn run(
     panels: bool,
     projector_focus_m: Option<f64>,
     point_connections: Option<u32>,
+    camera_lens: Option<(CameraProjection, Aperture, f64)>,
     execution: Option<&RenderExecutionConfig>,
 ) -> Result<(), Box<dyn Error>> {
     // Right-handed world, Z up, metres. Local source +Z is its optical axis.
@@ -212,13 +235,21 @@ fn run(
         println!("Direct illuminance: mean {mean_lux:.3} lx, peak {peak_lux:.3} lx");
     }
 
+    let (projection, aperture, focus_m) = match camera_lens {
+        Some(lens) => lens,
+        None => (
+            CameraProjection::try_vertical_fov(50.0_f64.to_radians())?,
+            Aperture::try_circular(0.0)?,
+            10.0,
+        ),
+    };
     let camera = PhysicalCamera::try_look_at(
         Point3::new(7.0, -10.0, 5.0),
         Point3::new(0.0, 0.0, 1.0),
         Vec3::new(0.0, 0.0, 1.0),
-        CameraProjection::try_vertical_fov(50.0_f64.to_radians())?,
-        10.0,
-        Aperture::try_circular(0.0)?, // Pinhole; no exposure or tone mapping.
+        projection,
+        focus_m,
+        aperture,
     )?;
     if paths || total_csv {
         return run_paths(
@@ -493,8 +524,9 @@ fn run_paths(
         strategy: DirectStrategy::Mis,
         seed: 0x5052_4556_495a,
     };
-    let mut image = PathLuminanceJob::new_with_emitters(
+    let mut image = PathLuminanceJob::new_with_camera(
         &scene,
+        camera,
         emitters,
         PathMedium::Scattering(&medium),
         TransportOptions {
@@ -523,6 +555,15 @@ fn run_paths(
         .filter_map(|p| p.estimated_standard_error_cd_m2)
         .fold(0.0, f64::max);
     println!("16 x 12 spectral path image, 128 samples/pixel, maximum 6 surface/volume vertices");
+    if let Some(focal_m) = camera.projection().focal_length_m() {
+        println!(
+            "Physical camera: {:.1} mm focal length, {:.1} mm sensor height, f/{:.2}, axial focus {:.3} m",
+            focal_m * 1000.0,
+            camera.projection().sensor_height_m().unwrap() * 1000.0,
+            camera.f_number().unwrap(),
+            camera.focus_distance_m(),
+        );
+    }
     println!("Reflections and multiple scattering: peak {peak:.6} cd/m^2");
     println!(
         "Largest estimated IID sampling standard error: {stderr:.6} cd/m^2 (not an error bound)"
