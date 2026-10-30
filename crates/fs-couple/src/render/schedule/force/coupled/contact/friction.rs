@@ -239,7 +239,7 @@ impl FrictionModalSystem {
     {
         poll(Some(gate))?;
         let column = scalar::admit_port(&network, &port, config)?;
-        let compliance = effective_compliance(&network, &column, gate)?;
+        let compliance = construction_compliance(&network, &column, gate)?;
         poll(Some(gate))?;
         Ok(Self { forces: vec![0.0; network.mode_count()], network, port,
             config, column, compliance, last: None, acceleration_pressure: None, interface: None, adhesive: None, nonlinear: None,
@@ -253,7 +253,7 @@ impl FrictionModalSystem {
         mut self, budget: super::super::PreparedModalBudget, gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_prepared_linear_propagation(budget, gate)?;
-        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
     }
@@ -266,7 +266,7 @@ impl FrictionModalSystem {
         mut self, constant_loss: &[super::super::ConstantLossConnection], gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_constant_loss_connections(constant_loss, gate)?;
-        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
     }
@@ -285,7 +285,7 @@ impl FrictionModalSystem {
         gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_material_relaxation(branches, initial_memory, gate)?;
-        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         limit("complete initial material/nonlinear energy", self.total_energy_j()?,
             self.network.config.maximum_total_energy_j)?;
         poll(Some(gate))?;
@@ -300,7 +300,7 @@ impl FrictionModalSystem {
         gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_additional_material_relaxation(branches, initial_memory, gate)?;
-        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         limit("complete initial material/nonlinear energy", self.total_energy_j()?,
             self.network.config.maximum_total_energy_j)?;
         poll(Some(gate))?;
@@ -335,7 +335,7 @@ impl FrictionModalSystem {
         source_modes: &[usize], maximum_poles: usize, gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_radiation_load(model, source_modes, maximum_poles, gate)?;
-        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
     }
@@ -361,6 +361,14 @@ impl FrictionModalSystem {
     pub const fn prepared_budget(&self) -> Option<super::super::PreparedModalBudget> {
         self.network.prepared_budget()
     }
+
+    /// Explicit construction purpose; harmonic-only networks retain this
+    /// identity through material and radiation attachments.
+    pub fn preparation(&self) -> super::super::ModalPreparation {
+        self.network.preparation()
+    }
+
+    pub const fn is_harmonic_only(&self) -> bool { self.network.is_harmonic_only() }
 
     /// Accepted components, with their existing basis, budgets and state.
     #[must_use]
@@ -435,6 +443,7 @@ impl FrictionModalSystem {
     fn stage_candidate(&mut self, external: &[f64], drive: FrictionDrive, gate: Option<&CancelGate>)
         -> Result<(FrictionModalFrame, Option<nonlinear::NonlinearFrictionFrame>), ModalFrictionError>
     {
+        self.network.require_time_domain()?;
         let (accepted, nonlinear_frame) = if let Some(mut state) = self.nonlinear.take() {
             let trial = state.stage(self, external, drive, gate);
             self.nonlinear = Some(state);
@@ -556,6 +565,17 @@ impl FrictionModalSystem {
         let regime = if step.branch == ContactBranch::Stuck { ModalFrictionRegime::Sticking } else { ModalFrictionRegime::Sliding };
         Ok((step.traction_n, regime, iterations, Some(FrictionRoots { found: step.roots, selected: step.selected })))
     }
+}
+
+// Analysis retains the original port/law but never consumes its held-step
+// compliance. Every prediction and advancing path checks construction purpose
+// before the private zero placeholder can participate in a contact solve.
+fn construction_compliance(
+    network: &CoupledModalSystem, column: &[f64], gate: &CancelGate,
+) -> Result<f64, ModalCouplingError> {
+    poll(Some(gate))?;
+    if network.is_harmonic_only() { return Ok(0.0); }
+    effective_compliance(network, column, gate)
 }
 
 // Optional physical acceleration readout; it does not replace mechanical evolution.

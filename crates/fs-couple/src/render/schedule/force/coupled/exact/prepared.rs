@@ -273,12 +273,11 @@ impl PreparedNetwork {
             material_couplings.push(branch.projection.iter().step_by(2)
                 .map(|b| finite(root * b)).collect::<Result<Vec<_>, _>>()?);
         }
-        let mut stiffness = vec![0.0; count * count];
+        let stiffness = mechanical_stiffness(models, columns, links, count, gate)?;
         let mut damping = vec![0.0; count * count];
         let mut component_rates = vec![0.0; count];
         let mut rest_force = vec![0.0; count];
         for (i, mode) in models.iter().flat_map(|m| m.modes()).enumerate() {
-            stiffness[i * count + i] = finite(mode.angular_frequency_rad_s.powi(2))?;
             component_rates[i] = finite(2.0 * mode.damping_ratio * mode.angular_frequency_rad_s)?;
             damping[i * count + i] = component_rates[i];
         }
@@ -289,7 +288,6 @@ impl PreparedNetwork {
             for i in 0..count {
                 rest_force[i] = finite(rest_force[i] + link.stiffness_n_m * link.rest_extension_m * column[i])?;
                 for j in 0..count {
-                    stiffness[i * count + j] = finite(stiffness[i * count + j] + link.stiffness_n_m * column[i] * column[j])?;
                     if viscous {
                         damping[i * count + j] = finite(damping[i * count + j] + link.damping_n_s_m * column[i] * column[j])?;
                     }
@@ -793,7 +791,35 @@ fn state_vector(count: usize, memory: usize, weights: &[f64], expected_dt: f64, 
 /// module notes). `stiffness` is the complete n x n stiffness with identity mass. Without an anchored link nothing is
 /// solved. K is positive semidefinite: an eigenvalue below zero by more than the solver's roundoff refuses, and one
 /// within it is a free coordinate, where `G(omega) / omega` has its finite limit.
-fn constant_loss_columns(
+/// The original equilibrium mechanical stiffness, shared by playback
+/// preparation and harmonic-only construction. Material histories remain
+/// separate restoring branches in both images.
+pub(super) fn mechanical_stiffness(
+    models: &[ModalAcousticTimeModel], columns: &[Vec<f64>], links: &[ConnectionLaw],
+    count: usize, gate: &CancelGate,
+) -> Result<Vec<f64>, ModalCouplingError> {
+    if columns.len() != links.len() || columns.iter().any(|column| column.len() != count)
+        || models.iter().map(|model| model.modes().len()).sum::<usize>() != count {
+        return Err(invalid("complete mechanical stiffness layout"));
+    }
+    let mut stiffness = vec![0.0; count.checked_mul(count)
+        .ok_or_else(|| invalid("mechanical stiffness extent overflow"))?];
+    for (i, mode) in models.iter().flat_map(|model| model.modes()).enumerate() {
+        stiffness[i * count + i] = finite(mode.angular_frequency_rad_s.powi(2))?;
+    }
+    for (column, link) in columns.iter().zip(links) {
+        poll(Some(gate))?;
+        for i in 0..count {
+            for j in 0..count {
+                stiffness[i * count + j] = finite(stiffness[i * count + j]
+                    + link.stiffness_n_m * column[i] * column[j])?;
+            }
+        }
+    }
+    Ok(stiffness)
+}
+
+pub(super) fn constant_loss_columns(
     stiffness: &[f64], columns: &[Vec<f64>], links: &[ConnectionLaw], count: usize, gate: &CancelGate,
 ) -> Result<Vec<Option<Vec<f64>>>, ModalCouplingError> {
     if links.iter().all(|link| link.constant_loss_reference_omega_rad_s.is_none()) {

@@ -83,19 +83,18 @@ impl CoupledModalSystem {
         if bound > core::f64::consts::PI/self.dt*self.config.nyquist_guard_fraction {
             return Err(invalid("complete acoustic/mechanical frequency bound exceeds Nyquist admission"));
         }
-        let exact = if let Some(budget) = self.prepared_budget {
-            exact::ExactNetwork::new_prepared_with_relaxation(&self.models, &self.columns, &self.connections,
-                self.mode_count(), self.dt, budget, &self.relaxation_branches, Some(&binding), gate)?
-        } else {
+        if self.prepared_budget.is_none() {
             self.admit_augmented_setup(self.relaxation_branches.len(), 2*model.poles.len())?;
-            exact::ExactNetwork::new_with_extensions(&self.models, &self.columns,
-                &self.connections, self.mode_count(), &self.relaxation_branches, Some(&binding), gate)?
-        };
+        }
+        let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
+            self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
+            Some(&binding), gate)?;
         poll(Some(gate))?;
         self.radiation_state = vec![0.0; 2*model.poles.len()];
         self.candidate_radiation_state = self.radiation_state.clone();
         self.radiation = Some(binding);
-        self.exact = Some(exact);
+        self.exact = operator.exact;
+        self.harmonic_damping_columns = operator.harmonic_damping_columns;
         self.linear_frequency_upper_bound_rad_s = bound;
         Ok(self)
     }

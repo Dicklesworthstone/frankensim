@@ -18,6 +18,8 @@ use crate::modal_acoustic_time::{
 };
 
 mod exact;
+mod preparation;
+pub use preparation::ModalPreparation;
 mod relaxation;
 pub use relaxation::ModalPlaneStressPoint;
 pub(crate) mod dg;
@@ -238,6 +240,8 @@ pub struct CoupledModalSystem {
     candidates: Vec<ModalAcousticTimeModel>,
     exact: Option<exact::ExactNetwork>,
     prepared_budget: Option<PreparedModalBudget>,
+    harmonic_only: bool,
+    harmonic_damping_columns: Vec<Option<Vec<f64>>>,
     relaxation_branches: Vec<fs_phs::RelaxationBranch>,
     material_memory: Vec<f64>,
     candidate_material_memory: Vec<f64>,
@@ -272,7 +276,7 @@ impl CoupledModalSystem {
         config: ModalCouplingConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_inner(models, connections, config, None, &[], gate)
+        Self::new_inner(models, connections, config, ModalPreparation::Ordinary, &[], gate)
     }
 
     /// Explicit cold preparation of the complete held-force transition and
@@ -286,7 +290,7 @@ impl CoupledModalSystem {
         budget: PreparedModalBudget,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_inner(models, connections, config, Some(budget), &[], gate)
+        Self::new_inner(models, connections, config, ModalPreparation::Prepared(budget), &[], gate)
     }
 
     /// [`Self::new_prepared`] with the listed connections at a constant loss factor ([`ConstantLossConnection`]). Each
@@ -302,14 +306,25 @@ impl CoupledModalSystem {
         budget: PreparedModalBudget,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_inner(models, connections, config, Some(budget), constant_loss, gate)
+        Self::new_inner(models, connections, config, ModalPreparation::Prepared(budget), constant_loss, gate)
+    }
+
+    /// Construct the same complete physical network for ordinary/prepared
+    /// playback or explicit harmonic-only analysis. Source coefficients and
+    /// constant-loss columns retain their original owners in every choice.
+    pub fn new_with_preparation(
+        models: Vec<ModalAcousticTimeModel>, connections: Vec<ModalConnection>,
+        constant_loss: &[ConstantLossConnection], config: ModalCouplingConfig,
+        preparation: ModalPreparation, gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(models, connections, config, preparation, constant_loss, gate)
     }
 
     fn new_inner(
         models: Vec<ModalAcousticTimeModel>,
         connections: Vec<ModalConnection>,
         config: ModalCouplingConfig,
-        prepared: Option<PreparedModalBudget>,
+        preparation: ModalPreparation,
         constant_loss: &[ConstantLossConnection],
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
@@ -333,7 +348,7 @@ impl CoupledModalSystem {
                 damping_n_s_m: link.damping_n_s_m, rest_extension_m: link.rest_extension_m,
             });
         }
-        Self::new_with_columns_inner(models, complete, config, prepared, constant_loss, gate)
+        Self::new_with_columns_inner(models, complete, config, preparation, constant_loss, gate)
     }
 
     /// Prepare simultaneous bilateral reactions on complete signed columns.
@@ -347,7 +362,7 @@ impl CoupledModalSystem {
         config: ModalCouplingConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_with_columns_inner(models, connections, config, None, &[], gate)
+        Self::new_with_columns_inner(models, connections, config, ModalPreparation::Ordinary, &[], gate)
     }
 
     /// Complete signed-column version of [`Self::new_prepared`].
@@ -358,17 +373,27 @@ impl CoupledModalSystem {
         budget: PreparedModalBudget,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_with_columns_inner(models, connections, config, Some(budget), &[], gate)
+        Self::new_with_columns_inner(models, connections, config, ModalPreparation::Prepared(budget), &[], gate)
+    }
+
+    /// Complete signed-column counterpart of [`Self::new_with_preparation`].
+    pub fn new_with_columns_preparation(
+        models: Vec<ModalAcousticTimeModel>, connections: Vec<ModalColumnConnection>,
+        constant_loss: &[ConstantLossConnection], config: ModalCouplingConfig,
+        preparation: ModalPreparation, gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_with_columns_inner(models, connections, config, preparation, constant_loss, gate)
     }
 
     fn new_with_columns_inner(
         models: Vec<ModalAcousticTimeModel>,
         connections: Vec<ModalColumnConnection>,
         config: ModalCouplingConfig,
-        prepared: Option<PreparedModalBudget>,
+        preparation: impl Into<ModalPreparation>,
         constant_loss: &[ConstantLossConnection],
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
+        let preparation = preparation.into();
         let (offsets, count, dt) = connection_layout(&models, connections.len(), config, gate)?;
         let links = connections.len();
         let mut columns = Vec::with_capacity(links);
@@ -388,7 +413,7 @@ impl CoupledModalSystem {
                 damping_n_s_m: link.damping_n_s_m, rest_extension_m: link.rest_extension_m,
                 constant_loss_reference_omega_rad_s: None });
         }
-        if !constant_loss.is_empty() && prepared.is_none() {
+        if !constant_loss.is_empty() && preparation.prepared_budget().is_none() {
             return Err(invalid("a constant-loss connection needs the prepared exact owner"));
         }
         anchor_constant_loss(&mut laws, constant_loss)?;
@@ -410,24 +435,8 @@ impl CoupledModalSystem {
         let guard = core::f64::consts::PI / dt * config.nyquist_guard_fraction;
         let linear_frequency_upper_bound_rad_s = upper_squared.sqrt();
         if linear_frequency_upper_bound_rad_s > guard { return Err(invalid("coupled stiffness bound exceeds the Nyquist guard")); }
-        let exact = if let Some(budget) = prepared {
-            Some(exact::ExactNetwork::new_prepared(
-                &models, &columns, &connections, count, dt, budget, None, gate,
-            )?)
-        } else if connections
-            .iter()
-            .any(|link| link.stiffness_n_m != 0.0 || link.damping_n_s_m != 0.0)
-        {
-            Some(exact::ExactNetwork::new(
-                &models,
-                &columns,
-                &connections,
-                count,
-                gate,
-            )?)
-        } else {
-            None
-        };
+        let operator = preparation::prepare(&models, &columns, &connections,
+            count, dt, preparation, &[], None, gate)?;
         let candidates = models.clone();
         let frame = CoupledModalFrame {
             sample: 0, observer_pressure_pa: 0.0, modal_energy_j: 0.0, connection_energy_j: 0.0,
@@ -456,7 +465,11 @@ impl CoupledModalSystem {
             }
         }
         let system = Self {
-            models, candidates, exact, prepared_budget: prepared, offsets, connections, columns,
+            models, candidates, exact: operator.exact,
+            prepared_budget: preparation.prepared_budget(),
+            harmonic_only: preparation.is_harmonic_only(),
+            harmonic_damping_columns: operator.harmonic_damping_columns,
+            offsets, connections, columns,
             relaxation_branches: Vec::new(), material_memory: Vec::new(),
             candidate_material_memory: Vec::new(),
             plane_stress_material_points: Vec::new(),
@@ -506,7 +519,7 @@ impl CoupledModalSystem {
         mut self, constant_loss: &[ConstantLossConnection], gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         poll(Some(gate))?;
-        let Some(budget) = self.prepared_budget else {
+        let Some(_) = self.prepared_budget else {
             return Err(invalid("a constant-loss connection needs the prepared exact owner"));
         };
         if self.samples_rendered() != 0 || constant_loss.is_empty()
@@ -514,10 +527,11 @@ impl CoupledModalSystem {
             return Err(invalid("constant-loss connections require one nonempty cold binding"));
         }
         anchor_constant_loss(&mut self.connections, constant_loss)?;
-        self.exact = Some(exact::ExactNetwork::new_prepared_with_relaxation(
-            &self.models, &self.columns, &self.connections, self.mode_count(), self.dt, budget,
-            &self.relaxation_branches, self.radiation.as_ref(), gate,
-        )?);
+        let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
+            self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
+            self.radiation.as_ref(), gate)?;
+        self.exact = operator.exact;
+        self.harmonic_damping_columns = operator.harmonic_damping_columns;
         poll(Some(gate))?;
         Ok(self)
     }
@@ -532,6 +546,31 @@ impl CoupledModalSystem {
     /// Explicit dense preparation choice, retained through owner conversions.
     #[must_use]
     pub const fn prepared_budget(&self) -> Option<PreparedModalBudget> { self.prepared_budget }
+
+    /// Construction purpose retained by coefficient and source rebuilds.
+    #[must_use]
+    pub fn preparation(&self) -> ModalPreparation {
+        match (self.harmonic_only, self.prepared_budget) {
+            (true, Some(budget)) => ModalPreparation::HarmonicOnly(budget),
+            (_, Some(budget)) => ModalPreparation::Prepared(budget),
+            (_, None) => ModalPreparation::Ordinary,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_harmonic_only(&self) -> bool { self.harmonic_only }
+
+    fn require_time_domain(&self) -> Result<(), ModalCouplingError> {
+        if self.harmonic_only {
+            return Err(invalid("harmonic-only construction cannot advance time or evaluate held-step compliance"));
+        }
+        Ok(())
+    }
+
+    fn connection_damping_column(&self, index: usize) -> Option<&[f64]> {
+        self.exact.as_ref().and_then(|exact| exact.damping_column(index))
+            .or_else(|| self.harmonic_damping_columns.get(index).and_then(Option::as_deref))
+    }
 
     /// The original admission bound on this complete linear stiffness operator.
     /// Includes every positive bridge/support spring in the actual mass basis;
@@ -624,6 +663,7 @@ impl CoupledModalSystem {
     fn stage_inner(&mut self, external: &[f64], gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>
     {
+        self.require_time_domain()?;
         exact::stage(self,external,gate)
     }
 
@@ -643,6 +683,7 @@ impl CoupledModalSystem {
         gate: Option<&CancelGate>,
     ) -> Result<(), ModalCouplingError> {
         poll(gate)?;
+        self.require_time_domain()?;
         if external.len() != self.mode_count() || external.iter().any(|x| !x.is_finite()) {
             return Err(invalid("external forces must be finite and match all component modes"));
         }
@@ -684,6 +725,7 @@ impl CoupledModalSystem {
         gate: &CancelGate,
     ) -> Result<Vec<f64>, ModalCouplingError> {
         poll(Some(gate))?;
+        self.require_time_domain()?;
         if let Some(exact) = &self.exact {
             return exact.response(column, self.dt);
         }

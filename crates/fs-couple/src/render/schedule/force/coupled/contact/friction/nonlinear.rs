@@ -397,12 +397,8 @@ impl FrictionModalSystem {
             connection: original_links + anchor.connection,
             reference_omega_rad_s: anchor.reference_omega_rad_s,
         }));
-        let network = match self.network.prepared_budget() {
-            Some(budget) => CoupledModalSystem::new_with_columns_inner(models, columns, self.network.config, Some(budget),
-                &constant_loss, gate),
-            None if constant_loss.is_empty() => CoupledModalSystem::new_with_columns(models, columns, self.network.config, gate),
-            None => return Err(invalid("constant-loss internal connections require prepared propagation").into()),
-        }?;
+        let network = CoupledModalSystem::new_with_columns_preparation(models, columns,
+            &constant_loss, self.network.config, self.network.preparation(), gate)?;
         let network = if self.network.relaxation_branches.is_empty() { network } else {
             let mut branches = self.network.relaxation_branches.clone();
             for branch in &mut branches { branch.projection.resize(2 * count, 0.0); }

@@ -44,6 +44,7 @@ pub(super) enum CoefficientEndpoint {
 struct Replacement {
     connections: Vec<ConnectionLaw>,
     exact: Option<exact::ExactNetwork>,
+    harmonic_damping_columns: Vec<Option<Vec<f64>>>,
     mechanical_bound: f64,
     frequency_bound: f64,
 }
@@ -254,44 +255,18 @@ impl CoupledModalSystem {
             r.mechanical_bound = mechanical_bound;
         }
         let radiation = refreshed_radiation.as_ref().or(self.radiation.as_ref());
-        let exact = if let Some(budget) = self.prepared_budget {
-            Some(exact::ExactNetwork::new_prepared_with_relaxation(
-                &self.models,
-                &self.columns,
-                &connections,
-                self.mode_count(),
-                self.dt,
-                budget,
-                &self.relaxation_branches,
-                radiation,
-                gate,
-            )?)
-        } else if connections
-            .iter()
-            .any(|law| law.stiffness_n_m != 0.0 || law.damping_n_s_m != 0.0)
-            || !self.relaxation_branches.is_empty()
-            || self.radiation.is_some()
-        {
-            Some(exact::ExactNetwork::new_with_extensions(
-                &self.models,
-                &self.columns,
-                &connections,
-                self.mode_count(),
-                &self.relaxation_branches,
-                radiation,
-                gate,
-            )?)
-        } else {
-            None
-        };
+        let operator = preparation::prepare(&self.models, &self.columns, &connections,
+            self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
+            radiation, gate)?;
         // A changed stiffness can also change a different constant-loss port's
         // projected damping column. Admit ALL actual new reactions.
         for (index, law) in connections.iter().enumerate() {
             poll(Some(gate))?;
             let column = &self.columns[index];
-            let damping_column = exact
+            let damping_column = operator.exact
                 .as_ref()
                 .and_then(|e| e.damping_column(index))
+                .or_else(|| operator.harmonic_damping_columns.get(index).and_then(Option::as_deref))
                 .unwrap_or(column);
             let velocity = models
                 .iter()
@@ -314,7 +289,8 @@ impl CoupledModalSystem {
         Ok(PreparedConnectionCoefficients {
             replacement: Some(Replacement {
                 connections,
-                exact,
+                exact: operator.exact,
+                harmonic_damping_columns: operator.harmonic_damping_columns,
                 mechanical_bound,
                 frequency_bound,
             }),
@@ -359,6 +335,7 @@ impl CoupledModalSystem {
         if let Some(replacement) = prepared.replacement {
             self.connections = replacement.connections;
             self.exact = replacement.exact;
+            self.harmonic_damping_columns = replacement.harmonic_damping_columns;
             self.linear_frequency_upper_bound_rad_s = replacement.frequency_bound;
             if let Some(r) = &mut self.radiation {
                 r.mechanical_bound = replacement.mechanical_bound;

@@ -125,6 +125,7 @@ impl PreparedJointDg {
         gate: &CancelGate,
     ) -> Result<Self, ModalDgError> {
         poll(Some(gate))?;
+        network.require_time_domain()?;
         let nd = load.branches().iter().try_fold(
             load.duct().continuous_operator().dimension(),
             |dimension, branch| {

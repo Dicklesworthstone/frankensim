@@ -363,9 +363,7 @@ impl CoupledModalSystem {
             .constant_loss_reference_omega_rad_s
             .is_some()
         {
-            self.exact
-                .as_ref()
-                .and_then(|exact| exact.damping_column(index))
+            self.connection_damping_column(index)
                 .ok_or_else(|| {
                     invalid("constant-loss harmonic response requires its prepared damping column")
                 })

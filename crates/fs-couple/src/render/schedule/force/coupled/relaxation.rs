@@ -196,19 +196,12 @@ impl CoupledModalSystem {
         all_branches.extend(branches);
         let mut all_memory = self.material_memory.clone();
         all_memory.extend(memory);
-        let exact = if let Some(budget) = self.prepared_budget {
-            exact::ExactNetwork::new_prepared_with_relaxation(
-                &self.models, &self.columns, &self.connections, self.mode_count(), self.dt,
-                budget, &all_branches, self.radiation.as_ref(), gate,
-            )?
-        } else {
-            exact::ExactNetwork::new_with_extensions(
-                &self.models, &self.columns, &self.connections, self.mode_count(), &all_branches,
-                self.radiation.as_ref(), gate,
-            )?
-        };
+        let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
+            self.mode_count(), self.dt, self.preparation(), &all_branches,
+            self.radiation.as_ref(), gate)?;
         poll(Some(gate))?;
-        self.exact = Some(exact);
+        self.exact = operator.exact;
+        self.harmonic_damping_columns = operator.harmonic_damping_columns;
         self.relaxation_branches = all_branches;
         self.candidate_material_memory = all_memory.clone();
         self.material_memory = all_memory;

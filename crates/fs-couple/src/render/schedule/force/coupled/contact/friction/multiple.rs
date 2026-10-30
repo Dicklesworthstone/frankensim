@@ -253,11 +253,13 @@ impl MultiFrictionModalSystem {
             points.push(Point { port, config, column });
         }
         let mut compliance = vec![0.0; p*p];
-        for j in 0..p {
-            let response = network_response(&core.network, &points[j].column, gate)?;
-            for i in 0..p { compliance[i*p+j] = dot(&points[i].column, &response)?; }
-            if compliance[j*p+j] <= 0.0 {
-                return Err(invalid("each friction port needs positive network compliance").into());
+        if !core.network.is_harmonic_only() {
+            for j in 0..p {
+                let response = network_response(&core.network, &points[j].column, gate)?;
+                for i in 0..p { compliance[i*p+j] = dot(&points[i].column, &response)?; }
+                if compliance[j*p+j] <= 0.0 {
+                    return Err(invalid("each friction port needs positive network compliance").into());
+                }
             }
         }
         poll(Some(gate))?;
@@ -481,6 +483,7 @@ impl MultiFrictionModalSystem {
     fn stage_constitutive(&mut self, external: &[f64], drives: &[FrictionDrive],
         obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
         -> Result<MultiFrictionFrame, ModalFrictionError> {
+        self.core.network.require_time_domain()?;
         if self.core.has_nonlinear_potentials() {
             if self.obstacles.as_ref().is_some_and(obstacles::ObstacleSet::has_residual) {
                 return Err(invalid("bound nonlinear storage is not staged with the obstacles' residual compliance").into());

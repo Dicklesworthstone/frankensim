@@ -28,6 +28,19 @@ pub(super) struct ExactNetwork {
 // inter-mode coupling. An arm's internal strain belongs to exactly one island.
 // This changes no retained coordinate, physical limit or dense-block capacity.
 impl ExactNetwork {
+    /// Reuse the original coupled-basis constant-loss preparation without
+    /// allocating transition matrices, resistance integrals or time state.
+    pub(super) fn harmonic_damping_columns(
+        models: &[ModalAcousticTimeModel], columns: &[Vec<f64>], links: &[ConnectionLaw],
+        count: usize, gate: &CancelGate,
+    ) -> Result<Vec<Option<Vec<f64>>>, ModalCouplingError> {
+        if links.iter().all(|link| link.constant_loss_reference_omega_rad_s.is_none()) {
+            return Ok(vec![None; links.len()]);
+        }
+        let stiffness = prepared::mechanical_stiffness(models, columns, links, count, gate)?;
+        prepared::constant_loss_columns(&stiffness, columns, links, count, gate)
+    }
+
     /// The prepared owner; `radiation` adds its two-way air as a pole bank beside the transition (`prepared::air`).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_prepared(
@@ -744,6 +757,7 @@ pub(super) fn stage(
     gate: Option<&CancelGate>,
 ) -> Result<(), ModalCouplingError> {
     poll(gate)?;
+    network.require_time_domain()?;
     let before = network.total_energy_j()?;
     let (rec_x, x, u, component_loss, connection_loss, material_loss, radiation_loss, h_x) = if let Some(exact) = &network.exact {
         let (rec, x, u) = exact.advance(&network.models, &network.material_memory,
