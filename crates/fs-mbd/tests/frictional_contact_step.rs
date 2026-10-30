@@ -1,6 +1,9 @@
 //! Native rigid contact trajectories, physical force work and geometric admission.
 //! Synthetic cuboid/support witnesses exercise the actual rotational mobility;
 //! their center of pressure is supplied analytically, not discovered by the solver.
+#[path = "frictional_contact_step/elliptic.rs"]
+mod elliptic;
+
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, NormalVelocityLaw};
 use fs_exec::CancelGate;
 use fs_mbd::frictional_impact::step::*;
@@ -93,14 +96,16 @@ fn gravity(gx: f64) -> Gravity {
 // rotation. For EVERY time, each vertex's rotational displacement is bounded by
 // R*|omega|*dt and its centre-plane height is affine. This is an interval-wide
 // geometric bound, not acceptance inferred from a few nonnegative samples.
-fn admit_box(path: &RigidContactPath<'_>) -> Result<f64, &'static str> {
-    if path.initial.len() != 1 || path.contacts.len() != 1 {
+fn admit_box<F: Copy>(path: &RigidContactPath<'_, F>) -> Result<f64, &'static str> {
+    if path.initial.len() != 1 || path.contacts.is_empty() {
         return Err("unexpected collision scene");
     }
     let c = path.contacts[0];
-    if c.normal_world != Vec3::new(0.0, 0.0, 1.0) {
-        return Err("unsupported fixture plane normal");
+    let normal_length = c.normal_world.norm_squared().sqrt();
+    if !normal_length.is_finite() || normal_length <= 0.0 {
+        return Err("plane normal");
     }
+    let normal = c.normal_world.scale(1.0 / normal_length);
     let (plane, velocity) = match c.other {
         RigidImpactCounterpart::PrescribedPlane {
             point_world,
@@ -108,6 +113,19 @@ fn admit_box(path: &RigidContactPath<'_>) -> Result<f64, &'static str> {
         } => (point_world, velocity_world),
         _ => return Err("fixture needs its complete plane"),
     };
+    // Additional parallel planes below this one impose weaker half-space
+    // constraints. The same whole-cuboid bound therefore covers all of them.
+    for extra in &path.contacts[1..] {
+        match extra.other {
+            RigidImpactCounterpart::PrescribedPlane {
+                point_world,
+                velocity_world,
+            } if extra.normal_world == c.normal_world
+                && velocity_world == velocity
+                && normal.dot(point_world.sub(plane)) <= 0.0 => {}
+            _ => return Err("additional boundary is not covered by the whole-path bound"),
+        }
+    }
     let props = path.properties[0];
     if props.principal_inertia_body() != Vec3::new(INERTIA, INERTIA, INERTIA) {
         return Err("rotation bound needs original spherical inertia");
@@ -117,13 +135,18 @@ fn admit_box(path: &RigidContactPath<'_>) -> Result<f64, &'static str> {
     for x in [-HALF, HALF] {
         for y in [-HALF, HALF] {
             for z in [-HALF, HALF] {
-                lowest = lowest.min(q.rotate_body_to_world(Vec3::new(x, y, z)).z);
+                lowest = lowest.min(normal.dot(q.rotate_body_to_world(Vec3::new(x, y, z))));
             }
         }
     }
-    let initial_z = path.post_contact[0].pose().position_world().z - plane.z;
-    let final_z =
-        path.endpoint[0].pose().position_world().z - plane.z - velocity.z * path.duration_s;
+    let initial_z = normal.dot(path.post_contact[0].pose().position_world().sub(plane));
+    let final_z = normal.dot(
+        path.endpoint[0]
+            .pose()
+            .position_world()
+            .sub(plane)
+            .sub(velocity.scale(path.duration_s)),
+    );
     let omega = props
         .angular_velocity_body_checked(path.post_contact[0].angular_momentum_body())
         .map_err(|_| "angular speed")?;

@@ -6,13 +6,18 @@
 //! and the original torque-free midpoint integrator advances the real poses.
 //! No gap projection, fabricated contact, or impact-to-heat allocation occurs.
 
+/// Directional coefficients and source histories through the same native step.
+pub mod elliptic;
+
 use super::{
-    RigidFrictionalContact, RigidFrictionalImpactError, RigidFrictionalImpactReport,
-    RigidImpactControls, RigidImpactCounterpart, apply_rigid_frictional_impacts,
+    ImpactResponse, RigidFrictionalContact, RigidFrictionalImpactError,
+    RigidFrictionalImpactReport, RigidImpactControls, RigidImpactCounterpart,
+    apply_rigid_frictional_impacts,
 };
 use crate::{
     DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench,
 };
+use fs_contact::frictional_multicontact::{FrictionalContactError, FrictionalContactResult};
 use fs_exec::CancelGate;
 
 /// Independent phase and complete-step acceptance gates.
@@ -40,16 +45,16 @@ pub struct RigidContactGap {
 /// finite set of samples cannot in general establish this. For planar translation
 /// the caller can prove a linear gap bound; curved/rotating features need their
 /// original collision/continuous-path authority.
-pub struct RigidContactPath<'a> {
+pub struct RigidContactPath<'a, F = f64> {
     pub initial: &'a [RigidBodyState],
     pub post_contact: &'a [RigidBodyState],
     pub endpoint: &'a [RigidBodyState],
     pub properties: &'a [MassProperties],
-    pub contacts: &'a [RigidFrictionalContact],
+    pub contacts: &'a [RigidFrictionalContact<F>],
     pub duration_s: f64,
     gate: &'a CancelGate,
 }
-impl RigidContactPath<'_> {
+impl<F> RigidContactPath<'_, F> {
     /// Evaluate the original zero-force midpoint drift at a fraction in [0,1].
     /// This defines the candidate numerical path, not exact Euler-top dynamics.
     /// Sampling is a tool for the geometry owner, not a coverage certificate.
@@ -82,10 +87,10 @@ impl RigidContactPath<'_> {
 
 /// No refusal publishes momenta or poses, including a late geometry refusal.
 #[derive(Debug)]
-pub enum RigidContactStepError<E> {
+pub enum RigidContactStepError<E, R = FrictionalContactResult, I = FrictionalContactError> {
     Invalid(&'static str),
     Dynamics(DynamicsError),
-    Impact(RigidFrictionalImpactError),
+    Impact(RigidFrictionalImpactError<R, I>),
     /// Original geometry owner rejected the whole path or its feature coverage.
     Path(E),
     Penetration {
@@ -96,27 +101,32 @@ pub enum RigidContactStepError<E> {
     Cancelled,
     Audit(&'static str),
 }
-impl<E> From<DynamicsError> for RigidContactStepError<E> {
+impl<E, R, I> From<DynamicsError> for RigidContactStepError<E, R, I> {
     fn from(error: DynamicsError) -> Self {
         Self::Dynamics(error)
     }
 }
-impl<E> From<RigidFrictionalImpactError> for RigidContactStepError<E> {
-    fn from(error: RigidFrictionalImpactError) -> Self {
+impl<E, R, I> From<RigidFrictionalImpactError<R, I>> for RigidContactStepError<E, R, I> {
+    fn from(error: RigidFrictionalImpactError<R, I>) -> Self {
         Self::Impact(error)
     }
 }
-impl<E: core::fmt::Debug> core::fmt::Display for RigidContactStepError<E> {
+impl<E: core::fmt::Debug, R: core::fmt::Debug, I: core::fmt::Debug> core::fmt::Display
+    for RigidContactStepError<E, R, I>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "rigid contact time step: {self:?}")
     }
 }
-impl<E: std::error::Error + 'static> std::error::Error for RigidContactStepError<E> {}
+impl<E: std::error::Error + 'static, R: core::fmt::Debug, I: core::fmt::Debug> std::error::Error
+    for RigidContactStepError<E, R, I>
+{
+}
 
 /// Work and configuration from the original accepted native states.
-pub struct RigidContactStepReport<P> {
+pub struct RigidContactStepReport<P, R = FrictionalContactResult> {
     pub duration_s: f64,
-    pub impact: RigidFrictionalImpactReport,
+    pub impact: RigidFrictionalImpactReport<R>,
     pub path_admission: P,
     pub initial_gaps: Vec<RigidContactGap>,
     pub endpoint_gaps: Vec<RigidContactGap>,
@@ -162,7 +172,7 @@ pub struct RigidContactStepReport<P> {
 ///
 /// The mandatory admission callback runs on staged states and must not publish
 /// external history. Its receipt publishes only with the accepted native bodies.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn step_rigid_frictional_contacts<P, E>(
     bodies: &mut [RigidBodyState],
     properties: &[MassProperties],
@@ -174,6 +184,44 @@ pub fn step_rigid_frictional_contacts<P, E>(
     admit_path: impl FnOnce(&RigidContactPath<'_>) -> Result<P, E>,
     gate: &CancelGate,
 ) -> Result<RigidContactStepReport<P>, RigidContactStepError<E>> {
+    step_with(
+        bodies,
+        properties,
+        wrenches,
+        gravity,
+        contacts,
+        dt_s,
+        controls,
+        apply_rigid_frictional_impacts,
+        admit_path,
+        gate,
+    )
+}
+
+// Constitutive dispatch changes only the simultaneous impulse owner. All
+// force work, native drift, geometric coverage and final publication stay here.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn step_with<F: Copy, R: ImpactResponse, I, P, E>(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    wrenches: &[Wrench],
+    gravity: Gravity,
+    contacts: &[RigidFrictionalContact<F>],
+    dt_s: f64,
+    controls: RigidContactStepControls,
+    apply_impact: impl FnOnce(
+        &mut [RigidBodyState],
+        &[MassProperties],
+        &[RigidFrictionalContact<F>],
+        RigidImpactControls,
+        &CancelGate,
+    ) -> Result<
+        RigidFrictionalImpactReport<R>,
+        RigidFrictionalImpactError<R, I>,
+    >,
+    admit_path: impl FnOnce(&RigidContactPath<'_, F>) -> Result<P, E>,
+    gate: &CancelGate,
+) -> Result<RigidContactStepReport<P, R>, RigidContactStepError<E, R, I>> {
     poll(gate)?;
     if bodies.len() != properties.len()
         || bodies.len() != wrenches.len()
@@ -196,7 +244,8 @@ pub fn step_rigid_frictional_contacts<P, E>(
         ));
     }
     let initial_gaps = gaps(bodies, properties, contacts, 0.0, false, gate)?;
-    let (before_energy, before_linear, before_angular) = super::totals(bodies, properties, gate)?;
+    let (before_energy, before_linear, before_angular) =
+        super::totals_with::<R, I>(bodies, properties, gate)?;
     let mut kicked = Vec::with_capacity(bodies.len());
     let mut force_work = 0.0;
     let mut torque_work = 0.0;
@@ -236,16 +285,16 @@ pub fn step_rigid_frictional_contacts<P, E>(
             );
         kicked.push(next);
     }
-    let (kick_energy, _, _) = super::totals(&kicked, properties, gate)?;
+    let (kick_energy, _, _) = super::totals_with::<R, I>(&kicked, properties, gate)?;
     let kick_residual = kick_energy - before_energy - force_work - torque_work;
     if !kick_residual.is_finite() || kick_residual.abs() > controls.work_energy_tolerance_j {
         return Err(RigidContactStepError::Audit(
             "native force/torque impulse work failed",
         ));
     }
-    let impact =
-        apply_rigid_frictional_impacts(&mut kicked, properties, contacts, controls.impact, gate)?;
-    let (_, drift_linear_before, drift_angular_before) = super::totals(&kicked, properties, gate)?;
+    let impact = apply_impact(&mut kicked, properties, contacts, controls.impact, gate)?;
+    let (_, drift_linear_before, drift_angular_before) =
+        super::totals_with::<R, I>(&kicked, properties, gate)?;
     let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
     let mut endpoint = Vec::with_capacity(kicked.len());
     for (&body, &property) in kicked.iter().zip(properties) {
@@ -257,7 +306,8 @@ pub fn step_rigid_frictional_contacts<P, E>(
         );
     }
     let endpoint_gaps = gaps(&endpoint, properties, contacts, dt_s, true, gate)?;
-    let (after_energy, after_linear, after_angular) = super::totals(&endpoint, properties, gate)?;
+    let (after_energy, after_linear, after_angular) =
+        super::totals_with::<R, I>(&endpoint, properties, gate)?;
     let force_displacement_work: f64 = bodies
         .iter()
         .zip(&endpoint)
@@ -280,7 +330,7 @@ pub fn step_rigid_frictional_contacts<P, E>(
     let drift_angular = after_angular.sub(drift_angular_before);
     let total_energy =
         after_energy - before_energy - force_work - torque_work - impact.support_work_j
-            + impact.contact.dissipated_energy;
+            + impact.contact.physical().dissipated_energy;
     let linear_residual = after_linear
         .sub(before_linear)
         .sub(applied_linear)
@@ -351,14 +401,14 @@ pub fn step_rigid_frictional_contacts<P, E>(
     })
 }
 
-fn gaps<E>(
+fn gaps<F, E, R, I>(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
-    contacts: &[RigidFrictionalContact],
+    contacts: &[RigidFrictionalContact<F>],
     elapsed_s: f64,
     endpoint: bool,
     gate: &CancelGate,
-) -> Result<Vec<RigidContactGap>, RigidContactStepError<E>> {
+) -> Result<Vec<RigidContactGap>, RigidContactStepError<E, R, I>> {
     let mut result = Vec::with_capacity(contacts.len());
     for contact in contacts {
         poll(gate)?;
@@ -415,7 +465,7 @@ fn gaps<E>(
     result.sort_by_key(|gap| gap.id);
     Ok(result)
 }
-fn poll<E>(gate: &CancelGate) -> Result<(), RigidContactStepError<E>> {
+fn poll<E, R, I>(gate: &CancelGate) -> Result<(), RigidContactStepError<E, R, I>> {
     if gate.is_requested() {
         Err(RigidContactStepError::Cancelled)
     } else {

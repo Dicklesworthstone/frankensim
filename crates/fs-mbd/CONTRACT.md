@@ -1,5 +1,27 @@
 # CONTRACT: fs-mbd
 
+## Directional friction in configuration-admitted rigid steps
+
+`frictional_impact::step::elliptic` applies the simultaneous directional
+contact owner inside the original force-kick/contact/torque-free-drift engine.
+Scalar and directional paths share the same initial/endpoint gap checks,
+complete-path geometry admission, original pose integration, momentum balances
+and work accounting. Normal/tangent and shared-body coupling remain intact.
+Force-splitting work and drift defects remain numerical terms, not friction heat.
+
+`step_rigid_elliptic_contacts_with` samples each active source from the actual
+post-kick, precontact velocity. Private source candidates survive through the
+native impact, drift, geometry callback and final whole-step audits; bodies and
+histories publish together only after all succeed. Inactive histories remain
+unchanged. Staging requires no clone bound on accepted source histories.
+
+This retains the original first-order held-force splitting and its timestep
+refinement requirement. The caller supplies the normal law, held friction role,
+original collision/path authority and any objective texture transport.
+Instantaneous loss does not define finite slip history, pressure, wear or heat
+allocation. Positive ellipses remain subject to native determinacy admission;
+singly zero principal coefficients retain explicit refusal.
+
 ## Directional friction through original articulated contact
 
 `articulated_contacts::friction::elliptic` routes oriented principal
