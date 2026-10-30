@@ -4,11 +4,19 @@
 //! sum_i k_i (e_i^T q)^2/2; transform each e_i with L^-1, exactly as every
 //! material-viscosity and fluid-traction column. The native components are
 //! FREE coordinates, so these springs are the only copy of solid elasticity.
+//! Modal spring factors use an explicit one-kilogram coordinate reference:
+//! x_i=q_i/sqrt(m_ref), k_i=m_ref*omega_i^2. It is only a units convention,
+//! not an additional mass or material property; k_i*x_i^2 is independent of it.
 //! No new integrator, mode retuning or diagonal damping approximation occurs.
 
 use super::*;
 use crate::render::schedule::force::coupled::{CoupledModalSystem, PreparedModalBudget};
 use core::ops::Range;
+
+const MODAL_SPRING_REFERENCE_MASS_KG: f64 = 1.0;
+
+mod ports;
+pub use ports::FrameFluidPortMap;
 
 /// Complete original source, normalized motion and every physical connection.
 /// Unlike `modal_parts`, this includes solid elasticity AND source viscosity.
@@ -87,8 +95,10 @@ impl<'f, F> MaterialFluidFrame<'f, F> {
         for (i, mode) in self.basis.modes().iter().enumerate() {
             poll(gate)?;
             unit[i] = 1.0;
-            connections.push(ground(coordinates.project_column(&unit)?,
-                positive(mode.eigenvalue_per_s2)?, 0.0));
+            let mut shapes = coordinates.project_column(&unit)?;
+            for value in &mut shapes { *value /= MODAL_SPRING_REFERENCE_MASS_KG.sqrt(); }
+            connections.push(ground(shapes,
+                positive(MODAL_SPRING_REFERENCE_MASS_KG * mode.eigenvalue_per_s2)?, 0.0));
             unit[i] = 0.0;
         }
         for port in &self.material_ports {

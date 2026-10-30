@@ -1,4 +1,5 @@
 //! G0/G1/G3: native complete equations, continuing histories and source-only swaps.
+mod ports;
 use super::*;
 use crate::air_path::cylinder::{CylinderFlowResolution, frame::{FrameFluidBudget, FrameFluidRegion}};
 use crate::frame_vibration::FrameVibrationBudget;
