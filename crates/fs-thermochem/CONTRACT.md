@@ -1212,3 +1212,44 @@ adjacent-representable density/temperature changes; independent first-law and
 entropy integrals; and agreement with the existing prepared isochore.
 There is no Region 3 mixture transport, automatic Region 1/2/3 caloric stitching,
 ice or Region 5 claim. Full-workspace DSR/Cargo validation remains separate.
+
+## Original water regional routing and source junctions
+
+`water::if97::regions` selects the original stable Region 1, 2 or 3 equation
+from pressure and temperature. `If97FluidState` retains its original source
+state and typed h, u, s, v, density, Cp, Cv, sound speed and derivatives.
+Requested pressure, achieved dense-source pressure residual and density work
+remain distinct. Gibbs evaluation introduces no density solve. Both canonical
+Region 4 anchors, p(T) and T(p), are recognized as ambiguous saturation rather
+than selecting a phase from inverse-equation roundoff.
+
+`If97FluidSaturationPair` routes low-temperature coexistence to the original
+Region 1/2 pair and high-temperature coexistence to the Region 3 pair. Original
+latent h/s, Gibbs mismatch and saturation-pressure residual remain visible.
+The exact minimum-temperature and 623.15 K pressure anchors use their original
+forward-temperature constructors, preserving the requested pressure bit-for-bit.
+Noncanonical inverse results below the stable ingress minimum refuse; no
+temperature clipping or caloric adjustment is applied.
+
+`If97RegionalJunction` prepares the two original source endpoints at a
+single-phase regional boundary. Region 1/3 uses the 623.15 K isotherm;
+Region 3/2 uses bounded bisection of the original forward B23 equation to obtain
+admitted one-sided temperatures. Their finite width, work and pressure residuals
+are exposed. The temperature bracket is a numerical admission diagnostic, not
+a certified real-arithmetic root enclosure. A 100 MPa B23 endpoint pair is
+admitted within the tested 1e-8 K caller budget without widening source domains.
+
+Signed original h/u/s/v/Gibbs differences at these junctions are retained.
+Section 10/Table 43 of the attributed IAPWS release describes finite regional
+matching errors; a junction is not a phase transition and its caloric mismatch
+is not latent heat. No interpolation, entropy/enthalpy reference correction or
+common shifted equation is introduced by this router. The engineering ingress
+is 273.16–1073.15 K with original regional pressure limits through 100 MPa.
+Ice, Region 5, metastable continuation and the exact critical singularity remain
+unsupported; unresolved near-critical solves retain their explicit refusal.
+
+Five focused tests verify regional source identity, canonical saturation
+ambiguity and endpoints, positive/negative junction mismatches at 20/25/50/100
+MPa, independent common pressure derivatives, source-domain and work limits,
+and early/late cancellation. All 182 native thermochemistry tests pass.
+Production routing is allocation-free and retains bounded source/boundary work.

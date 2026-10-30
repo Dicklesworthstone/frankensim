@@ -26,6 +26,8 @@ use fs_qty::{Density, Pressure, Qty, Temperature, Velocity};
 pub mod bounds;
 pub mod increments;
 pub mod region3;
+/// Original-source regional routing, saturation pairs and boundary diagnostics.
+pub mod regions;
 
 /// Authoritative coefficient release and temperature scale.
 pub const SOURCE_RELEASE: &str = "IAPWS R7-97(2012), IF97, ITS-90";
