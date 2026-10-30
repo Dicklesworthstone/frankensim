@@ -1498,36 +1498,121 @@ fn g1_the_film_card_curve_gives_each_head_mode_the_loss_tangent_at_its_own_frequ
     assert!(notes.iter().any(|n| n == EDGE_LOSS_STATED_UNKNOWN_RECEIPT));
     assert!(!notes.iter().any(|n| n == FILM_LOSS_STATED_UNKNOWN_RECEIPT));
     assert_eq!(piece.instrument.bodies[0].loss(), (0.0, 0.0));
-    // Each retained mode's tan delta is the card's at that mode's loaded
-    // frequency [Hz], and its eta is that times its bending share.
-    let mut modes = 0;
-    for line in notes.iter().filter(|n| n.starts_with("batter (") && n.contains("; film: tan delta")) {
-        let hz = receipt_number(line, "loaded ", " Hz");
-        let tan_delta = receipt_number(line, "film: tan delta ", ",");
-        let share = receipt_number(line, "bending share ", ",");
-        let eta = receipt_number(line, "eta ", ",");
-        let card = film.film_tan_delta(0, hz).unwrap().unwrap();
-        assert!((tan_delta - card).abs() <= 5.1e-5, "{line}: card {card}");
-        assert!((eta - tan_delta * share).abs() <= 4e-3 * eta, "{line}");
-        modes += 1;
+    // Each head carries its own generalized-Maxwell law on its bending operator, fitted to the
+    // card's curve alone. Its tan delta is the card's to within the measured certificate, at
+    // the knots and between them, so every grid mode reads the curve at its own frequency.
+    // Its storage modulus is the card's E at the anchor, and rises with frequency (causality).
+    for head in 0..2 {
+        let law = piece.instrument.bodies[head]
+            .film_law()
+            .expect("each head carries the film law");
+        assert!(
+            law.sup_rel_tan_delta_err < 0.02,
+            "certificate {}",
+            law.sup_rel_tan_delta_err
+        );
+        for hz in [20.0, 100.0, 632.0, 1000.0, 1125.0, 4000.0, 16000.0, 20000.0] {
+            let card = film.film_tan_delta(head, hz).unwrap().unwrap();
+            assert!(
+                (law.tan_delta(hz) / card - 1.0).abs() <= law.sup_rel_tan_delta_err + 1e-12,
+                "{hz} Hz"
+            );
+        }
+        assert!((law.storage(crate::film::matsuzawa_anchor_hz()) - 1.0).abs() < 1e-12);
+        assert!(
+            law.storage(20.0) < 1.0
+                && 1.0 < law.storage(20000.0)
+                && law.storage(20000.0) < law.glassy()
+        );
     }
-    assert!(modes >= 4, "{modes} batter modes carry a film loss");
-    assert!(notes.iter().any(|n| n.starts_with("batter head film loss: tan delta 0.0") && n.contains("at each mode's own loaded frequency")));
-    // The film's damping is in the stepped operator: it removes energy, part
-    // of what the head radiation's modal damping removes.
+    for head in ["batter", "resonant"] {
+        let starts = |prefix: &str| {
+            notes
+                .iter()
+                .filter(|n| n.starts_with(&format!("{head} {prefix}")))
+                .count()
+        };
+        assert_eq!(starts("film law: generalized Maxwell"), 1, "{head}");
+        assert_eq!(
+            starts("film law on the bending operator: every grid mode carries it"),
+            1,
+            "{head}"
+        );
+        let line = notes
+            .iter()
+            .find(|n| n.starts_with(&format!("{head} film law on the bending operator")))
+            .unwrap();
+        let top = receipt_number(line, "the highest at ", " Hz");
+        assert!(
+            top > 1000.0 && top < 20000.0 && line.contains("inside the curve's band"),
+            "{line}"
+        );
+    }
+    // The radiation load retains every shape the grid resolves, carries no film, and states
+    // the stiffness its shapes' frequencies are read at against the law's E' at its top shape.
+    for (head, label) in ["batter", "resonant"].into_iter().enumerate() {
+        let law = piece.instrument.bodies[head].film_law().unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with(&format!("{label} head radiation:"))
+                    && n.contains("extended to every shape the grid resolves"))
+        );
+        let scope = notes
+            .iter()
+            .find(|n| n.starts_with(&format!("{label} head radiation scope:")))
+            .unwrap();
+        assert!(
+            scope.contains(
+                "the film law is this head's own, on its bending operator, not in this load"
+            ),
+            "{scope}"
+        );
+        let low = receipt_number(scope, "at the lowest retained shape (", " Hz)");
+        let high = receipt_number(scope, "at the highest (", " Hz)");
+        let at_low = receipt_number(scope, "which is ", " % against it");
+        let at_high = receipt_number(scope, " Hz) and ", " % at the highest");
+        let shift = receipt_number(scope, "at most ", " % (pure bending)");
+        assert!(low < high, "{scope}");
+        for (hz, percent) in [(low, at_low), (high, at_high)] {
+            assert!(
+                (percent - 100.0 * (law.storage(hz) - 1.0)).abs() <= 0.05 + 1e-9,
+                "{scope}"
+            );
+        }
+        let bound = (law.storage(low).sqrt() - 1.0)
+            .abs()
+            .max((law.storage(high).sqrt() - 1.0).abs());
+        assert!((shift - 100.0 * bound).abs() <= 0.05 + 1e-9, "{scope}");
+    }
+    // The film's heat is the plates' own.
     let mut ins = piece.instrument;
     let mut out = vec![0.0; ins.mics.len()];
     for _ in 0..(0.03 / ins.k()) as usize {
         ins.step(&mut out);
     }
-    let load = ins.bodies[0].head_radiation().unwrap();
-    assert!(load.film_dissipated_j() > 0.0);
-    assert!(load.film_dissipated_j() < ins.bodies[0].head_radiated_j());
-    let mut stated = kit::drum_with_materials(&spec, &hits, standard_gas(), &declared).unwrap().instrument;
+    assert!(ins.bodies[0].film_heat_j() > 0.0 && ins.bodies[1].film_heat_j() > 0.0);
+    // Without a film law the viscous layer alone is the head's own loss, and still extends.
+    let stated_piece = kit::drum_with_materials(&spec, &hits, standard_gas(), &declared).unwrap();
+    assert!(
+        stated_piece
+            .notes
+            .iter()
+            .any(|n| n.starts_with("batter head radiation:")
+                && n.contains("extended to every shape the grid resolves"))
+    );
+    assert!(
+        !stated_piece
+            .notes
+            .iter()
+            .any(|n| n.contains("the film law is this head's own"))
+    );
+    let mut stated = stated_piece.instrument;
     for _ in 0..(0.03 / stated.k()) as usize {
         stated.step(&mut out);
     }
-    assert_eq!(stated.bodies[0].head_radiation().unwrap().film_dissipated_j(), 0.0);
+    assert!(stated.bodies[0].film_law().is_none());
+    assert_eq!(stated.bodies[0].film_heat_j(), 0.0);
 
     // The card kick says that no pillow is modelled.
     let mut kick = kit::kick();

@@ -418,6 +418,12 @@ impl Plan {
             if ins.bodies[bi].head_radiation().is_some() {
                 return Err(format!("{}: this GPU stepper has no head-radiation load; render the instrument natively", b.name));
             }
+            if ins.bodies[bi].film_law().is_some() {
+                return Err(format!(
+                    "{}: this GPU stepper has no film law; render the instrument natively",
+                    b.name
+                ));
+            }
             let source = b.viscosity.as_ref().map(|v| (v, b.viscosity_angle_rad));
             if source != ins.bodies[bi].bending_viscosity() {
                 return Err(format!("{}: exported and live bending-viscosity sources differ", b.name));

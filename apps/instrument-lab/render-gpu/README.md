@@ -31,8 +31,9 @@ render-gpu --precompile sm_89                                        # fill the 
 **Drums need `--preset-heads`.** Drum pieces (kick, snare, snare-off, tom-12,
 tom-14) refuse by default. Their only card-free heads are the presets, whose T60
 was fitted to recordings, so no default render path reads them (bead .370).
-The sourced heads carry a head-radiation load that this GPU path does not
-model, so render those natively with fs-vkplate's examples. `--preset-heads`
+The sourced heads carry a head-radiation load, and the film loss curve's heads a
+film law on their bending operator, that this GPU path does not model (the plan
+refuses either), so render those natively with fs-vkplate's examples. `--preset-heads`
 renders the fitted heads on purpose, and the notes name them as fitted. The
 cymbals and the hi-hat are unchanged.
 

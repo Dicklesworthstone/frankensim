@@ -271,11 +271,27 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
         ] {
             let coincidence_hz = gas.sound_speed.powi(2) / (2.0 * PI * hd.thickness)
                 * (12.0 * elastic.2 * (1.0 - elastic.1 * elastic.1) / elastic.0).sqrt();
-            let lines = match film {
-                Some(m) => head.attach_head_radiation_with_film(&table, s.radius, &gas, Some(compact), coincidence_hz,
-                    &|hz| m.film_tan_delta(index, hz))?,
-                None => head.attach_head_radiation_with_viscous(&table, s.radius, &gas, Some(compact), coincidence_hz)?,
+            // The card's film loss is the head's own generalized-Maxwell law on its bending
+            // operator (every grid mode); the radiation columns keep air mass, radiation and
+            // the viscous layer on every shape they retain.
+            let mut lines = match film {
+                Some(m) => {
+                    let law = crate::film::fit(
+                        &|hz| m.film_tan_delta(index, hz),
+                        m.film_band_hz(index)?,
+                        crate::film::matsuzawa_anchor_hz(),
+                    )?;
+                    head.attach_film_maxwell(law)?
+                }
+                None => vec![],
             };
+            lines.extend(head.attach_head_radiation_with_viscous(
+                &table,
+                s.radius,
+                &gas,
+                Some(compact),
+                coincidence_hz,
+            )?);
             for line in lines {
                 notes.push(format!("{label} {line}"));
             }

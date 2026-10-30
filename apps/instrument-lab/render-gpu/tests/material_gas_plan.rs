@@ -4,7 +4,10 @@
 #[allow(dead_code)]
 mod plan;
 
-use fs_vkplate::{BENDING_ROOT_ROWS_PER_NODE, GasState, Instrument, kit, standard_gas};
+use fs_vkplate::{
+    BENDING_ROOT_ROWS_PER_NODE, Body, Edge, GasState, Instrument, Nonlinear, PlateSpec, kit,
+    standard_gas,
+};
 
 fn drum(gas: GasState) -> Instrument {
     let mut spec = kit::kick();
@@ -175,6 +178,47 @@ fn gpu_plan_refuses_a_head_carrying_the_native_radiation_load() {
     assert!(matches!(
         plan::Plan::new(&image, &ins, 1, 64, true),
         Err(error) if error.contains("no head-radiation load")
+    ));
+}
+
+#[test]
+fn gpu_plan_refuses_a_plate_carrying_a_film_law() {
+    // The kit attaches a film law only to heads that also carry the head radiation (refused
+    // above); a plate with the law alone must not be planned with its film silently dropped.
+    let (thickness, rest) = (|_: f64| 1.9e-4, |_: f64| 0.0);
+    let spec = PlateSpec {
+        radius: 0.16,
+        hole: 0.0,
+        grid: 0.02,
+        edge: Edge::Clamped,
+        thickness: &thickness,
+        rest_height: &rest,
+        young: 4.9e9,
+        poisson: 0.38,
+        density: 1390.0,
+        tension: 2000.0,
+        bending: true,
+        nonlinear: Nonlinear::None,
+        t60: [(100.0, 1.0), (1000.0, 1.0)],
+        support: None,
+        muffle: None,
+    };
+    let mut head = Body::plate_without_surface_loss("film head", &spec).unwrap();
+    // A manufactured loss-tangent curve (fs-vkplate's film tests use the same one).
+    let law = fs_vkplate::film::fit(
+        &|hz| Ok(Some(0.016 + 0.007 * (hz / 20.0).log10())),
+        (20.0, 20_000.0),
+        fs_vkplate::film::matsuzawa_anchor_hz(),
+    )
+    .unwrap();
+    head.attach_film_maxwell(law).unwrap();
+    let mut ins = Instrument::new(48_000.0);
+    ins.add(head);
+    assert!(ins.bodies[0].head_radiation().is_none() && ins.bodies[0].film_law().is_some());
+    let image = ins.image();
+    assert!(matches!(
+        plan::Plan::new(&image, &ins, 1, 64, true),
+        Err(error) if error.contains("no film law")
     ));
 }
 

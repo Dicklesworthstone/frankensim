@@ -148,18 +148,45 @@ selected bending law still use their installed T60 decay points.
 
 `KitMaterials::with_film_loss_curve(temperature_axis, frequency_axis, T)` reads each
 head card's `loss_tangent_tensile` (`materials::FILM_LOSS_TANGENT`), a curve over a
-typed cyclic-frequency axis, through the canonical resolver. Each retained head
-mode takes the tan delta at its own loaded frequency times its bending share,
-the part of its stiffness energy in the body's bending operator rather than the
-tension (`Body::attach_head_radiation_with_film`), through the head radiation's
-modal damping. With the head's own loss modelled, the load retains every shape
-the grid resolves (see the head radiation section), so the volume shapes
-`(0,n)`, `n >= 2`, and the shapes beyond the table's set carry it too. A mode
-outside the card's band takes none, and its receipt says so; the `(0,1)` volume
-shape and the shapes the grid cannot resolve take none either. The drum's notes carry
-the film receipt and `materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT`, since no edge,
-hoop, shell or mount loss law exists, and `info_json` has `filmLossCurve`. Only
-the native card route uses it; live and browser drums keep the stated unknown.
+typed cyclic-frequency axis, through the canonical resolver. Each head's bending
+operator becomes a generalized-Maxwell (Prony) law fitted to that curve alone, never
+to a recording (`film::fit`, `Body::attach_film_maxwell`):
+- the fit is non-negative least squares on a fixed relaxation ladder (3 per decade, a
+  decade beyond each end of the band);
+- its receipt gives the measured sup error of tan delta against the curve (under 2 %
+  for the PET card);
+- the storage modulus equals the card's E at 632.5 Hz, the log-centre of Matsuzawa
+  1959's 100-4000 c/s, and causality makes it rise with frequency (the receipt states
+  E' at both ends of the band);
+- it is stepped with fs-material's exact linear-ramp branch recursion
+  (`GeneralizedMaxwell::step`) on the field K q. Its heat closes the discrete energy,
+  and the leapfrog admission uses its glassy modulus.
+
+Every grid mode therefore carries the tan delta at its own frequency times its
+bending share, including the modes above the radiation table's shapes and the
+`(0,1)` volume shape. The tension (a pre-stress) and the Berger in-plane stretching
+stay elastic. The head radiation then carries air mass, radiation and the Stokes
+viscous layer on every shape it retains (`Body::attach_head_radiation_with_viscous`),
+and no film loss; each shape's receipt gives its load T60 (radiation, compact share
+and viscous layer).
+
+The load reads each shape's air mass and resistance at its loaded frequency on the
+card's E, not on the law's E'. It does not iterate on the law's E'. On the PET snare E'
+runs from -1.7 % to +2.8 % over the batter's retained shapes (181-3190 Hz). On the
+resonant head it runs from -0.9 % to +3.9 % (343-5685 Hz). A shape's frequency
+therefore differs from the one its load is read at by about half that times its bending
+share: at most 1.4 % on the batter and 2.0 % on the resonant head (pure bending). Each
+head's radiation scope receipt states its own figures. E' is +4.7 % at 8 kHz, where no
+shape is retained.
+
+The PET law keeps 11 branches, each updated on every node at every step. That is
+0.5 % of the 3.5 mm snare render's profile. On the smallest live grids of the card
+film route (not in the browser), it adds up to +36 % per output sample.
+
+The drum's notes carry the law's receipts and
+`materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT`, since no edge, hoop, shell or mount
+loss law exists, and `info_json` has `filmLossCurve`. Only the native card route
+uses it; live and browser drums keep the stated unknown.
 
 `packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk` is a sourced head-film
 card, compiled with `xtask matdb-pack` from
@@ -338,9 +365,11 @@ bakes it on the power-consistent Rayleigh route
   motion keeps the compact monopole, the piston air mass and the cavity. The
   baked `m = 0` family only prints `R_compact / R_baffled` per volume shape in
   the receipt.
-- A head whose own loss is modelled (the film loss curve, the viscous face
-  layer) retains every shape its grid resolves, so that loss reaches every
-  resolved mode (`ModalAirLoad::new_with_losses`, `extend`):
+- A head whose own loss is modelled (a film law on its bending operator,
+  attached before the load, or the viscous face layer) retains every shape its
+  grid resolves, so that the air mass and the viscous layer reach every resolved
+  mode (`ModalAirLoad::new_with_losses`, `extend`). The film's loss is never in
+  the load; the law is the plate's own:
   - A volume shape `(0,n)`, `n >= 2`, takes the table's baffled load less what
     the compact net-volume model already gives it (`R_c V^2` and the piston air
     mass times `V^2 / A^2`), so nothing is counted twice. `(0,1)` stays on the
@@ -759,8 +788,8 @@ Their drums (`kick snare snare-off tom-12 tom-14`) are built from the sourced ca
 (`examples/drum_cards/mod.rs`):
 - the heads come from the PET film card and the stick from the hickory card, at the standard gas's
   293.15 K;
-- the film loss is the film card's derived loss-tangent curve, read at each head mode's own frequency
-  (`with_film_loss_curve`); the notes carry its receipt, the source note
+- the film loss is the film card's derived loss-tangent curve, as each head's generalized-Maxwell
+  law on every grid mode (`with_film_loss_curve`); the notes carry its receipts, the source note
   `drum_cards::FILM_LOSS_SOURCE_NOTE`, and the edge loss's stated unknown;
 - the stick's moving volume is `kit::STICK_TIP_KG` over the 800 kg/m³ at which that Z5A
   contact-effective mass was integrated, so the card's density sets the mass (7.30 g);

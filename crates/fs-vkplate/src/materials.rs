@@ -362,10 +362,10 @@ impl KitMaterials {
     /// Declare the head films' loss hysteretic, with the loss tangent each
     /// head's card gives as its FILM_LOSS_TANGENT curve over `frequency_axis`
     /// (a typed cyclic frequency) at `temperature_k` on `temperature_axis`.
-    /// Each retained head mode reads it at its own loaded frequency, times the
-    /// share of its stiffness energy held in bending
-    /// (`Body::attach_head_radiation_with_film`). A mode outside the card's
-    /// band takes no film loss, and its receipt says so. The edge loss stays a
+    /// The kit fits each head's generalized-Maxwell law to that curve alone
+    /// (`film::fit`) and puts it on the head's bending operator
+    /// (`Body::attach_film_maxwell`), so every grid mode carries the curve's
+    /// tan delta at its own frequency times its bending share. The edge loss stays a
     /// stated unknown entered as zero (EDGE_LOSS_STATED_UNKNOWN_RECEIPT).
     /// A head card without exactly one such claim, or one that does not
     /// resolve inside its own band at this temperature, refuses.
@@ -420,6 +420,15 @@ impl KitMaterials {
 
     pub const fn has_film_loss_curve(&self) -> bool {
         self.film_curve.is_some()
+    }
+
+    /// The batter (0) or resonant (1) head card's film loss-tangent band [Hz],
+    /// an error without a curve.
+    pub fn film_band_hz(&self, head: usize) -> Result<(f64, f64), String> {
+        self.film_curve
+            .as_ref()
+            .map(|curve| curve.band_hz[head.min(1)])
+            .ok_or_else(|| "film loss curve: none is declared".to_string())
     }
 
     /// The batter (0) or resonant (1) head card's film loss tangent at
@@ -481,7 +490,7 @@ impl KitMaterials {
         self.film_curve.as_ref().map(|curve| {
             let [(b_lo, b_hi), (r_lo, r_hi)] = curve.band_hz;
             format!(
-                "head film loss: hysteretic, tan delta from each head card's {FILM_LOSS_TANGENT} curve at {} K, read at each retained head mode's own loaded frequency (batter card {b_lo}-{b_hi} Hz, resonant card {r_lo}-{r_hi} Hz; a mode outside it takes none) times that mode's bending share",
+                "head film loss: each head's generalized-Maxwell law on its bending operator, fitted to its card's {FILM_LOSS_TANGENT} curve at {} K alone (batter card {b_lo}-{b_hi} Hz, resonant card {r_lo}-{r_hi} Hz), so every grid mode carries the tan delta at its own frequency times its bending share; tension and the Berger in-plane stretching stay elastic",
                 curve.temperature_k
             )
         })

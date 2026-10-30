@@ -56,6 +56,10 @@ pub mod coil;
 /// Elliptical Hertz contact of two elastic bodies.
 pub mod hertz;
 
+/// A head film's generalized-Maxwell law on a plate's bending operator, fitted to the film card's
+/// loss-tangent curve (every grid mode carries the film loss).
+pub mod film;
+
 /// A cymbal struck with the stick's shaft across its edge: the shaft's effective mass and its
 /// elastic contact across the grain from the stick card.
 pub mod shaft;
@@ -81,6 +85,9 @@ mod air_loss_tests;
 
 #[cfg(test)]
 mod bending_quadrature_tests;
+
+#[cfg(test)]
+mod film_tests;
 
 /// Four quarter-cell quadrature points, each with three tensor-root rows.
 /// Shared with consumers of `BodyImage::viscous_root`.
@@ -584,6 +591,10 @@ pub struct Body {
     /// Exterior radiation resistance and air mass of non-volume head shapes.
     head_radiation: Option<Box<radiation::ModalAirLoad>>,
     radiated_j: f64,
+    /// The film's generalized-Maxwell law on the bending operator (`film`), if attached.
+    film: Option<Box<film::FilmField>>,
+    /// Whether `stiff` also holds support springs (it is then not the bending operator alone).
+    support_springs: bool,
 }
 
 /// C = G'G is the assembled curvature-rate damping matrix. Retaining G lets
@@ -954,6 +965,7 @@ impl Body {
             name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, modal: None, tension: s.tension, berger, vk,
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
+            film: None, support_springs: s.support.is_some(),
         })
     }
 
@@ -974,6 +986,7 @@ impl Body {
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
+            film: None, support_springs: false,
         }
     }
 
@@ -1048,6 +1061,7 @@ impl Body {
             tension: 0.0, berger: 0.0, vk: None,
             w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
+            film: None, support_springs: false,
         }
     }
 
@@ -1058,29 +1072,37 @@ impl Body {
     /// with the baked volume shapes in the receipt.
     pub fn attach_head_radiation(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
         compact_volume_resistance: Option<f64>) -> Result<Vec<String>, String> {
-        self.attach_head_radiation_impl(table, radius, gas, compact_volume_resistance, None, None)
+        self.attach_head_radiation_impl(table, radius, gas, compact_volume_resistance, None)
     }
 
-    pub fn attach_head_radiation_with_viscous(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
-        compact_volume_resistance: Option<f64>, coincidence_hz: f64) -> Result<Vec<String>, String> {
-        self.attach_head_radiation_impl(table, radius, gas, compact_volume_resistance, Some(coincidence_hz), None)
+    pub fn attach_head_radiation_with_viscous(
+        &mut self,
+        table: &radiation::RadiationTable,
+        radius: f64,
+        gas: &GasState,
+        compact_volume_resistance: Option<f64>,
+        coincidence_hz: f64,
+    ) -> Result<Vec<String>, String> {
+        self.attach_head_radiation_impl(
+            table,
+            radius,
+            gas,
+            compact_volume_resistance,
+            Some(coincidence_hz),
+        )
     }
 
-    /// `attach_head_radiation_with_viscous` plus the film's hysteretic loss: each retained
-    /// mode takes `tan_delta` at its own loaded frequency [Hz] times the share of its
-    /// stiffness energy held in this body's bending operator (`radiation::FilmTanDelta`).
-    pub fn attach_head_radiation_with_film(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
-        compact_volume_resistance: Option<f64>, coincidence_hz: f64, tan_delta: radiation::FilmTanDelta)
-        -> Result<Vec<String>, String> {
-        self.attach_head_radiation_impl(table, radius, gas, compact_volume_resistance, Some(coincidence_hz), Some(tan_delta))
-    }
-
-    fn attach_head_radiation_impl(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
-        compact_volume_resistance: Option<f64>, coincidence_hz: Option<f64>, tan_delta: Option<radiation::FilmTanDelta>)
-        -> Result<Vec<String>, String> {
-        // Air loading is the same physics whatever the film-loss source: a
-        // sourced bending viscosity composes with it (its force is explicit,
-        // the air mass implicit). Shallow shells are not clamped films.
+    fn attach_head_radiation_impl(
+        &mut self,
+        table: &radiation::RadiationTable,
+        radius: f64,
+        gas: &GasState,
+        compact_volume_resistance: Option<f64>,
+        coincidence_hz: Option<f64>,
+    ) -> Result<Vec<String>, String> {
+        // Air loading is the same physics whatever the head's own loss: a
+        // sourced bending viscosity or a film law composes with it (its force
+        // is explicit, the air mass implicit). Shallow shells are not clamped films.
         if self.vk.is_some() || self.n < 2 {
             return Err(format!("{}: head radiation applies to clamped tensioned heads, not shells", self.name));
         }
@@ -1091,21 +1113,52 @@ impl Body {
             lap.mul_add(v, tension, &mut out);
             out
         };
-        // the bending operator alone: the tension's energy is pre-stress work, not strain
-        let bending = |v: &[f64]| {
-            let mut out = vec![0.0; v.len()];
-            stiff.mul_add(v, 1.0, &mut out);
-            out
-        };
-        let film = tan_delta.map(|t| (t, &bending as &dyn Fn(&[f64]) -> Vec<f64>));
         let viscous = coincidence_hz.map(|fc| (self.mass.iter().sum::<f64>() / self.area, fc));
-        // A head whose own losses are modelled (film, viscous layer) carries
-        // them on every shape the grid resolves, not only the table's: the
-        // load then also needs the piston's share of each volume shape.
-        let extend = (film.is_some() || viscous.is_some())
-            .then(|| if self.air_mass > 0.0 { self.air_mass / (self.area * self.area) } else { 0.0 });
-        let load = radiation::ModalAirLoad::new_with_losses(
-            table, radius, self.h, &self.xy, &self.mass, &stiffness, gas, compact_volume_resistance, film, viscous, extend)?;
+        // A head whose own loss is modelled (a film law on its bending operator,
+        // the viscous layer) has its air mass and viscous layer on every shape
+        // the grid resolves, not only the table's: the load then also needs the
+        // piston's share of each volume shape.
+        let extend = (self.film.is_some() || viscous.is_some()).then(|| {
+            if self.air_mass > 0.0 {
+                self.air_mass / (self.area * self.area)
+            } else {
+                0.0
+            }
+        });
+        let mut load = radiation::ModalAirLoad::new_with_losses(
+            table,
+            radius,
+            self.h,
+            &self.xy,
+            &self.mass,
+            &stiffness,
+            gas,
+            compact_volume_resistance,
+            viscous,
+            extend,
+        )?;
+        if let Some(film) = self.film.as_deref() {
+            // The load's loaded frequencies use the card's E; the law's E' differs (not iterated).
+            // E' rises with frequency, so the retained band's ends bound the difference.
+            let (low, high) = load.loaded_hz;
+            let (at_low, at_high) = (film.law.storage(low), film.law.storage(high));
+            let shift = (at_low.sqrt() - 1.0)
+                .abs()
+                .max((at_high.sqrt() - 1.0).abs());
+            let note = format!(
+                "; the film law is this head's own, on its bending operator, not in this load; each shape's load is read at its loaded frequency on the card's E, not the law's E', which is {:+.1} % against it at the lowest retained shape ({low:.0} Hz) and {:+.1} % at the highest ({high:.0} Hz); a shape's frequency differs from the one its load is read at by about half that times its bending share, at most {:.1} % (pure bending)",
+                100.0 * (at_low - 1.0),
+                100.0 * (at_high - 1.0),
+                100.0 * shift
+            );
+            if let Some(scope) = load
+                .receipt
+                .iter_mut()
+                .find(|line| line.starts_with("head radiation scope:"))
+            {
+                scope.push_str(&note);
+            }
+        }
         let receipt = load.receipt.clone();
         self.head_radiation = Some(Box::new(load));
         self.kc = 0.0; // the implicit air mass is prepared with the update coefficients
@@ -1119,6 +1172,77 @@ impl Body {
     /// Energy the head-radiation resistance removed, at centred velocity [J].
     pub fn head_radiated_j(&self) -> f64 {
         self.radiated_j
+    }
+
+    /// Make this plate's bending operator the film's generalized-Maxwell law
+    /// `law` (moduli relative to the plate's own E, the card's), on every grid
+    /// mode. The tension (a pre-stress) and the Berger in-plane stretching
+    /// stay elastic. Returns the receipt lines. A shallow shell, a plate
+    /// without bending, one whose stiffness operator also holds support
+    /// springs, or one with another bending loss refuses.
+    pub fn attach_film_maxwell(&mut self, law: film::FilmLaw) -> Result<Vec<String>, String> {
+        if self.vk.is_some() || self.n < 2 || self.stiff.col.is_empty() {
+            return Err(format!(
+                "{}: a film law needs a flat plate's bending operator",
+                self.name
+            ));
+        }
+        if self.support_springs {
+            return Err(format!(
+                "{}: this stiffness operator also holds support springs, not the bending operator alone",
+                self.name
+            ));
+        }
+        if self.viscosity.is_some() || self.modal.is_some() {
+            return Err(format!(
+                "{}: a film law and another bending loss are exclusive",
+                self.name
+            ));
+        }
+        if self.head_radiation.is_some() {
+            return Err(format!(
+                "{}: attach the film law before the head radiation, so that the load retains every shape the grid resolves",
+                self.name
+            ));
+        }
+        // The highest grid mode at the card's E (tension and bending), before the law is attached.
+        let top_hz = self.max_rate2().sqrt() / (2.0 * PI);
+        let (lo, hi) = law.band_hz;
+        let place = if top_hz <= hi {
+            format!(
+                "inside the curve's band, law tan delta {:.4} there",
+                law.tan_delta(top_hz)
+            )
+        } else {
+            format!(
+                "ABOVE the curve's {hi} Hz: the modes above it take the law's own continuation, not the curve"
+            )
+        };
+        let lines = vec![
+            law.receipt(),
+            format!(
+                "film law on the bending operator: every grid mode carries it, the highest at {top_hz:.0} Hz ({place}); below {lo} Hz the law continues the curve; tension (a pre-stress) and the Berger in-plane stretching stay elastic"
+            ),
+            "film law time stepping: fs-material's exact linear-ramp branch recursion (GeneralizedMaxwell::step) on the field K q; its heat (dt/tau)|q_mid|^2_K per branch closes the discrete energy, and admission uses the glassy modulus".to_string(),
+        ];
+        self.film = Some(Box::new(film::FilmField::new(law, self.n)));
+        Ok(lines)
+    }
+
+    /// The attached film law, if any.
+    pub fn film_law(&self) -> Option<&film::FilmLaw> {
+        self.film.as_deref().map(|f| &f.law)
+    }
+
+    /// Heat the film law's branches have dissipated [J] (the midpoint heat that
+    /// closes `discrete_energy`; see `film`).
+    pub fn film_heat_j(&self) -> f64 {
+        self.film.as_deref().map_or(0.0, |f| f.heat_j)
+    }
+
+    /// The film law's heat in the last step [J].
+    pub fn film_step_j(&self) -> f64 {
+        self.film.as_deref().map_or(0.0, |f| f.last_j)
     }
 
     pub fn node_at(&self, x: f64, y: f64) -> Option<usize> {
@@ -1206,7 +1330,17 @@ impl Body {
             *f = b - t * l;
         }
         if !self.stiff.col.is_empty() {
-            self.stiff.mul_add(&self.w, -1.0, &mut self.f);
+            if let Some(film) = self.film.as_deref_mut() {
+                // K w is kept for the film law's branches (`predict`); f gets the
+                // same -K w as below, and the law's difference from it in `predict`.
+                film.sw.fill(0.0);
+                self.stiff.mul_add(&self.w, 1.0, &mut film.sw);
+                for (f, s) in self.f.iter_mut().zip(&film.sw) {
+                    *f -= s;
+                }
+            } else {
+                self.stiff.mul_add(&self.w, -1.0, &mut self.f);
+            }
         }
     }
 
@@ -1322,6 +1456,11 @@ impl Body {
     fn predict(&mut self, k: f64) {
         self.coefs(k);
         let n = self.n;
+        if let Some(film) = self.film.as_deref_mut() {
+            // The branches advance once per step here (not in `linear_forces`,
+            // which the admission's power iteration also calls).
+            film.advance(&self.w, &self.wp, &mut self.f, k, &self.stiff);
+        }
         if let Some(viscous) = &self.viscosity {
             for i in 0..n { self.tmp[i] = self.w[i] - self.wp[i]; }
             // Backward velocity preserves the existing diagonal contact and
@@ -1548,11 +1687,15 @@ impl Body {
     }
 
     /// After setting w or wp directly (initial conditions), refresh the stored L wp.
+    /// A film law's branches relax: the set state has no film history.
     pub fn sync(&mut self) {
         for x in self.lwp.iter_mut() {
             *x = 0.0;
         }
         self.lap.mul_add(&self.wp, 1.0, &mut self.lwp);
+        if let Some(film) = self.film.as_deref_mut() {
+            film.reset();
+        }
     }
 
     /// Largest eigenvalue of M^-1 K for the LINEAR stiffness (power iteration on the symmetric
@@ -1569,6 +1712,13 @@ impl Body {
             let bias = std::mem::replace(&mut self.bias, vec![0.0; n]);
             self.linear_forces();
             self.bias = bias;
+            if let Some(film) = self.film.as_deref() {
+                // A film law's bending stiffness reaches its glassy modulus within a step.
+                let excess = film.law.glassy() - 1.0;
+                for (f, s) in self.f.iter_mut().zip(&film.sw) {
+                    *f -= excess * s;
+                }
+            }
             let y: Vec<f64> = (0..n).map(|i| -self.f[i] / self.mass[i].sqrt()).collect();
             let norm = y.iter().map(|a| a * a).sum::<f64>().sqrt();
             let vn = v.iter().map(|a| a * a).sum::<f64>().sqrt();
@@ -1719,8 +1869,14 @@ impl Body {
     pub fn discrete_energy(&self, k: f64) -> f64 {
         let velocity: Vec<f64> = self.w.iter().zip(&self.wp).map(|(w, wp)| (w - wp) / k).collect();
         let mut kw = vec![0.0; self.n];
-        self.stiff.mul_add(&self.w, 1.0, &mut kw);
+        // A film law keeps e_inf of the card's bending stiffness; its branches hold the rest.
+        let bending = self.film.as_deref().map_or(1.0, |f| f.e_inf());
+        self.stiff.mul_add(&self.w, bending, &mut kw);
         self.lap.mul_add(&self.w, self.tension, &mut kw);
+        let film = self
+            .film
+            .as_deref()
+            .map_or(0.0, |f| f.stored_j(&self.w, &self.wp));
         let kinetic = self.mass.iter().zip(&velocity).map(|(m, v)| 0.5*m*v*v).sum::<f64>();
         let correction = self.viscosity.as_ref().map_or(0.0, |v| k * v.c.quad(&velocity) / 4.0)
             + self.modal.as_ref().map_or(0.0, |m| k * m.c.quad(&velocity) / 4.0);
@@ -1733,7 +1889,7 @@ impl Body {
             radiation::ModalAirLoad::apply(&load.damping, &p, &mut b);
             0.5 * dot(&p, &a) - k * dot(&p, &b) / 4.0
         });
-        kinetic + air + 0.5 * dot(&self.wp, &kw) + 0.5 * self.psi * self.psi - correction
+        kinetic + air + film + 0.5 * dot(&self.wp, &kw) + 0.5 * self.psi * self.psi - correction
     }
 
     /// Kinetic + linear potential + auxiliary (nonlinear) energy at the half step (diagnostics).
@@ -1744,7 +1900,14 @@ impl Body {
             e += 0.5 * self.mass[i] * v * v;
         }
         let mid: Vec<f64> = (0..self.n).map(|i| 0.5 * (self.w[i] + self.wp[i])).collect();
-        e + 0.5 * self.tension * self.lap.quad(&mid) + 0.5 * self.stiff.quad(&mid) + 0.5 * self.psi * self.psi
+        let (bending, film) = self
+            .film
+            .as_deref()
+            .map_or((1.0, 0.0), |f| (f.e_inf(), f.elastic_j()));
+        e + 0.5 * self.tension * self.lap.quad(&mid)
+            + 0.5 * bending * self.stiff.quad(&mid)
+            + film
+            + 0.5 * self.psi * self.psi
     }
 }
 
