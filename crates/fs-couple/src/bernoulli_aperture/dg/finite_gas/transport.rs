@@ -5,6 +5,9 @@
 //! paying native gas-parameter work from that same transported candidate. No
 //! valve flow is silently converted into thermodynamic mass transport.
 
+/// Scalar moving sources on the same conservative native transport owner.
+pub mod scalar;
+
 use super::{FiniteGasApertureDgStep, acoustic, admit};
 use crate::bernoulli_aperture::dg::LoadedApertureDg;
 use crate::bernoulli_aperture::tube::TubeDrive;

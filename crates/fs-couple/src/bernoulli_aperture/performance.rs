@@ -14,6 +14,8 @@ pub mod force;
 pub mod boundaries;
 /// Scheduled heat into the original finite thermochemical DG inventory.
 pub mod finite_gas;
+/// Conservative finite reservoir exchange on the original source clock.
+pub mod finite_transport;
 /// Scheduled finite-body wall heating through the original coupled DG owner.
 pub mod thermal_wall;
 
@@ -123,6 +125,7 @@ pub struct AperturePerformance {
     boundary_frame: Option<BoundaryNetworkFrame>,
     mechanical_work_j: f64,
     finite_gas: Option<finite_gas::FiniteGasPlayback>,
+    finite_transport: Option<finite_transport::FiniteGasTransportPlayback>,
     finite_wall: Option<thermal_wall::FiniteWallPlayback>,
     observation_policy: ObservationPolicy,
 }
@@ -338,6 +341,7 @@ impl AperturePerformance {
             held_pressure_pa: 0.0, poisoned: false, forces: None, boundaries: None,
             boundary_frame: None, mechanical_work_j: 0.0,
             finite_gas: None,
+            finite_transport: None,
             finite_wall: None,
             observation_policy: ObservationPolicy::Diagnostic })
     }
@@ -413,7 +417,9 @@ impl AperturePerformance {
         let boundary_drives = self.boundaries.as_ref().map_or(&[][..], |b| b.candidate());
         match &mut self.system {
             CoupledAperture::Dg(m) => {
-                let frame = if let Some(gas) = &mut self.finite_gas {
+                let frame = if let Some(transport) = &mut self.finite_transport {
+                    transport.step(m, drive, force_n)?
+                } else if let Some(gas) = &mut self.finite_gas {
                     gas.step(m, drive, force_n)?
                 } else if let Some(wall) = &mut self.finite_wall {
                     wall.step(m, drive, force_n)?
@@ -501,6 +507,7 @@ impl PressureRenderer for AperturePerformance {
                     if let Some(forces) = &mut self.forces { forces.accept(sample); }
                     if let Some(boundaries) = &mut self.boundaries { boundaries.accept(); }
                     if let Some(gas) = &mut self.finite_gas { gas.accept(sample); }
+                    if let Some(transport) = &mut self.finite_transport { transport.accept(sample); }
                     if let Some(wall) = &mut self.finite_wall { wall.accept(sample); }
                     self.mechanical_work_j = work;
                     self.boundary_frame = boundary_frame;

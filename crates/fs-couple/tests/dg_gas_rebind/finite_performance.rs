@@ -1,4 +1,7 @@
 //! Authored heat reaches the original finite gas, source and retained DG histories.
+#[path = "finite_performance/transport.rs"]
+mod transport;
+
 use super::*;
 use super::finite_gas::{channel_load, controls, energy_solve, gas};
 use fs_couple::bernoulli_aperture::performance::{

@@ -160,6 +160,7 @@ impl AperturePerformance {
             || self.system.aperture().accepted_steps() != 0
             || self.finite_wall.is_some()
             || self.finite_gas.is_some()
+            || self.finite_transport.is_some()
         {
             return Err(invalid(
                 "finite wall heat must bind once before playback; combined finite gas/body heat needs a joint transaction",

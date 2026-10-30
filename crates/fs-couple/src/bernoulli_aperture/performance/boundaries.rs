@@ -242,6 +242,12 @@ impl AperturePerformance {
             work = work.checked_sub(gas.program.controls.len() as u64)
                 .ok_or_else(|| invalid("heat and other source controls exceed the auxiliary compilation work budget"))?;
         }
+        if let Some(transport) = &self.finite_transport {
+            assignments = assignments.checked_sub(transport.assignments)
+                .ok_or_else(|| invalid("gas transport and other controls exceed combined storage"))?;
+            work = work.checked_sub(transport.work)
+                .ok_or_else(|| invalid("gas transport and other controls exceed auxiliary compilation work"))?;
+        }
         if let Some(wall) = &self.finite_wall {
             assignments = assignments.checked_sub(wall.program.controls.len())
                 .ok_or_else(|| invalid("wall heat and other source controls exceed the combined storage budget"))?;

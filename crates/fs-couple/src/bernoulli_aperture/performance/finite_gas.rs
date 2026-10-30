@@ -105,7 +105,8 @@ impl AperturePerformance {
         -> Result<Self, GestureCompileError>
     {
         if self.poisoned || self.system.aperture().accepted_steps() != 0
-            || self.finite_gas.is_some() || self.finite_wall.is_some()
+            || self.finite_gas.is_some() || self.finite_transport.is_some()
+            || self.finite_wall.is_some()
         {
             return Err(invalid("finite gas heat must bind once before playback; combined finite gas/body heat needs a joint transaction"));
         }
@@ -170,23 +171,33 @@ impl AperturePerformance {
 
     /// The actual accepted inventory, including its conserved mass and source model.
     #[must_use]
-    pub fn finite_gas(&self) -> Option<&ClosedGasParcel> { self.finite_gas.as_ref().map(|state| &state.gas) }
+    pub fn finite_gas(&self) -> Option<&ClosedGasParcel> {
+        self.finite_gas.as_ref().map(|state| &state.gas).or_else(|| {
+            let id = self.finite_gas_transport_program()?.source_id;
+            self.finite_gas_parcels()?.get(&id)
+        })
+    }
     /// Original authored powers and solver admissions.
     #[must_use]
     pub fn finite_gas_heat_program(&self) -> Option<&FiniteGasHeatProgram> {
         self.finite_gas.as_ref().map(|state| &state.program)
+            .or_else(|| self.finite_gas_transport_program().map(|program| &program.source))
     }
     /// Shared cancellation gate retained by the finite-gas runtime.
     #[must_use]
     pub fn finite_gas_cancel_gate(&self) -> Option<&Arc<CancelGate>> {
         self.finite_gas.as_ref().map(|state| &state.gate)
+            .or_else(|| self.finite_gas_transport_cancel_gate())
     }
     /// Heat assignments published with successful pressure samples.
     #[must_use]
     pub fn applied_heat_controls(&self) -> &[GasHeatControl] {
-        self.finite_gas.as_ref().map_or(&[], |state| &state.program.controls[..state.next])
+        self.finite_gas.as_ref().map_or_else(|| self.applied_gas_transport_heat_controls(),
+            |state| &state.program.controls[..state.next])
     }
-    /// The original full gas/acoustic/mechanical work report, without recomputation.
+    /// The original full heat-only gas/acoustic/mechanical work report.
+    /// Reservoir exchange retains this source report inside
+    /// [Self::last_finite_gas_transport_step] under the authored source ID.
     #[must_use]
     pub fn last_finite_gas_step(&self) -> Option<&FiniteGasApertureDgStep<GasCompositionStep>> {
         self.finite_gas.as_ref().and_then(|state| state.last.as_ref())
