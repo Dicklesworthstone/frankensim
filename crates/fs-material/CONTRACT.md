@@ -5465,6 +5465,21 @@ The dynamic/kinematic basis is explicit; kinematic viscosity converts with the
 current density. Transport and acoustics must agree on the exact density bits.
 Existing optional liquid expansion remains an independent source derivative.
 
+The combined acoustic liquid retains its original `ResolvedLiquidState`, rather
+than discarding that owner after extracting a transport tuple. `try_from_liquid`
+adopts an already complete bundle with no query or claim reselection, including
+an admitted density-expansion path. `ThermalFluidTransport` delegates to that
+same owner: typed temperature and known, unknown, zero or signed expansion retain
+their original meaning. Refresh evaluates the complete bundle once, retains the
+original density path and nonthermal context, and rebuilds every numerical view
+atomically. A transport-only bundle cannot silently acquire an acoustic claim.
+
+The material regressions exercise both viscosity bases, exact source keys,
+shared density bits, source/tangent refresh and refusal without modifying the
+original state. Downstream regressions use this same object for natural
+convection, accepted finite-cell enthalpy and cavity modes. This supplies no
+compressible-flow, phase-change, attenuation or nonlinear-acoustic model.
+
 Seven focused material regressions cover gas pressure scaling and stale-state
 refusal, original IF97 derivative identities, source refresh/domain boundaries,
 adiabatic-modulus semantics, both liquid viscosity bases, exact source vocabulary

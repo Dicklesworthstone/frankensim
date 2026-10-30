@@ -7,10 +7,11 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::fluid_acoustics::{
-    FluidAcousticParameter, FluidAcousticState, FluidAcoustics, resolve_acoustic_liquid_state,
-    resolve_acoustic_liquid_state_with_requirements, resolve_fluid_acoustic_state,
+    FluidAcousticParameter, FluidAcousticState, FluidAcoustics, ResolvedAcousticLiquidState,
+    resolve_acoustic_liquid_state, resolve_acoustic_liquid_state_with_requirements,
+    resolve_fluid_acoustic_state,
 };
-use fs_material::fluid_transport::FluidTransport;
+use fs_material::fluid_transport::{FluidTransport, ThermalFluidTransport};
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::liquid::{
     DYNAMIC_VISCOSITY_DIMS, KINEMATIC_VISCOSITY_DIMS, LiquidPropertyRequirements,
@@ -432,16 +433,14 @@ fn exact_source_vocabulary_requires_no_aliases_or_claim_rewriting() {
             .is_none()
     );
     let expanding = liquid
-        .with_density_expansion(
-            &card,
-            "T",
-            Temperature::new(300.0),
-            Temperature::new(400.0),
-        )
+        .with_density_expansion(&card, "T", Temperature::new(300.0), Temperature::new(400.0))
         .unwrap();
     let hot = expanding.at_query_point(&card, &point(400.0)).unwrap();
     near(hot.density_kg_m3(), 960.0);
-    near(hot.density_expansion().unwrap().density_slope_kg_m3_k(), -0.4);
+    near(
+        hot.density_expansion().unwrap().density_slope_kg_m3_k(),
+        -0.4,
+    );
     near(hot.volumetric_expansion_per_k().unwrap(), 0.4 / 960.0);
     assert_eq!(hot.material().card_identity(), original_hash);
     assert!(hot.material().property("mass-density").is_some());
@@ -470,4 +469,117 @@ fn invalid_or_unrepresentable_acoustic_coefficients_refuse() {
     assert!(FluidAcousticState::try_new(f64::MAX, 2.0).is_err());
     assert!(FluidAcousticState::try_new(f64::MIN_POSITIVE, f64::MIN_POSITIVE).is_err());
     assert!(FluidAcousticState::from_adiabatic_bulk_modulus(f64::MIN_POSITIVE, f64::MAX).is_err());
+}
+
+#[test]
+fn acoustic_liquid_retains_original_expansion_and_refreshes_all_views_together() {
+    for basis in [
+        LiquidViscosityBasis::Dynamic,
+        LiquidViscosityBasis::Kinematic,
+    ] {
+        let (card, requirements) = liquid_fixture(basis, true);
+        let parameter = FluidAcousticParameter::sound_speed().unwrap();
+        let initial = resolve_acoustic_liquid_state_with_requirements(
+            &card,
+            &point(300.0),
+            &parameter,
+            &requirements,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        // An acoustic/transport bundle does not silently assume zero expansion.
+        assert_eq!(
+            initial
+                .thermal_transport_state()
+                .unwrap()
+                .volumetric_expansion_per_k(),
+            None
+        );
+        let liquid = initial
+            .liquid()
+            .clone()
+            .with_density_expansion(&card, "T", Temperature::new(300.0), Temperature::new(400.0))
+            .unwrap();
+        let combined =
+            ResolvedAcousticLiquidState::try_from_liquid(liquid.clone(), &parameter).unwrap();
+        assert_eq!(combined.liquid(), &liquid);
+        assert_eq!(combined.material(), initial.material());
+        assert_eq!(
+            combined.acoustic().identity(),
+            initial.acoustic().identity()
+        );
+
+        let hot = combined.at_query_point(&card, &point(375.0)).unwrap();
+        let thermal = hot.thermal_transport_state().unwrap();
+        let acoustic = hot.acoustic_state().unwrap();
+        assert_eq!(thermal.transport(), hot.transport_state().unwrap());
+        assert_eq!(
+            thermal.transport().density_kg_m3().to_bits(),
+            acoustic.density_kg_m3().to_bits()
+        );
+        near(thermal.temperature_k(), 375.0);
+        near(acoustic.density_kg_m3(), 970.0);
+        near(acoustic.sound_speed_m_s(), 1575.0);
+        near(thermal.volumetric_expansion_per_k().unwrap(), 0.4 / 970.0);
+        near(
+            hot.liquid()
+                .density_expansion()
+                .unwrap()
+                .density_slope_kg_m3_k(),
+            -0.4,
+        );
+        assert_eq!(
+            hot.liquid(),
+            &liquid.at_query_point(&card, &point(375.0)).unwrap()
+        );
+        assert_eq!(hot.material(), hot.liquid().material());
+        for property in requirements.properties() {
+            assert_eq!(
+                hot.material()
+                    .property(property.name())
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected,
+                initial
+                    .material()
+                    .property(property.name())
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected
+            );
+        }
+        assert_ne!(hot.acoustic().identity(), initial.acoustic().identity());
+
+        let saved = combined.clone();
+        assert!(combined.at_query_point(&card, &point(401.0)).is_err());
+        assert!(
+            combined
+                .at_query_point(&card, &point(350.0).with("pressure", 200_000.0).unwrap())
+                .is_err()
+        );
+        assert_eq!(combined, saved);
+    }
+}
+
+#[test]
+fn attaching_sound_does_not_requery_an_incomplete_liquid_bundle() {
+    let (card, requirements) = liquid_fixture(LiquidViscosityBasis::Dynamic, false);
+    // The card has acoustic data, but this original consumer selected only
+    // transport. Adding sound must explicitly resolve the complete bundle.
+    let liquid = resolve_liquid_state_with_requirements(
+        &card,
+        &point(300.0),
+        &requirements,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    assert!(
+        ResolvedAcousticLiquidState::try_from_liquid(
+            liquid,
+            &FluidAcousticParameter::sound_speed().unwrap(),
+        )
+        .is_err()
+    );
 }

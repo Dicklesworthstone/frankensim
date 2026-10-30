@@ -12,7 +12,9 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec, Velocity};
 
 use crate::MaterialError;
-use crate::fluid_transport::{FluidTransport, FluidTransportState};
+use crate::fluid_transport::{
+    FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
+};
 use crate::gas::{GasState, ResolvedGasState};
 use crate::gas_mixture::ResolvedGasMixtureState;
 use crate::liquid::{LiquidPropertyRequirements, ResolvedLiquidState};
@@ -356,21 +358,44 @@ pub fn resolve_fluid_acoustic_state(
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedAcousticLiquidState {
     acoustic: ResolvedFluidAcousticState,
+    liquid: ResolvedLiquidState,
     transport: FluidTransportState,
-    requirements: LiquidPropertyRequirements,
 }
 impl ResolvedAcousticLiquidState {
     fn admit(
         acoustic: ResolvedFluidAcousticState,
         requirements: &LiquidPropertyRequirements,
     ) -> Result<Self, MaterialStatePointError> {
-        // Reuse exact liquid admission and its dimensional/semantic checks.
-        // This temporary view selects no claims; the complete retained source
-        // bundle is the acoustic owner's original bundle.
         let liquid = ResolvedLiquidState::try_from_material_with_requirements(
             acoustic.material.clone(),
             requirements,
         )?;
+        Self::from_views(acoustic, liquid)
+    }
+
+    /// Add acoustics to an existing complete liquid bundle without querying or
+    /// replacing its source. The selected acoustic requirement must already be
+    /// in that bundle. Retains any admitted density-expansion path, including
+    /// its fixed pressure/composition context and analytic density tangent.
+    ///
+    /// All three views (sound, momentum/heat transport, and thermal expansion)
+    /// refresh through the original liquid owner at one common query point.
+    pub fn try_from_liquid(
+        liquid: ResolvedLiquidState,
+        parameter: &FluidAcousticParameter,
+    ) -> Result<Self, MaterialStatePointError> {
+        let acoustic = ResolvedFluidAcousticState::try_from_material(
+            liquid.material().clone(),
+            &liquid.requirements().properties()[0],
+            parameter,
+        )?;
+        Self::from_views(acoustic, liquid)
+    }
+
+    fn from_views(
+        acoustic: ResolvedFluidAcousticState,
+        liquid: ResolvedLiquidState,
+    ) -> Result<Self, MaterialStatePointError> {
         let transport =
             liquid
                 .transport_state()
@@ -384,8 +409,8 @@ impl ResolvedAcousticLiquidState {
         }
         Ok(Self {
             acoustic,
+            liquid,
             transport,
-            requirements: requirements.clone(),
         })
     }
     /// Complete evidence-bearing source/query bundle.
@@ -396,13 +421,18 @@ impl ResolvedAcousticLiquidState {
     pub const fn acoustic(&self) -> &ResolvedFluidAcousticState {
         &self.acoustic
     }
+    /// Original liquid owner, including its expansion source and complete
+    /// transport/acoustic bundle. No second set of claims is selected.
+    pub const fn liquid(&self) -> &ResolvedLiquidState {
+        &self.liquid
+    }
     /// Basis actually reported by the source; no dynamic/kinematic fallback.
     pub const fn viscosity_basis(&self) -> LiquidViscosityBasis {
-        self.requirements.viscosity_basis()
+        self.liquid.requirements().viscosity_basis()
     }
     /// Exact original liquid property roles, without canonical-name substitution.
     pub const fn liquid_requirements(&self) -> &LiquidPropertyRequirements {
-        &self.requirements
+        self.liquid.requirements()
     }
     /// Recompute all transport and acoustic properties using the original claims.
     pub fn at_query_point(
@@ -410,9 +440,9 @@ impl ResolvedAcousticLiquidState {
         card: &MaterialCard,
         point: &QueryPoint,
     ) -> Result<Self, MaterialStatePointError> {
-        Self::admit(
-            self.acoustic.at_query_point(card, point)?,
-            &self.requirements,
+        Self::try_from_liquid(
+            self.liquid.at_query_point(card, point)?,
+            self.acoustic.parameter(),
         )
     }
 }
@@ -424,6 +454,14 @@ impl FluidAcoustics for ResolvedAcousticLiquidState {
 impl FluidTransport for ResolvedAcousticLiquidState {
     fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
         Ok(self.transport)
+    }
+}
+impl ThermalFluidTransport for ResolvedAcousticLiquidState {
+    fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        // Reuse the same temperature semantics and known/unknown/signed beta
+        // as every other liquid consumer. In particular, no 1/T gas shortcut
+        // and no silent zero-expansion assumption enters acoustic liquids.
+        self.liquid.thermal_transport_state()
     }
 }
 
