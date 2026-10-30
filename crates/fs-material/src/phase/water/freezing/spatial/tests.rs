@@ -65,6 +65,21 @@ fn implicit_controls(dt: f64) -> ImplicitConductionControls {
         ..ImplicitConductionControls::default()
     }
 }
+
+fn adaptive_controls(dt: f64) -> AdaptiveImplicitConductionControls {
+    AdaptiveImplicitConductionControls {
+        step: ImplicitConductionControls {
+            cell_tolerance_j: 1e-9,
+            ..implicit_controls(dt)
+        },
+        initial_dt_s: dt,
+        enthalpy_absolute_tolerance_j_kg: 25.0,
+        temperature_absolute_tolerance_k: 0.01,
+        phase_fraction_absolute_tolerance: Some(0.0001),
+        relative_tolerance: 0.0,
+        ..AdaptiveImplicitConductionControls::default()
+    }
+}
 fn slab<'a>(
     caloric: &'a FreezingWaterThermalLaw,
     transport: &'a FreezingWaterConductivity,
@@ -548,4 +563,220 @@ fn implicit_refusal_preserves_physical_state_and_reuses_numerical_workspace() {
         fresh.profile(|| Ok(())).unwrap()
     );
     assert_eq!(reused_audit, fresh_audit);
+}
+
+#[test]
+fn adaptive_source_accuracy_refines_h_temperature_and_actual_liquid_inventory() {
+    let (caloric, transport) = laws();
+    let binding = FreezingWaterImplicitLaw::new(&caloric, &transport, || false).unwrap();
+    for fraction in [0.0, 0.37, 1.0] {
+        let source = caloric
+            .chart()
+            .state_at_liquid_fraction(fraction, || false)
+            .unwrap();
+        let observation = binding
+            .time_observables(source.specific_enthalpy_j_kg())
+            .unwrap();
+        assert_eq!(observation.temperature_k, source.temperature_k());
+        assert!((observation.phase_mass_fraction.unwrap() - fraction).abs() < 2e-15);
+    }
+    let initial = slab(&caloric, &transport, 24, true);
+    let before = initial.profile(|| Ok(())).unwrap();
+    // Independent original EXPLICIT transport on the same mesh; only temporal
+    // error is compared, without calling the adaptive controller as its oracle.
+    let (reference, reference_audit) = initial
+        .advance_to(12.0, controls(0.002), || Ok(()))
+        .unwrap();
+    let reference_profile = reference.profile(|| Ok(())).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(24).unwrap();
+    let mut loose = adaptive_controls(2.0);
+    loose.enthalpy_absolute_tolerance_j_kg = 100.0;
+    loose.temperature_absolute_tolerance_k = 0.05;
+    loose.phase_fraction_absolute_tolerance = Some(0.0003);
+    let mut tight = loose;
+    tight.enthalpy_absolute_tolerance_j_kg /= 100.0;
+    tight.temperature_absolute_tolerance_k /= 100.0;
+    tight.phase_fraction_absolute_tolerance = Some(0.000003);
+    let mut work = Vec::new();
+    let errors = [loose, tight].map(|control| {
+        let (next, audit) = initial
+            .advance_adaptive_to(12.0, control, &mut workspace, || Ok(()))
+            .unwrap();
+        let profile = next.profile(|| Ok(())).unwrap();
+        let mut error = [0.0_f64; 4];
+        for ((cell, reference), original) in profile.iter().zip(&reference_profile).zip(&before) {
+            error[0] += cell.reference_mass_kg
+                * (cell.stored_specific_enthalpy_j_kg - reference.stored_specific_enthalpy_j_kg)
+                    .abs();
+            error[1] = error[1]
+                .max((cell.material.temperature_k() - reference.material.temperature_k()).abs());
+            error[2] = error[2].max(
+                (cell.material.liquid_mass_fraction() - reference.material.liquid_mass_fraction())
+                    .abs(),
+            );
+            assert_eq!(cell.reference_mass_kg, original.reference_mass_kg);
+            assert_eq!(
+                next.thermal().cells()[&cell.cell_id].geometry,
+                initial.thermal().cells()[&cell.cell_id].geometry
+            );
+        }
+        error[3] = (audit.physical.thermal.external_heat_j
+            - reference_audit.thermal.external_heat_j)
+            .abs();
+        assert_eq!(next.time_s(), 12.0);
+        assert_eq!(next.mass_kg(), initial.mass_kg());
+        assert_eq!(audit.physical.thermal, audit.solve.solve.energy);
+        assert_eq!(audit.physical.entropy, audit.solve.solve.entropy);
+        assert!(audit.solve.maximum_accepted_normalized_error <= 1.0);
+        assert_eq!(
+            audit.solve.solve.energy.substeps,
+            2 * audit.solve.accepted_comparisons
+        );
+        assert!(audit.physical.source_enthalpy_residual_j.abs() < 2e-6);
+        assert!(audit.physical.internal_energy_residual_j.abs() < 2e-6);
+        assert!(audit.physical.pressure_work_j > 0.0);
+        assert!(!audit.physical.entropy.has_unclassified_sources);
+        assert!(
+            (audit.physical.entropy.reservoir_entropy_input_j_k
+                - audit.physical.thermal.external_heat_j / 253.15)
+                .abs()
+                < 1e-10
+        );
+        let source_entropy: f64 = before
+            .iter()
+            .zip(&profile)
+            .map(|(a, b)| {
+                a.reference_mass_kg
+                    * (b.material.thermal_specific_entropy_j_kg_k()
+                        - a.material.thermal_specific_entropy_j_kg_k())
+            })
+            .sum();
+        assert!((source_entropy - audit.physical.entropy.thermal_storage_change_j_k).abs() < 1e-10);
+        work.push((
+            audit.solve.accepted_comparisons,
+            audit.solve.accuracy_rejections,
+        ));
+        error
+    });
+    eprintln!(
+        "adaptive original-water refinement (field J, max K, max liquid fraction, bath J): {errors:?}; pairs/rejections={work:?}"
+    );
+    for component in 0..4 {
+        assert!(errors[1][component] < errors[0][component], "{errors:?}");
+    }
+    assert!(errors[1][0] < 0.5 * errors[0][0]);
+    assert!(work[1].0 > work[0].0 && work[1].1 > 0);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(initial.profile(|| Ok(())).unwrap(), before);
+}
+
+#[test]
+fn adaptive_water_bath_event_continues_exactly_and_late_source_audit_cancels_atomically() {
+    let (caloric, transport) = laws();
+    let event_time = 3.125;
+    let end_time = 8.125;
+    let initial = FreezingSlab::new(
+        &caloric,
+        &transport,
+        FreezingSlabGeometry {
+            thickness_m: 0.01,
+            area_m2: 0.001,
+            cells: 24,
+        },
+        caloric
+            .chart()
+            .state_at_temperature(Temperature::new(273.16), || false)
+            .unwrap(),
+        [
+            Some(FreezingSlabReservoir {
+                temperature_k: 253.15,
+                surface_resistance_m2_k_w: 0.0,
+            }),
+            None,
+        ],
+        &[FreezingSlabTemperatureEvent {
+            time_s: event_time,
+            face: SlabFace::Left,
+            temperature_k: 293.15,
+        }],
+        budget(24),
+        || Ok(()),
+    )
+    .unwrap();
+    let original = initial.profile(|| Ok(())).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(24).unwrap();
+    let control = adaptive_controls(1.0);
+    let mut calls = 0;
+    let (whole, whole_audit) = initial
+        .advance_adaptive_to(end_time, control, &mut workspace, || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+    let completed_checks = calls;
+    let (frozen, cold_audit) = initial
+        .advance_adaptive_to(event_time, control, &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!(frozen.time_s(), event_time);
+    assert_eq!(
+        frozen.thermal().cells()[&CellId(0)]
+            .boundary
+            .reservoir
+            .unwrap()
+            .temperature_k,
+        293.15
+    );
+    assert_eq!(cold_audit.physical.thermal.events, 1);
+    assert!(cold_audit.physical.thermal.external_heat_j < 0.0);
+    let continuation = AdaptiveImplicitConductionControls {
+        initial_dt_s: cold_audit.solve.suggested_dt_s,
+        ..control
+    };
+    let (thawed, warm_audit) = frozen
+        .advance_adaptive_to(end_time, continuation, &mut workspace, || Ok(()))
+        .unwrap();
+    assert!(warm_audit.physical.thermal.external_heat_j > 0.0);
+    assert!(
+        thawed.inventory(|| Ok(())).unwrap().ice_mass_kg
+            < frozen.inventory(|| Ok(())).unwrap().ice_mass_kg
+    );
+    assert_eq!(warm_audit.physical.thermal.events, 0);
+    assert_eq!(
+        thawed.profile(|| Ok(())).unwrap(),
+        whole.profile(|| Ok(())).unwrap()
+    );
+    assert!(
+        (whole_audit.physical.thermal.external_heat_j
+            - cold_audit.physical.thermal.external_heat_j
+            - warm_audit.physical.thermal.external_heat_j)
+            .abs()
+            < 1e-9
+    );
+    let reservoir_entropy = cold_audit.physical.thermal.external_heat_j / 253.15
+        + warm_audit.physical.thermal.external_heat_j / 293.15;
+    assert!(
+        (whole_audit.physical.entropy.reservoir_entropy_input_j_k - reservoir_entropy).abs()
+            < 1e-10
+    );
+    assert!(whole_audit.physical.internal_energy_residual_j.abs() < 2e-6);
+    // Stop at the slab wrapper's final checkpoint, after independently checking
+    // original source H and U+pV. A completed numerical prefix is still private.
+    calls = 0;
+    let error = initial
+        .advance_adaptive_to(end_time, control, &mut workspace, || {
+            calls += 1;
+            if calls == completed_checks {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        })
+        .err()
+        .unwrap();
+    assert_eq!(
+        error,
+        FreezingSlabError::Thermal(DepositionError::Cancelled)
+    );
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(initial.profile(|| Ok(())).unwrap(), original);
 }

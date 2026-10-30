@@ -5270,3 +5270,42 @@ authored; dense-water conductivity, container strength, wall storage/compliance,
 internal convection, multiphase behavior and regional stitching are not supplied.
 Native validation compiles the actual dense namespace and complete thermochemistry
 and thermal owners; it does not constitute a full workspace gate.
+
+## Adaptive spatial freezing with actual phase-inventory accuracy
+
+`FreezingWaterImplicitLaw::time_observables` obtains temperature and liquid
+mass fraction from one original caloric inverse. `FreezingSlab::advance_adaptive_to`
+uses the shared implicit accuracy controller and retains the existing independent
+source Delta H, Delta U + p Delta V and entropy accounts. No apparent heat
+capacity, duplicate fusion source, extrapolated accepted state or synthetic
+temperature-to-phase relation is added.
+
+`FreezingSlabAdaptiveAudit` separates the physical audit from the controller's
+local h/T/phase estimates and all attempted nonlinear work. Source and controller
+failures remain transactional, including cancellation after the final original-
+source audit. A returned `suggested_dt_s` explicitly seeds continuation.
+Scheduled face-temperature changes retain their exact event times and actual
+reservoir entropy temperatures.
+
+Two additional source tests bring the actual freezing namespace to 26 passing
+tests. A 24-cell, 12-second comparison against independent explicit transport at
+a 0.002-second cap reduces mass-weighted absolute enthalpy-field error from
+1.637753637 to 0.226923967 J when local h/T/liquid-fraction allowances tighten
+by 100. Maximum temperature discrepancy falls from 0.046597616 to 0.006387667 K,
+maximum liquid-fraction discrepancy from 0.011288234 to 0.001564972, and bath
+heat discrepancy from 1.498449183 to 0.207880577 J. Accepted comparison pairs
+increase from 141 to 1382: tighter accuracy costs additional original solves.
+The second case tests an exact cold-to-warm bath event, continuation at that
+event with the returned proposal, two-bath entropy and final-audit cancellation.
+
+`water_freezing_front --adaptive` exposes dimensioned enthalpy and temperature
+allowances, a liquid-mass-fraction allowance, a relative change allowance, and
+minimum/maximum comparison spans. The 24-cell, 120-second default adaptive run
+accepts 762 pairs (1524 physical half steps) from 817 comparisons. Its maximum
+accepted error ratio is 0.925807011 and maximum independent calorimetric residual
+is 1.1102e-9 J. Computed frozen reference-equivalent depth is 5.225752655 mm.
+
+These are local temporal estimates and computed reference-geometry results,
+not global or spatial accuracy certificates. Spatial refinement, source ranges,
+the explicit mixed-cell conductivity closure, and the fixed-pressure/no-flow
+limits of the original slab remain independent requirements.

@@ -19,6 +19,10 @@ use super::transport::{
     FreezingConductivityError, FreezingWaterConductivity, FreezingWaterImplicitLaw,
 };
 use super::{FreezingWaterError, FreezingWaterState};
+use fs_thermal::enthalpy::conduction::implicit::adaptive::{
+    AdaptiveImplicitConductionControls, AdaptiveImplicitConductionError,
+    AdaptiveImplicitConductionReport,
+};
 use fs_thermal::enthalpy::conduction::implicit::{
     ImplicitConductionChain, ImplicitConductionControls, ImplicitConductionError,
     ImplicitConductionLaw, ImplicitConductionReport, ImplicitConductionWorkspace,
@@ -73,6 +77,7 @@ pub enum FreezingSlabError {
     Material(FreezingWaterError),
     Transport(FreezingConductivityError),
     Implicit(ImplicitConductionError),
+    Adaptive(AdaptiveImplicitConductionError),
     Invalid(&'static str),
     EnergyBalance {
         maximum_residual_j: f64,
@@ -97,6 +102,11 @@ impl From<FreezingConductivityError> for FreezingSlabError {
 impl From<ImplicitConductionError> for FreezingSlabError {
     fn from(error: ImplicitConductionError) -> Self {
         Self::Implicit(error)
+    }
+}
+impl From<AdaptiveImplicitConductionError> for FreezingSlabError {
+    fn from(error: AdaptiveImplicitConductionError) -> Self {
+        Self::Adaptive(error)
     }
 }
 impl core::fmt::Display for FreezingSlabError {
@@ -158,6 +168,15 @@ pub struct FreezingSlabAudit {
 pub struct FreezingSlabImplicitAudit {
     pub physical: FreezingSlabAudit,
     pub solve: ImplicitConductionReport,
+}
+
+/// Original water calorimetry plus local h/T/liquid-inventory error estimates.
+/// The nested energy accounts describe the same accepted fine trajectory and
+/// are compared, never added. Work includes rejected and coarse comparisons.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreezingSlabAdaptiveAudit {
+    pub physical: FreezingSlabAudit,
+    pub solve: AdaptiveImplicitConductionReport,
 }
 
 /// A reusable physical slab assembled from the existing caloric and transport
@@ -500,6 +519,49 @@ impl<'a> FreezingSlab<'a> {
         )?;
         checkpoint()?;
         Ok((next, FreezingSlabImplicitAudit { physical, solve }))
+    }
+
+    /// Advance with temporal accuracy control in original specific enthalpy,
+    /// temperature and optionally actual liquid mass fraction. Equal melting
+    /// temperatures cannot hide an error in latent inventory. Only the original
+    /// conservative half-step trajectory is accepted, without extrapolation.
+    ///
+    /// Face-temperature events retain their exact times. This is a local time
+    /// estimator, not a spatial-error or measured-material uncertainty bound.
+    /// Use `solve.suggested_dt_s` as the next call's `initial_dt_s` to continue
+    /// the same controller. Failure leaves this slab and its source chart intact.
+    pub fn advance_adaptive_to(
+        &self,
+        target_s: f64,
+        controls: AdaptiveImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, FreezingSlabAdaptiveAudit), FreezingSlabError> {
+        checkpoint()?;
+        let law = FreezingWaterImplicitLaw::new(self.caloric, self.transport, || false)?;
+        let chain = ImplicitConductionChain::new(
+            &self.thermal,
+            &self.conduction,
+            &[(MaterialId(0), &law as &dyn ImplicitConductionLaw)],
+            &mut checkpoint,
+        )?;
+        let (thermal, solve) = chain.advance_adaptive_to(
+            &self.thermal,
+            target_s,
+            controls,
+            workspace,
+            &mut checkpoint,
+        )?;
+        let (next, physical) = self.finish_advance(
+            thermal,
+            self.conduction.clone(),
+            solve.solve.energy,
+            solve.solve.entropy,
+            controls.step.total_tolerance_j,
+            &mut checkpoint,
+        )?;
+        checkpoint()?;
+        Ok((next, FreezingSlabAdaptiveAudit { physical, solve }))
     }
 
     fn finish_advance(

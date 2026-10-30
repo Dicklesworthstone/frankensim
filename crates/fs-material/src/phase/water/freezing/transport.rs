@@ -19,7 +19,9 @@ use fs_qty::{Pressure, Temperature};
 use fs_thermal::enthalpy::DepositionError;
 use fs_thermal::enthalpy::ThermalLaw;
 use fs_thermal::enthalpy::conduction::ConductivityLaw;
-use fs_thermal::enthalpy::conduction::implicit::{ImplicitConductionLaw, ImplicitConductionState};
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionLaw, ImplicitConductionObservables, ImplicitConductionState,
+};
 use fs_thermochem::water::conductivity::{
     WaterConductivityError, WaterConductivityState, ice_at_temperature,
     liquid_at_pressure_temperature,
@@ -364,6 +366,24 @@ impl ImplicitConductionLaw for FreezingWaterImplicitLaw<'_> {
             temperature_slope_kg_k_j: state.temperature_enthalpy_derivative_kg_k_j(),
             conductivity_w_m_k: state.conductivity_w_m_k(),
             conductivity_slope_kg_w_m_k_j: state.conductivity_enthalpy_derivative_kg_w_m_k_j(),
+        })
+    }
+
+    fn time_observables(
+        &self,
+        specific_h_j_kg: f64,
+    ) -> Result<ImplicitConductionObservables, DepositionError> {
+        // Both accuracy coordinates come from one original caloric inverse.
+        // No conductivity query or synthetic temperature-to-phase map is needed.
+        let state = self
+            .caloric
+            .chart()
+            .state_at_specific_enthalpy(specific_h_j_kg, || false)
+            .map_err(|_| DepositionError::MaterialDomain)?
+            .into_state();
+        Ok(ImplicitConductionObservables {
+            temperature_k: state.temperature_k(),
+            phase_mass_fraction: Some(state.liquid_mass_fraction()),
         })
     }
 }
