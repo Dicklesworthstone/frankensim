@@ -1,6 +1,6 @@
 //! G0/G1/G3 tests of the actual held-effort layer law; all inputs are manufactured.
 use fs_tribo::{FrictionRegime, TangentialLaw, TangentialSolveConfig, TangentialStepInput};
-use fs_tribo::layer_contact::ThirdBodyLayerContact;
+use fs_tribo::layer_contact::{ThirdBodyLayerContact, ThirdBodyLayerRelaxationArm};
 
 fn law(yield_force: f64) -> ThirdBodyLayerContact {
     ThirdBodyLayerContact::new(1000.0, yield_force, 2.0, 300.0, 0.02).unwrap()
@@ -230,4 +230,111 @@ fn g1_affine_layer_elastic_loading_cools_and_closes_first_law_without_plastic_he
     // neither that error nor reversible cooling is material dissipation.
     let entropy_change = capacity*(t1/300.0).ln() + end.entropy_j_k;
     assert!(entropy_change >= -1e-15 && entropy_change < 2e-9);
+}
+
+fn hereditary(yield_force: f64) -> ThirdBodyLayerContact {
+    law(yield_force).with_relaxation(vec![
+        ThirdBodyLayerRelaxationArm { stiffness_n_m: 2000.0, relaxation_time_s: 0.01 },
+        ThirdBodyLayerRelaxationArm { stiffness_n_m: 700.0, relaxation_time_s: 0.04 },
+    ]).unwrap()
+}
+
+#[test]
+fn g1_subyield_shear_relaxes_to_equilibrium_with_second_order_material_memory() {
+    let model = hereditary(100.0);
+    let loaded = model.advance(&model.initial_state(),
+        &input([0.002, 0.001], 0.0002, 0.0)).unwrap();
+    assert_eq!(loaded.regime, FrictionRegime::Sticking);
+    assert!(loaded.dissipated_j > 0.0, "subyield viscoelastic loss is physical");
+    assert_eq!(loaded.state.plastic_slip_m(), [0.0; 2]);
+    let run = |steps: usize| {
+        let mut state = loaded.state.clone();
+        let mut heat = 0.0;
+        let dt = 0.02/steps as f64;
+        for _ in 0..steps {
+            let step = model.advance(&state, &input([0.0; 2], dt, 0.0)).unwrap();
+            let channels = model.step_dissipation(&state, &step.state, dt).unwrap();
+            assert_eq!(channels.plastic_j, 0.0);
+            close(channels.relaxation_j, step.dissipated_j, 1e-5);
+            close(step.closure_residual_j, 0.0, 1e-5);
+            heat += step.dissipated_j;
+            state = step.state;
+        }
+        assert_eq!(state.elastic_slip_m(), loaded.state.elastic_slip_m());
+        assert_eq!(state.plastic_slip_m(), [0.0; 2]);
+        close(model.stored_energy_j(&state)+heat,
+            model.stored_energy_j(&loaded.state), 0.01);
+        // The independent continuous held-strain Maxwell solution is one
+        // exponential per SOURCE arm. No force/spectrum fitting is involved.
+        let mut error = 0.0_f64;
+        for ((arm, initial), final_slip) in model.relaxation().iter()
+            .zip(loaded.state.relaxation_slip_m()).zip(state.relaxation_slip_m()) {
+            for axis in 0..2 {
+                let exact = initial[axis]*(-0.02/arm.relaxation_time_s).exp();
+                error = error.max((final_slip[axis]-exact).abs());
+            }
+        }
+        error
+    };
+    let errors = [run(20), run(40), run(80)];
+    for pair in errors.windows(2) { assert!((3.8..4.2).contains(&(pair[0]/pair[1]))); }
+}
+
+#[test]
+fn g1_maxwell_and_plastic_losses_close_the_same_two_axis_contact_return() {
+    let model = hereditary(0.1);
+    let mut state = model.initial_state();
+    let mut heat = 0.0;
+    let mut work = 0.0;
+    for i in 0..120 {
+        let angle = i as f64*0.19;
+        let drive = input([0.0002*angle.cos(), 0.0002*angle.sin()], 0.0005, 0.0001);
+        let step = model.advance(&state, &drive).unwrap();
+        let channels = model.step_dissipation(&state, &step.state, drive.dt_s).unwrap();
+        close(channels.plastic_j+channels.relaxation_j, step.dissipated_j, 1e-5);
+        assert!(channels.plastic_j >= 0.0 && channels.relaxation_j >= 0.0);
+        let actual = model.advance(&state, &input(step.slip_increment_m, drive.dt_s, 0.0)).unwrap();
+        for axis in 0..2 { close(actual.traction_n[axis], step.traction_n[axis], 1.0); }
+        for ((arm, old), new) in model.relaxation().iter()
+            .zip(state.relaxation_slip_m()).zip(step.state.relaxation_slip_m()) {
+            for axis in 0..2 {
+                let de = step.state.elastic_slip_m()[axis]-state.elastic_slip_m()[axis];
+                close(new[axis]-old[axis], de-drive.dt_s/arm.relaxation_time_s
+                    * (0.5*new[axis]+0.5*old[axis]), 0.001);
+            }
+        }
+        work += step.traction_n[0]*step.slip_increment_m[0]
+            +step.traction_n[1]*step.slip_increment_m[1];
+        heat += step.dissipated_j;
+        close(step.closure_residual_j, 0.0, 1e-5);
+        state = step.state;
+    }
+    assert!(heat > 0.0);
+    close(model.stored_energy_j(&state)+heat, work, work.abs());
+}
+
+#[test]
+fn g0_material_memory_continues_thermal_history_and_refuses_unresolved_or_replaced_arms() {
+    let cold = hereditary(100.0);
+    let loaded = cold.advance(&cold.initial_state(), &input([0.002, 0.001], 0.001, 0.0)).unwrap();
+    let warm = ThirdBodyLayerContact::new(1000.0, 100.0, 2.0, 310.0, 0.02).unwrap()
+        .with_relaxation(cold.relaxation().iter().map(|arm| ThirdBodyLayerRelaxationArm {
+            stiffness_n_m: arm.stiffness_n_m, relaxation_time_s: 0.5*arm.relaxation_time_s,
+        }).collect()).unwrap();
+    let continued = warm.continue_state(&loaded.state).unwrap();
+    assert_eq!(continued.relaxation_slip_m(), loaded.state.relaxation_slip_m());
+    assert_eq!(warm.stored_energy_j(&continued), cold.stored_energy_j(&loaded.state));
+    let held = TangentialStepInput { contact_temperature_k: Some(310.0), ..input([0.0;2], 0.001, 0.0) };
+    let relaxed = warm.advance(&continued, &held).unwrap();
+    assert!(relaxed.dissipated_j > 0.0);
+    close(relaxed.stored_change_j+relaxed.dissipated_j, 0.0, 0.01);
+    let snapshot = continued.clone();
+    assert!(warm.advance(&continued, &TangentialStepInput { dt_s: 0.02, ..held }).is_err());
+    assert_eq!(continued, snapshot);
+    assert!(law(100.0).continue_state_with_work(&loaded.state).is_err());
+    for arm in [
+        ThirdBodyLayerRelaxationArm { stiffness_n_m: 0.0, relaxation_time_s: 0.01 },
+        ThirdBodyLayerRelaxationArm { stiffness_n_m: 1.0, relaxation_time_s: f64::NAN },
+    ] { assert!(law(1.0).with_relaxation(vec![arm]).is_err()); }
+    assert!(law(1.0).with_relaxation(vec![cold.relaxation()[0]; 65]).is_err());
 }
