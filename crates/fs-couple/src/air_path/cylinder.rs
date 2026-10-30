@@ -29,6 +29,9 @@
 //! at preparation; evolving temperature/composition and non-Newtonian histories
 //! require their own coupled update, not mutation of an already loaded network.
 
+/// Source-defined elastic frames with complete exterior-fluid inertia and memory.
+pub mod frame;
+
 use super::invalid;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_aeroac::bessel::{j0, y0};
