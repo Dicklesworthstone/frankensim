@@ -7,7 +7,7 @@ Every input is derived from a committed description at eaf6e6539; nothing is tun
           (a rigid stop, no finger), mode count scaled so the top mode stays where the open string's was,
           its own duration and a bow lift at the end. Double stops are two cards in one `ensemble` run.
   wind    the fingering's own file with its duration and attack/release moved; nothing else changes.
-  voice   the vowel/pitch file with its duration and subglottal schedule moved.
+  voice   the vowel/pitch yielding-wall file render.sh grades, with its duration and subglottal schedule moved.
   lip     ONE render per phrase: the head plus a gesture schedule that steps lip pre-stress and tongues
           the mouth pressure per note (the pre-stress and pressures of render.sh's held notes).
 OUT_DIR/jobs.txt: `<mode> <out.wav> <args...>` per render; OUT_DIR/plan.json: how each phrase is joined.
@@ -103,6 +103,14 @@ RAMP = 0.08  # bow speed reaches its value in 80 ms (the committed cards use 150
 # cello C2 120-280 ms, bass A1 40-120 ms. The violin and viola speak at once from full force, while a low set-down
 # leaves the violin A string quiet and bright, sometimes on its second mode. 1 where no phrase bows the string.
 SET_DOWN = {"violin": (1, 1, 1, 1), "viola": (1, 1, 1, 1), "cello": (0.1, 0.7, 0.35, 1), "double-bass": (0.2, 0.1, 0.5, 0.2)}
+# Those lock times came from the audio, which cannot tell Helmholtz motion from a steady multiple slip. The solver's
+# own slip traces (one slip per period, slip time beta of the period) show the cello D string at 0.35 in multiple
+# slip for 0.9 s (D3 locks at 1.0 s) and the bass D and G strings out of Helmholtz motion for 0.3-0.5 s (bass F#2,
+# G2, A2, B2). On these strings the card's own onset leaves less time out of it in sum over their double-stop notes
+# (D3 0.25 s, F#2, G2, A2 0.15 s, B2 0.2 s; E3 0.5 s against 0.4 s; bass D2 0.3 s either way): the force constant from rest and the speed
+# ramp of the card (1 m/s^2, its sources.tsv bow_acceleration from Guettler 2002), the gesture its force was derived
+# for. Strings listed here keep the card's initial and first event as written; the others keep SET_DOWN and RAMP.
+CARD_ONSET = {"cello": (2,), "double-bass": (2, 3)}
 
 
 def bow_card(fam, si, off, dur):
@@ -112,6 +120,8 @@ def bow_card(fam, si, off, dur):
     n_audio = round((dur + TAIL) * 48000)
     init = next(l for l in base if l.startswith("initial"))
     _, _, _, force, beta = init.split("\t")
+    card_onset = si in CARD_ONSET.get(fam, ())
+    ramp = next(l for l in base if l.startswith("event\t0e0\t")).split("\t")[2] if card_onset else e(RAMP)
     for l in base:
         if l.startswith("audio "):
             a = l.split()
@@ -126,7 +136,7 @@ def bow_card(fam, si, off, dur):
             assert len(set(d[1:])) == 1, f"{fam} {f['strings'][si]}: per-mode damping"
             out.append(" ".join(["damping"] + [d[1]] * modes))
         elif l.startswith("initial"):
-            out.append(f"initial\tbow\t0e0\t{e(SET_DOWN[fam][si] * float(force))}\t{beta}")
+            out.append(l if card_onset else f"initial\tbow\t0e0\t{e(SET_DOWN[fam][si] * float(force))}\t{beta}")
         elif l.startswith("events"):
             out.append("events\t2")
         elif l.startswith("event\t"):
@@ -134,7 +144,7 @@ def bow_card(fam, si, off, dur):
         else:
             out.append(l)
     i = out.index(next(l for l in out if l.startswith("events")))
-    out[i + 1:i + 1] = [f"event\t0e0\t{e(RAMP)}\tbow\t1.5e-1\t{force}\t{beta}",
+    out[i + 1:i + 1] = [f"event\t0e0\t{ramp}\tbow\t1.5e-1\t{force}\t{beta}",
                         f"event\t{e(dur - 0.02)}\t2e-2\tbow\t1.5e-1\t0e0\t{beta}"]
     name = f"{fam}/s{si}-o{off}-d{dur:g}.performance"
     write(f"{OUT}/{name}", out)
@@ -174,13 +184,14 @@ for fam, f in BOWED.items():
         t += d
     plan[f"{fam}/melody"] = dict(family=fam, kind="melody", title="Ode to Joy (Beethoven), first phrase",
                                  notes=notes, join="detache")
-    # double stops: two cards in one ensemble run each
+    # double stops: two cards in one ensemble run each. The two parts' pressures add, so the PCM scale is twice the
+    # one-string scale (at 0.04 Pa the cello C2+G2 render clipped 23 samples, peak 0.0443 Pa).
     notes, t = [], 0.0
     for k, pair in enumerate(f["stops"]):
         d = 1.6 if k < 3 else 2.4
         cards = [bow_card(fam, si, off, d) for si, off in pair]
         wav = f"{fam}/chord{k}-d{d:g}.wav"
-        job(f"ensemble {wav} " + " ".join(f"--bow {c}" for c in cards) + f" --full-scale-pa {fs} --block 4096")
+        job(f"ensemble {wav} " + " ".join(f"--bow {c}" for c in cards) + f" --full-scale-pa {2 * float(fs):g} --block 4096")
         names = [nm(midi(f["strings"][si]) + off) for si, off in pair]
         notes.append(dict(wav=wav, at=round(t, 4), dur=d, note="+".join(names),
                           string="+".join(f["strings"][si] for si, _ in pair)))
@@ -265,7 +276,8 @@ for pitch in ["C3", "C4"]:
     notes, t = [], 0.0
     for v in "aeiou":
         d = 0.9 if v != "u" else 1.4
-        card = voice_note(f"story2008-{v}-{pitch}", d + 0.15)
+        # The cards voice/render.sh grades: the cited yielding wall, at the 192 kHz clock except /a/ (render.sh header).
+        card = voice_note(f"story2008-{v}-{pitch}-flanagan" + ("" if v == "a" else "-r4"), d + 0.15)
         wav = card.replace(".performance", ".wav")
         job(f"voice {wav} {card}")
         notes.append(dict(wav=wav, at=round(t, 4), dur=d, note=f"/{v}/ {pitch}"))
