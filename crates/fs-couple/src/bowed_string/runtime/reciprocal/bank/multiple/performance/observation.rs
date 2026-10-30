@@ -47,6 +47,8 @@ pub struct ShellObserverOptions {
 pub enum ShellObserverError {
     Invalid(&'static str),
     Shell(ShellBemError),
+    /// The original connected mechanics refused a continuous response.
+    Dynamics(crate::bowed_string::runtime::reciprocal::ReciprocalStringError),
     Transfer(TransferError),
     /// Shared Rayleigh receiver or material propagation admission.
     Plate(String),
@@ -67,6 +69,42 @@ fn poll(gate: &CancelGate) -> Result<(), ShellObserverError> {
     if gate.is_requested() { Err(ShellObserverError::Cancelled) } else { Ok(()) }
 }
 fn invalid(what: &'static str) -> ShellObserverError { ShellObserverError::Invalid(what) }
+
+// Shared by FIR playback and continuous response: change the mouth trace and
+// physical input inversely, retaining exactly the loaded source order.
+fn loaded_observation_inputs(
+    source: &crate::bowed_string::runtime::reciprocal::bank::MaterialStringBankSource,
+    body_modes: usize, loading: &crate::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemReport,
+    expected: &[usize], traces: &mut [Vec<f64>],
+) -> Result<(Vec<SourceId>, Vec<(usize, usize, f64)>), ShellObserverError> {
+    let body_component = source.strings().len();
+    let mut sources = (0..body_modes).map(|index| SourceId::StructuralMode(
+        format!("material-shell-mode:{index}:{}", loading.basis_identity),
+    )).collect::<Vec<_>>();
+    let mut coordinates: Vec<_> = (0..body_modes).map(|mode|(body_component,mode,1.0)).collect();
+    if loading.opening_ports != 0 {
+        let cavity = source.spatial_cavity()
+            .ok_or_else(||invalid("shell observer lost its original mouth geometry"))?;
+        if cavity.opening_count() != loading.opening_ports || traces.len() != expected.len() {
+            return Err(invalid("shell observer mouth extent differs from its joint load"));
+        }
+        for index in 0..loading.opening_ports {
+            let port = cavity.coupling().neck_radiation_port(index)
+                .map_err(|_|invalid("shell observer lost its original neck flow projection"))?;
+            if expected.get(body_modes+index) != Some(&port.coordinate) || port.coordinate < body_modes {
+                return Err(invalid("shell observer mouth address differs from its joint load"));
+            }
+            for value in &mut traces[body_modes+index] {
+                *value /= port.volume_weight_m2_per_sqrt_kg;
+            }
+            sources.push(SourceId::ApertureVolumeFlow(format!(
+                "material-shell-mouth:{index}:{}",loading.loading_identity)));
+            coordinates.push((body_component+1,port.coordinate-body_modes,
+                port.volume_weight_m2_per_sqrt_kg));
+        }
+    }
+    Ok((sources, coordinates))
+}
 
 impl ShellObserverOptions {
     /// Reuse the common finite-band declaration admission before shell or pack
@@ -271,34 +309,8 @@ impl MultiBowPerformance {
         if surface_panels != loading.surface_panels {
             return Err(invalid("shell observation geometry differs from the original radiation load"));
         }
-        let mut sources = (0..body_modes).map(|index| SourceId::StructuralMode(
-            format!("material-shell-mode:{index}:{}", loading.basis_identity),
-        )).collect::<Vec<_>>();
-        let mut coordinates: Vec<_> = (0..body_modes).map(|mode|(body_component,mode,1.0)).collect();
-        if loading.opening_ports != 0 {
-            let cavity = source.spatial_cavity()
-                .ok_or_else(||invalid("shell observer lost its original mouth geometry"))?;
-            if cavity.opening_count() != loading.opening_ports || traces.len() != source_count {
-                return Err(invalid("shell observer mouth extent differs from its joint load"));
-            }
-            for index in 0..loading.opening_ports {
-                let port = cavity.coupling().neck_radiation_port(index)
-                    .map_err(|_|invalid("shell observer lost its original neck flow projection"))?;
-                if expected[body_modes+index] != port.coordinate || port.coordinate < body_modes {
-                    return Err(invalid("shell observer mouth address differs from its joint load"));
-                }
-                // Loading columns use mass-normalized velocity. The common
-                // observation owner explicitly labels aperture volume flow,
-                // so transform BOTH the trace and accepted input inversely.
-                for value in &mut traces[body_modes+index] {
-                    *value /= port.volume_weight_m2_per_sqrt_kg;
-                }
-                sources.push(SourceId::ApertureVolumeFlow(format!(
-                    "material-shell-mouth:{index}:{}",loading.loading_identity)));
-                coordinates.push((body_component+1,port.coordinate-body_modes,
-                    port.volume_weight_m2_per_sqrt_kg));
-            }
-        }
+        let (sources, coordinates) = loaded_observation_inputs(
+            source, body_modes, loading, &expected, &mut traces)?;
         let gas = *source.gas();
         let mut boundary_allowance=loading.options;
         boundary_allowance.maximum_sweep_terms=options.maximum_sweep_terms;
@@ -345,6 +357,9 @@ impl MultiBowPerformance {
 
 /// The same receiver through a declared closed skin, with no air load fed back.
 pub mod one_way;
+
+/// The selected physical receiver at the forcing frequency, without FIR history.
+pub mod harmonic;
 
 /// The original flat body through the shared material-aware Rayleigh receiver.
 pub mod plate;

@@ -609,11 +609,42 @@ pub(super) fn impedance_rows(
     Ok((rows, policy.plain_cbie_limit()))
 }
 
-/// Dense work per frequency: assembly, one LU and every right-hand side.
-fn frequency_terms(panels: usize, sources: usize) -> Option<u64> {
+/// Dense work per frequency: one assembly/LU per original capped source batch,
+/// plus every right-hand side. The observation owner retains all input fields.
+pub(super) fn frequency_terms(panels: usize, sources: usize) -> Option<u64> {
     let p = panels as u64;
+    let batches = sources.div_ceil(helmholtz::MAX_RADIATION_FIELDS_PER_BATCH) as u64;
     p.checked_mul(p)?
-        .checked_mul(p.checked_add(sources as u64)?.checked_add(1)?)
+        .checked_mul(p.checked_add(1)?.checked_mul(batches)?.checked_add(sources as u64)?)
+}
+
+/// Original modal velocities and physical aperture flows, shared by playback
+/// and harmonic observation. Aperture shares multiply the input, never the
+/// unit-volume-flow trace, so their interference retains its physical phase.
+pub(super) fn observation_inputs(
+    source: &crate::bowed_string::runtime::reciprocal::bank::MaterialStringBankSource,
+    components: &[crate::modal_acoustic_time::ModalAcousticTimeModel],
+    mode_count: usize, skin: &ShellAcousticSkin, traces: &SkinTraces,
+) -> Result<(Vec<SourceId>, Vec<(usize, usize, f64)>, Vec<Vec<f64>>), ShellObserverError> {
+    let body_component = source.strings().len();
+    let mut sources: Vec<_> = (0..mode_count)
+        .map(|m| SourceId::StructuralMode(format!("one-way-shell-mode:{m}"))).collect();
+    let mut coordinates: Vec<_> = (0..mode_count).map(|m|(body_component,m,1.0)).collect();
+    let mut fields = traces.modes.clone();
+    if let Some(cavity) = source.material_cavity() {
+        let shape = cavity.cavity.neck_volume_shape_m2_per_sqrt_kg();
+        let neck = components.get(body_component+1)
+            .ok_or_else(||invalid("one-way observer lost the cavity neck component"))?;
+        if neck.modes().len() != 1 || !shape.is_finite() || shape <= 0.0 {
+            return Err(invalid("one-way observer needs the one physical neck coordinate"));
+        }
+        for (aperture, trace) in skin.apertures.iter().zip(&traces.apertures) {
+            sources.push(SourceId::ApertureVolumeFlow(format!("one-way-shell-aperture:{}",aperture.id)));
+            coordinates.push((body_component+1,0,aperture.flow_share*shape));
+            fields.push(trace.clone());
+        }
+    }
+    Ok((sources,coordinates,fields))
 }
 
 impl MultiBowPerformance {
@@ -746,33 +777,8 @@ impl MultiBowPerformance {
         if boundary_terms > options.maximum_boundary_terms {
             return Err(invalid("one-way skin exceeds its declared boundary work"));
         }
-        let mut sources: Vec<_> = (0..mode_count)
-            .map(|m| SourceId::StructuralMode(format!("one-way-shell-mode:{m}")))
-            .collect();
-        let mut coordinates: Vec<_> = (0..mode_count).map(|m| (body_component, m, 1.0)).collect();
-        let mut fields = traces.modes.clone();
-        if let Some(cavity) = cavity {
-            let shape = cavity.cavity.neck_volume_shape_m2_per_sqrt_kg();
-            let neck = self
-                .bank
-                .system
-                .components()
-                .get(body_component + 1)
-                .ok_or_else(|| invalid("one-way observer lost the cavity neck component"))?;
-            if neck.modes().len() != 1 || !shape.is_finite() || shape <= 0.0 {
-                return Err(invalid(
-                    "one-way observer needs the one physical neck coordinate",
-                ));
-            }
-            for (aperture, trace) in skin.apertures.iter().zip(&traces.apertures) {
-                sources.push(SourceId::ApertureVolumeFlow(format!(
-                    "one-way-shell-aperture:{}",
-                    aperture.id
-                )));
-                coordinates.push((body_component + 1, 0, aperture.flow_share * shape));
-                fields.push(trace.clone());
-            }
-        }
+        let (sources, coordinates, fields) = observation_inputs(
+            source, self.bank.system.components(), mode_count, skin, &traces)?;
         let medium = Medium {
             density: gas.density,
             sound_speed: gas.sound_speed,
