@@ -13,6 +13,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo="$(cd "$here/../../../.." && pwd -P)"
 materials="$repo/crates/fs-couple/examples/material_strings"
 assembly_options="${ASSEMBLY_OPTIONS:-$materials/cannone-h8.assembly}"
+performance="${MATERIAL_STRINGS_PERFORMANCE:-$materials/cannone-dominant-g3.material-strings}"
 geometry="$repo/data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026"
 for note in ${NOTES:-G3 D4 A4 E5}; do
     case "$note" in
@@ -21,7 +22,7 @@ for note in ${NOTES:-G3 D4 A4 E5}; do
     esac
     python3 "$repo/apps/instrument-lab/tools/render_material_strings.py" \
         --renderer "$bin" --out "$out/$note" \
-        --performance "$materials/cannone-dominant-g3.material-strings" \
+        --performance "$performance" \
         --pack-root "$materials/packs" \
         --shell-table "$geometry/shell-assembly-h8.tsv" \
         --assembly-options "$assembly_options" \

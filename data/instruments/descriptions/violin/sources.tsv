@@ -1,5 +1,6 @@
 frankensim.description-sources.v1
 quantity	scope	value	unit	route	citation_id	locator	note
+bow_ribbon_width	Cannone rigid-ribbon variant only	0.010	m	published-model-input	pitteroff-woodhouse-1998-bow-hair	Table I p. 549, violin bow ribbon width	Generic bow-family dimension in the authors' modelling table, not a measurement of the reference recording's bow; perpendicular contact and uniform load are explicit model assumptions. The five midpoint cells in cannone-ribbon-10mm.material-strings are numerical resolution, not measured hair count or tuned spectral weights.
 vibrating_length	all strings	0.328	m	published-measured	guettler2012-typical	table, column 'String length'	single length for the whole family; stopped notes are not used
 tuning_frequency	G3	196	Hz	published-measured	guettler2012-typical	table, column 'Frequency'	printed rounded value; f1 below is computed
 propagation_speed	G3	128.58	m/s	published-measured	guettler2012-typical	table, column 'Propagation speed'	equals 2*L*f0

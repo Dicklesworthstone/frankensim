@@ -95,6 +95,48 @@ bulk alloy unless its construction assumptions actually apply. Original source
 identities and queries are retained in the native log. The string is **not
 retuned** after substitution, and the sound is not peak-normalized.
 
+## Resolve the finite bow contact width
+
+`cannone-ribbon-10mm.material-strings` selects a **rigid, uniformly loaded
+ribbon** on the same four-string, shell and cavity assembly. Its only change
+from the original Cannone performance is `bow_ribbon 0.010 5`. The 10 mm
+physical width comes from the violin-bow ribbon in Table I of
+[Pitteroff and Woodhouse (1998), Part I](https://euphonics.org/wp-content/uploads/2022/03/Pitteroff_1.pdf),
+also retained in `bow-hair-horse-pitteroff-woodhouse-acustica1998`. It is a
+published bow-family dimension, not a measurement of il Cannone's or Iowa's
+actual bow. The contact is perpendicular to the string; this is the width
+along the string, without an inferred tilt correction.
+
+Select this data through the existing violin renderer:
+
+```bash
+NOTES=G3 \
+MATERIAL_STRINGS_PERFORMANCE="$PWD/data/instruments/descriptions/violin/cannone-ribbon-10mm.material-strings" \
+data/instruments/descriptions/violin/render.sh \
+  target/release/material_strings /path/to/new-ribbon-violin-run
+```
+
+The original bow card still supplies the speed ramp, **total** normal force
+and release. Five midpoint cells divide that total force equally; each has
+its own transverse/torsional contact map, slip velocity and traction in the
+simultaneous string/body solve. The width is neither an output filter nor a
+gain. Body, strings, atmosphere, receiver and pressure scale are unchanged.
+
+The cell count is a numerical resolution, not a fitted physical parameter.
+For a spatial refinement check, make separate copies with
+`bow_ribbon 0.010 3`, `bow_ribbon 0.010 5` and `bow_ribbon 0.010 9`, select
+each through `MATERIAL_STRINGS_PERFORMANCE`, and keep every other input and
+the common pressure scale fixed. Compare unnormalized pressure histories;
+neither three rungs nor a changing spectrum alone establishes convergence.
+
+This resolves finite contact breadth only. It retains the original authored
+Stribeck law, rigid bow support and uniform load distribution. It does not
+claim measured hair compliance, a rosin thermal law, individual hair
+engagement or improved acoustic fidelity. The source horsehair measurements
+do not supply the full frequency/temperature-dependent constitutive data
+needed to replace those assumptions. The point-contact recipe remains the
+default and is available for the controlled comparison.
+
 ## Apply a measured varnish to the existing violin
 
 `cannone-h8-varnish-memory.assembly` adds an explicitly authored 20 µm film

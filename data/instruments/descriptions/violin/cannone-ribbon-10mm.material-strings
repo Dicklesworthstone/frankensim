@@ -1,0 +1,30 @@
+frankensim-material-strings-v3
+audio 144000 288000 1 128
+state 293.15 1000
+gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+body violin-spruce-norway-viala2020-shell.fsmatpk 0.20781438 0.089946415 0.003 30 1
+strings 4
+string violin-string-dominant-g-pickering1985-section.fsmatpk 0.383 0.00040275 tension 43.99108723688379 127 22 0.8563968668407311 200000 0.1
+section homogeneous
+polarizations two 1 0 1 0
+string violin-string-dominant-d-pickering1985-section.fsmatpk 0.383 0.000399 tension 43.122446939143465 38 3 0.8563968668407311 200000 0.1
+section homogeneous
+polarizations two 1 0 1 0
+string violin-string-dominant-a-pickering1985-section.fsmatpk 0.383 0.0003405 tension 55.486491050429706 25 3 0.8563968668407311 200000 0.1
+section homogeneous
+polarizations two 1 0 1 0
+string violin-string-dominant-e-pickering1985-section.fsmatpk 0.383 0.0001555 tension 71.63411584970575 17 1 0.8563968668407311 200000 0.1
+section homogeneous
+polarizations two 1 0 1 0
+prepared-linear 512 4294967296 1000000000000000
+cavity physical-neck 0.002060956 0.027194321 0.003045029 flanged flanged 1
+friction stribeck 0.8 0.4 0.1 0
+bow_ribbon 0.010 5
+forces retain 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	bow	bow	0
+initial	bow	2e-1	1e0	7.707571801566581e-1
+events	0

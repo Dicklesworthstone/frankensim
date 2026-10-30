@@ -353,6 +353,29 @@
       }
     },
     {
+      "id": "vcsl-tenor-saxophone-c3-nv-vl2",
+      "instrument": "Tenor saxophone",
+      "path": "VCSL/BrettTenor_NV_Main_C3_vl2_rr1.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Reed%20Aerophones/Tenor%20Saxophone/Non-Vibrato/BrettTenor_NV_Main_C3_vl2_rr1.wav",
+      "sha256": "4afeef41e7f3a5df8c47a3f31389b5948837fe8b21c9e3e9e135829e44050677",
+      "bytes": 2121866,
+      "licence": "vcsl-cc0",
+      "source_page": "https://github.com/sgossner/VCSL/tree/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Reed%20Aerophones/Tenor%20Saxophone",
+      "articulation": "non-vibrato",
+      "range": "C3 (filename label; octave convention unverified)",
+      "dynamic": "velocity layer 2 (filename label)",
+      "notes": "Independently identified tenor saxophone, not the Iowa alto recording. Main microphone label; instrument geometry, player controls and recording-chain calibration are uncharacterized. VCSL permits tuning, mild EQ and noise reduction, so unprocessed audio is not assumed. Downloaded unchanged and fully decoded on 2026-10-30.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 48000,
+        "channels": 2,
+        "duration_s": 7.3674375,
+        "codec": "pcm_s24le",
+        "bits_per_sample": 24,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
       "id": "vcsl-organ-c3",
       "instrument": "Organ flue pipe",
       "path": "VCSL/RenOrgan_8foot_Room_C3_rr1.wav",

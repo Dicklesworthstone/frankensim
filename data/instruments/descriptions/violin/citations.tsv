@@ -1,5 +1,6 @@
 frankensim.description-citations.v1
 citation_id	citation
+pitteroff-woodhouse-1998-bow-hair	Pitteroff, R., Woodhouse, J. 'Mechanics of the Contact Area Between a Violin Bow and a String. Part I: Reflection and Transmission Behaviour', Acustica - acta acustica 84 (1998) 543-562, Table I p. 549. https://euphonics.org/wp-content/uploads/2022/03/Pitteroff_1.pdf; numerical source data retained in data/matdb/seed-v1/bow-hair-horse-pitteroff-woodhouse-acustica1998
 frankensim-baseline-body	crates/fs-couple/examples/bowed-string.performance body record (the existing one-mode baseline; no published source; UNKNOWN true value)
 frankensim-baseline-numerics	crates/fs-couple/examples/bowed-string.performance (subsamples, ambient, listener, compile_limits records; numerical/admission choices, not measured quantities)
 frankensim-card-sweep	bowed_card_sweep (crates/fs-couple/src/bin/bowed_card_sweep.rs, landed 601e374fc, --accel added in 339a41a47; built at 6f2e42ec7dfe and da31fbd67ee9 on trj): the library's own bowed run on a bow-force ladder with a rigid bridge, from a step start or with the bow speed ramped from rest, classified by the gate detector; per-card receipts under data/instruments/grades/<family>/bowed-card-sweep-6f2e42ec7.jsonl (step start) and bowed-card-sweep-ramp-da31fbd67.jsonl (ramped onset)

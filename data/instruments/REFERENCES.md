@@ -2,7 +2,8 @@
 
 `references-supplemental.json`, together with its `baseline_ids` from
 `references.json`, supplies actual recordings for all 22 instrument family
-cards, plus piano, organ, steel-string guitar, timpani, splash cymbal and the nine
+cards, including separate alto and tenor saxophones, plus piano, organ,
+steel-string guitar, timpani, splash cymbal and the nine
 drum-kit comparison states. Originals remain outside Git. The existing Iowa manifest has
 1,176 files (about 12.3 GB); its selected baseline requires 21 files
 (110,212,120 bytes), including an ambient-noise control.
@@ -31,6 +32,11 @@ bash data/instruments/fetch-references.sh \
 # One supplemental family, without fetching any archives.
 bash data/instruments/fetch-references.sh \
   --manifest data/instruments/references-supplemental.json --instrument Recorder
+
+# Independently identified tenor saxophone, not an alto substitute.
+bash data/instruments/fetch-references.sh \
+  --manifest data/instruments/references-supplemental.json \
+  --id vcsl-tenor-saxophone-c3-nv-vl2
 ```
 
 `--instrument` is case-insensitive and exact; both selectors are repeatable.
@@ -80,6 +86,23 @@ states. Point its `SALAMANDER_OH_DIR` argument at the extracted
 `Salamander/OH` directory. An archive is a
 source container, not an audio file.
 
+### Duduk source availability
+
+On 2026-10-30 the public Freesound preview returned HTTP 403. For listening
+coverage, the existing screened manifest also pins the independent
+[Sound of Armenian Duduk](https://commons.wikimedia.org/wiki/File:Sound_of_Armenian_Duduk.ogg)
+recording, which was downloaded, hash-verified and fully decoded:
+
+```sh
+bash data/instruments/fetch-references.sh \
+  --manifest data/instruments/references-screened.json \
+  --id commons-sound-of-armenian-duduk
+```
+
+Its source license is CC BY-SA 4.0. This is a different performance and remains
+a family-level listening reference: it is not the Freesound specimen, a
+matched note, or a characterized excitation/recording-chain measurement.
+
 ## Coverage
 
 Pitch/dynamic labels below come from the source. Chromatic-range files contain
@@ -102,6 +125,7 @@ every performed note.
 | Oboe | C4–B4, mf | Iowa |
 | Bassoon | C3–B3, mf | Iowa |
 | Alto saxophone | C4–B4, mf, no vibrato | Iowa |
+| Tenor saxophone | C3 filename label, velocity layer 2, no vibrato, Main microphone | VCSL |
 | Bb trumpet | C4–B4, mf, no vibrato | Iowa |
 | French horn | C4–B4, mf | Iowa |
 | Tenor trombone | C3–B3, mf | Iowa |
@@ -113,6 +137,7 @@ every performed note.
 | Tin whistle | phrase on metal D whistle with wooden stop | TimRoss / Wikimedia Commons |
 | Pan pipes | D4/G4 labels, native untuned recordings | pattingthestar / OpenGameArt |
 | Duduk | C-duduk performance by Steen, public MP3 preview | juskiddink / Freesound |
+| Duduk | independent phrase recording, source identity retained; fallback for unavailable preview | Wikimedia Commons |
 | Voice | Mirko “ah”, file 60 (C4 label) | SpectMorph |
 | Piano | Steinway B A4, pp/mf/ff | Iowa |
 | Organ flue pipe | Renaissance organ 8-foot register C3, Room microphone | VCSL |
