@@ -98,6 +98,301 @@ fn axial_rectangle_lux(luminance: f64, a: f64, b: f64, z: f64) -> f64 {
     2.0 * luminance * (a / az * (b / az).atan() + b / bz * (a / bz).atan())
 }
 
+fn projected_polygon_lux(
+    luminance: f64,
+    corners: [[f64; 3]; 4],
+    receiver: [f64; 3],
+    normal: [f64; 3],
+) -> f64 {
+    // Stokes' theorem on the unit sphere gives
+    // integral_Omega omega dOmega = (1/2) sum_edges theta * unit(u cross v).
+    // Dotting this vector with the receiving normal integrates the cosine.
+    // The polygon must be wholly above the horizon, with positive winding
+    // as seen from the receiver. No renderer PDF, ray or quadrature is used.
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let normal_length = dot(normal, normal).sqrt();
+    let normal = normal.map(|value| value / normal_length);
+    let directions = corners.map(|corner| {
+        let delta = std::array::from_fn(|axis| corner[axis] - receiver[axis]);
+        let distance = dot(delta, delta).sqrt();
+        let direction = delta.map(|value| value / distance);
+        assert!(
+            dot(normal, direction) > 0.0,
+            "reference requires no horizon clipping"
+        );
+        direction
+    });
+    let mut projection = 0.0;
+    for edge in 0..4 {
+        let u = directions[edge];
+        let v = directions[(edge + 1) % 4];
+        let cross = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let sine = dot(cross, cross).sqrt();
+        projection += dot(normal, cross) * sine.atan2(dot(u, v)) / (2.0 * sine);
+    }
+    assert!(projection > 0.0 && projection <= PI);
+    luminance * projection
+}
+
+fn diffuse_emitting_cube(coefficient: f64) -> Primitive {
+    // Exactly represented planar enclosure: 6 faces * 4 m², inward winding.
+    // Unlike a tessellated sphere, this reference has no curvature error.
+    Primitive {
+        shape: Shape::Mesh(TriMesh::new(
+            vec![
+                [-1.0, -1.0, -1.0],
+                [1.0, -1.0, -1.0],
+                [1.0, 1.0, -1.0],
+                [-1.0, 1.0, -1.0],
+                [-1.0, -1.0, 1.0],
+                [1.0, -1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, 1.0, 1.0],
+            ],
+            vec![
+                [0, 1, 2],
+                [0, 2, 3],
+                [4, 6, 5],
+                [4, 7, 6],
+                [0, 3, 7],
+                [0, 7, 4],
+                [1, 5, 6],
+                [1, 6, 2],
+                [0, 4, 5],
+                [0, 5, 1],
+                [3, 2, 6],
+                [3, 6, 7],
+            ],
+        )),
+        material: Material::Lambertian {
+            reflectance: LiftedSpectrum {
+                c: [0.0, 0.0, coefficient],
+            },
+        },
+        emission: None,
+    }
+}
+
+#[test]
+fn g1_off_axis_inclined_receiver_matches_exact_projected_solid_angle() {
+    with_cx(|cx, _| {
+        let mut scene = empty_scene([0.0; 3], [0.0, 0.0, 1.0]);
+        scene.primitives.push(panel(2.0, 1.0, 0.5, false));
+        let sources = [emitter(0, 100.0 * PI, EmissionSidedness::Front)];
+        let corners = [
+            [-1.0, -0.5, 2.0],
+            [1.0, -0.5, 2.0],
+            [1.0, 0.5, 2.0],
+            [-1.0, 0.5, 2.0],
+        ];
+        // Near-field, off-axis and far-field views exercise both geometric
+        // cosines. Flux is 100*pi lm over 2 m², hence L = 50 cd/m².
+        for (point, normal) in [
+            ([0.7, 0.1, 1.7], [0.1, 0.1, 1.0]),
+            ([0.6, -0.3, 0.3], [0.35, 0.25, 1.0]),
+            ([-1.2, 0.7, -3.0], [0.3, -0.4, 1.0]),
+        ] {
+            let expected = projected_polygon_lux(50.0, corners, point, normal);
+            let probe = IlluminanceProbe::try_new(
+                Point3::new(point[0], point[1], point[2]),
+                Vec3::new(normal[0], normal[1], normal[2]),
+            )
+            .unwrap();
+            let result = area_probe(&scene, &[], &sources, probe, 32_768, cx);
+            close(
+                result.illuminance_lux,
+                expected,
+                0.02,
+                "projected solid angle",
+            );
+            assert_eq!(result.direct_lux, 0.0);
+            // Any passive aperture covers at most the receiving hemisphere.
+            assert!(result.illuminance_lux <= 1.02 * PI * 50.0);
+        }
+    });
+}
+
+#[test]
+fn g1_diffuse_enclosure_matches_reflection_series_and_absorbed_power() {
+    with_cx(|cx, _| {
+        let emitted = 20.0;
+        let flux = 24.0 * PI * emitted;
+        let sources = [emitter(0, flux, EmissionSidedness::Front)];
+        // c=0 and c=3/4 represent spectrally constant rho=1/2 and 4/5.
+        // Every wall sees a complete hemisphere of the same radiance, so
+        // L_infinity = Le/(1-rho), independent of position or mesh sampling.
+        for (coefficient, rho) in [(0.0, 0.5_f64), (0.75, 0.8_f64)] {
+            let mut scene = empty_scene([0.0; 3], [0.0, 0.0, 1.0]);
+            scene.primitives.push(diffuse_emitting_cube(coefficient));
+            for depth in [1, 4, 12] {
+                let mut policy = settings(depth, 8192);
+                policy.strategy = DirectStrategy::BsdfOnly;
+                let value = area_pixel(&scene, &[], &sources, PathMedium::Vacuum, policy, cx);
+                // A hit-only depth D observes emission after 0..D-1 bounces.
+                let tail_fraction = rho.powi(depth as i32);
+                let expected = emitted * (1.0 - tail_fraction) / (1.0 - rho);
+                close(
+                    value.luminance_cd_m2,
+                    expected,
+                    0.002,
+                    "diffuse reflection series",
+                );
+                // Each wall absorbs (1-rho)*pi*L. Missing absorption equals
+                // the analytically known omitted tail, not sampling noise.
+                let absorbed = (1.0 - rho) * 24.0 * PI * value.luminance_cd_m2;
+                close(
+                    absorbed + flux * tail_fraction,
+                    flux,
+                    0.002,
+                    "enclosure power balance",
+                );
+                assert!(value.total_error_bound_cd_m2.is_none());
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_calibrated_multiple_scattering_preserves_enclosure_energy_balance() {
+    with_cx(|cx, _| {
+        let emitted = 20.0;
+        let rho = 0.5;
+        let flux = 24.0 * PI * emitted;
+        let mut scene = empty_scene([0.0; 3], [0.0, 0.0, 1.0]);
+        scene.primitives.push(diffuse_emitting_cube(0.0));
+        let sources = [emitter(0, flux, EmissionSidedness::Front)];
+        let density = [1.0];
+        let medium = ScatteringGrid::try_new(
+            cx,
+            AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([1; 3], &density, [-1.0; 3], [2.0; 3]),
+                MassAbsorptionSpectrum::constant(0.0).unwrap(),
+                None,
+                medium_budget(),
+            )
+            .unwrap(),
+            MassScatteringSpectrum::constant(0.4).unwrap(),
+            PhaseFunction::henyey_greenstein(0.6).unwrap(),
+        )
+        .unwrap();
+        // A constant isotropic radiance has equal in- and out-scattering for
+        // any normalized reciprocal phase law. With no volume absorption,
+        // L=Le+rho*L remains the exact all-order solution (40 cd/m²), and
+        // (1-rho)*A*pi*L equals the enclosure's emitted luminous flux.
+        // Scattering consumes path vertices too: the vacuum rho^depth tail
+        // is NOT a bound here. Two finite depths are regression convergence
+        // evidence only; neither the test tolerance nor sampling uncertainty
+        // certifies the untraced remainder or a measured haze model.
+        let mut previous = None;
+        for depth in [32, 64] {
+            let value = area_pixel(
+                &scene,
+                &[],
+                &sources,
+                PathMedium::Scattering(&medium),
+                settings(depth, 32_768),
+                cx,
+            );
+            close(
+                value.luminance_cd_m2,
+                emitted / (1.0 - rho),
+                0.03,
+                "conservative scattering in a calibrated diffuse enclosure",
+            );
+            close(
+                (1.0 - rho) * 24.0 * PI * value.luminance_cd_m2,
+                flux,
+                0.03,
+                "emitted versus absorbed lumens with multiple scattering",
+            );
+            if let Some(previous) = previous {
+                close(
+                    value.luminance_cd_m2,
+                    previous,
+                    0.005,
+                    "finite-depth convergence in this enclosure",
+                );
+            }
+            previous = Some(value.luminance_cd_m2);
+            assert!(value.total_error_bound_cd_m2.is_none());
+            assert!(value.estimated_standard_error_cd_m2.is_none());
+        }
+    });
+}
+
+#[test]
+fn g1_diffuse_enclosure_mis_and_lux_preserve_terminal_reflection_order() {
+    with_cx(|cx, _| {
+        let emitted = 20.0;
+        let rho = 0.5_f64;
+        let mut scene = empty_scene([0.0; 3], [0.0, 0.0, 1.0]);
+        scene.primitives.push(diffuse_emitting_cube(0.0));
+        let sources = [emitter(0, 24.0 * PI * emitted, EmissionSidedness::Front)];
+        let probes = [
+            IlluminanceProbe::try_new(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+                .unwrap(),
+            IlluminanceProbe::try_new(Point3::new(-0.3, 0.4, 0.1), Vec3::new(1.0, 0.0, 0.0))
+                .unwrap(),
+        ];
+        for depth in [1, 4] {
+            // NEE at the terminal wall includes one more reflected emission
+            // than a hit-only path: orders 0..D, in both camera and probe APIs.
+            let expected = emitted * (1.0 - rho.powi(depth as i32 + 1)) / (1.0 - rho);
+            let value = area_pixel(
+                &scene,
+                &[],
+                &sources,
+                PathMedium::Vacuum,
+                settings(depth, 32_768),
+                cx,
+            );
+            close(
+                value.luminance_cd_m2,
+                expected,
+                0.025,
+                "terminal MIS reflection order",
+            );
+            let mut job = PathIlluminanceJob::new_with_emitters(
+                &scene,
+                PhotometricEmitters {
+                    points: &[],
+                    surfaces: &sources,
+                },
+                PathMedium::Vacuum,
+                &probes,
+                TransportOptions::default(),
+                IlluminanceSampling {
+                    samples_per_probe: 32_768,
+                    max_depth: depth,
+                    sampler: Sampler::OwenSobol,
+                    seed: 173,
+                },
+                cx,
+            )
+            .unwrap();
+            job.advance(cx, usize::MAX).unwrap();
+            for value in job.estimates().map(Option::unwrap) {
+                close(
+                    value.illuminance_lux,
+                    PI * expected,
+                    0.025,
+                    "uniform-cavity illuminance",
+                );
+                assert_eq!(value.direct_lux, 0.0);
+                assert!(value.estimated_standard_error_lux.is_none());
+                assert!(value.total_error_bound_lux.is_none());
+            }
+        }
+        // The 2--2.5% bands here qualify fixed deterministic regression samples.
+        // They are not confidence intervals, calibration errors or certificates.
+    });
+}
+
 #[test]
 fn g1_area_source_luminance_uses_actual_area_sides_and_dimmer() {
     with_cx(|cx, _| {

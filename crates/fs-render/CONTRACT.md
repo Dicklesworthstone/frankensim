@@ -1752,6 +1752,39 @@ Both CSV modes name unknown total bounds. Stderr records the observer and
 semantics versions, units, numerical claim, sampling interpretation/seed/depth,
 and separate unknown calibration, discretization and physical-model errors.
 
+### Independent physical reference tests
+
+The following are independently specified mathematical regression references,
+with fixed test tolerances; passing them does not certify arbitrary scenes.
+Existing inverse-square/incidence, disk refinement, spectral extinction and
+progressive replay tests remain in the photometry batteries.
+
+- `observer` unit tests independently parse the original CIE CSV and check all
+  80 midpoint XYZ triples. `photometric_path::spectral_reference` compares
+  selective filters, colored reflection and finite-source measurements with
+  the published data. Two equal-power blue/red bins expose an observer error
+  that an unfiltered lumen-normalization round trip would cancel.
+- `photometric_path::area` evaluates inclined, off-axis receivers against a
+  spherical-polygon boundary integral of projected solid angle. A closed,
+  uniformly emitting diffuse cube tests the finite-depth geometric reflection
+  series, camera/probe units, terminal MIS weighting and absorbed-power balance.
+  Its analytic vacuum tail is a property of that benchmark only.
+- `photometric_image::scattering_reference` compares three non-collinear
+  fixtures with an independent angle-space airlight integral for isotropic,
+  forward/backward HG and Rayleigh phases. It checks passive extinction and SI
+  scale covariance. A deliberately unresolved narrow cone demonstrates why a
+  zero refinement discrepancy is not an enclosure.
+- A conservative-scattering diffuse-cube furnace tests all-order radiance and
+  energy balance at two path depths. Its acceptance tolerance does not provide
+  a general bound on scattering-order truncation.
+
+These original analytic scenes are not reproductions of CIE 171 test cases.
+The public CIE 171:2006 description does not supply the complete reference case
+data or permission to redistribute the report; no normative tables have been
+copied or inferred. The open observer dataset above is a separate CIE reference.
+Real-fixture accuracy still requires the reporter's licensed measurements,
+material/medium characterization and calibration uncertainties.
+
 ### Borrowed spectral physical media
 
 `PhotometricScene::try_with_medium` accepts `PhotometricMedium`, borrowing the

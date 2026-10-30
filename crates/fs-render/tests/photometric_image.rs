@@ -4,6 +4,9 @@
 
 #![cfg(feature = "photometry")]
 
+#[path = "photometric_image/scattering_reference.rs"]
+mod scattering_reference;
+
 use core::f64::consts::PI;
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
