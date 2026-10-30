@@ -20,7 +20,7 @@ use super::{
     RigidHertzRollingError, along, finite, kinematics, norm, rates, sphere_card, world,
 };
 use crate::tangential_friction::hertz::multiple::RigidHertzIslandControls;
-use crate::tangential_friction::hertz::{points, relative_point, relative_spin};
+use crate::tangential_friction::hertz::{accepted_phase, points, relative_point, relative_spin};
 use crate::tangential_friction::rolling::RigidRollingHistory;
 use crate::tangential_friction::{
     RigidContactBinding, RigidFrictionError, components, magnitude, poll, totals,
@@ -608,7 +608,14 @@ impl<'a> PreparedRigidHertzRollingIsland<'a> {
                 free_coordinates_m: m.rates_before.map(|v| self.dt_s * v),
             });
         }
-        let native = self.native.advance(&inputs, || gate.is_requested())?;
+        let phases: Vec<_> = self
+            .mechanics
+            .iter()
+            .map(|m| accepted_phase(&m.rates_before[..3]))
+            .collect();
+        let native = self
+            .native
+            .advance_phases(&inputs, &phases, || gate.is_requested())?;
         let mut linear = vec![Vec3::ZERO; self.before.len()];
         let mut angular = vec![Vec3::ZERO; self.before.len()];
         for (i, m) in self.mechanics.iter().enumerate() {

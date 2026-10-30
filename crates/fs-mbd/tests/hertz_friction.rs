@@ -149,6 +149,62 @@ fn axial(slip: f64, spin: f64) -> Fixture {
 }
 
 #[test]
+fn moving_high_static_capacity_uses_kinetic_traction_through_true_arrest() {
+    for (slip, spin) in [(1.0, 0.0), (0.0, 1.0)] {
+        let mut f = axial(slip, spin);
+        f.law = HertzWrenchContact::new(HertzWrenchParameters {
+            static_mu: 1.5,
+            ..f.law.parameters()
+        })
+        .unwrap();
+        let (capacity, mobility) = if slip != 0.0 {
+            (
+                4.0,
+                1.0 / 2.0 + 1.0 / 3.0 + 0.2 * 0.2 / 0.10 + 0.15 * 0.15 / 0.20,
+            )
+        } else {
+            (4.0 * 3.0 * PI * RADIUS / 16.0, 1.0 / 0.12 + 1.0 / 0.25)
+        };
+        let stop = 1.0 / (capacity * mobility);
+        for fraction in [0.75, 1.0] {
+            let mut bodies = f.bodies;
+            let report = f.advance(&mut bodies, fraction * stop, controls()).unwrap();
+            assert_eq!(report.contact.mode, HertzWrenchMode::Sliding);
+            let after = if slip != 0.0 {
+                report.slip_velocity_after_m_s[0]
+            } else {
+                report.spin_after_rad_s
+            };
+            close(after, 1.0 - fraction, 3e-14);
+            close(
+                report.contact.dissipated_energy_j,
+                (fraction - 0.5 * fraction * fraction) / mobility,
+                3e-14,
+            );
+            close(report.total_energy_residual_j, 0.0, 3e-14);
+        }
+        assert_eq!(f.law.parameters().static_mu, 1.5);
+    }
+}
+
+#[test]
+fn positive_static_but_zero_kinetic_capacity_does_not_capture_existing_motion() {
+    let mut f = axial(1e-20, 0.0);
+    f.law = HertzWrenchContact::new(HertzWrenchParameters {
+        static_mu: 1.5,
+        kinetic_mu: 0.0,
+        ..f.law.parameters()
+    })
+    .unwrap();
+    let mut bodies = f.bodies;
+    let report = f.advance(&mut bodies, 1.0, controls()).unwrap();
+    assert_eq!(bodies, f.bodies);
+    assert_eq!(report.contact.mode, HertzWrenchMode::Frictionless);
+    assert_eq!(report.contact.dissipated_energy_j, 0.0);
+    close(report.slip_velocity_after_m_s[0], 1e-20, 1e-35);
+}
+
+#[test]
 fn exact_kinetic_translation_stops_relative_point_slip_with_finite_support_recoil() {
     let f = axial(1.0, 0.0);
     // Independent scalar mechanics from both original masses and lever inertias.

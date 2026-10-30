@@ -10,8 +10,8 @@
 //! No invented compliance or sequential accepted-patch sweep is introduced.
 
 use super::{
-    PreparedRigidHertzPair, RigidHertzContact, RigidHertzControls, RigidHertzError, finite, points,
-    relative_point, relative_spin,
+    PreparedRigidHertzPair, RigidHertzContact, RigidHertzControls, RigidHertzError, accepted_phase,
+    finite, points, relative_point, relative_spin,
 };
 use crate::tangential_friction::{RigidContactBinding, components, magnitude, poll, totals};
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
@@ -477,7 +477,14 @@ impl PreparedRigidHertzIsland {
                 free_spin_angle_rad: self.dt_s * mechanics.rates_before[2] / patch.contact_radius_m,
             });
         }
-        let native = self.native.advance(&inputs, || gate.is_requested())?;
+        let phases: Vec<_> = self
+            .mechanics
+            .iter()
+            .map(|m| accepted_phase(&m.rates_before))
+            .collect();
+        let native = self
+            .native
+            .advance_phases(&inputs, &phases, || gate.is_requested())?;
         let mut linear = vec![Vec3::ZERO; self.before.len()];
         let mut angular = vec![Vec3::ZERO; self.before.len()];
         for (mechanics, contact) in self.mechanics.iter().zip(&native.contacts) {

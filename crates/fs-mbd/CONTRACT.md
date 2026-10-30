@@ -2188,3 +2188,53 @@ groups and eight original articulated-motion groups. These are focused
 original-source checks, not a full Cargo/DSR gate, cross-platform proof,
 performance qualification or general multibody lane completion. The broader
 `frankensim-ext-mbd-core-vqqt` remains open.
+
+
+## Hertz moving phases and physical collinear stop/restart — v0
+
+Original Hertz pair and simultaneous-island consumers, with and without
+material rolling, now supply accepted phase ownership to the original law.
+Any nonzero accepted shear/spin retains its kinetic capacity; it cannot spend
+a larger static capacity to choose a premature zero-midpoint displacement.
+Existing held-effort endpoints still require their original physical audits
+and may refuse an unresolved stop. A velocity tolerance is not an instruction
+to erase an initially nonzero motion.
+
+`hertz_rolling::collinear::PreparedRigidHertzRollingCollinear` resolves actual
+longitudinal slip arrest and subsequent static or rolling-driven restart for
+one finite body pair. Preparation retains original full-inertia mechanics and
+requires an invariant longitudinal-shear/lateral-rolling subspace, including
+zero unresolved normal response. With q=[u,R*omega] and original response
+W=[[a,b],[b,c]], gamma=A*N/R, sliding obeys
+`F=-mu_k*N*sign(u)`, `r'=b*F-c*gamma*r`, `u'=a*F-b*gamma*r`.
+The original exponential path integrates shear travel, force and moment
+impulses, surface work and bulk squared-rate work independently.
+
+A bracketed true zero of shear velocity ends a moving phase. Only there is
+`F_static=(b/a)*gamma*r` tested against the original static capacity. If it
+holds, surface heat is zero while rolling decays with
+`r'=-gamma*(c-b*b/a)*r` and continues heating the original bulk material.
+Otherwise the outgoing acceleration starts the appropriate kinetic phase,
+including reversal. Stop searches retain arithmetic-scaled velocity residuals
+as well as caller time/velocity gates; even real 1e-20 m/s initial slip is
+integrated rather than declared stationary.
+
+The opaque continuation binds a physically located stop to its exact original
+body states, masses, full inertias, body indices, arms and contact frame.
+Every phase advances the original material-owned checkpoint; the final body
+candidate applies one summed native wrench impulse and independently checks
+rates, kinetic work, history heat and total momentum. Preparation/trials are
+immutable. Source, effort, phase/root budget, numerical audit or cancellation
+failure returns no partial body, stop marker or material history. Work is
+bounded by at most 4096 phases and 256 root iterations per event.
+
+This owner holds poses, contact points, normal load, radius, material card and
+frequency over the window. It supplies no external forcing, normal impulse or
+normal elastic storage, moving geometry, general shear/spin event trajectory
+or simultaneous-island stopping path. Thermal trial owners may refresh admitted
+coefficients while reusing the same immutable geometry. Seven G1/G3 groups in
+`tests/hertz_rolling_collinear.rs` use independent scalar/exponential references
+for true arrest, post-stop rolling, reversal, split continuation, tiny motion
+and atomic source/domain/inertia refusals. Two additional `hertz_friction`
+regressions verify high-static translation/spin and zero-kinetic free motion;
+existing pair and island covariance/recoil/work tests remain active.

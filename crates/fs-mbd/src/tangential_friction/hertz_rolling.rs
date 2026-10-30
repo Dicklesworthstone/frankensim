@@ -23,9 +23,10 @@
 //! interface remains caller-owned unless a source-bound wrapper establishes it.
 
 pub mod multiple;
+pub mod collinear;
 
 use super::hertz::{
-    PreparedRigidHertzPair, RigidHertzContact, RigidHertzControls, RigidHertzError,
+    PreparedRigidHertzPair, RigidHertzContact, RigidHertzControls, RigidHertzError, accepted_phase,
     apply_pair_wrench, points, relative_point, relative_spin, scaled_response,
 };
 use super::rolling::RigidRollingHistory;
@@ -462,7 +463,12 @@ impl<'a> PreparedRigidHertzRollingPair<'a> {
             )?,
         )?;
         let resolved = hertz
-            .advance(&self.effective, controls.contact, || gate.is_requested())
+            .advance_phase(
+                &self.effective,
+                accepted_phase(&self.rate_before[..3]),
+                controls.contact,
+                || gate.is_requested(),
+            )
             .map_err(RigidHertzError::from)?;
         let hertz_effort = [
             resolved.force_n[0],

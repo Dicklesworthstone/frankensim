@@ -17,9 +17,19 @@ use fs_tribo::TriboError;
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::sliding_patch::contact::{
     HertzWrenchConfig, HertzWrenchContact, HertzWrenchError, HertzWrenchInput, HertzWrenchMode,
-    HertzWrenchStep,
+    HertzWrenchPhase, HertzWrenchStep,
 };
 use fs_tribo::sliding_patch::{HertzSlidingPatch, HertzSlidingPatchParameters};
+
+/// An actual nonzero accepted rate remains moving even below an error tolerance.
+/// Static capture from a moving state requires an independently located event.
+pub(super) fn accepted_phase(rates: &[f64]) -> HertzWrenchPhase {
+    if rates.iter().any(|&v| v != 0.0) {
+        HertzWrenchPhase::Kinetic
+    } else {
+        HertzWrenchPhase::StaticAdmissible
+    }
+}
 
 /// One caller-owned closed normal patch between two finite dynamic bodies.
 #[derive(Clone, Copy, Debug)]
@@ -366,7 +376,12 @@ impl PreparedRigidHertzPair {
             ..
         } = *self;
         let compliance = input.scaled_compliance_m_per_n;
-        let resolved = law.advance(&input, controls.contact, || gate.is_requested())?;
+        let resolved = law.advance_phase(
+            &input,
+            accepted_phase(&rate_before),
+            controls.contact,
+            || gate.is_requested(),
+        )?;
         let force = axes[0]
             .scale(resolved.force_n[0])
             .add(axes[1].scale(resolved.force_n[1]));
