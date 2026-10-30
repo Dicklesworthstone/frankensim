@@ -14,6 +14,9 @@ pub mod hertz;
 /// Simultaneous Hertz shear/spin and material-derived rolling on one native pair.
 pub mod hertz_rolling;
 
+/// Source-capable directional Coulomb friction with full two-body mobility.
+pub mod directional;
+
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::tangential::nonsmooth::{
     NonsmoothAudit, NonsmoothContact, NonsmoothContactResult, NonsmoothControls,

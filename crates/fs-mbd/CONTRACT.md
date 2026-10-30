@@ -1435,6 +1435,43 @@ Focused physical groups cover exact coast-down, driven work, world/boost
 covariance, continuation, elastic limits, source/traction refusal, late
 cancellation and attitude refinement.
 
+## Native rigid-body directional friction impulses
+
+`tangential_friction::directional::{apply_rigid_directional,
+apply_rigid_directional_with}` applies a held-load, frozen-geometry
+directional friction phase to two original finite rigid bodies. Their
+masses, full inertia tensors, poses and center-of-mass-relative contact
+arms determine the full tangential mobility `W = J M^-1 J^T`; the midpoint
+constitutive compliance is `C = dt^2 W / 2`. No scalar averaging of the
+off-diagonal response is performed.
+
+The native entry point retains the original elliptical law and history.
+The callback entry point admits a retained source owner using the same
+history, released motion, matrix and selected branch. A source that owns
+speed/path coordinates must close them against actual solved motion
+inside the callback. Exactly zero initial tangential speed selects the
+static-or-sliding branch; moving contact selects kinetic continuation.
+
+The actual opposing impulses update both bodies. Independently
+reconstructed endpoint kinematics, per-body and total momentum balances,
+midpoint work and contact storage/dissipation gate publication. Kinetic
+change is computed from momentum increments and mean velocities rather
+than subtraction of large absolute energies. The report exposes normal
+recoil for the surrounding normal owner. Exactly two bodies and accepted
+history are staged and published together after cancellation and all
+physical gates; failure leaves them unchanged.
+
+A phase that assists endpoint slip or produces moving midpoint stiction
+refuses as an unresolved slip event. Exact resolved stopping is admitted.
+The trajectory owner must refine or locate arrest; this adapter performs
+no event search, pose integration, normal impulse solve, changing-load
+integration, spin-friction solve or thermal-store update.
+
+`tests/rigid_directional.rs` checks full-tensor off-center response against
+independent unit-impulse columns, equivalent body-frame parameterizations,
+work/heat balance, exact stopping under large common translation, overstep
+refusal and atomic callback/cancellation/geometry failures.
+
 ## Joint Hertz sliding and spin on two finite bodies
 
 `tangential_friction::hertz::apply_rigid_hertz` consumes the original
