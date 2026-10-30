@@ -17,6 +17,7 @@ impl Input {
         }
         let wire = strings.get(string).ok_or("absent bending-memory string")?;
         let count = match &wire.section {
+            input::WireSection::Measured { .. } => return Err("whole-string measurements do not supply layer relaxation laws".into()),
             input::WireSection::Homogeneous | input::WireSection::CloseWound { .. } => 1,
             input::WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
         };
@@ -37,6 +38,7 @@ impl Input {
         for (index, selection) in self.selections.iter().enumerate() {
             let wire = strings.get(selection.string).ok_or("absent bending-memory string")?;
             let layers = match &wire.section {
+                input::WireSection::Measured { .. } => return Err("whole-string measurements do not supply layer relaxation laws".into()),
                 input::WireSection::Homogeneous | input::WireSection::CloseWound { .. } => 1,
                 input::WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
             };
@@ -84,6 +86,7 @@ impl Input {
         for selection in &self.selections {
             let wire=strings.get(selection.string).ok_or("absent bending-memory string")?;
             let sleeves = match &wire.section {
+                input::WireSection::Measured { .. } => return Err("whole-string measurements do not supply layer relaxation laws".into()),
                 // Bending memory belongs to the core. A sliding helical wrap
                 // is not another bonded bending layer and needs no such claims.
                 input::WireSection::Homogeneous | input::WireSection::CloseWound { .. } => &[][..],

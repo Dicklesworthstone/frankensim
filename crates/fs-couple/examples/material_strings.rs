@@ -4,6 +4,8 @@
 mod input;
 #[path = "material_strings/construction.rs"]
 mod construction;
+#[path = "material_strings/measured.rs"]
+mod measured;
 #[path = "material_strings/material_inputs.rs"]
 mod material_inputs;
 #[path = "material_strings/body.rs"]

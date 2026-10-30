@@ -31,6 +31,9 @@ impl input::Wire {
         gate: &CancelGate) -> Result<MaterialStringSource>
     {
         poll(gate)?;
+        if let input::WireSection::Measured { axes, properties } = &self.section {
+            return measured::resolve(self, axes, properties, catalog, loader, spec, gate);
+        }
         let thermal = match self.thermal_reference_kelvin {
             Some(reference) => {
                 let StringPrestress::FixedExtension { stress_free_length_m, linear_strain_limit } = self.prestress else {
@@ -46,6 +49,7 @@ impl input::Wire {
         let twist = self.twist_modes > 0;
         let core = resolve(&self.pack, catalog, loader, spec, false, twist, &self.bending_loss)?;
         let mut source = match &self.section {
+            input::WireSection::Measured { .. } => unreachable!("measured assembly resolves before bulk material"),
             input::WireSection::CloseWound { core_radius_m, pack, wire_radius_m, pitch_m } => {
                 if thermal.is_some() || twist || spec.longitudinal_waves.is_some() || self.torsion_memory.is_some() {
                     return Err("close-wound reduction supports frozen core flexure and spring extension; resolved winding thermal/torsional/axial-wave laws are unavailable".into());

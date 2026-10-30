@@ -236,6 +236,7 @@ impl Inputs {
                 .get(member)
                 .ok_or("bow interface names an absent string")?;
             let outer = match &wire.section {
+                input::WireSection::Measured { .. } => return Err("whole-string measurements do not identify the outer contact material".into()),
                 input::WireSection::Homogeneous => &wire.pack,
                 input::WireSection::CloseWound { pack, .. } => pack,
                 input::WireSection::Bonded { sleeves, .. } => {

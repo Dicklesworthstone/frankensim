@@ -6,9 +6,17 @@ schedule, physical load compiler and streamed PCM writer. It contains no modal
 frequency presets, separate pluck oscillator, per-string audio mixer or second
 physics integrator. All strings see one shared plate and optional cavity.
 
-The supplied coefficients are **synthetic integration fixtures**, not measured
+The basic wire/body coefficients are **synthetic integration fixtures**, not measured
 steel, gold, silver, wood, rosin or instrument data. The output is a reduced
 physical-model demonstration, not a validated violin/cello/bass recording.
+
+`section measured` also accepts source-bound whole-string line mass, flexural
+rigidity, diameter, span and fixed tension through this same performer. The
+[measured-string workflow](MEASURED_STRINGS.md) compiles the existing published
+Lampis cello-string pack and couples it to a manufactured laboratory plate.
+It retains the source's unknown measurement conditions and effective-coefficient
+limitations; it does not infer hidden winding, axial, torsional or intrinsic-loss
+properties, or claim a complete cello model.
 
 ### Shared material cards
 

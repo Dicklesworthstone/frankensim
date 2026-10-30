@@ -7,6 +7,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::cavity::ShellCavityMolec
 use fs_scenario::gesture::GestureValue;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
 use fs_scenario::acoustic::BendingRelaxationProperties;
+use fs_couple::material_assembly::measured_string::MeasuredStringProperties;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::ShellObserverOptions;
@@ -115,6 +116,9 @@ impl BendingLoss {
 #[derive(Clone, Debug)]
 pub enum WireSection {
     Homogeneous,
+    /// Whole-assembly measurements with an explicit elastic-only assumption.
+    /// Coordinates belong to the measurement, independently of body/gas state.
+    Measured { axes: Vec<(String, f64)>, properties: MeasuredStringProperties },
     Bonded { core_radius_m: f64, sleeves: Vec<WireLayer> },
     CloseWound { core_radius_m: f64, pack: String, wire_radius_m: f64, pitch_m: f64 },
 }
@@ -222,6 +226,8 @@ pub struct Spec {
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     /// The explicit contact-thermal profile requires original film density.
     pub contact_thermal: bool,
+    /// An explicit profile routes dry heat through original material-coordinate strips.
+    pub dry_contact_thermal: bool,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<MaterialForceProgram>,
     pub bow_fibers: Option<fibers::Input>,
     /// Prescribed position along the string, separate from tangential speed/load.
@@ -336,6 +342,9 @@ impl Spec {
                 row.end()?;
             }
             if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("bending-loss") {
+                if matches!(&wire.section, WireSection::Measured { .. }) {
+                    return Err("measured whole strings do not supply an intrinsic bending-loss law".into());
+                }
                 let mut row = r.row("bending-loss")?;
                 wire.bending_loss = match row.word()? {
                     "kelvin-voigt" => BendingLoss::KelvinVoigt,
@@ -1132,6 +1141,7 @@ impl Spec {
             if let BendingLoss::Prony { properties } = &wire.bending_loss {
                 let layers = match &wire.section {
                     WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
+                    WireSection::Measured { .. } => return Err("measured whole strings do not supply layer relaxation laws".into()),
                     WireSection::Homogeneous | WireSection::CloseWound { .. } => 1,
                 };
                 if self.prepared_linear.is_some() {
@@ -1195,12 +1205,16 @@ impl Spec {
         if let Some(fibers) = &self.bow_fibers {
             modes = modes.checked_add(fibers.mode_count(self)?).ok_or("complete fiber mode count overflow")?;
         }
-        let mut transverse = 0usize;
+        let mut fluid_loaded_string_modes = 0usize;
         for wire in &self.strings {
             let planes = if wire.polarizations.is_some() { 2 } else { 1 };
             let bending = wire.bending_modes.checked_mul(planes)
                 .ok_or("transverse mode count overflow")?;
-            transverse = transverse.checked_add(bending).ok_or("transverse mode count overflow")?;
+            // Every transverse and torsional coordinate has its own causal
+            // cylinder-fluid memory. Count both before enforcing exact budgets.
+            fluid_loaded_string_modes = fluid_loaded_string_modes.checked_add(bending)
+                .and_then(|n| n.checked_add(wire.twist_modes))
+                .ok_or("fluid-loaded string mode count overflow")?;
             modes = modes.checked_add(bending).and_then(|n| n.checked_add(wire.twist_modes))
                 .ok_or("complete string/body mode count overflow")?;
         }
@@ -1215,7 +1229,7 @@ impl Spec {
             .ok_or("complete connection count overflow")?;
         if let Some(resolution) = self.cylinder_gas_loading {
             resolution.validate()?;
-            let memory = transverse.checked_mul(resolution.intervals)
+            let memory = fluid_loaded_string_modes.checked_mul(resolution.intervals)
                 .ok_or("fluid memory dimension overflow")?;
             modes = modes.checked_add(memory).ok_or("complete fluid mode count overflow")?;
             links = links.checked_add(memory).ok_or("complete fluid connection count overflow")?;
@@ -1268,6 +1282,28 @@ impl<'a> Reader<'a> {
         let mut row = self.row("section")?;
         match row.word()? {
             "homogeneous" => { row.end()?; Ok(WireSection::Homogeneous) }
+            "measured" => {
+                let count = row.count(8)?;
+                let mut axes = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let axis = row.label()?;
+                    let value = row.scalar()?;
+                    if axes.iter().any(|(prior, _)| prior == &axis) {
+                        return Err("measured string coordinates must have distinct axes".into());
+                    }
+                    axes.push((axis, value));
+                }
+                let properties = MeasuredStringProperties {
+                    length: row.label()?, diameter: row.label()?, tension: row.label()?,
+                    linear_density: row.label()?, bending_stiffness: row.label()?,
+                };
+                properties.requirements()?;
+                if row.word()? != "no-intrinsic-loss" {
+                    return Err("measured strings require explicit no-intrinsic-loss; assembly measurements do not identify a damping law".into());
+                }
+                row.end()?;
+                Ok(WireSection::Measured { axes, properties })
+            }
             "close-wound" => {
                 let core_radius_m = row.positive()?;
                 let pack = row.path()?;
@@ -1302,7 +1338,7 @@ impl<'a> Reader<'a> {
                 }
                 Ok(WireSection::Bonded { core_radius_m, sleeves })
             }
-            _ => Err("section must be homogeneous, bonded CORE_RADIUS SLEEVE_COUNT, or close-wound CORE_RADIUS WRAP_PACK WIRE_RADIUS PITCH".into()),
+            _ => Err("section must be homogeneous, measured AXES AXIS VALUE ... LENGTH DIAMETER TENSION LINE_DENSITY EI no-intrinsic-loss, bonded CORE_RADIUS SLEEVE_COUNT, or close-wound CORE_RADIUS WRAP_PACK WIRE_RADIUS PITCH".into()),
         }
     }
     fn row(&mut self, key: &str) -> Result<Row<'a>> {
@@ -1314,6 +1350,13 @@ impl<'a> Reader<'a> {
 }
 impl<'a> Row<'a> {
     fn word(&mut self) -> Result<&'a str> { self.words.next().ok_or_else(|| format!("missing field on line {}", self.line).into()) }
+    fn label(&mut self) -> Result<String> {
+        let value = self.word()?;
+        if value.len() > 256 || value.chars().any(char::is_control) {
+            return Err("measurement axes and property names must be bounded labels".into());
+        }
+        Ok(value.to_owned())
+    }
     fn parse<T: FromStr>(&mut self) -> Result<T> {
         let line = self.line;
         self.word()?.parse().map_err(|_| format!("invalid field on line {line}").into())

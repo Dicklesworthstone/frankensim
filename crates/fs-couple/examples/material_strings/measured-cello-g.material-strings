@@ -1,0 +1,21 @@
+frankensim-material-strings-v3
+audio 48000 4096 0.01 128
+state 293.15 1000
+gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+body body.fsmatpk 0.4 0.3 0.001 2 1
+strings 1
+string cello-g-whole.fsmatpk 0.7 0.000575 tension 116.3 4 0 0.8 3000 0.1
+section measured 1 temperature_known 0 playing_length diameter_dominant tension_dominant linear_density_dominant bending_stiffness_dominant no-intrinsic-loss
+polarizations two 0.6 0.8 1 0
+cavity none
+friction stribeck 0.8 0.4 0.1 0
+forces preload 1 1
+port 0 0.2 centreline 0.002
+force 0 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	bow	bow	0
+initial	bow	0e0	0e0	2e-1
+events	0

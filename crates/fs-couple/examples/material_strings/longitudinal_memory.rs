@@ -57,6 +57,8 @@ impl Input {
                 input::WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
                 input::WireSection::CloseWound { .. } => return Err(
                     "quasistatic wound sections have no resolved longitudinal material history".into()),
+                input::WireSection::Measured { .. } => return Err(
+                    "measured whole strings do not supply axial material history".into()),
             };
             states = layers.checked_mul(self.properties.branches.len())
                 .and_then(|n| n.checked_mul(resolution.axial_modes.len()))

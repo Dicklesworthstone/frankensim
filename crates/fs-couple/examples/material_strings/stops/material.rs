@@ -133,6 +133,7 @@ impl Sources {
             // or a homogenized section modulus. The declared contact envelope
             // cannot exceed that constituent's real radial depth.
             let (outer, depth) = match &wire.section {
+                input::WireSection::Measured { .. } => return Err("whole-string measurements do not identify a material contact surface".into()),
                 input::WireSection::Homogeneous => (&wire.pack, wire.radius),
                 input::WireSection::CloseWound { pack, wire_radius_m, .. } => (pack, *wire_radius_m),
                 input::WireSection::Bonded { core_radius_m, sleeves } => {

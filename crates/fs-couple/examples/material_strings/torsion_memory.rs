@@ -8,6 +8,7 @@ impl input::Wire {
     pub(super) fn torsion_memory_states(&self) -> Result<usize> {
         let Some(layers) = &self.torsion_memory else { return Ok(0); };
         let physical_layers = match &self.section {
+            input::WireSection::Measured { .. } => return Err("whole-string measurements do not supply torsional layer laws".into()),
             input::WireSection::Homogeneous => 1,
             input::WireSection::CloseWound { .. } => return Err("close-wound torsion requires a resolved winding law".into()),
             input::WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
@@ -52,6 +53,7 @@ impl input::Wire {
         let Some(layers) = &self.torsion_memory else { return Ok(()); };
         self.torsion_memory_states()?;
         let sleeves = match &self.section {
+            input::WireSection::Measured { .. } => return Err("whole-string measurements do not supply torsional layer laws".into()),
             input::WireSection::Homogeneous => &[][..],
             input::WireSection::CloseWound { .. } => return Err("close-wound torsion requires a resolved winding law".into()),
             input::WireSection::Bonded { sleeves, .. } => sleeves.as_slice(),
