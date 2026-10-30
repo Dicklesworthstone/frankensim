@@ -1253,3 +1253,34 @@ ambiguity and endpoints, positive/negative junction mismatches at 20/25/50/100
 MPa, independent common pressure derivatives, source-domain and work limits,
 and early/late cancellation. All 182 native thermochemistry tests pass.
 Production routing is allocation-free and retains bounded source/boundary work.
+
+## Pinned hydrogen/oxygen finite-rate mechanism
+
+`kinetics::hydrogen::cantera_h2o2` constructs the complete ten-species,
+29-reaction ideal-gas `ohmech` from Cantera 3.2.0, commit
+`4a8358eb80cfeb50474386b5f9ec0b3a83519889`, mechanism blob
+`65e6321a60bafb1feb4f3b1be5347e6d1e89c937`. Atomic weights retain source
+`Elements.cpp` blob `ebe9da8b1a3e7944d1de070851b36fdb858ad8d4`.
+The original typed species bank, NASA owner and kinetic laws perform all work;
+no external runtime dependency or second thermodynamic implementation is added.
+All duplicate reactions, explicit collider channels, five generic third-body
+laws and the Troe falloff law remain. Source cm/mol/s and cal/mol rate data
+are converted to SI using their actual reaction order.
+
+The canonical axis is AR, H, H2, H2O, H2O2, HO2, N2, O, O2, OH. NASA7 is
+embedded exactly in NASA9 with zero inverse-temperature coefficients, on the
+common 300–3500 K interval. Callers explicitly choose original source h/s or
+`ContinuousAt300K`: the latter preserves the low-temperature region and Cp,
+using the existing continuity owner to bound upper-region h/s shifts by
+0.01 J/mol and 2e-5 J/(mol K). These are numerical reconciliation budgets,
+not experimental uncertainty. Source cards and corrections remain inspectable.
+Reverse rates and equilibrium constants follow the same chosen thermodynamics.
+
+Five focused source tests cover every species Cp/h/s and every reaction net
+rate at 700 and 1800 K, source identities, pressure/collider channels, equilibrium,
+continuity and cancellation. The native thermochemistry library passes 164 tests.
+An independent development-only Cantera 3.2.0 calculation agrees with all
+29 fixture rates to 2.45e-13 relative and thermodynamics to 3.51e-16.
+This establishes source conformance, not experimental validation.
+The loader supplies the hydrogen/oxygen submechanism, not full GRI methane
+chemistry, a time integrator, transport, soot, real-gas phases or a fire model.

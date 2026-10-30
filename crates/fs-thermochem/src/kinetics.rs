@@ -27,6 +27,8 @@ use fs_qty::{Pressure, Temperature};
 
 mod caloric;
 pub use caloric::admit_caloric_interval;
+/// Pinned hydrogen/oxygen source mechanism using these same kinetic owners.
+pub mod hydrogen;
 mod pressure;
 pub use pressure::{
     FalloffBroadeningV1, PressureDependenceV1, ThirdBodyEfficienciesV1, TroeFalloffV1,
