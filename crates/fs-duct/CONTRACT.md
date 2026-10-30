@@ -73,6 +73,16 @@ second duct type or global profile registry exists. `Segment::axial_length`
 also includes profiles. The profile carries no material defaults: propagation
 takes the caller's GasState, frequency, loss model, mouth load and step axis.
 
+`RadiusProfile::geometry` integrates the enclosed volume and true lateral wall
+area of any nonempty axial interval. Its fourth-order two-node Gauss rule splits
+at original spline knots and uses the caller's explicit `RiccatiSteps` per smooth
+span, with at most 65536 total panels. `geometry_controlled` polls cancellation
+at panel boundaries and publishes no partial result. The returned
+`ProfileGeometry` retains actual work; its error is a refinable numerical error,
+not a certified enclosure. The integral uses `2 pi r sqrt(1+(dr/dx)^2)` for wall
+area and excludes end caps. G1 checks independent cylinder/cone measures and
+fourth-order exponential volume/area ladders; G0/G4 check work and cancellation.
+
 `profile_matrix` integrates [p,Z_ref U] backward with fourth-order, two-node
 Magnus and a traceless 2x2 exponential. Forward off-diagonal coefficients are
 `i k Zc/Z_ref` and `i k Z_ref/Zc` under exp(-i omega t), from the existing

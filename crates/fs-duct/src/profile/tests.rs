@@ -64,6 +64,72 @@ fn order(case: &str, ns: &[usize], errors: Vec<f64>, p: f64) {
 }
 
 #[test]
+fn profile_geometry_recovers_cylinder_cone_and_measured_station_limits() {
+    // G1: independent exact volume and sloped lateral-area formulas.
+    let r0 = 0.02_f64;
+    let length = 0.4;
+    let cylinder = RadiusProfile::exponential(r0, 0.0, length).unwrap();
+    let measured = RadiusProfile::spline(
+        vec![(3.0, r0), (3.2, 0.03), (3.4, 0.04)], Some([0.05, 0.05]),
+    ).unwrap();
+    let cone = RadiusProfile::power(r0, 0.4, 1.0, length).unwrap();
+    for (profile, start, end) in [(&cylinder, 0.05, 0.35), (&cone, 0.05, 0.35),
+        (&measured, 0.05, 0.35)]
+    {
+        let a = profile.radius(start).unwrap();
+        let b = profile.radius(end).unwrap();
+        let dx = end - start;
+        let exact_v = core::f64::consts::PI * dx * (a * a + a * b + b * b) / 3.0;
+        let exact_a = core::f64::consts::PI * (a + b) * dx.hypot(b - a);
+        let geometry = profile.geometry(start, end, RiccatiSteps(2)).unwrap();
+        assert!((geometry.volume_m3 / exact_v - 1.0).abs() < 2e-14);
+        assert!((geometry.lateral_area_m2 / exact_a - 1.0).abs() < 2e-14);
+    }
+    assert_eq!(measured.geometry(0.05, 0.35, RiccatiSteps(2)).unwrap().integration_steps, 4);
+}
+
+#[test]
+fn exponential_profile_geometry_has_independent_fourth_order_volume_and_area_ladders() {
+    // G1: analytic exponential volume and surface-of-revolution antiderivative.
+    let (r0, flare, length) = (0.08_f64, 3.0_f64, 0.7_f64);
+    let profile = RadiusProfile::exponential(r0, flare, length).unwrap();
+    let exact_volume = core::f64::consts::PI * r0 * r0 * (flare * length).exp_m1() / flare;
+    let a = flare / 2.0;
+    let primitive = |r: f64| {
+        let u = a * r;
+        core::f64::consts::PI / (a * a) * (u * (1.0 + u * u).sqrt() + u.asinh())
+    };
+    let exact_area = primitive(r0 * (a * length).exp()) - primitive(r0);
+    let ns = [2, 4, 8, 16];
+    let measures: Vec<_> = ns.iter().map(|&n|
+        profile.geometry(0.0, length, RiccatiSteps(n)).unwrap()).collect();
+    order("profile-volume-gauss", &ns,
+        measures.iter().map(|m| (m.volume_m3 / exact_volume - 1.0).abs()).collect(), 4.0);
+    order("profile-wall-area-gauss", &ns,
+        measures.iter().map(|m| (m.lateral_area_m2 / exact_area - 1.0).abs()).collect(), 4.0);
+}
+
+#[test]
+fn profile_geometry_refuses_unresolved_intervals_work_and_cancellation() {
+    // G0/G4: bounded cold geometry work, with no partial result on refusal.
+    let profile = RadiusProfile::spline(
+        vec![(0.0, 0.02), (0.2, 0.03), (0.4, 0.04)], None,
+    ).unwrap();
+    for (start, end, count) in [(0.0, 0.4, 0), (-0.1, 0.2, 1), (0.1, 0.1, 1),
+        (0.0, 0.5, 1), (f64::NAN, 0.2, 1),
+        (0.0, 0.4, MAX_RICCATI_STEPS / 2 + 1)]
+    {
+        assert!(profile.geometry(start, end, RiccatiSteps(count)).is_err());
+    }
+    let mut calls = 0;
+    let error = profile.geometry_controlled(0.0, 0.4, RiccatiSteps(8), &mut || {
+        calls += 1;
+        calls > 3
+    }).unwrap_err();
+    assert!(matches!(error, DuctError::Cancelled { completed_steps: 3 }));
+}
+
+#[test]
 fn material_wall_profile_matches_independent_elastic_cylinder() {
     // G1: independent pressure/compliance derivation, not the wall-wave helper.
     // C' = S/(rho*c^2) + circumference/(K-omega^2*sigma).

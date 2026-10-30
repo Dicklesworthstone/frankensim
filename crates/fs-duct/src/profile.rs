@@ -102,6 +102,18 @@ pub struct RadiusProfile {
     length: f64,
 }
 
+/// Geometric measures of one admitted axial interval of a radius profile.
+/// The lateral area follows the actual wall slope and excludes end caps.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProfileGeometry {
+    /// Enclosed gas volume [m3].
+    pub volume_m3: f64,
+    /// Gas-facing lateral wall area [m2].
+    pub lateral_area_m2: f64,
+    /// Actual two-node Gauss panels, including splits at measured spline knots.
+    pub integration_steps: usize,
+}
+
 impl RadiusProfile {
     /// r(x)=r0 exp(area_flare*x/2); S(x)=S0 exp(area_flare*x).
     pub fn exponential(r0: f64, area_flare: f64, length: f64) -> Result<Self, DuctError> {
@@ -266,6 +278,82 @@ impl RadiusProfile {
         }
         Ok(s)
     }
+
+    /// Integrate volume and lateral wall area over `start_m..end_m`.
+    ///
+    /// Composite two-node Gauss quadrature is fourth order on each smooth span.
+    /// The explicit step count applies to EACH intersected spline span, with a
+    /// total cap of `MAX_RICCATI_STEPS`; no knot is skipped or decimated. The
+    /// caller refines this axis to control geometric integration error, which is
+    /// distinct from thermal-cell and acoustic-field discretization error.
+    pub fn geometry(
+        &self, start_m: f64, end_m: f64, steps: RiccatiSteps,
+    ) -> Result<ProfileGeometry, DuctError> {
+        self.geometry_controlled(start_m, end_m, steps, &mut || false)
+    }
+
+    /// The same bounded geometry integral with cancellation at each panel.
+    /// Refusal or cancellation publishes no partial measures.
+    pub fn geometry_controlled(
+        &self, start_m: f64, end_m: f64, steps: RiccatiSteps,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ProfileGeometry, DuctError> {
+        steps.validate()?;
+        if !start_m.is_finite() || !end_m.is_finite()
+            || start_m < 0.0 || end_m > self.length || end_m <= start_m
+        {
+            return Err(bad("profile geometry interval outside its axial support"));
+        }
+        let mut cuts = vec![start_m];
+        if let Some(stations) = self.stations() {
+            for &(position, _) in stations {
+                let x = position - stations[0].0;
+                if x > start_m && x < end_m {
+                    cuts.push(x);
+                }
+            }
+        }
+        cuts.push(end_m);
+        let count = (cuts.len() - 1).checked_mul(steps.0)
+            .filter(|count| *count <= MAX_RICCATI_STEPS)
+            .ok_or_else(|| bad("profile geometry exceeds MAX_RICCATI_STEPS"))?;
+        let root3 = det::sqrt(3.0);
+        let nodes = [0.5 - root3 / 6.0, 0.5 + root3 / 6.0];
+        let mut result = ProfileGeometry {
+            volume_m3: 0.0, lateral_area_m2: 0.0, integration_steps: 0,
+        };
+        for span in cuts.windows(2) {
+            let dx = (span[1] - span[0]) / steps.0 as f64;
+            for index in 0..steps.0 {
+                if cancelled() {
+                    return Err(DuctError::Cancelled { completed_steps: result.integration_steps });
+                }
+                let left = span[0] + index as f64 * dx;
+                let right = if index + 1 == steps.0 { span[1] }
+                    else { span[0] + (index + 1) as f64 * dx };
+                let width = right - left;
+                if !positive(width) {
+                    return Err(bad("profile geometry panel is numerically unresolved"));
+                }
+                for node in nodes {
+                    let x = left + node * width;
+                    let radius = self.radius(x)?;
+                    let slope = self.slope(x)?;
+                    let half_width = 0.5 * width;
+                    result.volume_m3 += core::f64::consts::PI * radius * radius * half_width;
+                    result.lateral_area_m2 += core::f64::consts::TAU * radius
+                        * slope.hypot(1.0) * half_width;
+                }
+                result.integration_steps += 1;
+            }
+        }
+        debug_assert_eq!(result.integration_steps, count);
+        if !positive(result.volume_m3) || !positive(result.lateral_area_m2) {
+            return Err(bad("profile geometric measures are not positive and finite"));
+        }
+        Ok(result)
+    }
+
     pub(super) fn eval(&self, x: f64) -> f64 {
         match &self.shape {
             Shape::Exponential { r0, area_flare } => r0 * det::exp(0.5 * area_flare * x),
