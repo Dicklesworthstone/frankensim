@@ -9,6 +9,8 @@ use fs_material::gas::GasSpec;
 use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
 use fs_rep_mesh::TetComplex;
 
+mod fluid;
+
 const LENGTH: f64 = 0.015;
 const HEIGHT: f64 = 0.002;
 const WIDTH: f64 = 0.004;

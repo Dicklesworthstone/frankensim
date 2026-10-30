@@ -3,8 +3,12 @@
 //! The velocity/pressure pair is Taylor--Hood P2/P1; temperature is P2. With
 //! `exp(+i omega t)` and `theta = T'/T0`, the equations are
 //! `i omega rho v = div(-p I + 2 mu dev(eps(v)) + zeta div(v) I)`,
-//! `div(v) + i omega (p/p0 - theta) = 0`, and
-//! `i omega (rho cp T0 theta - p) - kappa T0 laplacian(theta) = 0`.
+//! `div(v) + i omega (beta_T p - alpha_p T0 theta) = 0`, and
+//! `i omega (rho cp T0 theta - alpha_p T0 p) - kappa T0 laplacian(theta) = 0`.
+//! The signed isobaric expansion `alpha_p` and isothermal compressibility
+//! `beta_T` are material coefficients. The original ideal-gas constructor uses
+//! `alpha_p=1/T0, beta_T=1/p0`; [`ThermoviscousFe::new_with_thermodynamics`]
+//! admits a general fluid without assigning it an ideal-gas equation of state.
 //! These are full linear equations at rest, including axial diffusion and
 //! dilatational stress; no thin-layer or low-reduced-frequency approximation
 //! replaces their volume operators. See Kampinga, *Viscothermal acoustics using
@@ -23,7 +27,7 @@
 //!
 //! The assembled operator is `R + G + i omega H`: R is the viscous/thermal
 //! dissipation, G is exactly antisymmetric, and H is real symmetric for a
-//! calorically perfect gas. Passive complex cp adds a separately accounted
+//! stable fluid with real caloric coefficients. Passive complex cp adds a separately accounted
 //! caloric loss. Thus boundary input work closes against resolved volume losses.
 //! One cancellable original complex LU serves all simultaneous drives or all
 //! columns of a multiport response. Hard limits bound this dense local-domain
@@ -46,7 +50,10 @@ pub const MAX_LNS_DOFS: usize = 1536;
 /// Hard cap on element work in this local-domain owner.
 pub const MAX_LNS_ELEMENTS: usize = 8192;
 
-/// Uniform ideal-gas equilibrium and independently specified transport in SI.
+/// Uniform physical equilibrium and independently specified transport in SI.
+/// [`ThermoviscousFe::new`] selects the ideal-gas equation of state. With
+/// [`ThermoviscousFe::new_with_thermodynamics`], pressure remains the physical
+/// reference pressure; it does not determine compressibility or sound speed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThermoviscousMedium {
     /// Equilibrium density [kg/m^3].
@@ -67,13 +74,24 @@ pub struct ThermoviscousMedium {
 }
 
 impl ThermoviscousMedium {
-    /// Ideal-mixture gas constant [J/(kg K)].
+    /// Ideal-mixture gas constant [J/(kg K)] on the ideal-gas path only.
+    /// For a general fluid this ratio is not a gas constant.
     #[must_use]
     pub fn gas_constant_j_kg_k(self) -> f64 {
         self.pressure_pa / self.density_kg_m3 / self.temperature_k
     }
 
     fn validate(self) -> Result<(), ThermoviscousError> {
+        self.validate_transport()?;
+        if !self.gas_constant_j_kg_k().is_finite() || self.cp_j_kg_k <= self.gas_constant_j_kg_k() {
+            return Err(ThermoviscousError::InvalidInput(
+                "gas equilibrium/transport",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_transport(self) -> Result<(), ThermoviscousError> {
         let positive = [
             self.density_kg_m3,
             self.pressure_pa,
@@ -85,14 +103,82 @@ impl ThermoviscousMedium {
         if positive.iter().any(|x| !x.is_finite() || *x <= 0.0)
             || !self.bulk_viscosity_pa_s.is_finite()
             || self.bulk_viscosity_pa_s < 0.0
-            || !self.gas_constant_j_kg_k().is_finite()
-            || self.cp_j_kg_k <= self.gas_constant_j_kg_k()
         {
             return Err(ThermoviscousError::InvalidInput(
-                "gas equilibrium/transport",
+                "fluid equilibrium/transport",
             ));
         }
         Ok(())
+    }
+}
+
+/// Local thermodynamic derivatives of a single-phase fluid at rest.
+///
+/// `rho'/rho = beta_T p' - alpha_p T'`. The same signed expansion enters
+/// entropy/pressure work, so the mixed storage is symmetric. Stability requires
+/// `beta_S = beta_T - alpha_p^2 T0/(rho Cp) > 0`; the adiabatic wave speed is
+/// `c^2 = 1/(rho beta_S)`. Negative or zero expansion is supported. These are
+/// local constitutive coefficients, not a nonlinear EOS or phase-change law.
+/// See the general-fluid linearization in Jørgensen and Bruus (2021),
+/// <https://arxiv.org/abs/2012.07997>, and the thermoviscous equation definitions
+/// in <https://doc.comsol.com/6.4/doc/com.comsol.help.aco/aco_ug_thermo.09.04.html>.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermoviscousThermodynamics {
+    /// Isothermal compressibility [1/Pa], finite and positive.
+    pub isothermal_compressibility_pa_inv: f64,
+    /// Signed isobaric volumetric thermal expansion [1/K].
+    pub isobaric_expansion_per_k: f64,
+}
+
+impl ThermoviscousThermodynamics {
+    /// Original ideal-gas closure, without changing its equilibrium inputs.
+    pub fn ideal_gas(medium: ThermoviscousMedium) -> Result<Self, ThermoviscousError> {
+        medium.validate()?;
+        Ok(Self {
+            isothermal_compressibility_pa_inv: 1.0 / medium.pressure_pa,
+            isobaric_expansion_per_k: 1.0 / medium.temperature_k,
+        })
+    }
+
+    fn minimum_cp(self, medium: ThermoviscousMedium) -> f64 {
+        self.isobaric_expansion_per_k * self.isobaric_expansion_per_k * medium.temperature_k
+            / medium.density_kg_m3
+            / self.isothermal_compressibility_pa_inv
+    }
+
+    /// Thermodynamic adiabatic compressibility, including thermal coupling.
+    pub fn adiabatic_compressibility_pa_inv(
+        self,
+        medium: ThermoviscousMedium,
+    ) -> Result<f64, ThermoviscousError> {
+        medium.validate_transport()?;
+        let beta = self.isothermal_compressibility_pa_inv;
+        let alpha = self.isobaric_expansion_per_k;
+        let threshold = self.minimum_cp(medium);
+        let result = beta * (1.0 - threshold / medium.cp_j_kg_k);
+        if !beta.is_finite()
+            || beta <= 0.0
+            || !alpha.is_finite()
+            || !threshold.is_finite()
+            || threshold < 0.0
+            || !result.is_finite()
+            || result <= 0.0
+        {
+            return Err(ThermoviscousError::InvalidInput(
+                "fluid compressibility/expansion must have positive adiabatic storage",
+            ));
+        }
+        Ok(result)
+    }
+
+    /// Adiabatic speed [m/s] from this same compressibility and caloric state.
+    pub fn sound_speed_m_s(self, medium: ThermoviscousMedium) -> Result<f64, ThermoviscousError> {
+        let beta = self.adiabatic_compressibility_pa_inv(medium)?;
+        let c = det::sqrt(1.0 / medium.density_kg_m3 / beta);
+        if !c.is_finite() || c <= 0.0 {
+            return Err(ThermoviscousError::NonFinite);
+        }
+        Ok(c)
     }
 }
 
@@ -202,6 +288,8 @@ pub struct ThermoviscousFe<'c> {
     space: SimplexSpace<'c>,
     geometry: ElementGeometry,
     medium: ThermoviscousMedium,
+    thermodynamics: ThermoviscousThermodynamics,
+    ideal_gas: bool,
     velocity_map: Vec<Option<usize>>,
     temperature_map: Vec<Option<usize>>,
     velocity_count: usize,
@@ -257,12 +345,12 @@ pub struct ThermoviscousPower {
     pub caloric_w: f64,
 }
 impl ThermoviscousPower {
-    /// Sum of gas-volume and solid-wall dissipation.
+    /// Sum of fluid-volume and solid-wall dissipation.
     #[must_use]
     pub fn dissipated_w(self) -> f64 {
         self.viscous_w + self.bulk_w + self.conductive_w + self.solid_conductive_w + self.caloric_w
     }
-    /// Input minus gas-volume and solid-wall dissipation [W].
+    /// Input minus fluid-volume and solid-wall dissipation [W].
     #[must_use]
     pub fn balance_residual_w(self) -> f64 {
         self.input_w - self.dissipated_w()
@@ -305,7 +393,60 @@ impl<'c> ThermoviscousFe<'c> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ThermoviscousError> {
         poll(cancelled)?;
-        medium.validate()?;
+        let thermodynamics = ThermoviscousThermodynamics::ideal_gas(medium)?;
+        Self::assemble_medium(
+            complex,
+            positions,
+            medium,
+            thermodynamics,
+            true,
+            boundary,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Assemble the same mixed operator for a general single-phase fluid at
+    /// rest. The explicit thermodynamic derivatives replace only the ideal-gas
+    /// storage and reciprocal pressure/temperature coefficients. Geometry,
+    /// traction ports, viscous stress, thermal diffusion, finite solid walls,
+    /// factorization and independent work integration retain their owners.
+    /// No mean flow, cavitation, nonlinear EOS or evolving phase is implied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_thermodynamics(
+        complex: &'c TetComplex,
+        positions: &[[f64; 3]],
+        medium: ThermoviscousMedium,
+        thermodynamics: ThermoviscousThermodynamics,
+        boundary: &ThermoviscousBoundary,
+        limits: ThermoviscousLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousError> {
+        Self::assemble_medium(
+            complex,
+            positions,
+            medium,
+            thermodynamics,
+            false,
+            boundary,
+            limits,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_medium(
+        complex: &'c TetComplex,
+        positions: &[[f64; 3]],
+        medium: ThermoviscousMedium,
+        thermodynamics: ThermoviscousThermodynamics,
+        ideal_gas: bool,
+        boundary: &ThermoviscousBoundary,
+        limits: ThermoviscousLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousError> {
+        poll(cancelled)?;
+        let sound_speed = thermodynamics.sound_speed_m_s(medium)?;
         if limits.max_dofs == 0
             || limits.max_dense_bytes == 0
             || limits.max_elements == 0
@@ -356,14 +497,21 @@ impl<'c> ThermoviscousFe<'c> {
             max_aspect = max_aspect.max(aspect);
         }
         let space = SimplexSpace::new(complex, 2);
-        let gamma = medium.cp_j_kg_k / (medium.cp_j_kg_k - medium.gas_constant_j_kg_k());
+        // Preserve the original ideal-gas evaluation order. The generic path
+        // obtains c from beta_T, signed alpha_p and Cp, never from p0/rho.
+        let sound_speed = if ideal_gas {
+            let gamma = medium.cp_j_kg_k / (medium.cp_j_kg_k - medium.gas_constant_j_kg_k());
+            det::sqrt(gamma * medium.pressure_pa / medium.density_kg_m3)
+        } else {
+            sound_speed
+        };
         let fe = HelmholtzFe::new(
             complex,
             positions,
             2,
             Medium {
                 density_kg_m3: medium.density_kg_m3,
-                sound_speed_m_s: det::sqrt(gamma * medium.pressure_pa / medium.density_kg_m3),
+                sound_speed_m_s: sound_speed,
             },
         )?;
         poll(cancelled)?;
@@ -470,6 +618,8 @@ impl<'c> ThermoviscousFe<'c> {
             space,
             geometry,
             medium,
+            thermodynamics,
+            ideal_gas,
             velocity_map,
             temperature_map,
             velocity_count: nv,
@@ -530,6 +680,11 @@ impl<'c> ThermoviscousFe<'c> {
     pub const fn medium(&self) -> ThermoviscousMedium {
         self.medium
     }
+    /// Actual density/pressure/temperature derivatives used in the mixed solve.
+    #[must_use]
+    pub const fn thermodynamics(&self) -> ThermoviscousThermodynamics {
+        self.thermodynamics
+    }
     /// Number of declared traction coordinates.
     #[must_use]
     pub fn port_mode_count(&self) -> usize {
@@ -550,6 +705,11 @@ impl<'c> ThermoviscousFe<'c> {
         let n = self.n;
         let nv = self.velocity_count;
         let gas = self.medium;
+        let expansion_coupling = if self.ideal_gas {
+            1.0
+        } else {
+            self.thermodynamics.isobaric_expansion_per_k * gas.temperature_k
+        };
         let mu = gas.dynamic_viscosity_pa_s;
         let lambda = gas.bulk_viscosity_pa_s - 2.0 * mu / 3.0;
         let quad = duffy_quadrature(4);
@@ -619,7 +779,7 @@ impl<'c> ThermoviscousFe<'c> {
                         }
                         if let Some(ti) = self.temperature_map[gi] {
                             let temp = self.temperature_start + ti;
-                            let cross = weight * bary[a] * values[i];
+                            let cross = weight * bary[a] * values[i] * expansion_coupling;
                             self.mass[p * n + temp] -= cross;
                             self.mass[temp * n + p] -= cross;
                         }
@@ -629,7 +789,12 @@ impl<'c> ThermoviscousFe<'c> {
                     for b in 0..4 {
                         let row = self.pressure_start + tet[a] as usize;
                         let col = self.pressure_start + tet[b] as usize;
-                        self.mass[row * n + col] += weight * bary[a] * bary[b] / gas.pressure_pa;
+                        let mass = weight * bary[a] * bary[b];
+                        self.mass[row * n + col] += if self.ideal_gas {
+                            mass / gas.pressure_pa
+                        } else {
+                            mass * self.thermodynamics.isothermal_compressibility_pa_inv
+                        };
                     }
                 }
             }
@@ -647,12 +812,12 @@ impl<'c> ThermoviscousFe<'c> {
 
     fn validate_frequency_cp(&self, frequency_hz: f64, cp: C64) -> Result<f64, ThermoviscousError> {
         let omega = std::f64::consts::TAU * frequency_hz;
-        if !omega.is_finite()
-            || omega <= 0.0
-            || !finite(cp)
-            || cp.re <= self.medium.gas_constant_j_kg_k()
-            || cp.im > 0.0
-        {
+        let minimum_cp = if self.ideal_gas {
+            self.medium.gas_constant_j_kg_k()
+        } else {
+            self.thermodynamics.minimum_cp(self.medium)
+        };
+        if !omega.is_finite() || omega <= 0.0 || !finite(cp) || cp.re <= minimum_cp || cp.im > 0.0 {
             return Err(ThermoviscousError::InvalidInput(
                 "frequency/passive exp(+iwt) heat capacity",
             ));

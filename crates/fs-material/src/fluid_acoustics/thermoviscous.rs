@@ -20,12 +20,15 @@ use crate::fluid_transport::{
 };
 use crate::gas::{GasState, ResolvedGasState};
 use crate::gas_mixture::ResolvedGasMixtureState;
-use crate::liquid::LiquidPropertyRequirements;
+use crate::liquid::{
+    LiquidPropertyRequirements, VOLUMETRIC_EXPANSION_DIMS, VOLUMETRIC_EXPANSION_PROPERTY,
+};
 use crate::liquid_temperature::LiquidViscosityBasis;
 use crate::moist_air::ResolvedMoistAirState;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
-    SPECIFIC_HEAT_CAPACITY_DIMS, ScalarPropertyRequirement, resolve_material_state_point,
+    SPECIFIC_HEAT_CAPACITY_DIMS, ScalarAdmissibility, ScalarPropertyRequirement,
+    resolve_material_state_point,
 };
 use crate::thermochemical_gas::ResolvedThermochemicalGasState;
 use crate::thermochemical_gas::nonideal::ResolvedThermochemicalRealGasState;
@@ -333,11 +336,66 @@ pub fn resolve_thermoviscous_liquid_state_with_requirements(
     cv_requirement: &ScalarPropertyRequirement,
     selection: MaterialPropertySelection,
 ) -> Result<ResolvedThermoviscousLiquidState, MaterialStatePointError> {
+    resolve_bundle(
+        card,
+        point,
+        parameter,
+        liquid_requirements,
+        cv_requirement,
+        selection,
+        false,
+    )
+}
+
+/// Resolve transport, adiabatic acoustics, Cv and known signed volumetric
+/// expansion in ONE original bundle. Full pressure/velocity/temperature
+/// consumers need this extra derivative; Cp/Cv alone cannot determine its sign.
+/// No expansion is inferred from the material name or from an ideal-gas law.
+/// The original liquid owner admits its dimensional/quantity meaning and
+/// preserves it through the same `at_query_point` refresh as the other roles.
+pub fn resolve_thermoviscous_liquid_state_with_expansion(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    parameter: &FluidAcousticParameter,
+    viscosity_basis: LiquidViscosityBasis,
+    selection: MaterialPropertySelection,
+) -> Result<ResolvedThermoviscousLiquidState, MaterialStatePointError> {
+    resolve_bundle(
+        card,
+        point,
+        parameter,
+        &LiquidPropertyRequirements::canonical(viscosity_basis)?,
+        &positive_requirement(
+            SPECIFIC_HEAT_CAPACITY_CV_PROPERTY,
+            SPECIFIC_HEAT_CAPACITY_DIMS,
+        )?,
+        selection,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_bundle(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    parameter: &FluidAcousticParameter,
+    liquid_requirements: &LiquidPropertyRequirements,
+    cv_requirement: &ScalarPropertyRequirement,
+    selection: MaterialPropertySelection,
+    expansion: bool,
+) -> Result<ResolvedThermoviscousLiquidState, MaterialStatePointError> {
     require_scalar(parameter.requirement(), parameter.dims())?;
     require_cv(liquid_requirements, cv_requirement)?;
     let mut requirements = liquid_requirements.properties().to_vec();
     requirements.push(parameter.requirement().clone());
     requirements.push(cv_requirement.clone());
+    if expansion {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            VOLUMETRIC_EXPANSION_PROPERTY,
+            VOLUMETRIC_EXPANSION_DIMS,
+            ScalarAdmissibility::Finite,
+        )?);
+    }
     let material = resolve_material_state_point(card, point, &requirements, selection)?;
     let acoustic = ResolvedFluidAcousticState::try_from_material(
         material,

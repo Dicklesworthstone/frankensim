@@ -1,6 +1,7 @@
 use super::*;
 
 mod conductive;
+mod fluid;
 
 fn air() -> ThermoviscousMedium {
     let temperature = 293.15;

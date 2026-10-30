@@ -1,14 +1,13 @@
-//! Source-evaluated finite solids coupled to resolved gas temperature.
+//! Source-evaluated finite solids coupled to resolved fluid temperature.
 //!
 //! Every patch keeps its original material sample, geometry, depth and backing.
 //! The original mixed FE owns the gas heat equation and the normal solid heat
 //! admittance. No gas boundary-layer loss is added by this adapter.
 
 use super::{ThermoviscousInterior, ThermoviscousSourceError, invalid};
-use crate::cavity_modal::interior::conductive_wall_transport;
 use fs_feec::acoustics::helmholtz::boundary_layer::BoundaryLayerGeometry;
 use fs_feec::acoustics::helmholtz::boundary_layer::thermal_wall::{
-    ConductiveThermalWall, ThermalWallDepth,
+    ConductiveThermalWall, ThermalWallDepth, WallThermalTransport,
 };
 use fs_feec::acoustics::thermoviscous::{ThermoviscousError, wall::ConductiveWallRegion};
 use fs_material::thermal::transport::ThermalTransportSample;
@@ -25,7 +24,7 @@ pub struct MaterialWallRegion<'a> {
     pub geometry: BoundaryLayerGeometry,
 }
 
-impl<'c> ThermoviscousInterior<'c> {
+impl<'c, S> ThermoviscousInterior<'c, S> {
     /// Attach all finite wall patches once. Faces cannot overlap another
     /// patch, a pressure port or an exact isothermal wall. Unassigned no-slip
     /// walls remain insulated. Source samples are retained in patch order.
@@ -52,8 +51,18 @@ impl<'c> ThermoviscousInterior<'c> {
             if cancelled() {
                 return Err(ThermoviscousError::Cancelled.into());
             }
-            let transport = conductive_wall_transport(&self.gas, region.sample)
-                .map_err(ThermoviscousError::from)?;
+            // The complete fluid source was admitted at construction. Keep
+            // the SAME physical temperature for the original wall transport;
+            // do not require liquid/real-fluid coefficients to impersonate gas.
+            if self.fe.medium().temperature_k.to_bits() != region.sample.temperature_k().to_bits() {
+                return Err(invalid(
+                    "conductive acoustic wall and fluid require one equilibrium temperature",
+                ));
+            }
+            let transport = WallThermalTransport {
+                conductivity_w_m_k: region.sample.conductivity_w_m_k(),
+                volumetric_heat_capacity_j_m3_k: region.sample.volumetric_heat_capacity_j_m3_k(),
+            };
             numerical.push(ConductiveWallRegion {
                 faces: region.faces.to_vec(),
                 wall: ConductiveThermalWall {

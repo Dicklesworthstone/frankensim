@@ -1,8 +1,8 @@
-//! Source-owned gas calorics in resolved three-dimensional thermoviscous flow.
+//! Source-owned fluid calorics in resolved three-dimensional thermoviscous flow.
 //!
 //! The original mixed FE owner resolves velocity, pressure and temperature.
 //! This adapter binds its equilibrium and transport coefficients to one
-//! `GasState`, evaluates the original molecular reservoirs once per frequency,
+//! `GasState` or a shared material fluid, evaluates original gas molecular reservoirs once per frequency,
 //! and exports the same work-conjugate ports to the existing duct algebra.
 //! There is no additional attenuation coefficient or fitted wall resistance.
 //!
@@ -17,7 +17,10 @@
 use fs_duct::{DuctError, compose::TwoPort};
 use fs_feec::acoustics::thermoviscous::{
     ThermoviscousError, ThermoviscousFe, ThermoviscousField, ThermoviscousMedium,
+    ThermoviscousThermodynamics,
 };
+use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
+use fs_material::fluid_transport::ThermalFluidTransport;
 use fs_material::thermal::transport::ThermalTransportSample;
 use fs_material::{MaterialError, gas::GasState, relaxation::RelaxationState};
 use fs_math::c64::C64;
@@ -87,12 +90,62 @@ pub fn source_medium(
     })
 }
 
-/// Resolved mixed FE with immutable source gas and declared frequency band.
+/// The actual EOS derivatives and transport of one generic material fluid.
+/// `pressure_pa` is the declared equilibrium pressure (metadata for this local
+/// linearization), never an effective ideal-gas pressure. Bulk viscosity is
+/// an explicit independent input; no relaxation law is invented.
+///
+/// Cp, Cv and adiabatic c fix beta_T=(Cp/Cv)/(rho*c^2). Signed alpha_p must
+/// come from the SAME source's thermal view. Its thermodynamic identity
+/// beta_S=beta_T-alpha_p^2*T/(rho*Cp) must agree to floating-point accuracy.
+/// Unknown expansion or independently inconsistent property tuples refuse;
+/// the sign cannot be recovered from Cp/Cv and is never guessed.
+pub fn source_fluid_medium<M: ThermoviscousFluid + ThermalFluidTransport + ?Sized>(
+    material: &M,
+    pressure_pa: f64,
+    bulk_viscosity_pa_s: f64,
+) -> Result<(ThermoviscousMedium, ThermoviscousThermodynamics), ThermoviscousSourceError> {
+    let fluid = material.thermoviscous_state()?;
+    let thermal = material.thermal_transport_state()?;
+    if fluid.transport() != thermal.transport() {
+        return Err(invalid(
+            "resolved fluid acoustic and thermal transport must describe one state",
+        ));
+    }
+    let alpha = thermal.volumetric_expansion_per_k().ok_or_else(|| {
+        invalid("resolved fluid acoustics requires known signed isobaric expansion")
+    })?;
+    let acoustic = fluid.acoustic();
+    let transport = fluid.transport();
+    let medium = ThermoviscousMedium {
+        density_kg_m3: acoustic.density_kg_m3(),
+        pressure_pa,
+        temperature_k: thermal.temperature_k(),
+        cp_j_kg_k: transport.specific_heat_j_kg_k(),
+        dynamic_viscosity_pa_s: transport.dynamic_viscosity_pa_s(),
+        thermal_conductivity_w_m_k: transport.thermal_conductivity_w_m_k(),
+        bulk_viscosity_pa_s,
+    };
+    let beta_s = 1.0 / acoustic.adiabatic_bulk_modulus_pa();
+    let thermodynamics = ThermoviscousThermodynamics {
+        isothermal_compressibility_pa_inv: fluid.heat_capacity_ratio() * beta_s,
+        isobaric_expansion_per_k: alpha,
+    };
+    let actual = thermodynamics.adiabatic_compressibility_pa_inv(medium)?;
+    if (actual - beta_s).abs() > 256.0 * f64::EPSILON * beta_s {
+        return Err(invalid(
+            "resolved fluid Cp/Cv, sound speed and signed expansion violate one thermodynamic closure",
+        ));
+    }
+    Ok((medium, thermodynamics))
+}
+
+/// Resolved mixed FE with an original source fluid and declared frequency band.
 /// The band is a computation domain, not a source-accuracy certificate or a
 /// substitute for resolving the thermal and viscous penetration depths.
-pub struct ThermoviscousInterior<'c> {
+pub struct ThermoviscousInterior<'c, S = GasState> {
     fe: ThermoviscousFe<'c>,
-    gas: GasState,
+    source: S,
     relaxation: Option<RelaxationState>,
     band_hz: [f64; 2],
     wall_sources: Vec<ThermalTransportSample>,
@@ -113,6 +166,11 @@ impl<'c> ThermoviscousInterior<'c> {
         }
         let actual = fe.medium();
         let expected = source_medium(&gas, actual.bulk_viscosity_pa_s)?;
+        if fe.thermodynamics() != ThermoviscousThermodynamics::ideal_gas(expected)? {
+            return Err(invalid(
+                "resolved gas cannot bind a different fluid equation of state",
+            ));
+        }
         for (a, b) in [
             (actual.density_kg_m3, expected.density_kg_m3),
             (actual.pressure_pa, expected.pressure_pa),
@@ -140,7 +198,7 @@ impl<'c> ThermoviscousInterior<'c> {
         }
         Ok(Self {
             fe,
-            gas,
+            source: gas,
             relaxation: None,
             band_hz,
             wall_sources: Vec::new(),
@@ -160,11 +218,56 @@ impl<'c> ThermoviscousInterior<'c> {
         Ok(model)
     }
 
+    pub fn gas(&self) -> &GasState {
+        &self.source
+    }
+}
+
+impl<'c, S: ThermoviscousFluid + ThermalFluidTransport> ThermoviscousInterior<'c, S> {
+    /// Retain the original material source beside its full mixed FE. All
+    /// coefficients and EOS derivatives must match exactly, and neither wall
+    /// sources nor caloric reservoirs can be silently inherited from a gas.
+    pub fn from_material(
+        fe: ThermoviscousFe<'c>,
+        source: S,
+        band_hz: [f64; 2],
+    ) -> Result<Self, ThermoviscousSourceError> {
+        if !fe.conductive_walls().is_empty() {
+            return Err(invalid(
+                "bind the original fluid before its source-evaluated conductive walls",
+            ));
+        }
+        let actual = fe.medium();
+        let (expected, thermodynamics) =
+            source_fluid_medium(&source, actual.pressure_pa, actual.bulk_viscosity_pa_s)?;
+        if actual != expected || fe.thermodynamics() != thermodynamics {
+            return Err(invalid(
+                "resolved thermoviscous FE differs from its original fluid source",
+            ));
+        }
+        if !band_hz.iter().all(|f| f.is_finite() && *f > 0.0) || band_hz[1] <= band_hz[0] {
+            return Err(invalid(
+                "resolved fluid needs a positive increasing frequency band",
+            ));
+        }
+        Ok(Self {
+            fe,
+            source,
+            relaxation: None,
+            band_hz,
+            wall_sources: Vec::new(),
+        })
+    }
+}
+
+impl<'c, S> ThermoviscousInterior<'c, S> {
     pub fn inner(&self) -> &ThermoviscousFe<'c> {
         &self.fe
     }
-    pub fn gas(&self) -> &GasState {
-        &self.gas
+    /// Original material/source owner; the immutable numerical snapshot lives
+    /// in `inner()`. A source change requires an explicit new assembly.
+    pub fn material_source(&self) -> &S {
+        &self.source
     }
     pub fn relaxation(&self) -> Option<&RelaxationState> {
         self.relaxation.as_ref()
@@ -185,14 +288,14 @@ impl<'c> ThermoviscousInterior<'c> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<C64, ThermoviscousSourceError> {
         if cancelled() {
-            return Err(invalid("resolved source-gas evaluation cancelled"));
+            return Err(invalid("resolved source-fluid evaluation cancelled"));
         }
         if !frequency_hz.is_finite()
             || frequency_hz < self.band_hz[0]
             || frequency_hz > self.band_hz[1]
         {
             return Err(invalid(
-                "resolved source-gas frequency outside declared band",
+                "resolved source-fluid frequency outside declared band",
             ));
         }
         match &self.relaxation {
@@ -200,7 +303,7 @@ impl<'c> ThermoviscousInterior<'c> {
                 .caloric_response(core::f64::consts::TAU * frequency_hz)?
                 .cp_j_kg_k
                 .conj()),
-            None => Ok(C64::from_re(self.gas.specific_heat_cp)),
+            None => Ok(C64::from_re(self.fe.medium().cp_j_kg_k)),
         }
     }
 
