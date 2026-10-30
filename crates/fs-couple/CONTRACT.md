@@ -12554,3 +12554,38 @@ three-body/two-patch mechanical response and eliminated finite-cell thermal
 root, check source receipts and entropy, canonical permutations and signed
 outside heat, stationary two-route conduction, source/geometry/ownership
 refusals, loaded late failure/cancellation retry and large-clock synchronization.
+
+### Complete vibrating history at moving-end Dirac attachments
+
+The moving-end renderer consumes the original `PlateBankImage` through
+`dirac_body::join_complete_body`. Mixed compact/Vk coordinates, full material
+damping, Maxwell memory and attached acoustic histories remain in their
+original bank order after the complete string state; any explicit fluid load
+follows them, and the existing join multiplier remains last. The body force
+port participates in the original common-velocity `join_port`; its independent
+signed outward-volume port couples through the existing ratio-one transformer.
+The surviving fluid source port is mapped explicitly after the original string
+force ports. An unloaded body's pressure port stays open with zero applied
+pressure and is not mistaken for a volume-flow source.
+
+Joining accepted histories requires compatible initial attachment velocities.
+Admission uses the original efforts and force columns with a relative
+roundoff scale from their absolute products. Incompatible moving histories
+refuse; no velocity projection, hidden impact, state reset or material-memory
+reconstruction occurs. The multiplier has no storage and starts as a zero
+representative; the original descriptor integrator determines its interval
+reaction. The original complete quadratic pole bound and midpoint band remain
+in force, including stiff retained acoustic poles. Nonlinear storage keeps the
+existing Gonzalez update and its limits. This increment does not claim an
+exact descriptor propagator or automatic audio-clock admission for stiff loads.
+
+The original bank observer reads its complete physical prefix at the declared
+string offset, so compact and Vk modes cannot overlap or double count in the
+pressure calculation. Five focused native tests cover independently written
+mechanical/fluid DAE evolution with 20/40/80-step refinement, work/heat and
+constraint closure, nonlinear histories, malformed/incompatible joins, retained
+warm radiation state and temporal refusal, plus the actual renderer's mixed and
+Vk-only responses, signed areas and common-clock gate. The native target uses
+the actual exercised physics; unavailable bow/texture and cavity-source setup
+are explicitly outside its tested scope. Full workspace qualification is not
+asserted.

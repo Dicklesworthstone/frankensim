@@ -12,6 +12,7 @@ pub mod thermoelastic;
 /// Layer-resolved heat and continuing vibration on the same material sources.
 pub mod concentric;
 mod thermal_step;
+mod dirac_body;
 
 use crate::modal_acoustic_time::{
     MAX_TIME_DOMAIN_ACOUSTIC_MODES, ModalAcousticFrame, ModalAcousticMode, ModalAcousticState,
@@ -23,7 +24,7 @@ use crate::reed_bore::{
 };
 use crate::thin_plate::{
     PlateBank, PlateBankObservation, PlateChartRadiation, ResolvedPlateChart, VkBody, certified_chart_radiators,
-    certified_material_chart_radiators, certified_radiators, vk_plate_phs,
+    certified_material_chart_radiators, certified_radiators,
 };
 use crate::unilateral_contact::{
     modal_contact_forces, modal_friction_forces, modal_hunt_crossley_forces, slit_contact_force,
@@ -47,7 +48,7 @@ use fs_nlmodal::{
 };
 use fs_phs::{
     AcousticSection, AcousticTap, ChainOutlet, MouthFlange, ViscothermalPin, WallPin,
-    acoustic_chain_outlet_wall, bernoulli_volume_flow, join_port, mass_spring_damper, modal_bank,
+    acoustic_chain_outlet_wall, bernoulli_volume_flow, mass_spring_damper, modal_bank,
     modal_bank_ports, quasistatic_aperture_opening, step, step_descriptor, transformer,
 };
 use fs_scenario::{
@@ -612,8 +613,7 @@ fn realize_assembly_inner(
             assembly.bow,
             &assembly.obstacles,
             assembly.contact_texture,
-            &bodies,
-            assembly.plate,
+            &mut bodies,
             None,
             assembly.duct.as_ref(),
             assembly.reed,
@@ -649,8 +649,7 @@ fn realize_assembly_inner(
                 assembly.bow,
                 &assembly.obstacles,
                 assembly.contact_texture,
-                &bodies,
-                assembly.plate,
+                &mut bodies,
                 assembly.cavity,
                 None,
                 assembly.reed,
@@ -1951,8 +1950,7 @@ fn realize_dirac_join(
     bow: Option<BowStroke>,
     obstacles: &[UnilateralObstacle],
     texture: Option<ContactTexture>,
-    plates: &PlateBank,
-    plate_spec: Option<ThinPlate>,
+    plates: &mut PlateBank,
     cavity: Option<HelmholtzCavity>,
     duct: Option<&ViscothermalDuct>,
     reed: Option<BeatingReed>,
@@ -1977,17 +1975,23 @@ fn realize_dirac_join(
         .collect();
     let waveguide = moving_end_string_phs(string, &zetas, bow, &obs_stations)?;
     let n_string = waveguide.state_dim();
-    let need_area = cavity.is_some() || duct.is_some();
-    let body = if plates.vk.is_some() {
-        let spec = plate_spec.ok_or(AcousticRealizeError::InvalidDescription {
-            what: "von Karman Dirac join needs the plate description",
-        })?;
-        Some(vk_plate_phs(spec, need_area)?)
-    } else {
-        plate_modal_ports(plates, need_area)?
-    };
+    let mut string_state = vec![0.0; n_string];
+    if let Some(pluck) = pluck {
+        for k in 0..n_s {
+            string_state[2 * k] = free_fixed_pluck_modal(pluck, string, k);
+        }
+    }
+    initialize_relaxed_bending(string, &mut string_state);
+    let body = plates.physical_image(gas, sample_rate_hz, &fs_exec::CancelGate::default())?;
     let drive_inlet = reed.is_some() || blow.is_some();
-    let (waveguide, sys, ode_start) = match (body, cavity, duct) {
+    let (
+        waveguide,
+        sys,
+        mut x,
+        ode_start,
+        body_observation,
+        fluid_port,
+    ) = match (body, cavity, duct) {
         (None, _, Some(line)) => {
             refuse_open_nyquist(line, gas, sample_rate_hz)?;
             let (sections, taps) =
@@ -2006,36 +2010,41 @@ fn realize_dirac_join(
             let chain_face = usize::from(inlets == 2);
             let radius = sections.first().map_or(0.0, |s| s.radius);
             let area = core::f64::consts::PI * radius * radius;
+            let fluid_port = drive_inlet.then_some(waveguide.port_dim() - 1);
+            let system = transformer(waveguide, chain, 0, chain_face, area)
+                .map_err(render_phs_error)?;
+            string_state.resize(system.state_dim(), 0.0);
+            (Some(system), None, string_state, 0, None, fluid_port)
+        }
+        (None, _, None) => (Some(waveguide), None, string_state, 1, None, None),
+        (Some(plate), None, None) => {
+            let joined = dirac_body::join_complete_body(waveguide, string_state, plate, None)?;
             (
-                Some(
-                    transformer(waveguide, chain, 0, chain_face, area)
-                        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
-                ),
                 None,
+                Some(joined.system),
+                joined.state,
                 0,
+                Some(joined.observation),
+                joined.fluid_port,
             )
         }
-        (None, _, None) => (Some(waveguide), None, 1),
-        (Some(plate), None, None) => (
-            None,
-            Some(
-                join_port(waveguide, plate, 0, 0)
-                    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
-            ),
-            0,
-        ),
         (Some(plate), Some(cav), None) => {
             let flow = helmholtz_flow_cavity(cav, gas)
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-            let plate_cav = transformer(plate, flow, 1, 0, 1.0)
-                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            let load = dirac_body::DiracBodyLoad {
+                state: vec![0.0; flow.state_dim()],
+                system: flow,
+                face: 0,
+                drive_port: None,
+            };
+            let joined = dirac_body::join_complete_body(waveguide, string_state, plate, Some(load))?;
             (
                 None,
-                Some(
-                    join_port(waveguide, plate_cav, 0, 0)
-                        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
-                ),
+                Some(joined.system),
+                joined.state,
                 0,
+                Some(joined.observation),
+                joined.fluid_port,
             )
         }
         (Some(plate), None, Some(line)) => {
@@ -2054,15 +2063,20 @@ fn realize_dirac_join(
                 line.wall,
             )?;
             let chain_face = usize::from(inlets == 2);
-            let plate_line = transformer(plate, chain, 1, chain_face, 1.0)
-                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            let load = dirac_body::DiracBodyLoad {
+                state: vec![0.0; chain.state_dim()],
+                system: chain,
+                face: chain_face,
+                drive_port: drive_inlet.then_some(0),
+            };
+            let joined = dirac_body::join_complete_body(waveguide, string_state, plate, Some(load))?;
             (
                 None,
-                Some(
-                    join_port(waveguide, plate_line, 0, 0)
-                        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
-                ),
+                Some(joined.system),
+                joined.state,
                 0,
+                Some(joined.observation),
+                joined.fluid_port,
             )
         }
         (Some(_), Some(_), Some(_)) => {
@@ -2071,21 +2085,6 @@ fn realize_dirac_join(
             });
         }
     };
-    let mut x = match &sys {
-        Some(s) => vec![0.0; s.state_dim()],
-        None => vec![
-            0.0;
-            waveguide
-                .as_ref()
-                .map_or(n_string, fs_phs::PortHamiltonian::state_dim)
-        ],
-    };
-    if let Some(pluck) = pluck {
-        for k in 0..n_s {
-            x[2 * k] = free_fixed_pluck_modal(pluck, string, k);
-        }
-    }
-    initialize_relaxed_bending(string, &mut x);
     let dt = 1.0 / f64::from(sample_rate_hz);
     let descriptor_rate = sys
         .as_ref()
@@ -2097,6 +2096,10 @@ fn realize_dirac_join(
             .map_err(AcousticRealizeError::TimeResolution)?;
     }
     let waveguide_linear = waveguide.as_ref().map(prepare_render_linear).transpose()?;
+    let waveguide_exact = match (&waveguide, &waveguide_linear) {
+        (Some(system), Some(linear)) => prepare_chain_exact(system, linear, dt)?,
+        _ => None,
+    };
     let mut texture = TextureDrive::try_new(texture)?;
     let mut out = Vec::with_capacity(n);
     let phi0 = det::sqrt(2.0 / (string.lin_density_kg_m * string.length_m));
@@ -2117,6 +2120,7 @@ fn realize_dirac_join(
                 t,
                 dt,
                 &mut texture,
+                fluid_port,
             )?;
             step_descriptor(s, &x, &u, dt)
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
@@ -2137,15 +2141,16 @@ fn realize_dirac_join(
                 dt,
                 &mut texture,
                 ode_start,
+                fluid_port,
             )?;
-            fs_phs::linear_exact::step_render(
+            step_chain_flow(
                 wg,
                 waveguide_linear.as_ref().expect("prepared waveguide clock"),
+                waveguide_exact.as_ref(),
                 &x,
                 &u,
                 dt,
-            )
-            .map_err(render_phs_error)?
+            )?
             .x
         };
         let mut p = 0.0;
@@ -2155,22 +2160,10 @@ fn realize_dirac_join(
             let integral = phi0 * (if k % 2 == 0 { 1.0 } else { -1.0 }) / kappa;
             p += gas.density * string.width_m * acc * integral / (4.0 * pi * listener_m);
         }
-        if !plates.linear.is_empty() {
-            let base = n_string;
-            for (i, body) in plates.linear.iter().enumerate() {
-                let acc = (rec_x[base + 2 * i + 1] - x[base + 2 * i + 1]) / dt;
-                p += body.radiate_mass_normalized(acc, gas.density, listener_m);
-            }
+        if let Some(observation) = &body_observation {
+            p += observation.pressure_between(&x, &rec_x, dt, gas.density, listener_m)?;
         }
-        if let Some(vk) = plates.vk.as_ref() {
-            let base = n_string;
-            for (k, &area) in vk.areas.iter().enumerate() {
-                let acc = (rec_x[base + 2 * k + 1] - x[base + 2 * k + 1]) / dt;
-                p += gas.density * area * acc / (2.0 * pi * listener_m);
-            }
-        }
-        if plates.linear.is_empty()
-            && plates.vk.is_none()
+        if body_observation.is_none()
             && duct.is_some()
             && let Some(wg) = waveguide.as_ref()
         {
@@ -2257,6 +2250,7 @@ fn leftover_u(
     t: f64,
     dt: f64,
     texture: &mut TextureDrive,
+    fluid_port: Option<usize>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let m = sys.port_dim();
     if m == 0 {
@@ -2282,7 +2276,12 @@ fn leftover_u(
             col += 1;
         }
     }
-    if col < m {
+    if let Some(port) = fluid_port {
+        if port != col || port >= m {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "Dirac fluid source must follow the original string force ports",
+            });
+        }
         if let Some(reed) = reed {
             let p_m = blowing_envelope(reed, t);
             let p_bore = y.get(col).copied().unwrap_or(0.0);
@@ -2319,6 +2318,7 @@ fn leftover_u_ode(
     dt: f64,
     texture: &mut TextureDrive,
     start_col: usize,
+    fluid_port: Option<usize>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let m = sys.port_dim();
     let y = sys.output(x);
@@ -2347,7 +2347,12 @@ fn leftover_u_ode(
             col += 1;
         }
     }
-    if col < m {
+    if let Some(port) = fluid_port {
+        if port != col || port >= m {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "ODE fluid source must follow the original string force ports",
+            });
+        }
         if let Some(reed) = reed {
             let p_m = blowing_envelope(reed, t);
             let p_bore = y.get(col).copied().unwrap_or(0.0);
@@ -6250,7 +6255,7 @@ mod string_observer_tests {
                 moving_end: true,
                 tension_loss_factor: None,
             };
-            let render = |string: &PrestressedString| {
+            let mut render = |string: &PrestressedString| {
                 realize_dirac_join(
                     string,
                     Some(Pluck {
@@ -6260,8 +6265,7 @@ mod string_observer_tests {
                     None,
                     &[],
                     None,
-                    &plates,
-                    None,
+                    &mut plates,
                     None,
                     None,
                     None,
