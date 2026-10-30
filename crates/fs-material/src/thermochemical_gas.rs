@@ -15,6 +15,8 @@
 
 /// Conservative density/energy reconstruction and closed-volume gas heating.
 pub mod energy;
+/// Explicit nonideal mechanical/phase binding over the same canonical species.
+pub mod nonideal;
 /// Explicit binding of verified species, NASA-9 and transport packs.
 pub mod packs;
 
