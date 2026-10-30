@@ -32,6 +32,7 @@ fn row(label: &str, state: WaterFlowState) {
     let source = match state {
         WaterFlowState::Gibbs(_) => "Gibbs",
         WaterFlowState::Dense(_) => "Helmholtz",
+        WaterFlowState::Regional(_) => "Regional",
     };
     let quality = state
         .vapor_quality()

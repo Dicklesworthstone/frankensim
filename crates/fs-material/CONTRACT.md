@@ -4787,3 +4787,40 @@ subdivision, tiny heat/quality and zero-heat identity; and source, matching,
 work, energy and cancellation refusal. This equilibrium pressure owner does
 not supply a whole-path Cp stability certificate for `ThermalLaw`, ice,
 resolved phase kinetics, spatial two-phase flow, or vessel mechanics.
+
+## Complete high-pressure water cycles through the regional chart
+
+`phase::water::flow::across` accepts `RegionalWater` and
+`RegionalWaterState` through additional typed enum variants. The existing
+throttle, compressor and expander equations retain original h and raw s,
+reuse the regional inverses, propagate typed domain/gap/ambiguity refusal,
+and keep the established independent enthalpy and internal-energy/flow-work
+audits. Regional preparation and matching budgets remain owned by the chart.
+The dispatch introduces no heap allocation, caloric datum shift, duplicate
+flow work or alternative device efficiency convention.
+
+`cargo run -p fs-material --example water_regional_rankine` runs two complete
+four-device Rankine cycles: a 10 kPa saturated-liquid condenser outlet enters
+an explicitly 80% efficient feed pump, a single regional boiler path heats to
+823.15 K at 20 MPa or 25 MPa, an explicitly 85% efficient turbine returns to
+10 kPa, and the condenser returns exactly to the original saturated-liquid
+state. Pump discharge is cold Region 1 water; each boiler traverses Region 3
+and reaches Region 2 steam. The 20 MPa boiler includes physical vaporization;
+the 25 MPa boiler has zero latent heat and no invented supercritical quality.
+
+The example reports every stage, both original regional junctions, sensible/
+latent/matching heat contributions, phase quality, net shaft work, thermal
+efficiency, fluid entropy changes and independent energy residuals.
+It uses illustrative efficiencies, no pressure-drop model, and no assigned
+thermal reservoirs; it does not claim measured machinery performance or total
+reservoir entropy production. The earlier hot-inlet steam-train example remains
+a partial train and retains its stated limits.
+
+Three integrated regressions exercise both complete cycles and cold-feed
+region crossings, recover the existing 4 MPa Gibbs Rankine reference without
+changing its h/s datum or device behavior, and check regional outlet-domain and
+cancellation refusal. Combined with the six regional caloric tests and the
+15 existing dense/caloric/pressure-device tests, the original-source native
+water integration has 24 passing tests. Both water examples compile and run.
+The full workspace/DSR gate remains unavailable in this checkout because the
+required sibling constellation repositories and DSR executable are absent.

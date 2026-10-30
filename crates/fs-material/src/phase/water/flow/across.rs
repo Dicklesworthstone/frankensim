@@ -5,6 +5,8 @@
 //! enter a dense outlet chart when its requested h and s are in that chart.
 //! The selected charts own endpoint admission; this module does not stitch
 //! temperature paths across regional boundaries or extend their domains.
+//! The regional chart additionally accepts cold feedwater and hot steam on a
+//! single prepared pressure path, retaining its source-junction budgets.
 //!
 //! All devices use original source enthalpy and entropy. A chart's fixed-p
 //! entropy-integral adjustment is reported but never used to define an
@@ -16,6 +18,7 @@ use super::{
     WaterFlowBalance, WaterFlowError, WaterFlowSolve, WaterShaftDevice, WaterShaftSolve, poll,
 };
 use crate::phase::water::pressure::{DenseIsobaricError, DenseIsobaricState, DenseIsobaricWater};
+use crate::phase::water::regional::{RegionalWater, RegionalWaterError, RegionalWaterState};
 use crate::phase::water::{IsobaricWater, WaterEntropySolve, WaterState};
 use core::fmt;
 
@@ -24,6 +27,7 @@ use core::fmt;
 pub enum WaterFlowChart {
     Gibbs(IsobaricWater),
     Dense(DenseIsobaricWater),
+    Regional(RegionalWater),
 }
 
 impl From<IsobaricWater> for WaterFlowChart {
@@ -36,12 +40,18 @@ impl From<DenseIsobaricWater> for WaterFlowChart {
         Self::Dense(chart)
     }
 }
+impl From<RegionalWater> for WaterFlowChart {
+    fn from(chart: RegionalWater) -> Self {
+        Self::Regional(chart)
+    }
+}
 
 impl WaterFlowChart {
     pub fn pressure_pa(&self) -> f64 {
         match self {
             Self::Gibbs(chart) => chart.pressure_pa(),
             Self::Dense(chart) => chart.pressure_pa(),
+            Self::Regional(chart) => chart.pressure_pa(),
         }
     }
 
@@ -49,6 +59,7 @@ impl WaterFlowChart {
         match self {
             Self::Gibbs(chart) => chart.saturation_entropy_defect_j_kg_k(),
             Self::Dense(chart) => chart.saturation_entropy_defect_j_kg_k(),
+            Self::Regional(chart) => chart.saturation_entropy_defect_j_kg_k(),
         }
     }
 
@@ -69,6 +80,12 @@ impl WaterFlowChart {
                 let solved = chart.state_at_specific_enthalpy(h, cancelled)?;
                 let iterations = solved.iterations();
                 let evaluations = solved.source_evaluations();
+                Ok((solved.into_state().into(), iterations, evaluations))
+            }
+            Self::Regional(chart) => {
+                let solved = chart.state_at_specific_enthalpy(h, cancelled)?;
+                let iterations = solved.iterations();
+                let evaluations = solved.dense_source_evaluations();
                 Ok((solved.into_state().into(), iterations, evaluations))
             }
         }
@@ -94,6 +111,12 @@ impl WaterFlowChart {
                 let evaluations = solved.source_evaluations();
                 Ok((solved.into_state().into(), iterations, evaluations))
             }
+            Self::Regional(chart) => {
+                let solved = chart.state_at_specific_entropy(s, controls, cancelled)?;
+                let iterations = solved.iterations();
+                let evaluations = solved.dense_source_evaluations();
+                Ok((solved.into_state().into(), iterations, evaluations))
+            }
         }
     }
 }
@@ -103,6 +126,7 @@ impl WaterFlowChart {
 pub enum WaterFlowState {
     Gibbs(WaterState),
     Dense(DenseIsobaricState),
+    Regional(RegionalWaterState),
 }
 
 impl From<WaterState> for WaterFlowState {
@@ -115,23 +139,34 @@ impl From<DenseIsobaricState> for WaterFlowState {
         Self::Dense(state)
     }
 }
+impl From<RegionalWaterState> for WaterFlowState {
+    fn from(state: RegionalWaterState) -> Self {
+        Self::Regional(state)
+    }
+}
 
 impl WaterFlowState {
     pub const fn law(&self) -> WaterFlowChart {
         match self {
             Self::Gibbs(state) => WaterFlowChart::Gibbs(*state.law()),
             Self::Dense(state) => WaterFlowChart::Dense(*state.law()),
+            Self::Regional(state) => WaterFlowChart::Regional(*state.law()),
         }
     }
 
     pub fn pressure_pa(self) -> f64 {
-        self.law().pressure_pa()
+        match self {
+            Self::Gibbs(state) => state.pressure_pa(),
+            Self::Dense(state) => state.pressure_pa(),
+            Self::Regional(state) => state.pressure_pa(),
+        }
     }
 
     pub fn temperature_k(self) -> f64 {
         match self {
             Self::Gibbs(state) => state.temperature_k(),
             Self::Dense(state) => state.temperature_k(),
+            Self::Regional(state) => state.temperature_k(),
         }
     }
 
@@ -139,6 +174,7 @@ impl WaterFlowState {
         match self {
             Self::Gibbs(state) => state.specific_enthalpy_j_kg(),
             Self::Dense(state) => state.specific_enthalpy_j_kg(),
+            Self::Regional(state) => state.specific_enthalpy_j_kg(),
         }
     }
 
@@ -146,6 +182,7 @@ impl WaterFlowState {
         match self {
             Self::Gibbs(state) => state.specific_internal_energy_j_kg(),
             Self::Dense(state) => state.specific_internal_energy_j_kg(),
+            Self::Regional(state) => state.specific_internal_energy_j_kg(),
         }
     }
 
@@ -154,6 +191,7 @@ impl WaterFlowState {
         match self {
             Self::Gibbs(state) => state.specific_entropy_j_kg_k(),
             Self::Dense(state) => state.specific_entropy_j_kg_k(),
+            Self::Regional(state) => state.specific_entropy_j_kg_k(),
         }
     }
 
@@ -161,6 +199,7 @@ impl WaterFlowState {
         match self {
             Self::Gibbs(state) => state.specific_volume_m3_kg(),
             Self::Dense(state) => state.specific_volume_m3_kg(),
+            Self::Regional(state) => state.specific_volume_m3_kg(),
         }
     }
 
@@ -168,6 +207,7 @@ impl WaterFlowState {
         match self {
             Self::Gibbs(state) => state.vapor_quality(),
             Self::Dense(state) => state.vapor_quality(),
+            Self::Regional(state) => state.vapor_quality(),
         }
     }
 
@@ -176,6 +216,7 @@ impl WaterFlowState {
         match self {
             Self::Gibbs(state) => Some(state.vapor_mass_fraction()),
             Self::Dense(state) => state.vapor_mass_fraction(),
+            Self::Regional(state) => state.vapor_mass_fraction(),
         }
     }
 
@@ -355,6 +396,7 @@ pub struct AcrossWaterShaftChange {
 pub enum AcrossWaterFlowError {
     Flow(WaterFlowError),
     Dense(DenseIsobaricError),
+    Regional(RegionalWaterError),
     PressureClosure {
         defects_j_kg: [f64; 2],
         tolerance_j_kg: f64,
@@ -370,6 +412,14 @@ impl From<DenseIsobaricError> for AcrossWaterFlowError {
         match error {
             DenseIsobaricError::Cancelled => Self::Flow(WaterFlowError::Cancelled),
             other => Self::Dense(other),
+        }
+    }
+}
+impl From<RegionalWaterError> for AcrossWaterFlowError {
+    fn from(error: RegionalWaterError) -> Self {
+        match error {
+            RegionalWaterError::Cancelled => Self::Flow(WaterFlowError::Cancelled),
+            other => Self::Regional(other),
         }
     }
 }
@@ -454,3 +504,6 @@ fn audit(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod regional_tests;
