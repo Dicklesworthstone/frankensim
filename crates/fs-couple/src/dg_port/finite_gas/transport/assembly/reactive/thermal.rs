@@ -6,6 +6,9 @@
 //! the same endpoint as chemistry and native acoustic parameter work. Rejected
 //! heat/work probes never advance accepted thermal or acoustic history.
 
+/// One finite material body shared by several reacting acoustic gas volumes.
+pub mod shared;
+
 use super::{
     BoundaryGasReactionStep, Evolution, FiniteGasAcousticInput, FiniteGasAcousticNode,
     FiniteGasAcousticReaction, FiniteGasAcousticReactionReservoir, FiniteGasAcousticReactionSource,
@@ -31,8 +34,9 @@ use std::collections::BTreeMap;
 ///
 /// The body is a separate thermal store, not an implicit change to the duct or
 /// aperture material. Its immutable chart and layer card must agree. The same
-/// body may not be represented under several keys; shared spatial thermal
-/// networks require their original multi-cell coupling owner.
+/// body may not be represented under several keys; [`shared`] provides one
+/// body with several gas contacts. Spatial thermal networks retain their
+/// original multi-cell coupling owner.
 pub struct FiniteGasAcousticThermalBinding<'a> {
     pub body: UniformEnthalpyStepInput<'a>,
     pub layers: MaterialConductionLayers<'a>,

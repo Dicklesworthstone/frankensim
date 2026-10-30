@@ -9553,8 +9553,8 @@ applied and must not be deposited again.
 These are distinct uniform thermal stores with fixed effective layer geometry
 and negligible solid pV work. They do not automatically change an aperture's
 mechanics, wall stiffness, dimensions, or acoustic-loss heat partition. A body
-shared by several gas volumes requires a shared thermal-network owner, not
-duplicate map entries. Phase follows the original chart without claiming melt
+shared by several gas volumes uses the separate `thermal::shared` owner below;
+duplicate entries in this independent-body map remain unsupported. Phase follows the original chart without claiming melt
 motion or structural recoupling. Uniform-body validity and material/density/
 geometry consistency remain explicit caller obligations. Transport and frozen-
 medium acoustic sampling retain the existing first-order split; source-root
@@ -9565,6 +9565,52 @@ aperture fixture, a source-bound finite material store, independent energy and
 two-capacity backward-Euler references, exact empty-binding reduction, and
 atomic refusal/cancellation with deterministic retry. These are synthetic
 implementation checks, not experimental material or acoustic validation.
+
+## One finite thermal body shared by reacting acoustic volumes
+
+`dg_port::finite_gas::transport::assembly::reactive::thermal::shared` connects
+several distinct gas parcels to one original uniform material body. One
+canonical enthalpy endpoint supplies every contact temperature; the body's
+mass, storage change and prescribed heat appear once in the enclosing account.
+Each contact retains its own material layers, signed heat bracket and energy
+allowances. All layers must use the body's original material card, and their
+combined area cannot exceed its exposed surface. Disjoint patch placement and
+uniform-body validity remain caller obligations.
+
+The common transport owner now prepares one admitted immutable material
+snapshot. Every body, contact-heat and acoustic-work trial reuses that snapshot
+and the original accepted native histories. The existing scalar feedback owner
+closes the body's net heat against the independently evaluated contact sum.
+Each gas contact closes `Q_i = dt G_i(T_body,end - T_gas,end)`, using the
+original caloric or implicit chemistry endpoint and separate gas-to-wave work.
+The conductivity claim selected before transport stays pinned at actual
+endpoint conditions. Every signed contact is evaluated even when the net heat
+is zero, so a hot gas can heat a cold gas through an unchanged-temperature body.
+
+The body's original chart supplies
+`H_end - H_start = Q_body,external - Q_net`. The accepted report retains both
+the applied net coordinate and the actual sum of gas contact heats; their
+difference is a bounded source residual, not an additional heat source. The
+physical body-energy gate uses actual storage and actual contact heat. The
+enclosing gas/acoustic/body account independently closes original external
+heat/work, native storage and exported losses. Original transport driving-force,
+chemical entropy and species gates remain active.
+
+A whole-call endpoint evaluation budget bounds all discarded body, heat and
+work trials, including parcels without a thermal contact. Native owners keep
+their own internal limits. Missing sources, invalid charts, budget exhaustion,
+unclosed residuals and cancellation leave the gas map, all acoustic histories
+and the one body unchanged. Accepted publication changes those owners together;
+reported contact heat has already been applied.
+
+This remains a uniform-body, fixed-geometry, negligible-solid-pV-work model
+with effective conduction layers and the existing first-order transport split.
+It does not supply spatial solid gradients, thermal deformation, automatic wall
+stiffness or aperture updates, or acoustic-loss heating. The authored G1/G4
+regressions cover opposite nonzero contacts with zero net heat against an
+independent constant-capacity solution, reacting transport with continuing warm
+passive and paired-aperture owners, and atomic refusal/cancellation/retry. They
+are formatter/source checked; native execution remains unverified.
 
 ## Continuing spatial dielectric charge through thermal phase change
 

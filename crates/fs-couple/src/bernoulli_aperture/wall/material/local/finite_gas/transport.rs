@@ -506,6 +506,37 @@ pub(crate) fn finite_gas_transport_candidate_with_evolution<
     evolution: &T,
     cancelled: &mut C,
 ) -> Result<FiniteGasDgTransportCandidate<N, N::Step<T::Source>, T::Reservoir>, Error<T::Error>> {
+    prepare_finite_gas_transport(
+        parcels, nodes, inputs, paths, duration_s, controls, evolution, cancelled,
+    )?.candidate(evolution, cancelled)
+}
+
+/// One admitted, immutable material-transport stage. Coupled endpoint residuals
+/// may evaluate this snapshot repeatedly without transporting new arrivals a
+/// second time or advancing any accepted mechanical/acoustic history.
+pub(crate) struct PreparedFiniteGasTransport<'a, N: FiniteGasTransportNode> {
+    parcels: &'a BTreeMap<u64, ClosedGasParcel>,
+    nodes: &'a BTreeMap<u64, N>,
+    inputs: &'a BTreeMap<u64, N::Input>,
+    transported: BTreeMap<u64, ClosedGasParcel>,
+    transport: GasTransportStep,
+    duration_s: f64,
+    controls: FiniteGasDgTransportSolve,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_finite_gas_transport<
+    'a, N: FiniteGasTransportNode, T: FiniteGasTransportEvolution, C: FnMut() -> bool,
+>(
+    parcels: &'a BTreeMap<u64, ClosedGasParcel>,
+    nodes: &'a BTreeMap<u64, N>,
+    inputs: &'a BTreeMap<u64, N::Input>,
+    paths: GasTransportPaths<'_>,
+    duration_s: f64,
+    controls: FiniteGasDgTransportSolve,
+    evolution: &T,
+    cancelled: &mut C,
+) -> Result<PreparedFiniteGasTransport<'a, N>, Error<T::Error>> {
     check(cancelled)?;
     if parcels.is_empty() || parcels.len() > MAX_SNAPSHOT_PARCELS || nodes.is_empty()
         || !parcels.keys().eq(inputs.keys()) || nodes.keys().any(|id| !parcels.contains_key(id))
@@ -541,6 +572,32 @@ pub(crate) fn finite_gas_transport_candidate_with_evolution<
     let (transported, transport) = material::step_candidate_with_paths(
         parcels, paths, duration_s, &endpoints, controls.transport, &mut *cancelled,
     ).map_err(transport_error)?.into_parts();
+    check(cancelled)?;
+    Ok(PreparedFiniteGasTransport {
+        parcels, nodes, inputs, transported, transport, duration_s, controls,
+    })
+}
+
+impl<N: FiniteGasTransportNode> PreparedFiniteGasTransport<'_, N> {
+    /// Re-evaluate the endpoint on the same original source and inventory.
+    /// Source admission is repeated so changing a trial's evolution cannot
+    /// bypass its original caloric/chemical binding checks. The original material
+    /// stage and its driving-force report are reused, never advanced again.
+    pub(crate) fn candidate<T: FiniteGasTransportEvolution, C: FnMut() -> bool>(
+        &self,
+        evolution: &T,
+        cancelled: &mut C,
+    ) -> Result<FiniteGasDgTransportCandidate<N, N::Step<T::Source>, T::Reservoir>, Error<T::Error>> {
+    check(cancelled)?;
+    let (parcels, nodes, inputs) = (self.parcels, self.nodes, self.inputs);
+    let (transported, transport) = (&self.transported, &self.transport);
+    let (duration_s, controls) = (self.duration_s, self.controls);
+    for (&id, node_input) in inputs {
+        check(cancelled)?;
+        let input = N::transport_input(node_input, nodes.contains_key(&id)).map_err(Error::Invalid)?;
+        evolution.admit(id, &parcels[&id], input, duration_s, cancelled)
+            .map_err(|error| gas_error::<T>(id, error))?;
+    }
     let mut next_parcels = BTreeMap::new();
     let mut next_nodes = nodes.clone();
     let mut acoustics = BTreeMap::new();
@@ -614,7 +671,7 @@ pub(crate) fn finite_gas_transport_candidate_with_evolution<
         return Err(Error::Invalid("actual final gas network mass balance failed"));
     }
     let report = FiniteGasDgTransportStep {
-        duration_s, transport, acoustics, reservoirs,
+        duration_s, transport: transport.clone(), acoustics, reservoirs,
         gas_storage_change_j: gas_storage.value,
         acoustic_storage_change_j: acoustic_storage.value,
         supplied_heat_j: heat.value, port_work_j: port_work.value,
@@ -623,5 +680,6 @@ pub(crate) fn finite_gas_transport_candidate_with_evolution<
     };
     check(cancelled)?;
     Ok(FiniteGasDgTransportCandidate { parcels: next_parcels, nodes: next_nodes, step: report })
+    }
 }
 
