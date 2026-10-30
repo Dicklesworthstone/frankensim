@@ -167,3 +167,74 @@ resistance changed continuing displacement by approximately -1.1723e-8 m in the
 synthetic wet case. Refinement reduced trajectory and temperature errors against
 continuous DOP853. These equation checks are not native execution or measured-
 material validation.
+
+## Complete heat transport on the same relaxation trajectory
+
+`FrameRelaxationThermalSystem::step_heat_network` accepts the existing
+`PreparedHeatNetwork`. Thermal interface resistance, source-integrated k(T)
+layer conduction and gray-diffuse enclosure radiation now act on the same
+finite cells as Maxwell loss and bulk/interface Joule heat. The same entry
+supports unpowered material assemblies. It replaces bulk-only trial transport;
+it does not add a parallel temperature state, contact law or heat integrator.
+
+```rust,ignore
+use fs_couple::air_path::cylinder::frame::modal::relaxation::temperature::heat::
+    transport::RelaxationHeatInput;
+
+let heat = material_heat_network.prepare(&cx, &thermal)?;
+// Optionally use heat.with_integrated_conduction(...) with the original layer
+// source preparation. A link cannot also have a separate thermal-contact owner.
+let report = owner.step_heat_network(
+    &mut thermal, &held_native_mechanical_forces,
+    RelaxationHeatInput { network: &heat, cx: &cx },
+    Some(electrical_input), // None only for an electrically unbound owner.
+    thermal_controls, &cell_energy_guesses_j, &gate,
+)?;
+```
+
+Keep the same preparation between intervals to retain its original source pins.
+The heat assembly must borrow the original material-cell and thermal-link
+slices. Before speculative motion, its resistor sources, accepted temperature
+queries, conductor geometry, electrical interfaces, receiving cells and A/B
+heat fractions are checked against the continuing circuit. An explicit new
+heat preparation is a caller intervention, never an automatic source fallback.
+
+Each proposed thermal endpoint resolves the complete network once. The native
+circuit still starts every trial from its accepted charge/flux. Independently
+integrated Maxwell loss, actual electrical loss, contact conduction and signed
+radiative powers enter the original finite-cell residual exactly once. Source
+rate updates and all mechanical, fluid, electrical and caloric histories still
+publish at the existing common acceptance boundary. Cancellation through either
+Cx or the mechanical gate refuses before publication; a Cx cancellation also
+requests the native gate. Failed numerical/source trials cannot drain storage.
+
+`report.source` retains the original bulk snapshots. `report.heat_transfer`
+retains accepted thermal-contact, source-integrated layer and radiation results.
+`closed_radiation_net_j` records the enclosure's signed roundoff net without
+correcting individual cell powers. The physical total-energy gate excludes that
+internal exchange from `external_thermal_heat_j`, under the original tolerance.
+`radiation_exchange_entropy_j_k` is the signed material sum of Q/T at the actual
+receivers; include it with the terms in `report.entropy` to reconstruct caloric
+entropy storage. It is neither photon entropy nor a reversible-source claim.
+Authored heat stays separately classified, even in a radiating assembly.
+
+Geometry, view factors and contact areas remain fixed. The original solid,
+rate-only storage model and first-order thermal split still apply. This does
+not infer moving-enclosure radiation, contact opening, melting, expansion,
+field forces or fluid heating from exported exterior losses.
+
+Four additional native regression groups exercise continued powered/unpowered
+motion, independent RC and two-cell transport equations, emissivity-only and
+thermal-interface-only substitutions, integrated affine k(T), authored-source
+classification, empty-path parity, electrical-interface/partition continuity,
+and source-domain/budget/cancellation rollback with retry. They are authored but
+UNEXECUTED here: Cargo, Rust, rustfmt, RCH and DSR are unavailable. Run the focused
+heat test command above in the native workspace before treating this as qualified.
+
+An independent NumPy/SciPy reference ran six wet/dry, powered/unpowered and
+integrated-conduction cases at four time resolutions. Its maximum combined
+energy discrepancy was 4.21e-18 J; refinement reduced temperature and trajectory
+errors against continuous DOP853. Changing only emissivity from 0.2 to 0.8
+changed the synthetic continuing displacement by approximately -8.24e-9 m.
+These are checks of manufactured equations, NOT execution of Rust, experimental
+material validation, a full-workspace pass or a performance measurement.

@@ -195,3 +195,45 @@ fn initial_area_and_late_interface_domain_refusal_preserve_complete_owners() {
         });
     }
 }
+
+#[test]
+fn complete_heat_retains_original_electrical_interfaces_and_refuses_changed_partitions() {
+    use crate::circuit_enthalpy::contacts::heat::MaterialHeatNetwork;
+    use fs_exec::Cx;
+    fixture(spec(),|m,plain,source,heat,circuit| {
+        let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:11,kernel_id:52,tile:0,iteration:0},
+                fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
+            let network=MaterialHeatNetwork {electrical:source,thermal_contacts:&[],radiation:None};
+            let prepared=network.prepare(&cx,&heat).unwrap();
+            let altered:Vec<_>=source.contacts.iter().map(|c|MaterialElectricalContact {link:c.link,branch:c.branch,
+                point:c.point,selection:c.selection.clone(),heat_fraction_to_first:1.0-c.heat_fraction_to_first}).collect();
+            let foreign=ElectricalContactNetwork {bulk:source.bulk,contacts:&altered,electrical_bases:source.electrical_bases};
+            let wrong=MaterialHeatNetwork {electrical:&foreign,thermal_contacts:&[],radiation:None};
+            let wrong=wrong.prepare(&cx,&heat).unwrap();
+            let mut outcomes=Vec::new();
+            for full in [false,true] {
+                let mut heat=heat.clone();let (placement,material,native)=native(m);
+                let mut owner=FrameRelaxationThermalSystem::new(material,native,&heat,plain,&DEST,budget(),&gate).unwrap();
+                owner.bind_material_contact_circuit(&heat,source,circuit.clone(),&gate).unwrap();
+                let force=vec![0.0;owner.mechanical().mode_count()];
+                let memory=owner.mechanical().material_memory().to_vec();let cells=heat.cells().clone();
+                assert!(owner.step_heat_network(&mut heat,&force,RelaxationHeatInput {network:&wrong,cx:&cx},
+                    Some(RelaxationElectricalInput {ports:&[],solve:electrical_controls()}),controls(),&[0.0;2],&gate).is_err());
+                assert_eq!(owner.electrical().unwrap(),&circuit);assert_eq!(heat.cells(),&cells);
+                assert_eq!(owner.mechanical().material_memory(),memory);assert_eq!(owner.mechanical().samples_rendered(),0);
+                for _ in 0..3 {
+                    let input=RelaxationElectricalInput {ports:&[],solve:electrical_controls()};
+                    if full {owner.step_heat_network(&mut heat,&force,RelaxationHeatInput {network:&prepared,cx:&cx},
+                        Some(input),controls(),&[0.0;2],&gate).unwrap();}
+                    else {owner.step_electrical(&mut heat,&force,input,controls(),&[0.0;2],&gate).unwrap();}
+                }
+                outcomes.push((heat.cells().clone(),owner.electrical().unwrap().clone(),
+                    owner.mechanical().material_memory().to_vec(),
+                    placement.physical_state(owner.mechanical().components(),&gate).unwrap()));
+            }
+            assert_eq!(outcomes[0],outcomes[1]);
+        })
+    });
+}

@@ -5,7 +5,10 @@
 //! thermal split, not an endpoint-power heat estimate or a new integrator.
 /// Native electrical storage and Joule heat on the same finite-layer solve.
 pub mod electrical;
+/// Complete source heat transport on the same relaxation/circuit transaction.
+pub mod transport;
 use electrical::{ElectricalDriver, RelaxationElectricalInput};
+use transport::{RelaxationHeatInput, FrameHeatTransfer};
 use super::{FrameRelaxationLayerTemperature, PreparedLayerTemperatures};
 use super::shared::{admit_bindings, PreparedSharedTemperatures};
 use core::ops::Range;
@@ -29,6 +32,7 @@ pub enum RelaxationHeatSourceError {
     Material(FrameRelaxationError),
     Network(MaterialNetworkError),
     Contact(crate::circuit_enthalpy::contacts::material::ElectricalContactNetworkError),
+    Heat(crate::circuit_enthalpy::contacts::heat::HeatNetworkError),
     Native(ModalCouplingError),
     Port(fs_ports::CoupleError),
 }
@@ -85,6 +89,13 @@ pub struct RelaxationHeatReport {
     pub deposited_joule_heat_j:f64,
     pub thermal:EnergyAudit,
     pub source:MaterialNetworkSample,
+    /// Original thermal contacts, integrated layers and enclosure calculation.
+    pub heat_transfer:Option<FrameHeatTransfer>,
+    /// Numerical net of INTERNAL enclosure exchange; excluded from external heat.
+    pub closed_radiation_net_j:f64,
+    /// Signed sum Q_radiation/T_cell, not a photon entropy or reversible-heat law.
+    /// Add this term to `entropy`'s classified sources to recover caloric storage.
+    pub radiation_exchange_entropy_j_k:f64,
     pub layers:Vec<RelaxationLayerHeat>,
     /// Ranges in `layers`, one per original material binding in declaration
     /// order. Element/layer indices are LOCAL to the corresponding source frame.
@@ -252,14 +263,15 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
     /// Changing rates has no storage jump. Refine this first-order split in time.
     pub fn step(&mut self,thermal:&mut DepositionSimulation<'_>,external:&[f64],
         solve:FrameThermalSolve,energy_guess_j:&[f64],gate:&CancelGate)->Result<RelaxationHeatReport> {
-        self.step_inner(thermal,external,None,solve,energy_guess_j,gate)
+        self.step_inner(thermal,external,None,None,solve,energy_guess_j,gate)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn step_inner(&mut self,thermal:&mut DepositionSimulation<'_>,external:&[f64],
-        electrical_input:Option<RelaxationElectricalInput<'_>>,solve:FrameThermalSolve,
+        electrical_input:Option<RelaxationElectricalInput<'_>>,heat_input:Option<RelaxationHeatInput<'_, '_, '_, '_>>,
+        solve:FrameThermalSolve,
         energy_guess_j:&[f64],gate:&CancelGate)->Result<RelaxationHeatReport> {
-        check(gate)?;
+        transport::checkpoint(heat_input,gate)?;
         if self.electrical.is_some()!=electrical_input.is_some() {
             return Err(invalid("electrically bound relaxation requires explicit held electrical inputs"));
         }
@@ -284,6 +296,7 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
         let (materials,source,prepared,receivers,layer_ranges)=
             (&self.materials,self.source,&self.prepared,&self.receivers,&self.layer_ranges);
         let electrical=&self.electrical;
+        transport::checkpoint(heat_input,gate)?;
         let (candidate,mut report,source_update,native_update,next_circuit)=self.mechanical.step_with_admission(external,gate,
             |mechanical,frame,_transfers| -> Result<_> {
                 if finite(total-frame.material_dissipation_j)?.abs()>solve.total_energy_tolerance_j {
@@ -293,8 +306,7 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
                 let layers:Vec<_>=receivers.iter().map(|r|RelaxationLayerHeat {destination:r.destination,heat_j:heat[r.group]}).collect();
                 let (candidate,next_circuit,audit,entropy)=cell_driver_candidate_entropy_option(thermal,target,controls(solve),energy_guess_j,
                     |trial,_remaining| -> Result<_> {
-                        check(gate)?;
-                        let resolved=electrical::resolve(electrical.as_ref(),prepared,trial,gate)?;
+                        let (resolved,transfer)=transport::resolve(heat_input,electrical.as_ref(),prepared,trial,target-start,gate)?;
                         let coefficients=resolved.bulk;
                         let update=propose_shared(materials,mechanical,source,receivers,layer_ranges,trial,gate)?;
                         let circuit=electrical::advance(electrical.as_ref(),electrical_input,
@@ -303,7 +315,7 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
                             Driver {frame:frame.clone(),before,heat:selected,outside},circuit)?;
                         Ok(DrivenCoefficients {circuit:driver,
                             sources_w:coefficients.sources_w,conductances_w_k:coefficients.conductances_w_k,
-                            source:(coefficients.source,update),circuit_trials:1})
+                            source:(coefficients.source,update,transfer),circuit_trials:1})
                     },
                     |driver,duration,checkpoint| {
                         let mut powers=BTreeMap::new();
@@ -315,24 +327,38 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
                         }
                         electrical::deposit(electrical.as_ref(),driver,duration,&mut powers,checkpoint)?;
                         Ok(powers)
-                    },true,||gate.is_requested())?;
+                    },true,||transport::checkpoint(heat_input,gate).is_err())?;
                 if next_circuit.is_some()!=electrical.is_some() {
                     return Err(invalid("incomplete electrical endpoint on relaxation heat transaction"));
                 }
-                let (source,update)=audit.source;
+                let (source,update,transfer)=audit.source;
                 let native=mechanical.prepare_staged_material_relaxation_times(&update.updates,gate)?;
-                let entropy=entropy.ok_or_else(||invalid("missing original material heat entropy account"))?;
+                let mut entropy:FrameHeatEntropy=entropy
+                    .ok_or_else(||invalid("missing original material heat entropy account"))?.into();
+                let (heat_transfer,closed_radiation_net_j,radiation_exchange_entropy_j_k)=
+                    transport::finish(transfer,&candidate,target-start,&mut entropy,gate)?;
+                let (external_thermal_heat_j,total_energy_residual_j)=if heat_transfer.is_some() {
+                    let residual=finite(audit.total_energy_residual_j+closed_radiation_net_j)?;
+                    if residual.abs()>solve.total_energy_tolerance_j {
+                        return Err(invalid("closed radiation cannot supply external energy to material relaxation"));
+                    }
+                    (finite(audit.non_electrical_heat_j-closed_radiation_net_j)?,residual)
+                } else {(audit.non_electrical_heat_j,audit.total_energy_residual_j)};
                 let (mechanical,electrical)=audit.electrical;
                 let joule=electrical.as_ref().map_or(0.0,|step|step.heat_j);
                 if finite(audit.deposited_joule_j-selected-joule)?.abs()>solve.total_energy_tolerance_j {
                     return Err(invalid("relaxation and electrical heat lost their independent source accounts"));
                 }
                 let report=RelaxationHeatReport {mechanical,electrical,deposited_joule_heat_j:joule,
-                    thermal:audit.thermal,source,layers,
+                    thermal:audit.thermal,source,heat_transfer,closed_radiation_net_j,
+                    radiation_exchange_entropy_j_k,layers,
                     material_layer_ranges:layer_ranges.to_vec(),rates:MaterialRelaxationTimeReport::default(),deposited_material_heat_j:selected,
-                    external_mechanical_loss_j:outside,external_thermal_heat_j:audit.non_electrical_heat_j,
-                    total_energy_residual_j:audit.total_energy_residual_j,entropy:entropy.into(),nonlinear:audit.nonlinear,
+                    external_mechanical_loss_j:outside,external_thermal_heat_j,
+                    total_energy_residual_j,entropy,nonlinear:audit.nonlinear,
                     maximum_cell_residual_j:audit.maximum_cell_residual_j,material_trials:audit.circuit_trials};
+                // A late source-execution cancellation must precede native
+                // publication just like the mechanical gate's own final check.
+                transport::checkpoint(heat_input,gate)?;
                 Ok((candidate,report,update,native,next_circuit))
             })?;
         // The native admission made the final cancellation check. No fallible

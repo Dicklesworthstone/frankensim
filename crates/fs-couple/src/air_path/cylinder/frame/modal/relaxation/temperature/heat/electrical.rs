@@ -99,8 +99,66 @@ impl<'m, 'f, 'n, 'a, F> FrameRelaxationThermalSystem<'m, 'f, 'n, 'a, F> {
         energy_guess_j: &[f64],
         gate: &CancelGate,
     ) -> Result<RelaxationHeatReport> {
-        self.step_inner(thermal, external, Some(input), solve, energy_guess_j, gate)
+        self.step_inner(thermal, external, Some(input), None, solve, energy_guess_j, gate)
     }
+}
+
+// A complete heat evaluator may change thermal transport, never electrical
+// source identity, accepted physical state, geometry or heat destinations.
+pub(super) fn admit_heat_sources<S>(
+    binding: Option<&Binding<'_, '_>>,
+    coefficients: &mut ContactThermalCoefficients<S>,
+    destinations: &[crate::circuit_enthalpy::ResistorCell],
+    routes: &[crate::circuit_enthalpy::contacts::ContactHeatCells],
+    thermal: &DepositionSimulation<'_>,
+    gate: &CancelGate,
+) -> Result<()> {
+    use crate::circuit_enthalpy::contacts;
+    check(gate)?;
+    match binding {
+        Some(binding) => {
+            coefficients.bulk.resistors.sort_unstable_by_key(|r| r.branch);
+            if coefficients.bulk.resistors.as_slice() != binding.circuit.resistors() {
+                return Err(invalid("complete heat changed accepted relaxation resistor sources, state or geometry"));
+            }
+            contacts::admit_sources(&binding.circuit, &coefficients.contacts, || gate.is_requested())?;
+            coefficients.contacts.sort_unstable_by_key(|c| c.id());
+            for (actual, expected) in binding.circuit.contacts().iter().zip(&coefficients.contacts) {
+                check(gate)?;
+                // Pinning policy receipts may differ; the original selected
+                // source (above), physical query and reduction may not.
+                if actual.id() != expected.id() || actual.branch() != expected.branch()
+                    || actual.area_m2().to_bits() != expected.area_m2().to_bits()
+                    || actual.resistance_ohm().to_bits() != expected.resistance_ohm().to_bits()
+                    || actual.source().resolved().query() != expected.source().resolved().query()
+                {
+                    return Err(invalid("complete heat changed accepted relaxation electrical interface state or area"));
+                }
+            }
+            let map:BTreeMap<_,_> = destinations.iter().map(|r| (r.branch, r.cell)).collect();
+            if map.len() != destinations.len() || map != binding.destinations {
+                return Err(invalid("complete heat changed original relaxation Joule receivers"));
+            }
+            let routes = contacts::admit_routes(thermal, &binding.circuit, routes, || {
+                if gate.is_requested() { Err(DepositionError::Cancelled) } else { Ok(()) }
+            })?;
+            let same = match &binding.contacts {
+                Some(original) => routes == original.routes,
+                None => routes.is_empty(),
+            };
+            if !same {
+                return Err(invalid("complete heat changed original relaxation contact heat partitions"));
+            }
+        }
+        None => {
+            if !coefficients.bulk.resistors.is_empty() || !coefficients.contacts.is_empty()
+                || !destinations.is_empty() || !routes.is_empty()
+            {
+                return Err(invalid("unpowered relaxation cannot discard heat-network electrical work"));
+            }
+        }
+    }
+    check(gate)
 }
 
 // Keep original source selection and contact context evaluation in their
