@@ -6,12 +6,15 @@ export const MAX_ATTACHMENTS = 32;
 export const MAX_ATTACHMENT_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 export const MAX_REQUEST_BYTES = 4 * Math.ceil((MAX_SOURCE_BYTES + MAX_ATTACHMENT_BYTES) / 3) + 65536;
+export const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
+export const FINITE_GAS_STRING_RESULT_FORMAT = 'frankensim-finite-gas-string-result-v1';
 export const SUPPORTED_SCHEMAS = ['frankensim-reed-performance-v1', 'frankensim-flue-dg-performance-v1',
   'frankensim-material-modal-dg-valve-v1', 'frankensim-material-modal-valve-v1',
   'frankensim-plate-valve-performance-v1', 'frankensim-flue-performance-v1'];
 export const STRING_SCHEMAS = ['frankensim-material-strings-v1', 'frankensim-material-strings-v2',
   'frankensim-material-strings-v3'];
 export const RESOLVED_SCHEMAS = ['frankensim-resolved-dg-performance-v1'];
+export const FINITE_GAS_STRING_SCHEMAS = ['frankensim-finite-gas-string-v1'];
 
 export class NativeWindError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -20,18 +23,21 @@ export class NativeWindError extends Error {
 const utf8Bytes = value => new TextEncoder().encode(value).byteLength;
 
 export function validateSource(bytes, renderer = 'wind') {
-  if (!['wind', 'strings', 'resolved'].includes(renderer)) throw new NativeWindError(400, 'Choose the wind, material-string or resolved-flow renderer.');
+  if (!['wind', 'strings', 'resolved', 'finite-gas-string'].includes(renderer)) throw new NativeWindError(400, 'Choose a supported native physical performer.');
   if (!(bytes instanceof Uint8Array) || !bytes.length) throw new NativeWindError(400, 'Choose or enter a performance file.');
   if (bytes.length > MAX_SOURCE_BYTES) throw new NativeWindError(413, 'Performance exceeds the 1 MiB input limit.');
   let text;
   try { text = new TextDecoder('utf-8', {fatal:true, ignoreBOM:true}).decode(bytes); }
   catch { throw new NativeWindError(400, 'Performance must contain valid UTF-8 bytes.'); }
-  const schemas = renderer === 'strings' ? STRING_SCHEMAS : renderer === 'resolved' ? RESOLVED_SCHEMAS : SUPPORTED_SCHEMAS;
+  const schemas = renderer === 'strings' ? STRING_SCHEMAS : renderer === 'resolved' ? RESOLVED_SCHEMAS
+    : renderer === 'finite-gas-string' ? FINITE_GAS_STRING_SCHEMAS : SUPPORTED_SCHEMAS;
   if (!schemas.includes(text.split(/\r?\n/, 1)[0]))
     throw new NativeWindError(400, renderer === 'strings'
       ? 'Choose an original material-string performance supported by material_strings.'
       : renderer === 'resolved'
         ? 'Choose an original resolved-flow performance supported by music_render resolved.'
+        : renderer === 'finite-gas-string'
+          ? 'Choose an original heated string scenario supported by finite_gas_string.'
         : 'Choose a native reed, flue or material-valve performance supported by music_render wind.');
   // Do not trim, normalize newlines, parse records, or re-encode admitted bytes.
   return bytes;
@@ -95,6 +101,22 @@ function validateStringProfiles(value, renderer, attachedNames) {
   return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
 }
 
+function validateFiniteGasString(value, renderer, attachedNames, gasSources, decimate) {
+  if (renderer !== 'finite-gas-string') {
+    if (value !== undefined) throw new NativeWindError(400, 'Finite-gas string sources require their own performer.');
+    return undefined;
+  }
+  const keys = ['solidPath', 'gasRecordPath'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).some(key => !keys.includes(key))
+      || keys.some(key => typeof value[key] !== 'string' || !attachedNames.has(value[key])))
+    throw new NativeWindError(400, 'Finite-gas strings require explicit attached solid-pack and initial-gas-record paths.');
+  if (!gasSources || gasSources.phase !== 'frozen')
+    throw new NativeWindError(400, 'Finite-gas strings require attached gas sources with the frozen phase policy.');
+  if (decimate) throw new NativeWindError(400, 'Finite-gas strings require an authored 48 kHz clock; native decimation is unavailable.');
+  return {solidPath:value.solidPath, gasRecordPath:value.gasRecordPath};
+}
+
 /** Decode an attached text source for editing; binary packs stay byte attachments. */
 export function editableAttachmentText(bytes) {
   if (!(bytes instanceof Uint8Array) || !bytes.length)
@@ -131,12 +153,13 @@ export function validateInput(bytes, bundled = false) {
   if (packet?.format !== 'frankensim-native-wind-input-v1' || !Array.isArray(packet.attachments)
       || packet.attachments.length > MAX_ATTACHMENTS)
     throw new NativeWindError(400, 'Experiment requires its version and at most 32 source attachments.');
-  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources', 'renderer', 'stringProfiles'].includes(key))
+  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources', 'renderer', 'stringProfiles', 'finiteGasString'].includes(key))
       || (packet.decimate !== undefined && typeof packet.decimate !== 'boolean'))
     throw new NativeWindError(400, 'Experiment contains unsupported fields or an invalid native decimation option.');
   const renderer = packet.renderer === undefined ? 'wind' : packet.renderer;
   const source = validateSource(decodedBase64(packet.source, MAX_SOURCE_BYTES), renderer);
   const names = new Set(['input.performance', 'output.wav', 'output.provenance.json']);
+  if (renderer === 'finite-gas-string') names.add('output.history.csv');
   let total = 0;
   const attachments = packet.attachments.map(file => {
     if (!file || typeof file !== 'object' || Object.keys(file).some(key => !['path', 'bytes'].includes(key)))
@@ -158,8 +181,10 @@ export function validateInput(bytes, bundled = false) {
   const attachedNames = new Set(attachments.map(file => file.path));
   const gasSources = validateGasSources(packet.gasSources, attachedNames);
   const stringProfiles = validateStringProfiles(packet.stringProfiles, renderer, attachedNames);
+  const finiteGasString = validateFiniteGasString(packet.finiteGasString, renderer, attachedNames, gasSources, packet.decimate);
   return {source, attachments, decimate:packet.decimate ?? false, ...(renderer !== 'wind' ? {renderer} : {}),
-    ...(gasSources ? {gasSources} : {}), ...(stringProfiles ? {stringProfiles} : {})};
+    ...(gasSources ? {gasSources} : {}), ...(stringProfiles ? {stringProfiles} : {}),
+    ...(finiteGasString ? {finiteGasString} : {})};
 }
 
 /** Same versioned packet for HTTP rendering and files. No token, executable or output path is stored. */
@@ -170,5 +195,6 @@ export function serializeNativeExperiment(source, attachments, options = {}) {
     decimate:options.decimate ?? false,
     ...(options.renderer !== undefined ? {renderer:options.renderer} : {}),
     ...(options.gasSources !== undefined ? {gasSources:options.gasSources} : {}),
-    ...(options.stringProfiles !== undefined ? {stringProfiles:options.stringProfiles} : {})});
+    ...(options.stringProfiles !== undefined ? {stringProfiles:options.stringProfiles} : {}),
+    ...(options.finiteGasString !== undefined ? {finiteGasString:options.finiteGasString} : {})});
 }

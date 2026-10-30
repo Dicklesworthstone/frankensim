@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { nativeWindStatus, renderNativeWind, renderNativeWindBundle } from "../src/native-wind-client.mjs";
+import { createHash } from "node:crypto";
+import { nativeWindStatus, renderNativeWind, renderNativeWindBundle, renderNativePerformance } from "../src/native-wind-client.mjs";
 import { validateInput } from "./native-wind-protocol.mjs";
 
 const status = { available: true, busy: false, token: "test-session",
@@ -304,7 +305,7 @@ test("a selected performer or string profile cannot fall back to another native 
     undefined, never), /wind renderer is unavailable/);
   for (const renderer of [null, "piano"]) {
     await assert.rejects(renderNativeWindBundle("source", [], connected, {renderer}, undefined, never),
-      /Choose the wind, material-string or resolved-flow renderer/);
+      /supported native physical performer/);
   }
   await assert.rejects(renderNativeWindBundle("source", [], connected,
     {stringProfiles:{bodyPath:"body.profile"}}, undefined, never), /material-string renderer/);
@@ -343,4 +344,83 @@ test("resolved sources always select their command, including experiments withou
     await assert.rejects(renderNativeWindBundle(source, [], {...connected, renderers},
       {renderer:"resolved"}, undefined, never), /resolved-flow renderer is unavailable/);
   }
+});
+
+function finiteGasExperiment() {
+  const source = 'frankensim-finite-gas-string-v1\r\naudio 48000 2 0.01\r\n';
+  const gasSources = {components:[{speciesPath:'gas/s', nasa9Path:'gas/n', transportPath:'gas/t'}],
+    waterSpecies:null, phase:'frozen'};
+  const finiteGasString = {solidPath:'wire.pack', gasRecordPath:'gas/local.gas'};
+  const attachments = [...Object.values(finiteGasString), 'gas/reservoir.gas', ...Object.values(gasSources.components[0])]
+    .map((path, i) => ({path, bytes:new Uint8Array([0, 255, i, 13, 10])}));
+  const options = {renderer:'finite-gas-string', finiteGasString, gasSources};
+  const connected = {...status, renderers:{'finite-gas-string':true}, supportsGasSources:true,
+    maximumAttachments:32, maximumAttachmentFileBytes:8388608, maximumAttachmentBytes:33554432,
+    maximumRequestBytes:48000000, maximumHistoryBytes:16*1024*1024};
+  const bytes = wave(); new DataView(bytes.buffer).setInt16(44, -4321, true);
+  const history = Buffer.from('time_s,pressure_pa,gas_temperature_k,cumulative_electrical_source_work_j\r\n'
+    + '0.000020833333333333333,-0.0013187047944578387,300,0.000001\r\n');
+  const receipt = {format:'frankensim-native-pressure-v1', renderer:'finite-gas-string',
+    sampleRateHz:48000, samples:2, fullScalePa:0.01, clippedSamples:0,
+    wavSha256:createHash('sha256').update(bytes).digest('hex')};
+  const response = {format:'frankensim-finite-gas-string-result-v1',
+    wave:Buffer.from(bytes).toString('base64'), history:history.toString('base64'), receipt};
+  return {source, attachments, options, connected, bytes, history, receipt, response};
+}
+
+test('finite-gas rendering retains exact sources, native PCM calibration and complete CSV bytes', async () => {
+  const fixture = finiteGasExperiment();
+  const result = await renderNativePerformance(fixture.source, fixture.attachments, fixture.connected,
+    fixture.options, undefined, async (_url, request) => {
+      const packet = validateInput(Buffer.from(request.body), true);
+      assert.equal(packet.renderer, 'finite-gas-string');
+      assert.equal(packet.decimate, false);
+      assert.equal(Buffer.from(packet.source).toString(), fixture.source);
+      assert.deepEqual(packet.finiteGasString, fixture.options.finiteGasString);
+      assert.deepEqual(packet.gasSources, fixture.options.gasSources);
+      assert.deepEqual(packet.attachments, fixture.attachments);
+      return json(fixture.response);
+    });
+  assert.equal(result.wave.type, 'audio/wav');
+  assert.deepEqual(new Uint8Array(await result.wave.arrayBuffer()), fixture.bytes);
+  assert.deepEqual(result.receipt, fixture.receipt);
+  assert.match(result.history.type, /^text\/csv/);
+  assert.deepEqual(Buffer.from(await result.history.arrayBuffer()), fixture.history);
+});
+
+test('finite-gas requests cannot select an older renderer or discard required source associations', async () => {
+  const f = finiteGasExperiment(), never = async () => assert.fail('invalid finite-gas request was sent');
+  for (const connected of [{...f.connected, renderers:undefined},
+    {...f.connected, renderers:{wind:true, strings:true}}, {...f.connected, maximumHistoryBytes:undefined}]) {
+    await assert.rejects(renderNativePerformance(f.source, f.attachments, connected, f.options, undefined, never));
+  }
+  for (const changes of [{finiteGasString:undefined}, {gasSources:undefined}, {decimate:true},
+    {finiteGasString:{...f.options.finiteGasString, solidPath:'missing.pack'}}]) {
+    await assert.rejects(renderNativePerformance(f.source, f.attachments, f.connected,
+      {...f.options, ...changes}, undefined, never));
+  }
+});
+
+test('finite-gas results require bounded complete history and calibration for the exact WAV', async () => {
+  const f = finiteGasExperiment();
+  const render = (response, connected = f.connected) => renderNativePerformance(
+    f.source, f.attachments, connected, f.options, undefined, async () => json(response));
+  for (const changes of [{receipt:undefined}, {format:'unknown'}, {history:''}, {history:'AB=='},
+    {history:Buffer.from([255]).toString('base64')},
+    {receipt:{...f.receipt, renderer:'strings'}}, {receipt:{...f.receipt, wavSha256:'0'.repeat(64)}},
+    {receipt:{...f.receipt, sampleRateHz:16000}}]) {
+    await assert.rejects(render({...f.response, ...changes}));
+  }
+  await assert.rejects(render(f.response, {...f.connected, maximumHistoryBytes:f.history.length - 1}));
+  const changedRate = f.bytes.slice(); new DataView(changedRate.buffer).setUint32(24, 16000, true);
+  await assert.rejects(render({...f.response, wave:Buffer.from(changedRate).toString('base64')}));
+  let cancelled = false;
+  const stream = new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(66000)); },
+    cancel() { cancelled = true; },
+  });
+  await assert.rejects(renderNativePerformance(f.source, f.attachments,
+    {...f.connected, maximumOutputBytes:48, maximumHistoryBytes:64}, f.options, undefined,
+    async () => new Response(stream, {headers:{'Content-Type':'application/json'}})));
+  assert.equal(cancelled, true, 'oversized JSON must cancel the reader before decoding its payload');
 });

@@ -48,7 +48,8 @@ function stringSummary(stderr) {
 
 /** Missing legacy receipts return null; malformed emitted receipts always refuse. */
 export async function nativePressureReceipt(renderer, output, diagnostics, wave) {
-  const source = renderer === 'strings' ? stringSummary(diagnostics.stderr) : await windSummary(output);
+  const source = renderer === 'strings' || renderer === 'finite-gas-string'
+    ? stringSummary(diagnostics.stderr) : await windSummary(output);
   if (!source) return null;
   return validatePressureReceipt({format:PRESSURE_RECEIPT_FORMAT, renderer, ...source,
     wavSha256:createHash('sha256').update(wave).digest('hex')}, inspectNativeWave(wave), renderer);

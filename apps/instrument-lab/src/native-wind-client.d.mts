@@ -2,11 +2,12 @@
 import type {NativePressureReceipt} from './native-wave.mjs';
 export interface NativeWindStatus {
   available: boolean;
-  renderers?: { wind: boolean; strings: boolean; resolved?: boolean };
+  renderers?: { wind: boolean; strings: boolean; resolved?: boolean; 'finite-gas-string'?: boolean };
   busy: boolean;
   token?: string;
   maximumSourceBytes: number;
   maximumOutputBytes: number;
+  maximumHistoryBytes?: number;
   timeoutMs: number;
   maximumAttachments?: number;
   maximumAttachmentFileBytes?: number;
@@ -31,12 +32,15 @@ export interface NativeWindGasSources {
   phase: "frozen" | "liquid-water";
 }
 export interface NativeStringProfiles { bodyPath?: string; stopPath?: string; contactThermalPath?: string; }
+export interface NativeFiniteGasStringSources { solidPath: string; gasRecordPath: string; }
+export type NativeRenderer = 'wind' | 'strings' | 'resolved' | 'finite-gas-string';
 export interface NativeWindOptions {
-  renderer?: "wind" | "strings" | "resolved";
+  renderer?: NativeRenderer;
   decimate?: boolean;
   gasSources?: NativeWindGasSources;
   stringProfiles?: NativeStringProfiles;
+  finiteGasString?: NativeFiniteGasStringSources;
 }
 export function renderNativeWindBundle(source: string, attachments: readonly NativeWindAttachment[], status: NativeWindStatus, options?: NativeWindOptions, signal?: AbortSignal, request?: NativeWindRequest): Promise<Blob>;
-export interface NativePerformanceResult { wave: Blob; receipt: NativePressureReceipt | null; }
+export interface NativePerformanceResult { wave: Blob; receipt: NativePressureReceipt | null; history?: Blob; }
 export function renderNativePerformance(source: string, attachments: readonly NativeWindAttachment[], status: NativeWindStatus, options?: NativeWindOptions, signal?: AbortSignal, request?: NativeWindRequest): Promise<NativePerformanceResult>;

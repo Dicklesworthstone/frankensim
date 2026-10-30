@@ -17,7 +17,7 @@ const bundle = (bytes = source(), files = []) => Buffer.from(JSON.stringify({
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn) { for (let i = 0; i < 400; i++) { if (await fn()) return; await pause(10); } throw new Error('Timed out waiting for test condition.'); }
 async function setup(options = {}) {
-  const {withStrings = false, ...serverOptions} = options;
+  const {withStrings = false, withFiniteGasString = false, ...serverOptions} = options;
   const dir = await mkdtemp(join(tmpdir(), 'native-wind-test-')), dist = join(dir, 'dist'), tempRoot = join(dir, 'jobs');
   await mkdir(dist); await mkdir(tempRoot); await writeFile(join(dist, 'index.html'), '<title>Synthetic adapter test</title>');
   const receipt = join(dir, 'receipt.json'), engine = join(dir, 'fixture.mjs');
@@ -25,7 +25,8 @@ async function setup(options = {}) {
 // Synthetic process fixture: never presented as native physics.
 import {readFileSync, writeFileSync, statSync} from 'node:fs';
 const args = process.argv.slice(2), offset = ['wind', 'resolved'].includes(args[0]) ? 1 : 0;
-const inputPath = args[offset], outputPath = args[offset + 1], input = readFileSync(inputPath);
+const finite = args.includes('--history-output');
+const inputPath = args[offset], outputPath = args[finite ? 2 : offset + 1], input = readFileSync(inputPath);
 const text = input.toString(), requested = /^# read-files (.+)$/m.exec(text);
 const files = requested ? JSON.parse(requested[1]).map(path => ({
  path, bytes:readFileSync(path).toString('base64'), mode:statSync(path).mode & 0o777,
@@ -41,10 +42,19 @@ if (text.includes('test-delay')) await new Promise(resolve => setTimeout(resolve
 const wav = Buffer.alloc(48); wav.write('RIFF'); wav.writeUInt32LE(40, 4); wav.write('WAVEfmt ', 8);
 wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(48000, 24);
 wav.writeUInt32LE(96000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(4, 40);
+if (text.includes('test-wrong-rate')) { wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28); }
 writeFileSync(outputPath, wav);
+if (finite) {
+ const history = text.includes('test-history-large') ? Buffer.alloc(257, 49)
+  : text.includes('test-history-invalid') ? Buffer.from([255])
+  : Buffer.from('time_s,pressure_pa\\r\\n0.000020833333333333333,0\\r\\n');
+ if (!text.includes('test-history-missing')) writeFileSync(args[args.indexOf('--history-output') + 1], history);
+ if (!text.includes('test-no-calibration')) console.error('samples=2; rate_Hz=48000; clips=0; full_scale_Pa=1e-2');
+}
 `;
   await writeFile(engine, fixture, {mode:0o700});
-  const app = createNativeWindServer({engine, stringsEngine:withStrings ? engine : null, dist, tempRoot, ...serverOptions});
+  const app = createNativeWindServer({engine, stringsEngine:withStrings ? engine : null,
+    finiteGasStringEngine:withFiniteGasString ? engine : null, dist, tempRoot, ...serverOptions});
   await new Promise((accept, reject) => {app.server.once('error', reject); app.server.listen(0, '127.0.0.1', accept);});
   const url = `http://127.0.0.1:${app.server.address().port}`;
   const status = () => fetch(url + '/api/native-wind/status').then(r => r.json());
@@ -60,7 +70,7 @@ const native = {skip:process.platform === 'win32'};
 test('material strings reuse the exact source packet, gas associations and explicit profile paths', native, async () => {
   const app = await setup({withStrings:true, engine:null});
   try {
-    assert.deepEqual(app.initial.renderers, {wind:false, strings:true, resolved:false});
+    assert.deepEqual(app.initial.renderers, {wind:false, strings:true, resolved:false, 'finite-gas-string':false});
     assert.equal(app.initial.available, true);
     assert.ok(app.initial.supportedSchemas.includes('frankensim-material-strings-v3'));
     const names = ['wire.pack', 'body.pack', 'shape.body', 'finger.stops', 'contact.thermal', 'gas/s', 'gas/n', 'gas/t'];
@@ -419,4 +429,72 @@ test('gas associations refuse missing source paths and absent phase or water pol
     {...valid, components:[{...component, modelCoefficients:[1, 2, 3]}]}]) {
     assert.throws(() => validateInput(packet(bad), true), /[Gg]as|[Ee]very gas|[Cc]hoose an explicit|liquid-water/);
   }
+});
+
+function finiteGasPacket(mode = '') {
+  const paths = ['materials/wire.pack', 'gas/local.gas', 'gas/reservoir.gas', 'gas/species', 'gas/nasa9', 'gas/transport'];
+  const bytes = Buffer.from('frankensim-finite-gas-string-v1\r\n# read-files ' + JSON.stringify(paths)
+    + '\r\n# original temperature and feedback source µ\r\n' + mode + '\r\n');
+  const files = paths.map((path, i) => [path, Buffer.from([0, 255, i, 13, 10])]);
+  const packet = {...JSON.parse(bundle(bytes, files)), renderer:'finite-gas-string', decimate:false,
+    finiteGasString:{solidPath:paths[0], gasRecordPath:paths[1]},
+    gasSources:{components:[{speciesPath:paths[3], nasa9Path:paths[4], transportPath:paths[5]}],
+      waterSpecies:null, phase:'frozen'}};
+  return {packet, paths, files, bytes};
+}
+
+test('finite-gas strings run the existing executable with exact physical inputs and return calibrated WAV plus CSV', native, async () => {
+  const app = await setup({withFiniteGasString:true, engine:null});
+  try {
+    assert.equal(app.initial.available, true);
+    assert.equal(app.initial.renderers['finite-gas-string'], true);
+    assert.equal(app.initial.renderers.wind, false);
+    assert.equal(app.initial.maximumHistoryBytes, 16 * 1024 * 1024);
+    assert.ok(app.initial.supportedSchemas.includes('frankensim-finite-gas-string-v1'));
+    const f = finiteGasPacket();
+    const response = await app.runBundle(JSON.stringify(f.packet));
+    assert.equal(response.status, 200); assert.match(response.headers.get('content-type'), /application\/json/);
+    const result = await response.json();
+    assert.equal(result.format, 'frankensim-finite-gas-string-result-v1');
+    const wave = Buffer.from(result.wave, 'base64');
+    assert.equal(wave.length, 48); assert.equal(wave.readUInt32LE(24), 48000);
+    assert.equal(Buffer.from(result.history, 'base64').toString(), 'time_s,pressure_pa\r\n0.000020833333333333333,0\r\n');
+    assert.equal(result.receipt.renderer, 'finite-gas-string');
+    assert.equal(result.receipt.samples, 2); assert.equal(result.receipt.fullScalePa, 0.01);
+    const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+    assert.equal(record.bytes, f.bytes.toString('base64'));
+    assert.deepEqual(record.args, [join(record.cwd, 'input.performance'), f.paths[0], join(record.cwd, 'output.wav'),
+      '--gas-record', f.paths[1], '--self-contained', '--history-output', join(record.cwd, 'output.history.csv'),
+      '--require-sample-rate', '48000', ...f.paths.flatMap(path => ['--attached-source', path]),
+      '--gas-water', 'none', '--gas-phase', 'frozen', '--gas-component', ...f.paths.slice(3)]);
+    assert.deepEqual(record.files.map(file => [file.path, file.bytes]), f.files.map(([path, bytes]) => [path, bytes.toString('base64')]));
+    await until(async () => !(await app.status()).busy);
+    assert.deepEqual(await readdir(app.tempRoot), []);
+    assert.equal((await app.run()).status, 503, 'finite-gas rendering cannot substitute for a missing wind executable');
+  } finally { await app.cleanup(); }
+});
+
+test('an unconfigured finite-gas executable refuses without substituting another performer', native, async () => {
+  const app = await setup({withStrings:true});
+  try {
+    assert.equal(app.initial.renderers['finite-gas-string'], false);
+    const response = await app.runBundle(JSON.stringify(finiteGasPacket().packet));
+    assert.equal(response.status, 503); assert.match((await response.json()).error, /finite.gas/i);
+    await assert.rejects(readFile(app.receipt), {code:'ENOENT'});
+  } finally { await app.cleanup(); }
+});
+
+test('finite-gas history, sample-rate and calibration failures never return a partial experiment', native, async () => {
+  const app = await setup({withFiniteGasString:true, maximumHistoryBytes:64});
+  try {
+    assert.equal(app.initial.maximumHistoryBytes, 64);
+    for (const mode of ['test-history-large', 'test-history-invalid', 'test-history-missing', 'test-no-calibration', 'test-wrong-rate']) {
+      const response = await app.runBundle(JSON.stringify(finiteGasPacket(mode).packet));
+      assert.equal(response.status, 502, mode);
+      const result = await response.json();
+      assert.equal(typeof result.error, 'string'); assert.equal(result.wave, undefined); assert.equal(result.history, undefined);
+      await until(async () => !(await app.status()).busy);
+      assert.deepEqual(await readdir(app.tempRoot), []);
+    }
+  } finally { await app.cleanup(); }
 });

@@ -122,3 +122,45 @@ test('resolved experiments retain their performer, original gas sources and phys
   assert.equal(restored.decimate, true);
   assert.deepEqual(validateInput(encode(serializeNativeExperiment(decode(restored.source), restored.attachments, restored)), true), restored);
 });
+
+test('finite-gas string experiments retain exact solid, atmosphere, reservoir and feedback inputs', () => {
+  const source = 'frankensim-finite-gas-string-v1\r\naudio 48000 2400 0.01\r\n'
+    + 'nozzle gas/reservoir.gas 0.000002 0.0000000001 1 1e-14 1e-9 0.05\r\n'
+    + 'drive current 0.1\r\nelectrical_feedback 0.000005 1e-12 64\r\n';
+  const options = {renderer:'finite-gas-string',
+    finiteGasString:{solidPath:'materials/wire.pack', gasRecordPath:'gas/local.gas'},
+    gasSources:{components:[{speciesPath:'gas/species', nasa9Path:'gas/nasa9', transportPath:'gas/transport'}],
+      waterSpecies:null, phase:'frozen'}};
+  const files = [...Object.values(options.finiteGasString), 'gas/reservoir.gas',
+    ...Object.values(options.gasSources.components[0])]
+    .map((path, i) => ({path, bytes:new Uint8Array([0, 255, i, 13, 10])}));
+  const restored = validateInput(encode(serializeNativeExperiment(source, files, options)), true);
+  assert.equal(restored.renderer, 'finite-gas-string');
+  assert.equal(decode(restored.source), source);
+  assert.equal(restored.decimate, false);
+  assert.deepEqual(restored.finiteGasString, options.finiteGasString);
+  assert.deepEqual(restored.gasSources, options.gasSources);
+  assert.deepEqual(restored.attachments, files);
+  assert.deepEqual(validateInput(encode(serializeNativeExperiment(decode(restored.source), restored.attachments, restored)), true), restored);
+});
+
+test('finite-gas string packets require complete frozen sources and preserve native output names', () => {
+  const source = 'frankensim-finite-gas-string-v1\n';
+  const files = ['solid', 'local.gas', 'species', 'nasa9', 'transport']
+    .map(path => ({path, bytes:new Uint8Array([1])}));
+  const options = {renderer:'finite-gas-string', finiteGasString:{solidPath:'solid', gasRecordPath:'local.gas'},
+    gasSources:{components:[{speciesPath:'species', nasa9Path:'nasa9', transportPath:'transport'}], waterSpecies:null, phase:'frozen'}};
+  const packet = JSON.parse(serializeNativeExperiment(source, files, options));
+  const admit = value => validateInput(encode(JSON.stringify(value)), true);
+  for (const changes of [{finiteGasString:undefined}, {gasSources:undefined}, {decimate:true},
+    {gasSources:{...options.gasSources, phase:'liquid-water', waterSpecies:'H2O'}},
+    {finiteGasString:{solidPath:'missing', gasRecordPath:'local.gas'}},
+    {finiteGasString:{solidPath:'solid', gasRecordPath:'../local.gas'}},
+    {finiteGasString:{...options.finiteGasString, gain:2}}, {stringProfiles:{}}]) {
+    assert.throws(() => admit({...packet, ...changes}));
+  }
+  for (const path of ['output.history.csv', 'output.history.csv/child'])
+    assert.throws(() => admit({...packet, attachments:[...packet.attachments, {path, bytes:'AQ=='}]}), /collide/);
+  assert.throws(() => admit({...packet, renderer:'wind',
+    source:Buffer.from('frankensim-reed-performance-v1\n').toString('base64')}));
+});

@@ -1,4 +1,4 @@
-// Optional loopback companion for the existing wind, resolved-flow and string performers.
+// Optional loopback companion for the original native physical performers.
 import http from 'node:http';
 import {access, lstat, mkdir, mkdtemp, open, realpath, rm, stat, writeFile} from 'node:fs/promises';
 import {constants, createReadStream} from 'node:fs';
@@ -9,6 +9,7 @@ import {dirname, extname, isAbsolute, join, relative, resolve, sep} from 'node:p
 import {fileURLToPath} from 'node:url';
 import {DEFAULT_TIMEOUT_MS, MAX_LOG_BYTES, MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES,
   MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES,
+  MAX_HISTORY_BYTES, FINITE_GAS_STRING_RESULT_FORMAT, FINITE_GAS_STRING_SCHEMAS,
   NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, RESOLVED_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
 
 import {nativePressureReceipt} from './native-pressure-receipt.mjs';
@@ -80,19 +81,24 @@ async function serveAsset(req, res, dist, pathname) {
     res.once('close', () => stream.destroy()); stream.pipe(res); }
   return true;
 }
-function runNative(engine, input, output, dir, signal, outputLimit, experiment) {
+function runNative(engine, input, output, dir, signal, outputLimit, experiment, historyLimit) {
   return new Promise((accept, reject) => {
     if (signal.aborted) return reject(signal.reason);
-    const {attachments, decimate, gasSources, stringProfiles} = experiment;
+    const {attachments, decimate, gasSources, stringProfiles, finiteGasString} = experiment;
     const sourceArgs = attachments.flatMap(file => ['--attached-source', file.path]);
     const gasArgs = gasSources ? ['--gas-water', gasSources.waterSpecies ?? 'none',
       '--gas-phase', gasSources.phase, ...gasSources.components.flatMap(component =>
         ['--gas-component', component.speciesPath, component.nasa9Path, component.transportPath])] : [];
     const profileArgs = [['bodyPath', '--body-profile'], ['stopPath', '--stop-profile'], ['contactThermalPath', '--contact-thermal']]
       .flatMap(([key, flag]) => stringProfiles?.[key] ? [flag, stringProfiles[key]] : []);
+    const history = join(dir, 'output.history.csv');
     const command = experiment.renderer === 'strings' ? [] : [experiment.renderer ?? 'wind'];
-    const child = spawn(engine, [...command, input, output,
-      '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs, ...profileArgs], {cwd:dir, shell:false,
+    const args = experiment.renderer === 'finite-gas-string'
+      ? [input, finiteGasString.solidPath, output, '--gas-record', finiteGasString.gasRecordPath,
+        '--self-contained', '--history-output', history, '--require-sample-rate', '48000', ...sourceArgs, ...gasArgs]
+      : [...command, input, output,
+        '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs, ...profileArgs];
+    const child = spawn(engine, args, {cwd:dir, shell:false,
       windowsHide:true, detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
     let reason, size = 0, forceKill, finished = false; const chunks = [], stdout = [], stderr = [];
     const kill = name => { if (!child.pid) return;
@@ -111,9 +117,15 @@ function runNative(engine, input, output, dir, signal, outputLimit, experiment) 
     let checking = false;
     const check = setInterval(async () => {
       if (checking) return; checking = true;
-      try { const info = await lstat(output);
-        if (!info.isFile() || info.size > outputLimit) stop(new NativeWindError(502, 'Native WAV exceeds the output limit or is not a regular file.'));
-      } catch (error) { if (error.code !== 'ENOENT') stop(new NativeWindError(502, 'Could not inspect native output.')); }
+      try {
+        const outputs = [[output, outputLimit, 'WAV'],
+          ...(experiment.renderer === 'finite-gas-string' ? [[history, historyLimit, 'history']] : [])];
+        for (const [path, limit, name] of outputs) {
+          try { const info = await lstat(path);
+            if (!info.isFile() || info.size > limit) stop(new NativeWindError(502, `Native ${name} exceeds the output limit or is not a regular file.`));
+          } catch (error) { if (error.code !== 'ENOENT') stop(new NativeWindError(502, 'Could not inspect native output.')); }
+        }
+      }
       finally { checking = false; }
     }, 100); check.unref();
     child.once('error', () => stop(new NativeWindError(503, 'Selected native executable could not be started.')));
@@ -143,13 +155,39 @@ async function readWave(output, limit) {
   } finally { await file?.close(); }
 }
 
+async function readHistory(output, limit) {
+  let file;
+  try {
+    file = await open(output, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+    const info = await file.stat();
+    if (!info.isFile() || !info.size || info.size > limit)
+      throw new NativeWindError(502, 'Native history exceeds the output limit or is not a nonempty regular file.');
+    const bytes = Buffer.alloc(Math.min(info.size + 1, limit + 1));
+    let length = 0;
+    while (length < bytes.length) {
+      const read = await file.read(bytes, length, bytes.length - length, length);
+      if (!read.bytesRead) break;
+      length += read.bytesRead;
+    }
+    if (length !== info.size) throw new NativeWindError(502, 'Native history changed while being read.');
+    const result = bytes.subarray(0, length);
+    new TextDecoder('utf-8', {fatal:true}).decode(result);
+    return result;
+  } catch (error) {
+    if (error instanceof NativeWindError) throw error;
+    throw new NativeWindError(502, 'Native renderer did not leave readable UTF-8 history.');
+  } finally { await file?.close(); }
+}
+
 export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER || null,
   stringsEngine = process.env.FSIM_MATERIAL_STRINGS || null,
+  finiteGasStringEngine = process.env.FSIM_FINITE_GAS_STRING || null,
   dist = resolve(here, '../dist'), timeoutMs = DEFAULT_TIMEOUT_MS,
-  maximumOutputBytes = MAX_OUTPUT_BYTES, tempRoot = tmpdir()} = {}) {
-  if ([engine, stringsEngine].some(path => path && !isAbsolute(path))) throw new Error('Native executables must be absolute paths.');
+  maximumOutputBytes = MAX_OUTPUT_BYTES, maximumHistoryBytes = MAX_HISTORY_BYTES, tempRoot = tmpdir()} = {}) {
+  if ([engine, stringsEngine, finiteGasStringEngine].some(path => path && !isAbsolute(path))) throw new Error('Native executables must be absolute paths.');
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000
-      || !Number.isInteger(maximumOutputBytes) || maximumOutputBytes < 44 || maximumOutputBytes > MAX_OUTPUT_BYTES)
+      || !Number.isInteger(maximumOutputBytes) || maximumOutputBytes < 44 || maximumOutputBytes > MAX_OUTPUT_BYTES
+      || !Number.isInteger(maximumHistoryBytes) || maximumHistoryBytes < 1 || maximumHistoryBytes > MAX_HISTORY_BYTES)
     throw new Error('Invalid local rendering budget.');
   dist = resolve(dist); tempRoot = resolve(tempRoot);
   const token = randomBytes(32).toString('hex'); let active = null, closing = false;
@@ -170,12 +208,14 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
     catch { return send(400, {error:'Invalid request path.'}); }
     try {
       if (req.method === 'GET' && pathname === '/api/native-wind/status') {
-        const [wind, strings] = await Promise.all([available(engine), available(stringsEngine)]);
+        const [wind, strings, finiteGasString] = await Promise.all([available(engine), available(stringsEngine), available(finiteGasStringEngine)]);
         return send(200,
-        {available:!closing && (wind || strings),
-          renderers:{wind:!closing && wind, strings:!closing && strings, resolved:!closing && wind}, busy:active !== null, token,
-          maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, timeoutMs,
-          supportedSchemas:[...(wind ? [...SUPPORTED_SCHEMAS, ...RESOLVED_SCHEMAS] : []), ...(strings ? STRING_SCHEMAS : [])],
+        {available:!closing && (wind || strings || finiteGasString),
+          renderers:{wind:!closing && wind, strings:!closing && strings, resolved:!closing && wind,
+            'finite-gas-string':!closing && finiteGasString}, busy:active !== null, token,
+          maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, maximumHistoryBytes, timeoutMs,
+          supportedSchemas:[...(wind ? [...SUPPORTED_SCHEMAS, ...RESOLVED_SCHEMAS] : []), ...(strings ? STRING_SCHEMAS : []),
+            ...(finiteGasString ? FINITE_GAS_STRING_SCHEMAS : [])],
           maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
           maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true, supportsPressureReceipts:true});
       }
@@ -200,9 +240,12 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
       let dir;
       try {
         const experiment = await sourceBody(req, controller.signal, bundled);
-        const selectedEngine = experiment.renderer === 'strings' ? stringsEngine : engine;
+        const selectedEngine = experiment.renderer === 'strings' ? stringsEngine
+          : experiment.renderer === 'finite-gas-string' ? finiteGasStringEngine : engine;
         if (!await available(selectedEngine)) throw new NativeWindError(503, experiment.renderer === 'strings'
           ? 'Native material-string executable is unavailable. Build material_strings and configure its absolute path.'
+          : experiment.renderer === 'finite-gas-string'
+            ? 'Native finite-gas string executable is unavailable. Build finite_gas_string and configure its absolute path.'
           : 'Native wind/resolved-flow executable is unavailable. Build music_render and configure its absolute path.');
         if (controller.signal.aborted) throw controller.signal.reason;
         dir = await mkdtemp(join(tempRoot, 'frankensim-native-wind-'));
@@ -214,13 +257,21 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
           await mkdir(dirname(destination), {recursive:true, mode:0o700});
           await writeFile(destination, attachment.bytes, {mode:0o600, flag:'wx'});
         }
-        const diagnostics = await runNative(selectedEngine, input, output, dir, controller.signal, maximumOutputBytes, experiment);
+        const diagnostics = await runNative(selectedEngine, input, output, dir, controller.signal, maximumOutputBytes, experiment, maximumHistoryBytes);
         const wave = await readWave(output, maximumOutputBytes);
         if (controller.signal.aborted) throw controller.signal.reason;
         let receipt;
         try { receipt = await nativePressureReceipt(experiment.renderer ?? 'wind', output, diagnostics, wave); }
         catch (error) { throw new NativeWindError(502, error.message); }
         if (controller.signal.aborted) throw controller.signal.reason;
+        if (experiment.renderer === 'finite-gas-string') {
+          if (!receipt) throw new NativeWindError(502, 'Native finite-gas string pressure calibration is missing.');
+          const history = await readHistory(join(dir, 'output.history.csv'), maximumHistoryBytes);
+          if (controller.signal.aborted) throw controller.signal.reason;
+          send(200, {format:FINITE_GAS_STRING_RESULT_FORMAT,
+            wave:wave.toString('base64'), history:history.toString('base64'), receipt});
+          return;
+        }
         res.writeHead(200, {'Content-Type':'audio/wav', 'Content-Length':wave.length,
           ...(receipt ? {[PRESSURE_RECEIPT_HEADER]:JSON.stringify(receipt)} : {})}); res.end(wave);
       } finally {
@@ -243,20 +294,22 @@ async function cli() {
   let engine = process.env.FSIM_MUSIC_RENDER || null, dist = resolve(here, '../dist'), port = 8787;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
   let stringsEngine = process.env.FSIM_MATERIAL_STRINGS || null;
+  let finiteGasStringEngine = process.env.FSIM_FINITE_GAS_STRING || null;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--help') {
-      console.log('node tools/serve-native-wind.mjs [--engine /absolute/path/music_render] [--strings-engine /absolute/path/material_strings] [--dist DIST] [--port 8787] [--timeout-ms 60000]\nFSIM_MUSIC_RENDER and FSIM_MATERIAL_STRINGS select the local executables. --timeout-ms admits 1..600000 milliseconds per render. Build the app first with npm run build.'); return;
+      console.log('node tools/serve-native-wind.mjs [--engine /absolute/path/music_render] [--strings-engine /absolute/path/material_strings] [--finite-gas-string-engine /absolute/path/finite_gas_string] [--dist DIST] [--port 8787] [--timeout-ms 60000]\nFSIM_MUSIC_RENDER, FSIM_MATERIAL_STRINGS and FSIM_FINITE_GAS_STRING select the local executables. --timeout-ms admits 1..600000 milliseconds per render. Build the app first with npm run build.'); return;
     }
-    if (!['--engine', '--strings-engine', '--dist', '--port', '--timeout-ms'].includes(args[i]) || !args[i + 1]) throw new Error('Unknown or incomplete local-server option.');
+    if (!['--engine', '--strings-engine', '--finite-gas-string-engine', '--dist', '--port', '--timeout-ms'].includes(args[i]) || !args[i + 1]) throw new Error('Unknown or incomplete local-server option.');
     const option = args[i], value = args[++i];
     if (option === '--engine') engine = value; else if (option === '--strings-engine') stringsEngine = value;
+    else if (option === '--finite-gas-string-engine') finiteGasStringEngine = value;
     else if (option === '--dist') dist = resolve(value);
     else if (option === '--timeout-ms') timeoutMs = Number(value);
     else port = Number(value);
   }
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Port must be 1024–65535.');
-  const app = createNativeWindServer({engine, stringsEngine, dist, timeoutMs});
+  const app = createNativeWindServer({engine, stringsEngine, finiteGasStringEngine, dist, timeoutMs});
   app.server.on('error', error => { console.error(error.message); process.exitCode = 1; });
   app.server.listen(port, '127.0.0.1', () => console.log(`Instrument Lab + native physics: http://127.0.0.1:${port}\nLocal only; Ctrl+C stops rendering and the server.`));
   process.once('SIGINT', () => void app.shutdown()); process.once('SIGTERM', () => void app.shutdown());

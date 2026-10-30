@@ -61,28 +61,29 @@ changed gets a new URL, so no visitor pairs new code with an hour-old `strandbar
 
 ## Native wind and string renderer
 
-The instrument-family section can edit and render wind, resolved-flow and string
+The instrument-family section can edit and render wind, resolved-flow, string and heated-string
 performances with their original material packs using the **native `music_render wind`,
-`music_render resolved` and `material_strings` solvers**. Build the local executables and the app, then serve that app through the optional loopback
+`music_render resolved`, `material_strings` and `finite_gas_string` solvers**. Build the local executables and the app, then serve that app through the optional loopback
 companion. From the repository root:
 
 ```sh
-cargo build --release -p fs-couple --bin music_render --bin material_strings
+cargo build --release -p fs-couple --bin music_render --bin material_strings --bin finite_gas_string
 npm --prefix apps/instrument-lab ci
 npm --prefix apps/instrument-lab run build
 node apps/instrument-lab/tools/serve-native-wind.mjs \
   --engine "$(pwd)/target/release/music_render" \
-  --strings-engine "$(pwd)/target/release/material_strings"
+  --strings-engine "$(pwd)/target/release/material_strings" \
+  --finite-gas-string-engine "$(pwd)/target/release/finite_gas_string"
 ```
 
-Open `http://127.0.0.1:8787`. `FSIM_MUSIC_RENDER` and `FSIM_MATERIAL_STRINGS` can
+Open `http://127.0.0.1:8787`. `FSIM_MUSIC_RENDER`, `FSIM_MATERIAL_STRINGS` and `FSIM_FINITE_GAS_STRING` can
 supply the respective absolute executable paths; use the actual Cargo output
 paths if your target directory differs. `--dist` selects an existing app build
 and `--port` changes the loopback port. `--timeout-ms` sets the execution allowance
 for each render, from 1 to 600000 milliseconds (default 60000). For a longer
 resolved-flow calculation, use an explicit allowance such as `--timeout-ms 300000`;
 the panel displays it and Cancel still terminates the native calculation.
-Either executable can be configured on its
+Each executable can be configured on its
 own. The panel reports availability for the selected performer and refuses if
 that executable is absent. Starting without executables leaves the viewer
 available. Static hosted builds do not acquire a native rendering service.
@@ -119,6 +120,45 @@ which its native observer handles directly.
 Playback never peak-normalizes or retunes the native result. Original model
 limits and missing-source refusals still apply; attaching a pack does not
 qualify an instrument as measured or realistic.
+
+### Heated string with evolving material and finite gas
+
+Select **Heated string — electrical, thermal and finite-gas feedback** and the
+canonical **Heated string — electrical feedback and finite gas** starter. Its
+`browser-feedback-flow.string` describes a 0.1-second, 48 kHz trajectory through
+the original `finite_gas_string` runner. Electrical work heats the solid,
+temperature changes resistance and loss, conduction exchanges heat with the
+finite gas, and a nozzle transfers species and enthalpy to or from a reservoir.
+The same continuing string state supplies the pressure WAV.
+
+Build the original packs using the
+[heated-string source recipe](../../crates/fs-couple/examples/finite_gas_string/README.md#run-with-source-packs).
+Attach `string.pack`, the three nitrogen species/NASA-9/transport packs,
+[`nitrogen.gas`](../../crates/fs-couple/examples/self_heating_vibration/nitrogen.gas)
+and [`nitrogen-reservoir.gas`](../../crates/fs-couple/examples/finite_gas_string/nitrogen-reservoir.gas).
+In **Heated string and finite atmosphere**, select the solid pack and initial
+`nitrogen.gas` record. In **Thermochemical gas sources**, associate the three
+nitrogen packs, choose **Frozen gas composition** and enter water identity `none`.
+The nozzle record retains its exact attached filename. A bonded scenario also
+requires each sleeve pack named in that scenario.
+
+Change the original current/voltage drive, material pack, gas record, support
+condition or nozzle parameters, then render again. `electrical_feedback` selects
+the native bounded endpoint work solve; its work and residual controls stay in
+the source. **Download synchronized CSV** returns the original full observation
+table, including temperatures, transferred heat, gas/species state, electrical
+source work and energy residuals. The CSV and WAV come from the same accepted
+trajectory. Their current source selections travel together through **Save
+experiment** and **Open experiment**. Pressure A/B comparison uses the native
+writer's calibration and retains one common playback gain.
+
+This performer requires an explicitly authored 48 kHz clock and does not support
+native decimation. The service requests that rate before source loading; it
+never rewrites the scenario clock. Its CSV is limited to 16 MiB, independently
+of the 16 MiB WAV limit. Shorten the run when that observation budget is exceeded.
+The starter uses manufactured solid properties, first-order heat-then-flow
+integration and diagnostic compact pressure. It does not establish measured
+wire fidelity, chamber acoustics or reciprocal radiation loading.
 
 ### Resolved gas fields coupled to a duct
 
@@ -558,13 +598,21 @@ wall, reed, string and body materials. Unlisted files cannot fall through to the
 filesystem. Changing an association or policy marks the existing WAV as stale,
 just as replacing the source pack bytes does.
 
-Gas records stay inline in the performance; the panel does not pass a separate
-`--gas-record` override.
+Wind and ordinary material-string gas records stay inline in their performance.
+The heated-string performer selects an explicit attached initial gas record and
+passes it through the native runner's existing `--gas-record` option.
 
 The companion passes the exact UTF-8 bytes to the selected executable as
 `music_render wind INPUT.performance OUT.wav --self-contained` or
 `material_strings INPUT.performance OUT.wav --self-contained`, with a private working directory
 and fixed arguments (plus explicitly selected decimation, gas associations and string profiles).
+The heated-string route uses `finite_gas_string INPUT SOLID_PACK OUT.wav
+--gas-record GAS_RECORD --self-contained --history-output OUT.history.csv
+--require-sample-rate 48000`, with the same declared attachment and gas-source
+arguments. Only this route returns a versioned JSON result containing original
+WAV and CSV bytes plus mandatory pressure calibration; existing performers
+retain their WAV response. The client bounds the encoded response and each
+decoded artifact before offering playback or download.
 Attached files are written byte-for-byte beneath that
 private directory at their declared relative paths. Each is explicitly allowed
 with `--attached-source RELATIVE_PATH`; the native loader snapshots only these
@@ -580,7 +628,8 @@ Source or solver refusals remain visible; cancellation terminates the native
 child and removes that job's temporary files.
 
 The local adapter admits one render at a time, at most 1 MiB of source, 32 attached
-files (8 MiB each, 32 MiB combined), 16 MiB of WAV, 256 KiB of process diagnostics
+files (8 MiB each, 32 MiB combined), 16 MiB of WAV, 16 MiB of heated-string CSV,
+256 KiB of process diagnostics
 and 60 seconds per request. A versioned JSON/base64 envelope carries attachments;
 its complete encoded size is bounded before decoding, and the original text
 request remains supported. These are local
