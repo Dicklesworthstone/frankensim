@@ -14,6 +14,7 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 
 mod update;
+mod thermal;
 mod orthotropic;
 pub(super) mod finite_gas;
 

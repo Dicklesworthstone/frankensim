@@ -9771,7 +9771,8 @@ uniform-body validity remain caller obligations.
 The common transport owner now prepares one admitted immutable material
 snapshot. Every body, contact-heat and acoustic-work trial reuses that snapshot
 and the original accepted native histories. The existing scalar feedback owner
-closes the body's net heat against the independently evaluated contact sum.
+closes the body's energy-out coordinate against the independently evaluated
+contact sum and any selected endpoint wall-material work.
 Each gas contact closes `Q_i = dt G_i(T_body,end - T_gas,end)`, using the
 original caloric or implicit chemistry endpoint and separate gas-to-wave work.
 The conductivity claim selected before transport stays pinned at actual
@@ -9779,10 +9780,11 @@ endpoint conditions. Every signed contact is evaluated even when the net heat
 is zero, so a hot gas can heat a cold gas through an unchanged-temperature body.
 
 The body's original chart supplies
-`H_end - H_start = Q_body,external - Q_net`. The accepted report retains both
-the applied net coordinate and the actual sum of gas contact heats; their
-difference is a bounded source residual, not an additional heat source. The
-physical body-energy gate uses actual storage and actual contact heat. The
+`H_end - H_start = Q_body,external - Q_net - W_wall`. The accepted report retains
+the applied heat coordinate, actual gas contact sum and signed wall work as
+separate accounts; their difference is a bounded source residual, not an
+additional heat source. The physical body-energy gate uses actual storage,
+actual contact heat and the original native wall-material work. The
 enclosing gas/acoustic/body account independently closes original external
 heat/work, native storage and exported losses. Original transport driving-force,
 chemical entropy and species gates remain active.
@@ -9796,13 +9798,56 @@ reported contact heat has already been applied.
 
 This remains a uniform-body, fixed-geometry, negligible-solid-pV-work model
 with effective conduction layers and the existing first-order transport split.
-It does not supply spatial solid gradients, thermal deformation, automatic wall
-stiffness or aperture updates, or general acoustic-loss partition. Selected
-molecular source heating uses the original gas owner described below. The G1/G4
+It does not supply spatial solid gradients, thermal deformation, aperture
+updates or general acoustic-loss partition. Explicit uniform elastic wall
+feedback and selected molecular source heating use the original owners
+described below. The G1/G4
 regressions cover opposite nonzero contacts with zero net heat against an
 independent constant-capacity solution, reacting transport with continuing warm
 passive and paired-aperture owners, and atomic refusal/cancellation/retry. They
 are formatter/source checked; native execution remains unverified.
+
+## Finite-body temperature feedback into original elastic acoustic walls
+
+Each shared-body thermal port may select `SharedFiniteGasAcousticWallSolve`
+to refresh its original uniform elastic wall at the solved body temperature.
+The original material query bundle, selected claims, card identity and all
+non-temperature coordinates stay pinned. Native `LocalMaterialWall` and
+`MaterialWallDg::rebind_controlled` rebuild the existing coefficients while
+retaining displacement, conjugate momentum, acoustic history and the native
+propagator clock. No replacement wall-motion or material solver is introduced.
+
+The outer coordinate is now total energy out of the body:
+`S = sum(Q_i) + W_wall`. Every trial restarts the original gas/acoustic
+snapshot, evaluates all gas contacts, then updates the selected candidate
+walls at that same body endpoint. Signed native parameter work enters the
+body residual once: `delta H + sum(Q_i) + W_wall - Q_body,external = 0`.
+It is not gas-contact heat, molecular heat or gas-to-wave work. Positive wall
+work draws from the body; negative work returns to its finite enthalpy store.
+
+Reports expose each original material receipt and native wall update, total
+wall parameter work, and independently measured final acoustic storage after
+rebinding. The retained transport report explicitly describes the preceding
+gas/acoustic substage. The enclosing energy gate uses the final storage;
+discarded trials and failed final gates publish no partial body, gas or wall
+state. With no selected walls the prior arithmetic and storage report remain
+unchanged.
+
+This adapter admits original uniform isotropic elastic walls only. It checks
+initial material/body temperature, all-solid initial and candidate phase,
+constant material and chart density, fixed geometry/thickness/restraint, and
+a shared body inventory containing the sum of selected native thin-wall
+volumes and masses. Each wall has an explicit absolute parameter-work cap.
+Anisotropic or hereditary walls, regional bindings, competing owners,
+insufficient inventory, phase change and density changes refuse. Thermal
+expansion, phase transfer and a thermoelastic entropy model remain outside
+this bounded energy-accounting path. The original first-order split and
+source applicability limits still apply.
+
+Heating/cooling, continuing-history, source-pin and atomic refusal/retry
+regressions accompany the implementation. Parser/formatter and bounded source
+checks are available; native compilation and runtime execution remain
+unverified.
 
 ## Molecular acoustic heat in reacting thermal gas assemblies
 

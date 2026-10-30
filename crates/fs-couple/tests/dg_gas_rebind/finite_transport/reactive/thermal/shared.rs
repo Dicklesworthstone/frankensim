@@ -54,6 +54,7 @@ fn shared_ports<'a>(
                     body_distance_m: BODY_DISTANCE,
                 },
                 exchange: heat_exchange(),
+                wall: None,
             },
         )
     })
