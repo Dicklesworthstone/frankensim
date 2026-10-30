@@ -13,15 +13,21 @@
 # J. Acoust. Soc. Am. 117(1), 2005, pp. 370-374, Eq. 1 (d = 1.32 L^0.43, mm, Eastern European panpipes), and the length of each tube is computed
 # from the stopped-pipe formula L = c / (4 f) - 0.6133 a (open-end correction of a thin-walled pipe, Davies, Pinho and English 2006, Eq. 5), with
 # dry air at 20 C. Those derived rows are labelled DERIVED in fingerings.tsv and unknowns.tsv (u-tube-lengths).
-# Player: Fletcher 2005 Sec. IV and VI: jet speed 20 to 40 m/s (mouth pressure = rho V0^2 / 2) and a higher pressure for high notes; initial jet
-# half-width 1 mm to 0.5 mm (lip height 2 b0 reduced for high notes); jet length 10 mm to 5 mm (shorter for high notes); the three controls are
-# linear in log2(f) between the lowest and highest tube of the 13-note set. The labium offset is the cited stopped-pipe value of 0.5 jet half-widths
+# Player: no measurement of a pan-pipe player's pressure or jet length is in the library. Blowing pressure and jet length at each tube's equal-tempered
+# pitch are Fletcher 1975's median relations measured on four flute players (J. Acoust. Soc. Am. 57(1), pp. 233-237, Eq. 1 and Eq. 2): p [mbar] =
+# 0.008 nu [Hz] and l [mm] = 1.8 + 100 nu^(-1/2), i.e. 117.5 Pa and 10.05 mm at D3 to 395.1 Pa and 6.30 mm at B4, the card pressure printed to five
+# significant figures; Fletcher 2005 (Sec. IV and VI) points to that paper for the jet speed "as in the flute" and says the jet is shorter and the
+# pressure higher for high notes, so the step from the flute to a stopped pipe is an analogy, and D3 and G3 lie at or below the lowest pitches the
+# source reports (unknowns u-player-controls, ledger fletcher-1975-flute-blowing-pressure-and-jet-length). Initial jet half-width 1 mm to 0.5 mm
+# (lip height 2 b0 reduced for high notes, Fletcher 2005 Sec. VI) is still the published range ends paired linearly in log2(f) between the lowest
+# and highest tube of the 13-note set. The cards used before took the range ends of Fletcher 2005 for all three controls (V0 20 to 40 m/s, jet length
+# 10 mm to 5 mm), paired the same way. The labium offset is the cited stopped-pipe value of 0.5 jet half-widths
 # (Eq. 6, alpha about 2, gamma about 0.4): the steady entrained flow is blocked by the closed end, so the jet midplane passes outside the lip; it is
 # applied to the island's constant half-width, because the island does not model the jet spreading (u-jet-spreading). The lip aperture is as wide as the
 # tube (the jet cannot be wider; u-lip-aperture-width). The gesture is 50 ms attack, hold, 10.5 ms release.
 # Unknown or authored: onset ramp (50 ms), mouth loss (0.02), jet displacement gain (90, as in the flue gates), the jet card (the inline X-Est lip-jet card
-# of the flute, chosen BEFORE looking at any render because the pan-pipe jet comes from the lips). The jet length is only 5 times its height, just
-# under the 5.6 the island's early-tap correction needs for that card, so the loop delay is about 12 percent too long. The binary must contain
+# of the flute, chosen BEFORE looking at any render because the pan-pipe jet comes from the lips). The jet length is 5.03 (D3), 5.08 (G3), 5.34 (D4), 5.76 (G4)
+# and 6.30 (B4) times its height; the island's early-tap correction needs 5.6 for that card, so for D3, G3 and D4 the loop delay is too long (about 12 percent at a ratio of 5, not re-derived at 5.08 and 5.34). The binary must contain
 # the jet-island phase fix (fs-couple 1718d79fb or later).
 #
 # Numerical controls forced by the generic route (none is a physical parameter, none was tuned): mechanics clock 288 kHz because a viscothermal loss

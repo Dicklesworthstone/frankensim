@@ -9,7 +9,7 @@ system	stopped pipes blown across the open top by the player's lip jet; one jet,
 holder	none: no accessible instrument; tube lengths are computed from the note set, not measured
 reference_state	played
 environment	unstated by both papers; the recipe fills the tubes with exhaled breath (the shared woodwind pack, 27 C saturated; unknowns u-bore-gas) and keeps the room, the observer's and radiation exterior's gas, as dry air at 20 C
-source_ids	fletcher-2005-panpipes-jasa;sanchez-ghezzi-2010-zampona-notes;isvr-davies-2006-tin-whistle
+source_ids	fletcher-2005-panpipes-jasa;sanchez-ghezzi-2010-zampona-notes;isvr-davies-2006-tin-whistle;fletcher-1975-flute-blowing-pressure-and-jet-length
 target_relation	no real instrument: the recipe is the published scaling rule applied to the published note set. Screened siku recordings of other instruments now exist (Wikimedia Commons, CC BY-SA 4.0), but the grader has no library for them yet, so renders are listened to, not graded on the site (status.json says what was measured directly)
 hole_index	none: pan pipes have no finger holes; each tube is one note and the performance picks the tube
 pitch_standard	equal-tempered frequencies of the theoretical table of Sanchez Barrero and Ghezzi 2010 (A at 440 Hz)
