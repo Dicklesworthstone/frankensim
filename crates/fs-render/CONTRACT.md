@@ -492,8 +492,8 @@ differentiable lift). Pure Rust throughout.
   integrator, including its spectral BSDFs, lights and counter-based sampling;
   camera, reflected, RGB/thermal direct-light and environment segments all
   consume the same medium. This is a static-camera, absorption/emission,
-  refractive-index-one model. Nonzero media with dielectric geometry refuse
-  until their curved connection segments are integrated; vacuum grids preserve
+  refractive-index-one ambient model. Closed dielectric bodies displace the
+  grid and retain their material's own interior absorption; vacuum grids preserve
   the ordinary tracer's exact results. With nonzero media, final-vertex NEE keeps
   its complete weight because no competing BSDF continuation is evaluated,
   including a single rectangular light. `AbsorbingFilm` binds the medium snapshot
@@ -523,8 +523,15 @@ differentiable lift). Pure Rust throughout.
   coefficients, phase and settings, and publishes each sample range atomically.
   Zero-scattering snapshots retain deterministic absorption; vacuum retains
   the original surface path. This is one finite, index-one grid with global
-  spectral coefficients/phase, not overlapping-medium composition, dielectric
-  transport, volume-emitter NEE, polarization, or thermal-energy mutation.
+  spectral coefficients/phase, not overlapping-medium composition, volume-emitter
+  NEE, polarization, or thermal-energy mutation. With nonzero ambient grids,
+  every recursive Fresnel/spectral branch retains that same field after glass
+  exit. Specialized surface-only refractive NEE and its reverse competitor are
+  disabled together; complete interface random walks supply those paths.
+  Ordinary rough-interface NEE uses the correct ambient or glass side, and
+  rough Fresnel events have an independent random dimension from free flight.
+  Thermal sources embedded in glass remain explicitly unsupported. Scattering
+  semantics v2 admits this coupling without changing volume-only/vacuum streams.
   Focused regressions cover independent single-scatter source integrals,
   thermal spectra, surface shadow extinction, spectral furnace conservation,
   phase normalization/moments, exact progressive replay and bounded refusals.
@@ -859,7 +866,7 @@ original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to
 isotropic visible-normal sampling while preserving the same BSDF integral in
 expectation.
-Current no-claims: no dielectric/scattering-volume coupling, no Russian roulette, reflective GGX
+Current no-claims: no participating-grid interiors in glass, no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
 are single-scattering without multiple-scattering compensation, and standalone
 RGB emitters do not reflect. Thermal emitters retain their reciprocal diffuse

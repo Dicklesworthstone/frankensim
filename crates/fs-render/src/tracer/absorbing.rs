@@ -71,10 +71,12 @@ impl AbsorbingFilm {
 ///
 /// Density is kg/m³, mass absorption is m²/kg, world distance is metres and
 /// local-equilibrium emission is W/(m² sr nm). The same volume affects camera,
-/// reflected and direct-light shadow segments. A nonzero medium combined with
-/// any dielectric material currently refuses: curved/reflected dielectric
-/// connectors need their own complete segment integration. A vacuum grid
-/// retains the ordinary tracer's exact pixel stream and results.
+/// reflected and direct-light shadow segments. A closed dielectric displaces
+/// the ambient grid and retains its own homogeneous
+/// spectral absorption. Reflected/refracted continuations carry the same grid
+/// after exit. Nonzero grids use complete interface random walks rather than
+/// the surface-only specialized refractive NEE proposals. A vacuum grid retains
+/// the ordinary tracer's exact pixel stream and results.
 pub fn render_absorbing(
     scene: &Scene,
     medium: &AbsorbingGrid<'_>,

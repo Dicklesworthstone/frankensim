@@ -16,7 +16,9 @@ pub use execution::{
 };
 
 /// Bit-affecting physical free-flight, phase and survival-aware MIS semantics.
-pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 1;
+// v2 admits ambient grids around dielectric bodies and independently samples
+// rough Fresnel events; volume-only and vacuum streams remain unchanged.
+pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 2;
 
 /// Progressive film bound to one immutable participating-medium snapshot.
 ///
@@ -82,8 +84,13 @@ impl ScatteringFilm {
 /// Density is kg/m³, mass absorption/scattering are m²/kg and world distances
 /// are metres. The medium has index one and one reciprocal phase law. Camera,
 /// reflected, scattered and shadow rays all read the same borrowed field.
-/// Nonzero media with dielectric boundaries currently refuse. A zero-scattering
-/// field uses deterministic absorption; a vacuum preserves the ordinary tracer.
+/// The grid is the ambient index-one medium: closed dielectric interiors
+/// displace it and retain their own homogeneous spectral absorption. Refraction
+/// and reflection continue through that same accepted ambient field after
+/// every exit. Specialized refractive NEE connectors are disabled for nonzero
+/// physical grids; the complete interface random walk supplies their paths.
+/// A zero-scattering field uses deterministic absorption; a vacuum preserves
+/// the ordinary tracer.
 /// `max_depth` bounds the total number of surface and volume vertices together.
 pub fn render_scattering(
     scene: &Scene,
@@ -292,18 +299,14 @@ pub(super) fn render_medium_range(
 }
 
 fn validate_medium_scene(
-    scene: &Scene,
+    _scene: &Scene,
     cx: &Cx<'_>,
-    medium: Option<PathMedium<'_, '_>>,
+    _medium: Option<PathMedium<'_, '_>>,
 ) -> Result<(), TracerError> {
-    if medium.is_some() {
-        for primitive in &scene.primitives {
-            cx.checkpoint()?;
-            if matches!(primitive.material, Material::Dielectric { .. }) {
-                return Err(TracerError::VolumeDielectricUnsupported);
-            }
-        }
-    }
+    // Closed-interface nesting and unclosed media are validated by the path
+    // walk. The ambient physical grid is displaced by those interiors, so
+    // admitting a scene no longer requires a blanket dielectric prohibition.
+    cx.checkpoint()?;
     Ok(())
 }
 

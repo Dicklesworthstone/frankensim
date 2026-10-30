@@ -32,8 +32,11 @@
 //! `render_absorbing` entry integrates borrowed physical absorption/emission
 //! fields on the same camera and shadow paths. `render_scattering` adds
 //! spectral free flight, multiple scattering and phase-function/light MIS.
-//! Dielectric/volume connectors remain unsupported. There is no Russian roulette (fixed
-//! depth keeps work deterministic).
+//! The physical grid is the ambient medium, displaced by closed dielectric
+//! interiors. Refracted paths retain the same field and the glass's own
+//! absorption. Specialized refractive NEE connectors remain surface-only;
+//! physical media use the complete interface random walk. There is no Russian
+//! roulette (fixed depth keeps work deterministic).
 
 use crate::animated_instances::{AnimatedGeometryInstance, AnimatedInstanceError};
 use crate::aov::{
@@ -12727,6 +12730,13 @@ fn trace_path_with_medium(
     // energy when the final vertex has no evaluated BSDF continuation.
     #[cfg(feature = "volumes")]
     let legacy_light_weights = legacy_light_weights && medium.is_none();
+    // Existing finite-interface NEE connectors omit physical-field segments.
+    // Their reverse competitor must be disabled together with the proposal;
+    // the ordinary refractive random walk retains all of those paths.
+    #[cfg(feature = "volumes")]
+    let allow_dielectric_connectors = medium.is_none();
+    #[cfg(not(feature = "volumes"))]
+    let allow_dielectric_connectors = true;
     let key = [(s.seed & 0xffff_ffff) as u32, (s.seed >> 32) as u32];
     let rng = PathRng {
         pixel,
@@ -12806,7 +12816,12 @@ fn trace_path_with_medium(
         cx.checkpoint()?;
         let intersection = intersect(scene, cx, &ray, ray_time)?;
         #[cfg(feature = "volumes")]
-        if let Some(medium) = medium {
+        if let Some(medium) = medium
+            && medium_stack.len() == 0
+        {
+            // A closed dielectric displaces the ambient grid. Interior paths
+            // use the glass owner's homogeneous spectral absorption below;
+            // neither ambient LTE sources nor ambient collisions exist there.
             // The numerical ray starts off the surface to avoid self-hits.
             // Integrate between the retained physical endpoints, including
             // thin cells next to the terminal surface, rather than extending
@@ -13271,6 +13286,21 @@ fn trace_path_with_medium(
                                             Some((frame.geometric, ray.dir, n.dot(wi))),
                                         ));
                                     }
+                                    #[cfg(feature = "volumes")]
+                                    let volume_transmittance = if let Some(medium) = medium
+                                        && shadow_medium.is_none()
+                                    {
+                                        let distance = match direct.target {
+                                            DirectLightTarget::Rectangle { distance_m, .. } => {
+                                                distance_m
+                                            }
+                                            DirectLightTarget::Environment => f64::INFINITY,
+                                        };
+                                        medium
+                                            .transmittance(cx, hit.point, wi, distance, &lambdas)?
+                                    } else {
+                                        [1.0; PACKET]
+                                    };
                                     let (emission, emission_scale) = direct.emission;
                                     for (lane, &lambda) in lambdas.iter().enumerate() {
                                         if throughput[lane].to_bits() == 0.0_f64.to_bits() {
@@ -13290,6 +13320,11 @@ fn trace_path_with_medium(
                                         // MIS density is therefore this lane's native PDF;
                                         // there is no hero-lane proposal ratio here.
                                         let competing_pdf = evaluation.pdf;
+                                        #[cfg(feature = "volumes")]
+                                        let competing_pdf = competing_pdf
+                                            * medium.map_or(1.0, |medium| {
+                                                medium.escape_probability(&volume_transmittance)
+                                            });
                                         let weight = match s.strategy {
                                             DirectStrategy::Mis | DirectStrategy::PowerMis
                                                 if depth + 1 == s.max_depth
@@ -13318,6 +13353,8 @@ fn trace_path_with_medium(
                                             }
                                             DirectLightTarget::Environment => 1.0,
                                         };
+                                        #[cfg(feature = "volumes")]
+                                        let attenuation = attenuation * volume_transmittance[lane];
                                         let before = radiance[lane];
                                         radiance[lane] += throughput[lane]
                                             * evaluation.value
@@ -13413,7 +13450,8 @@ fn trace_path_with_medium(
                             // touching it. Enumerate this bounded technique
                             // independently; the zero-reflection TT route below
                             // intentionally remains first-blocker gated.
-                            if medium_stack.len() == 0
+                            if allow_dielectric_connectors
+                                && medium_stack.len() == 0
                                 && matches!(direct.target, DirectLightTarget::Rectangle { .. })
                                 && throughput
                                     .iter()
@@ -13524,7 +13562,9 @@ fn trace_path_with_medium(
                                 let bsdf_pdf =
                                     bsdf_pdf(&prim.material, n, wo, wi, brushed_frame.as_ref());
                                 #[cfg(feature = "volumes")]
-                                let volume_transmittance = if let Some(medium) = medium {
+                                let volume_transmittance = if let Some(medium) = medium
+                                    && medium_stack.len() == 0
+                                {
                                     let distance = match direct.target {
                                         DirectLightTarget::Rectangle { distance_m, .. } => {
                                             distance_m
@@ -13627,6 +13667,9 @@ fn trace_path_with_medium(
                                 && primitive_is_dielectric(scene, blocker.primitive_index)
                             {
                                 'optional_smooth_dielectric_nee: {
+                                    if !allow_dielectric_connectors {
+                                        break 'optional_smooth_dielectric_nee;
+                                    }
                                     // Both finite connectors model one isolated smooth
                                     // dielectric solid in ambient. A source already in a
                                     // medium would require a nested-interface manifold;
@@ -13783,14 +13826,22 @@ fn trace_path_with_medium(
         // BSDF sampling for the next bounce.
         let (u1, u2) = rng.path_pair(path_sobol, depth, 1);
         let wo = ray.dir.scale(-1.0);
+        let connector_previous = allow_dielectric_connectors
+            .then_some(previous_bsdf)
+            .flatten();
         match prim.material {
             Material::Dielectric { glass, surface } => {
                 let boundary = dielectric_boundary.ok_or(TracerError::InvalidInput)?;
                 let proposal_lane = active_lane.unwrap_or(0);
                 let event_sample = if surface.is_delta() {
                     u1
-                } else {
+                } else if allow_dielectric_connectors {
                     rng.path_pair(path_sobol, depth, 2).0
+                } else {
+                    // Physical free flight already owns the third bounce
+                    // pair. Rough-interface Fresnel selection needs another
+                    // independent variate, including after spectral splitting.
+                    u32_unit(philox4x32_10([pixel, sample, depth, 0x676c_6173], key)[0])
                 };
                 if surface.is_delta() && remaining_smooth_dielectric_splits > 0 {
                     let child_smooth_dielectric_splits =
@@ -13829,7 +13880,7 @@ fn trace_path_with_medium(
                          child_previous_bsdf: PreviousBsdf,
                          child_medium_stack: MediumStack,
                          child_active_lane: Option<usize>| {
-                            trace_path(
+                            trace_path_with_medium(
                                 scene,
                                 lighting,
                                 cx,
@@ -13864,6 +13915,8 @@ fn trace_path_with_medium(
                                     remaining_smooth_dielectric_splits:
                                         child_smooth_dielectric_splits,
                                 }),
+                                #[cfg(feature = "volumes")]
+                                medium,
                             )
                         };
 
@@ -13871,7 +13924,7 @@ fn trace_path_with_medium(
                         scene,
                         cx,
                         ray_time,
-                        previous_bsdf,
+                        connector_previous,
                         prev_origin,
                         &medium_stack,
                         prim_idx,
@@ -13924,7 +13977,7 @@ fn trace_path_with_medium(
                                 scene,
                                 cx,
                                 ray_time,
-                                previous_bsdf,
+                                connector_previous,
                                 prev_origin,
                                 &medium_stack,
                                 prim_idx,
@@ -13964,7 +14017,7 @@ fn trace_path_with_medium(
                             scene,
                             cx,
                             ray_time,
-                            previous_bsdf,
+                            connector_previous,
                             prev_origin,
                             &medium_stack,
                             prim_idx,
@@ -14038,7 +14091,7 @@ fn trace_path_with_medium(
                             scene,
                             cx,
                             ray_time,
-                            previous_bsdf,
+                            connector_previous,
                             prev_origin,
                             &medium_stack,
                             prim_idx,
@@ -14061,7 +14114,7 @@ fn trace_path_with_medium(
                         }
                         let mut child_throughput = [0.0; PACKET];
                         child_throughput[lane] = throughput[lane] * continuation.weight;
-                        let child = trace_path(
+                        let child = trace_path_with_medium(
                             scene,
                             lighting,
                             cx,
@@ -14095,6 +14148,8 @@ fn trace_path_with_medium(
                                 active_lane: Some(lane),
                                 remaining_smooth_dielectric_splits,
                             }),
+                            #[cfg(feature = "volumes")]
+                            medium,
                         )?;
                         add_xyz(&mut resumed_xyz, child.xyz);
                         if let Some(total) = &mut resumed_contribution_split {
@@ -14126,7 +14181,7 @@ fn trace_path_with_medium(
                     scene,
                     cx,
                     ray_time,
-                    previous_bsdf,
+                    connector_previous,
                     prev_origin,
                     &medium_stack,
                     prim_idx,

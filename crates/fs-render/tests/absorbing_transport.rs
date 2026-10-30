@@ -17,6 +17,8 @@ use fs_render::volumes::transport::{
     AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum, VolumeTransportError,
 };
 
+#[path = "absorbing_transport/dielectric.rs"]
+mod dielectric;
 #[path = "absorbing_transport/scattering.rs"]
 mod scattering;
 
@@ -426,7 +428,7 @@ fn g4_g5_progressive_volume_binding_replay_and_refusal_are_transactional() {
 }
 
 #[test]
-fn g0_nonzero_volume_refuses_unintegrated_dielectric_connectors() {
+fn g0_physical_volume_preserves_unclosed_dielectric_refusal() {
     with_cx(|cx, _| {
         let density = [1.0];
         let medium = AbsorbingGrid::try_new(
@@ -446,9 +448,16 @@ fn g0_nonzero_volume_refuses_unintegrated_dielectric_connectors() {
                 surface: DielectricSurface::SMOOTH,
             },
         ));
-        assert_eq!(
-            render_absorbing(&scene, &medium, cx, &settings(DirectStrategy::Mis)).unwrap_err(),
-            TracerError::VolumeDielectricUnsupported,
-        );
+        let settings = settings(DirectStrategy::Mis);
+        let mut film = AbsorbingFilm::try_new(&medium, &settings).unwrap();
+        let before = film.clone();
+        assert!(matches!(
+            render_absorbing_range(&scene, &medium, cx, &settings, &mut film, 0, settings.spp),
+            Err(TracerError::UnclosedMedium {
+                boundary_primitive: 0,
+                ..
+            }),
+        ));
+        assert_eq!(film, before);
     });
 }
