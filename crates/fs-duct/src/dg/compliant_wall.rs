@@ -19,6 +19,8 @@ mod relaxation;
 use coordinates::{CoordinateError, WallCoordinates};
 mod update;
 pub use update::{DgWallMaterialUpdate, DgWallRelaxationTransfer};
+mod heat;
+pub use heat::DgCompliantWallHeat;
 
 #[derive(Debug, Clone)]
 pub(super) struct CompliantWall {

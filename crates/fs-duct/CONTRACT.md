@@ -1946,3 +1946,33 @@ remain the single source of density, frozen calorics and relaxation.
 `DgDuct::prepare_molecular_heat` creates `DgMolecularHeat` from the original molecular reservoir slip squares and the complete native generator. Each row retains its source pressure projection, radial histories, reservoir rate and storage scale. `integrated_heat_j` observes the accepted initial state and the native held ports without advancing state or decomposing the rounded generator. The cache pins operator identity, interval and port ordering. It reuses `fs-phs::linear_exact::PreparedSourceLoss`; it does not estimate heat from endpoint power or assign a fraction of total acoustic loss.
 
 The source integral admits at most 128 complete native states and enforces explicit dimension, byte and work budgets. No pressure, velocity, gas, wall or memory coordinate is truncated. An absent molecular source returns exactly zero. Thermal wall conduction, viscous, structural and boundary losses are excluded from this channel. Source, identity, capacity and cancellation refusals preserve the original owners. `tests/molecular_heat.rs` adds independent physical-power quadrature with absent, uniform and spatial diffusion. Those new native regressions are pending execution: the authoring environment could not compile its unchanged pinned runtime dependency before shared memory and disk limits intervened.
+
+## Physical compliant-wall heat on the original DG trajectory
+
+`DgDuct::prepare_compliant_wall_heat` binds a read-only
+`DgCompliantWallHeat` to the original complete operator and propagator interval.
+It reuses `PreparedSourceLoss` to integrate the actual solid Kelvin and Maxwell
+source squares under the same held ports. Kelvin rows use each original
+element's resistance/surface-density ratio; Maxwell rows use each retained
+arm's rate and original support. Regional coefficients remain distinct.
+
+Every gas, wall, boundary and memory coordinate stays in the trajectory.
+Gas viscothermal diffusion, molecular relaxation, terminal absorption and
+numerical residuals are excluded from this solid source. The total acoustic
+energy decrement is never used to infer or allocate heat. Elastic walls yield
+an exactly zero source; a missing compliant-wall owner refuses.
+
+Preparation requires the explicit dense-exponential dimension, byte and work
+allowances and the original complete state of at most 128 coordinates. Warm
+evaluation is the retained positive quadratic source contraction. Changed
+operator identity or interval requires a new preparation; foreign states,
+invalid ports, unresolved integration, exhausted budgets and cancellation
+refuse without advancing the native trajectory. Integration failures retain
+the shared numerical owner's typed reason.
+
+The thermal consumer owns deposition and the matching reduction of exported
+loss. This factory does not update temperature, material, geometry or phase.
+Focused authored cases exercise independent physical-power integration,
+source isolation, regional loss, zero loss and refusal. Parser/formatter and
+source checks do not establish native execution or measured validation;
+native compilation and runtime tests remain unverified.

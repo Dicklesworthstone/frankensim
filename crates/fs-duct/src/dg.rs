@@ -87,6 +87,7 @@ mod viscothermal;
 pub use viscothermal::{DgWallAdmission, DgWallResolution};
 mod compliant_wall;
 pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate, DgWallRelaxationTransfer};
+pub use compliant_wall::DgCompliantWallHeat;
 mod port_response;
 pub use port_response::{DgMultiportResponse, DgPortResponse};
 mod side_ports;
