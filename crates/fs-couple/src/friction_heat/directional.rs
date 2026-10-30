@@ -27,6 +27,9 @@ pub mod sphere_plane;
 /// Original interface sources through simultaneous normal/directional impacts.
 pub mod impact;
 
+/// Original interface sources through joint-constrained simultaneous impacts.
+pub mod articulated;
+
 use super::{
     FrictionHeatInput, FrictionHeatReport, FrictionHeatRoute, FrictionHeatStep,
     FrictionHeatTolerances,

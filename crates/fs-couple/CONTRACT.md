@@ -1,5 +1,39 @@
 # CONTRACT: fs-couple
 
+## Sourced directional friction in articulated impacts
+
+`friction_heat::directional::articulated::resolve_source_articulated_elliptic_contacts`
+connects the original ordered material-interface claims to simultaneous contact
+response of free-floating jointed bodies. It reuses the existing source binding
+and preimpact coefficient sampler, with the native link-point kinematics,
+joint constraints, base recoil and full cross-contact mobility.
+
+Each geometrically active contact is sampled once in canonical contact-ID
+order using its actual incoming tangent speed and caller-owned local
+conditions. The exact normalized frame, both physical witness positions and
+original input index preserve source/history mapping; inactive histories stay
+untouched. Original claim pins, accepted path coordinates, texture and complete
+static/kinetic continuation state remain attached to the sampled candidate.
+
+One unpublished result contains every native mechanical response and the
+complete active source candidates. The adapter borrows accepted inputs and
+avoids cloning complete source histories into a second staging array. The
+surrounding event owner must publish all returned body responses and source
+histories together. Source refusal, cancellation and late mechanical admission
+failure return no partial candidate; callbacks must stage their external state.
+
+Four G1/G3/G4 regression groups specify independent prismatic-joint/base-recoil
+and energy references, heterogeneous sources and caller permutation, inactive
+histories, later-source refusal/cancellation and late momentum refusal with
+deterministic retry. These synthetic references do not establish experimental
+calibration.
+
+This is a held-source instantaneous impact law with an explicit coefficient
+role. It does not infer pressure from impulse, advance finite travel, allocate
+impact loss to heat/wear or automatically transport texture between changing
+frames. The caller supplies local conditions and uses the existing objective
+history transport when the contact frame changes.
+
 ## Sourced simultaneous directional rigid impacts
 
 `friction_heat::directional::impact::apply_source_rigid_elliptic_impacts`
