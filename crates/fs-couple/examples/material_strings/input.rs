@@ -221,6 +221,8 @@ pub struct Spec {
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     /// The explicit contact-thermal profile requires original film density.
     pub contact_thermal: bool,
+    /// An explicit profile routes dry heat through original material-coordinate strips.
+    pub dry_contact_thermal: bool,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<MaterialForceProgram>,
     pub bow_fibers: Option<fibers::Input>,
     /// Prescribed position along the string, separate from tangential speed/load.
@@ -981,7 +983,7 @@ impl Spec {
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
-            plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, bow_ribbon, bow_fibers,
+            plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, dry_contact_thermal: false, bow_ribbon, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.bow_station_program(&CancelGate::new_clock_free())?;
         spec.validate_cavity_gas()?;

@@ -89,7 +89,7 @@ fn loaded_analysis_keeps_the_playback_bank_without_a_time_propagator() {
             assert!((x-y).abs() <= 1e-10 * x.abs().max(y.abs()).max(1e-20));
             assert_eq!(a.source_band_rad_s, b.source_band_rad_s);
             let body_q = a.body_displacement_m_sqrt_kg().unwrap();
-            assert_eq!(body_q.len(), body.radiators().len());
+            assert_eq!(body_q.len(), body.physical_modes().len());
             for (port, velocity) in body.force_ports().iter().zip(&a.bridge_velocity_m_s) {
                 let displacement = port.iter().zip(body_q).fold(C64::ZERO,
                     |sum, (&shape, &q)| sum + q.scale(shape));

@@ -22,6 +22,13 @@ use fs_thermal::enthalpy::{
     series_conductance_w_k,
 };
 
+#[path = "contact_thermal/dry.rs"]
+mod dry;
+
+#[cfg(test)]
+#[path = "contact_thermal/tests.rs"]
+mod tests;
+
 pub const MAX_BYTES: usize = 65_536;
 const MAX_CELLS: usize = 256;
 const MAX_LINKS: usize = 1024;
@@ -44,6 +51,7 @@ struct Link {
 #[derive(Clone, Debug)]
 pub struct Profile {
     cells: Vec<Cell>,
+    dry: Vec<dry::Route>,
     films: Vec<(usize, CellId)>,
     series: Vec<SeriesDriveHeatDestination>,
     links: Vec<Link>,
@@ -120,10 +128,16 @@ impl Profile {
         let mut rows = Rows {
             lines: std::str::from_utf8(bytes)?.lines(),
         };
-        rows.row("frankensim-contact-thermal-v1")?.end()?;
+        let format = match rows.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) {
+            Some("frankensim-contact-thermal-v1") => 1,
+            Some("frankensim-contact-thermal-v2") => 2,
+            _ => return Err("unsupported contact-thermal profile version".into()),
+        };
+        rows.row(if format == 1 { "frankensim-contact-thermal-v1" }
+            else { "frankensim-contact-thermal-v2" })?.end()?;
         let mut boundary = rows.row("boundary")?;
         if boundary.word()? != "adiabatic" {
-            return Err("contact-thermal v1 requires an explicit adiabatic outer boundary".into());
+            return Err("contact-thermal requires an explicit adiabatic outer boundary".into());
         }
         boundary.end()?;
         let mut row = rows.row("solver")?;
@@ -186,6 +200,7 @@ impl Profile {
                 geometry,
             });
         }
+        let dry = if format == 2 { dry::parse(&mut rows, &cells)? } else { Vec::new() };
         let mut films = Vec::new();
         for _ in 0..rows.count("films", 64)? {
             let mut row = rows.row("film")?;
@@ -214,7 +229,10 @@ impl Profile {
             }
             series.push(route);
         }
-        if films.is_empty() && series.is_empty() {
+        if !dry.is_empty() && !films.is_empty() {
+            return Err("moving dry routes and retained shear-film histories require separate supported thermal owners".into());
+        }
+        if dry.is_empty() && films.is_empty() && series.is_empty() {
             return Err("contact-thermal profile has no physical heat route".into());
         }
         let mut links = Vec::<Link>::new();
@@ -252,6 +270,7 @@ impl Profile {
         newton.validate()?;
         Ok(Self {
             cells,
+            dry,
             films,
             series,
             links,
@@ -267,6 +286,13 @@ impl Profile {
                 newton,
             },
         })
+    }
+
+    /// Select the actual thermal owner before geometry/material admission.
+    /// Only explicit dry routes permit transported bow/fiber footprints.
+    pub fn configure(&self, spec: &mut input::Spec) {
+        spec.contact_thermal = true;
+        spec.dry_contact_thermal = !self.dry.is_empty();
     }
 
     /// Compile thermal data from the SAME cached material objects as mechanics.
@@ -289,9 +315,10 @@ impl Profile {
                     Admit::NonNegative,
                 )?,
             ];
+            let query = point(initial)?;
             let state = resolve_material_state_point(
                 &card,
-                &point(initial)?,
+                &query,
                 &requirement,
                 Pick::SingleClaimOnly,
             )?;
@@ -346,6 +373,7 @@ impl Profile {
             }
             sources.push(CellSource {
                 card,
+                query,
                 state,
                 curve,
                 source_curves: [cold, hot],
@@ -392,13 +420,19 @@ impl Profile {
         };
         // Validate the source masses, geometry and initial conductances before
         // creating any output. This processes only birth/contact events at t=0.
-        prepared.network(gate)?;
+        let network = prepared.network(gate)?;
+        for route in prepared.dry_routes(ready)? {
+            route.heat.admit::<std::convert::Infallible>(
+                ready.performance.bank().system(), &network, self.controls.maximum_cells)?;
+        }
+        drop(network);
         Ok(prepared)
     }
 }
 
 struct CellSource {
     card: MaterialCard,
+    query: QueryPoint,
     state: ResolvedMaterialStatePoint,
     curve: EquilibriumEnthalpyPhaseCurve,
     source_curves: [ResolvedHeatCapacityCurve; 2],
@@ -526,7 +560,7 @@ impl Prepared {
     }
     pub fn describe(&self) {
         eprintln!(
-            "contact_thermal=source-bound finite solid cells; adiabatic exterior; fixed compressed films; original sample clock"
+            "contact_thermal=source-bound finite solid cells; adiabatic exterior; fixed compressed films or moving dry footprints; original sample clock"
         );
         for (cell, source) in self.profile.cells.iter().zip(&self.sources) {
             eprintln!(
@@ -585,14 +619,17 @@ impl Prepared {
                 }
             })
             .collect();
-        let mut performance = ready.performance.with_contact_thermal_network(
-            network,
-            bindings,
-            self.profile.series.clone(),
-            self.profile.controls,
-            gate,
-            |endpoint| self.resolve(endpoint),
-        )?;
+        let dry = self.dry_routes(ready)?;
+        let resolve = |endpoint: &DepositionSimulation<'_>| self.resolve(endpoint);
+        let mut performance = if dry.is_empty() {
+            ready.performance.with_contact_thermal_network(
+                network, bindings, self.profile.series.clone(), self.profile.controls, gate, resolve,
+            )?
+        } else {
+            ready.performance.with_dry_contact_thermal_network(
+                network, dry, self.profile.series.clone(), self.profile.controls, gate, resolve,
+            )?
+        };
         let result = match trace {
             Some(trace) => write_traced_pressure(
                 &mut performance, output, trace, &ready.spec, decimate, gate,

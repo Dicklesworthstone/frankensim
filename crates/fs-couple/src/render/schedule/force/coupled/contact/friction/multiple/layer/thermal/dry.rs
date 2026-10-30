@@ -185,7 +185,10 @@ impl DryContactHeat<'_> {
         }
         footprint
     }
-    pub(super) fn admit<E>(
+    /// Validate the original interface, finite caloric cells, source masses,
+    /// material-coordinate coverage and nonduplicated conduction before output
+    /// or stepping. The thermal solve repeats these same checks on each step.
+    pub fn admit<E>(
         &self,
         system: &MultiFrictionModalSystem,
         thermal: &DepositionSimulation<'_>,

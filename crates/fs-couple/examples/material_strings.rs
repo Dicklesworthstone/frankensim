@@ -743,7 +743,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         && spec.plate_observer.is_some() {
         return Err("loaded shell response requires its shell or acoustic-skin receiver; a planar microphone is incompatible".into());
     }
-    spec.contact_thermal=thermal_profile.is_some();
+    if let Some(profile)=&thermal_profile { profile.configure(&mut spec); }
     let gate=std::sync::Arc::new(CancelGate::new_clock_free());
     let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let mut remaining=input::MAX_TOTAL_PACK_BYTES;

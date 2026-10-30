@@ -25,6 +25,12 @@ conductivity, friction coefficient, heat split or temperature correction to
 the audio**. Every cell names a material pack already loaded by the same
 assembly; its cached material card is used throughout.
 
+Version 2 also connects source-bound dry contacts to finite thermal strips on
+both original participants. The actual bow/string and fiber crossings move
+those footprints through material coordinates. Original cells retain their
+heat when the contact leaves and revisits them. Normal release turns off both
+friction heating and contact conduction through the existing mechanical owner.
+
 ## Required source data
 
 Each referenced pack must supply `density` [kg/m³],
@@ -91,6 +97,57 @@ Neighbor-cell temperatures drive conduction; film temperatures also drive
 the contact constitutive law. Thermal reassembly of strings, body and hair
 requires their corresponding thermomechanical owners.
 
+## Moving dry-contact profiles
+
+Use `frankensim-contact-thermal-v2` and insert the following block after the
+last `cell`, before `films`. All other v1 records and meanings are retained.
+
+```text
+dry-contacts N
+dry-contact PORT STRING_COORDINATE_ORIGIN fixed
+footprint A_LO A_HI A_WIDTH B_LO B_HI B_WIDTH
+surface N_A
+strip CELL_ID LO HI WIDTH HALF_DEPTH
+surface N_B
+strip CELL_ID LO HI WIDTH HALF_DEPTH
+```
+
+Repeat each `strip` according to its surface count and repeat the complete
+contact block according to `dry-contacts`. The first surface is the original
+interface's string participant A; the second is participant B. For a material
+fiber ribbon, replace the contact header with:
+
+```text
+dry-contact PORT STRING_COORDINATE_ORIGIN fiber FIBER_COORDINATE_ORIGIN
+```
+
+Origins map original string/fiber coordinates into the strips. Initial footprint
+centres must match the actual contacts. Fiber receivers retain the original
+fiber material and crossing. Bow travel, support acceleration and pressing use
+the same sample/work accounts and midpoint contact maps as mechanics.
+
+Each side's footprint area `(HI - LO) * WIDTH` must equal that physical port's
+source-declared nominal contact area. A ribbon therefore needs a route for each
+heated physical port, using its original distributed area. Strips are ordered,
+contiguous and nonoverlapping; a cell cannot belong to both sides of one route.
+The strip volume `(HI - LO) * WIDTH * 2 * HALF_DEPTH` must equal its original
+cell volume. Every cell's material identity must match its ordered source
+interface participant. Its density, heat capacity and conductivity come from
+the same assembly material card. No contact-plane thermal mass is introduced.
+
+The massless contact-plane temperature follows friction power and both surfaces'
+finite `k*A/d` fluxes. Signed heat can cool a hotter body even without slip.
+Cross-surface links refuse duplicated contact conduction. Geometry, source
+identity, caloric mass and coverage are admitted before output and at every step.
+
+Dry routes may share the network with explicit series-drive heat. Retained
+shear-film bindings and moving dry routes cannot be combined by this profile;
+set `films 0` for a dry profile. V1 film/series profiles keep their fixed-bow
+restriction. Missing hair thermal properties are not supplied from rosin or
+another material. This dry route retains its declared source friction law and
+checks its applicability at the solved interface temperature; it does not
+invent a temperature-dependent friction curve or a transported rosin layer.
+
 The explicit outer boundary is adiabatic. There is no inferred infinite
 heat bath or convective coefficient. A neighboring finite cell must have its
 own declared geometry and source material. Its stored heat remains in the
@@ -109,8 +166,8 @@ Their exact normal/attachment work enters the same mechanical and thermal
 transaction; rejected trials advance neither geometry nor heat. Changing
 callback size or enabling the trace does not switch to an isothermal step.
 
-The bow/film footprint and thermal grid remain fixed. Moving those footprints,
-thermal expansion and melt/recontact history still require corresponding
+The retained film footprint and thermal grid remain fixed. Moving a retained
+film, thermal expansion and melt/recontact history still require corresponding
 transport/work terms in the physical owner. Stop dissipation remains in its
 original mechanical loss account; it is not relabeled as film heat.
 Geometric stretching and retained longitudinal waves use their original
@@ -148,3 +205,5 @@ The library equivalent is
 existing performance, owns its supplied finite thermal network, and implements
 the same `PressureRenderer` trait. `into_thermal()` recovers accepted thermal
 history for continuation; no mechanical or thermal state is reset.
+Moving dry surfaces select `with_dry_contact_thermal_network(...)` through the
+same performance loop, finite thermal owner, observer, trace and PCM writer.

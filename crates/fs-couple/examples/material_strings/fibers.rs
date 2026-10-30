@@ -77,7 +77,7 @@ impl Input {
             }
         }
         if self.motion.is_some() || self.support_program.is_some() {
-            if spec.contact_thermal || spec.friction.shear_layers().is_some() {
+            if (spec.contact_thermal && !spec.dry_contact_thermal) || spec.friction.shear_layers().is_some() {
                 return Err(
                     "fiber support motion requires transported shear/thermal material patches"
                         .into(),

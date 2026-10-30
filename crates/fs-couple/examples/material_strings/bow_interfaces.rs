@@ -208,6 +208,12 @@ impl Inputs {
             .card()
             .friction_law())
     }
+    /// Ordered source participants, retained before reduction to a scalar law.
+    pub fn surface_materials(&self, track: &str) -> Result<&[MaterialStateId; 2]> {
+        Ok(self.bound.get(track)
+            .ok_or("dry contact heat requires an original source-bound interface")?
+            .state.surface_materials())
+    }
     pub fn validate_surfaces(&self, spec: &input::Spec, catalog: &Catalog) -> Result<()> {
         if self.research.is_some() {
             return Ok(());

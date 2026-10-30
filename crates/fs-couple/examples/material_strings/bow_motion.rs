@@ -67,7 +67,7 @@ impl Input {
 
     fn program(&self, spec: &Spec, gate: &CancelGate) -> Result<BowStationProgram> {
         poll(gate)?;
-        if spec.contact_thermal || spec.friction.shear_layers().is_some() {
+        if (spec.contact_thermal && !spec.dry_contact_thermal) || spec.friction.shear_layers().is_some() {
             return Err("bow migration requires transported material shear/thermal patches; those combinations are not supported".into());
         }
         let mut locations = Vec::with_capacity(spec.schedule.tracks().len());
