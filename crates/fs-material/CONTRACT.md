@@ -5210,3 +5210,24 @@ provide automatic temporal error control or unconditional nonlinear
 convergence. Full workspace/DSR qualification remains unavailable in the
 current checkout; the native validation compiles the original module sources
 against actual production dependency artifacts, without numerical stand-ins.
+
+## Source-defined expanding thermal surfaces
+
+`thermal::transport::expansion::surface::PreparedExpansionSurface` binds explicit
+reference areas grouped by principal normal to one original
+`PreparedFreeExpansion`. At each admitted temperature it derives
+`A_i = A_i,ref * s_j * s_k` and the exact temperature tangent. Another consumer
+can reuse an already evaluated original tangent only when the full prepared
+path identity matches. Area evaluation performs no runtime allocation, hashing
+or material query. Original card/claim references, fixed query conditions,
+reference normalization and the declared principal/isotropic basis remain
+authoritative. Zero selected faces remain zero; electrical L/A does not infer
+a thermal surface or boundary coverage.
+
+Three `expansion_surface` regressions cover normalized anisotropy and one-sided
+source knots, exact tangents and selected/zero patches, legitimate derivative
+cancellation, foreign paths and domain/area refusal. This owner admits aligned
+faces under diagonal unconstrained free expansion. Arbitrary curved normals,
+shear, constrained stress and moving interbody contact coverage require their
+own geometry owners. Thermal boundary laws and disjoint coverage admission
+remain with the consumer; surface geometry alone adds no heat or storage.

@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "tests/boundaries.rs"]
+mod boundaries;
+
 struct Sensible;
 impl ThermalLaw for Sensible {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {

@@ -14,6 +14,10 @@
 
 use super::*;
 
+#[path = "backward_euler/boundaries.rs"]
+mod boundaries;
+pub use boundaries::{BoundaryConductances, BoundaryStepCoefficients};
+
 impl DepositionSimulation<'_> {
     /// Evaluate the ORIGINAL thermal rate owner's external power at this state.
     /// Trial sources add to authored sources; link replacements keep their
@@ -28,13 +32,33 @@ impl DepositionSimulation<'_> {
         &self,
         sources_w: &BTreeMap<CellId, f64>,
         conductances_w_k: &BTreeMap<u64, f64>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, DepositionError> {
+        self.external_step_power_with_boundary_conductances(
+            sources_w,
+            conductances_w_k,
+            &BoundaryConductances::default(),
+            checkpoint,
+        )
+    }
+
+    /// The same physical external-power query with endpoint total boundary
+    /// conductances. Original temperatures, coverage and authored cell watts
+    /// remain unchanged. Internal links still cancel from this account.
+    pub fn external_step_power_with_boundary_conductances(
+        &self,
+        sources_w: &BTreeMap<CellId, f64>,
+        conductances_w_k: &BTreeMap<u64, f64>,
+        boundaries: &BoundaryConductances,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<f64, DepositionError> {
         checkpoint()?;
         let mut trial = self.clone();
         trial.set_step_conductances(conductances_w_k, &mut checkpoint)?;
         trial.add_step_sources(sources_w, &mut checkpoint)?;
-        let power = trial.heat_rates(f64::MAX, &mut checkpoint)?.external_w;
+        let power = trial
+            .heat_rates_with_boundaries(f64::MAX, boundaries, &mut checkpoint)?
+            .external_w;
         checkpoint()?;
         finite(power)
     }
@@ -147,7 +171,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
         self.evaluate_entropy_option(
             energy_increments_j,
-            |state| resolve(state).map(|coefficients| (coefficients, BTreeMap::new())),
+            |state| resolve(state).map(BoundaryStepCoefficients::from),
             false,
             checkpoint,
         )
@@ -167,7 +191,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
         self.evaluate_entropy_option(
             energy_increments_j,
-            |state| resolve(state).map(|coefficients| (coefficients, BTreeMap::new())),
+            |state| resolve(state).map(BoundaryStepCoefficients::from),
             true,
             checkpoint,
         )
@@ -179,7 +203,8 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
     /// The returned map replaces total W/K only for this endpoint evaluation,
     /// allowing a nonlinear half-cell or film resistance to use the SAME
     /// original residual as internal conduction. Accepted states retain authored
-    /// boundaries. Missing/nonfinite/negative coefficients refuse transactionally.
+    /// boundaries. Missing reservoirs and nonfinite/negative coefficients refuse
+    /// transactionally; omitted cells retain their authored conductances.
     pub fn evaluate_with_reservoirs<T, E: From<DepositionError>>(
         &self,
         energy_increments_j: &[f64],
@@ -188,7 +213,19 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         ) -> Result<(StepCoefficients<T>, BTreeMap<CellId, f64>), E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
-        self.evaluate_entropy_option(energy_increments_j, resolve, false, checkpoint)
+        self.evaluate_with_boundary_conductances(
+            energy_increments_j,
+            |state| {
+                resolve(state).map(|(bulk, reservoir_w_k)| BoundaryStepCoefficients {
+                    bulk,
+                    boundaries: BoundaryConductances {
+                        reservoir_w_k,
+                        ..BoundaryConductances::default()
+                    },
+                })
+            },
+            checkpoint,
+        )
     }
 
     /// The same endpoint evaluation with exact caloric entropy storage and
@@ -202,15 +239,51 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         ) -> Result<(StepCoefficients<T>, BTreeMap<CellId, f64>), E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
+        self.evaluate_with_boundary_conductances_and_entropy(
+            energy_increments_j,
+            |state| {
+                resolve(state).map(|(bulk, reservoir_w_k)| BoundaryStepCoefficients {
+                    bulk,
+                    boundaries: BoundaryConductances {
+                        reservoir_w_k,
+                        ..BoundaryConductances::default()
+                    },
+                })
+            },
+            checkpoint,
+        )
+    }
+
+    /// Same energy residual with endpoint-evaluated Robin/reservoir total G.
+    /// The original rate owner applies each exchange once; supplied watts are
+    /// never rescaled, and reference geometry, coverage and boundary values are
+    /// retained unchanged in both old and accepted states. Refine time/geometry
+    /// independently; this ingress does not qualify a moving-surface model.
+    pub fn evaluate_with_boundary_conductances<T, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<BoundaryStepCoefficients<T>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, T>, E> {
+        self.evaluate_entropy_option(energy_increments_j, resolve, false, checkpoint)
+    }
+
+    /// The same boundary-aware residual with the exact caloric entropy account.
+    /// Boundary entropy uses Q/T of each original prescribed reservoir; it is
+    /// not reclassified as an unqualified generated-heat source.
+    pub fn evaluate_with_boundary_conductances_and_entropy<T, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<BoundaryStepCoefficients<T>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, T>, E> {
         self.evaluate_entropy_option(energy_increments_j, resolve, true, checkpoint)
     }
 
     fn evaluate_entropy_option<T, E: From<DepositionError>>(
         &self,
         energy_increments_j: &[f64],
-        resolve: impl FnOnce(
-            &DepositionSimulation<'m>,
-        ) -> Result<(StepCoefficients<T>, BTreeMap<CellId, f64>), E>,
+        resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<BoundaryStepCoefficients<T>, E>,
         with_entropy: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
@@ -250,27 +323,41 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             storage.push(actual);
         }
         checkpoint()?;
-        let (
-            StepCoefficients {
-                sources_w,
-                conductances_w_k,
-                payload,
-            },
-            reservoir_conductances,
-        ) = resolve(&next)?;
+        let BoundaryStepCoefficients {
+            bulk:
+                StepCoefficients {
+                    sources_w,
+                    conductances_w_k,
+                    payload,
+                },
+            boundaries,
+        } = resolve(&next)?;
         checkpoint()?;
         let links = next.set_step_conductances(&conductances_w_k, &mut checkpoint)?;
-        let reservoirs =
-            next.set_step_reservoir_conductances(&reservoir_conductances, &mut checkpoint)?;
         let sources = next.add_step_sources(&sources_w, &mut checkpoint)?;
-        let rates = next.heat_rates(f64::MAX, &mut checkpoint)?;
+        let rates = next.heat_rates_with_boundaries(f64::MAX, &boundaries, &mut checkpoint)?;
         let entropy = if let Some(initial_h) = initial_h {
-            Some(next.entropy_step_audit(
-                &initial_h,
-                &rates.temperatures,
-                self.duration_s,
-                &mut checkpoint,
-            )?)
+            Some(
+                if boundaries.ambient_w_k.is_empty() && boundaries.reservoir_w_k.is_empty() {
+                    next.entropy_step_audit(
+                        &initial_h,
+                        &rates.temperatures,
+                        self.duration_s,
+                        &mut checkpoint,
+                    )?
+                } else {
+                    next.entropy_step_audit_with_boundary_coefficients(
+                        &initial_h,
+                        &rates.temperatures,
+                        self.duration_s,
+                        &BTreeMap::new(),
+                        &BTreeMap::new(),
+                        &boundaries.ambient_w_k,
+                        &boundaries.reservoir_w_k,
+                        &mut checkpoint,
+                    )?
+                },
+            )
         } else {
             None
         };
@@ -279,16 +366,6 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             next.links
                 .get_mut(&id)
                 .expect("validated link")
-                .conductance_w_k = value;
-        }
-        for (id, value) in reservoirs {
-            next.cells
-                .get_mut(&id)
-                .expect("validated reservoir cell")
-                .boundary
-                .reservoir
-                .as_mut()
-                .expect("validated reservoir")
                 .conductance_w_k = value;
         }
         for (id, value) in sources {

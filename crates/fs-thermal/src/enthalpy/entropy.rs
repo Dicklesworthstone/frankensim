@@ -141,6 +141,20 @@ impl DepositionSimulation<'_> {
         conductances: &BTreeMap<u64, f64>, reservoirs: &BTreeMap<CellId, f64>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<EntropyAudit, DepositionError> {
+        self.entropy_step_audit_with_boundary_coefficients(initial_h, temperatures, duration_s,
+            sources, conductances, &BTreeMap::new(), reservoirs, checkpoint)
+    }
+
+    // The same boundary entropy owner consumes current-surface total G directly.
+    // Reference coverage and actual reservoir temperatures are never overwritten.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn entropy_step_audit_with_boundary_coefficients(
+        &self, initial_h: &BTreeMap<CellId, f64>, temperatures: &BTreeMap<CellId, f64>,
+        duration_s: f64, sources: &BTreeMap<CellId, f64>,
+        conductances: &BTreeMap<u64, f64>, ambient_conductances: &BTreeMap<CellId, f64>,
+        reservoirs: &BTreeMap<CellId, f64>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<EntropyAudit, DepositionError> {
         checkpoint()?;
         if initial_h.len() != self.cells.len()
             || temperatures.len() != self.cells.len()
@@ -197,7 +211,8 @@ impl DepositionSimulation<'_> {
                 ));
             }
             let ambient = cell.boundary.ambient_k;
-            let g = finite(area * cell.boundary.htc_w_m2_k)?;
+            let g = if let Some(&g) = ambient_conductances.get(&id) {g}
+                else {finite(area * cell.boundary.htc_w_m2_k)?};
             let q = finite(g * (ambient - t))?;
             boundary.add(finite(q / ambient)?)?;
             generation.add(finite((q / t) * ((ambient - t) / ambient))?)?;

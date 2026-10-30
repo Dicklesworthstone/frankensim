@@ -542,7 +542,19 @@ impl<'a> DepositionSimulation<'a> {
         maximum_explicit_dt: f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<HeatRates, DepositionError> {
-        self.heat_rates_with_calorics(
+        self.heat_rates_with_boundaries(maximum_explicit_dt,
+            &backward_euler::BoundaryConductances::default(), checkpoint)
+    }
+
+    // Prescribed reservoirs retain their temperatures and reference coverage.
+    // Only total conductance may follow a source-owned current surface geometry.
+    fn heat_rates_with_boundaries(
+        &self,
+        maximum_explicit_dt: f64,
+        boundaries: &backward_euler::BoundaryConductances,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<HeatRates, DepositionError> {
+        self.heat_rates_with_calorics_and_boundaries(
             maximum_explicit_dt,
             |id, cell| {
                 Ok((
@@ -550,6 +562,7 @@ impl<'a> DepositionSimulation<'a> {
                     self.material_temperature_slopes[&cell.material_id],
                 ))
             },
+            boundaries,
             checkpoint,
         )
     }
@@ -559,9 +572,21 @@ impl<'a> DepositionSimulation<'a> {
     fn heat_rates_with_calorics(
         &self,
         maximum_explicit_dt: f64,
-        mut calorics: impl FnMut(CellId, &DepositedCell) -> Result<(f64, f64), DepositionError>,
+        calorics: impl FnMut(CellId, &DepositedCell) -> Result<(f64, f64), DepositionError>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<HeatRates, DepositionError> {
+        self.heat_rates_with_calorics_and_boundaries(maximum_explicit_dt, calorics,
+            &backward_euler::BoundaryConductances::default(), checkpoint)
+    }
+
+    fn heat_rates_with_calorics_and_boundaries(
+        &self,
+        maximum_explicit_dt: f64,
+        mut calorics: impl FnMut(CellId, &DepositedCell) -> Result<(f64, f64), DepositionError>,
+        boundaries: &backward_euler::BoundaryConductances,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<HeatRates, DepositionError> {
+        boundaries.admit(self, checkpoint)?;
         // Per-cell rates and outgoing conductances; no quadratic cell searches.
         let mut temperatures = BTreeMap::new();
         let mut rates = BTreeMap::new();
@@ -608,15 +633,16 @@ impl<'a> DepositionSimulation<'a> {
                     "contacts exceed surface area",
                 ));
             }
-            let ambient_g = finite(area * cell.boundary.htc_w_m2_k)?;
+            let ambient_g = boundaries.ambient(id, area, cell.boundary.htc_w_m2_k)?;
             let mut g = finite(outgoing[&id].0 + ambient_g)?;
             let mut external = finite(
                 cell.boundary.source_w + ambient_g * (cell.boundary.ambient_k - temperatures[&id]),
             )?;
             if let Some(r) = cell.boundary.reservoir {
-                g = finite(g + r.conductance_w_k)?;
+                let reservoir_g = boundaries.reservoir_w_k.get(&id).copied().unwrap_or(r.conductance_w_k);
+                g = finite(g + reservoir_g)?;
                 external =
-                    finite(external + r.conductance_w_k * (r.temperature_k - temperatures[&id]))?;
+                    finite(external + reservoir_g * (r.temperature_k - temperatures[&id]))?;
             }
             external_w = finite(external_w + external)?;
             let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;

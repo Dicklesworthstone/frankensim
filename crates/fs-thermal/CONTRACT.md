@@ -505,7 +505,7 @@ domain/work limits and transactional cancellation.
 endpoint reservoir-conductance replacements through
 `evaluate_with_reservoirs` and `evaluate_with_entropy_and_reservoirs`.
 Original bath temperatures, areas, heat rates and entropy remain authoritative;
-applied coefficients are restored before the endpoint can be accepted. Existing
+authored coefficients remain unchanged through evaluation and acceptance. Existing
 coefficient callbacks retain their original behavior. Unknown cells, absent
 baths, negative/nonfinite conductances and cancellation refuse transactionally.
 
@@ -550,3 +550,24 @@ and a 96-cell diffusion tail with sub-ULP energy updates. Two added reservoir
 regressions check original heat and actual-bath entropy plus refusal/rollback.
 The full pinned-main native thermal source passes 191 tests, with one existing
 ignored test; required workspace/DSR gates remain a separate unavailable check.
+
+## Shared endpoint ambient and reservoir conductances
+
+`backward_euler::{BoundaryConductances, BoundaryStepCoefficients}` pass endpoint
+total ambient/reservoir G directly into the original heat-rate and entropy
+owners. The boundary-aware residual and external-power APIs retain prescribed
+temperatures, reference coverage, authored h/G and cell watts. Replacement G
+is applied once; no boundary input is mutated or reclassified as generated heat.
+The same G participates in signed physical watts, outgoing-conductance/CFL
+accounting and boundary entropy Q/T. Existing ordinary callbacks use empty maps;
+the reservoir-only APIs delegate their maps through this same general ingress.
+Finite thermal stores remain original internal links, not prescribed baths.
+
+Unknown cells, absent reservoirs, negative/nonfinite G and nonzero Robin G
+without exposed reference coverage refuse. Three added native regressions cover
+independent finite-cell energy/entropy/CFL, unscaled applied watts and empty-map
+parity, invalid coverage and final cancellation/replay. These tests are compile
+checked in this change; their Cargo runtime build was killed while compiling
+the existing asupersync dependency. The earlier native test counts above are
+prior validation, not runtime evidence for this extension. Geometry-model
+validity and nonlinear/time accuracy remain the composing caller's responsibility.

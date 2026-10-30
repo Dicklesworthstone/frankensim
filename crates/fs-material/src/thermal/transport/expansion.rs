@@ -14,6 +14,10 @@
 //! moisture evolution or constrained thermoelastic response. Source uncertainty
 //! survives unchanged; no covariance or propagated uncertainty is invented.
 
+/// Material surface measures under the same source-defined free expansion.
+#[path = "expansion/surface.rs"]
+pub mod surface;
+
 use super::{ThermalTransportError, admit_temperature_point, positive, source_line, source_value};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
