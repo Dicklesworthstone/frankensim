@@ -9,6 +9,7 @@ mod temperature;
 mod upstream;
 mod molecular;
 mod patch;
+mod source_patch;
 mod reservoir;
 mod flue_geometry;
 mod aperture;
@@ -74,7 +75,9 @@ fn render(
     renderer.validate_sample_rate(RATE).unwrap();
     let mut pressure = vec![0.0; samples];
     for chunk in pressure.chunks_mut(block) {
-        renderer.block(chunk).unwrap();
+        renderer.block(chunk).unwrap_or_else(|error| panic!(
+            "resolved playback refused after {} accepted source steps: {error:?}",
+            renderer.system().accepted_steps()));
     }
     assert!(pressure.iter().all(|p| p.is_finite()));
     (pressure, renderer)

@@ -436,7 +436,11 @@ pub(super) fn resolved_provenance(
             config.closure.filter_width_lu * law.dx_m, config.closure.maximum_eddy_to_molecular,
             config.turbulent_prandtl, system.zone().sgs_config().is_some())
     });
-    let aperture = system.coupled_patch().map_or_else(String::new, |patch| {
+    let selected_patch = system.coupled_patch().map(|patch| ("coupled_patch", patch,
+        "selected aperture pressure, volume flow and acoustic work feed the bore; complete face mass and energy include escaping flow; no exterior radiation observer on the remainder"))
+        .or_else(|| system.source_patch().map(|patch| ("source_patch", patch,
+        "selected aperture receives the declared source pressure or finite upstream duct; source work and upstream duct flow use only this aperture; complete face mass and energy include the independently driven remainder; no extra microphone source")));
+    let aperture = selected_patch.map_or_else(String::new, |(name, patch, scope)| {
         let (kind, value, units, temperature) = match system.patch_background_drive().expect("explicit patch background") {
             fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(value) => ("prescribed-pressure-offset", value, "Pa", String::new()),
             fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(value) => ("incoming-characteristic", value, "m/s", String::new()),
@@ -445,8 +449,8 @@ pub(super) fn resolved_provenance(
                     format!(",\"inflow_temperature_k\":{inflow_temperature_k:e},\"temperature_scope\":\"prescribed only at inward flow; outgoing entropy remains fluid-owned\"")),
         };
         let open = system.zone().characteristic_axis().expect("original characteristic axis");
-        let (high, _) = system.zone().characteristic_patch().expect("declared coupled patch");
-        format!(",\"coupled_patch\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"{temperature}}},\"scope\":\"selected aperture pressure, volume flow and acoustic work feed the bore; complete face mass and energy include escaping flow; no exterior radiation observer on the remainder\"}}",
+        let (high, _) = system.zone().characteristic_patch().expect("declared original patch");
+        format!(",\"{name}\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"{temperature}}},\"scope\":\"{scope}\"}}",
             open.axis, high, patch.start[0], patch.start[1], patch.end[0], patch.end[1])
     });
     let reservoir = system.zone().reservoir_aperture().map_or_else(String::new, |opening| {

@@ -51,6 +51,56 @@ patch account to the complete face account. The other complete face can still
 carry the finite upstream acoustic load. Patch controls, fields, exchanges and
 both duct histories publish together only after all checks succeed.
 
+### Localized source and finite upstream aperture
+
+`NsfDg::new_with_source_patch` places the grid's one original patch on the
+source face, opposite the main DG bore. The prescribed boundary history then
+acts only on that aperture. Its surrounding cells retain their independently
+declared pressure or characteristic, while the complete downstream face feeds
+the main bore. The source opening is no longer forced to fill the whole zone.
+
+Attaching `with_upstream_load` to this explicit source-patch owner matches the
+finite upstream duct to the aperture area. Both acoustic pressure equations
+are solved on the same original fluid interval. Upstream flow, source work and
+projection checks use only the selected source quadrature; escaping flow in
+the remainder is never sent into that duct. `NsfDgFrame::source_patch` retains
+this exchange separately from `coupled_patch`. Both are already included in
+their complete face accounts. The original grid admits one characteristic
+patch, so source and bore patches cannot be declared simultaneously.
+
+The source-aperture roots test the accepted incoming controls and the preceding
+conditional main-face root as initial guesses. Every trial still consumes the
+same original shared budget and must meet the same pressure tolerance. Existing
+complete-face and downstream-aperture owners retain their original cold-start
+trial sequence.
+
+Native `source_patch` files use the existing `music_render resolved` and
+`ensemble --resolved` entry points. The prescribed-source file regression
+renders its complete 32-sample history and checks the actual pressure and fluid
+state across callback partitions, including the independently driven remainder.
+
+The source-aperture roots test accepted incoming controls and the preceding
+conditional main-face root as initial guesses. Prescribed controls carry no
+accepted incoming wave and use the bracket midpoint. Every trial consumes the
+original shared budget and must meet the original pressure tolerance. Existing
+complete-face and downstream-aperture owners retain their cold-start sequence.
+
+Continuing playback through every reflected-flow reversal remains unsupported.
+The original characteristic boundary switches its entropy and tangential
+velocity donor with flow direction; the pressure residual can jump over zero.
+`NsfDgError::Resolution` reports the actual adjacent incoming bracket and
+opposite nonzero residuals. The refused interval changes neither physical
+owner nor its boundary history; playback keeps its accepted prefix and becomes
+poisoned.
+
+The unchanged 32-sample closed-upstream regression encounters this limit after
+17 accepted intervals and verifies rollback, poisoned retry, and identical
+accepted output across callback sizes. A longer signed `+20/-20/0 Pa`
+downstream-radiation run also refused after 383 accepted intervals. That longer
+history remains a known limitation; complete 2,048-sample playback is not
+claimed. No donor smoothing, tolerance relaxation or substitute boundary law
+is introduced.
+
 This enables a split boundary topology, not a complete flute mouth. It does not
 create a labium wall at the patch edge, resolve an unmeshed jet, or remove the
 original first-order plane-normal characteristic approximation.
@@ -456,7 +506,7 @@ bulk_viscosity BULK_TO_SHEAR_RATIO SOURCE_TOKEN
 wall adiabatic
 [optional sgs exploration MODEL COEFFICIENT FILTER_WIDTH_LU MAX_EDDY_TO_MOLECULAR TURBULENT_PRANDTL]
 characteristic AXIS low|high MAX_RELATIVE_PERTURBATION
-[optional coupled_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
+[optional coupled_patch OR source_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
 [optional reservoir_aperture AXIS low|high DENSITY_KG_M3 VX_M_S VY_M_S VZ_M_S TEMPERATURE_K COUNT]
 [exactly COUNT reservoir_cell X Y Z records when an aperture is declared]
 initial rest
@@ -498,6 +548,12 @@ Alternatives use the same original parsers and owners:
   `examples/resolved-dg-split-aperture.performance` and Instrument Lab starter
   exercise the native aperture, surrounding ambient condition and bore-outlet
   microphone together. This coarse manufactured fixture is not flute geometry.
+- `source_patch START0 END0 START1 END1 pressure PA` instead selects the same
+  original patch on the opposite source face. The `boundary` history drives
+  those cells; the remainder retains `pressure PA` or `characteristic M_S`.
+  The main DG inlet must match its complete face. If `upstream_dg` is present,
+  its inlet must match the selected source area. Only one of `source_patch`
+  and `coupled_patch` may appear; neither record changes the original grid.
 - `gas thermochemical T_K P_PA mole|mass COUNT ID FRACTION ...` selects a complete
   source-backed thermochemical model. An `energy_solve ENERGY_J_KG_TOL MAXITER`
   record is then mandatory immediately after `fluid_limits`. Source packs and

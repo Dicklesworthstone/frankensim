@@ -281,8 +281,11 @@ impl ResolvedDgFilePerformance {
         let maximum_relative_perturbation = row.scalar()?;
         row.end()?;
         if axis >= 3 || periodic[axis] { return Err(bad(rows.line, "characteristic axis must be a nonperiodic physical axis")); }
-        let coupled_patch = if rows.next_is("coupled_patch") {
-            let mut row = rows.row("coupled_patch")?;
+        let patch_record = if rows.next_is("coupled_patch") { Some(("coupled_patch", high)) }
+            else if rows.next_is("source_patch") { Some(("source_patch", !high)) }
+            else { None };
+        let characteristic_patch = if let Some((record, patch_high)) = patch_record {
+            let mut row = rows.row(record)?;
             let start0 = row.number()?;
             let end0 = row.number()?;
             let start1 = row.number()?;
@@ -300,8 +303,11 @@ impl ResolvedDgFilePerformance {
                 return Err(bad(row.line, "patch controls require finite pressure and positive inflow temperature"));
             }
             row.end()?;
-            Some((NsfCharacteristicPatch { start: [start0, start1], end: [end0, end1] }, background))
+            Some((patch_high, NsfCharacteristicPatch { start: [start0, start1], end: [end0, end1] }, background))
         } else { None };
+        if rows.next_is("coupled_patch") || rows.next_is("source_patch") {
+            return Err(bad(rows.line, "one original characteristic patch must select either the source or coupled face"));
+        }
         let reservoir_aperture = if rows.next_is("reservoir_aperture") {
             let mut row = rows.row("reservoir_aperture")?;
             let axis: usize = row.number()?;
@@ -542,11 +548,11 @@ impl ResolvedDgFilePerformance {
         let mut zone = zone.with_characteristic_axis(NsfCharacteristicAxis {
             axis, faces: [face; 2], maximum_relative_perturbation,
         }).map_err(ResolvedDgInputError::Flow)?;
-        if let Some((patch, background)) = coupled_patch {
+        if let Some((patch_high, patch, background)) = characteristic_patch {
             let mut drives = zone.boundary_drives().expect("constructed characteristic axis");
-            drives[usize::from(high)] = background;
+            drives[usize::from(patch_high)] = background;
             zone.set_boundary_drives(drives).map_err(ResolvedDgInputError::Flow)?;
-            zone = zone.with_characteristic_patch(high, patch,
+            zone = zone.with_characteristic_patch(patch_high, patch,
                 NsfBoundaryDrive::IncomingCharacteristic(0.0)).map_err(ResolvedDgInputError::Flow)?;
         }
         if let Some(aperture) = reservoir_aperture {
@@ -557,10 +563,11 @@ impl ResolvedDgFilePerformance {
         }
         poll(&gate)?;
         let load = source.prepare_with_material_wall_layout(&gas, dt, &gate, &wall)?;
-        let mut system = if coupled_patch.is_some() {
-            NsfDg::new_on_patch(zone, load, high, limits, &gate)
-        } else {
-            NsfDg::new(zone, load, high, limits, &gate)
+        let mut system = match characteristic_patch {
+            Some((patch_high, _, _)) if patch_high == high =>
+                NsfDg::new_on_patch(zone, load, high, limits, &gate),
+            Some(_) => NsfDg::new_with_source_patch(zone, load, high, limits, &gate),
+            None => NsfDg::new(zone, load, high, limits, &gate),
         }.map_err(ResolvedDgInputError::Coupling)?;
         let upstream_wall = if let Some((source, wall)) = upstream {
             let load = source.prepare_with_material_wall_layout(&gas, dt, &gate, &wall)?;
