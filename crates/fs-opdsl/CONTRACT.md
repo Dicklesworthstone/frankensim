@@ -354,3 +354,7 @@ documented in the bead close); cross-ISA golden hash.
   baseline deck, activation threshold, kill criterion, cost percentiles, and
   independent reproduction pack remain pending, so the feature stays
   default-off.
+
+## Reversible material transfer charts
+
+The constitutive compiler preserves `EnergyBehavior::ReversibleTransfer` as `PotentialChart::ReversibleTransfer`, including the additive native codec tag 5; existing chart tags retain their meanings. Execution requires explicitly zero local dissipation for that chart. A reversible transfer node has no local storage or irreversible loss: its signed terminal work and heat still belong to the consumer's complete coupled balance. Declaring the chart does not certify an arbitrary surrounding network.

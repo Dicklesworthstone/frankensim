@@ -77,6 +77,8 @@ pub enum DifferentiabilityTag {
 /// potentials the node exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PotentialChart {
+    /// Reversible transfer with no local energy store or dissipation.
+    ReversibleTransfer,
     /// Free-energy storage only.
     Storage,
     /// Non-negative dissipation only.
@@ -244,6 +246,7 @@ impl<'n> BoundConstitutiveNode<'n> {
             Differentiability::NonSmooth => DifferentiabilityTag::NonSmooth,
         };
         let potential_chart = match declaration.energy {
+            EnergyBehavior::ReversibleTransfer => PotentialChart::ReversibleTransfer,
             EnergyBehavior::FreeEnergyStorage => PotentialChart::Storage,
             EnergyBehavior::NonNegativeDissipation => PotentialChart::Dissipation,
             EnergyBehavior::StorageAndDissipation => PotentialChart::StorageAndDissipation,
@@ -388,6 +391,14 @@ impl<'n> BoundConstitutiveNode<'n> {
                     law: self.provenance.law.clone(),
                     detail: graph_error_detail(&e),
                 })?;
+        if self.provenance.potential_chart == PotentialChart::ReversibleTransfer
+            && output.dissipation_rate != Some(0.0)
+        {
+            return Err(AdaptError::Evaluation {
+                law: self.provenance.law.clone(),
+                detail: "reversible transfer must report exactly zero dissipation".into(),
+            });
+        }
         self.state = output.next_state;
         Ok((output.outputs, output.dissipation_rate))
     }
@@ -446,7 +457,9 @@ impl<'n> BoundConstitutiveNode<'n> {
             PotentialChart::Storage | PotentialChart::StorageAndDissipation => {
                 self.node.free_energy(&self.state, inputs)
             }
-            PotentialChart::Dissipation | PotentialChart::EmpiricalNoClaim => None,
+            PotentialChart::ReversibleTransfer
+            | PotentialChart::Dissipation
+            | PotentialChart::EmpiricalNoClaim => None,
         }
     }
 }
@@ -619,6 +632,7 @@ const fn chart_tag(chart: PotentialChart) -> u8 {
         PotentialChart::Dissipation => 2,
         PotentialChart::StorageAndDissipation => 3,
         PotentialChart::EmpiricalNoClaim => 4,
+        PotentialChart::ReversibleTransfer => 5,
     }
 }
 
@@ -769,6 +783,7 @@ pub fn decode_constitutive_extension(
             2 => PotentialChart::Dissipation,
             3 => PotentialChart::StorageAndDissipation,
             4 => PotentialChart::EmpiricalNoClaim,
+            5 => PotentialChart::ReversibleTransfer,
             other => return Err(codec_err(format!("unknown potential-chart tag {other}"))),
         };
         let lane = match take(&mut cursor, 1)?[0] {

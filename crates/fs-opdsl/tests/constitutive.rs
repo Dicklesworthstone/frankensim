@@ -621,6 +621,24 @@ fn signatures_for_test() -> Vec<ConstitutiveSignature> {
     ]
 }
 
+#[test]
+fn reversible_transfer_chart_survives_codec_and_refuses_nonzero_dissipation() {
+    // The declaration is admissible at zero, but this deliberately mislabeled
+    // Fourier law produces heat away from zero. Neither execution path may
+    // silently retain its false reversible-transfer claim.
+    let mut node = HonestFourier::new();
+    node.decl.energy = EnergyBehavior::ReversibleTransfer;
+    node.decl.role = fs_material::graph::NodeRole::ReversibleCoupling;
+    let mut bound = BoundConstitutiveNode::bind(&node, None).unwrap();
+    assert_eq!(bound.provenance().potential_chart, PotentialChart::ReversibleTransfer);
+    assert_eq!(bound.free_energy(&[1.0]), None);
+    assert_eq!(bound.evaluate(&[0.0]).unwrap().1, Some(0.0));
+    let signatures = vec![ConstitutiveSignature::of("transfer", &bound)];
+    let encoded = encode_constitutive_extension(&signatures).unwrap();
+    assert_eq!(decode_constitutive_extension(&encoded).unwrap(), signatures);
+    assert!(bound.evaluate(&[1.0]).is_err());
+}
+
 fn admitted_system_with_extension(extension: Vec<u8>) -> fs_opdsl::system::AdmittedSystem {
     SystemDef::new()
         .scalar_convention(ScalarConvention::RealOnly)

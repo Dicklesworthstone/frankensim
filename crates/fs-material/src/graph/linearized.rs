@@ -188,6 +188,14 @@ impl ConstitutiveGraph {
                     output_direction.insert((node_id.clone(), port.name.clone()), value);
                 }
             }
+            if declaration.energy == EnergyBehavior::ReversibleTransfer
+                && result.dissipation_rate != Some(0.0)
+            {
+                return Err(GraphError::CardMismatch {
+                    law: declaration.law.0.clone(),
+                    obligation: "reversible transfer must report exactly zero dissipation",
+                });
+            }
             if let Some(rate) = result.dissipation_rate {
                 finite(node_id, "dissipation rate", &[rate])?;
                 if matches!(

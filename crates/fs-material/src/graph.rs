@@ -93,6 +93,10 @@ pub enum Differentiability {
 /// made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnergyBehavior {
+    /// Reversible transfer between externally owned stores, with zero local
+    /// storage and an explicitly reported zero dissipation rate. The physical
+    /// law and its consumer retain the energy/entropy balance obligations.
+    ReversibleTransfer,
     /// Derives from a free-energy potential; storage is conservative.
     FreeEnergyStorage,
     /// Purely dissipative; reported rate must be non-negative.
@@ -104,10 +108,11 @@ pub enum EnergyBehavior {
     Empirical,
 }
 
-/// Time-reversal parity of a port's quantity (Onsager–Casimir): heat
-/// flux and temperature gradient are Even; magnetization rates,
-/// velocities, and Hall-type variables are Odd. Required on
-/// reversible-coupling nodes, where the reciprocity gate reads it.
+/// Time-reversal parity of a port's declared quantity (Onsager–Casimir).
+/// Temperature and its spatial gradient are Even; velocity and electric
+/// current are Odd. Reversible power transfers linear in these odd quantities
+/// are Odd. Required on reversible-coupling nodes, where the reciprocity gate
+/// reads it; dissipative production is distinct from signed reversible transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeParity {
     /// Invariant under time reversal.

@@ -14,6 +14,9 @@ use crate::state_point::{MaterialPropertySelection, MaterialStatePointError,
     ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
     integrate_piecewise_linear, pinned_temperature_line, resolve_material_state_point};
 
+/// Source-bound Kelvin transport through the public constitutive graph.
+pub mod graph;
+
 /// Absolute scalar Seebeck coefficient under the convention in this module.
 pub const ABSOLUTE_SEEBECK_PROPERTY: &str = "absolute_seebeck_coefficient";
 /// Volts per kelvin, with signed values permitted.

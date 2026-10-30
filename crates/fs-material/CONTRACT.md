@@ -5102,3 +5102,7 @@ inside a 10 mm water layer and reports the resolved profile, phase inventories,
 heat, internal energy, pressure work and entropy. Focused tests also cover
 adiabatic equilibrium, a bath reversal, source/chart binding, energy balance,
 work limits and cancellation without altering accepted state.
+
+## Native thermoelectric constitutive graph
+
+`thermoelectric::graph::MaterialSeebeckNode` binds the original absolute thermopower source to the public constitutive graph through three temperature-change inputs and signed current. Every value is supplied by `ResolvedSeebeckSpan`, retaining both terminal Peltier transfers, the original bulk Thomson exchange, and electrical supply. The selected claim, query quantities, fixed external context, and continuously supported temperature slice remain pinned. Its consistent tangent integrates piecewise source derivatives, including reversed edges and the isothermal limit, without differencing nearly equal thermopowers. The node declares reversible transfer with no local storage and explicitly zero dissipation; graph execution and equation-compiler execution retain that declaration, and the compiler codec preserves it. Resistance, Joule heat, Fourier conduction, caloric storage, physical time, and acceptance of complete coupled balances remain with their existing owners. No phase evolution, magnetic transport, relative-to-reference thermopower substitution, or measured authority beyond the original source is inferred.
