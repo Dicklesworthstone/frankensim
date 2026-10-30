@@ -28,7 +28,7 @@ import regionalCavityStringSource from "../../../crates/fs-couple/examples/mater
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
 import shearStringSource from "../../../crates/fs-couple/examples/material_strings/shear-layer-bow.material-strings?raw";
 import finiteGasStringSource from "../../../crates/fs-couple/examples/finite_gas_string/browser-feedback-flow.string?raw";
-import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles, type NativeFiniteGasStringSources, type NativeRenderer } from "./native-wind-client.mjs";
+import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles, type NativeCoatingStrainGuard, type NativeFiniteGasStringSources, type NativeRenderer } from "./native-wind-client.mjs";
 import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
 import { createNativeAtmosphereControls } from "./native-atmosphere";
@@ -515,10 +515,12 @@ export function createNativeWindPanel(): HTMLElement {
     const submittedRenderer = selectedRenderer();
     let submittedGas: NativeWindGasSources | undefined;
     let submittedProfiles: NativeStringProfiles | undefined;
+    let submittedCoatingGuard: NativeCoatingStrainGuard | undefined;
     let submittedFiniteGas: NativeFiniteGasStringSources | undefined;
     try {
       submittedGas = gas.read();
       submittedProfiles = submittedRenderer === "strings" ? profiles.read() : undefined;
+      submittedCoatingGuard = submittedRenderer === "strings" ? profiles.readCoatingStrainGuard() : undefined;
       submittedFiniteGas = submittedRenderer === "finite-gas-string" ? finiteGasString.read() : undefined;
     }
     catch (error) { showResult(message(error), true); return; }
@@ -540,6 +542,7 @@ export function createNativeWindPanel(): HTMLElement {
       try {
         const native = await renderNativePerformance(submitted, submittedFiles, connected, {renderer:submittedRenderer,
           decimate:submittedDecimate, gasSources:submittedGas, stringProfiles:submittedProfiles,
+          coatingStrainGuard:submittedCoatingGuard,
           finiteGasString:submittedFiniteGas}, controller.signal);
         if (rendering !== controller || controller.signal.aborted) return;
         let details = submittedFiles.length
@@ -550,6 +553,7 @@ export function createNativeWindPanel(): HTMLElement {
           + ` · phase ${submittedGas.phase} · water ${submittedGas.waterSpecies ?? "none"}`;
         if (submittedProfiles) details += "\nString profiles: " + Object.entries(submittedProfiles)
           .map(([role, path]) => `${role}: ${path}`).join("; ");
+        if (submittedCoatingGuard) details += `\nCoating strain checks: maximum bytes ${submittedCoatingGuard.maximumBytes}, maximum work ${submittedCoatingGuard.maximumWork}`;
         if (submittedFiniteGas) details += `\nHeated string: ${submittedFiniteGas.solidPath} · initial gas: ${submittedFiniteGas.gasRecordPath}`;
         await comparison.setCurrent(native, sourceName,
           `Performer: ${submittedRenderer} · native decimation: ${submittedDecimate}\n${details}\n\nOriginal performance:\n${submitted}`, controller.signal);
@@ -733,6 +737,7 @@ export function createNativeWindPanel(): HTMLElement {
       const packet = serializeNativeExperiment(currentSource(), attachments, {
         renderer:selectedRenderer(), decimate:decimate.checked, gasSources:gas.read(),
         stringProfiles:selectedRenderer() === "strings" ? profiles.read() : undefined,
+        coatingStrainGuard:selectedRenderer() === "strings" ? profiles.readCoatingStrainGuard() : undefined,
         finiteGasString:selectedRenderer() === "finite-gas-string" ? finiteGasString.read() : undefined,
       });
       // Use the service's same envelope checks before saving an unusable packet.
@@ -771,7 +776,7 @@ export function createNativeWindPanel(): HTMLElement {
       decimate.checked = experiment.decimate;
       drawAttachments();
       gas.load(experiment.gasSources);
-      profiles.load(experiment.stringProfiles);
+      profiles.load(experiment.stringProfiles, experiment.coatingStrainGuard);
       finiteGasString.load(experiment.finiteGasString);
       starter.value = ""; canonical.hidden = true;
       introduction.textContent = `Loaded ${selected.name}: the complete performance and ${attachments.length} original source files.`;

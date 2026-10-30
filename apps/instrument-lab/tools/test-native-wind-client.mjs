@@ -223,7 +223,7 @@ test("selected gas sources cannot silently disappear on an older server or malfo
 });
 
 test("material strings preserve their performer, source, profiles, gas associations and native PCM", async () => {
-  const connected = {...status, renderers:{wind:false, strings:true}, supportsGasSources:true,
+  const connected = {...status, renderers:{wind:false, strings:true}, supportsGasSources:true, supportsCoatingStrainGuard:true,
     maximumAttachments:32, maximumAttachmentFileBytes:8388608,
     maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
   const source = "frankensim-material-strings-v3\r\n# µ original string material data\r\n";
@@ -233,9 +233,10 @@ test("material strings preserve their performer, source, profiles, gas associati
     transportPath:"gas/custom.transport"}], waterSpecies:null, phase:"frozen"};
   const attachments = [...Object.values(stringProfiles), ...Object.values(gasSources.components[0]), "materials/wire.fsmcdpk"]
     .map((path, index) => ({path, bytes:new Uint8Array([0, 255, index, 13, 10])}));
+  const coatingStrainGuard = {maximumBytes:536870912, maximumWork:1000000000000};
   const expected = wave(); expected[44] = 0x21; expected[45] = 0xa7;
   const result = await renderNativeWindBundle(source, attachments, connected,
-    {renderer:"strings", stringProfiles, gasSources}, undefined, async (url, options) => {
+    {renderer:"strings", stringProfiles, gasSources, coatingStrainGuard}, undefined, async (url, options) => {
       assert.equal(url, "/api/native-wind/render");
       assert.equal(options.headers["X-Native-Wind-Token"], status.token);
       assert.equal(options.headers["Content-Type"], "application/json;charset=utf-8");
@@ -243,6 +244,7 @@ test("material strings preserve their performer, source, profiles, gas associati
       assert.equal(packet.renderer, "strings");
       assert.equal(packet.decimate, false);
       assert.deepEqual(packet.stringProfiles, stringProfiles);
+      assert.deepEqual(packet.coatingStrainGuard, coatingStrainGuard);
       assert.deepEqual(packet.gasSources, gasSources);
       assert.deepEqual(Buffer.from(packet.source, "base64"), Buffer.from(source));
       assert.deepEqual(packet.attachments.map(file => ({path:file.path, bytes:Buffer.from(file.bytes, "base64")})),
@@ -261,6 +263,27 @@ test("material strings preserve their performer, source, profiles, gas associati
       assert.equal(Buffer.from(packet.source, "base64").toString(), source);
       return audio();
     });
+});
+
+test("coating strain checks cannot disappear on an older service or an invalid experiment", async () => {
+  const connected = {...status, renderers:{wind:true, strings:true}, supportsCoatingStrainGuard:true,
+    maximumAttachments:32, maximumAttachmentFileBytes:8388608,
+    maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
+  const source = "frankensim-material-strings-v3\n";
+  const files = [{path:"body.profile", bytes:new Uint8Array([1, 2, 3])}];
+  const options = {renderer:"strings", stringProfiles:{bodyPath:"body.profile"},
+    coatingStrainGuard:{maximumBytes:536870912, maximumWork:1000000000000}};
+  const never = async () => assert.fail("a selected coating strain check must be admitted before sending");
+  for (const supportsCoatingStrainGuard of [undefined, false]) {
+    await assert.rejects(renderNativeWindBundle(source, files, {...connected, supportsCoatingStrainGuard},
+      options, undefined, never), /cannot retain coating strain checks/);
+  }
+  await assert.rejects(renderNativeWindBundle(source, files, connected,
+    {...options, coatingStrainGuard:{maximumBytes:1, maximumWork:0}}, undefined, never), /Coating strain checks/);
+  await assert.rejects(renderNativeWindBundle(source, files, connected,
+    {...options, stringProfiles:undefined}, undefined, never), /Coating strain checks/);
+  await assert.rejects(renderNativeWindBundle("frankensim-reed-performance-v1\n", [], connected,
+    {renderer:"wind", coatingStrainGuard:options.coatingStrainGuard}, undefined, never), /material-string performer/);
 });
 
 test("tensor-body starter preserves its canonical profile and declared material paths", async () => {

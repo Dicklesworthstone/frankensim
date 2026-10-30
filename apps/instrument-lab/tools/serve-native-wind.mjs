@@ -84,20 +84,22 @@ async function serveAsset(req, res, dist, pathname) {
 function runNative(engine, input, output, dir, signal, outputLimit, experiment, historyLimit) {
   return new Promise((accept, reject) => {
     if (signal.aborted) return reject(signal.reason);
-    const {attachments, decimate, gasSources, stringProfiles, finiteGasString} = experiment;
+    const {attachments, decimate, gasSources, stringProfiles, coatingStrainGuard, finiteGasString} = experiment;
     const sourceArgs = attachments.flatMap(file => ['--attached-source', file.path]);
     const gasArgs = gasSources ? ['--gas-water', gasSources.waterSpecies ?? 'none',
       '--gas-phase', gasSources.phase, ...gasSources.components.flatMap(component =>
         ['--gas-component', component.speciesPath, component.nasa9Path, component.transportPath])] : [];
     const profileArgs = [['bodyPath', '--body-profile'], ['stopPath', '--stop-profile'], ['contactThermalPath', '--contact-thermal']]
       .flatMap(([key, flag]) => stringProfiles?.[key] ? [flag, stringProfiles[key]] : []);
+    const coatingArgs = coatingStrainGuard ? ['--coating-strain-guard',
+      String(coatingStrainGuard.maximumBytes), String(coatingStrainGuard.maximumWork)] : [];
     const history = join(dir, 'output.history.csv');
     const command = experiment.renderer === 'strings' ? [] : [experiment.renderer ?? 'wind'];
     const args = experiment.renderer === 'finite-gas-string'
       ? [input, finiteGasString.solidPath, output, '--gas-record', finiteGasString.gasRecordPath,
         '--self-contained', '--history-output', history, '--require-sample-rate', '48000', ...sourceArgs, ...gasArgs]
       : [...command, input, output,
-        '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs, ...profileArgs];
+        '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs, ...profileArgs, ...coatingArgs];
     const child = spawn(engine, args, {cwd:dir, shell:false,
       windowsHide:true, detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
     let reason, size = 0, forceKill, finished = false; const chunks = [], stdout = [], stderr = [];
@@ -217,7 +219,8 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
           supportedSchemas:[...(wind ? [...SUPPORTED_SCHEMAS, ...RESOLVED_SCHEMAS] : []), ...(strings ? STRING_SCHEMAS : []),
             ...(finiteGasString ? FINITE_GAS_STRING_SCHEMAS : [])],
           maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
-          maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true, supportsPressureReceipts:true});
+          maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true, supportsPressureReceipts:true,
+          supportsCoatingStrainGuard:true});
       }
       if (pathname !== '/api/native-wind/render' || req.method !== 'POST') {
         if (['GET', 'HEAD'].includes(req.method) && !pathname.startsWith('/api/') && await serveAsset(req, res, dist, pathname)) return;

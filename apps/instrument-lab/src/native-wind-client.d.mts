@@ -15,6 +15,7 @@ export interface NativeWindStatus {
   maximumRequestBytes?: number;
   supportsGasSources?: boolean;
   supportsPressureReceipts?: boolean;
+  supportsCoatingStrainGuard?: boolean;
 }
 export type NativeWindRequest = typeof globalThis.fetch;
 export function nativeWindStatus(signal?: AbortSignal, request?: NativeWindRequest): Promise<NativeWindStatus>;
@@ -32,6 +33,7 @@ export interface NativeWindGasSources {
   phase: "frozen" | "liquid-water";
 }
 export interface NativeStringProfiles { bodyPath?: string; stopPath?: string; contactThermalPath?: string; }
+export interface NativeCoatingStrainGuard { maximumBytes: number; maximumWork: number; }
 export interface NativeFiniteGasStringSources { solidPath: string; gasRecordPath: string; }
 export type NativeRenderer = 'wind' | 'strings' | 'resolved' | 'finite-gas-string';
 export interface NativeWindOptions {
@@ -39,6 +41,7 @@ export interface NativeWindOptions {
   decimate?: boolean;
   gasSources?: NativeWindGasSources;
   stringProfiles?: NativeStringProfiles;
+  coatingStrainGuard?: NativeCoatingStrainGuard;
   finiteGasString?: NativeFiniteGasStringSources;
 }
 export function renderNativeWindBundle(source: string, attachments: readonly NativeWindAttachment[], status: NativeWindStatus, options?: NativeWindOptions, signal?: AbortSignal, request?: NativeWindRequest): Promise<Blob>;

@@ -71,6 +71,7 @@ test('material strings reuse the exact source packet, gas associations and expli
   const app = await setup({withStrings:true, engine:null});
   try {
     assert.deepEqual(app.initial.renderers, {wind:false, strings:true, resolved:false, 'finite-gas-string':false});
+    assert.equal(app.initial.supportsCoatingStrainGuard, true);
     assert.equal(app.initial.available, true);
     assert.ok(app.initial.supportedSchemas.includes('frankensim-material-strings-v3'));
     const names = ['wire.pack', 'body.pack', 'shape.body', 'finger.stops', 'contact.thermal', 'gas/s', 'gas/n', 'gas/t'];
@@ -79,6 +80,7 @@ test('material strings reuse the exact source packet, gas associations and expli
     const packet = JSON.parse(bundle(bytes, files));
     packet.renderer = 'strings'; packet.decimate = true;
     packet.stringProfiles = {bodyPath:'shape.body', stopPath:'finger.stops', contactThermalPath:'contact.thermal'};
+    packet.coatingStrainGuard = {maximumBytes:536870912, maximumWork:1000000000000};
     packet.gasSources = {components:[{speciesPath:'gas/s', nasa9Path:'gas/n', transportPath:'gas/t'}], waterSpecies:null, phase:'frozen'};
     const response = await app.runBundle(JSON.stringify(packet));
     assert.equal(response.status, 200); assert.equal((await response.arrayBuffer()).byteLength, 48);
@@ -87,7 +89,8 @@ test('material strings reuse the exact source packet, gas associations and expli
     assert.deepEqual(receipt.args, [join(receipt.cwd, 'input.performance'), join(receipt.cwd, 'output.wav'),
       '--self-contained', '--decimate', ...names.flatMap(name => ['--attached-source', name]),
       '--gas-water', 'none', '--gas-phase', 'frozen', '--gas-component', 'gas/s', 'gas/n', 'gas/t',
-      '--body-profile', 'shape.body', '--stop-profile', 'finger.stops', '--contact-thermal', 'contact.thermal']);
+      '--body-profile', 'shape.body', '--stop-profile', 'finger.stops', '--contact-thermal', 'contact.thermal',
+      '--coating-strain-guard', '536870912', '1000000000000']);
     assert.deepEqual(receipt.files.map(file => [file.path, file.bytes]), files.map(([path, bytes]) => [path, bytes.toString('base64')]));
     await until(async () => !(await app.status()).busy);
     assert.equal((await app.run()).status, 503, 'a configured string performer must not substitute for a missing wind performer');

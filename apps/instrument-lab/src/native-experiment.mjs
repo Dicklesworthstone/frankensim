@@ -101,6 +101,16 @@ function validateStringProfiles(value, renderer, attachedNames) {
   return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
 }
 
+function validateCoatingStrainGuard(value, renderer, profiles) {
+  if (value === undefined) return undefined;
+  const keys = ['maximumBytes', 'maximumWork'];
+  if (renderer !== 'strings' || !profiles?.bodyPath || !value || typeof value !== 'object'
+      || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))
+      || keys.some(key => !Number.isSafeInteger(value[key]) || value[key] <= 0))
+    throw new NativeWindError(400, 'Coating strain checks require a material-string body profile and positive safe-integer byte/work limits.');
+  return {maximumBytes:value.maximumBytes, maximumWork:value.maximumWork};
+}
+
 function validateFiniteGasString(value, renderer, attachedNames, gasSources, decimate) {
   if (renderer !== 'finite-gas-string') {
     if (value !== undefined) throw new NativeWindError(400, 'Finite-gas string sources require their own performer.');
@@ -153,7 +163,7 @@ export function validateInput(bytes, bundled = false) {
   if (packet?.format !== 'frankensim-native-wind-input-v1' || !Array.isArray(packet.attachments)
       || packet.attachments.length > MAX_ATTACHMENTS)
     throw new NativeWindError(400, 'Experiment requires its version and at most 32 source attachments.');
-  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources', 'renderer', 'stringProfiles', 'finiteGasString'].includes(key))
+  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources', 'renderer', 'stringProfiles', 'coatingStrainGuard', 'finiteGasString'].includes(key))
       || (packet.decimate !== undefined && typeof packet.decimate !== 'boolean'))
     throw new NativeWindError(400, 'Experiment contains unsupported fields or an invalid native decimation option.');
   const renderer = packet.renderer === undefined ? 'wind' : packet.renderer;
@@ -181,9 +191,11 @@ export function validateInput(bytes, bundled = false) {
   const attachedNames = new Set(attachments.map(file => file.path));
   const gasSources = validateGasSources(packet.gasSources, attachedNames);
   const stringProfiles = validateStringProfiles(packet.stringProfiles, renderer, attachedNames);
+  const coatingStrainGuard = validateCoatingStrainGuard(packet.coatingStrainGuard, renderer, stringProfiles);
   const finiteGasString = validateFiniteGasString(packet.finiteGasString, renderer, attachedNames, gasSources, packet.decimate);
   return {source, attachments, decimate:packet.decimate ?? false, ...(renderer !== 'wind' ? {renderer} : {}),
     ...(gasSources ? {gasSources} : {}), ...(stringProfiles ? {stringProfiles} : {}),
+    ...(coatingStrainGuard ? {coatingStrainGuard} : {}),
     ...(finiteGasString ? {finiteGasString} : {})};
 }
 
@@ -196,5 +208,6 @@ export function serializeNativeExperiment(source, attachments, options = {}) {
     ...(options.renderer !== undefined ? {renderer:options.renderer} : {}),
     ...(options.gasSources !== undefined ? {gasSources:options.gasSources} : {}),
     ...(options.stringProfiles !== undefined ? {stringProfiles:options.stringProfiles} : {}),
+    ...(options.coatingStrainGuard !== undefined ? {coatingStrainGuard:options.coatingStrainGuard} : {}),
     ...(options.finiteGasString !== undefined ? {finiteGasString:options.finiteGasString} : {})});
 }

@@ -200,11 +200,10 @@ class MaterialPreparation(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             R.main(args)
 
-    def test_coating_guard_is_never_silently_dropped_from_an_exported_experiment(self):
+    def test_portable_coating_guard_refuses_invalid_or_inexact_budgets_before_io(self):
         root = Path(tempfile.mkdtemp())
-        # Refuse before reading sources or making a directory: the current lab
-        # packet has no playback-guard field and must not imply guarded replay.
-        for index, budget in enumerate((["1", "2"], ["0", "2"])):
+        # JavaScript must retain the native budgets exactly through a saved packet.
+        for index, budget in enumerate((["0", "2"], ["1", "9007199254740992"])):
             output = root / f"refused-{index}"
             with self.assertRaises(SystemExit):
                 R.main(["--prepare-only", "--performance", str(root / "unread"),
@@ -235,6 +234,7 @@ class MaterialPreparation(unittest.TestCase):
         output = root / "prepared"
         args = ["--prepare-only", "--performance", str(source), "--out", str(output),
                 "--body-profile", str(body), "--stop-profile", str(stop), "--contact-thermal", str(thermal),
+                "--coating-strain-guard", "536870912", "1000000000000",
                 "--gas-record", gas, "--cavity-gas-record", cavity,
                 "--gas-component", *map(str, gas_files[:3]),
                 "--gas-component", *map(str, gas_files[3:]), "--gas-water", "none", "--gas-phase", "frozen"]
@@ -244,6 +244,7 @@ class MaterialPreparation(unittest.TestCase):
         self.assertEqual(packet["format"], "frankensim-native-wind-input-v1")
         self.assertEqual(packet["renderer"], "strings")
         self.assertFalse(packet["decimate"])
+        self.assertEqual(packet["coatingStrainGuard"], {"maximumBytes": 536870912, "maximumWork": 1000000000000})
         prepared = base64.b64decode(packet["source"])
         self.assertEqual(prepared, (output / "performance.material-strings").read_bytes())
         self.assertIn("gas " + gas, prepared.decode())

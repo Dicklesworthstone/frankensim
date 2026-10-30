@@ -144,6 +144,11 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
       || typeof options.stringProfiles !== 'object' || Array.isArray(options.stringProfiles))) {
     throw new Error("Choose explicit attached profiles for the material-string renderer.");
   }
+  if (options.coatingStrainGuard !== undefined) {
+    if (renderer !== 'strings') throw new Error('Coating strain checks require the material-string performer.');
+    if (status.supportsCoatingStrainGuard !== true)
+      throw new Error('This local renderer cannot retain coating strain checks. Update the local server.');
+  }
   if (options.decimate !== undefined && typeof options.decimate !== 'boolean') {
     throw new Error("Choose whether to use native decimation explicitly.");
   }
@@ -169,7 +174,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
   }
   let body = bytes, contentType = "text/plain;charset=utf-8";
   if (attachments.length || options.decimate || options.gasSources !== undefined || renderer !== 'wind'
-      || options.stringProfiles !== undefined || options.finiteGasString !== undefined) {
+      || options.stringProfiles !== undefined || options.coatingStrainGuard !== undefined || options.finiteGasString !== undefined) {
     if (![status.maximumAttachments, status.maximumAttachmentFileBytes,
       status.maximumAttachmentBytes, status.maximumRequestBytes].every(positiveInteger)) {
       throw new Error("This local renderer does not support attached source files. Update the local server.");
@@ -189,7 +194,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     if (new TextEncoder().encode(body).byteLength > status.maximumRequestBytes) {
       throw new Error("The complete experiment exceeds the renderer's request limit.");
     }
-    if (renderer === 'finite-gas-string' || options.finiteGasString !== undefined)
+    if (renderer === 'finite-gas-string' || options.finiteGasString !== undefined || options.coatingStrainGuard !== undefined)
       validateInput(new TextEncoder().encode(body), true);
   }
   const response = await request(RENDER_URL, {

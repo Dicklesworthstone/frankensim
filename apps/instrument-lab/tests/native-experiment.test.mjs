@@ -13,6 +13,7 @@ test('complete string experiments retain original moving contact, thermal, mater
     + '# bow-stations and all following physical records are opaque transport bytes\r\n';
   const options = {renderer:'strings', decimate:true,
     stringProfiles:{bodyPath:'specimen/body.profile', stopPath:'contacts/bow.stops', contactThermalPath:'contacts/heat.profile'},
+    coatingStrainGuard:{maximumBytes:536870912, maximumWork:1000000000000},
     gasSources:{components:[{speciesPath:'gas/oxygen.species', nasa9Path:'gas/oxygen.nasa9', transportPath:'gas/oxygen.transport'},
       {speciesPath:'gas/inert.species', nasa9Path:'gas/inert.nasa9', transportPath:'gas/inert.transport'}],
       waterSpecies:null, phase:'frozen'}};
@@ -28,6 +29,7 @@ test('complete string experiments retain original moving contact, thermal, mater
   assert.equal(restored.renderer, 'strings');
   assert.equal(restored.decimate, true);
   assert.deepEqual(restored.stringProfiles, options.stringProfiles);
+  assert.deepEqual(restored.coatingStrainGuard, options.coatingStrainGuard);
   assert.deepEqual(restored.gasSources, options.gasSources);
   assert.deepEqual(validateInput(encode(serializeNativeExperiment(decode(restored.source), restored.attachments, restored)), true), restored);
   // A later data-only material substitution cannot change a saved experiment.
@@ -37,6 +39,27 @@ test('complete string experiments retain original moving contact, thermal, mater
   assert.equal(restored.attachments[0].bytes[0], 0);
   assert.deepEqual(variant.source, restored.source);
   assert.deepEqual(variant.stringProfiles, restored.stringProfiles);
+  assert.deepEqual(variant.coatingStrainGuard, restored.coatingStrainGuard);
+});
+
+test('coating strain budgets require explicit exact limits and a material-string body profile', () => {
+  const guard = {maximumBytes:536870912, maximumWork:1000000000000};
+  const files = [{path:'body.profile', bytes:encode('original coated body')}];
+  const packet = JSON.parse(serializeNativeExperiment('frankensim-material-strings-v3\n', files,
+    {renderer:'strings', stringProfiles:{bodyPath:'body.profile'}}));
+  for (const value of [null, [], {}, {...guard, extra:1},
+    ...[0, -1, 1.5, '2', Number.MAX_SAFE_INTEGER + 1].flatMap(invalid =>
+      [{...guard, maximumBytes:invalid}, {...guard, maximumWork:invalid}])]) {
+    assert.throws(() => validateInput(encode(JSON.stringify({...packet, coatingStrainGuard:value})), true),
+      /Coating strain checks/);
+  }
+  const {stringProfiles, ...withoutBody} = packet;
+  assert.throws(() => validateInput(encode(JSON.stringify({...withoutBody, coatingStrainGuard:guard})), true),
+    /Coating strain checks/);
+  const wind = serializeNativeExperiment('frankensim-reed-performance-v1\n', [],
+    {renderer:'wind', coatingStrainGuard:guard});
+  assert.throws(() => validateInput(encode(wind), true), /Coating strain checks/);
+  assert.equal(validateInput(encode(JSON.stringify(packet)), true).coatingStrainGuard, undefined);
 });
 
 test('wind experiments preserve independently declared internal, regional and external atmospheres', () => {

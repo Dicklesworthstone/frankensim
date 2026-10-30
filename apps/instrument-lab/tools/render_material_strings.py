@@ -172,7 +172,8 @@ def stage_packs(texts: list[str], root: Path, replacements: list[str], output: P
 
 
 def write_lab_experiment(source: Path, output: Path, attachments: list[str], profiles: dict,
-                         gas_sources: dict | None, decimate: bool) -> Path:
+                         gas_sources: dict | None, decimate: bool,
+                         coating_strain_guard: list[int] | None = None) -> Path:
     """Export the existing native HTTP packet; material/physics decoding stays in Rust.
 
     The lab's shared packet reader checks its transport bounds when opening this
@@ -187,6 +188,9 @@ def write_lab_experiment(source: Path, output: Path, attachments: list[str], pro
         packet["stringProfiles"] = profiles
     if gas_sources is not None:
         packet["gasSources"] = gas_sources
+    if coating_strain_guard is not None:
+        packet["coatingStrainGuard"] = {"maximumBytes": coating_strain_guard[0],
+                                        "maximumWork": coating_strain_guard[1]}
     path = output / "experiment.native.json"
     with path.open("x", encoding="utf-8") as stream:
         json.dump(packet, stream, separators=(",", ":"), ensure_ascii=False)
@@ -247,7 +251,7 @@ def main(argv=None) -> int:
     parser.add_argument("--bow-distance-from-bridge", type=float)
     parser.add_argument("--decimate", action="store_true", help="use the native 48 kHz output decimator without changing the mechanical clock")
     parser.add_argument("--coating-strain-guard", nargs=2, type=int, metavar=("MAX_BYTES", "MAX_WORK"),
-                        help="check all coating films at every native mechanical endpoint with explicit resources; native audio only")
+                        help="check all coating films at every native mechanical endpoint with explicit resources, retained in lab experiments")
     parser.add_argument("--loaded-response-only", nargs=4, metavar=("MIN_HZ", "MAX_HZ", "POINTS", "BRIDGE"),
                         help="save loaded-response.tsv through native released harmonic analysis; BRIDGE is an index, all or coherent")
     parser.add_argument("--body-response-force", action="append", nargs=3, default=[],
@@ -285,8 +289,8 @@ def main(argv=None) -> int:
     if args.coating_strain_guard:
         if min(args.coating_strain_guard) <= 0:
             parser.error("--coating-strain-guard needs positive byte and work allowances")
-        if export_experiment:
-            parser.error("the lab experiment packet does not encode --coating-strain-guard; select native audio rendering")
+        if export_experiment and max(args.coating_strain_guard) > 9_007_199_254_740_991:
+            parser.error("portable coating strain budgets must be safe integers no larger than 9007199254740991")
         if not (args.body_profile or args.shell_table):
             parser.error("--coating-strain-guard requires a shell body profile or shell table")
     if args.prepare_only and args.analysis:
@@ -369,7 +373,8 @@ def main(argv=None) -> int:
     if export_experiment:
         gas_sources = {"components": gas_components, "waterSpecies": None if args.gas_water == "none" else args.gas_water,
                        "phase": args.gas_phase} if gas_components else None
-        packet = write_lab_experiment(source, output, attachments, profiles, gas_sources, args.decimate)
+        packet = write_lab_experiment(source, output, attachments, profiles, gas_sources, args.decimate,
+                                      args.coating_strain_guard)
         print(packet)
     if args.prepare_only:
         return 0
