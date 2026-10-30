@@ -5,6 +5,9 @@
 //! and reservoir temperature while heat and Rayleigh forcing retain the full
 //! wall/reservoir difference. No additional thermal store or solver is created.
 
+/// Source-backed convection on the existing explicit thermal timeline.
+pub mod observer;
+
 use super::*;
 use fs_material::fluid_transport::{ThermalFluidTransport, ThermalFluidTransportState};
 

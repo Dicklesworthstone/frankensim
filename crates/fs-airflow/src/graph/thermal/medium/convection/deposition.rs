@@ -3,7 +3,8 @@
 //! The fluid is an explicitly prescribed reservoir, not another finite thermal
 //! store. One original transport snapshot supplies Re or Ra, Pr and h per binding.
 //! The original thermal owner supplies wall temperature and currently exposed
-//! area. Evaluate inside a thermal residual callback, never only at step start.
+//! area. Implicit solves evaluate every thermal trial; explicit observers
+//! re-evaluate at each native substep. Neither freezes the initial heat source.
 //! Borrowed-snapshot boundaries freeze fluid properties. The source-backed
 //! adapter re-evaluates transport and expansion at declared reservoir or film
 //! temperature inside the same residual. Geometry and reservoir energy remain

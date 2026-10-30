@@ -1,5 +1,8 @@
 //! Source curves -> film properties -> actual shared finite-cell heat storage.
 use super::*;
+
+#[path = "film_source/observer.rs"]
+mod observer;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::*;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

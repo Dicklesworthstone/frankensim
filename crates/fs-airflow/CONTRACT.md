@@ -108,6 +108,24 @@ store, and each correlation still requires its own supported property convention
 algebra, signed expansion, source-only viscosity substitutions in accepted
 backward-Euler finite-body balances, retained claims and atomic refusals.
 
+`source::observer::SourceConvectionObserver` supplies these heat rates to the
+original explicit `DepositionSimulation::advance_observed` timeline and composes
+with other `DepositionObserver` owners. Every actual substep reads its starting
+wall/film state and exposed area; accepted endpoint samples retain freshly
+resolved material owners. Scheduled events invalidate the sample, and the next
+substep uses the updated contact coverage and boundaries. The observer's signed
+interval heat is a share of the existing external-heat audit, never a second
+energy addition. Endpoint source refusal or cancellation discards both proposed
+histories. Resolver cloning must preserve the native observer's rollback rules.
+
+This adapter inherits explicit staggering and source time-refinement requirements;
+the conduction CFL is not a nonlinear-convection stability guarantee. It does
+not evolve reservoir energy, change source policies or introduce another thermal
+integrator. `tests/material_cell_convection/film_source/observer.rs` compares
+independent finite-body updates with simultaneous native spatial conduction,
+event-clipped exposure changes, retained endpoint sources, interval heat accounts,
+late source-support refusal and cancellation.
+
 ### Shared thermochemical medium in hydraulic and heat paths
 
 `FrozenFlowMedium::bind_fan_bank` connects the same original reference/inlet
