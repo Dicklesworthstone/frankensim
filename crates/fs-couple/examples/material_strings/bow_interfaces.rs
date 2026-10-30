@@ -1,15 +1,18 @@
 //! Ordered surface-data input for the existing simultaneous bow solver.
 //! This adapter selects coefficients and their common applicability; it owns
 //! no traction equation. The original packs and query receipts remain retained.
-//! Constant laws retain their original path. Source-backed Coulomb mu(T)
-//! requires the joint finite-cell contact-heat owner; pressure and speed remain
-//! actual mechanical applicability coordinates. No rosin or wear law is inferred.
+//! Original source-qualified environmental coordinates stay held. Coulomb
+//! coefficients that also respond to contact temperature require the joint
+//! finite-cell contact-heat owner; pressure and speed remain actual mechanical
+//! applicability coordinates. No rosin, sorption or wear law is inferred.
 use super::*;
 use fs_contact::interface_binding::{bind_dry_interface_system_card,
     thermal_friction::{SourceThermalCoulomb, ThermalFrictionAxes, FrictionQueryAxis,
         FrictionQueryAxisKind}};
 use fs_couple::render::schedule::force::coupled::contact::friction::interface::DryFrictionBinding;
-use fs_material::state_point::{ResolvedInterfaceStatePoint, resolve_interface_state_point};
+use fs_material::state_point::{ResolvedInterfaceStatePoint, ResolvedScalarProperty,
+    append_held_environment, query_with_source_conventions, resolve_interface_state_point};
+use fs_qty::{QuantitySpec, semantic::{QuantityKind, SemanticType, ValueForm}};
 use fs_tribo::{
     ApplicabilityRange, DryFrictionApplicability, DryInterfaceSystemCard, InputAuthority,
     InterfaceMedium, InterfaceSystemRef,
@@ -56,6 +59,7 @@ pub struct Inputs {
     layers: Option<shear_layers::Inputs>,
     declarations: Vec<Declaration>,
     packs: BTreeMap<String, NormalizedInterfacePack>,
+    environment: BTreeMap<String, Vec<(String, f64)>>,
     bound: BTreeMap<String, Bound>,
 }
 impl core::fmt::Debug for Inputs {
@@ -75,6 +79,7 @@ impl core::fmt::Debug for Inputs {
             .field("material_shear_layers", &self.layers)
             .field("declarations", &self.declarations)
             .field("packs", &packs)
+            .field("environment", &self.environment)
             .field("states", &states)
             .finish()
     }
@@ -87,6 +92,7 @@ impl Inputs {
             layers: None,
             declarations: Vec::new(),
             packs: BTreeMap::new(),
+            environment: BTreeMap::new(),
             bound: BTreeMap::new(),
         })
     }
@@ -129,6 +135,7 @@ impl Inputs {
             layers: None,
             declarations,
             packs: BTreeMap::new(),
+            environment: BTreeMap::new(),
             bound: BTreeMap::new(),
         })
     }
@@ -156,9 +163,19 @@ impl Inputs {
     pub fn load(
         &mut self,
         gate: &CancelGate,
+        loader: impl FnMut(&str) -> Result<NormalizedInterfacePack>,
+    ) -> Result<()> {
+        self.load_with_environment(&BTreeMap::new(), gate, loader)
+    }
+
+    pub fn load_with_environment(
+        &mut self,
+        environment: &BTreeMap<String, Vec<(String, f64)>>,
+        gate: &CancelGate,
         mut loader: impl FnMut(&str) -> Result<NormalizedInterfacePack>,
     ) -> Result<()> {
         let mut packs = BTreeMap::new();
+        let mut retained_environment = BTreeMap::new();
         let mut bound = BTreeMap::new();
         let mut remaining = input::MAX_TOTAL_PACK_BYTES;
         for d in &self.declarations {
@@ -173,14 +190,26 @@ impl Inputs {
                 remaining -= size;
                 packs.insert(d.pack.clone(), pack);
             }
-            let source = resolve(d, &packs[&d.pack])?;
+            let held = environment.get(&d.pack).map_or(&[][..], Vec::as_slice);
+            let source = resolve(d, &packs[&d.pack], held)?;
+            if let Some(held) = environment.get(&d.pack) {
+                retained_environment.insert(d.pack.clone(), held.clone());
+            }
             bound.insert(d.track.clone(), source);
         }
         poll(gate)?;
         self.packs = packs;
+        self.environment = retained_environment;
         self.bound = bound;
         Ok(())
     }
+    pub fn require_environment(&self, environment: &BTreeMap<String, Vec<(String, f64)>>) -> Result<()> {
+        if self.declarations.iter().any(|d| self.environment.get(&d.pack) != environment.get(&d.pack)) {
+            return Err("bow interfaces must be resolved at the current declared held environment".into());
+        }
+        Ok(())
+    }
+    pub fn has_source(&self, name: &str) -> bool { self.packs.contains_key(name) }
     pub fn pack_bytes(&self) -> Result<usize> {
         if self
             .declarations
@@ -264,7 +293,7 @@ impl Inputs {
     }
 }
 
-fn resolve(d: &Declaration, pack: &NormalizedInterfacePack) -> Result<Bound> {
+fn resolve(d: &Declaration, pack: &NormalizedInterfacePack, environment: &[(String, f64)]) -> Result<Bound> {
     if pack.card().medium() != "dry" {
         return Err("the dry bow law requires an explicitly dry ordered interface card".into());
     }
@@ -284,21 +313,33 @@ fn resolve(d: &Declaration, pack: &NormalizedInterfacePack) -> Result<Bound> {
             Requirement::try_new(name, dims, admit)
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let point = QueryPoint::new()
-        .with("T", d.temperature)?
-        .with("p", d.pressure)?
-        .with("v", d.speed)?;
+    let claims = pack.claims_pack().claims();
+    let static_quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    let point = query_with_source_conventions(claims, &[
+        ("T", static_quantity(QuantityKind::AbsoluteTemperature), d.temperature),
+        ("p", static_quantity(QuantityKind::Pressure), d.pressure),
+        ("v", QuantitySpec::dimensional(fs_qty::Velocity::DIMS), d.speed),
+    ])?;
+    let point = append_held_environment(claims, point, environment)?;
     let state =
         resolve_interface_state_point(pack.card(), &point, &requirements, Pick::SingleClaimOnly)?;
-    let thermal = matches!(d.model, Model::Coulomb) && state.properties().iter().any(|property|
-        property.answer().receipt.decision != fs_matdb::EvaluationDecision::ConstantWithinValidity);
+    // Temperature, pressure and actual slip belong to physical owners. Only
+    // explicitly supplied, source-qualified extra coordinates may be frozen.
+    let held_response = |property: &ResolvedScalarProperty| {
+        if property.source_axes().is_empty() {
+            property.answer().receipt.decision == fs_matdb::EvaluationDecision::ConstantWithinValidity
+        } else {
+            property.source_axes().iter().all(|(axis, _)|
+                environment.iter().any(|(name, _)| name == axis))
+        }
+    };
+    let thermal = matches!(d.model, Model::Coulomb)
+        && state.properties().iter().any(|property| !held_response(property));
     let mut ranges = [(0.0f64, f64::MAX); 3];
     for property in state.properties() {
-        if !thermal && property.answer().receipt.decision
-            != fs_matdb::EvaluationDecision::ConstantWithinValidity
-        {
+        if !thermal && !held_response(property) {
             return Err(
-                "temperature-dependent bow coefficients require the sourced Coulomb thermal owner"
+                "evolving bow coefficients require the sourced Coulomb thermal owner; only declared environmental coordinates may be held"
                     .into(),
             );
         }

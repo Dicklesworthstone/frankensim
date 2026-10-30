@@ -59,9 +59,11 @@ impl ResolvedLinearInterface {
     /// positive physical area. Both properties are required; an explicitly
     /// sourced zero permits a pure spring or damper, while two zeros refuse.
     ///
-    /// Only validity-wide constants and the original resolver's fixed absolute
-    /// temperature curves are admitted. Frequency-dependent samples are not
-    /// converted into a constant time-domain law. Both claims need explicit
+    /// Validity-wide constants and original source curves/surfaces at held,
+    /// source-qualified external conditions are admitted. Temperature, moisture,
+    /// composition and imposed pressure remain in the original query receipts.
+    /// Frequency-dependent samples are not converted into a constant time-domain
+    /// law. Both claims need explicit
     /// frequency applicability; consumers must check their actual modes/band.
     /// The complete original state, ordered materials and usage receipts remain
     /// inspectable. Changing state requires a new source resolution.
@@ -257,9 +259,9 @@ fn coefficient(
             admissibility: ScalarAdmissibility::NonNegative,
         });
     }
-    if !p.is_constant_at_fixed_temperature() {
+    if !p.is_constant_at_fixed_environment() {
         return Err(invalid(
-            "linear interface coefficients must be constant at the resolved temperature",
+            "linear interface coefficients must be constant at the resolved external conditions",
         ));
     }
     let band = p.angular_frequency_band_rad_s()?.ok_or_else(|| {

@@ -123,3 +123,101 @@ fn layered_two_plane_strings_bind_the_physical_outer_sleeve_not_the_core() {
         }
     });
 }
+
+
+mod held_environment {
+    use super::*;
+    use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+
+    fn source() -> NormalizedInterfacePack {
+        let base = interface(30e6, 1000.0, "wire.fsmatpk", "body.fsmatpk", 200_000.0);
+        let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+        let mut claims = ClaimSet::new();
+        for (_, original) in base.claims_pack().claims().claims_ordered() {
+            let mut claim = original.clone();
+            let PropertyValue::Scalar { value, dims } = claim.value else { unreachable!() };
+            let factor = if claim.key.name() == "normal_stiffness" { 2.0 } else { 4.0 };
+            claim.value = PropertyValue::Curve { abscissa: "moisture_content".into(),
+                abscissa_dims: Dims::NONE, knots: vec![(0.0, value), (0.2, factor*value)], dims };
+            claim.validity = ValidityDomain::unconstrained()
+                .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 280.0, 320.0)
+                .with_quantity("omega", quantity(QuantityKind::Frequency(FrequencyConvention::Angular)), 0.0, 200_000.0)
+                .with_quantity("moisture_content", quantity(QuantityKind::Moisture(MoistureBasis::DryMass)), 0.0, 0.2);
+            claim.interpolation = InterpolationPolicy::LinearInside;
+            claims.insert_claim(claim).unwrap();
+        }
+        let claims = NormalizedPack::new("synthetic-joint-environment", "synthetic-v1",
+            base.claims_pack().source_artifact(), "CC0-1.0", claims, vec![], vec![]).unwrap();
+        NormalizedInterfacePack::new(base.card().surface_a().clone(), base.card().surface_b().clone(),
+            base.card().context().clone(), claims).unwrap()
+    }
+    fn environment(moisture: f64) -> BTreeMap<String, Vec<(String, f64)>> {
+        BTreeMap::from([("bridge.fsintpk".into(), vec![("moisture_content".into(), moisture)])])
+    }
+
+    #[test]
+    fn held_interface_state_reaches_bridge_reactions_and_pressure_with_the_original_artifact() {
+        scoped(|cx, gate| {
+            let source = source();
+            let prepare = |moisture| {
+                let text = String::from_utf8(sourced_spec().bytes).unwrap().replace("state 293.15 1000",
+                    &format!("state 293.15 1000\nmaterial-states 1\nmaterial-state bridge.fsintpk 1 moisture_content {moisture}"));
+                let mut s = input::Spec::parse(text.as_bytes()).unwrap();
+                s.bridge_interfaces.load_with_environment(s.temperature, s.omega, &s.material_states,
+                    gate, |_| Ok(source.clone())).unwrap();
+                s
+            };
+            let mut dry = compile(cx, gate, prepare(0.0), 7800.0);
+            let mut moist = compile(cx, gate, prepare(0.2), 7800.0);
+            let original = &dry.performance.bank().source().bank().material_bridge_interfaces()[0].interface;
+            let changed = &moist.performance.bank().source().bank().material_bridge_interfaces()[0].interface;
+            assert_eq!(changed.resolved().card_identity(), source.card().content_hash());
+            assert_eq!(original.resolved().card_identity(), changed.resolved().card_identity());
+            assert_ne!(original.resolved().identity(), changed.resolved().identity());
+            assert_eq!(changed.stiffness_n_m(), 2.0*original.stiffness_n_m());
+            assert_eq!(changed.damping_n_s_m(), 4.0*original.damping_n_s_m());
+            for name in ["wire.fsmatpk", "body.fsmatpk"] {
+                assert_eq!(dry.catalog[name].pack.content_hash(), moist.catalog[name].pack.content_hash());
+            }
+            let expected = pressure(&mut dry, 37);
+            let changed = pressure(&mut moist, 128);
+            assert!(expected.iter().zip(&changed).any(|(a,b)| (a-b).abs() > 1e-15));
+            assert_eq!(changed, pressure(&mut compile(cx, gate, prepare(0.2), 7800.0), 1));
+            let frame = moist.performance.bank().system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            let mut stale = prepare(0.0);
+            stale.material_states = environment(0.2);
+            let mut reads = 0;
+            assert!(stale.compile(cx, gate, |name| {
+                reads += 1; Ok(pack(name, 7800.0, 200_000.0, None))
+            }).is_err());
+            assert_eq!(reads, 0);
+        });
+    }
+
+    #[test]
+    fn axial_bearings_consume_the_same_held_joint_law_and_reject_stale_context() {
+        use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::AxialBearingGeometry;
+        scoped(|_, gate| {
+            let mut inputs = axial_bearings::Inputs::new(vec![axial_bearings::Declaration {
+                geometry: AxialBearingGeometry { string: 0, station_fraction: 0.8, shell_component: 0, node: 0,
+                    string_axis: [1.0, 0.0, 0.0], contact_arm_m: [0.0; 3], rest_extension_m: 0.0 },
+                source: bridge_interfaces::Declaration { string: 0, pack: "bridge.fsintpk".into(), area_m2: 0.0001,
+                    stiffness_property: "normal_stiffness".into(), viscosity_property: "normal_viscosity".into() },
+            }]).unwrap();
+            let source = source();
+            let held = environment(0.2);
+            inputs.load_with_environment(293.15, 1000.0, &held, gate, |_| Ok(source.clone())).unwrap();
+            inputs.require_environment(&held).unwrap();
+            let law = inputs.bindings(293.15, 1000.0).unwrap()[0].interface.clone();
+            assert_eq!(law.stiffness_n_m(), 6000.0);
+            assert_eq!(law.damping_n_s_m(), 0.4);
+            assert_eq!(law.resolved().query().axes()["moisture_content"], 0.2);
+            assert_eq!(law.resolved().card_identity(), source.card().content_hash());
+            assert!(inputs.require_environment(&environment(0.0)).is_err());
+            assert!(inputs.load_with_environment(293.15, 1000.0, &environment(0.3),
+                gate, |_| Ok(source.clone())).is_err());
+            assert_eq!(inputs.bindings(293.15, 1000.0).unwrap()[0].interface, law);
+        });
+    }
+}

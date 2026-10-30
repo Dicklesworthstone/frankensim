@@ -194,8 +194,9 @@ pub struct CavityMolecular {
 pub struct Spec {
     pub bytes: Vec<u8>, pub rate: u32, pub samples: u64, pub full_scale: f64, pub block: usize,
     pub temperature: f64, pub omega: f64, pub gas: GasState, pub body: Body, pub strings: Vec<Wire>,
-    /// Additional held source coordinates, keyed by the original bulk-pack path.
-    /// Temperature and frequency keep the global state convention.
+    /// Additional held source coordinates, keyed by the original material or
+    /// bow/bridge/axial interface pack path. Each physical owner retains its
+    /// temperature, frequency, pressure and actual-slip conventions.
     pub material_states: BTreeMap<String, Vec<(String, f64)>>,
     /// Retain original thermochemical composition and pack authority with the coefficients.
     pub gas_record: GasRecord,

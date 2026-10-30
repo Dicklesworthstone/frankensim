@@ -242,6 +242,9 @@ impl input::Spec {
         mut loader:impl FnMut(&str)->Result<P>)->Result<ReadyBank> {
         poll(gate)?;
         self.validate_material_states()?;
+        self.friction.require_environment(&self.material_states)?;
+        self.bridge_interfaces.require_environment(&self.material_states)?;
+        self.axial_bearings.require_environment(&self.material_states)?;
         self.friction.validate_thermal_mode(self.dry_contact_thermal)?;
         let preparation = if harmonic_only {
             if !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
@@ -518,8 +521,10 @@ impl input::Spec {
             layers.bind(&self,bank,&mut catalog,&mut loader,gate)?
         } else { bank };
         poll(gate)?;
-        if self.material_states.keys().any(|name| !catalog.contains_key(name)) {
-            return Err("material-state names a bulk pack unused by this assembly".into());
+        if self.material_states.keys().any(|name| !catalog.contains_key(name)
+            && !self.friction.has_source(name) && !self.bridge_interfaces.has_source(name)
+            && !self.axial_bearings.has_source(name)) {
+            return Err("material-state names a source pack unused by this assembly".into());
         }
         Ok(ReadyBank { spec:self,catalog,bank,body_profile:profile,
             rotational_bridge_baselines_m:baselines,stop_profile,body_radiation,bow_station_program })
@@ -798,17 +803,17 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         return response_options.as_ref().expect("response-only option checked")
             .write(projected.shell(),projected.assembly(),&gate);
     }
-    spec.friction.load(&gate,|name| {
+    spec.friction.load_with_environment(&spec.material_states, &gate,|name| {
         let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
         Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
     })?;
-    spec.bridge_interfaces.load(spec.temperature, spec.omega, &gate, |name| {
+    spec.bridge_interfaces.load_with_environment(spec.temperature, spec.omega, &spec.material_states, &gate, |name| {
         let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
         Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
     })?;
-    spec.axial_bearings.load(spec.temperature, spec.omega, &gate, |name| {
+    spec.axial_bearings.load_with_environment(spec.temperature, spec.omega, &spec.material_states, &gate, |name| {
         let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
         Ok(NormalizedInterfacePack::from_bytes(&bytes)?)

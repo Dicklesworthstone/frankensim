@@ -51,7 +51,8 @@ it does not rewrite source cards to make their schemas appear equal.
 ### Held material environment
 
 An optional block immediately after `state` supplies additional source
-coordinates for individual bulk packs:
+coordinates for individual material packs and ordered bow, bridge or axial
+bearing interface packs:
 
 ```text
 state 293.15 1000
@@ -79,6 +80,19 @@ alter the existing string, section, fiber and isotropic plate laws, and their
 joint pressure output, without replacing the immutable material card or
 choosing a different instrument model. The resolved state identity changes
 with the coordinates.
+
+The same block can name a `bow-interface`, primary bridge-interface or
+`axial-bearing` pack. The original interface claims then determine friction
+coefficients or joint stiffness and viscosity at those held conditions, feeding
+the existing reciprocal string/body solve. Its ordered surfaces and source
+identity remain intact. This supports, for example, a source-declared joint
+stiffness-versus-moisture curve without encoding moisture in bridge mechanics.
+For bow interfaces, `p` and `v` are already owned actual contact coordinates and
+cannot be overridden by `material-state`. A Coulomb source depending on both
+contact temperature and held moisture still requires the finite-cell contact
+heat owner; every temperature and motion re-query retains that same moisture
+and its original selected claims. Changing declared held state after loading an
+interface requires resolving it again.
 
 The existing support prescription remains authoritative: maintained force stays
 fixed, while fixed extension changes its resulting force with the resolved
@@ -1183,15 +1197,24 @@ bow surface; texture, third body and named history remain part of the original
 source identity. Changing a string's outer material while retaining an interface
 for the old surface refuses instead of reusing its friction coefficients.
 
-Selected claims require explicit finite bare-SI validity on `T`, `p` and `v`.
-Constant coefficient sources retain the original path. A `coulomb` declaration
-may select coefficients that depend on `T` when every affected contact has an
-explicit finite-cell dry route in a version 2 `--contact-thermal` profile; see
-[CONTACT_THERMAL.md](CONTACT_THERMAL.md). The existing heat solver then solves
-interface temperature, source-refreshed traction and the original cell energies
-together. Coefficient response to pressure, speed or additional history is not
-supplied by this temperature-only route. Stribeck and hyperbolic coefficient
-sources remain constant throughout their applicability.
+Selected claims require explicit finite SI validity on `T`, `p` and `v`.
+Declared source quantity metadata are preserved: absolute kelvin temperature,
+static pressure in pascals and sliding speed in metres per second. A
+`material-state` row can additionally select source-qualified held environmental
+coordinates for the interface pack. Constants and coefficients depending only
+on those held coordinates use the existing fixed-law path.
+
+A `coulomb` declaration may also select coefficients that depend on `T` when
+every affected contact has an explicit finite-cell dry route in a version 2
+`--contact-thermal` profile; see [CONTACT_THERMAL.md](CONTACT_THERMAL.md). Its
+original source must declare static-pressure semantics on `p` and dimensional
+velocity on `v`, as required by the shared thermal friction owner. The existing
+heat solver then solves interface temperature, source-refreshed traction and
+the original cell energies together, holding any additional environmental
+coordinates fixed. Coefficient response to actual contact pressure, speed or
+additional history still needs its own constitutive owner and refuses this
+route. Stribeck and hyperbolic coefficients may depend on the held environment;
+they remain fixed during the performance.
 
 The query chooses a supported immutable source; its pressure and speed are not
 imposed on the physical solver. Actual normal load divided by nominal area and

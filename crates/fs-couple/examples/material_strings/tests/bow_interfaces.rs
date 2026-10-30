@@ -495,3 +495,142 @@ mod hyperbolic {
         });
     }
 }
+
+
+mod held_environment {
+    use super::*;
+    use fs_qty::{QuantitySpec, semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+
+    // Manufactured source laws exercise transport and coupling; they are not
+    // a measured rosin/humidity model. The same artifact serves every state.
+    fn source(response: Option<&str>) -> NormalizedInterfacePack {
+        let base = interface(0.4, "wire.fsmatpk", 0.1);
+        let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+        let mut claims = ClaimSet::new();
+        for (_, original) in base.claims_pack().claims().claims_ordered() {
+            let mut claim = original.clone();
+            let PropertyValue::Scalar { value, dims } = claim.value else { unreachable!() };
+            claim.validity = ValidityDomain::unconstrained()
+                .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 280.0, 320.0)
+                .with_quantity("p", quantity(QuantityKind::Pressure), 0.1, 1e6)
+                .with_quantity("v", QuantitySpec::dimensional(fs_qty::Velocity::DIMS), 0.0, 10.0)
+                .with_quantity("moisture_content", quantity(QuantityKind::Moisture(MoistureBasis::DryMass)), 0.0, 0.2);
+            claim.value = if let Some(axis) = response {
+                let (lo, hi) = claim.validity.bound(axis).unwrap();
+                PropertyValue::Surface2D {
+                    axes: [axis.into(), "moisture_content".into()],
+                    axis_dims: [claim.validity.axis_quantities()[axis].dims(), Dims::NONE],
+                    samples: vec![([lo, 0.0], value), ([hi, 0.0], 0.9*value),
+                        ([lo, 0.2], 0.5*value), ([hi, 0.2], 0.4*value)],
+                    triangles: vec![[0, 1, 2], [1, 3, 2]], dims,
+                }
+            } else {
+                PropertyValue::Curve { abscissa: "moisture_content".into(), abscissa_dims: Dims::NONE,
+                    knots: vec![(0.0, value), (0.2, 0.5*value)], dims }
+            };
+            claim.interpolation = InterpolationPolicy::LinearInside;
+            claims.insert_claim(claim).unwrap();
+        }
+        let claims = NormalizedPack::new("synthetic-bow-environment", "synthetic-v1",
+            base.claims_pack().source_artifact(), "CC0-1.0", claims, vec![], vec![]).unwrap();
+        NormalizedInterfacePack::new(base.card().surface_a().clone(), base.card().surface_b().clone(),
+            base.card().context().clone(), claims).unwrap()
+    }
+
+    fn input(moisture: f64) -> input::Spec {
+        let text = String::from_utf8(source_spec().bytes).unwrap().replace("state 293.15 1000",
+            &format!("state 293.15 1000\nmaterial-states 1\nmaterial-state bow.fsintpk 1 moisture_content {moisture}"));
+        input::Spec::parse(text.as_bytes()).unwrap()
+    }
+    fn load(s: &mut input::Spec, gate: &CancelGate, source: &NormalizedInterfacePack) -> Result<()> {
+        s.friction.load_with_environment(&s.material_states, gate, |_| Ok(source.clone()))
+    }
+
+    #[test]
+    fn one_bow_source_changes_actual_pressure_with_held_moisture_and_preserves_callback_history() {
+        scoped(|cx, gate| {
+            let source = source(None);
+            let make = |moisture| {
+                let mut s = input(moisture);
+                load(&mut s, gate, &source).unwrap();
+                compile(cx, gate, s, 7800.0)
+            };
+            let mut dry = make(0.0);
+            let mut moist = make(0.2);
+            for name in ["wire.fsmatpk", "body.fsmatpk"] {
+                assert_eq!(dry.catalog[name].pack.content_hash(), moist.catalog[name].pack.content_hash());
+            }
+            for (a, b) in dry.performance.bank().system().components().iter()
+                .zip(moist.performance.bank().system().components()) {
+                assert_eq!(a.modes(), b.modes());
+            }
+            assert_eq!(moist.spec.bow_law(0).unwrap(),
+                &FrictionLaw::Coulomb { static_mu: 0.4, kinetic_mu: 0.2 });
+            let expected = pressure(&mut dry, 37);
+            let changed = pressure(&mut moist, 128);
+            assert!(expected.iter().zip(&changed).any(|(a,b)| (a-b).abs() > 1e-15));
+            assert_eq!(changed, pressure(&mut make(0.2), 1));
+            for ready in [&dry, &moist] {
+                assert!(ready.performance.bank().bow_interface(0).unwrap().temperature_source().is_none());
+                let frame = ready.performance.bank().system().last_frame().unwrap();
+                assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            }
+            for model in ["stribeck mu_static mu_kinetic stribeck_speed viscous_per_speed",
+                "hyperbolic mu_static mu_kinetic stribeck_speed"] {
+                let text = String::from_utf8(input(0.2).bytes).unwrap()
+                    .replace("coulomb mu_static mu_kinetic", model);
+                let mut s = input::Spec::parse(text.as_bytes()).unwrap();
+                load(&mut s, gate, &source).unwrap();
+                s.friction.validate_thermal_mode(false).unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn thermal_bow_refresh_retains_source_context_and_refuses_dynamic_coefficients_without_their_owner() {
+        scoped(|_, gate| {
+            let mut s = input(0.1);
+            load(&mut s, gate, &source(Some("T"))).unwrap();
+            assert!(s.friction.validate_thermal_mode(false).is_err());
+            s.friction.validate_thermal_mode(true).unwrap();
+            let binding = s.friction.binding("bow").unwrap().unwrap();
+            let owner = binding.temperature_source().unwrap();
+            let point = owner.initial_source().query().with("T", 310.0).unwrap()
+                .with("p", 3.0).unwrap().with("v", 0.2).unwrap();
+            let (resolved, law) = owner.coefficients_at_query(&point).unwrap();
+            assert_eq!(resolved.query().axes()["moisture_content"], 0.1);
+            assert_eq!(resolved.card_identity(), owner.initial_source().card_identity());
+            assert_ne!(law, *binding.card().friction_law());
+            for property in resolved.properties() {
+                assert_eq!(property.answer().receipt.selected,
+                    owner.initial_source().property(property.requirement().name()).unwrap().answer().receipt.selected);
+            }
+            assert!(owner.coefficients_at_query(&point.with("moisture_content", 0.2).unwrap()).is_err());
+            for dynamic in ["p", "v"] {
+                assert!(load(&mut input(0.1), gate, &source(Some(dynamic))).is_err());
+            }
+        });
+    }
+
+    #[test]
+    fn changed_or_missing_held_bow_state_refuses_before_bulk_loading() {
+        scoped(|cx, gate| {
+            let source = source(None);
+            assert!(source_spec().friction.load(gate, |_| Ok(source.clone())).is_err());
+            let mut s = input(0.1);
+            load(&mut s, gate, &source).unwrap();
+            s.material_states.get_mut("bow.fsintpk").unwrap()[0].1 = 0.2;
+            let mut reads = 0;
+            assert!(s.compile(cx, gate, |name| {
+                reads += 1; Ok(pack(name, 7800.0, 200_000.0, None))
+            }).is_err());
+            assert_eq!(reads, 0);
+            assert!(load(&mut input(0.3), gate, &source).is_err());
+            for axis in ["p", "v"] {
+                let mut s = input(0.1);
+                s.material_states.get_mut("bow.fsintpk").unwrap().push((axis.into(), 0.2));
+                assert!(load(&mut s, gate, &source).is_err());
+            }
+        });
+    }
+}

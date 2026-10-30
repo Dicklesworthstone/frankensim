@@ -9,7 +9,7 @@ use super::*;
 use fs_contact::interface_binding::thermal_friction::{
     FrictionQueryAxisKind, SourceThermalCoulomb, SourceThermalCoulombError,
 };
-use fs_material::state_point::ResolvedInterfaceStatePoint;
+use fs_material::state_point::{ResolvedInterfaceStatePoint, is_fixed_external_coordinate};
 use fs_qty::Temperature;
 use fs_tribo::{DryFrictionApplicability, DryFrictionState, DryInterfaceSystemCard};
 use std::sync::Arc;
@@ -54,23 +54,34 @@ impl DryFrictionBinding {
     }
 
     /// Bind existing source-pinned Coulomb coefficients to finite contact heat.
-    /// Only temperature may change coefficient VALUES here. Explicit pressure
-    /// and sliding-speed applicability are still checked on actual mechanics;
-    /// pressure-, speed-, path- or surface-temperature-dependent responses need
-    /// their own joint constitutive unknowns and refuse this owner.
+    /// Only the owned contact temperature evolves coefficient values here.
+    /// Original source-qualified environmental coordinates remain held in every
+    /// thermal and mechanical re-query. Explicit pressure and sliding-speed
+    /// applicability are still checked on actual mechanics; responses to those
+    /// coordinates, path or a second temperature need their own joint
+    /// constitutive unknowns and refuse this owner.
     pub fn new_temperature_source(
         source: SourceThermalCoulomb,
         applicability: DryFrictionApplicability,
         nominal_area_m2: f64,
     ) -> Result<Self, ModalFrictionError> {
+        let point = source.initial_source().query();
+        let held_environment = |axis: &String, dims: fs_qty::Dims| {
+            source.axes().nominal_pressure.as_ref() != Some(axis)
+                && !source.query_axes().iter().any(|owned| &owned.name == axis)
+                && dims != Temperature::DIMS
+                && point.axis_quantities().get(axis).is_some_and(|quantity|
+                    quantity.dims() == dims && is_fixed_external_coordinate(
+                        axis, Some(*quantity), point.axes().get(axis).copied()))
+        };
         if source.query_axes().iter().any(|axis| axis.kind != FrictionQueryAxisKind::SlidingSpeed)
             || source.initial_source().properties().iter().any(|property|
                 property.source_axes().iter().any(|(axis, dims)|
-                    axis != &source.axes().temperature || *dims != Temperature::DIMS))
+                    !((axis == &source.axes().temperature && *dims == Temperature::DIMS)
+                        || held_environment(axis, *dims))))
         {
-            return Err(invalid("modal thermal Coulomb coefficients may respond only to their owned contact temperature").into());
+            return Err(invalid("modal thermal Coulomb coefficients require their owned contact temperature and held source-qualified environment").into());
         }
-        let point = source.initial_source().query();
         let temperature = *point.axes().get(&source.axes().temperature)
             .ok_or_else(|| invalid("thermal friction lost its original temperature coordinate"))?;
         let (resolved, law) = source.coefficients_at_query(&point)?;
@@ -127,7 +138,7 @@ impl DryFrictionBinding {
         }
         let (resolved, law) = source.law.coefficients_at_query(&point)?;
         if law != *self.card.friction_law() {
-            return Err(invalid("actual pressure/speed changed a temperature-only friction coefficient").into());
+            return Err(invalid("actual pressure/speed changed a thermal friction coefficient at held environment").into());
         }
         Ok(Some(resolved))
     }
