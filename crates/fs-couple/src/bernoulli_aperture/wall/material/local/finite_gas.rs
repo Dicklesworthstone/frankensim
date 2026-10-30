@@ -126,13 +126,13 @@ fn native<E>(error: fs_duct::DuctError) -> FiniteGasDgError<E> {
 }
 
 /// Difference specific energies before multiplying, preserving formation references.
-fn stored_change(old: &ClosedGasParcel, next: &ClosedGasParcel) -> f64 {
+pub(crate) fn stored_change(old: &ClosedGasParcel, next: &ClosedGasParcel) -> f64 {
     let u = old.state().specific_internal_energy_j_kg();
     next.mass_kg() * (next.state().specific_internal_energy_j_kg() - u)
         + (next.mass_kg() - old.mass_kg()) * u
 }
 
-fn field<E>(original: &AxialGasField, gas: &ClosedGasParcel)
+pub(crate) fn field<E>(original: &AxialGasField, gas: &ClosedGasParcel)
     -> Result<AxialGasField, FiniteGasDgError<E>>
 {
     let mut context = QueryPoint::new();
@@ -160,15 +160,7 @@ fn field<E>(original: &AxialGasField, gas: &ClosedGasParcel)
     Ok(result)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare<S, E, C: FnMut() -> bool>(
-    duct: &DgDuct, state: &DgState, propagator: &DgPropagator,
-    gas: &ClosedGasParcel, ports: &[PortInput], controls: FiniteGasDgSolve,
-    mut evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
-        -> Result<FiniteGasDgBackground<S>, E>,
-    cancelled: &mut C,
-) -> Result<Candidate<S>, FiniteGasDgError<E>> {
-    check(cancelled)?;
+pub(crate) fn admit_controls<E>(controls: FiniteGasDgSolve) -> Result<(), FiniteGasDgError<E>> {
     let [lo, hi] = controls.work_bracket_j;
     if !lo.is_finite() || !hi.is_finite() || lo > hi || lo > 0.0 || hi < 0.0
         || !positive(controls.work_tolerance_j) || !positive(controls.energy_tolerance_j)
@@ -182,6 +174,20 @@ fn prepare<S, E, C: FnMut() -> bool>(
     {
         return Err(FiniteGasDgError::Invalid("positive diffusion error admission required"));
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare<S, E, C: FnMut() -> bool>(
+    duct: &DgDuct, state: &DgState, propagator: &DgPropagator,
+    gas: &ClosedGasParcel, ports: &[PortInput], controls: FiniteGasDgSolve,
+    mut evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C)
+        -> Result<FiniteGasDgBackground<S>, E>,
+    cancelled: &mut C,
+) -> Result<Candidate<S>, FiniteGasDgError<E>> {
+    check(cancelled)?;
+    admit_controls(controls)?;
+    let [lo, hi] = controls.work_bracket_j;
     let original = duct.gas_field().ok_or(FiniteGasDgError::Invalid(
         "finite gas coupling requires an original complete source field",
     ))?;
@@ -296,7 +302,7 @@ fn prepare<S, E, C: FnMut() -> bool>(
     Ok(candidate)
 }
 
-fn heated<C: FnMut() -> bool>(
+pub(crate) fn heated<C: FnMut() -> bool>(
     old: &ClosedGasParcel, heat_j: f64, work: f64, solve: GasEnergySolve, cancelled: &mut C,
 ) -> Result<FiniteGasDgBackground<GasCompositionStep>, GasEnergyError> {
     let mut gas = old.clone();

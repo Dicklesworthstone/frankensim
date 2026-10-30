@@ -8484,6 +8484,43 @@ test execution remains unverified: dependency code generation was interrupted
 under sustained shared memory pressure before a test binary ran. This is not
 complete constellation qualification or measured acoustic validation.
 
+## Finite thermochemical feedback through the complete acoustic load
+
+`DgPortLoad::step_with_finite_gas_controlled` connects the original finite
+thermochemical inventory to the complete continuing bore, finite terminal
+passages, branch coupling and causal exterior load. One original held-flow
+sample is followed by the existing scalar work solve. Each trial starts from
+the same original gas inventory and the same marched acoustic histories;
+the native gas transfer supplies the actual bore AND channel parameter work.
+The existing heat convenience uses the original caloric/transport source
+owner, with no replacement gas equation or integration scheme.
+
+The inventory's physical volume must equal the uniform circular main bore
+plus all of its main-gas slit/circular terminal passages. Independently
+sourced branches and their passages remain separate inventories. Their
+original equilibrium-pressure requirements, computed exterior source gates,
+channel Mach limits and sum-of-absolute-work allowance remain active.
+
+`FiniteGasDgPortStep` retains the original background report, gas energy change,
+heat, separately transported enthalpy, signed work and actual native transfer.
+The whole endpoint balance includes represented bore/branch/channel storage,
+original loss and net acoustic port work. Rational terminal and driven-mouth
+exchange remain signed boundary work; no rational storage is invented.
+Historical interval frames and impulses survive the material refresh. Returned
+endpoint pressures and the full current storage/parameter-work ledger use the
+accepted gas. All source, work, volume and cancellation checks precede joint
+gas/load publication.
+
+This is a bounded first-order frozen-medium partition at fixed geometry.
+Acoustic volume flow does not imply thermodynamic mass transport, and original
+wall/viscous/numerical loss is not silently deposited into the background.
+The callback owns any actual heat/species process and returns uncommitted
+companions for publication only after success. Focused synthetic regressions
+cover independent caloric/compressive-energy references, native nozzle/species
+transfer with per-cell momentum and kinetic work in both channel geometries,
+and refusal/cancellation/exact retry. Native execution and measured physical
+validation remain separate gates. This advances MR05/MR06/MR33/MR67.
+
 ## Continuing spatial dielectric charge through thermal phase change
 
 `ConductionThermalNetwork::step_dielectric_candidate` connects the native

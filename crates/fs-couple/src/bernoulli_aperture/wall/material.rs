@@ -24,6 +24,10 @@ pub use local::finite_gas::{
     FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgLoss, FiniteGasDgSolve,
     FiniteGasDgStep,
 };
+pub(crate) use local::finite_gas::{
+    admit_controls as admit_finite_gas_controls, field as finite_gas_field,
+    heated as heated_finite_gas, stored_change as finite_gas_stored_change,
+};
 
 pub use local::finite_gas::transport::{
     FiniteGasDgBinding, FiniteGasDgNode, FiniteGasDgTransportInput,

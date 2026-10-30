@@ -11,6 +11,9 @@ pub mod input;
 /// Computed exterior radiation from the actual endpoint geometry and gas.
 pub mod radiation;
 
+/// Finite thermochemical storage and feedback on this complete continuing load.
+pub mod finite_gas;
+
 mod gas;
 pub use gas::{DgGasRefresh, DgPortGasUpdate};
 pub(crate) use gas::prepare_dg_gas;
