@@ -148,7 +148,7 @@ impl<'n, 'a> FrameThermoelasticBinding<'n, 'a> {
         Ok(FrameThermoelasticSystem {
             frames, owned_connections, connection_heat_destinations: Vec::new(), mechanical,
             prepared: prepared.ok_or_else(|| invalid("missing shared material preparation"))?,
-            members, states, origin_s,
+            source, electrical: None, members, states, origin_s,
         })
     }
 
