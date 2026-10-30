@@ -236,6 +236,17 @@ pub struct ThirdBodyHeatInput<P> {
     pub transport: StepCoefficients<P>,
 }
 
+/// Reversible mechanical/caloric exchange around the same physical friction
+/// input. The constitutive owner supplies both terms from its admitted potential;
+/// neither is an independently authored heating fraction or material damping.
+pub struct ThirdBodyThermoelasticInput<P> {
+    pub heat: ThirdBodyHeatInput<P>,
+    /// Signed transfer into the existing caloric cell [J].
+    pub reversible_heat_j: f64,
+    /// Actual change of the mechanical potential's entropy [J/K].
+    pub mechanical_entropy_change_j_k: f64,
+}
+
 /// Independent thermal cell, whole-network, layer and combined joule gates.
 #[derive(Clone, Copy, Debug)]
 pub struct ThirdBodyHeatTolerances {
@@ -252,15 +263,17 @@ pub struct ThirdBodyHeatReport {
     /// Signed conduction into each body, including ordinary unequal-T exchange.
     pub body_heat_j: [f64; 2],
     pub dissipated_j: f64,
+    /// Signed internal exchange from the mechanical potential, separate from D.
+    pub reversible_heat_j: f64,
     /// Actual change in the EXISTING layer's mass times specific enthalpy.
     pub layer_stored_change_j: f64,
     /// Other heat reaching the layer from its original boundary and source.
     pub layer_external_heat_j: f64,
-    /// Layer storage + body conduction - friction work - other layer heat.
+    /// Layer storage + body conduction - friction/reversible/other layer heat.
     pub layer_energy_residual_j: f64,
     pub external_heat_j: f64,
     pub thermal: EnergyAudit,
-    /// Original total storage - outside heat - physical friction work.
+    /// Original caloric storage - outside heat - friction - reversible transfer.
     pub total_energy_residual_j: f64,
     /// Optional exact caloric storage and endpoint-quadrature entropy account.
     /// Includes the finite layer once; its contacts remain network conduction.
@@ -273,6 +286,8 @@ struct Endpoint<P> {
     conductances: [f64; 2],
     body_heat: [f64; 2],
     dissipated: f64,
+    reversible: f64,
+    mechanical_entropy_change: f64,
     layer_storage: f64,
     layer_external: f64,
     external: f64,
@@ -317,7 +332,10 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
         resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyHeatInput<P>, E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
-        self.evaluate_entropy_option(energy_increments_j, resolve, false, checkpoint)
+        self.evaluate_entropy_option(energy_increments_j, |state, temperature| {
+            Ok(ThirdBodyThermoelasticInput { heat: resolve(state, temperature)?,
+                reversible_heat_j: 0.0, mechanical_entropy_change_j_k: 0.0 })
+        }, false, checkpoint)
     }
 
     /// Audit the SAME finite-layer candidate without another material callback.
@@ -335,13 +353,30 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
         resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyHeatInput<P>, E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
-        self.evaluate_entropy_option(energy_increments_j, resolve, true, checkpoint)
+        self.evaluate_entropy_option(energy_increments_j, |state, temperature| {
+            Ok(ThirdBodyThermoelasticInput { heat: resolve(state, temperature)?,
+                reversible_heat_j: 0.0, mechanical_entropy_change_j_k: 0.0 })
+        }, true, checkpoint)
+    }
+
+    /// The same thermal residual with signed reciprocal heat from an admitted
+    /// mechanical free energy. Physical loss remains nonnegative and is counted
+    /// once. Reversible exchange is removed from external-source classification;
+    /// its mechanical entropy is included separately when the audit is requested.
+    pub fn evaluate_thermoelastic<P, E: From<DepositionError>>(
+        &self, energy_increments_j: &[f64],
+        resolve: impl FnOnce(&DepositionSimulation<'m>, f64)
+            -> Result<ThirdBodyThermoelasticInput<P>, E>,
+        audit_entropy: bool,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
+        self.evaluate_entropy_option(energy_increments_j, resolve, audit_entropy, checkpoint)
     }
 
     fn evaluate_entropy_option<P, E: From<DepositionError>>(
         &self,
         energy_increments_j: &[f64],
-        resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyHeatInput<P>, E>,
+        resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyThermoelasticInput<P>, E>,
         with_entropy: bool,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
@@ -353,7 +388,10 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
             |state: &DepositionSimulation<'m>| -> Result<StepCoefficients<Endpoint<P>>, E> {
                 let layer_id = self.route.layer_cell();
                 let temperature = state.temperature_k(layer_id)?;
-                let input = resolve(state, temperature)?;
+                let ThirdBodyThermoelasticInput { heat: input, reversible_heat_j,
+                    mechanical_entropy_change_j_k } = resolve(state, temperature)?;
+                finite(reversible_heat_j)?;
+                finite(mechanical_entropy_change_j_k)?;
                 if !input.dissipated_j.is_finite() || input.dissipated_j < 0.0 {
                     return Err(invalid(
                         "third-body heat needs finite nonnegative physical friction work",
@@ -412,8 +450,9 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
                     )?;
                 }
                 let layer_external = finite(dt * layer_power)?;
-                let power = finite(input.dissipated_j / dt)?;
-                if input.dissipated_j > 0.0 && power == 0.0 {
+                let caloric_heat_j = finite(input.dissipated_j + reversible_heat_j)?;
+                let power = finite(caloric_heat_j / dt)?;
+                if caloric_heat_j != 0.0 && power == 0.0 {
                     return Err(DepositionError::Arithmetic.into());
                 }
                 let source = sources_w.entry(layer_id).or_insert(0.0);
@@ -427,6 +466,8 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
                         conductances,
                         body_heat,
                         dissipated: input.dissipated_j,
+                        reversible: reversible_heat_j,
+                        mechanical_entropy_change: mechanical_entropy_change_j_k,
                         layer_storage,
                         layer_external,
                         external,
@@ -445,7 +486,8 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
             FrictionHeatEntropy::from_trial(
                 trial.entropy_audit().ok_or(DepositionError::Arithmetic)?,
                 other_sources, endpoint.dissipated, endpoint.temperature, 0.0,
-            )
+            )?.with_mechanical_storage(endpoint.mechanical_entropy_change,
+                endpoint.reversible, endpoint.temperature)
         }).transpose()?;
         check()?;
         let report = ThirdBodyHeatReport {
@@ -453,17 +495,20 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
             conductances_w_k: endpoint.conductances,
             body_heat_j: endpoint.body_heat,
             dissipated_j: endpoint.dissipated,
+            reversible_heat_j: endpoint.reversible,
             layer_stored_change_j: endpoint.layer_storage,
             layer_external_heat_j: endpoint.layer_external,
             layer_energy_residual_j: finite(
                 endpoint.layer_storage + finite(endpoint.body_heat[0] + endpoint.body_heat[1])?
                     - endpoint.dissipated
+                    - endpoint.reversible
                     - endpoint.layer_external,
             )?,
             external_heat_j: endpoint.external,
             thermal: *trial.audit(),
             total_energy_residual_j: finite(
-                trial.audit().stored_energy_change_j - endpoint.external - endpoint.dissipated,
+                trial.audit().stored_energy_change_j - endpoint.external - endpoint.dissipated
+                    - endpoint.reversible,
             )?,
             entropy,
         };

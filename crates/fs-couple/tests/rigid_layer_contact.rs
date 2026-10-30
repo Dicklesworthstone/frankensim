@@ -1,6 +1,9 @@
 //! G0/G1/G3/G4: native finite-thickness shear and its original finite heat store.
 //! Synthetic material values exercise the declared linear director interpolation;
 //! none is a calibrated layer specimen or a complete bending/inertial solid.
+#[path = "rigid_layer_contact/thermal.rs"]
+mod thermoelastic;
+
 use fs_couple::friction_heat::third_body::rigid::*;
 use fs_couple::friction_heat::third_body::{ThirdBodyHeatRoute, ThirdBodyHeatTolerances};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};

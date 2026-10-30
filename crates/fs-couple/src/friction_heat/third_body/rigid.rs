@@ -19,9 +19,10 @@
 
 use super::{
     ThirdBodyHeatInput, ThirdBodyHeatReport, ThirdBodyHeatRoute, ThirdBodyHeatStep,
-    ThirdBodyHeatTolerances, half_distances,
+    ThirdBodyHeatTolerances, ThirdBodyThermoelasticInput, half_distances,
 };
 use fs_mbd::{DynamicsError, MassProperties, RigidBodyState, Vec3};
+use fs_material::state_point::ShearLayerThermalSlopes;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
@@ -34,6 +35,9 @@ use fs_tribo::{
     TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput, TriboError,
 };
 use std::cell::{Cell, RefCell};
+
+/// Source-pinned thermoelastic layer feedback on the original rigid/heat solve.
+pub mod thermal;
 
 /// The actual opposing face centres and unchanged material tangent frame.
 /// The normal points from face A to face B. Arms are COM-relative in each
@@ -380,8 +384,23 @@ pub struct HeatedRigidLayerReport<P> {
     pub nonlinear: NewtonReport,
     pub trials: usize,
     pub source: P,
+    /// Present only for the explicitly selected source-derived affine potential.
+    pub thermoelastic: Option<RigidLayerThermoelasticReport>,
     /// Delta(K_bodies + U_layer_shear + H_original_network) - Q_external.
     pub combined_energy_residual_j: f64,
+}
+
+/// Actual two-temperature mechanical storage; none of these terms is plastic
+/// or Maxwell dissipation. The native constitutive report retains its original
+/// frozen-coefficient mechanical work account alongside this correction.
+#[derive(Clone, Copy, Debug)]
+pub struct RigidLayerThermoelasticReport {
+    pub coefficient_free_energy_change_j: f64,
+    pub free_energy_change_j: f64,
+    pub mechanical_entropy_change_j_k: f64,
+    pub entropy_energy_change_j: f64,
+    pub internal_energy_change_j: f64,
+    pub reversible_heat_j: f64,
 }
 
 /// Original body, retained deformation and finite enthalpy endpoints. Publish
@@ -420,6 +439,7 @@ struct HeatStage<P> {
     mechanical: Stage,
     law: ThirdBodyLayerContact,
     source: P,
+    thermoelastic: Option<RigidLayerThermoelasticReport>,
 }
 
 /// Joint finite-layer force, retained slip and ORIGINAL finite-cell heat solve.
@@ -448,6 +468,22 @@ pub fn step_heated_rigid_layer_candidate<'t, P, E>(
     controls: HeatedRigidLayerSolve,
     force_guess_n: [f64; 2],
     energy_guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'t>, f64) -> Result<RigidLayerHeatSource<P>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<HeatedRigidLayerCandidate<'t, P>, HeatedRigidLayerError<E>> {
+    step_heated_impl(bodies, properties, history, thermal, route, target_s,
+        normal_n, law_solve, controls, force_guess_n, energy_guess_j, None, resolve, cancelled)
+}
+
+// The optional derivative is private to the source-bound thermal ingress. The
+// original public callback cannot supply an unadmitted elastic temperature law.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn step_heated_impl<'t, P, E>(
+    bodies: &[RigidBodyState; 2], properties: [MassProperties; 2],
+    history: &RigidLayerHistory, thermal: &DepositionSimulation<'t>,
+    route: &ThirdBodyHeatRoute, target_s: f64, normal_n: f64,
+    law_solve: TangentialSolveConfig, controls: HeatedRigidLayerSolve,
+    force_guess_n: [f64; 2], energy_guess_j: &[f64], thermal_slopes: Option<&ShearLayerThermalSlopes>,
     resolve: impl Fn(&DepositionSimulation<'t>, f64) -> Result<RigidLayerHeatSource<P>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<HeatedRigidLayerCandidate<'t, P>, HeatedRigidLayerError<E>> {
@@ -489,6 +525,10 @@ pub fn step_heated_rigid_layer_candidate<'t, P, E>(
     )?;
     prepared.admit_thermal_route(route, controls.mechanical.geometry_tolerance_m)?;
     let heat_step = ThirdBodyHeatStep::new(thermal, target_s, route, &poll)?;
+    let old_thermodynamics = thermal_slopes.map(|slopes|
+        history.law.thermodynamics_with_relaxation(&history.deformation,
+            slopes.equilibrium_n_m_k, &slopes.relaxation_n_m_k)
+            .map_err(RigidLayerError::from)).transpose()?;
     let count = heat_step.cell_ids().len();
     let scale = controls.energy_coordinate_j_per_n;
     let trials = Cell::new(0usize);
@@ -504,7 +544,7 @@ pub fn step_heated_rigid_layer_candidate<'t, P, E>(
         let coefficients =
             |endpoint: &DepositionSimulation<'t>,
              temperature: f64|
-             -> Result<ThirdBodyHeatInput<HeatStage<P>>, HeatedRigidLayerError<E>> {
+             -> Result<ThirdBodyThermoelasticInput<HeatStage<P>>, HeatedRigidLayerError<E>> {
                 let source =
                     resolve(endpoint, temperature).map_err(HeatedRigidLayerError::Source)?;
                 if source.law.temperature_kelvin().to_bits() != temperature.to_bits() {
@@ -513,10 +553,15 @@ pub fn step_heated_rigid_layer_candidate<'t, P, E>(
                     )
                     .into());
                 }
-                let continued = source
-                    .law
-                    .continue_state(&history.deformation)
-                    .map_err(RigidLayerError::from)?;
+                let continuation = if thermal_slopes.is_some() {
+                    Some(source.law.continue_state_with_work(&history.deformation)
+                        .map_err(RigidLayerError::from)?)
+                } else { None };
+                let continued = match &continuation {
+                    Some(value) => value.state.clone(),
+                    None => source.law.continue_state(&history.deformation)
+                        .map_err(RigidLayerError::from)?,
+                };
                 let mechanical = prepared.evaluate(
                     &source.law,
                     &continued,
@@ -525,7 +570,29 @@ pub fn step_heated_rigid_layer_candidate<'t, P, E>(
                     law_solve,
                     [x[0], x[1]],
                 )?;
-                Ok(ThirdBodyHeatInput {
+                let thermoelastic = if let (Some(slopes), Some(old), Some(continuation)) =
+                    (thermal_slopes, old_thermodynamics, continuation) {
+                    let new = source.law.thermodynamics_with_relaxation(
+                        &mechanical.report.constitutive.state, slopes.equilibrium_n_m_k,
+                        &slopes.relaxation_n_m_k)
+                        .map_err(RigidLayerError::from)?;
+                    let coefficient = continuation.coefficient_free_energy_change_j;
+                    let entropy_energy_change_j = temperature * new.entropy_j_k
+                        - history.law.temperature_kelvin() * old.entropy_j_k;
+                    Some(RigidLayerThermoelasticReport {
+                        coefficient_free_energy_change_j: coefficient,
+                        free_energy_change_j: mechanical.report.constitutive.stored_change_j + coefficient,
+                        mechanical_entropy_change_j_k: new.entropy_j_k - old.entropy_j_k,
+                        entropy_energy_change_j,
+                        internal_energy_change_j: new.internal_energy_j - old.internal_energy_j,
+                        reversible_heat_j: -coefficient - entropy_energy_change_j,
+                    })
+                } else { None };
+                Ok(ThirdBodyThermoelasticInput {
+                    reversible_heat_j: thermoelastic.map_or(0.0, |value| value.reversible_heat_j),
+                    mechanical_entropy_change_j_k: thermoelastic.map_or(0.0,
+                        |value| value.mechanical_entropy_change_j_k),
+                    heat: ThirdBodyHeatInput {
                     dissipated_j: mechanical.report.constitutive.dissipated_j,
                     conductivity_w_m_k: source.conductivity_w_m_k,
                     area_resistance_m2_k_w: source.area_resistance_m2_k_w,
@@ -536,15 +603,12 @@ pub fn step_heated_rigid_layer_candidate<'t, P, E>(
                             mechanical,
                             law: source.law,
                             source: source.transport.payload,
+                            thermoelastic,
                         },
                     },
-                })
+                }})
             };
-        if entropy {
-            heat_step.evaluate_with_entropy(&energy, coefficients, &poll)
-        } else {
-            heat_step.evaluate(&energy, coefficients, &poll)
-        }
+        heat_step.evaluate_thermoelastic(&energy, coefficients, entropy, &poll)
     };
     let problem = FallibleFiniteDifference::new(
         count + 2,
@@ -583,8 +647,10 @@ pub fn step_heated_rigid_layer_candidate<'t, P, E>(
     let trial = evaluate(&solver.x, controls.audit_entropy)?;
     let mechanical = &trial.payload().mechanical.report;
     mechanical.admit(controls.mechanical)?;
+    let mechanical_storage = trial.payload().thermoelastic.map_or(
+        mechanical.constitutive.stored_change_j, |value| value.internal_energy_change_j);
     let combined = mechanical.kinetic_energy_change_j
-        + mechanical.constitutive.stored_change_j
+        + mechanical_storage
         + trial.report().thermal.stored_energy_change_j
         - trial.report().external_heat_j;
     if !combined.is_finite() || combined.abs() > controls.combined_energy_tolerance_j {
@@ -610,6 +676,7 @@ pub fn step_heated_rigid_layer_candidate<'t, P, E>(
             nonlinear: result.report,
             trials: trials.get(),
             source: staged.source,
+            thermoelastic: staged.thermoelastic,
             combined_energy_residual_j: combined,
         },
     })

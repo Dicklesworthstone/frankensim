@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 /// Entropy account of one coupled friction/thermal candidate, in J/K.
 ///
-/// Storage equals reservoir input + network/interface conduction + friction
+/// Caloric plus mechanical entropy storage equals reservoir input + network/interface conduction + friction
 /// generation + other source-at-cell contribution + temporal defect + interface
 /// residual/T, to floating-point summation. Acceptance still requires the
 /// original cell, thermal, interface and total energy gates. Endpoint quadrature
@@ -19,6 +19,13 @@ use std::collections::BTreeMap;
 pub struct FrictionHeatEntropy {
     /// Exact original caloric integrals, including latent storage once.
     pub thermal_storage_change_j_k: f64,
+    /// Mechanical entropy from an explicitly admitted temperature-dependent
+    /// potential. Zero for isothermal potentials; this is storage, not production.
+    pub mechanical_storage_change_j_k: f64,
+    /// Signed reversible heat into the caloric owner divided by its endpoint
+    /// temperature. This internal transfer is not friction generation or an
+    /// unclassified external source; it is already inside caloric storage.
+    pub reversible_caloric_exchange_j_k: f64,
     /// Actual ambient/support reservoir heat divided by its own temperature.
     pub reservoir_entropy_input_j_k: f64,
     /// Original network links and ambient/support contacts. The direct friction
@@ -136,6 +143,17 @@ impl InterfaceEntropy {
     }
 }
 impl FrictionHeatEntropy {
+    pub(super) fn with_mechanical_storage(mut self, entropy_change_j_k: f64,
+        reversible_heat_j: f64, temperature_k: f64) -> Result<Self, DepositionError> {
+        self.mechanical_storage_change_j_k = finite(entropy_change_j_k)?;
+        self.reversible_caloric_exchange_j_k = finite(reversible_heat_j / temperature_k)?;
+        // The original caloric defect contains the reversible transfer. Add
+        // the separately owned mechanical entropy to close total storage;
+        // neither term may be labeled irreversible friction production.
+        self.temporal_defect_j_k = finite(self.temporal_defect_j_k + entropy_change_j_k)?;
+        Ok(self)
+    }
+
     pub(super) fn from_trial(
         thermal: &EntropyAudit,
         interface: InterfaceEntropy,
@@ -191,6 +209,8 @@ impl FrictionHeatEntropy {
         }
         Ok(Self {
             thermal_storage_change_j_k: thermal.thermal_storage_change_j_k,
+            mechanical_storage_change_j_k: 0.0,
+            reversible_caloric_exchange_j_k: 0.0,
             reservoir_entropy_input_j_k: reservoir,
             network_conduction_generation_j_k: network,
             interface_conduction_generation_j_k: conduction,
