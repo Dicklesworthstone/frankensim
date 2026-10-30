@@ -1314,3 +1314,40 @@ source applicability; they do not resolve bulk liquid flow or pinch-off.
 Inverse gap/radius geometry has analytic first variations and a reciprocal Hessian. A symmetric discrete gradient and actual circular-perimeter resistance exchange normal work with surface storage, viscous line loss and pinning loss. Canonical physical coordinates retain separate geometric residuals, and shape/force/work estimates must fit explicit numerical budgets. Bounded local solves and actual-source mechanical continuation share the existing dynamic load-line owner.
 
 Six focused test groups cover original Young-equilibrium reduction, independent radial-graph shape integration and first variations, physical perimeter losses and eventual pinning, analytic implicit tangent, second-order refinement against independent shooting/RK4, source/domain restrictions and atomic refusal. Liquid motion remains quasistatic and line-friction dominated; unequal circular footprints, bulk-flow inertia/dissipation, topology changes and full 3-D stability remain outside this branch.
+
+
+## Independently moving circular wetting lines on unlike surfaces
+
+`capillary_bridge::axisymmetric::asymmetric_contact_line` retains the original
+three-dimensional fixed-volume Young--Laplace bridge and both ordered wetting
+sources. The two circular footprints may have different Young angles, line
+frictions, pinning thresholds and surface histories. The original equilibrium
+owner requires a common medium, third body and surrounding environment while
+retaining each surface's independent history in its source identity.
+
+A three-coordinate inverse solve recovers gap and both physical radii through
+the original first-integral meridian quadratures. Analytic first variations and
+the full reciprocal Hessian feed one average-vector-field work quadrature.
+A coupled active-set solve admits one pinned footprint while the other moves,
+and retains the actual per-line circumference: viscous loss is
+`2*pi*zeta_i*mean(radius_i)*delta_radius_i^2/dt`. Advancing/receding pinning work,
+normal mechanical work and signed surface storage are separate accounts. The
+implicit normal tangent includes both footprint responses. All hot-path arrays
+are fixed-size; geometry, quadrature, iteration and backtrack work are bounded.
+
+Accepted physical coordinates retain numerical shape discrepancies separately,
+so inverse residuals do not accumulate as gap or footprint drift. Force and work
+uncertainty estimates include quadrature, inverse geometry and local implicit
+residuals. These estimates are not interval certificates. Cancellation or any
+source/domain/work/accuracy refusal leaves the immutable accepted state intact.
+The shared dynamic-contact-line load-line seam exposes the same source to native
+mechanics without a substitute surface law.
+
+Admission remains quasistatic, line-friction dominated, connected, acute-angle,
+nonpositive-pressure and interior-neck, with explicit gravity and low-speed
+screens and a conservative fixed-footprint axisymmetric stability criterion.
+Bulk-flow loss/inertia, positive-pressure topology branches, evaporation,
+pinch-off and full three-dimensional stability are outside this owner. G1/G3
+checks compare both halves against independent radial-graph integration and
+recover second-order time refinement against independent two-line motion;
+G0/G4 checks retain source/history, budgets, cancellation and identical retry.

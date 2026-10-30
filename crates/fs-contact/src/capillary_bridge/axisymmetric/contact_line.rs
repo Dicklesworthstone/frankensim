@@ -419,7 +419,7 @@ fn poll(gate: &CancelGate) -> Result<(), ContactLineError> {
     }
 }
 impl AxisymmetricContactLineConfig {
-    fn numbers(self) -> [f64; 17] {
+    pub(super) fn numbers(self) -> [f64; 17] {
         [
             self.minimum_angle_radians,
             self.maximum_angle_radians,
@@ -440,7 +440,7 @@ impl AxisymmetricContactLineConfig {
             self.shape.gap_relative_tolerance,
         ]
     }
-    fn validate(self) -> Result<(), ContactLineError> {
+    pub(super) fn validate(self) -> Result<(), ContactLineError> {
         self.shape.validate().map_err(original_error)?;
         if self.numbers().iter().any(|v| !v.is_finite() || *v <= 0.0)
             || self.minimum_angle_radians >= self.maximum_angle_radians

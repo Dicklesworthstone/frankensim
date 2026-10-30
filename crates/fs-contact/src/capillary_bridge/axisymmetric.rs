@@ -52,6 +52,9 @@ pub mod load_line;
 /// Finite-rate circular contact-line motion on the original Young--Laplace shape.
 pub mod contact_line;
 
+/// Independently moving circular contact lines on unlike original surfaces.
+pub mod asymmetric_contact_line;
+
 /// Explicit suction branch; q=-Delta_p*a/gamma, a the actual neck radius.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AxisymmetricBranch {
@@ -296,7 +299,15 @@ impl SourceAxisymmetricCapillaryBridge {
                 .require_liquid_state(&liquid)
                 .map_err(BridgeError::from)?;
         }
-        if wetting[0].context() != wetting[1].context() {
+        // The liquid and surrounding environment are common; each original
+        // solid surface may have its own preparation/contamination history.
+        // Those histories remain in the ordered source identities below.
+        let first = wetting[0].context();
+        let second = wetting[1].context();
+        if first.medium != second.medium
+            || first.third_body != second.third_body
+            || first.environment != second.environment
+        {
             return Err(invalid("common original surface environment"));
         }
         let sigma = liquid
