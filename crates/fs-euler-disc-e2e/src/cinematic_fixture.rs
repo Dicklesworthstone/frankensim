@@ -55,7 +55,7 @@ use crate::structural_acoustics::{
     RetardedFarFieldObserverControls, RigidDiscBroadbandRadiationArtifact,
     StructuralBroadbandRadiationArtifact, StructuralBroadbandRadiationRequest,
     StructuralMeshControls, StructuralModalBasisError, StructuralModeRequest,
-    StructuralResidualFlexibilityControls, StructuralResidualFlexibilityEstimateBasis,
+    StructuralRadiationModeCoverage, StructuralResidualFlexibilityControls, StructuralResidualFlexibilityEstimateBasis,
     StructuralResidualModalLossSpectrum, build_rectangular_plate_modal_basis,
     build_structural_broadband_radiation_artifact,
     build_structural_residual_flexibility_estimate_basis, superpose_pressure_signals,
@@ -8632,14 +8632,9 @@ fn prepare_fixture_disc_acoustics(
         },
         cx,
     ) {
-        Ok(basis) if basis.certified_in_band_mode_count == 0 => Some(basis),
-        Ok(_) => {
-            return Err(CinematicFixtureError::Pipeline(
-                "critique broadband disc path refuses to omit certified in-band modes".into(),
-            ));
-        }
+        Ok(basis) => Some(basis),
         Err(StructuralModalBasisError::InvalidRequest { what })
-            if what == "residual-flexibility enrichment window contains no elastic modes" =>
+            if what == "structural partition window contains no elastic modes" =>
         {
             None
         }
@@ -8662,8 +8657,7 @@ fn prepare_fixture_disc_acoustics(
                 material_state_identity: basis.material_state_identity,
                 damping_model_identity: physical_disc.damping_model_identity,
                 loss_factors: basis
-                    .enrichment_modes
-                    .iter()
+                    .radiation_modes(StructuralRadiationModeCoverage::InBandAndEnrichment)
                     .map(|mode| {
                         2.0 * physical_disc
                             .rayleigh_damping
@@ -8674,6 +8668,7 @@ fn prepare_fixture_disc_acoustics(
             build_structural_broadband_radiation_artifact(
                 &StructuralBroadbandRadiationRequest {
                     basis,
+                    coverage: StructuralRadiationModeCoverage::InBandAndEnrichment,
                     loss: &loss,
                     medium: ResolvedAcousticMedium {
                         gas: &gas,
@@ -9162,16 +9157,16 @@ fn build_physical_audio(
                 broadband_radiation_identity: source.identity,
                 left_pressure_identity: left.identity,
                 right_pressure_identity: right.identity,
-                retained_mode_count: basis.enrichment_modes.len(),
+                retained_mode_count: basis.radiation_modes(source.coverage).count(),
                 minimum_mode_frequency_hz: basis
-                    .enrichment_modes
-                    .first()
-                    .expect("admitted residual basis contains enrichment modes")
+                    .radiation_modes(source.coverage)
+                    .next()
+                    .expect("admitted radiation subspace is nonempty")
                     .frequency_hz,
                 maximum_mode_frequency_hz: basis
-                    .enrichment_modes
+                    .radiation_modes(source.coverage)
                     .last()
-                    .expect("admitted residual basis contains enrichment modes")
+                    .expect("admitted radiation subspace is nonempty")
                     .frequency_hz,
                 minimum_directivity_captured_fraction: source
                     .radiation
@@ -9195,7 +9190,7 @@ fn build_physical_audio(
             FixtureDiscAcousticRadiator::OmittedNoMechanicsCadenceElasticDrive {
                 structural_basis_identity: basis.identity,
                 broadband_radiation_identity: source.identity,
-                retained_mode_count: basis.enrichment_modes.len(),
+                retained_mode_count: basis.radiation_modes(source.coverage).count(),
             }
         }
         _ => {

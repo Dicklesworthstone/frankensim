@@ -76,7 +76,7 @@ use crate::{
 /// Schema version of the integrated structural modal artifact.
 pub const STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION: u32 = 1;
 /// Schema version of the count-certified residual-flexibility estimate.
-pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION: u32 = 1;
+pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION: u32 = 2;
 /// Exact limitation attached to every truncated residual-flexibility basis.
 pub const STRUCTURAL_RESIDUAL_FLEXIBILITY_NO_CLAIM: &str = "Estimate-only: inertia certifies eigenvalue counts, not an enclosure of the eigenvector-derived compliance; eigenpair residuals, modes above the declared enrichment band, mesh and constitutive error, dynamic correction, and broadband radiation/audio are not bounded";
 /// Limitation carried by the broadband body-frame source artifact and stem.
@@ -90,13 +90,13 @@ pub const MAX_PHYSICAL_PRESSURE_OBSERVERS: usize = 64;
 const STRUCTURAL_MODAL_BASIS_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-modal-basis.v1";
 const STRUCTURAL_RESIDUAL_FLEXIBILITY_IDENTITY_DOMAIN: &str =
-    "org.frankensim.fs-euler-disc-e2e.structural-residual-flexibility.v1";
+    "org.frankensim.fs-euler-disc-e2e.structural-residual-flexibility.v2";
 const STRUCTURAL_RESIDUAL_RESPONSE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-residual-response.v1";
 const STRUCTURAL_BROADBAND_SOURCE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.structural-broadband-source.v1";
 const STRUCTURAL_BROADBAND_ARTIFACT_IDENTITY_DOMAIN: &str =
-    "org.frankensim.fs-euler-disc-e2e.structural-broadband-artifact.v1";
+    "org.frankensim.fs-euler-disc-e2e.structural-broadband-artifact.v2";
 const RIGID_DISC_BROADBAND_SOURCE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.rigid-disc-broadband-source.v1";
 const RIGID_DISC_BROADBAND_ARTIFACT_IDENTITY_DOMAIN: &str =
@@ -265,7 +265,10 @@ pub struct StructuralResidualFlexibilityEstimateBasis {
     pub maximum_rigid_stiffness_relative_residual: f64,
     /// Largest M-inner-product defect among rigid and retained elastic modes.
     pub maximum_mass_orthogonality_error: f64,
-    /// Certified mass-normalized enrichment modes with full nodal/panel shapes.
+    /// Certified mass-normalized modes inside the forcing band. These are
+    /// dynamic coordinates, never part of the static residual-flexibility sum.
+    pub in_band_modes: Vec<StructuralMode>,
+    /// Certified mass-normalized complement above the forcing band.
     pub enrichment_modes: Vec<StructuralMode>,
     /// Declared forcing band whose upper edge begins the residual sum [Hz].
     pub forcing_frequency_band_hz: (f64, f64),
@@ -333,12 +336,34 @@ pub struct StructuralResidualFlexibilityEstimateComparison {
     pub relative_panel_normal_l2_difference: f64,
 }
 
-/// Offline BEM sampling and causal-fit request for the residual basis's fixed
-/// scalar modal-acceleration coordinates.
+/// Explicit disjoint structural subspace used by one radiation bank.
+///
+/// Complete coverage retains every certified elastic mode in the declared
+/// window, with in-band modes first and enrichment modes second. Six rigid
+/// modes remain separate. An enrichment-only artifact never silently gains
+/// the omitted resonances, and two banks must not radiate the same modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StructuralRadiationModeCoverage {
+    EnrichmentOnly,
+    InBandAndEnrichment,
+}
+impl StructuralRadiationModeCoverage {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::EnrichmentOnly => 0,
+            Self::InBandAndEnrichment => 1,
+        }
+    }
+}
+
+/// Offline BEM sampling and causal-fit request for explicitly selected
+/// scalar modal-acceleration coordinates from one count-certified partition.
 pub struct StructuralBroadbandRadiationRequest<'a> {
-    /// Count-certified source basis; only `enrichment_modes` are dynamic.
+    /// Original common mesh, material, mass normalization and disjoint modes.
     pub basis: &'a StructuralResidualFlexibilityEstimateBasis,
-    /// Loss factors evaluated in the exact enrichment-mode order.
+    /// Exact dynamic subspace; this is not inferred from the loss-vector length.
+    pub coverage: StructuralRadiationModeCoverage,
+    /// Loss factors in the selected `basis.radiation_modes(coverage)` order.
     pub loss: &'a StructuralResidualModalLossSpectrum,
     /// Evidence-bound exterior gas state.
     pub medium: ResolvedAcousticMedium<'a>,
@@ -354,8 +379,8 @@ pub struct StructuralBroadbandRadiationRequest<'a> {
     pub fit: BroadbandRadiationControls,
 }
 
-/// Constitutive damping samples bound specifically to one residual basis's
-/// enrichment-mode order.
+/// Constitutive damping samples bound to the original spectral partition.
+/// The consuming request explicitly selects their mode ordering.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructuralResidualModalLossSpectrum {
     /// Exact residual basis identity.
@@ -364,7 +389,7 @@ pub struct StructuralResidualModalLossSpectrum {
     pub material_state_identity: ContentHash,
     /// Constitutive damping model/evidence identity.
     pub damping_model_identity: ContentHash,
-    /// Loss factor `eta(omega_k)` in enrichment-mode order.
+    /// Loss factor `eta(omega_k)` in the request's selected mode order.
     pub loss_factors: Vec<f64>,
 }
 
@@ -377,8 +402,10 @@ pub struct StructuralBroadbandRadiationArtifact {
     pub identity: ContentHash,
     /// Evidence ceiling inherited from the neutral broadband bridge.
     pub authority: BroadbandRadiationAuthority,
-    /// Exact residual/enrichment basis identity.
+    /// Exact complete spectral-partition identity.
     pub structural_basis_identity: ContentHash,
+    /// Exact disjoint dynamic subspace represented by the filter inputs.
+    pub coverage: StructuralRadiationModeCoverage,
     /// Gas species/EOS/transport identity used by BEM.
     pub gas_model_identity: ContentHash,
     /// Constant homogeneous propagation speed [m/s].
@@ -389,7 +416,7 @@ pub struct StructuralBroadbandRadiationArtifact {
     pub damping_model_identity: ContentHash,
     /// Audio sample rate [Hz].
     pub sample_rate_hz: u32,
-    /// Loss factors in enrichment-mode/input order.
+    /// Loss factors in the explicitly selected mode/input order.
     pub modal_loss_factors: Vec<f64>,
     /// Solver-neutral fitted real-tesseral filter bank.
     pub radiation: BroadbandRadiationArtifact,
@@ -1260,10 +1287,11 @@ pub struct PhysicalModalAudioModel<'basis> {
     pub damping_model_identity: ContentHash,
 }
 
-/// Persistent enrichment-mode oscillator plus causal broadband radiation bank.
+/// Original modal oscillator and causal radiation bank on one explicit subspace.
 pub struct StructuralBroadbandSourceRuntime<'artifact> {
     basis: &'artifact StructuralResidualFlexibilityEstimateBasis,
     source: &'artifact StructuralBroadbandRadiationArtifact,
+    modes: Vec<StructuralMode>,
     modal_runtime: ModalAcousticTimeModel,
     modal_damping_ratios: Vec<f64>,
     radiation_runtime: BroadbandRadiationRuntime<'artifact>,
@@ -1693,10 +1721,13 @@ pub fn build_structural_modal_basis(
     })
 }
 
-/// Build a count-certified positive-spectrum complement above the forcing band.
+/// Build a count-certified positive-spectrum partition at the forcing-band edge.
+/// Both subspaces retain their original eigenvectors; static flexibility uses
+/// only the enrichment complement, while radiation selects its dynamic scope.
 ///
 /// # Errors
-/// Refuses malformed inputs, incomplete partitions/rigid proofs, empty enrichment, caps, or non-positive modes.
+/// Refuses malformed inputs, incomplete partitions/rigid proofs, an empty full
+/// window, caps, or non-positive modes. Either individual partition may be empty.
 pub fn build_structural_residual_flexibility_estimate_basis(
     request: &StructuralModeRequest<'_>,
     controls: StructuralResidualFlexibilityControls,
@@ -1748,9 +1779,9 @@ pub fn build_structural_residual_flexibility_estimate_basis(
         }
     }
     let enrichment_count = report.expected - in_band_count;
-    if enrichment_count == 0 {
+    if report.expected == 0 {
         return Err(StructuralModalBasisError::InvalidRequest {
-            what: "residual-flexibility enrichment window contains no elastic modes",
+            what: "structural partition window contains no elastic modes",
         });
     }
     if in_band_count > request.maximum_modes {
@@ -1783,6 +1814,7 @@ pub fn build_structural_residual_flexibility_estimate_basis(
         rigid_modes_per_sqrt_kg,
         maximum_rigid_stiffness_relative_residual: rigid_null_residual,
         maximum_mass_orthogonality_error: mass_orthogonality_error,
+        in_band_modes: all_modes,
         enrichment_modes,
         forcing_frequency_band_hz: (request.minimum_frequency_hz, request.maximum_frequency_hz),
         enrichment_frequency_band_hz: (
@@ -3907,6 +3939,19 @@ impl StructuralModalBasis {
 }
 
 impl StructuralResidualFlexibilityEstimateBasis {
+    /// Dynamic coordinates in one unambiguous order. No static residual term
+    /// is appended to these modes, so the high partition is not counted twice.
+    pub fn radiation_modes(
+        &self,
+        coverage: StructuralRadiationModeCoverage,
+    ) -> impl DoubleEndedIterator<Item = &StructuralMode> {
+        let low = match coverage {
+            StructuralRadiationModeCoverage::EnrichmentOnly => 0,
+            StructuralRadiationModeCoverage::InBandAndEnrichment => self.in_band_modes.len(),
+        };
+        self.in_band_modes.iter().take(low).chain(&self.enrichment_modes)
+    }
+
     /// Recompute the content identity from every stored semantic field.
     #[must_use]
     pub fn recomputed_identity(&self) -> ContentHash {
@@ -4235,8 +4280,66 @@ fn project_point_force_on_modes(
     })
 }
 
-/// Build a causal broadband body-frame source bank from the exact residual
-/// basis, material loss evidence, gas state, and disjoint BEM grids.
+fn checked_structural_radiation_modes(
+    basis: &StructuralResidualFlexibilityEstimateBasis,
+    coverage: StructuralRadiationModeCoverage,
+    sample_rate_hz: u32,
+) -> Result<Vec<StructuralMode>, StructuralModalBasisError> {
+    let forcing = basis.forcing_frequency_band_hz;
+    let enrichment = basis.enrichment_frequency_band_hz;
+    let count = basis.radiation_modes(coverage).count();
+    if basis.schema_version != STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION
+        || basis.authority != StructuralResidualFlexibilityAuthority::EstimateOnly
+        || basis.recomputed_identity() != basis.identity
+        || basis.operator_identity == ContentHash([0; 32])
+        || basis.certified_in_band_mode_count != basis.in_band_modes.len()
+        || basis.certified_enrichment_mode_count != basis.enrichment_modes.len()
+        || basis.certified_partition_mode_count
+            != basis.certified_in_band_mode_count
+                .checked_add(basis.certified_enrichment_mode_count)
+                .unwrap_or(usize::MAX)
+        || forcing.1.to_bits() != enrichment.0.to_bits()
+        || !(forcing.0 > 0.0 && forcing.0 < forcing.1
+            && enrichment.0 < enrichment.1 && enrichment.1.is_finite())
+        || count == 0
+        || count > MAX_RADIATION_FIELDS_PER_BATCH
+        || sample_rate_hz == 0
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "radiation requires a complete disjoint structural partition and an explicit nonempty subspace within the original mode budget",
+        });
+    }
+    for (modes, band) in [
+        (basis.in_band_modes.as_slice(), forcing),
+        (basis.enrichment_modes.as_slice(), enrichment),
+    ] {
+        let lower = (core::f64::consts::TAU * band.0).powi(2);
+        let upper = (core::f64::consts::TAU * band.1).powi(2);
+        if modes.iter().any(|mode| {
+            mode.nodal_shape_per_sqrt_kg.len() != basis.mesh.nodes_m.len()
+                || mode.panel_normal_shape_per_sqrt_kg.len() != basis.mesh.boundary.triangles.len()
+                || !(mode.angular_frequency_rad_s > 0.0 && mode.angular_frequency_rad_s.is_finite()
+                    && mode.frequency_hz > band.0 && mode.frequency_hz <= band.1
+                    && mode.eigenvalue_interval_s2.0 > lower
+                    && mode.eigenvalue_interval_s2.1 <= upper)
+        }) {
+            return Err(StructuralModalBasisError::IdentityMismatch {
+                what: "retained structural shapes or eigenvalue intervals do not match their disjoint spectral partition",
+            });
+        }
+    }
+    if basis.radiation_modes(coverage)
+        .any(|mode| mode.frequency_hz >= 0.5 * f64::from(sample_rate_hz))
+    {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "every selected structural mode must remain below the radiation clock Nyquist frequency",
+        });
+    }
+    Ok(basis.radiation_modes(coverage).cloned().collect())
+}
+
+/// Build a causal broadband body-frame source bank from the explicitly selected
+/// count-certified subspace, material loss evidence, gas and disjoint BEM grids.
 ///
 /// At drive frequency `omega`, unit generalized modal acceleration implies
 /// `q = -1/omega^2` and therefore `v_n = +i phi_n/omega` under
@@ -4249,7 +4352,7 @@ pub fn build_structural_broadband_radiation_artifact(
     let basis = request.basis;
     let loss = request.loss;
     let sample_rate_hz = request.fit.sample_rate_hz as u32;
-    let forcing = basis.forcing_frequency_band_hz;
+    let modes = checked_structural_radiation_modes(basis, request.coverage, sample_rate_hz)?;
     let enrichment = basis.enrichment_frequency_band_hz;
     let grids_valid = |grid: &[f64]| {
         !grid.is_empty()
@@ -4262,22 +4365,7 @@ pub fn build_structural_broadband_radiation_artifact(
                     && (index == 0 || grid[index - 1] < frequency)
             })
     };
-    if basis.schema_version != STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION
-        || basis.authority != StructuralResidualFlexibilityAuthority::EstimateOnly
-        || basis.recomputed_identity() != basis.identity
-        || basis.operator_identity == ContentHash([0; 32])
-        || basis.enrichment_modes.is_empty()
-        || basis.enrichment_modes.len() > MAX_RADIATION_FIELDS_PER_BATCH
-        || basis.certified_enrichment_mode_count != basis.enrichment_modes.len()
-        || basis.certified_partition_mode_count
-            != basis
-                .certified_in_band_mode_count
-                .checked_add(basis.certified_enrichment_mode_count)
-                .unwrap_or(usize::MAX)
-        || forcing.1.to_bits() != enrichment.0.to_bits()
-        || !(forcing.0 > 0.0 && forcing.0 < forcing.1 && enrichment.0 < enrichment.1)
-        || sample_rate_hz == 0
-        || f64::from(sample_rate_hz).to_bits() != request.fit.sample_rate_hz.to_bits()
+    if f64::from(sample_rate_hz).to_bits() != request.fit.sample_rate_hz.to_bits()
         || !grids_valid(request.training_frequency_hz)
         || !grids_valid(request.held_out_frequency_hz)
         || request.held_out_frequency_hz.iter().any(|held| {
@@ -4305,22 +4393,14 @@ pub fn build_structural_broadband_radiation_artifact(
         || loss.structural_basis_identity != basis.identity
         || loss.material_state_identity != basis.material_state_identity
         || loss.damping_model_identity == ContentHash([0; 32])
-        || loss.loss_factors.len() != basis.enrichment_modes.len()
+        || loss.loss_factors.len() != modes.len()
         || loss
             .loss_factors
             .iter()
             .any(|value| !(value.is_finite() && *value >= 0.0))
-        || basis.enrichment_modes.iter().any(|mode| {
-            mode.panel_normal_shape_per_sqrt_kg.len() != basis.mesh.boundary.triangles.len()
-                || !(mode.angular_frequency_rad_s > 0.0
-                    && mode.angular_frequency_rad_s.is_finite()
-                    && mode.eigenvalue_interval_s2.0 > (core::f64::consts::TAU * forcing.1).powi(2)
-                    && mode.frequency_hz <= enrichment.1
-                    && mode.frequency_hz < 0.5 * request.fit.sample_rate_hz)
-        })
     {
         return Err(StructuralModalBasisError::IdentityMismatch {
-            what: "broadband damping, medium, or enrichment modes do not match the exact residual basis",
+            what: "broadband damping or medium does not match the selected structural subspace",
         });
     }
 
@@ -4351,7 +4431,7 @@ pub fn build_structural_broadband_radiation_artifact(
         let omega = core::f64::consts::TAU * frequency_hz;
         let (_, solutions) = solve_modal_acceleration_radiation_batch(
             &surface,
-            &basis.enrichment_modes,
+            &modes,
             omega,
             medium,
             radius_m,
@@ -4359,7 +4439,7 @@ pub fn build_structural_broadband_radiation_artifact(
         let tables = checked_directivity_tables(
             &surface,
             &solutions,
-            &basis.enrichment_modes,
+            &modes,
             medium,
             request.directivity.maximum_spherical_harmonic_degree,
             request.directivity.minimum_captured_fraction,
@@ -4379,7 +4459,7 @@ pub fn build_structural_broadband_radiation_artifact(
         let omega = core::f64::consts::TAU * frequency_hz;
         let (_, solutions) = solve_modal_acceleration_radiation_batch(
             &surface,
-            &basis.enrichment_modes,
+            &modes,
             omega,
             medium,
             radius_m,
@@ -4387,7 +4467,7 @@ pub fn build_structural_broadband_radiation_artifact(
         let tables = checked_directivity_tables(
             &surface,
             &solutions,
-            &basis.enrichment_modes,
+            &modes,
             medium,
             request.directivity.maximum_spherical_harmonic_degree,
             request.directivity.minimum_captured_fraction,
@@ -4407,8 +4487,18 @@ pub fn build_structural_broadband_radiation_artifact(
             diagnostics: radiation_sample_diagnostics(&solutions, captured_fraction),
         });
     }
-    let input_ids: Vec<String> = (0..basis.enrichment_modes.len())
-        .map(|mode| format!("enrichment-mode-{mode:04}-qddot[m*sqrt(kg)/s^2]"))
+    let in_band_count = match request.coverage {
+        StructuralRadiationModeCoverage::EnrichmentOnly => 0,
+        StructuralRadiationModeCoverage::InBandAndEnrichment => basis.in_band_modes.len(),
+    };
+    let input_ids: Vec<String> = (0..modes.len())
+        .map(|mode| {
+            if mode < in_band_count {
+                format!("in-band-mode-{mode:04}-qddot[m*sqrt(kg)/s^2]")
+            } else {
+                format!("enrichment-mode-{:04}-qddot[m*sqrt(kg)/s^2]", mode - in_band_count)
+            }
+        })
         .collect();
     let source_identity = broadband_sample_identity(request);
     let samples = SampledRadiationData {
@@ -4426,6 +4516,7 @@ pub fn build_structural_broadband_radiation_artifact(
     let identity = structural_broadband_artifact_identity(
         source_identity,
         basis.identity,
+        request.coverage,
         request.medium.gas_model_identity,
         request.medium.gas.sound_speed,
         source_diameter_m,
@@ -4437,6 +4528,7 @@ pub fn build_structural_broadband_radiation_artifact(
         identity,
         authority: BroadbandRadiationAuthority::EstimateOnly,
         structural_basis_identity: basis.identity,
+        coverage: request.coverage,
         gas_model_identity: request.medium.gas_model_identity,
         sound_speed_m_s: request.medium.gas.sound_speed,
         source_diameter_m,
@@ -4638,6 +4730,7 @@ pub fn build_rigid_disc_broadband_radiation_artifact(
 fn structural_broadband_artifact_identity(
     source_identity: ContentHash,
     structural_basis_identity: ContentHash,
+    coverage: StructuralRadiationModeCoverage,
     gas_model_identity: ContentHash,
     sound_speed_m_s: f64,
     source_diameter_m: f64,
@@ -4646,6 +4739,7 @@ fn structural_broadband_artifact_identity(
     radiation: &BroadbandRadiationArtifact,
 ) -> ContentHash {
     let mut h = DomainHasher::new(STRUCTURAL_BROADBAND_ARTIFACT_IDENTITY_DOMAIN);
+    h.update(&[coverage.tag()]);
     for identity in [
         source_identity,
         structural_basis_identity,
@@ -4935,6 +5029,7 @@ fn radiation_sample_diagnostics(
 
 fn broadband_sample_identity(request: &StructuralBroadbandRadiationRequest<'_>) -> ContentHash {
     let mut h = DomainHasher::new(STRUCTURAL_BROADBAND_SOURCE_IDENTITY_DOMAIN);
+    h.update(&[request.coverage.tag()]);
     for identity in [
         request.basis.identity,
         request.basis.operator_identity,
@@ -4947,7 +5042,7 @@ fn broadband_sample_identity(request: &StructuralBroadbandRadiationRequest<'_>) 
     hash_usizes(
         &mut h,
         [
-            request.basis.enrichment_modes.len(),
+            request.basis.radiation_modes(request.coverage).count(),
             request.directivity.maximum_spherical_harmonic_degree,
             request.fit.fit_order,
             request.fit.fit_iterations,
@@ -4995,6 +5090,7 @@ impl StructuralBroadbandRadiationArtifact {
         Ok(structural_broadband_artifact_identity(
             broadband_source_id_from_report(&self.radiation)?,
             self.structural_basis_identity,
+            self.coverage,
             self.gas_model_identity,
             self.sound_speed_m_s,
             self.source_diameter_m,
@@ -5004,12 +5100,13 @@ impl StructuralBroadbandRadiationArtifact {
         ))
     }
 
-    /// Bind this exact source bank to its residual basis and a modal budget.
+    /// Bind this exact source bank to its explicit dynamic subspace and budget.
     pub fn try_runtime<'a>(
         &'a self,
         basis: &'a StructuralResidualFlexibilityEstimateBasis,
         budget: ModalAcousticTimeBudget,
     ) -> Result<StructuralBroadbandSourceRuntime<'a>, StructuralModalBasisError> {
+        let structural_modes = checked_structural_radiation_modes(basis, self.coverage, self.sample_rate_hz)?;
         if self.authority != BroadbandRadiationAuthority::EstimateOnly
             || self.no_claims != STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM
             || self.recomputed_identity()? != self.identity
@@ -5019,8 +5116,8 @@ impl StructuralBroadbandRadiationArtifact {
             || !(self.sound_speed_m_s > 0.0 && self.sound_speed_m_s.is_finite())
             || !(self.source_diameter_m > 0.0 && self.source_diameter_m.is_finite())
             || self.damping_model_identity == ContentHash([0; 32])
-            || self.modal_loss_factors.len() != basis.enrichment_modes.len()
-            || self.radiation.inputs.len() != basis.enrichment_modes.len()
+            || self.modal_loss_factors.len() != structural_modes.len()
+            || self.radiation.inputs.len() != structural_modes.len()
             || !self
                 .radiation
                 .report
@@ -5031,8 +5128,7 @@ impl StructuralBroadbandRadiationArtifact {
                 what: "broadband source artifact does not match the exact residual basis",
             });
         }
-        let modes = basis
-            .enrichment_modes
+        let modes = structural_modes
             .iter()
             .zip(&self.modal_loss_factors)
             .map(|(mode, loss)| ModalAcousticMode {
@@ -5051,7 +5147,8 @@ impl StructuralBroadbandRadiationArtifact {
                 .map(|loss| loss_factor_to_zeta(*loss))
                 .collect(),
             radiation_runtime: self.radiation.try_runtime()?,
-            modal_acceleration: vec![0.0; basis.enrichment_modes.len()],
+            modal_acceleration: vec![0.0; structural_modes.len()],
+            modes: structural_modes,
         })
     }
 }
@@ -5187,7 +5284,7 @@ impl StructuralBroadbandSourceRuntime<'_> {
                 .map_err(|_| StructuralModalBasisError::Cancelled)?;
             modal_forces.push(modal_force_for_control_interval(
                 &self.basis.mesh,
-                &self.basis.enrichment_modes,
+                &self.modes,
                 controls,
                 interval,
                 maximum_contact_distance_m,
@@ -5232,7 +5329,7 @@ impl StructuralBroadbandSourceRuntime<'_> {
             self.modal_runtime
                 .step_duration(force, self.modal_runtime.sample_period_s())?;
             write_closing_modal_acceleration(
-                &self.basis.enrichment_modes,
+                &self.modes,
                 &self.modal_damping_ratios,
                 self.modal_runtime.states(),
                 force,
@@ -5321,6 +5418,8 @@ pub fn synthesize_rigid_disc_retarded_far_field_world_observers(
         identity: source.identity,
         authority: source.authority,
         structural_basis_identity: source.structural_basis_identity,
+        // This private rigid-source carrier does not enter a structural runtime.
+        coverage: StructuralRadiationModeCoverage::EnrichmentOnly,
         gas_model_identity: source.gas_model_identity,
         sound_speed_m_s: source.sound_speed_m_s,
         source_diameter_m: source.source_diameter_m,
@@ -6509,13 +6608,14 @@ fn residual_flexibility_basis_identity(
             basis.slice_stats.factor_peak_bytes,
             basis.slice_stats.pivots_delayed,
             basis.rigid_modes_per_sqrt_kg.len(),
+            basis.in_band_modes.len(),
             basis.enrichment_modes.len(),
         ],
     );
     for mode in &basis.rigid_modes_per_sqrt_kg {
         hash_f64_slice(&mut hasher, mode);
     }
-    for mode in &basis.enrichment_modes {
+    for mode in basis.in_band_modes.iter().chain(&basis.enrichment_modes) {
         hash_f64s(
             &mut hasher,
             [
@@ -7414,6 +7514,168 @@ mod tests {
         ] {
             assert!(metric.is_finite());
         }
+    }
+
+    fn partitioned_test_basis() -> (
+        StructuralResidualFlexibilityEstimateBasis,
+        StructuralResidualFlexibilityEstimateBasis,
+    ) {
+        let specimen = specimen();
+        let mut request = coarse_modal_request(&specimen);
+        request.maximum_frequency_hz = 12_000.0;
+        let controls = StructuralResidualFlexibilityControls {
+            maximum_enrichment_frequency_hz: 100_000.0,
+            maximum_enrichment_modes: 64,
+        };
+        let full_high = with_cx(|cx| {
+            build_structural_residual_flexibility_estimate_basis(&request, controls, cx).unwrap()
+        });
+        let gap = full_high.enrichment_modes.windows(2)
+            .find(|pair| pair[1].eigenvalue_interval_s2.0 > pair[0].eigenvalue_interval_s2.1 * (1.0 + 1.0e-8))
+            .expect("coarse original specimen has distinct elastic eigenspaces");
+        request.maximum_frequency_hz = 0.5 * (gap[0].frequency_hz + gap[1].frequency_hz);
+        let partitioned = with_cx(|cx| {
+            build_structural_residual_flexibility_estimate_basis(&request, controls, cx).unwrap()
+        });
+        (full_high, partitioned)
+    }
+
+    #[test]
+    fn g0_g3_complete_partition_retains_in_band_modes_without_static_double_count() {
+        use StructuralRadiationModeCoverage::{EnrichmentOnly, InBandAndEnrichment};
+        let (all_high, basis) = partitioned_test_basis();
+        assert!(basis.certified_in_band_mode_count > 0);
+        assert!(basis.certified_enrichment_mode_count > 0);
+        assert_eq!(basis.in_band_modes.len(), basis.certified_in_band_mode_count);
+        assert_eq!(basis.enrichment_modes.len(), basis.certified_enrichment_mode_count);
+        let complete = checked_structural_radiation_modes(&basis, InBandAndEnrichment, 1_000_000).unwrap();
+        let complement = checked_structural_radiation_modes(&basis, EnrichmentOnly, 1_000_000).unwrap();
+        assert_eq!(complete.len(), basis.certified_partition_mode_count);
+        assert_eq!(complement.len(), basis.certified_enrichment_mode_count);
+        assert_eq!(complete.len(), all_high.enrichment_modes.len());
+        // The original one-window eigensolve is unchanged by moving the partition.
+        // Every native eigenvector, including its signs and normal trace, survives.
+        for (actual, original) in complete.iter().zip(&all_high.enrichment_modes) {
+            assert_eq!(actual.eigenvalue_s2.to_bits(), original.eigenvalue_s2.to_bits());
+            assert_eq!(actual.nodal_shape_per_sqrt_kg, original.nodal_shape_per_sqrt_kg);
+            assert_eq!(actual.panel_normal_shape_per_sqrt_kg, original.panel_normal_shape_per_sqrt_kg);
+        }
+        let point = [0.038, 0.0, 0.0];
+        let residual = basis.evaluate_point_force(point, [0.0, 0.0, 1.0], 1.0e-12).unwrap();
+        assert_eq!(residual.modal_displacement_m_sqrt_kg.len(), complement.len());
+        let independent_work: f64 = residual.force_projection.modal_force_n_per_sqrt_kg
+            .iter().zip(&basis.enrichment_modes)
+            .map(|(force, mode)| force * force / mode.eigenvalue_s2).sum();
+        assert!((residual.elastic_work_j - independent_work).abs() <= 1.0e-8 * independent_work);
+        let full_static = all_high.evaluate_point_force(point, [0.0, 0.0, 1.0], 1.0e-12).unwrap();
+        assert!(residual.elastic_work_j < full_static.elastic_work_j);
+
+        // A complete dynamic source also exists when the upper complement is empty.
+        // Count that smaller full window with the original eigensolver, not by
+        // removing stored modes or changing a certified count after construction.
+        let specimen = specimen();
+        let mut request = coarse_modal_request(&specimen);
+        request.maximum_frequency_hz = basis.forcing_frequency_band_hz.1;
+        let upper = 0.5 * (request.maximum_frequency_hz + basis.enrichment_modes[0].frequency_hz);
+        let low_only = with_cx(|cx| build_structural_residual_flexibility_estimate_basis(
+            &request, StructuralResidualFlexibilityControls {
+                maximum_enrichment_frequency_hz: upper, maximum_enrichment_modes: 64,
+            }, cx).unwrap());
+        assert!(low_only.in_band_modes.len() > 0);
+        assert!(low_only.enrichment_modes.is_empty());
+        assert_eq!(low_only.certified_partition_mode_count, basis.certified_in_band_mode_count);
+        assert_eq!(checked_structural_radiation_modes(&low_only, InBandAndEnrichment, 1_000_000).unwrap().len(),
+            low_only.certified_partition_mode_count);
+        assert!(checked_structural_radiation_modes(&low_only, EnrichmentOnly, 1_000_000).is_err());
+    }
+
+    #[test]
+    fn g3_in_band_motion_and_sampled_radiation_follow_complete_partition() {
+        use StructuralRadiationModeCoverage::{EnrichmentOnly, InBandAndEnrichment};
+        let (_, basis) = partitioned_test_basis();
+        let all = checked_structural_radiation_modes(&basis, InBandAndEnrichment, 1_000_000).unwrap();
+        let high = checked_structural_radiation_modes(&basis, EnrichmentOnly, 1_000_000).unwrap();
+        let n_low = basis.in_band_modes.len();
+        let forces = project_point_force_on_modes(&basis.mesh, &all,
+            [0.038, 0.0, 0.0], [0.0, 0.0, 0.1], 1.0e-12).unwrap().modal_force_n_per_sqrt_kg;
+        let model = |modes: &[StructuralMode]| ModalAcousticTimeModel::try_new(
+            1_000_000, modes.iter().map(|mode| ModalAcousticMode {
+                angular_frequency_rad_s: mode.angular_frequency_rad_s,
+                damping_ratio: 0.0, pressure_per_modal_velocity: C64::ZERO,
+            }).collect(), ModalAcousticTimeBudget::audible_reference()).unwrap();
+        let mut complete_motion = model(&all);
+        let mut low_motion = model(&basis.in_band_modes);
+        let mut high_motion = model(&high);
+        for _ in 0..32 {
+            complete_motion.step_duration(&forces, 1.0e-6).unwrap();
+            low_motion.step_duration(&forces[..n_low], 1.0e-6).unwrap();
+            high_motion.step_duration(&forces[n_low..], 1.0e-6).unwrap();
+        }
+        for (actual, separate) in complete_motion.states().iter()
+            .zip(low_motion.states().iter().chain(high_motion.states()))
+        {
+            assert_eq!(actual.displacement_m_sqrt_kg.to_bits(), separate.displacement_m_sqrt_kg.to_bits());
+            assert_eq!(actual.velocity_m_sqrt_kg_per_s.to_bits(), separate.velocity_m_sqrt_kg_per_s.to_bits());
+        }
+        for ((state, mode), force) in complete_motion.states().iter().zip(&all).zip(&forces) {
+            let phase = mode.angular_frequency_rad_s * 32.0e-6;
+            let exact = force / mode.eigenvalue_s2 * (1.0 - det::cos(phase));
+            assert!((state.displacement_m_sqrt_kg - exact).abs()
+                <= 2.0e-12 * (force / mode.eigenvalue_s2).abs().max(f64::MIN_POSITIVE));
+        }
+
+        // The original exterior owner observes every retained trace at the SAME
+        // physical frequency. This is a harmonic field check, not a claim that a
+        // constant-frequency transfer is a broadband time-domain receiver.
+        let surface = SpherePanels::from_triangles(basis.mesh.boundary.triangles.iter()
+            .map(|triangle| triangle.map(|node| basis.mesh.nodes_m[node])).collect()).unwrap();
+        let radius = basis.mesh.nodes_m.iter().map(|p| norm_squared(*p).sqrt()).fold(0.0, f64::max);
+        let omega = core::f64::consts::TAU * 200.0;
+        let medium = Medium::air();
+        let (_, fields) = solve_modal_acceleration_radiation_batch(&surface, &all, omega, medium, radius).unwrap();
+        assert_eq!(fields.len(), basis.certified_partition_mode_count);
+        let directions = [[1.0, 0.0, 0.0], [0.0, 1.0, 1.0], [0.5, 0.25, -1.0]];
+        let mut low_pressure = [C64::ZERO; 3];
+        let mut high_pressure = [C64::ZERO; 3];
+        let mut pressure = [C64::ZERO; 3];
+        for (index, ((field, mode), force)) in fields.iter().zip(&all).zip(&forces).enumerate() {
+            let acceleration = -omega * omega * force / (mode.eigenvalue_s2 - omega * omega);
+            let transfer = far_field(&surface, field, medium, &directions);
+            for i in 0..directions.len() {
+                let contribution = transfer[i].scale(acceleration);
+                pressure[i] = pressure[i] + contribution;
+                if index < n_low { low_pressure[i] = low_pressure[i] + contribution; }
+                else { high_pressure[i] = high_pressure[i] + contribution; }
+            }
+        }
+        assert!(low_pressure.iter().any(|p| p.abs() > 0.0));
+        for i in 0..directions.len() {
+            let separate = low_pressure[i] + high_pressure[i];
+            assert!((pressure[i] - separate).abs() <= 1.0e-12
+                * (low_pressure[i].abs() + high_pressure[i].abs()).max(f64::MIN_POSITIVE));
+        }
+    }
+
+    #[test]
+    fn g4_complete_partition_refuses_missing_counts_legacy_schema_and_aliased_modes() {
+        use StructuralRadiationModeCoverage::InBandAndEnrichment;
+        let (_, mut basis) = partitioned_test_basis();
+        assert!(checked_structural_radiation_modes(&basis, InBandAndEnrichment, 1_000_000).is_ok());
+        let schema = basis.schema_version;
+        basis.schema_version = schema - 1;
+        basis.identity = basis.recomputed_identity();
+        assert!(checked_structural_radiation_modes(&basis, InBandAndEnrichment, 1_000_000).is_err());
+        basis.schema_version = schema;
+        basis.certified_in_band_mode_count += 1;
+        basis.identity = basis.recomputed_identity();
+        assert!(checked_structural_radiation_modes(&basis, InBandAndEnrichment, 1_000_000).is_err());
+        basis.certified_in_band_mode_count -= 1;
+        basis.identity = basis.recomputed_identity();
+        assert!(checked_structural_radiation_modes(&basis, InBandAndEnrichment, 1).is_err());
+        let original = basis.in_band_modes[0].panel_normal_shape_per_sqrt_kg[0];
+        basis.in_band_modes[0].panel_normal_shape_per_sqrt_kg[0] = original + 1.0;
+        assert_ne!(basis.identity, basis.recomputed_identity());
+        assert!(checked_structural_radiation_modes(&basis, InBandAndEnrichment, 1_000_000).is_err());
     }
 
     #[test]

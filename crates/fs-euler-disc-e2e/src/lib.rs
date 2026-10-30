@@ -140,7 +140,7 @@ pub use structural_acoustics::{
     STRUCTURAL_RESIDUAL_FLEXIBILITY_SCHEMA_VERSION, StructuralBroadbandRadiationArtifact,
     StructuralBroadbandRadiationRequest, StructuralBroadbandSourceRuntime,
     StructuralBroadbandSourceStem, StructuralMeshControls, StructuralModalBasis,
-    StructuralModalBasisError, StructuralMode, StructuralModeRequest,
+    StructuralModalBasisError, StructuralMode, StructuralModeRequest, StructuralRadiationModeCoverage,
     StructuralResidualFlexibilityAuthority, StructuralResidualFlexibilityControls,
     StructuralResidualFlexibilityEstimateBasis, StructuralResidualFlexibilityEstimateComparison,
     StructuralResidualFlexibilityEstimateResponse, StructuralResidualModalLossSpectrum,
