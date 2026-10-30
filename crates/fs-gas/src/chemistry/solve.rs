@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct Statistics {
     pub nonlinear_iterations: usize,
     pub temperature_evaluations: usize,
+    pub direct_fallbacks: usize,
 }
 
 struct StateWorkspace {
@@ -18,7 +19,10 @@ pub(super) struct Reactor {
     pub controls: IsochoricKineticsSolve,
     volume: f64,
     target_density: f64,
+    /// Untouched whole-call feed for the final elemental inventory audit.
     pub initial: Vec<f64>,
+    /// Accepted composition about which the next local reaction extents act.
+    origin: Vec<f64>,
     nu: Vec<f64>,
     state: StateWorkspace,
     trial: Vec<f64>,
@@ -32,6 +36,7 @@ impl Reactor {
     pub(super) fn workspace_bytes(&self) -> usize {
         let scalars = [
             &self.initial,
+            &self.origin,
             &self.nu,
             &self.state.concentrations,
             &self.trial,
@@ -47,7 +52,20 @@ impl Reactor {
         .iter()
         .map(|values| values.capacity())
         .sum::<usize>();
-        scalars * core::mem::size_of::<f64>() + self.state.kinetics.workspace_bytes()
+        let sparse = self.newton.stoichiometric_rows.as_ref().map_or(0, |rows| {
+            (rows.offsets.capacity() + rows.column_offsets.capacity())
+                * core::mem::size_of::<usize>()
+                + (rows.entries.capacity() + rows.column_entries.capacity())
+                    * core::mem::size_of::<(usize, f64)>()
+        });
+        let direct = self.newton.direct_fallback.as_ref().map_or(0, |work| {
+            (work.matrix.capacity() + work.rhs.capacity() + work.row_scale.capacity())
+                * core::mem::size_of::<f64>()
+        });
+        scalars * core::mem::size_of::<f64>()
+            + self.state.kinetics.workspace_bytes()
+            + sparse
+            + direct
     }
 
     pub fn new(
@@ -66,12 +84,14 @@ impl Reactor {
                     .expect("admitted stoichiometry") as f64;
             }
         }
+        let newton = NewtonWorkspace::new(ns, nr, &nu)?;
         Ok(Self {
             mechanism,
             controls,
             volume: 1.0,
             target_density: 0.0,
             initial: zeros(ns)?,
+            origin: zeros(ns)?,
             nu,
             state: StateWorkspace {
                 concentrations: zeros(ns)?,
@@ -80,7 +100,7 @@ impl Reactor {
             trial: zeros(nr)?,
             residual: zeros(nr)?,
             delta: zeros(nr)?,
-            newton: NewtonWorkspace::new(ns, nr)?,
+            newton,
             temperature_extent_derivatives: zeros(nr)?,
             stats: Statistics::default(),
         })
@@ -135,11 +155,22 @@ impl Reactor {
         }
         self.volume = volume.value();
         self.target_density = target_density;
+        self.origin.copy_from_slice(&self.initial);
         self.stats = Statistics::default();
         Ok(target)
     }
     pub fn concentrations(&self) -> &[f64] {
         &self.state.concentrations
+    }
+
+    /// Change coordinates after an accepted step without changing any physical
+    /// amount or the conserved energy. Accumulating every reaction cycle over
+    /// the complete trajectory makes tiny intermediates the difference of
+    /// macroscopic extents, destroying their representable positive domain.
+    /// Local extents retain the same stoichiometric update and final original-
+    /// feed conservation gates without clipping a species or seeding radicals.
+    pub fn rebase(&mut self, concentrations: &[f64]) {
+        self.origin.copy_from_slice(concentrations);
     }
     pub fn resolve(
         &mut self,
@@ -152,7 +183,7 @@ impl Reactor {
             self.controls,
             self.volume,
             self.target_density,
-            &self.initial,
+            &self.origin,
             &self.nu,
             extents,
             hint,
@@ -291,7 +322,7 @@ impl Reactor {
                 self.temperature_extent_derivatives[k] =
                     -du.value() / state.heat_capacity_v_density_j_m3_k;
             }
-            self.newton.solve(
+            let direct_fallback = self.newton.solve(
                 &self.nu,
                 self.state.kinetics.rate_jacobian(),
                 self.state.kinetics.temperature_derivatives(),
@@ -302,6 +333,7 @@ impl Reactor {
                 &mut self.delta,
                 cancelled,
             )?;
+            self.stats.direct_fallbacks += usize::from(direct_fallback);
             let mut fraction = 1.0;
             let mut accepted = None;
             for _ in 0..self.controls.maximum_backtracks {
@@ -314,7 +346,7 @@ impl Reactor {
                     self.controls,
                     self.volume,
                     self.target_density,
-                    &self.initial,
+                    &self.origin,
                     &self.nu,
                     &self.trial,
                     state.temperature.value(),
@@ -386,27 +418,51 @@ impl Reactor {
 /// and duplicate reaction directions; no stoichiometric rank cutoff is used.
 pub(super) struct NewtonWorkspace {
     dimension: usize,
+    stoichiometric_rows: Option<StoichiometricRows>,
     matrix: Vec<f64>,
     rhs: Vec<f64>,
     row_scale: Vec<f64>,
     refinement_residual: Vec<f64>,
     refinement_delta: Vec<f64>,
+    direct_fallback: Option<DirectNewtonWorkspace>,
+}
+
+/// Cold-prepared storage for the original extent equation. It is used only
+/// when recovery from the smaller system fails its unchanged backward gate.
+struct DirectNewtonWorkspace {
+    matrix: Vec<f64>,
+    rhs: Vec<f64>,
+    row_scale: Vec<f64>,
 }
 
 impl NewtonWorkspace {
-    pub(super) fn new(ns: usize, nr: usize) -> Result<Self, IsochoricKineticsError> {
-        Self::with_dimension(nr.min(ns + 1), nr)
+    pub(super) fn new(ns: usize, nr: usize, nu: &[f64]) -> Result<Self, IsochoricKineticsError> {
+        let mut workspace = Self::with_dimension(nr.min(ns + 1), nr)?;
+        if workspace.dimension < nr {
+            workspace.stoichiometric_rows = Some(StoichiometricRows::new(ns, nr, nu)?);
+        }
+        Ok(workspace)
     }
 
     fn with_dimension(dimension: usize, nr: usize) -> Result<Self, IsochoricKineticsError> {
         let refinement = if dimension < nr { nr } else { 0 };
         Ok(Self {
             dimension,
+            stoichiometric_rows: None,
             matrix: zeros(dimension * dimension)?,
             rhs: zeros(dimension)?,
             row_scale: zeros(dimension)?,
             refinement_residual: zeros(refinement)?,
             refinement_delta: zeros(refinement)?,
+            direct_fallback: if dimension < nr {
+                Some(DirectNewtonWorkspace {
+                    matrix: zeros(nr * nr)?,
+                    rhs: zeros(nr)?,
+                    row_scale: zeros(nr)?,
+                })
+            } else {
+                None
+            },
         })
     }
 
@@ -415,12 +471,26 @@ impl NewtonWorkspace {
         Self::with_dimension(nr, nr)
     }
 
+    /// Dense reference to the same reduced equation, retained only for tests.
+    #[cfg(test)]
+    pub(super) fn dense_reduced(ns: usize, nr: usize) -> Result<Self, IsochoricKineticsError> {
+        Self::with_dimension(nr.min(ns + 1), nr)
+    }
+
+    #[cfg(test)]
+    pub(super) fn nonzero_stoichiometry(&self) -> usize {
+        self.stoichiometric_rows
+            .as_ref()
+            .map_or(0, |rows| rows.entries.len())
+    }
+
     #[cfg(test)]
     pub(super) fn dimension(&self) -> usize {
         self.dimension
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Return whether a direct fallback was needed after reduced recovery.
     pub(super) fn solve(
         &mut self,
         nu: &[f64],
@@ -432,9 +502,10 @@ impl NewtonWorkspace {
         residual: &[f64],
         delta: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), IsochoricKineticsError> {
+    ) -> Result<bool, IsochoricKineticsError> {
         let equation = NewtonEquation {
             nu,
+            stoichiometric_rows: self.stoichiometric_rows.as_ref(),
             concentration_derivatives,
             temperature_derivatives,
             temperature_extent_derivatives,
@@ -450,7 +521,7 @@ impl NewtonWorkspace {
                 delta,
                 cancelled,
             )?;
-            return Ok(());
+            return Ok(false);
         }
         equation.reduced(
             &mut self.matrix,
@@ -460,10 +531,10 @@ impl NewtonWorkspace {
             cancelled,
         )?;
         // Recovering extent corrections as b + h U y can cancel large stiff
-        // terms. Check the original extent equation, with at most two residual
+        // terms. Check the original extent equation, with at most four residual
         // corrections. This uses the same prepared storage and never accepts a
         // reduced solve solely because its smaller matrix was nonsingular.
-        for refinement in 0..=2 {
+        for refinement in 0..=4 {
             if equation.check_correction(
                 delta,
                 &mut self.rhs,
@@ -471,9 +542,9 @@ impl NewtonWorkspace {
                 &mut self.refinement_residual,
                 cancelled,
             )? {
-                return Ok(());
+                return Ok(false);
             }
-            if refinement == 2 {
+            if refinement == 4 {
                 break;
             }
             NewtonEquation {
@@ -491,16 +562,132 @@ impl NewtonWorkspace {
                 *value += correction;
             }
         }
+        // Tiny source channels may require a componentwise correction that
+        // the Schur recovery cannot represent accurately, even with a modest
+        // matrix condition number. Reuse the original scaled-partial-pivot
+        // solver on I-hUV, then apply EXACTLY the same unscaled residual gate.
+        // No extent is clipped and no physical or numerical tolerance changes.
+        let fallback = self
+            .direct_fallback
+            .as_mut()
+            .expect("prepared reduced fallback");
+        equation.direct(
+            &mut fallback.matrix,
+            &mut fallback.rhs,
+            &mut fallback.row_scale,
+            delta,
+            cancelled,
+        )?;
+        for refinement in 0..=2 {
+            if equation.check_correction(
+                delta,
+                &mut self.rhs,
+                &mut self.row_scale,
+                &mut self.refinement_residual,
+                cancelled,
+            )? {
+                return Ok(true);
+            }
+            if refinement == 2 {
+                break;
+            }
+            NewtonEquation {
+                residual: &self.refinement_residual,
+                ..equation
+            }
+            .direct(
+                &mut fallback.matrix,
+                &mut fallback.rhs,
+                &mut fallback.row_scale,
+                &mut self.refinement_delta,
+                cancelled,
+            )?;
+            for (value, correction) in delta.iter_mut().zip(&self.refinement_delta) {
+                *value += correction;
+            }
+        }
         Err(failed(
             step,
-            "reduced Newton correction exceeds the original linear residual gate",
+            "direct Newton fallback exceeds the original linear residual gate",
         ))
+    }
+}
+
+/// Prepared exact nonzero structure of N. Entries retain increasing source
+/// reaction order, so every compensated reduction has the same term order as
+/// the dense equation. There is no numerical threshold or rank approximation.
+struct StoichiometricRows {
+    offsets: Vec<usize>,
+    entries: Vec<(usize, f64)>,
+    column_offsets: Vec<usize>,
+    column_entries: Vec<(usize, f64)>,
+}
+
+impl StoichiometricRows {
+    fn new(ns: usize, nr: usize, nu: &[f64]) -> Result<Self, IsochoricKineticsError> {
+        if nr == 0 || ns.checked_mul(nr) != Some(nu.len()) || nu.iter().any(|v| !v.is_finite()) {
+            return Err(IsochoricKineticsError::Invalid(
+                "invalid prepared stoichiometric matrix",
+            ));
+        }
+        let mut offsets = Vec::new();
+        offsets
+            .try_reserve_exact(ns + 1)
+            .map_err(|_| IsochoricKineticsError::AllocationRefused)?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(nu.iter().filter(|&&v| v != 0.0).count())
+            .map_err(|_| IsochoricKineticsError::AllocationRefused)?;
+        offsets.push(0);
+        for row in nu.chunks_exact(nr) {
+            for (j, &coefficient) in row.iter().enumerate() {
+                if coefficient != 0.0 {
+                    entries.push((j, coefficient));
+                }
+            }
+            offsets.push(entries.len());
+        }
+        // The uncommon direct fallback uses the same exact sparsity in column
+        // order. Its sums retain increasing species order from the dense owner.
+        let mut column_offsets = Vec::new();
+        column_offsets
+            .try_reserve_exact(nr + 1)
+            .map_err(|_| IsochoricKineticsError::AllocationRefused)?;
+        let mut column_entries = Vec::new();
+        column_entries
+            .try_reserve_exact(entries.len())
+            .map_err(|_| IsochoricKineticsError::AllocationRefused)?;
+        column_offsets.push(0);
+        for j in 0..nr {
+            for i in 0..ns {
+                let coefficient = nu[i * nr + j];
+                if coefficient != 0.0 {
+                    column_entries.push((i, coefficient));
+                }
+            }
+            column_offsets.push(column_entries.len());
+        }
+        Ok(Self {
+            offsets,
+            entries,
+            column_offsets,
+            column_entries,
+        })
+    }
+
+    fn row(&self, species: usize) -> &[(usize, f64)] {
+        &self.entries[self.offsets[species]..self.offsets[species + 1]]
+    }
+
+    fn column(&self, reaction: usize) -> &[(usize, f64)] {
+        &self.column_entries[self.column_offsets[reaction]..self.column_offsets[reaction + 1]]
     }
 }
 
 #[derive(Clone, Copy)]
 struct NewtonEquation<'a> {
     nu: &'a [f64],
+    stoichiometric_rows: Option<&'a StoichiometricRows>,
     concentration_derivatives: &'a [f64],
     temperature_derivatives: &'a [f64],
     temperature_extent_derivatives: &'a [f64],
@@ -524,9 +711,15 @@ impl NewtonEquation<'_> {
             poll(cancelled)?;
             for k in 0..nr {
                 let mut derivative = Sum::default();
-                for i in 0..ns {
-                    derivative
-                        .add(self.concentration_derivatives[j * ns + i] * self.nu[i * nr + k]);
+                if let Some(sparse) = self.stoichiometric_rows {
+                    for &(i, coefficient) in sparse.column(k) {
+                        derivative.add(self.concentration_derivatives[j * ns + i] * coefficient);
+                    }
+                } else {
+                    for i in 0..ns {
+                        derivative
+                            .add(self.concentration_derivatives[j * ns + i] * self.nu[i * nr + k]);
+                    }
                 }
                 derivative
                     .add(self.temperature_derivatives[j] * self.temperature_extent_derivatives[k]);
@@ -558,36 +751,30 @@ impl NewtonEquation<'_> {
         // from the original compensated stoichiometric energy sum avoids
         // differentiating arbitrary elemental reference energies off the
         // conserved composition manifold. No inverse or rank test on N occurs.
-        for i in 0..n {
+        for i in 0..ns {
             poll(cancelled)?;
-            let mut projected = Sum::default();
-            for j in 0..nr {
-                let v = if i < ns {
-                    self.nu[i * nr + j]
-                } else {
-                    self.temperature_extent_derivatives[j] / self.temperature_scale
-                };
-                projected.add(-v * self.residual[j]);
-            }
-            rhs[i] = projected.value();
-            for k in 0..n {
-                let mut derivative = Sum::default();
-                for j in 0..nr {
-                    let v = if i < ns {
-                        self.nu[i * nr + j]
-                    } else {
-                        self.temperature_extent_derivatives[j] / self.temperature_scale
-                    };
-                    let u = if k < ns {
-                        self.concentration_derivatives[j * ns + k]
-                    } else {
-                        self.temperature_derivatives[j] * self.temperature_scale
-                    };
-                    derivative.add(v * u);
-                }
-                matrix[i * n + k] = if i == k { 1.0 } else { 0.0 } - self.step * derivative.value();
-            }
+            let row = &mut matrix[i * n..(i + 1) * n];
+            rhs[i] = if let Some(sparse) = self.stoichiometric_rows {
+                self.assemble_row(i, sparse.row(i).iter().copied(), row)
+            } else {
+                self.assemble_row(
+                    i,
+                    self.nu[i * nr..(i + 1) * nr].iter().copied().enumerate(),
+                    row,
+                )
+            };
         }
+        poll(cancelled)?;
+        // The thermal row remains dense: dropping its small values would alter
+        // the original energy-constrained Newton equation and datum invariance.
+        rhs[ns] = self.assemble_row(
+            ns,
+            self.temperature_extent_derivatives
+                .iter()
+                .map(|v| v / self.temperature_scale)
+                .enumerate(),
+            &mut matrix[ns * n..],
+        );
         solve_linear(matrix, rhs, row_scale, n, cancelled)?;
         for j in 0..nr {
             poll(cancelled)?;
@@ -604,6 +791,32 @@ impl NewtonEquation<'_> {
         Ok(())
     }
 
+    fn assemble_row(
+        self,
+        row: usize,
+        terms: impl Iterator<Item = (usize, f64)> + Clone,
+        matrix_row: &mut [f64],
+    ) -> f64 {
+        let ns = matrix_row.len() - 1;
+        let mut projected = Sum::default();
+        for (j, coefficient) in terms.clone() {
+            projected.add(-coefficient * self.residual[j]);
+        }
+        for (column, value) in matrix_row.iter_mut().enumerate() {
+            let mut derivative = Sum::default();
+            for (j, coefficient) in terms.clone() {
+                let u = if column < ns {
+                    self.concentration_derivatives[j * ns + column]
+                } else {
+                    self.temperature_derivatives[j] * self.temperature_scale
+                };
+                derivative.add(coefficient * u);
+            }
+            *value = if row == column { 1.0 } else { 0.0 } - self.step * derivative.value();
+        }
+        projected.value()
+    }
+
     /// Componentwise backward residual in the original unscaled extent
     /// equation. This is a linear arithmetic gate, not a nonlinear error bound.
     fn check_correction(
@@ -616,22 +829,26 @@ impl NewtonEquation<'_> {
     ) -> Result<bool, IsochoricKineticsError> {
         let nr = self.residual.len();
         let ns = self.nu.len() / nr;
-        for i in 0..=ns {
+        for i in 0..ns {
             poll(cancelled)?;
-            let mut value = Sum::default();
-            let mut magnitude = Sum::default();
-            for j in 0..nr {
-                let term = if i < ns {
-                    self.nu[i * nr + j]
-                } else {
-                    self.temperature_extent_derivatives[j]
-                } * delta[j];
-                value.add(term);
-                magnitude.add(term.abs());
-            }
-            projected[i] = value.value();
-            projected_magnitude[i] = magnitude.value();
+            (projected[i], projected_magnitude[i]) = if let Some(sparse) = self.stoichiometric_rows
+            {
+                Self::project_delta(sparse.row(i).iter().copied(), delta)
+            } else {
+                Self::project_delta(
+                    self.nu[i * nr..(i + 1) * nr].iter().copied().enumerate(),
+                    delta,
+                )
+            };
         }
+        poll(cancelled)?;
+        (projected[ns], projected_magnitude[ns]) = Self::project_delta(
+            self.temperature_extent_derivatives
+                .iter()
+                .copied()
+                .enumerate(),
+            delta,
+        );
         let tolerance = 64.0 * f64::EPSILON * (ns + nr + 1) as f64;
         let mut closed = true;
         for j in 0..nr {
@@ -662,6 +879,17 @@ impl NewtonEquation<'_> {
             closed &= defect[j].abs() <= tolerance * scale;
         }
         Ok(closed)
+    }
+
+    fn project_delta(terms: impl Iterator<Item = (usize, f64)>, delta: &[f64]) -> (f64, f64) {
+        let mut value = Sum::default();
+        let mut magnitude = Sum::default();
+        for (j, coefficient) in terms {
+            let term = coefficient * delta[j];
+            value.add(term);
+            magnitude.add(term.abs());
+        }
+        (value.value(), magnitude.value())
     }
 }
 
@@ -805,7 +1033,7 @@ fn resolve(
     })
 }
 
-// Purpose-specific bounded dense Newton solve (at most128 unknowns).
+// Purpose-specific bounded dense Newton solve (at most512 reaction unknowns).
 // Scaled partial pivoting is deterministic; it refuses unresolved pivots and
 // nonfinite arithmetic. The nonlinear residual remains the acceptance owner.
 fn solve_linear(

@@ -21,7 +21,7 @@ fn reduced_newton_matches_full_extents_with_dependent_stoichiometry_and_heat() {
         .map(|j| -(0..ns).map(|i| u[i] * nu[i * nr + j]).sum::<f64>() / 900.0)
         .collect();
     let residual = [1.0, -0.4, 0.3, -0.2, 0.8, -1.1, 0.17];
-    let mut reduced = NewtonWorkspace::new(ns, nr).unwrap();
+    let mut reduced = NewtonWorkspace::new(ns, nr, &nu).unwrap();
     let mut full = NewtonWorkspace::full_extent(nr).unwrap();
     assert_eq!(reduced.dimension(), 4);
     assert_eq!(full.dimension(), 7);
@@ -61,9 +61,20 @@ fn reduced_newton_matches_full_extents_with_dependent_stoichiometry_and_heat() {
             assert!((applied + residual[j]).abs() <= 3e-12 * (1.0 + magnitude));
         }
     }
-    assert_eq!(NewtonWorkspace::new(10, 29).unwrap().dimension(), 11);
-    assert_eq!(NewtonWorkspace::new(3, 3).unwrap().dimension(), 3);
-    assert_eq!(NewtonWorkspace::new(3, 4).unwrap().dimension(), 4);
+    assert_eq!(
+        NewtonWorkspace::new(10, 29, &[0.0; 290])
+            .unwrap()
+            .dimension(),
+        11
+    );
+    assert_eq!(
+        NewtonWorkspace::new(3, 3, &[0.0; 9]).unwrap().dimension(),
+        3
+    );
+    assert_eq!(
+        NewtonWorkspace::new(3, 4, &[0.0; 12]).unwrap().dimension(),
+        4
+    );
 }
 
 #[test]
@@ -78,7 +89,7 @@ fn stiff_schur_recovery_closes_the_original_extent_equation() {
     let jac: Vec<_> = (0..nr).flat_map(|_| [rate, -rate]).collect();
     let residual = vec![-step * rate * 100.0; nr];
     let mut delta = vec![0.0; nr];
-    let mut solver = NewtonWorkspace::new(2, nr).unwrap();
+    let mut solver = NewtonWorkspace::new(2, nr, &nu).unwrap();
     solver
         .solve(
             &nu,
@@ -182,8 +193,8 @@ fn reduced_exothermic_reactor_matches_lumped_rates_and_elemental_reference_shift
 
 #[test]
 fn reduced_workspace_and_reactor_replay_after_cancellation() {
-    let mut workspace = NewtonWorkspace::new(2, 4).unwrap();
     let nu = [-1.0; 4].into_iter().chain([1.0; 4]).collect::<Vec<_>>();
+    let mut workspace = NewtonWorkspace::new(2, 4, &nu).unwrap();
     let jac = [3.0, -3.0].repeat(4);
     let residual = [1.0, 2.0, 3.0, 4.0];
     let mut delta = [0.0; 4];
@@ -217,7 +228,7 @@ fn reduced_workspace_and_reactor_replay_after_cancellation() {
         )
         .unwrap();
     let mut direct = [0.0; 4];
-    NewtonWorkspace::new(2, 4)
+    NewtonWorkspace::new(2, 4, &nu)
         .unwrap()
         .solve(
             &nu,
@@ -265,4 +276,100 @@ fn reduced_workspace_and_reactor_replay_after_cancellation() {
         run(&mechanism, 500.0, 0.1, control)
     );
     assert_eq!(input, [Amount::new(1.0), Amount::new(0.0)]);
+}
+
+#[test]
+fn sparse_gri_schur_matches_dense_original_equation_and_prepared_reuse() {
+    use fs_thermochem::kinetics::gri30::{Gri30Calorics, cantera_gri30};
+    let mechanism = cantera_gri30(Gri30Calorics::Original).unwrap();
+    let ns = mechanism.thermodynamics().models().len();
+    let nr = mechanism.reactions().len();
+    let mut nu = vec![0.0; ns * nr];
+    for i in 0..ns {
+        for j in 0..nr {
+            nu[i * nr + j] = mechanism.stoichiometry().get(i, j).unwrap() as f64;
+        }
+    }
+    let mut sparse = NewtonWorkspace::new(ns, nr, &nu).unwrap();
+    let mut dense = NewtonWorkspace::dense_reduced(ns, nr).unwrap();
+    assert_eq!(sparse.dimension(), 54);
+    assert_eq!(dense.dimension(), 54);
+    let nonzero = nu.iter().filter(|&&x| x != 0.0).count();
+    assert_eq!(sparse.nonzero_stoichiometry(), nonzero);
+    assert!(nonzero < ns * nr / 8);
+    let concentrations: Vec<_> = (0..ns).map(|i| 0.01 * (i + 1) as f64).collect();
+    let mut kinetics = KineticWorkspaceV1::new(&mechanism).unwrap();
+    let state = mechanism
+        .evaluate(
+            Temperature::new(1800.0),
+            &concentrations,
+            &mut kinetics,
+            || false,
+        )
+        .unwrap();
+    let mut dt = vec![0.0; nr];
+    for j in 0..nr {
+        let mut energy = Sum::default();
+        for i in 0..ns {
+            energy.add(kinetics.species_internal_energies()[i] * nu[i * nr + j]);
+        }
+        dt[j] = -energy.value() / state.thermodynamics.heat_capacity_v_density_j_m3_k;
+    }
+    let residual: Vec<_> = (0..nr).map(|j| 1e-7 * ((j % 17) as f64 - 8.0)).collect();
+    let mut a = vec![0.0; nr];
+    let mut b = vec![0.0; nr];
+    for step in [1e-10, 1e-8, 1e-6] {
+        for (workspace, output) in [(&mut sparse, &mut a), (&mut dense, &mut b)] {
+            workspace
+                .solve(
+                    &nu,
+                    kinetics.rate_jacobian(),
+                    kinetics.temperature_derivatives(),
+                    &dt,
+                    1800.0,
+                    step,
+                    &residual,
+                    output,
+                    &mut || false,
+                )
+                .unwrap();
+        }
+        // Exact zeros contribute nothing to the compensated reductions; source
+        // reaction order and the dense thermal coordinate remain unchanged.
+        assert_eq!(a, b);
+    }
+    // A small source-specific release timing, without a timing assertion or a
+    // benchmark framework. Both owners reuse all storage and solve identical
+    // original equations; it measures this operation, not reactor throughput.
+    #[cfg(not(debug_assertions))]
+    {
+        const REPEATS: usize = 40;
+        let mut timings = [std::time::Duration::ZERO; 2];
+        for (index, workspace) in [&mut sparse, &mut dense].into_iter().enumerate() {
+            let start = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                workspace
+                    .solve(
+                        &nu,
+                        kinetics.rate_jacobian(),
+                        kinetics.temperature_derivatives(),
+                        &dt,
+                        1800.0,
+                        1e-8,
+                        &residual,
+                        &mut a,
+                        &mut || false,
+                    )
+                    .unwrap();
+                std::hint::black_box(&a);
+            }
+            timings[index] = start.elapsed();
+        }
+        eprintln!(
+            "GRI Schur {REPEATS} prepared 54x54 solves: sparse={:?}, dense={:?}, N nonzeros={nonzero}/{}",
+            timings[0],
+            timings[1],
+            ns * nr
+        );
+    }
 }

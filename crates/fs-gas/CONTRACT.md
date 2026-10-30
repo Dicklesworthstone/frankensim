@@ -243,9 +243,12 @@ This implements a bounded homogeneous reactor slice of
 `frankensim-ext-gas-chemistry-ladder-paqh`, not the complete combustion ladder.
 
 The solver advances reaction extents with damped backward Euler (the default)
-or optional second-order L-stable SDIRK2, both with adaptive step doubling. Every candidate reconstructs amounts from the original feed
-plus the exact admitted stoichiometric matrix; there is no independent species
-clipping, positive trace seeding, or equilibrium projection. Temperature solves
+or optional second-order L-stable SDIRK2, both with adaptive step doubling.
+Each candidate uses the last accepted composition plus local reaction extents
+through the exact admitted stoichiometric matrix. The origin is refreshed only
+after acceptance; the original feed and fixed total energy remain untouched for
+whole-call mass, elemental, energy and entropy audits. No species clipping,
+positive trace seeding or equilibrium projection is introduced. Temperature solves
 the original total internal energy at each candidate composition, with the
 formation contribution present exactly once. No separate reaction heat source
 is added. The source-path/positive-Cv interval admission is the same L1 helper
@@ -1328,3 +1331,70 @@ This remains the Estimated conservative engineering lane. No moving
 unequal-caloric interface pressure-equilibrium property, fully discrete
 entropy/invariant-domain theorem, chemistry, spatial convergence or molecular
 shock-thickness validation follows from a successful face evaluation.
+
+## Complete methane chemistry with trace-preserving local extents
+
+The existing prepared reactor now admits the complete 53-species, 325-channel
+`kinetics::gri30::cantera_gri30` source, including its 16 originally irreversible
+channels. `ContinuousAt300K` uses the source's explicitly declared upper-region
+enthalpy/entropy continuity adjustment, retaining every original Cp law and
+each species' own NASA seam. Its common admitted interval is 300--3000 K.
+No reduced global methane reaction or added combustion heat source is used.
+
+Reaction coordinates are rebased only after an accepted complete step.
+Candidates reconstruct from that accepted composition plus local stoichiometric
+extents; the original feed and fixed total internal energy remain untouched for
+whole-call mass, elemental, energy and entropy audits. This prevents a trace
+intermediate from becoming the subtraction of large accumulated reaction-cycle
+extents. It introduces no species clipping, positive trace floor, radical seed
+or equilibrium projection, and rejected attempts retain their accepted origin.
+
+The smaller Newton system remains algebraically equivalent to the full extent
+equation. Exact nonzero stoichiometric rows and columns are prepared once,
+without thresholds or rank truncation; compensated sums retain source order.
+For GRI, the common factorization is 54 by 54 instead of 325 by 325. Its
+stoichiometric matrix has 1227 nonzero entries out of 17225, reducing reduced
+assembly product terms from 947700 to 83808, including the unchanged thermal
+row. A focused release measurement of 40 identical source-derived equations
+took 13.151 ms with the sparse traversal versus 90.728 ms with the dense
+traversal; their 325 corrections were bit-identical. These are one-run
+operation timings, not a whole-reactor or portable speed guarantee.
+
+Every reduced correction must satisfy the original unscaled componentwise
+linear backward-error gate. Up to four residual corrections are bounded.
+If trace-channel cancellation still fails that gate, prepared storage permits
+the existing scaled-partial-pivot full-extent solver, followed by the same gate
+and at most two direct residual corrections. Physical and numerical acceptance
+tolerances are unchanged. `IsochoricKineticsBalance::direct_fallbacks` reports
+successful recovered Newton corrections, including those in later-rejected
+time-step attempts. For GRI the fallback matrix/RHS/scales reserve 850200
+bytes; the sparse column cache adds 22240 bytes beyond the sparse-row path.
+All numerical buffers are prepared before advancing; no hot-path allocation
+is introduced.
+
+The independent development-only reproducer
+`data/reference/thermochem/gri30_cantera32.py` verifies Cantera 3.2.0 and the
+pinned source blob, then integrates the complete mechanism separately with
+CVODES. Two native SDIRK2 regressions use CH4:O2:N2 = 1:4:15.04, one litre,
+101325 Pa and no radical seeds. At 2 ms, the 1300 K induction case agrees with
+the 1300.5483131534243 K reference within 0.00000181 K; the 1500 K ignition
+case agrees with the 2600.310562321808 K reference within 0.0000561 K.
+Both compare all 53 species within 0.5% plus 1e-12 mol, original physical
+energy within 2e-8 J, pressure, independent atom/mass inventories and entropy.
+
+The hot case uses 911 accepted steps, 154 rejected attempts, 11997 Newton
+iterations and 1296 successful direct fallbacks at relative tolerance 2e-5.
+Its observed mass residual is 1.11e-19 kg, maximum relative elemental residual
+1.19e-15 and energy residual magnitude 2.85e-14 J. The induction case uses
+110 accepted steps and no rejections. These are fixture-specific work and
+accuracy observations, not certified error bounds. All 25 focused chemistry
+tests pass, including original hydrogen, integration-order, conservation,
+datum-invariance, cancellation and sparse/dense-equivalence regressions. The
+complete focused native gas library also passes all 158 tests.
+
+This extends homogeneous methane/natural-gas/nitrogen chemistry. It supplies
+neither a fitted wood/PMMA pyrolysate nor soot, char oxidation, spray, real-gas
+or experimentally validated flame/emission prediction. A finite-step entropy
+check does not turn the source's irreversible channels into detailed-balanced
+reactions, establish a fully discrete coupled entropy theorem, or give higher
+order to surrounding pressure, transport, radiation or solid-source splitting.

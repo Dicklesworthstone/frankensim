@@ -167,6 +167,10 @@ pub struct IsochoricKineticsBalance {
     pub nonlinear_iterations: usize,
     /// Actual caloric trial evaluations across all stages.
     pub temperature_evaluations: usize,
+    /// Newton corrections recovered by the prepared full reaction solve after
+    /// the reduced solve missed the unchanged linear residual tolerance.
+    /// Includes corrections in stages that are subsequently rejected.
+    pub direct_fallbacks: usize,
 }
 
 /// Fully accepted finite-duration endpoint retaining the exact mechanism.
@@ -481,8 +485,9 @@ fn advance_prepared<'a>(
                 return Err(IsochoricKineticsError::Cancelled);
             }
             Ok((state, error, entropy_change)) if error <= 1.0 => {
-                current.copy_from_slice(fine);
                 current_concentrations.copy_from_slice(reactor.concentrations());
+                reactor.rebase(current_concentrations);
+                current.fill(0.0);
                 accepted = state;
                 elapsed = if step == remaining {
                     duration.value()
@@ -522,8 +527,9 @@ fn advance_prepared<'a>(
             }
         }
     }
-    // Reconstruct from original feed plus accumulated reaction extents before
-    // publication; no sum of independently clamped species updates is retained.
+    // Resolve the exact accepted composition after the last coordinate rebase.
+    // Each local update used stoichiometric extents without clipping; the final
+    // mass/element audit below still compares against the untouched original feed.
     accepted = reactor.resolve(current, accepted.temperature.value(), &mut cancelled)?;
     for (amount, concentration) in amounts.iter_mut().zip(reactor.concentrations()) {
         *amount = Amount::new(*concentration * volume.value());
@@ -536,6 +542,7 @@ fn advance_prepared<'a>(
         (accepted.entropy_density_j_m3_k - initial.entropy_density_j_m3_k) * volume.value();
     balance.nonlinear_iterations = reactor.stats.nonlinear_iterations;
     balance.temperature_evaluations = reactor.stats.temperature_evaluations;
+    balance.direct_fallbacks = reactor.stats.direct_fallbacks;
     balance.maximum_relative_element_residual = element_residual(
         &reactor.mechanism,
         &reactor.initial,
