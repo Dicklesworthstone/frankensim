@@ -137,7 +137,7 @@ fn flux(s:Spec,t:[f64;2])->(f64,f64) {
     } else { LINK_AREA/(0.05/0.04+0.05/0.08+if s.paths {s.resistance} else {0.0})*(t[0]-t[1]) };
     let radiation = if s.paths {FACE_SIDE*FACE_SIDE*SIGMA*(t[0]-t[1])*(t[0]+t[1])
         *(t[0]*t[0]+t[1]*t[1])/(1.0/s.emissivity+1.0/0.6-1.0)} else {0.0};
-    (conductive,radiation)
+    return (conductive,radiation);
 }
 
 #[test]
@@ -253,4 +253,89 @@ fn late_transport_domain_budget_and_independent_cancellation_preserve_every_hist
             if !narrow {owner.step_heat_network(&mut heat,&force,RelaxationHeatInput {network,cx},Some(input()),solve(),&[0.0;2],&gate).unwrap();}
         });
     }
+}
+
+#[test]
+fn composed_heat_source_keeps_the_actual_accepted_payload_and_bulk_trajectory() {
+    use crate::circuit_enthalpy::{CircuitThermalCoefficients, contacts::ContactThermalCoefficients};
+    fixture(spec(), |m, plain, powered, bases, heat, network, cx| {
+        let gate = CancelGate::new_clock_free();
+        let mut outcomes = Vec::new();
+        for composed in [false, true] {
+            let mut heat = heat.clone();
+            let (placement, material, native) = native(m);
+            let mut owner = FrameRelaxationThermalSystem::new(material, native, &heat,
+                plain, &DEST, budget(), &gate).unwrap();
+            owner.bind_material_circuit(&heat, powered, circuit(powered, &heat, bases, None), bases, &gate).unwrap();
+            let force = vec![0.0; owner.mechanical().mode_count()];
+            let calls = std::cell::Cell::new(0usize);
+            for _ in 0..3 {
+                if composed {
+                    let report = owner.step_heat_network_with(&mut heat, &force,
+                        RelaxationHeatInput { network, cx }, Some(input()), solve(), &[0.0; 2], &gate,
+                        |trial| {
+                            calls.set(calls.get() + 1);
+                            let ContactThermalCoefficients { bulk, contacts } = network.resolve(cx, trial)?;
+                            let temperatures = [trial.temperature_k(CellId(0))?, trial.temperature_k(CellId(1))?];
+                            Ok::<_, HeatNetworkError>(ContactThermalCoefficients { contacts,
+                                bulk: CircuitThermalCoefficients { resistors: bulk.resistors,
+                                    sources_w: bulk.sources_w, conductances_w_k: bulk.conductances_w_k,
+                                    source: (bulk.source, (calls.get(), temperatures)) } })
+                        }).unwrap();
+                    let (last_call, temperatures) = report.transport_source.unwrap();
+                    assert_eq!(last_call, calls.get());
+                    assert_eq!(temperatures, [heat.temperature_k(CellId(0)).unwrap(), heat.temperature_k(CellId(1)).unwrap()]);
+                    assert!(report.total_energy_residual_j.abs() < solve().total_energy_tolerance_j);
+                } else {
+                    owner.step_heat_network(&mut heat, &force, RelaxationHeatInput { network, cx },
+                        Some(input()), solve(), &[0.0; 2], &gate).unwrap();
+                }
+            }
+            outcomes.push((heat.cells().clone(), owner.electrical().unwrap().clone(),
+                owner.mechanical().material_memory().to_vec(),
+                placement.physical_state(owner.mechanical().components(), &gate).unwrap()));
+        }
+        assert_eq!(outcomes[0], outcomes[1]);
+    });
+}
+
+#[test]
+fn typed_late_transport_failure_rolls_back_all_histories_and_allows_retry() {
+    use crate::circuit_enthalpy::{CircuitThermalCoefficients, contacts::ContactThermalCoefficients};
+    use crate::air_path::cylinder::frame::modal::relaxation::temperature::heat::transport::RelaxationTransportError;
+    #[derive(Debug)]
+    enum Failure { Original(HeatNetworkError), Domain { cell: CellId } }
+    fixture(spec(), |m, plain, powered, bases, mut heat, network, cx| {
+        let gate = CancelGate::new_clock_free();
+        let (placement, material, native) = native(m);
+        let mut owner = FrameRelaxationThermalSystem::new(material, native, &heat,
+            plain, &DEST, budget(), &gate).unwrap();
+        owner.bind_material_circuit(&heat, powered, circuit(powered, &heat, bases, None), bases, &gate).unwrap();
+        let accepted = (heat.cells().clone(), owner.electrical().unwrap().clone(),
+            owner.mechanical().material_memory().to_vec(),
+            placement.physical_state(owner.mechanical().components(), &gate).unwrap());
+        let force = vec![0.0; owner.mechanical().mode_count()];
+        let calls = std::cell::Cell::new(0usize);
+        let result = owner.step_heat_network_with(&mut heat, &force,
+            RelaxationHeatInput { network, cx }, Some(input()), solve(), &[0.0; 2], &gate,
+            |trial| {
+                calls.set(calls.get() + 1);
+                if calls.get() > 1 { return Err(Failure::Domain { cell: CellId(1) }); }
+                let ContactThermalCoefficients { bulk, contacts } = network.resolve(cx, trial).map_err(Failure::Original)?;
+                Ok(ContactThermalCoefficients { contacts, bulk: CircuitThermalCoefficients {
+                    resistors: bulk.resistors, sources_w: bulk.sources_w,
+                    conductances_w_k: bulk.conductances_w_k, source: (bulk.source, ()) } })
+            });
+        assert!(matches!(result, Err(RelaxationTransportError::Source(Failure::Domain { cell: CellId(1) }))));
+        assert!(calls.get() > 1); // Admission succeeded; refusal occurred after mechanics staged.
+        assert_eq!(heat.cells(), &accepted.0);
+        assert_eq!(owner.electrical().unwrap(), &accepted.1);
+        assert_eq!(owner.mechanical().material_memory(), accepted.2);
+        assert_eq!(placement.physical_state(owner.mechanical().components(), &gate).unwrap(), accepted.3);
+        assert_eq!(heat.time_s(), 0.0);
+        assert_eq!(owner.mechanical().samples_rendered(), 0);
+        owner.step_heat_network(&mut heat, &force, RelaxationHeatInput { network, cx },
+            Some(input()), solve(), &[0.0; 2], &gate).unwrap();
+        assert_eq!(owner.mechanical().samples_rendered(), 1);
+    });
 }
