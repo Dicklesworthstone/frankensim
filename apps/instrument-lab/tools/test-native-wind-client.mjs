@@ -325,11 +325,12 @@ test("resolved sources always select their command, including experiments withou
   const pressureSource = (await readFile(new URL("../../../crates/fs-couple/examples/resolved-dg-pressure.performance", import.meta.url))).toString("utf8");
   const splitApertureSource = (await readFile(new URL("../../../crates/fs-couple/examples/resolved-dg-split-aperture.performance", import.meta.url))).toString("utf8");
   const sideApertureSource = (await readFile(new URL("../../../crates/fs-couple/examples/resolved-dg-side-aperture.performance", import.meta.url))).toString("utf8");
+  const slitEdgeSource = (await readFile(new URL("../../../crates/fs-couple/examples/resolved-dg-slit-edge.performance", import.meta.url))).toString("utf8");
   const upstreamSource = (await readFile(new URL("../../../crates/fs-couple/examples/resolved-dg-upstream.performance", import.meta.url))).toString("utf8");
   assert.match(pressureSource, /^boundary pressure 3$/m);
   assert.match(upstreamSource, /^upstream_dg dg_tube /m);
   assert.match(upstreamSource, /^boundary upstream-pressure 3$/m);
-  for (const selected of [source, pressureSource, splitApertureSource, sideApertureSource, upstreamSource]) for (const decimate of [false, true]) {
+  for (const selected of [source, pressureSource, splitApertureSource, sideApertureSource, slitEdgeSource, upstreamSource]) for (const decimate of [false, true]) {
     await renderNativeWindBundle(selected, [], connected, {renderer:"resolved", decimate}, undefined,
       async (_url, options) => {
         assert.equal(options.headers["Content-Type"], "application/json;charset=utf-8");

@@ -224,6 +224,12 @@ the short closed-tube fixture does not qualify an anatomical airway or flute.
 
 The canonical `resolved-dg.performance` starter is a small exploratory physical
 field fixture. It does not describe a complete flute or reed instrument.
+The **Resolved flow — slit jet and solid edge** starter adds an actual solid
+nozzle, free gap and wedge through `resolved-dg-slit-edge.performance`. Pressure
+drives the same resolved fluid through that geometry into a selected bore
+aperture and separate atmospheric opening. Its 0.5 mm grid and 1 mm slit are
+explicit manufactured dimensions; the short example exercises the physical
+connections and needs refinement before edge-tone or instrument claims.
 Native admission retains the stated grid spacing, substeps and physical clock;
 the Lab never coarsens them to fit the execution allowance. Complete experiments
 save and restore this performer, the unchanged source files and gas associations.

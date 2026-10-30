@@ -9,6 +9,7 @@ mod upstream;
 mod molecular;
 mod patch;
 mod reservoir;
+mod flue_geometry;
 mod aperture;
 mod sgs;
 

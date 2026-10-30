@@ -131,6 +131,32 @@ reader requires the `exploration` token and the source remains ineligible for
 acceptance renders. Filter, geometry, source-flow and interface convergence are
 still required; enabling a closure does not qualify a turbulent flute jet.
 
+### Manufactured slit, free gap and solid edge
+
+`examples/resolved-dg-slit-edge.performance` puts a solid nozzle and edge into
+this same native path. Its 12 × 6 × 2.5 mm Cartesian domain uses 0.5 mm cells,
+with 375 explicit stationary solid cells forming a 3 mm long, 1 mm high slit
+and a staircased wedge. The slit exits at x = 4 mm; the edge starts at x = 7 mm.
+A 30-tile lower downstream patch feeds the original 60 mm DG tube, with both
+areas equal to 7.5 × 10⁻⁶ m². A separate 27-tile top opening retains the original
+ambient reservoir. All collars and reservoir fluid halos remain explicit.
+
+The declared 0.02 → 0.2 → 2 Pa pressure steps and release drive the actual fluid
+through those solids. Four original NSF steps form each coupled interval;
+96 kHz observation and optional PCM decimation retain that physical clock.
+The native computed baffled load, Stokes–Kirchhoff observer and fixed 20 Pa
+PCM scale are unchanged. Instrument Lab offers the same canonical file as
+**Resolved flow — slit jet and solid edge**; it can also be passed directly to
+`music_render resolved` with the existing command options.
+
+This is a manufactured integration geometry. The available Bressan recorder
+description does not supply its complete windway height, curvature and jet
+offset, so those dimensions are not presented as measured instrument data.
+The two-cell slit, voxel edge, downstream fluid collar and same-area circular
+plane-mode connection require refinement and physical validation. The example
+contains no jet card or synthetic noise source; it does not establish
+self-sustained edge tone, a converged turbulent jet or realistic flute sound.
+
 ### Physical pressure control
 
 `NsfBoundaryDrive::PressureOffset(delta_p)` fixes the other face's pressure

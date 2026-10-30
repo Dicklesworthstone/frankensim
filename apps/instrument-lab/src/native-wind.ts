@@ -7,6 +7,7 @@ import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.per
 import pressureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-pressure.performance?raw";
 import splitApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-split-aperture.performance?raw";
 import sideApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-side-aperture.performance?raw";
+import slitEdgeResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-slit-edge.performance?raw";
 import upstreamResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-upstream.performance?raw";
 import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
 import nolleMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-nolle-molecular.performance?raw";
@@ -99,6 +100,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a pressure-driven gas field has a separate opening in its side wall, while the original end face feeds the bore. Edit the opening cells and prescribed gas state to explore how ventilation changes the same resolved flow and bore pressure.",
     help: "reservoir_aperture declares physical density, velocity and temperature; the original material law determines pressure. Cells must avoid wall corners, solids and the characteristic collars. Reservoir mass and energy have separate accounts. The opening is a prescribed reservoir, not a transparent acoustic boundary, and the microphone observes the bore outlet. This coarse fixture does not qualify flute geometry or jet turbulence.",
+  },
+  {
+    name: "resolved-dg-slit-edge.performance",
+    label: "Resolved flow — slit jet and solid edge",
+    renderer: "resolved",
+    source: slitEdgeResolvedDgSource,
+    decimate: true,
+    intro: "Starter: blowing pressure drives air through a solid slit nozzle, across a free gap and past a solid edge. The same fluid field feeds a bore aperture and a separate atmospheric opening; the microphone observes the bore outlet.",
+    help: "This manufactured geometry uses a 0.5 mm grid, a 1 mm slit and an explicit solid wedge. Edit solids, pressure or gas to change the original flow; no jet card or noise generator supplies the sound. The physical solver keeps its own clock while native decimation produces 48 kHz playback. This short coarse example needs grid and interface refinement before edge-tone or instrument claims.",
   },
   {
     name: "resolved-dg-upstream.performance",
