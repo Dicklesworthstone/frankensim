@@ -339,3 +339,5 @@ fn late_coolant_failure_keeps_its_typed_cause_and_rolls_back_the_complete_assemb
         assert_eq!(owner.mechanical().samples_rendered(),1);
     });
 }
+
+mod finite;
