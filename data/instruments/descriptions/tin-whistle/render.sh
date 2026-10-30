@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Native renders of the committed tin-whistle performances (pexfp.338, lane P4). Listening only: there is no licensed reference recording yet
-# (bead pexfp.219), so these are not graded. Run on trj. The performance files must exist in the snapshot of a pushed SHA; the music_render
+# (bead pexfp.219), so these are not graded. Run on ts1 (the kit's /data/tmp/wa-inst paths; trj is a production host). The performance files must exist in the snapshot of a pushed SHA; the music_render
 # binary may come from an earlier green SHA (BIN_SHA12), it does not read these files at build time:
 #   SHA12=<sha12 containing these files> BIN_SHA12=<sha12 with a release music_render> \
 #     data/instruments/descriptions/tin-whistle/render.sh
@@ -52,15 +52,22 @@
 # `windway slit` and its pressures: the Nolle/Price transfer refuses this windway. The gesture is 50 ms attack, hold, 10.5 ms release.
 # Dry air at 20 C is the measurement's own gas, not an omission: the paper blew the whistle from a regulated, metered air supply in an anechoic
 # room at 20 C (specimen.tsv, environment), not by mouth. Do not change it to breath; breath gas belongs to recipes whose data were played.
-# Unknown or authored: labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), jet displacement gain (90, as in the
-# flue gates), the jet card (the repository interim slot-jet card, chosen BEFORE looking at any render because a windway jet is a slot jet; it is
-# outside its Reynolds band, u-jet-profile). The binary must contain the jet-island phase fix (fs-couple 1718d79fb or later).
+# Jet: `jet_response forced-bickley 0.1 90` (pexfp.135.4) puts the forced Bickley jet in place of the relay's band chain and displacement gain
+# (the `jet` row's 90 is passed and unused). It is matched to the developing windway's exit at each note's held pressure by Verge's rule as
+# Segoufin states it (thesis, 2000, sec. 5.2): its centre speed is the exit's Bernoulli core speed and its half-width conserves the exit's
+# momentum flux with a parabolic wall layer (H = 2.5), so U0/U 1.43 and b 0.44 h on D5 down to 1.23 and 0.56 h on D7c (the sidecar's
+# jet_response records both). Not claimed: the exit's shape beyond its centre speed and momentum (flatter than Bickley: de la Cuadra's Nolle
+# fits, n 2 to 4) and the exit during attack and release. The binary must contain fs-couple cc6094588 or later.
+# Unknown or authored: labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), the jet card (the repository interim slot-jet card,
+# chosen BEFORE looking at any render because a windway jet is a slot jet; it is outside its Reynolds band, u-jet-profile).
 #
 # Numerical controls forced by the generic route (none is a physical parameter, none was tuned): mechanics clock 288 kHz because a viscothermal loss
 # cell needs four transit samples and under 0.5 rad at its band edge (3 kHz); loss only on bore sections of 17 mm or more; finger holes are chimney
 # sections of 1.5 mm (a section under one propagation step is refused, the wall is 0.3 mm: u-hole-chimney); compact baffled radiation loads, which
 # hold for ka <= 0.5 and so cap the receiver band at 2.8 kHz; minimum jet speed 0.2 m/s (the windway gives a jet slower than 1 m/s at the
-# first control tick of the attack, which the default limit refuses); the pressure release lasts 10.5 ms because a release that ends exactly on a
+# first control tick of the attack, which the default limit refuses); jet history 131072 samples (at 0.2 m/s the forced jet's 90 b/U0 window
+# spans 58.5k samples of the 288 kHz clock on D5 up to 87.0k on D7c, above the 65536 declared before; D5 renders bit-identically at both, and
+# A5 is refused at 65536); the forced jet's spacing 0.1 b and window 90 b/U0; the pressure release lasts 10.5 ms because a release that ends exactly on a
 # control tick can leave a rounding-sized pressure that the jet domain check refuses.
 #
 # SEED=<n> re-renders with another jet seed into $OUT/seed-<n>/<end> (seed-independence check).

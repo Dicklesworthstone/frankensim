@@ -20,9 +20,13 @@ const CARD: &str =
 /// The card's flue row: the window's radiation replaces the authored loss.
 const FLUE: &str = "flue 0.00800 0.00148 0.00530 0 0 0\n";
 
-/// The card without its window radiation and window rows (lossless mouth),
-/// cut to a 1024-sample window whose only gesture event is the opening
-/// pressure ramp.
+/// The card's forced jet. These tests are about the window, so they keep the
+/// relay jet; the forced jet's kernel also takes minutes to integrate per parse.
+const FORCED: &str = "jet_response forced-bickley 0.1 90\n";
+
+/// The card without its window radiation and window rows (lossless mouth) and
+/// without its forced jet, cut to a 1024-sample window whose only gesture event
+/// is the opening pressure ramp.
 fn legacy() -> String {
     let rows: Vec<&str> = CARD
         .lines()
@@ -34,8 +38,10 @@ fn legacy() -> String {
         CARD.contains(&radiating) && CARD.contains(FLUE),
         "the D5 window no longer radiates through its row; update this test"
     );
+    assert!(CARD.contains(FORCED), "the D5 jet changed; update this test");
     let text = CARD
         .replace(&radiating, "")
+        .replace(FORCED, "")
         .replace("output 120000 5", "output 1024 1");
     let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t9.3447e1\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
     assert!(
