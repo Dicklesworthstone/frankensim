@@ -4178,3 +4178,81 @@ context/domain refusals, capacity-only heating, finite geometry, nonlinear
 multilayer flux and a real FSRI gypsum/mineral-wool/plywood stack coupled to
 the original implicit energy and sensible-entropy accounting. Full workspace
 Cargo validation remains blocked by seven missing sibling repositories.
+
+## Adhesive, resin and conditioned-product transient thermal response (2026-10-29)
+
+This increment adds **12 profiles, 74 property claims, 1,152 numerical values
+and 79 source observations**: six adhesive/resin references and six FSRI
+product populations. Claims include source statistics and explicit model
+interpretations; they are not all independent measurements.
+
+| Profile | Claims | Source-supported additions |
+| --- | ---: | --- |
+| [Stycast 2850FT with Catalyst 23LV](stycast-2850ft-23lv-rostem-2021-caloric/manifest.tsv) | 2 | Specific heat 2–20 K and nominal source density |
+| [Stycast 1266](stycast-1266-rostem-2021-caloric/manifest.tsv) | 2 | Specific heat 2–20 K and nominal source density |
+| [EPO-TEK 377](epotek-377-rostem-2021-caloric/manifest.tsv) | 2 | Specific heat 2–20 K and nominal source density |
+| [EPO-TEK 377H](epotek-377h-rostem-2021-caloric/manifest.tsv) | 2 | Separate specific heat 2–20 K and nominal source density |
+| [LOCTITE EA 9394](henkel-loctite-ea9394-cured-2015/manifest.tsv) | 17 | Bulk mechanics at 298.15 K; two CTE points; eight lap-joint strength points; nominal conductivity |
+| [Araldite 2011](huntsman-araldite-2011-cured-reference/manifest.tsv) | 3 | Conductivity and separately cured flexural properties at 296.15 K |
+| [HIPS, unconditioned](fsri-hips-unconditioned-2021/manifest.tsv) | 8 | Native capacity, source-normalized specific heat, apparent/local conductivity and statistics |
+| [Memory-foam carpet pad, dried](fsri-memory-foam-pad-dried-2022/manifest.tsv) | 6 | One capacity run; separate conductivity and density populations |
+| [Homasote, unconditioned](fsri-homasote-unconditioned-2021/manifest.tsv) | 8 | Whole cellulose-board thermal population |
+| [Homasote, dried](fsri-homasote-dried-2021/manifest.tsv) | 8 | Separate oven-conditioned cellulose-board population |
+| [Engineered flooring, unconditioned](fsri-engineered-flooring-unconditioned-2021/manifest.tsv) | 8 | Whole hardwood-face/plywood product thermal population |
+| [Engineered flooring, dried](fsri-engineered-flooring-dried-2021/manifest.tsv) | 8 | Separate conditioned flooring population |
+
+The four cryogenic epoxy references preserve the actual cured populations from
+[Rostem et al. (2021)](https://ntrs.nasa.gov/citations/20210019152), rather than
+joining them to producer datasheet specimens. The paper's coefficient table
+omits output units. Reproducing its plotted heat-capacity ordinate requires
+J/(kg K) fit output; queries retain both `source-fit-unit-labelled=0` and
+`source-fit-unit-interpretation-j-per-kg-k=1`. Exact cure schedules, absolute
+measurement pressure, Cp-versus-Cv constraint and matched specimens are unknown.
+The four nominal densities do not supply density(T) or volumetric capacity.
+Finite interpolation comparisons below 0.008 percent are sampling checks, not
+continuous error certificates or measurement uncertainties.
+
+EA 9394's conductivity has no stated test temperature or cure and remains
+`nominal-source-thermal-conductivity`, not a temperature law. CTE is supported
+only at 313.15 and 373.15 K. Eight distinct lap-joint strengths occupy source
+temperatures from 218.15 to 477.15 K; they are discrete points, with a five-day
+298.15 K cure and the specified joint substrate/preparation retained. That cure
+does not qualify the separate bulk or thermal measurements. Araldite conductivity
+is supported only at 296.15 K after 20 minutes at 373.15 K, while its flexural
+properties use a 16-hour 313.15 K cure. The producer's ambiguous hardener-ratio
+unit remains unresolved. No interpolation across these points, elastic-tensor
+completion, cohesive law or missing caloric property is supplied; the test's
+two-kelvin constant-conductivity scenario is explicitly authored outside the
+source cards.
+
+The FSRI additions retain source pin
+`a432697e4b7d40f642b5cc8f384506439ebb32df`. Capacity supports
+283.15–313.15 K and conductivity supports 288.15–318.15 K, giving a joint
+transport span of 288.15–313.15 K. Density is only a source-normalization input.
+Dry and unconditioned populations remain separate; local conductivity requires
+the finite-gradient mean-temperature interpretation. Dried memory foam has one
+capacity run and no finite capacity-SD claim; its conductivity R1 filename
+internally labels R3, so three files do not establish three independent coupons.
+HIPS retains POLYB/PlasticB aliases. Flooring stock metadata says 3.2 mm while
+HFM specimens measure about 8.8–9.8 mm; stock/coupon equivalence, layer details,
+material axes, formulation and cross-property matching remain unknown.
+
+`thermal::transport::stack::transient::PreparedLayeredThermalBody` now prepares
+**1–64 planar layers and up to 512 finite-volume cells**, with an independent
+temperature and heat storage in each cell. Each layer's sourced capacity is
+prepared once and shared across its uniform subdivisions. Storage uses an
+explicit whole-layer mass or geometric reference volume; adjacent half-cell
+conduction and interlayer contact resistance retain the original source laws.
+The bound borrowed laws feed the existing `BackwardEulerStep` owner, including
+energy and sensible-entropy accounting. This distributed transient body adds no
+time integrator and does not reinterpret the existing steady conduction stack
+as distributed storage.
+
+All **10 focused native tests pass: three adhesive/resin, three FSRI and four
+transient-body tests**. They cover actual pack compilation, independent source
+reductions/equations, context and domain refusals, mass/volume heating, nonlinear
+contact flux and derivatives, and cancellation. Independent cosine-mode checks
+separate spatial refinement at 2/4/8/16 cells from backward-Euler refinement at
+1/2/4/8 steps; a six-cell FSRI wall and material substitution exercise real source
+data in the distributed model. Full workspace Cargo validation remains blocked
+by seven missing sibling repositories.

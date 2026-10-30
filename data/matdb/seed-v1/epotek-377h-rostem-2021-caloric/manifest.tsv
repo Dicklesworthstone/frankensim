@@ -1,0 +1,22 @@
+frankensim.matdb-manifest.v3
+pack_id	epotek-377h-rostem-2021-caloric
+redistribution	permitted	Selected attributed numerical facts, independent equation evaluations and original notes only; no source document or table layout is redistributed
+citation	K. Rostem et al., Cryogenics 118 (2021) 103329, Tables 1-2 and Fig. 1; https://ntrs.nasa.gov/api/citations/20210019152/downloads/Rostem-specific-heat%20of%20epoxies%20and%20mixtures.pdf; accessed 2026-10-30
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	adhesive-resin-thermal	properties.tsv	material-tsv-v1
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	nominal_source_density	nominal-source-density	dimensional
+axis	source_grade_epotek_377h	source-grade-epotek-377h	dimensional
+axis	resin_to_hardener_mass_ratio	resin-to-hardener-mass-ratio	dimensional
+axis	source_cure_history_known	source-cure-history-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_measurement_vacuum	source-measurement-vacuum	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_caloric_constraint_known	source-caloric-constraint-known	dimensional
+axis	source_fit_unit_labelled	source-fit-unit-labelled	dimensional
+axis	source_fit_unit_interpretation_j_per_kg_k	source-fit-unit-interpretation-j-per-kg-k	dimensional
+axis	source_density_temperature_known	source-density-temperature-known	dimensional
+axis	source_density_cured_state_known	source-density-cured-state-known	dimensional

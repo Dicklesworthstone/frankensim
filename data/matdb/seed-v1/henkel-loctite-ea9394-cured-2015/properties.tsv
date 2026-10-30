@@ -1,0 +1,262 @@
+frankensim.matdb-source.v1
+observation	identity	henkel-loctite-ea9394-cured-2015	Henkel LOCTITE EA 9394 AERO Technical Process Bulletin, revision 7/2015; https://dm.henkel-dam.com/is/content/henkel/EA-9394-Aero	Selected original EA9394 numerical facts only. Resin:hardener mass ratio 100:17 is retained; uncured mixed density 1.36 g/ml is not a cured density. Five-day 25 C lap-joint cure is not silently assigned to the separate bulk or thermal sections. Typical results and unstated uncertainties do not establish design allowables, generic epoxy behavior, current formulation equivalence or complete material laws.
+observation	thermal	henkel-loctite-ea9394-cured-2015	EA9394 bulletin p. 5 thermal rows	The printed SI conductivity 0.331 W/(m K) is retained rather than independently reconverting rounded 7.92e-4 cal/(s cm C). Test temperature, method, moisture conditioning and cure are unstated, so this is nominal-source-thermal-conductivity, not a continuous temperature law. The expansion coefficients 55.6 and 80.6 micrometre/(metre C) are discrete values at 40 and 100 C. Their length-denominator convention and scan history are unknown; no finite strain or interpolation is invented.
+observation	tension	henkel-loctite-ea9394-cured-2015	EA9394 bulletin p. 4 bulk tensile properties, ASTM D638	Printed SI tensile strength 46.0 MPa, tensile modulus 4237 MPa and break elongation 1.66 percent at 25 C use nominal 3.18 mm castings. Cure history, rate and detailed moisture conditioning are not reported. Tensile modulus is not promoted to a fully qualified isotropic Young modulus or bondline stiffness.
+observation	shear	henkel-loctite-ea9394-cured-2015	EA9394 bulletin p. 4 dry/wet bulk shear modulus	Dry 1461 MPa and wet 1027 MPa at 25 C remain different moisture labels (source-moisture-label=1 dry, =2 wet). Conditioning procedure, shear test method and specimen correspondence with tensile castings are unstated. No Poisson ratio is inferred from E/G.
+observation	compression	henkel-loctite-ea9394-cured-2015	EA9394 bulletin p. 5 compression, ASTM D695	Compression strength 68.9 MPa at 25 C applies to rectangular specimens nominally 12.7 mm wide, 25.4 mm long and 12.7 mm high. Rate, cure and detailed conditioning are unstated; this is not a compressive modulus or a universal failure surface.
+observation	lap-joint	henkel-loctite-ea9394-cured-2015	EA9394 bulletin p. 3 tensile lap shear, ASTM D1002	Eight original temperature points use five days cure at 25 C, 2024-T3 bare aluminum adherends and phosphoric-acid anodizing per ASTM D3933. Original MPa values are retained. Bondline thickness, overlap dimensions and rate are not reported. These are lap-joint strength values, not bulk shear strength or an intrinsic cohesive law; no temperature interpolation is supplied.
+scalar	reported-conductivity	identity,thermal	nominal_source_thermal_conductivity	.331	W/m/K	constant
+uncertainty	reported-conductivity	unstated	-	-	-	-
+validity	reported-conductivity	source_grade_ea9394	1	1	1
+validity	reported-conductivity	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	reported-conductivity	source_moisture_conditioning_known	0	0	1
+validity	reported-conductivity	source_pressure_known	0	0	1
+validity	reported-conductivity	source_specimens_matched	0	0	1
+validity	reported-conductivity	source_test_direction_known	0	0	1
+validity	reported-conductivity	source_cure_history_known	0	0	1
+validity	reported-conductivity	source_test_temperature_known	0	0	1
+validity	reported-conductivity	source_test_method_known	0	0	1
+scalar	tensile-modulus	identity,tension	tensile_modulus	4237000000	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_ea9394	1	1	1
+validity	tensile-modulus	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	tensile-modulus	source_moisture_conditioning_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_specimens_matched	0	0	1
+validity	tensile-modulus	source_test_direction_known	0	0	1
+validity	tensile-modulus	source_cure_history_known	0	0	1
+validity	tensile-modulus	source_test_temperature_known	1	1	1
+validity	tensile-modulus	temperature	298.15	298.15	K
+validity	tensile-modulus	source_test_rate_known	0	0	1
+validity	tensile-modulus	casting_thickness	.00318	.00318	m
+scalar	tensile-strength	identity,tension	tensile_strength	46000000	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_ea9394	1	1	1
+validity	tensile-strength	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	tensile-strength	source_moisture_conditioning_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_specimens_matched	0	0	1
+validity	tensile-strength	source_test_direction_known	0	0	1
+validity	tensile-strength	source_cure_history_known	0	0	1
+validity	tensile-strength	source_test_temperature_known	1	1	1
+validity	tensile-strength	temperature	298.15	298.15	K
+validity	tensile-strength	source_test_rate_known	0	0	1
+validity	tensile-strength	casting_thickness	.00318	.00318	m
+scalar	break-elongation	identity,tension	tensile_elongation_at_break	.0166	1	constant
+uncertainty	break-elongation	unstated	-	-	-	-
+validity	break-elongation	source_grade_ea9394	1	1	1
+validity	break-elongation	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	break-elongation	source_moisture_conditioning_known	0	0	1
+validity	break-elongation	source_pressure_known	0	0	1
+validity	break-elongation	source_specimens_matched	0	0	1
+validity	break-elongation	source_test_direction_known	0	0	1
+validity	break-elongation	source_cure_history_known	0	0	1
+validity	break-elongation	source_test_temperature_known	1	1	1
+validity	break-elongation	temperature	298.15	298.15	K
+validity	break-elongation	source_test_rate_known	0	0	1
+validity	break-elongation	casting_thickness	.00318	.00318	m
+scalar	shear-dry	identity,shear	shear_modulus	1461000000	Pa	constant
+uncertainty	shear-dry	unstated	-	-	-	-
+validity	shear-dry	source_grade_ea9394	1	1	1
+validity	shear-dry	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	shear-dry	source_moisture_conditioning_known	0	0	1
+validity	shear-dry	source_pressure_known	0	0	1
+validity	shear-dry	source_specimens_matched	0	0	1
+validity	shear-dry	source_test_direction_known	0	0	1
+validity	shear-dry	source_cure_history_known	0	0	1
+validity	shear-dry	source_test_temperature_known	1	1	1
+validity	shear-dry	temperature	298.15	298.15	K
+validity	shear-dry	source_test_rate_known	0	0	1
+validity	shear-dry	source_moisture_label	1	1	1
+validity	shear-dry	source_test_method_known	0	0	1
+scalar	shear-wet	identity,shear	shear_modulus	1027000000	Pa	constant
+uncertainty	shear-wet	unstated	-	-	-	-
+validity	shear-wet	source_grade_ea9394	1	1	1
+validity	shear-wet	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	shear-wet	source_moisture_conditioning_known	0	0	1
+validity	shear-wet	source_pressure_known	0	0	1
+validity	shear-wet	source_specimens_matched	0	0	1
+validity	shear-wet	source_test_direction_known	0	0	1
+validity	shear-wet	source_cure_history_known	0	0	1
+validity	shear-wet	source_test_temperature_known	1	1	1
+validity	shear-wet	temperature	298.15	298.15	K
+validity	shear-wet	source_test_rate_known	0	0	1
+validity	shear-wet	source_moisture_label	2	2	1
+validity	shear-wet	source_test_method_known	0	0	1
+scalar	compression-strength	identity,compression	compressive_strength	68900000	Pa	constant
+uncertainty	compression-strength	unstated	-	-	-	-
+validity	compression-strength	source_grade_ea9394	1	1	1
+validity	compression-strength	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	compression-strength	source_moisture_conditioning_known	0	0	1
+validity	compression-strength	source_pressure_known	0	0	1
+validity	compression-strength	source_specimens_matched	0	0	1
+validity	compression-strength	source_test_direction_known	0	0	1
+validity	compression-strength	source_cure_history_known	0	0	1
+validity	compression-strength	source_test_temperature_known	1	1	1
+validity	compression-strength	temperature	298.15	298.15	K
+validity	compression-strength	source_test_rate_known	0	0	1
+validity	compression-strength	specimen_width	.0127	.0127	m
+validity	compression-strength	specimen_length	.0254	.0254	m
+validity	compression-strength	specimen_height	.0127	.0127	m
+scalar	expansion-313.15	identity,thermal	linear_thermal_expansion_coefficient	.0000556	K^-1	constant
+uncertainty	expansion-313.15	unstated	-	-	-	-
+validity	expansion-313.15	source_grade_ea9394	1	1	1
+validity	expansion-313.15	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	expansion-313.15	source_moisture_conditioning_known	0	0	1
+validity	expansion-313.15	source_pressure_known	0	0	1
+validity	expansion-313.15	source_specimens_matched	0	0	1
+validity	expansion-313.15	source_test_direction_known	0	0	1
+validity	expansion-313.15	source_cure_history_known	0	0	1
+validity	expansion-313.15	source_test_temperature_known	1	1	1
+validity	expansion-313.15	temperature	313.15	313.15	K
+validity	expansion-313.15	source_coefficient_length_convention_known	0	0	1
+validity	expansion-313.15	source_thermal_scan_conditions_known	0	0	1
+scalar	expansion-373.15	identity,thermal	linear_thermal_expansion_coefficient	.0000806	K^-1	constant
+uncertainty	expansion-373.15	unstated	-	-	-	-
+validity	expansion-373.15	source_grade_ea9394	1	1	1
+validity	expansion-373.15	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	expansion-373.15	source_moisture_conditioning_known	0	0	1
+validity	expansion-373.15	source_pressure_known	0	0	1
+validity	expansion-373.15	source_specimens_matched	0	0	1
+validity	expansion-373.15	source_test_direction_known	0	0	1
+validity	expansion-373.15	source_cure_history_known	0	0	1
+validity	expansion-373.15	source_test_temperature_known	1	1	1
+validity	expansion-373.15	temperature	373.15	373.15	K
+validity	expansion-373.15	source_coefficient_length_convention_known	0	0	1
+validity	expansion-373.15	source_thermal_scan_conditions_known	0	0	1
+scalar	lap-shear--55	identity,lap-joint	lap_shear_strength	2.27E+7	Pa	constant
+uncertainty	lap-shear--55	unstated	-	-	-	-
+validity	lap-shear--55	source_grade_ea9394	1	1	1
+validity	lap-shear--55	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	lap-shear--55	source_moisture_conditioning_known	0	0	1
+validity	lap-shear--55	source_pressure_known	0	0	1
+validity	lap-shear--55	source_specimens_matched	0	0	1
+validity	lap-shear--55	source_test_direction_known	0	0	1
+validity	lap-shear--55	source_cure_history_known	1	1	1
+validity	lap-shear--55	cure_temperature	298.15	298.15	K
+validity	lap-shear--55	cure_age	432000	432000	s
+validity	lap-shear--55	temperature	218.15	218.15	K
+validity	lap-shear--55	source_test_temperature_known	1	1	1
+validity	lap-shear--55	source_joint_2024_t3_bare_paa	1	1	1
+validity	lap-shear--55	source_bondline_thickness_known	0	0	1
+validity	lap-shear--55	source_overlap_dimensions_known	0	0	1
+validity	lap-shear--55	source_test_rate_known	0	0	1
+scalar	lap-shear-25	identity,lap-joint	lap_shear_strength	2.89E+7	Pa	constant
+uncertainty	lap-shear-25	unstated	-	-	-	-
+validity	lap-shear-25	source_grade_ea9394	1	1	1
+validity	lap-shear-25	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	lap-shear-25	source_moisture_conditioning_known	0	0	1
+validity	lap-shear-25	source_pressure_known	0	0	1
+validity	lap-shear-25	source_specimens_matched	0	0	1
+validity	lap-shear-25	source_test_direction_known	0	0	1
+validity	lap-shear-25	source_cure_history_known	1	1	1
+validity	lap-shear-25	cure_temperature	298.15	298.15	K
+validity	lap-shear-25	cure_age	432000	432000	s
+validity	lap-shear-25	temperature	298.15	298.15	K
+validity	lap-shear-25	source_test_temperature_known	1	1	1
+validity	lap-shear-25	source_joint_2024_t3_bare_paa	1	1	1
+validity	lap-shear-25	source_bondline_thickness_known	0	0	1
+validity	lap-shear-25	source_overlap_dimensions_known	0	0	1
+validity	lap-shear-25	source_test_rate_known	0	0	1
+scalar	lap-shear-82	identity,lap-joint	lap_shear_strength	2.07E+7	Pa	constant
+uncertainty	lap-shear-82	unstated	-	-	-	-
+validity	lap-shear-82	source_grade_ea9394	1	1	1
+validity	lap-shear-82	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	lap-shear-82	source_moisture_conditioning_known	0	0	1
+validity	lap-shear-82	source_pressure_known	0	0	1
+validity	lap-shear-82	source_specimens_matched	0	0	1
+validity	lap-shear-82	source_test_direction_known	0	0	1
+validity	lap-shear-82	source_cure_history_known	1	1	1
+validity	lap-shear-82	cure_temperature	298.15	298.15	K
+validity	lap-shear-82	cure_age	432000	432000	s
+validity	lap-shear-82	temperature	355.15	355.15	K
+validity	lap-shear-82	source_test_temperature_known	1	1	1
+validity	lap-shear-82	source_joint_2024_t3_bare_paa	1	1	1
+validity	lap-shear-82	source_bondline_thickness_known	0	0	1
+validity	lap-shear-82	source_overlap_dimensions_known	0	0	1
+validity	lap-shear-82	source_test_rate_known	0	0	1
+scalar	lap-shear-93	identity,lap-joint	lap_shear_strength	2.00E+7	Pa	constant
+uncertainty	lap-shear-93	unstated	-	-	-	-
+validity	lap-shear-93	source_grade_ea9394	1	1	1
+validity	lap-shear-93	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	lap-shear-93	source_moisture_conditioning_known	0	0	1
+validity	lap-shear-93	source_pressure_known	0	0	1
+validity	lap-shear-93	source_specimens_matched	0	0	1
+validity	lap-shear-93	source_test_direction_known	0	0	1
+validity	lap-shear-93	source_cure_history_known	1	1	1
+validity	lap-shear-93	cure_temperature	298.15	298.15	K
+validity	lap-shear-93	cure_age	432000	432000	s
+validity	lap-shear-93	temperature	366.15	366.15	K
+validity	lap-shear-93	source_test_temperature_known	1	1	1
+validity	lap-shear-93	source_joint_2024_t3_bare_paa	1	1	1
+validity	lap-shear-93	source_bondline_thickness_known	0	0	1
+validity	lap-shear-93	source_overlap_dimensions_known	0	0	1
+validity	lap-shear-93	source_test_rate_known	0	0	1
+scalar	lap-shear-121	identity,lap-joint	lap_shear_strength	1.58E+7	Pa	constant
+uncertainty	lap-shear-121	unstated	-	-	-	-
+validity	lap-shear-121	source_grade_ea9394	1	1	1
+validity	lap-shear-121	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	lap-shear-121	source_moisture_conditioning_known	0	0	1
+validity	lap-shear-121	source_pressure_known	0	0	1
+validity	lap-shear-121	source_specimens_matched	0	0	1
+validity	lap-shear-121	source_test_direction_known	0	0	1
+validity	lap-shear-121	source_cure_history_known	1	1	1
+validity	lap-shear-121	cure_temperature	298.15	298.15	K
+validity	lap-shear-121	cure_age	432000	432000	s
+validity	lap-shear-121	temperature	394.15	394.15	K
+validity	lap-shear-121	source_test_temperature_known	1	1	1
+validity	lap-shear-121	source_joint_2024_t3_bare_paa	1	1	1
+validity	lap-shear-121	source_bondline_thickness_known	0	0	1
+validity	lap-shear-121	source_overlap_dimensions_known	0	0	1
+validity	lap-shear-121	source_test_rate_known	0	0	1
+scalar	lap-shear-149	identity,lap-joint	lap_shear_strength	1.10E+7	Pa	constant
+uncertainty	lap-shear-149	unstated	-	-	-	-
+validity	lap-shear-149	source_grade_ea9394	1	1	1
+validity	lap-shear-149	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	lap-shear-149	source_moisture_conditioning_known	0	0	1
+validity	lap-shear-149	source_pressure_known	0	0	1
+validity	lap-shear-149	source_specimens_matched	0	0	1
+validity	lap-shear-149	source_test_direction_known	0	0	1
+validity	lap-shear-149	source_cure_history_known	1	1	1
+validity	lap-shear-149	cure_temperature	298.15	298.15	K
+validity	lap-shear-149	cure_age	432000	432000	s
+validity	lap-shear-149	temperature	422.15	422.15	K
+validity	lap-shear-149	source_test_temperature_known	1	1	1
+validity	lap-shear-149	source_joint_2024_t3_bare_paa	1	1	1
+validity	lap-shear-149	source_bondline_thickness_known	0	0	1
+validity	lap-shear-149	source_overlap_dimensions_known	0	0	1
+validity	lap-shear-149	source_test_rate_known	0	0	1
+scalar	lap-shear-177	identity,lap-joint	lap_shear_strength	8.3E+6	Pa	constant
+uncertainty	lap-shear-177	unstated	-	-	-	-
+validity	lap-shear-177	source_grade_ea9394	1	1	1
+validity	lap-shear-177	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	lap-shear-177	source_moisture_conditioning_known	0	0	1
+validity	lap-shear-177	source_pressure_known	0	0	1
+validity	lap-shear-177	source_specimens_matched	0	0	1
+validity	lap-shear-177	source_test_direction_known	0	0	1
+validity	lap-shear-177	source_cure_history_known	1	1	1
+validity	lap-shear-177	cure_temperature	298.15	298.15	K
+validity	lap-shear-177	cure_age	432000	432000	s
+validity	lap-shear-177	temperature	450.15	450.15	K
+validity	lap-shear-177	source_test_temperature_known	1	1	1
+validity	lap-shear-177	source_joint_2024_t3_bare_paa	1	1	1
+validity	lap-shear-177	source_bondline_thickness_known	0	0	1
+validity	lap-shear-177	source_overlap_dimensions_known	0	0	1
+validity	lap-shear-177	source_test_rate_known	0	0	1
+scalar	lap-shear-204	identity,lap-joint	lap_shear_strength	4.1E+6	Pa	constant
+uncertainty	lap-shear-204	unstated	-	-	-	-
+validity	lap-shear-204	source_grade_ea9394	1	1	1
+validity	lap-shear-204	resin_to_hardener_mass_ratio	5.882352941176471	5.882352941176471	1
+validity	lap-shear-204	source_moisture_conditioning_known	0	0	1
+validity	lap-shear-204	source_pressure_known	0	0	1
+validity	lap-shear-204	source_specimens_matched	0	0	1
+validity	lap-shear-204	source_test_direction_known	0	0	1
+validity	lap-shear-204	source_cure_history_known	1	1	1
+validity	lap-shear-204	cure_temperature	298.15	298.15	K
+validity	lap-shear-204	cure_age	432000	432000	s
+validity	lap-shear-204	temperature	477.15	477.15	K
+validity	lap-shear-204	source_test_temperature_known	1	1	1
+validity	lap-shear-204	source_joint_2024_t3_bare_paa	1	1	1
+validity	lap-shear-204	source_bondline_thickness_known	0	0	1
+validity	lap-shear-204	source_overlap_dimensions_known	0	0	1
+validity	lap-shear-204	source_test_rate_known	0	0	1

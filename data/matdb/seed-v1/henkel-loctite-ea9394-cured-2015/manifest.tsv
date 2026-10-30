@@ -1,0 +1,37 @@
+frankensim.matdb-manifest.v3
+pack_id	henkel-loctite-ea9394-cured-2015
+redistribution	permitted	Selected attributed numerical facts, independent equation evaluations and original notes only; no source document or table layout is redistributed
+citation	Henkel LOCTITE EA 9394 AERO, Technical Process Bulletin revision 7/2015, pp. 3-5; https://dm.henkel-dam.com/is/content/henkel/EA-9394-Aero; accessed 2026-10-30
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	adhesive-resin-thermal	properties.tsv	material-tsv-v1
+property	nominal_source_thermal_conductivity	nominal-source-thermal-conductivity	thermal-conductivity
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation_at_break	tensile-elongation-at-break	dimensional
+property	shear_modulus	shear-modulus	dimensional
+property	compressive_strength	compressive-strength	dimensional
+property	linear_thermal_expansion_coefficient	linear-thermal-expansion-coefficient	dimensional
+property	lap_shear_strength	lap-shear-strength	dimensional
+axis	source_grade_ea9394	source-grade-ea9394	dimensional
+axis	resin_to_hardener_mass_ratio	resin-to-hardener-mass-ratio	dimensional
+axis	source_moisture_conditioning_known	source-moisture-conditioning-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_test_direction_known	source-test-direction-known	dimensional
+axis	source_cure_history_known	source-cure-history-known	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_method_known	source-test-method-known	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	casting_thickness	casting-thickness	dimensional
+axis	source_moisture_label	source-moisture-label	dimensional
+axis	specimen_width	specimen-width	dimensional
+axis	specimen_length	specimen-length	dimensional
+axis	specimen_height	specimen-height	dimensional
+axis	source_coefficient_length_convention_known	source-coefficient-length-convention-known	dimensional
+axis	source_thermal_scan_conditions_known	source-thermal-scan-conditions-known	dimensional
+axis	cure_temperature	cure-temperature	absolute-temperature
+axis	cure_age	cure-age	dimensional
+axis	source_joint_2024_t3_bare_paa	source-joint-2024-t3-bare-paa	dimensional
+axis	source_bondline_thickness_known	source-bondline-thickness-known	dimensional
+axis	source_overlap_dimensions_known	source-overlap-dimensions-known	dimensional

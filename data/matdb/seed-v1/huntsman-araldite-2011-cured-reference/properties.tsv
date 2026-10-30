@@ -1,0 +1,50 @@
+frankensim.matdb-source.v1
+observation	identity	huntsman-araldite-2011-cured-reference	Huntsman ARALDITE 2011 A/B Enhanced TDS; https://products.huntsman.com/products/araldite-2011-a-b	Producer typical results only; the page does not promise the latest formulation. Its mix field prints 0.8 with units %(W) for hardener:resin, which is not silently repaired into a qualified ratio. The approximate 1.05 g/cm3 liquid/mixed density does not become cured density. Separate cure schedules and unknown matched specimens are retained. No heat capacity, instantaneous expansion or cohesive failure law is supplied.
+observation	conductivity	huntsman-araldite-2011-cured-reference	Huntsman thermal-conductivity row, ISO 8894/90	Thermal conductivity 0.22 W/(m K) is explicitly associated with 20 minutes at 100 C cure and 23 C testing. Only that temperature point is admitted; the product use-temperature or cure-temperature interval does not extend the measured conductivity support.
+observation	flexure	huntsman-araldite-2011-cured-reference	Huntsman typical physical properties, ISO 178 flexural rows and default cure/test preamble	Flexural strength 60.4 MPa and flexural modulus 1904.1 MPa inherit the stated default 16 hours at 40 C cure and 23 C testing. The different explicit thermal cure does not qualify these properties. The stated lap-joint geometry in the general preamble is not reassigned to ISO 178 bend specimens; bend geometry and test speed remain unknown. Flexural modulus is not silently reclassified as Young modulus.
+scalar	conductivity	identity,conductivity	thermal_conductivity	.22	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_grade_araldite_2011	1	1	1
+validity	conductivity	source_mix_ratio_known	0	0	1
+validity	conductivity	source_mix_ratio_unit_consistent	0	0	1
+validity	conductivity	source_moisture_condition_known	0	0	1
+validity	conductivity	source_pressure_known	0	0	1
+validity	conductivity	source_test_direction_known	0	0	1
+validity	conductivity	source_specimens_matched	0	0	1
+validity	conductivity	source_cure_history_known	1	1	1
+validity	conductivity	source_test_temperature_known	1	1	1
+validity	conductivity	temperature	296.15	296.15	K
+validity	conductivity	cure_temperature	373.15	373.15	K
+validity	conductivity	cure_age	1200	1200	s
+scalar	flexural-strength	identity,flexure	flexural_strength	60400000	Pa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_araldite_2011	1	1	1
+validity	flexural-strength	source_mix_ratio_known	0	0	1
+validity	flexural-strength	source_mix_ratio_unit_consistent	0	0	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+validity	flexural-strength	source_pressure_known	0	0	1
+validity	flexural-strength	source_test_direction_known	0	0	1
+validity	flexural-strength	source_specimens_matched	0	0	1
+validity	flexural-strength	source_cure_history_known	1	1	1
+validity	flexural-strength	source_test_temperature_known	1	1	1
+validity	flexural-strength	temperature	296.15	296.15	K
+validity	flexural-strength	cure_temperature	313.15	313.15	K
+validity	flexural-strength	cure_age	57600	57600	s
+validity	flexural-strength	source_flexural_geometry_known	0	0	1
+validity	flexural-strength	source_test_rate_known	0	0	1
+scalar	flexural-modulus	identity,flexure	flexural_modulus	1904100000	Pa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade_araldite_2011	1	1	1
+validity	flexural-modulus	source_mix_ratio_known	0	0	1
+validity	flexural-modulus	source_mix_ratio_unit_consistent	0	0	1
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_pressure_known	0	0	1
+validity	flexural-modulus	source_test_direction_known	0	0	1
+validity	flexural-modulus	source_specimens_matched	0	0	1
+validity	flexural-modulus	source_cure_history_known	1	1	1
+validity	flexural-modulus	source_test_temperature_known	1	1	1
+validity	flexural-modulus	temperature	296.15	296.15	K
+validity	flexural-modulus	cure_temperature	313.15	313.15	K
+validity	flexural-modulus	cure_age	57600	57600	s
+validity	flexural-modulus	source_flexural_geometry_known	0	0	1
+validity	flexural-modulus	source_test_rate_known	0	0	1

@@ -921,3 +921,54 @@ nonlinear multilayer transport, and FSRI gypsum/mineral-wool/plywood coupled
 to the original implicit energy and sensible-entropy accounting. Full workspace
 Cargo validation remains unavailable because seven required sibling repositories
 are missing; these are bounded production-module results.
+
+## 2026-10-29 adhesive, resin and distributed thermal-body increment
+
+Added **12 profiles / 74 property claims / 1,152 numerical values / 79 source
+observations**. Four Rostem cryogenic epoxy populations and two producer
+adhesive references contribute 28 claims; HIPS, dried memory foam, and separate
+dry/unconditioned Homasote and engineered-flooring populations contribute 46.
+Exact source manifests and conditions are linked in the
+[seed catalog](../data/matdb/seed-v1/README.md#adhesive-resin-and-conditioned-product-transient-thermal-response-2026-10-29).
+
+The Stycast 2850FT/23LV, Stycast 1266, EPO-TEK 377 and 377H caloric fits are
+bounded to 2–20 K. Their table omits output units; J/(kg K) is the explicit
+interpretation required to reproduce the paper's plotted ordinate, with the
+missing label retained as query context. Cure schedules and Cp-versus-Cv
+constraint remain unknown, and nominal source density does not become a
+density law. Sampling checks do not certify continuous error or source
+uncertainty. EA 9394 retains nominal conductivity with unspecified temperature
+and cure, 298.15 K bulk values, discrete CTE points at 313.15/373.15 K, and
+separately qualified lap-joint points from 218.15 to 477.15 K. Araldite's
+296.15 K conductivity uses a 20-minute 373.15 K cure; its flexural values use
+16 hours at 313.15 K. The producer's ambiguous ratio unit remains unresolved;
+these states and discrete points cannot be silently joined or interpolated.
+
+FSRI capacity spans 283.15–313.15 K, conductivity 288.15–318.15 K, and their
+joint transport path 288.15–313.15 K. Native capacity, normalization density,
+derived specific heat and descriptive scatter remain distinct. Dried memory
+foam has one capacity run, undefined capacity scatter, and a conflicting
+conductivity specimen label. HIPS source aliases and flooring's 3.2 mm stock
+label versus roughly 8.8–9.8 mm instrument thicknesses remain visible.
+Conditioning, local-conductivity interpretation, unknown layer/axis details and
+unverified coupon correspondence stay required; no moisture trajectory or
+stock-to-installed geometry mapping is inferred.
+
+`PreparedLayeredThermalBody`, in
+`thermal::transport::stack::transient`, prepares **1–64 layers and up to 512
+cells** with independent cell temperatures and storage. It prepares source
+capacity once per layer, reuses it across uniform subdivisions, and accepts
+explicit whole-layer mass or geometric reference volume. Original borrowed
+thermal laws supply half-cell conduction, explicit interlayer resistance and
+per-cell storage to the existing `BackwardEulerStep` owner. Energy and sensible
+entropy retain that owner's accounting. This is a distributed transient
+finite-volume body; the preceding steady conduction stack retains its original
+role, and no second time integrator is introduced.
+
+All **10 focused native tests pass (3 adhesive/resin + 3 FSRI + 4 core)**.
+Independent cosine-mode checks separate 2/4/8/16-cell spatial refinement from
+1/2/4/8-step backward-Euler refinement. Manufactured nonlinear contacts and
+derivatives, a real six-cell FSRI wall with material substitution, source
+reductions, heating, refusal and cancellation cases also pass. Full workspace
+Cargo validation remains blocked by seven required sibling repositories;
+these are bounded compiler and production-model results.

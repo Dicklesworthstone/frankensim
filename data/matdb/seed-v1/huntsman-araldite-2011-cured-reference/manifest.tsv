@@ -1,0 +1,23 @@
+frankensim.matdb-manifest.v3
+pack_id	huntsman-araldite-2011-cured-reference
+redistribution	permitted	Selected attributed numerical facts, independent equation evaluations and original notes only; no source document or table layout is redistributed
+citation	Huntsman ARALDITE 2011 A/B producer Enhanced TDS, typical physical properties and explicit thermal row; https://products.huntsman.com/products/araldite-2011-a-b; accessed 2026-10-30
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	adhesive-resin-thermal	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	flexural_strength	flexural-strength	dimensional
+property	flexural_modulus	flexural-modulus	dimensional
+axis	source_grade_araldite_2011	source-grade-araldite-2011	dimensional
+axis	source_mix_ratio_known	source-mix-ratio-known	dimensional
+axis	source_mix_ratio_unit_consistent	source-mix-ratio-unit-consistent	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_test_direction_known	source-test-direction-known	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_cure_history_known	source-cure-history-known	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	cure_temperature	cure-temperature	absolute-temperature
+axis	cure_age	cure-age	dimensional
+axis	source_flexural_geometry_known	source-flexural-geometry-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
