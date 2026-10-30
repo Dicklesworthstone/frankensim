@@ -4,6 +4,10 @@
 //! direction. A source's unknown orientation stays unknown; no isotropic material,
 //! matched specimen, contact law, caloric law or moisture trajectory is inferred.
 
+/// Spatially resolved layer storage on the original conservative thermal owner.
+#[path = "stack/transient.rs"]
+pub mod transient;
+
 use super::{CONDUCTIVITY, ThermalTransportError, admit_temperature_point, positive, source_line};
 use crate::thermal::conduction::{
     ConductivityCurve, LayerConductionConfig, LayerStackConduction, LayerStackResponse,

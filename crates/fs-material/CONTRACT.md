@@ -4828,3 +4828,57 @@ required sibling constellation repositories and DSR executable are absent.
 ## Source-bound Ohmic constitutive graph
 
 `conductor::graph::MaterialOhmicNode` exposes the original scalar conductor as a public constitutive-law node with temperature-change and signed-current inputs, and signed-voltage and nonnegative-Joule-power outputs. It preserves the selected electrical property key and basis, original material bundle and claims, and continuously supported temperature slice, including fixed-context sampled surfaces. Conductivity is queried before conversion to resistance. Its piecewise-consistent tangent differentiates the native resistance and Joule-power equations; interior knots use the right interval and the final endpoint uses the left interval. Construction admits positive, representable native transport across every electrical source knot and refuses unsupported spans, unowned response coordinates, and phase-fraction evolution. This is fixed-geometry, memoryless scalar DC transport; thermal storage, time, contacts, skin effects, expansion, and phase evolution remain with their existing physical owners.
+
+## Spatial heat storage inside sourced layers (2026-10-29)
+
+`thermal::transport::stack::transient::PreparedLayeredThermalBody` prepares
+1–64 planar material layers with up to 512 spatial control volumes. Each layer
+has an original conductivity query, a separately selected capacity query,
+explicit whole-layer mass and a positive uniform subdivision count. Mass-based
+capacity must name that whole mass; native volumetric capacity must name the
+area-times-thickness volume. Preparation divides the amount among cells and
+retains one per-cell storage curve per layer, shared by that layer's immutable
+caloric law. Spatial refinement does not duplicate source preparations.
+
+Capacity and conductivity retain the same immutable material card and agree
+on shared typed fixed conditions. The caller still declares compatible source
+populations and caloric/work constraints; common card identity does not prove
+matched specimens. All capacity and conductivity paths share a positive-width
+temperature interval containing the explicit common energy datum. Original
+receipts, amounts, physical ordering, geometry and subdivision counts contribute
+to prepared identity. No density law is inferred from the required mass input.
+
+`BoundLayeredThermalBody` attaches the exact original borrowed storage laws and
+checked cell/material/link IDs. Its birth events create independent cell
+enthalpies, then contacts. Each internal face uses the original two-layer
+conduction kernel across the adjacent half-cell distances. Contact resistance
+applies only at actual material interfaces; subdivisions inside a layer have
+perfect contact. The response retains each edge's heat flow, interface
+temperatures, endpoint derivatives and continuity diagnostics.
+
+Call `step_coefficients` on every candidate of the existing backward-Euler
+residual owner. It checks the actual law objects, cell mass and geometry, source
+layer identities and link orientation/area before returning sparse conductance
+replacements. The original timeline owns energy, sources, evolution, optional
+sensible entropy and acceptance. This adapter supplies no second time integrator
+or nonlinear solver. Initial conductances are only initial values. Successful
+edge kernels allocate nothing; candidate temperature, response and coefficient
+containers use O(cells) storage. Checkpoints and explicit edge iteration budgets
+bound work; cancellation/refusal changes no physical state.
+
+The model holds geometry, mass, composition and source conditions fixed. Only
+the two axial faces are represented; lateral surfaces are insulated. Boundary
+heat sources/reservoirs use the existing owner's events. Each cell has one
+temperature; spatial refinement and time-step refinement remain independent.
+Phase change, moisture transport, changing cure, expansion work and experimental
+qualification are not supplied by this sensible finite-volume assembly.
+
+All four tests in `xtask/tests/material_layered_transient.rs` pass against the
+production modules. An independently derived insulated cosine mode exercises
+2/4/8/16 cells and 1/2/4/8 backward-Euler steps with separate spatial and temporal
+convergence. Manufactured nonlinear heterogeneous layers check half-cell and
+contact physics, exact caloric integrals, finite-difference tangents, energy
+and entropy. A six-cell FSRI gypsum/mineral-wool/plywood wall retains real source
+receipts, and a material substitution changes its transient from the same initial
+temperature field. Binding/domain/budget/cancellation refusals preserve the
+original timeline.
