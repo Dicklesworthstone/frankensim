@@ -9049,6 +9049,41 @@ and all seven required constellation checkouts are missing. The available
 cached rustfmt parsed and formatted the changed sources. This is source-level
 evidence, not compilation or numerical proof.
 
+## Transported gas feedback through electrical and finite-heat motion
+
+`transported_electroacoustic_candidate` and
+`transported_electroacoustic_network_candidate` use the same finite regional
+gas finisher after the existing reciprocal electrical/shared-motion solve.
+The original candidate owns current, back emf, both piston gases and the only
+mechanical trajectory. In the network path, the same original material-cell
+solve owns temperature-dependent resistance, Joule heat and both gas contacts.
+No electrical or thermal trial is repeated by regional gas-work feedback.
+
+The current interval retains its original acoustic-medium pressure law.
+Native transport, caloric heat and operator work produce the continuing
+regional gas and load endpoints; those operators affect the next interval's
+current, motion and thermal network. The complete candidate retains the
+original circuit and source reports, and its final enclosing gate uses the
+strictest applicable native, acoustic and transport energy tolerance.
+The source-bound material-piston entry point retains canonical inertia,
+specimen receipts and the full accepted motion clock.
+
+In the ordinary electrical path resistor heat remains the original exported
+loss. In the finite-network path it has already entered the authored cell
+enthalpies and is not charged again. Regional supplied heat is separately
+authored; neither the network cells nor either moving piston chamber may be
+duplicated in the regional parcel graph. Native transported enthalpy and
+gas-to-wave parameter work remain internal transfers.
+
+Regressions cover unchanged current-interval native results, next-interval
+gas-to-current feedback, independent complete energy/mass accounts, finite
+network continuation and late cancellation/retry. They are authored but
+unexecuted because native build prerequisites are unavailable. Cached rustfmt
+parsed and formatted the changed sources; no numerical result is claimed.
+Fixed geometry, frozen
+linear transducer, balanced mean loads and the original first-order thermal
+and acoustic-gas partitions remain explicit limits.
+
 ## Acoustic loading through finite electrothermal material networks
 
 `DoubleActingGasPiston::electroacoustic_network_candidate` closes the same

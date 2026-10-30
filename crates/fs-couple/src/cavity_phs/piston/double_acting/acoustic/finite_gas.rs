@@ -13,6 +13,9 @@
 //! thermodynamic volume is inferred. The original frozen-medium, first-order
 //! partition and linear perturbation assumptions remain.
 
+/// Reciprocal electrical drive and finite material heat with regional gas transport.
+pub mod electrical;
+
 use super::{AcousticMotionError, AcousticMotionFace, AcousticMotionSolve, AcousticMotionStep};
 use crate::bernoulli_aperture::wall::material::{
     FiniteGasTransportNode, finite_gas_transport_candidate_with_paths,
