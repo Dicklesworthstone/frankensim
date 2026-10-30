@@ -24,8 +24,16 @@
 //! LABEL`). Bare numbers without a label refuse (bead pexfp.32). Each
 //! section's pack, hash, state and query point, or its fixture label, is kept
 //! in `section_provenance` for the render sidecar.
+//!
+//! After a DG source and before optional finite gas or observation records,
+//! `dg_wall LAYOUT` selects the shared original material-wall grammar: rigid,
+//! isotropic, orthotropic, physically positioned regions or a main/chimney
+//! assembly. Its native solid state joins the same acoustic propagator before
+//! the moving plate is bound. Wall and plate declarations share one immutable
+//! artifact cache; their different material conditions remain independent.
 mod force;
 mod finite_gas;
+mod wall;
 /// Material-card multimode valves coupled to both ducts and one physical receiver.
 pub mod material_modal;
 use super::force::ApertureForceProgram;
@@ -43,6 +51,7 @@ use crate::render::schedule::GestureCompileError;
 use crate::material_source::{MaterialRecord, fixture_label, plate_section};
 use crate::thin_plate::PlateMaterialModel;
 use fs_matdb::NormalizedMaterialCardPack;
+use crate::dg_port::input::wall::regions::DgMaterialWallLayout;
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use fs_blake3::{ContentHash, hash_domain};
 use crate::bernoulli_aperture::viscothermal::ViscothermalSection;
@@ -189,6 +198,7 @@ pub struct PlateValvePerformance {
     exterior_gas: Option<GasState>,
     gas_records: Vec<GasRecord>,
     section_provenance: Vec<String>,
+    dg_wall: Option<DgMaterialWallLayout>,
 }
 impl PlateValvePerformance {
     /// Parse every record, derive the actual plate and selected blade symmetry,
@@ -249,8 +259,8 @@ impl PlateValvePerformance {
         let dt=1.0/f64::from(parsed.config.sample_rate_hz);
         // One exterior declaration drives radiation; all internal media and
         // constitutive loads still come from their original regional states.
-        let duct=parsed.duct.prepare_in_exterior(&parsed.air,dt,parsed.observation,
-            parsed.exterior.as_ref(),gate)?;
+        let duct=parsed.duct.prepare_in_exterior_with_wall(&parsed.air,dt,parsed.observation,
+            parsed.exterior.as_ref(),parsed.dg_wall.as_ref(),gate)?;
         let inlet_gas=duct.inlet_gas(parsed.air)?;
         let inlet_density=inlet_gas.density;
         let z=duct.inlet_impedance(inlet_density)?;
@@ -327,6 +337,7 @@ impl PlateValvePerformance {
             exterior_gas: dg_exterior.or(parsed.exterior),
             gas_records: parsed.gas_records,
             section_provenance: parsed.section_provenance,
+            dg_wall: parsed.dg_wall,
         })
     }
     /// Each material section's source, in section order: `pack PATH HASH state
@@ -350,6 +361,10 @@ impl PlateValvePerformance {
     pub fn gas_records(&self) -> &[GasRecord] {
         &self.gas_records
     }
+    /// Original authored DG material walls, including physical regions and
+    /// explicit chimney assignments. None preserves the original omitted-wall path.
+    #[must_use]
+    pub const fn dg_wall_layout(&self) -> Option<&DgMaterialWallLayout> {self.dg_wall.as_ref()}
     /// Complete finite renderer with immutable access to the physical specimen.
     #[must_use]
     pub const fn renderer(&self) -> &AperturePerformance {&self.renderer}
@@ -374,6 +389,7 @@ struct Parsed {
     full_scale_pa: f64,
     air: GasState,
     duct: DuctInput,
+    dg_wall: Option<DgMaterialWallLayout>,
     exterior: Option<GasState>,
     observation: ApertureObservation,
     chart: PlateChart,
@@ -436,6 +452,8 @@ impl Parsed {
             row.finish()?;Some(state)
         } else {None};
         let duct = DuctInput::read_with_gas_sources(&mut r, &air, gate, sources, &mut gas_records)?;
+        let mut packs = wall::MaterialPacks::new();
+        let dg_wall = wall::read(&mut r, &duct, &mut packs, load_material, gate)?;
         let finite_gas = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("finite_gas") {
             Some(finite_gas::FiniteGasInput::read(&mut r, sources, gate)?)
@@ -501,7 +519,6 @@ impl Parsed {
         if section_count==0 {return Err(bad(r.line,"at least one material section is required"));}
         let mut sections=Vec::with_capacity(section_count);
         let mut section_provenance=Vec::with_capacity(section_count);
-        let mut packs:Vec<(String,NormalizedMaterialCardPack)>=Vec::new();
         for _ in 0..section_count {
             checkpoint(gate)?;
             let mut row=r.row("section")?;let kind=row.word()?;let line=row.line;
@@ -525,16 +542,11 @@ impl Parsed {
                     let thickness=row.scalar()?;
                     let angle=if model==PlateMaterialModel::Isotropic {0.0} else {row.scalar()?};
                     let record=MaterialRecord::parse(&row.rest()).map_err(ingress)?;
-                    if !packs.iter().any(|(path,_)|*path==record.pack) {
-                        if packs.len()>=MAX_SECTIONS {return Err(bad(line,"too many material packs"));}
-                        let pack=load_material(&record.pack).map_err(|source|PlateValveInputError::MaterialSource{line,source})?;
-                        packs.push((record.pack.clone(),pack));
-                    }
-                    let pack=&packs.iter().find(|(path,_)|*path==record.pack).expect("loaded above").1;
-                    let card=record.card(pack).map_err(ingress)?;
+                    let pack=wall::load_pack(&mut packs,&record.pack,line,load_material,gate)?;
+                    let card=record.card(&pack).map_err(ingress)?;
                     let point=record.query_point(card).map_err(ingress)?;
                     let (section,_)=plate_section(card,&point,model,thickness,angle).map_err(ingress)?;
-                    (section,record.provenance(pack))
+                    (section,record.provenance(&pack))
                 }
                 _=>return Err(bad(line,"section must be isotropic, orthotropic or a pack-backed material section")),
             };
@@ -623,7 +635,7 @@ impl Parsed {
         if r.lines.next().is_some() {return Err(bad(r.line+1,"unexpected trailing geometry record"));}
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
-        Ok(Self{gas_records,config,full_scale_pa,air,duct,exterior,observation,chart,plate,symmetry,slit_length_m,initial,closure,relaxation,forces,finite_gas,max_angular_step,
+        Ok(Self{gas_records,config,full_scale_pa,air,duct,dg_wall,exterior,observation,chart,plate,symmetry,slit_length_m,initial,closure,relaxation,forces,finite_gas,max_angular_step,
             schedule,nodes:node_count,triangles:triangle_count,sections:section_count,section_provenance})
     }
 }

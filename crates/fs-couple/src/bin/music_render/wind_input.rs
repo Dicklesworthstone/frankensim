@@ -1269,6 +1269,7 @@ fn load_with_all_sources(
             ApertureObservation::TubeBaffled(_)|ApertureObservation::NetworkBaffled {..}=>"baffled-outlet",
         };
         let receiver_json=format!("{}{}",outlet_provenance(p.renderer(),i.radiation_load),super::duct_metadata::provenance(&p));
+        let wall_json=p.dg_wall_layout().map_or_else(String::new,dg_wall_provenance);
         let computed_dg = matches!(p.renderer().system(), CoupledAperture::Dg(runtime)
             if runtime.load().radiation_record().is_some());
         let scope=if observation!="baffled-outlet" { "internal pressure, not an exterior microphone" }
@@ -1287,7 +1288,7 @@ fn load_with_all_sources(
             finite_gas_heat::provenance(p.renderer(), i.sample_rate_hz));
         // Each section's pack, hash, state and query point, or its fixture label (pexfp.32).
         let section_sources=p.section_provenance().iter().map(|s|format!("\"{s}\"")).collect::<Vec<_>>().join(",");
-        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"section_sources\":[{section_sources}],\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; {propagation}; {scope}\"{receiver_json}{gas_json}}}",
+        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"section_sources\":[{section_sources}],\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; {propagation}; {scope}\"{receiver_json}{gas_json}{wall_json}}}",
             i.input_hash.to_hex(),i.nodes,i.triangles,i.sections,i.memory_branches,i.compiled_controls,
             requested,i.represented_tube_length_m,plate.mass_kg(),plate.stiffness_n_m(),plate.pressure_area_m2());
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,

@@ -15864,3 +15864,27 @@ energy closure, continuing acoustic histories, scheduled powers, block
 partition invariance and transactional refusal/cancellation. These cases are
 implementation evidence only when executed; they do not supply experimental
 validation or establish omitted transport, phase or geometric feedback.
+
+## Authored material walls in the original plate-valve DG performance
+
+The existing plate-valve file accepts optional dg_wall declarations immediately
+after its DG geometry/source records. It consumes the shared rigid, uniform,
+principal-aligned orthotropic, physical-region and main/chimney assembly grammar.
+The original DgSourceInput binds that layout before the actual inlet impedance
+and moving plate are constructed. Gas, solid inertia/elasticity, Kelvin/Maxwell
+memories, ports, terminal reaction and retained clocks remain in the same native
+DG owner. No second wall trajectory or fitted sound filter is introduced.
+
+Wall and plate declarations share one immutable artifact cache. The original
+wall resolver bounds its declaration counts and total source bytes; existing
+plate-section counts bound additional artifacts. Regional conditions, physical
+supports, restraints and thicknesses remain separate. The retained layout is
+inspectable on PlateValvePerformance and enters the existing CLI wall metadata.
+Omission preserves the original path, and explicit non-DG walls refuse before
+material loading. Native geometry, band, source and DOF admissions still apply.
+
+Focused G0/G3/G4 cases in performance/file/wall/tests.rs exercise rigid-path
+equivalence, uniform/regional source-to-operator effects, continuing pressure
+and wall motion, shared artifact loading, and malformed/source/cancellation
+refusals. Tests require execution for runtime evidence; synthetic cards do not
+provide experimental material or instrument validation.

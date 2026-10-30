@@ -221,24 +221,51 @@ impl DuctInput {
         }
     }
 
+    /// Bind an authored solid layout before the original mean-port/plate load
+    /// is derived. Without a declaration, preserve the existing path exactly.
+    pub fn prepare_in_exterior_with_wall(
+        self, air: &GasState, dt: f64, observation: ApertureObservation,
+        exterior: Option<&GasState>, wall: Option<&DgMaterialWallLayout>,
+        gate: &CancelGate,
+    ) -> Result<PreparedDuct, PlateValveInputError> {
+        let Some(wall) = wall else {
+            return self.prepare_in_exterior(air, dt, observation, exterior, gate);
+        };
+        let Self::Dg(source) = self else {
+            return Err(bad(0, "DG material walls require the original DG duct owner"));
+        };
+        if exterior.is_some() {
+            return Err(bad(0, "DG exterior gas belongs to its original computed radiation declaration"));
+        }
+        Self::prepare_dg(source, air, dt, observation, Some(wall), gate)
+    }
+
+    fn prepare_dg(
+        source: DgInput, air: &GasState, dt: f64, observation: ApertureObservation,
+        wall: Option<&DgMaterialWallLayout>, gate: &CancelGate,
+    ) -> Result<PreparedDuct, PlateValveInputError> {
+        if !matches!(observation, ApertureObservation::Inlet | ApertureObservation::TubeBaffled(_)) {
+            return Err(bad(0, "DG observation requires inlet or its computed baffled-outlet receiver"));
+        }
+        let load = match wall {
+            Some(wall) => source.prepare_with_material_wall_layout(air, dt, gate, wall),
+            None => source.prepare(air, dt, gate),
+        }?;
+        if matches!(observation, ApertureObservation::TubeBaffled(_))
+            && load.radiation_record().is_none()
+        {
+            return Err(bad(0, "DG baffled-outlet observation requires a computed baffled reaction source"));
+        }
+        Ok(PreparedDuct { tube:None, graph:None, dg:Some(load),
+            gases:None, observation, radiation:vec![], losses:vec![] })
+    }
+
     pub fn prepare(self, air: &GasState, dt: f64, observation: ApertureObservation, gate: &CancelGate)
         -> Result<PreparedDuct, PlateValveInputError>
     {
         let physics = PlateValveInputError::Physics;
         match self {
-            Self::Dg(source) => {
-                if !matches!(observation, ApertureObservation::Inlet | ApertureObservation::TubeBaffled(_)) {
-                    return Err(bad(0, "DG observation requires inlet or its computed baffled-outlet receiver"));
-                }
-                let load = source.prepare(air, dt, gate)?;
-                if matches!(observation, ApertureObservation::TubeBaffled(_))
-                    && load.radiation_record().is_none()
-                {
-                    return Err(bad(0, "DG baffled-outlet observation requires a computed baffled reaction source"));
-                }
-                Ok(PreparedDuct { tube:None, graph:None, dg:Some(load),
-                    gases:None, observation, radiation:vec![], losses:vec![] })
-            }
+            Self::Dg(source) => Self::prepare_dg(source, air, dt, observation, None, gate),
             Self::Tube { spec, radiation_band, loss } => {
                 if !matches!(observation, ApertureObservation::Inlet | ApertureObservation::TubeTerminal
                     | ApertureObservation::TubeBaffled(_)) {
