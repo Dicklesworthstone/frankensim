@@ -1,5 +1,7 @@
 //! G1/G3/G4 material fits alter native circuit work and actual finite core heat.
 use super::*;
+
+mod heat;
 use fs_material::field_storage::{
     MAGNETIC_PERMEABILITY_DIMS,
     hysteresis::source::{HysteresisBranchSources, HysteresisSources, ResolvedScalarHysteresis},

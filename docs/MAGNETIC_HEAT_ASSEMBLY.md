@@ -54,3 +54,41 @@ independent two-temperature voltage/current/energy reference, continued physical
 steps, source-only contact/emissivity substitutions, exact reduction to the
 bulk-only path and refused endpoints. The model still requires time and spatial
 refinement; numerical checks do not establish measured-device qualification.
+
+## Hysteretic cores with retained magnetic memory
+
+`ThermalHystereticCircuit::step_candidate_with_heat_network` connects the
+existing voltage-driven hysteretic circuit to the same complete heat assembly.
+The supplied `PreparedHeatNetwork` must wrap the exact `MaterialNetwork`
+used by `ThermalHystereticCircuit::bind`. This retains every original caloric
+binding, source choice, circuit branch and thermal receiver while adding
+source-bound thermal contacts, integrated conduction layers and enclosure
+radiation.
+
+Every thermal trial starts from the same accepted magnetic polarization,
+linkage and circuit storage. The original hysteresis law supplies irreversible
+pinning heat to the core; the original circuit supplies winding Joule heat to
+its separate receiver. Both are deposited once. Cooling changes the winding's
+source-bound resistance and therefore its voltage-driven current and magnetic
+trajectory within the same coupled solve. The returned generic candidate
+retains the complete `HeatNetworkSample` and both publishable histories.
+
+For this path, true external heat is `report.non_electrical_heat_j -
+dt * report.source.radiation_net_power_w()`. The existing whole-system gate
+checks closed-enclosure exchange independently. Unsupported electrical contact
+work and field-dependent thermal interfaces or emissivity refuse; they are not
+silently evaluated at a frozen electrical or magnetic field.
+
+The core's fitted coefficients remain constant over their explicitly admitted
+temperature interval. This path preserves source validity and magnetic memory;
+it does not infer temperature-dependent hysteresis, a Curie transition,
+magnetocaloric response, eddy loss or moving geometry. Monotone-linkage intervals
+and first-order endpoint thermal coupling retain their original limits.
+
+The focused regression in
+`crates/fs-couple/src/material_circuit/hysteretic/tests/source/heat.rs` uses a
+source-bound core on a sliding branch and two finite caloric cells. It compares
+contact/emissivity data substitutions against an independent scalar
+current/temperature/energy reference, checks continued magnetic history and
+source pins, and checks refusal of a foreign assembly, a source-domain exit and
+cancellation. These manufactured checks do not qualify a measured device.
