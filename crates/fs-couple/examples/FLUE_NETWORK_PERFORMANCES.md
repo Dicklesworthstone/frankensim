@@ -16,6 +16,37 @@ selected opening contributes its actual terminal volume flow to the existing
 multirate Rayleigh receiver. The source never substitutes internal pressure for
 exterior microphone pressure.
 
+## Exterior gas propagation on the characteristic network
+
+The characteristic `frankensim-flue-performance-v1` route accepts an optional
+record immediately after `receiver`, before `outlets` and any mouth or
+window records:
+
+```text
+receiver 0 0 0.5 4 16 1000
+observer_gas stokes-kirchhoff 4096 1000000 50000000
+```
+
+This uses the declared exterior density, sound speed, viscosity, conductivity
+and heat capacity on every original surface-to-microphone path. All selected
+terminal openings and the independently sized mouth use the shared gas/Rayleigh
+owner. Their numerical causal padding is aligned before pressure is summed;
+their physical flight-time differences remain. Every mechanical sample reaches
+the existing multirate observation, with the original signed flow and PCM scale.
+No extra radiation reaction, jet gain or bore loss is introduced. Receipts report
+`observer_gas` and `mouth_observer_gas`, including the physical law and path filters.
+
+`lossless` selects a comparison through the same owner. Omission retains the
+original lossless receiver. `molecular` accepts the shared relaxation grammar
+below and binds the original `exterior` species record, independently of bore
+composition. Missing species or an out-of-domain constitutive law refuses.
+
+The published D4, G4 and A5 flute descriptions now explicitly select classical
+Stokes–Kirchhoff propagation with their existing exterior state. Their physical
+source parameters and 5 Pa PCM full scale are unchanged. At their microphone
+distances this is a small propagation correction; the estimated jet and its
+unresolved timbre limitations retain their existing qualification.
+
 ## Geometry and material gas
 
 ### Molecular gas response inside DG bores and along exterior paths

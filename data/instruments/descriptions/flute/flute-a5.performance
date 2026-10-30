@@ -114,6 +114,7 @@ loss_section 34 7 200 3000
 loss_section 36 7 200 3000
 loss_section 38 9 200 3000
 receiver -0.63849 0 1 4 16 2800
+observer_gas stokes-kirchhoff 4096 1000000 50000000
 outlets 39 10
 outlet 20 -0.3131407 0
 outlet 22 -0.2897199 0
