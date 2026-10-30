@@ -229,6 +229,13 @@ impl SlitChannel {
     #[must_use]
     pub fn velocities_m_s(&self) -> &[f64] { self.profile.velocities() }
 
+    /// Signed velocity at half the physical gap [m/s]. An odd mesh supplies its
+    /// middle cell; an even mesh linearly interpolates its two central cells.
+    /// Startup, release and reversal use the retained field, never 1.5 times
+    /// bulk speed. This observation changes no flow, momentum or stored energy.
+    #[must_use]
+    pub fn centre_speed_m_s(&self) -> f64 { self.profile.midpoint_speed() }
+
     /// Last accepted exchange, all zero before the first step.
     #[must_use]
     pub const fn last_step(&self) -> SlitChannelStep { self.profile.last_step() }
@@ -269,6 +276,13 @@ impl SlitChannel {
     /// It is useful for cold admission, but never replaces the live field.
     pub fn steady_bulk_speed_m_s(&self, pressure_pa: f64) -> Result<f64, AcousticRealizeError> {
         self.profile.steady_bulk_speed(pressure_pa)
+    }
+
+    /// Centre velocity of the steady solution on THIS mesh [m/s], including the
+    /// declared exit pressure law. Used for cold pressure admission only; it
+    /// neither advances the channel nor replaces its live velocity profile.
+    pub fn steady_centre_speed_m_s(&self, pressure_pa: f64) -> Result<f64, AcousticRealizeError> {
+        self.profile.steady_midpoint_speed(pressure_pa)
     }
 
     /// Advance one physical pressure interval, allowing signed pressure and flow.

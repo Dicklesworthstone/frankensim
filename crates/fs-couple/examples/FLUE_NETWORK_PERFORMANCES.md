@@ -567,7 +567,25 @@ density, viscosity and sound speed; there is no second authored inlet medium.
 Both bore renderers use one source-selection parser and the same `FlueVoice`
 attachments. A developing slit uses its material gas and Shah law at the held
 pressure, with its own domain checks. Card centreline speed reads that source's
-exit profile. Nolle/Price and forced Bickley transfers own their profiles and
+exit profile. With `windway unsteady`, `jet_speed card-centreline` now reads the
+actual velocity at half the channel gap: the middle cell on an odd transverse
+mesh, or linear interpolation between the central pair on an even mesh.
+Convection, the instability band, Reynolds number and the live Mach check all
+use that same candidate centre speed before accepting the sample. The original
+bulk flow still carries mass, jet volume and every channel energy term. A
+starting flat core can therefore evolve toward a developed profile without a
+fixed transient centre/bulk multiplier, and a pressure release retains the
+moving gas and its feedback.
+
+Cold pressure admission uses the steady response of the **same** transverse
+operator and retains the existing inviscid and Mach checks. This does not
+replace live profiles with equilibrium values; a zero-pressure release can
+still have nonzero instantaneous centre velocity. Omit `jet_speed` to retain the
+existing bulk-speed image. The unsteady channel's uniform kinetic-head terminal
+and the jet card's existing approximation remain; this connection does not add
+resolved free-jet spreading or establish instrument realism.
+
+Nolle/Price and forced Bickley transfers own their profiles and
 exclude card centreline selection and developing/unsteady windways; incompatible
 selections refuse rather than silently substituting a source law. The prescribed
 mouth contraction uses the same current-flow solve and actual inlet gas.

@@ -207,3 +207,54 @@ fn affine_flow_condensation_retains_the_same_profile_pressure_and_energy() {
     assert!(nonlinear.pressure_load().is_err());
     assert!(nonlinear.preview_at_flow(1e-5).is_err());
 }
+
+#[test]
+fn centre_velocity_samples_the_actual_even_and_odd_mesh_and_steady_operator() {
+    let g = gas(1.0, 101_325.0);
+    let pressure = 100.0;
+    let exact = pressure * HEIGHT.powi(2) / (8.0 * g.dynamic_viscosity * LENGTH);
+    for cells in [15, 16, 31, 32] {
+        for exit in [SlitExit::StaticPressure, SlitExit::UniformKineticHead] {
+            let mut c = channel(g, cells, viscous_time(g) / 20.0, exit);
+            assert_eq!(c.centre_speed_m_s(), 0.0);
+            let steady = c.steady_centre_speed_m_s(pressure).unwrap();
+            assert_eq!(c.steady_centre_speed_m_s(-pressure).unwrap(), -steady);
+            assert_eq!(c.steady_centre_speed_m_s(0.0).unwrap(), 0.0);
+            for _ in 0..600 { check_energy(c.step(pressure).unwrap()); }
+            let field = c.velocities_m_s();
+            let middle = cells / 2;
+            let expected = if cells % 2 == 1 { field[middle] }
+                else { 0.5 * field[middle - 1] + 0.5 * field[middle] };
+            assert_eq!(c.centre_speed_m_s(), expected);
+            assert!((c.centre_speed_m_s() - steady).abs() < 1e-10 * steady);
+            if exit == SlitExit::StaticPressure {
+                // The cell-centred no-slip boundary and reconstruction retain
+                // their spatial error; no continuum ratio repairs the field.
+                assert!((steady - exact).abs() / exact < 2.0 / (cells * cells) as f64);
+            }
+            let saved = c.velocities_m_s().to_vec();
+            assert!(c.steady_centre_speed_m_s(f64::NAN).is_err());
+            assert_eq!(c.velocities_m_s(), saved);
+        }
+    }
+}
+
+#[test]
+fn centre_velocity_keeps_startup_release_and_reversal_momentum() {
+    let g = gas(1.0, 101_325.0);
+    for cells in [64, 65] {
+        let mut c = channel(g, cells, 0.005 * viscous_time(g), SlitExit::StaticPressure);
+        let first = c.step(100.0).unwrap();
+        let centre = c.centre_speed_m_s();
+        assert!(centre > first.bulk_speed_m_s);
+        assert!(centre / first.bulk_speed_m_s < 1.15,
+            "a starting flat core must not be replaced by 1.5 times bulk flow");
+        let release = c.step(0.0).unwrap();
+        assert!(c.centre_speed_m_s() > 0.0);
+        assert!(release.kinetic_energy_j < first.kinetic_energy_j);
+        assert_eq!(release.pressure_work_j, 0.0);
+        check_energy(release);
+        for _ in 0..64 { check_energy(c.step(-100.0).unwrap()); }
+        assert!(c.centre_speed_m_s() < 0.0, "channel observation retains signed reversal");
+    }
+}

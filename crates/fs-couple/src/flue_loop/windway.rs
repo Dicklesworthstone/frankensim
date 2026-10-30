@@ -2,7 +2,9 @@
 //!
 //! The channel resolves unsteady transverse no-slip momentum. The feedback
 //! field solves dv/dt + c(t) dv/dx = 0 across the supplied cut-up, using the
-//! accepted bulk speed times the ORIGINAL card convection ratio. Linear
+//! accepted source speed times the ORIGINAL card convection ratio. The optional
+//! centreline selection reads the same resolved field; bulk flow retains all
+//! source momentum and energy accounts. Linear
 //! semi-Lagrangian interpolation is refinable in space and time. Characteristics
 //! entering during a step interpolate the previous and current mouth velocity;
 //! their current coefficient participates in the original joint mouth solve.
@@ -80,7 +82,7 @@ impl UnsteadyWindway {
         self.channel.steady_bulk_speed_m_s(pressure_pa).map_err(FlueError::Physics)
     }
 
-    pub(super) fn prepare(&self, pressure_pa: f64) -> Result<WindwayTrial, FlueError>
+    pub(super) fn prepare(&self, pressure_pa: f64, centreline: bool) -> Result<WindwayTrial, FlueError>
     {
         // The existing channel is the only momentum owner. Its complete trial
         // remains private until mouth, wave and transport admission succeed.
@@ -89,7 +91,8 @@ impl UnsteadyWindway {
         if frame.bulk_speed_m_s < 0.0 {
             return Err(FlueError::Invalid { what: "flue jet requires nonnegative accepted windway speed" });
         }
-        let convection = self.convection.prepare(frame.bulk_speed_m_s * self.convection_ratio,
+        let speed = if centreline { channel.centre_speed_m_s() } else { frame.bulk_speed_m_s };
+        let convection = self.convection.prepare(speed * self.convection_ratio,
             self.channel.spec().sample_period_s)?;
         Ok(WindwayTrial { channel, convection, convection_ratio: self.convection_ratio,
             tap_fraction: self.tap_fraction })
@@ -106,6 +109,7 @@ pub(super) struct WindwayTrial {
 }
 impl WindwayTrial {
     pub(super) fn frame(&self) -> SlitChannelStep { self.channel.last_step() }
+    pub(super) fn centre_speed_m_s(&self) -> f64 { self.channel.centre_speed_m_s() }
     /// The feedback at `tap_fraction` of the cut-up (0 is the flue exit, 1 the
     /// labium). The transport step's own linear interpolant between the
     /// bracketing nodes; below the first node the other end is the current mouth
@@ -311,7 +315,7 @@ mod tests {
             bore_area_m2: 1e-4, mouth_loss_rel: 0.02 };
         let original = UnsteadyWindway::new(&gas, &geometry, 0.015, 16, 32,
             1.0/48_000.0, 0.4).unwrap();
-        let candidate = original.prepare(300.0).unwrap();
+        let candidate = original.prepare(300.0, false).unwrap();
         assert!(candidate.frame().bulk_speed_m_s > 0.0);
         assert!(candidate.frame().kinetic_energy_j > 0.0);
         assert!(candidate.finish(f64::INFINITY).is_err());
@@ -319,7 +323,7 @@ mod tests {
         assert!(original.convected_velocity_m_s().iter().all(|v| *v == 0.0));
         assert_eq!(original.boundary_velocity_m_s(), 0.0);
         assert_eq!(original.channel().last_step().kinetic_energy_j, 0.0);
-        let accepted = original.prepare(300.0).unwrap().finish(0.3).unwrap();
+        let accepted = original.prepare(300.0, false).unwrap().finish(0.3).unwrap();
         assert!(accepted.channel().last_step().kinetic_energy_j > 0.0);
         assert_eq!(accepted.boundary_velocity_m_s(), 0.3);
     }

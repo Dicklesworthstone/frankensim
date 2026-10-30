@@ -869,6 +869,11 @@ impl FlueVoice {
     /// speed alone sets the jet's flux.
     #[must_use]
     pub fn card_speed_m_s(&self) -> f64 {
+        if self.card_centreline.is_some() {
+            if let Some(windway) = &self.unsteady_windway {
+                return windway.channel().centre_speed_m_s();
+            }
+        }
         self.card_speed_at(self.blow_pa, self.jet_speed_m_s)
     }
 
@@ -897,10 +902,13 @@ impl FlueVoice {
     /// flow is unchanged. A slit held as fully developed is refused where its Poiseuille centre
     /// would exceed the inviscid bound `sqrt(2P/rho)`. Both this bound and the declared
     /// low-Mach limit apply to the card's speed at attachment and every pressure control.
-    /// The jet transfers, which own their exit speed, and the unsteady channel are refused.
+    /// An unsteady windway supplies the actual interpolated centre velocity EACH
+    /// sample, including after pressure release. Its steady original mesh supplies
+    /// only cold pressure admission; the live field is never reset to that state.
+    /// The jet transfers, which own their exit profiles, remain incompatible.
     ///
     /// # Errors
-    /// Repeated or late attachment, a poisoned voice, a jet transfer, an unsteady windway, a
+    /// Repeated or late attachment, a poisoned voice, a jet transfer, a
     /// non-positive held pressure, or a centre speed above the inviscid or low-Mach bound
     /// at the supplied held pressure or the currently accepted pressure.
     pub fn with_card_centreline_speed(mut self, held_pressure_pa: f64) -> Result<Self, FlueError> {
@@ -910,16 +918,17 @@ impl FlueVoice {
         if self.forced.is_some() || self.nolle.is_some() {
             return Err(FlueError::Invalid { what: "card centreline speed refuses the jet transfers, which own their exit speed" });
         }
-        if self.unsteady_windway.is_some() {
-            return Err(FlueError::Invalid { what: "card centreline speed does not read the unsteady channel's centre cell" });
-        }
         if !(held_pressure_pa > 0.0 && held_pressure_pa.is_finite()) {
             return Err(FlueError::Invalid { what: "card centreline speed requires a positive held blowing pressure" });
         }
         let bulk = self.speed_at_pressure(held_pressure_pa)?;
         let inviscid = (2.0 * held_pressure_pa / self.rho).sqrt();
         let centre = forced_jet::POISEUILLE_CENTRE_OVER_BULK * bulk;
-        let (card, law) = if self.viscous_windway.is_some() {
+        let (card, law) = if let Some(windway) = &self.unsteady_windway {
+            (windway.channel().steady_centre_speed_m_s(held_pressure_pa)
+                .map_err(FlueError::Physics)?,
+                "resolved unsteady slit: interpolated original centre velocity")
+        } else if self.viscous_windway.is_some() {
             (centre, "fully developed slit: Poiseuille centre 1.5 x bulk")
         } else if self.developing_windway.is_some() {
             if inviscid < centre {
@@ -1083,8 +1092,10 @@ impl FlueVoice {
     /// The supplied length and transverse mesh determine the evolving velocity
     /// profile. The existing card's feedback is convected across its physical
     /// cut-up on a separate, explicitly refinable spatial mesh. Actual accepted
-    /// bulk speed drives source flow, amplification, Reynolds validity and this
-    /// transport EACH sample, independently of host callback partitioning.
+    /// bulk speed drives source flow EACH sample. Amplification, Reynolds
+    /// validity and convection use that speed by default, or the original
+    /// profile's centre velocity with `with_card_centreline_speed`. Both images
+    /// are independent of host callback partitioning.
     ///
     /// The windway starts at rest even when a pressure is already held. A pressure
     /// release leaves the fluid moving; wall friction and the explicit exit remove
@@ -1113,7 +1124,7 @@ impl FlueVoice {
             return Err(FlueError::Invalid { what: "the forced jet refuses the unsteady windway" });
         }
         if self.card_centreline.is_some() {
-            return Err(FlueError::Invalid { what: "card centreline speed does not read the unsteady channel's centre cell" });
+            return Err(FlueError::Invalid { what: "windway must be attached before the card centreline speed, whose exit it sets" });
         }
         self.unsteady_windway = Some(windway::UnsteadyWindway::new(&self.gas, &self.geometry,
             length_m, transverse_cells, convection_cells, self.dt, self.island.convection_ratio)?);
@@ -1599,7 +1610,7 @@ impl FlueVoice {
         let mut windway_defect = 0.0;
         for slot in out.iter_mut() {
             let mut windway_trial = self.unsteady_windway.as_ref()
-                .map(|windway| windway.prepare(self.blow_pa)).transpose()?;
+                .map(|windway| windway.prepare(self.blow_pa, self.card_centreline.is_some())).transpose()?;
             let u = if let Some(windway) = &windway_trial {
                 let frame = windway.frame();
                 // Spatial transport admits arbitrarily slow transient motion;
@@ -1615,10 +1626,16 @@ impl FlueVoice {
             } else { self.jet_speed_m_s() };
             // The bulk speed carries the flux; the card's own speed (the bulk speed unless the
             // card centreline speed is attached) sets its convection, band, seed and Reynolds number.
-            let card_u = self.card_speed_at(self.blow_pa, u);
+            let card_u = match &windway_trial {
+                Some(windway) if self.card_centreline.is_some() => windway.centre_speed_m_s(),
+                _ => self.card_speed_at(self.blow_pa, u),
+            };
+            // The same candidate centre speed controls transport, instability
+            // and Mach admission before any source or bore state is published.
+            self.line.validate_jet_speed(card_u)?;
             let q_max = u * self.geometry.flue_height_m * self.geometry.flue_width_m;
-            let transit = if u == 0.0 { f64::INFINITY } else if windway_trial.is_some() {
-                self.geometry.cut_up_m / (self.island.convection_ratio * u)
+            let transit = if card_u == 0.0 { f64::INFINITY } else if windway_trial.is_some() {
+                self.geometry.cut_up_m / (self.island.convection_ratio * card_u)
             } else { self.transit_s() };
             let seed_scale = self.island.seed_amplitude_rel * card_u;
             let reynolds = card_u * self.geometry.flue_height_m / self.nu;
@@ -2347,8 +2364,10 @@ mod convection_tests {
             .with_developing_windway(0.015, 100.0).is_err());
         assert!(voice(air, g, 0.01).with_card_centreline_speed(100.0).unwrap()
             .with_unsteady_windway(0.015, 8, 8).is_err());
-        assert!(voice(air, g, 0.01).with_unsteady_windway(0.015, 8, 8).unwrap()
-            .with_card_centreline_speed(100.0).is_err());
+        assert!(voice(air, g, 0.01).with_unsteady_windway(0.06, 8, 8).unwrap()
+            .with_card_centreline_speed(100.0).is_ok());
+        assert!(matches!(voice(air, g, 0.01).with_unsteady_windway(0.015, 8, 8).unwrap()
+            .with_card_centreline_speed(100.0), Err(FlueError::Invalid { what }) if what.contains("inviscid")));
         // The jet transfers own their exit speed, in either order.
         let nolle = FlueGeometry { cut_up_m: 0.004, ..g };
         let spec = NolleSpec::price_2015(ChannelClass::Short, 0.0007).unwrap();

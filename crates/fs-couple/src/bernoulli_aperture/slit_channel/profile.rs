@@ -23,10 +23,20 @@ pub(super) struct MomentumProfile {
     pressure_response: Vec<f64>,
     mean_pressure_response: f64,
     steady_mean_response: f64,
+    steady_midpoint_response: f64,
     velocity: Vec<f64>,
     trial: Vec<f64>,
     energy_j: f64,
     last: SlitChannelStep,
+}
+
+// Cell centres straddle the geometric midpoint for an even mesh; an odd mesh
+// has a centre exactly there. This is linear reconstruction of the original
+// field, not a parabolic profile or a rescaling of its bulk velocity.
+fn midpoint_sample(values: &[f64]) -> f64 {
+    let upper = values.len() / 2;
+    if values.len() % 2 == 1 { values[upper] }
+    else { 0.5 * values[upper - 1] + 0.5 * values[upper] }
 }
 
 fn factor(mass: &[f64], conductance: &[f64], dt: f64)
@@ -83,18 +93,34 @@ impl MomentumProfile {
         let mut steady = area.clone();
         solve(&steady_inverse, &steady_lower, &steady_upper, &mut steady);
         let steady_mean_response = area.iter().zip(&steady).map(|(a, v)| a * v).sum::<f64>() / total_area;
-        if ![mean_pressure_response, steady_mean_response].iter().all(|x| x.is_finite() && *x > 0.0)
+        let steady_midpoint_response = midpoint_sample(&steady);
+        if ![mean_pressure_response, steady_mean_response, steady_midpoint_response]
+            .iter().all(|x| x.is_finite() && *x > 0.0)
             || pressure_response.iter().any(|v| !v.is_finite() || *v <= 0.0) {
             return Err(invalid("channel pressure response cannot be represented"));
         }
         Ok(Self { density, dt, exit, area, total_area, mass, conductance,
             inverse_diagonal, lower_ratio, upper_ratio, pressure_response,
-            mean_pressure_response, steady_mean_response,
+            mean_pressure_response, steady_mean_response, steady_midpoint_response,
             velocity: vec![0.0; n], trial: vec![0.0; n], energy_j: 0.0,
             last: SlitChannelStep::default() })
     }
 
     pub(super) fn velocities(&self) -> &[f64] { &self.velocity }
+    pub(super) fn midpoint_speed(&self) -> f64 { midpoint_sample(&self.velocity) }
+
+    // The same no-slip operator supplies the steady shape and bulk response.
+    // The nonlinear exit changes its amplitude, never this normalized shape.
+    pub(super) fn steady_midpoint_speed(&self, pressure: f64)
+        -> Result<f64, AcousticRealizeError>
+    {
+        let speed = self.steady_bulk_speed(pressure)?
+            * (self.steady_midpoint_response / self.steady_mean_response);
+        if !speed.is_finite() {
+            return Err(invalid("channel steady midpoint velocity cannot be represented"));
+        }
+        Ok(speed)
+    }
     pub(super) const fn last_step(&self) -> SlitChannelStep { self.last }
     pub(super) const fn stored_energy_j(&self) -> f64 { self.energy_j }
 

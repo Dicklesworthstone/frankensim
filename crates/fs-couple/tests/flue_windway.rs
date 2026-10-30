@@ -453,3 +453,110 @@ fn rejected_mouth_solve_keeps_the_accepted_source_momentum_and_feedback() {
     assert!(v.apply(FlueControl::SetBlowingPressure(0.0)).is_err());
     assert!(v.step_block(&mut [0.0]).is_err());
 }
+
+#[test]
+fn resolved_centre_speed_drives_the_same_sample_jet_and_convected_field() {
+    let g = gas(1.0);
+    for cells in [31, 32] {
+        let mut v = voice_geometry(g, 0.3, 0.004, 0.01)
+            .with_unsteady_windway(0.06, cells, 64).unwrap()
+            .with_card_centreline_speed(300.0).unwrap();
+        let steady = v.unsteady_windway().unwrap().channel()
+            .steady_centre_speed_m_s(300.0).unwrap();
+        assert_eq!(v.card_centreline_speed().unwrap().held_card_speed_m_s, steady);
+        v.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+        assert_eq!(v.card_speed_m_s(), 0.0);
+        let mut first_ratio = 0.0;
+        let mut last_ratio = 0.0;
+        for step in 0..320 {
+            if step == 256 {
+                let speed = v.card_speed_m_s();
+                v.apply(FlueControl::SetBlowingPressure(0.0)).unwrap();
+                assert_eq!(v.card_speed_m_s(), speed, "release cannot reset the momentum field");
+            }
+            let before = v.unsteady_windway().unwrap();
+            let old = before.convected_velocity_m_s().to_vec();
+            let previous_boundary = before.boundary_velocity_m_s();
+            v.step_block(&mut [0.0]).unwrap();
+            let after = v.unsteady_windway().unwrap();
+            let frame = after.channel().last_step();
+            let centre = after.channel().centre_speed_m_s();
+            assert_eq!(v.card_speed_m_s(), centre);
+            assert_eq!(v.jet_speed_m_s(), frame.bulk_speed_m_s);
+            let expected_flow = 0.01 * HEIGHT * frame.bulk_speed_m_s;
+            assert!((frame.flow_m3_s - expected_flow).abs()
+                <= 64.0 * f64::EPSILON * expected_flow.abs());
+            assert_eq!(v.reynolds(), centre * HEIGHT / (g.dynamic_viscosity / g.density));
+            assert!((v.transit_s() * centre * v.island().convection_ratio - 0.004).abs() < 1e-15);
+            let ratio = centre / frame.bulk_speed_m_s;
+            if step == 0 { first_ratio = ratio; }
+            if step == 255 { last_ratio = ratio; }
+            let travel = centre * v.island().convection_ratio / f64::from(RATE);
+            let current_boundary = after.boundary_velocity_m_s();
+            let dx = 0.004 / 64.0;
+            for (index, &actual) in after.convected_velocity_m_s().iter().enumerate() {
+                let x = (index + 1) as f64 * dx;
+                let from = (x - travel) / dx;
+                let expected = if from <= 0.0 {
+                    current_boundary + (previous_boundary - current_boundary) * (x / travel)
+                } else {
+                    let lower = from.floor() as usize;
+                    let fraction = from - lower as f64;
+                    let left = if lower == 0 { previous_boundary } else { old[lower - 1] };
+                    if fraction == 0.0 { left } else { left + fraction * (old[lower] - left) }
+                };
+                assert!((actual - expected).abs() < 2e-12 * (1.0 + expected.abs()),
+                    "centre-speed characteristic at cell {index}");
+            }
+            if step >= 256 {
+                assert!(centre > 0.0);
+                assert_eq!(frame.pressure_work_j, 0.0);
+                assert!(frame.stored_delta_j < 0.0);
+            }
+        }
+        assert!(first_ratio < 1.15);
+        assert!(last_ratio > first_ratio + 0.1, "the profile must develop, not use a fixed ratio");
+        assert!(v.diagnostics().iter().all(|d| d.windway_ledger_defect_j.abs() < 1e-12));
+    }
+}
+
+#[test]
+fn centreline_material_profile_reaches_microphone_and_preserves_block_partition() {
+    let build = |g, centred| {
+        let v = voice_geometry(g, 0.3, 0.004, 0.01)
+            .with_unsteady_windway(0.06, 32, 96).unwrap();
+        if centred { v.with_card_centreline_speed(300.0).unwrap() } else { v }
+    };
+    let (one, a) = render(build(gas(1.0), true), 513);
+    let (many, b) = render(build(gas(1.0), true), 37);
+    assert_eq!(a, b);
+    assert_eq!(one.voice().card_speed_m_s(), many.voice().card_speed_m_s());
+    let (bulk, bulk_audio) = render(build(gas(1.0), false), 37);
+    assert_eq!(one.voice().unsteady_windway().unwrap().channel().velocities_m_s(),
+        bulk.voice().unsteady_windway().unwrap().channel().velocities_m_s(),
+        "centre observation cannot change the mass or energy owner");
+    assert_ne!(a, bulk_audio, "source feedback must use the selected physical speed");
+    let (viscous, changed_audio) = render(build(gas(2.0), true), 37);
+    assert!(viscous.voice().card_speed_m_s() < one.voice().card_speed_m_s());
+    assert_ne!(a, changed_audio, "material transport must reach real receiver pressure");
+}
+
+#[test]
+fn unsteady_centreline_admission_uses_steady_mesh_but_release_keeps_live_state() {
+    let build = || voice(gas(1.0), 0.05).with_unsteady_windway(0.06, 32, 64).unwrap();
+    let mut bulk = build();
+    bulk.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+    assert!(bulk.with_card_centreline_speed(100.0).is_err(),
+        "a cold receipt cannot admit an already-held centre speed above Mach");
+    let mut v = build().with_card_centreline_speed(100.0).unwrap();
+    v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+    v.step_block(&mut [0.0; 64]).unwrap();
+    let state = v.unsteady_windway().unwrap().channel().velocities_m_s().to_vec();
+    assert!(v.apply(FlueControl::SetBlowingPressure(300.0)).is_err());
+    assert_eq!(v.unsteady_windway().unwrap().channel().velocities_m_s(), state);
+    let centre = v.card_speed_m_s();
+    v.apply(FlueControl::SetBlowingPressure(0.0)).unwrap();
+    assert_eq!(v.card_speed_m_s(), centre);
+    v.step_block(&mut [0.0]).unwrap();
+    assert!(v.card_speed_m_s() > 0.0);
+}
