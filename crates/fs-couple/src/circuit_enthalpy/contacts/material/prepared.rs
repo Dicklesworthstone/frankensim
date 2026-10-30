@@ -4,6 +4,7 @@ use super::*;
 use crate::circuit_enthalpy::material::PreparedMaterialNetwork;
 
 mod extension;
+mod field_storage;
 
 /// One borrowed electrical/thermal contact network with fixed source choices.
 /// The existing bulk preparation and interface evaluator own all material queries.
