@@ -538,6 +538,17 @@ differentiable lift). Pure Rust throughout.
   Memory, traversal, cancellation and nonfinite-radiance refusals publish no
   partial film. This adds parallel static-field rendering, not adaptive media,
   dynamic-field shutter interpolation or a separate executor.
+- **Accepted medium history (`tracer,volumes`):**
+  `MediumTimeline` borrows contiguous physical-state intervals and their
+  already admitted absorbing/scattering grids without copying fields or
+  allocating during admission or lookup. Content identity binds intervals,
+  model kinds and numerical states. Binary search selects the later state at
+  an internal discontinuity and the final state at the final endpoint.
+  Complete shutter coverage is required; gaps and overlaps are named refusals.
+  The exposure model holds each accepted state over its declared interval,
+  including explicit grid/model changes. It does not interpolate temperatures,
+  average optical depth before rendering, or extrapolate missing simulation
+  state. One selected state must remain fixed for the complete optical path.
 
 ## Invariants
 

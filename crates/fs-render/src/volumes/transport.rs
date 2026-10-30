@@ -18,6 +18,8 @@ use fs_math::det;
 mod cells;
 /// Spectral free flights and phase functions for physical participating media.
 pub mod scattering;
+/// Immutable accepted medium snapshots on one physical observation clock.
+pub mod timeline;
 
 const MAX_KNOTS: usize = 16;
 
