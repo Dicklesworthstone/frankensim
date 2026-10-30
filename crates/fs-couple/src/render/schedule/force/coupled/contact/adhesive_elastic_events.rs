@@ -411,8 +411,10 @@ impl<'a> AdhesiveElasticEventModalSystem<'a> {
             &mut self.network,
             EventNativeAccount {
                 sample,
+                observer_pressure_pa: 0.0,
                 energy_before_j: before,
                 modal_energy_j: motion.modal_energy_j,
+                component_dissipation_j: 0.0,
                 connection_energy_j: spring_after,
                 connection_dissipation_j: damping_loss,
                 work_j: native_work,

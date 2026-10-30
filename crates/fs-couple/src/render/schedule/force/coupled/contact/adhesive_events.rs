@@ -366,8 +366,10 @@ impl<'a> AdhesiveEventModalSystem<'a> {
             &mut self.network,
             EventNativeAccount {
                 sample,
+                observer_pressure_pa: 0.0,
                 energy_before_j: before,
                 modal_energy_j: after,
+                component_dissipation_j: 0.0,
                 connection_energy_j: 0.0,
                 connection_dissipation_j: 0.0,
                 work_j: mechanical_work,

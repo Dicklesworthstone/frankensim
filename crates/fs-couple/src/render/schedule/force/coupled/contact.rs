@@ -459,3 +459,6 @@ pub mod adhesive_events;
 
 /// Resolved junction events through an original native elastic connection.
 pub mod adhesive_elastic_events;
+
+/// Sourced adhesive events retaining every original elastic mode and connection.
+pub mod adhesive_network_events;

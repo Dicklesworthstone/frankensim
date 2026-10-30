@@ -113,8 +113,10 @@ pub(crate) fn stage_motion(
 
 pub(crate) struct EventNativeAccount {
     pub sample: u64,
+    pub observer_pressure_pa: f64,
     pub energy_before_j: f64,
     pub modal_energy_j: f64,
+    pub component_dissipation_j: f64,
     pub connection_energy_j: f64,
     pub connection_dissipation_j: f64,
     pub work_j: f64,
@@ -123,7 +125,9 @@ pub(crate) struct EventNativeAccount {
 }
 
 /// Stage the original native diagnostics and work ports without publication.
-/// Admitted callers have free modes, zero acoustic transfers and no memories.
+/// Admitted callers retain the original modal/connection losses and read-only
+/// pressure transfers. Material memories and acoustic back-reaction require
+/// their own event propagation and are not represented by this account.
 pub(crate) fn stage_account(
     network: &mut CoupledModalSystem,
     account: EventNativeAccount,
@@ -131,13 +135,13 @@ pub(crate) fn stage_account(
 ) {
     let frame = &mut network.staged_frame;
     frame.sample = account.sample;
-    frame.observer_pressure_pa = 0.0;
+    frame.observer_pressure_pa = account.observer_pressure_pa;
     frame.modal_energy_j = account.modal_energy_j;
     frame.connection_energy_j = account.connection_energy_j;
     frame.material_energy_j = 0.0;
     frame.radiation_energy_j = 0.0;
     frame.external_work_j = account.work_j;
-    frame.component_dissipation_j = 0.0;
+    frame.component_dissipation_j = account.component_dissipation_j;
     frame.connection_dissipation_j = account.connection_dissipation_j;
     frame.material_dissipation_j = 0.0;
     frame.radiation_dissipation_j = 0.0;
@@ -154,7 +158,7 @@ pub(crate) fn stage_account(
             storage_change_j: Some(
                 account.modal_energy_j + account.connection_energy_j - account.energy_before_j,
             ),
-            loss_j: Some(account.connection_dissipation_j),
+            loss_j: Some(account.component_dissipation_j + account.connection_dissipation_j),
             included_work_j: account.work_j,
             entropy_change_j_k: 0.0,
             tolerance_j: Some(account.tolerance_j),

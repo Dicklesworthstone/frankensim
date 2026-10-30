@@ -12407,3 +12407,29 @@ irrelevant high-frequency cells. The law assumes fixed sources, normal
 capacity, frame, coefficients, and external loads during a step; nonlinear
 material memory, radiation dynamics, vector friction, and simultaneous contact
 constraints are outside this owner.
+
+
+## Sourced adhesive events in the original native network
+
+`render::schedule::force::coupled::contact::adhesive_network_events` binds the
+linear-network event owner to the original `CoupledModalSystem`. Admission
+checks the ordered material identities, original DMT area and junction shear
+strength, complete contact column, and every component/connection budget. It
+retains every admitted original mode, modal damping term, spring rest extension,
+connection column, and read-only pressure transfer; no reduced surrogate body
+or spring replaces the supplied network.
+
+Each candidate replays through the original component state guards and checks
+the resulting original storage, reactions, pressure, connection port work, and
+loss accounts independently. External mechanical work and junction loss enter
+the native boundary account while modal and connection losses remain in their
+original channels. Contact impulse and time moment retain momentum and position
+effects through stop, hold, and restart. Original energy tolerances include the
+event solver's numerical work uncertainty, and conservative interval energy
+bounds enforce connection-force and tangent-speed limits between endpoints.
+
+Accepted bodies, phase, frame, connection ports, and clock publish together only
+after all checks and the final gate; late refusal and cancellation permit an
+identical retry. Normal indentation/capacity is held during a step. Material
+memory, acoustic back-reaction, and constant-loss connections with distinct
+damping columns require other propagation owners and are refused here.
