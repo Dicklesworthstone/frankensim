@@ -5,6 +5,7 @@ import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.per
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import pressureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-pressure.performance?raw";
+import warmRampResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-warm-ramp.performance?raw";
 import splitApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-split-aperture.performance?raw";
 import sideApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-side-aperture.performance?raw";
 import radiatingMouthResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-radiating-mouth.performance?raw";
@@ -86,6 +87,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a declared pressure history drives the original resolved gas field and spatial bore. The returning wave and actual gas properties determine inlet flow; the native exterior microphone observes the resulting pressure.",
     help: "boundary pressure gives pascals relative to the original source-face pressure. Change the gas, stationary geometry or pressure history in the source, keeping the declared numerical limits. This is an ideal pressure boundary in the existing local-linear characteristic domain, not finite airway storage or a measured flute. Native decimation preserves the physical solver clock.",
+  },
+  {
+    name: "resolved-dg-warm-ramp.performance",
+    label: "Resolved flow — warm breath ramps",
+    renderer: "resolved",
+    source: warmRampResolvedDgSource,
+    decimate: true,
+    intro: "Starter: pressure and incoming gas temperature rise and fall through the original resolved flow, bore and exterior microphone. Edit the ramp endpoints to explore breath onset and release.",
+    help: "Each ramp acts on the physical source at the start of its existing solver interval. Pressure is in pascals relative to the source reference and temperature is in kelvin; output samples are not enveloped or normalized. This short synthetic source is not a measured player or flute.",
   },
   {
     name: "resolved-dg-split-aperture.performance",

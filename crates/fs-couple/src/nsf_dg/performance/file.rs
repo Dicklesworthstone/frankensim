@@ -145,6 +145,8 @@ pub struct ResolvedDgPerformanceInfo {
     pub solid_cells: usize,
     pub initial_state_cells: usize,
     pub boundary_segments: usize,
+    /// Linear physical control segments, sampled on the original source clock.
+    pub boundary_ramps: usize,
     /// Original physical NSF/DG intervals required for the observation window.
     pub physical_intervals: u64,
     /// Explicit exploratory transport declaration; zero coefficients retain
@@ -546,45 +548,25 @@ impl ResolvedDgFilePerformance {
         }
         let mut boundaries = Vec::with_capacity(boundary_segments);
         let mut previous_end = 0;
+        let mut boundary_ramps = 0;
         for n in 0..boundary_segments {
             if n % 256 == 0 { poll(&gate)?; }
-            let mut row = rows.row("hold")?;
+            let ramp = rows.next_is("ramp");
+            let mut row = rows.row(if ramp { "ramp" } else { "hold" })?;
             let end: usize = row.number()?;
-            let value = row.scalar()?;
-            let drive = match boundary_kind {
-                4 => {
-                    let temperature = row.scalar()?;
-                    if !(temperature_window_k[0]..=temperature_window_k[1]).contains(&temperature) {
-                        return Err(bad(row.line, "source inflow temperature lies outside the declared fluid window"));
-                    }
-                    NsfDgDrive::Boundary(NsfBoundaryDrive::PressureTemperature {
-                        pressure_offset_pa: value, inflow_temperature_k: temperature,
-                    })
-                },
-                3 | 5 => {
-                    let temperature_k = row.scalar()?;
-                    if value <= 0.0 || !(temperature_window_k[0]..=temperature_window_k[1]).contains(&temperature_k) {
-                        return Err(bad(row.line,
-                            "reservoir controls require positive absolute pressure and temperature inside the fluid window"));
-                    }
-                    if boundary_kind == 3 {
-                        NsfDgDrive::Reservoir { pressure_pa: value, temperature_k }
-                    } else {
-                        NsfDgDrive::ReservoirAperture {
-                            aperture: driven_aperture.expect("validated reservoir index"),
-                            pressure_pa: value, temperature_k,
-                        }
-                    }
-                },
-                2 => NsfDgDrive::UpstreamPressureRise(value),
-                1 => NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(value)),
-                _ => NsfDgDrive::Boundary(NsfBoundaryDrive::IncomingCharacteristic(value)),
-            };
+            let first = read_drive(&mut row, boundary_kind, driven_aperture, temperature_window_k)?;
+            let last = if ramp {
+                // Read and admit both endpoints, including an exclusive final
+                // temperature that the physical intervals may never sample.
+                let last = read_drive(&mut row, boundary_kind, driven_aperture, temperature_window_k)?;
+                boundary_ramps += 1;
+                Some(last)
+            } else { None };
             row.end()?;
             if end <= previous_end || end > samples {
                 return Err(bad(rows.line, "boundary endpoints must increase inside the declared sample window"));
             }
-            boundaries.push((end, drive));
+            boundaries.push(BoundarySegment { start: previous_end, end, first, last });
             previous_end = end;
         }
         if previous_end != samples { return Err(bad(rows.line, "boundary history must cover the complete declared window")); }
@@ -603,11 +585,11 @@ impl ResolvedDgFilePerformance {
             if index % 256 == 0 { poll(&gate)?; }
             let start = if matching_clock { index as f64 }
                 else { index as f64 * (physical_dt * f64::from(sample_rate_hz)) };
-            while segment < boundaries.len() && start >= boundaries[segment].0 as f64 {
+            while segment < boundaries.len() && start >= boundaries[segment].end as f64 {
                 segment += 1;
             }
             let value = boundaries.get(segment).ok_or_else(|| bad(0,
-                "physical source interval starts beyond the declared boundary window"))?.1;
+                "physical source interval starts beyond the declared boundary window"))?.at(start)?;
             boundary.push(value);
         }
         let coordinate = |x: [usize; 3]| (x[2] * dims[1] + x[1]) * dims[0] + x[0];
@@ -680,7 +662,7 @@ impl ResolvedDgFilePerformance {
             info: ResolvedDgPerformanceInfo {
                 input_hash: hash_domain("org.frankensim.fs-couple.resolved-dg-performance.v1", bytes),
                 sample_rate_hz, samples: samples as u64, full_scale_pa, dimensions: dims,
-                solid_cells, initial_state_cells, boundary_segments,
+                solid_cells, initial_state_cells, boundary_segments, boundary_ramps,
                 physical_intervals: physical_intervals as u64,
                 sgs,
             }, renderer, gas_records, wall, upstream_wall,
@@ -692,6 +674,92 @@ impl ResolvedDgFilePerformance {
     pub const fn wall_layout(&self) -> &DgMaterialWallLayout { &self.wall }
     pub fn upstream_wall_layout(&self) -> Option<&DgMaterialWallLayout> { self.upstream_wall.as_ref() }
     pub fn into_renderer(self) -> NsfDgPerformance<D3q27> { self.renderer }
+}
+
+// A segment lives on the declared observation clock; its value is held across
+// each original NSF/DG interval. The renderer's pressure projection is unchanged.
+struct BoundarySegment {
+    start: usize,
+    end: usize,
+    first: NsfDgDrive,
+    last: Option<NsfDgDrive>,
+}
+impl BoundarySegment {
+    fn at(&self, sample: f64) -> Result<NsfDgDrive, ResolvedDgInputError> {
+        // Keep legacy held controls bit-for-bit, including signed zero.
+        let Some(last) = self.last else { return Ok(self.first); };
+        let fraction = (sample - self.start as f64) / (self.end - self.start) as f64;
+        let interpolate = |a: f64, b: f64| {
+            if fraction == 0.0 || a == b { a }
+            else { (1.0 - fraction) * a + fraction * b }
+        };
+        let value = match (self.first, last) {
+            (NsfDgDrive::Boundary(NsfBoundaryDrive::IncomingCharacteristic(a)),
+             NsfDgDrive::Boundary(NsfBoundaryDrive::IncomingCharacteristic(b))) =>
+                NsfDgDrive::Boundary(NsfBoundaryDrive::IncomingCharacteristic(interpolate(a, b))),
+            (NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(a)),
+             NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(b))) =>
+                NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(interpolate(a, b))),
+            (NsfDgDrive::Boundary(NsfBoundaryDrive::PressureTemperature {
+                pressure_offset_pa: a, inflow_temperature_k: ta }),
+             NsfDgDrive::Boundary(NsfBoundaryDrive::PressureTemperature {
+                pressure_offset_pa: b, inflow_temperature_k: tb })) =>
+                NsfDgDrive::Boundary(NsfBoundaryDrive::PressureTemperature {
+                    pressure_offset_pa: interpolate(a, b),
+                    inflow_temperature_k: interpolate(ta, tb),
+                }),
+            (NsfDgDrive::UpstreamPressureRise(a), NsfDgDrive::UpstreamPressureRise(b)) =>
+                NsfDgDrive::UpstreamPressureRise(interpolate(a, b)),
+            (NsfDgDrive::Reservoir { pressure_pa: a, temperature_k: ta },
+             NsfDgDrive::Reservoir { pressure_pa: b, temperature_k: tb }) =>
+                NsfDgDrive::Reservoir {
+                    pressure_pa: interpolate(a, b), temperature_k: interpolate(ta, tb),
+                },
+            (NsfDgDrive::ReservoirAperture { aperture: ia, pressure_pa: a, temperature_k: ta },
+             NsfDgDrive::ReservoirAperture { aperture: ib, pressure_pa: b, temperature_k: tb })
+                if ia == ib => NsfDgDrive::ReservoirAperture {
+                    aperture: ia, pressure_pa: interpolate(a, b), temperature_k: interpolate(ta, tb),
+                },
+            _ => return Err(bad(0, "ramp endpoints must retain the same physical drive and opening")),
+        };
+        if !value.is_finite() { return Err(bad(0, "interpolated boundary control is not finite")); }
+        Ok(value)
+    }
+}
+
+fn read_drive(row: &mut Row<'_>, kind: u8, aperture: Option<usize>, window: [f64; 2])
+    -> Result<NsfDgDrive, ResolvedDgInputError>
+{
+    let value = row.scalar()?;
+    Ok(match kind {
+        4 => {
+            let temperature = row.scalar()?;
+            if !(window[0]..=window[1]).contains(&temperature) {
+                return Err(bad(row.line, "source inflow temperature lies outside the declared fluid window"));
+            }
+            NsfDgDrive::Boundary(NsfBoundaryDrive::PressureTemperature {
+                pressure_offset_pa: value, inflow_temperature_k: temperature,
+            })
+        },
+        3 | 5 => {
+            let temperature_k = row.scalar()?;
+            if value <= 0.0 || !(window[0]..=window[1]).contains(&temperature_k) {
+                return Err(bad(row.line,
+                    "reservoir controls require positive absolute pressure and temperature inside the fluid window"));
+            }
+            if kind == 3 {
+                NsfDgDrive::Reservoir { pressure_pa: value, temperature_k }
+            } else {
+                NsfDgDrive::ReservoirAperture {
+                    aperture: aperture.expect("validated reservoir index"),
+                    pressure_pa: value, temperature_k,
+                }
+            }
+        },
+        2 => NsfDgDrive::UpstreamPressureRise(value),
+        1 => NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(value)),
+        _ => NsfDgDrive::Boundary(NsfBoundaryDrive::IncomingCharacteristic(value)),
+    })
 }
 
 fn read_solids(rows: &mut Rows<'_>, dims: [usize; 3], dx_m: f64, cells: usize,

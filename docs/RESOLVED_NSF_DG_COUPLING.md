@@ -522,6 +522,51 @@ sampled-passivity admission uses `PI / dt`. Exact reciprocal integer clocks keep
 the existing bake and arithmetic. The source ceiling never becomes a rounded
 mechanical step.
 
+### Physical breath ramps
+
+Native histories can vary their physical source controls with linear ramps:
+
+```text
+boundary pressure 3
+ramp 480 0 20
+hold 1440 20
+ramp 1920 20 0
+```
+
+A scalar ramp is `ramp END_OBSERVATION_SAMPLE START_VALUE END_VALUE`.
+Values retain the selected boundary's units: pressure offsets and upstream
+series pressure rises in Pa, incoming characteristics in m/s. For
+`pressure-temperature`, `reservoir` and indexed `aperture` controls, each
+endpoint is a pressure/temperature pair:
+
+```text
+boundary pressure-temperature 2
+ramp 960 0 300 20 303
+ramp 1920 20 303 0 300
+```
+
+Each segment begins at the previous segment's exclusive endpoint, or zero for
+the first segment. Its final value is the value approached at its exclusive
+end; the following segment owns that instant. Both endpoint temperatures must
+lie in the original fluid temperature window even if the final endpoint is
+never sampled. Reservoir pressure remains absolute; pressure-temperature
+source pressure remains relative to the original face reference. An indexed
+`boundary aperture INDEX COUNT` retains that same physical opening throughout
+every ramp; it never interpolates or switches the opening identity.
+
+The reader evaluates each ramp at the **start of the original physical
+NSF/DG interval**, measured on the observation clock, then retains that control
+through the interval. It does not change the source clock or interpolate PCM.
+The existing exact-clock path retains integer sample positions; different
+observation clocks use the same physical interval duration as the source.
+As with holds, physical control discretization requires interval refinement.
+Hold-only input preserves its existing arithmetic.
+
+`crates/fs-couple/examples/resolved-dg-warm-ramp.performance` exercises warm
+pressure ramps through the original resolved volume, live bore and exterior
+observer. It is a synthetic integration source, not a measured player envelope
+or instrument-fidelity result.
+
 ## Native file and Instrument Lab
 
 `nsf_dg::performance::file::ResolvedDgFilePerformance` assembles the original
@@ -598,7 +643,7 @@ observation inlet-pressure
 [optional existing observer_gas record, only with a baffled observer]
 boundary COUNT
 hold END_OBSERVATION_SAMPLE INCOMING_CHARACTERISTIC_M_S
-[repeat exactly COUNT increasing hold records]
+[repeat exactly COUNT increasing hold or ramp records]
 end
 ```
 
@@ -697,10 +742,10 @@ Alternatives use the same original parsers and owners:
 
 Cell indices are zero-based. Axes are `0`, `1`, `2`; periodic flags are `0` or
 `1`, and the characteristic axis must be nonperiodic. The `low|high` field
-selects the face coupled to the DG inlet. The `hold` history drives the opposite
+selects the face coupled to the DG inlet. The `hold` or `ramp` history drives the opposite
 face, its explicit upstream series actuator, or the explicitly selected
 transverse reservoir. Endpoints are exclusive indices on the **observation** clock and must
-cover the declared window exactly. Each physical interval uses the held value
+cover the declared window exactly. Each physical interval uses the segment's value
 at its start, so a discontinuous control can incur up to one physical interval
 of event timing error; that error refines with the original discretization.
 

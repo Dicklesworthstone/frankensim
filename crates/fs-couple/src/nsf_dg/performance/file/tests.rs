@@ -6,6 +6,7 @@ use fs_material::gas_species::input::{ThermochemicalPhase, read_gas_record};
 
 mod pressure;
 mod temperature;
+mod ramps;
 mod upstream;
 mod molecular;
 mod patch;
