@@ -3,6 +3,33 @@
 > Status: ACTIVE (Stage 1, increment 1 — bead tqag). Capability-routed
 > body-to-body contact over certified motion.
 
+## Source-owned continuous directional sliding and arrest
+
+`SourceThermalEllipticCoulomb::relax_motion_consistent` closes the original
+ordered interface's declared speed and accumulated-distance coordinates against
+the native `EllipticCoulomb::relax_velocity` trajectory. Distance is the unsigned
+curved path, not the norm of net displacement. Speed is that distance divided by
+the phase duration; each path coordinate starts at its own accepted source value.
+Both selected principal coefficient bundles, their claim pins and the transported
+native texture/history refresh together. The source point retains the original
+temperature/pressure and every fixed external coordinate.
+
+The existing scalar motion root and complete source-coordinate validation are
+shared with the held-step consumer. The explicit bracket must lie inside the
+physical/source domain; native full-matrix recoil supplies no Euclidean free-slip
+upper bound. Acceptance requires the actual distance residual from below, not
+merely a narrow bracket. Source/native evaluations are bounded and cancellation
+is polled. A failed query, root, force admission or native trajectory returns no
+changed source/history candidate. Motion-independent sources use one query.
+
+Coefficients, normal load and geometry are held inside one phase. Average-speed
+and endpoint-path queries are a time discretization for varying sources, not an
+exact varying-coefficient ODE. Convergent subdivision belongs to the trajectory
+owner. Nonmonotone sources do not imply a unique root; the native quadrature
+estimates remain estimates. G1/G3/G4 tests cover analytic speed feedback and a
+three-rung time ladder, path-dependent arrest and restart, unsigned curved travel,
+source pins, independent coordinate origins, and transactional refusals.
+
 ## Purpose and layer
 
 Blocker B3 (expansion plan, phase E2): body-to-body contact detection

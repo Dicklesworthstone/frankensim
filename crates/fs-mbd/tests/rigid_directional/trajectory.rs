@@ -244,3 +244,86 @@ fn relaxation_budget_geometry_and_cancellation_leave_bodies_and_history_unchange
         .is_ok()
     );
 }
+
+#[test]
+fn original_source_history_callback_shares_body_audits_and_atomic_publication() {
+    let (original, props, c) = full_pair(false);
+    let law = EllipticCoulomb::new([0.9, 0.8], [0.2, 0.4], [0.6, 0.8]).unwrap();
+    let original_history = (law.initial_state(), 41_u64);
+    let mut expected_bodies = original;
+    let mut expected_history = original_history.0.clone();
+    let expected = apply_rigid_directional_trajectory(
+        &mut expected_bodies,
+        &props,
+        c,
+        &law,
+        &mut expected_history,
+        5.0,
+        controls(),
+        relaxation(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+
+    for refusal in 0..4 {
+        let mut bodies = original;
+        let mut history = original_history.clone();
+        let gate = CancelGate::new();
+        let result = apply_rigid_directional_trajectory_with(
+            &mut bodies,
+            &props,
+            c,
+            &mut history,
+            5.0,
+            controls(),
+            |old, input| {
+                assert_eq!(old, &original_history);
+                assert_eq!(input.mobility_per_kg, expected.mobility_per_kg);
+                assert_eq!(input.velocity_m_s, expected.slip_velocity_before_m_s);
+                if refusal == 1 {
+                    return Err("original coefficient source unavailable");
+                }
+                let mut native = law
+                    .relax_velocity(&old.0, input, relaxation(), &mut || false)
+                    .unwrap();
+                let state = (native.state.clone(), old.1 + 1);
+                if refusal == 2 {
+                    // Source callbacks cannot bypass the independent work audit.
+                    native.dissipated_j += 1.0;
+                }
+                if refusal == 3 {
+                    gate.request();
+                }
+                Ok((native, state))
+            },
+            &gate,
+        );
+        if refusal == 0 {
+            let report = result.unwrap();
+            assert_eq!(bodies, expected_bodies);
+            assert_eq!(history, (expected_history.clone(), 42));
+            assert_eq!(report.relaxation, expected.relaxation);
+            assert_eq!(report.audit, expected.audit);
+        } else {
+            match refusal {
+                1 => assert!(matches!(
+                    result,
+                    Err(RigidDirectionalTrajectoryError::Relaxation(
+                        "original coefficient source unavailable"
+                    ))
+                )),
+                2 => assert!(matches!(
+                    result,
+                    Err(RigidDirectionalTrajectoryError::Audit(_))
+                )),
+                3 => assert!(matches!(
+                    result,
+                    Err(RigidDirectionalTrajectoryError::Cancelled)
+                )),
+                _ => unreachable!(),
+            }
+            assert_eq!(bodies, original);
+            assert_eq!(history, original_history);
+        }
+    }
+}

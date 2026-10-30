@@ -340,12 +340,28 @@ impl SourceThermalCoulomb {
         input: &TangentialStepInput,
         point: &QueryPoint,
     ) -> Result<ResolvedInterfaceStatePoint, SourceThermalCoulombError> {
+        self.source_at_query_conditions(
+            previous,
+            input.contact_temperature_k,
+            input.nominal_pressure_pa,
+            point,
+        )
+    }
+
+    fn source_at_query_conditions(
+        &self,
+        previous: &ResolvedInterfaceStatePoint,
+        temperature_k: Option<f64>,
+        pressure_pa: Option<f64>,
+        point: &QueryPoint,
+    ) -> Result<ResolvedInterfaceStatePoint, SourceThermalCoulombError> {
         query::validate_refresh(
             &self.initial_source.query(),
             point,
             &self.axes,
             &self.query_axes,
-            input,
+            temperature_k,
+            pressure_pa,
         )?;
         let previous_point = previous.query();
         if self.query_axes.iter().any(|axis| {

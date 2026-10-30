@@ -89,7 +89,8 @@ pub(super) fn validate_refresh(
     point: &QueryPoint,
     primary: &ThermalFrictionAxes,
     axes: &[FrictionQueryAxis],
-    input: &TangentialStepInput,
+    temperature_k: Option<f64>,
+    pressure_pa: Option<f64>,
 ) -> Result<(), SourceThermalCoulombError> {
     if initial.axis_quantities() != point.axis_quantities()
         || initial.axes().keys().ne(point.axes().keys())
@@ -109,14 +110,14 @@ pub(super) fn validate_refresh(
             ));
         }
     }
-    if !input.contact_temperature_k.is_some_and(|t| {
+    if !temperature_k.is_some_and(|t| {
         t.is_finite() && t > 0.0 && point.axes().get(&primary.temperature) == Some(&t)
     }) {
         return Err(SourceThermalCoulombError::Invalid(
             "friction query temperature must equal the supplied constitutive temperature",
         ));
     }
-    match (&primary.nominal_pressure, input.nominal_pressure_pa) {
+    match (&primary.nominal_pressure, pressure_pa) {
         (Some(axis), Some(p))
             if p.is_finite() && p >= 0.0 && point.axes().get(axis) == Some(&p) => {}
         (None, None) => {}

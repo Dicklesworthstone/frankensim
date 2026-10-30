@@ -9,6 +9,9 @@
 /// Close declared speed/path coordinates against actual full-matrix slip.
 pub mod motion;
 
+/// Source-consistent curved sliding and finite arrest with full body mobility.
+pub mod trajectory;
+
 use fs_tribo::tangential::elliptic::{
     EllipticCoulomb, EllipticCoulombState, SymmetricTangentialCompliance,
 };

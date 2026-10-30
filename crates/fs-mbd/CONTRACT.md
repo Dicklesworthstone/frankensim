@@ -1,5 +1,26 @@
 # CONTRACT: fs-mbd
 
+## Source callbacks for continuous directional trajectories
+
+`apply_rigid_directional_trajectory_with` supplies the original pair's full
+tensor mobility and point velocity to a constitutive source callback. The
+callback returns the native integrated trajectory plus its source/history
+candidate. The native constant-law entry point delegates to this same owner;
+there is one body mobility calculation, impulse application and audit path.
+
+Only the original two bodies are staged. Opposing integrated impulses, actual
+endpoint velocity, individual and total momenta, impulse/kinetic work and
+nonnegative physical heat are checked before those bodies and the callback
+history publish together. A source refusal, bad candidate or cancellation leaves
+all accepted owners unchanged. The callback owns constitutive/source admission;
+this adapter does not manufacture coefficients, resolve material names or
+replace native curve work with average force times net travel.
+
+Poses, arms, inertia and normal load are frozen. Normal recoil is reported, not
+silently constrained. Changing sources and thermal storage remain external
+owners. G1/G3/G4 native tests retain analytic and full-tensor arrest/continuation
+checks and add a source-history callback, audit rejection and atomic retry.
+
 ## Purpose and layer
 
 Layer: **L3 FLUX**. `fs-mbd` provides safe-Rust rigid-body dynamics in two

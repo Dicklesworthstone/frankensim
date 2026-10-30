@@ -1,4 +1,7 @@
 //! G1/G3/G4: actual full-matrix slip closes original speed/path queries.
+#[path = "trajectory.rs"]
+mod trajectory;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::elliptic::motion::{
     MotionQueryError, MotionQuerySolve,

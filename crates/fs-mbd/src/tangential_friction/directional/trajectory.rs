@@ -39,33 +39,33 @@ pub struct RigidDirectionalTrajectoryReport {
 }
 
 #[derive(Debug)]
-pub enum RigidDirectionalTrajectoryError {
+pub enum RigidDirectionalTrajectoryError<E = EllipticRelaxationError> {
     Mechanics(RigidDirectionalError),
-    Relaxation(EllipticRelaxationError),
+    Relaxation(E),
     Audit(RigidDirectionalTrajectoryAudit),
     Cancelled,
 }
-impl From<DynamicsError> for RigidDirectionalTrajectoryError {
+impl<E> From<DynamicsError> for RigidDirectionalTrajectoryError<E> {
     fn from(e: DynamicsError) -> Self {
         Self::Mechanics(RigidDirectionalError::Dynamics(e))
     }
 }
-impl From<RigidDirectionalError> for RigidDirectionalTrajectoryError {
+impl<E> From<RigidDirectionalError> for RigidDirectionalTrajectoryError<E> {
     fn from(e: RigidDirectionalError) -> Self {
         Self::Mechanics(e)
     }
 }
-impl core::fmt::Display for RigidDirectionalTrajectoryError {
+impl<E: core::fmt::Debug> core::fmt::Display for RigidDirectionalTrajectoryError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "rigid directional trajectory: {self:?}")
     }
 }
-impl std::error::Error for RigidDirectionalTrajectoryError {}
+impl<E: core::fmt::Debug> std::error::Error for RigidDirectionalTrajectoryError<E> {}
 
 /// Advance a constant-law, held-load two-body friction phase through arrest.
 /// Exactly two bodies and the original history publish only after independent
 /// impulse, endpoint-velocity and work/heat checks and a final cancellation poll.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn apply_rigid_directional_trajectory(
     bodies: &mut [RigidBodyState],
     properties: &[MassProperties],
@@ -77,6 +77,42 @@ pub fn apply_rigid_directional_trajectory(
     relaxation: EllipticRelaxationControls,
     gate: &CancelGate,
 ) -> Result<RigidDirectionalTrajectoryReport, RigidDirectionalTrajectoryError> {
+    apply_rigid_directional_trajectory_with(
+        bodies,
+        properties,
+        contact,
+        history,
+        dt_s,
+        controls,
+        |state, input| {
+            let report =
+                law.relax_velocity(state, input, relaxation, &mut || gate.is_requested())?;
+            let next = report.state.clone();
+            Ok((report, next))
+        },
+        gate,
+    )
+}
+
+/// Apply a source owner's continuous trajectory to the original body pair.
+///
+/// The callback receives the actual full body mobility and initial velocity,
+/// and returns its native trajectory plus its own source/history candidate.
+/// It may resolve changing coefficient queries without owning another body
+/// response or applying impulses. This owner independently audits endpoint
+/// velocity, opposing impulses and physical heat before publishing exactly two
+/// bodies and the callback history together. Callback refusals are preserved.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn apply_rigid_directional_trajectory_with<S, E>(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    contact: RigidDirectionalContact,
+    history: &mut S,
+    dt_s: f64,
+    controls: RigidDirectionalControls,
+    mut resolve: impl FnMut(&S, &EllipticRelaxationInput) -> Result<(EllipticRelaxationReport, S), E>,
+    gate: &CancelGate,
+) -> Result<RigidDirectionalTrajectoryReport, RigidDirectionalTrajectoryError<E>> {
     if gate.is_requested() {
         return Err(RigidDirectionalTrajectoryError::Cancelled);
     }
@@ -86,6 +122,8 @@ pub fn apply_rigid_directional_trajectory(
         || binding.body_a >= bodies.len()
         || binding.body_b >= bodies.len()
         || binding.body_a == binding.body_b
+        || !dt_s.is_finite()
+        || dt_s <= 0.0
         || [
             controls.geometry_tolerance_m,
             controls.velocity_tolerance_m_s,
@@ -118,22 +156,30 @@ pub fn apply_rigid_directional_trajectory(
     let mobility = response::<TriboError>(before, props, arms, axes)?;
     let initial = old[0].point_velocity_world.sub(old[1].point_velocity_world);
     let velocity = [initial.dot(axes[0]), initial.dot(axes[1])];
-    let resolved = law
-        .relax_velocity(
-            history,
-            &EllipticRelaxationInput {
-                velocity_m_s: velocity,
-                mobility_per_kg: mobility,
-                normal_n: contact.normal_load_n,
-                dt_s,
-                maximum_force_n: controls.contact.maximum_force_n,
-                contact_temperature_k: contact.contact_temperature_k,
-                nominal_pressure_pa: contact.nominal_pressure_pa,
-            },
-            relaxation,
-            &mut || gate.is_requested(),
+    let (resolved, next) = resolve(
+        history,
+        &EllipticRelaxationInput {
+            velocity_m_s: velocity,
+            mobility_per_kg: mobility,
+            normal_n: contact.normal_load_n,
+            dt_s,
+            maximum_force_n: controls.contact.maximum_force_n,
+            contact_temperature_k: contact.contact_temperature_k,
+            nominal_pressure_pa: contact.nominal_pressure_pa,
+        },
+    )
+    .map_err(RigidDirectionalTrajectoryError::Relaxation)?;
+    if !resolved.distance_m.is_finite()
+        || resolved.distance_m < 0.0
+        || !resolved.dissipated_j.is_finite()
+        || resolved.dissipated_j < 0.0
+        || resolved.slip_increment_m.iter().any(|x| !x.is_finite())
+    {
+        return Err(RigidDirectionalError::Invalid(
+            "finite nonnegative native trajectory distance and heat required",
         )
-        .map_err(RigidDirectionalTrajectoryError::Relaxation)?;
+        .into());
+    }
     let impulse = axes[0]
         .scale(-resolved.traction_impulse_ns[0])
         .add(axes[1].scale(-resolved.traction_impulse_ns[1]));
@@ -226,7 +272,6 @@ pub fn apply_rigid_directional_trajectory(
         impulse_work_j: impulse_work,
         audit,
     };
-    let next = report.relaxation.state.clone();
     if gate.is_requested() {
         return Err(RigidDirectionalTrajectoryError::Cancelled);
     }
