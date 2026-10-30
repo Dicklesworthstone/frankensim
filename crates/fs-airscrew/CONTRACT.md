@@ -153,3 +153,42 @@ balances. The method is second order for held smooth admitted inputs. These
 axial reduced-state balances do not establish whole-fluid/body passivity,
 skew/crossflow forces, azimuthal harmonics, swirl, wake geometry transport,
 blade unsteadiness, or historical calibration.
+
+
+## Oblique rigid-blade force and hub moment
+
+`oblique::{DiskFrame, AzimuthQuadrature}` supplies a separately selected,
+revolution-averaged blade-element law for uniform incident crossflow and
+carrier tilt. Each section uses the existing radial widths and native
+attached/separated section closure. Its material velocity relative to incident
+air is `V_hub + omega_tilt cross r + Omega_absolute r t`. The axial carrier
+rate is already included in the absolute shaft speed and is not added again.
+The force is `dT n - (dQ/r) t`; its actual arm gives the transverse hub
+moment. Positive thrust, physical spin direction and material radial reference
+are distinct inputs. Frame admission checks orthonormality without silently
+changing geometry. The construction follows the inclined-propeller section
+kinematics discussed with figures 93–95 of NASA CR-182121
+(<https://ntrs.nasa.gov/citations/19880016976>).
+
+`ObliqueLoads` returns full force, transverse hub moment EXCLUDING axial shaft
+torque, required drive torque, profile-drag dissipation, actual section
+kinematic power, induced work and a floating-point power residual. The admitted
+section law satisfies `F dot V_hub + M_perp dot omega_tilt - Q Omega_absolute
++ T v_i + D_profile = 0` in real arithmetic. Required torque retains its sign;
+the aerodynamic axial moment is opposite physical spin. These are local
+section-power identities, not a complete fluid/wake passivity result.
+
+Quadrature has 8–512 points in multiples of four, with deterministic antipodal
+pairs and trigonometry prepared once. Evaluation allocates no storage and costs
+O(radial stations times azimuth points). Nonpositive local tangential speed,
+reversed section throughflow, and `|alpha| > 1.3` refuse instead of extrapolating
+the native angle clamp. Normal-branch induction admission remains explicit.
+The maximum ignored spanwise speed is reported: a two-dimensional strip law
+does not model spanwise force. There is no blade phase, flapping, skew-induced
+wake distribution, compressibility, swirl, cyclic pitch or section memory.
+
+Five focused native tests in `tests/oblique.rs` cover the original axial limit,
+an independent attached-section midpoint quadrature and azimuth refinement,
+physical handedness parity, full frame rotation and shaft/carrier power, and
+bounded work/reversed-flow/angle/overflow refusals. This establishes numerical
+conformance of the declared Estimated section model, not propeller calibration.

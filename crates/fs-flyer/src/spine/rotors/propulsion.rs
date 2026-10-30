@@ -114,6 +114,7 @@ struct AerodynamicStage<'a> {
     freestream: [f64; 3],
     rho: f64,
     incident: IncidentInflow<'a>,
+    carrier_angular_velocity_body_rad_s: [f64; 3],
 }
 
 struct AerodynamicFields<'a> {
@@ -121,6 +122,7 @@ struct AerodynamicFields<'a> {
     strip_velocity_mps: Option<&'a [[f64; 3]]>,
     thrust_n: [f64; 2],
     torque_nm: [f64; 2],
+    oblique: Option<&'a [fs_airscrew::oblique::ObliqueLoads; 2]>,
 }
 
 trait AerodynamicSolution {
@@ -134,6 +136,7 @@ impl AerodynamicSolution for CoupledStep {
             strip_velocity_mps: self.strip_velocity_mps.as_deref(),
             thrust_n: self.thrust_n,
             torque_nm: self.torque_nm,
+            oblique: None,
         }
     }
 }
@@ -458,6 +461,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             freestream,
             rho,
             incident,
+            carrier_angular_velocity_body_rad_s: state.rigid.omega_body,
         })?;
         let fields = aerodynamics.load_fields();
         let local = fields.strip_velocity_mps.ok_or_else(|| {
@@ -515,9 +519,17 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         let mut aerodynamic_nm = [0.0; N];
         for k in 0..2 {
             let mount = self.mounts[k];
-            let thrust = vec(mount.thrust_direction_body).scale(fields.thrust_n[k]);
-            force = force + thrust;
-            moment = moment + (vec(disks[k].center_m) - vec(design.cg_m)).cross(thrust);
+            let propeller_force = match fields.oblique {
+                Some(loads) => vec(loads[k].force_n),
+                None => vec(mount.thrust_direction_body).scale(fields.thrust_n[k]),
+            };
+            force = force + propeller_force;
+            moment = moment + (vec(disks[k].center_m) - vec(design.cg_m)).cross(propeller_force);
+            if let Some(loads) = fields.oblique {
+                // Transverse hub moments act on the carrier. The axial moment
+                // belongs exclusively to the physical shaft port below.
+                moment = moment + vec(loads[k].hub_moment_nm);
+            }
             // BEMT reports required drive torque in its positive-speed branch.
             // Physical aerodynamic torque on the rotor has the opposite sign.
             aerodynamic_nm[mount.rotor_index] = -mount.handedness.sign() * fields.torque_nm[k];

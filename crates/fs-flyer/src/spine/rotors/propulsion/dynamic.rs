@@ -9,9 +9,11 @@
 //!
 //! This tier uses `fs_airscrew::dynamic_inflow`'s constant-density apparent
 //! air mass. Its impulse/work balance is an AXIAL reduced-state balance,
-//! not the world momentum of a resolved wake. Skew, transverse disk forces,
-//! wake rotation during large maneuvers, blade harmonics and unsteady airfoil
-//! memory remain absent. Existing quasi-steady propulsion remains selectable.
+//! not the world momentum of a resolved wake. `new_oblique` additionally
+//! resolves revolution-averaged section crossflow and transverse hub loads;
+//! the wake still uses the declared uniform AXIAL transport approximation.
+//! Skew-induced wake distributions, wake rotation during large maneuvers,
+//! blade-phase harmonics and unsteady airfoil memory remain absent.
 
 use super::{
     AerodynamicFields, AerodynamicSolution, AerodynamicStage, DiskAxes, GearedLoads,
@@ -19,6 +21,7 @@ use super::{
     wing_error,
 };
 use fs_airscrew::dynamic_inflow::{InflowStep, RotorEvaluation, UniformAxialInflow};
+use fs_airscrew::oblique::{AzimuthQuadrature, DiskFrame, ObliqueLoads, SpinDirection};
 use fs_wing::induced_velocity_free;
 use fs_wing::nonlinear::solve_nonlinear_with_incident;
 
@@ -40,6 +43,9 @@ pub struct DynamicAerodynamics {
     pub disk_axial_mps: [f64; 2],
     /// L/R native blade thrust, shaft torque and wake acceleration.
     pub propellers: [RotorEvaluation; 2],
+    /// Full section-integrated body-frame loads when oblique blades are selected.
+    /// Their transverse hub moments exclude the separately owned shaft torque.
+    pub oblique: Option<[ObliqueLoads; 2]>,
     /// Wing circulation at this physical wash state [m²/s].
     pub gamma: Vec<f64>,
     /// Incident plus vector prop wash used for circulation and panel forces.
@@ -57,6 +63,7 @@ impl AerodynamicSolution for DynamicAerodynamics {
             strip_velocity_mps: Some(&self.strip_velocity_mps),
             thrust_n: self.propellers.map(|prop| prop.thrust_n),
             torque_nm: self.propellers.map(|prop| prop.torque_nm),
+            oblique: self.oblique.as_ref(),
         }
     }
 }
@@ -94,6 +101,7 @@ pub struct DynamicPropulsion<'p, 'a, const N: usize> {
     propulsion: &'p GearedPropulsion<'a, N>,
     inflow: UniformAxialInflow,
     axes: DiskAxes,
+    oblique: Option<(AzimuthQuadrature, [DiskFrame; 2])>,
 }
 
 fn air_error(error: fs_airscrew::Refusal) -> Refusal {
@@ -120,7 +128,49 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             inflow: UniformAxialInflow::new(propulsion.design.rotor.radius_m, density_kg_m3)
                 .map_err(air_error)?,
             axes: DiskAxes::new(propulsion.mounts.map(|mount| mount.thrust_direction_body))?,
+            oblique: None,
         })
+    }
+
+    /// Select revolution-averaged oblique blade loads and physical tilt-rate
+    /// kinematics. The same scalar axial wake and straight axial wing wash are
+    /// retained deliberately: this is not a skewed-wake momentum closure.
+    /// The finite azimuth rule uses a fixed body-frame radial reference.
+    ///
+    /// # Errors
+    /// Native density, axis, quadrature and orthonormal-frame admission.
+    pub fn new_oblique(
+        propulsion: &'p GearedPropulsion<'a, N>,
+        density_kg_m3: f64,
+        azimuth_points: usize,
+    ) -> Result<Self, Refusal> {
+        let mut result = Self::new(propulsion, density_kg_m3)?;
+        let rule = AzimuthQuadrature::new(azimuth_points).map_err(air_error)?;
+        let frame = |k: usize| {
+            let mount = propulsion.mounts[k];
+            let axis = mount.thrust_direction_body;
+            // The least-aligned coordinate yields a well-conditioned material
+            // reference, fixed in the carrier rather than chosen from airflow.
+            let reference = (0..3)
+                .min_by(|&i, &j| axis[i].abs().total_cmp(&axis[j].abs()))
+                .expect("three coordinates");
+            let mut radial = axis.map(|x| -axis[reference] * x);
+            radial[reference] += 1.0;
+            let length =
+                (radial[0] * radial[0] + radial[1] * radial[1] + radial[2] * radial[2]).sqrt();
+            radial = radial.map(|x| x / length);
+            let rotor_axis = propulsion.assembly.rotors()[mount.rotor_index].axis_body;
+            let alignment =
+                axis[0] * rotor_axis[0] + axis[1] * rotor_axis[1] + axis[2] * rotor_axis[2];
+            let spin = if mount.handedness.sign() * alignment > 0.0 {
+                SpinDirection::AlongThrust
+            } else {
+                SpinDirection::AgainstThrust
+            };
+            DiskFrame::new(axis, radial, spin).map_err(air_error)
+        };
+        result.oblique = Some((rule, [frame(0)?, frame(1)?]));
+        Ok(result)
     }
 
     /// The explicit per-disk apparent-air-mass model.
@@ -159,6 +209,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             None,
         )
         .map_err(wing_error)?;
+        let mut disk_velocity_mps = [[0.0; 3]; 2];
         let disk_axial_mps = core::array::from_fn(|k| {
             let induced = induced_velocity_free(
                 stage.disks[k].center_m,
@@ -166,10 +217,39 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
                 &wing.gamma,
                 stage.freestream,
             );
+            disk_velocity_mps[k] =
+                core::array::from_fn(|j| stage.incident.disk_velocity_mps[k][j] + induced[j]);
             self.axes
                 .axial(k, stage.incident.disk_velocity_mps[k], induced)
         });
+        let oblique = if let Some((rule, frames)) = &self.oblique {
+            let loads = |k: usize| {
+                rule.evaluate(
+                    &self.propulsion.design.rotor,
+                    stage.rho,
+                    frames[k],
+                    disk_velocity_mps[k],
+                    stage.carrier_angular_velocity_body_rad_s,
+                    induced_mps[k],
+                    stage.disks[k].omega_rad_s,
+                )
+                .map_err(air_error)
+            };
+            Some([loads(0)?, loads(1)?])
+        } else {
+            None
+        };
         let propeller = |k: usize| {
+            if let Some(loads) = &oblique {
+                return Ok(RotorEvaluation {
+                    thrust_n: loads[k].thrust_n,
+                    torque_nm: loads[k].torque_nm,
+                    inflow: self
+                        .inflow
+                        .rate(disk_axial_mps[k], induced_mps[k], loads[k].thrust_n)
+                        .map_err(air_error)?,
+                });
+            }
             self.inflow
                 .evaluate(
                     &self.propulsion.design.rotor,
@@ -183,6 +263,7 @@ impl<'p, 'a, const N: usize> DynamicPropulsion<'p, 'a, N> {
             induced_mps,
             disk_axial_mps,
             propellers: [propeller(0)?, propeller(1)?],
+            oblique,
             gamma: wing.gamma,
             strip_velocity_mps,
             wing_lift_n: wing.total_lift_n,

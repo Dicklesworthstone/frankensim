@@ -22,6 +22,7 @@ use fs_airfoil::flat_plate_separated;
 use fs_math::det;
 
 pub mod dynamic_inflow;
+pub mod oblique;
 
 /// Station-count cap (refusals at cap AND cap+1).
 pub const MAX_STATIONS: usize = 64;
@@ -331,6 +332,7 @@ struct BladeLoads {
     sin_phi: f64,
     thrust: f64,
     torque: f64,
+    profile_drag: f64,
 }
 
 impl StationSample {
@@ -402,6 +404,7 @@ impl StationProblem<'_> {
             sin_phi,
             thrust,
             torque,
+            profile_drag: q * self.station.chord_m * cd * b,
         })
     }
 
@@ -411,6 +414,7 @@ impl StationProblem<'_> {
             sin_phi,
             thrust,
             torque,
+            ..
         } = self.blade_loads(w)?;
         let b = f64::from(self.rotor.n_blades);
         let f_tip = if sin_phi.abs() > 1e-9 {

@@ -533,3 +533,42 @@ constant-density, disk-average flow, quasi-steady blade/wing sections and
 the existing wash window; it supplies no skew/crossflow loading, swirl,
 harmonics, transported wake geometry, blade memory, gimbal motion, historical
 calibration, browser wiring or cross-platform qualification.
+
+
+## Oblique propeller loads in coupled aircraft motion
+
+`spine::rotors::propulsion::dynamic::DynamicPropulsion::new_oblique` explicitly
+selects native revolution-averaged oblique blade loads over the existing geared
+aircraft and uniform axial wake. The normal constructor keeps the original
+axial model. Each actual aerodynamic stage supplies incident plus wing-induced
+velocity at each disk center and the carrier angular rate to the native blade
+owner. Fixed body-frame disk references and physical spin directions are
+prepared independently of the signs chosen for mechanical shaft coordinates.
+
+The shared aerodynamic assembly applies the full force at the disk center,
+its moment arm about the aircraft COM, and the transverse hub moment. Axial
+aerodynamic torque goes only to the original physical shaft port. Consequently
+shaft reaction, carrier tilt, transverse loading and aircraft world momentum
+use the same real force evaluation without duplicated shaft torque. Both start
+and predicted-midpoint stages include oblique loads before advancing the
+original aircraft/gear/wake state. No independent mechanics or wing solver is
+introduced. The section power account includes hub translation, tilt and
+absolute shaft spin; relative shaft power and carrier axial rotation sum to
+that same physical absolute-spin work.
+
+The wake remains the named constant-density uniform AXIAL apparent-air-mass
+model and its straight axial wash. The scalar momentum/energy receipts are not
+a full oblique-fluid impulse or passivity theorem. Incident flow is uniform
+across each disk apart from actual carrier tilt kinematics; intra-disk wind
+gradients, skew-wake geometry/induction, blade-phase harmonics, flapping and
+unsteady airfoil memory remain outside this model. The existing normal wake
+and new section-domain refusals both apply; no negative-speed clipping or
+reversed-flow fallback occurs.
+
+Three focused native cases in `tests/oblique_propulsion.rs` reconstruct the
+actual carrier wrench difference from blade forces/hub moments, advance a
+canted two-propeller aircraft with independent physical world momentum
+reconstruction, and reverse all mechanical shaft-axis sign conventions while
+retaining an identical physical trajectory. The existing dynamic, geared,
+spatial and coupled aerodynamic suites also remain applicable. No historical,
+full-workspace, browser, real-time or performance qualification is implied.
