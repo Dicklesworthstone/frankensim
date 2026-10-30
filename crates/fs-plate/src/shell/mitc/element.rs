@@ -11,6 +11,7 @@ fn unit(v: [f64; 3]) -> [f64; 3] {
     v.map(|x| x / n)
 }
 
+#[derive(Debug, Clone)]
 struct Kinematics {
     normals: [[f64; 3]; 3],
     average: [f64; 3],
@@ -172,48 +173,62 @@ fn stiffness_rule() -> Vec<([f64; 3], f64)> {
     q
 }
 
-pub(super) struct ElementStrainField {
+/// Original element kinematics with the equilibrium bubble map prepared once.
+/// Stiffness, viscosity and strain observation share `elastic_transform`.
+#[derive(Debug, Clone)]
+pub(super) struct PreparedStrainField {
     kin: Kinematics,
     constant: [[f64; N]; 2],
     twisting: [f64; N],
-    q: [f64; N],
+    bubble: [[f64; 18]; 2],
     g: FacetGeometry,
 }
 
-impl ElementStrainField {
+impl PreparedStrainField {
     pub(super) fn new(
         mesh: &ShellMesh,
         tri: &[usize; 3],
         g: FacetGeometry,
         normals: [[f64; 3]; 3],
         section: &ShearShellSection,
-        u_18: &[f64; 18],
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, PlateError> {
         let kin = Kinematics::new(mesh, tri, &g, normals);
-        let k = strain_matrix(&kin, &g, section.coupled_matrices(), &mut || false)?;
+        let k = strain_matrix(&kin, &g, section.coupled_matrices(), cancelled)?;
         let transform = elastic_transform(&k)?;
-        let (constant, twisting) = kin.shear_ties(&g);
-        let mut q = [0.0; N];
-        q[..18].copy_from_slice(u_18);
-        for j in 0..18 {
-            q[18] += transform[18][j] * u_18[j];
-            q[19] += transform[19][j] * u_18[j];
+        if transform[18..].iter().flatten().any(|v| !v.is_finite()) {
+            return Err(PlateError::BadSection {
+                what: "unrepresentable MITC strain bubble transform",
+            });
         }
+        let (constant, twisting) = kin.shear_ties(&g);
         Ok(Self {
             kin,
             g,
             constant,
             twisting,
-            q,
+            bubble: [transform[18], transform[19]],
         })
     }
 
-    pub(super) fn eval(&self, r: f64, s: f64) -> ([f64; 3], [f64; 3], [f64; 2]) {
+    pub(super) fn expand(&self, u_18: &[f64; 18]) -> [f64; N] {
+        let mut q = [0.0; N];
+        q[..18].copy_from_slice(u_18);
+        for j in 0..18 {
+            q[18] += self.bubble[0][j] * u_18[j];
+            q[19] += self.bubble[1][j] * u_18[j];
+        }
+        q
+    }
+
+    pub(super) fn eval(&self, q: &[f64; N], r: f64, s: f64)
+        -> ([f64; 3], [f64; 3], [f64; 2])
+    {
         let mut eps_m = [0.0; 3];
         let mut eps_b = [0.0; 3];
         let mut gamma = [0.0; 2];
         for c in 0..N {
-            let qc = self.q[c];
+            let qc = q[c];
             if qc == 0.0 {
                 continue;
             }
@@ -231,6 +246,30 @@ impl ElementStrainField {
             }
         }
         (eps_m, eps_b, gamma)
+    }
+}
+
+pub(super) struct ElementStrainField {
+    prepared: PreparedStrainField,
+    q: [f64; N],
+}
+
+impl ElementStrainField {
+    pub(super) fn new(
+        mesh: &ShellMesh,
+        tri: &[usize; 3],
+        g: FacetGeometry,
+        normals: [[f64; 3]; 3],
+        section: &ShearShellSection,
+        u_18: &[f64; 18],
+    ) -> Result<Self, PlateError> {
+        let prepared = PreparedStrainField::new(mesh, tri, g, normals, section, &mut || false)?;
+        let q = prepared.expand(u_18);
+        Ok(Self { prepared, q })
+    }
+
+    pub(super) fn eval(&self, r: f64, s: f64) -> ([f64; 3], [f64; 3], [f64; 2]) {
+        self.prepared.eval(&self.q, r, s)
     }
 }
 

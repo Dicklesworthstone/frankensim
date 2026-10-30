@@ -19,6 +19,8 @@ use fs_sparse::{Coo, DirectOrdering, LdltOptions, NdOptions, SymbolicLdlt};
 use std::collections::BTreeMap;
 
 mod element;
+/// Reusable observation of the original condensed MITC strain field.
+pub mod strain;
 /// Full membrane, bending and transverse-shear material dissipation.
 pub mod viscosity;
 /// Work-conjugate bilateral physical attachments in the shared shell pencil.
