@@ -4,6 +4,9 @@ use fs_couple::friction_heat::directional::trajectory::*;
 use fs_math::det;
 use fs_tribo::tangential::elliptic::relaxation::EllipticRelaxationControls;
 
+#[path = "trajectory/march.rs"]
+mod march;
+
 fn trajectory_controls() -> EllipticRelaxationControls {
     EllipticRelaxationControls {
         time_tolerance_s: 1e-10,

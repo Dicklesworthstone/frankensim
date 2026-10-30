@@ -14,6 +14,9 @@
 //! continuously varying source law, a unique source root or spatial convergence.
 //! Poses, contact frame, normal load and body inertia remain fixed.
 
+/// Refine coupled material/thermal phases on one accepted physical clock.
+pub mod march;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::elliptic::trajectory::SourceRelaxationError;
 use fs_mbd::tangential_friction::directional::trajectory::{

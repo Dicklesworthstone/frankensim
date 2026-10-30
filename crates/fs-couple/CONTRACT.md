@@ -1,5 +1,47 @@
 # CONTRACT: fs-couple
 
+## Adaptive time refinement of sourced directional friction and heat
+
+`friction_heat::directional::trajectory::march::advance_source_directional_heat`
+advances a held-geometry span using the original coupled phase. Every comparison
+starts one full step and two half steps from the same accepted checkpoint. It
+compares original linear/angular momenta, each finite cell's energy, unsigned
+path, net slip and physical friction work in explicit physical error scales.
+Relative scales use increments from that checkpoint, preserving independence
+from background momentum and thermal reference energy. Only the actual two-half
+result is accepted; no extrapolated momentum, heat or material state is created.
+Time refinement updates the original source coefficients and thermal endpoints
+as bodies slow down, stop and continue exchanging heat.
+
+An explicit mean-speed domain is intersected with the supplied phase-distance
+domain using each represented duration. Smaller timesteps cannot accidentally
+turn a fixed trial distance into an out-of-domain source speed, and no bound
+based on initial Euclidean speed is assumed. Invalid/nonfinite domains refuse.
+Source/path/thermal/geometry refusals propagate rather than being reclassified
+as successful refinement. Native force, quadrature, source and Newton limits
+remain active; separate comparison and accepted-phase budgets bound total work
+and retained accepted payloads. Cell comparisons poll cancellation in bounded
+chunks. Source callbacks evaluate private candidates and must not mutate
+external physical state.
+
+The complete requested span is atomic, including a failure after private
+successful steps. Only the chosen two bodies, original source history and
+original thermal timeline publish at the end. Compensated physical-transfer
+totals and direct origin-to-end kinetic/cell-energy changes check whole-span
+mechanical, thermal and combined closure against an absolute energy tolerance.
+Every owned accumulated-path coordinate is independently compared with total
+curved travel, limiting accumulated source-root and rounding defects. Accepted
+phase reports retain their exact start/end times and source transport payloads.
+
+This is local step-doubling error estimation for a fixed-pose, fixed-load,
+endpoint thermal/source discretization. It does not certify global error,
+source-root uniqueness, spatial thermal convergence or discontinuous-law
+convergence; no external drive, normal dynamics or thermal event scheduler is
+added. G1/G3/G4 tests include three time rungs against an independent continuous
+temperature-dependent friction ODE, adaptive arrest followed by conduction,
+source-speed domain admission and whole-span rollback/retry after late source,
+cancellation and work-budget failures.
+
 ## Sourced directional arrest coupled to finite heat
 
 `friction_heat::directional::trajectory::apply_source_directional_trajectory_heat`
