@@ -337,7 +337,7 @@ fn g0_g3_elements_minerals_and_alloys_keep_reference_model_guards() {
         ),
         (
             "fused-silica-crystran-reference",
-            5,
+            7,
             298.15,
             2203.0,
             703.0,
@@ -463,6 +463,71 @@ fn g0_g3_elements_minerals_and_alloys_keep_reference_model_guards() {
     // A real material change reaches the physical screening calculation.
     // The thermal-reference source assumptions remain explicit for both.
     assert!(cooling_times[2] > 1000.0 * cooling_times[0]); // fused silica / diamond
+}
+
+#[test]
+fn g1_sourced_bulk_shear_drive_native_solid_pressure_and_wave_response() {
+    use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+    use fs_material::elastic::acoustic::sourced::{
+        IsotropicBulkShearRequirements, resolve_isotropic_bulk_shear_state,
+    };
+    use fs_material::state_point::{
+        MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+    };
+    use fs_solid::linear3::TetElasticMaterial;
+
+    let pack = compile("fused-silica-crystran-reference", 7);
+    let point = temperature(flags(&[
+        ("engineering-reference-model", 1.0), ("source-temperatures-matched", 0.0),
+    ]), "temperature", 298.15);
+    for (name, value) in [("bulk-modulus", 36.7e9), ("shear-modulus", 31.2e9)] {
+        let answer = sample(&pack, name, PA, &point, value);
+        assert_eq!(answer.evidence.value.uncertainty, UncertaintyModel::Unstated);
+        refuses(&pack, name, PA, &QueryPoint::new());
+        refuses(&pack, name, PA, &point.clone().with("source-temperatures-matched", 1.0).unwrap());
+        refuses(&pack, name, PA, &point.clone().with("temperature", 299.16).unwrap());
+    }
+    let normalized = NormalizedMaterialCardPack::new(MaterialStateId {
+        chemistry: pack.pack_id().into(), phase: "amorphous solid".into(),
+        process: "explicit frozen isotropic supplier reference".into(), revision: 0,
+    }, pack).unwrap();
+    let requirement = |name, dims| ScalarPropertyRequirement::try_new(
+        name, dims, ScalarAdmissibility::StrictlyPositive,
+    ).unwrap();
+    let requirements = IsotropicBulkShearRequirements::try_new(
+        requirement("density", RHO), requirement("bulk-modulus", PA),
+        requirement("shear-modulus", PA),
+    ).unwrap();
+    let state = resolve_isotropic_bulk_shear_state(
+        normalized.card(), &point, &requirements, 0.001,
+        MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    for property in state.material().properties() {
+        normalized.card().claims().verify_receipt(&property.answer().receipt).unwrap();
+    }
+    let native = TetElasticMaterial::from_resolved_bulk_shear_state(&state).unwrap();
+    let response = native.acoustic_response(0.001).unwrap();
+    assert_eq!(response.stiffness_mandel_pa(), state.acoustic().stiffness_mandel_pa());
+    assert_eq!(response.material_state_identity(), state.identity());
+    let close = |actual: f64, expected: f64| {
+        assert!((actual / expected - 1.0).abs() < 2e-12, "{actual:e} != {expected:e}");
+    };
+    let modes = response.directional_waves([1.0, -2.0, 3.0]).unwrap().modes;
+    close(modes[0].phase_speed_m_s, (31.2e9_f64 / 2203.0).sqrt());
+    close(modes[1].phase_speed_m_s, (31.2e9_f64 / 2203.0).sqrt());
+    close(modes[2].phase_speed_m_s, ((36.7e9_f64 + 4.0 * 31.2e9 / 3.0) / 2203.0).sqrt());
+    let pressure = response.hydrostatic_response(1e6).unwrap();
+    close(pressure.volumetric_strain, -1e6 / 36.7e9);
+    close(pressure.stored_energy_density_j_m3, 1e12 / (2.0 * 36.7e9));
+    // The mechanical operator's same tensor reproduces the pressure stress.
+    for (i, row) in native.stiffness_mandel_pa().iter().enumerate().take(3) {
+        let stress: f64 = row.iter().zip(pressure.strain_mandel).map(|(c,e)| c*e).sum();
+        close(stress, -1e6);
+        assert!(pressure.strain_mandel[i] < 0.0);
+    }
+    // Separately printed E/nu are rounded alternatives, not extra equations
+    // that may overwrite the independent source K/G pair.
+    assert!((response.bulk_modulus_pa() / (73.1e9 / (3.0 * (1.0 - 2.0 * 0.17))) - 1.0).abs() > 0.005);
 }
 
 /// Compile-derived material data feed the production constant-capacity binding

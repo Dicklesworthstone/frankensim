@@ -1,10 +1,12 @@
 frankensim.matdb-source.v1
-observation	engineering-reference	Fused silica amorphous-glass engineering reference	Frozen coefficients from Crystran Product Data	The 298.15–299.15 K calculation interval is author-declared for nominal elastic and thermal calculations, not measured temperature coverage. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. The supplier states amorphous glass and isotropy. Test temperature, pressure, hydroxyl content, specimen and uncertainty are unspecified for these five entries. No crystal-quartz substitution, strength, thermal-expansion law, softening, damage or experimental qualification is supplied.
+observation	engineering-reference	Fused silica amorphous-glass engineering reference	Frozen coefficients from Crystran Product Data	The 298.15–299.15 K calculation interval is author-declared for nominal elastic and thermal calculations, not measured temperature coverage. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. The supplier states amorphous glass and isotropy. Test temperature, pressure, hydroxyl content, specimen and uncertainty are unspecified for these seven entries. No crystal-quartz substitution, strength, thermal-expansion law, softening, damage or experimental qualification is supplied. Bulk/shear and Young/Poisson are alternative independent elastic input pairs; the separately printed rounded values are not forced to be mutually exact. Wave speeds and pressure strain derived from either selected frozen law are predictions, not measured ultrasonic or finite-pressure response data.
 observation	density	Fused silica glass reference	Crystran Product Data, density	Source value 2.203 g/cc converts to 2203 kg/m3.
 observation	heat-capacity	Fused silica glass reference	Crystran Product Data, specific heat capacity	Source value 703 J/(kg K); no temperature or interval is printed beside this entry.
 observation	conductivity	Fused silica glass reference	Crystran Product Data, thermal conductivity	Source value 1.38 W/(m K); no temperature or interval is printed beside this entry.
-observation	young-modulus	Fused silica glass reference	Crystran Product Data, Young modulus	Source value 73.1 GPa is retained. The separately printed shear modulus is not an additional independent isotropic input; the reduced model derives its shear response from the selected E and Poisson ratio.
+observation	young-modulus	Fused silica glass reference	Crystran Product Data, Young modulus	Source value 73.1 GPa is retained. A reduced model selecting E and Poisson ratio derives its shear response from that pair. A model explicitly selecting the separately supplied bulk and shear moduli uses those original values instead; no averaging or reconciliation is inferred.
 observation	poisson-ratio	Fused silica glass reference	Crystran Product Data, Poisson ratio	Source value 0.17 is retained without an inferred precision or confidence interval.
+observation	bulk-modulus	Fused silica glass reference	Crystran Product Data, bulk modulus	Source value 36.7 GPa is retained. Thermodynamic convention, excitation frequency and test pressure are unstated; this is not labeled an adiabatic measurement. Its reciprocal gives the hydrostatic compressibility of the explicitly selected frozen isotropic model.
+observation	shear-modulus	Fused silica glass reference	Crystran Product Data, shear modulus	Source value 31.2 GPa is retained. Density and the explicitly selected bulk/shear pair determine longitudinal and transverse waves in the frozen isotropic elastic model. No frequency-dependent loss, acoustic attenuation or measured wave speed is inferred.
 scalar	density	density,engineering-reference	density	2203	kg/m3	constant
 uncertainty	density	unstated	-	-	-	-
 validity	density	temperature	298.15	299.15	K
@@ -30,3 +32,13 @@ uncertainty	poisson-ratio	unstated	-	-	-	-
 validity	poisson-ratio	temperature	298.15	299.15	K
 validity	poisson-ratio	engineering_reference_model	1	1	1
 validity	poisson-ratio	source_temperatures_matched	0	0	1
+scalar	bulk-modulus	bulk-modulus,engineering-reference	bulk_modulus	36.7	GPa	constant
+uncertainty	bulk-modulus	unstated	-	-	-	-
+validity	bulk-modulus	temperature	298.15	299.15	K
+validity	bulk-modulus	engineering_reference_model	1	1	1
+validity	bulk-modulus	source_temperatures_matched	0	0	1
+scalar	shear-modulus	shear-modulus,engineering-reference	shear_modulus	31.2	GPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	298.15	299.15	K
+validity	shear-modulus	engineering_reference_model	1	1	1
+validity	shear-modulus	source_temperatures_matched	0	0	1

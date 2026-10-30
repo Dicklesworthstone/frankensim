@@ -1,7 +1,7 @@
 frankensim.matdb-manifest.v3
 pack_id	fused-silica-crystran-reference
 redistribution	permitted	Selected attributed numerical facts and original annotations only; no source document, prose or table layout is redistributed
-citation	Crystran Ltd, Fused Silica Glass (SiO2), Product Data, accessed 2026-10-28; https://www.crystran.com/optical-materials/fused-silica-sio2/
+citation	Crystran Ltd, Fused Silica Glass (SiO2), Product Data, accessed 2026-10-28 and bulk/shear entries verified 2026-10-30; https://www.crystran.co.uk/optical-materials/fused-silica-sio2
 license	Attributed-Numerical-Facts-Only-No-Source-Document-License
 source	engineering-reference	properties.tsv	material-tsv-v1
 property	density	density	dimensional
@@ -9,6 +9,8 @@ property	specific_heat_capacity	specific-heat-capacity	dimensional
 property	thermal_conductivity	thermal-conductivity	thermal-conductivity
 property	young_modulus	young-modulus	dimensional
 property	poisson_ratio	poisson-ratio	dimensional
+property	bulk_modulus	bulk-modulus	dimensional
+property	shear_modulus	shear-modulus	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	engineering_reference_model	engineering-reference-model	dimensional
 axis	source_temperatures_matched	source-temperatures-matched	dimensional

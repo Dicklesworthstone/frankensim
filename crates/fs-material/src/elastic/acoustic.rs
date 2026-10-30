@@ -16,6 +16,10 @@ use fs_blake3::ContentHash;
 use fs_la::{eigen::jacobi_eigh, factor::cholesky};
 use fs_math::det;
 
+/// Source-selected density, bulk modulus and shear modulus for an explicitly
+/// isotropic elastic law, retaining the original property-use receipts.
+pub mod sourced;
+
 fn invalid(what: &str) -> MaterialError {
     MaterialError::Parameters {
         what: what.to_owned(),
@@ -77,6 +81,40 @@ pub struct HydrostaticElasticResponse {
 }
 
 impl ElasticAcousticState {
+    /// Build the isotropic tensor directly from independently selected bulk
+    /// and shear moduli. Neither modulus is replaced by a rounded E/nu pair.
+    /// The caller explicitly chooses isotropy and the source's response regime;
+    /// static moduli are not promoted to measured ultrasonic data.
+    pub fn from_bulk_and_shear(
+        density_kg_m3: f64,
+        bulk_modulus_pa: f64,
+        shear_modulus_pa: f64,
+        material_state_identity: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+    ) -> Result<Self, MaterialError> {
+        if [bulk_modulus_pa, shear_modulus_pa]
+            .into_iter()
+            .any(|value| !value.is_finite() || value <= 0.0)
+        {
+            return Err(invalid("isotropic bulk and shear moduli must be finite and positive"));
+        }
+        let lambda = bulk_modulus_pa - (2.0 / 3.0) * shear_modulus_pa;
+        let mut stiffness = [[0.0; 6]; 6];
+        for (i, row) in stiffness.iter_mut().enumerate().take(3) {
+            row[..3].fill(lambda);
+            row[i] = bulk_modulus_pa + (4.0 / 3.0) * shear_modulus_pa;
+        }
+        for (i, row) in stiffness.iter_mut().enumerate().skip(3) {
+            row[i] = 2.0 * shear_modulus_pa;
+        }
+        Self::try_new_mandel(
+            stiffness,
+            density_kg_m3,
+            material_state_identity,
+            maximum_absolute_mandel_strain,
+        )
+    }
+
     /// Use an existing isotropic law and its declared strain ceiling.
     pub fn from_isotropic(
         law: &super::IsotropicElastic,

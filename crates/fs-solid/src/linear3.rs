@@ -381,6 +381,20 @@ impl TetElasticMaterial {
         .expect("an admitted isotropic-elastic state satisfies tet invariants")
     }
 
+    /// Use the exact tensor constructed from the selected source bulk and
+    /// shear moduli, without converting through rounded Young/Poisson data.
+    /// Mechanics, pressure response and directional waves retain one density
+    /// and source-bound law identity. Isotropy is explicitly selected upstream.
+    pub fn from_resolved_bulk_shear_state(
+        state: &fs_material::elastic::acoustic::sourced::ResolvedIsotropicBulkShearState,
+    ) -> Result<Self, TetElasticError> {
+        Self::try_new_mandel(
+            state.acoustic().density_kg_m3(),
+            *state.acoustic().stiffness_mandel_pa(),
+            state.identity().0,
+        )
+    }
+
     /// Bind an evidence-bearing orthotropic state and an independently
     /// identified material-axis orientation to the global operator frame.
     pub fn try_from_resolved_orthotropic_state(
