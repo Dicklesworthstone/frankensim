@@ -99,7 +99,9 @@ impl ImpactSystem {
     /// Ambient pressure/temperature define a fixed reservoir: the total ledger
     /// includes relative gas free energy, not isolated thermal internal energy.
     ///
-    /// Gas may precede or follow radiation/material memory. At most 64 gas cells
+    /// Gas may precede or follow radiation/linear material memory. Mapped
+    /// supported history requires a new coupled source-domain bound and refuses.
+    /// At most 64 gas cells
     /// and 1024 total scalar states are admitted; no cell is dropped to fit.
     /// Simultaneous resistance-only and compressible images refuse rather than
     /// double-counting the same interface. No attachment after time has advanced.
@@ -138,6 +140,7 @@ impl ImpactSystem {
     fn bind_compressible_squeeze_film(mut self, geometry:ResistiveFilm, gas:AmbientGas,
         source:Option<GasRecord>) -> Result<Self,ImpactError>
     {
+        self.require_recomposition_without_mapped_memory()?;
         if self.sample!=0 || self.gas_film.is_some() || !self.squeeze_films.is_empty()
             || geometry.port_count()!=self.modes {
             return Err(invalid("compressible film needs one cold exclusive full-basis gas graph"));

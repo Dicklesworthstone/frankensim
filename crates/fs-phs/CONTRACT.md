@@ -258,6 +258,29 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   after adding a 1e24 J energy datum, nested material histories, and independent
   polarized stored-energy, force-work and Maxwell/Kelvin heat identities.
 
+- `with_mapped_relaxation_branches` uses that SAME Maxwell storage, resistance
+  extension and original time owner for an immutable `RelaxationStrainMap`.
+  A nonlinear epsilon(x) appends one normalized z per arm and preserves all
+  original ports. Its exact force uses gradient(epsilon); its storage Hessian
+  includes both the gradient dyad and retained-stress Hessian(epsilon) term.
+  It never claims an exact quadratic flow. An explicitly quadratic strain map
+  supplies a stable polynomial energy remainder, including represented-midpoint
+  rounding; absent geometry support or absent base remainder keeps the original
+  subtraction fallback. Mapped reference evaluation uses temporary derivative
+  vectors and does not claim allocation-free execution. This is the nonlinear
+  discrete-gradient equation, not a separate local midpoint-memory update or a
+  guarantee that memory remains in a convex endpoint-strain hull. Composing
+  physical owners retain material bands, clock and strain/history envelopes.
+  Supported moving strings retain source layer spectra, mean/cosine histories,
+  reciprocal endpoint work and their original impact transaction through this
+  map. The original linear fast path and its arithmetic order are preserved.
+  Production and full test metadata type-check with genuine dependencies. Three
+  native tests of the exact production map/energy-remainder excerpt pass without
+  substituted owners, including independent 120-digit polynomial references at
+  ordinary scale, huge background storage and a rounded adjacent-float midpoint.
+  Full fs-couple integration tests are present but were not executed in the
+  dependency-constrained validation environment.
+
 - `discrete_gradient` — the PINNED Gonzalez midpoint formula (order
   2): satisfies `dg . (b - a) = H(b) - H(a)` identically.
   `Storage::midpoint_energy_remainder` optionally supplies a cancellation-stable

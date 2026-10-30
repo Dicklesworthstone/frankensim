@@ -6,6 +6,7 @@ use crate::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::{
 use crate::modal_acoustic_time::ModalAcousticState;
 use crate::render::plate::impact::supported::longitudinal::{LongitudinalSupportModes, StringSupportGeometry};
 use fs_math::det;
+pub mod relaxation;
 
 /// A material string's actual spatial attachment and explicit axial resolution.
 /// Axial mass and EA are read from its original material, not entered again.

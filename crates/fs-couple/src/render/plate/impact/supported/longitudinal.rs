@@ -6,6 +6,7 @@
 use super::*;
 use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
 mod viscosity;
+pub mod relaxation;
 
 /// A physical span and the direction of the common translating termination.
 /// The first transverse axis fixes the source's existing two-plane frame; the

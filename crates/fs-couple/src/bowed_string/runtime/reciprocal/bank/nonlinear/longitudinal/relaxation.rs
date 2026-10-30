@@ -187,7 +187,7 @@ impl StringBankLongitudinalRelaxation {
     }
 }
 
-fn elastic_section(source: &MaterialStringSource) -> Result<ConcentricElasticSection, ImpactError> {
+pub(in crate::bowed_string::runtime::reciprocal::bank) fn elastic_section(source: &MaterialStringSource) -> Result<ConcentricElasticSection, ImpactError> {
     match source {
         MaterialStringSource::WithPolarizations(p) => elastic_section(p.source()),
         MaterialStringSource::WithTorsion(t) => elastic_section(t.bending()),

@@ -4,7 +4,7 @@
 use super::{ImpactError, ImpactSystem, invalid};
 use super::radiation::MAX_JOINT_STATES;
 use fs_math::det;
-use fs_phs::RelaxationBranch;
+use fs_phs::{RelaxationBranch,MappedRelaxationBranch};
 
 #[path = "shell_relaxation.rs"]
 mod shell;
@@ -34,6 +34,9 @@ pub(super) struct Memory {
     pub(super) base_dim: usize,
     rows: Vec<Vec<f64>>,
     rates: Vec<f64>,
+    mapped: Vec<MappedRelaxationBranch>,
+    supports: Vec<(usize,super::supported::SupportedStrings,usize,usize)>,
+    joint_omega_bound: f64,
 }
 impl Memory {
     pub(crate) fn branch_count(&self) -> usize { self.rates.len() }
@@ -60,7 +63,7 @@ impl Memory {
         Ok(power)
     }
 
-    pub(super) fn add_hessian(&self, direction: &[f64], output: &mut [f64]) {
+    pub(super) fn add_hessian(&self, state:&[f64], direction: &[f64], output: &mut [f64]) {
         output[self.base_dim..].fill(0.0);
         for (i, row) in self.rows.iter().enumerate() {
             let change = row.iter().zip(direction).map(|(b,d)| b*d).sum::<f64>()
@@ -68,18 +71,71 @@ impl Memory {
             for (out,b) in output[..self.base_dim].iter_mut().zip(row) { *out += b*change; }
             output[self.base_dim+i] = -change;
         }
+        for (i,branch) in self.mapped.iter().enumerate() {
+            let scale=det::sqrt(branch.stiffness);
+            let x=&state[..self.base_dim];let d=&direction[..self.base_dim];
+            let effort=scale*branch.strain.strain(x)-state[self.base_dim+i];
+            let mut g=vec![0.0;self.base_dim];let mut h=vec![0.0;self.base_dim];
+            branch.strain.gradient(x,&mut g);branch.strain.hessian_vector(x,d,&mut h);
+            for value in &mut g {*value*=scale;}
+            let change=g.iter().zip(d).map(|(g,d)|g*d).sum::<f64>()-direction[self.base_dim+i];
+            for ((out,g),h) in output[..self.base_dim].iter_mut().zip(g).zip(h) {
+                *out+=g*change+effort*(scale*h);
+            }
+            output[self.base_dim+i]=-change;
+        }
     }
+    pub(super) fn admit_state(&self,state:&[f64])->Result<(),ImpactError> {
+        for (offset,support,start,count) in &self.supports {
+            let memory=state.get(self.base_dim+start..self.base_dim+start+count)
+                .ok_or_else(||invalid("supported material history prefix is incomplete"))?;
+            support.admit_memory(*offset,state,memory)?;
+        }
+        Ok(())
+    }
+    pub(super) fn admit_radiation(&self,omega:f64,coupling_bound:f64,dt:f64)
+        -> Result<Option<f64>,ImpactError>
+    {
+        if self.supports.is_empty() {return Ok(None);}
+        // In energy-scaled canonical coordinates, the old and acoustic
+        // oscillator blocks have norm max(Omega_old,Omega_air). The reciprocal
+        // velocity-port skew block adds at most ||L||_2, bounded by the original
+        // radiation owner's max absolute row/column sum. Memory has no J row.
+        let bound=self.joint_omega_bound.max(omega)+coupling_bound;
+        if !bound.is_finite() {return Err(invalid("supported hereditary radiation bound overflows"));}
+        fs_phs::linear_exact::admit_midpoint_band(bound,dt).map_err(ImpactError::TimeResolution)?;
+        for (_,support,_,_) in &self.supports {
+            if let Some(config)=support.memory_configuration() {config.admit_domain(bound,dt)?;}
+        }
+        Ok(Some(bound))
+    }
+    pub(super) fn commit_radiation_bound(&mut self,bound:f64) {self.joint_omega_bound=bound;}
     fn observe(&self, state: &[f64]) -> RelaxationObservation {
-        let mut result = RelaxationObservation { states:self.rows.len(), ..Default::default() };
+        let mut result = RelaxationObservation { states:self.rates.len(), ..Default::default() };
         for (i,(row,rate)) in self.rows.iter().zip(&self.rates).enumerate() {
             let effort = row.iter().zip(state).map(|(b,x)| b*x).sum::<f64>() - state[self.base_dim+i];
             result.stored_energy_j += 0.5*effort*effort;
             result.dissipated_power_w += rate*effort*effort;
         }
+        for (i,(branch,rate)) in self.mapped.iter().zip(&self.rates).enumerate() {
+            let effort=det::sqrt(branch.stiffness)*branch.strain.strain(&state[..self.base_dim])-state[self.base_dim+i];
+            result.stored_energy_j+=0.5*effort*effort;
+            result.dissipated_power_w+=rate*effort*effort;
+        }
         result
     }
 }
 impl ImpactSystem {
+    /// A later load needs a new complete strain/history and source-band bound.
+    /// Preserve the old linear-memory composition path; the mapped supported
+    /// path must not silently reuse authority from its previous operator.
+    pub(super) fn require_recomposition_without_mapped_memory(&self)->Result<(),ImpactError> {
+        if self.relaxation.as_ref().is_some_and(|memory|!memory.supports.is_empty()) {
+            return Err(invalid("nonlinear gap loading needs supported hereditary domain recomposition"));
+        }
+        Ok(())
+    }
+
     /// Original attached Maxwell arms, in their unchanged insertion order.
     /// Each arm has one physical loss channel; zero means no memory attachment.
     pub fn relaxation_branch_count(&self) -> usize {
@@ -149,8 +205,49 @@ impl ImpactSystem {
         if !energy.is_finite() || energy<0.0 || energy>self.config.maximum_energy_j {
             return Err(invalid("initial material memory exceeds the mechanical energy ceiling"));
         }
-        self.relaxation=Some(Memory {base_dim,rows,rates});
+        self.relaxation=Some(Memory {base_dim,rows,rates,mapped:vec![],supports:vec![],joint_omega_bound:0.0});
         Ok(self)
+    }
+
+    /// Called by the original constructor after all body/felt state is known.
+    /// Immutable supported-body data cannot be dropped when composed with an
+    /// impact exciter. Memory remains in the one existing pHS state and ledger.
+    pub(super) fn with_supported_relaxation(mut self,joint_omega_bound:f64)->Result<Self,ImpactError> {
+        let base_dim=self.x.len();let mut branches=Vec::new();let mut supports=Vec::new();
+        let mut memories=Vec::new();let mut rates=Vec::new();
+        for (_,offset,support) in &self.supports {
+            let Some(config)=support.memory_configuration() else {continue;};
+            config.admit_domain(joint_omega_bound,self.config.dt_s)?;
+            let local=support.memory_branches(*offset,base_dim)?;
+            let start=branches.len();
+            if start+local.len()>256 || base_dim+start+local.len()>MAX_JOINT_STATES {
+                return Err(invalid("complete supported material histories exceed the joint state ceiling"));
+            }
+            for branch in &local {
+                let rate=1.0/branch.relaxation_time_s;
+                if !rate.is_finite() || rate<=0.0 || self.config.dt_s*rate>2.0 {
+                    return Err(invalid("original impact clock does not resolve supported material relaxation"));
+                }
+                let z=match config.initial {
+                    InitialMemory::Relaxed=>det::sqrt(branch.stiffness)*branch.strain.strain(&self.x),
+                    InitialMemory::Unrelaxed=>0.0,
+                };
+                if !z.is_finite() {return Err(invalid("supported material initial history overflows"));}
+                memories.push(z);rates.push(rate);
+            }
+            supports.push((*offset,support.clone(),start,local.len()));branches.extend(local);
+        }
+        if branches.is_empty() && supports.iter().all(|(_,s,_,_)|
+            s.memory_configuration().is_none_or(|m|!m.has_source_domain())) {return Ok(self);}
+        self.system=self.system.with_mapped_relaxation_branches(branches.clone()).map_err(ImpactError::PreparedSolve)?;
+        self.x.extend(memories);
+        let memory=Memory {base_dim,rows:vec![],rates,mapped:branches,supports,joint_omega_bound};
+        memory.admit_state(&self.x)?;
+        let energy=self.stored_energy_j();
+        if !energy.is_finite() || energy<0.0 || energy>self.config.maximum_energy_j {
+            return Err(invalid("supported material initial history exceeds the energy ceiling"));
+        }
+        self.relaxation=Some(memory);Ok(self)
     }
 
     /// Observe added material memory without advancing mechanics or its history.

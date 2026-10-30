@@ -23,8 +23,10 @@ impl ImpactSystem {
     /// Add one immutable fluid pressure island without replacing contacts,
     /// resetting body/history state, or creating a second time integrator.
     /// Construction is cold. The film's ports must cover every mechanical mode,
-    /// including exact zeros for unrelated bodies. At most four islands.
+    /// including exact zeros for unrelated bodies. At most four islands. Mapped
+    /// supported history requires a new coupled source-domain bound and refuses.
     pub fn with_squeeze_film(mut self, film: ResistiveFilm) -> Result<Self, ImpactError> {
+        self.require_recomposition_without_mapped_memory()?;
         if self.gas_film.is_some() || film.port_count() != self.modes || self.squeeze_films.len() >= 4 {
             return Err(invalid("squeeze film mode count, duplicate gas image or four-island ceiling failed"));
         }

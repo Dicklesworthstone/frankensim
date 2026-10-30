@@ -62,6 +62,9 @@ pub use prepared::{PreparedStepError, PreparedStepRecord, StepWorkspace};
 mod newton;
 use fs_math::c64::C64;
 use fs_math::det;
+mod relaxation_map;
+pub use relaxation_map::{MappedRelaxationBranch, RelaxationStrainMap};
+use relaxation_map::RelaxationCoupling;
 pub use newton::{
     NewtonSite, SolveBudget, SolveCertificate, admit_default_newton_iterate, admit_newton_iterate,
     arithmetic_rounding_floor,
@@ -575,7 +578,7 @@ pub struct RelaxationBranch {
 struct RelaxationStorage {
     base: Box<dyn Storage>,
     base_dim: usize,
-    couplings: Vec<Vec<f64>>,
+    couplings: Vec<RelaxationCoupling>,
 }
 
 impl Storage for RelaxationStorage {
@@ -591,7 +594,13 @@ impl Storage for RelaxationStorage {
         // from coordinate increments; large stored material energy must not
         // erase the base's small nonlinear restoring force or energy change.
         // The second factor retains rounding of the represented midpoint.
-        for (arm, row) in self.couplings.iter().enumerate() {
+        for (arm, coupling) in self.couplings.iter().enumerate() {
+            let RelaxationCoupling::Linear(row) = coupling else {
+                let z=self.base_dim+arm;
+                remainder+=coupling.mapped_remainder(&a[..self.base_dim],&b[..self.base_dim],
+                    &mid[..self.base_dim],a[z],b[z],mid[z])?;
+                continue;
+            };
             let z = self.base_dim + arm;
             let mut change = -(b[z] - a[z]);
             let mut offset = -((a[z] - mid[z]) + (b[z] - mid[z]));
@@ -612,7 +621,8 @@ impl Storage for RelaxationStorage {
         for i in 0..self.base_dim {for j in 0..self.base_dim {
             matrix[i*n+j] = base.matrix[i*self.base_dim+j];
         }}
-        for (arm,b) in self.couplings.iter().enumerate() {
+        for (arm,coupling) in self.couplings.iter().enumerate() {
+            let RelaxationCoupling::Linear(b) = coupling else { return None; };
             let z = self.base_dim+arm;
             for i in 0..self.base_dim {
                 for j in 0..self.base_dim {matrix[i*n+j]+=b[i]*b[j];}
@@ -625,8 +635,8 @@ impl Storage for RelaxationStorage {
 
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         let mut h = self.base.hamiltonian(&x[..self.base_dim]);
-        for (k, b) in self.couplings.iter().enumerate() {
-            let strain: f64 = b.iter().zip(x).map(|(b, x)| b * x).sum();
+        for (k, coupling) in self.couplings.iter().enumerate() {
+            let strain = coupling.strain(&x[..self.base_dim]);
             h += 0.5 * (strain - x[self.base_dim + k]).powi(2);
         }
         h
@@ -635,12 +645,10 @@ impl Storage for RelaxationStorage {
     fn gradient(&self, x: &[f64], out: &mut [f64]) {
         self.base
             .gradient(&x[..self.base_dim], &mut out[..self.base_dim]);
-        for (k, b) in self.couplings.iter().enumerate() {
-            let strain: f64 = b.iter().zip(x).map(|(b, x)| b * x).sum();
+        for (k, coupling) in self.couplings.iter().enumerate() {
+            let strain = coupling.strain(&x[..self.base_dim]);
             let effort = strain - x[self.base_dim + k];
-            for (o, b) in out[..self.base_dim].iter_mut().zip(b) {
-                *o += b * effort;
-            }
+            coupling.add_gradient(&x[..self.base_dim], effort, &mut out[..self.base_dim]);
             out[self.base_dim + k] = -effort;
         }
     }
@@ -673,9 +681,6 @@ impl PortHamiltonian {
         let error = || PhsError::Dimension {
             what: "relaxation branch state dimensions",
         };
-        let dim = self.n.checked_add(branches.len()).ok_or_else(error)?;
-        let square = dim.checked_mul(dim).ok_or_else(error)?;
-        let ports = dim.checked_mul(self.m).ok_or_else(error)?;
         let mut couplings = Vec::with_capacity(branches.len());
         let mut rates = Vec::with_capacity(branches.len());
         for branch in &branches {
@@ -703,9 +708,21 @@ impl PortHamiltonian {
             {
                 return Err(PhsError::RelaxationParameters);
             }
-            couplings.push(b);
+            couplings.push(RelaxationCoupling::Linear(b));
             rates.push(rate);
         }
+        self.with_relaxation_couplings(couplings, rates)
+    }
+
+    // Both linear and geometrically nonlinear strain maps use this SAME
+    // internal-strain storage, matrix extension and resistance witness.
+    fn with_relaxation_couplings(self, couplings: Vec<RelaxationCoupling>, rates: Vec<f64>)
+        -> Result<Self, PhsError>
+    {
+        let error = || PhsError::Dimension { what: "relaxation branch state dimensions" };
+        let dim = self.n.checked_add(couplings.len()).ok_or_else(error)?;
+        let square = dim.checked_mul(dim).ok_or_else(error)?;
+        let ports = dim.checked_mul(self.m).ok_or_else(error)?;
         let mut j = vec![0.0; square];
         let mut r = vec![0.0; square];
         let mut g = vec![0.0; ports];

@@ -98,7 +98,7 @@ impl ImpactSystem {
                 None=>self.mechanical.hessian_vector(x,d,out),
             }) {return false;}
         out[base..].fill(0.0);
-        if let Some(memory)=&self.relaxation {memory.add_hessian(d,out);}
+        if let Some(memory)=&self.relaxation {memory.add_hessian(x,d,out);}
         if let Some(air)=&self.radiation {air.add_hessian(d,out);}
         if self.gas_film.as_ref().is_some_and(|gas|!gas.add_hessian(x,d,out)) {return false;}
         out.iter().all(|v|v.is_finite())

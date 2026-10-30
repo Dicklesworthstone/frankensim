@@ -121,7 +121,9 @@ impl ImpactSystem {
     ///
     /// # Errors
     /// Invalid/duplicate source indices, nonfinite or unresolved model, exceeded
-    /// work limits, or repeat/late attachment. No failed fit is replaced by zeros.
+    /// work limits, or repeat/late attachment. Mapped supported memory rechecks
+    /// its original source domain and physical clock against the complete new
+    /// oscillator/coupling bound. No failed fit is replaced by zeros.
     pub fn with_radiation_load(mut self,model:&Model,source_modes:&[usize],maximum_poles:usize)
         -> Result<Self,ImpactError>
     {
@@ -147,6 +149,11 @@ impl ImpactSystem {
             return Err(invalid("radiation coupling exceeds mechanical-rate resolution"));
         }
         if norm==0. {return Ok(self);}
+        let material_bound=match &self.relaxation {
+            Some(memory)=>memory.admit_radiation(model.poles.iter().map(|p|p.omega)
+                .fold(0.0_f64,f64::max),norm,self.config.dt_s)?,
+            None=>None,
+        };
         let omega:Vec<_>=model.poles.iter().map(|p|p.omega).collect();
         let zeta:Vec<_>=model.poles.iter().map(|p|p.zeta).collect();
         let drives:Vec<Vec<_>>=(0..model.ports).map(|j|model.poles.iter().map(|p|p.coupling[j]).collect()).collect();
@@ -155,6 +162,9 @@ impl ImpactSystem {
         self.system=self.system.with_parallel_load(load,source_modes).map_err(ImpactError::PreparedSolve)?;
         let base_dim=self.x.len();self.x.resize(dim,0.);
         self.radiation=Some(Memory {base_dim,omega,rates:model.poles.iter().map(|p|2.*p.zeta*p.omega).collect()});
+        if let (Some(memory),Some(bound))=(&mut self.relaxation,material_bound) {
+            memory.commit_radiation_bound(bound);
+        }
         Ok(self)
     }
     /// Endpoint generalized force exerted ON one original coordinate by the

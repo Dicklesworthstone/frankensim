@@ -87,7 +87,7 @@ fn material_band(
     Ok(())
 }
 
-fn string_band(
+pub(super) fn string_band(
     source: &MaterialStringSource,
     band: &mut (f64, f64),
 ) -> Result<(), ReciprocalStringError> {

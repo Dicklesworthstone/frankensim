@@ -3,6 +3,8 @@
 mod support;
 #[path = "material_supported_strings/axial_loss.rs"]
 mod axial_loss;
+#[path = "material_supported_strings/axial_relaxation.rs"]
+mod axial_relaxation;
 use support::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::{MaterialStringSource,
     nonlinear::{NonlinearMaterialString, supported::SupportedMaterialStrings}};
