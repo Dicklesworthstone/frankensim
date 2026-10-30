@@ -6,6 +6,8 @@
 
 /// Complete heat transfer on the original explicit thermal timeline.
 pub mod observer;
+/// Source-resolved coolant assemblies for original coupled physics drivers.
+pub mod assembly;
 /// Source-resolved cooling on the shared material-memory/mechanical timeline.
 pub mod relaxation;
 
@@ -81,6 +83,12 @@ pub struct ConvectionHeatSample<F, L = F> {
     /// Reciprocal exchange with actual finite fluid cells, already in the
     /// native link-conductance map. This is never external heat supply.
     pub finite_convection: Option<ResolvedLinkConvection<L>>,
+}
+
+impl<F, L> AsRef<HeatNetworkSample> for ConvectionHeatSample<F, L> {
+    fn as_ref(&self) -> &HeatNetworkSample {
+        &self.heat
+    }
 }
 
 /// A prepared heat assembly and physical fluid boundaries on its actual cells.

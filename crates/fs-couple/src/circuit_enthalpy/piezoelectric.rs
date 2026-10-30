@@ -12,6 +12,8 @@ use crate::material_circuit::piezoelectric::{
     PiezoelectricCircuit, PiezoelectricCircuitCandidate, PiezoelectricCircuitStep,
 };
 
+/// Complete material heat assemblies on this original rod/current/enthalpy owner.
+pub mod heat;
 /// Ceramic coefficient/entropy feedback on this original circuit and heat owner.
 pub mod thermal;
 
@@ -83,6 +85,22 @@ pub fn step_candidate<'m, S, E>(
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<CircuitThermalCoefficients<S>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<PiezoelectricEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
+    resolved_candidate(thermal, target_s, input, controls, guess_j,
+        |state| resolve(state).map_err(CircuitEnthalpyError::Source), cancelled)
+}
+
+// Both raw coefficient callbacks and complete heat assemblies enter this same
+// original mechanical/electrical driver and finite thermal residual. Retain
+// typed source, numerical and cancellation errors without nesting or erasure.
+#[allow(clippy::too_many_arguments)]
+fn resolved_candidate<'m, S, E>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    input: PiezoelectricEnthalpyInput<'_>, controls: CircuitEnthalpySolve,
+    guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>)
+        -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PiezoelectricEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
     let cancel = RefCell::new(cancelled);
     let original = CircuitEnthalpyInput {
         circuit: input.model.circuit(), ports: input.electrical_ports,
@@ -91,7 +109,7 @@ pub fn step_candidate<'m, S, E>(
     let (thermal, model, report) = coupled_driver_candidate(
         thermal, target_s, original, &[], controls, guess_j,
         |state, _remaining| {
-            let coefficients = resolve(state).map_err(CircuitEnthalpyError::Source)?;
+            let coefficients = resolve(state)?;
             let circuit = input.model.step_candidate(
                 coefficients.resistors, input.electrical_ports, input.force_n,
                 target_s-thermal.time_s(), controls.circuit, || (*cancel.borrow_mut())(),

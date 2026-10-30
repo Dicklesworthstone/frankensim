@@ -1,4 +1,6 @@
 //! Finite gas changes actual cyclic creep; mechanical heat returns to that gas.
+mod dynamics;
+
 use super::*;
 use fs_conduction::transient::deposition::contact::{ContactCell, MaterialContactLink};
 use fs_conduction::{

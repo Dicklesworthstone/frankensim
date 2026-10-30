@@ -3,6 +3,10 @@
 use super::*;
 #[path = "finite_links/observer.rs"]
 mod observer;
+#[path = "finite_links/field_storage.rs"]
+mod field_storage;
+#[path = "finite_links/piezoelectric.rs"]
+mod piezoelectric;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::{
     SourceConvectiveLink, evaluate_source_link_convection,
 };
