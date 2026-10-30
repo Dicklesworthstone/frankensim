@@ -6,6 +6,9 @@
 //! enter native ABA but contribute no external spatial impulse. They are finite
 //! spring/damper elements, not holonomic constraints or a contact regularization.
 
+/// Simultaneously implicit finite attachments with native momentum reconstruction.
+pub mod implicit;
+
 use super::{
     ArticulatedModel, Cow, EvaluatedStage, FreeFloatingBaseState, FreeFloatingMotionError,
     FreeFloatingMotionLoads, FreeFloatingMotionState, FreeFloatingMotionStep, MomentumMap, Vec3,
@@ -111,12 +114,21 @@ pub fn step_free_floating_spatial(
         &mut cancelled,
         |map, base, cancelled| evaluate(map, base, loads, cancelled),
     )?;
+    finish_spatial(model, evaluated, loads, &mut cancelled)
+}
+
+fn finish_spatial(
+    model: &ArticulatedModel,
+    evaluated: super::EvaluatedStep,
+    loads: SpatialMotionLoads<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
     let mut stored_energy_after = 0.0;
     if !loads.connections.is_empty() {
-        let final_map = MomentumMap::new(model, &evaluated.step.state_after, &mut cancelled)?;
+        let final_map = MomentumMap::new(model, &evaluated.step.state_after, cancelled)?;
         for (i, connection) in loads.connections.iter().enumerate() {
             if i % 64 == 0 {
-                poll(&mut cancelled)?;
+                poll(cancelled)?;
             }
             let (_, length) = separation(&final_map, *connection)?;
             stored_energy_after += storage(*connection, length);
@@ -134,7 +146,7 @@ pub fn step_free_floating_spatial(
         ],
         "spatial_motion.final_energy",
     )?;
-    poll(&mut cancelled)?;
+    poll(cancelled)?;
     Ok(SpatialMotionStep {
         motion: evaluated.step,
         stored_energy_before: evaluated.stored_energy_before,

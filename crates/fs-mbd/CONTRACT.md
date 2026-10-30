@@ -1934,3 +1934,82 @@ zero/released ports, full-tensor 5N mobility against an independent adjugate
 inverse, world/tangent-frame covariance, exact permutation/reuse/spectator
 invariance and physical ownership, cancellation, budget and late-failure
 refusals. The original seven joint-pair and nine Hertz-island groups also pass.
+
+## Implicit finite attachments on free-floating articulated trees
+
+`articulated::motion::spatial_loads::implicit::step_free_floating_spatial_implicit`
+advances the same original `SpatialMotionLoads` with a simultaneous nonlinear
+Lie-midpoint solve. It admits the original full link inertias, offset origins
+and COMs, mixed fixed/revolute/prismatic/helical trees, held joint efforts,
+rotating link-frame wrenches, inertial material-point loads, uniform gravity and
+all declared finite Kelvin--Voigt connections. It does not replace the existing
+explicit selector or change that selector's arithmetic.
+
+The nonlinear unknowns are only the midpoint joint rates and three base angular
+rates. At a solution, `q_h=q_0+h v_h/2`, `v_h=v_0+h a_h/2` and
+`R_h=R_0 exp(h omega_h/2)`. The original ABA supplies `a_h`; the original locked
+composite inertia reconstructs `omega_h` and base translation from the actual
+stage's total spatial momenta. External force and COM-torque resultants depend
+only on stage geometry, so their impulse equations are eliminated analytically.
+The COM midpoint is `X_h=X_0+h P_h/(2 M)`. Final COM, linear momentum and central
+angular momentum use the same midpoint resultants, retaining their world-origin
+angular impulse as well as base/shape recoil. Internal connections add no
+external momentum. Every connection uses the original material points and
+actual stage strain rate; no connection-by-connection velocity update is used.
+
+`fs-solver::nonlinear::NewtonKrylovState` owns iteration and globalization;
+`fs-solver::finite_difference::FallibleFiniteDifference` owns the fallible
+directional Jacobian actions. The direct `fs-solver` dependency adds no new
+package. Native residuals cost O(links+point loads+connections), and bounded
+Krylov storage is O(restart*(joints+3)); no dense generalized mass matrix or
+Jacobian is formed. The common gravity-only external case skips the extra
+external-resultant probe. Numerical Jacobian error is not an adjoint, and its
+inner linear solve is deliberately inexact: a 1e-3 forcing floor avoids trying
+to solve below directional-difference noise. This does not relax the independently
+repeated outer residual or the caller's strict absolute acceptance tolerance.
+
+Controls declare separate physical angular and linear velocity scales; helical
+coordinates use rad/s, while prismatic coordinates use m/s. The nonlinear norm
+is dimensionless after those scales. A result retains actual unscaled joint and
+base-angular equation defects, the repeated scaled residual, native Newton
+history and the number of real residual evaluations. Hard limits retain 4096
+links, 16384 combined spatial loads, 64 Newton attempts, 64 Krylov vectors, eight
+restart cycles per attempt and 16384 residual evaluations, including stencils
+and final verification. Cancellation polls all native evaluation and generic
+solver boundaries. Malformed controls, failed source/stencil evaluations,
+unresolved equations, exhausted work, invalid final geometry and late
+cancellation return no advanced state. A forbidden nonlinear trial refuses;
+there is no clipping, hidden smoothing, or changed constitutive law.
+
+Storage, nonnegative midpoint damping loss, connection work defect and complete
+kinetic-plus-storage work defect use the original shared spatial-load account.
+They remain separate from external/actuator work and from any thermal
+destination. In the fixed-axis quadratic oscillator limit this is the ordinary
+implicit midpoint rule: A-stable, but **not L-stable**. Its scalar stability
+function is `(1+z/2)/(1-z/2)` and tends to -1 as a negative real `z` becomes
+large. The original MOOSE implementation documents the same linear distinction:
+<https://mooseframework.inl.gov/docs/doxygen/moose/classImplicitMidpoint.html>.
+Coarse stable steps can retain unresolved high-frequency oscillation and phase
+error. General rotating nonlinear trees are not claimed energy-exact, passive,
+variational, symplectic or rigidly constrained. This does not implement
+generalized-alpha, contact, loop closure, uniqueness certification or an
+adjoint. Only initial, trial-midpoint and endpoint connection geometry is
+evaluated; no continuous-path admissibility or collision guarantee follows.
+
+Seven new focused native groups pass alongside all seven existing spatial-load
+and eight existing articulated-motion groups. Independent tests include stiff
+two-mass Cayley response with `h omega=10` over 60 steps, actual base recoil,
+undamped storage and damped loss; both three-mass spring-chain modes with a
+shared link; exact continuous damped-oscillator refinement; a noncoincident
+rotating full-tensor tree under inertial and rotating body loads; frame changes,
+rate scaling and a 1e9 m/s common axial boost; a zero-joint force-driven body;
+and early/late cancellation, nonlinear and final-evaluation budgets, malformed
+controls, final coincident geometry and deterministic retry. The stiff scalar
+cases use at most 12 real residual evaluations per step. Continuous oscillator
+state errors are `1.07617e-2, 2.68014e-3, 6.69381e-4`; the independent fine explicit
+trajectory comparison on the changing-geometry tree gives `5.97471e-3,
+1.49312e-3, 3.73255e-4`, with accumulated work defects `1.21004e-2,
+3.04096e-3, 7.61237e-4 J`. These are second-order refinement evidence on the named
+fixtures and focused original-source native checks, not a full Cargo/DSR gate,
+cross-platform qualification, runtime benchmark or experimental calibration.
+The broader `frankensim-ext-mbd-core-vqqt` remains open.
