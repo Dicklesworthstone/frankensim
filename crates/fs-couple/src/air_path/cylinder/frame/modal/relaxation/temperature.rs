@@ -24,6 +24,15 @@ pub struct FrameRelaxationLayerTemperature<'a> {
     pub temperature_k: f64,
 }
 
+/// Source-only proposal. Native rates and these snapshots publish together.
+pub(super) struct PreparedLayerTemperatures {
+    pub(super) members: Vec<FrameRelaxationMember>,
+    pub(super) updates: Vec<MaterialRelaxationTime>,
+}
+
+/// Finite caloric cells, original relaxation heat and rate feedback on one clock.
+pub mod heat;
+
 impl<F> FrameRelaxationBinding<'_, '_, F> {
     /// Re-evaluate the SAME layer claims at prescribed temperatures and update
     /// their original native Maxwell rates without erasing any accepted state.
@@ -52,6 +61,16 @@ impl<F> FrameRelaxationBinding<'_, '_, F> {
         layers: &[FrameRelaxationLayerTemperature<'_>],
         gate: &CancelGate,
     ) -> Result<MaterialRelaxationTimeReport> {
+        let prepared = self.prepare_layer_temperatures(mechanical, layers, gate)?;
+        let report = mechanical.set_material_relaxation_times(&prepared.updates, gate)?;
+        self.install_layer_temperatures(prepared);
+        Ok(report)
+    }
+
+    pub(super) fn prepare_layer_temperatures(
+        &self, mechanical: &CoupledModalSystem,
+        layers: &[FrameRelaxationLayerTemperature<'_>], gate: &CancelGate,
+    ) -> Result<PreparedLayerTemperatures> {
         poll(gate)?;
         let count = self.members.iter().try_fold(0usize, |n, member|
             n.checked_add(member.source.elastic().layers().len())
@@ -139,14 +158,15 @@ impl<F> FrameRelaxationBinding<'_, '_, F> {
             return Err(invalid("refreshed source omitted an original material coordinate"));
         }
         poll(gate)?;
-        let report = mechanical.set_material_relaxation_times(&updates, gate)?;
-        // The native owner checked cancellation immediately before publication.
-        // No fallible operation or new cancellation point may split these moves.
-        for (branch, update) in self.branches.iter_mut().zip(updates) {
+        Ok(PreparedLayerTemperatures { members: refreshed, updates })
+    }
+
+    // Source snapshots install only after the same native endpoint is admitted.
+    pub(super) fn install_layer_temperatures(&mut self, prepared: PreparedLayerTemperatures) {
+        for (branch, update) in self.branches.iter_mut().zip(prepared.updates) {
             branch.relaxation_time_s = update.relaxation_time_s;
         }
-        self.members = refreshed;
-        Ok(report)
+        self.members = prepared.members;
     }
 }
 

@@ -1,0 +1,295 @@
+//! Finite source-layer heat and rate feedback on the same native trajectory.
+//! Exact frozen-start-rate motion supplies original positive Maxwell heat;
+//! the existing enthalpy residual advances caloric storage/conduction. Endpoint
+//! rate preparation and BOTH histories publish together. This is a first-order
+//! thermal split, not an endpoint-power heat estimate or a new integrator.
+use super::{FrameRelaxationLayerTemperature, PreparedLayerTemperatures};
+use super::super::{FrameRelaxationBinding, FrameRelaxationError};
+use crate::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpySolve, DrivenCoefficients,
+    DriverAccount, ThermalDriver, cell_driver_candidate_entropy_option};
+use crate::circuit_enthalpy::material::{MaterialNetwork, MaterialNetworkError,
+    MaterialNetworkSample, PreparedMaterialNetwork};
+use crate::frame_vibration::thermal::{FrameLayerCell, FrameThermalSolve, FrameHeatEntropy};
+use crate::material_circuit::MaterialCircuitSolve;
+use crate::render::schedule::force::coupled::{CoupledModalSystem,CoupledModalFrame,ModalCouplingError};
+use crate::render::schedule::force::coupled::coefficients::heat::{MaterialHeatBudget,MaterialHeatIntegral};
+use crate::render::schedule::force::coupled::coefficients::rates::MaterialRelaxationTimeReport;
+use fs_exec::CancelGate;
+use fs_solver::NewtonReport;
+use fs_thermal::enthalpy::{DepositedCell,DepositionSimulation,EnergyAudit};
+use std::collections::{BTreeMap,BTreeSet};
+
+#[derive(Debug)]
+pub enum RelaxationHeatSourceError {
+    Material(FrameRelaxationError),
+    Network(MaterialNetworkError),
+    Native(ModalCouplingError),
+    Port(fs_ports::CoupleError),
+}
+impl core::fmt::Display for RelaxationHeatSourceError {
+    fn fmt(&self,f:&mut core::fmt::Formatter<'_>)->core::fmt::Result {write!(f,"source relaxation heat: {self:?}")}
+}
+impl std::error::Error for RelaxationHeatSourceError {}
+pub type RelaxationHeatError=CircuitEnthalpyError<RelaxationHeatSourceError>;
+type Result<T>=core::result::Result<T,RelaxationHeatError>;
+impl From<ModalCouplingError> for RelaxationHeatError {
+    fn from(e:ModalCouplingError)->Self {match e {
+        ModalCouplingError::Cancelled=>Self::Cancelled,
+        other=>Self::Source(RelaxationHeatSourceError::Native(other)),
+    }}
+}
+impl From<FrameRelaxationError> for RelaxationHeatError {
+    fn from(e:FrameRelaxationError)->Self {match e {
+        FrameRelaxationError::Cancelled=>Self::Cancelled,
+        other=>Self::Source(RelaxationHeatSourceError::Material(other)),
+    }}
+}
+impl From<fs_ports::CoupleError> for RelaxationHeatError {
+    fn from(e:fs_ports::CoupleError)->Self {Self::Source(RelaxationHeatSourceError::Port(e))}
+}
+fn network(e:MaterialNetworkError)->RelaxationHeatError {
+    match e {
+        MaterialNetworkError::Thermal(fs_thermal::enthalpy::DepositionError::Cancelled)=>RelaxationHeatError::Cancelled,
+        other=>RelaxationHeatError::Source(RelaxationHeatSourceError::Network(other)),
+    }
+}
+fn invalid(s:&'static str)->RelaxationHeatError {RelaxationHeatError::Invalid(s)}
+fn check(gate:&CancelGate)->Result<()> {if gate.is_requested(){Err(RelaxationHeatError::Cancelled)}else{Ok(())}}
+fn finite(x:f64)->Result<f64> {if x.is_finite(){Ok(x)}else{Err(invalid("nonfinite relaxation/heat arithmetic"))}}
+fn same_positive(a:f64,b:f64)->bool {a.is_finite()&&b.is_finite()&&a>0.0&&b>0.0&&(a-b).abs()<=1e-10*b}
+fn controls(c:FrameThermalSolve)->CircuitEnthalpySolve {
+    CircuitEnthalpySolve {maximum_cells:c.maximum_cells,maximum_circuit_trials:c.maximum_material_trials,
+        maximum_newton_iterations:c.maximum_newton_iterations,difference_step_j:c.difference_step_j,
+        cell_energy_tolerance_j:c.cell_energy_tolerance_j,thermal_energy_tolerance_j:c.thermal_energy_tolerance_j,
+        total_energy_tolerance_j:c.total_energy_tolerance_j,newton:c.newton,
+        circuit:MaterialCircuitSolve {energy_tolerance_j:0.0,power_tolerance_w:0.0}}
+}
+
+struct Receiver { destination:FrameLayerCell, original:DepositedCell, source_cell:usize, group:usize }
+
+/// Integrated heat of the ORIGINAL layer, not a fitted sharing fraction.
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub struct RelaxationLayerHeat {pub destination:FrameLayerCell,pub heat_j:f64}
+
+pub struct RelaxationHeatReport {
+    pub mechanical:CoupledModalFrame,
+    pub thermal:EnergyAudit,
+    pub source:MaterialNetworkSample,
+    pub layers:Vec<RelaxationLayerHeat>,
+    pub rates:MaterialRelaxationTimeReport,
+    pub deposited_material_heat_j:f64,
+    /// Other branches, fluid/connection losses and component damping, NOT heat
+    /// assigned to this solid. Every unbound Maxwell group is independently integrated.
+    pub external_mechanical_loss_j:f64,
+    pub external_thermal_heat_j:f64,
+    pub total_energy_residual_j:f64,
+    pub entropy:FrameHeatEntropy,
+    pub nonlinear:NewtonReport,
+    pub maximum_cell_residual_j:f64,
+    pub material_trials:usize,
+}
+
+/// One source-defined frame's finite layers inside a complete mechanical assembly.
+/// Foreign bodies/material memories retain their dynamics and explicit loss
+/// sinks. Whole-layer thermal lumping is a caller-selected physical model;
+/// internal gradients, expansion, changing storage moduli/mass and phase change
+/// are not inferred. The original source rate-only admission remains binding.
+pub struct FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
+    material:FrameRelaxationBinding<'m,'f,F>,
+    mechanical:CoupledModalSystem,
+    source:&'n MaterialNetwork<'a>,
+    prepared:PreparedMaterialNetwork<'n,'a>,
+    receivers:Vec<Receiver>,
+    groups:Vec<core::ops::Range<usize>>,
+    outside_groups:Vec<usize>,
+    heat_budget:MaterialHeatBudget,
+    integral:Option<MaterialHeatIntegral>,
+    origin_s:f64,
+}
+
+impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
+    /// Bind each original material layer to exactly one whole solid caloric cell.
+    /// All source cards, contexts, density, physical layer volume and mass must
+    /// match. Distinct layers may not silently share a cell. Initial q/v, fluid
+    /// momenta and Maxwell histories are retained; no zero-state restart occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(material:FrameRelaxationBinding<'m,'f,F>,mechanical:CoupledModalSystem,
+        thermal:&DepositionSimulation<'_>,source:&'n MaterialNetwork<'a>,destinations:&[FrameLayerCell],
+        heat_budget:MaterialHeatBudget,gate:&CancelGate)->Result<Self> {
+        check(gate)?;
+        if mechanical.samples_rendered()!=0 || !source.resistors.is_empty() {
+            return Err(invalid("relaxation heat requires a cold shared clock and a thermal-only source network"));
+        }
+        material.states(&mechanical,gate)?;
+        let prepared=source.prepare(thermal,||gate.is_requested()).map_err(network)?;
+        let count:usize=material.members().iter().map(|m|m.source.elastic().layers().len()).sum();
+        if count!=destinations.len() || count>heat_budget.max_groups {
+            return Err(invalid("one bounded whole-cell destination per original relaxation layer required"));
+        }
+        let routes:BTreeMap<_,_>=destinations.iter().map(|d|((d.element,d.layer),d.cell)).collect();
+        if routes.len()!=count {return Err(invalid("duplicate layer heat destination"));}
+        let mut used=BTreeSet::new();let mut receivers=Vec::with_capacity(count);
+        let mut groups=Vec::new();let mut outside_groups=Vec::new();
+        let range=material.memory_range();
+        if range.start>0 {outside_groups.push(groups.len());groups.push(0..range.start);}
+        let mut cursor=range.start;
+        for member in material.members() {
+            let (_,_,length)=material.source().frame().reference_strain_traces(member.element)
+                .map_err(|e|FrameRelaxationError::Frame(e.into()))?;
+            for (layer,(solid,geometry)) in member.source.elastic().layers().iter()
+                .zip(member.source.elastic().layer_integrals()).enumerate() {
+                check(gate)?;
+                let cell=*routes.get(&(member.element,layer)).ok_or_else(||invalid("missing original layer cell"))?;
+                if !used.insert(cell){return Err(invalid("each relaxation layer needs its own whole caloric inventory"));}
+                let index=source.cells.iter().position(|s|s.cell==cell).ok_or_else(||invalid("missing original caloric source"))?;
+                let caloric=&source.cells[index];
+                let original=thermal.cells().get(&cell).ok_or_else(||invalid("inactive layer heat cell"))?;
+                let density=geometry.line_density_kg_m()/geometry.area_m2();
+                let initial_temperature=solid.material.query_point().iter()
+                    .find(|(axis,_)|axis==caloric.point.temperature_axis).map(|(_,t)|*t)
+                    .ok_or_else(||invalid("source layer lacks its caloric temperature axis"))?;
+                if solid.material.card_identity()!=caloric.point.material.content_hash()
+                    || solid.material.query()!=*caloric.point.context
+                    || original.material_id!=caloric.material_id
+                    || !same_positive(original.mass_kg,geometry.line_density_kg_m()*length)
+                    || !same_positive(original.geometry.volume_m3,geometry.area_m2()*length)
+                    || caloric.curve.knots().iter().any(|k|k.liquid_mass_fraction!=0.0||!same_positive(k.bulk_density_kg_m3,density))
+                    || thermal.temperature_k(cell)?.to_bits()!=initial_temperature.to_bits() {
+                    return Err(invalid("relaxation heat must retain original card/context and whole fixed-solid mass/volume/caloric law"));
+                }
+                let first=cursor;
+                while material.coordinates().get(cursor-range.start).is_some_and(|c|c.element==member.element&&c.layer==layer) {cursor+=1;}
+                let group=groups.len();groups.push(first..cursor);
+                receivers.push(Receiver {destination:FrameLayerCell {element:member.element,layer,cell},
+                    original:original.clone(),source_cell:index,group});
+            }
+        }
+        if cursor!=range.end {return Err(invalid("layer heat did not cover every original material memory"));}
+        if range.end<mechanical.material_memory().len() {
+            outside_groups.push(groups.len());groups.push(range.end..mechanical.material_memory().len());
+        }
+        let mut owner=Self {material,mechanical,source,prepared,receivers,groups,outside_groups,heat_budget,
+            integral:None,origin_s:thermal.time_s()};
+        // Reuse the existing pinned rate-only source admission, including
+        // validity-wide CONSTANT storage, not equality at two temperatures.
+        owner.propose_temperatures(thermal,gate)?;
+        owner.integral=Some(owner.mechanical.prepare_material_heat(&owner.groups,heat_budget,gate)?);
+        check(gate)?;Ok(owner)
+    }
+
+    pub fn mechanical(&self)->&CoupledModalSystem {&self.mechanical}
+    pub fn material(&self)->&FrameRelaxationBinding<'m,'f,F> {&self.material}
+
+    fn propose_temperatures(&self,thermal:&DepositionSimulation<'_>,gate:&CancelGate)->Result<PreparedLayerTemperatures> {
+        propose(&self.material,&self.mechanical,self.source,&self.receivers,thermal,gate)
+    }
+
+    /// One exact frozen-rate mechanical sample, one original enthalpy solve,
+    /// then original rates at the receiving endpoint temperatures. Physical heat
+    /// is integrated per layer; it is never an energy residual or endpoint power.
+    /// No partial mechanics, caloric state, source snapshot or clock publishes.
+    /// Changing rates has no storage jump. Refine this first-order split in time.
+    pub fn step(&mut self,thermal:&mut DepositionSimulation<'_>,external:&[f64],
+        solve:FrameThermalSolve,energy_guess_j:&[f64],gate:&CancelGate)->Result<RelaxationHeatReport> {
+        check(gate)?;
+        let sample=self.mechanical.samples_rendered();
+        let next=sample.checked_add(1).ok_or_else(||invalid("relaxation heat clock overflow"))?;
+        let dt=self.mechanical.sample_period_s();
+        let start=finite(self.origin_s+sample as f64*dt)?;
+        let target=finite(self.origin_s+next as f64*dt)?;
+        if thermal.time_s().to_bits()!=start.to_bits()||target<=start {
+            return Err(invalid("relaxation and caloric histories must share their original advancing clock"));
+        }
+        for (receiver,layer) in self.receivers.iter().zip(self.material.members().iter().flat_map(|m|m.source.elastic().layers())) {
+            let axis=self.source.cells[receiver.source_cell].point.temperature_axis;
+            let previous=layer.material.query_point().iter().find(|(name,_)|name==axis).map(|(_,t)|*t)
+                .ok_or_else(||invalid("accepted material temperature axis disappeared"))?;
+            if thermal.temperature_k(receiver.destination.cell)?.to_bits()!=previous.to_bits() {
+                return Err(invalid("finite heat and relaxation rates were changed outside joint publication"));
+            }
+        }
+        if self.integral.as_ref().map_or(Ok(false),|i|i.is_current(&self.mechanical,gate))?==false {
+            self.integral=Some(self.mechanical.prepare_material_heat(&self.groups,self.heat_budget,gate)?);
+        }
+        let heat=self.integral.as_ref().ok_or_else(||invalid("material heat integral is absent"))?
+            .evaluate(&self.mechanical,external,gate)?;
+        let total=heat.iter().try_fold(0.0,|s,h|finite(s+h))?;
+        let selected=self.receivers.iter().try_fold(0.0,|s,r|finite(s+heat[r.group]))?;
+        let foreign=self.outside_groups.iter().try_fold(0.0,|s,&i|finite(s+heat[i]))?;
+        let before=self.mechanical.total_energy_j()?;
+        let (material,source,prepared,receivers)=(&self.material,self.source,&self.prepared,&self.receivers);
+        let (candidate,mut report,source_update,native_update)=self.mechanical.step_with_admission(external,gate,
+            |mechanical,frame,_transfers| -> Result<_> {
+                if finite(total-frame.material_dissipation_j)?.abs()>solve.total_energy_tolerance_j {
+                    return Err(invalid("independent source-layer heat does not equal native total material loss"));
+                }
+                let outside=finite(foreign+frame.component_dissipation_j+frame.connection_dissipation_j+frame.radiation_dissipation_j)?;
+                let layers:Vec<_>=receivers.iter().map(|r|RelaxationLayerHeat {destination:r.destination,heat_j:heat[r.group]}).collect();
+                let (candidate,(),audit,entropy)=cell_driver_candidate_entropy_option(thermal,target,controls(solve),energy_guess_j,
+                    |trial,_remaining| -> Result<_> {
+                        check(gate)?;
+                        let coefficients=prepared.resolve(trial,||gate.is_requested()).map_err(network)?;
+                        let update=propose(material,mechanical,source,receivers,trial,gate)?;
+                        Ok(DrivenCoefficients {circuit:Driver {frame:frame.clone(),before,heat:selected,outside},
+                            sources_w:coefficients.sources_w,conductances_w_k:coefficients.conductances_w_k,
+                            source:(coefficients.source,update),circuit_trials:1})
+                    },
+                    |_driver,duration,checkpoint| {
+                        let mut powers=BTreeMap::new();
+                        for layer in &layers {
+                            checkpoint()?;
+                            let power=finite(layer.heat_j/duration)?;
+                            if layer.heat_j>0.0&&power==0.0 {return Err(invalid("layer heat power underflow"));}
+                            powers.insert(layer.destination.cell,power);
+                        }
+                        Ok(powers)
+                    },true,||gate.is_requested())?;
+                let (source,update)=audit.source;
+                let native=mechanical.prepare_staged_material_relaxation_times(&update.updates,gate)?;
+                let entropy=entropy.ok_or_else(||invalid("missing original material heat entropy account"))?;
+                let report=RelaxationHeatReport {mechanical:audit.electrical,thermal:audit.thermal,source,layers,
+                    rates:MaterialRelaxationTimeReport::default(),deposited_material_heat_j:audit.deposited_joule_j,
+                    external_mechanical_loss_j:outside,external_thermal_heat_j:audit.non_electrical_heat_j,
+                    total_energy_residual_j:audit.total_energy_residual_j,entropy:entropy.into(),nonlinear:audit.nonlinear,
+                    maximum_cell_residual_j:audit.maximum_cell_residual_j,material_trials:audit.circuit_trials};
+                Ok((candidate,report,update,native))
+            })?;
+        // The native admission made the final cancellation check. No fallible
+        // work may split publication of mechanics, source conditions and heat.
+        report.rates=self.mechanical.install_material_relaxation_times(native_update);
+        self.material.install_layer_temperatures(source_update);
+        *thermal=candidate;
+        if !report.rates.changes.is_empty(){self.integral=None;}
+        Ok(report)
+    }
+}
+
+fn propose<F>(material:&FrameRelaxationBinding<'_, '_, F>,mechanical:&CoupledModalSystem,
+    source:&MaterialNetwork<'_>,receivers:&[Receiver],thermal:&DepositionSimulation<'_>,gate:&CancelGate)
+    ->Result<PreparedLayerTemperatures> {
+    let mut inputs=Vec::with_capacity(receivers.len());
+    for receiver in receivers {
+        check(gate)?;
+        let cell=thermal.cells().get(&receiver.destination.cell).ok_or_else(||invalid("layer heat cell disappeared"))?;
+        let original=&receiver.original;
+        if cell.id!=original.id||cell.material_id!=original.material_id||cell.body_id!=original.body_id
+            ||cell.segment_id!=original.segment_id||cell.mass_kg.to_bits()!=original.mass_kg.to_bits()||cell.geometry!=original.geometry {
+            return Err(invalid("original layer caloric inventory or geometry changed"));
+        }
+        let point=&source.cells[receiver.source_cell].point;
+        inputs.push(FrameRelaxationLayerTemperature {element:receiver.destination.element,layer:receiver.destination.layer,
+            card:point.material,temperature_axis:point.temperature_axis,temperature_k:thermal.temperature_k(cell.id)?});
+    }
+    material.prepare_layer_temperatures(mechanical,&inputs,gate).map_err(Into::into)
+}
+struct Driver {frame:CoupledModalFrame,before:f64,heat:f64,outside:f64}
+impl ThermalDriver for Driver {
+    type Model=();type Step=CoupledModalFrame;
+    fn account(&self)->DriverAccount<'_> {DriverAccount {resistors:&[],contacts:&[],heat_j:self.heat,
+        numerical_dissipation_j:self.frame.numerical_dissipation_j,
+        stored_change_j:self.frame.total_energy_j()-self.before,supplied_j:self.frame.external_work_j-self.outside}}
+    fn into_parts(self)->((),CoupledModalFrame){((),self.frame)}
+}
+
+#[cfg(test)]
+mod tests;

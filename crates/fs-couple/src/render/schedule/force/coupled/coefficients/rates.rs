@@ -31,6 +31,12 @@ pub struct MaterialRelaxationTimeReport {
     pub changes: Vec<MaterialRelaxationTimeChange>,
 }
 
+/// Native preparation retained until the enclosing physical transaction accepts.
+pub(crate) struct PreparedMaterialRelaxationTimes {
+    replacement: Option<(Vec<fs_phs::RelaxationBranch>, preparation::PreparedOperator)>,
+    report: MaterialRelaxationTimeReport,
+}
+
 impl CoupledModalSystem {
     /// Change selected Maxwell relaxation times at one accepted boundary.
     ///
@@ -54,6 +60,20 @@ impl CoupledModalSystem {
         updates: &[MaterialRelaxationTime],
         gate: &CancelGate,
     ) -> Result<MaterialRelaxationTimeReport, ModalCouplingError> {
+        let prepared = self.prepare_rates(updates, CoefficientEndpoint::Accepted, gate)?;
+        poll(Some(gate))?;
+        Ok(self.install_material_relaxation_times(prepared))
+    }
+
+    pub(crate) fn prepare_staged_material_relaxation_times(
+        &self, updates: &[MaterialRelaxationTime], gate: &CancelGate,
+    ) -> Result<PreparedMaterialRelaxationTimes, ModalCouplingError> {
+        self.prepare_rates(updates, CoefficientEndpoint::Staged, gate)
+    }
+
+    fn prepare_rates(
+        &self, updates: &[MaterialRelaxationTime], endpoint: CoefficientEndpoint, gate: &CancelGate,
+    ) -> Result<PreparedMaterialRelaxationTimes, ModalCouplingError> {
         poll(Some(gate))?;
         if updates.len() > self.relaxation_branches.len() {
             return Err(invalid("relaxation time updates exceed original branch count"));
@@ -81,16 +101,20 @@ impl CoupledModalSystem {
         }
         if changed == 0 {
             poll(Some(gate))?;
-            return Ok(MaterialRelaxationTimeReport::default());
+            return Ok(PreparedMaterialRelaxationTimes { replacement: None, report: MaterialRelaxationTimeReport::default() });
         }
+        let (models, memory) = match endpoint {
+            CoefficientEndpoint::Accepted => (&self.models, &self.material_memory),
+            CoefficientEndpoint::Staged => (&self.candidates, &self.candidate_material_memory),
+        };
         let mut branches = self.relaxation_branches.clone();
         let mut report = MaterialRelaxationTimeReport { changes: Vec::with_capacity(changed) };
         for update in updates {
             poll(Some(gate))?;
             let branch = &mut branches[update.branch];
             if branch.relaxation_time_s == update.relaxation_time_s { continue; }
-            let mismatch = finite(super::super::relaxation::relaxed_memory(std::slice::from_ref(branch), &self.models)?[0]
-                - self.material_memory[update.branch])?;
+            let mismatch = finite(super::super::relaxation::relaxed_memory(std::slice::from_ref(branch), models)?[0]
+                - memory[update.branch])?;
             let stored_energy_j = finite(0.5 * mismatch * mismatch)?;
             let power_before_w = finite(mismatch * (mismatch / branch.relaxation_time_s))?;
             let power_after_w = finite(mismatch * (mismatch / update.relaxation_time_s))?;
@@ -107,10 +131,19 @@ impl CoupledModalSystem {
             self.mode_count(), self.dt, self.preparation(), &branches,
             self.radiation.as_ref(), gate)?;
         poll(Some(gate))?;
-        self.exact = operator.exact;
-        self.harmonic_damping_columns = operator.harmonic_damping_columns;
-        self.relaxation_branches = branches;
-        Ok(report)
+        Ok(PreparedMaterialRelaxationTimes { replacement: Some((branches, operator)), report })
+    }
+
+    // Publication is infallible and belongs immediately after joint admission.
+    pub(crate) fn install_material_relaxation_times(
+        &mut self, prepared: PreparedMaterialRelaxationTimes,
+    ) -> MaterialRelaxationTimeReport {
+        if let Some((branches, operator)) = prepared.replacement {
+            self.exact = operator.exact;
+            self.harmonic_damping_columns = operator.harmonic_damping_columns;
+            self.relaxation_branches = branches;
+        }
+        prepared.report
     }
 }
 
