@@ -7,6 +7,9 @@
 //! is not endpoint arrest: a coarse phase that would assist slip or spin at an
 //! endpoint refuses and requires the trajectory owner to refine its interval.
 
+/// Simultaneous original Hertz patches with shared finite-body recoil.
+pub mod multiple;
+
 use super::{RigidContactBinding, RigidFrictionError, components, magnitude, poll, totals, vector};
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
 use fs_exec::CancelGate;

@@ -1713,3 +1713,39 @@ admissibility, and separation impulses. Retained groups remain perfectly rigid.
 This API does not discover fracture, model finite attachment forces or stored
 elastic energy, partition heat, or certify the exact continuum trajectory.
 
+
+
+## Simultaneous native Hertz contact islands — v0
+
+`tangential_friction::hertz::multiple::PreparedRigidHertzIsland` freezes the
+original contact geometry, normal loads, radii and held interval and captures
+each participating native body once. Stable unique patch IDs determine
+assembly and reduction order. Sparse two-body factors construct the full
+`3N × 3N` shear/spin mobility from actual masses, full inertia tensors,
+orientations and contact arms, retaining every shared-body cross response.
+Untouched spectators neither enter the energy account nor consume the
+participating-body budget. Keyed coefficient trials reuse the same original
+momenta and prepared response and require exactly unchanged N and radius.
+
+Every trial invokes the original simultaneous Hertz constitutive owner, sums
+all point impulses and free spin couples, and forms each body endpoint once.
+Every patch then evaluates original Hertz traction and heat at its actual
+common endpoint-derived midpoint motion. Native force/moment, work/heat,
+endpoint compatibility, and loaded normal-motion gates apply per patch.
+The whole island separately checks actual kinetic change against impulse work
+and summed physical dissipation, and checks linear and angular momentum.
+Only a complete admitted candidate reaches the publication boundary; failures
+and cancellation leave all original body states and preparation unchanged.
+
+This is a held-geometry, held-effort phase. Normal impulse, pose evolution,
+retained elastic contact memory and rolling deformation remain with their
+original owners. Endpoint-assisted shear/spin and loaded normal motion refuse
+unresolved events requiring trajectory refinement. This initial island rung
+requires a positive-definite full contact response; dependent coordinates are
+refused without invented compliance. It supplies no thermal store or
+experimental validation. Seven focused G1/G3/G4 groups in
+`tests/hertz_multiple.rs` check independent three-body force/spin recoil and
+heat, full-tensor cross-patch response against a separate dense inverse,
+world/gauge/boost covariance, exact input-order canonicalization, energetic
+spectators, coefficient reuse, original single-patch reduction and atomic
+late-failure/cancellation retry.
