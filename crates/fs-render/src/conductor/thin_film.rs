@@ -13,6 +13,8 @@ use crate::dielectric::DielectricIor;
 use fs_blake3::DomainHasher;
 use fs_math::det;
 
+mod polarization;
+
 /// Upper thickness of this explicitly coherent, uniform local coating model.
 /// This 100 micrometre bound limits phase arguments and does not establish
 /// that a particular source has sufficient temporal or spatial coherence.
@@ -21,11 +23,12 @@ pub const MAX_COHERENT_COATING_THICKNESS_M: f64 = 1.0e-4;
 /// One transparent isotropic film, conformal to each conductor microfacet.
 ///
 /// The source must describe its visible phase-index law and thickness.
-/// The model sums coherent s/p amplitudes within this film and then returns
-/// unpolarized reflected power. Thickness is normal to the local microfacet.
+/// The model sums coherent s/p amplitudes within this film. Scalar Fresnel
+/// returns their mean power; `ConductorOptics::fresnel_mueller` retains their
+/// relative phase for polarized transport. Thickness is normal to the microfacet.
 /// It assumes locally parallel boundaries and a laterally uniform film; the
 /// caller must ensure coherence across its optical path difference. It adds
-/// no absorption in the film, polarization tracking between bounces, arbitrary
+/// no absorption in the film, arbitrary
 /// multilayer stacks, thickness distributions, diffraction, or scene-wide
 /// coherent propagation. The substrate retains its complex-index absorption.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,33 +138,8 @@ impl CoherentDielectricCoating {
             return super::fresnel_conductor(incident_eta, substrate.eta, substrate.k, cosine);
         }
 
-        let n0_squared = incident_eta * incident_eta;
-        let n1_squared = film_eta * film_eta;
-        let transverse_squared = n0_squared * (1.0 - cosine * cosine);
-        let q0 = incident_eta * cosine;
-        let q1_squared = n1_squared - transverse_squared;
-        let n2_squared = Complex::new(substrate.eta, substrate.k).square();
-        let q2 = forward_sqrt(n2_squared - Complex::new(transverse_squared, 0.0));
-
-        let phase_scale = core::f64::consts::TAU * (self.thickness_m * 1.0e9) / wavelength_nm;
-        let (cos_phase, sin_phase_over_q) = propagation(q1_squared, phase_scale);
-
-        // Using q/n^2 for p is the magnetic-field convention; at normal
-        // incidence its reflected amplitude has the opposite sign from s.
-        // Powers, and the coherent relative signs at BOTH interfaces, agree.
-        let r_s = reflection(
-            q0,
-            q2,
-            cos_phase,
-            sin_phase_over_q,
-            q1_squared * sin_phase_over_q,
-        );
-        let r_p = reflection(
-            q0 / n0_squared,
-            q2 / n2_squared,
-            cos_phase,
-            n1_squared * sin_phase_over_q,
-            q1_squared * sin_phase_over_q / n1_squared,
+        let [r_s, r_p] = polarization::coated_amplitudes(
+            wavelength_nm, incident_eta, substrate, cosine, film_eta, self.thickness_m,
         );
         let reflectance = 0.5 * (r_s.norm_squared() + r_p.norm_squared());
         if !reflectance.is_finite() || !(-1.0e-12..=1.0 + 1.0e-12).contains(&reflectance) {

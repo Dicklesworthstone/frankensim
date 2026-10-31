@@ -179,30 +179,8 @@ impl CoherentAbsorbingCoating {
             return super::fresnel_conductor(incident_eta, substrate.eta, substrate.k, cosine);
         }
 
-        let n0_squared = incident_eta * incident_eta;
-        let transverse_squared = n0_squared * (1.0 - cosine * cosine);
-        let n1_squared = Complex::new(film.eta, film.k).square();
-        let q1_squared = n1_squared - Complex::new(transverse_squared, 0.0);
-        let n2_squared = Complex::new(substrate.eta, substrate.k).square();
-        let q2 = super::thin_film::forward_sqrt(n2_squared - Complex::new(transverse_squared, 0.0));
-        let phase_scale = core::f64::consts::TAU * (self.thickness_m * 1.0e9) / wavelength_nm;
-        let (cos_phase, sin_phase_over_q) = propagation(q1_squared, phase_scale);
-        let q0 = incident_eta * cosine;
-        let r_s = reflection(
-            q0,
-            q2,
-            cos_phase,
-            sin_phase_over_q,
-            q1_squared * sin_phase_over_q,
-        );
-        // The p wave uses magnetic-field admittance q/n², consistently with
-        // both interfaces of the transparent film and substrate reflection.
-        let r_p = reflection(
-            q0 / n0_squared,
-            q2 / n2_squared,
-            cos_phase,
-            n1_squared * sin_phase_over_q,
-            q1_squared * sin_phase_over_q / n1_squared,
+        let [r_s, r_p] = reflection_amplitudes(
+            wavelength_nm, incident_eta, substrate, cosine, film, self.thickness_m,
         );
         let reflectance = 0.5 * (r_s.norm_squared() + r_p.norm_squared());
         if !reflectance.is_finite() || !(-1.0e-12..=1.0 + 1.0e-12).contains(&reflectance) {
@@ -210,6 +188,32 @@ impl CoherentAbsorbingCoating {
         }
         Ok(reflectance.clamp(0.0, 1.0))
     }
+}
+
+// Shared by scalar power and polarization. Keep the native complex
+// propagation and interface operation order; only the final readout differs.
+pub(super) fn reflection_amplitudes(
+    wavelength_nm: f64,
+    incident_eta: f64,
+    substrate: ComplexIor,
+    cosine: f64,
+    film: ComplexIor,
+    thickness_m: f64,
+) -> [Complex; 2] {
+    let n0_squared = incident_eta * incident_eta;
+    let transverse_squared = n0_squared * (1.0 - cosine * cosine);
+    let n1_squared = Complex::new(film.eta, film.k).square();
+    let q1_squared = n1_squared - Complex::new(transverse_squared, 0.0);
+    let n2_squared = Complex::new(substrate.eta, substrate.k).square();
+    let q2 = super::thin_film::forward_sqrt(n2_squared - Complex::new(transverse_squared, 0.0));
+    let phase_scale = core::f64::consts::TAU * (thickness_m * 1.0e9) / wavelength_nm;
+    let (cos_phase, sin_phase_over_q) = propagation(q1_squared, phase_scale);
+    let q0 = incident_eta * cosine;
+    let r_s = reflection(q0, q2, cos_phase, sin_phase_over_q, q1_squared * sin_phase_over_q);
+    // The p wave uses magnetic-field admittance q/n² at both interfaces.
+    let r_p = reflection(q0 / n0_squared, q2 / n2_squared, cos_phase,
+        n1_squared * sin_phase_over_q, q1_squared * sin_phase_over_q / n1_squared);
+    [r_s, r_p]
 }
 
 fn propagation(q_squared: Complex, phase_scale: f64) -> (Complex, Complex) {
