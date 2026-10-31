@@ -12,6 +12,9 @@
 //! equilibrium or change composition. A higher-level pressure/port owner must
 //! choose and refine the transferred mass.
 
+/// Quasi-steady pressure-driven flow using the same source-backed PR branch.
+pub mod nozzle;
+
 use super::IsochoricRealGasParcel;
 use crate::thermochemical_gas::energy::{
     GasEnergyError, GasEnergySolve, poll, updated_point,
