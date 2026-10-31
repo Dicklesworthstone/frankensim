@@ -2369,8 +2369,11 @@ impl BeamTiedShellModel {
 /// the on-node one (`g1_off_node_brace_converges`). On Kirchhoff shells (CST/DKT, cubic w along an
 /// edge) an off-node Euler-Bernoulli beam's slope-deflection constraint conflicts with the linearly
 /// interpolated rotation, and the result converges to a STIFFER limit (measured on a braced plate,
-/// 2026-10-23); there, use the on-node bonded `ShellBeam` (`assemble_stiffened_shell`), which this
-/// tie reproduces exactly when the beam nodes are the shell nodes. Only the beams are new here: the shell
+/// 2026-10-23); there, use the on-node bonded `ShellBeam` with `BeamMass::Consistent`
+/// (`assemble_stiffened_shell_with_mass`), which this tie reproduces to rounding when the beam
+/// nodes are the shell nodes. Chains use consistent translational and sectional rotary inertia;
+/// the legacy piano bonded entry point retains its explicit lumped-mass contract.
+/// Only the beams are new here: the shell
 /// pencil, its ties and its supports are taken as they are, and the beam pencil enters by congruence,
 /// so the result stays symmetric and work-conjugate. A master DOF that a support fixes contributes
 /// nothing; a master DOF that a shell tie eliminated contributes through its own coupling row.

@@ -450,6 +450,38 @@ against CST/DKT.
   stepping, check common-scale invariance, undamped energy conservation and
   damped decay, and exercise admission/cancellation/refusal behavior.
 
+### Three-dimensional beam inertia
+
+`shell::stiffened::timoshenko::{segment_matrices, assemble_beam_chain}` and
+their existing `tie_beams_to_shells` consumer now use consistent beam mass.
+One shared kinetic integral covers axial motion, torsion, both bending planes,
+and section spin. It integrates the exact static Timoshenko displacement and
+independent rotation fields with four Gauss points (degree-six exact); zero
+shear compliance gives cubic Hermite displacement and its Rayleigh rotary
+inertia. Axial/torsional fields are linear. The polar torsional inertia is
+`rho*(Iy+Iz)`, independent of the Saint-Venant stiffness constant `J`.
+
+Rigid motion has the continuum mass and spatial inertia for any segment
+length: transverse orbital inertia about the center is `rho*A*L^3/12`,
+plus `rho*I*L` for section spin. Endpoint lumping instead gives
+`rho*A*L^3/4` for the orbital term. The default chain and shell-tie path no
+longer incurs that single-segment error. General deformational frequencies
+still require spatial refinement; the static shape functions do not make a
+finite element exact for every dynamic wavelength.
+
+`BeamMass` makes the discretization explicit on the `*_with_mass` variants.
+`assemble_stiffened_shell` and its material-section form retain their frozen
+legacy lumped piano pencil and bit-semantics version. Their `*_with_mass`
+forms admit consistent mass; the same signed eccentric rigid-arm congruence
+transforms stiffness and inertia, including translation/rotation coupling.
+The shell's own mass choice is not altered. Prismatic centered sections,
+small motions, fixed section orientation and straight segments remain the
+model assumptions; no warping inertia or finite-rotation gyroscopic law is
+implied. Tests cover independent polynomial kinetic integrals, arbitrary
+spatial rigid motion with eccentric bonds, the shear-rigid limit, the
+continuum Timoshenko spectrum, bonded/tied congruence, and the unchanged
+legacy piano golden.
+
 ## Invariants
 1. Element certificates (tested on an irregular triangle): stiffness
    symmetry; all three rigid-body motions store zero energy to roundoff;

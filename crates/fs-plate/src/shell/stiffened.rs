@@ -5,11 +5,14 @@
 //! inertia. This retains axial/bending coupling and the sign of eccentricity;
 //! adding EAe^2 to EI alone cannot do that for a deformable shell membrane.
 //! Straight Euler-Bernoulli segments, Saint-Venant GJ torsion, perfect bonds,
-//! small motions about the supplied geometry, lumped centroidal inertia.
+//! small motions about the supplied geometry. The piano-compatible entry points
+//! retain lumped inertia; the explicit mass variants also admit consistent inertia.
 //! No shear deformation, glue slip, stress stiffening or preload equilibrium.
 
 /// Tapered round-beam flexure with consistent rotary inertia.
 pub mod beam;
+mod inertia;
+pub use inertia::BeamMass;
 /// Shear-deformable (Timoshenko) segments between a beam's own nodes; Euler-Bernoulli is its Phi = 0 case.
 pub mod timoshenko;
 
@@ -76,6 +79,8 @@ fn unit(v: [f64;3]) -> Result<[f64;3], PlateError> {
 /// Assemble reinforced geometry through the existing shell and sparse owners.
 /// Each beam is a distinct physical segment; callers must not list it twice.
 /// No partially reinforced model escapes on a refusal.
+/// Retains the legacy lumped piano pencil; choose `BeamMass::Consistent` through
+/// [`assemble_stiffened_shell_with_mass`] for exact beam-field kinetic energy.
 /// # Errors
 /// Existing shell refusals, invalid beam geometry/section, or numeric overflow.
 pub fn assemble_stiffened_shell(mesh: &ShellMesh, sections: &[PlateSection],
@@ -91,8 +96,31 @@ pub fn assemble_stiffened_shell_materials(mesh: &ShellMesh, sections: &[ShellSec
     -> Result<ShellModel, PlateError> {
     assemble_sections(mesh, sections, boundary, support, beams)
 }
+/// Bonded reinforcement with a chosen physical beam inertia discretization.
+/// `Consistent` integrates cubic displacement and section spin before applying
+/// the same eccentric rigid-arm map as stiffness. The shell inertia is unchanged.
+/// # Errors
+/// The same refusals as [`assemble_stiffened_shell`].
+pub fn assemble_stiffened_shell_with_mass(mesh: &ShellMesh, sections: &[PlateSection],
+    boundary: &[usize], support: ShellSupport, beams: &[ShellBeam], mass: BeamMass)
+    -> Result<ShellModel, PlateError> {
+    assemble_sections_with_mass(mesh, sections, boundary, support, beams, mass)
+}
+/// Material-section form of [`assemble_stiffened_shell_with_mass`].
+/// # Errors
+/// The same refusals as [`assemble_stiffened_shell_materials`].
+pub fn assemble_stiffened_shell_materials_with_mass(mesh: &ShellMesh, sections: &[ShellSection],
+    boundary: &[usize], support: ShellSupport, beams: &[ShellBeam], mass: BeamMass)
+    -> Result<ShellModel, PlateError> {
+    assemble_sections_with_mass(mesh, sections, boundary, support, beams, mass)
+}
 pub(super) fn assemble_sections<S: Section>(mesh: &ShellMesh, sections: &[S],
     boundary: &[usize], support: ShellSupport, beams: &[ShellBeam])
+    -> Result<ShellModel, PlateError> {
+    assemble_sections_with_mass(mesh, sections, boundary, support, beams, BeamMass::Lumped)
+}
+fn assemble_sections_with_mass<S: Section>(mesh: &ShellMesh, sections: &[S],
+    boundary: &[usize], support: ShellSupport, beams: &[ShellBeam], mass: BeamMass)
     -> Result<ShellModel, PlateError> {
     let mut model = super::assemble(mesh, sections, false, boundary, support)?;
     if beams.is_empty() { return Ok(model); }
@@ -101,7 +129,7 @@ pub(super) fn assemble_sections<S: Section>(mesh: &ShellMesh, sections: &[S],
     copy_sparse(&model.k, &mut k);
     copy_sparse(&model.m, &mut m);
     for beam in beams {
-        let (ke, me) = element(mesh, beam)?;
+        let (ke, me) = element_with_mass(mesh, beam, mass)?;
         for i in 0..12 {
             let Some(row) = model.dof_map[6*beam.nodes[i/6]+i%6] else { continue; };
             for j in 0..12 {
@@ -130,7 +158,12 @@ fn copy_sparse(source: &Csr, target: &mut Coo) {
 // Element coordinates: [u,v,w,theta_x,theta_y,theta_z] at each shell node.
 // Congruence, rather than separately authored force/motion maps, guarantees
 // reciprocal work. A beam bending slope is theta_z for v and -theta_y for w.
+#[cfg(test)]
 fn element(mesh: &ShellMesh, beam: &ShellBeam)
+    -> Result<([f64;144],[f64;144]),PlateError> {
+    element_with_mass(mesh, beam, BeamMass::Lumped)
+}
+fn element_with_mass(mesh: &ShellMesh, beam: &ShellBeam, mass: BeamMass)
     -> Result<([f64;144],[f64;144]),PlateError> {
     beam.section.validate()?;
     if beam.nodes[0] == beam.nodes[1]
@@ -149,7 +182,6 @@ fn element(mesh: &ShellMesh, beam: &ShellBeam)
     let axes = [x,cross(z,x),z];
     let s = beam.section;
     let mut k = [0.0;144];
-    let mut m = [0.0;144];
     for (a,b,coefficient) in [(0,6,s.young_pa*s.area_m2/length),
         (3,9,s.shear_pa*s.torsion_m4/length)] {
         k[12*a+a] += coefficient; k[12*b+b] += coefficient;
@@ -167,13 +199,7 @@ fn element(mesh: &ShellMesh, beam: &ShellBeam)
             k[12*slots[i]+slots[j]] += coefficient*hermite[i][j]*signs[i]*signs[j];
         }}
     }
-    // Centroidal nodal masses. Longitudinal extent is represented by the two
-    // nodal translational masses, cross-section rotary inertia by Iy and Iz.
-    let half = s.density_kg_m3*l/2.0;
-    for node in 0..2 { for (dof,inertia) in [s.area_m2,s.area_m2,s.area_m2,
-        s.iy_m4+s.iz_m4,s.iy_m4,s.iz_m4].into_iter().enumerate() {
-        let i=6*node+dof; m[12*i+i] = half*inertia;
-    }}
+    let m = inertia::local_mass(s, l, [0.0; 2], mass)?;
     let mut transform=[0.0;144];
     for node in 0..2 {
         let base=6*node;
@@ -218,6 +244,38 @@ mod tests {
     }
     fn quadratic(a:&[f64;144],u:&[f64;12])->f64 {
         (0..12).map(|i|u[i]*(0..12).map(|j|a[12*i+j]*u[j]).sum::<f64>()).sum()
+    }
+    #[test]
+    fn consistent_offset_beam_has_exact_spatial_rigid_inertia() {
+        let mut mesh = mesh(); mesh.nodes[1] = [0.8, 0.3, 0.2];
+        let mut b = beam(); b.offsets_m[1] = [-0.02, 0.01, 0.08];
+        let (_, m) = element_with_mass(&mesh, &b, BeamMass::Consistent).unwrap();
+        let ends: [[f64; 3]; 2] = std::array::from_fn(|n|
+            std::array::from_fn(|i| mesh.nodes[n][i] + b.offsets_m[n][i]));
+        let chord = std::array::from_fn(|i| ends[1][i] - ends[0][i]);
+        let center = std::array::from_fn(|i| 0.5 * (ends[0][i] + ends[1][i]));
+        let l = dot(chord, chord).sqrt();
+        let x = unit(chord).unwrap();
+        let z = unit(std::array::from_fn(|i| b.section_z[i] - dot(b.section_z, x) * x[i])).unwrap();
+        let axes = [x, cross(z, x), z];
+        let s = b.section;
+        for (v, omega) in [([0.4, -0.2, 0.7], [-0.3, 0.5, 0.8]),
+            ([0.0; 3], [1.0, 0.0, 0.0]), ([0.0; 3], [0.0, 1.0, 0.0]),
+            ([0.0; 3], [0.0, 0.0, 1.0]), ([0.4, -0.2, 0.7], [0.0; 3])] {
+            let mut q = [0.0; 12];
+            for node in 0..2 {
+                let orbital = cross(omega, mesh.nodes[node]);
+                for i in 0..3 { q[6 * node + i] = v[i] + orbital[i]; q[6 * node + 3 + i] = omega[i]; }
+            }
+            let orbital = cross(omega, center);
+            let vc = std::array::from_fn(|i| v[i] + orbital[i]);
+            let edge_spin = cross(omega, chord);
+            let section_spin: f64 = axes.iter().zip([s.iy_m4 + s.iz_m4, s.iy_m4, s.iz_m4])
+                .map(|(axis, inertia)| inertia * dot(omega, *axis).powi(2)).sum();
+            let want = s.density_kg_m3 * l * (s.area_m2 *
+                (dot(vc, vc) + dot(edge_spin, edge_spin) / 12.0) + section_spin);
+            assert!((quadratic(&m, &q) / want - 1.0).abs() < 5e-14);
+        }
     }
     #[test]
     fn offset_beam_preserves_all_six_rigid_motions() {

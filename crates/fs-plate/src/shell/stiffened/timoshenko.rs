@@ -7,14 +7,15 @@
 //! terms are those of the Euler-Bernoulli `ShellBeam`. The shear areas A_sy, A_sz are cross-section
 //! data (the area weighted by the section's transverse shear-stress distribution), never a fitted factor.
 //!
-//! Inertia is the SAME lumped centroidal inertia as `ShellBeam`: rho A L / 2 per node in translation
-//! and rho I L / 2 per node in rotation. So it does not depend on G, and G -> infinity recovers the
-//! Euler-Bernoulli segment: bit for bit in M, and with an O(1/G) difference in K.
+//! Inertia integrates both translational and section-rotation kinetic energy with the exact static
+//! Timoshenko fields. G -> infinity recovers the cubic Hermite/Rayleigh beam in both K and M. Rigid
+//! translation and rotation reproduce the continuum mass and full inertia at any segment length.
+//! Explicit `BeamMass::Lumped` retains the old endpoint quadrature for legacy pencil comparisons.
 //!
 //! DOF order at each node: [u, v, w, theta_x, theta_y, theta_z] in global axes. Rotations about the
 //! section axes follow `ShellBeam`: the slope of v is theta_z, the slope of w is -theta_y.
 //! No offsets: an off-node beam is attached to a shell by a tie, not by a rigid arm here.
-use super::{BeamSection, bad, congruence, cross, dot, unit};
+use super::{BeamMass, BeamSection, bad, congruence, cross, dot, inertia, unit};
 use crate::PlateError;
 use fs_sparse::{Coo, Csr};
 
@@ -36,7 +37,7 @@ pub enum BeamKind {
     Timoshenko(ShearAreas),
 }
 
-/// Global 12x12 stiffness and lumped inertia of one straight centroidal segment from `p0_m` to `p1_m`.
+/// Global 12x12 stiffness and consistent inertia of one straight centroidal segment from `p0_m` to `p1_m`.
 /// `section_z` is the direction of the section's +z axis; its part normal to the chord is used.
 ///
 /// # Errors
@@ -48,6 +49,20 @@ pub fn segment_matrices(
     section_z: [f64; 3],
     section: BeamSection,
     kind: BeamKind,
+) -> Result<([f64; 144], [f64; 144]), PlateError> {
+    segment_matrices_with_mass(p0_m, p1_m, section_z, section, kind, BeamMass::Consistent)
+}
+
+/// Segment matrices with an explicit inertia choice; see [`segment_matrices`].
+/// # Errors
+/// The same section, geometry and numeric refusals as [`segment_matrices`].
+pub fn segment_matrices_with_mass(
+    p0_m: [f64; 3],
+    p1_m: [f64; 3],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    mass: BeamMass,
 ) -> Result<([f64; 144], [f64; 144]), PlateError> {
     section.validate()?;
     if let BeamKind::Timoshenko(shear) = kind {
@@ -73,7 +88,7 @@ pub fn segment_matrices(
     let projection = dot(hint, x);
     let z = unit(std::array::from_fn(|i| hint[i] - projection * x[i]))?;
     let axes = [x, cross(z, x), z];
-    let (k, m) = local_matrices(section, kind, length);
+    let (k, m) = local_matrices(section, kind, length, mass)?;
     let mut transform = [0.0; 144];
     for node in 0..2 {
         let base = 6 * node;
@@ -97,10 +112,14 @@ pub fn segment_matrices(
     Ok((k, m))
 }
 
-/// Local (chord axes) stiffness and lumped inertia of a segment of length `l`.
-fn local_matrices(s: BeamSection, kind: BeamKind, l: f64) -> ([f64; 144], [f64; 144]) {
+/// Local (chord axes) stiffness and inertia of a segment of length `l`.
+fn local_matrices(
+    s: BeamSection,
+    kind: BeamKind,
+    l: f64,
+    mass: BeamMass,
+) -> Result<([f64; 144], [f64; 144]), PlateError> {
     let mut k = [0.0; 144];
-    let mut m = [0.0; 144];
     for (a, b, coefficient) in [
         (0, 6, s.young_pa * s.area_m2 / l),
         (3, 9, s.shear_pa * s.torsion_m4 / l),
@@ -114,13 +133,18 @@ fn local_matrices(s: BeamSection, kind: BeamKind, l: f64) -> ([f64; 144], [f64; 
         BeamKind::EulerBernoulli => (None, None),
         BeamKind::Timoshenko(areas) => (Some(areas.y_m2), Some(areas.z_m2)),
     };
-    for (slots, signs, inertia, shear_area) in [
+    let mut phi_bending = [0.0; 2];
+    for (plane, (slots, signs, inertia, shear_area)) in [
         ([1, 5, 7, 11], [1.0; 4], s.iz_m4, shear_y),
         ([2, 4, 8, 10], [1.0, -1.0, 1.0, -1.0], s.iy_m4, shear_z),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let phi = shear_area.map_or(0.0, |area| {
             12.0 * s.young_pa * inertia / (s.shear_pa * area * l * l)
         });
+        phi_bending[plane] = phi;
         let block = [
             [12.0, 6.0 * l, -12.0, 6.0 * l],
             [6.0 * l, (4.0 + phi) * l * l, -6.0 * l, (2.0 - phi) * l * l],
@@ -134,24 +158,7 @@ fn local_matrices(s: BeamSection, kind: BeamKind, l: f64) -> ([f64; 144], [f64; 
             }
         }
     }
-    let half = s.density_kg_m3 * l / 2.0;
-    for node in 0..2 {
-        for (dof, inertia) in [
-            s.area_m2,
-            s.area_m2,
-            s.area_m2,
-            s.iy_m4 + s.iz_m4,
-            s.iy_m4,
-            s.iz_m4,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let i = 6 * node + dof;
-            m[12 * i + i] = half * inertia;
-        }
-    }
-    (k, m)
+    Ok((k, inertia::local_mass(s, l, phi_bending, mass)?))
 }
 
 /// Stiffness and inertia of a chain of segments through `nodes_m` (6 DOF per node, global axes, no
@@ -165,6 +172,19 @@ pub fn assemble_beam_chain(
     section: BeamSection,
     kind: BeamKind,
 ) -> Result<(Csr, Csr), PlateError> {
+    assemble_beam_chain_with_mass(nodes_m, section_z, section, kind, BeamMass::Consistent)
+}
+
+/// Beam-chain form of [`segment_matrices_with_mass`].
+/// # Errors
+/// The same node, section and numeric refusals as [`assemble_beam_chain`].
+pub fn assemble_beam_chain_with_mass(
+    nodes_m: &[[f64; 3]],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    mass: BeamMass,
+) -> Result<(Csr, Csr), PlateError> {
     if nodes_m.len() < 2 {
         return Err(bad("a beam chain needs at least two nodes"));
     }
@@ -172,7 +192,8 @@ pub fn assemble_beam_chain(
     let mut k = Coo::new(n, n);
     let mut m = Coo::new(n, n);
     for (e, pair) in nodes_m.windows(2).enumerate() {
-        let (ke, me) = segment_matrices(pair[0], pair[1], section_z, section, kind)?;
+        let (ke, me) =
+            segment_matrices_with_mass(pair[0], pair[1], section_z, section, kind, mass)?;
         for i in 0..12 {
             for j in 0..12 {
                 let (row, col) = (6 * e + i, 6 * e + j);
@@ -215,6 +236,143 @@ mod tests {
         (0..12)
             .map(|i| u[i] * (0..12).map(|j| a[12 * i + j] * u[j]).sum::<f64>())
             .sum()
+    }
+
+    #[test]
+    fn consistent_mass_integrates_independent_static_velocity_fields() {
+        // Construct polynomial fields directly from EI theta''=-V and
+        // v'=theta+V/(GA_s), then integrate their squares analytically. This
+        // oracle does not use the element's nodal interpolation or quadrature.
+        let l: f64 = 0.31;
+        let square_integral = |c: &[f64]| -> f64 {
+            c.iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    c.iter()
+                        .enumerate()
+                        .map(|(j, b)| a * b * l.powi((i + j + 1) as i32) / (i + j + 1) as f64)
+                        .sum::<f64>()
+                })
+                .sum()
+        };
+        let at_tip = |c: &[f64]| c.iter().rev().fold(0.0, |v, x| v * l + x);
+        for kind in [BeamKind::EulerBernoulli, BeamKind::Timoshenko(shear())] {
+            for shear_pa in [8e6, 8e8, 8e10] {
+                let mut s = section();
+                s.shear_pa = shear_pa;
+                let mut q = [0.0; 12];
+                let mut want = 0.0;
+                for (slots, sign, inertia, area, theta, v0) in [
+                    (
+                        [1, 5, 7, 11],
+                        1.0,
+                        s.iz_m4,
+                        shear().y_m2,
+                        [0.7, -0.8, 0.6],
+                        -0.2,
+                    ),
+                    (
+                        [2, 4, 8, 10],
+                        -1.0,
+                        s.iy_m4,
+                        shear().z_m2,
+                        [-0.4, 0.5, -0.3],
+                        0.1,
+                    ),
+                ] {
+                    let gamma = match kind {
+                        BeamKind::EulerBernoulli => 0.0,
+                        BeamKind::Timoshenko(_) => {
+                            -2.0 * s.young_pa * inertia * theta[2] / (s.shear_pa * area)
+                        }
+                    };
+                    let v = [v0, theta[0] + gamma, 0.5 * theta[1], theta[2] / 3.0];
+                    for (slot, value) in slots.into_iter().zip([
+                        v0,
+                        sign * theta[0],
+                        at_tip(&v),
+                        sign * at_tip(&theta),
+                    ]) {
+                        q[slot] = value;
+                    }
+                    want += s.density_kg_m3
+                        * (s.area_m2 * square_integral(&v) + inertia * square_integral(&theta));
+                }
+                for (a, b, inertia, field) in [
+                    (0, 6, s.area_m2, [0.4, -0.7]),
+                    (3, 9, s.iy_m4 + s.iz_m4, [-0.6, 0.8]),
+                ] {
+                    q[a] = field[0];
+                    q[b] = at_tip(&field);
+                    want += s.density_kg_m3 * inertia * square_integral(&field);
+                }
+                let (_, m) =
+                    segment_matrices([0.0; 3], [l, 0.0, 0.0], [0.0, 0.0, 1.0], s, kind).unwrap();
+                assert!((quadratic(&m, &q) / want - 1.0).abs() < 3e-13);
+                // J controls torsional stiffness, not rotational mass.
+                s.torsion_m4 *= 17.0;
+                let (_, changed) =
+                    segment_matrices([0.0; 3], [l, 0.0, 0.0], [0.0, 0.0, 1.0], s, kind).unwrap();
+                assert_eq!(m, changed);
+            }
+        }
+    }
+
+    #[test]
+    fn consistent_mass_recovers_rayleigh_limit_and_exact_rigid_spin() {
+        let l: f64 = 0.31;
+        let ends = [[-0.5 * l, 0.0, 0.0], [0.5 * l, 0.0, 0.0]];
+        let mut spin = [0.0; 12];
+        spin[1] = -0.5 * l;
+        spin[7] = 0.5 * l;
+        spin[5] = 1.0;
+        spin[11] = 1.0;
+        let mut errors = Vec::new();
+        for g in [1e10, 1e11, 1e12, 1e13] {
+            let mut s = section();
+            s.shear_pa = g;
+            let (_, m) = segment_matrices(
+                ends[0],
+                ends[1],
+                [0.0, 0.0, 1.0],
+                s,
+                BeamKind::Timoshenko(shear()),
+            )
+            .unwrap();
+            let (_, eb) = segment_matrices(
+                ends[0],
+                ends[1],
+                [0.0, 0.0, 1.0],
+                s,
+                BeamKind::EulerBernoulli,
+            )
+            .unwrap();
+            let orbital = s.density_kg_m3 * s.area_m2 * l.powi(3) / 12.0;
+            let sectional = s.density_kg_m3 * s.iz_m4 * l;
+            assert!((quadratic(&m, &spin) / (orbital + sectional) - 1.0).abs() < 5e-14);
+            let (_, lumped) = segment_matrices_with_mass(
+                ends[0],
+                ends[1],
+                [0.0, 0.0, 1.0],
+                s,
+                BeamKind::EulerBernoulli,
+                BeamMass::Lumped,
+            )
+            .unwrap();
+            assert!(((quadratic(&lumped, &spin) - sectional) / orbital - 3.0).abs() < 5e-14);
+            errors.push(
+                m.iter()
+                    .zip(&eb)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f64::max),
+            );
+        }
+        for pair in errors.windows(2) {
+            assert!(
+                ((pair[1] / pair[0]).log10() + 1.0).abs() < 0.02,
+                "consistent inertia must converge to Rayleigh as 1/G: {errors:?}"
+            );
+        }
     }
 
     #[test]
@@ -284,7 +442,7 @@ mod tests {
 
     #[test]
     fn g0_euler_bernoulli_limit_bitwise_structure() {
-        // Phi = 0 reproduces the on-node Euler-Bernoulli `ShellBeam` (zero offsets) bit for bit, in K and M.
+        // Explicit endpoint quadrature reproduces the legacy on-node `ShellBeam` bit for bit.
         let nodes = vec![[0.1, -0.2, 0.3], [0.9, 0.1, 0.5], [0.0, 1.0, 0.0]];
         let mesh = ShellMesh::new(nodes.clone(), vec![[0, 1, 2]]).unwrap();
         let beam = ShellBeam {
@@ -294,12 +452,13 @@ mod tests {
             section: section(),
         };
         let (k_eb, m_eb) = element(&mesh, &beam).unwrap();
-        let (k, m) = segment_matrices(
+        let (k, m) = segment_matrices_with_mass(
             nodes[0],
             nodes[1],
             [0.0, 0.0, 1.0],
             section(),
             BeamKind::EulerBernoulli,
+            BeamMass::Lumped,
         )
         .unwrap();
         assert!(k.iter().zip(&k_eb).all(|(a, b)| a.to_bits() == b.to_bits()));
@@ -311,20 +470,22 @@ mod tests {
             s.shear_pa = g;
             let mut eb = s;
             eb.shear_pa = g;
-            let (kt, mt) = segment_matrices(
+            let (kt, mt) = segment_matrices_with_mass(
                 nodes[0],
                 nodes[1],
                 [0.0, 0.0, 1.0],
                 s,
                 BeamKind::Timoshenko(shear()),
+                BeamMass::Lumped,
             )
             .unwrap();
-            let (ke, me) = segment_matrices(
+            let (ke, me) = segment_matrices_with_mass(
                 nodes[0],
                 nodes[1],
                 [0.0, 0.0, 1.0],
                 eb,
                 BeamKind::EulerBernoulli,
+                BeamMass::Lumped,
             )
             .unwrap();
             assert!(mt.iter().zip(&me).all(|(a, b)| a.to_bits() == b.to_bits()));

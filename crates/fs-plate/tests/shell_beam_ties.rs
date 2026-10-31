@@ -15,9 +15,9 @@
 //! the beam's own nodes to a shell skin line, with the arm u + theta x d):
 //! - `g1_matching_beam_tie_reproduces_on_node_beam`: beam nodes on the shell nodes (C = I) reproduce the
 //!   bonded eccentric `ShellBeam` model (CST/DKT shell, Euler-Bernoulli beam) to 1e-9;
-//! - `g3_on_node_beam_tie_matches_legacy_to_rounding`: the same on-node tie agrees with the legacy
-//!   `assemble_stiffened_shell` pencil entry by entry within a derived rounding bound. The plan's "bitwise"
-//!   form of this claim is falsified (see the test);
+//! - `g3_on_node_beam_tie_matches_legacy_to_rounding`: the same on-node tie agrees with the consistent
+//!   bonded `assemble_stiffened_shell_with_mass` pencil entry by entry within a derived rounding bound.
+//!   The plan's "bitwise" form of this claim is falsified (see the test);
 //! - `g3_legacy_bonded_beam_pencil_golden`: the bits of the legacy bonded pencil the piano boards consume,
 //!   pinned under docs/GOLDEN_POLICY.md;
 //! - `g1_off_node_brace_converges`: a straight and a curved Timoshenko brace on an MITC3+ plate, each
@@ -50,7 +50,9 @@ use fs_plate::shell::stiffened::BeamSection;
 use fs_plate::shell::stiffened::timoshenko::{
     BeamKind, ShearAreas, assemble_beam_chain, segment_matrices,
 };
-use fs_plate::shell::stiffened::{ShellBeam, assemble_stiffened_shell};
+use fs_plate::shell::stiffened::{
+    BeamMass, ShellBeam, assemble_stiffened_shell, assemble_stiffened_shell_with_mass,
+};
 use fs_plate::shell::{ShellMesh, ShellModel, ShellSupport, assemble_shell_sections};
 
 const L: f64 = 0.3;
@@ -430,6 +432,10 @@ fn on_node_shell_beam(p: &Plate) -> (fs_sparse::Csr, fs_sparse::Csr) {
 
 /// The same bonded eccentric model, whole.
 fn on_node_model(p: &Plate) -> ShellModel {
+    on_node_model_with_mass(p, BeamMass::Consistent)
+}
+
+fn on_node_model_with_mass(p: &Plate, mass: BeamMass) -> ShellModel {
     let beams: Vec<ShellBeam> = p
         .line
         .windows(2)
@@ -440,13 +446,14 @@ fn on_node_model(p: &Plate) -> ShellModel {
             section: brace_section(),
         })
         .collect();
-    assemble_stiffened_shell(
-        &p.mesh,
-        &dkt_sections(p),
-        &p.clamped,
-        ShellSupport::Clamped,
-        &beams,
-    )
+    match mass {
+        BeamMass::Lumped => assemble_stiffened_shell(
+            &p.mesh, &dkt_sections(p), &p.clamped, ShellSupport::Clamped, &beams,
+        ),
+        BeamMass::Consistent => assemble_stiffened_shell_with_mass(
+            &p.mesh, &dkt_sections(p), &p.clamped, ShellSupport::Clamped, &beams, mass,
+        ),
+    }
     .unwrap()
 }
 
@@ -751,11 +758,14 @@ fn segment_products(
     out
 }
 
-/// The plan's G3 claim, "an on-node beam tie reproduces `assemble_stiffened_shell` K and M bitwise", is
+/// The plan's original G3 claim, "an on-node beam tie reproduces `assemble_stiffened_shell` K and M bitwise", is
 /// FALSIFIED (measured 2026-10-23; ruling 6285): on this fixture 3212 of the 864^2 K entries differ in their
 /// bits, by at most 9.6e-17 of the largest entry. The legacy path itself is untouched, so the piano boards
 /// are not affected (their pencil is pinned by `g3_legacy_bonded_beam_pencil_golden`). What holds is
-/// agreement to rounding, gated by a DERIVED bound rather than a chosen one. The two paths differ in three
+/// agreement to rounding, gated by a DERIVED bound rather than a chosen one. Both sides now select
+/// consistent beam mass; the separate legacy golden below still calls the frozen piano entry point.
+/// The shared rounded local mass integral is identical on both sides, so its quadrature evaluation
+/// precedes the comparison's rounding chain. The two paths differ in three
 /// ways, and each is accounted for:
 /// - Arithmetic order. Both evaluate a sum of the plate entry P and each segment's congruence terms. Along a
 ///   chain of at most m roundings a computed sum of products is within gamma_m of the sum of its terms'
@@ -896,7 +906,7 @@ const LEGACY_BONDED_PENCIL_GOLDEN: u64 = 0x24de_da52_df52_7693;
 fn g3_legacy_bonded_beam_pencil_golden() {
     let mut acc = FNV_OFFSET;
     for bump in [0.0, 0.02] {
-        let model = on_node_model(&plate(8, bump));
+        let model = on_node_model_with_mass(&plate(8, bump), BeamMass::Lumped);
         acc = fold_matrix(fold_matrix(acc, &model.k), &model.m);
     }
     println!(
