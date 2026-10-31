@@ -13,7 +13,7 @@ use fs_qty::{Pressure, QuantitySpec, Temperature};
 use fs_thermochem::SpeciesId;
 use fs_thermochem::eos::peng_robinson::PengRobinsonPhaseV1;
 
-fn parcel() -> IsochoricRealGasParcel {
+pub(super) fn parcel() -> IsochoricRealGasParcel {
     // Reuse the original piston fixture's NASA and source-backed transport.
     let ideal = super::tests::gas(0.75, 0.001);
     let model = ThermochemicalPengRobinsonModel::new(
@@ -50,7 +50,7 @@ fn parcel() -> IsochoricRealGasParcel {
     IsochoricRealGasParcel::new(model, point, 0.001, PengRobinsonPhaseV1::Vapor).unwrap()
 }
 
-fn controls() -> PistonSolve {
+pub(super) fn controls() -> PistonSolve {
     PistonSolve {
         volume_bracket_m3: [0.00095, 0.00105],
         gas: GasEnergySolve {
@@ -65,7 +65,7 @@ fn controls() -> PistonSolve {
     }
 }
 
-fn drive(heat_j: f64) -> PistonInput {
+pub(super) fn drive(heat_j: f64) -> PistonInput {
     PistonInput {
         duration_s: 2e-5,
         heat_j,
