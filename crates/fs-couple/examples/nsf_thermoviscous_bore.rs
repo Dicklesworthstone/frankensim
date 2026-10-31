@@ -7,6 +7,8 @@
 //! heat are authored; its pressure, temperature and emitted flow are solved.
 //! A separate escape shares reciprocal radiation with the original bore; its
 //! signed tile flows and the bore outlets reach the same microphone.
+//! A second complete acoustic cavity and closed passage react on the upstream
+//! face. All three physical volumes and the finite supply retain their owners.
 //! This unexecuted coarse composition is not measured anatomy or a qualified jet.
 
 use fs_couple::bernoulli_aperture::performance::ApertureObservation;
@@ -40,8 +42,10 @@ use fs_lbm::nsf3::{
     NsfReservoirAperture, NsfSpec, WallThermal,
 };
 use fs_material::gas_species::input::{GasRecord, read_gas_record};
+use fs_material::gas::GasState;
 use fs_material::relaxation::{RelaxationAbsorption, input::medium_from_record};
 use fs_qty::semantic::{Composition, CompositionBasis};
+use fs_rep_mesh::TetComplex;
 use std::fs::OpenOptions;
 use std::sync::Arc;
 
@@ -56,6 +60,27 @@ const BAND_HZ: [f64; 2] = [20.0, 2_000.0];
 const CHAMBER_VOLUME_M3: f64 = 1e-5;
 const PEAK_VOLUME_RATE_M3_S: f64 = -1e-6;
 const PEAK_HEAT_POWER_W: f64 = 5e-4;
+
+// Both acoustic regions use the original complete mixed field, with explicit
+// planar ports in the supplied order. This helper only selects mesh faces; it
+// introduces no volume reduction or separate propagation law.
+fn acoustic_field<'c>(mesh: &'c TetComplex, points: &[[f64; 3]], gas: &GasState,
+    planes: &[(usize, f64)], gate: &CancelGate)
+    -> Result<ThermoviscousFe<'c>, Box<dyn std::error::Error>>
+{
+    let geometry = HelmholtzFe::new(mesh, points, 2,
+        Medium { density_kg_m3: gas.density, sound_speed_m_s: gas.sound_speed })?;
+    let faces = geometry.boundary_faces();
+    let openings: Vec<Vec<_>> = planes.iter().map(|&(axis, coordinate)|
+        faces.iter().copied().filter(|face| face.iter().all(|&v|
+            (points[v as usize][axis] - coordinate).abs() < 1e-14)).collect()).collect();
+    let walls: Vec<_> = faces.into_iter().filter(|face|
+        !openings.iter().any(|opening| opening.contains(face))).collect();
+    Ok(ThermoviscousFe::new(mesh, points, source_medium(gas, 0.0)?,
+        &ThermoviscousBoundary { no_slip_faces: walls.clone(), isothermal_faces: walls,
+            ports: openings.iter().map(|opening| BoundaryMode::uniform(opening)).collect() },
+        ThermoviscousLimits::default(), &mut || gate.is_requested())?)
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os().skip(1);
@@ -95,7 +120,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // Physical NSF box: [0,12dx] x [-32dx,0] x [0,5dx]. The high-y
     // lower half adjoins FE port 2 at y=0; its upper half keeps the original
-    // zero incoming characteristic. The FE and NSF occupy distinct volumes.
+    // zero incoming characteristic. The complete low-y face adjoins a separate
+    // upstream FE cavity ending at y=-32dx. All three volumes are disjoint.
     // Cell geometry below is a manufactured halfway-bounce-back staircase.
     let zone = NsfGrid3::<D3q27>::new(
         NsfSpec {
@@ -109,14 +135,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         |[x, y, _]| {
             // Both characteristic faces require two all-fluid collar layers.
-            // A wall behind the unused low-y collar isolates its ambient
-            // pocket: chamber gas cannot bypass the windway through that face.
-            let back_wall = y == 2;
+            // The low-y collar now connects to a closed acoustic assembly;
+            // no solid back wall may isolate that feedback from the plenum.
             let windway = (8..13).contains(&y) && !(5..7).contains(&x);
             // Seven fluid layers separate the windway exit and edge tip.
             // The wedge thickens above x=6; y=30,31 retain the fluid collar.
             let edge = (20..30).contains(&y) && x >= 6 && x < 7 + (y - 20) / 3;
-            back_wall || windway || edge
+            windway || edge
         },
         |_| (1.0, [0.0; 3], gas.temperature),
     )?.with_characteristic_axis(NsfCharacteristicAxis {
@@ -152,22 +177,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mesh, unit_points) = kuhn_cube(1);
     let points: Vec<_> = unit_points.iter()
         .map(|p| [p[0] * length, p[1] * height, p[2] * width]).collect();
-    let geometry = HelmholtzFe::new(&mesh, &points, 2,
-        Medium { density_kg_m3: gas.density, sound_speed_m_s: gas.sound_speed })?;
-    let faces = geometry.boundary_faces();
-    let opening = |axis: usize, coordinate: f64| faces.iter().copied().filter(|face|
-        face.iter().all(|&v| (points[v as usize][axis] - coordinate).abs() < 1e-14))
-        .collect::<Vec<_>>();
-    let cork_face = opening(0, 0.0);
-    let bore_face = opening(0, length);
-    let source_face = opening(1, 0.0);
-    let walls: Vec<_> = faces.iter().copied().filter(|face|
-        !cork_face.contains(face) && !bore_face.contains(face) && !source_face.contains(face)).collect();
-    let field = ThermoviscousFe::new(&mesh, &points, source_medium(&gas, 0.0)?,
-        &ThermoviscousBoundary { no_slip_faces: walls.clone(), isothermal_faces: walls,
-            ports: vec![BoundaryMode::uniform(&cork_face), BoundaryMode::uniform(&bore_face),
-                BoundaryMode::uniform(&source_face)] },
-        ThermoviscousLimits::default(), &mut || gate.is_requested())?;
+    let field = acoustic_field(&mesh, &points, &gas,
+        &[(0, 0.0), (0, length), (1, 0.0)], &gate)?;
     let source = ThermoviscousInterior::from_relaxation(field, molecular.clone(), BAND_HZ)?;
     let prepared = source.prepare_time(dt, ThermoviscousTimeLimits::default(),
         &mut || gate.is_requested())?;
@@ -187,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         segments: vec![Segment::Cylinder { radius, length: 0.02 }],
     }, &gas, DgMesh { elements: 2, order: 2 },
         DgBoundary::Port(PortId(0)), DgBoundary::Closed)?
-        .with_viscothermal(12, BAND_HZ, 0.01)?.with_molecular_relaxation(molecular)?;
+        .with_viscothermal(12, BAND_HZ, 0.01)?.with_molecular_relaxation(molecular.clone())?;
     let cork = DgPortLoad::new(cork, dt, 1e-11, MAX_DG_PROPAGATOR_DOFS)?;
     let acoustic = ThermoviscousDg::new(&source, prepared, bore, 1,
         ThermoviscousDgLimits { maximum_steps: intervals as u64,
@@ -195,6 +206,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..ThermoviscousDgLimits::default() }, &gate)?
         .with_additional_duct(0, cork, &gate)?;
     let load = ThermoviscousDgLoad::new(acoustic, 2, &gate)?;
+    // The upstream region occupies [0,12dx] x [-36dx,-32dx] x [0,5dx].
+    // Its port 1 faces the low-y NSF interface; port 0 leads farther outward
+    // into a finite closed passage. These are manufactured geometry data,
+    // not acquired player anatomy or an acoustically equivalent tract claim.
+    let upstream_width = DIMS[0] as f64 * dx;
+    let upstream_end = -(DIMS[1] as f64) * dx;
+    let upstream_start = upstream_end - 4.0 * dx;
+    let (upstream_mesh, upstream_unit) = kuhn_cube(1);
+    let upstream_points: Vec<_> = upstream_unit.iter().map(|p|
+        [p[0] * upstream_width, upstream_start + p[1] * 4.0 * dx, p[2] * width]).collect();
+    let upstream_field = acoustic_field(&upstream_mesh, &upstream_points, &gas,
+        &[(1, upstream_start), (1, upstream_end)], &gate)?;
+    let upstream_source = ThermoviscousInterior::from_relaxation(
+        upstream_field, molecular.clone(), BAND_HZ)?;
+    let upstream_prepared = upstream_source.prepare_time(dt, ThermoviscousTimeLimits::default(),
+        &mut || gate.is_requested())?;
+    let upstream_radius = fs_math::det::sqrt(upstream_width * width / std::f64::consts::PI);
+    let upstream_duct = DgDuct::new(&Duct {
+        segments: vec![Segment::Cylinder { radius: upstream_radius, length: 0.04 }],
+    }, &gas, DgMesh { elements: 2, order: 2 },
+        DgBoundary::Port(PortId(0)), DgBoundary::Closed)?
+        .with_viscothermal(12, BAND_HZ, 0.01)?.with_molecular_relaxation(molecular)?;
+    let upstream_duct = DgPortLoad::new(upstream_duct, dt, 1e-11, MAX_DG_PROPAGATOR_DOFS)?;
+    let upstream_acoustic = ThermoviscousDg::new(&upstream_source, upstream_prepared,
+        upstream_duct, 0, ThermoviscousDgLimits {
+            maximum_steps: intervals as u64, maximum_abs_pressure_pa: 100.0,
+            maximum_total_energy_j: 1e-4, ..ThermoviscousDgLimits::default()
+        }, &gate)?;
+    let upstream_load = ThermoviscousDgLoad::new(upstream_acoustic, 1, &gate)?;
     let system = NsfThermoviscousDg::new_on_patch(zone, load, true, NsfDgLimits {
         substeps: SUBSTEPS, maximum_cells: CELLS,
         maximum_cell_steps: CELLS * SUBSTEPS * EVALUATIONS,
@@ -218,19 +258,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminal_radial_rings: 8, terminal_angular_points: 32,
         pressure_bracket_pa: [-20.0, 20.0],
     };
-    let system = system.with_reservoir_radiation_at(1, mouth_radiation,
-        NsfDgRadiationSolve {
+    // One explicit policy solves downstream, passive escape and upstream
+    // efforts together. Both attachments require this SAME policy.
+    let joint_solve = NsfDgRadiationSolve {
             difference_step: 1e-5, maximum_iterations: 12,
             newton: fs_solver::NewtonKrylovConfig {
                 absolute_tolerance: 1e-8, relative_tolerance: 0.0,
-                linear_restart: 2, max_linear_cycles: 8,
+                linear_restart: 3, max_linear_cycles: 8,
                 forcing_minimum: 1e-5, forcing_maximum: 0.5,
                 forcing_gamma: 0.9, forcing_exponent: 1.5,
                 globalization: fs_solver::Globalization::LineSearch(fs_solver::LineSearchConfig {
                     armijo: 1e-4, contraction: 0.5, minimum_step: 1e-6,
                 }),
             },
-        }, &gate)?;
+        };
+    let system = system.with_upstream_load(upstream_load, joint_solve, &gate)?
+        .with_reservoir_radiation_at(1, mouth_radiation, joint_solve, &gate)?;
     // One gentle squeeze and explicit heating of the SAME finite gas owner.
     // Its held p/T comes from its accepted inventory, then actual NSF flux
     // and original midpoint heat/volume work update that inventory together.
@@ -266,11 +309,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         summary.samples, summary.clipped_samples, summary.full_scale_pa);
     println!("NSF dx={dx} m, coupled dt={physical_dt} s; pressure={} Pa, flow={} m^3/s",
         frame.inlet_pressure_pa, frame.inlet_flow_m3_s);
-    println!("acoustic storage={} J, balance={} J, projection covariance={} J, work residual={} J",
+    println!("downstream acoustic storage={} J, balance={} J, projection covariance={} J, work residual={} J",
         frame.acoustic_stored_energy_j, frame.acoustic_balance_residual_j,
         frame.projection_covariance_j, frame.acoustic_work_residual_j);
     println!("NSF mass change={} kg, total-energy change={} J, mass projection difference={} kg",
         frame.flow_mass_change_kg, frame.flow_energy_change_j, frame.mass_projection_difference_kg);
+    let upstream = frame.upstream.as_ref().ok_or("the accepted upstream field receipt is missing")?;
+    println!("upstream field: pressure={} Pa, outward source flow={} m^3/s, inlet work={} J, series source work={} J",
+        upstream.inlet_pressure_pa, upstream.inlet_flow_m3_s,
+        upstream.inlet_work_j, upstream.source_work_j);
+    println!("upstream field: acoustic storage={} J, balance={} J, pressure residual={} Pa, projection covariance={} J, work residual={} J",
+        upstream.acoustic_stored_energy_j, upstream.acoustic_balance_residual_j,
+        upstream.pressure_residual_pa, upstream.projection_covariance_j,
+        upstream.acoustic_work_residual_j);
     let escape = frame.reservoir_radiations.first()
         .filter(|mouth| mouth.resolved_exchange.aperture == 1)
         .ok_or("the accepted passive escape receipt is missing")?;
