@@ -1,5 +1,35 @@
 # CONTRACT: fs-conduction
 
+## Source-bound implicit finite-cell contact
+
+`transient::deposition::contact::implicit::PreparedMaterialContact` binds the
+original ordered material-contact source and caloric objects to the native
+implicit chain/graph. It pins the initial physical interface claim and compiles
+its canonical source line once, retaining every source knot and usage receipt.
+Constant scalars and linear curves in either side's temperature or liquid mass
+fraction, the declared mean temperature, or a fixed external coordinate are
+admitted. A source surface requires its own canonical gradient support and is
+explicitly refused by this entry point; no finite-difference source law or
+temperature/fraction mixing rule is inferred.
+
+Every trial uses original numeric caloric values and the complete analytic
+enthalpy chain rule. Mean-temperature response includes both half-weighted
+temperature derivatives; phase response remains active on a latent plateau.
+All original applicability bounds follow their actual two-sided coordinates,
+including coordinates absent from the value formula. Successful and refused
+runtime evaluations allocate nothing and perform no source query or hashing.
+Typed preparation/source failures remain available; the native trait preserves
+its `MaterialDomain` contract. Original reference receipts remain labelled as
+reference queries, while trial values are compiled numerical responses.
+
+The native thermal owner applies resistance once in series with actual bulk
+conductivity and owns the residual, Jacobian, energy, entropy and time history.
+Focused cross-owner regressions cover unequal-mass latent/sensible exchange,
+material-only resistance changes, simultaneous nonlinear bulk conductivity,
+constant-source compatibility, both-side temperature/phase tangents, source
+domain refusal, cancellation and clean retry. No pressure/gap/area evolution or
+interfacial heat storage is added by this stationary-contact reduction.
+
 ## Radiation rate bounds on the shared thermal timeline
 
 `RadiationCellSources::conductance_bounds_w_k` supplies conservative per-cell

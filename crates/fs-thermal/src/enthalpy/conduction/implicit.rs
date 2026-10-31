@@ -31,6 +31,11 @@ mod graph;
 use graph::LinearTopology;
 pub use graph::{ImplicitConductionGraph, ImplicitConductionLinearControls};
 
+/// Source-owned state-dependent contact resistance in the same implicit solve.
+#[path = "implicit/contact.rs"]
+pub mod contact;
+use contact::{ImplicitContactLaw, ImplicitContactState};
+
 /// One fused constitutive query, with derivatives on the same enthalpy chart.
 /// At a genuine corner the material owner explicitly selects its one-sided
 /// generalized derivative. The original residual still decides acceptance.
@@ -209,12 +214,14 @@ pub struct ImplicitConductionChain<'a> {
     ids: Vec<CellId>,
     index: BTreeMap<CellId, usize>,
     topology: LinearTopology,
+    contacts: BTreeMap<u64, &'a dyn ImplicitContactLaw>,
 }
 
 struct Endpoint {
     states: Vec<ImplicitConductionState>,
     link_values: BTreeMap<u64, f64>,
     reservoir_values: BTreeMap<CellId, f64>,
+    contacts: BTreeMap<u64, ImplicitContactState>,
 }
 
 impl<'a> ImplicitConductionChain<'a> {
@@ -272,6 +279,7 @@ impl<'a> ImplicitConductionChain<'a> {
             index: ids.iter().enumerate().map(|(i, &id)| (id, i)).collect(),
             ids,
             topology,
+            contacts: BTreeMap::new(),
         };
         result.admit(thermal, &mut checkpoint)?;
         result.endpoint(thermal, &mut checkpoint)?;
@@ -433,17 +441,38 @@ impl<'a> ImplicitConductionChain<'a> {
             states.push(state);
         }
         let mut link_values = BTreeMap::new();
+        let mut contacts = BTreeMap::new();
         for (&id, binding) in &self.conduction.links {
             checkpoint()?;
             let a = states[self.index[&binding.a]];
             let b = states[self.index[&binding.b]];
+            let resistance = if let Some(law) = self.contacts.get(&id) {
+                let enthalpies = [
+                    thermal.cells[&binding.a].specific_h_j_kg,
+                    thermal.cells[&binding.b].specific_h_j_kg,
+                ];
+                let bounds = law.enthalpy_bounds_j_kg();
+                if enthalpies
+                    .iter()
+                    .zip(bounds)
+                    .any(|(&h, [lo, hi])| !(lo..=hi).contains(&h))
+                {
+                    return Err(DepositionError::MaterialDomain.into());
+                }
+                let state = law.state_at_specific_enthalpies(enthalpies)?;
+                state.admit()?;
+                contacts.insert(id, state);
+                state.resistance_m2_k_w
+            } else {
+                binding.geometry.contact_resistance_m2_k_w
+            };
             link_values.insert(
                 id,
                 series_contact_conductance_w_k(
                     binding.area_m2,
                     binding.geometry.half_distances_m,
                     [a.conductivity_w_m_k, b.conductivity_w_m_k],
-                    binding.geometry.contact_resistance_m2_k_w,
+                    resistance,
                 )?,
             );
         }
@@ -469,6 +498,7 @@ impl<'a> ImplicitConductionChain<'a> {
             states,
             link_values,
             reservoir_values,
+            contacts,
         })
     }
 
@@ -553,8 +583,14 @@ impl<'a> ImplicitConductionChain<'a> {
             let a = endpoint.states[ia];
             let b = endpoint.states[ib];
             let g = endpoint.link_values[&id];
-            let ga = conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[0], a)?;
-            let gb = conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[1], b)?;
+            let mut ga =
+                conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[0], a)?;
+            let mut gb =
+                conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[1], b)?;
+            if let Some(contact) = endpoint.contacts.get(&id) {
+                ga = finite(ga + contact.conductance_derivative(g, link.area_m2, 0)?)?;
+                gb = finite(gb + contact.conductance_derivative(g, link.area_m2, 1)?)?;
+            }
             let difference = b.temperature_k - a.temperature_k;
             let qa = finite(
                 (ga * difference - g * a.temperature_slope_kg_k_j) / thermal.cells[&link.a].mass_kg,

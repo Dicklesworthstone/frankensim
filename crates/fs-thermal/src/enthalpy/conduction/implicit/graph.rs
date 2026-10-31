@@ -46,6 +46,19 @@ pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
 impl<'a> ImplicitConductionGraph<'a> {
+    /// Attach original two-sided contact laws to this same graph and nonlinear
+    /// residual. See the chain entry for binding and no-double-counting rules.
+    pub fn with_contacts(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        contacts: &[(u64, &'a dyn super::contact::ImplicitContactLaw)],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_contacts(thermal, contacts, checkpoint)?,
+        })
+    }
+
     /// Bind fixed cells/faces and the original caloric/conductivity objects.
     /// Invalid work controls, source domains or incomplete bindings refuse
     /// before any physical state changes.

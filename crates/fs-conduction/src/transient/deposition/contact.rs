@@ -13,6 +13,8 @@ use fs_qty::QuantitySpec;
 
 mod observer;
 pub use observer::{MaterialContactObserver, MaterialContactObserverError};
+/// Prepared original interface sources for native implicit chain/graph transport.
+pub mod implicit;
 
 /// Maximum contacts queried during one coefficient evaluation.
 pub const MAX_MATERIAL_NETWORK_CONTACTS: usize = 256;

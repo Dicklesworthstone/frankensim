@@ -4,6 +4,25 @@ Layer L3. Shared conservative thermal transport and solid/vapor exchange.
 Runtime dependencies: std, fs-la, fs-math, fs-solver. Spatial discretizations and material
 constitutive data remain owned by their existing crates.
 
+## State-dependent contact in implicit thermal networks
+
+`enthalpy::conduction::implicit::contact::ImplicitContactLaw` supplies positive
+area-specific contact resistance and its two specific-enthalpy derivatives on
+the original ordered caloric objects. Chain and graph `with_contacts` attachment
+requires unique active links and zero authored resistance on those links, so
+source and fixed contact resistance cannot be counted twice. Unselected links
+retain the original fixed-resistance path. Explicit zero resistance requires
+zero tangents; isolation still checks the source domain.
+
+The existing endpoint supplies `G=A/(d_a/k_a+R''+d_b/k_b)` to the same conservative
+backward-Euler residual. Each Jacobian column includes both its bulk-k response
+and `-G²/A * dR''/dh_i`, then divides by that cell's original mass for the native
+energy unknown. The resistance-fraction form avoids explicitly squaring G.
+Opposite heat rows retain opposite signs. No additional heat source, enthalpy
+storage, clock or nonlinear solver is introduced. The existing nonsymmetric
+graph solve, backtracking, entropy, energy gates and transactional refusal own
+acceptance. Interface geometry, pressure and interfacial storage remain fixed.
+
 ## Existing thermal timeline
 
 The enthalpy, advection, contact, observation and event APIs retain their
