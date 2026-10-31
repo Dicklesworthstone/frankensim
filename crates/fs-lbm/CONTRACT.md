@@ -803,6 +803,29 @@ rollback. Their addition does not establish executed native validation.
   original Guo source `S` and force-corrected velocity. Central moments thus
   receive `(I - Lambda/2) S` with each mode's own rate; reduced cumulants
   are evaluated in the physical frame with zero first central moments.
+  **`ReducedCumulant` is linearly unstable at rest for any field that varies
+  along all three axes** (pexfp.138). With third- and fourth-order rates 1
+  and `second_order_rate` 1.98807 (nu = 1e-3), with no wall and no force, a
+  seed grows at +4.09e-2 per step on a periodic 4 x 4 x 4 box, at
+  k = (pi, pi, pi/2), and at +5.11e-2 on 20 x 4 x 4, at k = (3pi/5, pi, pi).
+  From 1e-8 it reaches negative density within about 420 steps. At the
+  rates checked, fields uniform along any one axis don't grow.
+  - **Cause.** At rest the relaxed rows are Hermite polynomials. On D3Q19,
+    H220 and H002, and their permutations, have weighted inner product
+    -1/27: these are the eight corner velocities D3Q19 lacks. It is the only
+    overlap between rows relaxed at different rates. Without it the linear
+    step can't grow in the 1/w norm, at any wavenumber or any rates in (0, 2).
+  - **`CentralMoment` at `higher_order_rate` 1 also grows at rest** once
+    `second_order_rate` is above about 1.988, more slowly and at longer
+    wavelengths. It grows at +8.31e-4 per step at 1.98807 on 12 x 4 x 16.
+  - **`CollisionModel27::Cumulant` has no such overlap and shows no growth**
+    at rest at any wavenumber. This was checked with omega
+    [r, r, 1 x 8] and with ten unlike rates, and on two periodic boxes in
+    Rust.
+  - **Not covered:** shear, walls and mean flow.
+  - `tests/rest_wave_three_axes.rs` checks this: a three-axis density wave
+    grows on `ReducedCumulant` and decays on `Cumulant`, and its one-axis
+    twin decays on both.
   All paths reject invalid parameters or state before publication. On an
   x86-64 CPU with FMA, every cell runs the same body compiled under
   `target_feature(enable = "fma")` (the `d3q19/fma` capsule) instead of one

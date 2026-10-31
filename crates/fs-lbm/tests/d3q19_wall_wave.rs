@@ -177,6 +177,10 @@ fn seeded_rate(re: f64, settle: usize) -> f64 {
     rate
 }
 
+/// This reads a mixture, not the wall wave alone. Below the crossing near Re 319 two real
+/// modes trade character: at Re 251 the slowest mode is mostly a viscous mode of the
+/// resting fluid, about -8.3e-4 per step, and the wall wave is second at -2.69e-3. The
+/// fitted rate is a blend of the two. Both decay, so the assertion still holds.
 #[test]
 fn wall_wave_decays_at_re_251() {
     let rate = seeded_rate(250.0, SETTLE_RE_251);
