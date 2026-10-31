@@ -18,7 +18,7 @@ use fs_rand::philox::philox4x32_10;
 
 use super::mirrors::ConductorBeamError;
 use super::transport::{BeamError, BeamMedium, PolarizedBeam};
-use crate::conductor::ConductorOptics;
+use crate::conductor::{ConductorOptics, ConductorSurface};
 use crate::dielectric::{DielectricEvent, DielectricGlass, DielectricSurface};
 use crate::instances::{InstanceError, InstanceHit, InstanceScene};
 
@@ -43,6 +43,11 @@ pub enum Interaction {
     /// front/back coatings require distinct geometry bindings. No roughness or
     /// transmission into the opaque substrate is inferred.
     SmoothConductor { optics: usize, medium: usize },
+    /// Two-sided isotropic single-scattering GGX metal. Optical constants and
+    /// coherent coatings remain in the shared table, independent of roughness.
+    /// Native rejected microfacet samples terminate without resampling. This
+    /// does not model anisotropic brushing or a tilted shading normal.
+    RoughConductor { optics: usize, medium: usize, surface: ConductorSurface },
     /// A two-sided ideal receiver. Positive Q uses the world reference axis
     /// projected transverse to each arriving ray. A parallel axis is refused.
     /// No lens/pupil transformation or grazing-angle polarizer model is inferred.
@@ -200,7 +205,8 @@ impl<'a> PolarizedScene<'a> {
 
     /// Trace with externally supplied `[microfacet_u, microfacet_v, event]`
     /// samples. The callback receives the zero-based surface-event index and
-    /// is called only for dielectric hits, after geometry and medium admission.
+    /// is called only for dielectric or rough-conductor hits, after geometry
+    /// and medium admission. Rough metals use the first two samples only.
     /// This scene uses piecewise-homogeneous straight segments. A sampled
     /// gradient-index medium refuses at launch, before any traversal or sample;
     /// its curved boundary intersections are not implemented by this owner.
@@ -283,6 +289,23 @@ impl<'a> PolarizedScene<'a> {
                     // power is removed by the response, not a second roulette.
                     offset = settings.query_offset_m;
                 }
+                Interaction::RoughConductor { optics, medium, surface } => {
+                    if result.medium != medium {
+                        return Err(SceneError::MediumMismatch {
+                            object_id: hit.object_id, expected: medium, actual: result.medium,
+                        });
+                    }
+                    let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
+                    let draw = samples(event);
+                    let Some(next) = result.beam.sample_rough_conductor(
+                        normal, &self.conductors[optics], surface, [draw[0], draw[1]],
+                    )? else {
+                        result.termination = PathTermination::RejectedMicrofacet;
+                        return finish(cx, result);
+                    };
+                    result.beam = next.beam;
+                    offset = settings.query_offset_m;
+                }
                 Interaction::Dielectric { outside, inside, surface } => {
                     let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
                     let cosine = normal.dot(result.beam.ray().dir);
@@ -343,7 +366,8 @@ fn admit_bindings(
                     return Err(SceneError::InvalidBindings);
                 }
             }
-            Interaction::SmoothConductor { optics, medium } => {
+            Interaction::SmoothConductor { optics, medium }
+            | Interaction::RoughConductor { optics, medium, .. } => {
                 if optics >= conductor_count || medium >= media_count {
                     return Err(SceneError::InvalidBindings);
                 }
@@ -511,6 +535,57 @@ mod conductor_tests {
             close(reading.photopic_stokes_lm().v,expected);
             close(reading.circular_analyzer(true).unwrap().luminous_lm,expected);
             close(reading.circular_analyzer(false).unwrap().luminous_lm,0.0);
+        });
+    }
+
+    #[test]
+    fn g1_native_rough_metal_scene_matches_explicit_beam_and_receiver_path() {
+        with_cx(|cx| {
+            let geometry=geometry(); let media=[glass(0.1)]; let metal=metal();
+            let film=CoherentDielectricCoating::try_new(CauchyIor::try_constant(1.45).unwrap(),125e-9,metal.source()).unwrap();
+            let metals=[metal.with_coating(film)];
+            let surface=ConductorSurface::try_rough(0.4).unwrap();
+            let mut bindings=bindings(0);
+            bindings[0].interaction=Interaction::RoughConductor { optics:0,medium:0,surface };
+            let scene=PolarizedScene::try_new_with_conductors(&geometry,&media,&metals,bindings).unwrap();
+            let input=beam(media[0],550.0); let draw=[0.17,0.63];
+            let reflected=input.advance(1.0).unwrap().sample_rough_conductor(
+                Vec3::new(0.0,0.0,1.0),&metals[0],surface,draw,
+            ).unwrap().unwrap().beam;
+            let remaining=-2.0/reflected.ray().dir.z;
+            let expected=reflected.advance(remaining).unwrap().with_reference_axis(Vec3::new(1.0,0.0,0.0)).unwrap();
+            let mut calls=0;
+            let out=scene.trace_with_samples(cx,input,0,settings(),|event| {
+                assert_eq!(event,0); calls+=1; [draw[0],draw[1],0.5]
+            }).unwrap();
+            assert_eq!(calls,1); assert_eq!(out.termination(),PathTermination::Detected);
+            assert_eq!(out.last_hit().unwrap().object_id,2);
+            assert_eq!(out.medium_index(),0); close(out.traveled_m(),1.0+remaining);
+            for (a,b) in [out.beam().power().i,out.beam().power().q,out.beam().power().u,out.beam().power().v]
+                .into_iter().zip([expected.power().i,expected.power().q,expected.power().u,expected.power().v]) { close(a,b); }
+            assert_eq!(scene.trace(cx,input,0,settings(),31,42).unwrap(),
+                scene.trace(cx,input,0,settings(),31,42).unwrap());
+        });
+    }
+
+    #[test]
+    fn g0_scene_rough_metal_rejection_stops_without_retry_or_invented_absorption() {
+        with_cx(|cx| {
+            let geometry=geometry(); let media=[glass(0.1)]; let metals=[metal()];
+            let mut bindings=bindings(0);
+            bindings[0].interaction=Interaction::RoughConductor {
+                optics:0,medium:0,surface:ConductorSurface::try_rough(1.0).unwrap(),
+            };
+            assert!(matches!(PolarizedScene::try_new(&geometry,&media,bindings.clone()),Err(SceneError::InvalidBindings)));
+            let scene=PolarizedScene::try_new_with_conductors(&geometry,&media,&metals,bindings).unwrap();
+            let mut calls=0;
+            let out=scene.trace_with_samples(cx,beam(media[0],550.0),0,settings(),|_| {
+                calls+=1; [0.9,0.2,0.5]
+            }).unwrap();
+            assert_eq!(calls,1); assert_eq!(out.termination(),PathTermination::RejectedMicrofacet);
+            assert_eq!(out.surface_events(),1); assert_eq!(out.medium_index(),0);
+            close(out.traveled_m(),1.0);
+            close(out.beam().power().i,fs_math::det::exp(-0.1));
         });
     }
 }

@@ -12,7 +12,7 @@
 //! Internally localized events carry their explicit departure witness.
 //!
 //! Reflection/transmission use the local phase indices, native polarized
-//! smooth/GGX sampler and smooth conductor response. Boundary departure is
+//! smooth/GGX sampler and smooth/rough conductor responses. Boundary departure is
 //! propagated and counted in distance, optical lengths and absorption. Geometry and field
 //! snapshots stay fixed for an entire trace. This forward ray-power estimator
 //! supplies detector samples; it does not supply scalar camera/BDPT MIS
@@ -282,7 +282,8 @@ impl<'a> CurvedPolarizedScene<'a> {
     }
 
     /// Trace through the native clearance/event owner. The sampler is called
-    /// only after an admitted dielectric event and medium-side check.
+    /// only after an admitted dielectric or rough-conductor event and medium
+    /// check. Rough conductors use the first two samples; smooth metals use none.
     /// Boundary departure is physical propagation, not a discarded ray offset.
     pub fn trace_with_samples(
         &self,
@@ -450,6 +451,21 @@ impl<'a> CurvedPolarizedScene<'a> {
                         .map_err(SceneError::from)?
                         .beam;
                 }
+                Interaction::RoughConductor { optics, medium, surface } => {
+                    if result.medium != medium {
+                        return Err(SceneError::MediumMismatch {
+                            object_id: instance.object_id(), expected: medium, actual: result.medium,
+                        }.into());
+                    }
+                    let draw = samples(event);
+                    let Some(next) = result.beam.sample_rough_conductor(
+                        witness.normal, &self.conductors[optics], surface, [draw[0], draw[1]],
+                    ).map_err(SceneError::from)? else {
+                        result.termination = PathTermination::RejectedMicrofacet;
+                        break;
+                    };
+                    result.beam = next.beam;
+                }
                 Interaction::Dielectric {
                     outside,
                     inside,
@@ -526,3 +542,80 @@ fn checked_add(a: f64, b: f64) -> Result<f64, CurvedSceneError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod rough_conductor_tests {
+    use super::*;
+    use crate::charts::TriMesh;
+    use crate::conductor::ConductorSurface;
+    use crate::gradient_index::{GradientIndexOptions, GradientIndexSample};
+    use crate::instances::{GeometryInstance, RigidTransform, SharedGeometry};
+    use fs_exec::{CancelGate, ExecMode, StreamKey};
+    use fs_geom::Vec3;
+
+    struct VerticalIndex;
+    impl GradientIndexField for VerticalIndex {
+        fn sample(&self, p: Point3, _: f64) -> Result<GradientIndexSample, GradientIndexError> {
+            let n = 1.2 + 0.02 * p.z;
+            GradientIndexSample::try_new(n, Vec3::new(0.0,0.0,0.02), 0.1, Some(n))
+        }
+    }
+
+    #[test]
+    fn g1_rough_metal_uses_event_local_index_and_retains_gradient_snapshot() {
+        let gate = CancelGate::new();
+        fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
+            let cx = Cx::new(&gate, arena,
+                StreamKey { seed:31, kernel_id:7, tile:0, iteration:0 },
+                asupersync::types::Budget::INFINITE, ExecMode::Deterministic);
+            let plane = |id: u64, z: f64| GeometryInstance::try_new(id,
+                fs_blake3::hash_domain("org.frankensim.test.rough-gradient", &id.to_le_bytes()),
+                SharedGeometry::mesh(TriMesh::new(
+                    vec![[-10.0,-10.0,z],[10.0,-10.0,z],[0.0,10.0,z]],vec![[0,1,2]],
+                )), RigidTransform::identity()).unwrap();
+            let geometry = InstanceScene::try_new(vec![plane(1,1.0),plane(2,-1.0)]).unwrap();
+            let field = VerticalIndex;
+            let identity = ContentHash([42;32]);
+            let media = [SceneMedium::GradientIndex { field:&field, identity }];
+            let metals = [ConductorOptics::representative_tungsten()];
+            let bindings = vec![
+                SurfaceBinding { object_id:1, interaction:Interaction::RoughConductor {
+                    optics:0, medium:0, surface:ConductorSurface::try_rough(0.2).unwrap(),
+                } },
+                SurfaceBinding { object_id:2, interaction:Interaction::Detector {
+                    reference_axis:Vec3::new(1.0,0.0,0.0),
+                } },
+            ];
+            let scene = CurvedPolarizedScene::try_new_with_conductors(
+                &cx,&geometry,&media,&metals,bindings,100_000,
+            ).unwrap();
+            let input = scene.launch_beam(Point3::new(0.0,0.0,0.0),
+                PolarizationFrame::try_new(Vec3::new(0.0,0.0,1.0),Vec3::new(1.0,0.0,0.0)).unwrap(),
+                550.0,0,Stokes::try_new(1.0,0.0,0.0,1.0).unwrap()).unwrap();
+            let settings = CurvedTraceSettings {
+                max_surface_events:4, max_distance_m:4.0, max_total_steps:16_384, max_query_work:1_000_000,
+                event:GradientEventOptions {
+                    integration:GradientIndexOptions {
+                        position_tolerance_m:1e-11, direction_tolerance:1e-12,
+                        ..GradientIndexOptions::default()
+                    },
+                    surface_tolerance_m:1e-7, ..GradientEventOptions::default()
+                },
+            };
+            let mut calls = 0;
+            let out = scene.trace_with_samples(&cx,input,0,settings,|event| {
+                assert_eq!(event,0); calls += 1; [0.0,0.0,0.5]
+            }).unwrap();
+            assert_eq!(calls,1);
+            assert_eq!(out.termination(),PathTermination::Detected);
+            assert_eq!(out.medium_snapshot_identity(),Some(identity));
+            assert!(matches!(out.beam().medium(),BeamMedium::GradientIndex(_)));
+            assert!((out.traveled_m()-3.0).abs()<3e-6);
+            assert!((out.optical_path_length_m()-3.61).abs()<4e-6);
+            assert!((out.optical_depth()-0.3).abs()<1e-6);
+            let expected = metals[0].fresnel(550.0,1.22,1.0).unwrap()*(-0.3_f64).exp();
+            assert!((out.beam().power().i-expected).abs()<2e-6);
+            assert!((out.beam().power().v+expected).abs()<2e-6);
+        });
+    }
+}
