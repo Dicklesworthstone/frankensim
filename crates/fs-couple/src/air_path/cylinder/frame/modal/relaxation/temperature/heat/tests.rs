@@ -33,7 +33,7 @@ fn source(layer:usize,varying:bool)->(MaterialCard,ResolvedHeatCapacityCurve) {
         ("increment",Pressure::DIMS,[600.0,900.0][layer]),("time",Time::DIMS,tau),
         ("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS,CP)] {
         let curve=name=="time"&&varying;
-        let mut validity=ValidityDomain::unconstrained().with("T",290.0,340.0);
+        let mut validity=ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),290.0,340.0);
         if name=="time" {validity=validity.with("omega",0.0,10000.0);}
         claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),
             value:if curve {PropertyValue::Curve {abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
