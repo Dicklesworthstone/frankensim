@@ -10,6 +10,9 @@ use fs_qty::Frequency;
 #[path = "../../nsf3_thermochemical/source.rs"]
 mod gas_source;
 
+#[path = "rheology/quasisteady.rs"]
+mod quasisteady;
+
 fn point_at(t: f64) -> QueryPoint {
     point(t, 100000.0)
         .with_quantity("rate", QuantitySpec::dimensional(Frequency::DIMS), 0.0)

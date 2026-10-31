@@ -7,6 +7,9 @@
 
 use super::*;
 
+mod quasisteady;
+pub use quasisteady::{QuasisteadyRheologyControls, QuasisteadyRheologyReport};
+
 /// Immutable constitutive source on actual caloric and kinematic coordinates.
 /// Implementations must retain original source claims and refuse unsupported
 /// states. They must not mutate shared external physical history. Exact solids
@@ -39,6 +42,8 @@ where
 pub(super) struct RheologyBinding<'a, F> {
     source: &'a dyn FlowRheologySource<F>,
     pub(super) rates: Vec<f64>,
+    quasisteady: Option<QuasisteadyRheologyControls>,
+    report: Option<QuasisteadyRheologyReport>,
 }
 
 impl<'a, F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot>
@@ -79,6 +84,8 @@ where
         self.rheology = Some(RheologyBinding {
             source,
             rates: Vec::new(),
+            quasisteady: None,
+            report: None,
         });
         self.endpoint = self.sample_materials(thermal, &mut || Ok(()))?;
         admit_density(&self.endpoint, self.density_kg_m3)?;
@@ -90,6 +97,9 @@ where
 
     /// Accepted endpoint rates in native voxel order. Source-start rates are
     /// retained separately on `applied()`, matching its physical coefficients.
+    /// Before a quasisteady advance this is the explicitly admitted initial
+    /// seed; after it, this is the actual solved rate, not a new thermal-endpoint
+    /// equilibrium solve. The next source epoch closes that equilibrium.
     pub fn endpoint_shear_rate_per_s(&self) -> Option<&[f64]> {
         self.rheology
             .as_ref()
@@ -114,17 +124,21 @@ where
             );
         };
         let source = binding.source;
-        let owner = self
-            .unsteady
-            .as_ref()
-            .ok_or(invalid("native rheology lost its momentum owner"))?;
-        let active = self.momentum_domain(&self.endpoint, check)?;
-        let domain = active.as_ref().unwrap_or(self.domain);
-        let mut rates = if domain.fluid_count() == 0 {
-            vec![0.0; domain.cell_count()]
+        let mut rates = if binding.quasisteady.is_some() {
+            binding.rates.clone()
         } else {
-            let fluid = self.reference.map(|_| self.reference_fluid()).transpose()?;
-            owner.shear_rates(domain, fluid.as_ref(), self.config, self.gate)?
+            let owner = self
+                .unsteady
+                .as_ref()
+                .ok_or(invalid("native rheology lost its momentum owner"))?;
+            let active = self.momentum_domain(&self.endpoint, check)?;
+            let domain = active.as_ref().unwrap_or(self.domain);
+            if domain.fluid_count() == 0 {
+                vec![0.0; domain.cell_count()]
+            } else {
+                let fluid = self.reference.map(|_| self.reference_fluid()).transpose()?;
+                owner.shear_rates(domain, fluid.as_ref(), self.config, self.gate)?
+            }
         };
         let phase_law = self.exact_phase.then_some(self.mushy).flatten();
         let mut resolve = |voxel: usize, cell: &DepositedCell, temperature: f64| {

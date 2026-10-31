@@ -3808,6 +3808,53 @@ closed single-phase Boussinesq/Stokes restrictions and introduces no additional
 solver, state clock or gravitational-potential reservoir. Its actual entry tests
 cover material source identity, bounded support and data-only coupled response.
 
+### Quasisteady source rheology closes native pressure flow and heat
+
+`MaterialFlowFeedback::with_quasisteady_rheology` and the original pinned
+`LiquidFlowRheology::quasisteady_feedback` bind a declared per-voxel rate seed
+to the existing source/flow/enthalpy owner. Zero shear is not presumed to lie
+in source support. Before advancing, select the original closed viscous/body
+heating or opposed reservoir pressure-work heating mode. This is an additional
+explicit constitutive closure; the retained, time-lagged mode below is unchanged.
+
+At fixed source-start enthalpy and temperature, each trial resolves the SAME
+source, rebuilds viscosity and viscosity-dependent mushy/porous resistance,
+and runs the original native Stokes and physical-power gates. Unit molecular
+quadrature observes actual cell-volume RMS `sqrt(2 D:D)` from the returned
+MAC fluxes, including graded reciprocal shear, no-slip half cells and the
+pressure-work mouth half-edges. Darcy loss, forcing and numerical residuals
+are not kinematic strain. Re-querying the immutable material at this ACTUAL
+rate must succeed before any relaxation; unsupported physical states cannot
+be hidden by damping the next source coordinate.
+
+`QuasisteadyRheologyControls` bounds constitutive iterations, absolute/relative
+rate error, relative viscosity/conductivity/Cp mismatch, and convex relaxation
+of the next rate query. Both rate and transport closure are required. Every
+actual native trial also consumes the original `max_solves` budget. No trial
+calls wrapped source, conductance or thermal-step hooks. Only the final source
+epoch, its original physical heat and actual advective flux reach those owners.
+Rate-dependent conductivity therefore enters the original half-cell series
+conductance and conductive/advective CFL using the SAME accepted source query.
+
+`applied().shear_rate_per_s` retains the coordinates actually queried for those
+applied coefficients; `quasisteady_rheology_report()` exposes their bounded
+discrepancy from solved rates. `endpoint_shear_rate_per_s()` retains the actual
+solved rate. The thermal endpoint is re-admitted at that rate and its actual
+new temperature, without claiming a second equilibrium solve at the endpoint.
+The next thermal source epoch closes that new equilibrium. Source, nonlinear
+or native budgets, arithmetic/power refusal and cancellation preserve the
+entire original accepted thermal, flow and wrapped-observer state.
+
+This remains the admitted fixed-geometry/reference-mass incompressible caloric
+Stokes approximation. It adds no material memory, yield evolution, open
+kinetic-energy store, universal convergence or uniqueness certificate. The
+cell-RMS constitutive reduction and explicit thermal split require spatial and
+temporal refinement. Focused fixtures use independent affine-source channel
+and circulation roots, data-only material swaps, distinct seeds/directions,
+rate-dependent heat conduction, thermal feedback, stream enthalpy, constant
+source parity, observer counts and rollback. Source/parser validation does not
+substitute for native test execution or measured rheology validation.
+
 ### Source rheology on the retained momentum and enthalpy timeline
 
 `LiquidFlowRheology` binds the original pinned liquid, density and caloric

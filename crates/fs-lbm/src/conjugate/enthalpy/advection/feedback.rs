@@ -119,9 +119,11 @@ pub struct FlowMaterialSample<F, T = FluidTransportState> {
 pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     pub time_s: f64,
     pub samples: Vec<FlowMaterialSample<F, T>>,
-    /// Cell-volume RMS sqrt(2 D:D) [1/s] of the accepted starting MAC state.
-    /// Present only with explicit native rheology; these rates queried the
-    /// SAME material coefficients used by momentum, conductivity and heat.
+    /// Cell-volume RMS sqrt(2 D:D) source coordinates [1/s]. Retained rheology
+    /// uses its accepted starting MAC state; quasisteady rheology closes these
+    /// queries against the actual returned flow within explicit rate/transport
+    /// tolerances. These rates queried the SAME coefficients used by momentum,
+    /// conductivity and heat; endpoint rates remain a separate observation.
     pub shear_rate_per_s: Option<Vec<f64>>,
     pub flow: FvFlow,
     /// Applied `(rho(T)-rho0)*g` [N/m³] in native voxel order, zero on solids.
@@ -760,89 +762,14 @@ where
         self.advected.expect("accepted observer").into_inner()
     }
 
-    fn check_map(
-        &self,
-        thermal: &DepositionSimulation<'_>,
-        check: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(), MaterialFlowError<O::Error>> {
-        check_gate(self.gate, check)?;
-        admit_map(thermal, self.domain, self.density_kg_m3, self.input, check)?;
-        self.check_fluid_conduction(thermal, check)?;
-        Ok(())
-    }
-}
-
-impl<F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot> DepositionObserver
-    for MaterialFlowFeedback<'_, F, R, O, T>
-where
-    R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
-{
-    type Error = MaterialFlowError<O::Error>;
-
-    fn begin(&mut self) -> Result<(), Self::Error> {
-        self.advected
-            .as_mut()
-            .ok_or(invalid("unfinished material-flow source epoch"))?
-            .begin()
-            .map_err(MaterialFlowError::Inner)?;
-        self.audit = AdvectionAudit::default();
-        if let Some(owner) = &mut self.viscous_heating {
-            owner.begin();
-        }
-        if let Some(owner) = &mut self.unsteady {
-            owner.begin_advance()?;
-        }
-        self.solves = 0;
-        Ok(())
-    }
-
-    fn requires_step_interval(&self) -> bool {
-        self.unsteady
-            .as_ref()
-            .is_some_and(MaterialMomentum::has_heating)
-            || self
-                .advected
-                .as_ref()
-                .is_some_and(|inner| inner.requires_step_interval())
-    }
-
-    fn step_sources(
-        &mut self,
-        thermal: &DepositionSimulation<'_>,
-        start_s: f64,
-        dt_s: f64,
-        end_s: f64,
-        check: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        check_gate(self.gate, check)?;
-        // Always forward duration-dependent inner sources, including when
-        // this observer has no physical momentum-heating attachment.
-        let mut sources = self
-            .advected
-            .as_mut()
-            .ok_or(invalid("missing material-flow source epoch"))?
-            .step_sources(thermal, start_s, dt_s, end_s, check)
-            .map_err(MaterialFlowError::Inner)?;
-        let heat = self.prepare_unsteady_heat(thermal, start_s, dt_s, end_s, check)?;
-        for (cell, watts) in heat {
-            check_gate(self.gate, check)?;
-            let value = sources.entry(cell).or_insert(0.0);
-            *value += watts;
-            if !value.is_finite() {
-                return Err(DepositionError::Arithmetic.into());
-            }
-        }
-        check_gate(self.gate, check)?;
-        Ok(sources)
-    }
-
-    fn sources(
+    /// Resolve coefficients and native momentum without touching the wrapped
+    /// thermal observer. Nonlinear source iteration reuses this exact stage;
+    /// only its final epoch can become an advective graph or heat source.
+    fn solve_material_flow_epoch(
         &mut self,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.check_map(thermal, check)?;
-        self.check_unsteady_start(thermal, check)?;
+    ) -> Result<(MaterialFlowEpoch<F, T>, Option<FluidTransportState>), MaterialFlowError<O::Error>> {
         let samples = self.sample_materials(thermal, check)?;
         admit_density(&samples, self.density_kg_m3)?;
         self.check_phase_conduction(&samples, check)?;
@@ -1017,8 +944,112 @@ where
         };
         check_gate(self.gate, check)?;
         self.admit_forchheimer_speed(&porous_samples, &flow, check)?;
+        let epoch = MaterialFlowEpoch {
+            time_s: thermal.time_s(),
+            samples,
+            shear_rate_per_s: self.rheology.as_ref().map(|source| source.rates.clone()),
+            flow,
+            buoyancy_force_n_m3,
+            buoyancy_support_reaction_n_m3,
+            external_force_n_m3: self.external_force_n_m3.clone(),
+            mushy_drag_pa_s_m2,
+            porous_samples,
+            darcy_resistance_pa_s_m2,
+            forchheimer_resistance,
+            viscous_power,
+        };
+        self.solves += usize::from(native_solve);
+        Ok((epoch, reference))
+    }
+
+    fn check_map(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), MaterialFlowError<O::Error>> {
+        check_gate(self.gate, check)?;
+        admit_map(thermal, self.domain, self.density_kg_m3, self.input, check)?;
+        self.check_fluid_conduction(thermal, check)?;
+        Ok(())
+    }
+}
+
+impl<F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot> DepositionObserver
+    for MaterialFlowFeedback<'_, F, R, O, T>
+where
+    R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
+{
+    type Error = MaterialFlowError<O::Error>;
+
+    fn begin(&mut self) -> Result<(), Self::Error> {
+        self.advected
+            .as_mut()
+            .ok_or(invalid("unfinished material-flow source epoch"))?
+            .begin()
+            .map_err(MaterialFlowError::Inner)?;
+        self.audit = AdvectionAudit::default();
+        if let Some(owner) = &mut self.viscous_heating {
+            owner.begin();
+        }
+        if let Some(owner) = &mut self.unsteady {
+            owner.begin_advance()?;
+        }
+        self.solves = 0;
+        Ok(())
+    }
+
+    fn requires_step_interval(&self) -> bool {
+        self.unsteady
+            .as_ref()
+            .is_some_and(MaterialMomentum::has_heating)
+            || self
+                .advected
+                .as_ref()
+                .is_some_and(|inner| inner.requires_step_interval())
+    }
+
+    fn step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        check_gate(self.gate, check)?;
+        // Always forward duration-dependent inner sources, including when
+        // this observer has no physical momentum-heating attachment.
+        let mut sources = self
+            .advected
+            .as_mut()
+            .ok_or(invalid("missing material-flow source epoch"))?
+            .step_sources(thermal, start_s, dt_s, end_s, check)
+            .map_err(MaterialFlowError::Inner)?;
+        let heat = self.prepare_unsteady_heat(thermal, start_s, dt_s, end_s, check)?;
+        for (cell, watts) in heat {
+            check_gate(self.gate, check)?;
+            let value = sources.entry(cell).or_insert(0.0);
+            *value += watts;
+            if !value.is_finite() {
+                return Err(DepositionError::Arithmetic.into());
+            }
+        }
+        check_gate(self.gate, check)?;
+        Ok(sources)
+    }
+
+    fn sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.check_map(thermal, check)?;
+        self.check_unsteady_start(thermal, check)?;
+        let (epoch, reference) = self.solve_rheology_epoch(thermal, check)?;
+        let active_domain = self.momentum_domain(&epoch.samples, check)?;
+        let domain = active_domain.as_ref().unwrap_or(self.domain);
         let (flows, boundaries) =
-            mass_graph(domain, &flow.field, self.density_kg_m3, self.input, check)?;
+            mass_graph(domain, &epoch.flow.field, self.density_kg_m3, self.input, check)?;
         let old = self
             .advected
             .take()
@@ -1030,8 +1061,8 @@ where
         let mut sources = advected
             .sources(thermal, check)
             .map_err(MaterialFlowError::Inner)?;
-        if let Some(power) = &viscous_power {
-            for sample in &samples {
+        if let Some(power) = &epoch.viscous_power {
+            for sample in &epoch.samples {
                 check_gate(self.gate, check)?;
                 let heat = power.cell_heat_w[sample.voxel];
                 if heat != 0.0 {
@@ -1045,21 +1076,7 @@ where
         }
         self.advected = Some(advected);
         self.reference = reference;
-        self.applied = Some(MaterialFlowEpoch {
-            time_s: thermal.time_s(),
-            samples,
-            shear_rate_per_s: self.rheology.as_ref().map(|source| source.rates.clone()),
-            flow,
-            buoyancy_force_n_m3,
-            buoyancy_support_reaction_n_m3,
-            external_force_n_m3: self.external_force_n_m3.clone(),
-            mushy_drag_pa_s_m2,
-            porous_samples,
-            darcy_resistance_pa_s_m2,
-            forchheimer_resistance,
-            viscous_power,
-        });
-        self.solves += usize::from(native_solve);
+        self.applied = Some(epoch);
         Ok(sources)
     }
 

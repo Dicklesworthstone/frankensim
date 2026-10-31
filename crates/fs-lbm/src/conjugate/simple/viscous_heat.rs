@@ -363,6 +363,46 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
     Ok((flow, power))
 }
 
+/// Kinematic observation of an already solved physical field. The unit
+/// molecular coefficient removes viscosity weighting while preserving every
+/// original cell, shear edge, wall and opt-in reservoir mouth quadrature.
+/// This neither solves momentum nor creates a thermal source.
+#[cfg(feature = "enthalpy-coupling")]
+pub(in crate::conjugate) fn physical_flow_shear_rates(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    field: &FlowField,
+    config: &SimpleConfig,
+    controls: ViscousHeatControls,
+    pressure_work: bool,
+    gate: &CancelGate,
+) -> Result<Vec<f64>, ChtError> {
+    let pressure_work_axis = if pressure_work {
+        Some(pressure::admit_pressure_work_heating(domain, config, controls)?)
+    } else {
+        admit_heating(domain, config, controls)?;
+        None
+    };
+    let mut unit = *fluid;
+    unit.kinematic_viscosity_m2_s = 1.0 / unit.density_kg_m3;
+    let mut sampler = material_solver(
+        domain, &unit, &vec![1.0; domain.cell_count()], None, None, config, gate,
+    )?;
+    sampler.pressure_work_axis = pressure_work_axis;
+    for (a, fluxes) in field.face_arrays().into_iter().enumerate() {
+        if fluxes.len() != sampler.vel[a].len() {
+            return Err(invalid_power("physical shear field differs from the original native grid"));
+        }
+        for (i, flux) in fluxes.iter().enumerate() {
+            if i % 256 == 0 { poll(gate)?; }
+            sampler.vel[a][i] = finite_value(
+                "rheology.physical_velocity", *flux / sampler.comp_face_area(a, i),
+            )?;
+        }
+    }
+    sampler.molecular_shear_rates(gate)
+}
+
 impl Solver<'_> {
     // One source-based Reynolds bound for old and new native face fields.
     fn source_reynolds(&self, velocities: &[Vec<f64>; 3]) -> Result<f64, ChtError> {

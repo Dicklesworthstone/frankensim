@@ -1,7 +1,7 @@
 //! Same pinned liquid/caloric bundle as ordinary thermal feedback, with an
 //! explicit physical shear-rate axis owned by native staggered momentum.
 
-use super::super::feedback::rheology::FlowRheologySource;
+use super::super::feedback::rheology::{FlowRheologySource, QuasisteadyRheologyControls};
 use super::*;
 
 /// Immutable source binding; no independent material table or caloric chart.
@@ -24,6 +24,46 @@ impl<'a> LiquidFlowRheology<'a> {
             input,
             rate_axis: rate_axis.to_owned(),
         })
+    }
+
+    /// Bind this original liquid/caloric bundle to quasisteady constitutive
+    /// closure. Supply one declared initial physical rate per voxel, then
+    /// select `with_pressure_work_heating`, `with_viscous_heating` or
+    /// `with_body_force_heating` on the returned owner before advancing.
+    /// Every trial consumes the original max_solves budget; wrapped source,
+    /// conduction, advection and heat hooks receive only the converged epoch.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn quasisteady_feedback<'s, O: DepositionObserver>(
+        &'s self,
+        thermal: &DepositionSimulation<'_>,
+        domain: &'s VoxelDomain,
+        config: &'s SimpleConfig,
+        inner: O,
+        gate: &'s CancelGate,
+        max_solves: usize,
+        initial_shear_rate_per_s: Vec<f64>,
+        controls: QuasisteadyRheologyControls,
+    ) -> Result<
+        MaterialFlowFeedback<
+            's,
+            ResolvedLiquidState,
+            impl Clone
+            + FnMut(usize, &DepositedCell, f64) -> Result<ResolvedLiquidState, MaterialError>
+            + use<'s, 'a, O>,
+            O,
+        >,
+        MaterialFlowError<O::Error>,
+    > {
+        // The already admitted source reference initializes the common owner;
+        // the explicit physical seeds below immediately replace that query.
+        let rate = self.input.liquid.reference_point().axes()[&self.rate_axis];
+        let resolve = move |voxel, cell: &DepositedCell, temperature| {
+            self.resolve(voxel, cell, temperature, rate)
+        };
+        MaterialFlowFeedback::try_new(
+            thermal, domain, self.input.native(), config, inner, gate, max_solves, resolve,
+        )?
+        .with_quasisteady_rheology(thermal, self, initial_shear_rate_per_s, controls)
     }
 
     /// Create the original retained MAC/enthalpy owner at rest and immediately
