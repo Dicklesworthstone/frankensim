@@ -26,7 +26,7 @@ pub const OVERSTRESS_EXPONENT_PROPERTY: &str = "plastic_overstress_exponent";
 /// Nonlinear kinetics with the original J2 history and explicit physical time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PowerLawOverstressJ2 {
-    linear: LinearOverstressJ2,
+    pub(super) linear: LinearOverstressJ2,
     stress_scale_pa: f64,
     exponent: f64,
 }

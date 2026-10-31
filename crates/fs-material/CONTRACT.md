@@ -8317,3 +8317,12 @@ admitted only with the zero tangent required by the native implicit owner.
 Constitutive regressions cover source crossings, one-sided tangents, original
 caloric values, insulation, source/domain refusals and cancelled preparation;
 cross-owner latent transport and contact tests live in `fs-couple`.
+
+
+## Joint Voce hardening and Perzyna overstress
+
+`plastic::rate::VoceOverstressJ2` jointly integrates independently selected Voce saturation and linear or power-law associative overstress at an explicit physical duration. Its single consistency equation includes the elastic/linear-hardening correction, the exact incremental Voce strength and the inverse kinetic stress. Summed secants feed the original J2 tensor return; summed endpoint derivatives feed its consistent tangent. No intermediate rate-independent return commits or changes incoming history. The linear case reuses the native Voce solve; nonlinear kinetics use a safeguarded logarithmic bracket with a 96-iteration ceiling and no per-response heap allocation.
+
+Physical dissipation is `(sigma_y + f_visc) delta_alpha`. Recoverable saturation energy and its convex backward-Euler remainder retain their original storage and numerical accounts. Q=0 delegates exactly to the original selected rate law; n=1 recovers linear kinetics. Explicit positive viscosity/duration/stress normalization, n>=1, finite native histories and the declared small-strain ceiling remain mandatory. Nonlinear Chaboche recovery, sub-yield creep, finite deformation and empirical calibration are outside this law.
+
+`tests/plastic_voce_overstress.rs` verifies independently prescribed joint rates, all tangent components under reversal, cyclic work partitions, exact reductions, a closed-form constant-stress Voce creep solution with first-order refinement, tiny representable rate increments and invalid input refusal. Focused native execution does not qualify the whole Cargo workspace or the live cancellation runtime.

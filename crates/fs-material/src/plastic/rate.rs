@@ -19,6 +19,8 @@ use fs_qty::Dims;
 
 mod power;
 pub use power::{PowerLawOverstressJ2, OVERSTRESS_EXPONENT_PROPERTY, OVERSTRESS_STRESS_SCALE_PROPERTY};
+mod voce;
+pub use voce::VoceOverstressJ2;
 
 /// The selected kinetic law; both variants retain the native J2 history and
 /// energetic hardening. Kept internal to the shared thermal dispatch.
@@ -26,6 +28,7 @@ pub use power::{PowerLawOverstressJ2, OVERSTRESS_EXPONENT_PROPERTY, OVERSTRESS_S
 pub(crate) enum OverstressJ2 {
     Linear(LinearOverstressJ2),
     PowerLaw(PowerLawOverstressJ2),
+    Voce(VoceOverstressJ2),
 }
 impl OverstressJ2 {
     pub(crate) fn advance_with_energy(&self, old_strain: &Voigt, old_state: &J2State,
@@ -33,28 +36,29 @@ impl OverstressJ2 {
         match self {
             Self::Linear(law) => law.advance_with_energy(old_strain, old_state, strain, tolerances),
             Self::PowerLaw(law) => law.advance_with_energy(old_strain, old_state, strain, tolerances),
+            Self::Voce(law) => law.advance_with_energy(old_strain, old_state, strain, tolerances),
         }
     }
 }
 impl SmallStrainLaw for OverstressJ2 {
     type State = J2State;
     fn initial_state(&self) -> J2State {
-        match self { Self::Linear(law) => law.initial_state(), Self::PowerLaw(law) => law.initial_state() }
+        match self { Self::Linear(law) => law.initial_state(), Self::PowerLaw(law) => law.initial_state(), Self::Voce(law) => law.initial_state() }
     }
     fn stress(&self, strain: &Voigt, state: &J2State) -> Voigt {
-        match self { Self::Linear(law) => law.stress(strain, state), Self::PowerLaw(law) => law.stress(strain, state) }
+        match self { Self::Linear(law) => law.stress(strain, state), Self::PowerLaw(law) => law.stress(strain, state), Self::Voce(law) => law.stress(strain, state) }
     }
     fn tangent(&self, strain: &Voigt, state: &J2State) -> Tangent6 {
-        match self { Self::Linear(law) => law.tangent(strain, state), Self::PowerLaw(law) => law.tangent(strain, state) }
+        match self { Self::Linear(law) => law.tangent(strain, state), Self::PowerLaw(law) => law.tangent(strain, state), Self::Voce(law) => law.tangent(strain, state) }
     }
     fn update_state(&self, strain: &Voigt, state: &J2State) -> J2State {
-        match self { Self::Linear(law) => law.update_state(strain, state), Self::PowerLaw(law) => law.update_state(strain, state) }
+        match self { Self::Linear(law) => law.update_state(strain, state), Self::PowerLaw(law) => law.update_state(strain, state), Self::Voce(law) => law.update_state(strain, state) }
     }
     fn admissibility(&self) -> MaterialAdmissibility {
-        match self { Self::Linear(law) => law.admissibility(), Self::PowerLaw(law) => law.admissibility() }
+        match self { Self::Linear(law) => law.admissibility(), Self::PowerLaw(law) => law.admissibility(), Self::Voce(law) => law.admissibility() }
     }
     fn card(&self) -> ModelCard {
-        match self { Self::Linear(law) => law.card(), Self::PowerLaw(law) => law.card() }
+        match self { Self::Linear(law) => law.card(), Self::PowerLaw(law) => law.card(), Self::Voce(law) => law.card() }
     }
 }
 

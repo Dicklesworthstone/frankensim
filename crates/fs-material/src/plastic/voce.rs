@@ -80,8 +80,17 @@ impl VoceJ2 {
         self.rate_per_strain
     }
 
-    fn saturation_strength(&self, alpha: f64) -> f64 {
+    pub(super) fn saturation_strength(&self, alpha: f64) -> f64 {
         self.saturation_pa * -det::expm1(-self.rate_per_strain * alpha)
+    }
+
+    /// Stable incremental hardening slope, including the zero-increment limit.
+    /// Shared by the rate-independent and combined overstress returns.
+    pub(super) fn saturation_secant_pa(&self, alpha: f64, delta: f64) -> f64 {
+        let x = self.rate_per_strain * delta;
+        let ratio = if x == 0.0 { 1.0 } else { -det::expm1(-x) / x };
+        self.saturation_pa * self.rate_per_strain
+            * det::exp(-self.rate_per_strain * alpha) * ratio
     }
 
     /// Isotropic hardening force H alpha + Q (1-exp(-b alpha)) [Pa].
@@ -230,12 +239,7 @@ impl VoceJ2 {
         if !delta.is_finite() || delta <= 0.0 {
             return (shifted, f64::NAN);
         }
-        let x = self.rate_per_strain * delta;
-        let ratio = if x == 0.0 { 1.0 } else { -det::expm1(-x) / x };
-        let secant = self.saturation_pa
-            * self.rate_per_strain
-            * det::exp(-self.rate_per_strain * state.alpha)
-            * ratio;
+        let secant = self.saturation_secant_pa(state.alpha, delta);
         (shifted, secant)
     }
 
