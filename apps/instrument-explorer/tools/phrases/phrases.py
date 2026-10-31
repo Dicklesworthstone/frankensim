@@ -7,7 +7,7 @@ cello, double-bass and voice phrases of 2026-10-30: d49a124c2); nothing is tuned
   bowed   one card per note: the open-string card with the string shortened to 2^(-n/12) of its length
           (a rigid stop, no finger), mode count scaled so the top mode stays where the open string's was,
           its own duration and a bow lift at the end. Double stops are two cards in one `ensemble` run.
-  wind    the fingering's own file with its duration and attack/release moved; nothing else changes.
+  wind    the fingering's own file with its duration and release moved (the attack stays the card's); nothing else changes.
   voice   the vowel/pitch yielding-wall file render.sh grades, with its duration and subglottal schedule moved, and the
           sung phrases' vibrato (a fold-tension gesture, VIBRATO below) added; the graded straight tones have none.
   lip     ONE render per phrase: the head plus a gesture schedule that steps lip pre-stress and tongues
@@ -205,7 +205,10 @@ for fam, f in BOWED.items():
 # ---------------------------------------------------------------- flues (tin whistle, pan pipes)
 
 
-def wind_note(fam, stem, dur, attack=0.03):
+# The attack is the card's own first pressure event, as the graded and listening notes play it: the whistle's is the
+# cited player rise (Ernoult and Fabre 2017, recorder players, by analogy), the pan pipes' an authored ramp the card's
+# unknowns declare. Only the note's length and release move.
+def wind_note(fam, stem, dur):
     base = read(f"{SRC}/{fam}/{stem}.performance")
     out = []
     n_audio = round((dur + 0.3) * 48000)
@@ -213,9 +216,6 @@ def wind_note(fam, stem, dur, attack=0.03):
         if l.startswith("output "):
             o = l.split()
             out.append(" ".join(["output", str(n_audio)] + o[2:]))
-        elif l.startswith("event\t0e0\t") and "pressure-pa" in l:
-            p = l.split("\t")
-            out.append("\t".join([p[0], p[1], e(attack)] + p[3:]))
         elif l.startswith("event\t") and l.rstrip().endswith("0e0") and "pressure-pa" in l:
             p = l.split("\t")
             out.append("\t".join([p[0], e(dur)] + p[2:]))
