@@ -89,6 +89,10 @@ pub struct RelaxationHeatReport<S = ()> {
     /// Original additional transport payload at the accepted thermal endpoint.
     /// None on the ordinary bulk path; never a discarded nonlinear trial.
     pub transport_source: Option<S>,
+    /// Prescribed mass-carried enthalpy evaluated at this accepted endpoint.
+    /// Inlet/outlet energy is already part of external_thermal_heat_j; internal
+    /// recirculation is not external heating. None on the non-advected path.
+    pub enthalpy_flow: Option<transport::RelaxationEnthalpyFlow>,
     pub mechanical:CoupledModalFrame,
     /// Native circuit storage, work, currents and branch heat when bound.
     pub electrical:Option<crate::material_circuit::MaterialCircuitStep>,
@@ -354,14 +358,14 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
                 let layers:Vec<_>=receivers.iter().map(|r|RelaxationLayerHeat {destination:r.destination,heat_j:heat[r.group]}).collect();
                 let (candidate,next_circuit,audit,entropy)=cell_driver_candidate_entropy_option(thermal,target,controls(solve),energy_guess_j,
                     |trial,_remaining| -> Result<_> {
-                        let (resolved,transfer,transport_source)=transport::resolve(heat_input,electrical.as_ref(),prepared,trial,target-start,gate)?;
+                        let (resolved,transfer,transport_source,flow_transfers)=transport::resolve(heat_input,electrical.as_ref(),prepared,trial,target-start,gate)?;
                         let mut coefficients=resolved.bulk;
                         let update=propose_shared(materials,mechanical,source,receivers,layer_ranges,trial,gate)?;
                         let (circuit,field)=field::advance(electrical.as_ref(),electrical_input,
                             field_prepared.as_ref(),coefficients.resistors,resolved.contacts,trial,
                             &mut coefficients.sources_w,target-start,solve.total_energy_tolerance_j,gate)?;
                         let driver=ElectricalDriver::new(
-                            Driver {frame:frame.clone(),before,heat:selected,outside},circuit)?;
+                            Driver {frame:frame.clone(),before,heat:selected,outside},circuit)?.with_transfers(flow_transfers);
                         Ok(DrivenCoefficients {circuit:driver,
                             sources_w:coefficients.sources_w,conductances_w_k:coefficients.conductances_w_k,
                             source:(coefficients.source,update,transfer,field,transport_source),circuit_trials:1})
@@ -384,7 +388,7 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
                 let native=mechanical.prepare_staged_material_relaxation_times(&update.updates,gate)?;
                 let mut entropy:FrameHeatEntropy=entropy
                     .ok_or_else(||invalid("missing original material heat entropy account"))?.into();
-                let (heat_transfer,closed_radiation_net_j,radiation_exchange_entropy_j_k)=
+                let (heat_transfer,closed_radiation_net_j,radiation_exchange_entropy_j_k,enthalpy_flow)=
                     transport::finish(transfer,&candidate,target-start,&mut entropy,gate)?;
                 let (field_storage,field_entropy)=field::finish(field,heat_transfer.is_some(),
                     radiation_exchange_entropy_j_k,&mut entropy,gate)?;
@@ -416,7 +420,7 @@ impl<'m,'f,'n,'a,F> FrameRelaxationThermalSystem<'m,'f,'n,'a,F> {
                 if finite(audit.deposited_joule_j-selected-joule)?.abs()>solve.total_energy_tolerance_j {
                     return Err(invalid("relaxation and electrical heat lost their independent source accounts"));
                 }
-                let report=RelaxationHeatReport {transport_source,mechanical,electrical,field_storage,field_entropy,deposited_joule_heat_j:joule,
+                let report=RelaxationHeatReport {transport_source,enthalpy_flow,mechanical,electrical,field_storage,field_entropy,deposited_joule_heat_j:joule,
                     thermal:audit.thermal,source,heat_transfer,closed_radiation_net_j,
                     radiation_exchange_entropy_j_k,layers,
                     material_layer_ranges:layer_ranges.to_vec(),rates:MaterialRelaxationTimeReport::default(),deposited_material_heat_j:selected,

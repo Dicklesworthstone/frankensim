@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 const COOLANT:CellId=CellId(7);
 const PATCHES:[f64;2]=[0.01,0.2];
 #[derive(Clone,Copy)]
-struct Spec { k:f64, cp:f64, mass:f64, powered:bool, reverse:bool, reservoir:bool }
-fn spec()->Spec {Spec {k:1.0,cp:4000.0,mass:0.02,powered:true,reverse:false,reservoir:false}}
+struct Spec { k:f64, cp:f64, mass:f64, powered:bool, reverse:bool, reservoir:bool, circulating:bool }
+fn spec()->Spec {Spec {k:1.0,cp:4000.0,mass:0.02,powered:true,reverse:false,reservoir:false,circulating:false}}
 fn liquid_point(t:f64)->QueryPoint {QueryPoint::new().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),t)
     .unwrap().with("p",100000.0).unwrap()}
 fn liquid(s:Spec)->(MaterialCard,ResolvedHeatCapacityCurve) {
@@ -51,6 +51,12 @@ fn fixture<R>(s:Spec,run:impl FnOnce(&MaterialFluidFrame<'_,FluidTransportState>
         material_id:MaterialId(7),mass_kg:s.mass,specific_h_j_kg:20.0*s.cp,
         geometry:CellGeometry {start_m:[0.0;3],end_m:[1.0,0.0,0.0],volume_m3:s.mass/1000.0,surface_area_m2:1.0},
         boundary:Boundary {ambient_k:310.0,htc_w_m2_k:0.0,reservoir:None,source_w:0.0}})});
+    if s.circulating {
+        events.push(TimedEvent {time_s:0.0,event:Event::Birth(DepositedCell {id:CellId(8),segment_id:0,body_id:2,
+            material_id:MaterialId(7),mass_kg:2.0*s.mass,specific_h_j_kg:5.0*s.cp,
+            geometry:CellGeometry {start_m:[0.0;3],end_m:[1.0,0.0,0.0],volume_m3:2.0*s.mass/1000.0,surface_area_m2:1.0},
+            boundary:Boundary {ambient_k:295.0,htc_w_m2_k:0.0,reservoir:None,source_w:0.0}})});
+    }
     for i in 0..2 {
         let pair=if s.reverse {[COOLANT,CellId(i as u64)]}else{[CellId(i as u64),COOLANT]};
         events.push(TimedEvent {time_s:0.0,event:Event::Contact(ThermalLink {
@@ -58,13 +64,17 @@ fn fixture<R>(s:Spec,run:impl FnOnce(&MaterialFluidFrame<'_,FluidTransportState>
     }
     let heat=DepositionSimulation::new(events,&[(MaterialId(0),curves[0].curve() as &dyn ThermalLaw),
         (MaterialId(1),curves[1].curve() as &dyn ThermalLaw),(MaterialId(7),curve.curve() as &dyn ThermalLaw)],
-        DepositionBudget {max_cells:3,max_links:2,max_events:5,max_substeps:128}).unwrap()
+        DepositionBudget {max_cells:if s.circulating {4}else{3},max_links:2,max_events:6,max_substeps:128}).unwrap()
         .advance_to(0.0,StepConfig {max_dt_s:DT,energy_tolerance_j:1e-10},||Ok(())).unwrap().0;
     let query=point(300.0);let fluid_query=liquid_point(310.0);
     let mut cells:Vec<_>=(0..2).map(|i|MaterialCell {cell:CellId(i as u64),material_id:MaterialId(i as u64),
         curve:curves[i].curve(),point:ThermalMaterialPoint {material:&cards[i],context:&query,temperature_axis:"T",liquid_fraction_axis:None},conductivity:None}).collect();
     cells.push(MaterialCell {cell:COOLANT,material_id:MaterialId(7),curve:curve.curve(),
         point:ThermalMaterialPoint {material:&coolant,context:&fluid_query,temperature_axis:"T",liquid_fraction_axis:None},conductivity:None});
+    if s.circulating {
+        cells.push(MaterialCell {cell:CellId(8),material_id:MaterialId(7),curve:curve.curve(),
+            point:ThermalMaterialPoint {material:&coolant,context:&fluid_query,temperature_axis:"T",liquid_fraction_axis:None},conductivity:None});
+    }
     let resistors:[_;2]=core::array::from_fn(|i|CellResistor {destination:ResistorCell {branch:i+1,cell:CellId(i as u64)},
         selection:MaterialPropertySelection::SingleClaimOnly,length_m:1.0,area_m2:area(i)});
     let plain=MaterialNetwork {cells:&cells,resistors:&[],links:&[]};
@@ -198,3 +208,5 @@ fn incomplete_links_and_late_coolant_refusal_preserve_the_whole_finite_inventory
         assert_eq!(owner.mechanical().samples_rendered(),1);
     });
 }
+
+mod advection;

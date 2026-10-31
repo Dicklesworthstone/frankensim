@@ -5,7 +5,7 @@
 //! closure and accuracy. In particular directed mass-carried enthalpy must not
 //! be converted into a symmetric Fourier conductance or external heater pair.
 use super::*;
-use crate::enthalpy::advection::Advected;
+use super::super::advection::Advected;
 
 /// Complete endpoint transport. Existing source/boundary coefficients retain
 /// their meaning. `transfers` use the SAME native pairwise power owner as the

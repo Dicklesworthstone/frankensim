@@ -8,6 +8,7 @@ use fs_couple::air_path::cylinder::frame::modal::relaxation::temperature::heat::
 };
 use fs_couple::frame_vibration::thermal::FrameThermalSolve;
 use fs_exec::CancelGate;
+use fs_conduction::transient::deposition::advection::Advected;
 
 /// The accepted reservoir-fluid sources accompany the original complete
 /// mechanical/electrical/caloric report in `transport_source`. They are the
@@ -121,8 +122,53 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
         resolve_links:impl Fn(&SourceConvectiveLink,&DepositionSimulation<'_>,Temperature)->Result<L,E>,
     )->Result<FiniteConvectiveRelaxationReport<F,L>,ConvectiveRelaxationError<E>>
     where R:Fn(&SourceConvectiveCell,&DepositionSimulation<'_>,Temperature)->Result<F,E> {
-        owner.step_heat_network_with(thermal,external_modal_forces,
-            RelaxationHeatInput {network:self.heat,cx},electrical,controls,energy_guess_j,gate,|trial| {
+        self.step_relaxation_links_flow(cx,owner,thermal,external_modal_forces,electrical,
+            controls,energy_guess_j,gate,links,maximum_links,resolve_links,None)
+    }
+
+    /// The same finite coolant/convection/circuit/material trajectory with
+    /// prescribed balanced mass-carried enthalpy. `flow` uses original finite
+    /// coolant cell IDs and caloric material identities. Keep this graph and
+    /// its inlet states fixed over the interval. No accepted observer is stepped.
+    ///
+    /// Both convective transfer and advective donor enthalpy see the SAME trial
+    /// temperatures. Recirculation is internal; only inlet/outlet enthalpy is
+    /// external supply. The native implicit residual applies every exchange
+    /// once. Flow through bound mechanical material inventories refuses.
+    ///
+    /// Mass rates, relative surface speeds and pressure/composition remain
+    /// prescribed and must represent the same physical flow where applicable.
+    /// This does not solve pumps, pressure, fluid momentum or moving mass.
+    /// It preserves the original upwind spatial and first-order time limits.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn step_advected_relaxation_with_links<F: ThermalFluidTransport, L: ThermalFluidTransport, M, E>(
+        &self, cx:&Cx<'_>,
+        owner:&mut FrameRelaxationThermalSystem<'_, '_, '_, '_, M>,
+        thermal:&mut DepositionSimulation<'_>, external_modal_forces:&[f64],
+        electrical:Option<RelaxationElectricalInput<'_>>, controls:FrameThermalSolve,
+        energy_guess_j:&[f64], gate:&CancelGate, links:&[SourceConvectiveLink],
+        maximum_links:usize,
+        resolve_links:impl Fn(&SourceConvectiveLink,&DepositionSimulation<'_>,Temperature)->Result<L,E>,
+        flow:&Advected<()>,
+    )->Result<FiniteConvectiveRelaxationReport<F,L>,ConvectiveRelaxationError<E>>
+    where R:Fn(&SourceConvectiveCell,&DepositionSimulation<'_>,Temperature)->Result<F,E> {
+        self.step_relaxation_links_flow(cx,owner,thermal,external_modal_forces,electrical,
+            controls,energy_guess_j,gate,links,maximum_links,resolve_links,Some(flow))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn step_relaxation_links_flow<F: ThermalFluidTransport, L: ThermalFluidTransport, M, E>(
+        &self, cx:&Cx<'_>,
+        owner:&mut FrameRelaxationThermalSystem<'_, '_, '_, '_, M>,
+        thermal:&mut DepositionSimulation<'_>, external_modal_forces:&[f64],
+        electrical:Option<RelaxationElectricalInput<'_>>, controls:FrameThermalSolve,
+        energy_guess_j:&[f64], gate:&CancelGate, links:&[SourceConvectiveLink],
+        maximum_links:usize,
+        resolve_links:impl Fn(&SourceConvectiveLink,&DepositionSimulation<'_>,Temperature)->Result<L,E>,
+        flow:Option<&Advected<()>>,
+    )->Result<FiniteConvectiveRelaxationReport<F,L>,ConvectiveRelaxationError<E>>
+    where R:Fn(&SourceConvectiveCell,&DepositionSimulation<'_>,Temperature)->Result<F,E> {
+        let resolve = |trial:&DepositionSimulation<'_>| {
                 let ContactThermalCoefficients {bulk,contacts}=self.resolve_with_links(
                     cx,trial,links,maximum_links,&resolve_links)?;
                 let ConvectionHeatSample {heat,convection,finite_convection}=bulk.source;
@@ -133,6 +179,12 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
                     resistors:bulk.resistors,sources_w:bulk.sources_w,conductances_w_k:bulk.conductances_w_k,
                     source:(heat,FiniteRelaxationConvection {reservoirs:convection,finite}),
                 }})
-            })
+            };
+        match flow {
+            Some(flow) => owner.step_heat_network_with_advection(thermal,external_modal_forces,
+                RelaxationHeatInput {network:self.heat,cx},electrical,controls,energy_guess_j,gate,flow,resolve),
+            None => owner.step_heat_network_with(thermal,external_modal_forces,
+                RelaxationHeatInput {network:self.heat,cx},electrical,controls,energy_guess_j,gate,resolve),
+        }
     }
 }

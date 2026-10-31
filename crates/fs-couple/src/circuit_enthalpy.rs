@@ -39,9 +39,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitError,
     MaterialCircuitSolve, MaterialCircuitStep, MaterialResistor};
-use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
+use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit, HeatTransfer};
 use fs_thermal::enthalpy::backward_euler::{
     BackwardEulerStep, BoundaryConductances, BoundaryStepCoefficients, StepCoefficients,
+    TransportStepCoefficients,
 };
 use fs_solver::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
@@ -331,6 +332,9 @@ pub(crate) trait ThermalDriver {
     fn take_boundary_conductances(&mut self) -> BoundaryConductances {
         BoundaryConductances::default()
     }
+    // Conservative exchanges are NOT driver heat or independent supply. Move
+    // their endpoint powers into the original thermal pairwise residual once.
+    fn take_heat_transfers(&mut self) -> Vec<HeatTransfer> { Vec::new() }
 }
 
 pub(crate) struct BoundaryDriver<D> {
@@ -344,6 +348,9 @@ impl<D: ThermalDriver> ThermalDriver for BoundaryDriver<D> {
     fn into_parts(self) -> (Self::Model, Self::Step) { self.inner.into_parts() }
     fn take_boundary_conductances(&mut self) -> BoundaryConductances {
         std::mem::take(&mut self.boundaries)
+    }
+    fn take_heat_transfers(&mut self) -> Vec<HeatTransfer> {
+        self.inner.take_heat_transfers()
     }
 }
 impl ThermalDriver for MaterialCircuitCandidate {
@@ -542,6 +549,7 @@ pub(crate) fn cell_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
         trials.set(trials.get()+coefficients.circuit_trials);
         let mut circuit = coefficients.circuit;
         let boundaries = circuit.take_boundary_conductances();
+        let transfers = circuit.take_heat_transfers();
         let account = circuit.account();
         if !account.numerical_dissipation_j.is_finite() || account.numerical_dissipation_j < 0.0 {
             return Err(CircuitEnthalpyError::Invalid("driver numerical dissipation must be finite and nonnegative"));
@@ -555,8 +563,26 @@ pub(crate) fn cell_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
             return Err(CircuitEnthalpyError::Invalid("too many external source cells"));
         }
         let entropy = if entropy_requested {
-            Some(entropy::SourceSample::new(thermal, state, &powers,
-                &coefficients.sources_w, dt, checkpoint)?)
+            // Entropy-only total source view follows the original thermal
+            // observer convention. These powers are never external ENERGY or
+            // Joule heat. The supplying owner still owes stream/mixing entropy.
+            let mut entropy_sources = coefficients.sources_w.clone();
+            let mut has_transfer = false;
+            for transfer in &transfers {
+                checkpoint()?;
+                if transfer.a == transfer.b || !state.cells().contains_key(&transfer.a)
+                    || !state.cells().contains_key(&transfer.b) {
+                    return Err(CircuitEnthalpyError::Invalid("invalid internal energy-transfer endpoint"));
+                }
+                finite(transfer.power_w)?;
+                has_transfer |= transfer.power_w != 0.0;
+                for (id, sign) in [(transfer.a, -1.0), (transfer.b, 1.0)] {
+                    let value = entropy_sources.entry(id).or_insert(0.0);
+                    *value = finite(*value + sign * transfer.power_w)?;
+                }
+            }
+            Some((entropy::SourceSample::new(thermal, state, &powers,
+                &entropy_sources, dt, checkpoint)?, has_transfer))
         } else { None };
         for (cell, power) in coefficients.sources_w {
             checkpoint()?; finite(power)?;
@@ -564,14 +590,14 @@ pub(crate) fn cell_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
             let sum = powers.entry(cell).or_insert(0.0);
             *sum = finite(*sum + power)?;
         }
-        Ok::<_, CircuitEnthalpyError<E>>(BoundaryStepCoefficients { bulk: StepCoefficients { sources_w: powers,
+        Ok::<_, CircuitEnthalpyError<E>>(TransportStepCoefficients { heat: BoundaryStepCoefficients { bulk: StepCoefficients { sources_w: powers,
             conductances_w_k: coefficients.conductances_w_k,
-            payload: (circuit, coefficients.source, deposited, entropy) }, boundaries })
+            payload: (circuit, coefficients.source, deposited, entropy) }, boundaries }, transfers })
         };
         if entropy_requested {
-            step.evaluate_with_boundary_conductances_and_entropy(x, coefficients, checkpoint)
+            step.evaluate_with_transport_and_entropy(x, coefficients, checkpoint)
         } else {
-            step.evaluate_with_boundary_conductances(x, coefficients, checkpoint)
+            step.evaluate_with_transport(x, coefficients, checkpoint)
         }
     };
     let problem = FallibleFiniteDifference::new(step.cell_ids().len(), controls.difference_step_j,
@@ -586,9 +612,11 @@ pub(crate) fn cell_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
     if result.progress != SolverRunProgress::Complete { return Err(CircuitEnthalpyError::Interrupted(result.progress)); }
     if !result.report.converged { return Err(CircuitEnthalpyError::NotConverged(result.report)); }
     let trial = evaluate(&solver.x, with_entropy)?;
-    let entropy = trial.payload().3.as_ref().map(|sample| {
-        sample.finish(trial.entropy_audit().ok_or(DepositionError::Arithmetic)?,
-            trial.residual_j(), checkpoint)
+    let entropy = trial.payload().3.as_ref().map(|(sample, has_transfer)| {
+        let mut account = sample.finish(trial.entropy_audit().ok_or(DepositionError::Arithmetic)?,
+            trial.residual_j(), checkpoint)?;
+        account.has_unclassified_sources |= *has_transfer;
+        Ok::<_, DepositionError>(account)
     }).transpose()?;
     let maximum_cell_residual_j = trial.maximum_cell_residual_j();
     let (next, (candidate, source, deposited_joule_j, _), audit) = trial.accept(

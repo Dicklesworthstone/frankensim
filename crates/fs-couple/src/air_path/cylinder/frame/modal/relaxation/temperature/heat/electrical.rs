@@ -253,10 +253,11 @@ pub(super) fn advance(
 pub(super) struct ElectricalDriver {
     mechanical: Driver,
     electrical: Option<MaterialCircuitCandidate>,
+    transfers: Vec<fs_thermal::enthalpy::HeatTransfer>,
 }
 impl ElectricalDriver {
     pub(super) fn new(mechanical: Driver, electrical: Option<MaterialCircuitCandidate>) -> Result<Self> {
-        let driver = Self { mechanical, electrical };
+        let driver = Self { mechanical, electrical, transfers: Vec::new() };
         let a = driver.account();
         finite(a.heat_j)?;
         finite(a.stored_change_j)?;
@@ -264,10 +265,17 @@ impl ElectricalDriver {
         finite(a.numerical_dissipation_j)?;
         Ok(driver)
     }
+    pub(super) fn with_transfers(mut self, transfers: Vec<fs_thermal::enthalpy::HeatTransfer>) -> Self {
+        self.transfers = transfers;
+        self
+    }
 }
 impl ThermalDriver for ElectricalDriver {
     type Model = Option<MaterialCircuit>;
     type Step = (CoupledModalFrame, Option<MaterialCircuitStep>);
+    fn take_heat_transfers(&mut self) -> Vec<fs_thermal::enthalpy::HeatTransfer> {
+        std::mem::take(&mut self.transfers)
+    }
     fn account(&self) -> DriverAccount<'_> {
         let mut account = self.mechanical.account();
         if let Some(candidate) = &self.electrical {
