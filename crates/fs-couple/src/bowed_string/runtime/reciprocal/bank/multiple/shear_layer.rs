@@ -17,6 +17,25 @@ use crate::render::schedule::force::coupled::contact::friction::{FrictionDrive,
         SeriesDriveHeatDestination}};
 
 impl MultiBowStringBank {
+    /// Original material/geometry-derived Hertz--Mindlin contacts on the same
+    /// string/body/cavity and PCM path. The caller owns ordered surface identity
+    /// and circular Hertz-patch geometry; no bow-hair geometry is inferred.
+    /// Each source supplies its fixed normal preload. Corresponding gestures
+    /// must use zero additional normal force. Temperature and material patch
+    /// stay fixed; relocation, normal histories and thermal feedback require
+    /// their own explicit history/work composition and are not reset here.
+    pub fn with_bow_mindlin_contacts(mut self,
+        bindings: Vec<(usize, fs_contact::interface_binding::mindlin::SourceMindlinContact)>,
+        gate: &CancelGate) -> Result<Self, ReciprocalStringError>
+    {
+        if !bindings.is_empty() && self.bow_station_motion_limits().is_some() {
+            return Err(super::invalid("moving bow stations cannot bind retained Mindlin contact history"));
+        }
+        self.system = self.system.with_material_mindlin_contacts(bindings, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        Ok(self)
+    }
+
     /// Original distributed material heat and contact heat on one physical
     /// clock. Support inertia, moving material footprints, stop work, retained
     /// fiber/string histories and pressure all use the same candidate. No

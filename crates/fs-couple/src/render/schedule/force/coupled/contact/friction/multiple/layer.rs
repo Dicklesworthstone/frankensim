@@ -269,6 +269,7 @@ impl MultiFrictionModalSystem {
             poll(Some(gate))?;
             if port >= self.port_count()
                 || self.shear_layers[port].is_some()
+                || self.mindlin_contacts[port].is_some()
                 || self.interface(port).is_some()
             {
                 return Err(invalid("one material shear layer per actual port, without a competing dry-interface source").into());

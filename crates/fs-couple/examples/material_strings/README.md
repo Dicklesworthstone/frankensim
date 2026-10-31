@@ -1334,6 +1334,42 @@ including trial-dependent film/counterface conduction. The legacy `interfaces`
 and `layers` forms retain their existing behavior. A uniform `bow_ribbon`
 continues to expand one authored track and its selected material over its cells.
 
+The same `contacts` block can select an existing source-bound Hertz--Mindlin
+law for a **fixed circular point patch**:
+
+```text
+friction contacts 1
+bow-mindlin bow counterface.fsmatpk contact.fsintpk normal.fsmodelpk mu_local 0.0002 1e-9 1e-8 0.1 0.00005 0.00005 0.01 0.02 0.03 512
+```
+
+After the track, the fields are **counterface bulk pack, ordered interface pack,
+normal-model pack, dimensionless local Coulomb property, effective Hertz radius
+[m], retained indentation [m], maximum indentation [m], maximum indentation rate
+[m/s], half-space depth [m], outer-layer depth [m], relative radius/modulus/load
+uncertainties, and maximum retained history intervals**. These sample numbers
+illustrate syntax, not measured bow geometry. The normal model must explicitly
+select the existing elastic circular Hertz law. The ordered interface must name
+the string's actual outer constituent and the declared counterface; the declared
+depths must fit inside that outer constituent. Original bulk/normal/friction
+source domains, uncertainty and geometric validity checks remain in force.
+
+Every gesture on this track must set **normal force to zero**, meaning *no
+additional prescribed load*. The original geometry, indentation and materials
+compute the retained Hertz preload; it appears in the source report and the
+ordinary per-step normal-force trace. Shear modulus and Poisson ratio come from
+those same bulk sources. The existing Mindlin owner supplies tangential
+compliance, reversal memory, reversible contact energy and irreversible
+microslip heat to the same string/body/cavity solve and PCM observer. It does
+not use a fitted onset stiffness or count stored shear energy as heat.
+
+This first source connection keeps normal indentation, temperature, tangent and
+material patch fixed. Changing prescribed load, migrating the patch, applying
+finite-cell thermal feedback, or requesting ribbon/fiber subdivision refuses
+before playback; no loaded history is discarded or cloned into artificial
+patches. A circular Hertz patch is an explicit geometry assumption, not an
+automatic model of crossed cylindrical hairs. Other named tracks can retain
+their existing dry interfaces or material films in the same simultaneous solve.
+
 The original `NormalizedInterfacePack` must declare `medium = dry`. Its ordered
 surface A must be the selected string's **actual outer material state**, including
 the outermost sleeve for a bonded string. Surface B identifies the prescribed

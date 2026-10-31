@@ -20,6 +20,8 @@ mod stops;
 mod bow_interfaces;
 #[path = "material_strings/shear_layers.rs"]
 mod shear_layers;
+#[path = "material_strings/bow_mindlin.rs"]
+mod bow_mindlin;
 #[path = "material_strings/contact_thermal.rs"]
 mod contact_thermal;
 #[path = "material_strings/bridge_interfaces.rs"]
@@ -302,6 +304,7 @@ impl input::Spec {
             return Err("bow residual flexibility requires fixed bows on the time-domain performer".into());
         }
         if let Some(layers)=self.friction.shear_layers() { layers.preflight(&self)?; }
+        if let Some(mindlin)=self.friction.mindlin() { mindlin.preflight(&self)?; }
         if let Some(body)=&profile { body.preflight(&self)?; }
         if self.one_way_observer.is_some() && profile.is_none() {
             return Err("one_way_observer requires a body profile that declares its closed acoustic skin".into());
@@ -553,6 +556,9 @@ impl input::Spec {
             Some(stops)=>stops.bind(bank,&self,&mut catalog,&mut loader,gate)?, None=>bank };
         let bank=if let Some(layers)=self.friction.shear_layers() {
             layers.bind(&self,bank,&mut catalog,&mut loader,gate)?
+        } else { bank };
+        let bank=if let Some(mindlin)=self.friction.mindlin() {
+            mindlin.bind(&self,bank,&mut catalog,&mut loader,gate)?
         } else { bank };
         let bank = if self.bow_residual_flexibility {
             bank.with_bow_residual_flexibility(gate)?
@@ -847,6 +853,11 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
         Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
     })?;
+    spec.friction.load_mindlin_sources(&gate, |name| {
+        let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
+        remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
+        Ok(bytes)
+    })?;
     spec.bridge_interfaces.load_with_environment(spec.temperature, spec.omega, &spec.material_states, &gate, |name| {
         let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
@@ -913,6 +924,12 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             ready.performance.preload_energy_j());
     }
     for port in 0..ready.spec.bow_contact_count() {
+        if let Some(source)=ready.performance.bank().system().material_mindlin_contact(port) {
+            let patch=source.normal_response();
+            eprintln!("bow_mindlin_port={port}; normal_source={}; friction_source={}; fixed_T_K={}; indentation_m={}; Hertz_preload_N={}; patch_radius_m={}; source_parameters={:?}; fixed circular isothermal contact history",
+                source.normal_source().model().identity(),source.friction_source().identity(),
+                source.temperature_kelvin(),patch.approach_m,patch.normal_force_n,patch.patch_radius_m,source.law().parameters());
+        }
         if let Some(layer)=ready.performance.bank().bow_shear_layer(port) {
             eprintln!("bow_shear_layer_port={port}; source={}; area_m2={}; thickness_m={}; initial_T_K={}; stiffness_N_m={}; yield_N={}; plastic_resistance_N_s_m={}; max_elastic_shear={}",
                 layer.resolved().identity(),layer.area_m2(),layer.thickness_m(),layer.temperature_kelvin(),

@@ -60,6 +60,7 @@ const LAYER_TOPOLOGY_LAW: FrictionLaw = FrictionLaw::Coulomb { static_mu: 0.0, k
 pub struct Inputs {
     research: Option<FrictionLaw>,
     layers: Option<shear_layers::Inputs>,
+    mindlin: Option<bow_mindlin::Inputs>,
     declarations: Vec<Declaration>,
     packs: BTreeMap<String, NormalizedInterfacePack>,
     environment: BTreeMap<String, Vec<(String, f64)>>,
@@ -77,14 +78,16 @@ impl core::fmt::Debug for Inputs {
             .iter()
             .map(|(track, b)| (track, b.state.identity()))
             .collect();
-        f.debug_struct("BowFriction")
+        let mut debug = f.debug_struct("BowFriction");
+        debug
             .field("research_override", &if self.layers.is_none() { self.research.as_ref() } else { None })
             .field("material_shear_layers", &self.layers)
             .field("declarations", &self.declarations)
             .field("packs", &packs)
             .field("environment", &self.environment)
-            .field("states", &states)
-            .finish()
+            .field("states", &states);
+        if let Some(mindlin) = &self.mindlin { debug.field("material_mindlin_contacts", mindlin); }
+        debug.finish()
     }
 }
 impl Inputs {
@@ -93,6 +96,7 @@ impl Inputs {
         Ok(Self {
             research: Some(law),
             layers: None,
+            mindlin: None,
             declarations: Vec::new(),
             packs: BTreeMap::new(),
             environment: BTreeMap::new(),
@@ -108,18 +112,32 @@ impl Inputs {
     /// Each authored track selects its own physical interface or retained film.
     /// All declarations still bind to the same original multi-contact owner.
     pub fn contacts(layers: Vec<shear_layers::Declaration>, dry: Vec<Declaration>) -> Result<Self> {
-        if layers.len() + dry.len() == 0 || layers.len() + dry.len() > 16 {
+        Self::contacts_with_mindlin(layers, dry, Vec::new())
+    }
+    pub fn contacts_with_mindlin(layers: Vec<shear_layers::Declaration>, dry: Vec<Declaration>,
+        mindlin: Vec<bow_mindlin::Declaration>) -> Result<Self> {
+        let count = layers.len() + dry.len() + mindlin.len();
+        if count == 0 || count > 16 {
             return Err("source contacts require 1..=16 explicit track declarations".into());
         }
-        if layers.iter().any(|layer| dry.iter().any(|interface| layer.track == interface.track)) {
-            return Err("a bow track cannot own both a dry interface and a material shear layer".into());
+        if layers.iter().any(|layer| dry.iter().any(|interface| layer.track == interface.track))
+            || mindlin.iter().any(|point| layers.iter().any(|layer| layer.track == point.track)
+                || dry.iter().any(|interface| interface.track == point.track)) {
+            return Err("a bow track must own exactly one dry interface, material film or Mindlin contact".into());
         }
         let mut inputs = Self::interfaces(dry)?;
         if !layers.is_empty() { inputs.layers = Some(shear_layers::Inputs::new(layers)?); }
+        if !mindlin.is_empty() { inputs.mindlin = Some(bow_mindlin::Inputs::new(mindlin)?); }
         Ok(inputs)
     }
     pub fn shear_layers(&self) -> Option<&shear_layers::Inputs> {
         self.layers.as_ref()
+    }
+    pub fn mindlin(&self) -> Option<&bow_mindlin::Inputs> { self.mindlin.as_ref() }
+    pub fn load_mindlin_sources(&mut self, gate: &CancelGate,
+        loader: impl FnMut(&str) -> Result<Vec<u8>>) -> Result<()> {
+        if let Some(mindlin) = &mut self.mindlin { mindlin.load(gate, loader)?; }
+        Ok(())
     }
     pub fn validate_thermal_mode(&self, dry_thermal: bool) -> Result<()> {
         if !dry_thermal && self.bound.values().any(|bound|
@@ -147,6 +165,7 @@ impl Inputs {
         Ok(Self {
             research: None,
             layers: None,
+            mindlin: None,
             declarations,
             packs: BTreeMap::new(),
             environment: BTreeMap::new(),
@@ -157,15 +176,17 @@ impl Inputs {
         if self.research.is_some() {
             return Ok(());
         }
-        if self.declarations.len() + self.layers.as_ref().map_or(0, |layers| layers.track_count()) != schedule.tracks().len()
+        if self.declarations.len() + self.layers.as_ref().map_or(0, |layers| layers.track_count())
+            + self.mindlin.as_ref().map_or(0, |mindlin| mindlin.track_count()) != schedule.tracks().len()
             || schedule
                 .tracks()
                 .iter()
                 .any(|t| !self.declarations.iter().any(|d| d.track == t.id)
-                    && !self.layers.as_ref().is_some_and(|layers| layers.contains_track(&t.id)))
+                    && !self.layers.as_ref().is_some_and(|layers| layers.contains_track(&t.id))
+                    && !self.mindlin.as_ref().is_some_and(|mindlin| mindlin.contains_track(&t.id)))
         {
             return Err(
-                "source-bound friction requires exactly one named interface or material layer for every bow track"
+                "source-bound friction requires exactly one named interface, material layer or Mindlin contact for every bow track"
                     .into(),
             );
         }
@@ -223,7 +244,9 @@ impl Inputs {
         }
         Ok(())
     }
-    pub fn has_source(&self, name: &str) -> bool { self.packs.contains_key(name) }
+    pub fn has_source(&self, name: &str) -> bool {
+        self.packs.contains_key(name) || self.mindlin.as_ref().is_some_and(|mindlin| mindlin.has_source(name))
+    }
     pub fn pack_bytes(&self) -> Result<usize> {
         if self
             .declarations
@@ -234,13 +257,15 @@ impl Inputs {
                 "load every declared bow interface before constructing material strings".into(),
             );
         }
-        self.packs.values().try_fold(0usize, |n, p| {
+        let mindlin = self.mindlin.as_ref().map(bow_mindlin::Inputs::pack_bytes).transpose()?.unwrap_or(0);
+        self.packs.values().try_fold(mindlin, |n, p| {
             n.checked_add(p.to_bytes().len())
                 .ok_or_else(|| "bow interface byte count overflow".into())
         })
     }
     pub fn binding(&self, track: &str) -> Result<Option<&DryFrictionBinding>> {
-        if self.research.is_some() || self.layers.as_ref().is_some_and(|layers| layers.contains_track(track)) {
+        if self.research.is_some() || self.layers.as_ref().is_some_and(|layers| layers.contains_track(track))
+            || self.mindlin.as_ref().is_some_and(|mindlin| mindlin.contains_track(track)) {
             return Ok(None);
         }
         Ok(Some(
@@ -255,7 +280,8 @@ impl Inputs {
         if let Some(law) = &self.research {
             return Ok(law);
         }
-        if self.layers.as_ref().is_some_and(|layers| layers.contains_track(track)) {
+        if self.layers.as_ref().is_some_and(|layers| layers.contains_track(track))
+            || self.mindlin.as_ref().is_some_and(|mindlin| mindlin.contains_track(track)) {
             return Ok(&LAYER_TOPOLOGY_LAW);
         }
         Ok(self
@@ -275,7 +301,8 @@ impl Inputs {
             return Ok(());
         }
         for track in spec.schedule.tracks() {
-            if self.layers.as_ref().is_some_and(|layers| layers.contains_track(&track.id)) {
+            if self.layers.as_ref().is_some_and(|layers| layers.contains_track(&track.id))
+                || self.mindlin.as_ref().is_some_and(|mindlin| mindlin.contains_track(&track.id)) {
                 continue;
             }
             let member = fs_scenario::gesture::path::legacy_member(&track.target, "bow")

@@ -211,6 +211,9 @@ impl MultiFrictionModalSystem {
                 return Err(invalid("moving friction must preserve both original component identities").into());
             }
             let moving = next.left != old.port.left || next.right != old.port.right;
+            if moving && self.mindlin_contacts[i].is_some() {
+                return Err(invalid("Mindlin contact cannot migrate without material-history transport").into());
+            }
             if moving && self.contact_loads[i].is_some() && normal_geometry.is_none() {
                 return Err(invalid("contact-loaded friction cannot migrate without its normal patch").into());
             }

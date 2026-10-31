@@ -33,7 +33,7 @@ impl NonlinearTrial for MultipleTrial<'_> {
                     .filter_map(|(drive, &stretch)| drive.map(|drive| drive.spring_energy_j(stretch)))
                     .sum();
                 NonlinearInternalStorage { before_energy_j,
-                    after_energy_j: frame.shear_layer_energy_j + series_energy }
+                    after_energy_j: frame.shear_layer_energy_j + frame.mindlin_energy_j + series_energy }
             }),
             contacts: match (&self.inner.obstacles, self.initial_contact_energy_j) {
                 (Some(obstacles), Some(before_energy_j)) => Some(NonlinearContactWork {
@@ -63,12 +63,15 @@ impl MultiFrictionModalSystem {
         // compliant-drive stretch. stage_multiple only replaces their scratch;
         // publish_step commits them once after the complete DG solve succeeds.
         let initial_internal_energy_j = if self.shear_layers.iter().any(Option::is_some)
+            || self.mindlin_contacts.iter().any(Option::is_some)
             || self.series_drives.iter().any(Option::is_some) {
             let layer_energy: f64 = self.shear_layers.iter().flatten()
                 .map(layer::MaterialShearLayer::energy_j).sum();
             let series_energy: f64 = self.series_drives.iter().flatten()
                 .map(|drive| drive.spring_energy_j(drive.stretch_m())).sum();
-            Some(finite(layer_energy + series_energy)?)
+            let mindlin_energy: f64 = self.mindlin_contacts.iter().flatten()
+                .map(mindlin::MaterialMindlinContact::energy_j).sum();
+            Some(finite(layer_energy + mindlin_energy + series_energy)?)
         } else { None };
         let mut state = self.core.nonlinear.take()
             .ok_or_else(|| invalid("nonlinear trial requires retained constitutive storage"))?;

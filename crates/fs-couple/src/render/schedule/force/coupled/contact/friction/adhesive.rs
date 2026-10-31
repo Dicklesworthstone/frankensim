@@ -118,7 +118,7 @@ impl AdhesiveModalBinding {
                 }
                 Ok((finite(traction*slip)?,residual))
             }
-            ModalFrictionRegime::Shearing {..} => Err(invalid("adhesive junction friction has no elastic shear store").into()),
+            ModalFrictionRegime::Shearing {..} | ModalFrictionRegime::Microslip => Err(invalid("adhesive junction friction has no elastic shear store").into()),
         }
     }
 }

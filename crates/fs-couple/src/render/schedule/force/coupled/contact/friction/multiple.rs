@@ -43,6 +43,9 @@ mod active_set;
 /// Stateful material shear in the same mechanical and acoustic transaction.
 pub mod layer;
 
+/// Original source-bound Hertz--Mindlin microslip at fixed normal preload.
+pub mod mindlin;
+
 /// Bounded joint setup and nonlinear work, in addition to each port's limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MultiFrictionConfig {
@@ -81,13 +84,15 @@ pub struct FrictionPortFrame {
     pub roots: Option<FrictionRoots>,
     /// Independent material-layer storage/loss, absent for unchanged dry ports.
     pub shear_layer: Option<layer::ShearLayerFrame>,
+    /// Source-bound elastic microslip storage/history and irreversible heat.
+    pub mindlin: Option<mindlin::MindlinFrame>,
 }
 impl Default for FrictionPortFrame {
     fn default() -> Self {
         Self { normal_force_n: 0.0, traction_n: 0.0, slip_distance_m: 0.0, drive_work_j: 0.0,
             dissipation_j: 0.0, series_drive_dissipation_j: 0.0,
             constitutive_residual_n: 0.0, regime: ModalFrictionRegime::Released,
-            roots: None, shear_layer: None }
+            roots: None, shear_layer: None, mindlin: None }
     }
 }
 
@@ -110,6 +115,8 @@ pub struct MultiFrictionFrame {
     pub friction_dissipation_j: f64,
     /// Reversible material shear-layer storage, separate from network storage [J].
     pub shear_layer_energy_j: f64,
+    /// Reversible Hertz--Mindlin tangential storage, separate from layer/network [J].
+    pub mindlin_energy_j: f64,
     /// Stored unilateral-contact potential, separate from network storage [J].
     pub obstacle_energy_j: f64,
     /// Nonadhesive loss at the optional compliant obstacles [J].
@@ -189,6 +196,7 @@ pub struct MultiFrictionModalSystem {
     // Constitutive candidates never replace accepted history until the complete
     // coupled network, all contacts and the energy ledger accept the step.
     shear_layers: Vec<Option<layer::MaterialShearLayer>>,
+    mindlin_contacts: Vec<Option<mindlin::MaterialMindlinContact>>,
     // Pivot budget for the active-set rescue (frankensim-o7qbp). Set at
     // construction; a test may lower it to plant a budget-exhaustion negative.
     active_set_budget: usize,
@@ -238,6 +246,7 @@ impl MultiFrictionModalSystem {
             || self.contact_loads.iter().any(Option::is_some)
             || self.series_drives.iter().any(Option::is_some)
             || self.shear_layers.iter().any(Option::is_some)
+            || self.mindlin_contacts.iter().any(Option::is_some)
         {
             return Err(invalid(
                 "released harmonic response requires no bound normal contact, shear layer or compliant drive",
@@ -300,7 +309,8 @@ impl MultiFrictionModalSystem {
             obstacles: None, contact_loads: vec![None; p],
             series_drives: vec![None; p], staged_stretch: vec![0.0; p],
             friction_residual: None,
-            shear_layers: vec![None; p], active_set_budget: 4 * p + 16, obstacle_resolves: 0 })
+            shear_layers: vec![None; p], mindlin_contacts: vec![None; p],
+            active_set_budget: 4 * p + 16, obstacle_resolves: 0 })
     }
     /// Accepted steps whose stop missed at its actual endpoint and was solved
     /// again with headroom, then passed the unchanged tolerance.
@@ -366,6 +376,9 @@ impl MultiFrictionModalSystem {
         let network = self.core.total_energy_j()?;
         let network = if self.shear_layers.iter().any(Option::is_some) {
             finite(network + self.shear_layers.iter().flatten().map(layer::MaterialShearLayer::energy_j).sum::<f64>())?
+        } else { network };
+        let network = if self.mindlin_contacts.iter().any(Option::is_some) {
+            finite(network + self.mindlin_contacts.iter().flatten().map(mindlin::MaterialMindlinContact::energy_j).sum::<f64>())?
         } else { network };
         let hair: f64 = self.series_drives.iter().flatten()
             .map(|drive| drive.spring_energy_j(drive.stretch_m())).sum();
@@ -459,7 +472,7 @@ impl MultiFrictionModalSystem {
     pub fn initialize_released_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalFrictionError>
     {
-        if self.shear_layers.iter().any(Option::is_some) {
+        if self.shear_layers.iter().any(Option::is_some) || self.mindlin_contacts.iter().any(Option::is_some) {
             return Err(invalid("released static preload cannot discard retained material-layer shear").into());
         }
         if let Some(state) = &mut self.core.nonlinear {
@@ -515,6 +528,7 @@ impl MultiFrictionModalSystem {
         let p = self.points.len();
         if p == 1 && self.obstacles.is_none() && self.series_drives.iter().all(Option::is_none)
             && self.shear_layers.iter().all(Option::is_none) && self.endpoint_controls.is_none()
+            && self.mindlin_contacts.iter().all(Option::is_none)
             && self.friction_residual.is_none() {
             let f = *self.core.step_inner(external, drives[0], gate)?;
             // A later endpoint-bound step uses the joint owner. Preserve the
@@ -523,7 +537,7 @@ impl MultiFrictionModalSystem {
             self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
                 drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
                 series_drive_dissipation_j: 0.0,
-                constitutive_residual_n: f.constitutive_residual_n, regime: f.regime, roots: f.roots, shear_layer: None };
+                constitutive_residual_n: f.constitutive_residual_n, regime: f.regime, roots: f.roots, shear_layer: None, mindlin: None };
             self.frame.sample = f.sample; self.frame.observer_pressure_pa = f.observer_pressure_pa;
             self.frame.network_energy_j = f.network_energy_j; self.frame.external_work_j = f.external_work_j;
             self.frame.drive_work_j = f.drive_work_j; self.frame.network_dissipation_j = f.network_dissipation_j;
@@ -610,6 +624,7 @@ impl MultiFrictionModalSystem {
         }
         if let Some(residual) = &mut self.friction_residual { residual.publish(&self.tractions); }
         for layer in self.shear_layers.iter_mut().flatten() { layer.publish(); }
+        for contact in self.mindlin_contacts.iter_mut().flatten() { contact.publish(); }
         if let Some(obstacles) = &mut self.obstacles { obstacles.publish(); }
         self.obstacle_resolves += accepted.obstacle_resolves;
         // Reuse the accepted port allocation through repeated constitutive
@@ -639,6 +654,11 @@ impl MultiFrictionModalSystem {
             poll(gate)?;
             self.staged_branches[i] = ContactBranch::Fresh;
             return layer.solve(free, compliance, normal, dt, config);
+        }
+        if let Some(contact) = &self.mindlin_contacts[i] {
+            poll(gate)?;
+            self.staged_branches[i] = ContactBranch::Fresh;
+            return contact.solve(free, compliance, normal, dt, config);
         }
         let continued = matches!(law, FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. });
         if !continued || normal == 0.0 {
@@ -687,7 +707,8 @@ impl MultiFrictionModalSystem {
         cause: ModalFrictionError) -> Result<(), ModalFrictionError>
     {
         let p = self.points.len();
-        if self.obstacles.is_some() || self.shear_layers.iter().any(Option::is_some) {
+        if self.obstacles.is_some() || self.shear_layers.iter().any(Option::is_some)
+            || self.mindlin_contacts.iter().any(Option::is_some) {
             // Not attempted: the active-set model covers only the plain friction
             // ports. Name it a decline that carries the Gauss-Seidel failure.
             return Err(ModalFrictionError::ActiveSetDeclined { cause: Box::new(cause) });
@@ -823,6 +844,9 @@ impl MultiFrictionModalSystem {
                 let checked = if let Some(layer) = &self.shear_layers[i] {
                     layer.check(slip, self.tractions[i], drive.normal_force_n, self.sample_period_s(),
                         self.points[i].config, self.iterations[i])
+                } else if let Some(contact) = &self.mindlin_contacts[i] {
+                    contact.check(slip, self.tractions[i], drive.normal_force_n, self.sample_period_s(),
+                        self.points[i].config, self.iterations[i])
                 } else {
                     scalar::check(&self.points[i].port.law, self.points[i].config,
                         self.sample_period_s(), drive, self.tractions[i], slip, self.regimes[i], self.iterations[i]).map(|_| ())
@@ -884,15 +908,20 @@ impl MultiFrictionModalSystem {
             }
             let drive = self.contact_loaded_drive(i, drives[i])?;
             let dt = self.sample_period_s();
-            let (dissipation, residual, shear_layer) = if let Some(layer) = &mut self.shear_layers[i] {
+            let (dissipation, residual, shear_layer, mindlin) = if let Some(layer) = &mut self.shear_layers[i] {
                 let (frame, residual) = layer.stage(slip, self.tractions[i], drive.normal_force_n, dt,
                     self.points[i].config, self.iterations[i])?;
                 self.regimes[i] = ModalFrictionRegime::Shearing { plastic_flow: frame.plastic_flow };
-                (frame.dissipated_j, residual, Some(frame))
+                (frame.dissipated_j, residual, Some(frame), None)
+            } else if let Some(contact) = &mut self.mindlin_contacts[i] {
+                let (frame, residual) = contact.stage(slip, self.tractions[i], drive.normal_force_n, dt,
+                    self.points[i].config, self.iterations[i])?;
+                self.regimes[i] = ModalFrictionRegime::Microslip;
+                (frame.dissipated_j, residual, None, Some(frame))
             } else {
                 let (loss, residual) = scalar::check(&self.points[i].port.law, self.points[i].config,
                     dt, drive, self.tractions[i], slip, self.regimes[i], self.iterations[i])?;
-                (loss, residual, None)
+                (loss, residual, None, None)
             };
             // A contact-loaded law has no known load until the JOINT solve.
             // Validate all three slip rates with that same held reaction before
@@ -909,7 +938,7 @@ impl MultiFrictionModalSystem {
                 traction_n: self.tractions[i], slip_distance_m: slip,
                 drive_work_j: supply, dissipation_j: dissipation,
                 series_drive_dissipation_j: hair_loss, constitutive_residual_n: residual,
-                regime: self.regimes[i], roots: self.port_roots[i], shear_layer };
+                regime: self.regimes[i], roots: self.port_roots[i], shear_layer, mindlin };
         }
         let mut pressure = self.core.staged_observer_pressure(gate)?;
         if let (Some(obstacles), Some(weights)) = (&self.obstacles, self.core.acceleration_pressure_weights()) {
@@ -925,6 +954,10 @@ impl MultiFrictionModalSystem {
         let shear_layer_energy = finite(self.shear_layers.iter().flatten()
             .map(layer::MaterialShearLayer::staged_energy_j).sum())?;
         let after = if self.shear_layers.iter().any(Option::is_some) { finite(after+shear_layer_energy)? }
+            else { after };
+        let mindlin_energy = finite(self.mindlin_contacts.iter().flatten()
+            .map(mindlin::MaterialMindlinContact::staged_energy_j).sum())?;
+        let after = if self.mindlin_contacts.iter().any(Option::is_some) { finite(after+mindlin_energy)? }
             else { after };
         let (friction_residual_energy, friction_residual_loss) = match &self.friction_residual {
             Some(residual) => residual.staged_energy_loss_j(&self.tractions)?,
@@ -945,6 +978,7 @@ impl MultiFrictionModalSystem {
         let scale = before.max(after).max(network_loss).max(loss).max(obstacle_loss)
             .max(external_work.abs()).max(absolute_work).max(absolute_obstacle_work);
         if self.obstacles.is_some() || self.shear_layers.iter().any(Option::is_some)
+            || self.mindlin_contacts.iter().any(Option::is_some)
             || self.friction_residual.is_some() {
             limit("total energy including contact storage", after, self.core.network.config.maximum_total_energy_j)?;
         }
@@ -958,7 +992,8 @@ impl MultiFrictionModalSystem {
             sample: staged.sample, observer_pressure_pa: pressure,
             network_energy_j: network_energy, external_work_j: external_work,
             drive_work_j: work, network_dissipation_j: network_loss,
-            friction_dissipation_j: loss, shear_layer_energy_j: shear_layer_energy, energy_residual_j: residual,
+            friction_dissipation_j: loss, shear_layer_energy_j: shear_layer_energy,
+            mindlin_energy_j: mindlin_energy, energy_residual_j: residual,
             obstacle_energy_j: obstacle_energy, obstacle_dissipation_j: obstacle_loss,
             obstacle_work_j: obstacle_work, obstacle_residual_energy_j: residual_energy,
             obstacle_residual_loss_j: residual_loss, energy_tolerance_j: tolerance, sweeps,
@@ -982,7 +1017,7 @@ impl MultiFrictionModalSystem {
             return Err(invalid("friction residual compliance does not reconstruct source-bound endpoint velocities").into());
         }
         let point = self.points.get(index).ok_or_else(|| invalid("interface names an unknown friction port"))?;
-        if self.interface(index).is_some() || self.shear_layers[index].is_some()
+        if self.interface(index).is_some() || self.shear_layers[index].is_some() || self.mindlin_contacts[index].is_some()
             || point.port.law != *binding.card().friction_law() {
             return Err(invalid("interface must match the unchanged physical port law and cannot replace a retained source").into());
         }

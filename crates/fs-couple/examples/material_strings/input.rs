@@ -918,6 +918,7 @@ impl Spec {
                 if count == 0 { return Err("source-bound friction requires explicit contact declarations".into()); }
                 let mut layers=Vec::with_capacity(count);
                 let mut interfaces=Vec::with_capacity(count);
+                let mut mindlin=Vec::with_capacity(count);
                 for _ in 0..count {
                     match r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) {
                         Some("shear-layer") if kind != "interfaces" => {
@@ -941,6 +942,24 @@ impl Spec {
                             }
                             layers.push(declaration);
                         }
+                        Some("bow-mindlin") if kind == "contacts" => {
+                            use fs_contact::normal_patch::{InputUncertainty, source::PointContactEnvelope};
+                            let mut row=r.row("bow-mindlin")?;
+                            let declaration=bow_mindlin::Declaration {
+                                track:row.word()?.to_string(), receiver_pack:row.path()?,
+                                interface_pack:row.path()?, normal_model_pack:row.path()?,
+                                friction_property:row.word()?.to_string(),
+                                radius_m:row.positive()?, indentation_m:row.positive()?,
+                                envelope:PointContactEnvelope {
+                                    maximum_indentation_m:row.positive()?, maximum_absolute_rate_m_per_s:row.scalar()?,
+                                    maximum_step_s:0.0, half_space_depth_m:row.positive()?, layer_thickness_m:row.positive()?,
+                                    uncertainty:InputUncertainty { radius_relative:row.scalar()?,
+                                        modulus_relative:row.scalar()?, load_relative:row.scalar()? },
+                                },
+                                maximum_history_intervals:row.count(fs_tribo::mindlin::MAX_HISTORY_INTERVALS)?,
+                            };
+                            row.end()?; mindlin.push(declaration);
+                        }
                         Some("bow-interface") if kind != "layers" => {
                             let mut row=r.row("bow-interface")?;
                             let track=row.word()?.to_string(); let pack=row.path()?;
@@ -963,7 +982,7 @@ impl Spec {
                 match kind {
                     "layers" => bow_interfaces::Inputs::layers(layers)?,
                     "interfaces" => bow_interfaces::Inputs::interfaces(interfaces)?,
-                    _ => bow_interfaces::Inputs::contacts(layers, interfaces)?,
+                    _ => bow_interfaces::Inputs::contacts_with_mindlin(layers, interfaces, mindlin)?,
                 }
             },
             _ => return Err("unsupported physical friction law".into()),

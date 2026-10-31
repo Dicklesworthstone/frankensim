@@ -591,6 +591,11 @@ impl MultiFrictionModalSystem {
             }
         };
         checkpoint()?;
+        if self.mindlin_contacts.iter().any(Option::is_some) {
+            return Err(LayerThermalError::Invalid(
+                "fixed-source Mindlin contacts are isothermal; finite-cell feedback requires explicit constitutive history and energy transfer",
+            ));
+        }
         controls.newton.validate()?;
         let current_s = number(self.samples_rendered() as f64 * self.sample_period_s())?;
         let next_sample =

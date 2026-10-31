@@ -81,6 +81,9 @@ pub enum ModalFrictionRegime {
         /// Whether this interval produced irreversible plastic slip.
         plastic_flow: bool,
     },
+    /// Source-bound Cattaneo--Mindlin elastic microslip, including gross slip.
+    /// Reversible shear energy and physical loss have independent port receipts.
+    Microslip,
 }
 
 /// Network, constitutive and step-averaged sticking failures stay distinct.

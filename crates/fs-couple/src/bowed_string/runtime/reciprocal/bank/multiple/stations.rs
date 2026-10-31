@@ -140,6 +140,9 @@ impl MultiBowStringBank {
 
     pub(super) fn admit_bow_station_sources(&self) -> Result<(), ModalFrictionError> {
         for port in 0..self.source.bows.len() {
+            if self.system.material_mindlin_contact(port).is_some() {
+                return Err(error("bow migration requires Mindlin material-history transport"));
+            }
             if self.system.material_shear_layer(port).is_some()
                 && !self.system.material_shear_layer_attached_to_left(port) {
                 return Err(error(

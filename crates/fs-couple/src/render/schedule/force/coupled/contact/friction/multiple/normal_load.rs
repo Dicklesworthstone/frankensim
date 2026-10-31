@@ -54,6 +54,7 @@ impl MultiFrictionModalSystem {
             poll(Some(gate))?;
             if binding.friction_port >= mapping.len() || self.obstacle(binding.obstacle).is_none()
                 || mapping[binding.friction_port].is_some()
+                || self.mindlin_contacts[binding.friction_port].is_some()
                 || mapping.contains(&Some(binding.obstacle)) {
                 return Err(invalid("one actual normal contact is required per distinct tangential contact").into());
             }
@@ -79,13 +80,20 @@ impl MultiFrictionModalSystem {
                 return Err(invalid("contact-loaded friction cannot also prescribe a normal load").into());
             }
         }
+        for (source, drive) in self.mindlin_contacts.iter().zip(drives) {
+            if source.is_some() && drive.normal_force_n != 0.0 {
+                return Err(invalid("fixed Mindlin preload requires zero additional prescribed normal load; geometry and materials own its retained Hertz load").into());
+            }
+        }
         Ok(())
     }
 
     pub(super) fn contact_loaded_drive(&self, port: usize, mut drive: FrictionDrive)
         -> Result<FrictionDrive, ModalFrictionError>
     {
-        if let Some(index) = self.contact_loads[port] {
+        if let Some(source) = &self.mindlin_contacts[port] {
+            drive.normal_force_n = source.normal_force_n();
+        } else if let Some(index) = self.contact_loads[port] {
             drive.normal_force_n = self.obstacles.as_ref().and_then(|o| o.normal_reaction(index))
                 .ok_or_else(|| invalid("contact-normal binding lost its original obstacle"))?;
             if !drive.normal_force_n.is_finite() || drive.normal_force_n < 0.0 {

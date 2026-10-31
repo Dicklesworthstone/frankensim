@@ -125,6 +125,7 @@ impl MultiFrictionModalSystem {
         if self.obstacles.is_some() || self.core.has_nonlinear_potentials()
             || self.endpoint_controls.is_some()
             || self.shear_layers.iter().any(Option::is_some)
+            || self.mindlin_contacts.iter().any(Option::is_some)
             || (0..self.port_count()).any(|i| self.interface(i).is_some()) {
             return Err(invalid("friction residual compliance requires fixed dry ports without normal contacts, nonlinear storage or interface histories").into());
         }

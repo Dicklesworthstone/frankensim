@@ -110,7 +110,7 @@ pub(super) fn check(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
     let speed = finite(slip/dt)?;
     let mut constitutive_residual_n = 0.0;
     let loss = match regime {
-        ModalFrictionRegime::Shearing { .. } => return Err(invalid("material shear must be checked by its stateful constitutive owner").into()),
+        ModalFrictionRegime::Shearing { .. } | ModalFrictionRegime::Microslip => return Err(invalid("material shear must be checked by its stateful constitutive owner").into()),
         ModalFrictionRegime::Released => 0.0,
         ModalFrictionRegime::Sticking => {
             if slip.abs() > config.sticking_tolerance_m {

@@ -7,6 +7,8 @@ use fs_matdb::{MODEL_PACK_TARGET_BASIS, ModelNormalizationReceipt, ModelNormaliz
 mod source_fixture;
 #[path = "normal_sources/shell.rs"]
 mod shell;
+#[path = "normal_sources/mindlin.rs"]
+mod mindlin;
 
 fn provenance() -> Provenance {
     Provenance { source: "synthetic native normal-contact test".into(),
@@ -48,9 +50,12 @@ fn interface(outer: &str, receiver: &str) -> NormalizedInterfacePack {
     }, pack_claims("normal-interface", claims)).unwrap()
 }
 fn models() -> NormalizedModelPack {
+    models_for(Some(0.2))
+}
+fn models_for(dissipation: Option<f64>) -> NormalizedModelPack {
     let a = source_fixture::solid("A", 7800.0, 200e9);
     let b = source_fixture::solid("B", 7800.0, 2e7);
-    let mut card = source_fixture::bind(&a, &b, Some(0.2), 0.0).model_card().clone();
+    let mut card = source_fixture::bind(&a, &b, dissipation, 0.0).model_card().clone();
     let literal = fs_blake3::ContentHash([31; 32]);
     card.sources = vec![literal];
     card.provenance.artifact = Some(literal);
