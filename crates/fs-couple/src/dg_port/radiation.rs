@@ -354,7 +354,7 @@ impl DgPortLoad {
         ))?;
         // The private source record and ordered terminal basis were bound
         // together at construction; observation cannot substitute geometry.
-        if source.driven_mouth().is_some_and(|mouth|
+        if source.driven_mouths().first().is_some_and(|mouth|
             receiver.radial_rings != mouth.terminal_radial_rings
                 || receiver.angular_points != mouth.terminal_angular_points)
         {

@@ -91,3 +91,5 @@ fn original_surface_and_work_admissions_refuse_overlaps_unresolved_shapes_and_ex
     assert!(MixedSurface::new(expensive, &terminals, &gas,
         [1.0, 4000.0], options, &gate).is_err());
 }
+
+mod multiple;

@@ -2,7 +2,7 @@
 //! The mouth flow is supplied by its physical owner, not inferred from the bore.
 
 use super::*;
-use crate::dg_port::terminal::IndependentMouthRelation;
+use crate::dg_port::terminal::IndependentMouthsRelation;
 
 /// Mean efforts of the original coupled bore/exterior owners.
 /// Coordinates are [flow INTO the bore, flow OUT into the exterior mouth],
@@ -13,6 +13,122 @@ pub struct DgIndependentMouthResponse {
     pub history_pressure_pa: [f64; 2],
     /// Row-major 2-by-2 effort response [Pa s/m³].
     pub impedance_pa_s_m3: [[f64; 2]; 2],
+}
+
+/// Complete mean effort law after the original terminal/branch elimination.
+/// Coordinates are bore inflow followed by each declared mouth's outward flow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DgIndependentMouthsResponse {
+    pub history_pressure_pa: Vec<f64>,
+    /// Flat row-major square matrix with width history_pressure_pa.len().
+    pub impedance_pa_s_m3: Vec<f64>,
+}
+
+impl DgIndependentMouthsResponse {
+    pub(in crate::dg_port) fn singleton(&self)
+        -> Result<DgIndependentMouthResponse, AcousticRealizeError>
+    {
+        if self.history_pressure_pa.len() != 2 || self.impedance_pa_s_m3.len() != 4 {
+            return Err(invalid("scalar independent mouth response requires exactly one mouth"));
+        }
+        Ok(DgIndependentMouthResponse {
+            history_pressure_pa: [self.history_pressure_pa[0], self.history_pressure_pa[1]],
+            impedance_pa_s_m3: [[self.impedance_pa_s_m3[0], self.impedance_pa_s_m3[1]],
+                [self.impedance_pa_s_m3[2], self.impedance_pa_s_m3[3]]],
+        })
+    }
+}
+
+/// One physical mouth's signed exchange with the shared radiation history.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DgIndependentMouthExchange {
+    pub outward_flow_m3_s: f64,
+    pub mean_pressure_pa: f64,
+    pub load_work_j: f64,
+}
+
+/// Complete source work, counting the original bore inlet once and every mouth
+/// once. Rational work is signed exchange, not a dissipation certificate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DgIndependentMouthsFrame {
+    pub mouths: Vec<DgIndependentMouthExchange>,
+    pub inlet_pressure_pa: f64,
+    pub source_work_j: f64,
+    pub pressure_work_residual_j: f64,
+}
+
+impl DgIndependentMouthsFrame {
+    pub(in crate::dg_port) fn singleton(&self) -> Option<DgIndependentMouthFrame> {
+        let [mouth] = self.mouths.as_slice() else { return None; };
+        Some(DgIndependentMouthFrame {
+            outward_flow_m3_s: mouth.outward_flow_m3_s,
+            mean_pressure_pa: mouth.mean_pressure_pa,
+            inlet_pressure_pa: self.inlet_pressure_pa,
+            load_work_j: mouth.load_work_j,
+            source_work_j: self.source_work_j,
+            pressure_work_residual_j: self.pressure_work_residual_j,
+        })
+    }
+
+    pub(in crate::dg_port) fn new(
+        inlet_flow: f64, mouth_flows: &[f64], mouth_pressures: &[f64],
+        inlet_pressure: f64, inlet_work: f64,
+        response: &DgIndependentMouthsResponse, dt: f64,
+    ) -> Result<Self, AcousticRealizeError> {
+        let width = mouth_flows.len() + 1;
+        if mouth_flows.is_empty() || mouth_pressures.len() != mouth_flows.len()
+            || response.history_pressure_pa.len() != width
+            || response.impedance_pa_s_m3.len() != width * width
+        {
+            return Err(invalid("independent mouth work requires the complete original coordinate basis"));
+        }
+        // The one-mouth path keeps the exact original arithmetic and checks.
+        if mouth_flows.len() == 1 {
+            let frame = DgIndependentMouthFrame::new(inlet_flow, mouth_flows[0],
+                mouth_pressures[0], inlet_pressure, inlet_work, &response.singleton()?, dt)?;
+            return Ok(Self {
+                mouths: vec![DgIndependentMouthExchange {
+                    outward_flow_m3_s: frame.outward_flow_m3_s,
+                    mean_pressure_pa: frame.mean_pressure_pa,
+                    load_work_j: frame.load_work_j,
+                }],
+                inlet_pressure_pa: frame.inlet_pressure_pa,
+                source_work_j: frame.source_work_j,
+                pressure_work_residual_j: frame.pressure_work_residual_j,
+            });
+        }
+        let flows: Vec<_> = core::iter::once(inlet_flow).chain(mouth_flows.iter().copied()).collect();
+        let pressures: Vec<_> = core::iter::once(inlet_pressure).chain(mouth_pressures.iter().copied()).collect();
+        let mut expected = response.history_pressure_pa.clone();
+        let mut scales = vec![0.0; width];
+        for row in 0..width {
+            scales[row] = pressures[row].abs() + expected[row].abs();
+            for (column, flow) in flows.iter().enumerate() {
+                let term = response.impedance_pa_s_m3[row * width + column] * flow;
+                expected[row] += term;
+                scales[row] += term.abs();
+            }
+        }
+        let mouths: Vec<_> = mouth_flows.iter().zip(mouth_pressures).map(|(&flow, &pressure)|
+            DgIndependentMouthExchange { outward_flow_m3_s: flow, mean_pressure_pa: pressure,
+                load_work_j: pressure * (flow * dt) }).collect();
+        let source_work_j = mouths.iter().fold(inlet_work, |work, mouth| work + mouth.load_work_j);
+        let expected_work = flows.iter().zip(&expected).map(|(q, p)| p * (q * dt)).sum::<f64>();
+        let pressure_work_residual_j = source_work_j - expected_work;
+        let work_scale = inlet_work.abs() + mouths.iter().map(|mouth| mouth.load_work_j.abs()).sum::<f64>()
+            + flows.iter().zip(&expected).map(|(q, p)| (p * (q * dt)).abs()).sum::<f64>()
+            + flows.iter().zip(&scales).map(|(q, scale)| scale * q.abs() * dt).sum::<f64>();
+        if !flows.iter().chain(&pressures).chain(&expected).chain(&scales).all(|value| value.is_finite())
+            || ![source_work_j, expected_work, pressure_work_residual_j, work_scale]
+                .into_iter().all(f64::is_finite)
+            || pressures.iter().zip(&expected).zip(&scales)
+                .any(|((actual, expected), scale)| (actual - expected).abs() > 1e-10 * scale.max(1e-300))
+            || pressure_work_residual_j.abs() > 1e-10 * work_scale.max(1e-300)
+        {
+            return Err(invalid("joint DG/mouth mean efforts disagree with original complete pressure work"));
+        }
+        Ok(Self { mouths, inlet_pressure_pa: inlet_pressure, source_work_j, pressure_work_residual_j })
+    }
 }
 
 /// Accepted independent mouth exchange from the original joint radiation owner.
@@ -86,22 +202,36 @@ impl DgPortLoad {
         self.with_driven_mouth(mouth, mechanics_rate_hz, gate)
     }
 
+    /// Attach every declared rectangle to the SAME computed radiation owner.
+    /// Their mutual terms and every circular-outlet cross term remain live.
+    pub fn with_independent_mouths(
+        self, mouths: &[DrivenMouthSurface], mechanics_rate_hz: u32, gate: &CancelGate,
+    ) -> Result<Self, MimoRadiationInputError> {
+        self.with_driven_mouths(mouths, mechanics_rate_hz, gate)
+    }
+
     /// Two independent mean efforts from the current original bore, branch,
     /// channel and radiation histories. This query advances no owner.
     pub fn independent_mouth_response(&self)
         -> Result<DgIndependentMouthResponse, AcousticRealizeError>
     {
-        Ok(self.independent_mouth_relation()?.efforts)
+        self.independent_mouths_relation()?.efforts.singleton()
     }
 
-    pub(in crate::dg_port) fn independent_mouth_relation(&self)
-        -> Result<IndependentMouthRelation, AcousticRealizeError>
+    pub fn independent_mouths_response(&self)
+        -> Result<DgIndependentMouthsResponse, AcousticRealizeError>
+    {
+        Ok(self.independent_mouths_relation()?.efforts)
+    }
+
+    pub(in crate::dg_port) fn independent_mouths_relation(&self)
+        -> Result<IndependentMouthsRelation, AcousticRealizeError>
     {
         let coupling = self.terminal_coupling.as_ref().filter(|value| value.driven_mouth)
             .ok_or_else(|| invalid("independent mouth flow requires its original joint exterior"))?;
         let terminal = self.terminal.as_ref()
             .ok_or_else(|| invalid("independent mouth flow lost its original rational owner"))?;
-        coupling.independent_mouth_relation(self.multiport_response()?, terminal,
+        coupling.independent_mouths_relation(self.multiport_response()?, terminal,
             &self.terminal_channels)
     }
 
@@ -118,5 +248,21 @@ impl DgPortLoad {
 
     pub const fn last_independent_mouth_frame(&self) -> Option<&DgIndependentMouthFrame> {
         self.last_independent_mouth_frame.as_ref()
+    }
+
+    /// Advance the complete supplied flow vector on one original physical clock.
+    /// Wrong arity, nonfinite input, owner refusal and cancellation publish none
+    /// of the duct, branch, channel or shared radiation histories.
+    pub fn step_with_mouth_flows(
+        &mut self, bore_inflow_m3_s: f64, mouth_outflows_m3_s: &[f64], gate: &CancelGate,
+    ) -> Result<crate::dg_port::DgStepOutput, AcousticRealizeError> {
+        if gate.is_requested() { return Err(invalid("joint DG/mouth step cancelled")); }
+        let trial = self.preview_step_with_mouth_flows(bore_inflow_m3_s, mouth_outflows_m3_s)?;
+        if gate.is_requested() { return Err(invalid("joint DG/mouth step cancelled")); }
+        Ok(trial.accept())
+    }
+
+    pub const fn last_independent_mouths_frame(&self) -> Option<&DgIndependentMouthsFrame> {
+        self.last_independent_mouths_frame.as_ref()
     }
 }

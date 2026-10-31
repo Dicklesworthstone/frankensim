@@ -1,6 +1,6 @@
-//! One reciprocal Rayleigh image of a rectangular driven mouth and circular
-//! terminals. Channel zero is the rectangle; all remaining channels retain the
-//! original terminal order. Each field is normal velocity per physical outward
+//! One reciprocal Rayleigh image of rectangular driven mouths and circular
+//! terminals. Leading channels follow the declared rectangle order; remaining
+//! channels retain the original terminal order. Each field is normal velocity per physical outward
 //! volume flow, so its work pairing is pressure times volume flow.
 //!
 //! Geometry uses the EXACT existing receiver quadratures, and every matrix entry
@@ -53,29 +53,59 @@ impl MixedSurface {
         mouth: DrivenMouthSurface, terminals: &[CircularOpening], gas: &GasState,
         band_hz: [f64; 2], options: BaffledMimoBakeOptions, gate: &CancelGate,
     ) -> Result<Self, BaffledMimoBakeError> {
+        Self::new_many(&[mouth], terminals, gas, band_hz, options, gate)
+    }
+
+    fn new_many(
+        mouths: &[DrivenMouthSurface], terminals: &[CircularOpening], gas: &GasState,
+        band_hz: [f64; 2], options: BaffledMimoBakeOptions, gate: &CancelGate,
+    ) -> Result<Self, BaffledMimoBakeError> {
         poll(gate)?;
-        if terminals.is_empty() || terminals.len() >= super::MAX_BAFFLED_MIMO_PORTS
-            || mouth.center_m.iter().any(|value| !value.is_finite())
-            || mouth.size_m.iter().any(|value| !value.is_finite() || *value <= 0.0)
-            || mouth.cells.iter().any(|count| !(1..=512).contains(count))
-            || !(1..=128).contains(&mouth.terminal_radial_rings)
-            || !(8..=512).contains(&mouth.terminal_angular_points)
+        let ports = mouths.len().checked_add(terminals.len())
+            .ok_or_else(|| invalid("mixed source channel count overflows"))?;
+        if mouths.is_empty() || terminals.is_empty() || ports > super::MAX_BAFFLED_MIMO_PORTS
+            || mouths.iter().any(|mouth|
+                mouth.center_m.iter().any(|value| !value.is_finite())
+                || mouth.size_m.iter().any(|value| !value.is_finite() || *value <= 0.0)
+                || mouth.cells.iter().any(|count| !(1..=512).contains(count))
+                || !(1..=128).contains(&mouth.terminal_radial_rings)
+                || !(8..=512).contains(&mouth.terminal_angular_points))
         {
-            return Err(invalid("mixed source requires one rectangle and bounded original circular quadrature"));
+            return Err(invalid("mixed source requires bounded rectangles and original circular quadrature"));
+        }
+        let quadrature = mouths[0];
+        if mouths.iter().any(|mouth|
+            mouth.terminal_radial_rings != quadrature.terminal_radial_rings
+                || mouth.terminal_angular_points != quadrature.terminal_angular_points)
+        {
+            return Err(invalid("joint mouths must declare the same shared circular quadrature"));
         }
         admit_apertures(terminals)?;
-        for opening in terminals {
-            let dx = ((opening.center_m[0] - mouth.center_m[0]).abs()
-                - 0.5 * mouth.size_m[0]).max(0.0);
-            let dy = ((opening.center_m[1] - mouth.center_m[1]).abs()
-                - 0.5 * mouth.size_m[1]).max(0.0);
-            if !dx.is_finite() || !dy.is_finite() || det::hypot(dx, dy) <= opening.radius_m {
-                return Err(invalid("mixed mouth and terminal openings must be disjoint and separated"));
+        for (index, mouth) in mouths.iter().enumerate() {
+            poll(gate)?;
+            for previous in &mouths[..index] {
+                let dx = (mouth.center_m[0] - previous.center_m[0]).abs()
+                    - (0.5 * mouth.size_m[0] + 0.5 * previous.size_m[0]);
+                let dy = (mouth.center_m[1] - previous.center_m[1]).abs()
+                    - (0.5 * mouth.size_m[1] + 0.5 * previous.size_m[1]);
+                if !dx.is_finite() || !dy.is_finite() || (dx <= 0.0 && dy <= 0.0) {
+                    return Err(invalid("joint rectangular mouths must be disjoint and separated"));
+                }
+            }
+            for opening in terminals {
+                let dx = ((opening.center_m[0] - mouth.center_m[0]).abs()
+                    - 0.5 * mouth.size_m[0]).max(0.0);
+                let dy = ((opening.center_m[1] - mouth.center_m[1]).abs()
+                    - 0.5 * mouth.size_m[1]).max(0.0);
+                if !dx.is_finite() || !dy.is_finite() || det::hypot(dx, dy) <= opening.radius_m {
+                    return Err(invalid("mixed mouth and terminal openings must be disjoint and separated"));
+                }
             }
         }
-        let ports = terminals.len() + 1;
-        let rectangle_cells = mouth.cells[0] * mouth.cells[1];
-        let circle_cells = mouth.terminal_radial_rings * mouth.terminal_angular_points;
+        let rectangle_cells = mouths.iter().try_fold(0usize, |sum, mouth|
+            sum.checked_add(mouth.cells[0] * mouth.cells[1]))
+            .ok_or_else(|| invalid("mixed rectangle surface count overflows"))?;
+        let circle_cells = quadrature.terminal_radial_rings * quadrature.terminal_angular_points;
         let count = rectangle_cells.checked_add(circle_cells * terminals.len())
             .ok_or_else(|| invalid("mixed source surface count overflows"))?;
         if count > MAX_MODAL_RAYLEIGH_CELLS {
@@ -102,28 +132,31 @@ impl MixedSurface {
         let medium = gas.into();
         // Receiver position is not used by these surface-only owners. The real
         // microphone remains independently constructed at its authored position.
-        let rectangle = BaffledPressure::rectangular_surface(mouth.size_m,
-            RectangularOutletReceiver { center_m: mouth.center_m, position_m: [0.0; 3],
-                cells: mouth.cells, maximum_frequency_hz: band_hz[1] }, medium)
-            .map_err(BaffledMimoBakeError::Surface)?;
         let mut samples = Vec::with_capacity(count);
-        for cell in rectangle {
-            let mut shape = vec![0.0; ports];
-            shape[0] = cell.mode_shape[0];
-            samples.push(AreaSample { position_m: [cell.position_m[0], cell.position_m[1]],
-                area_m2: cell.area_m2, mode_shape: shape });
+        for (index, mouth) in mouths.iter().enumerate() {
+            poll(gate)?;
+            let rectangle = BaffledPressure::rectangular_surface(mouth.size_m,
+                RectangularOutletReceiver { center_m: mouth.center_m, position_m: [0.0; 3],
+                    cells: mouth.cells, maximum_frequency_hz: band_hz[1] }, medium)
+                .map_err(BaffledMimoBakeError::Surface)?;
+            for cell in rectangle {
+                let mut shape = vec![0.0; ports];
+                shape[index] = cell.mode_shape[0];
+                samples.push(AreaSample { position_m: [cell.position_m[0], cell.position_m[1]],
+                    area_m2: cell.area_m2, mode_shape: shape });
+            }
         }
         for (index, opening) in terminals.iter().enumerate() {
             poll(gate)?;
             let circle = BaffledPressure::circular_surface(opening.radius_m,
                 CircularOutletReceiver { position_m: [0.0; 3],
-                    radial_rings: mouth.terminal_radial_rings,
-                    angular_points: mouth.terminal_angular_points,
+                    radial_rings: quadrature.terminal_radial_rings,
+                    angular_points: quadrature.terminal_angular_points,
                     maximum_frequency_hz: band_hz[1] }, medium)
                 .map_err(BaffledMimoBakeError::Surface)?;
             for cell in circle {
                 let mut shape = vec![0.0; ports];
-                shape[index + 1] = cell.mode_shape[0];
+                shape[index + mouths.len()] = cell.mode_shape[0];
                 samples.push(AreaSample {
                     position_m: [cell.position_m[0] + opening.center_m[0],
                         cell.position_m[1] + opening.center_m[1]],
@@ -141,12 +174,12 @@ impl MixedSurface {
             .map_err(|source| BaffledMimoBakeError::Sample {
                 frequency_hz: omega_small / core::f64::consts::TAU, source })?;
         for port in 0..ports {
-            let exact = if port == 0 {
-                rectangular_static_inertance(mouth.size_m, gas.density)
+            let exact = if port < mouths.len() {
+                rectangular_static_inertance(mouths[port].size_m, gas.density)
                     .map_err(|error| BaffledMimoBakeError::Surface(error.to_string()))?
             } else {
                 8.0 * gas.density / (3.0 * core::f64::consts::PI.powi(2)
-                    * terminals[port - 1].radius_m)
+                    * terminals[port - mouths.len()].radius_m)
             };
             let relative = (-image[port * ports + port].im / omega_small / exact - 1.0).abs();
             if !relative.is_finite() || relative > 0.05 {
@@ -187,22 +220,44 @@ pub(crate) fn bake_driven_mouth(
     mechanics_rate_hz: u32, band_hz: [f64; 2], options: BaffledMimoBakeOptions,
     limits: MimoRadiationLimits, gate: &CancelGate,
 ) -> Result<(MimoModel, BaffledMimoBakeReport, [u8; 32], [u8; 32]), BaffledMimoBakeError> {
+    bake_driven_mouths(exterior, &[mouth], terminals, mechanics_rate_hz,
+        band_hz, options, limits, gate)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bake_driven_mouths(
+    exterior: &GasState, mouths: &[DrivenMouthSurface], terminals: &[CircularOpening],
+    mechanics_rate_hz: u32, band_hz: [f64; 2], options: BaffledMimoBakeOptions,
+    limits: MimoRadiationLimits, gate: &CancelGate,
+) -> Result<(MimoModel, BaffledMimoBakeReport, [u8; 32], [u8; 32]), BaffledMimoBakeError> {
     poll(gate)?;
-    admit_common(exterior, terminals.len() + 1, mechanics_rate_hz, band_hz, options, limits)?;
-    let surface = MixedSurface::new(mouth, terminals, exterior, band_hz, options, gate)?;
+    let ports = mouths.len().checked_add(terminals.len())
+        .ok_or_else(|| invalid("mixed source channel count overflows"))?;
+    admit_common(exterior, ports, mechanics_rate_hz, band_hz, options, limits)?;
+    let surface = if mouths.len() == 1 {
+        MixedSurface::new(mouths[0], terminals, exterior, band_hz, options, gate)?
+    } else {
+        MixedSurface::new_many(mouths, terminals, exterior, band_hz, options, gate)?
+    };
     // The retained surface coexists with both fitting and residue repair.
     // Keep its allocation out of the shared owner's remaining allowance.
     let fit_options = BaffledMimoBakeOptions {
         max_fit_memory_bytes: options.max_fit_memory_bytes - surface.scratch_bytes,
         ..options
     };
-    let (model, report) = fit_source(terminals.len() + 1, mechanics_rate_hz, band_hz,
+    let (model, report) = fit_source(ports, mechanics_rate_hz, band_hz,
         fit_options, limits, gate, |hz, gate| surface.rows(exterior, hz, gate))?;
-    let mut hash = DomainHasher::new("org.frankensim.fs-couple.mixed-baffled-flow-source.v1");
+    // Preserve the original singleton declaration and realization identities.
+    let mut hash = DomainHasher::new(if mouths.len() == 1 {
+        "org.frankensim.fs-couple.mixed-baffled-flow-source.v1"
+    } else { "org.frankensim.fs-couple.multiple-mixed-baffled-flow-source.v1" });
     hash.update(&declaration(exterior, terminals, mechanics_rate_hz, band_hz));
-    for value in mouth.center_m.into_iter().chain(mouth.size_m) { scalar(&mut hash, value); }
-    for count in [mouth.cells[0], mouth.cells[1], mouth.terminal_radial_rings,
-        mouth.terminal_angular_points] { hash.update(&(count as u64).to_le_bytes()); }
+    if mouths.len() != 1 { hash.update(&(mouths.len() as u64).to_le_bytes()); }
+    for mouth in mouths {
+        for value in mouth.center_m.into_iter().chain(mouth.size_m) { scalar(&mut hash, value); }
+        for count in [mouth.cells[0], mouth.cells[1], mouth.terminal_radial_rings,
+            mouth.terminal_angular_points] { hash.update(&(count as u64).to_le_bytes()); }
+    }
     let source_identity = hash.finalize().0;
     let realization_identity = realization(source_identity, &model, options);
     Ok((model, report, source_identity, realization_identity))

@@ -498,6 +498,7 @@ impl DgPortLoad {
             source_work_j: inlet_work_j,
             driven_mouth_frame: None,
             independent_mouth_frame: None,
+            independent_mouths_frame: None,
             branch_states,
             branch_frames,
             terminal_channels: Vec::new(),

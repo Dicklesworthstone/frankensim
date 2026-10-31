@@ -343,3 +343,5 @@ fn independent_mouth_retains_finite_gap_work_and_closed_terminal_rows() {
         assert_eq!(load.terminal().unwrap().pole_states(), rational.pole_states());
     }
 }
+
+mod multiple;

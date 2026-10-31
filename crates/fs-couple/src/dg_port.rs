@@ -28,7 +28,8 @@ mod continuous;
 pub(crate) use continuous::{DgJunctionTrajectory, DgTerminalTrajectory};
 use terminal::{TerminalCoupling, TerminalRelation};
 mod mouth;
-pub use mouth::{DgDrivenMouthFrame, DgIndependentMouthFrame, DgIndependentMouthResponse};
+pub use mouth::{DgDrivenMouthFrame, DgIndependentMouthExchange, DgIndependentMouthFrame,
+    DgIndependentMouthResponse, DgIndependentMouthsFrame, DgIndependentMouthsResponse};
 
 mod branch;
 pub use branch::{DgBranch, DgBranchFrame, DgBranchLoad};
@@ -97,6 +98,7 @@ pub struct DgPortLoad {
     last_terminal_frames: Vec<DgTerminalFrame>,
     last_driven_mouth_frame: Option<DgDrivenMouthFrame>,
     last_independent_mouth_frame: Option<DgIndependentMouthFrame>,
+    last_independent_mouths_frame: Option<DgIndependentMouthsFrame>,
     radiation_record: Option<ComputedBaffledRecord>,
     branches: Vec<DgBranchLoad>,
     branch_coupling: Option<BranchCoupling>,
@@ -237,7 +239,8 @@ impl DgPortLoad {
             duct, wall_source: None, propagator, state, inlet, impedance_pa_s_m3: 0.0,
             terminal, terminal_coupling, last_terminal_frame: None,
             last_terminal_frames: Vec::new(), last_driven_mouth_frame: None,
-            last_independent_mouth_frame: None, radiation_record: None,
+            last_independent_mouth_frame: None, last_independent_mouths_frame: None,
+            radiation_record: None,
             branches, branch_coupling, last_branch_frames: Vec::new(),
             terminal_channels: Vec::new(), last_terminal_channel_frames: Vec::new(),
         };
@@ -316,6 +319,9 @@ impl DgPortLoad {
     /// driven exterior mouth instead returns inlet minus exterior-mouth pressure.
     /// No participant advances while this relation is inspected.
     pub fn port_response(&self) -> Result<DgPortResponse, AcousticRealizeError> {
+        if self.terminal_coupling.as_ref().is_some_and(|coupling| coupling.mouth_count > 1) {
+            return Err(invalid("multiple exterior mouths require the complete independent pressure response"));
+        }
         match &self.terminal {
             Some(terminal) => Ok(self.terminal_relation(terminal)?.inlet),
             None if self.branch_coupling.is_none() => self.propagator
@@ -347,17 +353,27 @@ impl DgPortLoad {
     pub(crate) fn preview_step_with_mouth_flow(
         &mut self, volume_flow_m3_s: f64, mouth_flow_m3_s: f64,
     ) -> Result<DgPortTrial<'_>, AcousticRealizeError> {
-        self.preview_step_inner(volume_flow_m3_s, Some(mouth_flow_m3_s))
+        self.preview_step_inner(volume_flow_m3_s, Some(&[mouth_flow_m3_s]))
+    }
+
+    pub(crate) fn preview_step_with_mouth_flows(
+        &mut self, volume_flow_m3_s: f64, mouth_flows_m3_s: &[f64],
+    ) -> Result<DgPortTrial<'_>, AcousticRealizeError> {
+        self.preview_step_inner(volume_flow_m3_s, Some(mouth_flows_m3_s))
     }
 
     fn preview_step_inner(
-        &mut self, volume_flow_m3_s: f64, mouth_flow_m3_s: Option<f64>,
+        &mut self, volume_flow_m3_s: f64, mouth_flows_m3_s: Option<&[f64]>,
     ) -> Result<DgPortTrial<'_>, AcousticRealizeError> {
-        if mouth_flow_m3_s.is_some_and(|value| !value.is_finite()) {
-            return Err(invalid("DG exterior mouth flow must be finite"));
+        let load_offset = self.terminal_coupling.as_ref().map_or(0, |coupling| coupling.mouth_count);
+        if mouth_flows_m3_s.is_some_and(|values| values.is_empty()
+            || values.len() != load_offset || values.iter().any(|value| !value.is_finite()))
+            || (mouth_flows_m3_s.is_none() && load_offset > 1)
+        {
+            return Err(invalid("DG exterior mouths require every finite flow in original source order"));
         }
-        let independent = mouth_flow_m3_s
-            .map(|_| self.independent_mouth_relation()).transpose()?;
+        let independent = mouth_flows_m3_s
+            .map(|_| self.independent_mouths_relation()).transpose()?;
         if !volume_flow_m3_s.is_finite() {
             return Err(invalid("DG inlet flow must be finite"));
         }
@@ -367,24 +383,31 @@ impl DgPortLoad {
         let mut inputs = vec![PortInput { id: self.inlet, effort: volume_flow_m3_s }];
         let count = self.terminal_ports().len();
         let mut outward_flows = vec![0.0; count];
-        let load_offset = usize::from(self.terminal_coupling.as_ref()
-            .is_some_and(|coupling| coupling.driven_mouth));
         let mut load_pressure = vec![0.0; count + load_offset];
         if let (Some(relation), Some(candidate), Some(coupling)) =
             (&relation, &mut terminal, &self.terminal_coupling)
         {
             for (i, outward) in outward_flows.iter_mut().enumerate() {
                 *outward = if let Some(source) = &independent {
-                    source.outward_history_m3_s[i]
-                        + source.outward_per_source[i][0] * volume_flow_m3_s
-                        + source.outward_per_source[i][1] * mouth_flow_m3_s.expect("independent source")
+                    let mut value = source.outward_history_m3_s[i]
+                        + source.outward_per_source[i][0] * volume_flow_m3_s;
+                    for (coefficient, flow) in source.outward_per_source[i][1..].iter()
+                        .zip(mouth_flows_m3_s.expect("independent sources"))
+                    {
+                        value += coefficient * flow;
+                    }
+                    value
                 } else {
                     relation.outward_history_m3_s[i]
                         + coupling.outward_per_inlet[i] * volume_flow_m3_s
                 };
             }
             let mut load_flows = Vec::with_capacity(count + load_offset);
-            if load_offset != 0 { load_flows.push(mouth_flow_m3_s.unwrap_or(-volume_flow_m3_s)); }
+            if let Some(flows) = mouth_flows_m3_s {
+                load_flows.extend_from_slice(flows);
+            } else if load_offset == 1 {
+                load_flows.push(-volume_flow_m3_s);
+            }
             load_flows.extend_from_slice(&outward_flows);
             candidate.step_mean_into(&load_flows, &mut load_pressure)
                 .map_err(|_| invalid("DG rational terminal candidate left the finite pressure/state domain"))?;
@@ -404,17 +427,19 @@ impl DgPortLoad {
         let inlet_port = output.port_outputs.iter().find(|port| port.id == self.inlet)
             .ok_or_else(|| invalid("DG candidate omitted its original inlet"))?;
         let inlet_work_j = volume_flow_m3_s * inlet_port.delta_x;
-        let driven_mouth_frame = if load_offset != 0 && independent.is_none() {
+        let driven_mouth_frame = if load_offset == 1 && independent.is_none() {
             let source = &relation.as_ref().expect("driven mouth requires its admitted terminal relation").inlet;
             Some(DgDrivenMouthFrame::new(volume_flow_m3_s, load_pressure[0],
                 inlet_port.conjugate_rate, inlet_work_j, source, self.propagator.dt())?)
         } else { None };
-        let independent_mouth_frame = independent.as_ref().map(|source| {
-            DgIndependentMouthFrame::new(volume_flow_m3_s,
-                mouth_flow_m3_s.expect("independent source"), load_pressure[0],
+        let independent_mouths_frame = independent.as_ref().map(|source| {
+            DgIndependentMouthsFrame::new(volume_flow_m3_s,
+                mouth_flows_m3_s.expect("independent sources"), &load_pressure[..load_offset],
                 inlet_port.conjugate_rate, inlet_work_j, &source.efforts, self.propagator.dt())
         }).transpose()?;
-        let source_work_j = independent_mouth_frame.as_ref().map_or_else(
+        let independent_mouth_frame = independent_mouths_frame.as_ref()
+            .and_then(DgIndependentMouthsFrame::singleton);
+        let source_work_j = independent_mouths_frame.as_ref().map_or_else(
             || driven_mouth_frame.as_ref().map_or(inlet_work_j, |frame| frame.source_work_j),
             |frame| frame.source_work_j);
         let (terminal_channels, terminal_channel_frames) = self.step_terminal_channels(
@@ -488,7 +513,7 @@ impl DgPortLoad {
             return Err(invalid("aggregate DG/channel port work does not equal inlet minus exterior work"));
         }
         Ok(DgPortTrial { owner: self, main_inputs: Some(main_inputs), state, output, terminal, terminal_frame, terminal_frames,
-            inlet_work_j, source_work_j, driven_mouth_frame, independent_mouth_frame,
+            inlet_work_j, source_work_j, driven_mouth_frame, independent_mouth_frame, independent_mouths_frame,
             branch_states, branch_frames,
             terminal_channels, terminal_channel_frames })
     }
@@ -508,6 +533,7 @@ pub(crate) struct DgPortTrial<'a> {
     source_work_j: f64,
     driven_mouth_frame: Option<DgDrivenMouthFrame>,
     independent_mouth_frame: Option<DgIndependentMouthFrame>,
+    independent_mouths_frame: Option<DgIndependentMouthsFrame>,
     branch_states: Vec<DgState>,
     branch_frames: Vec<DgBranchFrame>,
     terminal_channels: Vec<DgTerminalChannelLoad>,
@@ -535,6 +561,9 @@ impl DgPortTrial<'_> {
     pub(crate) const fn independent_mouth_frame(&self) -> Option<&DgIndependentMouthFrame> {
         self.independent_mouth_frame.as_ref()
     }
+    pub(crate) const fn independent_mouths_frame(&self) -> Option<&DgIndependentMouthsFrame> {
+        self.independent_mouths_frame.as_ref()
+    }
     pub(crate) const fn terminal_frame(&self) -> Option<&DgTerminalFrame> {
         self.terminal_frame.as_ref()
     }
@@ -551,6 +580,7 @@ impl DgPortTrial<'_> {
         self.owner.last_terminal_frames = self.terminal_frames;
         self.owner.last_driven_mouth_frame = self.driven_mouth_frame;
         self.owner.last_independent_mouth_frame = self.independent_mouth_frame;
+        self.owner.last_independent_mouths_frame = self.independent_mouths_frame;
         for (branch, state) in self.owner.branches.iter_mut().zip(self.branch_states) {
             branch.state = state;
         }

@@ -6,7 +6,7 @@
 
 use super::{MimoRadiationLimits, MimoRadiationModel};
 use super::bake::{BaffledMimoBakeOptions, BaffledMimoBakeReport, bake_baffled_mimo};
-use super::bake::mixed::{DrivenMouthSurface, bake_driven_mouth};
+use super::bake::mixed::{DrivenMouthSurface, bake_driven_mouth, bake_driven_mouths};
 use super::input::{MimoRadiationInput, MimoRadiationInputError, MimoRadiationRecord};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec};
@@ -138,7 +138,7 @@ impl ComputedBaffledInput {
             declaration_identity: model.declaration_identity,
             realization_identity: model.realization_identity,
             gas_record: exterior.clone(), apertures: apertures.to_vec(), band_hz,
-            options: self.options, limits: self.limits, report, driven_mouth: None,
+            options: self.options, limits: self.limits, report, driven_mouths: Vec::new(),
         };
         Ok((model, record))
     }
@@ -156,7 +156,7 @@ pub struct ComputedBaffledRecord {
     options: BaffledMimoBakeOptions,
     limits: MimoRadiationLimits,
     report: BaffledMimoBakeReport,
-    driven_mouth: Option<DrivenMouthSurface>,
+    driven_mouths: Vec<DrivenMouthSurface>,
 }
 impl ComputedBaffledRecord {
     /// Identity of actual source geometry, atmosphere and numerical declaration.
@@ -166,11 +166,15 @@ impl ComputedBaffledRecord {
     /// Original resolved exterior, including thermochemical source receipts.
     pub const fn gas_record(&self) -> &GasRecord { &self.gas_record }
     /// Actual circular terminals in their original observer/terminal order.
-    /// A driven mouth, when present, is channel zero of the joint matrix and
-    /// is followed by these same circular channels without reordering.
+    /// Driven mouths lead the joint matrix in their declared order, followed
+    /// by these same circular channels without reordering.
     pub fn apertures(&self) -> &[CircularOpening] { &self.apertures }
-    /// Optional physical mouth and complete mixed-source surface resolution.
-    pub const fn driven_mouth(&self) -> Option<DrivenMouthSurface> { self.driven_mouth }
+    /// Original singleton view; multiple independent mouths have no one-mouth
+    /// representation. Use driven_mouths for the complete leading channel group.
+    pub const fn driven_mouth(&self) -> Option<DrivenMouthSurface> {
+        match self.driven_mouths.as_slice() { [mouth] => Some(*mouth), _ => None }
+    }
+    pub fn driven_mouths(&self) -> &[DrivenMouthSurface] { &self.driven_mouths }
 
     /// Replace this cold circular image with one joint rectangle/terminal fit.
     /// The original full gas record, complete mechanical band and numerical
@@ -180,19 +184,33 @@ impl ComputedBaffledRecord {
     pub fn with_driven_mouth(
         &self, mouth: DrivenMouthSurface, mechanics_rate_hz: u32, gate: &CancelGate,
     ) -> Result<(fs_vfit::mimo::MimoModel, Self), MimoRadiationInputError> {
-        if self.driven_mouth.is_some()
+        self.with_driven_mouths(&[mouth], mechanics_rate_hz, gate)
+    }
+
+    /// One original reciprocal image of every supplied rectangle and circular
+    /// outlet. Leading channels follow the slice order. Self and mutual terms
+    /// share one physical source, fit and causal radiation state.
+    pub fn with_driven_mouths(
+        &self, mouths: &[DrivenMouthSurface], mechanics_rate_hz: u32, gate: &CancelGate,
+    ) -> Result<(fs_vfit::mimo::MimoModel, Self), MimoRadiationInputError> {
+        if !self.driven_mouths.is_empty() || mouths.is_empty()
             || self.band_hz[1].to_bits() != (0.5 * f64::from(mechanics_rate_hz)).to_bits()
         {
             return Err(bad("joint mouth replacement requires the original clock and one unmodified circular source"));
         }
-        let (model, report, declaration_identity, realization_identity) = bake_driven_mouth(
-            self.gas_record.state(), mouth, &self.apertures, mechanics_rate_hz,
-            self.band_hz, self.options, self.limits, gate,
-        ).map_err(MimoRadiationInputError::Bake)?;
+        let baked = if let [mouth] = mouths {
+            bake_driven_mouth(self.gas_record.state(), *mouth, &self.apertures,
+                mechanics_rate_hz, self.band_hz, self.options, self.limits, gate)
+        } else {
+            bake_driven_mouths(self.gas_record.state(), mouths, &self.apertures,
+                mechanics_rate_hz, self.band_hz, self.options, self.limits, gate)
+        };
+        let (model, report, declaration_identity, realization_identity) =
+            baked.map_err(MimoRadiationInputError::Bake)?;
         Ok((model, Self { declaration_identity, realization_identity,
             gas_record: self.gas_record.clone(), apertures: self.apertures.clone(),
             band_hz: self.band_hz, options: self.options, limits: self.limits,
-            report, driven_mouth: Some(mouth) }))
+            report, driven_mouths: mouths.to_vec() }))
     }
     /// Full admitted physical band, ending at mechanical Nyquist.
     pub const fn band_hz(&self) -> [f64; 2] { self.band_hz }

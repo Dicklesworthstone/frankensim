@@ -55,17 +55,18 @@ pub(super) fn computed_baffled_provenance(
     let limits = record.limits();
     let band = record.band_hz();
     let report = record.report();
-    let driven_mouth = record.driven_mouth();
-    let offset = usize::from(driven_mouth.is_some());
-    let terminals = record.apertures().iter().enumerate().map(|(port, aperture)| format!(
-        "{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
-        port + offset, aperture.center_m[0], aperture.center_m[1], aperture.radius_m
-    )).collect::<Vec<_>>().join(",");
-    let apertures = driven_mouth.map_or_else(|| terminals.clone(), |mouth| format!(
-        "{{\"port\":0,\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"outward_flow\":\"negative driven inlet flow\",\"terminal_radial_rings\":{},\"terminal_angular_points\":{}}},{terminals}",
+    let driven_mouths = record.driven_mouths();
+    let offset = driven_mouths.len();
+    let mut apertures = driven_mouths.iter().enumerate().map(|(port, mouth)| format!(
+        "{{\"port\":{port},\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"outward_flow\":\"original exterior mouth coordinate; coupling owner supplies its independent or constrained flow\",\"terminal_radial_rings\":{},\"terminal_angular_points\":{}}}",
         mouth.center_m[0], mouth.center_m[1], mouth.size_m[0], mouth.size_m[1],
         mouth.cells[0], mouth.cells[1], mouth.terminal_radial_rings, mouth.terminal_angular_points
-    ));
+    )).collect::<Vec<_>>();
+    apertures.extend(record.apertures().iter().enumerate().map(|(port, aperture)| format!(
+        "{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
+        port + offset, aperture.center_m[0], aperture.center_m[1], aperture.radius_m
+    )));
+    let apertures = apertures.join(",");
     let number = |value: Option<f64>| value.filter(|v| v.is_finite())
         .map_or_else(|| "null".into(), |value| format!("{value:e}"));
     let rungs = report.rungs.iter().map(|rung| format!(
@@ -75,12 +76,12 @@ pub(super) fn computed_baffled_provenance(
         rung.refusal.as_ref().map_or_else(|| "null".into(), |text| super::json_string(text))
     )).collect::<Vec<_>>().join(",");
     let gas_sources = super::thermochemical::provenance(core::slice::from_ref(record.gas_record()));
-    let source = if driven_mouth.is_some() { "computed-mixed-baffled" } else { "computed-baffled" };
+    let source = if driven_mouths.is_empty() { "computed-baffled" } else { "computed-mixed-baffled" };
     // An unrepaired fit keeps its original scope text byte for byte.
     let repair = report.rungs.iter().find(|rung| rung.order == report.selected_order)
         .and_then(|rung| rung.repair_relative_change)
         .map(|change| format!("residue passivity repair of the selected fit (in-band change {change:e}); no"));
-    let scope = if driven_mouth.is_some() {
+    let scope = if !driven_mouths.is_empty() {
         format!("actual coplanar rectangular mouth and circular terminals in the bound exterior; complete shared power-consistent Rayleigh surface matrix and mutual source feedback; proper rational approximation over full mechanical Nyquist band; {} measured-instrument qualification; finite surface/frequency checks and sampled GridOnly are not continuum or storage certificates",
             repair.as_deref().unwrap_or("no passivity repair or"))
     } else {

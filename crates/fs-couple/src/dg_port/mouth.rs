@@ -8,7 +8,8 @@ use fs_exec::CancelGate;
 use fs_vfit::mimo::load::{MimoLoadLimits, PreparedMimoLoad};
 
 mod independent;
-pub use independent::{DgIndependentMouthFrame, DgIndependentMouthResponse};
+pub use independent::{DgIndependentMouthExchange, DgIndependentMouthFrame,
+    DgIndependentMouthResponse, DgIndependentMouthsFrame, DgIndependentMouthsResponse};
 
 /// Accepted exterior mouth pressure and signed work from the original joint
 /// model. This is energy exchange, not a heat or rational-storage certificate.
@@ -57,8 +58,9 @@ impl DgDrivenMouthFrame {
 }
 
 impl DgPortLoad {
-    /// Whether this load's driven source effort is inlet minus mouth pressure.
-    /// Nonlinear adapters must explicitly support that pressure-jump meaning.
+    /// Whether this load has any leading exterior-mouth coordinates. Scalar
+    /// nonlinear adapters must explicitly support the singleton pressure jump;
+    /// a larger group requires the complete independent-flow interface.
     pub fn has_driven_mouth(&self) -> bool {
         self.terminal_coupling.as_ref().is_some_and(|coupling| coupling.driven_mouth)
     }
@@ -84,8 +86,16 @@ impl DgPortLoad {
     fn install_driven_mouth(&mut self, terminal: PreparedMimoLoad)
         -> Result<(), AcousticRealizeError>
     {
+        self.install_independent_mouths(terminal, 1)
+    }
+
+    fn install_independent_mouths(&mut self, terminal: PreparedMimoLoad, mouths_count: usize)
+        -> Result<(), AcousticRealizeError>
+    {
         self.admit_cold_mouth()?;
-        if terminal.time_step_s().to_bits() != self.propagator.dt().to_bits()
+        if mouths_count == 0
+            || self.terminal_ports().len().checked_add(mouths_count) != Some(terminal.ports())
+            || terminal.time_step_s().to_bits() != self.propagator.dt().to_bits()
             || terminal.pole_states().iter().any(|state| state.re != 0.0 || state.im != 0.0)
         {
             return Err(invalid("joint mouth requires cold rational memory on the original DG clock"));
@@ -106,13 +116,19 @@ impl DgPortLoad {
     /// Existing bore/branch operators and histories are preserved. The complete
     /// current physical source record replaces its former circular-only image.
     pub(crate) fn with_driven_mouth(
-        mut self, mouth: DrivenMouthSurface, mechanics_rate_hz: u32, gate: &CancelGate,
+        self, mouth: DrivenMouthSurface, mechanics_rate_hz: u32, gate: &CancelGate,
+    ) -> Result<Self, MimoRadiationInputError> {
+        self.with_driven_mouths(&[mouth], mechanics_rate_hz, gate)
+    }
+
+    pub(crate) fn with_driven_mouths(
+        mut self, mouths: &[DrivenMouthSurface], mechanics_rate_hz: u32, gate: &CancelGate,
     ) -> Result<Self, MimoRadiationInputError> {
         self.admit_cold_mouth().map_err(MimoRadiationInputError::Physics)?;
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
         let record = self.radiation_record.as_ref().ok_or_else(||
             MimoRadiationInputError::Physics(invalid("joint mouth requires the original computed exterior source")))?;
-        let (model, record) = record.with_driven_mouth(mouth, mechanics_rate_hz, gate)?;
+        let (model, record) = record.with_driven_mouths(mouths, mechanics_rate_hz, gate)?;
         let limits = record.limits();
         let terminal = PreparedMimoLoad::new(&model, self.propagator.dt(), MimoLoadLimits {
             band_rad_s: [core::f64::consts::TAU * record.band_hz()[0],
@@ -121,7 +137,11 @@ impl DgPortLoad {
             max_states: limits.max_states, max_memory_bytes: limits.max_memory_bytes,
         }).map_err(|error| MimoRadiationInputError::Physics(invalid(error.0)))?;
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
-        self.install_driven_mouth(terminal).map_err(MimoRadiationInputError::Physics)?;
+        if mouths.len() == 1 {
+            self.install_driven_mouth(terminal)
+        } else {
+            self.install_independent_mouths(terminal, mouths.len())
+        }.map_err(MimoRadiationInputError::Physics)?;
         self.radiation_record = Some(record);
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
         Ok(self)
