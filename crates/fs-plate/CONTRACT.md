@@ -1027,3 +1027,40 @@ tangent contributions. Loaded reference geometries still refuse. This is the
 original moderate-deformation shell and linear offset-rotation model with
 massless scalar tensile laws, not a distributed vibrating string, finite-rotation
 attachment, compressive contact, soundpost friction or complete M1.4-W1 closure.
+
+## Compression-only elastic members in assembled equilibrium
+
+`shell::preload::assembly::equilibrate_connected_shell_assembly` adds physical
+compression-only axial members to the same solve as existing tensile tethers,
+dead forces and shell/tie internal forces. `AssemblyStrut` supplies an explicit
+free length [m] and positive axial rigidity EA [N]. Its stiffness is EA divided
+by free length; no contact penalty or missing material property is inferred.
+An overlength member models elastic interference preload, while a short member
+remains separated until its bearings approach the declared free length.
+
+The original radial connection owner evaluates compression
+`C = (EA / L_free) * max(L_free - L, 0)` and the elastic potential
+`U = (EA / (2 L_free)) * max(L_free - L, 0)^2`. Its signed radial gradient
+and full Hessian retain the negative transverse geometric stiffness `-C/L`.
+The same coalesced relative point map carries both endpoint forces, offset
+moments, matrix-free actions and symmetric cross-body tangent blocks through
+rigid/nonmatching ties. Existing tensile arithmetic and one-part APIs remain
+unchanged. The original continuation scales whole connection potentials,
+and its physical force and stable-inertia gates accept the final body.
+
+`StrutResponse` reports compression, signed free-length gap, current length,
+equal/opposite endpoint forces, absolute nonnegative elastic storage, and a
+cancellation-resistant potential change relative to the reference. Connection
+energy is separate from structural storage. Open members have exactly zero
+force and tangent. At zero gap the open-side tangent is selected explicitly;
+a two-sided linearization does not exist there. Small-vibration use is valid
+only while the chosen active branch persists. Final cancellation still occurs
+after all physical responses and component displacements are ready.
+
+Tethers and struts share the existing aggregate count, mapped-column and
+tangent-work caps. The unloaded shell assembly still needs physical supports
+and ties; compression does not regularize reference rigid modes. This scope is
+a massless elastic axial member with the original moderate-deformation shell
+and linear bearing-offset map. It does not model member flexure/buckling,
+distributed post inertia, finite contact footprints or friction, and does not
+claim complete M1.4-W1 or mixed shell/solid assembly coverage.

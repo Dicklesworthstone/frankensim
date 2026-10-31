@@ -5,7 +5,7 @@
 //! `T^T` and tangents by `T^T K T`, including eccentric and nonmatching seams.
 //! Components are never equilibrated independently and then attached afterward.
 
-use super::tethers::{PreparedPoint, PreparedTether, TetherResponse};
+use super::tethers::{PreparedPoint, PreparedTether, StrutResponse, TetherResponse};
 use super::{
     ComponentTransform, CoordinateRows, Element, Equilibrium, PreloadOptions, PreloadProblem,
     positive_factor, solve_problem, validate_options,
@@ -78,7 +78,7 @@ pub struct AssemblyTetherPoint {
     pub arm_m: [f64; 3],
 }
 
-/// Opposite endpoint of one massless tensile connection.
+/// Opposite endpoint of one massless axial connection.
 #[derive(Clone, Copy, Debug)]
 pub enum AssemblyTetherAnchor {
     /// Fixed world position [m]; its reaction is opposite the bearing force.
@@ -100,6 +100,25 @@ pub struct AssemblyTether {
     pub axial_stiffness_n_per_m: f64,
 }
 
+/// A compression-only elastic axial member, including an interference-fit post.
+///
+/// Compression is `(EA / free_length) * max(free_length - current_length, 0)`.
+/// The free length and axial rigidity are physical inputs, not contact penalties.
+/// A short member exerts no force until the bearings approach its free length.
+/// This massless axial law does not resolve member bending, flexural buckling,
+/// footprint contact, friction, or finite rotations of the bearing offsets.
+#[derive(Clone, Copy, Debug)]
+pub struct AssemblyStrut {
+    /// First material endpoint, using the original reciprocal shell point map.
+    pub bearing: AssemblyTetherPoint,
+    /// Fixed world anchor or a second moving material endpoint.
+    pub anchor: AssemblyTetherAnchor,
+    /// Uncompressed member length [m]; may exceed the reference bearing spacing.
+    pub free_length_m: f64,
+    /// Positive axial rigidity, Young's modulus times cross-sectional area [N].
+    pub axial_rigidity_n: f64,
+}
+
 /// Joint shell equilibrium and original tensile-connection response ledger.
 #[derive(Debug)]
 pub struct PreloadedTetheredShellAssembly {
@@ -114,6 +133,19 @@ pub struct PreloadedTetheredShellAssembly {
     pub tether_responses: Vec<TetherResponse>,
 }
 
+/// One accepted body with simultaneously equilibrated tensile and compressive ports.
+#[derive(Debug)]
+pub struct PreloadedConnectedShellAssembly {
+    /// Original structural equilibrium and mass, with both connection laws
+    /// already included in the tangent used for subsequent small vibrations.
+    pub equilibrium: PreloadedShellAssembly,
+    /// Tensile endpoint states in tether input order.
+    pub tether_responses: Vec<TetherResponse>,
+    /// Compressive endpoint states in strut input order. Connection potential
+    /// changes remain separate from `equilibrium.stored_energy_j`.
+    pub strut_responses: Vec<StrutResponse>,
+}
+
 /// Equilibrate all components together, then linearize that same physical body.
 ///
 /// Uses [`super::equilibrate_shell_materials`]'s Green--Lagrange membrane force,
@@ -124,8 +156,9 @@ pub struct PreloadedTetheredShellAssembly {
 ///
 /// All component geometries must explicitly be unloaded. This entry point
 /// supplies dead loads; [`equilibrate_tethered_shell_assembly`] also includes
-/// conservative, direction-updating tensile connections. Nonconservative
-/// follower loads and unilateral contact need their own residual and tangent.
+/// conservative, direction-updating tensile connections, and
+/// [`equilibrate_connected_shell_assembly`] includes elastic compressive posts.
+/// Nonconservative follower loads and footprint contact need their own laws.
 /// At most 64 components, 10,000 total nodes and 40,000 total triangles are
 /// admitted. Tie work uses the caller's existing `TieBudget`; nonlinear work
 /// uses `PreloadOptions`. Cancellation is checked during component/tie assembly
@@ -186,11 +219,64 @@ pub fn equilibrate_tethered_shell_assembly(
     tethers: &[AssemblyTether],
     options: PreloadOptions,
     solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize) -> Result<(Vec<f64>, usize), String>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<PreloadedTetheredShellAssembly, String> {
+    equilibrate_connected_shell_assembly(
+        components,
+        edge_ties,
+        face_ties,
+        tie_budget,
+        tethers,
+        &[],
+        options,
+        solve,
+        cancelled,
+    )
+    .map(|loaded| PreloadedTetheredShellAssembly {
+        equilibrium: loaded.equilibrium,
+        tether_responses: loaded.tether_responses,
+    })
+}
+
+/// Equilibrate tensile strings and compression-only struts with the same body.
+///
+/// Both endpoints use the original coalesced relative point map, force transfer
+/// and radial Hessian. A strut supplies its actual `EA / free_length` stiffness;
+/// separation removes its entire force and tangent. At exactly zero shortening
+/// the open-side tangent is selected because a unique two-sided tangent does not
+/// exist there. A compressed strut contributes negative transverse geometric
+/// stiffness; the original inertia gate refuses an unstable accepted increment.
+///
+/// The original continuation scales both complete connection potentials and
+/// dead loads together. Supports/ties must stabilize the unloaded reference;
+/// struts never supply artificial regularization. The existing 4,096-connection,
+/// retained-column and tangent-work caps apply to tethers and struts together.
+/// Reference mass, moderate shell deformation and linear offset rotations retain
+/// their original meaning. Connection mass, member flexure and friction are not
+/// inferred. No partial body is returned after refusal or cancellation.
+///
+/// # Errors
+/// Original assembly/tether refusals, nonpositive or nonfinite strut inputs,
+/// nonrepresentable axial stiffness, or an unstable compressively loaded body.
+#[allow(clippy::too_many_arguments)]
+pub fn equilibrate_connected_shell_assembly(
+    components: &[ShellPreloadComponent<'_>],
+    edge_ties: &[EdgeTie],
+    face_ties: &[FaceTie],
+    tie_budget: TieBudget,
+    tethers: &[AssemblyTether],
+    struts: &[AssemblyStrut],
+    options: PreloadOptions,
+    solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize) -> Result<(Vec<f64>, usize), String>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreloadedConnectedShellAssembly, String> {
     validate_options(options)?;
-    if tethers.len() > 4096 {
-        return Err("assembled preload exceeds 4096 tensile connections".into());
+    if tethers
+        .len()
+        .checked_add(struts.len())
+        .is_none_or(|n| n > 4096)
+    {
+        return Err("assembled preload exceeds 4096 axial connections".into());
     }
     if components.is_empty() || components.len() > 64 {
         return Err("assembled preload requires 1..=64 shell components".into());
@@ -328,8 +414,9 @@ pub fn equilibrate_tethered_shell_assembly(
             rows,
         });
     }
-    let prepared_tethers = prepare_tethers(
+    let prepared_tethers = prepare_connections(
         tethers,
+        struts,
         components,
         &models,
         &transforms,
@@ -369,7 +456,14 @@ pub fn equilibrate_tethered_shell_assembly(
     let tether_responses = problem
         .tethers
         .iter()
+        .take(tethers.len())
         .map(|t| t.response(&u))
+        .collect::<Result<Vec<_>, _>>()?;
+    let strut_responses = problem
+        .tethers
+        .iter()
+        .skip(tethers.len())
+        .map(|t| t.strut_response(&u))
         .collect::<Result<Vec<_>, _>>()?;
     let displacements = assembly.expand_components(&u).map_err(|e| e.to_string())?;
     if cancelled() {
@@ -387,14 +481,16 @@ pub fn equilibrate_tethered_shell_assembly(
         iterations,
         evaluations,
     };
-    Ok(PreloadedTetheredShellAssembly {
+    Ok(PreloadedConnectedShellAssembly {
         equilibrium,
         tether_responses,
+        strut_responses,
     })
 }
 
-fn prepare_tethers(
+fn prepare_connections(
     tethers: &[AssemblyTether],
+    struts: &[AssemblyStrut],
     components: &[ShellPreloadComponent<'_>],
     models: &[ShellModel],
     maps: &[ComponentTransform],
@@ -413,30 +509,47 @@ fn prepare_tethers(
             &models[port.component],
         )
     };
-    let mut prepared = Vec::with_capacity(tethers.len());
+    let count = tethers.len() + struts.len();
+    let mut prepared = Vec::with_capacity(count);
     let mut columns = 0usize;
     let mut tangent_entries = 0usize;
-    for tether in tethers {
+    for index in 0..count {
         if cancelled() {
             return Err("assembled shell preload cancelled".into());
         }
-        let bearing = point(tether.bearing)?;
-        let (anchor_position, anchor) = match tether.anchor {
+        let (bearing_port, anchor_port) = if let Some(tether) = tethers.get(index) {
+            (tether.bearing, tether.anchor)
+        } else {
+            let strut = &struts[index - tethers.len()];
+            (strut.bearing, strut.anchor)
+        };
+        let bearing = point(bearing_port)?;
+        let (anchor_position, anchor) = match anchor_port {
             AssemblyTetherAnchor::World(position) => (position, None),
             AssemblyTetherAnchor::Shell(port) => {
                 let anchor = point(port)?;
                 (anchor.position()?, Some((port.component, anchor)))
             }
         };
-        let mut connection = PreparedTether::at_point(
-            &bearing,
-            anchor_position,
-            tether.reference_tension_n,
-            tether.axial_stiffness_n_per_m,
-        )?;
+        let mut connection = if let Some(tether) = tethers.get(index) {
+            PreparedTether::at_point(
+                &bearing,
+                anchor_position,
+                tether.reference_tension_n,
+                tether.axial_stiffness_n_per_m,
+            )?
+        } else {
+            let strut = &struts[index - tethers.len()];
+            PreparedTether::at_strut(
+                &bearing,
+                anchor_position,
+                strut.free_length_m,
+                strut.axial_rigidity_n,
+            )?
+        };
         if !single || anchor.is_some() {
             connection = connection.remap(
-                &maps[tether.bearing.component].rows,
+                &maps[bearing_port.component].rows,
                 anchor
                     .as_ref()
                     .map(|(component, point)| (point, &maps[*component].rows)),
@@ -445,16 +558,16 @@ fn prepare_tethers(
         let count = connection.column_count();
         columns = columns
             .checked_add(count)
-            .ok_or("tether column budget overflow")?;
+            .ok_or("axial connection column budget overflow")?;
         tangent_entries = tangent_entries
             .checked_add(
                 count
                     .checked_mul(count)
-                    .ok_or("tether tangent budget overflow")?,
+                    .ok_or("axial connection tangent budget overflow")?,
             )
-            .ok_or("tether tangent budget overflow")?;
+            .ok_or("axial connection tangent budget overflow")?;
         if columns > 262_144 || tangent_entries > 8_388_608 {
-            return Err("assembled tether map or tangent work budget exceeded".into());
+            return Err("assembled axial connection map or tangent work budget exceeded".into());
         }
         prepared.push(connection);
     }
@@ -505,6 +618,8 @@ fn check_slave_supports(
     Ok(())
 }
 
+#[cfg(test)]
+mod strut_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
