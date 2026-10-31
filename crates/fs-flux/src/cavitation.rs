@@ -33,7 +33,11 @@ mod population;
 mod stepper;
 
 pub use keller_miksis::{BubblePressureSample, KellerMiksisBubble, KellerMiksisLimits};
-pub use population::{BubblePopulation, BubblePopulationClass, BubblePopulationError};
+pub use population::{
+    BubblePopulation, BubblePopulationClass, BubblePopulationError, EvolvingBubblePopulation,
+    PopulationAdvance, PopulationEvolutionError, PopulationEvolutionLimits,
+    PopulationEvolutionNumerics, PopulationEvolutionStep, PopulationObservation,
+};
 
 /// Invalid input, an explicit model boundary, or an unsuccessful integration.
 #[derive(Clone, Debug, PartialEq)]

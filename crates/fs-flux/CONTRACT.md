@@ -1690,6 +1690,32 @@ radius and volume coordinates, independent pressure/work derivatives, the
 isothermal limit and representability. This is barotropic mechanical work,
 not a new gas caloric model, phase-change energy or thermal closure.
 
+## Nonlinear polydisperse bubble evolution
+
+`BubblePopulation` retains each original Keller--Miksis model and its absolute
+number density per fixed reference mixture volume. `EvolvingBubblePopulation`
+advances each class through the original radial equation and adaptive kernel
+under one prescribed smooth pressure history. It preserves gas inventories,
+number weights and one accepted clock. Actual native volumes and their
+geometric derivatives supply compensated sums of void fraction, its first and
+second time derivatives, and the number-radius moment.
+
+The sum of authored per-class maximum-radius volumes must fit the declared
+dilute fraction (at most 0.01) before integration. This whole-interval envelope
+does not rely on asynchronous endpoint checks or silently tighten native
+radius limits. One shared trial budget bounds all class work. Two preallocated
+state vectors support proposal inspection and infallible commit without
+per-advance state/model cloning or allocation. Failure, cancellation or dropping
+the proposal preserves every accepted class and the common clock.
+
+Ten new native regressions check independent geometric derivatives, original
+per-class trajectories, split-bin invariance, proposal replay, shared-work
+exhaustion, late-class refusal, cancellation, dilution/clock boundaries and
+weighted-source representability.
+This fixed-number owner supplies no transport, nucleation, breakup, coalescence,
+gas diffusion, thermal phase kinetics or inter-bubble pressure feedback.
+Dilution alone does not certify weak collective cloud interaction.
+
 ## Anisotropic Stokes–Brinkman permeability (`continuum`)
 
 `FluxSystem::assemble_brinkman_mixed` adds `nu K^-1 u` to the existing

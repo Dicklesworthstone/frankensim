@@ -15,6 +15,14 @@
 
 use super::{BubbleLinearization, CavitationError, CavitationState, KellerMiksisBubble};
 
+#[path = "population/evolution.rs"]
+mod evolution;
+pub use evolution::{
+    EvolvingBubblePopulation, PopulationAdvance, PopulationEvolutionError,
+    PopulationEvolutionLimits, PopulationEvolutionNumerics, PopulationEvolutionStep,
+    PopulationObservation,
+};
+
 /// Invalid population data or refusal by an original radial model.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BubblePopulationError {
