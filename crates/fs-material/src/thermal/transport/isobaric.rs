@@ -18,6 +18,7 @@ use super::{
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{ClaimSelection, MaterialCard, PropertyKey, PropertyLineSlice, QueryPoint};
 use fs_qty::{Pressure, QuantitySpec};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw, ThermalStorageBasis};
 
 /// Explicit Cp role and one source-supported isobar at fixed composition.
@@ -73,15 +74,18 @@ impl IsobaricHeatCapacityLaw {
         }
         for point in [query.lower, query.upper] {
             admit_temperature_point(point, query.temperature_axis)?;
-            if point.axis_quantities().get(query.pressure_axis)
-                != Some(&QuantitySpec::dimensional(Pressure::DIMS))
+            if !point.axis_quantities().get(query.pressure_axis).is_some_and(|quantity| {
+                *quantity == QuantitySpec::dimensional(Pressure::DIMS)
+                    || *quantity == QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::Pressure, ValueForm::Static))
+            })
                 || !point
                     .axes()
                     .get(query.pressure_axis)
                     .is_some_and(|&p| positive(p))
             {
                 return Err(invalid(
-                    "isobaric Cp requires explicit positive absolute pressure in pascals",
+                    "isobaric Cp requires positive static pressure in pascals, not a stress or dynamic alias",
                 ));
             }
         }
@@ -299,5 +303,72 @@ impl ThermalLaw for IsobaricHeatCapacityLaw {
             return Err(DepositionError::MaterialDomain);
         }
         Ok(Some(change))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim, PropertyValue,
+        Provenance, UncertaintyModel,
+    };
+    use fs_qty::Temperature;
+
+    #[test]
+    fn static_pressure_quantity_is_preserved_without_accepting_stress_or_rms_aliases() {
+        let typed = |kind, form| QuantitySpec::semantic(SemanticType::new(kind, form));
+        for (pressure, accepted) in [
+            (QuantitySpec::dimensional(Pressure::DIMS), true),
+            (typed(QuantityKind::Pressure, ValueForm::Static), true),
+            (typed(QuantityKind::Stress, ValueForm::Static), false),
+            (typed(QuantityKind::Pressure, ValueForm::Rms), false),
+        ] {
+            let temperature = typed(QuantityKind::AbsoluteTemperature, ValueForm::Static);
+            let key = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT);
+            let mut claims = ClaimSet::new();
+            claims.insert_claim(PropertyClaim {
+                key: key.clone(),
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![(290.0, 2.0), (300.0, 2.0), (310.0, 4.0)],
+                    dims: SPECIFIC_HEAT,
+                },
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity("T", temperature, 290.0, 310.0)
+                    .with_quantity("p", pressure, 100000.0, 100000.0),
+                interpolation: InterpolationPolicy::LinearInside,
+                uncertainty: UncertaintyModel::Unstated,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "synthetic isobaric capacity".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            }).unwrap();
+            let card = MaterialCard::assemble(MaterialStateId {
+                chemistry: "synthetic caloric fluid".into(),
+                phase: "liquid".into(), process: "numerical fixture".into(), revision: 0,
+            }, claims, vec![]).unwrap();
+            let point = |t| QueryPoint::new()
+                .with_quantity("T", temperature, t).unwrap()
+                .with_quantity("p", pressure, 100000.0).unwrap();
+            let lower = point(290.0);
+            let upper = point(310.0);
+            let law = IsobaricHeatCapacityLaw::try_new(&card, IsobaricHeatCapacityQuery {
+                specific_heat_cp: &key, temperature_axis: "T", pressure_axis: "p",
+                lower: &lower, upper: &upper, selection: ClaimSelection::Policy(fs_matdb::SelectionPolicy::SingleClaimOnly),
+            }, 300.0);
+            assert_eq!(law.is_ok(), accepted, "{pressure:?}");
+            if let Ok(law) = law {
+                assert_eq!(law.material_card_identity(), card.content_hash());
+                assert_eq!(law.query_endpoints(), &[lower, upper]);
+                assert_eq!(law.query_endpoints()[0].axis_quantities()["p"], pressure);
+                assert!((law.specific_enthalpy_change_j_kg(300.0, 310.0).unwrap() - 30.0).abs() < 1e-13);
+                assert!((law.specific_enthalpy_change_j_kg(305.0, 300.0).unwrap() + 12.5).abs() < 1e-13);
+            }
+        }
     }
 }

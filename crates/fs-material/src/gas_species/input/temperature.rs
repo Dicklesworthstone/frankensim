@@ -119,6 +119,49 @@ impl IsobaricGasLaw {
         &self.reference
     }
 
+    /// Admit a continuous, stable caloric interval on this retained gas law.
+    ///
+    /// This initialization check retains the original pressure, composition and
+    /// transport/phase admission at both ends. Source-backed gases reuse the
+    /// existing bounded NASA-9 coefficient analysis to establish positive Cv
+    /// (and therefore Cp) throughout the interval. Raw sources must remain in
+    /// one region per species; crossing seams requires an already explicit
+    /// continuous caloric reference. No source is fitted or reconciled here.
+    ///
+    /// This supplies interval admission, not an energy integrator. Consumers
+    /// still evaluate the original Cp and enthalpy change at each trial.
+    pub fn admit_caloric_interval(
+        &self,
+        lower: Temperature,
+        upper: Temperature,
+    ) -> Result<(), MaterialError> {
+        if !lower.value().is_finite() || !upper.value().is_finite()
+            || lower.value() <= 0.0 || lower.value() >= upper.value()
+        {
+            return Err(MaterialError::State {
+                what: "caloric interval requires ordered positive absolute temperatures".into(),
+            });
+        }
+        self.at_temperature(lower)?;
+        self.at_temperature(upper)?;
+        if let Source::Thermochemical { model, .. } = &self.source {
+            // Only the original coefficient-bound initialization is used.
+            // The root-solver fields are validated but no root solve is run.
+            let controls = crate::thermochemical_gas::energy::GasEnergySolve {
+                minimum_temperature_k: lower.value(),
+                maximum_temperature_k: upper.value(),
+                energy_tolerance_j_kg: 1.0,
+                maximum_iterations: 1,
+            };
+            model.maximum_isochoric_temperature_slope(controls).map_err(|error| {
+                MaterialError::State {
+                    what: format!("retained gas continuous caloric interval: {error}"),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     /// Isobaric specific enthalpy change `h(to) - h(from)` [J/kg] of this
     /// same retained gas. Both endpoints retain the original pressure,
     /// composition, source claims and phase/domain admission.
@@ -333,6 +376,9 @@ mod tests {
         ] {
             let law = law(text);
             let (a, b) = (Temperature::new(300.0), Temperature::new(310.0));
+            law.admit_caloric_interval(a, b).unwrap();
+            assert!(law.admit_caloric_interval(b, a).is_err());
+            assert!(law.admit_caloric_interval(a, a).is_err());
             let change = law.specific_enthalpy_change(a, b).unwrap();
             assert_eq!(change, law.reference().state().specific_heat_cp * 10.0);
             assert_eq!(law.specific_enthalpy_change(b, a).unwrap(), -change);
@@ -388,6 +434,7 @@ mod tests {
                 IsobaricGasLaw::try_from_model(model.clone(), point(280.0, 100000.0)).unwrap();
             for (a, b) in [(280.0, 290.0), (320.0, 330.0)] {
                 let (a, b) = (Temperature::new(a), Temperature::new(b));
+                law.admit_caloric_interval(a, b).unwrap();
                 let change = law.specific_enthalpy_change(a, b).unwrap();
                 assert_eq!(
                     change,
@@ -409,6 +456,21 @@ mod tests {
             assert!((change / expected - 1.0).abs() < 1e-13);
 
             let (a, b) = (Temperature::new(290.0), Temperature::new(320.0));
+            assert!(law.admit_caloric_interval(a, b).is_err());
+            if gap == 0.0 {
+                let reconciled = model.with_caloric_continuity(
+                    Temperature::new(280.0),
+                    fs_thermochem::MolarEnergyQuantityV1::new(1e6),
+                    fs_thermochem::MolarThermalQuantityV1::new(1.0),
+                ).unwrap();
+                let continuous = IsobaricGasLaw::try_from_model(
+                    reconciled, point(280.0, 100000.0),
+                ).unwrap();
+                continuous.admit_caloric_interval(a, b).unwrap();
+                let expected = (R / 0.028) * (3.5 + 0.0005 * 610.0) * 30.0;
+                assert!((continuous.specific_enthalpy_change(a, b).unwrap()
+                    / expected - 1.0).abs() < 1e-13);
+            }
             // Both original endpoints, and the raw endpoint-difference API,
             // support this query even when the intervening 300..310 K does not.
             law.at_temperature(a).unwrap();
