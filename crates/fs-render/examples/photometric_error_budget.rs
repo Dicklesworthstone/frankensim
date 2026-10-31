@@ -2,6 +2,10 @@
 //!
 //! Run: cargo run -p fs-render --features photometry --example photometric_error_budget
 //! Stdout is per-probe CSV; stderr names the independent analytic reference.
+//! Add `-- --direct` for direct-lux arithmetic enclosures at the ten CIE-derived
+//! diffuse point-source positions, or `-- --direct-haze` for an authored gray
+//! extinction extension. These use the same source/probe owners and the shared
+//! fs-ivl attenuation enclosure, not a separate renderer.
 //!
 //! An inward-facing 2 m cube emits uniform Le=8 cd/m² and reflects rho=0.5.
 //! Its ideal vacuum equilibrium is L=Le/(1-rho), E=pi*L for every interior
@@ -11,24 +15,29 @@
 //! The 0.01 lx budget covers only the admitted model's omitted reflection
 //! orders. Fixed-count IID sampling error is estimated separately; arithmetic,
 //! spectral, geometry, physical-model and calibration errors remain unknown.
-//! This is an authored mathematical case, not CIE 171 conformance or a measured
-//! fixture. All geometry, emission and reflection use the existing native tracer.
+//! The optional direct modes instead enclose arithmetic of the retained source
+//! coefficients, positions and homogeneous medium. Source construction,
+//! calibration, model discrepancy and total physical error remain unknown.
+//! No mode establishes full CIE 171 conformance or measured-fixture accuracy.
 
 use std::error::Error;
-use std::f64::consts::PI;
+use std::f64::consts::{FRAC_PI_2, PI};
 use std::io::{self, Write};
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::charts::TriMesh;
+use fs_render::instances::RigidTransform;
 use fs_render::photometry::area::{
     EmissionSidedness, PhotometricAreaEmitter, PhotometricEmitters,
 };
+use fs_render::photometry::medium::{HomogeneousMedium, PhaseFunction};
 use fs_render::photometry::path::{
     IlluminanceSampling, PathErrorBudget, PathIlluminanceJob, PathMedium,
 };
-use fs_render::photometry::source::SourceSpectrum;
-use fs_render::photometry::{IlluminanceProbe, TransportOptions};
+use fs_render::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum};
+use fs_render::photometry::source::validation::{EnclosedIlluminance, EnclosedIlluminanceJob};
+use fs_render::photometry::{IlluminanceProbe, PhotometricScene, TransportOptions};
 use fs_render::spectral::SpectralReflectance;
 use fs_render::tracer::{Camera, Material, Primitive, Sampler, Scene, Shape};
 
@@ -159,7 +168,63 @@ fn calculate(cx: &Cx<'_>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn direct_reference(cx: &Cx<'_>, haze: bool) -> Result<(), Box<dyn Error>> {
+    // Factual setup and provenance are retained in
+    // tests/photometric_path/cie171_analytical.rs. No rounded table is copied.
+    let positions: [[f64; 2]; 10] = [
+        [0.0, 0.0], [0.5, 0.0], [1.0, 0.0], [1.5, 0.0], [0.5, 0.5],
+        [1.0, 0.5], [1.5, 0.5], [1.0, 1.0], [1.5, 1.0], [1.5, 1.5],
+    ];
+    let sources = [PhotometricSource::try_new(
+        RigidTransform::try_new([1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 3.0])?,
+        1000.0 * PI,
+        1.0,
+        AngularDistribution::cosine_power(1.0, FRAC_PI_2)?,
+        SourceSpectrum::equal_energy(),
+    )?];
+    let absorption = if haze { 0.07 } else { 0.0 };
+    let scattering = if haze { 0.13 } else { 0.0 };
+    let medium = HomogeneousMedium::try_new(absorption, scattering, PhaseFunction::Isotropic)?;
+    let scene = PhotometricScene::try_new(
+        &[], &sources, medium, TransportOptions::default(), cx,
+    )?;
+    let probes: Vec<_> = positions.iter().map(|[x, y]| {
+        IlluminanceProbe::try_new(Point3::new(*x, *y, 0.0), Vec3::new(0.0, 0.0, 1.0))
+    }).collect::<Result<_, _>>()?;
+    let mut job = EnclosedIlluminanceJob::new(&scene, &probes, cx)?;
+    while !job.is_complete() {
+        job.advance(cx, 3)?;
+    }
+    eprintln!("direct unscattered lux; source construction, calibration and total physical error unknown");
+    eprintln!("reference formula: 9000/(9+x*x+y*y)^2 * exp(-(absorption+scattering)*sqrt(9+x*x+y*y))");
+    eprintln!("gray absorption_per_m={absorption} scattering_per_m={scattering}; haze is an authored extension, not a CIE case");
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    EnclosedIlluminance::write_csv_header(&mut writer)?;
+    for (index, (report, [x, y])) in job.results().iter().zip(positions).enumerate() {
+        let distance_squared = 9.0 + x * x + y * y;
+        // Independent formula evaluation is a diagnostic f64 reference, NOT
+        // the source of the rigorous interval emitted by the production API.
+        let reference = 9000.0 / (distance_squared * distance_squared)
+            * (-(absorption + scattering) * distance_squared.sqrt()).exp();
+        eprintln!("probe={index} x_m={x} y_m={y} analytic_reference_f64_lux={reference}");
+        report.write_csv_row(index, &mut writer)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let mode = match args.as_slice() {
+        [] => 0,
+        [arg] if arg == "--direct" => 1,
+        [arg] if arg == "--direct-haze" => 2,
+        _ => return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: photometric_error_budget [--direct | --direct-haze]",
+        ).into()),
+    };
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -175,6 +240,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        calculate(&cx)
+        match mode {
+            1 => direct_reference(&cx, false),
+            2 => direct_reference(&cx, true),
+            _ => calculate(&cx),
+        }
     })
 }
