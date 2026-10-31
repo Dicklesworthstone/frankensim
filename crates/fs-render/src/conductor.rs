@@ -5,11 +5,16 @@
 //! divides both by the incident dielectric index before solving the exact
 //! complex interface equations.  Built-in metal tables are representative
 //! look-development assets, not measurements of a specimen or finish.
+//! An explicitly supplied [`CoherentDielectricCoating`] adds local thin-film
+//! interference without introducing coherence between independent scene paths.
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::det;
 
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
+
+mod thin_film;
+pub use thin_film::{CoherentDielectricCoating, MAX_COHERENT_COATING_THICKNESS_M};
 
 /// Bit semantics of table validation, interpolation, and Fresnel evaluation.
 pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 1;
@@ -44,6 +49,8 @@ pub enum ConductorError {
     InvalidRoughness,
     /// A source identity was zero.
     InvalidSource,
+    /// A coherent coating thickness was non-finite or outside its domain.
+    InvalidCoating,
     /// Valid inputs nevertheless produced an invalid complex intermediate.
     NumericalFailure,
 }
@@ -58,6 +65,7 @@ impl core::fmt::Display for ConductorError {
             Self::InvalidIncidence => "invalid conductor incidence cosine",
             Self::InvalidRoughness => "invalid conductor GGX roughness",
             Self::InvalidSource => "invalid conductor source identity",
+            Self::InvalidCoating => "invalid coherent dielectric coating thickness",
             Self::NumericalFailure => "conductor Fresnel evaluation was non-finite",
         })
     }
@@ -79,8 +87,8 @@ pub enum ConductorDataStatus {
 }
 
 /// Caller-supplied source identifier and declared status of admitted optical
-/// data. Built-in identifiers bind their complete canonical tables; custom
-/// identifiers remain caller assertions. In all cases,
+/// data, including explicit coating laws. Built-in identifiers bind their
+/// complete canonical tables; custom identifiers remain caller assertions. In all cases,
 /// [`ConductorOptics::content_identity`] binds the actual admitted knots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ConductorSource {
@@ -193,6 +201,7 @@ pub struct ConductorOptics {
     samples: [ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT],
     source: ConductorSource,
     provenance: ConductorProvenance,
+    coating: Option<CoherentDielectricCoating>,
 }
 
 impl ConductorOptics {
@@ -243,10 +252,28 @@ impl ConductorOptics {
             samples,
             source,
             provenance,
+            coating: None,
         })
     }
 
-    /// Evaluate linearly interpolated absolute `eta + i k`.
+    /// Attach one explicitly declared transparent, conformal coherent film.
+    /// Its thickness and phase-index law are independent of the substrate
+    /// table and GGX roughness; no oxide is inferred from the metal's name.
+    /// All conductor BSDF consumers evaluate the same coated Fresnel law.
+    #[must_use]
+    pub fn with_coating(mut self, coating: CoherentDielectricCoating) -> Self {
+        self.coating = Some(coating);
+        self
+    }
+
+    /// Explicit coherent film, if supplied by the caller.
+    #[must_use]
+    pub const fn coating(self) -> Option<CoherentDielectricCoating> {
+        self.coating
+    }
+
+    /// Evaluate the linearly interpolated substrate's absolute `eta + i k`.
+    /// An optional coating retains its own independent phase-index law.
     pub fn complex_ior(self, wavelength_nm: f64) -> Result<ComplexIor, ConductorError> {
         if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
             return Err(ConductorError::InvalidWavelength);
@@ -282,7 +309,9 @@ impl ConductorOptics {
         }
     }
 
-    /// Exact unpolarized Fresnel reflectance at this table's wavelength.
+    /// Exact unpolarized reflectance at this table's wavelength, including
+    /// all coherent internal reflections when a coating is supplied. The
+    /// two polarization amplitudes are combined only after taking their powers.
     pub fn fresnel(
         self,
         wavelength_nm: f64,
@@ -290,7 +319,10 @@ impl ConductorOptics {
         incidence_cosine: f64,
     ) -> Result<f64, ConductorError> {
         let ior = self.complex_ior(wavelength_nm)?;
-        fresnel_conductor(incident_eta, ior.eta, ior.k, incidence_cosine)
+        match self.coating {
+            Some(coating) => coating.fresnel(wavelength_nm, incident_eta, ior, incidence_cosine),
+            None => fresnel_conductor(incident_eta, ior.eta, ior.k, incidence_cosine),
+        }
     }
 
     /// Canonical knots in ascending wavelength order.
@@ -299,13 +331,14 @@ impl ConductorOptics {
         self.samples
     }
 
-    /// Bound source identity and declared status.
+    /// Substrate source identity and declared status. A coating, if present,
+    /// retains its separate source through [`Self::coating`].
     #[must_use]
     pub const fn source(self) -> ConductorSource {
         self.source
     }
 
-    /// Built-in or caller-supplied provenance class.
+    /// Built-in or caller-supplied substrate provenance class.
     #[must_use]
     pub const fn provenance(self) -> ConductorProvenance {
         self.provenance
@@ -335,6 +368,10 @@ impl ConductorOptics {
             hasher.update(&sample.wavelength_nm.to_bits().to_le_bytes());
             hasher.update(&sample.eta.to_bits().to_le_bytes());
             hasher.update(&sample.k.to_bits().to_le_bytes());
+        }
+        if let Some(coating) = self.coating {
+            // Bare optics retain their existing identities and arithmetic.
+            coating.update_identity(&mut hasher);
         }
         hasher.finalize()
     }

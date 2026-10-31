@@ -51,6 +51,28 @@ differentiable lift). Pure Rust throughout.
   incident medium, and validated isotropic-GGX roughness. Built-in tungsten and
   stainless-steel tables are explicitly representative look-development data;
   table/source/material identities prove replay binding, not specimen fidelity.
+  `ConductorOptics::with_coating(CoherentDielectricCoating)` additionally admits
+  one explicitly source-bound transparent isotropic film: an existing visible
+  Cauchy phase-index law and a uniform thickness in metres, from zero through
+  100 micrometres. Separate complex s/p amplitudes retain substrate reflection
+  phase and sum every internal reflection before unpolarized power averaging.
+  A fixed-size characteristic-matrix evaluation handles the film's critical
+  angle by its analytic sinc limit and scales evanescent transfer entries to
+  preserve frustrated total internal reflection without exponential overflow.
+  Both isotropic and brushed conductor BSDFs, including their existing direct,
+  camera, photometric and bidirectional consumers, use this same Fresnel owner.
+  The film follows the local microfacet normal; geometric proposals remain
+  unchanged. Bare presets and bare optical identities remain unchanged. A
+  coating is never inferred from a metal name or material-state binding.
+  The caller declares sufficient coherence and locally parallel, laterally
+  uniform boundaries. This is local single-film interference, with no absorbing
+  film, arbitrary multilayer stack, thickness distribution, polarization
+  transport between bounces, diffraction, or scene-wide coherent field claim.
+  G0/G1/G3 tests cover independent complex Airy answers, quarter-wave
+  cancellation, half-wave/zero-thickness/bare limits, incident-medium effects,
+  critical/evanescent continuity, passivity and both native conductor BSDFs.
+  The derivation follows [Byrnes, *Multilayer optical calculations*,
+  sections 2--5 and appendix D](https://arxiv.org/abs/1603.02720).
 
 - `material_state` (opt-in `material-state`, including `tracer` and L3
   `fs-material`/`fs-conduction`): `MaterialOpticalBinding` converts resolved visible conductor
@@ -1343,12 +1365,12 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   face pair.
   Fixed-metric, representability-aware ray offsets are robust engineering, not
   a certified positional-error enclosure.
-- Conductor support is homogeneous, opaque, non-polarizing geometric optics
-  with isotropic single-scattering GGX. The representative presets do not claim
+- Conductor support is an opaque complex-index substrate with optional explicit
+  local coherent transparent-film interference and single-scattering GGX.
+  The representative presets do not infer an oxide/passivation film or claim
   material identification, alloy/lot or product calibration, a measured finish,
-  oxide/passivation or thin-film layers, anisotropic brushing/machining grooves,
-  temperature dependence, polarization, interfacet multiple scattering, or a
-  conversion from measured `Ra`/`Rq` to GGX alpha. Caller-asserted measured
+  temperature dependence, polarization transport, interfacet multiple scattering,
+  or a conversion from measured `Ra`/`Rq` to GGX alpha. Caller-asserted measured
   source metadata is retained but not independently authenticated. A content
   hash establishes exact replay inputs, not physical truth.
 - The tracer implements spectrum→CIE XYZ→Bradford-adapted linear sRGB and

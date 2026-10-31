@@ -905,8 +905,9 @@ pub enum Material {
         /// Roughness α (GGX convention, > 0).
         alpha: f64,
     },
-    /// Opaque spectral conductor using exact complex-IOR Fresnel and an
-    /// isotropic single-scattering GGX microfacet surface.
+    /// Opaque spectral conductor using exact complex-IOR Fresnel, optional
+    /// coherent dielectric-film interference, and an isotropic
+    /// single-scattering GGX microfacet surface.
     Conductor {
         /// Validated absolute complex-index table and honest provenance.
         optics: ConductorOptics,
@@ -18753,6 +18754,99 @@ mod tests {
             tungsten_smooth.content_identity(),
             stainless_smooth.content_identity()
         );
+    }
+
+    #[test]
+    fn g1_coherent_film_reaches_isotropic_and_brushed_bsdfs() {
+        use crate::conductor::{
+            CoherentDielectricCoating, ConductorDataStatus, ConductorIorSample, ConductorSource,
+        };
+        use crate::dielectric::CauchyIor;
+
+        let source = ConductorSource::try_new(
+            hash_domain("org.frankensim.test.film-bsdf", b"synthetic"),
+            ConductorDataStatus::Representative,
+        )
+        .unwrap();
+        let samples = core::array::from_fn(|i| {
+            ConductorIorSample::try_new(380.0 + 50.0 * i as f64, 2.25, 1.0e-8).unwrap()
+        });
+        let bare = ConductorOptics::try_new(samples, source).unwrap();
+        let coated = bare.with_coating(
+            CoherentDielectricCoating::try_new(
+                CauchyIor::try_constant(1.5).unwrap(),
+                100.0e-9,
+                source,
+            )
+            .unwrap(),
+        );
+        let detail = crate::surface_detail::SurfaceDetail::none(0.18);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let frame =
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.4, 0.25, 0.1), normal)
+                .unwrap();
+        for brushed in [false, true] {
+            let material = |optics| {
+                if brushed {
+                    Material::BrushedConductor { optics, detail }
+                } else {
+                    Material::Conductor {
+                        optics,
+                        surface: ConductorSurface::try_rough(0.18).unwrap(),
+                    }
+                }
+            };
+            let (plain_material, film_material) = (material(bare), material(coated));
+            assert_ne!(
+                plain_material.content_identity(),
+                film_material.content_identity()
+            );
+            for wavelength in [430.0, 600.0, 780.0] {
+                let value = |mat| {
+                    opaque_bsdf_eval(
+                        mat,
+                        normal,
+                        normal,
+                        normal,
+                        wavelength,
+                        None,
+                        brushed.then_some(&frame),
+                    )
+                    .unwrap()
+                };
+                let plain = value(&plain_material);
+                let film = value(&film_material);
+                let expected_ratio = coated.fresnel(wavelength, 1.0, 1.0).unwrap()
+                    / bare.fresnel(wavelength, 1.0, 1.0).unwrap();
+                assert!((film / plain - expected_ratio).abs() < 1.0e-13);
+                if wavelength == 600.0 {
+                    assert!(
+                        film < 1.0e-15 * plain,
+                        "quarter-wave interference must reach transport"
+                    );
+                }
+                // The film changes the optical weight, not the admitted
+                // geometric direction proposal or its MIS density.
+                assert_eq!(
+                    bsdf_pdf(
+                        &plain_material,
+                        normal,
+                        normal,
+                        normal,
+                        brushed.then_some(&frame)
+                    )
+                    .to_bits(),
+                    bsdf_pdf(
+                        &film_material,
+                        normal,
+                        normal,
+                        normal,
+                        brushed.then_some(&frame)
+                    )
+                    .to_bits(),
+                );
+            }
+        }
     }
 
     #[test]
