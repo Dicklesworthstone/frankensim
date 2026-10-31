@@ -260,6 +260,7 @@ pub(super) fn solve<'m>(
         terminal_voltage_v,
         terminal_charge_c,
         nodal_boundary_charge_c,
+        free_charge_density_c_m3: rho.to_vec(),
         evaluation,
         volume_charge_c,
         charge_balance_residual_c,

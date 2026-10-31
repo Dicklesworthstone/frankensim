@@ -1,5 +1,6 @@
 //! Shared geometric Maxwell-stress integral; constitutive and source admission
-//! stays with each field owner. The two supplied vectors have a pressure pairing.
+//! stays with each field owner. Nonlinear materials supply their own isotropic
+//! pressure potential; geometry and first moments have one shared owner.
 
 use fs_ga::{Vec3, Wrench};
 use fs_rep_mesh::TriComplex2;
@@ -31,6 +32,74 @@ pub(crate) fn integrate(
     moment_origin_m: [f64; 3],
     limits: MaxwellForceLimits,
     mut fields: impl FnMut(usize, usize, [u32; 2]) -> Result<([f64; 2], [f64; 2]), ContourError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Wrench, ContourError> {
+    integrate_with_pressure(
+        mesh,
+        thickness_m,
+        enclosed_cells,
+        frame,
+        moment_origin_m,
+        limits,
+        |inner, outer, vertices| {
+            let (field, dual) = fields(inner, outer, vertices)?;
+            let pressure = 0.5 * field[0].mul_add(dual[0], field[1] * dual[1]);
+            Ok((field, dual, pressure))
+        },
+        cancelled,
+    )
+}
+
+/// Integrate `a tensor b - pressure I` using the original closed geometric
+/// contour. The constitutive owner supplies the pressure [J/m3 = Pa] and
+/// admits the material/mechanical convention on both incident cells.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn integrate_with_pressure(
+    mesh: &TriComplex2,
+    thickness_m: f64,
+    enclosed_cells: &[usize],
+    frame: &PlanarFrame,
+    moment_origin_m: [f64; 3],
+    limits: MaxwellForceLimits,
+    mut fields: impl FnMut(usize, usize, [u32; 2]) -> Result<([f64; 2], [f64; 2], f64), ContourError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Wrench, ContourError> {
+    integrate_traction(
+        mesh,
+        thickness_m,
+        enclosed_cells,
+        frame,
+        moment_origin_m,
+        limits,
+        |inner, outer, vertices, normal_area| {
+            let (field, dual, pressure) = fields(inner, outer, vertices)?;
+            if !pressure.is_finite() {
+                return Err(ContourError::Invalid(
+                    "Maxwell pressure is not representable",
+                ));
+            }
+            let normal_dual = dual[0].mul_add(normal_area[0], dual[1] * normal_area[1]);
+            Ok([
+                field[0].mul_add(normal_dual, -pressure * normal_area[0]),
+                field[1].mul_add(normal_dual, -pressure * normal_area[1]),
+            ])
+        },
+        cancelled,
+    )
+}
+
+/// Apply the caller's admitted stress directly to the oriented contour area.
+/// This permits a material owner to retain stable principal stresses without
+/// subtracting a large isotropic pressure from a large dyadic contribution.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn integrate_traction(
+    mesh: &TriComplex2,
+    thickness_m: f64,
+    enclosed_cells: &[usize],
+    frame: &PlanarFrame,
+    moment_origin_m: [f64; 3],
+    limits: MaxwellForceLimits,
+    mut traction: impl FnMut(usize, usize, [u32; 2], [f64; 2]) -> Result<[f64; 2], ContourError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Wrench, ContourError> {
     poll(cancelled)?;
@@ -79,7 +148,6 @@ pub(crate) fn integrate(
         let outer = outside[edge.global_edge].ok_or(ContourError::Invalid(
             "Maxwell contour must lie strictly inside the mesh",
         ))?;
-        let (field, dual) = fields(inner, outer, edge.oriented_vertices)?;
         let [a, b] = edge.oriented_vertices.map(|v| mesh.vertices()[v as usize]);
         let orientation = triangle_orientation(mesh, inner)?;
         if triangle_orientation(mesh, outer)? != orientation {
@@ -96,13 +164,8 @@ pub(crate) fn integrate(
                 "Maxwell contour area is not representable",
             ));
         }
-        let pressure = 0.5 * field[0].mul_add(dual[0], field[1] * dual[1]);
-        let normal_dual = dual[0].mul_add(normal_area[0], dual[1] * normal_area[1]);
-        let force = frame.vector_to_global([
-            field[0].mul_add(normal_dual, -pressure * normal_area[0]),
-            field[1].mul_add(normal_dual, -pressure * normal_area[1]),
-            0.0,
-        ]);
+        let local_force = traction(inner, outer, edge.oriented_vertices, normal_area)?;
+        let force = frame.vector_to_global([local_force[0], local_force[1], 0.0]);
         let center = frame.point_to_global([
             0.5 * a[0] + 0.5 * b[0],
             0.5 * a[1] + 0.5 * b[1],

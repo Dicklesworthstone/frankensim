@@ -1778,3 +1778,41 @@ its field and source identity; it is a local `dQ/dV`, not a global `Q=C*V` law.
 A genuine source-law kink or exhausted field support refuses a unique two-sided
 differential response. These fixed-geometry, memoryless, reversible laws do not
 infer dielectric relaxation, hysteresis, thermal evolution or electrostriction.
+
+## Nonlinear electric forces and original discrete virtual work
+
+`NonlinearElectricField::maxwell_wrench` uses the original shared geometric
+contour owner with an explicitly frozen isotropic constitutive potential.
+Its stress is `E tensor D - w* I`. Parallel and transverse principal stresses
+use independently integrated physical energy `w` and coenergy `w*`, retaining
+small longitudinal pressure without subtracting two large biased quantities.
+The original linear magnetic/electric callers retain their existing dyadic
+pressure arithmetic through the same contour geometry and first moments.
+
+Every contour edge requires one identical complete isotropic material source
+on both sides, zero original free-charge density, and no electrode vertex.
+Actual extrusion depth, winding, frame, origin, work bounds and cancellation
+remain with the original owner. The enclosed region may contain charge and
+contrasting materials. This gives a net instantaneous native `Wrench`, not an
+invented solid-surface traction map or an additional overlapping rho E load.
+
+`shape_forces` differentiates the original accepted mixed electrical P1
+functional with respect to vertex positions and physical extrusion thickness.
+Voltage controls and floating total charges stay fixed. Each cell transports
+its original total free charge, so its density changes inversely with volume;
+the consistent q/3 source remains unchanged. Isotropic material contexts stay
+fixed. Anisotropy refuses until its deformation/frame convention is supplied.
+The result retains the field and its actual controls. `virtual_work` contracts
+the same derivative directly over cells without allocating a nodal force
+vector; local displacement differences preserve rigid-translation invariance.
+Its virtual displacement is in metres and its first-order result is in joules.
+
+These envelope derivatives require no extra field solve or tangent assembly,
+but inherit the accepted primal residual and spatial error. Independent
+fixed-voltage/coenergy and fixed-charge/energy perturbations test the declared
+held variables. A source-free nonlinear radial field tests the pressure term
+against a distinct half-pairing falsifier. Refinement and original linear force
+parity are implementation evidence, not a force enclosure or measured material
+validation. Electrostriction, thermal/material evolution, ambient mechanical
+pressure, finite moving-mesh work and a mechanical time step remain with their
+corresponding physical owners.

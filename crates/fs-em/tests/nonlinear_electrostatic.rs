@@ -1,5 +1,8 @@
 //! Independent nonlinear slab/series oracles at picofarad and picocoulomb scales.
 //! Authored constitutive fixtures; these are not measured material predictions.
+#[path = "nonlinear_electrostatic/force.rs"]
+mod force;
+
 use fs_em::electrostatic::{
     ElectrostaticControls, PlanarElectrostatics,
     nonlinear::{

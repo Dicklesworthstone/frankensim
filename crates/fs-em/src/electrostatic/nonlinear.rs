@@ -12,6 +12,7 @@
 //! dielectric memory, thermal evolution, electrostriction or spatial error bounds.
 
 mod electrodes;
+pub mod force;
 mod solve;
 pub mod tangent;
 
@@ -445,6 +446,7 @@ pub struct NonlinearElectricField<'m> {
     terminal_voltage_v: Vec<f64>,
     terminal_charge_c: Vec<f64>,
     nodal_boundary_charge_c: Vec<Option<f64>>,
+    free_charge_density_c_m3: Vec<f64>,
     evaluation: Evaluation,
     volume_charge_c: f64,
     charge_balance_residual_c: f64,
@@ -474,6 +476,15 @@ impl<'m> NonlinearElectricField<'m> {
     }
     pub fn nodal_boundary_charge_c(&self) -> &[Option<f64>] {
         &self.nodal_boundary_charge_c
+    }
+    /// Original cell sources, retained for force admission and explicit
+    /// transport under a virtual geometry change.
+    pub fn free_charge_density_c_m3(&self) -> &[f64] {
+        &self.free_charge_density_c_m3
+    }
+    /// Actual voltage and total-charge controls of this accepted field.
+    pub fn electrode_controls(&self) -> &[ElectrodeControl] {
+        &self.controls
     }
     pub fn electric_field_v_m(&self) -> &[[f64; 2]] {
         &self.evaluation.electric
