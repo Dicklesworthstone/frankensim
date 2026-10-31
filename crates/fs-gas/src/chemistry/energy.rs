@@ -6,8 +6,13 @@
 //! `G = 3 kB V ne sum_n[n_n (me/m_n) km_n(Te)]`.
 //! Banks (1966), equations 16–20, derives this stationary-heavy Maxwellian
 //! closure: <https://ntrs.nasa.gov/api/citations/19660020172/downloads/19660020172.pdf>.
-//! No electron-ion, inelastic, radiative or field power is invented. A user
-//! may supply separately calculated electron/ion Joule power to these pools.
+//! An explicitly supplied shared Coulomb model adds electron-ion thermal
+//! exchange from the SAME symmetric pair law used by material momentum drag.
+//! Its screening convention, classical weak-coupling domain and original
+//! populations remain retained. Neutral and Coulomb transfers are separately
+//! accounted while their sum drives one conservative implicit exchange.
+//! Inelastic, radiative and field power are not inferred. A user may supply
+//! separately calculated electron/heavy electrical heating to these pools.
 //!
 //! Each substep lags G at its actual starting Te, then solves one monotone
 //! implicit exchange with equal and opposite pool increments. Full/two-half
@@ -19,6 +24,7 @@
 //! two-temperature molecular reverse rate, or per-trial heap allocation.
 
 use fs_qty::{Energy, Power, Temperature, Time};
+use fs_thermochem::coulomb::{CoulombErrorV1, CoulombModelV1};
 use fs_thermochem::electron_collision::{
     AVOGADRO_PER_MOL, ELECTRON_MASS_KG, ElectronCollisionErrorV1, ElectronCollisionKindV1,
     ElectronCrossSectionV1, MaxwellianRateControlsV1, MaxwellianRateWeightingV1,
@@ -40,9 +46,10 @@ pub struct ElectronHeavyEnergySolve {
     pub minimum_temperature_k: f64,
     /// Common maximum temperature admitted for every populated original source.
     pub maximum_temperature_k: f64,
-    /// Maximum charged-particle mole fraction, strictly between zero and one.
-    /// This limits the chosen electron-neutral closure; it does not prove that
-    /// omitted Coulomb collisions are negligible in a particular experiment.
+    /// Maximum charged-particle mole fraction, greater than zero. It must be
+    /// below one in the neutral-only path; a supplied Coulomb model permits
+    /// one, including a fully ionized thermal parcel. A smaller limit does not
+    /// prove that omitted collisions are negligible in a particular experiment.
     pub maximum_charged_mole_fraction: f64,
     /// Joint bound on `sqrt(me/m_target)` and
     /// `sqrt((Th/m_target)/(Te/me))`, strictly between zero and one. Both
@@ -97,7 +104,7 @@ impl ElectronHeavyEnergySolve {
             maximum_iterations: 64,
         }
     }
-    fn validate(self) -> Result<(), ElectronHeavyEnergyError> {
+    fn validate(self, includes_coulomb: bool) -> Result<(), ElectronHeavyEnergyError> {
         if [
             self.minimum_temperature_k,
             self.maximum_temperature_k,
@@ -118,7 +125,8 @@ impl ElectronHeavyEnergySolve {
             || self.initial_step_s > self.maximum_step_s
             || self.relative_tolerance >= 1.0
             || self.maximum_target_thermal_speed_ratio >= 1.0
-            || self.maximum_charged_mole_fraction >= 1.0
+            || self.maximum_charged_mole_fraction > 1.0
+            || (!includes_coulomb && self.maximum_charged_mole_fraction == 1.0)
             || self.relative_charge_tolerance >= 1.0
             || !(1..=1_000_000).contains(&self.maximum_steps)
             || !(4..=256).contains(&self.maximum_iterations)
@@ -150,6 +158,8 @@ pub enum ElectronHeavyEnergyError {
         species: SpeciesId,
         source: ElectronCollisionErrorV1,
     },
+    /// Original Coulomb model, screening or classical-domain admission refused.
+    Coulomb(CoulombErrorV1),
     /// A temperature/energy or stationary-heavy trial exceeds the declared domain.
     OutsideDomain,
     /// A bounded monotone nonlinear solve failed to converge.
@@ -181,6 +191,10 @@ pub struct ElectronHeavyEnergyBalance {
     pub heavy_deposited_energy_j: f64,
     /// Signed cumulative transfer from electrons to heavy particles [J].
     pub electron_to_heavy_energy_j: f64,
+    /// Signed cumulative electron-to-heavy Coulomb transfer [J].
+    pub electron_to_heavy_coulomb_energy_j: f64,
+    /// Signed cumulative electron-to-neutral transfer [J].
+    pub electron_to_heavy_neutral_energy_j: f64,
     /// Actual source electron energy change minus its target [J].
     pub electron_energy_residual_j: f64,
     /// Actual source heavy energy change minus its target [J].
@@ -199,6 +213,7 @@ pub struct ElectronHeavyEnergyResult {
     initial: FrozenIonizedGasStateV1,
     state: FrozenIonizedGasStateV1,
     sources: Vec<ElectronCrossSectionV1>,
+    coulomb: Option<CoulombModelV1>,
     controls: ElectronHeavyEnergySolve,
     elapsed: Time,
     balance: ElectronHeavyEnergyBalance,
@@ -215,6 +230,10 @@ impl ElectronHeavyEnergyResult {
     /// Original momentum cross sections, retaining source provenance/envelopes.
     pub fn momentum_sources(&self) -> &[ElectronCrossSectionV1] {
         &self.sources
+    }
+    /// Original pair law, screening choice, population binding and domain limits.
+    pub const fn coulomb_model(&self) -> Option<&CoulombModelV1> {
+        self.coulomb.as_ref()
     }
     /// Actual elapsed time [s].
     pub const fn elapsed_time(&self) -> Time {
@@ -246,9 +265,65 @@ pub fn advance_frozen_energy(
     heavy_power: Power,
     duration: Time,
     controls: ElectronHeavyEnergySolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ElectronHeavyEnergyResult, ElectronHeavyEnergyError> {
+    advance(
+        initial,
+        momentum_sources,
+        None,
+        electron_power,
+        heavy_power,
+        duration,
+        controls,
+        cancelled,
+    )
+}
+
+/// Evolve neutral and Coulomb exchange together in the existing energy owner.
+///
+/// The Coulomb model must retain exactly these species models, populations and
+/// volume. Its coefficients and domain diagnostics are refreshed at actual Th
+/// and Te for each lagged step. Each populated neutral still requires its own
+/// momentum cross section; a fully ionized parcel supplies an empty neutral
+/// list. All heavy species share Th; no ionization or radiation is inferred.
+///
+/// Supplied powers are held over this interval. Material Coulomb heating may
+/// include signed, equal-and-opposite drift corrections to thermal exchange;
+/// supply each returned pool power once, without adding total E.J again. The
+/// zero-drift Coulomb exchange itself is computed here, not in those powers.
+pub fn advance_frozen_energy_with_coulomb(
+    initial: &FrozenIonizedGasStateV1,
+    momentum_sources: &[ElectronCrossSectionV1],
+    coulomb: &CoulombModelV1,
+    electron_power: Power,
+    heavy_power: Power,
+    duration: Time,
+    controls: ElectronHeavyEnergySolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ElectronHeavyEnergyResult, ElectronHeavyEnergyError> {
+    advance(
+        initial,
+        momentum_sources,
+        Some(coulomb),
+        electron_power,
+        heavy_power,
+        duration,
+        controls,
+        cancelled,
+    )
+}
+
+fn advance(
+    initial: &FrozenIonizedGasStateV1,
+    momentum_sources: &[ElectronCrossSectionV1],
+    coulomb: Option<&CoulombModelV1>,
+    electron_power: Power,
+    heavy_power: Power,
+    duration: Time,
+    controls: ElectronHeavyEnergySolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ElectronHeavyEnergyResult, ElectronHeavyEnergyError> {
-    controls.validate()?;
+    controls.validate(coulomb.is_some())?;
     poll(&mut cancelled)?;
     if !duration.value().is_finite()
         || duration.value() < 0.0
@@ -262,6 +337,7 @@ pub fn advance_frozen_energy(
     let problem = Problem::new(
         initial,
         momentum_sources,
+        coulomb,
         [heavy_power.value(), electron_power.value()],
         controls,
         &mut cancelled,
@@ -269,6 +345,7 @@ pub fn advance_frozen_energy(
     let mut point = Point {
         time: 0.0,
         exchange: 0.0,
+        coulomb_exchange: 0.0,
         temperatures: [
             initial.heavy_temperature().value(),
             initial.electron_temperature().value(),
@@ -330,6 +407,10 @@ pub fn advance_frozen_energy(
             .min(point.capacities[1] * point.temperatures[1]);
         error = error.max(
             (two.exchange - full.exchange).abs()
+                / (controls.energy_tolerance_j + controls.relative_tolerance * thermal_scale),
+        );
+        error = error.max(
+            (two.coulomb_exchange - full.coulomb_exchange).abs()
                 / (controls.energy_tolerance_j + controls.relative_tolerance * thermal_scale),
         );
         if !error.is_finite() {
@@ -395,12 +476,15 @@ pub fn advance_frozen_energy(
         initial: initial.clone(),
         state,
         sources: momentum_sources.to_vec(),
+        coulomb: coulomb.cloned(),
         controls,
         elapsed: duration,
         balance: ElectronHeavyEnergyBalance {
             electron_deposited_energy_j: electron_power.value() * duration.value(),
             heavy_deposited_energy_j: heavy_power.value() * duration.value(),
             electron_to_heavy_energy_j: point.exchange,
+            electron_to_heavy_coulomb_energy_j: point.coulomb_exchange,
+            electron_to_heavy_neutral_energy_j: point.exchange - point.coulomb_exchange,
             electron_energy_residual_j: residuals[1],
             heavy_energy_residual_j: residuals[0],
             maximum_normalized_local_error: maximum_error,
@@ -419,6 +503,13 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ElectronHeavyEnergyE
 }
 fn positive(v: f64) -> bool {
     v.is_finite() && v > 0.0
+}
+
+fn coulomb_error(error: CoulombErrorV1) -> ElectronHeavyEnergyError {
+    match error {
+        CoulombErrorV1::Cancelled => ElectronHeavyEnergyError::Cancelled,
+        error => ElectronHeavyEnergyError::Coulomb(error),
+    }
 }
 
 #[cfg(test)]

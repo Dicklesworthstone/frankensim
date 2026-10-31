@@ -55,13 +55,26 @@ pub(in crate::chemistry) fn source_pool_calorics(
 pub(super) struct Point {
     pub time: f64,
     pub exchange: f64,
+    pub coulomb_exchange: f64,
     pub temperatures: [f64; 2],
     pub capacities: [f64; 2],
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Coupling {
+    neutral: f64,
+    coulomb: f64,
+}
+impl Coupling {
+    fn total(self) -> f64 {
+        self.neutral + self.coulomb
+    }
 }
 
 pub(super) struct Problem<'a> {
     initial: &'a FrozenIonizedGasStateV1,
     sources: [Option<&'a ElectronCrossSectionV1>; MAX_EQUILIBRIUM_SPECIES_V1],
+    coulomb: Option<&'a CoulombModelV1>,
     powers: [f64; 2],
     controls: ElectronHeavyEnergySolve,
     energy_limits: [[f64; 2]; 2],
@@ -71,12 +84,18 @@ impl<'a> Problem<'a> {
     pub fn new(
         initial: &'a FrozenIonizedGasStateV1,
         sources: &'a [ElectronCrossSectionV1],
+        coulomb: Option<&'a CoulombModelV1>,
         powers: [f64; 2],
         controls: ElectronHeavyEnergySolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ElectronHeavyEnergyError> {
         let bank = initial.thermodynamics();
         let species = bank.elemental_matrix().species();
+        if coulomb.is_some_and(|model| !model.is_bound_to_populations(initial)) {
+            return Err(ElectronHeavyEnergyError::Invalid(
+                "Coulomb law must retain the same source models, amounts and volume",
+            ));
+        }
         if initial.relative_charge_residual() > controls.relative_charge_tolerance {
             return Err(ElectronHeavyEnergyError::Invalid(
                 "initial charge residual exceeds publication tolerance",
@@ -95,6 +114,7 @@ impl<'a> Problem<'a> {
         let mut result = Self {
             initial,
             sources: [None; MAX_EQUILIBRIUM_SPECIES_V1],
+            coulomb,
             powers,
             controls,
             energy_limits: [[0.0; 2]; 2],
@@ -149,7 +169,7 @@ impl<'a> Problem<'a> {
         }
         if !positive(total) || charged / total > controls.maximum_charged_mole_fraction {
             return Err(ElectronHeavyEnergyError::Invalid(
-                "electron-neutral dilute charged-fraction domain",
+                "declared charged-fraction domain",
             ));
         }
         if has_electrons {
@@ -254,13 +274,29 @@ impl<'a> Problem<'a> {
         &self,
         point: &Point,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<f64, ElectronHeavyEnergyError> {
-        if !self.has_electrons {
-            return Ok(0.0);
-        }
-        let mut frequency = Sum::default();
+    ) -> Result<Coupling, ElectronHeavyEnergyError> {
         let te = point.temperatures[1];
         let th = point.temperatures[0];
+        let coulomb = if let Some(model) = self.coulomb {
+            let properties = model
+                .evaluate(Temperature::new(th), Temperature::new(te), &mut *cancelled)
+                .map_err(coulomb_error)?;
+            properties.electron_heavy_thermal_conductance_w_m3_k() * self.initial.volume().value()
+        } else {
+            0.0
+        };
+        if !coulomb.is_finite() || coulomb < 0.0 {
+            return Err(ElectronHeavyEnergyError::Arithmetic(
+                "Coulomb thermal conductance",
+            ));
+        }
+        if !self.has_electrons {
+            return Ok(Coupling {
+                neutral: 0.0,
+                coulomb,
+            });
+        }
+        let mut frequency = Sum::default();
         for (i, source) in self
             .sources
             .iter()
@@ -315,22 +351,26 @@ impl<'a> Problem<'a> {
         // R=kB*NA is exact in the shared SI convention. Keeping the molar
         // amount avoids overflowing an unnecessary total particle count.
         let g = (3.0 * R * electron_amount) * frequency.value;
-        if !g.is_finite() || g < 0.0 {
+        if !g.is_finite() || g < 0.0 || !(g + coulomb).is_finite() {
             return Err(ElectronHeavyEnergyError::Arithmetic(
                 "elastic electron-heavy coupling",
             ));
         }
-        Ok(g)
+        Ok(Coupling {
+            neutral: g,
+            coulomb,
+        })
     }
 
     pub fn step(
         &self,
         start: &Point,
         end: f64,
-        coupling: f64,
+        coupling: Coupling,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, ElectronHeavyEnergyError> {
-        let alpha = (end - start.time) * coupling;
+        let total_coupling = coupling.total();
+        let alpha = (end - start.time) * total_coupling;
         if !alpha.is_finite() {
             return Err(ElectronHeavyEnergyError::Arithmetic(
                 "implicit exchange coefficient",
@@ -374,6 +414,12 @@ impl<'a> Problem<'a> {
                 return Ok(Point {
                     time: end,
                     exchange,
+                    coulomb_exchange: start.coulomb_exchange
+                        + if total_coupling == 0.0 {
+                            0.0
+                        } else {
+                            increment * (coupling.coulomb / total_coupling)
+                        },
                     temperatures: [th, te],
                     capacities: [ch, ce],
                 });

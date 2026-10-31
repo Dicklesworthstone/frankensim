@@ -1,4 +1,5 @@
 use super::*;
+mod coulomb;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
 use fs_qty::{Amount, Area, MolarMass, Pressure, Volume};
