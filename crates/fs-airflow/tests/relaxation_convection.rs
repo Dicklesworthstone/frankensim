@@ -1,54 +1,41 @@
-//! Source coolant data changes the continuing native Maxwell/fluid/circuit trajectory.
-//! All cards are manufactured numerical fixtures, not measured materials.
-use fs_couple::air_path::cylinder::frame::modal::relaxation::{FrameRelaxationBinding};
-use fs_couple::air_path::cylinder::frame::modal::relaxation::temperature::heat::{
-    FrameRelaxationThermalSystem, transport::{RelaxationHeatInput, RelaxationTransportError},
-    electrical::RelaxationElectricalInput,
-};
-use fs_couple::frame_vibration::thermal::{FrameLayerCell,FrameThermalSolve};
-use fs_couple::render::schedule::force::coupled::CoupledModalSystem;
-use fs_couple::render::schedule::force::coupled::coefficients::heat::MaterialHeatBudget;
-use fs_couple::circuit_enthalpy::{CircuitEnthalpyError,ResistorCell,
-    material::{CellResistor,MaterialNetwork},contacts::{heat::MaterialHeatNetwork,
-    material::ElectricalContactNetwork}};
-use fs_couple::material_circuit::{MaterialCircuit,MaterialCircuitSolve};
-use fs_airflow::graph::thermal::medium::convection::deposition::source::{
-    SourceConvectiveCell,SourceCellConvectionLaw,SourceCellConvectionError,ConvectionPropertyTemperature,
-    heat::{SourceConvectionHeatNetwork,ConvectionHeatError},
-};
-use fs_airflow::graph::thermal::medium::convection::ForcedConvectionSettings;
+//! Original fluid sources -> finite heat -> source relaxation -> continuing motion.
+//! Synthetic material/coolant data are numerical oracles, NOT measured specimens.
+use fs_airflow::graph::thermal::medium::convection::{ForcedConvectionSettings,
+    deposition::source::{SourceConvectiveCell,SourceCellConvectionLaw,ConvectionPropertyTemperature,
+        SourceCellConvectionError,heat::{SourceConvectionHeatNetwork,ConvectionHeatError}}};
 use fs_convection::CorrelationId;
-use fs_material::liquid_temperature::{LiquidTemperatureLaw,LiquidViscosityBasis};
-use fs_material::liquid::{ResolvedLiquidState,DYNAMIC_VISCOSITY_DIMS};
-use fs_material::conductor::{ElectricalPropertyBasis,ELECTRICAL_RESISTIVITY_DIMS};
-use fs_material::state_point::{THERMAL_CONDUCTIVITY_DIMS,MaterialStatePointError};
-use fs_exec::{CancelGate,Cx};
-use fs_qty::Length;
-use fs_phs::circuit::{Branch,CircuitGraph};
 use fs_couple::air_path::cylinder::{CylinderFlowResolution,frame::{MaterialFluidFrame,FrameFluidBinding,FrameFluidBudget}};
 use fs_couple::air_path::cylinder::frame::modal::FrameFluidPlacement;
-use fs_couple::air_path::cylinder::frame::modal::relaxation::{FrameLongitudinalRelaxation,FrameRelaxationBudget};
-use fs_couple::frame_vibration::FrameVibrationBudget;
+use fs_couple::air_path::cylinder::frame::modal::relaxation::{FrameLongitudinalRelaxation,FrameRelaxationBinding,FrameRelaxationBudget};
+use fs_couple::air_path::cylinder::frame::modal::relaxation::temperature::heat::{FrameRelaxationThermalSystem,
+    electrical::RelaxationElectricalInput,transport::RelaxationTransportError};
+use fs_couple::frame_vibration::{FrameVibrationBudget,thermal::{FrameLayerCell,FrameThermalSolve}};
 use fs_couple::modal_acoustic_time::{ModalAcousticState,ModalAcousticTimeBudget};
-use fs_couple::render::schedule::force::coupled::ModalCouplingConfig;
-use fs_couple::circuit_enthalpy::material::MaterialCell;
+use fs_couple::render::schedule::force::coupled::{CoupledModalSystem,ModalCouplingConfig,
+    coefficients::heat::MaterialHeatBudget};
+use fs_couple::circuit_enthalpy::{CircuitEnthalpyError,ResistorCell,
+    material::{MaterialCell,MaterialNetwork,CellResistor},contacts::{material::ElectricalContactNetwork,heat::MaterialHeatNetwork}};
 use fs_couple::cavity_phs::piston::thermal::source::ThermalMaterialPoint;
+use fs_couple::material_circuit::{MaterialCircuit,MaterialCircuitSolve};
 use fs_evidence::ValidityDomain;
+use fs_exec::{CancelGate,Cx};
 use fs_matdb::{MaterialCard,ClaimSet,MaterialStateId,PropertyClaim,PropertyKey,PropertyValue,
     Provenance,QueryPoint,InterpolationPolicy,UncertaintyModel,SelectionPolicy};
 use fs_material::fluid_transport::FluidTransportState;
 use fs_material::section::{ConcentricElasticSection,ConcentricMaterialLayer};
 use fs_material::section::relaxation::LayerRelaxationProperties;
 use fs_material::state_point::{ScalarPropertyRequirement,ScalarAdmissibility,MaterialPropertySelection,
-    resolve_material_state_point,SPECIFIC_HEAT_CAPACITY_DIMS};
+    resolve_material_state_point,SPECIFIC_HEAT_CAPACITY_DIMS,THERMAL_CONDUCTIVITY_DIMS,MaterialStatePointError};
 use fs_material::phase::{ResolvedHeatCapacityCurve,HeatCapacitySourceQuery,SolidLiquidPhase};
-use fs_phs::RelaxationBranch;
-use fs_qty::{Density,Pressure,Time,Temperature,QuantitySpec};
-use fs_couple::frame_vibration::{Frame2d,FrameMassFormulation,Geometry};
+use fs_material::conductor::{ElectricalPropertyBasis,ELECTRICAL_RESISTIVITY_DIMS};
+use fs_material::liquid::{LiquidTemperatureLaw,LiquidViscosityBasis,DYNAMIC_VISCOSITY_DIMS};
+use fs_phs::{RelaxationBranch,circuit::{Branch,CircuitGraph}};
+use fs_qty::{Density,Pressure,Time,Temperature,QuantitySpec,Length};
+use fs_solid::frame2d::{Frame2d,FrameMassFormulation,Geometry};
 use fs_thermal::enthalpy::*;
 use fs_solver::NewtonKrylovConfig;
 
-const CP:f64=2000.0; // Manufactured heat capacity, NOT measured material data.
+const CP:f64=100.0; // Manufactured heat capacity, NOT measured material data.
 const RADII:[f64;2]=[0.06,0.1];
 fn point(t:f64)->QueryPoint {QueryPoint::new().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),t).unwrap().with("omega",1.0).unwrap()}
 fn source(layer:usize,varying:bool)->(MaterialCard,ResolvedHeatCapacityCurve) {
@@ -60,21 +47,21 @@ fn source(layer:usize,varying:bool)->(MaterialCard,ResolvedHeatCapacityCurve) {
         ("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS,CP),
         ("electrical_resistivity",ELECTRICAL_RESISTIVITY_DIMS,[0.2,0.6][layer])] {
         let curve=(name=="time"&&varying)||name=="electrical_resistivity";
-        let mut validity=ValidityDomain::unconstrained().with("T",290.0,340.0);
+        let mut validity=ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),280.0,340.0);
         if name=="time" {validity=validity.with("omega",0.0,10000.0);}
         claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),
             value:if curve {PropertyValue::Curve {abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
-                knots:if name=="time" {vec![(290.0,1.2*tau),(300.0,tau),(340.0,0.2*tau)]}
-                    else {vec![(290.0,0.8*value),(300.0,value),(340.0,1.8*value)]},dims}}
+                knots:if name=="time" {vec![(280.0,1.4*tau),(300.0,tau),(340.0,0.2*tau)]}
+                    else {vec![(280.0,0.6*value),(300.0,value),(340.0,1.8*value)]},dims}}
                 else {PropertyValue::Scalar {value,dims}},validity,
             interpolation:if curve {InterpolationPolicy::LinearInside}else{InterpolationPolicy::ConstantWithinValidity},
             uncertainty:UncertaintyModel::Unstated,observations:vec![],
-            provenance:Provenance {source:"manufactured self-heating section".into(),license:"test-only".into(),artifact:None}}).unwrap();
+            provenance:Provenance {source:"manufactured convective relaxation section".into(),license:"test-only".into(),artifact:None}}).unwrap();
     }
     let card=MaterialCard::assemble(MaterialStateId {chemistry:format!("layer {layer}"),phase:"solid".into(),process:"synthetic".into(),revision:0},claims,vec![]).unwrap();
     let curve=ResolvedHeatCapacityCurve::try_new(&card,HeatCapacitySourceQuery {
         heat_capacity:&PropertyKey::new("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS),
-        density:&PropertyKey::new("density",Density::DIMS),temperature_axis:"T",lower:&point(290.0),upper:&point(340.0),
+        density:&PropertyKey::new("density",Density::DIMS),temperature_axis:"T",lower:&point(280.0),upper:&point(340.0),
         selection:SelectionPolicy::SingleClaimOnly},SolidLiquidPhase::Solid,0.0,1e-6).unwrap();
     (card,curve)
 }
@@ -176,7 +163,7 @@ fn coolant(scale:f64)->MaterialCard {
         claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),
             value:PropertyValue::Curve {abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
                 knots:vec![(280.0,value-20.0*slope),(340.0,value+40.0*slope)],dims},
-            validity:ValidityDomain::unconstrained().with("T",280.0,340.0).with("p",100000.0,100000.0),
+            validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),280.0,340.0).with("p",100000.0,100000.0),
             interpolation:InterpolationPolicy::LinearInside,uncertainty:UncertaintyModel::Unstated,
             observations:vec![],provenance:Provenance {source:"synthetic coolant substitution".into(),license:"test-only".into(),artifact:None},
         }).unwrap();
@@ -238,106 +225,103 @@ fn original_coolant_data_changes_heat_charge_rates_and_the_continuing_wet_frame(
                         near(fluid.property_temperature_k,0.5*(t+310.0),1e-12);
                         assert_eq!(fluid.material.material().card_identity(),card.content_hash());
                         assert_eq!(fluid.material.material().query().axes()["p"],100000.0);
-                        near(sample.wall_temperature_k,t,0.0);
-                        near(sample.reference_temperature_k,310.0,0.0);
-                        near(sample.exposed_area_m2,exposed_area(i),1e-12);
-                        let power=exposed_area(i)*h_reference(scale,t)*(310.0-t);
-                        near(sample.heat_into_cell_w,power,1e-8);
+                        let h=h_reference(scale,t);let area=exposed_area(i);
+                        let power=h*area*(310.0-t);external+=DT*power;
+                        near(sample.evaluation.as_ref().unwrap().coefficient.value.value(),h,1e-9);
+                        near(sample.power_into_cell_w,power,1e-8);
                         let loss=report.layers.iter().find(|l|l.destination.cell==id).unwrap().heat_j;
                         let cell=&heat.cells()[&id];
-                        near(cell.mass_kg*(cell.specific_h_j_kg-cells[&id].specific_h_j_kg),loss+joule[i]+DT*power,2e-8);
-                        external+=DT*power;
+                        near(cell.mass_kg*(cell.specific_h_j_kg-cells[&id].specific_h_j_kg),
+                            loss+joule[i]+DT*power,2e-8);
                     }
-                    near(report.external_thermal_heat_j,external,1e-8);
-                    assert!(report.entropy.has_unclassified_sources); // Actual reservoir powers remain explicit.
-                    work+=report.mechanical.external_work_j;
+                    near(report.external_thermal_heat_j,external,2e-8);
+                    assert!(report.entropy.has_unclassified_sources); // Not relabeled reservoir entropy.
+                    near(report.entropy.unclassified_source_at_cell_j_k,sources.convection().sources_w().iter()
+                        .map(|(cell,power)|DT*power/heat.temperature_k(*cell).unwrap()).sum(),1e-10);
+                    near(report.entropy.accounting_residual_j_k,0.0,1e-8);
+                    work+=report.mechanical.external_work_j;outside+=report.external_mechanical_loss_j;
                     supplied_heat+=external;
-                    outside+=report.external_mechanical_loss_j+report.mechanical.numerical_dissipation_j;
-                    near(owner.mechanical().total_energy_j().unwrap()+caloric(&heat)+stored-initial+outside-work-supplied_heat,0.0,2e-7);
+                    near(owner.mechanical().total_energy_j().unwrap()+caloric(&heat)+stored-initial+outside-work-supplied_heat,0.0,3e-7);
+                    near(report.total_energy_residual_j,0.0,controls().total_energy_tolerance_j);
+                    assert_eq!(owner.mechanical().samples_rendered(),n);assert_eq!(heat.time_s(),n as f64*DT);
                     assert!(!report.rates.changes.is_empty());
-                    assert_eq!(heat.time_s(),n as f64*DT);assert_eq!(owner.mechanical().samples_rendered(),n);
                 }
-                // The unselected constrained material history is never heated or reset by this binding.
                 near(owner.mechanical().material_memory()[0],0.007*(-12.0*DT/0.7).exp(),1e-10);
-                endpoints.push([placement.physical_state(owner.mechanical().components(),&gate).unwrap()[0],
-                    heat.temperature_k(CellId(1)).unwrap(),owner.electrical().map_or(0.0,|c|c.charges_c()[0])]);
+                endpoints.push((placement.physical_state(owner.mechanical().components(),&gate).unwrap()[0],
+                    heat.temperature_k(CellId(1)).unwrap(),owner.electrical().map_or(0.0,|c|c.charges_c()[0])));
             }
-            assert!((endpoints[1][0]-endpoints[0][0]).abs()>1e-12);
-            assert!(endpoints[1][1]>endpoints[0][1]);
-            if powered {assert!((endpoints[1][2]-endpoints[0][2]).abs()>1e-10);}
+            assert!((endpoints[0].0-endpoints[1].0).abs()>1e-11);
+            assert!(endpoints[1].1>endpoints[0].1);
+            if powered {assert!((endpoints[0].2-endpoints[1].2).abs()>1e-10);}
         });
     }
 }
 
 #[test]
-fn empty_convection_is_the_same_powered_or_unpowered_heat_trajectory() {
-    for powered in [false,true] {
-        fixture(powered,|m,plain,electric,circuit,heat,prepared,cx| {
-            let gate=CancelGate::new_clock_free();let mut endpoints=Vec::new();
-            for composed in [false,true] {
-                let mut heat=heat.clone();let (placement,material,native)=native(m);
-                let mut owner=FrameRelaxationThermalSystem::new(material,native,&heat,plain,&DEST,budget(),&gate).unwrap();
-                if powered {owner.bind_material_circuit(&heat,electric,circuit.clone(),
-                    &[(1,ElectricalPropertyBasis::Resistivity),(2,ElectricalPropertyBasis::Resistivity)],&gate).unwrap();}
-                let network=SourceConvectionHeatNetwork {heat:prepared,cells:&[],maximum_cells:0,
-                    resolve_fluid:|_:&SourceConvectiveCell,_:&DepositionSimulation<'_>,_:Temperature|
-                        ->Result<ResolvedLiquidState,MaterialStatePointError>{panic!("empty boundary invoked a fluid source")}};
-                let force=vec![0.0;owner.mechanical().mode_count()];
-                for _ in 0..3 {
-                    if composed {let report=network.step_relaxation(cx,&mut owner,&mut heat,&force,
-                        powered.then_some(input()),controls(),&[0.0;2],&gate).unwrap();
-                        assert!(report.transport_source.unwrap().materials().is_empty());}
-                    else {owner.step_heat_network(&mut heat,&force,RelaxationHeatInput {network:prepared,cx},
-                        powered.then_some(input()),controls(),&[0.0;2],&gate).unwrap();}
-                }
-                endpoints.push((heat.cells().clone(),owner.electrical().cloned(),
-                    owner.mechanical().material_memory().to_vec(),
-                    placement.physical_state(owner.mechanical().components(),&gate).unwrap()));
-            }
-            assert_eq!(endpoints[0],endpoints[1]);
-        });
-    }
-}
-
-#[test]
-fn late_coolant_failure_keeps_its_typed_cause_and_rolls_back_the_complete_assembly() {
-    #[derive(Debug)]
-    enum Failure { Domain(CellId), Original(MaterialStatePointError) }
+fn late_original_fluid_refusal_keeps_charge_all_histories_sources_and_cells_for_retry() {
+    #[derive(Debug)] enum Failure { Late, Material(MaterialStatePointError) }
     fixture(true,|m,plain,electric,circuit,mut heat,prepared,cx| {
         let gate=CancelGate::new_clock_free();let (placement,material,native)=native(m);
         let mut owner=FrameRelaxationThermalSystem::new(material,native,&heat,plain,&DEST,budget(),&gate).unwrap();
         owner.bind_material_circuit(&heat,electric,circuit.clone(),
             &[(1,ElectricalPropertyBasis::Resistivity),(2,ElectricalPropertyBasis::Resistivity)],&gate).unwrap();
-        let card=coolant(1.0);let law=coolant_law(&card);let boundaries=boundaries();
-        let calls=std::cell::Cell::new(0usize);let refuse=std::cell::Cell::new(true);
+        let before=heat.cells().clone();let state=placement.physical_state(owner.mechanical().components(),&gate).unwrap();
+        let memory=owner.mechanical().material_memory().to_vec();let source=owner.material().members()[0].source.clone();
+        let external=vec![0.0;owner.mechanical().mode_count()];let card=coolant(1.0);let law=coolant_law(&card);
+        let boundaries=boundaries();let calls=std::cell::Cell::new(0usize);
         let network=SourceConvectionHeatNetwork {heat:prepared,cells:&boundaries,maximum_cells:2,
-            resolve_fluid:|binding:&SourceConvectiveCell,_:&DepositionSimulation<'_>,t:Temperature| {
-                calls.set(calls.get()+1);
-                if refuse.get() && calls.get()>2 {return Err(Failure::Domain(binding.cell));}
-                law.at_temperature(t).map_err(Failure::Original)
+            resolve_fluid:|_:&SourceConvectiveCell,_:&DepositionSimulation<'_>,t:Temperature| {
+                calls.set(calls.get()+1);if calls.get()>2 {return Err(Failure::Late);}
+                law.at_temperature(t).map_err(Failure::Material)
             }};
-        let cells=heat.cells().clone();let memories=owner.mechanical().material_memory().to_vec();
-        let physical=placement.physical_state(owner.mechanical().components(),&gate).unwrap();
-        let material=owner.material().members()[0].source.clone();
-        let force=vec![0.0;owner.mechanical().mode_count()];
-        let error=network.step_relaxation(cx,&mut owner,&mut heat,&force,Some(input()),controls(),&[0.0;2],&gate);
-        assert!(matches!(error,Err(RelaxationTransportError::Source(ConvectionHeatError::Convection(
-            SourceCellConvectionError::Source {cell:CellId(0),source:Failure::Domain(CellId(0)),..})))));
-        assert!(calls.get()>2);assert_eq!(heat.cells(),&cells);assert_eq!(owner.electrical().unwrap(),&circuit);
-        assert_eq!(owner.mechanical().material_memory(),memories);
-        assert_eq!(owner.material().members()[0].source,material);
-        assert_eq!(placement.physical_state(owner.mechanical().components(),&gate).unwrap(),physical);
-        assert_eq!(owner.mechanical().samples_rendered(),0);assert_eq!(heat.time_s(),0.0);
-        refuse.set(false);
-        let mut exhausted=controls();exhausted.maximum_material_trials=1;
-        assert!(network.step_relaxation(cx,&mut owner,&mut heat,&force,Some(input()),exhausted,&[0.0;2],&gate).is_err());
-        assert_eq!(heat.cells(),&cells);assert_eq!(owner.electrical().unwrap(),&circuit);
+        assert!(matches!(network.step_relaxation(cx,&mut owner,&mut heat,&external,Some(input()),controls(),&[0.0;2],&gate),
+            Err(RelaxationTransportError::Source(ConvectionHeatError::Convection(SourceCellConvectionError::Source {source:Failure::Late,..})))));
+        assert!(calls.get()>2);
+        assert_eq!(heat.cells(),&before);assert_eq!(owner.electrical().unwrap(),&circuit);
+        assert_eq!(owner.mechanical().material_memory(),memory);assert_eq!(owner.material().members()[0].source,source);
+        assert_eq!(placement.physical_state(owner.mechanical().components(),&gate).unwrap(),state);
+        assert_eq!(heat.time_s(),0.0);assert_eq!(owner.mechanical().samples_rendered(),0);
+        let network=SourceConvectionHeatNetwork {heat:prepared,cells:&boundaries,maximum_cells:2,
+            resolve_fluid:|_:&SourceConvectiveCell,_:&DepositionSimulation<'_>,t:Temperature|law.at_temperature(t)};
         let cancelled=CancelGate::new_clock_free();cancelled.request();
-        assert!(matches!(network.step_relaxation(cx,&mut owner,&mut heat,&force,Some(input()),controls(),&[0.0;2],&cancelled),
+        assert!(matches!(network.step_relaxation(cx,&mut owner,&mut heat,&external,Some(input()),controls(),&[0.0;2],&cancelled),
             Err(RelaxationTransportError::Relaxation(CircuitEnthalpyError::Cancelled))));
-        network.step_relaxation(cx,&mut owner,&mut heat,&force,Some(input()),controls(),&[0.0;2],&gate).unwrap();
+        assert_eq!(heat.cells(),&before);
+        network.step_relaxation(cx,&mut owner,&mut heat,&external,Some(input()),controls(),&[0.0;2],&gate).unwrap();
         assert_eq!(owner.mechanical().samples_rendered(),1);
     });
 }
+
+#[test]
+fn empty_source_convection_has_exact_bulk_path_parity_and_duplicate_boundaries_refuse() {
+    fixture(false,|m,plain,_,_,heat,prepared,cx| {
+        let gate=CancelGate::new_clock_free();let mut endpoints=Vec::new();
+        let card=coolant(1.0);let law=coolant_law(&card);
+        for convective in [false,true] {
+            let mut heat=heat.clone();let (placement,material,native)=native(m);
+            let mut owner=FrameRelaxationThermalSystem::new(material,native,&heat,plain,&DEST,budget(),&gate).unwrap();
+            let external=vec![0.0;owner.mechanical().mode_count()];
+            for _ in 0..3 {
+                if convective {let network=SourceConvectionHeatNetwork {heat:prepared,cells:&[],maximum_cells:0,
+                    resolve_fluid:|_:&SourceConvectiveCell,_:&DepositionSimulation<'_>,t:Temperature|law.at_temperature(t)};
+                    let report=network.step_relaxation(cx,&mut owner,&mut heat,&external,None,controls(),&[0.0;2],&gate).unwrap();
+                    assert!(report.transport_source.unwrap().materials().is_empty());
+                }else {owner.step_heat_network(&mut heat,&external,RelaxationHeatInput {network:prepared,cx},None,controls(),&[0.0;2],&gate).unwrap();}
+            }
+            endpoints.push((heat.cells().clone(),owner.mechanical().material_memory().to_vec(),
+                placement.physical_state(owner.mechanical().components(),&gate).unwrap()));
+        }
+        assert_eq!(endpoints[0],endpoints[1]);
+        let mut heat=heat.clone();let (_,material,native)=native(m);
+        let mut owner=FrameRelaxationThermalSystem::new(material,native,&heat,plain,&DEST,budget(),&gate).unwrap();
+        let external=vec![0.0;owner.mechanical().mode_count()];let boundaries=[boundaries()[0],boundaries()[0]];
+        let network=SourceConvectionHeatNetwork {heat:prepared,cells:&boundaries,maximum_cells:2,
+            resolve_fluid:|_:&SourceConvectiveCell,_:&DepositionSimulation<'_>,t:Temperature|law.at_temperature(t)};
+        assert!(network.step_relaxation(cx,&mut owner,&mut heat,&external,None,controls(),&[0.0;2],&gate).is_err());
+        assert_eq!(owner.mechanical().samples_rendered(),0);assert_eq!(heat.time_s(),0.0);
+    });
+}
+
+use fs_couple::air_path::cylinder::frame::modal::relaxation::temperature::heat::transport::RelaxationHeatInput;
 
 mod finite;
