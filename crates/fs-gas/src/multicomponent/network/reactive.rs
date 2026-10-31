@@ -5,7 +5,9 @@
 //! participate in the same complete-duration retry and atomic publication.
 //! Symmetric ordering is not a global order or entropy-stability certificate.
 
-use super::super::dissipation::{ConstantTransport, DissipationControl, DissipationError, TransportLaw};
+use super::super::dissipation::{
+    ConstantTransport, DissipationControl, DissipationError, TransportLaw,
+};
 pub use super::super::reactive::{ChemistryReport, ReactiveStepControl};
 use super::super::reactive::{ReactiveError, react_cell};
 use super::super::wall_exchange::{WallControl, WallExchangeError};
@@ -13,12 +15,15 @@ use super::super::{
     Cell, Error as FlowError, MAX_COMPONENTS, MAX_SPECIES, MixtureEuler1d, MixtureGas, StepReport,
     allocated, positive, sum,
 };
-use super::coupled::{SourceError, checked_totals, duplicate, initial_duration, reset};
 pub use super::coupled::NetworkSources;
+use super::coupled::{SourceError, checked_totals, duplicate, initial_duration, reset};
 use super::dissipation::{NetworkDissipationOperator, SplitNetworkDissipationReport};
-use super::wall_exchange::{NetworkWallOperator, SplitNetworkWallReport};
 use super::valve::{SplitNetworkValveReport, ValveError};
-use super::{MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum, PlenumConnection, PortExchange};
+use super::wall_exchange::{NetworkWallOperator, SplitNetworkWallReport};
+use super::{
+    MixtureNetwork1d, NetworkStepReport, NetworkTotals, Plenum, PlenumBoundaryWork,
+    PlenumConnection, PortExchange,
+};
 use crate::chemistry::{IsochoricKineticsError, IsochoricKineticsSolve, IsochoricReactor};
 use fs_qty::{Amount, Time};
 use fs_thermochem::kinetics::IdealGasKineticsV1;
@@ -113,11 +118,13 @@ pub struct ReactiveNetworkReport {
     /// Add the reported finite-wall storage to close gas-plus-wall energy.
     /// Inter-plenum valve transfers are deliberately excluded from this account.
     pub boundary_change: NetworkTotals,
-    /// Species/gauge-energy residual after external transport and chemistry changes.
+    /// Mechanical work on the gas [J], distinct from heat and chemical reference changes.
+    pub boundary_work_on_gas_j: f64,
+    /// Species/gauge-energy residual after external transport, pressure work and chemistry changes.
     pub conservation_residual: NetworkTotals,
     /// Total mass change minus external transport [kg].
     pub mass_residual_kg: f64,
-    /// Physical chemical-total-energy change minus external exchange [J],
+    /// Physical chemical-total-energy change minus external exchange and pressure work [J],
     /// evaluated from differences rather than large absolute energy totals.
     pub absolute_energy_residual_j: f64,
 }
@@ -208,6 +215,12 @@ impl ReactingNetwork1d {
     pub fn accepted_branch_transport_reports(&self) -> Option<&[StepReport]> {
         self.last_report.map(|_| self.accepted.branch_reports.as_slice())
     }
+    /// Actual accepted chamber volumes and mechanical work during transport.
+    /// The surrounding chemistry, molecular and wall stages do not change volume.
+    pub fn accepted_plenum_boundary_work(&self) -> Option<&[PlenumBoundaryWork]> {
+        self.last_report
+            .map(|_| self.accepted.plenum_work.as_slice())
+    }
     /// Release complete physical fields without a stale intermediate report.
     pub fn into_network(mut self) -> MixtureNetwork1d {
         self.accepted.last_report = None;
@@ -224,11 +237,55 @@ impl ReactingNetwork1d {
     /// All supplied source operators are borrowed for this one complete step;
     /// accepted reports and wall storage publish only with the final gas state.
     pub fn step_with_sources(
-        &mut self, maximum_duration: Time, controls: ReactiveStepControl,
-        sources: NetworkSources<'_, '_>, cancelled: impl FnMut() -> bool,
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        sources: NetworkSources<'_, '_>,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         self.step_impl::<ConstantTransport>(maximum_duration, controls, None,
-            DissipationControl::default(), sources, cancelled)
+            DissipationControl::default(), sources, None, cancelled)
+    }
+    /// Compose chemistry with prescribed finite-time chamber motion and port flow.
+    /// Negative rates compress; one finite dV/dt [m³/s] is required per plenum.
+    /// Every chemistry half uses its actual volume on that side of transport.
+    pub fn step_with_volume_rates(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        volume_rates_m3_s: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_with_volume_rates_and_sources(
+            maximum_duration,
+            controls,
+            volume_rates_m3_s,
+            NetworkSources::default(),
+            cancelled,
+        )
+    }
+    /// Add finite-wall heat exchange to the moving reacting network transaction.
+    /// Authored wall conductances and compact mixing lengths remain fixed model
+    /// inputs; volume motion alone does not infer a changing contact area.
+    /// Nonzero motion with valve sources explicitly refuses. Zero rates retain
+    /// the original rigid composition, including its valve support, bit for bit.
+    pub fn step_with_volume_rates_and_sources(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        volume_rates_m3_s: &[f64],
+        sources: NetworkSources<'_, '_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration,
+            controls,
+            None,
+            DissipationControl::default(),
+            sources,
+            Some(volume_rates_m3_s),
+            cancelled,
+        )
     }
     /// Advance D/2, C/2, A, C/2, D/2 with source-bound molecular subcycling.
     pub fn step_with_dissipation<L: TransportLaw>(
@@ -244,11 +301,52 @@ impl ReactingNetwork1d {
     /// restarts from accepted storage when any stage shortens/refuses the trial.
     /// Final valve/wall temperatures must still fit the chemistry source path.
     pub fn step_with_dissipation_and_sources<L: TransportLaw>(
-        &mut self, operator: &mut NetworkDissipationOperator<L>, maximum_duration: Time,
-        controls: ReactiveStepControl, dissipation_controls: DissipationControl,
-        sources: NetworkSources<'_, '_>, cancelled: impl FnMut() -> bool,
+        &mut self,
+        operator: &mut NetworkDissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        sources: NetworkSources<'_, '_>,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
-        self.step_impl(maximum_duration, controls, Some(operator), dissipation_controls, sources, cancelled)
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            sources,
+            None,
+            cancelled,
+        )
+    }
+    /// Compose molecular transport, chemistry, moving-volume advection and walls.
+    ///
+    /// All sources use the common accepted duration. Complete retries restore
+    /// original fields and volumes; operator geometry and finite-wall storage
+    /// publish only with the final gas state. Pressure work enters the energy
+    /// balance exactly once and remains separate from wall heat and chemistry.
+    /// The original compact-volume, transport-law and splitting limits remain;
+    /// this API adds no temporal-order or spatial piston-shock claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation_volume_rates_and_sources<L: TransportLaw>(
+        &mut self,
+        operator: &mut NetworkDissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        volume_rates_m3_s: &[f64],
+        sources: NetworkSources<'_, '_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some(operator),
+            dissipation_controls,
+            sources,
+            Some(volume_rates_m3_s),
+            cancelled,
+        )
     }
     /// Existing wall/chemistry/advection path, with no molecular operator.
     pub fn step_with_wall(

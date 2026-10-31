@@ -57,32 +57,94 @@ impl NetworkSources<'_, '_> {
         if let Some((_, controls)) = &self.valves { controls.validate()?; }
         Ok(())
     }
+    pub(super) fn admit_volume_motion(
+        &self,
+        network: &MixtureNetwork1d,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), SourceError> {
+        // Valve sweeps retain a separate rigid-volume ownership contract.
+        // Refuse before any source trial rather than silently rebind that owner.
+        if self.valves.is_some() {
+            return Err(
+                ValveError::Invalid("moving plenums with valve sources are not supported").into(),
+            );
+        }
+        if let Some((wall, _)) = &self.wall {
+            wall.admit_plenum_volumes(network, cancelled)?;
+        }
+        Ok(())
+    }
     pub(super) fn first_half(
-        &mut self, network: &mut MixtureNetwork1d, duration: Time,
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SourceStage, SourceError> {
+        self.first_half_impl(network, duration, false, cancelled)
+    }
+    pub(super) fn first_moving_half(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SourceStage, SourceError> {
+        self.first_half_impl(network, duration, true, cancelled)
+    }
+    fn first_half_impl(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        moving: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SourceStage, SourceError> {
         // Reset every source receipt/storage bank before any source changes the
         // trial gas. A later failure cannot publish a prefix of the composition.
         if let Some((op, _)) = &mut self.wall { op.begin_trial(cancelled)?; }
         if let Some((op, _)) = &mut self.valves { op.begin_trial(cancelled)?; }
-        let wall = self.wall_half(network, duration, cancelled)?;
+        let wall = self.wall_half(network, duration, moving, cancelled)?;
         let valves = self.valve_half(network, duration, false, cancelled)?;
         Ok(SourceStage { wall, valves })
     }
     pub(super) fn second_half(
-        &mut self, network: &mut MixtureNetwork1d, duration: Time,
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SourceStage, SourceError> {
+        self.second_half_impl(network, duration, false, cancelled)
+    }
+    pub(super) fn second_moving_half(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SourceStage, SourceError> {
+        self.second_half_impl(network, duration, true, cancelled)
+    }
+    fn second_half_impl(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        moving: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SourceStage, SourceError> {
         let valves = self.valve_half(network, duration, true, cancelled)?;
-        let wall = self.wall_half(network, duration, cancelled)?;
+        let wall = self.wall_half(network, duration, moving, cancelled)?;
         Ok(SourceStage { wall, valves })
     }
     fn wall_half(
-        &mut self, network: &mut MixtureNetwork1d, duration: Time,
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        moving: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Option<NetworkWallReport>, SourceError> {
         match &mut self.wall {
-            Some((op, controls)) => Ok(Some(op.advance_for_trial(network, duration, *controls, cancelled)?)),
+            Some((op, controls)) => Ok(Some(if moving {
+                op.advance_for_moving_trial(network, duration, *controls, cancelled)?
+            } else {
+                op.advance_for_trial(network, duration, *controls, cancelled)?
+            })),
             None => Ok(None),
         }
     }
@@ -157,6 +219,7 @@ pub(super) fn reset(
     }
     for (trial, accepted) in trial.plenums.iter_mut().zip(&accepted.plenums) {
         poll(cancelled)?;
+        trial.volume_m3 = accepted.volume_m3;
         trial.state.partial_densities.copy_from_slice(&accepted.state.partial_densities);
         trial.state.momentum = accepted.state.momentum;
         trial.state.energy = accepted.state.energy;

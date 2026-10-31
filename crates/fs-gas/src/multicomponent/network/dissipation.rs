@@ -101,6 +101,8 @@ pub struct NetworkDissipationOperator<L: TransportLaw> {
     branches: Vec<BranchShape>,
     connections: Vec<PlenumConnection>,
     endpoint_connections: Vec<[Option<usize>; 2]>,
+    // Accepted geometry binding is separate from unpublished per-interval geometry.
+    accepted_plenum_volumes: Vec<f64>,
     plenum_volumes: Vec<f64>,
     plenum_lengths: Vec<Length>,
     plenum_cell_start: usize,
@@ -258,12 +260,20 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
             branch_report_candidate: allocated(branch_count, empty_report(n))?,
             port_exchange_candidate: allocated(port_count, empty_exchange(n))?,
         };
+        let mut plenum_volumes = allocated(plenum_count, 0.0)?;
+        let mut accepted_plenum_volumes = allocated(plenum_count, 0.0)?;
+        for (destination, plenum) in plenum_volumes.iter_mut().zip(&network.plenums) {
+            poll(&mut cancelled)?;
+            *destination = plenum.volume_m3;
+        }
+        accepted_plenum_volumes.copy_from_slice(&plenum_volumes);
         let owner = Self {
             gas: gas.clone(),
             branches,
             connections: network.connections.clone(),
             endpoint_connections: network.endpoint_connections.clone(),
-            plenum_volumes: network.plenums.iter().map(|p| p.volume_m3).collect(),
+            accepted_plenum_volumes,
+            plenum_volumes,
             plenum_lengths,
             plenum_cell_start,
             law,
@@ -328,12 +338,46 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
         controls: DissipationControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkDissipationReport, DissipationError> {
+        self.admit_plenum_volumes(network, cancelled)?;
+        self.advance_for_moving_trial(network, duration, controls, cancelled)
+    }
+    // Only a composing owner that admitted the accepted geometry may request
+    // motion. These scratch volumes never rebind the public operator on refusal.
+    pub(super) fn advance_for_moving_trial(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        controls: DissipationControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NetworkDissipationReport, DissipationError> {
         self.trial_report = None;
         let report = evolve::advance(self, network, duration, controls, cancelled)?;
         self.trial_report = Some(report);
         Ok(report)
     }
+    pub(super) fn admit_plenum_volumes(
+        &self,
+        network: &MixtureNetwork1d,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
+        if self.accepted_plenum_volumes.len() != network.plenums.len() {
+            return Err(DissipationError::Invalid(
+                "molecular plenum ownership changed",
+            ));
+        }
+        for (&expected, actual) in self.accepted_plenum_volumes.iter().zip(&network.plenums) {
+            poll(cancelled)?;
+            if expected.to_bits() != actual.volume_m3.to_bits() {
+                return Err(DissipationError::Invalid(
+                    "molecular plenum geometry changed",
+                ));
+            }
+        }
+        Ok(())
+    }
     pub(super) fn publish_trial_report(&mut self) {
+        self.accepted_plenum_volumes
+            .copy_from_slice(&self.plenum_volumes);
         self.last_report = Some(self.trial_report.take().expect("completed molecular trial"));
         self.port_exchanges
             .copy_from_slice(&self.work.port_exchange_candidate);

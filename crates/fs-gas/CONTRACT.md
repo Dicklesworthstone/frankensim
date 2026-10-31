@@ -1999,6 +1999,31 @@ The compact perfectly mixed chamber approximation remains. Rates are constant
 over each accepted step. Spatial piston shocks, branch-wall motion and piston
 inertia require other physical owners; this is not a spatial ALE solver.
 
+### Moving chambers with reacting source operators
+
+`ReactingNetwork1d` composes prescribed plenum volume rates with finite-rate
+chemistry, molecular species/heat transport, viscosity and finite-wall storage.
+The existing split remains W/2 -> D/2 -> C/2 -> moving transport -> C/2 -> D/2
+-> W/2, omitting absent operators. Source halves before transport use the
+original volume; halves afterward use the actual accepted endpoint volume.
+Boundary work has its own report field and is subtracted exactly once from
+referenced and physical-energy residuals.
+
+Prepared wall and molecular operators keep accepted geometry separate from
+unpublished interval volumes. Complete-step acceptance publishes the new
+bindings, while shortened-duration retries restore original fields AND volumes.
+Final cancellation preserves accepted geometry, reports and wall storage.
+All-zero rates retain the original rigid path. Nonzero motion with valve
+sources explicitly refuses because those sources retain rigid-volume semantics.
+
+Authored wall conductances, contact areas and compact mixing lengths remain
+fixed inputs; a volume rate does not determine their changing geometry.
+The compact mixing and existing reaction/source-splitting approximations remain.
+Focused regressions exercise live reaction/transport/compression/wall energy,
+duration restart, final cancellation and reuse, accepted geometry rebinding,
+exact zero-motion identity and valve admission. No new global temporal-order
+or entropy-stability claim is made.
+
 ## Original material calorics in finite gas walls
 
 `MaterialWallCaloric` binds the existing `PreparedHeatStorage` to finite

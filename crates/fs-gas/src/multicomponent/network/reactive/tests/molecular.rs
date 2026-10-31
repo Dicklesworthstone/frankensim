@@ -7,7 +7,7 @@ use crate::multicomponent::network::dissipation::NetworkDissipationOperator;
 use fs_qty::DynViscosity;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
-fn operator(
+pub(super) fn operator(
     network: &MixtureNetwork1d,
     diffusion: f64,
     viscosity: f64,

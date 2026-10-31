@@ -16,10 +16,10 @@
 
 use super::MixtureNetwork1d;
 use crate::multicomponent::wall_exchange::{
-    MaterialWallCaloric, WallCellReport, WallContact, WallControl, WallDrag, WallExchangeError, WallThermal,
-    exchange_cell, exchange_cell_with_heat_storage,
+    MaterialWallCaloric, WallCellReport, WallContact, WallControl, WallDrag, WallExchangeError,
+    WallThermal, exchange_cell, exchange_cell_with_heat_storage,
 };
-use crate::multicomponent::{Cell, Mesh1d, MixtureGas, allocated, sum};
+use crate::multicomponent::{Cell, Mesh1d, MixtureGas, allocated, positive, sum};
 use fs_qty::Time;
 
 mod caloric;
@@ -91,6 +91,7 @@ pub struct NetworkWallOperator<'law> {
     gas: MixtureGas,
     branches: Vec<BranchShape>,
     plenum_volumes: Vec<f64>,
+    candidate_plenum_volumes: Vec<f64>,
     plenum_start: usize,
     contacts: Vec<WallContact>,
     candidate_contacts: Vec<WallContact>,
@@ -185,6 +186,7 @@ impl<'law> NetworkWallOperator<'law> {
             gas: network.gas().clone(),
             branches,
             plenum_volumes,
+            candidate_plenum_volumes: allocated(network.plenums.len(), 0.0)?,
             plenum_start,
             contacts,
             candidate_contacts: allocated(count, empty)?,
@@ -263,6 +265,8 @@ impl<'law> NetworkWallOperator<'law> {
     ) -> Result<(), WallExchangeError> {
         self.trial_active = false;
         self.trial_report = None;
+        self.candidate_plenum_volumes
+            .copy_from_slice(&self.plenum_volumes);
         for (destination, source) in self
             .candidate_contacts
             .chunks_mut(128)
@@ -281,6 +285,36 @@ impl<'law> NetworkWallOperator<'law> {
     }
 
     pub(super) fn advance_for_trial(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        controls: WallControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NetworkWallReport, WallExchangeError> {
+        self.admit_plenum_volumes(network, cancelled)?;
+        self.advance_for_moving_trial(network, duration, controls, cancelled)
+    }
+
+    pub(super) fn admit_plenum_volumes(
+        &self,
+        network: &MixtureNetwork1d,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), WallExchangeError> {
+        if self.plenum_volumes.len() != network.plenums.len() {
+            return Err(WallExchangeError::Invalid("wall plenum ownership changed"));
+        }
+        for (&expected, actual) in self.plenum_volumes.iter().zip(&network.plenums) {
+            poll(cancelled)?;
+            if expected.to_bits() != actual.volume_m3.to_bits() {
+                return Err(WallExchangeError::Invalid("wall plenum geometry changed"));
+            }
+        }
+        Ok(())
+    }
+
+    // Only the composing motion owner may change trial volumes after admitting
+    // their accepted binding. No accepted geometry changes before publication.
+    pub(super) fn advance_for_moving_trial(
         &mut self,
         network: &mut MixtureNetwork1d,
         duration: Time,
@@ -360,9 +394,10 @@ impl<'law> NetworkWallOperator<'law> {
         }
         for (i, plenum) in network.plenums.iter().enumerate() {
             poll(cancelled)?;
-            if plenum.volume_m3.to_bits() != self.plenum_volumes[i].to_bits() {
-                return Err(WallExchangeError::Invalid("wall plenum geometry changed"));
+            if !positive(plenum.volume_m3) {
+                return Err(WallExchangeError::Invalid("wall plenum volume must be positive"));
             }
+            self.candidate_plenum_volumes[i] = plenum.volume_m3;
             let index = self.plenum_start + i;
             let contact = self.candidate_contacts[index];
             #[cfg(feature = "material")]
@@ -455,6 +490,7 @@ impl<'law> NetworkWallOperator<'law> {
 
     pub(super) fn publish_trial_report(&mut self) {
         if let Some(report) = self.trial_report {
+            self.plenum_volumes.copy_from_slice(&self.candidate_plenum_volumes);
             core::mem::swap(&mut self.contacts, &mut self.candidate_contacts);
             core::mem::swap(&mut self.branch_impulses, &mut self.candidate_impulses);
             self.last_report = Some(report);

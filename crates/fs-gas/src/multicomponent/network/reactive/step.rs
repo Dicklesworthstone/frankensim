@@ -3,9 +3,42 @@ use super::*;
 
 impl ReactingNetwork1d {
     pub(super) fn step_impl<L: TransportLaw>(
-        &mut self, maximum_duration: Time, controls: ReactiveStepControl,
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        operator: Option<&mut NetworkDissipationOperator<L>>,
+        dissipation_controls: DissipationControl,
+        sources: NetworkSources<'_, '_>,
+        volume_rates: Option<&[f64]>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        let result = self.step_trial(
+            maximum_duration,
+            controls,
+            operator,
+            dissipation_controls,
+            sources,
+            volume_rates,
+            cancelled,
+        );
+        if result.is_err() {
+            // The accepted owner is unchanged. Restore private trial geometry
+            // even on a final-poll cancellation; the next attempt's existing
+            // bounded reset restores all trial fields from that accepted owner.
+            for (trial, accepted) in self.trial.plenums.iter_mut().zip(&self.accepted.plenums) {
+                trial.volume_m3 = accepted.volume_m3;
+            }
+        }
+        result
+    }
+    fn step_trial<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
         mut operator: Option<&mut NetworkDissipationOperator<L>>,
-        dissipation_controls: DissipationControl, mut sources: NetworkSources<'_, '_>,
+        dissipation_controls: DissipationControl,
+        mut sources: NetworkSources<'_, '_>,
+        volume_rates: Option<&[f64]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         poll(&mut cancelled)?;
@@ -13,10 +46,51 @@ impl ReactingNetwork1d {
             || !positive(controls.transport.cfl) || controls.transport.cfl > 0.45
             || controls.transport.maximum_halvings > 32
         { return Err(ReactiveNetworkError::Invalid("reacting network duration, CFL or retry controls")); }
+        let volume_rates = match volume_rates {
+            Some(rates) => {
+                if rates.len() != self.accepted.plenums.len() {
+                    return Err(ReactiveNetworkError::Invalid(
+                        "one volume rate is required for every reacting plenum",
+                    ));
+                }
+                let mut moving = false;
+                for &rate in rates {
+                    poll(&mut cancelled)?;
+                    if !rate.is_finite() {
+                        return Err(ReactiveNetworkError::Invalid(
+                            "reacting plenum volume rates must be finite",
+                        ));
+                    }
+                    moving |= rate != 0.0;
+                }
+                moving.then_some(rates)
+            }
+            None => None,
+        };
         sources.validate()?;
+        if volume_rates.is_some() {
+            sources.admit_volume_motion(&self.accepted, &mut cancelled)?;
+            if let Some(operator) = operator.as_ref() {
+                operator.admit_plenum_volumes(&self.accepted, &mut cancelled)?;
+            }
+        }
         let before = checked_totals(&self.accepted, &mut cancelled)?;
         let mut duration = initial_duration(&self.accepted, &mut self.trial,
             maximum_duration.value(), controls.transport.cfl, &mut cancelled)?;
+        if let Some(rates) = volume_rates {
+            for (plenum, &rate) in self.accepted.plenums.iter().zip(rates) {
+                poll(&mut cancelled)?;
+                let fractional_rate = rate.abs() / plenum.volume_m3;
+                if !fractional_rate.is_finite() {
+                    return Err(ReactiveNetworkError::Invalid(
+                        "unrepresentable reacting plenum volume rate",
+                    ));
+                }
+                if fractional_rate > 0.0 {
+                    duration = duration.min(0.8 * controls.transport.cfl / fractional_rate);
+                }
+            }
+        }
         let mut last = ReactiveNetworkError::Invalid("no representable reacting network increment");
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
@@ -28,11 +102,20 @@ impl ReactingNetwork1d {
             let mut chemistry = ChemistryReport::default();
             let attempt = (|| {
                 let half = Time::new(0.5 * duration);
-                let first_sources = sources.first_half(&mut self.trial, half, &mut cancelled)?;
+                let first_sources = if volume_rates.is_some() {
+                    sources.first_moving_half(&mut self.trial, half, &mut cancelled)?
+                } else {
+                    sources.first_half(&mut self.trial, half, &mut cancelled)?
+                };
                 let first = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = operator.advance_for_trial(&mut self.trial, half,
-                            dissipation_controls, &mut cancelled)?;
+                        let report = if volume_rates.is_some() {
+                            operator.advance_for_moving_trial(&mut self.trial, half,
+                                dissipation_controls, &mut cancelled)?
+                        } else {
+                            operator.advance_for_trial(&mut self.trial, half,
+                                dissipation_controls, &mut cancelled)?
+                        };
                         for (destination, source) in self.trial_molecular_ports.iter_mut()
                             .zip(operator.trial_port_exchanges())
                         {
@@ -45,7 +128,11 @@ impl ReactingNetwork1d {
                 };
                 react_network(&mut self.trial, &mut self.reactor, &mut self.amounts,
                     half.value(), &mut chemistry, &mut cancelled)?;
-                let transport = self.trial.step(Time::new(duration), controls.transport, &mut cancelled)?;
+                let transport = match volume_rates {
+                    Some(rates) => self.trial.step_with_volume_rates(Time::new(duration),
+                        controls.transport, rates, &mut cancelled)?,
+                    None => self.trial.step(Time::new(duration), controls.transport, &mut cancelled)?,
+                };
                 if transport.elapsed.value() != duration {
                     return Ok((transport, false, None, None, None));
                 }
@@ -53,8 +140,13 @@ impl ReactingNetwork1d {
                     half.value(), &mut chemistry, &mut cancelled)?;
                 let second = match operator.as_deref_mut() {
                     Some(operator) => {
-                        let report = operator.advance_for_trial(&mut self.trial, half,
-                            dissipation_controls, &mut cancelled)?;
+                        let report = if volume_rates.is_some() {
+                            operator.advance_for_moving_trial(&mut self.trial, half,
+                                dissipation_controls, &mut cancelled)?
+                        } else {
+                            operator.advance_for_trial(&mut self.trial, half,
+                                dissipation_controls, &mut cancelled)?
+                        };
                         for (destination, source) in self.trial_molecular_ports.iter_mut()
                             .zip(operator.trial_port_exchanges())
                         {
@@ -72,7 +164,11 @@ impl ReactingNetwork1d {
                     }
                     None => None,
                 };
-                let second_sources = sources.second_half(&mut self.trial, half, &mut cancelled)?;
+                let second_sources = if volume_rates.is_some() {
+                    sources.second_moving_half(&mut self.trial, half, &mut cancelled)?
+                } else {
+                    sources.second_half(&mut self.trial, half, &mut cancelled)?
+                };
                 // A final valve can cool the donor or heat/change the receiver
                 // after chemistry has finished. Admission must include that final
                 // source, not only the states at the chemical endpoints.
@@ -115,14 +211,16 @@ impl ReactingNetwork1d {
                     // Valve transfers cancel internally. Adding their energy
                     // here would count internal donor enthalpy as external heat.
                     let mut residual = NetworkTotals { species_masses: [0.0; MAX_SPECIES], species_count: n,
-                        energy: after.energy - before.energy - boundary_change.energy - chemistry.referenced_energy_change_j };
+                        energy: after.energy - before.energy - boundary_change.energy
+                            - transport.boundary_work_on_gas_j - chemistry.referenced_energy_change_j };
                     for k in 0..n {
                         residual.species_masses[k] = after.species_masses[k] - before.species_masses[k]
                             - boundary_change.species_masses[k] - chemistry.species_change_kg[k];
                     }
                     let mass_residual_kg = sum((0..n).map(|k| after.species_masses[k]
                         - before.species_masses[k] - boundary_change.species_masses[k]));
-                    let absolute_energy_residual_j = sum(core::iter::once(after.energy - before.energy - boundary_change.energy)
+                    let absolute_energy_residual_j = sum(core::iter::once(after.energy - before.energy
+                        - boundary_change.energy - transport.boundary_work_on_gas_j)
                         .chain((0..n).map(|k| (after.species_masses[k] - before.species_masses[k]
                             - boundary_change.species_masses[k]) * self.gas().energy_references()[k])));
                     if !residual.energy.is_finite() || !residual.species_masses[..n].iter().all(|x| x.is_finite())
@@ -132,6 +230,7 @@ impl ReactingNetwork1d {
                     let report = ReactiveNetworkReport {
                         elapsed: Time::new(duration), coupling_retries: retry, transport, chemistry,
                         dissipation, wall: wall_report, valves: valve_report, before, after, boundary_change,
+                        boundary_work_on_gas_j: transport.boundary_work_on_gas_j,
                         conservation_residual: residual, mass_residual_kg, absolute_energy_residual_j,
                     };
                     poll(&mut cancelled)?;

@@ -61,11 +61,16 @@ pub(super) fn advance<L: TransportLaw>(
     }
     for (index, plenum) in network.plenums.iter().enumerate() {
         poll(cancelled)?;
-        if plenum.volume_m3.to_bits() != owner.plenum_volumes[index].to_bits() {
+        if !positive(plenum.volume_m3) {
             return Err(DissipationError::Invalid(
-                "molecular plenum geometry changed",
+                "molecular plenum volume must be positive",
             ));
         }
+        // The entry point admitted the accepted binding (rigid) or the composing
+        // owner explicitly supplied motion. Use this interval's actual volume in
+        // every inventory, parabolic bound and molecular update, without changing
+        // the accepted operator binding until whole-step publication.
+        owner.plenum_volumes[index] = plenum.volume_m3;
         let start = (owner.plenum_cell_start + index) * m;
         owner.work.current[start..start + n].copy_from_slice(&plenum.state.partial_densities);
         owner.work.current[start + n] = 0.0;
