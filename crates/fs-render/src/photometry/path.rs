@@ -11,6 +11,8 @@
 //! A finite path-depth ceiling still omits transport. Estimated IID sampling
 //! error does not bound that omission, source calibration, spectral/observer
 //! error, geometric error or pixel integration. Total error remains unknown.
+//! [`PathErrorBudget`] keeps those slices separate alongside each accepted
+//! measurement and can export them as CSV without inventing absent bounds.
 
 use crate::camera::PhysicalCamera;
 use crate::tracer::photometric::FixtureTransport;
@@ -30,7 +32,9 @@ mod remainder;
 mod report;
 pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIlluminanceJob};
 pub use remainder::{DiffuseTransportRemainder, DiffuseVacuumRemainder};
-pub use report::{PathCalculationContext, SamplingUncertainty};
+pub use report::{
+    PathCalculationContext, PathErrorBudget, PhotometricQuantity, SamplingUncertainty,
+};
 
 /// Borrowed native physical media for spectral fixture paths.
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;

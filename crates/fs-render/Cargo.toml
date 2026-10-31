@@ -87,6 +87,10 @@ required-features = ["photometry"]
 name = "photometric_stage"
 required-features = ["photometry"]
 
+[[example]]
+name = "photometric_error_budget"
+required-features = ["photometry"]
+
 [[test]]
 name = "volumes_battery"
 required-features = ["volumes"]
