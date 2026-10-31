@@ -17426,6 +17426,42 @@ as heat. The complete thermoelastic split remains first order. Regressions check
 fixed-world parity, independent rotating attachment impulses, complete material
 plus caloric storage, and late thermal refusal followed by a valid retry.
 
+## Intrinsic material torsional loss on native rods
+
+`rod_motion::PreparedRodTorsionalLoss` binds the existing
+`ConcentricTorsionalSection` shear-viscosity law to every original rod segment.
+The enriched loss bundle may add an explicit viscosity property, but its card,
+complete physical query, selected original mechanical properties, annular
+geometry and shear convention must match the actual model. Transient admission
+requires fixed-state coefficients with explicit broadband frequency support.
+A temperature/material refresh makes an old loss source refuse; the caller must
+prepare the matching new source rather than retain stale viscosity.
+
+`RodMotion::step_torsional_candidate` and
+`step_spatial_torsional_candidate` reuse the existing motion owner under fixed
+world or prepared rotating-point loads. For relative log rotation phi, the
+viscous rate is d(phi_x)/dt. Its exact left/right SO(3) Jacobian pullbacks retain
+finite-bend coupling and equal/opposite world moments. Resistance is
+`c = sum(eta_s J)/L`; no loss ratio or measured calibration is invented.
+
+Each frozen-pose two-node relaxation uses the original full central inertia,
+with supported rotations removed from mobility. An exact exponential impulse
+produces nonnegative shear heat and the actual support reaction. Bounded stack
+scratch and a palindromic segment sweep avoid a dense damping solve. Symmetric
+half-loss/native-step/half-loss composition is second order for the admitted
+smooth fixed-state model. Each loss map is dissipative even for stiff viscosity;
+elastic wave stability and timestep refinement remain required.
+
+The native receipt reports total and per-segment physical heat separately.
+Its numerical defect is delta mechanical energy plus heat minus applied-work
+quadrature. Heat is not silently deposited into a reservoir, and this path adds
+no finite thermoelastic reciprocity, bending/axial viscosity, contact, fluid-film
+loss or temperature evolution. Focused synthetic fixtures cover exact pair heat
+and reaction under load, strong viscosity, two-segment analytic damped modes and
+heat refinement, finite-bend gradient probes, collective spin, full-tensor
+eccentric/frame momentum balance, source mismatch, thermal refresh and atomic
+refusal. They do not establish experimental material validity.
+
 ## Point impulses on continuing geometrically exact rods
 
 `rod_motion::RodMotion::apply_point_impulses` applies simultaneous terminal or

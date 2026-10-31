@@ -12,8 +12,9 @@
 //! Free nodes and stationary frame clamps are supported. An eccentric free rotor
 //! with constrained centerline translation needs a coupled constraint integrator
 //! and refuses. No distributed cable inertia, moving supports, contact, material
-//! damping, damage or live solid-source replacement is inferred. Prescribed
-//! hydrostatic fluid refresh retains this same trajectory and accounts for the
+//! axial/bending damping, damage or live solid-source replacement is inferred.
+//! Explicit source-bound torsional viscosity uses its own passive loss flow.
+//! Prescribed hydrostatic fluid refresh retains this trajectory and accounts for the
 //! environmental parameter work at the original potential reference.
 
 use std::sync::Arc;
@@ -366,6 +367,10 @@ pub mod loads;
 pub use loads::{PreparedRodLoads, RodPointForce};
 use loads::StageLoads;
 
+/// Source-bound intrinsic circular-shaft viscosity on the native motion owner.
+pub mod torsional_loss;
+pub use torsional_loss::{PreparedRodTorsionalLoss, RodTorsionalHeat};
+
 /// Instantaneous terminal and attachment impulses on the same trajectory.
 pub mod impulse;
 
@@ -380,7 +385,7 @@ pub struct RodMotionControls {
     /// Explicit upper step bound, not an inferred stability limit.
     pub maximum_step_s: f64,
     pub maximum_steps: usize,
-    /// Bound on |delta kinetic + delta potential - source quadrature| [J].
+    /// Bound on |delta kinetic + delta potential + physical heat - source work| [J].
     pub energy_defect_limit_j: f64,
     /// Upper bound on each free rotor's swept angle, in (0, pi/2].
     pub maximum_rotation_rad: f64,
@@ -447,7 +452,11 @@ pub struct RodMotionStep {
     /// Symmetric kick quadrature of applied material-node wrench power.
     /// Gravity and buoyancy remain in potential energy, not counted twice as work.
     pub source_work_quadrature_j: f64,
+    /// Delta mechanical energy plus physical heat minus applied-work quadrature.
     pub integration_defect_j: f64,
+    /// Nonnegative intrinsic shear heat in original segment order, when enabled.
+    /// The numerical defect accounts for this heat separately from source work.
+    pub torsional_heat: Option<RodTorsionalHeat>,
     /// Applied loads, gravity/buoyancy wrenches and stationary-support impulses.
     pub external_linear_impulse_n_s: [f64; 3],
     pub external_angular_impulse_nm_s: [f64; 3],
@@ -592,6 +601,10 @@ impl<I:RodMotionInertia> RodMotion<I> {
     }
     fn step_with_loads(&self,dt:f64,loads:StageLoads<'_>,controls:RodMotionControls,
         gate:&CancelGate)->Result<(Self,RodMotionStep),RodMotionError> {
+        self.step_with_torsion_loads(dt,loads,None,controls,gate)
+    }
+    fn step_with_torsion_loads(&self,dt:f64,loads:StageLoads<'_>,loss:Option<&PreparedRodTorsionalLoss>,controls:RodMotionControls,
+        gate:&CancelGate)->Result<(Self,RodMotionStep),RodMotionError> {
         checkpoint(gate)?;
         if !dt.is_finite() || dt<=0.0 || 0.5*dt==0.0
             || !controls.maximum_step_s.is_finite() || controls.maximum_step_s<=0.0 || dt>controls.maximum_step_s
@@ -602,6 +615,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
             return Err(RodMotionError::Invalid("invalid rod interval, work gate or step/rotation budget"));
         }
         loads.validate()?;
+        if let Some(law)=loss {law.admit(&self.model,gate)?;}
         let next_time=self.time_s+dt;
         if !next_time.is_finite() || next_time<=self.time_s {
             return Err(RodMotionError::Invalid("rod clock cannot represent the requested advance"));
@@ -609,6 +623,10 @@ impl<I:RodMotionInertia> RodMotion<I> {
         let before=self.observe(controls.balance_origin_m)?;
         let mut candidate=self.clone();
         let mut accounts=KickAccounts::new(loads.len());
+        let mut torsional_heat=loss.map(PreparedRodTorsionalLoss::heat);
+        if let (Some(law),Some(heat))=(loss,torsional_heat.as_mut()) {
+            law.flow(&mut candidate,0.5*dt,&mut accounts,heat,gate)?;
+        }
         candidate.kick(0.5*dt,loads,controls.balance_origin_m,&mut accounts,gate)?;
         for node in 0..loads.len() {
             checkpoint(gate)?;
@@ -640,9 +658,13 @@ impl<I:RodMotionInertia> RodMotion<I> {
         }
         candidate.response=candidate.model.evaluate(&candidate.pose,gate)?;
         candidate.kick(0.5*dt,loads,controls.balance_origin_m,&mut accounts,gate)?;
+        if let (Some(law),Some(heat))=(loss,torsional_heat.as_mut()) {
+            law.flow(&mut candidate,0.5*dt,&mut accounts,heat,gate)?;
+        }
         let after=candidate.observe(controls.balance_origin_m)?;
-        let defect=(after.kinetic_energy_j-before.kinetic_energy_j)
+        let mut defect=(after.kinetic_energy_j-before.kinetic_energy_j)
             +(after.potential_energy_j-before.potential_energy_j)-accounts.work;
+        if let Some(heat)=&torsional_heat {defect+=heat.total_heat_j;}
         finite(&[accounts.work,defect])?;
         if defect.abs()>controls.energy_defect_limit_j {
             return Err(RodMotionError::Energy {defect_j:defect,limit_j:controls.energy_defect_limit_j});
@@ -655,7 +677,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
         candidate.steps=self.steps.checked_add(1).ok_or(RodMotionError::Invalid("rod step count overflow"))?;
         checkpoint(gate)?;
         Ok((candidate,RodMotionStep {before,after,source_work_quadrature_j:accounts.work,
-            integration_defect_j:defect,external_linear_impulse_n_s:accounts.linear,
+            integration_defect_j:defect,torsional_heat,external_linear_impulse_n_s:accounts.linear,
             external_angular_impulse_nm_s:accounts.angular,linear_balance_residual_n_s:linear_residual,
             angular_balance_residual_nm_s:angular_residual,support_impulses:accounts.supports}))
     }

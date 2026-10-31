@@ -28,6 +28,9 @@ mod enthalpy;
 #[path = "rod_motion/loads.rs"]
 mod loads;
 
+#[path = "rod_motion/torsional_loss.rs"]
+mod torsional_loss;
+
 #[path = "rod_motion/impulse.rs"]
 mod impulse;
 
