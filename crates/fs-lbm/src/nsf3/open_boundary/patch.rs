@@ -249,6 +249,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             total_energy_out_j: 0.5
                 * (self.open_out.patch_total_out[side] + flux_after.patch_total_out[side])
                 * self.law.energy_unit_j(),
+            advected_stagnation_enthalpy_out_j: 0.5
+                * (self.open_out.patch_advected_out[side] + flux_after.patch_advected_out[side])
+                * self.law.energy_unit_j(),
             ..NsfBoundaryExchange::default()
         };
         let mut count = 0;
@@ -287,6 +290,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         out.mean_pressure_pa /= count as f64;
         out.mean_acoustic_pressure_pa /= count as f64;
+        out.nonadvective_energy_out_j =
+            out.total_energy_out_j - out.advected_stagnation_enthalpy_out_j;
         Some(out)
     }
 }

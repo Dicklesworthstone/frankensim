@@ -1279,12 +1279,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             for a in 0..3 {
                 if self.fluid_at(x, a, 1).is_none() {
                     if let Some(face) = self.characteristic_face(faces, i, a, 1) {
-                        let (total, internal) =
+                        let (total, internal, advected) =
                             self.open_energy_flux(face, i, a, 1, rho, theta, sig, transport)?;
                         open.total_out[1] += total;
                         open.internal_out[1] += internal;
+                        open.advected_out[1] += advected;
                         if faces.is_some_and(|faces| faces.contains_patch(x, 1)) {
                             open.patch_total_out[1] += total;
+                            open.patch_advected_out[1] += advected;
                         }
                     } else if self.open_at(i, a, 1).is_some() {
                         let flux = wall_flux(i, a, 1)?;
@@ -1296,12 +1298,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
                 if self.fluid_at(x, a, -1).is_none() {
                     if let Some(face) = self.characteristic_face(faces, i, a, -1) {
-                        let (total, internal) =
+                        let (total, internal, advected) =
                             self.open_energy_flux(face, i, a, -1, rho, theta, sig, transport)?;
                         open.total_out[0] -= total;
                         open.internal_out[0] -= internal;
+                        open.advected_out[0] -= advected;
                         if faces.is_some_and(|faces| faces.contains_patch(x, 0)) {
                             open.patch_total_out[0] -= total;
+                            open.patch_advected_out[0] -= advected;
                         }
                     } else if self.open_at(i, a, -1).is_some() {
                         let flux = wall_flux(i, a, -1)?;

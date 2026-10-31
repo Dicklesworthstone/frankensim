@@ -118,6 +118,16 @@ pub struct NsfBoundaryExchange {
     /// Original FV enthalpy, conduction and viscous-work flux in the fixed
     /// sensible-energy chart of this grid's retained gas owner.
     pub total_energy_out_j: f64,
+    /// Advected stagnation enthalpy in the same sensible-energy chart [J].
+    /// This is the mass-carried rho*(e + p/rho + |u|^2/2)*u_n contribution
+    /// only; Fourier heat and viscous stress work are deliberately excluded.
+    /// Positive is outward, matching mass_out_kg.
+    pub advected_stagnation_enthalpy_out_j: f64,
+    /// Non-advective energy crossing the face [J]: Fourier heat plus the
+    /// signed viscous-stress work. This is defined by the original FV split,
+    /// and total_energy_out_j equals this plus advected_stagnation_enthalpy_out_j
+    /// to final receipt arithmetic.
+    pub nonadvective_energy_out_j: f64,
     /// Time-and-area averaged pressure of this face.
     pub mean_pressure_pa: f64,
     /// Time-averaged integral of the reconstructed normal velocity [m^3/s].
@@ -138,8 +148,11 @@ pub struct NsfBoundaryExchange {
 pub(super) struct BoundaryFlux {
     pub total_out: [f64; 2],
     pub internal_out: [f64; 2],
+    /// Mass-carried stagnation enthalpy before Fourier/stress-work terms.
+    pub advected_out: [f64; 2],
     pub prescribed_out: f64,
     pub patch_total_out: [f64; 2],
+    pub patch_advected_out: [f64; 2],
     /// Cached original FV moments, separately owned by each localized aperture.
     pub reservoir: [ReservoirFlux; super::MAX_NSF_RESERVOIR_APERTURES],
 }
@@ -694,7 +707,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         theta: &[f64],
         sig: &[[f64; 6]],
         transport: &[NsfSgsTransport],
-    ) -> Result<(f64, f64), NsfError> {
+    ) -> Result<(f64, f64, f64), NsfError> {
         let mut k = self.spec.gas.face_conductivity(
             &self.law,
             0.5 * (theta[i] + face.theta),
@@ -714,10 +727,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         };
         let viscous_work = row[0] * face.u[0] + row[1] * face.u[1] + row[2] * face.u[2];
         let kinetic = 0.5 * (face.u[0] * face.u[0] + face.u[1] * face.u[1] + face.u[2] * face.u[2]);
-        let total =
-            face.rho * (face.internal + kinetic + face.theta) * face.u[axis] - viscous_work + heat;
+        let advected =
+            face.rho * (face.internal + kinetic + face.theta) * face.u[axis];
+        let total = advected - viscous_work + heat;
         let internal = face.rho * face.internal * face.u[axis] + heat;
-        Ok((total, internal))
+        Ok((total, internal, advected))
     }
 
     pub(super) fn open_incoming_populations(
@@ -852,6 +866,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             out.total_energy_out_j = 0.5
                 * (self.open_out.total_out[side] + flux_after.total_out[side])
                 * self.law.energy_unit_j();
+            out.advected_stagnation_enthalpy_out_j = 0.5
+                * (self.open_out.advected_out[side] + flux_after.advected_out[side])
+                * self.law.energy_unit_j();
+            out.nonadvective_energy_out_j =
+                out.total_energy_out_j - out.advected_stagnation_enthalpy_out_j;
             for (old, new) in before.values[side].iter().zip(&after.values[side]) {
                 out.momentum_out_kg_m_s[axis] += 0.5
                     * sign

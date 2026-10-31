@@ -89,6 +89,15 @@ fn uniform_throughflow_exchanges_actual_mass_momentum_enthalpy_and_work_on_every
                 assert!((e.mass_out_kg - mass_out).abs() < 2e-11 * mass_out.abs());
                 assert!((e.total_energy_out_j - energy_out).abs() < 2e-10 * energy_out.abs());
                 assert!(
+                    (e.advected_stagnation_enthalpy_out_j - energy_out).abs()
+                        < 2e-10 * energy_out.abs()
+                );
+                assert!(e.nonadvective_energy_out_j.abs() < 2e-10 * energy_out.abs());
+                assert_eq!(
+                    e.total_energy_out_j,
+                    e.advected_stagnation_enthalpy_out_j + e.nonadvective_energy_out_j
+                );
+                assert!(
                     (e.momentum_out_kg_m_s[axis] - momentum_out).abs() < 2e-11 * momentum_out.abs()
                 );
                 assert!(
