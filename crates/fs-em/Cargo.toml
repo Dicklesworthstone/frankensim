@@ -11,11 +11,12 @@ description = "Material-resolved planar magnetostatics on the shared FEEC and so
 layer = "L3"
 
 [features]
-plane-wave = []
+plane-wave = ["dep:fs-fft"]
 
 [dependencies]
 fs-math = { path = "../fs-math" }
 fs-feec = { path = "../fs-feec" }
+fs-fft = { path = "../fs-fft", optional = true }
 fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }

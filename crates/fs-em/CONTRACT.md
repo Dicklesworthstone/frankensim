@@ -1803,6 +1803,54 @@ Debye/geometry invariance, weak-film loss, critical films/exits and thick absorb
 homogeneous isotropic planar model: finite coherence length, roughness,
 anisotropy and mesh Maxwell evolution are outside its scope.
 
+### Coherent vector beam diffraction through the same films
+
+`plane_wave::angular_spectrum::PlanarAngularSpectrum` accepts complex peak Ex/Ey
+samples at the incident face of an original `PlanarDielectricLayers`. The input
+is one explicitly periodic, band-limited rectangular cell in physical metres;
+x varies fastest. Both grid dimensions are powers of two, capped at 4096 to
+bound a single uninterruptible FFT pencil. All incident Fourier bins must lie
+strictly inside the incident light cone. No modes are silently removed,
+windowed or renormalized. A caller approximating an isolated beam must resolve
+its bandwidth and converge the cell/padding independently; an authored hard
+aperture's unresolved high spatial frequencies are not synthesized.
+
+The original `fs-fft` plans analyze both complex components once. Every mode
+uses its actual conserved transverse wave number and its own TE/TM response
+from the original source/material/film owner. Complex amplitudes combine before
+forming intensity. Source epsilon and mu remain distinct; scalar refractive
+index or normal-incidence transmission cannot replace their vector response.
+For the existing exp(+i omega t) convention, normalized inverse FFTs analyze
+the field and unnormalized forward FFTs reconstruct exp(-i k.r) modes.
+
+Each subsequent plane reuses the cached modes and plans, applies exact kz
+propagation, enforces k.E=0, and obtains H=(k cross E)/(omega mu). It returns
+all six complex field components and physical cycle-mean Poynting flux.
+Incident, reflected, their coherent sum, and transmitted fields have explicit
+face/distance conventions. Film-induced evanescent fields decay without a
+growing transfer matrix. An exactly grazing exit is refused because the
+supplied tangential-electric parameterization becomes singular there; the
+underlying film solver retains its internal critical-angle limits.
+
+Modewise power integrates over the original cell: reflected outward power,
+exit-face transmitted power and physical film absorption are separate. Loss
+after propagation into an absorbing exit is computed from the actual field,
+without relabeling it as film absorption. Local flux retains interference and
+its sign. Numerical-storage and FFT-work budgets precede allocation; source
+response work is bounded by the admitted grid and original 64-layer maximum.
+Cancellation polls between rows, pencils and bounded mode batches, publishing
+no partial field. Further planes require six separable FFTs and linear modal
+work, with no repeated constitutive or film solve. This is an operation-count
+description, not a measured throughput claim.
+
+Native leaf tests exercise both Maxwell curls/divergences, polarization and
+signed power, and evanescent decay. Source-backed integration regressions cover
+original-film reduction, an independent direct Fourier diffraction series,
+TIR, Debye film/exit loss, budgets and cancellation. Their Cargo execution
+requires the workspace constellation dependencies. This feature does not add
+transients, incident near-field excitation, rough/finite film edges, arbitrary
+three-dimensional scattering, or empirical material-frequency qualification.
+
 ### Two-sided coherent illumination and layer heating
 
 `PlanarDielectricLayers::prepare_illumination` retains the same source-bound

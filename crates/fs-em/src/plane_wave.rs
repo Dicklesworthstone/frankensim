@@ -29,6 +29,9 @@ use fs_math::{c64::C64, det};
 /// Coherent finite dielectric films, with the same source laws and conventions.
 pub mod layers;
 
+/// Coherent vector diffraction of sampled beams through the original films.
+pub mod angular_spectrum;
+
 /// Electric field transverse to the incidence plane, or magnetic field transverse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarization {
