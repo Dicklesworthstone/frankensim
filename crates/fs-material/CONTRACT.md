@@ -8623,3 +8623,39 @@ energy shift. The NASA caloric fixture is synthetic and checks constitutive
 consistency, not experimental methane sound-speed accuracy. Generic acoustic
 trait use retains the original thermodynamic state instead of flattening it
 into an unrelated material model.
+
+## Source-backed nonlinear dielectric temperature scaling
+
+`field_storage::dielectric::reversible::thermal` explicitly admits
+`D(E,T)=s(T) D_ref(E)` from the original reversible dielectric claim and a
+separate original positive dimensionless affine scale claim with `s(T_ref)=1`.
+`ThermalReversibleDielectricMaterial` retains the complete material bundle,
+selected source identities, original field path, nonthermal coordinates and
+supported absolute-temperature interval. The reference must have no temperature
+value axis. This owner does not infer separability or thermodynamics from a
+general `D(E,T)` surface. Original source receipts remain reference evidence;
+resolved snapshots share the immutable prepared table and evaluate actual scaled
+displacement, both tangents, inverse response, charge-form potential, coenergy
+and scalar/vector work. `is_temperature_scaled()` makes this additional physical
+role explicit to coupled owners.
+
+For actual displacement magnitude `D`, `z=D/s` and volume `V`, the field terms
+are `F=V*s*w_ref(z)`, `S=V*s'*g_ref(z)`, `U=F+T*S`, and
+`C_D=-V*T*(s')^2*z^2/(s*epsilon_ref,diff)`. Here `w_ref` and `g_ref` are the original
+charge-form potential and coenergy, respectively. The charge-form response is
+Helmholtz free energy on a thermal snapshot, not its complete internal energy.
+The zero-field caloric chart supplies the thermal datum; signed field entropy
+and internal energy are reversible contributions. The full-strip capacity bound
+includes both sides of original tangent jumps and conservative outward rounding.
+A finite thermal owner must keep the combined caloric and field capacity positive.
+
+`admit_source_refresh` permits only the same original source family and owned
+thermal coordinate. Fixed-history parameter work remains the responsibility of
+the native electrical owner. `thermal_offset_change_j` retains `Delta(T*S)` by
+compensated original inverse-segment coenergy integration and explicit affine
+scale increments, including work below endpoint spacing. It never labels that
+exchange as irreversible dielectric heat. Unsupported source strips, malformed
+scale laws, changed bundles, negative-magnitude state queries and unrepresentable
+nonzero field contributions refuse. Focused evidence is in
+`tests/dielectric_reversible_thermal.rs`; existing dielectric kernel and Debye
+thermal tests continue to exercise the shared material boundaries.

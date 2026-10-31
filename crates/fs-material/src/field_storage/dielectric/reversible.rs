@@ -6,9 +6,9 @@
 //! Field and displacement inputs to evaluation are magnitudes. The signed
 //! scalar work methods use the corresponding odd E(D) and even energy.
 //!
-//! These are fixed-context constitutive snapshots without remanence, memory,
-//! leakage or a thermal/mechanical update. A source-dependent temperature
-//! snapshot does not supply field entropy or internal-energy corrections.
+//! Ordinary snapshots are fixed-context laws without remanence, memory or
+//! leakage. The explicit [`thermal`] owner adds source-backed separable
+//! temperature scaling and its reciprocal field entropy/internal energy.
 
 use crate::{
     field_storage::FieldStorageError,
@@ -21,6 +21,9 @@ use crate::{
 use fs_matdb::{ClaimSelection, MaterialCard, PropertyLineSlice, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
 use std::sync::Arc;
+
+/// Explicit source-backed D(E,T)=s(T)D_ref(E) and reciprocal thermodynamics.
+pub mod thermal;
 
 /// Electric-field magnitude in volts per metre.
 pub const ELECTRIC_FIELD_DIMS: Dims = Dims([1, 1, -3, 0, -1, 0]);
@@ -35,6 +38,8 @@ pub const REVERSIBLE_ELECTRIC_DISPLACEMENT_PROPERTY: &str = "reversible_electric
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReversibleDielectricMaterial {
     prepared: Arc<Prepared>,
+    // Original D_ref receipts/tables remain immutable and shared.
+    temperature_scale: Option<Arc<thermal::ResolvedScale>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -58,7 +63,9 @@ pub struct ReversibleDielectricResponse {
     pub secant_permittivity_f_m: f64,
     /// dD/dE [F/m]; right derivative at interior knots, left at the last knot.
     pub differential_permittivity_f_m: f64,
-    /// Physical fixed-charge storage integral_0^D E(s) ds [J/m3].
+    /// Charge-form potential integral_0^D E(s) ds [J/m3]. This is Helmholtz
+    /// free energy for an explicitly thermal snapshot; its thermal owner adds
+    /// T*S to report internal energy. Ordinary fixed laws use it as storage.
     pub energy_density_j_m3: f64,
     /// Voltage-form potential integral_0^E D(s) ds [J/m3].
     pub coenergy_density_j_m3: f64,
@@ -248,6 +255,7 @@ impl ReversibleDielectricMaterial {
                 energy_at_knots_j_m3,
                 coenergy_at_knots_j_m3,
             }),
+            temperature_scale: None,
         })
     }
 
@@ -255,9 +263,32 @@ impl ReversibleDielectricMaterial {
     pub fn card(&self) -> &MaterialCard {
         &self.prepared.card
     }
-    /// Original zero-field snapshot with the selected claim and complete context.
+    /// Complete zero-field material bundle at this snapshot's actual context.
     pub fn material(&self) -> &ResolvedMaterialStatePoint {
-        &self.prepared.material
+        self.temperature_scale
+            .as_ref()
+            .map_or(&self.prepared.material, |scale| &scale.material)
+    }
+    /// Whether explicit thermal scaling and field entropy belong to this law.
+    /// A closed mechanical/electrical owner must not silently freeze that role.
+    pub fn is_temperature_scaled(&self) -> bool {
+        self.temperature_scale.is_some()
+    }
+    /// Actual positive D/D_ref scale; one for an ordinary source snapshot.
+    pub fn displacement_scale(&self) -> f64 {
+        self.temperature_scale.as_ref().map_or(1.0, |s| s.value)
+    }
+    fn displacement_knot(&self, i: usize) -> f64 {
+        self.displacement_scale() * self.prepared.path.knots[i].1.evidence.value.value
+    }
+    fn slope(&self, i: usize) -> f64 {
+        self.displacement_scale() * self.prepared.slopes_f_m[i]
+    }
+    fn energy_knot(&self, i: usize) -> f64 {
+        self.displacement_scale() * self.prepared.energy_at_knots_j_m3[i]
+    }
+    fn coenergy_knot(&self, i: usize) -> f64 {
+        self.displacement_scale() * self.prepared.coenergy_at_knots_j_m3[i]
     }
     /// Every canonical source breakpoint and its original answer/receipt.
     pub fn source_path(&self) -> &PropertyLineSlice {
@@ -269,15 +300,7 @@ impl ReversibleDielectricMaterial {
     }
     /// Largest admitted displacement magnitude [C/m2] on the same source path.
     pub fn maximum_displacement_c_m2(&self) -> f64 {
-        self.prepared
-            .path
-            .knots
-            .last()
-            .unwrap()
-            .1
-            .evidence
-            .value
-            .value
+        self.displacement_knot(self.prepared.path.knots.len() - 1)
     }
     fn admit_displacement(&self, displacement: f64) -> Result<(), FieldStorageError> {
         if displacement.is_finite() && displacement.abs() <= self.maximum_displacement_c_m2() {
@@ -292,7 +315,9 @@ impl ReversibleDielectricMaterial {
         self.prepared
             .path
             .knots
-            .partition_point(|(_, answer)| answer.evidence.value.value <= displacement)
+            .partition_point(|(_, answer)| {
+                self.displacement_scale() * answer.evidence.value.value <= displacement
+            })
             .saturating_sub(1)
             .min(self.prepared.slopes_f_m.len() - 1)
     }
@@ -318,14 +343,14 @@ impl ReversibleDielectricMaterial {
             .partition_point(|(e, _)| *e <= field_v_m)
             .saturating_sub(1)
             .min(self.prepared.slopes_f_m.len() - 1);
-        let (e0, answer) = &self.prepared.path.knots[i];
-        let d0 = answer.evidence.value.value;
+        let e0 = self.prepared.path.knots[i].0;
+        let d0 = self.displacement_knot(i);
         let de = field_v_m - e0;
-        let dd = self.prepared.slopes_f_m[i] * de;
+        let dd = self.slope(i) * de;
         let displacement = if field_v_m == self.maximum_field_strength_v_m() {
             self.maximum_displacement_c_m2()
         } else {
-            self.prepared.slopes_f_m[i].mul_add(de, d0)
+            self.slope(i).mul_add(de, d0)
         };
         self.response(i, field_v_m, displacement, de, dd)
     }
@@ -343,15 +368,15 @@ impl ReversibleDielectricMaterial {
             ));
         }
         let i = self.displacement_segment(displacement_c_m2);
-        let (e0, answer) = &self.prepared.path.knots[i];
-        let dd = displacement_c_m2 - answer.evidence.value.value;
-        let de = dd / self.prepared.slopes_f_m[i];
+        let e0 = self.prepared.path.knots[i].0;
+        let dd = displacement_c_m2 - self.displacement_knot(i);
+        let de = dd / self.slope(i);
         let e1 = self.prepared.path.knots[i + 1].0;
         let field = if displacement_c_m2 == self.maximum_displacement_c_m2() {
             self.maximum_field_strength_v_m()
         } else {
             // Only roundoff of an already admitted affine inverse is limited.
-            (e0 + de).clamp(*e0, e1)
+            (e0 + de).clamp(e0, e1)
         };
         self.response(i, field, displacement_c_m2, de, dd)
     }
@@ -371,22 +396,22 @@ impl ReversibleDielectricMaterial {
         de: f64,
         dd: f64,
     ) -> Result<ReversibleDielectricResponse, FieldStorageError> {
-        let (e0, answer) = &self.prepared.path.knots[i];
-        let d0 = answer.evidence.value.value;
+        let e0 = self.prepared.path.knots[i].0;
+        let d0 = self.displacement_knot(i);
         // Work uses de and dd, not subtraction of large rounded total fields.
         let (energy, coenergy) =
             if e == self.maximum_field_strength_v_m() && d == self.maximum_displacement_c_m2() {
                 (
-                    *self.prepared.energy_at_knots_j_m3.last().unwrap(),
-                    *self.prepared.coenergy_at_knots_j_m3.last().unwrap(),
+                    self.energy_knot(self.prepared.path.knots.len() - 1),
+                    self.coenergy_knot(self.prepared.path.knots.len() - 1),
                 )
             } else {
                 (
-                    (e0 + 0.5 * de).mul_add(dd, self.prepared.energy_at_knots_j_m3[i]),
-                    (d0 + 0.5 * dd).mul_add(de, self.prepared.coenergy_at_knots_j_m3[i]),
+                    (e0 + 0.5 * de).mul_add(dd, self.energy_knot(i)),
+                    (d0 + 0.5 * dd).mul_add(de, self.coenergy_knot(i)),
                 )
             };
-        let differential = self.prepared.slopes_f_m[i];
+        let differential = self.slope(i);
         let secant = if e == 0.0 { differential } else { d / e };
         if [e, d, secant, energy, coenergy]
             .iter()
@@ -420,15 +445,10 @@ impl ReversibleDielectricMaterial {
             let magnitude = position.abs();
             let outward = position == 0.0 || position.signum() == direction;
             let mut i = self.displacement_segment(magnitude);
-            if !outward && i > 0 && magnitude == self.prepared.path.knots[i].1.evidence.value.value
-            {
+            if !outward && i > 0 && magnitude == self.displacement_knot(i) {
                 i -= 1;
             }
-            let boundary_magnitude = self.prepared.path.knots[i + usize::from(outward)]
-                .1
-                .evidence
-                .value
-                .value;
+            let boundary_magnitude = self.displacement_knot(i + usize::from(outward));
             let boundary = if position == 0.0 {
                 direction
             } else {
@@ -439,7 +459,7 @@ impl ReversibleDielectricMaterial {
             } else {
                 after.max(boundary)
             };
-            visit(next - position, self.prepared.slopes_f_m[i].recip())?;
+            visit(next - position, self.slope(i).recip())?;
             position = next;
         }
         Ok(())
@@ -485,6 +505,95 @@ impl ReversibleDielectricMaterial {
         self.integrate_relative_field(before, after, field)
     }
 
+    /// Stable coenergy difference at SIGNED scalar displacements. Coenergy is
+    /// even; the crossed original inverse segments integrate D (dE/dD) dD
+    /// directly. Converting close D endpoints to rounded E first can lose work.
+    pub fn coenergy_change_displacement_density_j_m3(
+        &self,
+        before_d: f64,
+        after_d: f64,
+    ) -> Result<f64, FieldStorageError> {
+        self.admit_displacement(before_d)?;
+        self.admit_displacement(after_d)?;
+        let (before, after) = (before_d.abs(), after_d.abs());
+        let mut position = before;
+        let (mut work, mut correction) = (0.0, 0.0);
+        self.walk_displacement(before, after, |dd, inverse| {
+            let term = finite((dd * inverse) * (position + 0.5 * dd))?;
+            if term == 0.0 {
+                return Err(invalid("nonzero dielectric coenergy increment underflows"));
+            }
+            add(&mut work, &mut correction, term)?;
+            position += dd;
+            Ok(())
+        })?;
+        finite(work + correction)
+    }
+
+    // Integrate a displacement increment even below the spacing of `before`.
+    // Thermal scaling supplies that increment directly from its affine source,
+    // instead of subtracting rounded D/s endpoints. Exact source knots split
+    // the walk; no evaluation/query/allocation occurs in the loop.
+    fn coenergy_displacement_increment(
+        &self,
+        before: f64,
+        increment: f64,
+        mapped_original_upper_bound: bool,
+    ) -> Result<(f64, f64), FieldStorageError> {
+        self.admit_displacement(before)?;
+        if before < 0.0 || !increment.is_finite() {
+            return Err(invalid("invalid dielectric coenergy increment"));
+        }
+        let increasing = increment >= 0.0;
+        let (mut position, mut remaining) = (before, increment);
+        let (mut work, mut correction) = (0.0, 0.0);
+        while remaining != 0.0 {
+            let mut i = self.displacement_segment(position);
+            if !increasing && i > 0 && position == self.displacement_knot(i) {
+                i -= 1;
+            }
+            let boundary = self.displacement_knot(i + usize::from(increasing));
+            let available = boundary - position;
+            // An exactly mapped original upper endpoint can differ from the
+            // rounded scaled knot by a few ulps. Its source-derived residual
+            // uses the final original segment; this is not external support.
+            let upper_correction = mapped_original_upper_bound
+                && increasing
+                && position == self.maximum_displacement_c_m2()
+                && remaining <= 16.0 * f64::EPSILON * position;
+            if available == 0.0 && !upper_correction {
+                return Err(invalid(
+                    "thermal displacement increment leaves source support",
+                ));
+            }
+            let last = upper_correction || remaining.abs() <= available.abs();
+            let dd = if last { remaining } else { available };
+            let half = 0.5 * dd;
+            let midpoint = finite(position + half)?;
+            let midpoint_error = if position.abs() >= half.abs() {
+                (position - midpoint) + half
+            } else {
+                (half - midpoint) + position
+            };
+            let ratio = dd / self.slope(i);
+            let ratio_error = (-ratio).mul_add(self.slope(i), dd) / self.slope(i);
+            let term = finite(ratio * midpoint)?;
+            if term == 0.0 {
+                return Err(invalid("nonzero thermal coenergy increment underflows"));
+            }
+            add(&mut work, &mut correction, term)?;
+            add(&mut work, &mut correction, ratio.mul_add(midpoint, -term))?;
+            add(&mut work, &mut correction, ratio * midpoint_error)?;
+            add(&mut work, &mut correction, ratio_error * midpoint)?;
+            if last {
+                break;
+            }
+            remaining -= available;
+            position = boundary;
+        }
+        Ok((work, correction))
+    }
+
     /// Stable coenergy(after)-coenergy(before) [J/m3] for NONNEGATIVE electric
     /// field magnitudes. Original crossed-segment D dE integrals preserve small
     /// Newton line-search work beneath a large unchanged field-energy bias.
@@ -514,16 +623,16 @@ impl ReversibleDielectricMaterial {
             if !increasing && i > 0 && position == self.prepared.path.knots[i].0 {
                 i -= 1;
             }
-            let (e0, answer) = &self.prepared.path.knots[i];
+            let e0 = self.prepared.path.knots[i].0;
             let next = if increasing {
                 after_e.min(self.prepared.path.knots[i + 1].0)
             } else {
-                after_e.max(*e0)
+                after_e.max(e0)
             };
             let de = next - position;
             let midpoint_d = finite(
-                self.prepared.slopes_f_m[i]
-                    .mul_add((position - e0) + 0.5 * de, answer.evidence.value.value),
+                self.slope(i)
+                    .mul_add((position - e0) + 0.5 * de, self.displacement_knot(i)),
             )?;
             let term = finite(de * midpoint_d)?;
             if term == 0.0 {
