@@ -14,58 +14,115 @@ pub struct TensorThermalState {
     pub heat_capacity_j_k: f64,
 }
 
-fn recoverable_factor(
-    stiffness: &Tangent6,
-    rows: &Tangent6,
-    relative_tolerance: f64,
-) -> Result<fs_la::factor::Cholesky> {
-    let matrix: Vec<_> = stiffness.iter().flatten().copied().collect();
-    let factor = fs_la::factor::cholesky(&matrix, 6).map_err(|_| {
-        invalid("changed Maxwell factors must preserve all physical spring strain directions")
-    })?;
-    // A rounded Gram matrix can give a singular B a tiny positive Cholesky
-    // pivot. Check every factor-space unit vector, even at zero actual memory.
-    for column in 0..6 {
-        let mut inverse_column = rows[column];
-        factor.solve(&mut inverse_column);
-        let recovered_column = apply(rows, &inverse_column);
-        for (row, value) in recovered_column.iter().enumerate() {
-            let expected = if row == column { 1.0 } else { 0.0 };
-            if !value.is_finite() || (value - expected).abs() > relative_tolerance {
-                return Err(invalid(
-                    "Maxwell factor has unresolved or singular physical strain directions",
-                ));
+// A right inverse on the ORIGINAL nonzero Gram rows. Normalize each row
+// independently before solving: a weak positive spring direction is never
+// classified as zero from its magnitude relative to another direction.
+// Only exactly zero original rows are absent. Redundant or numerically
+// unresolved nonzero rows refuse instead of inventing a spectral cutoff.
+struct FactorRecovery {
+    rows: Tangent6,
+    scales: Voigt,
+    dual: Tangent6,
+    projector: Tangent6,
+    rank: usize,
+}
+impl FactorRecovery {
+    fn new(original: &Tangent6, tolerance: f64) -> Result<Self> {
+        let scales = original.map(|row| row.iter().fold(0.0_f64, |s, x| s.max(x.abs())));
+        let active: Vec<_> = (0..6).filter(|&i| scales[i] != 0.0).collect();
+        let rows = core::array::from_fn(|i| {
+            if scales[i] == 0.0 { [0.0; 6] } else { original[i].map(|x| x / scales[i]) }
+        });
+        let rank = active.len();
+        let mut dual = [[0.0; 6]; 6];
+        if rank != 0 {
+            let gram: Vec<_> = active.iter().flat_map(|&i|
+                active.iter().map(move |&j| dot(&rows[i], &rows[j]))).collect();
+            let factor = fs_la::factor::cholesky(&gram, rank).map_err(|_| {
+                invalid("Maxwell nonzero factor rows must have independently recoverable directions")
+            })?;
+            for (column, &index) in active.iter().enumerate() {
+                let mut weights = vec![0.0; rank];
+                weights[column] = 1.0;
+                factor.solve(&mut weights);
+                dual[index] = core::array::from_fn(|i| active.iter().zip(&weights)
+                    .map(|(&row, weight)| rows[row][i] * weight).sum());
+                for &row in &active {
+                    let value = dot(&rows[row], &dual[index]);
+                    let expected = if row == index { 1.0 } else { 0.0 };
+                    if !value.is_finite() || (value - expected).abs() > tolerance {
+                        return Err(invalid("Maxwell factor row inverse exceeds its relative allowance"));
+                    }
+                }
             }
         }
+        let projector: Tangent6 = core::array::from_fn(|i| core::array::from_fn(|j|
+            active.iter().map(|&row| dual[row][i] * rows[row][j]).sum()));
+        for i in 0..6 {
+            for j in 0..6 {
+                let value = projector[i][j];
+                if !value.is_finite() || value.abs() > 1.0 + tolerance
+                    || (value - projector[j][i]).abs() > tolerance {
+                    return Err(invalid("Maxwell physical factor range is numerically unresolved"));
+                }
+            }
+        }
+        Ok(Self { rows, scales, dual, projector, rank })
     }
-    Ok(factor)
-}
 
-fn recover_strain(
-    stiffness: &Tangent6,
-    rows: &Tangent6,
-    z: &[f64],
-    root: f64,
-    tolerance: f64,
-) -> Result<Voigt> {
-    let factor = recoverable_factor(stiffness, rows, tolerance)?;
-    let mut strain = core::array::from_fn(|i| (0..6).map(|j| rows[j][i] * z[j] / root).sum());
-    factor.solve(&mut strain);
-    if !finite(&strain) {
-        return Err(invalid("Maxwell spring-strain recovery overflow"));
+    fn same_range(&self, other: &Self, tolerance: f64) -> Result<()> {
+        if self.rank != other.rank || self.projector.iter().flatten()
+            .zip(other.projector.iter().flatten()).any(|(a, b)| (a-b).abs() > tolerance) {
+            return Err(invalid("changed Maxwell factors must preserve the same physical strain range"));
+        }
+        Ok(())
     }
-    let recovered = apply(rows, &strain).map(|x| root * x);
-    let scale = z.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
-    let residual = recovered
-        .iter()
-        .zip(z)
-        .fold(0.0_f64, |s, (a, b)| s.max((a - b).abs()));
-    if !finite(&recovered) || !residual.is_finite() || residual > tolerance * scale {
-        return Err(invalid(
-            "Maxwell spring-strain reconstruction exceeds its relative allowance",
-        ));
+
+    // Entropy must not depend on any unobserved strain in the original
+    // factor's nullspace. Normalize every derivative row independently too.
+    fn admit_derivative(&self, derivative: &Tangent6, tolerance: f64) -> Result<()> {
+        for row in derivative {
+            if !finite(row) { return Err(invalid("nonfinite Maxwell thermal derivative")); }
+            let scale = row.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
+            if scale == 0.0 { continue; }
+            let direction = row.map(|x| x / scale);
+            let represented = apply(&self.projector, &direction);
+            if represented.iter().zip(direction).any(|(a, b)| (a-b).abs() > tolerance) {
+                return Err(invalid("Maxwell thermal derivative requires an unobserved strain direction"));
+            }
+        }
+        Ok(())
     }
-    Ok(strain)
+
+    fn strain(&self, z: &[f64], root: f64, tolerance: f64) -> Result<Voigt> {
+        let mut coordinates = [0.0; 6];
+        for i in 0..6 {
+            if self.scales[i] == 0.0 {
+                if z[i] != 0.0 {
+                    return Err(invalid("Maxwell memory lies outside its original factor range"));
+                }
+            } else {
+                let denominator = root * self.scales[i];
+                coordinates[i] = if denominator.is_finite() && denominator != 0.0 {
+                    z[i] / denominator
+                } else { (z[i] / root) / self.scales[i] };
+                if !coordinates[i].is_finite() || (z[i] != 0.0 && coordinates[i] == 0.0) {
+                    return Err(invalid("Maxwell observable strain is not representable"));
+                }
+            }
+        }
+        let strain = core::array::from_fn(|i|
+            (0..6).map(|row| self.dual[row][i] * coordinates[row]).sum());
+        let recovered = apply(&self.rows, &strain);
+        let scale = coordinates.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
+        let residual = recovered.iter().zip(coordinates)
+            .fold(0.0_f64, |s, (a, b)| s.max((a-b).abs()));
+        if !finite(&strain) || !finite(&recovered) || !residual.is_finite()
+            || residual > tolerance * scale {
+            return Err(invalid("Maxwell spring-strain reconstruction exceeds its relative allowance"));
+        }
+        Ok(strain)
+    }
 }
 
 impl ProjectedTensorProny {
@@ -74,11 +131,13 @@ impl ProjectedTensorProny {
     /// and branch order. The source-binding owner must additionally establish
     /// that corresponding branches describe the SAME physical internal variable.
     ///
-    /// For z=sqrt(V) B e, recover e by C e=B^T z/sqrt(V), C=B^T B,
-    /// then form z_new=sqrt(V) B_new e. Changed singular factors refuse at BOTH
-    /// endpoints: old hidden strain cannot be reconstructed, and a new nullspace
-    /// would erase strain required by later continuation. Exactly unchanged
-    /// factors need no inversion, including rank-deficient branches.
+    /// For z=sqrt(V) B e, recover the observable strain through the original
+    /// independently normalized nonzero factor rows, then form sqrt(V) B_new e.
+    /// Rank-deficient factors may change when their physical row spaces agree.
+    /// A changed rank/nullspace or unresolved dependent rows refuse: hidden
+    /// strain cannot be invented or erased for later continuation. Every nonzero
+    /// row survives, however weak; there is no eigenvalue cutoff. Exactly
+    /// unchanged factors need no inversion, including rank-deficient branches.
     /// If free strain changes, subtract B_new*(free_new-free_old) from each
     /// new factor coordinate. Thus the original VISCOUS strain survives the
     /// thermal strain change; keeping spring strain fixed would erase thermal
@@ -132,8 +191,10 @@ impl ProjectedTensorProny {
                 }
                 continue;
             }
-            let strain = recover_strain(&old.c_pa, &old_rows, z, root, relative_tolerance)?;
-            recoverable_factor(&new.c_pa, &new_rows, relative_tolerance)?;
+            let old_recovery = FactorRecovery::new(&old_rows, relative_tolerance)?;
+            let new_recovery = FactorRecovery::new(&new_rows, relative_tolerance)?;
+            old_recovery.same_range(&new_recovery, relative_tolerance)?;
+            let strain = old_recovery.strain(z, root, relative_tolerance)?;
             let transformed =
                 core::array::from_fn::<_, 6, _>(|i| root * dot(&new_rows[i], &strain) - shift[i]);
             if !finite(&transformed) {
@@ -150,10 +211,11 @@ impl ProjectedTensorProny {
     /// come from the same source law and reference frame as this projection;
     /// the source/coupling owner establishes that identity.
     ///
-    /// Every varying branch recovers physical elastic strain through the same
-    /// checked factor inverse used by native memory transfer. A varying singular
-    /// branch refuses even at zero actual memory. An unchanged singular branch
-    /// contributes its original free energy and zero thermal entropy.
+    /// Every varying branch recovers observable elastic strain through the same
+    /// checked factor inverse used by native memory transfer. Rank-deficient
+    /// branches are admitted only when their thermal derivative also acts within
+    /// that physical range; derivatives requiring hidden strain refuse even at
+    /// zero memory. An unchanged branch needs no strain reconstruction.
     pub fn thermal_state(
         &self,
         derivative: &source::thermal::TensorTemperatureDerivative,
@@ -306,7 +368,9 @@ impl ProjectedTensorProny {
             }
             if slope.iter().flatten().any(|v| *v != 0.0) {
                 let rows = branch.resolved_gram_rows(&self.model.factors[index]);
-                let q = recover_strain(&branch.c_pa, &rows, z, root, relative_memory_tolerance)?;
+                let recovery = FactorRecovery::new(&rows, relative_memory_tolerance)?;
+                recovery.admit_derivative(slope, relative_memory_tolerance)?;
+                let q = recovery.strain(z, root, relative_memory_tolerance)?;
                 if has_expansion || changing_expansion {
                     // The combined capacity bound assumes ||q|| <= 2L.
                     // Use the SAME native Mandel-norm admission as total and

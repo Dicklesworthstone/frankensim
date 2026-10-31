@@ -148,6 +148,123 @@ fn thermal_projection_retains_signed_full_tensor_derivatives_and_original_strain
     assert!(p.thermal_stiffness_derivatives(&incomplete,budget(),||false).is_err());
 }
 
+fn deviatoric_rows(scale: f64) -> Tangent6 {
+    let mut rows = [[0.0;6];6];
+    let a = scale/det::sqrt(2.0);
+    let b = scale/det::sqrt(6.0);
+    rows[0] = [a,-a,0.0,0.0,0.0,0.0];
+    rows[1] = [b,b,-2.0*b,0.0,0.0,0.0];
+    for i in 2..5 { rows[i][i+1] = scale; }
+    rows
+}
+fn factor_projection(rows: Tangent6, free: Voigt) -> ProjectedTensorProny {
+    TensorProny::new_mandel(diagonal(12.0), vec![
+        TensorPronyBranch::from_gram_rows(rows,0.1).unwrap()],0.1).unwrap()
+        .project_strain(&columns(),0.25,budget(),||false).unwrap()
+        .with_eigenstrain_mandel(free).unwrap()
+}
+
+#[test]
+fn changing_rank_five_factors_preserve_memory_and_thermal_eigenstrain() {
+    let rows = deviatoric_rows(2.0);
+    let mut next_rows = rows;
+    next_rows[0] = core::array::from_fn(|i| 1.2*rows[0][i]+0.4*rows[1][i]);
+    next_rows[1] = core::array::from_fn(|i| -0.2*rows[0][i]+0.8*rows[1][i]);
+    next_rows[2] = rows[2].map(|v| 1.4*v);
+    next_rows[3] = rows[3].map(|v| 0.7*v);
+    let free = [1e-4,2e-4,-1e-4,0.0,3e-5,-2e-5];
+    let old = factor_projection(rows,[0.0;6]);
+    let next = factor_projection(next_rows,free);
+    // The hydrostatic part is invisible to this shear arm. All five
+    // observable directions, including signed normal/shear terms, remain.
+    let q = [0.018,0.006,0.012,0.003,-0.002,0.001];
+    let memory = apply(&rows,&q).map(|x| 0.5*x);
+    let changed = old.transfer_factor_memory(&next,&memory,1e-11,||false).unwrap();
+    let expected = apply(&next_rows,&core::array::from_fn(|i| q[i]-free[i])).map(|x| 0.5*x);
+    for (actual,want) in changed.iter().zip(expected) {
+        assert!((actual-want).abs() < 1e-15,"{actual} vs {want}");
+    }
+    let returned = next.transfer_factor_memory(&old,&changed,1e-11,||false).unwrap();
+    for (actual,want) in returned.iter().zip(memory) { assert!((actual-want).abs() < 1e-15); }
+    assert_eq!(memory[5],0.0);
+    assert_eq!(changed[5],0.0);
+    assert!(matches!(old.transfer_factor_memory(&next,&memory,1e-11,||true),
+        Err(TensorPronyError::Cancelled)));
+}
+
+#[test]
+fn singular_affine_thermal_memory_retains_entropy_and_expansion_capacity() {
+    let rows = deviatoric_rows(2.0);
+    let point = factor_projection(rows,[0.0;6]);
+    let c = gram(&rows).unwrap();
+    let slope = c.map(|row| row.map(|v| -0.005*v));
+    let derivative = source::thermal::TensorTemperatureDerivative::from_affine_parts(
+        [[0.0;6];6],vec![slope],[280.0,320.0]);
+    let alpha = [1e-4,2e-4,-1e-4,3e-5,-2e-5,4e-5];
+    let beta = [1e-6,-2e-6,1e-6,3e-7,2e-7,-4e-7];
+    let expansion = TensorThermalExpansion::try_new(300.0,alpha,beta,[280.0,320.0]).unwrap();
+    let x = [0.003,-0.001];
+    let e = mandel(&point.strain(&x).unwrap());
+    let q = [0.018,0.006,0.012,0.003,-0.002,0.001];
+    let memory = apply(&rows,&q).map(|v| 0.5*v);
+    let state = point.thermal_state_with_expansion_derivatives(
+        &derivative,&x,&memory,300.0,&expansion,1e-11,||false).unwrap();
+    // Independent physical-strain derivatives of .5 V(e:Ceq:e+q:C:q).
+    let equilibrium = diagonal(12.0);
+    let stress = core::array::from_fn(|i| apply(&equilibrium,&e)[i]+apply(&c,&q)[i]);
+    let free = 0.125*(dot(&e,&apply(&equilibrium,&e))+dot(&q,&apply(&c,&q)));
+    let entropy = 0.25*(dot(&alpha,&stress)-0.5*dot(&q,&apply(&slope,&q)));
+    let curvature = 0.25*(dot(&alpha,&apply(&equilibrium,&alpha))
+        +dot(&alpha,&apply(&c,&alpha))-2.0*dot(&alpha,&apply(&slope,&q))-dot(&beta,&stress));
+    close(state.free_energy_j,free);
+    close(state.entropy_j_k,entropy);
+    close(state.internal_energy_j,free+300.0*entropy);
+    close(state.heat_capacity_j_k,-300.0*curvature);
+}
+
+#[test]
+fn thermal_transfer_retains_weak_positive_rows_and_refuses_rank_or_range_changes() {
+    let mut rows = [[0.0;6];6]; rows[0][0] = 100.0; rows[1][1] = 1e-100;
+    let mut changed_rows = rows; changed_rows[0][0] = 200.0; changed_rows[1][1] = 3e-100;
+    let old = factor_projection(rows,[0.0;6]);
+    let next = factor_projection(changed_rows,[0.0;6]);
+    let q = [0.01,0.02,0.0,0.0,0.0,0.0];
+    let memory = apply(&rows,&q).map(|v| 0.5*v);
+    let result = old.transfer_factor_memory(&next,&memory,1e-11,||false).unwrap();
+    for (actual,expected) in result.iter().zip(apply(&changed_rows,&q).map(|v| 0.5*v)) {
+        if expected == 0.0 { assert_eq!(*actual,0.0); }
+        else { assert!((actual/expected-1.0).abs() < 1e-12); }
+    }
+    assert!(result[1] > 0.0,"weak physical memory must survive");
+    changed_rows[1][1] = 0.0;
+    let dropped = factor_projection(changed_rows,[0.0;6]);
+    assert!(old.transfer_factor_memory(&dropped,&[0.0;6],1e-11,||false).is_err());
+    assert!(dropped.transfer_factor_memory(&old,&[0.0;6],1e-11,||false).is_err());
+    changed_rows[1][2] = 3e-100;
+    let rotated_nullspace = factor_projection(changed_rows,[0.0;6]);
+    assert!(old.transfer_factor_memory(&rotated_nullspace,&[0.0;6],1e-11,||false).is_err());
+}
+
+#[test]
+fn hidden_thermal_directions_and_unrecoverable_factor_memory_refuse_transactionally() {
+    let rows = deviatoric_rows(2.0);
+    let old = factor_projection(rows,[0.0;6]);
+    let saved = old.clone();
+    let next = factor_projection(rows.map(|row| row.map(|v| 2.0*v)),[0.0;6]);
+    let mut memory = [0.0;6]; memory[5] = 1e-100;
+    assert!(old.transfer_factor_memory(&next,&memory,1e-11,||false).is_err());
+    let mut redundant = rows; redundant[5] = rows[0];
+    assert!(old.transfer_factor_memory(&factor_projection(redundant,[0.0;6]),
+        &[0.0;6],1e-11,||false).is_err());
+    let hidden = core::array::from_fn(|i| core::array::from_fn(|j|
+        if i<3 && j<3 {1e-100} else {0.0}));
+    let derivative = source::thermal::TensorTemperatureDerivative::from_affine_parts(
+        [[0.0;6];6],vec![hidden],[280.0,320.0]);
+    assert!(old.thermal_state(&derivative,&[0.0;2],&[0.0;6],300.0,1e-11,||false).is_err());
+    assert_eq!(memory[5],1e-100);
+    assert_eq!(old,saved);
+}
+
 #[test]
 fn expansion_capacity_matches_internal_energy_at_fixed_total_and_viscous_strain() {
     let column = [1.0, 0.2, -0.4, 0.3, -0.1, 0.15];

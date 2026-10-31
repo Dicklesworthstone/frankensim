@@ -6296,10 +6296,12 @@ and numerical limits.
 `ProjectedTensorProny::thermal_state` evaluates Helmholtz free energy psi,
 entropy S=-psi_T, internal energy U=psi+T*S and mechanical heat capacity
 dU/dT=-T*psi_TT using the original strain map
-and complete native factor memory. Physical Maxwell strain recovery shares
-the native checked transfer inverse. Varying singular factors refuse even
-at zero actual memory; unchanged singular factors retain their original
-free energy with zero thermal entropy. The expansion evaluator includes equilibrium and every Maxwell spring.
+and complete native factor memory. Observable Maxwell strain recovery shares
+the native checked transfer inverse. Varying rank-deficient factors are admitted
+when their original nonzero rows are independently recoverable and the thermal
+derivative acts entirely within that physical strain range. A derivative requiring
+hidden strain refuses even at zero actual memory. Unchanged tensors need no
+strain reconstruction. The expansion evaluator includes equilibrium and every Maxwell spring.
 The fixed-size TensorThermalExpansion descriptor admits affine alpha(T) and
 carries exact-temperature alpha/alpha' snapshots with whole-interval bounds.
 Its source authority comes from the existing integrated expansion owner;
@@ -6330,6 +6332,22 @@ rank-deficient Maxwell tensor. This does not relax the existing
 `thermal_state` refusal when a consumer retains only factor memory and cannot
 recover the required physical strain. Source identity, frame, affine interval
 admission and thermodynamic accounting remain the consumer's responsibility.
+
+`transfer_factor_memory` supports changing rank-deficient Maxwell factors with
+the same observable strain space, including bulk-only and shear-only arms.
+It normalizes every original nonzero Gram row independently and constructs a
+checked row-space inverse; only exactly zero original rows are absent. Thus
+even a very weak positive physical direction survives without an eigenvalue
+cutoff or a fabricated elastic floor. Old and new row counts and physical
+range projectors must agree. Changing rank/nullspace, unresolved dependent
+rows, nonrepresentable recovery and memory outside the retained factor range
+refuse before publication. This is a bounded extension for independent nonzero
+factor rows, not a general redundant-factor pseudoinverse. The same recovered
+observable strain supplies affine branch entropy and expansion curvature;
+the existing 2L envelope and receiving caloric capacity gate remain binding.
+Four focused G0/G1/G3 projection regressions cover rank-five thermal round trips,
+independent entropy/capacity contractions, weak positive-mode retention, and
+transactional refusal of lost/hidden directions and inconsistent memory.
 
 ## Source density retained through bounded phase transport
 

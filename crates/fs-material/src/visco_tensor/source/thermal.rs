@@ -211,8 +211,9 @@ impl TensorThermalLaw {
     /// of every Maxwell branch may have its OWN affine slope, including signed
     /// cross terms. Relaxation times retain positive piecewise-linear support.
     ///
-    /// Every source axis/validity restriction remains owned. Changing singular
-    /// branch factors retains the native explicit history-transfer refusal.
+    /// Every source axis/validity restriction remains owned. Changing branch
+    /// factors preserve the same observable strain range; changed rank/nullspace
+    /// or unrecoverable factor rows retain the native history-transfer refusal.
     /// This law supplies neither thermal expansion nor a finite-strain model.
     pub fn try_new(
         source: &ResolvedTensorMaterial,
