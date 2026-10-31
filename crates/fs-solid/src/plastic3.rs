@@ -35,8 +35,9 @@
 //!
 //! # No-claim boundaries
 //!
-//! Small strain and rotation (no finite-strain plasticity), rate
-//! independence, constant-strain tetrahedra (plastic incompressibility locks
+//! Small strain and rotation (no finite-strain plasticity); no implicit clock.
+//! Rate-dependent laws must supply a physical interval for each load increment.
+//! Constant-strain tetrahedra (plastic incompressibility locks
 //! P1 tetrahedra in confined flow: limit loads of confined problems are
 //! over-predicted; no mixed/B-bar formulation), dead loads only, no
 //! limit-load continuation (an increment past a limit load stalls and
@@ -53,6 +54,8 @@ use fs_sparse::{Coo, Csr};
 
 use crate::linear3::TetAssemblyBudget;
 
+/// Physical-time creep increments with independent work and heat accounting.
+pub mod creep;
 /// Inertial increments using the same constitutive assembly and Newton owner.
 pub mod dynamics;
 

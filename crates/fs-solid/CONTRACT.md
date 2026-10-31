@@ -1601,10 +1601,51 @@ plastic state; the elastic-law tangent equals `linear3` to 4e-13 relative; a
 cantilever driven by tip displacement yields progressively (1, 20, 33 newly
 yielding elements) with a falling secant stiffness.
 
-No-claims (`plastic3`): small strain and rotation; rate independence;
+No-claims (`plastic3`): small strain and rotation; no implicit clock
+(rate-dependent laws require explicit physical intervals);
 constant-strain tetrahedra lock under confined plastic incompressibility
 (confined limit loads are over-predicted; no B-bar/mixed formulation); dead
 loads; no limit-load continuation; no mesh-convergence claim.
+
+### Sub-yield creep on the native solid (`plastic3::creep`)
+
+`SmallStrainTetProblem::solve_creep_from` consumes the accepted nodal
+displacement and per-element `CreepState` through the original sparse Newton
+owner. Uniform `NortonCreep` and source-bound `ResolvedNortonCreep` fields
+retain the same constitutive flow, tangent, source receipts and reference
+geometry. Exactly one absolute load endpoint represents one positive common
+physical duration; the adapter refuses multi-entry paths or unequal element
+durations. Newton and backtracking always borrow the old history. The published
+stress is the converged trial stress evaluated before committing that history,
+so observing a rate-dependent endpoint cannot advance another interval.
+
+The adapter admits finite old/new material histories and bounds the full
+displacement gradient by each law's small-strain limit, including its skew
+part. Each checked constitutive increment is compared with the actual native
+stress and committed state. Per-element accounts in J/m³ and reference
+volumes are returned for conservative physical-heat transfer. The whole-solid
+audit independently compares applied-force and support-reaction endpoint work
+with integrated stress work, then with elastic storage change, physical creep
+dissipation and backward-Euler numerical loss. Numerical loss is not heat.
+All local and global gates and cancellation precede publication; caller-owned
+displacements and histories are never mutated.
+
+Elastic coefficients and geometry must remain fixed across an interval.
+Prescribed temperature may change Norton kinetics between intervals while
+retaining creep history; elastic parameter work, thermal expansion, reciprocal
+thermal evolution and inertia require their separate owners. This is a
+small-strain, secondary-creep model, with no primary/tertiary creep, rupture,
+confined-flow accuracy or material-population qualification claim.
+
+`tests/plastic3_creep.rs` checks a loaded six-tetrahedron bar against analytical
+constant-stress Norton creep, permanent set after unloading, held-length
+relaxation against the backward-Euler recurrence and three timestep rungs,
+per-element temperature-dependent histories and heat, and transactional
+refusals including cancellation. These are manufactured implementation checks,
+not measured validation.
+The source-bound regression warms an accepted loaded trajectory, preserves
+every pinned claim, and substitutes a material with twice the reference rate;
+the actual bar extension follows the independent accumulated creep law.
 
 ### Rod couples held in laboratory coordinates
 
