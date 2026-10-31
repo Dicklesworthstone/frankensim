@@ -6,6 +6,8 @@
 
 /// Shared-state multiport flow with the original source-resolved wall inertias.
 pub mod graph;
+/// Reciprocal acoustic loads and finite-body heat retaining material inertia.
+pub mod acoustic;
 /// Continuing pressure work after shared reacting gas and spatial-solid heat.
 pub mod solid;
 /// State-dependent finite-body power retaining original material inertia.

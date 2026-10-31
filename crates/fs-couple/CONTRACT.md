@@ -11066,6 +11066,38 @@ history, exact decoupled reduction, refusal/cancellation and retry/suffix
 continuation. They are authored but unexecuted in the unavailable native
 workspace; parser/formatter checks are not numerical or experimental proof.
 
+### Real-gas and source-bound material acoustic actuators
+
+`AcousticPistonCandidate<G>` and `AcousticThermalPistonCandidate<S, G>` admit
+the original ideal or PR chamber owner through the shared `PistonGas` seam.
+Actual chamber density, caloric departures, pressure and acoustic stiffness
+remain in the native momentum and thermal proposals. Each additional acoustic
+domain retains its own sourced medium and complete history; it need not have
+the same gas density or composition as either thermodynamic chamber.
+
+The affine acoustic reaction is prepared once, participates in every native
+heat/impulse trial, and each original DG load advances once after convergence.
+No acoustic march is nested inside a heat search. Accepted mechanical work
+cancels inlet acoustic work; the enclosing account retains both native gas
+energy increments, one wall inertia, any finite-body enthalpy, original
+acoustic storage, physical losses and signed terminal work.
+
+`material::acoustic` forwards these same mechanical, thermal and source-layer
+entries through `MaterialDoubleActingGasPiston<G>`. Its candidates retain the
+original rigid-body density and geometry receipts, canonical inertia and
+complete accepted port clocks. Binding verifies the native mass and face
+geometry without rebuilding gas or acoustic snapshots, then performs a final
+cancellation poll before returning any endpoint. The thermal body may be a
+separately declared store; heating does not silently alter the rigid specimen.
+
+Focused real-gas regressions cover continuing independent energy/impulse
+balances, exact original DG replay, opposite face heats on actual PR
+midpoints, zero-area reduction, source-density substitutions and rollback at
+the final material-wrapper poll. This extends the closed-chamber acoustic and
+finite-body paths; the metering, electrical and evolving acoustic-gas adapters
+retain their existing constitutive scope. Fixed acoustic geometry and the
+small-displacement mean-port approximation remain explicit.
+
 ## Acoustic back-pressure through metering and finite-body heat
 
 `DoubleActingGasPiston::acoustic_valve_candidate` and

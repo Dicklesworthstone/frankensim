@@ -16,6 +16,8 @@ use fs_vfit::mimo::MimoModel;
 use fs_vfit::mimo::load::{MimoLoadLimits, PreparedMimoLoad};
 use fs_vfit::model::PoleTerm;
 
+mod real_gas;
+
 pub(super) fn mechanics() -> DoublePistonSolve {
     DoublePistonSolve {
         piston: single_controls(),

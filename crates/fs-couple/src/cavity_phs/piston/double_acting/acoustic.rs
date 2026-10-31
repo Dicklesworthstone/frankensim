@@ -21,7 +21,7 @@ pub mod valve;
 
 use super::{DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep};
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::cavity_phs::piston::PistonError;
+use crate::cavity_phs::piston::{ClosedGasParcel, PistonError, PistonGas};
 use crate::dg_port::{DgPortLoad, DgTerminalFrame, sum_terminal_work};
 use fs_duct::dg::DgStepOutput;
 
@@ -198,9 +198,9 @@ pub(super) fn prepare<'a, E>(
 /// March each original complete load once, using the accepted native motion.
 /// All accepted owners remain borrowed immutably; partial private proposals are
 /// discarded on any late work failure or cancellation.
-pub(super) fn finish<E>(
+pub(super) fn finish<E, S>(
     prepared: PreparedAcousticMotion<'_>,
-    mechanical: &DoublePistonStep,
+    mechanical: &DoublePistonStep<S>,
     external_force_n: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<DgPortLoad>, AcousticMotionStep), AcousticMotionError<E>> {
@@ -347,21 +347,21 @@ pub(super) fn finish<E>(
 /// Native gas, branch, material-wall, finite-channel and rational-load histories
 /// stay with their original owners; consume and publish all endpoints together.
 #[derive(Clone, Debug)]
-pub struct AcousticPistonCandidate {
-    piston: DoubleActingGasPiston,
+pub struct AcousticPistonCandidate<G: PistonGas = ClosedGasParcel> {
+    piston: DoubleActingGasPiston<G>,
     loads: Vec<DgPortLoad>,
-    step: DoublePistonStep,
+    step: DoublePistonStep<G::State>,
     motion: AcousticMotionStep,
     total_energy_residual_j: f64,
 }
-impl AcousticPistonCandidate {
-    pub const fn piston(&self) -> &DoubleActingGasPiston {
+impl<G: PistonGas> AcousticPistonCandidate<G> {
+    pub const fn piston(&self) -> &DoubleActingGasPiston<G> {
         &self.piston
     }
     pub fn loads(&self) -> &[DgPortLoad] {
         &self.loads
     }
-    pub const fn piston_step(&self) -> &DoublePistonStep {
+    pub const fn piston_step(&self) -> &DoublePistonStep<G::State> {
         &self.step
     }
     pub const fn motion(&self) -> &AcousticMotionStep {
@@ -373,9 +373,9 @@ impl AcousticPistonCandidate {
     pub fn into_parts(
         self,
     ) -> (
-        DoubleActingGasPiston,
+        DoubleActingGasPiston<G>,
         Vec<DgPortLoad>,
-        DoublePistonStep,
+        DoublePistonStep<G::State>,
         AcousticMotionStep,
         f64,
     ) {
@@ -389,12 +389,15 @@ impl AcousticPistonCandidate {
     }
 }
 
-impl DoubleActingGasPiston {
+impl<G: PistonGas> DoubleActingGasPiston<G> {
     /// Couple the original two independent finite gases and their ONE moving
     /// body to additional acoustic faces. Pressure is the original DG acoustic
     /// perturbation; chamber absolute-pressure work remains with this piston.
     /// Any uncompensated mean pressure on the additional faces belongs in the
     /// authored external force or a balanced reference configuration.
+    /// Ideal and real-gas chambers retain their own original caloric, pressure,
+    /// density and acoustic states; these additional domains keep independent
+    /// frozen material fields and do not replace either chamber's gas owner.
     ///
     /// Every load uses the same interval and accepted step count. Different
     /// acoustic gases, geometry, branches, wall memories and terminal loads are
@@ -414,7 +417,7 @@ impl DoubleActingGasPiston {
         faces: &[AcousticMotionFace<'_>],
         motion: AcousticMotionSolve,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<AcousticPistonCandidate, AcousticMotionError<PistonError>> {
+    ) -> Result<AcousticPistonCandidate<G>, AcousticMotionError<PistonError>> {
         let prepared = prepare(
             faces,
             input.duration_s,

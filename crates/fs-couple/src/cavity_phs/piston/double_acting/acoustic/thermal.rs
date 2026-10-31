@@ -11,24 +11,25 @@ use super::{
 use crate::cavity_phs::piston::double_acting::{
     DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve,
 };
+use crate::cavity_phs::piston::{ClosedGasParcel, PistonGas};
 use crate::cavity_phs::piston::thermal::double_acting::{
     DoubleHeatExchangeSolve, DoubleThermalPistonCandidate,
 };
 use crate::cavity_phs::piston::thermal::{ConductanceSample, ThermalPistonError};
 use crate::dg_port::DgPortLoad;
+use fs_material::fluid_transport::FluidTransport;
 use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStepInput};
-use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 
 /// Original finite-body/two-gas candidate and all continuing acoustic endpoints.
 #[derive(Debug)]
-pub struct AcousticThermalPistonCandidate<S> {
-    native: DoubleThermalPistonCandidate<S>,
+pub struct AcousticThermalPistonCandidate<S, G: PistonGas = ClosedGasParcel> {
+    native: DoubleThermalPistonCandidate<S, G>,
     loads: Vec<DgPortLoad>,
     motion: AcousticMotionStep,
     total_energy_residual_j: f64,
 }
-impl<S> AcousticThermalPistonCandidate<S> {
-    pub const fn native(&self) -> &DoubleThermalPistonCandidate<S> {
+impl<S, G: PistonGas> AcousticThermalPistonCandidate<S, G> {
+    pub const fn native(&self) -> &DoubleThermalPistonCandidate<S, G> {
         &self.native
     }
     pub fn loads(&self) -> &[DgPortLoad] {
@@ -45,7 +46,7 @@ impl<S> AcousticThermalPistonCandidate<S> {
     pub fn into_parts(
         self,
     ) -> (
-        DoubleThermalPistonCandidate<S>,
+        DoubleThermalPistonCandidate<S, G>,
         Vec<DgPortLoad>,
         AcousticMotionStep,
         f64,
@@ -59,7 +60,7 @@ impl<S> AcousticThermalPistonCandidate<S> {
     }
 }
 
-impl DoubleActingGasPiston {
+impl<G: PistonGas> DoubleActingGasPiston<G> {
     /// Resolve both gas/body heat laws on the actual acoustically loaded motion.
     ///
     /// All original heat trials retain the same prepared affine acoustic force
@@ -68,6 +69,8 @@ impl DoubleActingGasPiston {
     /// each complete acoustic owner advances once after convergence. No valve,
     /// mass exchange, repeated acoustic marching or separate thermal integrator
     /// is introduced. The callback must not debit live state.
+    /// Each original ideal or real gas supplies its own complete midpoint;
+    /// density, caloric departures and source identity remain chamber-local.
     ///
     /// Source/refinement controls retain their original meaning. This remains
     /// fixed-body enthalpy coupled to small-displacement mean-port acoustics;
@@ -82,11 +85,11 @@ impl DoubleActingGasPiston {
         exchange: DoubleHeatExchangeSolve,
         acoustic: AcousticMotionSolve,
         resolve: impl FnMut(
-            &[ResolvedThermochemicalGasState; 2],
+            &[G::State; 2],
             EquilibriumPhaseState,
         ) -> Result<[ConductanceSample<S>; 2], E>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<AcousticThermalPistonCandidate<S>, AcousticMotionError<ThermalPistonError<E>>> {
+    ) -> Result<AcousticThermalPistonCandidate<S, G>, AcousticMotionError<ThermalPistonError<E>>> {
         let prepared = prepare(
             faces,
             input.duration_s,
@@ -158,11 +161,13 @@ impl DoubleActingGasPiston {
         layers: [crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers<'_>; 2],
         cancelled: impl FnMut() -> bool,
     ) -> Result<
-        AcousticThermalPistonCandidate<fs_material::state_point::ResolvedMaterialStatePoint>,
+        AcousticThermalPistonCandidate<fs_material::state_point::ResolvedMaterialStatePoint, G>,
         AcousticMotionError<
             ThermalPistonError<crate::cavity_phs::piston::thermal::layers::LayerConductionError>,
         >,
-    > {
+    >
+    where G::State: FluidTransport,
+    {
         self.acoustic_thermal_candidate(
             faces,
             input,
