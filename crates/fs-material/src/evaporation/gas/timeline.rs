@@ -7,6 +7,9 @@
 //! inventory/temperature/equilibrium step limits retry from the same accepted
 //! state; rejected attempts spend work but contribute no physical exchange.
 
+/// Simultaneous retained wall films sharing one finite atmosphere and heat clock.
+pub mod multiple;
+
 use super::{
     GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasFilmHeatSolve,
     GasLiquidBinding, advance_surface_with_gas, advance_surface_with_gas_and_heat,

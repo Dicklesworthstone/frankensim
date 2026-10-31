@@ -1,4 +1,6 @@
 //! G0 original-owner coupling and G1 full heat/finite-humidity refinement.
+mod multiple;
+
 use super::*;
 use crate::thermochemical_gas::energy::{
     GasEnergySolve, parcel::transfer::species::boundary::GasSpeciesBoundarySolve,

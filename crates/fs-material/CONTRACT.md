@@ -6777,6 +6777,20 @@ film extinction or volume-displacement work. Regression sources exercise shared
 inventory, opposite-signed exchange, input-order invariance and source-relative
 energy accounting; native execution remains a separate required validation.
 
+`evaporation::gas::timeline::multiple::advance_deposition_with_gas` connects
+that same chamber to several original thermal cells. Heat/contact/source
+transport advances once per event-clipped interval, then all exposed films
+exchange with one common gas. Each cell retains its source chart, temperature,
+liquid mass and fixed datum. Births receive no earlier phase exchange, and
+endpoint covering cannot rewrite the preceding exposure. Step-limit refusals
+retry the complete heat/phase proposal while spending the original attempted
+thermal-work allowance. Whole-window total/species mass and absolute caloric
+defects are checked without renewing the budget per film or interval. Per-cell
+accounts retain both gross directions and recession; geometry remains fixed.
+Regression sources cover cold/warm counterflow, original heat and birth energy,
+covering events, finite-gas retries, cancellation, singleton compatibility and
+refinement of the complete shared clock.
+
 ### Reciprocal sensible heat through the gas film
 
 `evaporation::gas::advance_surface_with_gas_and_heat` adds a caller-supplied
