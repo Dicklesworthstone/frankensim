@@ -20,8 +20,11 @@ use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpSta
 use fs_material::plastic::chaboche::axial::{UniaxialChaboche, UniaxialChabocheState};
 use fs_material::plastic::reduction::{UniaxialJ2, UniaxialJ2State, UniaxialVoce};
 
+/// Bounded runtime dispatch of exact native multi-backstress axial laws.
+pub mod chaboche;
 /// Material-bound fiber laws, RC section geometry and coherent member mass.
 pub mod material;
+use chaboche::{ChabocheFiberLaw, ChabocheFiberState};
 
 /// A fiber's constitutive card.
 #[derive(Debug, Clone)]
@@ -36,6 +39,8 @@ pub enum FiberLaw {
     Voce(UniaxialVoce),
     /// Independent nonlinear backstress recovery with native Voce isotropic hardening.
     Chaboche(UniaxialChaboche),
+    /// Two through eight independently evolving native recovery branches.
+    ChabocheBranches(ChabocheFiberLaw),
     /// Menegotto–Pinto steel.
     Steel(MenegottoPintoSteel),
     /// Mander concrete (confined or unconfined by parameters).
@@ -53,6 +58,8 @@ pub enum FiberState {
     Voce(UniaxialJ2State),
     /// Signed axial plastic history and independently retained backstress.
     Chaboche(UniaxialChabocheState),
+    /// Ordered native histories, with the same branch count as the fiber law.
+    ChabocheBranches(ChabocheFiberState),
     /// Steel state.
     Steel(MpState),
     /// Concrete state.
@@ -101,6 +108,7 @@ impl Section {
                 FiberLaw::J2(l) => FiberState::J2(l.initial_state()),
                 FiberLaw::Voce(l) => FiberState::Voce(l.initial_state()),
                 FiberLaw::Chaboche(l) => FiberState::Chaboche(l.initial_state()),
+                FiberLaw::ChabocheBranches(l) => FiberState::ChabocheBranches(l.initial_state()),
                 FiberLaw::Steel(l) => FiberState::Steel(l.initial_state()),
                 FiberLaw::Concrete(l) => FiberState::Concrete(l.initial_state()),
             })
@@ -190,6 +198,22 @@ impl Section {
                     }
                     Err(_) => (f64::NAN, f64::NAN),
                 },
+                (FiberLaw::ChabocheBranches(l), FiberState::ChabocheBranches(s)) => {
+                    match l.response(eps, s) {
+                        Ok(response) => response,
+                        Err(error) if checked => return Err(refused(&error.to_string())),
+                        Err(_) => (f64::NAN, f64::NAN),
+                    }
+                }
+                (FiberLaw::Chaboche(_), FiberState::ChabocheBranches(_))
+                | (FiberLaw::ChabocheBranches(_), FiberState::Chaboche(_)) => {
+                    if checked {
+                        return Err(refused(
+                            "fiber law and backstress-history branch counts differ",
+                        ));
+                    }
+                    (f64::NAN, f64::NAN)
+                }
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
                     (-l.stress(-eps, s), l.tangent(-eps, s))
                 }
@@ -223,6 +247,9 @@ impl Section {
                 (FiberLaw::J2(l), FiberState::J2(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Voce(l), FiberState::Voce(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Chaboche(l), FiberState::Chaboche(s)) => *s = l.update_state(eps, s),
+                (FiberLaw::ChabocheBranches(l), FiberState::ChabocheBranches(s)) => {
+                    l.commit(eps, s)
+                }
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
                     *s = l.update_state(-eps, s);

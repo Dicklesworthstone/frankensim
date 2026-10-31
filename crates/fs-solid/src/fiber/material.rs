@@ -16,7 +16,10 @@ use fs_material::MaterialError;
 use fs_material::creep::uniaxial::UniaxialNorton;
 use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
 use fs_material::plastic::chaboche::axial::UniaxialChaboche;
-use fs_material::plastic::chaboche::source::{ResolvedChabocheJ2, chaboche_requirements};
+use fs_material::plastic::chaboche::source::{
+    BackstressProperties, ResolvedChabocheBranches, ResolvedChabocheJ2,
+    chaboche_branch_requirements, chaboche_requirements,
+};
 use fs_material::plastic::reduction::{UniaxialJ2, UniaxialVoce};
 use fs_material::plastic::source::{
     HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements,
@@ -132,6 +135,7 @@ pub struct FiberMaterial {
     law: FiberLaw,
     density_kg_m3: f64,
     source: Option<ResolvedMaterialStatePoint>,
+    chaboche_branch_properties: Option<Vec<BackstressProperties>>,
 }
 impl FiberMaterial {
     /// Explicit authored law and density, without implied source authority.
@@ -141,6 +145,18 @@ impl FiberMaterial {
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
             FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
+            FiberLaw::ChabocheBranches(law) => {
+                require(
+                    positive(density_kg_m3),
+                    "Chaboche fiber density must be finite and positive",
+                )?;
+                Ok(Self {
+                    law: FiberLaw::ChabocheBranches(law),
+                    density_kg_m3,
+                    source: None,
+                    chaboche_branch_properties: None,
+                })
+            }
             FiberLaw::Concrete(law) => Self::concrete(law, density_kg_m3),
             FiberLaw::Steel(law) => Self::steel(law, density_kg_m3),
         }
@@ -158,6 +174,7 @@ impl FiberMaterial {
             law: FiberLaw::Norton(law),
             density_kg_m3,
             source: None,
+            chaboche_branch_properties: None,
         })
     }
 
@@ -173,6 +190,7 @@ impl FiberMaterial {
             law: FiberLaw::J2(law),
             density_kg_m3,
             source: None,
+            chaboche_branch_properties: None,
         })
     }
 
@@ -224,6 +242,7 @@ impl FiberMaterial {
             law: FiberLaw::Voce(law),
             density_kg_m3,
             source: None,
+            chaboche_branch_properties: None,
         })
     }
 
@@ -272,6 +291,7 @@ impl FiberMaterial {
             law: FiberLaw::Chaboche(law),
             density_kg_m3,
             source: None,
+            chaboche_branch_properties: None,
         })
     }
 
@@ -312,6 +332,64 @@ impl FiberMaterial {
         Ok(material)
     }
 
+    /// Authored one-through-eight-branch metal law, preserving the native
+    /// ordered histories and exact axial restriction. No calibration is inferred.
+    pub fn chaboche_branches<const N: usize>(
+        law: UniaxialChaboche<N>,
+        density_kg_m3: f64,
+    ) -> Result<Self> {
+        Self::authored(FiberLaw::chaboche_branches(law)?, density_kg_m3)
+    }
+
+    /// Resolve named recovery branches, Voce/Prager coefficients and reference
+    /// density from one fixed-condition bundle. Branch order is caller supplied
+    /// and retained; no unused native branches are introduced.
+    pub fn resolve_chaboche_branches<const N: usize>(
+        card: &MaterialCard,
+        point: &QueryPoint,
+        density_property: &str,
+        basis: HardeningPropertyBasis,
+        strain_limit: f64,
+        selection: MaterialPropertySelection,
+        properties: [BackstressProperties; N],
+    ) -> Result<Self> {
+        let mut requirements = chaboche_branch_requirements(basis, &properties)?;
+        if requirements
+            .iter()
+            .any(|requirement| requirement.name() == density_property)
+        {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: density_property.into(),
+                reason: "fiber density must have a distinct name from every constitutive property role",
+            }.into());
+        }
+        requirements.push(ScalarPropertyRequirement::try_new(
+            density_property,
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+        let source = resolve_material_state_point(card, point, &requirements, selection)?;
+        let density = source
+            .property(density_property)
+            .expect("required density was resolved");
+        if !density.is_static_at_fixed_external_conditions() {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: density_property.into(),
+                reason: "Chaboche fiber density cannot freeze sampled strain, stress, rate or history dependence",
+            }.into());
+        }
+        let density_kg_m3 = density.value_si();
+        let resolved =
+            ResolvedChabocheBranches::try_from_material(source, basis, strain_limit, properties)?;
+        let mut material = Self::chaboche_branches(
+            UniaxialChaboche::new(resolved.law().clone())?,
+            density_kg_m3,
+        )?;
+        material.chaboche_branch_properties = Some(resolved.properties().to_vec());
+        material.source = Some(resolved.material().clone());
+        Ok(material)
+    }
+
     /// Explicit research-model parameters, with no implied catalog authority.
     pub fn concrete(law: ManderConcrete, density_kg_m3: f64) -> Result<Self> {
         require(
@@ -330,6 +408,7 @@ impl FiberMaterial {
             law: FiberLaw::Concrete(law),
             density_kg_m3,
             source: None,
+            chaboche_branch_properties: None,
         })
     }
 
@@ -350,6 +429,7 @@ impl FiberMaterial {
             law: FiberLaw::Steel(law),
             density_kg_m3,
             source: None,
+            chaboche_branch_properties: None,
         })
     }
 
@@ -462,6 +542,13 @@ impl FiberMaterial {
     pub const fn source(&self) -> Option<&ResolvedMaterialStatePoint> {
         self.source.as_ref()
     }
+    /// Ordered source property roles for a named branch binding, including N=1.
+    /// Authored laws and legacy single-branch bindings return None. Source names
+    /// identify branch roles; the complete original receipt bundle remains in source().
+    #[must_use]
+    pub fn chaboche_branch_properties(&self) -> Option<&[BackstressProperties]> {
+        self.chaboche_branch_properties.as_deref()
+    }
     /// Immutable law coefficients; no integration-point history is stored here.
     #[must_use]
     pub const fn law(&self) -> &FiberLaw {
@@ -566,6 +653,7 @@ impl RcSection {
                         | FiberLaw::J2(_)
                         | FiberLaw::Voce(_)
                         | FiberLaw::Chaboche(_)
+                        | FiberLaw::ChabocheBranches(_)
                 ),
             "core and cover require concrete; reinforcement requires a steel or native J2 law",
         )?;
