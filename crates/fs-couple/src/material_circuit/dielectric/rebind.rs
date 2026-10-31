@@ -75,6 +75,11 @@ impl DebyeCircuit {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
         poll(&mut cancelled)?;
+        if self.reversible_instantaneous().is_some() {
+            return Err(invalid(
+                "nonlinear instantaneous dielectric refresh needs its own parameter and thermal entropy work",
+            ));
+        }
         let polarization = self.polarization_charges_c();
         let parameter_work_j = self.source().fixed_charge_free_energy_change_j(
             &source,

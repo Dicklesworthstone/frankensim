@@ -1,9 +1,11 @@
 //! Source-backed dielectric absorption on the existing Kirchhoff descriptor.
 //!
-//! One original capacitor becomes C_infinity in parallel with source-derived
-//! series RC polarization arms. The descriptor owns all electric history; this
-//! module adds no time integrator. Polarization heat comes from the SAME native
-//! midpoint efforts as circuit dissipation and is never called bulk Ohmic heat.
+//! One original capacitor supplies instantaneous storage in parallel with
+//! source-derived series RC polarization arms. Linear C_infinity is the default;
+//! [`nonlinear`] admits an original reversible instantaneous D(E) instead.
+//! The descriptor owns all electric history; this module adds no time integrator.
+//! Polarization heat comes from the SAME native midpoint efforts as circuit
+//! dissipation and is never called bulk Ohmic heat.
 
 use std::sync::Arc;
 
@@ -13,8 +15,11 @@ use fs_phs::{
     circuit::{Branch, CircuitDae, CircuitGraph, assemble_circuit},
 };
 
+use super::capacitance::dielectric::MaterialDielectricCapacitor;
 use super::{MaterialCircuitError, MaterialCircuitSolve, admit_graph, extended, poll, positive};
 
+/// Source-backed nonlinear instantaneous response with the same Debye memory.
+pub mod nonlinear;
 /// Conservative material refresh without erasing polarization history.
 pub mod rebind;
 
@@ -27,6 +32,7 @@ struct Prepared {
     polarization_charge_indices: Vec<usize>,
     loss_branches: Vec<usize>,
     material_resistors: Vec<super::MaterialResistor>,
+    reversible_instantaneous: Option<MaterialDielectricCapacitor>,
 }
 
 /// Fixed source/geometry and an accepted native circuit state. The compiled
@@ -151,6 +157,21 @@ fn accumulate_storage_change(
     accumulate(sum, correction, change * (offset / coefficient))
 }
 
+fn dielectric_storage_energy(
+    source: &ResolvedDebyeCapacitor,
+    instantaneous: Option<&MaterialDielectricCapacitor>,
+    instantaneous_charge_c: f64,
+    polarization_charges_c: &[f64],
+) -> Result<f64, MaterialCircuitError> {
+    match instantaneous {
+        Some(law) => finite(
+            law.stored_energy_j(instantaneous_charge_c)?
+                + source.stored_energy_j(0.0, polarization_charges_c)?,
+        ),
+        None => Ok(source.stored_energy_j(instantaneous_charge_c, polarization_charges_c)?),
+    }
+}
+
 impl DebyeCircuit {
     /// Replace ONE capacitor placeholder with its original dielectric model and
     /// append its internal nodes/branches. All original graph indices stay fixed.
@@ -171,9 +192,34 @@ impl DebyeCircuit {
     /// loss stays separate from the source-bound dielectric's physical heat.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        graph: CircuitGraph,
+        branch: usize,
+        source: ResolvedDebyeCapacitor,
+        fluxes_wb: Vec<f64>,
+        charges_c: Vec<f64>,
+        polarization_charges_c: Vec<f64>,
+        initial_inputs: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MaterialCircuitError> {
+        Self::assemble_with_instantaneous(
+            graph,
+            branch,
+            source,
+            None,
+            fluxes_wb,
+            charges_c,
+            polarization_charges_c,
+            initial_inputs,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_with_instantaneous(
         mut graph: CircuitGraph,
         branch: usize,
         source: ResolvedDebyeCapacitor,
+        reversible_instantaneous: Option<MaterialDielectricCapacitor>,
         fluxes_wb: Vec<f64>,
         charges_c: Vec<f64>,
         polarization_charges_c: Vec<f64>,
@@ -219,7 +265,12 @@ impl DebyeCircuit {
             .iter()
             .filter(|(_, _, branch)| matches!(branch, Branch::Capacitor { .. }))
             .count();
-        source.stored_energy_j(charges_c[capacitor_slot], &polarization_charges_c)?;
+        dielectric_storage_energy(
+            &source,
+            reversible_instantaneous.as_ref(),
+            charges_c[capacitor_slot],
+            &polarization_charges_c,
+        )?;
         graph.branches[branch].2 = Branch::Capacitor {
             farads: source.instantaneous_capacitance_f(),
         };
@@ -245,7 +296,18 @@ impl DebyeCircuit {
             ));
         }
         admit_graph(&graph)?;
-        let dae = assemble_circuit(&graph)?;
+        let dae = if let Some(law) = &reversible_instantaneous {
+            fs_phs::circuit::capacitance::assemble_circuit_with_capacitor_curves(
+                &graph,
+                &[fs_phs::circuit::capacitance::CapacitorCurve {
+                    branch,
+                    curve: law.curve().clone(),
+                }],
+                &[],
+            )?
+        } else {
+            assemble_circuit(&graph)?
+        };
         let mut all_charges = charges_c;
         all_charges.extend(polarization_charges_c);
         let initial = extended(&dae, &fluxes_wb, &all_charges, initial_inputs)?;
@@ -267,12 +329,17 @@ impl DebyeCircuit {
                 polarization_charge_indices,
                 loss_branches,
                 material_resistors: Vec::new(),
+                reversible_instantaneous,
             }),
             state,
         })
     }
 
-    /// Complete original material law and fixed dielectric geometry.
+    /// Original pole law, zero-field background and fixed dielectric geometry.
+    /// With [`Self::reversible_instantaneous`], that source supplies the poles
+    /// and matching low-field baseline; the retained nonlinear law supplies
+    /// the actual instantaneous voltage/energy. Its finite-field response is
+    /// not the linear source's frequency-domain admittance.
     pub fn source(&self) -> &ResolvedDebyeCapacitor {
         &self.prepared.source
     }
@@ -288,7 +355,7 @@ impl DebyeCircuit {
     pub fn state(&self) -> &[f64] {
         &self.state
     }
-    /// Charge on C_infinity alone [C]; polarization charges remain separate.
+    /// Instantaneous charge q_infinity alone [C]; polarization stays separate.
     pub fn instantaneous_charge_c(&self) -> f64 {
         self.state[self.prepared.instantaneous_charge_index]
     }
@@ -302,7 +369,12 @@ impl DebyeCircuit {
     }
     /// Physical original terminal voltage from the instantaneous storage [V].
     pub fn terminal_voltage_v(&self) -> f64 {
-        self.instantaneous_charge_c() / self.source().instantaneous_capacitance_f()
+        match self.reversible_instantaneous() {
+            Some(law) => law
+                .voltage_v(self.instantaneous_charge_c())
+                .unwrap_or(f64::NAN),
+            None => self.instantaneous_charge_c() / self.source().instantaneous_capacitance_f(),
+        }
     }
     /// Instantaneous and all polarization storage, counted exactly once [J].
     pub fn dielectric_energy_j(&self) -> Result<f64, MaterialCircuitError> {
@@ -316,10 +388,12 @@ impl DebyeCircuit {
         {
             *charge = state[index];
         }
-        Ok(self.source().stored_energy_j(
+        dielectric_storage_energy(
+            self.source(),
+            self.reversible_instantaneous(),
             state[self.prepared.instantaneous_charge_index],
             &charges[..self.source().poles().len()],
-        )?)
+        )
     }
 
     fn dielectric_energy_change(
@@ -329,13 +403,21 @@ impl DebyeCircuit {
     ) -> Result<f64, MaterialCircuitError> {
         let (mut sum, mut correction) = (0.0, 0.0);
         let slot = self.prepared.instantaneous_charge_index;
-        accumulate_storage_change(
-            &mut sum,
-            &mut correction,
-            before[slot],
-            after[slot],
-            self.source().instantaneous_capacitance_f(),
-        )?;
+        if let Some(law) = self.reversible_instantaneous() {
+            accumulate(
+                &mut sum,
+                &mut correction,
+                law.curve().energy_change_j(before[slot], after[slot])?,
+            )?;
+        } else {
+            accumulate_storage_change(
+                &mut sum,
+                &mut correction,
+                before[slot],
+                after[slot],
+                self.source().instantaneous_capacitance_f(),
+            )?;
+        }
         for (&slot, pole) in self
             .prepared
             .polarization_charge_indices
@@ -374,13 +456,24 @@ impl DebyeCircuit {
                 }
                 _ => continue,
             };
-            accumulate_storage_change(
-                &mut sum,
-                &mut correction,
-                before[slot],
-                after[slot],
-                coefficient,
-            )?;
+            if let Some(law) = self
+                .reversible_instantaneous()
+                .filter(|_| slot == self.prepared.instantaneous_charge_index)
+            {
+                accumulate(
+                    &mut sum,
+                    &mut correction,
+                    law.curve().energy_change_j(before[slot], after[slot])?,
+                )?;
+            } else {
+                accumulate_storage_change(
+                    &mut sum,
+                    &mut correction,
+                    before[slot],
+                    after[slot],
+                    coefficient,
+                )?;
+            }
         }
         finite(sum + correction)
     }
@@ -425,6 +518,11 @@ impl DebyeCircuit {
             || native.dissipated < 0.0
         {
             return Err(invalid("invalid native dielectric circuit step"));
+        }
+        if self.reversible_instantaneous().is_some() {
+            // The same frozen source must admit the physical endpoint without
+            // projecting a charge/flux or hiding an ideal-clamp impulse.
+            dae.consistent_initial_state(&native.x, inputs)?;
         }
         let voltage = |node| {
             if node == 0 {
@@ -479,18 +577,25 @@ impl DebyeCircuit {
             } else {
                 other_resistor_heat_j = finite(other_resistor_heat_j + heat)?;
                 other_resistors.push(DebyeResistorHeat {
-                    branch, voltage_drop_v: drop, current_a: current, heat_j: heat,
+                    branch,
+                    voltage_drop_v: drop,
+                    current_a: current,
+                    heat_j: heat,
                 });
             }
         }
         let (a, b, _) = self.graph().branches[self.prepared.branch];
-        let mut charge_change = finite(
-            native.x[self.prepared.instantaneous_charge_index]
-                - x0[self.prepared.instantaneous_charge_index],
-        )?;
-        for &slot in &self.prepared.polarization_charge_indices {
-            charge_change = finite(charge_change + finite(native.x[slot] - x0[slot])?)?;
+        let (mut charge_change, mut charge_correction) = (0.0, 0.0);
+        for slot in std::iter::once(self.prepared.instantaneous_charge_index)
+            .chain(self.prepared.polarization_charge_indices.iter().copied())
+        {
+            accumulate(
+                &mut charge_change,
+                &mut charge_correction,
+                native.x[slot] - x0[slot],
+            )?;
         }
+        let charge_change = finite(charge_change + charge_correction)?;
         let dielectric_terminal_work_j = finite((voltage(a) - voltage(b)) * charge_change)?;
         let dielectric_energy_j = [self.energy(&x0)?, self.energy(&native.x)?];
         let dielectric_energy_change_j = self.dielectric_energy_change(&x0, &native.x)?;

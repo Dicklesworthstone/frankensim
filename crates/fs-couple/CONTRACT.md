@@ -19182,3 +19182,58 @@ knot with changing material resistance, source retention through rebuilds,
 bidirectional fixed-charge parameter work, original extra capacitor and mutual
 magnetic history, source-authority/clamp refusals and cancellation. These
 authored fixtures validate numerical behavior, not measured dielectric data.
+
+## Nonlinear instantaneous dielectric response with native polarization memory
+
+`DebyeCircuit::new_with_reversible_instantaneous` combines an explicitly
+instantaneous, source-backed D_inf(E) law with the existing source-derived
+Debye polarization arms. The original descriptor, RC coefficients, branch
+indices, charge/flux ordering and physical resistor-heat owner are reused;
+ordinary steps retain the same immutable preparation. The original linear
+constructor and its thermal owner remain separate supported profiles.
+
+At fixed area A and gap d, the physical coordinates are
+q_inf=A*(D-sum P_k) and q_k=A*P_k. The native branch storage therefore realizes
+H=A*d*[w_inf(D-sum P_k)+sum P_k^2/(2*chi_k)], with w_inf=integral E dD_inf.
+The existing R_k=tau_k/C_k, C_k=chi_k*A/d arms give
+tau_k*Pdot_k+P_k=chi_k*E and physical polarization heat
+A*d*sum(tau_k/chi_k)*Pdot_k^2. Total terminal charge includes instantaneous and
+all retained polarization charges once; it is not the instantaneous charge.
+Neither an equilibrium capacitance nor a frequency-dependent C owns this
+stored energy. Other original resistor heat stays separately identifiable.
+
+Both source owners must retain the same original card, fixed geometry and
+exact non-field context. The nonlinear law is explicitly assigned the
+instantaneous role, and its zero-field tangent must match the original
+epsilon_infinity to arithmetic roundoff. A total equilibrium D(E) curve is
+not an instantaneous source and would count polarization twice. The retained
+instantaneous law is field-only; the original background and polarization
+increments must be constant-source properties in this closed profile.
+Relaxation times retain their fixed original context. Actual nonlinear
+voltage, energy and stable energy increments use the original signed native
+curve; the original linear source admittance describes only its declared
+low-field baseline, not finite-amplitude nonlinear frequency response.
+
+Every accepted step checks both the complete native circuit balance and the
+dielectric's own storage-plus-polarization-heat balance against actual terminal
+work. Stable constitutive increments and compensated charge transfer retain
+small work below a large stationary stored-energy bias. The native global
+Gonzalez correction can distribute a nonlinear remainder across other changing
+stores; an unresolved local partition defect refuses under the original
+physical tolerance instead of being called heat. Smaller steps and temporal
+refinement remain necessary. Original source support, native consistent
+initialization and endpoint constraints, bounded work and cancellation are
+admission gates, with no charge projection or partial memory publication.
+
+Existing source/thermal rebind explicitly refuses the nonlinear profile until
+its nonlinear parameter work and field entropy are represented; it cannot
+silently restore linear C_infinity or erase polarization. This extension
+supplies nonlinear instantaneous response with the original linear Debye
+processes. It adds no saturation of the relaxing polarization, hysteresis,
+fractional dispersion, fringing, breakdown, geometry motion or thermal update.
+`tests/dielectric_nonlinear.rs` covers linear and zero-pole limits, nonlinear
+open-circuit absorption across a source knot with independent ODE refinement
+and both polarities, analytic held-voltage polarization heat, driven warm
+memory beside a large independent bias, actual local partition-work refusal,
+and source/background/context/geometry/clamp/refresh/cancellation boundaries.
+All constitutive data are explicitly authored numerical fixtures.
