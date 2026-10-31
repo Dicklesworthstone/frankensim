@@ -3,7 +3,7 @@
 use super::*;
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
-fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
+pub(super) fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -25,11 +25,11 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     })
 }
 
-fn sphere_for_x(x: f64, n: f64, k: f64) -> MieSphere {
+pub(super) fn sphere_for_x(x: f64, n: f64, k: f64) -> MieSphere {
     MieSphere::try_new(x * 550e-9 / core::f64::consts::TAU, n, k, 1.0, 1000.0).unwrap()
 }
 
-fn close(actual: f64, expected: f64, tolerance: f64) {
+pub(super) fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
         "{actual:e} != {expected:e}; tolerance {tolerance:e}"
@@ -216,7 +216,7 @@ fn g1_angular_normalization_moment_and_resolved_phase_table() {
     });
 }
 
-fn angular_integrals(solution: &MieSolution) -> (f64, f64) {
+pub(super) fn angular_integrals(solution: &impl MieAngularSolution) -> (f64, f64) {
     let count = solution.multipoles() + 1;
     let (mut mass, mut moment) = (0.0, 0.0);
     for index in 0..count {

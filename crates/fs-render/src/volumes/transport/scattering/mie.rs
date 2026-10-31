@@ -20,8 +20,15 @@ use super::{MAX_PHASE_KNOTS, TabulatedPhase, VolumeTransportError, checkpoint};
 use fs_exec::Cx;
 use fs_math::{c64::C64, det};
 
+mod distribution;
+mod population;
 mod spectrum;
+pub use distribution::{LognormalRadiusReport, ParticleSizeDistribution};
+pub use population::{
+    MAX_MIE_POPULATION_BINS, MiePopulation, MiePopulationBudget, MiePopulationSolution,
+};
 pub use spectrum::MieOpticalSpectrum;
+pub(crate) use spectrum::prepare_visible_spectrum;
 
 /// Maximum admitted size parameter `2 pi n_host r / lambda_vacuum`.
 pub const MAX_MIE_SIZE_PARAMETER: f64 = 128.0;
@@ -116,6 +123,31 @@ impl MieSphere {
             host_index_n,
             particle_density_kg_m3,
         })
+    }
+
+    /// Physical particle radius, metres.
+    #[must_use]
+    pub const fn radius_m(self) -> f64 {
+        self.radius_m
+    }
+
+    /// Real nonabsorbing host index used by this sphere.
+    #[must_use]
+    pub const fn host_index_n(self) -> f64 {
+        self.host_index_n
+    }
+
+    /// Particle mass `4*pi*r^3*rho/3`, kg. Population reductions require
+    /// this positive quantity to be representable in addition to cross sections.
+    pub fn particle_mass_kg(self) -> Result<f64, MieError> {
+        let mass = (4.0 * core::f64::consts::PI / 3.0)
+            * (self.radius_m * self.radius_m)
+            * (self.particle_density_kg_m3 * self.radius_m);
+        if mass.is_finite() && mass > 0.0 {
+            Ok(mass)
+        } else {
+            Err(MieError::Numerical)
+        }
     }
 
     /// Prepare the complete retained Mie series at one vacuum wavelength, nm.
@@ -389,103 +421,142 @@ impl MieSolution {
         tolerance: f64,
         max_knots: usize,
     ) -> Result<MiePhaseTable, MieError> {
+        prepare_phase_table(self, cx, tolerance, max_knots)
+    }
+}
+
+/// Shared preparation seam for single spheres, populations, and material
+/// adapters. Only preparation evaluates the full angular series; transport
+/// uses the native tabulated phase and its matched sampler.
+pub(crate) trait MieAngularSolution {
+    fn cross_sections(&self) -> MieCrossSections;
+    fn multipoles(&self) -> usize;
+    fn eval_cos(&self, cosine: f64) -> Result<f64, MieError>;
+
+    fn phase_table(
+        &self,
+        cx: &Cx<'_>,
+        tolerance: f64,
+        max_knots: usize,
+    ) -> Result<MiePhaseTable, MieError> {
+        prepare_phase_table(self, cx, tolerance, max_knots)
+    }
+}
+
+impl MieAngularSolution for MieSolution {
+    fn cross_sections(&self) -> MieCrossSections {
+        self.cross_sections()
+    }
+    fn multipoles(&self) -> usize {
+        self.multipoles()
+    }
+    fn eval_cos(&self, cosine: f64) -> Result<f64, MieError> {
+        self.eval_cos(cosine)
+    }
+}
+
+fn prepare_phase_table<S: MieAngularSolution + ?Sized>(
+    solution: &S,
+    cx: &Cx<'_>,
+    tolerance: f64,
+    max_knots: usize,
+) -> Result<MiePhaseTable, MieError> {
+    poll(cx)?;
+    if !tolerance.is_finite() || !(0.0..=0.1).contains(&tolerance) || tolerance == 0.0 {
+        return Err(MieError::Parameters);
+    }
+    if solution.cross_sections().scattering_m2 == 0.0 {
+        return Err(MieError::NoScattering);
+    }
+    let intervals = (4 * solution.multipoles()).max(16);
+    if max_knots > MAX_PHASE_KNOTS || max_knots <= intervals {
+        return Err(MieError::AngularResolution);
+    }
+    let mut knots = Vec::new();
+    knots
+        .try_reserve_exact(max_knots)
+        .map_err(|_| MieError::Budget)?;
+    for index in 0..=intervals {
         poll(cx)?;
-        if !tolerance.is_finite() || !(0.0..=0.1).contains(&tolerance) || tolerance == 0.0 {
-            return Err(MieError::Parameters);
-        }
-        if self.scattering_sum == 0.0 {
-            return Err(MieError::NoScattering);
-        }
-        let intervals = (4 * self.coefficients.len()).max(16);
-        if max_knots > MAX_PHASE_KNOTS || max_knots <= intervals {
-            return Err(MieError::AngularResolution);
-        }
-        let mut knots = Vec::new();
-        knots
-            .try_reserve_exact(max_knots)
+        let cosine = if index == 0 {
+            -1.0
+        } else if index == intervals {
+            1.0
+        } else {
+            -det::cos(core::f64::consts::PI * index as f64 / intervals as f64)
+        };
+        knots.push((cosine, solution.eval_cos(cosine)?));
+    }
+    loop {
+        let mut next = Vec::new();
+        next.try_reserve_exact(max_knots)
             .map_err(|_| MieError::Budget)?;
-        for index in 0..=intervals {
+        next.push(knots[0]);
+        let (mut maximum_error, mut normalization) = (0.0_f64, 0.0);
+        for pair in knots.windows(2) {
             poll(cx)?;
-            let cosine = if index == 0 {
-                -1.0
-            } else if index == intervals {
-                1.0
-            } else {
-                -det::cos(core::f64::consts::PI * index as f64 / intervals as f64)
-            };
-            knots.push((cosine, self.eval_cos(cosine)?));
-        }
-        loop {
-            let mut next = Vec::new();
-            next.try_reserve_exact(max_knots)
-                .map_err(|_| MieError::Budget)?;
-            next.push(knots[0]);
-            let (mut maximum_error, mut normalization) = (0.0_f64, 0.0);
-            for pair in knots.windows(2) {
-                poll(cx)?;
-                let [(lo, left), (hi, right)] = [pair[0], pair[1]];
-                let mut interval_error = 0.0_f64;
-                for fraction in [0.25, 0.5, 0.75] {
-                    let actual = self.eval_cos((hi - lo).mul_add(fraction, lo))?;
-                    let interpolated = left * (1.0 - fraction) + right * fraction;
-                    interval_error = interval_error.max(
-                        (actual - interpolated).abs()
-                            / actual
-                                .max(interpolated)
-                                .max(1.0 / (4.0 * core::f64::consts::PI)),
-                    );
-                }
-                maximum_error = maximum_error.max(interval_error);
-                normalization += core::f64::consts::PI * (hi - lo) * (left + right);
-                if interval_error > tolerance * 0.5 {
-                    if next.len() + 1 >= max_knots {
-                        return Err(MieError::AngularResolution);
-                    }
-                    let middle = (hi - lo).mul_add(0.5, lo);
-                    next.push((middle, self.eval_cos(middle)?));
-                }
-                if next.len() == max_knots {
+            let [(lo, left), (hi, right)] = [pair[0], pair[1]];
+            let mut interval_error = 0.0_f64;
+            for fraction in [0.25, 0.5, 0.75] {
+                let actual = solution.eval_cos((hi - lo).mul_add(fraction, lo))?;
+                let interpolated = left * (1.0 - fraction) + right * fraction;
+                interval_error = interval_error.max(
+                    (actual - interpolated).abs()
+                        / actual
+                            .max(interpolated)
+                            .max(1.0 / (4.0 * core::f64::consts::PI)),
+                );
+            }
+            maximum_error = maximum_error.max(interval_error);
+            normalization += core::f64::consts::PI * (hi - lo) * (left + right);
+            if interval_error > tolerance * 0.5 {
+                if next.len() + 1 >= max_knots {
                     return Err(MieError::AngularResolution);
                 }
-                next.push((hi, right));
+                let middle = (hi - lo).mul_add(0.5, lo);
+                next.push((middle, solution.eval_cos(middle)?));
             }
-            if next.len() != knots.len() {
-                knots = next;
-                continue;
-            }
-            let phase = TabulatedPhase::try_new(&knots).map_err(|_| MieError::Numerical)?;
-            let normalization_error = (normalization - 1.0).abs();
-            let mean_cosine_error = (phase.mean_cosine() - self.cross_sections.mean_cosine).abs();
-            // Normalization changes every ordinate. Include that change in
-            // the retained pointwise diagnostic rather than hiding it.
-            let normalized_error = maximum_error + normalization_error / normalization;
-            if normalized_error <= tolerance && mean_cosine_error <= tolerance {
-                poll(cx)?;
-                return Ok(MiePhaseTable {
-                    phase,
-                    normalization_error,
-                    mean_cosine_error,
-                    max_sampled_relative_error: normalized_error,
-                });
-            }
-            // A global normalization/moment failure can survive local tests;
-            // refine every interval instead of accepting a normalized alias.
-            if 2 * knots.len() - 1 > max_knots {
+            if next.len() == max_knots {
                 return Err(MieError::AngularResolution);
             }
-            let mut refined = Vec::new();
-            refined
-                .try_reserve_exact(max_knots)
-                .map_err(|_| MieError::Budget)?;
-            refined.push(knots[0]);
-            for pair in knots.windows(2) {
-                poll(cx)?;
-                let middle = (pair[1].0 - pair[0].0).mul_add(0.5, pair[0].0);
-                refined.push((middle, self.eval_cos(middle)?));
-                refined.push(pair[1]);
-            }
-            knots = refined;
+            next.push((hi, right));
         }
+        if next.len() != knots.len() {
+            knots = next;
+            continue;
+        }
+        let phase = TabulatedPhase::try_new(&knots).map_err(|_| MieError::Numerical)?;
+        let normalization_error = (normalization - 1.0).abs();
+        let mean_cosine_error = (phase.mean_cosine() - solution.cross_sections().mean_cosine).abs();
+        // Normalization changes every ordinate. Include that change in
+        // the retained pointwise diagnostic rather than hiding it.
+        let normalized_error = maximum_error + normalization_error / normalization;
+        if normalized_error <= tolerance && mean_cosine_error <= tolerance {
+            poll(cx)?;
+            return Ok(MiePhaseTable {
+                phase,
+                normalization_error,
+                mean_cosine_error,
+                max_sampled_relative_error: normalized_error,
+            });
+        }
+        // A global normalization/moment failure can survive local tests;
+        // refine every interval instead of accepting a normalized alias.
+        if 2 * knots.len() - 1 > max_knots {
+            return Err(MieError::AngularResolution);
+        }
+        let mut refined = Vec::new();
+        refined
+            .try_reserve_exact(max_knots)
+            .map_err(|_| MieError::Budget)?;
+        refined.push(knots[0]);
+        for pair in knots.windows(2) {
+            poll(cx)?;
+            let middle = (pair[1].0 - pair[0].0).mul_add(0.5, pair[0].0);
+            refined.push((middle, solution.eval_cos(middle)?));
+            refined.push(pair[1]);
+        }
+        knots = refined;
     }
 }
 
