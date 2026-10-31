@@ -272,7 +272,8 @@ mod tests {
     use super::*;
     use fs_evidence::ValidityDomain;
     use fs_matdb::{
-        ClaimSet, InterpolationPolicy, PropertyClaim, PropertyValue, Provenance, UncertaintyModel,
+        ClaimSet, InterpolationPolicy, ObservationDataset, PropertyClaim, PropertyValue,
+        Provenance, UncertaintyModel,
     };
     use fs_qty::{Density, Dims, Pressure, Temperature};
 
@@ -331,6 +332,24 @@ mod tests {
 
     fn card() -> MaterialCard {
         let mut claims = ClaimSet::new();
+        let artifact = fs_blake3::hash_domain(
+            "org.frankensim.tests.material-transient.source.v1",
+            b"synthetic SI curves: rho=1000; cp=1000; k=2; k-longitudinal=20; k-through=1; T=300..360; p=100000..102000",
+        );
+        let provenance = Provenance {
+            source: "synthetic numerical fixture, not measured data".into(),
+            license: "CC0-1.0".into(),
+            artifact: Some(artifact),
+        };
+        let observation = claims
+            .register_observation(ObservationDataset {
+                specimen: "synthetic stationary thermal specimen".into(),
+                method: "explicitly authored constant numerical reference curves".into(),
+                artifact,
+                caveats: "test fixture only; no experimental or catalog-material authority".into(),
+                provenance: provenance.clone(),
+            })
+            .unwrap();
         for (name, dims, value) in [
             ("rho", Density::DIMS, 1000.0),
             ("cp", Dims([2, 0, -2, -1, 0, 0]), 1000.0),
@@ -362,12 +381,8 @@ mod tests {
                         ),
                     uncertainty: UncertaintyModel::Unstated,
                     interpolation: InterpolationPolicy::LinearInside,
-                    observations: Vec::new(),
-                    provenance: Provenance {
-                        source: "synthetic numerical fixture, not measured data".into(),
-                        license: "CC0-1.0".into(),
-                        artifact: None,
-                    },
+                    observations: vec![observation],
+                    provenance: provenance.clone(),
                 })
                 .unwrap();
         }
