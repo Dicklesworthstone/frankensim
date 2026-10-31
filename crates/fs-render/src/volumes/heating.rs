@@ -28,6 +28,9 @@ pub mod feedback;
 /// Temperature-dependent absorption and multiple scattering on native thermal cells.
 pub mod scattering_feedback;
 
+/// Shared source-bound temperature-dependent absorption/scattering fields.
+pub mod temperature_field;
+
 /// Passive volumetric emission, reabsorption and bath exchange on native thermal cells.
 pub mod exchange;
 

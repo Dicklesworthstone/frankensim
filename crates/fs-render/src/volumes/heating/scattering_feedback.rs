@@ -12,19 +12,19 @@
 //! energies below account for the actual sampled heat, without incorrectly
 //! applying a frozen-field standard-error formula to changing optical fields.
 
-use super::feedback::{
-    CompiledTable, OpticalFeedbackError, TemperatureAbsorptionTable, TemperatureSpectrum,
-};
+use super::feedback::{OpticalFeedbackError, TemperatureAbsorptionTable};
 use super::scattering::{ScatteringEnergyBudget, ScatteringHeating, ScatteringHeatingTolerance};
+use super::temperature_field::{
+    TemperatureOpticalField, TemperatureOpticalFieldBudget, TemperatureOpticalState,
+    transport_checkpoint,
+};
 use super::{CheckedSum, OpticalHeatingError, nonnegative};
+use crate::volumes::transport::scattering::PhaseFunction;
 use crate::volumes::transport::scattering::deposition::{
     ScatteringDepositionConfig, ScatteringPowerDeposition,
 };
-use crate::volumes::transport::scattering::{
-    CellPhaseFunction, CellScatteringGrid, MassScatteringSpectrum, PhaseFunction,
-};
 use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError};
-use fs_blake3::{ContentHash, DomainHasher};
+use fs_blake3::DomainHasher;
 use fs_geom::{Point3, Vec3};
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
@@ -40,70 +40,7 @@ pub use refinement::{
     ScatteringRefinementError, ScatteringScalarEstimate,
 };
 
-/// Source-bound mass scattering in m²/kg versus kelvin. The retained rows are
-/// actual scattering spectra, including their original source support and any
-/// analytic wavelength law. Interpolation in kelvin reuses the absorption
-/// feedback owner's compiled coefficient interpolation and never extrapolates.
-#[derive(Clone, Debug)]
-pub struct TemperatureScatteringTable {
-    source_identity: ContentHash,
-    rows: Vec<(f64, MassScatteringSpectrum)>,
-    wavelength_bounds_nm: (f64, f64),
-}
-
-impl TemperatureScatteringTable {
-    pub fn try_new(
-        source_identity: ContentHash,
-        rows: &[(f64, MassScatteringSpectrum)],
-        max_temperature_knots: usize,
-    ) -> Result<Self, OpticalFeedbackError> {
-        if rows.len() < 2
-            || rows.len() > max_temperature_knots
-            || source_identity == ContentHash([0; 32])
-            || rows.iter().any(|(t, _)| !t.is_finite() || *t <= 0.0)
-            || rows.windows(2).any(|p| p[0].0 >= p[1].0)
-        {
-            return Err(invalid(
-                "ordered positive scattering temperatures, bounded rows and source identity required",
-            ));
-        }
-        let bounds = rows[0].1.wavelength_bounds_nm();
-        if rows.iter().any(|(_, s)| s.wavelength_bounds_nm() != bounds) {
-            return Err(invalid(
-                "scattering temperature rows must share a wavelength domain",
-            ));
-        }
-        let mut retained = Vec::new();
-        retained
-            .try_reserve_exact(rows.len())
-            .map_err(|_| OpticalFeedbackError::Budget)?;
-        retained.extend_from_slice(rows);
-        Ok(Self {
-            source_identity,
-            rows: retained,
-            wavelength_bounds_nm: bounds,
-        })
-    }
-
-    pub fn temperature_bounds_k(&self) -> (f64, f64) {
-        (self.rows[0].0, self.rows[self.rows.len() - 1].0)
-    }
-    pub fn wavelength_bounds_nm(&self) -> (f64, f64) {
-        self.wavelength_bounds_nm
-    }
-    pub fn source_identity(&self) -> ContentHash {
-        self.source_identity
-    }
-}
-
-impl TemperatureSpectrum for MassScatteringSpectrum {
-    fn source_identity(&self) -> Option<ContentHash> {
-        MassScatteringSpectrum::source_identity(self)
-    }
-    fn at(&self, wavelength_nm: f64) -> Result<f64, VolumeTransportError> {
-        MassScatteringSpectrum::at(self, wavelength_nm)
-    }
-}
+pub use super::temperature_field::{TemperatureScatteringTable, ThermalScatteringCell};
 
 /// A collimated source followed until every represented packet escapes the
 /// open grid or is retained unresolved. Powers are quadrature-weighted watts.
@@ -115,17 +52,6 @@ pub struct IncidentScatteringBeam<const N: usize> {
     pub unit_direction: Vec3,
     pub wavelengths_nm: [f64; N],
     pub incident_power_w: [f64; N],
-}
-
-/// Local material laws, heat receiver and phase-palette selection. Multiple
-/// optical cells may share one thermal cell; all their true heat is summed.
-#[derive(Clone, Copy, Debug)]
-pub struct ThermalScatteringCell {
-    pub grid_cell: usize,
-    pub thermal_cell: CellId,
-    pub absorption_table: usize,
-    pub scattering_table: usize,
-    pub phase: usize,
 }
 
 /// Storage bounds at admission and aggregate work ceilings for ONE native
@@ -165,34 +91,11 @@ pub struct ConditionalSourcePrecision<const N: usize> {
     pub maximum_unresolved_standard_error_w: [f64; N],
 }
 
-#[derive(Clone, Copy)]
-struct BoundMaterial {
-    thermal_cell: CellId,
-    absorption_table: usize,
-    scattering_table: usize,
-}
-
 struct FeedbackModel<'g, const N: usize> {
-    identity: ContentHash,
-    geometry: AbsorbingGrid<'g>,
+    field: Arc<TemperatureOpticalField<'g, N>>,
     beam: IncidentScatteringBeam<N>,
-    bounds_nm: (f64, f64),
-    absorption: Vec<CompiledTable<N>>,
-    scattering: Vec<CompiledTable<N>>,
-    materials: Vec<BoundMaterial>,
-    cell_materials: Vec<Option<usize>>,
-    phases: Vec<PhaseFunction>,
-    cell_phases: Vec<usize>,
     config: ScatteringDepositionConfig,
     tolerance: ScatteringHeatingTolerance,
-    has_scattering: bool,
-}
-
-#[derive(Clone, Debug)]
-struct PreparedCoefficients<const N: usize> {
-    absorption: Vec<[f64; N]>,
-    scattering: Vec<[f64; N]>,
-    materials: Vec<([f64; N], [f64; N])>,
 }
 
 /// Cloneable transactional observer sharing immutable geometry, original source
@@ -201,7 +104,7 @@ struct PreparedCoefficients<const N: usize> {
 #[derive(Clone)]
 pub struct TemperatureScatteringHeating<'g, const N: usize> {
     model: Arc<FeedbackModel<'g, N>>,
-    coefficients: PreparedCoefficients<N>,
+    coefficients: TemperatureOpticalState<N>,
     current: Option<ScatteringHeating<N>>,
     budget: ScatteringFeedbackBudget,
     histories: u32,
@@ -217,7 +120,7 @@ pub struct TemperatureScatteringHeating<'g, const N: usize> {
 impl<const N: usize> core::fmt::Debug for TemperatureScatteringHeating<'_, N> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TemperatureScatteringHeating")
-            .field("model_identity", &self.model.identity)
+            .field("model_identity", &self.model.field.identity())
             .field("time_s", &self.time_s)
             .field("histories_per_lane", &self.histories)
             .field("source_evaluations", &self.evaluations)
@@ -257,32 +160,10 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
             || table_count > budget.max_tables
             || bindings.len() > count
             || phases.len() > count
-            || budget.max_source_evaluations == 0
-            || budget.max_traced_segments == 0
-            || config.histories_per_lane < 2
-            || config.max_collisions_per_history == 0
-            || config.max_total_segments == 0
         {
             return Err(OpticalFeedbackError::Budget);
         }
-        if absorption.is_empty()
-            || scattering.is_empty()
-            || phases.is_empty()
-            || thermal.cells().is_empty()
-            || !beam.incident_power_w.iter().copied().all(nonnegative)
-            || ![
-                tolerance.power_roundoff_w,
-                tolerance.max_unresolved_w,
-                tolerance.max_total_standard_error_w,
-                tolerance.max_cell_standard_error_w,
-            ]
-            .into_iter()
-            .all(nonnegative)
-        {
-            return Err(invalid(
-                "nonempty optical laws, active thermal cells and finite power/error allowances required",
-            ));
-        }
+        validate_source(&beam, thermal, budget, config, tolerance)?;
         let components = [
             beam.origin.x,
             beam.origin.y,
@@ -291,11 +172,6 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
             beam.unit_direction.y,
             beam.unit_direction.z,
         ];
-        if components.iter().any(|v| !v.is_finite())
-            || (beam.unit_direction.dot(beam.unit_direction) - 1.0).abs() > 2.0e-10
-        {
-            return Err(VolumeTransportError::Ray.into());
-        }
         let mut hash = DomainHasher::new("org.frankensim.render.temperature-scattering-model.v1");
         hash.update(geometry.content_identity().as_bytes());
         hash.update(&(N as u64).to_le_bytes());
@@ -306,160 +182,89 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
             hash.update(&beam.wavelengths_nm[lane].to_bits().to_le_bytes());
             hash.update(&beam.incident_power_w[lane].to_bits().to_le_bytes());
         }
-        let mut bounds = (0.0_f64, f64::MAX);
-        let mut knots = 0usize;
-        let mut compiled_absorption = Vec::new();
-        let mut compiled_scattering = Vec::new();
-        compiled_absorption
-            .try_reserve_exact(absorption.len())
-            .map_err(|_| OpticalFeedbackError::Budget)?;
-        compiled_scattering
-            .try_reserve_exact(scattering.len())
-            .map_err(|_| OpticalFeedbackError::Budget)?;
-        hash.update(&(absorption.len() as u64).to_le_bytes());
-        for table in absorption {
-            checkpoint()?;
-            knots = knots
-                .checked_add(table.knot_count())
-                .ok_or(OpticalFeedbackError::Budget)?;
-            if knots > budget.max_total_temperature_knots {
-                return Err(OpticalFeedbackError::Budget);
-            }
-            let domain = table.wavelength_bounds_nm();
-            bounds.0 = bounds.0.max(domain.0);
-            bounds.1 = bounds.1.min(domain.1);
-            compiled_absorption.push(table.compile(
-                &beam.wavelengths_nm,
-                &mut hash,
-                &mut checkpoint,
-            )?);
-        }
-        hash.update(&(scattering.len() as u64).to_le_bytes());
-        for table in scattering {
-            checkpoint()?;
-            knots = knots
-                .checked_add(table.rows.len())
-                .ok_or(OpticalFeedbackError::Budget)?;
-            if knots > budget.max_total_temperature_knots {
-                return Err(OpticalFeedbackError::Budget);
-            }
-            bounds.0 = bounds.0.max(table.wavelength_bounds_nm.0);
-            bounds.1 = bounds.1.min(table.wavelength_bounds_nm.1);
-            compiled_scattering.push(CompiledTable::compile(
-                table.source_identity,
-                table.wavelength_bounds_nm,
-                &table.rows,
-                &beam.wavelengths_nm,
-                &mut hash,
-                &mut checkpoint,
-            )?);
-        }
-        let mut selected = allocate(count, None)?;
-        for binding in bindings {
-            checkpoint()?;
-            if binding.grid_cell >= count
-                || binding.absorption_table >= absorption.len()
-                || binding.scattering_table >= scattering.len()
-                || binding.phase >= phases.len()
-            {
-                return Err(invalid(
-                    "optical binding references an unknown cell, table or phase",
-                ));
-            }
-            if selected[binding.grid_cell].replace(*binding).is_some() {
-                return Err(OpticalHeatingError::DuplicateCell(binding.grid_cell).into());
-            }
-            if !thermal.cells().contains_key(&binding.thermal_cell) {
-                return Err(OpticalHeatingError::InactiveCell(binding.thermal_cell).into());
-            }
-        }
-        let mut materials = Vec::new();
-        materials
-            .try_reserve_exact(bindings.len())
-            .map_err(|_| OpticalFeedbackError::Budget)?;
-        let mut unique_materials = BTreeMap::new();
-        let mut cell_materials = allocate(count, None)?;
-        let mut cell_phases = allocate(count, 0usize)?;
-        for (index, binding) in selected.into_iter().enumerate() {
-            checkpoint()?;
-            let Some(binding) = binding else {
-                if geometry
-                    .cell_density_kg_m3(index)
-                    .is_some_and(|rho| rho > 0.0)
-                {
-                    return Err(OpticalHeatingError::UnmappedCell(index).into());
-                }
-                continue;
-            };
-            let key = (
-                binding.thermal_cell,
-                binding.absorption_table,
-                binding.scattering_table,
-            );
-            let slot = *unique_materials.entry(key).or_insert_with(|| {
-                let slot = materials.len();
-                materials.push(BoundMaterial {
-                    thermal_cell: binding.thermal_cell,
-                    absorption_table: binding.absorption_table,
-                    scattering_table: binding.scattering_table,
-                });
-                slot
-            });
-            cell_materials[index] = Some(slot);
-            cell_phases[index] = binding.phase;
-            for value in [
-                index as u64,
-                binding.thermal_cell.0,
-                binding.absorption_table as u64,
-                binding.scattering_table as u64,
-                binding.phase as u64,
-            ] {
-                hash.update(&value.to_le_bytes());
-            }
-        }
-        let mut retained_phases = Vec::new();
-        retained_phases
-            .try_reserve_exact(phases.len())
-            .map_err(|_| OpticalFeedbackError::Budget)?;
-        hash.update(&(phases.len() as u64).to_le_bytes());
-        for phase in phases {
-            checkpoint()?;
-            phase.hash_into(&mut hash);
-            retained_phases.push(phase.clone());
-        }
-        let has_scattering = compiled_scattering
-            .iter()
-            .any(CompiledTable::has_nonzero_coefficient);
-        let mut coefficients = PreparedCoefficients {
-            absorption: allocate(count, [0.0; N])?,
-            scattering: allocate(count, [0.0; N])?,
-            materials: allocate(materials.len(), ([0.0; N], [0.0; N]))?,
-        };
-        let model = Arc::new(FeedbackModel {
-            identity: hash.finalize(),
+        let (field, coefficients) = TemperatureOpticalField::compile_with_hash(
             geometry,
+            beam.wavelengths_nm,
+            absorption,
+            scattering,
+            phases,
+            bindings,
+            thermal,
+            field_budget(budget),
+            hash,
+            &mut checkpoint,
+        )?;
+        Self::assembled(
+            Arc::new(field),
+            coefficients,
             beam,
-            bounds_nm: bounds,
-            absorption: compiled_absorption,
-            scattering: compiled_scattering,
-            materials,
-            cell_materials,
-            phases: retained_phases,
-            cell_phases,
+            thermal,
+            budget,
             config,
             tolerance,
-            has_scattering,
-        });
-        model.prepare(thermal, &mut coefficients, &mut checkpoint)?;
-        // Validate full packet/phase support before exposing the observer,
-        // without consuming any of the future trajectory's photon streams.
+        )
+    }
+
+    /// Use the SAME compiled constitutive field as other optical/thermal
+    /// observers. Candidate coefficient packets and sampled accounts remain
+    /// private; immutable source tables, geometry, and phase data share one Arc.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_field(
+        field: Arc<TemperatureOpticalField<'g, N>>,
+        beam: IncidentScatteringBeam<N>,
+        thermal: &DepositionSimulation<'_>,
+        budget: ScatteringFeedbackBudget,
+        config: ScatteringDepositionConfig,
+        tolerance: ScatteringHeatingTolerance,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        checkpoint()?;
+        if field.geometry().cell_count() > budget.max_grid_cells
+            || field.table_count() > budget.max_tables
+            || field.temperature_knot_count() > budget.max_total_temperature_knots
+        {
+            return Err(OpticalFeedbackError::Budget);
+        }
+        validate_source(&beam, thermal, budget, config, tolerance)?;
+        if beam.wavelengths_nm.map(f64::to_bits) != field.wavelengths_nm().map(f64::to_bits) {
+            return Err(invalid(
+                "incident wavelengths must match the compiled optical field",
+            ));
+        }
+        let coefficients = field.initial_state(thermal, &mut checkpoint)?;
         transport_checkpoint(&mut checkpoint, |check| {
-            model.field(&coefficients, check).map(|_| ())
+            field.field(&coefficients, check).map(|_| ())
         })?;
+        Self::assembled(
+            field,
+            coefficients,
+            beam,
+            thermal,
+            budget,
+            config,
+            tolerance,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assembled(
+        field: Arc<TemperatureOpticalField<'g, N>>,
+        coefficients: TemperatureOpticalState<N>,
+        beam: IncidentScatteringBeam<N>,
+        thermal: &DepositionSimulation<'_>,
+        budget: ScatteringFeedbackBudget,
+        config: ScatteringDepositionConfig,
+        tolerance: ScatteringHeatingTolerance,
+    ) -> Result<Self, OpticalFeedbackError> {
         let sums = EnergySums::default();
         let energy = sums.value()?;
         Ok(Self {
-            model,
+            model: Arc::new(FeedbackModel {
+                field,
+                beam,
+                config,
+                tolerance,
+            }),
             coefficients,
             current: None,
             budget,
@@ -475,6 +280,10 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
                 maximum_unresolved_standard_error_w: [0.0; N],
             },
         })
+    }
+
+    pub fn optical_field(&self) -> &Arc<TemperatureOpticalField<'g, N>> {
+        &self.model.field
     }
 
     pub fn time_s(&self) -> f64 {
@@ -509,7 +318,7 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
     /// Conservative over all admitted temperatures; an initially transparent
     /// scattering law may become active later along the thermal trajectory.
     pub fn has_scattering(&self) -> bool {
-        self.model.has_scattering
+        self.model.field.has_scattering()
     }
 
     /// Start a future conditional replica from this accepted physical state.
@@ -578,71 +387,6 @@ impl<'g, const N: usize> TemperatureScatteringHeating<'g, N> {
     }
 }
 
-impl<const N: usize> FeedbackModel<'_, N> {
-    fn prepare(
-        &self,
-        thermal: &DepositionSimulation<'_>,
-        fields: &mut PreparedCoefficients<N>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(), OpticalFeedbackError> {
-        for (material, values) in self.materials.iter().zip(&mut fields.materials) {
-            checkpoint()?;
-            let temperature = thermal.temperature_k(material.thermal_cell)?;
-            values.0 = self.absorption[material.absorption_table]
-                .at(material.thermal_cell, temperature)?;
-            values.1 = self.scattering[material.scattering_table]
-                .at(material.thermal_cell, temperature)?;
-        }
-        for (index, slot) in self.cell_materials.iter().enumerate() {
-            if index % 256 == 0 {
-                checkpoint()?;
-            }
-            if let Some(slot) = slot {
-                (fields.absorption[index], fields.scattering[index]) = fields.materials[*slot];
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_temperatures(
-        &self,
-        thermal: &DepositionSimulation<'_>,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(), OpticalFeedbackError> {
-        for material in &self.materials {
-            checkpoint()?;
-            let t = thermal.temperature_k(material.thermal_cell)?;
-            self.absorption[material.absorption_table]
-                .check_temperature(material.thermal_cell, t)?;
-            self.scattering[material.scattering_table]
-                .check_temperature(material.thermal_cell, t)?;
-        }
-        Ok(())
-    }
-}
-
-impl<'g, const N: usize> FeedbackModel<'g, N> {
-    fn field<'s>(
-        &'s self,
-        values: &'s PreparedCoefficients<N>,
-        check: &mut dyn FnMut() -> Result<(), VolumeTransportError>,
-    ) -> Result<CellScatteringGrid<'s, 'g, N>, VolumeTransportError> {
-        CellScatteringGrid::try_new_with_checkpoint(
-            &mut || check(),
-            &self.geometry,
-            self.beam.wavelengths_nm,
-            &values.absorption,
-            &values.scattering,
-            CellPhaseFunction::Indexed {
-                palette: &self.phases,
-                cell_indices: &self.cell_phases,
-            },
-            self.bounds_nm,
-            self.identity,
-        )
-    }
-}
-
 impl<const N: usize> DepositionObserver for TemperatureScatteringHeating<'_, N> {
     type Error = OpticalFeedbackError;
 
@@ -665,10 +409,11 @@ impl<const N: usize> DepositionObserver for TemperatureScatteringHeating<'_, N> 
             return Err(OpticalFeedbackError::Budget);
         }
         self.model
+            .field
             .prepare(thermal, &mut self.coefficients, checkpoint)?;
         let config = self.step_config();
         let report = transport_checkpoint(checkpoint, |check| {
-            let field = self.model.field(&self.coefficients, check)?;
+            let field = self.model.field.field(&self.coefficients, check)?;
             field.deposit_multiple_scattering_power_with_checkpoint(
                 &mut || check(),
                 self.model.beam.origin,
@@ -690,14 +435,12 @@ impl<const N: usize> DepositionObserver for TemperatureScatteringHeating<'_, N> 
             .map_err(|_| OpticalFeedbackError::Budget)?;
         for cell in &report.cells {
             checkpoint()?;
-            let material = self
+            let receiver = self
                 .model
-                .cell_materials
-                .get(cell.cell_index)
-                .copied()
-                .flatten()
+                .field
+                .receiver(cell.cell_index)
                 .ok_or(OpticalHeatingError::UnmappedCell(cell.cell_index))?;
-            bindings.push((cell.cell_index, self.model.materials[material].thermal_cell));
+            bindings.push((cell.cell_index, receiver));
         }
         // Preserve one owner for conservation, uncertainty and many-to-one
         // thermal admission; no second report-validation policy is introduced.
@@ -719,7 +462,9 @@ impl<const N: usize> DepositionObserver for TemperatureScatteringHeating<'_, N> 
         self.check_clock(thermal)?;
         // The native owner brackets every event with its cancellation callback.
         // Endpoint events still validate material support with no next step.
-        self.model.validate_temperatures(thermal, &mut || Ok(()))
+        self.model
+            .field
+            .validate_temperatures(thermal, &mut || Ok(()))
     }
 
     fn step(
@@ -739,7 +484,9 @@ impl<const N: usize> DepositionObserver for TemperatureScatteringHeating<'_, N> 
                 "matching accepted interval required for temperature-dependent scattered heat",
             ));
         }
-        self.model.validate_temperatures(thermal, checkpoint)?;
+        self.model
+            .field
+            .validate_temperatures(thermal, checkpoint)?;
         let current = self
             .current
             .as_mut()
@@ -826,33 +573,59 @@ impl<const N: usize> EnergySums<N> {
     }
 }
 
-fn allocate<T: Clone>(count: usize, value: T) -> Result<Vec<T>, OpticalFeedbackError> {
-    let mut result = Vec::new();
-    result
-        .try_reserve_exact(count)
-        .map_err(|_| OpticalFeedbackError::Budget)?;
-    result.resize(count, value);
-    Ok(result)
+fn field_budget(budget: ScatteringFeedbackBudget) -> TemperatureOpticalFieldBudget {
+    TemperatureOpticalFieldBudget {
+        max_grid_cells: budget.max_grid_cells,
+        max_tables: budget.max_tables,
+        max_total_temperature_knots: budget.max_total_temperature_knots,
+    }
 }
 
-fn transport_checkpoint<T>(
-    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    operation: impl FnOnce(
-        &mut dyn FnMut() -> Result<(), VolumeTransportError>,
-    ) -> Result<T, VolumeTransportError>,
-) -> Result<T, OpticalFeedbackError> {
-    let mut refusal = None;
-    let result = operation(&mut || match checkpoint() {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            refusal = Some(error);
-            Err(VolumeTransportError::Cancelled)
-        }
-    });
-    if let Some(error) = refusal {
-        return Err(error.into());
+fn validate_source<const N: usize>(
+    beam: &IncidentScatteringBeam<N>,
+    thermal: &DepositionSimulation<'_>,
+    budget: ScatteringFeedbackBudget,
+    config: ScatteringDepositionConfig,
+    tolerance: ScatteringHeatingTolerance,
+) -> Result<(), OpticalFeedbackError> {
+    if N == 0
+        || budget.max_source_evaluations == 0
+        || budget.max_traced_segments == 0
+        || config.histories_per_lane < 2
+        || config.max_collisions_per_history == 0
+        || config.max_total_segments == 0
+    {
+        return Err(OpticalFeedbackError::Budget);
     }
-    result.map_err(Into::into)
+    if thermal.cells().is_empty()
+        || !beam.incident_power_w.iter().copied().all(nonnegative)
+        || ![
+            tolerance.power_roundoff_w,
+            tolerance.max_unresolved_w,
+            tolerance.max_total_standard_error_w,
+            tolerance.max_cell_standard_error_w,
+        ]
+        .into_iter()
+        .all(nonnegative)
+    {
+        return Err(invalid(
+            "active thermal cells and finite power/error allowances required",
+        ));
+    }
+    let components = [
+        beam.origin.x,
+        beam.origin.y,
+        beam.origin.z,
+        beam.unit_direction.x,
+        beam.unit_direction.y,
+        beam.unit_direction.z,
+    ];
+    if components.iter().any(|v| !v.is_finite())
+        || (beam.unit_direction.dot(beam.unit_direction) - 1.0).abs() > 2.0e-10
+    {
+        return Err(VolumeTransportError::Ray.into());
+    }
+    Ok(())
 }
 
 fn invalid(reason: &'static str) -> OpticalFeedbackError {

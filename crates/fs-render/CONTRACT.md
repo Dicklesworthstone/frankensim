@@ -4042,6 +4042,33 @@ original continuation budget is restored. This is conditional time-convergence
 evidence; it neither resamples the operator nor certifies spatial, spectral,
 constitutive or Monte Carlo trajectory errors. Independent-operator ensembles
 would be required to assess sampling variability of the thermal trajectory.
+### Shared temperature-dependent optical material fields
+
+`volumes::heating::temperature_field::TemperatureOpticalField<N>` is the shared
+constitutive owner for local absorption and scattering versus native thermal
+temperature. It compiles the original source spectra at the supplied wavelength
+packet once and reuses `feedback::CompiledTable` for interpolation in kelvin.
+The neutral field contains geometry, density, source identities, phases and
+thermal/material bindings; it requires no incident beam, thermal bath or
+invented optical data. Declared spectral and temperature support never expands.
+
+Preparations read each distinct native thermal temperature once, then evaluate
+each distinct receiver/table pair once. Candidate-local coefficient packets are
+updated only when their actual coefficient bits change. A temperature change
+on a flat constitutive table therefore preserves the optical packet. Every
+positive-density cell retains its domain binding, including transparent cells
+and pure scatterers. A packet from another field is refused before transport.
+The original cell transport owner remains responsible for coefficient, phase
+and constituent-source/Kirchhoff admission.
+
+`TemperatureScatteringHeating::from_field` accepts an `Arc` of this field so
+incident heating and volume emission can share the same compiled source laws.
+Existing `try_new` callers retain their original source identity serialization,
+photon streams, physical rates and energy accounts. `TemperatureScatteringTable`
+and `ThermalScatteringCell` remain available at their original public paths.
+The field owns neither a second temperature evolution nor a second caloric law;
+immutable inputs are shared and mutable candidate packets roll back with the
+native observer transaction.
 
 ### Coherent transparent coatings on dielectric ray boundaries
 
