@@ -261,6 +261,35 @@ numerical use, not measured component life or a validated population transfer.
 Eight focused tests in `tests/fatigue_strain_source.rs` exercise analytical count
 conversions, original receipts, source selection, context and fit-domain refusals.
 
+## Paired stress and mechanical-strain fatigue corrections
+
+`fatigue::strain_life::PairedStrainLifeMiner` evaluates named Morrow and
+Smith-Watson-Topper policies from simultaneous signed normal stress and total
+mechanical strain on one fixed plane. Morrow uses the actual signed mean stress;
+SWT uses the actual maximum tensile stress times strain amplitude. The original
+finite cycle interval remains binding, with each correction's amplitude support
+recomputed at those bounds. The same safeguarded log-life inverse handles all
+three strain-life policies. A scalar strain-only counter refuses corrected
+policies because it has no stress observation.
+
+The existing rainflow owner is generalized with a per-turning-point context:
+scalar paths have zero-sized context and paired paths retain the observed
+stress. There is one counting algorithm and one compensated Miner sum. Samples,
+blocks and finalization retain their transactional cancellation/refusal behavior.
+Stress and strain increments must have matching directions; stress changes at
+unchanged strain and nested reductions that would hide an unmatched stress
+extreme refuse. These are observed coincident-extrema checks, not proof of
+unsampled peaks, stabilized material behavior or general multiaxial validity.
+
+Morrow's compressive-mean credit is part of that explicitly selected empirical
+model. A nonpositive Morrow elastic fatigue coefficient refuses; it is not a
+static-strength failure criterion. Nonzero-strain SWT cycles without a tensile
+maximum also refuse rather than imply infinite fatigue life. Applying these
+constant-cycle equations to evolving cycles remains an empirical approximation;
+no hardening, relaxation, sequence, heat or constitutive degradation law is added.
+Seven focused analytical and history tests cover both equations, cycle/strain
+conventions, real stress pairing, nested histories, chunking and rollback.
+
 ## Purpose and layer
 
 ### Shared stress-life and total mechanical strain-life fatigue

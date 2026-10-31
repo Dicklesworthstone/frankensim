@@ -11,7 +11,7 @@
 //! inferred from yield strength, hardness or a plastic-hardening modulus. The
 //! declared finite life interval is strict: neither a low-amplitude endurance
 //! limit nor a short-life extrapolation is invented. `Uncorrected` explicitly
-//! omits mean-stress effects; mean STRAIN cannot supply a Morrow/SWT correction.
+//! omits mean-stress effects; Morrow/SWT require the paired stress/strain owner.
 //! This uniaxial/fixed-plane empirical Miner estimate is not a multiaxial
 //! criterion, stiffness loss, dissipated heat, rupture or service-life proof.
 
@@ -21,6 +21,10 @@ use std::sync::Arc;
 
 /// Source-backed CMB calibration with explicit full-cycle/reversal fit conventions.
 pub mod source;
+
+/// Paired stress/strain histories and named mean-stress corrections.
+mod mean_stress;
+pub use mean_stress::{PairedStrainLifeMiner, StrainStressSample};
 
 /// Coefficients of the total mechanical strain-amplitude relation. Both
 /// exponents are strictly negative. A zero coefficient admits the corresponding
@@ -171,30 +175,54 @@ impl StrainLifeCurve {
     /// A bracketed Newton solve in log-reversals uses at most 64 iterations and
     /// deterministic elementary functions. Bisection safeguards every step.
     pub fn cycles_to_failure(&self, amplitude: f64) -> Result<Option<f64>, FatigueError> {
+        self.invert_life(
+            amplitude,
+            self.minimum_amplitude,
+            self.maximum_amplitude,
+            |x| self.evaluate_log_reversals(x),
+        )
+    }
+
+    // Every correction shares this bounded inverse and the original cycle
+    // domain; only its amplitude relation and endpoint support change.
+    fn invert_life(
+        &self,
+        amplitude: f64,
+        minimum_amplitude: f64,
+        maximum_amplitude: f64,
+        evaluate: impl Fn(f64) -> (f64, f64),
+    ) -> Result<Option<f64>, FatigueError> {
         if !amplitude.is_finite() || amplitude < 0.0 {
             return Err(FatigueError::Arithmetic);
         }
         if amplitude == 0.0 {
             return Ok(None);
         }
-        if amplitude < self.minimum_amplitude || amplitude > self.maximum_amplitude {
+        if !minimum_amplitude.is_finite()
+            || minimum_amplitude <= 0.0
+            || !maximum_amplitude.is_finite()
+            || maximum_amplitude <= minimum_amplitude
+        {
+            return Err(FatigueError::Arithmetic);
+        }
+        if amplitude < minimum_amplitude || amplitude > maximum_amplitude {
             return Err(FatigueError::StrainAmplitudeOutsideCurve {
                 amplitude,
-                minimum: self.minimum_amplitude,
-                maximum: self.maximum_amplitude,
+                minimum: minimum_amplitude,
+                maximum: maximum_amplitude,
             });
         }
-        if amplitude == self.maximum_amplitude {
+        if amplitude == maximum_amplitude {
             return Ok(Some(self.minimum_cycles));
         }
-        if amplitude == self.minimum_amplitude {
+        if amplitude == minimum_amplitude {
             return Ok(Some(self.maximum_cycles));
         }
         let mut lo = self.log_minimum_reversals;
         let mut hi = self.log_maximum_reversals;
         let mut x = lo + 0.5 * (hi - lo);
         for _ in 0..64 {
-            let (value, derivative) = self.evaluate_log_reversals(x);
+            let (value, derivative) = evaluate(x);
             let residual = value - amplitude;
             if !value.is_finite() {
                 return Err(FatigueError::Arithmetic);
@@ -261,6 +289,12 @@ impl StrainLifeCurve {
 pub enum StrainLifeMeanStress {
     /// Explicitly neglect mean stress; applicability must be calibrated.
     Uncorrected,
+    /// Morrow modifies the elastic fatigue-strength term with the cycle's
+    /// actual signed mean stress. Compressive mean receives model credit.
+    Morrow,
+    /// Fixed-plane Smith-Watson-Topper uses actual maximum tensile stress
+    /// times total mechanical strain amplitude. This is not a plane search.
+    SmithWatsonTopper,
 }
 
 /// Accounted cycles and dimensionless Miner damage. Open endpoint half cycles
@@ -292,6 +326,11 @@ impl StrainLifeMiner {
     ) -> Result<Self, FatigueError> {
         match mean_stress {
             StrainLifeMeanStress::Uncorrected => {}
+            StrainLifeMeanStress::Morrow | StrainLifeMeanStress::SmithWatsonTopper => {
+                return Err(FatigueError::InvalidCalibration(
+                    "mean-stress correction requires PairedStrainLifeMiner and actual stress/strain samples",
+                ));
+            }
         }
         Ok(Self {
             curve,
@@ -353,7 +392,7 @@ impl StrainLifeMiner {
 }
 
 impl CycleLife for StrainLifeCurve {
-    fn admit_sample(&self, value: f64, sample: u64) -> Result<(), FatigueError> {
+    fn admit_sample(&self, value: f64, _context: (), sample: u64) -> Result<(), FatigueError> {
         if value.is_finite() {
             Ok(())
         } else {
@@ -364,6 +403,7 @@ impl CycleLife for StrainLifeCurve {
         &self,
         amplitude: f64,
         _mean: f64,
+        _contexts: [(); 2],
     ) -> Result<(Option<f64>, f64), FatigueError> {
         Ok((self.cycles_to_failure(amplitude)?, amplitude))
     }

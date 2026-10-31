@@ -91,6 +91,10 @@ pub enum FatigueError {
     AmplitudeOutsideCurve { amplitude_pa: f64, minimum_pa: f64, maximum_pa: f64 },
     StrainAmplitudeOutsideCurve { amplitude: f64, minimum: f64, maximum: f64 },
     LifeOutsideCurve { cycles: f64, minimum: f64, maximum: f64 },
+    InvalidStressExtrema { minimum_pa: f64, maximum_pa: f64 },
+    MeanStressOutsideStrainLife { mean_pa: f64, fatigue_strength_coefficient_pa: f64 },
+    NoTensileStress { maximum_pa: f64 },
+    UnsupportedPairedHistory { sample: u64, what: &'static str },
     StaticStrengthExceeded { peak_pa: f64, ultimate_strength_pa: f64 },
     Arithmetic,
     Allocation,
@@ -221,7 +225,7 @@ pub struct FatigueSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct TurningPoint { value: f64 }
+struct TurningPoint<A = ()> { value: f64, context: A }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct Tally {
@@ -289,10 +293,17 @@ impl RainflowMiner {
 // Scalar counting is independent of the calibrated life law. The private
 // statically dispatched boundary prevents stress and dimensionless strain from
 // acquiring one another's units or mean-correction policy.
-trait CycleLife {
-    fn admit_sample(&self, value: f64, sample: u64) -> Result<(), FatigueError>;
+trait CycleLife<A: Copy = ()> {
+    fn admit_sample(&self, value: f64, context: A, sample: u64) -> Result<(), FatigueError>;
+    fn admit_transition(&self, _previous: TurningPoint<A>, _next: TurningPoint<A>, _sample: u64) -> Result<(), FatigueError> {
+        Ok(())
+    }
+    fn admit_reduction(&self, _outer_start: Option<TurningPoint<A>>, _a: TurningPoint<A>,
+        _b: TurningPoint<A>, _end: TurningPoint<A>, _sample: u64) -> Result<(), FatigueError> {
+        Ok(())
+    }
     /// Life in full cycles and the amplitude retained in this law's own units.
-    fn evaluate_cycle(&self, amplitude: f64, mean: f64) -> Result<(Option<f64>, f64), FatigueError>;
+    fn evaluate_cycle(&self, amplitude: f64, mean: f64, contexts: [A; 2]) -> Result<(Option<f64>, f64), FatigueError>;
 }
 
 struct StressLife<'a> {
@@ -300,14 +311,14 @@ struct StressLife<'a> {
     correction: MeanStressCorrection,
 }
 impl CycleLife for StressLife<'_> {
-    fn admit_sample(&self, value: f64, sample: u64) -> Result<(), FatigueError> {
+    fn admit_sample(&self, value: f64, _context: (), sample: u64) -> Result<(), FatigueError> {
         if !value.is_finite() { return Err(FatigueError::InvalidStress { sample }); }
         // Constant or unfinished monotone histories need not close any cycle.
         // Their instantaneous tensile peaks must still pass the strength law.
         self.correction.corrected_amplitude(0.0, value)?;
         Ok(())
     }
-    fn evaluate_cycle(&self, amplitude: f64, mean: f64) -> Result<(Option<f64>, f64), FatigueError> {
+    fn evaluate_cycle(&self, amplitude: f64, mean: f64, _contexts: [(); 2]) -> Result<(Option<f64>, f64), FatigueError> {
         let corrected = self.correction.corrected_amplitude(amplitude, mean)?;
         Ok((self.curve.cycles_to_failure(corrected)?, corrected))
     }
@@ -315,10 +326,10 @@ impl CycleLife for StressLife<'_> {
 
 /// One bounded rainflow/history owner for all scalar life laws.
 #[derive(Debug, Clone, PartialEq)]
-struct RainflowHistory {
+struct RainflowHistory<A = ()> {
     limits: RainflowLimits,
-    residue: Vec<TurningPoint>,
-    pending: Option<TurningPoint>,
+    residue: Vec<TurningPoint<A>>,
+    pending: Option<TurningPoint<A>>,
     direction: i8,
     samples: u64,
     tally: Tally,
@@ -326,22 +337,32 @@ struct RainflowHistory {
 }
 
 impl RainflowHistory {
+    fn push(&mut self, value: f64, law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+        self.push_point(TurningPoint { value, context: () }, law, cancelled)
+    }
+
+    fn push_block(&mut self, values: &[f64], law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+        self.push_points(values.iter().map(|&value| TurningPoint { value, context: () }), law, cancelled)
+    }
+}
+
+impl<A: Copy> RainflowHistory<A> {
     fn new(limits: RainflowLimits) -> Result<Self, FatigueError> {
         if limits.maximum_samples == 0 || limits.maximum_residue < 2 { return Err(FatigueError::InvalidLimits); }
         Ok(Self { limits, residue: Vec::new(), pending: None,
             direction: 0, samples: 0, tally: Tally::default(), finished: false })
     }
 
-    fn push(&mut self, value: f64, law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+    fn push_point(&mut self, point: TurningPoint<A>, law: &impl CycleLife<A>, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
         if cancelled() { return Err(FatigueError::Cancelled); }
         if self.finished { return Err(FatigueError::AlreadyFinished); }
-        if value.is_finite() && self.samples >= self.limits.maximum_samples {
+        if point.value.is_finite() && self.samples >= self.limits.maximum_samples {
             return Err(FatigueError::SampleLimit { limit: self.limits.maximum_samples });
         }
-        law.admit_sample(value, self.samples)?;
-        let point = TurningPoint { value };
+        law.admit_sample(point.value, point.context, self.samples)?;
         let mut direction = self.direction;
         if let Some(previous) = self.pending {
+            law.admit_transition(previous, point, self.samples)?;
             if point.value != previous.value {
                 let next_direction = if point.value > previous.value { 1 } else { -1 };
                 if direction == 0 || direction != next_direction {
@@ -356,21 +377,21 @@ impl RainflowHistory {
         Ok(())
     }
 
-    fn push_block(&mut self, values: &[f64], law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+    fn push_points(&mut self, points: impl ExactSizeIterator<Item = TurningPoint<A>>, law: &impl CycleLife<A>, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
         if cancelled() { return Err(FatigueError::Cancelled); }
         if self.finished { return Err(FatigueError::AlreadyFinished); }
-        let count = u64::try_from(values.len()).map_err(|_| FatigueError::Arithmetic)?;
+        let count = u64::try_from(points.len()).map_err(|_| FatigueError::Arithmetic)?;
         if count > self.limits.maximum_samples - self.samples {
             return Err(FatigueError::SampleLimit { limit: self.limits.maximum_samples });
         }
         let mut candidate = self.clone();
-        for &value in values { candidate.push(value, law, cancelled)?; }
+        for point in points { candidate.push_point(point, law, cancelled)?; }
         if cancelled() { return Err(FatigueError::Cancelled); }
         *self = candidate;
         Ok(())
     }
 
-    fn finish(&mut self, law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+    fn finish(&mut self, law: &impl CycleLife<A>, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
         if cancelled() { return Err(FatigueError::Cancelled); }
         if self.finished { return Ok(()); }
         let mut candidate = self.clone();
@@ -389,11 +410,11 @@ impl RainflowHistory {
         Ok(())
     }
 
-    fn count_cycle(&self, mut tally: Tally, a: TurningPoint, b: TurningPoint, full: bool, law: &impl CycleLife) -> Result<Tally, FatigueError> {
+    fn count_cycle(&self, mut tally: Tally, a: TurningPoint<A>, b: TurningPoint<A>, full: bool, law: &impl CycleLife<A>) -> Result<Tally, FatigueError> {
         if a.value == b.value { return Ok(tally); }
         let amplitude = half_range(a.value, b.value)?;
         let mean = 0.5 * a.value + 0.5 * b.value;
-        let (life, counted_amplitude) = law.evaluate_cycle(amplitude, mean)?;
+        let (life, counted_amplitude) = law.evaluate_cycle(amplitude, mean, [a.context, b.context])?;
         let weight = if full { 1.0 } else { 0.5 };
         let damage = life.map_or(0.0, |life| weight / life);
         let corrected_term = damage - tally.compensation;
@@ -411,7 +432,7 @@ impl RainflowHistory {
     // Preview reductions and damage without mutating the accepted stack. A new
     // extreme can remove arbitrarily many nested pairs, but at most the explicit
     // residue limit. No clone/allocation proportional to trace length is needed.
-    fn append_reversal(&mut self, point: TurningPoint, law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+    fn append_reversal(&mut self, point: TurningPoint<A>, law: &impl CycleLife<A>, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
         let mut keep = self.residue.len();
         let mut start_half = None;
         let mut tally = self.tally;
@@ -420,6 +441,8 @@ impl RainflowHistory {
             let a = self.residue[keep - 2];
             let b = self.residue[keep - 1];
             if half_range(b.value, point.value)? < half_range(a.value, b.value)? { break; }
+            law.admit_reduction(if keep > 2 { Some(self.residue[keep - 3]) } else { None },
+                a, b, point, self.samples)?;
             tally = self.count_cycle(tally, a, b, keep > 2, law)?;
             if keep == 2 { start_half = Some(b); keep = 0; break; }
             keep -= 2;
