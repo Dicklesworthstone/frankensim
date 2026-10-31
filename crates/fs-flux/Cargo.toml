@@ -95,7 +95,9 @@ path = "examples/transient_osmotic_filtration.rs"
 required-features = ["continuum"]
 
 [[example]]
-name = "shock_box"
+name = "donnan_swelling"
+path = "examples/donnan_swelling.rs"
+required-features = ["continuum"]
 path = "examples/shock_box.rs"
 required-features = ["experimental-compressible"]
 

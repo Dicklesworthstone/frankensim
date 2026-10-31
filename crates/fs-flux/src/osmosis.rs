@@ -19,14 +19,17 @@
 //! reconstruct actual membrane-face concentrations without hidden inventories.
 //! Nonideal compartments use their shared free-energy pressure with fully
 //! retained solutes and bare membranes; leaky and film transport need matching
-//! chemical-potential laws. [`transient`] supplies separate finite-storage films.
-//! Neither owner supplies ionic electrochemistry, solvent inertia, a heat balance
-//! or mechanical inertia.
+//! chemical-potential laws. Separate owners provide finite-storage films in
+//! [`transient`] and ideal fast-ion water exchange in [`donnan`]. None supplies
+//! solvent inertia, a heat balance or mechanical inertia.
 //! Successful advances allocate no memory. All workspace is prepared up front;
 //! failed, cancelled or exhausted advances publish neither state nor time.
 
 /// Finite-storage concentration films coupled to membrane water transport.
 pub mod transient;
+
+/// Finite water exchange with conservative, fast-ion Donnan equilibrium.
+pub mod donnan;
 
 #[cfg(test)]
 mod nonideal_tests;

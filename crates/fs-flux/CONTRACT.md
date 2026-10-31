@@ -1862,3 +1862,39 @@ and solute against the steady-film comparison, then exposes startup film
 storage and face enrichment. Focused regressions cover analytical diffusion,
 multiple permeating species on unequal meshes, steady forward/reverse limits,
 time/space refinement, steep roots, inventory checks and atomic refusal.
+
+
+## Finite Donnan swelling and mechanical water exchange
+
+`osmosis::donnan::DonnanOsmoticPair` couples the shared finite-bath ideal ionic
+partition to finite water motion and the original compartment pressure/volume
+laws. Preparation canonicalizes mobile ions at the supplied volumes while
+retaining each species' total. Fixed charge and independent trapped osmotic
+particles remain explicit. Every water trial re-equilibrates the finite ions
+and uses FULL mobile-plus-trapped osmotic pressure exactly once, without ionic
+reflection factors or an infinite salt bath. Compartment solution getters hold
+mobile ions only; the Donnan report holds full osmotic pressure including traps.
+
+One step uses backward Euler. Analytical nonnegative ionic stiffness augments
+the mechanical elastance in a safeguarded Newton solve; the ideal equilibrated
+free energy makes the scalar residual monotone. Bounded bracketing handles
+volume applicability and stiff roots, and a narrow sign-changing bracket may
+control transfer-position error while retaining the actual balance residual.
+All mutable storage is prepared once. Every ion total, water, both fixed charges,
+mechanical boundary work and accepted clock remain explicit. Failure, exhausted
+inner/outer work or cancellation publishes neither inventories nor diagnostics.
+The ionic work diagnostic counts completed equilibria; refused trials remain
+bounded by the explicit outer and inner controls.
+
+This is the ideal fast-ion limit, not transient ionic permeability,
+Nernst--Planck transport, double-layer storage, imposed voltage/current or a
+nonideal electrolyte closure. Incompatible nonideal inventories are refused.
+Root tolerances do not control first-order temporal error. Mechanical work is
+an exact integral for the declared linear chamber laws, not a thermal closure.
+
+The `donnan_swelling` example follows finite charged-bath swelling against
+compliance, compares an independent monovalent algebraic equilibrium, and
+reports voltage, conserved inventories and ideal-plus-mechanical energy.
+Focused regressions cover linear and nonlinear analytical solutions,
+counterion-only limits, multivalent charge conservation, stiff hydraulics,
+orientation, energy decay, volume depletion, workspace limits and atomic retry.

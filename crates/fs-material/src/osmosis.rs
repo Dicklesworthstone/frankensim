@@ -31,10 +31,10 @@ use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 /// Exact steady diffusive films coupled to the original selective membrane.
 pub mod polarization;
 
-/// Thermodynamically consistent finite-domain solution interactions.
-pub mod nonideal;
 /// Shared finite aqueous inventories with their selected thermodynamics.
 pub mod aqueous;
+/// Thermodynamically consistent finite-domain solution interactions.
+pub mod nonideal;
 pub use aqueous::AqueousSolution;
 /// Finite-bath ideal ionic partition with fixed charge and explicit trapped particles.
 pub mod donnan;
