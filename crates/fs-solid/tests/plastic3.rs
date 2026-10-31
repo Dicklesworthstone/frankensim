@@ -173,7 +173,10 @@ fn uniaxial_hardening_path_and_unloading_match_closed_form() {
     for state in &solution.element_states {
         let J2State { alpha, .. } = state;
         // Newton's 1e-10 force gate bounds the committed state to ~1e-9.
-        assert!((alpha - plastic).abs() < 1e-8 * plastic, "alpha {alpha} vs {plastic}");
+        assert!(
+            (alpha - plastic).abs() < 1e-8 * plastic,
+            "alpha {alpha} vs {plastic}"
+        );
     }
     let corner = nodes
         .iter()
@@ -650,13 +653,21 @@ fn continuation_refusal_does_not_consume_the_accepted_history() {
 fn overstress_solution_publishes_one_physical_update_per_increment() {
     use fs_material::plastic::rate::LinearOverstressJ2;
 
-    let nodes = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let nodes = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
     let tets = [[0, 1, 2, 3]];
     let dt = 0.1;
     let viscosity = 100.0;
     let law = LinearOverstressJ2::new(j2(), viscosity, dt).unwrap();
     let strain = [0.006, 0.0, 0.0, 0.0, 0.0, 0.0];
-    let displacement: Vec<_> = nodes.iter().flat_map(|x| [strain[0] * x[0], 0.0, 0.0]).collect();
+    let displacement: Vec<_> = nodes
+        .iter()
+        .flat_map(|x| [strain[0] * x[0], 0.0, 0.0])
+        .collect();
     let prescribed: Vec<_> = displacement.iter().copied().enumerate().collect();
     let problem = SmallStrainTetProblem {
         prescribed_m: &prescribed,
@@ -675,17 +686,104 @@ fn overstress_solution_publishes_one_physical_update_per_increment() {
         let elastic_strain = std::array::from_fn(|i| strain[i] - next.plastic_strain[i]);
         let expected = law.backbone().elastic.stress(&elastic_strain, &());
         for (actual, expected) in result.element_stress[0].iter().zip(expected) {
-            assert!((actual - expected).abs() < 2e-12, "step {step}: {actual} != {expected}");
+            assert!(
+                (actual - expected).abs() < 2e-12,
+                "step {step}: {actual} != {expected}"
+            );
         }
         assert!((result.increments[0].reactions_n[3] - expected[0] / 6.0).abs() < 2e-12);
         // Scalar backward-Euler Perzyna equation, including further stress
         // relaxation at fixed displacement on the second and third intervals.
         let trial_q = 2.0 * shear * (strain[0] - 1.5 * old_plastic[0]);
-        let delta = (trial_q - SIGMA_Y - H * old_alpha).max(0.0)
-            / (3.0 * shear + H + viscosity / dt);
+        let delta =
+            (trial_q - SIGMA_Y - H * old_alpha).max(0.0) / (3.0 * shear + H + viscosity / dt);
         assert!((next.alpha - old_alpha - delta).abs() < 2e-15);
         assert!(delta > 0.0);
         state = next.clone();
         old_u = result.displacement_m.as_flattened().to_vec();
     }
+}
+
+#[test]
+fn fixed_stiff_region_and_rigid_travel_do_not_hide_plastic_disequilibrium() {
+    let nodes = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [2.0, 0.0, 0.0],
+        [3.0, 0.0, 0.0],
+        [2.0, 1.0, 0.0],
+        [2.0, 0.0, 1.0],
+    ];
+    let tets = [[0, 1, 2, 3], [4, 5, 6, 7]];
+    let laws = [
+        j2(),
+        J2Plasticity::new(IsotropicElastic::new(1e18, NU, 0.05).unwrap(), 1e16, 0.0).unwrap(),
+    ];
+    let force = 1.0;
+    let shear = E / (2.0 * (1.0 + NU));
+    let bulk = E / (3.0 * (1.0 - 2.0 * NU));
+    // Analytic constrained-lateral J2 response: sigma_xx = K eps_xx
+    // + (2/3) [sigma_y + H (2 mu eps_xx-sigma_y)/(3 mu+H)].
+    let expected = (6.0 * force - 2.0 * shear * SIGMA_Y / (3.0 * shear + H))
+        / (bulk + 4.0 * shear * H / (3.0 * (3.0 * shear + H)));
+    for shift in [0.0, 1e5] {
+        let mut old_u = vec![shift; 24];
+        // Region 2 is completely restrained and stressed; its support
+        // forces cannot set convergence tolerances for the loaded region 1.
+        old_u[15] += 0.001;
+        let prescribed: Vec<_> = old_u
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(d, _)| *d != 3)
+            .collect();
+        let problem = SmallStrainTetProblem {
+            nodes_m: &nodes,
+            tetrahedra: &tets,
+            laws: SmallStrainLawField::PerElement(&laws),
+            prescribed_m: &prescribed,
+            nodal_forces_n: &[(3, force)],
+            load_path: &[1.0],
+            budget: TetAssemblyBudget::standard(),
+            settings: IncrementSettings {
+                relative_tolerance: 1e-7,
+                ..IncrementSettings::default()
+            },
+        };
+        let initial = [laws[0].initial_state(), laws[1].initial_state()];
+        let result = with_cx(|cx| problem.solve_from(&old_u, &initial, cx)).unwrap();
+        assert!((result.element_strain[0][0] - expected).abs() < 1e-9);
+        assert!((result.element_stress[0][0] / 6.0 - force).abs() < 1e-7);
+        assert!(result.element_states[0].alpha > 0.0);
+        assert_eq!(result.element_states[1].alpha, 0.0);
+        assert_eq!(initial, [laws[0].initial_state(), laws[1].initial_state()]);
+    }
+}
+
+#[test]
+fn fully_prescribed_solid_refuses_nonfinite_constitutive_history() {
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let law = j2();
+    let prescribed: Vec<_> = (0..12).map(|d| (d, 0.0)).collect();
+    let problem = SmallStrainTetProblem {
+        prescribed_m: &prescribed,
+        ..problem_for(&nodes, &tets, &law)
+    };
+    let invalid = J2State {
+        plastic_strain: [f64::NAN; 6],
+        alpha: 0.0,
+    };
+    with_cx(|cx| {
+        assert!(matches!(
+            problem.solve_from(&[0.0; 12], &[invalid.clone()], cx),
+            Err(fs_solid::SmallStrainTetError::InvalidInput { .. })
+        ));
+        assert!(matches!(
+            problem.internal_force(&[0.0; 12], &[invalid], cx),
+            Err(fs_solid::SmallStrainTetError::InvalidInput { .. })
+        ));
+    });
 }

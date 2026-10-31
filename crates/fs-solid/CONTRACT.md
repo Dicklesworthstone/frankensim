@@ -1424,12 +1424,20 @@ elasticity). Tensor-component Voigt strain `eps = B u`, internal force
 `sum V B^T W sigma`, tangent `sum V B^T W C_alg B` with `W = diag(1,1,1,2,2,2)`.
 Each load factor (which may decrease or reverse) is one Newton solve from
 the last converged state, prescribed increments through the consistent
-linearization, residual-increase halving, the same scale-aware gate and
-linear-solve policy as `hyper3`; element states are updated by the law and
+linearization, residual-increase halving, and the same linear-solve policy
+as `hyper3`. The static force gate uses element stress-force bounds on free
+rows and actual free external loads, retaining the largest accepted scale
+through each unloading increment. Fully fixed regions and rigid travel do
+not weaken another region's equilibrium tolerance. Constitutive nonfinite
+stress, force or tangent refuses before publishing state. Element states are updated by the law and
 committed only after convergence. The solution carries displacements,
 element strain/stress/states, and per-increment reactions, residual
 histories, and counts of evolving elements. `internal_force` and
 `tangent_matrix` take explicit committed states for verification.
+The convergence check precedes tangent assembly. The element tangent kernel
+precomputes its twelve constitutive strain-column contractions once on the
+stack and reuses them for all test columns; no changed convergence order,
+speedup factor or mesh-accuracy claim is inferred from this operation reduction.
 
 `SmallStrainLawField::Uniform(&law)` and
 `SmallStrainLawField::PerElement(&laws)` use this same numerical owner.

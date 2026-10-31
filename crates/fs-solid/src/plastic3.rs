@@ -27,9 +27,11 @@
 //! one Newton solve from the previous converged state with the prescribed
 //! increment taken through the consistent linearization `K_ff d = -r_f -
 //! K_fp dp`; a step that increases the residual is halved. The gate is
-//! `||r_f|| <= relative_tolerance * max(||f_int||, ||f_ext||,
-//! max|K_dd| max|u|)`. After convergence each element state is updated by
-//! the law (`update_state`) and committed.
+//! `||r_f|| <= relative_tolerance * force_scale`. The scale bounds actual
+//! element stress forces on free rows, with the external free-force norm and
+//! the largest accepted scale in this increment retained through unloading.
+//! Reactions on unrelated fixed bodies and rigid translations do not weaken
+//! the gate. After convergence each element history is committed.
 //!
 //! # No-claim boundaries
 //!
@@ -379,10 +381,12 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
 
     fn strain(element: &Element, u: &[f64]) -> Voigt {
         let mut eps = [0.0; 6];
-        for (a, &node) in element.nodes.iter().enumerate() {
+        // grad(N_0) = -sum_{a>0} grad(N_a): subtract translation before
+        // contraction rather than cancelling large absolute displacements.
+        for (a, &node) in element.nodes.iter().enumerate().skip(1) {
             for i in 0..3 {
                 let col = b_column(element.gradients[a], i);
-                let ui = u[3 * node + i];
+                let ui = u[3 * node + i] - u[3 * element.nodes[0] + i];
                 for (e, c) in eps.iter_mut().zip(col) {
                     *e = c.mul_add(ui, *e);
                 }
@@ -396,17 +400,30 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         elements: &[Element],
         states: &[L::State],
         u: &[f64],
+        prescribed: Option<&[bool]>,
         cx: &Cx<'_>,
-    ) -> Result<Vec<f64>, SmallStrainTetError> {
+    ) -> Result<(Vec<f64>, f64), SmallStrainTetError> {
         let mut f = vec![0.0f64; u.len()];
+        let mut force_bounds = prescribed.map(|_| vec![0.0; u.len()]);
         for (index, element) in elements.iter().enumerate() {
             if index % 4096 == 0 {
                 checkpoint(cx)?;
             }
-            let sigma = self
-                .laws
-                .at(index)
-                .stress(&Self::strain(element, u), &states[index]);
+            let strain = Self::strain(element, u);
+            let sigma = self.laws.at(index).stress(&strain, &states[index]);
+            if strain.iter().chain(&sigma).any(|v| !v.is_finite()) {
+                return Err(SmallStrainTetError::InvalidInput {
+                    what: format!("element {index} has non-finite strain or constitutive stress"),
+                });
+            }
+            let stress_norm = if prescribed.is_some() {
+                sigma.iter().enumerate().fold(0.0_f64, |n, (v, s)| {
+                    let n = n.hypot(*s);
+                    if v >= 3 { n.hypot(*s) } else { n }
+                })
+            } else {
+                0.0
+            };
             for (a, &node) in element.nodes.iter().enumerate() {
                 for i in 0..3 {
                     let col = b_column(element.gradients[a], i);
@@ -415,10 +432,28 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                         s = (col[v] * WEIGHT[v]).mul_add(sigma[v], s);
                     }
                     f[3 * node + i] = element.volume.mul_add(s, f[3 * node + i]);
+                    if let (Some(prescribed), Some(bounds)) = (prescribed, &mut force_bounds)
+                        && !prescribed[3 * node + i]
+                    {
+                        // Cauchy-Schwarz for B_column : sigma in the tensor
+                        // metric. It remains nonzero at a traction-free row
+                        // when individual stress components cancel there.
+                        let b_norm =
+                            fs_math::det::sqrt((0..6).map(|v| WEIGHT[v] * col[v] * col[v]).sum());
+                        bounds[3 * node + i] += element.volume * b_norm * stress_norm;
+                    }
                 }
             }
         }
-        Ok(f)
+        let scale = force_bounds.as_ref().map_or(0.0, |bounds| {
+            bounds.iter().fold(0.0_f64, |n, v| n.hypot(*v))
+        });
+        if !scale.is_finite() || f.iter().any(|v| !v.is_finite()) {
+            return Err(SmallStrainTetError::InvalidInput {
+                what: "non-finite assembled constitutive force or force scale".into(),
+            });
+        }
+        Ok((f, scale))
     }
 
     fn tangent(
@@ -438,19 +473,24 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                 .laws
                 .at(index)
                 .tangent(&Self::strain(element, u), &states[index]);
-            let cols: Vec<Voigt> = (0..12)
-                .map(|k| b_column(element.gradients[k / 3], k % 3))
-                .collect();
+            if c.iter().flatten().any(|v| !v.is_finite()) {
+                return Err(SmallStrainTetError::InvalidInput {
+                    what: format!("element {index} has a non-finite constitutive tangent"),
+                });
+            }
+            let cols: [Voigt; 12] =
+                std::array::from_fn(|k| b_column(element.gradients[k / 3], k % 3));
+            // C B_q is shared by all twelve test columns. Keep both small
+            // arrays on the stack instead of allocating once per element.
+            let cb: [Voigt; 12] = cols.map(|bq| {
+                std::array::from_fn(|v| (0..6).fold(0.0, |sum, w| c[v][w].mul_add(bq[w], sum)))
+            });
             for (p, bp) in cols.iter().enumerate() {
                 let row = 3 * element.nodes[p / 3] + p % 3;
-                for (q, bq) in cols.iter().enumerate() {
+                for (q, cbq) in cb.iter().enumerate() {
                     let mut s = 0.0;
                     for v in 0..6 {
-                        let mut cb = 0.0;
-                        for w in 0..6 {
-                            cb = c[v][w].mul_add(bq[w], cb);
-                        }
-                        s = (bp[v] * WEIGHT[v]).mul_add(cb, s);
+                        s = (bp[v] * WEIGHT[v]).mul_add(cbq[v], s);
                     }
                     coo.push(row, 3 * element.nodes[q / 3] + q % 3, element.volume * s);
                 }
@@ -459,7 +499,13 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         if let Some(inertia) = inertia {
             inertia.add_tangent(&mut coo, cx)?;
         }
-        Ok(coo.assemble())
+        let matrix = coo.assemble();
+        if (0..matrix.nrows()).any(|row| matrix.row(row).1.iter().any(|v| !v.is_finite())) {
+            return Err(SmallStrainTetError::InvalidInput {
+                what: "non-finite assembled constitutive tangent".into(),
+            });
+        }
+        Ok(matrix)
     }
 
     /// Internal force at `displacement_m` (all DOFs) with the given committed
@@ -475,7 +521,8 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
     ) -> Result<Vec<f64>, SmallStrainTetError> {
         let elements = self.validate()?;
         self.check(displacement_m, states)?;
-        self.internal(&elements, states, displacement_m, cx)
+        self.internal(&elements, states, displacement_m, None, cx)
+            .map(|(force, _)| force)
     }
 
     /// Algorithmic tangent at `displacement_m` with the given committed
@@ -515,10 +562,11 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         for element in &elements {
             checkpoint(cx)?;
             let mut gradient = [[0.0; 3]; 3];
-            for (a, &node) in element.nodes.iter().enumerate() {
+            for (a, &node) in element.nodes.iter().enumerate().skip(1) {
                 for i in 0..3 {
                     for j in 0..3 {
-                        gradient[i][j] = displacement_m[3 * node + i]
+                        gradient[i][j] = (displacement_m[3 * node + i]
+                            - displacement_m[3 * element.nodes[0] + i])
                             .mul_add(element.gradients[a][j], gradient[i][j]);
                     }
                 }
@@ -612,17 +660,38 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                 .iter()
                 .map(|&(dof, value)| (dof, load * value))
                 .collect();
+            if f_ext
+                .iter()
+                .chain(target.iter().map(|(_, v)| v))
+                .any(|v| !v.is_finite())
+            {
+                return Err(SmallStrainTetError::InvalidInput {
+                    what: "load factor produces non-finite forces or prescribed displacements"
+                        .into(),
+                });
+            }
+            let scale_rows = if inertia.is_none() {
+                Some(is_prescribed.as_slice())
+            } else {
+                None
+            };
+            let external_free_norm = free.iter().fold(0.0_f64, |n, &d| n.hypot(f_ext[d]));
             let mut history = Vec::new();
             let mut fallbacks = 0usize;
             let mut converged = false;
-            let mut f_int = self.internal(&elements, &states, &u, cx)?;
+            let (mut f_int, initial_scale) =
+                self.internal(&elements, &states, &u, scale_rows, cx)?;
+            let mut static_force_scale = initial_scale.max(external_free_norm);
             let mut elastic_free_norm = if inertia.is_some() {
                 free.iter().fold(0.0_f64, |n, &d| n.hypot(f_int[d]))
-            } else { 0.0 };
-            if let Some(inertia) = inertia { inertia.add_force(&u, &mut f_int, cx)?; }
+            } else {
+                0.0
+            };
+            if let Some(inertia) = inertia {
+                inertia.add_force(&u, &mut f_int, cx)?;
+            }
             for _ in 0..self.settings.max_newton_iterations {
                 checkpoint(cx)?;
-                let full = self.tangent(&elements, &states, &u, inertia, cx)?;
                 let residual: Vec<f64> = free.iter().map(|&d| f_int[d] - f_ext[d]).collect();
                 let pending: Vec<(usize, f64)> = target
                     .iter()
@@ -630,14 +699,9 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                     .collect();
                 let pending_any = pending.iter().any(|&(_, dp)| dp != 0.0);
                 let scale = if let Some(inertia) = inertia {
-                    let external_free_norm = free.iter()
-                        .fold(0.0_f64, |n, &d| n.hypot(f_ext[d]));
                     inertia.force_scale(&u, &free, elastic_free_norm, external_free_norm, cx)?
                 } else {
-                    let stiffness = (0..dofs).map(|d| full.get(d, d).abs()).fold(0.0, f64::max);
-                    let reach = u.iter().map(|v| v.abs()).fold(0.0, f64::max);
-                    norm(&f_int).max(norm(&f_ext)).max(stiffness * reach)
-                        .max(f64::MIN_POSITIVE)
+                    static_force_scale.max(f64::MIN_POSITIVE)
                 };
                 let relative = norm(&residual) / scale;
                 history.push(relative);
@@ -645,6 +709,9 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                     converged = true;
                     break;
                 }
+                // A converged iterate needs no new constitutive tangent or
+                // global sparse assembly, including a fully prescribed body.
+                let full = self.tangent(&elements, &states, &u, inertia, cx)?;
                 let mut dp_full = vec![0.0f64; dofs];
                 for &(dof, dp) in &pending {
                     dp_full[dof] = dp;
@@ -674,24 +741,32 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                     for &(dof, dp) in &pending {
                         trial[dof] = alpha.mul_add(dp, trial[dof]);
                     }
-                    let mut f_trial = self.internal(&elements, &states, &trial, cx)?;
+                    let (mut f_trial, trial_scale) =
+                        self.internal(&elements, &states, &trial, scale_rows, cx)?;
                     let trial_elastic_free_norm = if inertia.is_some() {
                         free.iter().fold(0.0_f64, |n, &d| n.hypot(f_trial[d]))
-                    } else { 0.0 };
-                    if let Some(inertia) = inertia { inertia.add_force(&trial, &mut f_trial, cx)?; }
+                    } else {
+                        0.0
+                    };
+                    if let Some(inertia) = inertia {
+                        inertia.add_force(&trial, &mut f_trial, cx)?;
+                    }
                     let after: Vec<f64> = free.iter().map(|&d| f_trial[d] - f_ext[d]).collect();
                     if pending_any || norm(&after) < before || alpha < 1e-3 {
-                        accepted = Some((trial, f_trial, trial_elastic_free_norm));
+                        accepted = Some((trial, f_trial, trial_elastic_free_norm, trial_scale));
                         break;
                     }
                     alpha *= 0.5;
                 }
-                let Some((trial, f_trial, trial_elastic_free_norm)) = accepted else {
+                let Some((trial, f_trial, trial_elastic_free_norm, trial_scale)) = accepted else {
                     return Err(SmallStrainTetError::NewtonStalled { increment, history });
                 };
                 u = trial;
                 f_int = f_trial;
                 elastic_free_norm = trial_elastic_free_norm;
+                // Freeze the largest accepted physical force scale through
+                // unloading; rejected proposals cannot loosen the force gate.
+                static_force_scale = static_force_scale.max(trial_scale);
             }
             if !converged {
                 return Err(SmallStrainTetError::NewtonStalled { increment, history });
