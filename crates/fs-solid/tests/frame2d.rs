@@ -578,3 +578,179 @@ fn frame_sustained_load_admission_preserves_the_committed_state() {
         assert_eq!(frame.displacements(), initial);
     }
 }
+
+fn nonlinear_damping_frame() -> Frame2d {
+    let mut frame = Frame2d::new(Geometry::Corotational);
+    let base = frame.add_node(0.0, 0.0);
+    let tip = frame.add_node(1.0, 0.0);
+    frame.fix(base, [true; 3]);
+    frame.fix(tip, [true, false, true]);
+    frame
+        .add_element(base, tip, 3, 0.0, &|| SectionModel::Elastic {
+            ea: 1e4,
+            ei: 1.0,
+        })
+        .unwrap();
+    frame.add_mass(tip, 1.0);
+    frame
+}
+
+#[test]
+fn frame_g3_split_nonlinear_record_retains_initial_rayleigh_damping() {
+    let mut whole = nonlinear_damping_frame();
+    let mut split = whole.clone();
+    let damping = Rayleigh { a0: 0.1, a1: 0.03 };
+    let dt = 0.002;
+    let ground: Vec<f64> = (0..=1000)
+        .map(|i| 0.4 * (3.4 * i as f64 * dt).sin())
+        .collect();
+    let expected = whole.newmark(&ground, dt, (0.0, 1.0), damping).unwrap();
+    let cut = 413;
+    let first = split
+        .newmark(&ground[..=cut], dt, (0.0, 1.0), damping)
+        .unwrap();
+    let mut changed_law = split.clone();
+    changed_law.reset_rayleigh_reference();
+    let second = split
+        .newmark(&ground[cut..], dt, (0.0, 1.0), damping)
+        .unwrap();
+    let refitted = changed_law
+        .newmark(&ground[cut..], dt, (0.0, 1.0), damping)
+        .unwrap();
+    let mut refit_difference = 0.0_f64;
+    for (i, u) in second.u.iter().enumerate() {
+        for (actual, full) in u.iter().zip(&expected.u[cut + i]) {
+            assert!((actual - full).abs() < 5e-9);
+        }
+        refit_difference = refit_difference.max((refitted.u[i][4] - u[4]).abs());
+    }
+    assert!(refit_difference > 1e-4, "the split must change the tangent");
+    let joined_loss = first.damping_energy.last().unwrap() + second.damping_energy.last().unwrap();
+    assert!((joined_loss - expected.damping_energy.last().unwrap()).abs() < 1e-9);
+    assert!(second.damping_energy.windows(2).all(|e| e[1] >= e[0]));
+}
+
+#[test]
+fn frame_g0_damping_admission_is_unconditional_and_preserves_state() {
+    let mut frame = nonlinear_damping_frame();
+    let valid = Rayleigh { a0: 0.1, a1: 0.03 };
+    frame
+        .newmark(&[0.0, 0.2, 0.4], 0.002, (0.0, 1.0), valid)
+        .unwrap();
+    let before = frame.displacements().to_vec();
+    let forces = frame.element_forces(0);
+    let mut baseline = frame.clone();
+    for (damping, ground, direction) in [
+        (Rayleigh { a0: -1.0, a1: 0.0 }, [0.0, 0.0], (0.0, 1.0)),
+        (Rayleigh { a0: 0.0, a1: -1.0 }, [0.0, 0.0], (0.0, 1.0)),
+        (
+            Rayleigh {
+                a0: f64::NAN,
+                a1: 0.0,
+            },
+            [0.0, 0.0],
+            (0.0, 1.0),
+        ),
+        (
+            Rayleigh {
+                a0: 0.0,
+                a1: f64::INFINITY,
+            },
+            [0.0, 0.0],
+            (0.0, 1.0),
+        ),
+        (
+            Rayleigh {
+                a0: 0.0,
+                a1: f64::MAX,
+            },
+            [0.0, 0.0],
+            (0.0, 1.0),
+        ),
+        (valid, [0.0, f64::NAN], (0.0, 1.0)),
+        (valid, [0.0, 0.0], (f64::INFINITY, 1.0)),
+    ] {
+        let error = frame
+            .newmark(&ground, 0.002, direction, damping)
+            .unwrap_err();
+        assert!(matches!(error, fs_solid::SolidError::InvalidInput { .. }));
+        assert_eq!(frame.displacements(), before);
+        assert_eq!(frame.element_forces(0), forces);
+    }
+    let continuation = [0.4, 0.3, 0.2, 0.1];
+    assert_eq!(
+        frame
+            .newmark(&continuation, 0.002, (0.0, 1.0), valid)
+            .unwrap(),
+        baseline
+            .newmark(&continuation, 0.002, (0.0, 1.0), valid)
+            .unwrap(),
+    );
+}
+
+#[test]
+fn frame_g0_initial_buckling_cannot_become_negative_damping() {
+    let mut frame = Frame2d::new(Geometry::Corotational);
+    let base = frame.add_node(0.0, 0.0);
+    let tip = frame.add_node(1.0, 0.0);
+    frame.fix(base, [true; 3]);
+    frame.fix(tip, [false, false, true]);
+    frame
+        .add_element(base, tip, 3, 0.0, &|| SectionModel::Elastic {
+            ea: 1e4,
+            ei: 1.0,
+        })
+        .unwrap();
+    frame.add_mass(tip, 1.0);
+    let mut compression = vec![0.0; frame.ndof()];
+    compression[3 * tip] = -20.0;
+    frame.static_load(&compression, 1).unwrap();
+    frame.fix(tip, [true, false, true]);
+    // At L=0.998, Kyy = 12/L^2 - 20/L < 0. A positive stiffness
+    // coefficient alone would manufacture negative damping after buckling.
+    let initial = frame.displacements().to_vec();
+    let error = frame
+        .newmark_with_load(
+            &[0.0, 0.0],
+            0.001,
+            (0.0, 1.0),
+            Rayleigh { a0: 0.0, a1: 0.1 },
+            &compression,
+        )
+        .unwrap_err();
+    assert!(matches!(error, fs_solid::SolidError::InvalidInput { .. }));
+    assert_eq!(frame.displacements(), initial);
+    // Instability itself is still represented. Zero loss, mass loss, and a
+    // combined C made nonnegative by mass loss remain valid models.
+    for damping in [
+        Rayleigh { a0: 0.0, a1: 0.0 },
+        Rayleigh { a0: 2.0, a1: 0.0 },
+        Rayleigh { a0: 2.0, a1: 0.1 },
+    ] {
+        let history = frame
+            .clone()
+            .newmark_with_load(&[0.0, 0.0], 0.001, (0.0, 1.0), damping, &compression)
+            .unwrap();
+        assert_eq!(history.damping_energy, vec![0.0, 0.0]);
+    }
+}
+
+#[test]
+fn frame_g3_added_member_invalidates_the_damping_reference() {
+    let mut changed = nonlinear_damping_frame();
+    let mut fresh = changed.clone();
+    let damping = Rayleigh { a0: 0.1, a1: 0.03 };
+    changed.newmark(&[0.0], 0.002, (0.0, 1.0), damping).unwrap();
+    for frame in [&mut changed, &mut fresh] {
+        frame
+            .add_element(0, 1, 3, 0.0, &|| SectionModel::Elastic { ea: 1e4, ei: 1.0 })
+            .unwrap();
+    }
+    let ground = [0.0, 0.1, 0.2, 0.3, 0.4];
+    assert_eq!(
+        changed
+            .newmark(&ground, 0.002, (0.0, 1.0), damping)
+            .unwrap(),
+        fresh.newmark(&ground, 0.002, (0.0, 1.0), damping).unwrap(),
+    );
+}

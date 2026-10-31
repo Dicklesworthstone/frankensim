@@ -1229,6 +1229,29 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   `newmark` continues to mean zero sustained load; a preload is never inferred
   from internal forces. The energy audit uses the change in kinetic energy
   from the supplied initial state, alongside incremental internal work.
+  The initial Rayleigh reference tangent is frozen at the first admitted
+  transient initialization (after any gravity/static preload) and retained
+  across record boundaries, clones and retries after a partially accepted
+  history. Static loading does not silently replace it. Adding a node or
+  member invalidates the reference; `reset_rayleigh_reference` explicitly
+  requests a new one without resetting mechanical or material state. Current
+  point masses still enter the mass-proportional term, and supports restrict
+  the same full reference operator. Explicit coefficients may change between
+  records; that is a caller-requested change of the damping model.
+  Every frame, including one without material viscosity, refuses nonfinite
+  forcing/directions and negative/nonfinite Rayleigh coefficients before state
+  mutation. For nonzero stiffness-proportional damping, the complete free-DOF
+  C (including mass and material loss) must have nonnegative work within a
+  floating-point sign-resolution check. Positive diagonal congruence scaling
+  followed by the existing Cholesky owner with a scratch-only
+  `64*eps*n_active` diagonal allowance admits semidefinite loss directions;
+  negative diagonals and nonzero rows with zero diagonal are refused.
+  The original C is never shifted, clipped or replaced in forces or work.
+  This numerical admission is not an interval passivity certificate and does
+  not suppress physical buckling in the stiffness/internal-force model.
+  The focused frame tests cover nonlinear whole/split-history agreement,
+  explicit reference changes, structural edits, negative-damping refusal,
+  mass-stabilized damping and retained zero-loss directions.
   The `static_load` and `newmark` Newton steps backtrack
   (step 1, ½, … down to 2⁻⁹) on the free residual norm, because fiber laws
   are non-smooth: Mander concrete has zero tangent at exactly zero strain, so

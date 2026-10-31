@@ -404,6 +404,7 @@ pub struct Frame2d {
     u: Vec<f64>,
     vel: Vec<f64>,
     acc: Vec<f64>,
+    rayleigh_reference_stiffness: Option<Vec<f64>>,
 }
 
 /// One static step record.
@@ -417,7 +418,9 @@ pub struct StaticStep {
     pub iterations: usize,
 }
 
-/// Rayleigh damping `C = a₀M + a₁K₀` (initial stiffness).
+/// Rayleigh damping `C = a₀M + a₁K₀`. The frame retains the tangent `K₀`
+/// from the first admitted transient initialization across subsequent records.
+/// This is an authored proportional model, not a material loss law.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rayleigh {
     /// Mass-proportional coefficient.
@@ -573,11 +576,13 @@ impl Frame2d {
             u: Vec::new(),
             vel: Vec::new(),
             acc: Vec::new(),
+            rayleigh_reference_stiffness: None,
         }
     }
 
     /// Add a node; returns its index.
     pub fn add_node(&mut self, x: f64, y: f64) -> usize {
+        self.reset_rayleigh_reference();
         self.nodes.push([x, y]);
         self.fixed.extend([false; 3]);
         self.nodal_mass.extend([0.0; 3]);
@@ -716,6 +721,7 @@ impl Frame2d {
             cos0: dx / l0,
             sin0: dy / l0,
         });
+        self.reset_rayleigh_reference();
         Ok(self.elements.len() - 1)
     }
 
@@ -1199,6 +1205,76 @@ impl Frame2d {
         (massive, massless)
     }
 
+    // A compressed/softening reference tangent can be indefinite even with
+    // nonnegative Rayleigh coefficients. Test the actual free-coordinate C,
+    // not K alone: mass damping may legitimately restore nonnegative work.
+    fn admit_damping_matrix(&self, matrix: &[f64]) -> Result<(), SolidError> {
+        let invalid = || SolidError::InvalidInput {
+            what: "frame damping has a negative or unresolved dissipative direction".into(),
+        };
+        let n = self.ndof();
+        let free: Vec<usize> = (0..n).filter(|&i| !self.fixed[i]).collect();
+        let mut active = Vec::with_capacity(free.len());
+        for &i in &free {
+            let diagonal = matrix[i * n + i];
+            if diagonal < 0.0 {
+                return Err(invalid());
+            }
+            if diagonal == 0.0 {
+                // A PSD matrix's zero diagonal implies an exactly zero row.
+                if free
+                    .iter()
+                    .any(|&j| matrix[i * n + j] != 0.0 || matrix[j * n + i] != 0.0)
+                {
+                    return Err(invalid());
+                }
+            } else {
+                active.push((i, diagonal.sqrt()));
+            }
+        }
+        let dimension = active.len();
+        if dimension == 0 {
+            return Ok(());
+        }
+        // Congruence scaling removes coordinate units and disparate diagonal
+        // magnitudes. The shift is ONLY an arithmetic sign-resolution allowance
+        // in this scratch factorization; physical forces and work use the
+        // original unshifted C. Semidefinite/rigid directions remain legal.
+        let tolerance = 64.0 * f64::EPSILON * dimension as f64;
+        let mut scaled = vec![0.0; dimension * dimension];
+        for (i, &(row, sr)) in active.iter().enumerate() {
+            scaled[i * dimension + i] = 1.0 + tolerance;
+            for (j, &(column, sc)) in active[..i].iter().enumerate() {
+                let lower = matrix[row * n + column] / sr / sc;
+                let upper = matrix[column * n + row] / sr / sc;
+                if !lower.is_finite()
+                    || !upper.is_finite()
+                    || (lower - upper).abs() > tolerance * lower.abs().max(upper.abs()).max(1.0)
+                {
+                    return Err(invalid());
+                }
+                let value = 0.5 * lower + 0.5 * upper;
+                scaled[i * dimension + j] = value;
+                scaled[j * dimension + i] = value;
+            }
+        }
+        fs_la::factor::cholesky(&scaled, dimension)
+            .map(|_| ())
+            .map_err(|_| invalid())
+    }
+
+    /// Explicitly choose a new reference tangent for the next admitted
+    /// transient initialization. This changes the authored stiffness-proportional
+    /// damping model; it does not reset displacement, velocity or material history.
+    ///
+    /// Ordinary continuation, cloning and static loading retain the original
+    /// reference. Adding a node or a member invalidates it automatically because
+    /// the structural operator changes. New point masses enter the current
+    /// mass-proportional term; added supports restrict the same full reference.
+    pub fn reset_rayleigh_reference(&mut self) {
+        self.rayleigh_reference_stiffness = None;
+    }
+
     /// Implicit Newmark-β (average acceleration, γ = ½, β = ¼) response to a
     /// uniform base acceleration record `ground` (sampled every `dt`) acting
     /// along the global direction `(dir_x, dir_y)`, with authored Rayleigh
@@ -1230,6 +1306,14 @@ impl Frame2d {
     /// Attached material viscosity enters the full physical damping matrix;
     /// it is never replaced by a fitted independent damping ratio per mode.
     /// Its source-band and linear-model admission occurs before state changes.
+    /// Stiffness-proportional damping is admitted on the actual free-coordinate
+    /// damping matrix, including mass and material loss. Negative directions
+    /// beyond a scaled floating-point tolerance are refused, never clipped.
+    /// The initial tangent used by Rayleigh damping is retained across calls,
+    /// including clones and retries after an accepted partial record. Splitting
+    /// a nonlinear record therefore does not change the damping operator.
+    /// Use [`Self::reset_rayleigh_reference`] to request a different reference;
+    /// subsequent changes in stiffness are otherwise confined to internal force.
     ///
     /// # Errors
     /// [`SolidError::InvalidInput`] for a wrong-length or non-finite sustained
@@ -1254,6 +1338,17 @@ impl Frame2d {
                 what: "sustained load must have one finite entry per DOF".into(),
             });
         }
+        if ground
+            .iter()
+            .chain([dir.0, dir.1, damping.a0, damping.a1].iter())
+            .any(|v| !v.is_finite())
+            || damping.a0 < 0.0
+            || damping.a1 < 0.0
+        {
+            return Err(SolidError::InvalidInput {
+                what: "frame requires finite forcing and nonnegative finite authored Rayleigh coefficients".into(),
+            });
+        }
         let (gamma, beta) = (0.5, 0.25);
         let m = self.reference_mass()?;
         let infl: Vec<f64> = (0..n)
@@ -1264,7 +1359,19 @@ impl Frame2d {
             })
             .collect();
         let mass_influence: Vec<f64> = (0..n).map(|d| m.row_action(d, &infl)).collect();
-        let (_, k0, _) = self.assemble(&self.u)?;
+        // Capture once, after any static preload. Reassembling this tangent
+        // on every call changes physical damping when a nonlinear record is
+        // split or resumed after a failed step.
+        let new_reference = if self.rayleigh_reference_stiffness.is_none() {
+            Some(self.assemble(&self.u)?.1)
+        } else {
+            None
+        };
+        let k0 = self
+            .rayleigh_reference_stiffness
+            .as_ref()
+            .or(new_reference.as_ref())
+            .expect("existing or newly assembled Rayleigh reference");
         let rayleigh_matrix: Vec<f64> = (0..n * n)
             .map(|idx| {
                 let (i, j) = (idx / n, idx % n);
@@ -1276,27 +1383,18 @@ impl Frame2d {
             operator.admit_timestep(dt)?;
         }
         let material_matrix = material_damping.as_ref().map(FrameMaterialDamping::entries);
-        if material_matrix.is_some()
-            && (ground
-                .iter()
-                .chain([dir.0, dir.1, damping.a0, damping.a1].iter())
-                .any(|v| !v.is_finite())
-                || damping.a0 < 0.0
-                || damping.a1 < 0.0)
-        {
-            return Err(SolidError::InvalidInput {
-                what: "material-damped frame requires finite forcing and nonnegative finite authored Rayleigh coefficients".into(),
-            });
-        }
         let cmat: Vec<f64> = rayleigh_matrix
             .iter()
             .enumerate()
             .map(|(i, value)| value + material_matrix.as_ref().map_or(0.0, |matrix| matrix[i]))
             .collect();
-        if material_matrix.is_some() && cmat.iter().any(|value| !value.is_finite()) {
+        if cmat.iter().any(|value| !value.is_finite()) {
             return Err(SolidError::InvalidInput {
                 what: "combined frame damping is unrepresentable".into(),
             });
+        }
+        if damping.a1 > 0.0 {
+            self.admit_damping_matrix(&cmat)?;
         }
         let cv = |v: &[f64]| -> Vec<f64> {
             (0..n)
@@ -1331,7 +1429,13 @@ impl Frame2d {
         let p0 = pext(ground.first().copied().unwrap_or(0.0));
         let c0 = cv(&self.vel);
         let initial_force: Vec<f64> = (0..n).map(|d| p0[d] - c0[d] - f0[d]).collect();
-        self.acc = m.acceleration(&initial_force, &self.fixed)?;
+        let initial_acceleration = m.acceleration(&initial_force, &self.fixed)?;
+        // Failed admission must not establish a reference for a future run.
+        // Once initialization succeeds, retain it even if a later step fails.
+        if let Some(stiffness) = new_reference {
+            self.rayleigh_reference_stiffness = Some(stiffness);
+        }
+        self.acc = initial_acceleration;
         hist.base_shear[0] = (0..n)
             .filter(|&d| self.fixed[d] && d % 3 == 0)
             .map(|d| p0[d] - m.row_action(d, &self.acc) - c0[d] - f0[d])
@@ -1457,5 +1561,43 @@ impl Frame2d {
             c_prev = cvel;
         }
         Ok(hist)
+    }
+}
+
+#[cfg(test)]
+mod damping_admission_tests {
+    use super::{Frame2d, Geometry};
+
+    #[test]
+    fn g0_semidefinite_damping_keeps_zero_modes_and_coordinate_scaling() {
+        let mut frame = Frame2d::new(Geometry::Linear);
+        frame.add_node(0.0, 0.0);
+        // Rank-one loss with an exactly undamped coordinate. Congruence
+        // rescales the active coordinates by 200 orders without changing sign.
+        for scale in [1.0_f64, 1e100] {
+            let c = [
+                4.0 / scale / scale,
+                2.0,
+                0.0,
+                2.0,
+                scale * scale,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ];
+            frame.admit_damping_matrix(&c).unwrap();
+            let mut indefinite = c;
+            indefinite[1] = 2.1;
+            indefinite[3] = 2.1;
+            assert!(frame.admit_damping_matrix(&indefinite).is_err());
+        }
+        frame.admit_damping_matrix(&[0.0; 9]).unwrap();
+        for bad in [
+            [-1e-250, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.1, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0, 0.0],
+        ] {
+            assert!(frame.admit_damping_matrix(&bad).is_err());
+        }
     }
 }
