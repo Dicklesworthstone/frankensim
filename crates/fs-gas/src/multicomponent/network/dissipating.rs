@@ -5,7 +5,7 @@
 use super::super::dissipation::{DissipationControl, DissipationError, TransportLaw};
 use super::super::wall_exchange::{WallControl, WallExchangeError};
 use super::super::{
-    Error as FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, StepControl, StepReport,
+    Cell, Error as FlowError, MAX_SPECIES, MixtureEuler1d, MixtureGas, StepControl, StepReport,
     allocated, positive, sum,
 };
 use super::coupled::{SourceError, checked_totals, duplicate, initial_duration, reset};
@@ -192,7 +192,30 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
         &mut self, maximum_duration: Time, controls: DissipatingStepControl,
         sources: NetworkSources<'_, '_>, cancelled: impl FnMut() -> bool,
     ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
-        self.step_impl(maximum_duration, controls, sources, cancelled)
+        self.step_impl(maximum_duration, controls, sources, None, cancelled)
+    }
+    /// Advance molecular/wave transport against prescribed mixture reservoirs.
+    pub fn step_with_reservoirs(
+        &mut self,
+        maximum_duration: Time,
+        controls: DissipatingStepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
+        self.step_with_reservoirs_and_sources(
+            maximum_duration, controls, reservoirs, NetworkSources::default(), cancelled,
+        )
+    }
+    /// Compose reservoirs with optional finite-wall and valve source halves.
+    pub fn step_with_reservoirs_and_sources(
+        &mut self,
+        maximum_duration: Time,
+        controls: DissipatingStepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        sources: NetworkSources<'_, '_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
+        self.step_impl(maximum_duration, controls, sources, Some(reservoirs), cancelled)
     }
     /// Existing wall/molecular API, using the common optional-source transaction.
     pub fn step_with_wall(

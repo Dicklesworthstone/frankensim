@@ -450,3 +450,53 @@ fn reacting_network_admission_checks_original_source_and_every_plenum_temperatur
         Err(ReactiveNetworkError::Cancelled)
     ));
 }
+
+
+#[test]
+fn pressure_reservoirs_drive_species_through_the_atomic_reacting_transaction() {
+    let mechanism = mechanism(0.0, 2.0, 0.0);
+    let mut flow = reacting(&mechanism, 4, false);
+    let supply = flow.gas().conserved(&[0.0, 2.0], 0.0, 2.0).unwrap();
+    let reservoirs = [[Some(supply.as_cell()), None], [None; 2]];
+    let before = flow.totals();
+    let report = flow
+        .step_with_reservoirs(
+            Time::new(0.002),
+            ReactiveStepControl::default(),
+            &reservoirs,
+            || false,
+        )
+        .unwrap();
+
+    assert_eq!(report.elapsed, report.transport.elapsed);
+    assert!(report.boundary_change.species_masses[1] > 0.0);
+    assert!(flow.branches()[0].cell(0).unwrap().partial_densities[1] > 0.0);
+    assert!(report.chemistry.cell_solves > 0);
+    for k in 0..2 {
+        close(report.conservation_residual.species_masses[k], 0.0, 5e-12);
+        close(
+            report.after.species_masses[k] - before.species_masses[k],
+            report.boundary_change.species_masses[k] + report.chemistry.species_change_kg[k],
+            5e-12,
+        );
+    }
+    close(report.mass_residual_kg, 0.0, 5e-12);
+    close(report.absolute_energy_residual_j, 0.0, 5e-11);
+
+    let mut moving = reacting(&mechanism, 4, false);
+    let before_volume = moving.plenums()[0].volume_m3();
+    let moved = moving
+        .step_with_reservoirs_and_volume_rates(
+            Time::new(0.002),
+            ReactiveStepControl::default(),
+            &reservoirs,
+            &[-0.01],
+            || false,
+        )
+        .unwrap();
+    assert!(moving.plenums()[0].volume_m3() < before_volume);
+    assert!(moved.boundary_work_on_gas_j > 0.0);
+    assert!(moved.boundary_change.species_masses[1] > 0.0);
+    close(moved.mass_residual_kg, 0.0, 6e-12);
+    close(moved.absolute_energy_residual_j, 0.0, 6e-11);
+}

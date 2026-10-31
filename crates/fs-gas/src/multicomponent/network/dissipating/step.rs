@@ -4,7 +4,9 @@ use super::*;
 impl<L: TransportLaw> DissipatingNetwork1d<L> {
     pub(super) fn step_impl(
         &mut self, maximum_duration: Time, controls: DissipatingStepControl,
-        mut sources: NetworkSources<'_, '_>, mut cancelled: impl FnMut() -> bool,
+        mut sources: NetworkSources<'_, '_>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<DissipatingNetworkReport, DissipatingNetworkError> {
         poll(&mut cancelled)?;
         if !positive(maximum_duration.value()) || controls.maximum_coupling_retries > 32
@@ -31,7 +33,12 @@ impl<L: TransportLaw> DissipatingNetwork1d<L> {
                     poll(&mut cancelled)?;
                     *destination = *source;
                 }
-                let transport = self.trial.step(Time::new(duration), controls.transport, &mut cancelled)?;
+                let transport = match reservoirs {
+                    Some(reservoirs) => self.trial.step_with_reservoirs(
+                        Time::new(duration), controls.transport, reservoirs, &mut cancelled)?,
+                    None => self.trial.step(
+                        Time::new(duration), controls.transport, &mut cancelled)?,
+                };
                 if transport.elapsed.value() != duration { return Ok((transport, None)); }
                 let second = self.molecular.advance_for_trial(&mut self.trial, half, controls.molecular, &mut cancelled)?;
                 for (total, second) in self.trial_molecular_ports.iter_mut().zip(self.molecular.trial_port_exchanges()) {

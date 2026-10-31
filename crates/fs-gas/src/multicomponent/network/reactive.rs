@@ -244,7 +244,38 @@ impl ReactingNetwork1d {
         cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         self.step_impl::<ConstantTransport>(maximum_duration, controls, None,
-            DissipationControl::default(), sources, None, cancelled)
+            DissipationControl::default(), sources, None, None, cancelled)
+    }
+    /// Advance reacting flow against prescribed species-bearing pressure reservoirs.
+    ///
+    /// Reservoirs are refreshed from the actual branch-end state at every
+    /// transport RK stage and complete retry. Optional wall/valve sources still
+    /// surround the same chemistry/transport transaction, so no intermediate
+    /// reservoir-driven state is published.
+    pub fn step_with_reservoirs(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_with_reservoirs_and_sources(
+            maximum_duration, controls, reservoirs, NetworkSources::default(), cancelled,
+        )
+    }
+    /// Compose prescribed pressure reservoirs with optional wall/valve halves.
+    pub fn step_with_reservoirs_and_sources(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        sources: NetworkSources<'_, '_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration, controls, None, DissipationControl::default(),
+            sources, None, Some(reservoirs), cancelled,
+        )
     }
     /// Compose chemistry with prescribed finite-time chamber motion and port flow.
     /// Negative rates compress; one finite dV/dt [m³/s] is required per plenum.
@@ -284,7 +315,22 @@ impl ReactingNetwork1d {
             DissipationControl::default(),
             sources,
             Some(volume_rates_m3_s),
+            None,
             cancelled,
+        )
+    }
+    /// Combine prescribed reservoirs with moving reacting compact volumes.
+    pub fn step_with_reservoirs_and_volume_rates(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        volume_rates_m3_s: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_impl::<ConstantTransport>(
+            maximum_duration, controls, None, DissipationControl::default(),
+            NetworkSources::default(), Some(volume_rates_m3_s), Some(reservoirs), cancelled,
         )
     }
     /// Advance D/2, C/2, A, C/2, D/2 with source-bound molecular subcycling.
@@ -316,7 +362,29 @@ impl ReactingNetwork1d {
             dissipation_controls,
             sources,
             None,
+            None,
             cancelled,
+        )
+    }
+    /// Compose molecular transport and chemistry with prescribed pressure reservoirs.
+    ///
+    /// Optional wall and valve halves remain in the same complete-duration
+    /// transaction. Reservoir transfer is counted only by the transport boundary
+    /// report; molecular and wall terms retain their existing ownership.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dissipation_reservoirs_and_sources<L: TransportLaw>(
+        &mut self,
+        operator: &mut NetworkDissipationOperator<L>,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: DissipationControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        sources: NetworkSources<'_, '_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
+        self.step_impl(
+            maximum_duration, controls, Some(operator), dissipation_controls,
+            sources, None, Some(reservoirs), cancelled,
         )
     }
     /// Compose molecular transport, chemistry, moving-volume advection and walls.
@@ -345,6 +413,7 @@ impl ReactingNetwork1d {
             dissipation_controls,
             sources,
             Some(volume_rates_m3_s),
+            None,
             cancelled,
         )
     }

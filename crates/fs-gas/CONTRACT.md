@@ -2140,3 +2140,32 @@ Their presence does not establish executed native validation.
 `MixtureNetwork1d::step_with_reservoirs` accepts one optional stationary left/right source pair per branch, in canonical species order and energy reference gauges. Raw `Cell` source compatibility remains caller-owned; species dimensions, stationarity and source-state validity are admitted. Only unconnected physical ends may have prescribed reservoirs. Characteristic fluxes refresh at both SSP RK2 stages and every retry, preserving reservoir inflow species and stagnation enthalpy, and interior outflow species and total enthalpy. External fluxes enter the global boundary balance; finite-plenum exchanges remain exact opposites. An all-None source slice keeps the original step. Fields, clocks and accepted reports publish atomically. Construction-time primitive caches and existing endpoint workspaces avoid per-step numerical heap allocation.
 
 `step_with_reservoirs_and_volume_rates` applies prescribed exterior sources and finite-plenum motion in the same native SSP RK2 transaction. Each stage uses the evolving chamber volume, composition and energy alongside fresh branch-end characteristic states; mechanical `-p*dV/dt` updates extensive energy beside conservative port transport. Reports separate exterior enthalpy transfer from accepted plenum boundary work. All-None sources preserve the volume-rate lane; all-zero rates preserve rigid-reservoir arithmetic, and every retry replays both drives before one shared publication point. Reservoir controls are not yet propagated through reactive or wall-source composed network wrappers.
+
+
+## Pressure reservoirs through coupled reacting and molecular network owners
+
+The prescribed species-bearing pressure reservoirs of `MixtureNetwork1d` now
+propagate through the complete reacting and molecular network transactions
+instead of requiring a caller-side split. `ReactingNetwork1d::step_with_reservoirs`
+and `step_with_reservoirs_and_sources` compose the original C/A/C chemistry
+with reservoir-driven characteristic transport and optional wall/valve halves.
+`step_with_reservoirs_and_volume_rates` evaluates the same exterior pressure
+drive simultaneously with finite-plenum pressure work. The molecular owner
+likewise exposes `DissipatingNetwork1d::step_with_reservoirs` and
+`step_with_reservoirs_and_sources`, retaining D/2-A-D/2 and optional source
+halves in one complete-duration retry.
+
+Reservoir states remain prescribed and undepleted during one call. Every
+transport retry recomputes their characteristic flux from the actual branch
+stage state. Reservoir mass/enthalpy appears exactly once in the transport
+boundary report; chemistry reference changes, molecular boundary transfer,
+wall heat, valve-internal exchange and moving-volume work keep their existing
+separate accounts. A shortened acoustic step restarts all chemistry, molecular,
+wall and valve owners from accepted storage before replaying the pressure drive.
+Cancellation or source refusal publishes none of those states or receipts.
+
+Focused regressions drive a new species from a high-pressure reservoir through
+the reacting network, including simultaneous plenum compression, and through
+the molecular D/A/D owner. They reconstruct species and physical-energy changes
+from the complete reports. These tests are authored but native execution remains
+subject to the repository's existing build-resource limits.

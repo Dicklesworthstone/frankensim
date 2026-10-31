@@ -10,6 +10,7 @@ impl ReactingNetwork1d {
         dissipation_controls: DissipationControl,
         sources: NetworkSources<'_, '_>,
         volume_rates: Option<&[f64]>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         let result = self.step_trial(
@@ -19,6 +20,7 @@ impl ReactingNetwork1d {
             dissipation_controls,
             sources,
             volume_rates,
+            reservoirs,
             cancelled,
         );
         if result.is_err() {
@@ -39,6 +41,7 @@ impl ReactingNetwork1d {
         dissipation_controls: DissipationControl,
         mut sources: NetworkSources<'_, '_>,
         volume_rates: Option<&[f64]>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveNetworkReport, ReactiveNetworkError> {
         poll(&mut cancelled)?;
@@ -128,10 +131,15 @@ impl ReactingNetwork1d {
                 };
                 react_network(&mut self.trial, &mut self.reactor, &mut self.amounts,
                     half.value(), &mut chemistry, &mut cancelled)?;
-                let transport = match volume_rates {
-                    Some(rates) => self.trial.step_with_volume_rates(Time::new(duration),
-                        controls.transport, rates, &mut cancelled)?,
-                    None => self.trial.step(Time::new(duration), controls.transport, &mut cancelled)?,
+                let transport = match (volume_rates, reservoirs) {
+                    (Some(rates), Some(reservoirs)) => self.trial.step_with_reservoirs_and_volume_rates(
+                        Time::new(duration), controls.transport, reservoirs, rates, &mut cancelled)?,
+                    (Some(rates), None) => self.trial.step_with_volume_rates(
+                        Time::new(duration), controls.transport, rates, &mut cancelled)?,
+                    (None, Some(reservoirs)) => self.trial.step_with_reservoirs(
+                        Time::new(duration), controls.transport, reservoirs, &mut cancelled)?,
+                    (None, None) => self.trial.step(
+                        Time::new(duration), controls.transport, &mut cancelled)?,
                 };
                 if transport.elapsed.value() != duration {
                     return Ok((transport, false, None, None, None));

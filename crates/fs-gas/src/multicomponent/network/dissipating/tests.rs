@@ -323,3 +323,42 @@ fn refused_or_late_cancelled_compositions_preserve_both_port_reports_and_reuse_w
         close(q.energy, expected.energy, 3e-11);
     }
 }
+
+
+#[test]
+fn prescribed_pressure_reservoirs_participate_in_molecular_network_retries_and_balances() {
+    let g = gas(2, true, 5.0);
+    let mut flow = owner(&g);
+    let supply = g.conserved(&[0.0, 2.0], 0.0, 2.0).unwrap();
+    let reservoirs = [[Some(supply.as_cell()), None]];
+    let before = inventories(&flow);
+    let report = flow
+        .step_with_reservoirs(
+            Time::new(0.004),
+            DissipatingStepControl::default(),
+            &reservoirs,
+            || false,
+        )
+        .unwrap();
+
+    assert_eq!(report.elapsed, report.transport.elapsed);
+    assert!(report.boundary_change.species_masses[1] > 0.0);
+    assert!(flow.branches()[0].cell(0).unwrap().partial_densities[1] > 0.1);
+    assert_eq!(report.molecular.first.elapsed.value(), 0.5 * report.elapsed.value());
+    assert_eq!(report.molecular.second.elapsed.value(), 0.5 * report.elapsed.value());
+    for k in 0..2 {
+        close(report.conservation_residual.species_masses[k], 0.0, 6e-12);
+    }
+    close(report.mass_residual_kg, 0.0, 6e-12);
+    close(report.absolute_energy_residual_j, 0.0, 6e-11);
+
+    let after = inventories(&flow);
+    for k in 0..2 {
+        close(after.0[k] - before.0[k], report.boundary_change.species_masses[k], 6e-12);
+    }
+    close(
+        after.1 - before.1,
+        report.boundary_change.absolute_energy(&g).unwrap(),
+        6e-11,
+    );
+}
