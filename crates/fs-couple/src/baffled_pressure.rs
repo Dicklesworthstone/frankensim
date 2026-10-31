@@ -30,6 +30,10 @@ mod bandlimited;
 #[path = "baffled_pressure_path.rs"]
 mod path;
 
+/// Continuous-frequency pressure, gradient and particle velocity on this surface basis.
+#[path = "baffled_pressure_harmonic.rs"]
+pub mod harmonic;
+
 /// Material-derived absorption/dispersion on every original surface path.
 #[path = "baffled_pressure_gas.rs"]
 pub mod gas;
