@@ -1419,3 +1419,30 @@ lung motion, a playable phrase, or evidence of flute sound quality. Regression
 sources compare the original material candidate, complete energy balance,
 feedback, rollback and native control timing; native execution and physical
 refinement remain required before stronger claims.
+
+### Named-mixture actuation starter
+
+`crates/fs-couple/examples/resolved-dg-actuated-mixture.performance` supplies a
+second native route using the original named gas data directly. Its mole
+fractions are 0.75 N2, 0.20 O2, 0.04 CO2 and 0.01 water vapor. The resolved zone,
+both acoustic ducts and exterior use that same declared mixture at 300 K and
+95000 Pa; the 10 mL source starts at the reference state. The existing
+compression/heating/expansion program then changes the actual finite inventory.
+
+The file retains the computed downstream radiation, separate reciprocal escape
+opening, closed upstream duct and material microphone. It uses the same native
+resolved render entry point and requires no external NASA species, caloric or
+transport packs. Its 290..320 K run window stays inside the named mixture's
+declared near-ambient range; every actual state still passes pressure and
+condensation checks. The original material law determines the physical solver
+clock, while the file requests 384 observation samples at 48 kHz.
+
+This is an 8 ms numerical composition example. The mixture, 10 mL volume,
+geometry, imposed rates and bulk-viscosity ratio are authored inputs, without
+physiological or instrument calibration. The native regression exercises its
+named finite source, both ducts and reciprocal escape together. Other focused
+regressions cover actual heat/work and streamed-energy closure, callback replay,
+unequal solver/output clocks and rollback after a refused named-source gesture.
+Those runtime tests remain unexecuted in the direct GitHub implementation
+session because its pinned dependency checkout is incomplete; the example is
+not evidence of converged or realistic instrument sound.
