@@ -420,3 +420,79 @@ fn g0_glue_checks_actual_modes_and_rejects_stale_solid_state() {
         );
     });
 }
+
+fn held_environment_glue_pack() -> NormalizedInterfacePack {
+    use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+    let base = source(2e7, 2000.0);
+    let original = base.claims_pack().claims();
+    let mut claims = ClaimSet::new();
+    for id in original.observation_ids() {
+        assert_eq!(claims.register_observation(original.observation(id).unwrap().clone()).unwrap(), id);
+    }
+    let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    for (_, original) in original.claims_ordered() {
+        let mut claim = original.clone();
+        let PropertyValue::Scalar { value, dims } = claim.value else { unreachable!() };
+        let factor = if dims == stiffness_per_area_dims() { 4.0 } else { 2.0 };
+        claim.value = PropertyValue::Curve { abscissa: "moisture_content".into(),
+            abscissa_dims: Dims::NONE, knots: vec![(0.0, value), (0.2, factor*value)], dims };
+        claim.validity = ValidityDomain::unconstrained()
+            .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 280.0, 320.0)
+            .with_quantity("omega", quantity(QuantityKind::Frequency(FrequencyConvention::Angular)), 0.0, 200_000.0)
+            .with_quantity("moisture_content", quantity(QuantityKind::Moisture(MoistureBasis::DryMass)), 0.0, 0.2);
+        claim.interpolation = InterpolationPolicy::LinearInside;
+        claims.insert_claim(claim).unwrap();
+    }
+    let claims = NormalizedPack::new("synthetic-glue-environment", "synthetic-interface-v1",
+        base.claims_pack().source_artifact(), "CC0-1.0", claims, vec![], vec![]).unwrap();
+    NormalizedInterfacePack::new(base.card().surface_a().clone(), base.card().surface_b().clone(),
+        base.card().context().clone(), claims).unwrap()
+}
+
+#[test]
+fn g3_held_glue_environment_changes_the_assembled_body_and_rejects_stale_selection() {
+    scoped(|cx, gate| {
+        // Original synthetic artifact, with no inferred moisture transport.
+        let source = held_environment_glue_pack();
+        let state = |moisture| {
+            let mut spec = performance();
+            spec.material_states.insert("joint.fsintpk".into(),
+                vec![("moisture_content".into(), moisture)]);
+            spec
+        };
+        let prepare = |moisture| {
+            let spec = state(moisture);
+            let profile = loaded(&spec, gate, &text(), source.clone());
+            assert!(profile.has_interface_source("joint.fsintpk"));
+            spec.compile_with_body(cx, gate, Some(profile), |name| Ok(pack(name, 0.0, None))).unwrap()
+        };
+        let mut low = prepare(0.0);
+        let mut high = prepare(0.2);
+        let joint = |ready: &Ready| {
+            let tie = &ready.performance.bank().source().bank().material_shell_assembly().unwrap()
+                .specimen.edge_ties[0];
+            let TieKind::Compliant(glue) = tie.kind else { panic!("original glue joint disappeared") };
+            glue
+        };
+        let a = joint(&low);
+        let b = joint(&high);
+        assert_eq!(b.normal_n_m3, 4.0*a.normal_n_m3);
+        assert_eq!(b.viscosity_n_s_m3.unwrap(), a.viscosity_n_s_m3.unwrap().map(|value| 2.0*value));
+        assert_eq!(low.catalog["body.fsmatpk"].pack.content_hash(),
+            high.catalog["body.fsmatpk"].pack.content_hash());
+        let low_pressure = pressure(&mut low, 7);
+        let high_pressure = pressure(&mut high, 31);
+        assert_ne!(low_pressure, high_pressure);
+        assert_eq!(high_pressure, pressure(&mut prepare(0.2), 1));
+        let mut profile = loaded(&state(0.0), gate, &text(), source.clone());
+        let original_bytes = profile.interface_pack_bytes().unwrap();
+        assert!(profile.load_interfaces(&state(0.3), gate, |_| Ok(source.clone())).is_err());
+        assert_eq!(profile.interface_pack_bytes().unwrap(), original_bytes);
+        assert!(state(0.2).compile_with_body(cx, gate, Some(profile.clone()),
+            |name| Ok(pack(name, 0.0, None))).is_err());
+        state(0.0).compile_with_body(cx, gate, Some(profile),
+            |name| Ok(pack(name, 0.0, None))).unwrap();
+        let mut missing = Profile::parse(text().as_bytes()).unwrap();
+        assert!(missing.load_interfaces(&performance(), gate, |_| Ok(source.clone())).is_err());
+    });
+}

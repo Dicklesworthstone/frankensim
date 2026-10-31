@@ -523,7 +523,8 @@ impl input::Spec {
         poll(gate)?;
         if self.material_states.keys().any(|name| !catalog.contains_key(name)
             && !self.friction.has_source(name) && !self.bridge_interfaces.has_source(name)
-            && !self.axial_bearings.has_source(name)) {
+            && !self.axial_bearings.has_source(name)
+            && !profile.as_ref().is_some_and(|body| body.has_interface_source(name))) {
             return Err("material-state names a source pack unused by this assembly".into());
         }
         Ok(ReadyBank { spec:self,catalog,bank,body_profile:profile,

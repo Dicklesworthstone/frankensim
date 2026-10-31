@@ -242,6 +242,10 @@ impl Spec {
         self.interfaces.load(gate, loader)
     }
 
+    pub(super) fn has_interface_source(&self, name: &str) -> bool {
+        self.interfaces.has_source(name)
+    }
+
     pub(super) fn interface_pack_bytes(&self) -> Result<usize> {
         self.interfaces.loaded_pack_bytes()
     }
@@ -381,7 +385,7 @@ impl Spec {
         let specimen = if let Some(memory) = &self.coating_memory {
             specimen.with_coating_relaxation(memory.options, gate)?
         } else { specimen };
-        let specimen = self.interfaces.bind(specimen, gate)?;
+        let specimen = self.interfaces.bind(specimen, spec, gate)?;
         let specimen = if let Some(surfaces) = &self.pressure_surfaces {
             specimen.with_pressure_surfaces(surfaces.clone(), gate)?
         } else { specimen };

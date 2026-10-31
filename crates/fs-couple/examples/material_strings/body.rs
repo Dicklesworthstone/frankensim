@@ -190,6 +190,14 @@ impl Profile {
         }
         Ok(())
     }
+    /// Whether an original ordered interface pack participates in this body.
+    pub fn has_interface_source(&self, name: &str) -> bool {
+        match &self.model {
+            BodyModel::Plate(_) => false,
+            BodyModel::Shell(shell) => shell.has_interface_source(name),
+            BodyModel::Assembly(assembly) => assembly.has_interface_source(name),
+        }
+    }
     pub fn interface_pack_bytes(&self) -> Result<usize> {
         match &self.model {
             BodyModel::Plate(_) => Ok(0),

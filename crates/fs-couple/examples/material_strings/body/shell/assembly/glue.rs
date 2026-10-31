@@ -30,6 +30,7 @@ struct Declaration {
 struct Bound {
     source: ResolvedGlueLine,
     omega_band: (f64, f64),
+    query: QueryPoint,
 }
 #[derive(Clone, Default)]
 pub(super) struct Inputs {
@@ -114,14 +115,10 @@ impl Inputs {
 
     pub(super) fn load(
         &mut self,
-        temperature: f64,
-        omega: f64,
+        spec: &input::Spec,
         gate: &CancelGate,
         loader: &mut impl FnMut(&str) -> Result<NormalizedInterfacePack>,
     ) -> Result<()> {
-        let point = QueryPoint::new()
-            .with("T", temperature)?
-            .with("omega", omega)?;
         let mut packs = BTreeMap::<String, NormalizedInterfacePack>::new();
         let mut remaining = input::MAX_TOTAL_PACK_BYTES;
         let mut bindings = Vec::with_capacity(self.declarations.len());
@@ -137,13 +134,20 @@ impl Inputs {
                 remaining -= bytes;
                 packs.insert(d.pack.clone(), pack);
             }
+            let held = spec.material_states.get(&d.pack).map_or(&[][..], Vec::as_slice);
+            let point = bridge_interfaces::source_query(&packs[&d.pack], spec.temperature,
+                spec.omega, held)?;
             bindings.push(resolve(&packs[&d.pack], d, &point)?);
         }
         poll(gate)?;
         self.packs = packs;
         self.bindings = bindings;
-        self.state = Some((temperature.to_bits(), omega.to_bits()));
+        self.state = Some((spec.temperature.to_bits(), spec.omega.to_bits()));
         Ok(())
+    }
+
+    pub(super) fn has_source(&self, name: &str) -> bool {
+        self.packs.contains_key(name)
     }
 
     pub(super) fn loaded_pack_bytes(&self) -> Result<usize> {
@@ -177,11 +181,14 @@ impl Inputs {
                 "glue interfaces must be reloaded at the current declared solid state".into(),
             );
         }
-        let point = QueryPoint::new()
-            .with("T", spec.temperature)?
-            .with("omega", spec.omega)?;
         for (d, bound) in self.declarations.iter().zip(&self.bindings) {
             poll(gate)?;
+            let held = spec.material_states.get(&d.pack).map_or(&[][..], Vec::as_slice);
+            let point = bridge_interfaces::source_query(&self.packs[&d.pack], spec.temperature,
+                spec.omega, held)?;
+            if point != bound.query {
+                return Err("glue interfaces must be reloaded at the current declared environment".into());
+            }
             let (a, b) = match d.joint {
                 Joint::Edge(i) => (edges[i].a.component, edges[i].b.component),
                 Joint::Face(i) => (faces[i].master_component, faces[i].slave_component),
@@ -316,8 +323,8 @@ fn resolve(pack: &NormalizedInterfacePack, d: &Declaration, point: &QueryPoint) 
     let state = resolve_interface_state_point(card, point, &requirements, Pick::SingleClaimOnly)?;
     let mut band = (0.0_f64, f64::MAX);
     for p in state.properties() {
-        if !p.is_constant_at_fixed_temperature() {
-            return Err("glue coefficients must be constant at the resolved temperature".into());
+        if !p.is_constant_at_fixed_environment() {
+            return Err("glue coefficients must be constant at the resolved external conditions".into());
         }
         let (lo, hi) = p
             .angular_frequency_band_rad_s()?
@@ -338,5 +345,6 @@ fn resolve(pack: &NormalizedInterfacePack, d: &Declaration, point: &QueryPoint) 
     Ok(Bound {
         source,
         omega_band: band,
+        query: point.clone(),
     })
 }

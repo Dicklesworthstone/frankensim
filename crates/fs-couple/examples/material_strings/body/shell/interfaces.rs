@@ -145,6 +145,10 @@ impl Inputs {
         Ok(())
     }
 
+    pub(super) fn has_source(&self, name: &str) -> bool {
+        self.packs.contains_key(name)
+    }
+
     pub(super) fn loaded_pack_bytes(&self) -> Result<usize> {
         if self.declarations.iter().any(|d| !self.packs.contains_key(&d.pack)) {
             return Err("shell interface packs must be loaded before bulk material construction".into());
@@ -152,7 +156,7 @@ impl Inputs {
         Ok(self.pack_bytes)
     }
 
-    pub(super) fn bind(&self, specimen: ResolvedShearShell,
+    pub(super) fn bind(&self, specimen: ResolvedShearShell, spec: &input::Spec,
         gate: &CancelGate) -> Result<ResolvedShearShell>
     {
         let Some(budget) = self.budget else { return Ok(specimen); };
@@ -161,8 +165,9 @@ impl Inputs {
             poll(gate)?;
             let pack = self.packs.get(&declaration.pack)
                 .ok_or("shell interface pack was not loaded through the source loader")?;
-            let point = QueryPoint::new().with("T", declaration.temperature)?
-                .with("omega", declaration.omega)?;
+            let held = spec.material_states.get(&declaration.pack).map_or(&[][..], Vec::as_slice);
+            let point = bridge_interfaces::source_query(pack, declaration.temperature,
+                declaration.omega, held)?;
             let requirements = [
                 Requirement::try_new(&declaration.stiffness, stiffness_per_area_dims(), Admit::Finite)?,
                 Requirement::try_new(&declaration.viscosity, viscosity_per_area_dims(), Admit::Finite)?,

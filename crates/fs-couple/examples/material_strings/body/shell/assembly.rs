@@ -279,7 +279,7 @@ impl Spec {
                 );
             }
         }
-        glue.load(spec.temperature, spec.omega, gate, &mut cached)?;
+        glue.load(spec, gate, &mut cached)?;
         bytes = bytes.checked_add(glue.loaded_pack_bytes()?)
             .ok_or("assembly interface source bytes overflow")?;
         if bytes > input::MAX_TOTAL_PACK_BYTES {
@@ -289,6 +289,11 @@ impl Spec {
         self.components = candidate;
         self.glue = glue;
         Ok(())
+    }
+
+    pub(crate) fn has_interface_source(&self, name: &str) -> bool {
+        self.glue.has_source(name)
+            || self.components.iter().any(|component| component.shell.has_interface_source(name))
     }
 
     pub(crate) fn interface_pack_bytes(&self) -> Result<usize> {

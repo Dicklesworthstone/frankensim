@@ -1080,6 +1080,22 @@ stiffness is supported. These are fixed-state constant coefficients with an
 explicit frequency validity interval; all retained shell modes must fit the
 intersection of the original bulk and interface source bands.
 
+The performance's existing `material-states` block may name each interface
+pack, including shell holding supports and interfaces inside v4 components:
+
+```text
+material-states 1
+material-state holding.fsintpk 1 moisture_content 0.12
+```
+
+The original interface source must declare that coordinate's quantity and
+validity. Its own `TEMPERATURE_K` and `OMEGA_RAD_S` still select the base state;
+additional coordinates use the same shared query boundary as bulk materials,
+bows and bridges. Source curves at those held conditions determine the actual
+spring and dashpot. This does not infer moisture from gas humidity or evolve
+sorption. The regression fixture uses a manufactured response, not measured
+holding or tissue data.
+
 The shared MITC owner adds the complete spring outer product before the body
 eigensolve. The existing reciprocal solver applies interface damping on that
 same physical eigenbasis alongside full bulk material viscosity, bridge
@@ -1243,10 +1259,14 @@ Stiffnesses must be positive. Each viscosity must be nonnegative; zero loss
 must be explicitly sourced. Coefficients resolve at the performance's solid
 `state T OMEGA`, and every selected claim must state its frequency applicability.
 The complete retained eigenvalue intervals must fit the intersection of those
-bands before the performer is published. Fixed-temperature source curves are
-admitted; frequency-dependent coefficients and constant-loss anchors require a
-different constitutive realization and refuse. Changing the declared solid
-state requires reloading the original interface sources.
+bands before the performer is published. Source curves and surfaces at
+qualified held environmental conditions are admitted; frequency-dependent
+coefficients and constant-loss anchors require a different constitutive
+realization and refuse. A `material-state joint.fsintpk COUNT AXIS VALUE ...`
+row selects additional coordinates from that original adhesive source, through
+the same material-query boundary as shell holding supports. Changing the
+declared solid or environmental state requires reloading the interface sources;
+the complete query is retained and checked again during material binding.
 
 The profile retains original packs, ordered surface descriptions, adhesive and
 history, claim receipts and uncertainties through `ResolvedGlueLine`. The joint

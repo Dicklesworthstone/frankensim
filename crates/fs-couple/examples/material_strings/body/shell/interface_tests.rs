@@ -210,3 +210,72 @@ fn interface_geometry_and_complete_allowances_precede_source_io_and_paths_cache_
         assert_eq!(reads, 0);
     });
 }
+
+fn held_environment_pack() -> NormalizedInterfacePack {
+    use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+    let base = holding_pack(1e8, 2e4, "body.fsmatpk", 200_000.0);
+    let original = base.claims_pack().claims();
+    let mut claims = ClaimSet::new();
+    for id in original.observation_ids() {
+        assert_eq!(claims.register_observation(original.observation(id).unwrap().clone()).unwrap(), id);
+    }
+    let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    for (_, original) in original.claims_ordered() {
+        let mut claim = original.clone();
+        let PropertyValue::Scalar { value, dims } = claim.value else { unreachable!() };
+        claim.value = PropertyValue::Curve { abscissa: "moisture_content".into(),
+            abscissa_dims: Dims::NONE, knots: vec![(0.0, value), (0.2, 4.0*value)], dims };
+        claim.validity = ValidityDomain::unconstrained()
+            .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 280.0, 320.0)
+            .with_quantity("omega", quantity(QuantityKind::Frequency(FrequencyConvention::Angular)), 0.0, 200_000.0)
+            .with_quantity("moisture_content", quantity(QuantityKind::Moisture(MoistureBasis::DryMass)), 0.0, 0.2);
+        claim.interpolation = InterpolationPolicy::LinearInside;
+        claims.insert_claim(claim).unwrap();
+    }
+    let claims = NormalizedPack::new("synthetic-holding-environment", "synthetic-interface-v1",
+        base.claims_pack().source_artifact(), "CC0-1.0", claims, vec![], vec![]).unwrap();
+    NormalizedInterfacePack::new(base.card().surface_a().clone(), base.card().surface_b().clone(),
+        base.card().context().clone(), claims).unwrap()
+}
+
+#[test]
+fn g3_held_body_interface_state_changes_support_and_pressure_through_the_original_source() {
+    scoped(|cx, gate| {
+        // Manufactured state response, not measured tissue or sorption data.
+        let source = held_environment_pack();
+        let prepare = |moisture: Option<f64>| -> Result<Ready> {
+            let mut spec = shell_spec();
+            if let Some(value) = moisture {
+                spec.material_states.insert("holding.fsintpk".into(),
+                    vec![("moisture_content".into(), value)]);
+            }
+            let mut profile = held_profile();
+            profile.load_interfaces(&spec, gate, |_| Ok(source.clone()))?;
+            assert!(profile.has_interface_source("holding.fsintpk"));
+            spec.compile_with_body(cx, gate, Some(profile), |name| Ok(pack(name, 1.0, None)))
+        };
+        let mut low = prepare(Some(0.0)).unwrap();
+        let mut high = prepare(Some(0.2)).unwrap();
+        let link = |ready: &Ready| ready.performance.bank().source().bank()
+            .material_shell().unwrap().specimen.interfaces()[0].clone();
+        let a = link(&low);
+        let b = link(&high);
+        assert_eq!(a.input().interface.card_identity(), b.input().interface.card_identity());
+        assert_eq!(b.input().interface.query().axes()["moisture_content"], 0.2);
+        assert_eq!(b.law().stiffness_n_m, 4.0*a.law().stiffness_n_m);
+        assert_eq!(b.law().damping_n_s_m, 4.0*a.law().damping_n_s_m);
+        for name in ["wire.fsmatpk", "sleeve.fsmatpk", "body.fsmatpk"] {
+            assert_eq!(low.catalog[name].pack.content_hash(), high.catalog[name].pack.content_hash());
+        }
+        let low_pressure = pressure(&mut low, 7);
+        let high_pressure = pressure(&mut high, 31);
+        assert_ne!(low_pressure, high_pressure);
+        assert_eq!(high_pressure, pressure(&mut prepare(Some(0.2)).unwrap(), 1));
+        for ready in [&low, &high] {
+            let frame = ready.performance.bank().system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        assert!(prepare(None).is_err());
+        assert!(prepare(Some(0.3)).is_err());
+    });
+}
