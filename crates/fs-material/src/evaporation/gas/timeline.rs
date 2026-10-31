@@ -3,8 +3,9 @@
 //! Original heat/contact/source laws act first, then the existing conservative
 //! liquid/gas owner advances the same interval. The next interval sees its
 //! actual vapor inventory, pressure and temperatures. Reference geometry stays
-//! fixed. This first-order split requires full-timestep refinement; a refused
-//! rate/temperature/equilibrium limit requires retrying the original interval.
+//! fixed. This first-order split requires full-timestep refinement. Explicit
+//! inventory/temperature/equilibrium step limits retry from the same accepted
+//! state; rejected attempts spend work but contribute no physical exchange.
 
 use super::{
     GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasLiquidBinding,
@@ -68,6 +69,10 @@ pub struct GasEvaporationTimelineAudit {
     pub energy_residual_j: f64,
     pub recession_m: f64,
     pub phase_steps: usize,
+    /// Native thermal work, INCLUDING discarded heat/phase attempts.
+    pub attempted_thermal_substeps: usize,
+    /// Explicit step-limit refusals that shortened an attempted interval.
+    pub rejected_intervals: usize,
     pub last_step: Option<GasEvaporationStep>,
 }
 
@@ -192,6 +197,9 @@ impl DepositionObserver for Branch {
 /// The gas owner's absolute mass budget bounds the COMPLETE mass residual.
 /// The larger original absolute heat/gas energy budget bounds the COMPLETE
 /// source-relative energy defect, with no multiplication by accepted step count.
+/// Explicit phase step limits discard the complete attempted heat/gas state
+/// and retry a strictly shorter interval. Rejected thermal substeps spend the
+/// same original work allowance; unsupported sources/charts still refuse.
 ///
 /// Heat to other cells remains in the original thermal network. The gas-volume
 /// and film assumptions of advance_surface_with_gas remain unchanged; no
@@ -282,6 +290,8 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
         energy_residual_j: 0.0,
         recession_m: 0.0,
         phase_steps: 0,
+        attempted_thermal_substeps: heat.substeps,
+        rejected_intervals: 0,
         last_step: None,
     };
     let mut epoch = next.time_s();
@@ -307,106 +317,139 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
         if !stop.is_finite() || stop <= start {
             return Err(DepositionError::Arithmetic.into());
         }
-        let remaining = next
-            .work_budget()
-            .max_substeps
-            .checked_sub(audit.thermal.substeps)
-            .ok_or(DepositionError::Budget(
-                "finite-gas evaporation thermal substeps",
-            ))?;
-        let (heated, observed, heat) = next.advance_observed_limited(
-            &branch,
-            stop,
-            thermal_config,
-            remaining,
-            &mut checkpoint,
-        )?;
-        next = heated;
-        branch = observed;
-        add_heat(&mut audit.thermal, heat)?;
-        if let Some(area) = area {
-            let expected = next.cells()[&id].clone();
-            let chart_error = std::cell::RefCell::new(None);
-            let mut checkpoint_error = None;
-            let proposal = advance_surface_with_gas(
-                surface.law,
-                surface.binding,
-                LiquidSurfaceState {
-                    mass_kg: expected.mass_kg,
-                    specific_enthalpy_j_kg: expected.specific_h_j_kg,
-                    area_m2: area,
-                },
-                &next_gas,
-                catalog,
-                |h| {
-                    let value = if (lo..=hi).contains(&h) {
-                        next.temperature_at_specific_enthalpy_k(id, h)
-                    } else {
-                        Err(DepositionError::MaterialDomain)
-                    };
-                    value.map_err(|error| {
-                        *chart_error.borrow_mut() = Some(error);
-                        EvaporationError::Invalid("original pure-liquid caloric branch refused")
-                    })
-                },
-                surface.mass_transfer_coefficient_m_s,
-                stop - start,
-                phase_config,
-                || {
-                    if let Err(error) = checkpoint() {
-                        checkpoint_error = Some(error);
-                        true
-                    } else {
-                        false
-                    }
-                },
-            );
-            if let Some(error) = checkpoint_error {
-                return Err(error.into());
-            }
-            let candidate = match proposal {
-                Ok(value) => value,
-                Err(error) => {
-                    if let Some(original) = chart_error.into_inner() {
-                        return Err(original.into());
-                    }
-                    return Err(error.into());
-                }
-            };
-            let (liquid, evolved_gas, _, step) = candidate.into_parts();
-            next.apply_liquid_exchanges(
-                &[LiquidCellExchange {
-                    expected,
-                    interval_exposed_area_m2: area,
-                    replacement: liquid,
-                    pure_liquid_enthalpy_range_j_kg: [lo, hi],
-                }],
+        let planned_stop = stop;
+        loop {
+            checkpoint()?;
+            let remaining = next
+                .work_budget()
+                .max_substeps
+                .checked_sub(audit.attempted_thermal_substeps)
+                .ok_or(DepositionError::Budget(
+                    "finite-gas evaporation thermal substeps",
+                ))?;
+            let (mut heated, observed, heat) = next.advance_observed_limited(
+                &branch,
+                stop,
+                thermal_config,
+                remaining,
                 &mut checkpoint,
             )?;
-            next_gas = evolved_gas;
-            add(&mut audit.transferred_mass_kg, step.transferred_mass_kg)?;
-            add(&mut audit.latent_energy_j, step.latent_energy_j)?;
-            add(&mut audit.energy_into_gas_j, step.energy_into_gas_j)?;
-            add(
-                &mut audit.thermal_energy_change_j,
-                step.liquid_enthalpy_change_j,
-            )?;
-            add(
-                &mut audit.gas_energy_change_j,
-                step.gas_internal_energy_change_j,
-            )?;
-            add(&mut audit.energy_residual_j, step.energy_residual_j)?;
-            add(&mut audit.recession_m, step.recession_m)?;
-            audit.phase_steps = audit
-                .phase_steps
-                .checked_add(1)
+            audit.attempted_thermal_substeps = audit
+                .attempted_thermal_substeps
+                .checked_add(heat.substeps)
                 .ok_or(DepositionError::Arithmetic)?;
-            audit.last_step = Some(step);
+            if let Some(area) = area {
+                let expected = heated.cells()[&id].clone();
+                let chart_error = std::cell::RefCell::new(None);
+                let mut checkpoint_error = None;
+                let proposal = advance_surface_with_gas(
+                    surface.law,
+                    surface.binding,
+                    LiquidSurfaceState {
+                        mass_kg: expected.mass_kg,
+                        specific_enthalpy_j_kg: expected.specific_h_j_kg,
+                        area_m2: area,
+                    },
+                    &next_gas,
+                    catalog,
+                    |h| {
+                        let value = if (lo..=hi).contains(&h) {
+                            heated.temperature_at_specific_enthalpy_k(id, h)
+                        } else {
+                            Err(DepositionError::MaterialDomain)
+                        };
+                        value.map_err(|error| {
+                            *chart_error.borrow_mut() = Some(error);
+                            EvaporationError::Invalid("original pure-liquid caloric branch refused")
+                        })
+                    },
+                    surface.mass_transfer_coefficient_m_s,
+                    stop - start,
+                    phase_config,
+                    || {
+                        if let Err(error) = checkpoint() {
+                            checkpoint_error = Some(error);
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                );
+                if let Some(error) = checkpoint_error {
+                    return Err(error.into());
+                }
+                let candidate = match proposal {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if let Some(original) = chart_error.into_inner() {
+                            return Err(original.into());
+                        }
+                        if let GasEvaporationError::StepSizeLimit {
+                            maximum_duration_s, ..
+                        } = error
+                        {
+                            let reduced = maximum_duration_s.min(0.5 * (stop - start));
+                            let retry_stop = start + reduced;
+                            if !maximum_duration_s.is_finite()
+                                || reduced <= 0.0
+                                || !retry_stop.is_finite()
+                                || retry_stop <= start
+                                || retry_stop >= stop
+                                || heat.substeps == 0
+                            {
+                                return Err(error.into());
+                            }
+                            audit.rejected_intervals = audit
+                                .rejected_intervals
+                                .checked_add(1)
+                                .ok_or(DepositionError::Arithmetic)?;
+                            stop = retry_stop;
+                            // `next`, `branch`, gas, birth offsets and physical
+                            // audits still describe the unchanged accepted start.
+                            continue;
+                        }
+                        return Err(error.into());
+                    }
+                };
+                let (liquid, evolved_gas, _, step) = candidate.into_parts();
+                heated.apply_liquid_exchanges(
+                    &[LiquidCellExchange {
+                        expected,
+                        interval_exposed_area_m2: area,
+                        replacement: liquid,
+                        pure_liquid_enthalpy_range_j_kg: [lo, hi],
+                    }],
+                    &mut checkpoint,
+                )?;
+                next_gas = evolved_gas;
+                add(&mut audit.transferred_mass_kg, step.transferred_mass_kg)?;
+                add(&mut audit.latent_energy_j, step.latent_energy_j)?;
+                add(&mut audit.energy_into_gas_j, step.energy_into_gas_j)?;
+                add(
+                    &mut audit.thermal_energy_change_j,
+                    step.liquid_enthalpy_change_j,
+                )?;
+                add(
+                    &mut audit.gas_energy_change_j,
+                    step.gas_internal_energy_change_j,
+                )?;
+                add(&mut audit.energy_residual_j, step.energy_residual_j)?;
+                add(&mut audit.recession_m, step.recession_m)?;
+                audit.phase_steps = audit
+                    .phase_steps
+                    .checked_add(1)
+                    .ok_or(DepositionError::Arithmetic)?;
+                audit.last_step = Some(step);
+            }
+            next = heated;
+            branch = observed;
+            add_heat(&mut audit.thermal, heat)?;
+            break;
         }
         if empty || event_time == Some(stop) {
             epoch = stop;
             interval = 1;
-        } else {
+        } else if stop == planned_stop {
             interval = interval.checked_add(1).ok_or(DepositionError::Arithmetic)?;
         }
     }

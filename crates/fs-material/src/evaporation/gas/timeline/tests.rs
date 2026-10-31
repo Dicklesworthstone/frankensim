@@ -440,3 +440,133 @@ fn complete_heat_and_finite_gas_feedback_converges_under_time_refinement() {
     assert!(b < 0.7 * a, "{a}, {b}");
     assert!(c < 0.7 * b, "{b}, {c}");
 }
+
+#[test]
+fn bounded_local_retry_recovers_finite_backpressure_without_replaying_heat_or_events() {
+    let catalog = catalog(0.0);
+    let initial_gas = gas(&catalog, 1e-5);
+    let binding = GasLiquidBinding {
+        species: id(),
+        liquid_enthalpy_offset_j_kg: 0.0,
+    };
+    let mut covered = boundary(2.0);
+    covered.reservoir = Some(Reservoir {
+        area_m2: 1e-3,
+        conductance_w_k: 0.0,
+        temperature_k: 300.0,
+    });
+    let original = thermal(
+        vec![
+            birth(0.0, 2.0),
+            TimedEvent {
+                time_s: 1.0,
+                event: Event::Boundary(CellId(1), covered),
+            },
+        ],
+        1000,
+    );
+    let result = advance_deposition_with_gas(
+        &original,
+        surface(&binding),
+        &initial_gas,
+        &catalog,
+        2.0,
+        heat(2.0),
+        controls(),
+        || Ok(()),
+    )
+    .unwrap();
+    let audit = result.audit();
+    assert!(audit.rejected_intervals > 0);
+    assert!(audit.attempted_thermal_substeps >= audit.thermal.substeps + audit.rejected_intervals);
+    assert!(audit.attempted_thermal_substeps <= original.work_budget().max_substeps);
+    assert!(audit.transferred_mass_kg > 0.0);
+    assert_eq!(result.thermal().time_s(), 2.0);
+    assert_eq!(audit.thermal.events, 2);
+    assert_eq!(result.thermal().exposed_area_m2(CellId(1)), Ok(0.0));
+    assert_eq!(audit.last_step.as_ref().unwrap().transferred_mass_kg, 0.0);
+    near(audit.thermal.external_heat_j, 4.0, 1e-12);
+    near(audit.incoming_energy_j, 0.01 * h(300.0), 1e-10);
+    near(
+        audit.thermal_energy_change_j + audit.gas_energy_change_j - audit.incoming_energy_j - 4.0,
+        0.0,
+        1e-6,
+    );
+    near(audit.mass_residual_kg, 0.0, 1e-14);
+    assert!(audit.energy_residual_j.abs() <= 1e-6);
+    assert!(original.cells().is_empty());
+}
+
+#[test]
+fn rejected_intervals_spend_work_and_late_retry_cancellation_preserves_both_inputs() {
+    let catalog = catalog(0.0);
+    let initial_gas = gas(&catalog, 1e-5);
+    let before_gas = initial_gas.clone();
+    let binding = GasLiquidBinding {
+        species: id(),
+        liquid_enthalpy_offset_j_kg: 0.0,
+    };
+    let limited = thermal(vec![birth(0.0, 2.0)], 1);
+    assert!(matches!(
+        advance_deposition_with_gas(
+            &limited,
+            surface(&binding),
+            &initial_gas,
+            &catalog,
+            2.0,
+            heat(2.0),
+            controls(),
+            || Ok(())
+        ),
+        Err(GasEvaporationTimelineError::Thermal(
+            DepositionError::Budget(_)
+        ))
+    ));
+    assert!(limited.cells().is_empty());
+    assert_eq!(limited.time_s(), 0.0);
+    assert_eq!(initial_gas, before_gas);
+
+    let original = thermal(vec![birth(0.0, 2.0)], 1000);
+    let mut polls = 0;
+    let accepted = advance_deposition_with_gas(
+        &original,
+        surface(&binding),
+        &initial_gas,
+        &catalog,
+        2.0,
+        heat(2.0),
+        controls(),
+        || {
+            polls += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(accepted.audit().rejected_intervals > 0);
+    let mut seen = 0;
+    assert!(matches!(
+        advance_deposition_with_gas(
+            &original,
+            surface(&binding),
+            &initial_gas,
+            &catalog,
+            2.0,
+            heat(2.0),
+            controls(),
+            || {
+                seen += 1;
+                if seen == polls {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        ),
+        Err(GasEvaporationTimelineError::Thermal(
+            DepositionError::Cancelled
+        ))
+    ));
+    assert!(original.cells().is_empty());
+    assert_eq!(original.time_s(), 0.0);
+    assert_eq!(initial_gas, before_gas);
+}
