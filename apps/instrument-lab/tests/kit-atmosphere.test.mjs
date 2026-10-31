@@ -15,10 +15,12 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
   missingWithGas = false, refuseGas = false, scales = [3, 5], materials,
   missingWithMaterials = false, refuseMaterials = false,
   missingWithBendingLoss = false, refuseBendingLoss = false, gasSources,
-  missingWithGasSources = false, refuseGasSources = false, missingWithStatedUnknown = false } = {}) {
+  missingWithGasSources = false, refuseGasSources = false, missingWithStatedUnknown = false, refuseAt = [] } = {}) {
   const calls = [], messages = [], kept = [];
   let id = 0, active = 0, clock = 0, attached = 0, correctionCalls = 0;
   function piece(name, scale, record, materials) {
+    // a physical refusal on one grid, through every constructor (the closed hi-hat's pedal load at 8x)
+    if (refuseAt.includes(scale)) throw new Error('hi-hat initial load did not become quiescent within 8.5 s');
     const instance = {
       id: ++id, name, scale, record, materials,
       copy() {
@@ -351,4 +353,23 @@ test('a restarted worker adopts its new atmosphere while omitted records keep th
   const legacy = await run(undefined);
   assert.ok(legacy.calls.every(call => call[0] === 'default'));
   assert.equal(legacy.messages.at(-1).type, 'ready');
+});
+
+test('a grid whose build refuses is skipped, and ready carries the engine text for the page to show', async () => {
+  for (const gasRecord of [undefined, '293.15 101325 0']) {
+    const result = await run(gasRecord, { scales: [3, 5, 8], refuseAt: [8] });
+    const ready = result.messages.at(-1);
+    assert.equal(ready.type, 'ready');
+    assert.notEqual(ready.scale, 8);
+    // the worker runs in its own realm: copy its values into this one, as the tests above do
+    assert.deepEqual([...ready.refused].map(({ scale, message }) => ({ scale, message })), [{ scale: 8, message: 'hi-hat initial load did not become quiescent within 8.5 s' }]);
+    assert.ok(result.calls.some(call => call[2] === 8), 'the refused grid was tried');
+  }
+  const both = await run(undefined, { scales: [2.5, 3, 5, 8], refuseAt: [2.5, 8] });
+  // every grid the search tries is fast here, so it reaches 2.5x too: both refusals, in search order (coarse end first)
+  assert.equal(both.messages.at(-1).type, 'ready');
+  assert.equal(both.messages.at(-1).scale, 3);
+  assert.deepEqual([...both.messages.at(-1).refused].map(x => x.scale), [8, 2.5]);
+  const clean = await run(undefined, { scales: [3, 5] });
+  assert.deepEqual([...clean.messages.at(-1).refused], []);
 });

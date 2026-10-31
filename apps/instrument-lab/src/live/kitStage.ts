@@ -698,7 +698,8 @@ export function mountLiveKit(root: HTMLElement): void {
     hud.replaceChildren(...PIECES.map((p) => {
       const L = lives.get(p.id)!, r = L.ready!;
       return el("span", { class: "kit-hud-item" }, el("b", {}, p.name),
-        L.failure ? ` stopped: ${L.failure}` : ` ${r.info.surfaceNodes} nodes · grid ${r.scale}× · ${r.realtime.toFixed(1)}× real time`);
+        L.failure ? ` stopped: ${L.failure}` : ` ${r.info.surfaceNodes} nodes · grid ${r.scale}× · ${r.realtime.toFixed(1)}× real time`
+          + (r.refused ?? []).map((x) => ` · ${x.scale}× refused: ${x.message}`).join(""));
     }));
   }
 

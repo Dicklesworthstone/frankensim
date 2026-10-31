@@ -221,6 +221,8 @@ export interface KitReady {
   levelFix?: number;
   /** "none": no level table for this wasm, so the gain is unscaled. */
   levels?: "ok" | "none";
+  /** Grids of the search whose build refused, with the engine's text; empty when none did (absent from an older worker). */
+  refused?: { scale: number; message: string }[];
 }
 export interface KitField {
   frame: number;

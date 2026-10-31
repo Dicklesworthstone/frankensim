@@ -34,9 +34,11 @@
 //   {type:'stop'}                           end the sequence (ringing continues)
 //   {type:'gain', gain}                     a new page gain (scaled by the same levelFix)
 // Worker -> main thread
-//   {type:'ready', info, gasRecord?, xy:Float32Array, h, radius, scale, realtime, levelFix, levels}
+//   {type:'ready', info, gasRecord?, xy:Float32Array, h, radius, scale, realtime, levelFix, levels, refused}
 //       levelFix  the factor on the page's gain for this grid (1 on 5x); levels: 'ok', or 'none' when
 //                 engine_levels.json is missing or was measured with another wasm (gain unscaled)
+//       refused   [{scale, message}]: each grid of the search whose build refused, with the engine's own
+//                 text (the closed hi-hat's pedal load that never settles, for example); [] when none did
 //   {type:'burst', frame, stepMs, count, v:Float32Array}    the first milliseconds after a stroke: `count`
 //                                                          surface velocities `stepMs` apart, back to back
 //   {type:'field', frame, epoch, v:Float32Array, kinetic, force}   ~fieldHz while the piece moves; force:
@@ -193,8 +195,9 @@ function makePiece(name, scale, gasRecord, materials, gasSources) {
 // copies: a copy runs 1-3 % faster (its memory is laid out in one piece), so it would read high.
 // The first timing in a Worker runs while V8 is still optimizing the engine code, and can read slow. A
 // shortfall there is timed once more, on a new build, before it ends the search.
+// A grid whose build refuses is skipped, and its text goes into `refused` for the page to show.
 let timed = 0;
-function choose(name, scales, minRealtime, benchMs, gasRecord, materials, gasSources) {
+function choose(name, scales, minRealtime, benchMs, gasRecord, materials, gasSources, refused) {
   let pick = null;
   for (let i = scales.length - 1; i >= 0; i--) {
     let kept = null, rt;
@@ -203,9 +206,10 @@ function choose(name, scales, minRealtime, benchMs, gasRecord, materials, gasSou
       kept = copyOf(built);
       rt = bench(built, benchMs, minRealtime);
       if (timed++ === 0 && rt < minRealtime) rt = bench(makePiece(name, scales[i], gasRecord, materials, gasSources), benchMs, minRealtime);
-    } catch {
+    } catch (e) {
       kept?.free();
-      continue; // refused (the grid needs oversampling at 48 kHz) or failed: skip it, as a finest-first search would
+      refused.push({ scale: scales[i], message: e && e.message ? String(e.message) : String(e) });
+      continue; // refused (the grid needs oversampling at 48 kHz, or its initial state never settles) or failed: skip it, as a finest-first search would
     }
     if (rt < minRealtime) {
       if (!pick) return { scale: scales[i], realtime: rt, piece: kept };
@@ -241,7 +245,8 @@ self.onmessage = async (event) => {
       const gasRecord = m.gasRecord;
       const materials = m.materials;
       const gasSources = gasSourcePacket(gasRecord, m.gasSources);
-      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112, gasRecord, materials, gasSources);
+      const refused = [];
+      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112, gasRecord, materials, gasSources, refused);
       piece = pick.piece || makePiece(m.piece, pick.scale, gasRecord, materials, gasSources);
       // The grid correction table describes the original material presets.
       // A source-bound swap keeps the declared pressure gain; it is never
@@ -305,7 +310,7 @@ self.onmessage = async (event) => {
       };
       lane = createLane(m.port, engine, { aheadFrames: m.aheadFrames || 1024, chunk: m.chunk });
       const xy = piece.surfaceXY();
-      post({ type: 'ready', info: JSON.parse(piece.info()), gasRecord, xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table && materials === undefined && gasSources === undefined ? 'ok' : 'none' }, [xy.buffer]);
+      post({ type: 'ready', info: JSON.parse(piece.info()), gasRecord, xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table && materials === undefined && gasSources === undefined ? 'ok' : 'none', refused }, [xy.buffer]);
     } else if (!piece || !lane) {
       return;
     } else if (m.type === 'strike') {
