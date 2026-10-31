@@ -11,14 +11,15 @@
 //! energy balance telescopes exactly. `k_h = 2 k_P k_N / (k_P + k_N)` is the
 //! series (harmonic) conductance of two half cells, exact for
 //! piecewise-constant conductivity meeting at the face.
-//! With an authored k(T) table, continuous solid faces and Dirichlet/Robin half
-//! cells instead integrate the declared law in temperature. Positive Kirchhoff
-//! secants preserve the conservative stencil and the source-free 1-D solution;
-//! a Robin surface solves the same integrated half cell in series with its film.
+//! With authored k(T) tables, each bulk half cell integrates its own law in
+//! temperature. One common flux satisfies both surface temperatures and the
+//! declared contact jump. Positive secants preserve the conservative stencil;
+//! a Robin surface solves the integrated half cell in series with its film.
 
 use fs_exec::CancelGate;
 use fs_sparse::Coo;
 
+use super::conductance::{ConductivityCurve, interface_conductance};
 use super::domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 use super::flow::{FlowField, scale_rows};
 use super::krylov::bicgstab_ilu0;
@@ -313,14 +314,18 @@ pub struct EnergyReport {
 pub struct EnergySolution {
     /// Temperature per cell, K.
     pub temperature: Vec<f64>,
-    /// Cell-centre conductivity along x, y, z, W/(m K), retained for material
-    /// reporting and discontinuous interfaces. Authored k(T) tables integrate
-    /// continuous solid faces and Dirichlet/Robin half cells separately; these
-    /// local values alone do not reconstruct those nonlinear face coefficients.
+    /// Cell-centre conductivity along x, y, z, W/(m K), retained for local
+    /// material reporting. Authored k(T) tables integrate the bulk half cells;
+    /// these local values alone do not reconstruct nonlinear face coefficients.
     pub conductivity: Vec<[f64; 3]>,
     /// Canonical `(lower cell, upper cell)` face resistances actually used by
     /// this solve, m² K/W. Kept for consistent downstream heat-flow observers.
     pub face_contact_resistance_m2_k_w: std::collections::BTreeMap<(usize, usize), f64>,
+    /// Ordinary solid/fluid faces as `(solid cell, fluid cell, conductance W/K)`.
+    /// These are the actual accepted face coefficients, including nonlinear
+    /// bulk response and contact. Compact junctions retain their own links.
+    /// Storage grows with boundary faces, not with all grid faces.
+    pub solid_fluid_links: Vec<(usize, usize, f64)>,
     /// One entry per `ThermalSetup::compact_components`, in order.
     pub junctions: Vec<JunctionSolution>,
     /// Solve evidence.
@@ -370,37 +375,13 @@ impl EnergySolution {
     /// fluid/solid face, W, including any explicitly resolved face resistance.
     #[must_use]
     pub fn solid_to_fluid_heat_w(&self, domain: &VoxelDomain) -> f64 {
-        let mut total = 0.0;
-        // A collapsed component cell holds its junction's temperature and
-        // reaches its neighbours only through the junction's links.
-        let collapsed = |c: usize| {
-            let at = domain.coords(c);
-            self.junctions
-                .iter()
-                .any(|j| (0..3).all(|a| at[a] >= j.cells.0[a] && at[a] < j.cells.1[a]))
-        };
+        let mut total = self.solid_fluid_links.iter().map(|&(solid, fluid, g)| {
+            g * (self.temperature[solid] - self.temperature[fluid])
+        }).sum();
         for junction in &self.junctions {
             for &(n, g) in &junction.links {
                 if domain.is_fluid(n) {
                     total += g * (junction.temperature_k - self.temperature[n]);
-                }
-            }
-        }
-        for c in 0..domain.cell_count() {
-            if domain.is_fluid(c) || collapsed(c) {
-                continue;
-            }
-            for f in 0..6 {
-                if let Some(n) = domain.neighbor(c, f)
-                    && domain.is_fluid(n)
-                {
-                    let axis = f / 2;
-                    let (kc, kn) = (self.conductivity[c][axis], self.conductivity[n][axis]);
-                    let contact = self.face_contact_resistance_m2_k_w
-                        .get(&(c.min(n), c.max(n))).copied().unwrap_or(0.0);
-                    let d = domain.face_area(c, axis)
-                        / (0.5 * domain.widths(c)[axis] / kc + contact + 0.5 * domain.widths(n)[axis] / kn);
-                    total += d * (self.temperature[c] - self.temperature[n]);
                 }
             }
         }
@@ -455,7 +436,7 @@ impl Context<'_> {
         {
             return Err(ChtError::InvalidInput {
                 field: "thermal.face_coefficients",
-                reason: "face energy coefficients or nonlinear film are unrepresentable".into(),
+                reason: "face energy coefficients or nonlinear interface are unrepresentable".into(),
             });
         }
         Ok(term)
@@ -478,6 +459,65 @@ impl Context<'_> {
             }
             _ => 0.0,
         }
+    }
+
+    fn conductivity_curve(&self, c: usize, axis: usize) -> ConductivityCurve<'_> {
+        if self.conductivity_temperature.is_some()
+            && let Voxel::Solid(m) = self.domain.voxel_at(c)
+        {
+            let material = &self.solids[usize::from(m)];
+            if !material.conductivity_table.is_empty() {
+                return ConductivityCurve::tabulated(
+                    material.conductivity_w_m_k,
+                    material.axis_conductivity()[axis],
+                    &material.conductivity_table,
+                );
+            }
+        }
+        // Resolved molecular fields and fluid eddy conductivity are already
+        // frozen by their owners. No temperature curve is inferred from them.
+        ConductivityCurve::constant(self.k[c][axis])
+    }
+
+    fn diffusive_conductance(&self, c: usize, n: usize, axis: usize) -> f64 {
+        let area = self.domain.face_area(c, axis);
+        let half_c = 0.5 * self.domain.widths(c)[axis];
+        let half_n = 0.5 * self.domain.widths(n)[axis];
+        let contact = self.contact(c, n);
+        let has_curve = |cell| match self.domain.voxel_at(cell) {
+            Voxel::Solid(m) => !self.solids[usize::from(m)].conductivity_table.is_empty(),
+            Voxel::Fluid => false,
+        };
+        let d = if let Some(t) = self.conductivity_temperature
+            && (has_curve(c) || has_curve(n))
+        {
+            if let (Voxel::Solid(a), Voxel::Solid(b)) =
+                (self.domain.voxel_at(c), self.domain.voxel_at(n))
+                && a == b && contact == 0.0
+            {
+                // One continuous curve has a direct Kirchhoff secant.
+                let solid = &self.solids[usize::from(a)];
+                area * solid.axis_conductivity()[axis]
+                    * solid.conductivity_secant_factor(t[c], t[n])
+                    / (half_c + half_n)
+            } else {
+                // Both rows use exactly the same ordering and positive
+                // conductance. Each bulk has its own integrated curve; the
+                // two surface temperatures retain the declared contact jump.
+                let (a, b) = (c.min(n), c.max(n));
+                area * interface_conductance(
+                    self.conductivity_curve(a, axis), t[a],
+                    0.5 * self.domain.widths(a)[axis],
+                    self.conductivity_curve(b, axis), t[b],
+                    0.5 * self.domain.widths(b)[axis], contact,
+                ).unwrap_or(f64::NAN)
+            }
+        } else {
+            area / (half_c / self.k[c][axis] + contact + half_n / self.k[n][axis])
+        };
+        // A failed or unrepresentable face must not silently become an
+        // insulator. checked_term gives it the existing typed refusal.
+        if d.is_finite() && d > 0.0 { d } else { f64::NAN }
     }
 
     fn weight(&self, peclet: f64) -> f64 {
@@ -514,30 +554,7 @@ impl Context<'_> {
         let flux = self.rho_c * self.flow.outward(self.domain, c, f);
         let kc = self.k[c][f / 2];
         if let Some(n) = self.domain.neighbor(c, f) {
-            let kn = self.k[n][f / 2];
-            // Series resistance of the two half cells and any contact
-            // between their materials: exact for piecewise-constant k.
-            let contact = self.contact(c, n);
-            let half_n = 0.5 * self.domain.widths(n)[axis];
-            let d = if let Some(t) = self.conductivity_temperature
-                && let (Voxel::Solid(a), Voxel::Solid(b)) =
-                    (self.domain.voxel_at(c), self.domain.voxel_at(n))
-                && a == b
-                && contact == 0.0
-            {
-                // Within one continuous material, Fourier's law integrates
-                // to q = A * integral(k dT) / centre_distance. Its positive
-                // secant preserves the original reciprocal face stencil and
-                // is exact across every crossed conductivity-table knot.
-                let solid = &self.solids[usize::from(a)];
-                area * solid.axis_conductivity()[axis]
-                    * solid.conductivity_secant_factor(t[c], t[n])
-                    / (half_c + half_n)
-            } else {
-                // Material jumps and finite contact resistances keep their
-                // declared two-half-cell series model.
-                area / (half_c / kc + contact + half_n / kn)
-            };
+            let d = self.diffusive_conductance(c, n, axis);
             if let Some(field) = self.enthalpy {
                 let mass = self.density * self.flow.outward(self.domain, c, f);
                 // Solid faces are impermeable. At a fluid face both rows use
@@ -699,9 +716,8 @@ pub(crate) struct PseudoStep<'a> {
 
 /// The energy solve, iterated to a consistent temperature field when a solid
 /// declares a temperature-dependent conductivity. Each Picard pass evaluates
-/// continuous solid faces and Dirichlet/Robin half cells with the table's
-/// integrated secant, and material/contact jumps with cell-centred series
-/// coefficients, until the largest temperature change is below 1e-10 of its span.
+/// the integrated bulk laws and their material/contact interface conditions,
+/// until the largest temperature change is below 1e-10 of its span.
 #[allow(clippy::too_many_arguments)] // physics inputs + step state
 pub(crate) fn solve_energy_inner(
     domain: &VoxelDomain,
@@ -980,7 +996,7 @@ fn solve_energy_field(
         contacts.push(((a.min(b), a.max(b)), contact.resistance_m2_k_w));
     }
     let compact = Compact::new(domain, &k, setup)?;
-    let face_contacts = face_contact::prepare(domain, flow, setup, &k, &compact, gate)?;
+    let face_contacts = face_contact::prepare(domain, flow, setup, &compact, gate)?;
     let ctx = Context {
         domain,
         flow,
@@ -995,6 +1011,19 @@ fn solve_energy_field(
         enthalpy,
         scheme: config.scheme,
     };
+    // Validate the actual native or frozen face law, not a different
+    // centre-conductivity approximation during nonlinear Picard passes.
+    for (index, &(a, b)) in ctx.face_contacts.keys().enumerate() {
+        if index.is_multiple_of(256) { super::poll(gate)?; }
+        let face = (0..6).find(|&f| domain.neighbor(a, f) == Some(b))
+            .expect("admitted contact face");
+        if !ctx.diffusive_conductance(a, b, face / 2).is_finite() {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.face_contacts",
+                reason: format!("contact {index}: total face conductance is unrepresentable"),
+            });
+        }
+    }
     let source = |c: usize| {
         if setup.power_w.is_empty() {
             0.0
@@ -1174,7 +1203,18 @@ fn solve_energy_field(
         term.diag.mul_add(temperature[c], -off) - term.rhs
     };
     let mut sink_w = 0.0f64;
+    let mut solid_fluid_links = Vec::new();
     for c in 0..cells {
+        if c.is_multiple_of(4096) { super::poll(gate)?; }
+        if !domain.is_fluid(c) && compact.owner(c).is_none() {
+            for f in 0..6 {
+                if let Some(n) = domain.neighbor(c, f) && domain.is_fluid(n) {
+                    let term = ctx.checked_term(c, f)?;
+                    let (_, g) = term.off.expect("interior solid/fluid face");
+                    solid_fluid_links.push((c, n, g));
+                }
+            }
+        }
         let sink = sinks[c].0.mul_add(temperature[c], -sinks[c].1);
         sink_w += sink;
         scale += sink.abs();
@@ -1286,6 +1326,7 @@ fn solve_energy_field(
         temperature,
         conductivity: ctx.k,
         face_contact_resistance_m2_k_w: ctx.face_contacts,
+        solid_fluid_links,
         junctions,
         report,
     })

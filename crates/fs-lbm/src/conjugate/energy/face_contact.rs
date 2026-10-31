@@ -6,8 +6,9 @@ use super::{ChtError, Compact, FlowField, ThermalSetup, Voxel, VoxelDomain};
 
 /// One zero-thickness thermal joint on a Cartesian cell face.
 ///
-/// Additional to bulk half cells: G = area / (wa/(2*ka) + R + wb/(2*kb)).
-/// Cell order does not change this reciprocal coefficient. A source owner may
+/// Additional to the bulk half cells: the two surface temperatures differ by
+/// R times the heat flux. Constant bulks give G = area/(wa/(2*ka)+R+wb/(2*kb));
+/// native k(T) curves use their integrated half-cell laws. A source owner may
 /// retain ordered surfaces and resolve R at both local temperatures. Same-material
 /// joints, solid/fluid walls and stagnant fluid pairs are allowed. No contact-area,
 /// pressure, phase or interfacial storage law is inferred.
@@ -24,7 +25,6 @@ pub(super) fn prepare(
     domain: &VoxelDomain,
     flow: &FlowField,
     setup: &ThermalSetup,
-    conductivity: &[[f64; 3]],
     compact: &Compact,
     gate: &CancelGate,
 ) -> Result<BTreeMap<(usize, usize), f64>, ChtError> {
@@ -66,15 +66,6 @@ pub(super) fn prepare(
         }
         if flow.outward(domain, a, face) != 0.0 {
             return Err(refuse(format!("contact {index}: stationary thermal contacts cannot carry through-flow")));
-        }
-        let axis = face / 2;
-        let resistance = 0.5 * domain.widths(a)[axis] / conductivity[a][axis]
-            + r + 0.5 * domain.widths(b)[axis] / conductivity[b][axis];
-        let conductance = domain.face_area(a, axis) / resistance;
-        if !resistance.is_finite() || resistance <= 0.0
-            || !conductance.is_finite() || conductance <= 0.0
-        {
-            return Err(refuse(format!("contact {index}: total face conductance is unrepresentable")));
         }
     }
     super::super::poll(gate)?;

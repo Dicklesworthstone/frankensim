@@ -430,7 +430,8 @@ pub struct SolidMaterial {
     /// piecewise linear in T, constant beyond the ends, scaling every axis
     /// conductivity by `k(T) / conductivity_w_m_k`. Continuous same-material
     /// faces and Dirichlet/Robin half cells integrate the table exactly;
-    /// discontinuous/contact faces retain cell-centred series coefficients.
+    /// different materials and contacts share the flux from their two
+    /// integrated half-cell laws and the declared interface resistance.
     /// The energy solve iterates to consistency.
     pub conductivity_table: Vec<(f64, f64)>,
 }

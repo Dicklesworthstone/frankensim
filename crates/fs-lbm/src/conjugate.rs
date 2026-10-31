@@ -36,6 +36,9 @@
 //!    conservative form, so the discrete total energy flux telescopes exactly:
 //!    the [`EnergyBalance`] closes to solver tolerance whatever the residual
 //!    divergence of the supplied flux field.
+//!    Native temperature-dependent solids integrate each half cell's own
+//!    conductivity law. A material interface shares one heat flux, with its
+//!    declared contact resistance determining the surface temperature jump.
 //!
 //! The linear system is an M-matrix (non-positive off-diagonals, weakly
 //! diagonally dominant for a divergence-free flux field), so the discrete
@@ -89,6 +92,7 @@ use crate::d3q19::Face3;
 /// Face-local material/reservoir exchange with a resolved surface temperature.
 pub mod boundary_exchange;
 mod buoyant;
+mod conductance;
 mod domain;
 mod electric;
 mod energy;

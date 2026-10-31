@@ -2583,9 +2583,27 @@ constant endpoint extensions; near equilibrium it integrates temperature
 intervals directly rather than subtracting two large potentials. Table lookup
 is logarithmic, followed only by the crossed knots, with no face allocations.
 Reciprocal rows use identical coefficients. Cell-reported conductivity remains
-the local value. Material jumps, finite contact resistances and compact-component
-links retain their cell-centred series model and require spatial refinement;
-no exact nonlinear interface solution is claimed there. The analytic film is
+the local value. Different-material and finite-contact faces integrate each
+bulk half cell separately and solve for their single common heat flux. The
+surface temperature jump equals the authored area-specific resistance times
+that flux. Positive tables give a monotone scalar equation. Two knot cursors
+merge the relevant events in flux order, invert each linear piece analytically,
+and use bounded safeguarded Newton iterations only in the final piece pair.
+Normalized temperature drops avoid subtracting large conductivity potentials;
+constant laws and equal-temperature limits retain a direct series calculation.
+No face allocations or new numerical dependencies are introduced. The same law
+applies to native solid/fluid walls, including the existing fluid eddy term once.
+Resolved molecular fields retain their explicitly frozen coefficients.
+
+`EnergySolution::solid_fluid_links` retains the actual ordinary wall coefficients
+as a contiguous boundary-only list. The solid-to-fluid observer sums those links
+and the separate compact links instead of reconstructing a different law from
+cell-centre values or rescanning every component. Fixed-temperature solid cells
+are included. `tests/conjugate/nonlinear_contact.rs` checks different nonlinear
+materials with known interface temperatures, graded axes, reversal, contact
+jumps, solid/fluid observations and an independent transient storage balance.
+
+Compact-component links still use their cell-centred series model. The analytic film is
 the declared stationary scalar Robin law, not a resolved fluid boundary layer.
 
 The existing steady and transient Picard/Krylov owner evaluates these
