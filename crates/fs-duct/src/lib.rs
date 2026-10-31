@@ -77,6 +77,8 @@ pub mod compose;
 /// Material-driven pressure waves and viscothermal losses for gases and liquids,
 /// with shared geometry, wall response and stable pressure/volume-flow composition.
 pub mod fluid;
+/// Finite porous layers with transmission, reflection and coherent absorption.
+pub mod porous;
 /// Smooth plane-wave profiles and declared integration/slice axes.
 pub mod profile;
 /// Harmonic molecular dispersion coupled to the original wall-diffusion law.

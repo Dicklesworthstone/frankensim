@@ -2250,3 +2250,38 @@ Focused tests in `wall/porous/tests.rs` verify source/fluid and phasor preservat
 (G1), segmentation/constant-profile equivalence (G3), and original support and
 cancellation refusals. These tests establish the stated local model, not material
 qualification outside the source's domain.
+
+
+## Finite porous layers and coherent absorption
+
+`porous::PorousLayer` binds an original `PorousFluidLaw`, its coherent saturating
+fluid, one admitted angular frequency, physical thickness and full exposed face
+area. It conjugates the original JCA(L) characteristic response into the duct
+phasor convention and delegates propagation to `compose::TwoPort::from_wave`.
+The effective density/bulk modulus already include porosity; volume flow is
+superficial velocity times the full face area, without another porosity factor.
+The equivalent cylinder radius supplies only that plane-wave area; it introduces
+no additional circular-pore or rigid-wall diffusion law.
+
+The reusable block composes with other porous layers, native fluid gaps and
+explicit loads through the existing scattering/budget/cancellation owners.
+Only decaying exponentials are formed, including opaque layers. Preparation
+has fixed work and field/power queries allocate nothing. The material source,
+frequency support and original fluid snapshot remain available unchanged.
+
+`power_for_incident_pressure` accepts coherent peak pressure waves on both
+faces, returns outgoing waves, total pressure and inward volume flow, and reports
+cycle-averaged incoming, outgoing and absorbed power. Outgoing amplitudes combine
+before squaring, preserving interference; transmitted sound is not counted as
+absorption. The signed balance retains floating-point roundoff without clipping.
+It does not partition pore heat between fluid and skeleton or evolve temperature.
+A physical normal-incidence plane-wave interpretation requires the surrounding
+fluid's real rho*c/area as the common port reference.
+
+The layer is homogeneous, rigid-frame and plane-wave, with open-pore pressure
+and volume-flow continuity. Moving frames, finite-face diffraction, oblique
+incidence, skins/interface resistances, anisotropy and mean flow need their own
+admitted owners. `porous/tests.rs` independently solves interface continuity,
+checks coherent absorbed power against the original viscous/thermal volume-loss
+integral, composes split layers and an actual fluid air gap, recovers the existing
+rigid-backed material impedance, and exercises thin/opaque limits and refusal.
