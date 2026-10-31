@@ -7784,3 +7784,12 @@ permittivity-weighted component products. A small transverse field change under
 a large bias therefore retains its quadratic work, including in the linear
 material limit. This is the source-owned work operation used by spatial
 nonlinear backtracking; endpoint stored energies remain separate diagnostics.
+
+
+## Independently sourced Chaboche backstress branches
+
+`plastic::chaboche::source::ResolvedChabocheBranches<N>` binds one through eight independently named C_i/gamma_i pairs to the existing native ChabocheJ2<N>. `BackstressProperties` order is branch/history order, including explicit zero-C branches. There is no sorting, averaging, padding or inference from total stiffness or monotonic tangent. Each pair has exact Pa/dimensionless quantities, finite nonnegative values, fixed external conditions and independent claim selection.
+
+Duplicate or aliased branch/backbone/reference-density roles, missing or ambiguous pins, evolving mechanical/rate/frequency coordinates, unsupported counts and total-strain tangent inference refuse. The complete original ResolvedVoceJ2 bundle, extra density/physics roles and source-use receipts survive adoption; ordered getters expose each original branch claim. SmallStrainLaw delegates stress, state, analytic tangent and symmetry declaration to the unchanged native constitutive owner, so existing generic continuum paths can use the resolved law directly.
+
+Synthetic cyclic/source regressions cover two and three distinct recovery scales through reversal, explicit inactive/linear branch limits, equal total modulus with differing cyclic response, full source identity and receipts, complete quantity/condition admission, and the eight-branch bound. Canonical N=1 agrees exactly with the original single-branch source API. These tests verify integration rather than empirical calibration. Re-resolution at another temperature does not supply thermal Chaboche history transport or its energy account.

@@ -26,6 +26,13 @@ use crate::state_point::{
 };
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
 
+/// Independently named, ordered sources for one to eight retained backstresses.
+pub mod branches;
+pub use branches::{
+    BackstressProperties, ResolvedChabocheBranches, chaboche_branch_requirements,
+    resolve_chaboche_branches,
+};
+
 /// Independent branch modulus C [Pa], in `dX = (2/3) C d(epsilon_p) - gamma X d(alpha)`.
 pub const CHABOCHE_BACKSTRESS_MODULUS_PROPERTY: &str = "chaboche_backstress_modulus";
 /// Dynamic recovery gamma per unit equivalent plastic strain [dimensionless].
@@ -194,7 +201,7 @@ fn admit_basis(basis: HardeningPropertyBasis) -> Result<(), J2SourceError> {
 
 fn coefficient<'a>(
     material: &'a ResolvedMaterialStatePoint,
-    name: &'static str,
+    name: &str,
     dims: Dims,
 ) -> Result<&'a ResolvedScalarProperty, J2SourceError> {
     let property = material.property(name).ok_or(J2SourceError::Invalid(
