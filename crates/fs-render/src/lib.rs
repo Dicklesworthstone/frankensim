@@ -62,6 +62,8 @@ pub mod material_state;
 #[cfg(feature = "photometry")]
 pub mod photometry;
 pub mod spectral;
+/// Stokes/Mueller polarization transport primitives.
+pub mod polarization;
 #[cfg(feature = "tracer")]
 pub mod thermal_surface;
 #[cfg(feature = "tracer")]
