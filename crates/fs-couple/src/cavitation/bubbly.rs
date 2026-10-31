@@ -1,4 +1,4 @@
-//! Small-amplitude coherent waves in a dilute monodisperse bubbly liquid.
+//! Small-amplitude coherent waves in a dilute bubbly liquid.
 //!
 //! The original Keller--Miksis owner supplies its reference-equilibrium
 //! linearization. For exp(-i omega t), its fractional-radius susceptibility is
@@ -30,11 +30,19 @@
 use fs_duct::compose::{ComposeOptions, PreparedChain};
 use fs_duct::fluid::{self, FluidDuctError};
 use fs_duct::{ConeSlices, Duct, SegmentWave, WallModel};
-use fs_flux::cavitation::{BubbleLinearization, CavitationError, KellerMiksisBubble};
+use fs_flux::cavitation::{
+    BubbleLinearization, BubblePopulationError, CavitationError, KellerMiksisBubble,
+};
 use fs_material::MaterialError;
 use fs_material::cavitation::{CavitationProperties, CavitationState};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_math::{c64::C64, det};
+
+#[path = "bubbly/population.rs"]
+mod population;
+pub use population::{
+    PolydisperseBubblyLiquid, PolydisperseBubblyLiquidResponse, PopulationResponseDiagnostics,
+};
 
 /// Declared physical bounds; no value is a damping fit or a numerical clamp.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,6 +67,7 @@ pub struct BubblyLiquidLimits {
 pub enum BubblyLiquidError {
     Material(MaterialError),
     Bubble(CavitationError),
+    Population(BubblePopulationError),
     Duct(FluidDuctError),
     MaterialMismatch,
     InvalidInput(&'static str),
@@ -74,6 +83,7 @@ impl core::fmt::Display for BubblyLiquidError {
         match self {
             Self::Material(error) => write!(f, "bubbly liquid material: {error}"),
             Self::Bubble(error) => write!(f, "bubbly liquid dynamics: {error}"),
+            Self::Population(error) => write!(f, "bubbly liquid population: {error}"),
             Self::Duct(error) => write!(f, "bubbly liquid propagation: {error}"),
             Self::MaterialMismatch => write!(f, "bubble and source must use the identical liquid"),
             Self::InvalidInput(what) => write!(f, "invalid bubbly liquid input: {what}"),
@@ -96,6 +106,11 @@ impl From<MaterialError> for BubblyLiquidError {
 impl From<CavitationError> for BubblyLiquidError {
     fn from(error: CavitationError) -> Self {
         Self::Bubble(error)
+    }
+}
+impl From<BubblePopulationError> for BubblyLiquidError {
+    fn from(error: BubblePopulationError) -> Self {
+        Self::Population(error)
     }
 }
 impl From<FluidDuctError> for BubblyLiquidError {
@@ -208,23 +223,11 @@ impl<'a, F: CavitationProperties + ?Sized> DiluteBubblyLiquid<'a, F> {
         omega_rad_s: f64,
         maximum_local_pressure_amplitude_pa: f64,
     ) -> Result<BubblyLiquidResponse, BubblyLiquidError> {
-        if !omega_rad_s.is_finite()
-            || omega_rad_s <= 0.0
-            || !maximum_local_pressure_amplitude_pa.is_finite()
-            || maximum_local_pressure_amplitude_pa < 0.0
-        {
-            return Err(BubblyLiquidError::InvalidInput(
-                "frequency and local pressure amplitude",
-            ));
-        }
-        let medium = self.material.acoustic_state()?;
-        let omega = omega_rad_s;
-        let k_l = omega / medium.sound_speed_m_s();
-        if !k_l.is_finite() || k_l <= 0.0 {
-            return Err(BubblyLiquidError::InvalidInput(
-                "unrepresentable liquid wavenumber",
-            ));
-        }
+        let (medium, k_l) = admit_harmonic(
+            self.material,
+            omega_rad_s,
+            maximum_local_pressure_amplitude_pa,
+        )?;
         let mut diagnostics = BubblyResponseDiagnostics {
             void_fraction: self.void_fraction,
             maximum_local_pressure_amplitude_pa,
@@ -245,104 +248,46 @@ impl<'a, F: CavitationProperties + ?Sized> DiluteBubblyLiquid<'a, F> {
                 diagnostics,
             });
         };
+        let response = single_bubble_response(
+            &self.bubble,
+            linear,
+            medium,
+            omega_rad_s,
+            maximum_local_pressure_amplitude_pa,
+            self.limits,
+        )?;
+        diagnostics.fractional_radius_per_pa = response.susceptibility;
+        diagnostics.fractional_radius_amplitude = response.fractional_radius_amplitude;
+        diagnostics.wall_mach_amplitude = response.wall_mach_amplitude;
+        let wavenumber = coherent_wavenumber(
+            medium,
+            omega_rad_s,
+            response.susceptibility.scale(3.0 * self.void_fraction),
+        )?;
         let radius = linear.equilibrium_radius_m;
-        let density = medium.density_kg_m3();
-        let inertia = density * radius * radius;
-        let numerator = C64::new(1.0, -omega * linear.pressure_derivative_time_s);
-        let denominator = C64::new(
-            linear.stiffness_coefficient_per_s2 - linear.inertia_multiplier * omega * omega,
-            -linear.damping_coefficient_per_s * omega,
-        );
-        let susceptibility = -(numerator / denominator).scale(1.0 / inertia);
-        if !finite(susceptibility) || susceptibility.abs() == 0.0 || susceptibility.im >= 0.0 {
-            return Err(BubblyLiquidError::InvalidInput(
-                "unresolved passive bubble susceptibility",
-            ));
-        }
-        diagnostics.fractional_radius_per_pa = susceptibility;
-        diagnostics.fractional_radius_amplitude =
-            susceptibility.abs() * maximum_local_pressure_amplitude_pa;
-        bound(
-            "fractional radius",
-            diagnostics.fractional_radius_amplitude,
-            self.limits.maximum_fractional_radius,
-        )?;
-        let radial_limits = self.bubble.limits();
-        let radius_envelope = (1.0 - radial_limits.minimum_radius_m / radius)
-            .min(radial_limits.maximum_radius_m / radius - 1.0);
-        bound(
-            "native radius interval",
-            diagnostics.fractional_radius_amplitude,
-            radius_envelope,
-        )?;
-        diagnostics.wall_mach_amplitude = diagnostics.fractional_radius_amplitude * k_l * radius;
-        bound(
-            "wall Mach amplitude",
-            diagnostics.wall_mach_amplitude,
-            radial_limits.maximum_wall_mach_number,
-        )?;
-        // This is the native linearized wall-minus-drive pressure, not a
-        // second radiation-power subtraction or a heuristic damping term.
-        let wall_stiffness = C64::new(
-            inertia * linear.stiffness_coefficient_per_s2,
-            -4.0 * self.material.dynamic_viscosity_pa_s() * omega,
-        );
-        let pressure_ratio = (C64::ONE + wall_stiffness * susceptibility).abs()
-            * (maximum_local_pressure_amplitude_pa / medium.adiabatic_bulk_modulus_pa());
-        bound(
-            "native liquid pressure ratio",
-            pressure_ratio,
-            self.bubble.compressibility_limits().maximum_pressure_ratio,
-        )?;
-        let inverse_sound_speed = 1.0 / medium.sound_speed_m_s();
-        let slowness_squared = C64::from_re(inverse_sound_speed * inverse_sound_speed)
-            - susceptibility.scale(3.0 * self.void_fraction * density);
-        let wavenumber = slowness_squared.sqrt().scale(omega);
-        if !finite(wavenumber) || wavenumber.re <= 0.0 || wavenumber.im <= 0.0 {
-            return Err(BubblyLiquidError::InvalidInput(
-                "unresolved forward passive mixture wave",
-            ));
-        }
-        let largest_wavenumber = k_l.max(wavenumber.abs());
-        diagnostics.wavenumber_radius = largest_wavenumber * radius;
-        bound(
-            "bubble compactness",
-            diagnostics.wavenumber_radius,
-            self.limits.maximum_wavenumber_radius,
-        )?;
         let spacing_over_radius = det::pow(
             4.0 * core::f64::consts::PI / (3.0 * self.void_fraction),
             1.0 / 3.0,
         );
         let spacing = radius * spacing_over_radius;
-        if !spacing.is_finite() || spacing <= 0.0 {
-            return Err(BubblyLiquidError::InvalidInput(
-                "unrepresentable interbubble spacing",
-            ));
-        }
+        let collective = collective_admission(
+            k_l.max(wavenumber.abs()),
+            radius,
+            spacing,
+            response.scattering_over_radius * radius,
+            3.0 * self.void_fraction
+                * response.scattering_over_radius
+                * response.scattering_over_radius
+                / radius,
+            k_l,
+            self.limits,
+        )?;
         diagnostics.mean_bubble_spacing_m = Some(spacing);
-        diagnostics.wavenumber_spacing = largest_wavenumber * spacing;
-        bound(
-            "homogenization",
-            diagnostics.wavenumber_spacing,
-            self.limits.maximum_wavenumber_spacing,
-        )?;
-        let scattering_over_radius = (numerator / denominator).scale(omega * omega).abs();
+        diagnostics.wavenumber_radius = collective.wavenumber_radius;
+        diagnostics.wavenumber_spacing = collective.wavenumber_spacing;
         diagnostics.neighbor_scattered_pressure_ratio =
-            scattering_over_radius / spacing_over_radius;
-        bound(
-            "neighbor scattered pressure",
-            diagnostics.neighbor_scattered_pressure_ratio,
-            self.limits.maximum_neighbor_scattered_pressure_ratio,
-        )?;
-        diagnostics.multiple_scattering_parameter =
-            3.0 * self.void_fraction * scattering_over_radius * scattering_over_radius
-                / (k_l * radius);
-        bound(
-            "multiple scattering",
-            diagnostics.multiple_scattering_parameter,
-            self.limits.maximum_multiple_scattering_parameter,
-        )?;
+            collective.neighbor_scattered_pressure_ratio;
+        diagnostics.multiple_scattering_parameter = collective.multiple_scattering_parameter;
         Ok(BubblyLiquidResponse {
             medium,
             omega_rad_s,
@@ -350,6 +295,174 @@ impl<'a, F: CavitationProperties + ?Sized> DiluteBubblyLiquid<'a, F> {
             diagnostics,
         })
     }
+}
+
+// Shared by the one-size and polydisperse owners. These are the original
+// physical susceptibility and amplitude/domain checks, not a second gas model.
+fn admit_harmonic(
+    material: CavitationState,
+    omega: f64,
+    amplitude: f64,
+) -> Result<(FluidAcousticState, f64), BubblyLiquidError> {
+    if !omega.is_finite() || omega <= 0.0 || !amplitude.is_finite() || amplitude < 0.0 {
+        return Err(BubblyLiquidError::InvalidInput(
+            "frequency and local pressure amplitude",
+        ));
+    }
+    let medium = material.acoustic_state()?;
+    let k_l = omega / medium.sound_speed_m_s();
+    if !k_l.is_finite() || k_l <= 0.0 {
+        return Err(BubblyLiquidError::InvalidInput(
+            "unrepresentable liquid wavenumber",
+        ));
+    }
+    Ok((medium, k_l))
+}
+
+#[derive(Clone, Copy)]
+struct SingleBubbleResponse {
+    susceptibility: C64,
+    fractional_radius_amplitude: f64,
+    wall_mach_amplitude: f64,
+    liquid_pressure_ratio: f64,
+    scattering_over_radius: f64,
+}
+fn single_bubble_response(
+    bubble: &KellerMiksisBubble,
+    linear: BubbleLinearization,
+    medium: FluidAcousticState,
+    omega: f64,
+    amplitude: f64,
+    limits: BubblyLiquidLimits,
+) -> Result<SingleBubbleResponse, BubblyLiquidError> {
+    let radius = linear.equilibrium_radius_m;
+    let inertia = medium.density_kg_m3() * radius * radius;
+    let numerator = C64::new(1.0, -omega * linear.pressure_derivative_time_s);
+    let denominator = C64::new(
+        linear.stiffness_coefficient_per_s2 - linear.inertia_multiplier * omega * omega,
+        -linear.damping_coefficient_per_s * omega,
+    );
+    let pressure_transfer = numerator / denominator;
+    let susceptibility = -pressure_transfer.scale(1.0 / inertia);
+    let susceptibility_magnitude = susceptibility.abs();
+    if !finite(susceptibility) || susceptibility_magnitude == 0.0 || susceptibility.im >= 0.0 {
+        return Err(BubblyLiquidError::InvalidInput(
+            "unresolved passive bubble susceptibility",
+        ));
+    }
+    let fractional_radius_amplitude = susceptibility_magnitude * amplitude;
+    bound(
+        "fractional radius",
+        fractional_radius_amplitude,
+        limits.maximum_fractional_radius,
+    )?;
+    let radial_limits = bubble.limits();
+    let radius_envelope = (1.0 - radial_limits.minimum_radius_m / radius)
+        .min(radial_limits.maximum_radius_m / radius - 1.0);
+    bound(
+        "native radius interval",
+        fractional_radius_amplitude,
+        radius_envelope,
+    )?;
+    let wall_mach_amplitude =
+        fractional_radius_amplitude * (omega / medium.sound_speed_m_s()) * radius;
+    bound(
+        "wall Mach amplitude",
+        wall_mach_amplitude,
+        radial_limits.maximum_wall_mach_number,
+    )?;
+    let wall_stiffness = C64::new(
+        inertia * linear.stiffness_coefficient_per_s2,
+        -4.0 * bubble.liquid().dynamic_viscosity_pa_s() * omega,
+    );
+    let liquid_pressure_ratio = (C64::ONE + wall_stiffness * susceptibility).abs()
+        * (amplitude / medium.adiabatic_bulk_modulus_pa());
+    bound(
+        "native liquid pressure ratio",
+        liquid_pressure_ratio,
+        bubble.compressibility_limits().maximum_pressure_ratio,
+    )?;
+    let scattering_over_radius = pressure_transfer.scale(omega * omega).abs();
+    if !scattering_over_radius.is_finite() || scattering_over_radius <= 0.0 {
+        return Err(BubblyLiquidError::InvalidInput(
+            "unrepresentable bubble scattering amplitude",
+        ));
+    }
+    Ok(SingleBubbleResponse {
+        susceptibility,
+        fractional_radius_amplitude,
+        wall_mach_amplitude,
+        liquid_pressure_ratio,
+        scattering_over_radius,
+    })
+}
+
+// delta_alpha_per_pa is the actual complex occupied-volume response,
+// 3 sum_j alpha_j chi_j. There is no population-averaged radius.
+fn coherent_wavenumber(
+    medium: FluidAcousticState,
+    omega: f64,
+    delta_alpha_per_pa: C64,
+) -> Result<C64, BubblyLiquidError> {
+    let inverse_sound_speed = 1.0 / medium.sound_speed_m_s();
+    let slowness_squared = C64::from_re(inverse_sound_speed * inverse_sound_speed)
+        - delta_alpha_per_pa.scale(medium.density_kg_m3());
+    let wavenumber = slowness_squared.sqrt().scale(omega);
+    if !finite(wavenumber) || wavenumber.re <= 0.0 || wavenumber.im <= 0.0 {
+        return Err(BubblyLiquidError::InvalidInput(
+            "unresolved forward passive mixture wave",
+        ));
+    }
+    Ok(wavenumber)
+}
+
+struct CollectiveDiagnostics {
+    wavenumber_radius: f64,
+    wavenumber_spacing: f64,
+    neighbor_scattered_pressure_ratio: f64,
+    multiple_scattering_parameter: f64,
+}
+fn collective_admission(
+    largest_wavenumber: f64,
+    maximum_radius: f64,
+    spacing: f64,
+    maximum_scattering_amplitude: f64,
+    scattering_cross_section_per_m: f64,
+    k_l: f64,
+    limits: BubblyLiquidLimits,
+) -> Result<CollectiveDiagnostics, BubblyLiquidError> {
+    if !spacing.is_finite() || spacing <= 0.0 {
+        return Err(BubblyLiquidError::InvalidInput(
+            "unrepresentable interbubble spacing",
+        ));
+    }
+    let result = CollectiveDiagnostics {
+        wavenumber_radius: largest_wavenumber * maximum_radius,
+        wavenumber_spacing: largest_wavenumber * spacing,
+        neighbor_scattered_pressure_ratio: maximum_scattering_amplitude / spacing,
+        multiple_scattering_parameter: scattering_cross_section_per_m / k_l,
+    };
+    bound(
+        "bubble compactness",
+        result.wavenumber_radius,
+        limits.maximum_wavenumber_radius,
+    )?;
+    bound(
+        "homogenization",
+        result.wavenumber_spacing,
+        limits.maximum_wavenumber_spacing,
+    )?;
+    bound(
+        "neighbor scattered pressure",
+        result.neighbor_scattered_pressure_ratio,
+        limits.maximum_neighbor_scattered_pressure_ratio,
+    )?;
+    bound(
+        "multiple scattering",
+        result.multiple_scattering_parameter,
+        limits.maximum_multiple_scattering_parameter,
+    )?;
+    Ok(result)
 }
 
 /// Physical envelope and response under the admitted local pressure amplitude.

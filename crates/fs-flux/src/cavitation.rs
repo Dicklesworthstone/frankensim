@@ -24,10 +24,13 @@ use fs_material::cavitation::CavitationState;
 
 #[path = "cavitation/keller_miksis.rs"]
 mod keller_miksis;
+#[path = "cavitation/population.rs"]
+mod population;
 #[path = "cavitation/stepper.rs"]
 mod stepper;
 
 pub use keller_miksis::{BubblePressureSample, KellerMiksisBubble, KellerMiksisLimits};
+pub use population::{BubblePopulation, BubblePopulationClass, BubblePopulationError};
 
 /// Invalid input, an explicit model boundary, or an unsuccessful integration.
 #[derive(Clone, Debug, PartialEq)]

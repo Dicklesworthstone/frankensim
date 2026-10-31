@@ -61,7 +61,7 @@ near-resonant bubble population. The supplied pressure envelope is the maximum
 LOCAL amplitude anywhere in the bubbly region; reflected/amplified fields must
 respect it, and inlet amplitude alone is insufficient.
 
-This is a frozen, dilute, monodisperse coherent-wave model around stable
+This is a frozen, dilute coherent-wave model around stable
 equilibrium. It excludes thermal gas relaxation, evolving vapor inventory,
 spatial correlations, nonlinear cloud collapse and individual wall-near bubble
 dynamics. Coherent attenuation includes scattered energy and cannot be
@@ -74,6 +74,29 @@ cylinders, cones and profiles; independent static gas/capillary compliance;
 native nonlinear-to-linear response including zero-viscosity radiation;
 matched-pipe phase/attenuation; and actual amplitude, scattering,
 homogenization, source-mismatch and cancellation refusals.
+
+`PolydisperseBubblyLiquid` consumes an original `fs-flux::BubblePopulation`
+without replacing its classes by a mean radius. Each occupied class retains
+its native Keller--Miksis gas inventory and stable equilibrium linearization;
+all classes share the exact liquid and the same ambient pressure to roundoff.
+The coherent compliance is `3 sum_j alpha_j chi_j`, with
+`alpha_j = (4 pi/3) n_j R_j^3`. Scattered power uses the separate positive sum
+`sum_j n_j 4 pi |f_j|^2`, so opposite radial phases cannot cancel scattering
+admission. Mean spacing comes from total number density; neighbor admission
+uses the largest individual scattering amplitude. Splitting a class into
+identical bins cannot relax these physical limits.
+
+Mono- and polydisperse routes share one native susceptibility/admission kernel.
+Each occupied radius must independently pass its nonlinear owner's radius,
+Mach, pressure and amplitude domain. Fixed-order compensated accumulation
+preserves number, volume, complex response and scattering moments; harmonic
+evaluation allocates no workspace and polls cancellation per class. The caller
+sets an explicit class budget. Empty populations recover original pure-liquid
+propagation. This frozen distribution does not evolve nucleation, transport,
+coalescence, breakup or bubble-cloud interactions. Six native population and
+seven coupled regressions cover the true two-radius response, independent
+scattering sums, one-bin and split-bin identities, static compliance, actual
+duct phase/attenuation, and refusal of a rare but overdriven radius class.
 
 ## Event-resolved vapor cavities in liquid ducts
 
