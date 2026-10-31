@@ -14,10 +14,10 @@ pub mod elliptic;
 
 use super::{
     ArticulatedContactError, ArticulatedContactSystem, ContactCounterpart, EventResponse,
-    EventWorkspace, LinkContactPoint, Prepared, finite, magnitude, poll, prepare_point,
-    unit_normal, vector,
+    EventWorkspace, LinkContactPoint, Prepared, finite, poll, prepare_point, unit_normal,
 };
 use crate::articulated::FreeFloatingImpulseResponse;
+use crate::articulated::contact_geometry::prepare_contact_frame;
 use fs_contact::frictional_multicontact::{
     FrictionalContact, FrictionalContactConfig, FrictionalContactDeterminacy,
     FrictionalContactResult, NormalVelocityLaw, solve_frictional_contacts,
@@ -217,82 +217,34 @@ fn prepare_event_with<F: Copy, L, E: From<ArticulatedContactError>>(
     for &index in &order {
         poll(cancelled)?;
         let c = contacts[index];
-        let normal = unit_normal(c.normal_world)?;
-        // Normalize before crossing to avoid overflow in arbitrary finite hints.
-        // Two cross products remove the parallel part without magnifying the
-        // subtraction error of nearly parallel unit vectors.
-        let hint = unit_normal(c.tangent_world)?;
-        let second_tangent = unit_normal(normal.cross(hint))?;
-        let first_tangent = unit_normal(second_tangent.cross(normal))?;
-        let axes = [normal, first_tangent, second_tangent];
-        let mut gap = 0.0;
-        let mut relative_velocity = [0.0; 3];
-        let mut point_world = Vec3::default();
-        let mut counterpart_point_world = Vec3::default();
-        for (axis_index, axis) in axes.into_iter().enumerate() {
-            let (first, world_point) = prepare_point(c.point, axis, &workspace.before)?;
-            let (second, other_point, plane_speed) = match c.other {
-                ContactCounterpart::Body(point) => {
-                    if point.system_index == c.point.system_index
-                        && point.link_index == c.point.link_index
-                    {
-                        return Err(ArticulatedContactError::Invalid(
-                            "contact requires distinct rigid links",
-                        )
-                        .into());
-                    }
-                    let (term, position) =
-                        prepare_point(point, axis.scale(-1.0), &workspace.before)?;
-                    (Some(term), position, 0.0)
-                }
-                ContactCounterpart::PrescribedPlane {
-                    point_world,
-                    velocity_world,
-                } => {
-                    vector(point_world)?;
-                    vector(velocity_world)?;
-                    (None, point_world, finite(axis.dot(velocity_world))?)
-                }
-            };
-            if axis_index == 0 {
-                let separation = world_point - other_point;
-                gap = finite(normal.dot(separation))?;
-                point_world = world_point;
-                counterpart_point_world = if second.is_some() {
-                    other_point
-                } else {
-                    world_point - normal.scale(gap)
-                };
-                vector(counterpart_point_world)?;
-                if second.is_some() {
-                    let tangent = separation - normal.scale(gap);
-                    let scale = magnitude(world_point)
-                        .max(magnitude(other_point))
-                        .max(magnitude(separation));
-                    if magnitude(tangent) > 256.0 * f64::EPSILON * scale {
-                        return Err(ArticulatedContactError::NonCollinearContact { index }.into());
-                    }
-                }
-            }
-            let row = Prepared {
-                first,
-                second,
-                axis_world: axis,
-                world_point,
-                plane_speed,
-                minimum_speed: (axis_index == 0 && gap <= c.activation_tolerance).then_some(0.0),
-            };
-            relative_velocity[axis_index] = finite(row.velocity(&workspace.before))?;
-            prepared.push(row);
+        let geometry = prepare_contact_frame(
+            c.point,
+            c.other,
+            c.normal_world,
+            c.tangent_world,
+            index,
+            &workspace.before,
+        )
+        .map_err(ArticulatedContactError::from)?;
+        for (axis_index, row) in geometry.rows.iter().enumerate() {
+            prepared.push(Prepared {
+                first: row.first,
+                second: row.second,
+                axis_world: row.axis_world,
+                world_point: row.world_point,
+                plane_speed: row.plane_speed,
+                minimum_speed: (axis_index == 0 && row.gap <= c.activation_tolerance)
+                    .then_some(0.0),
+            });
         }
         laws.push(make_law(&ArticulatedImpactKinematics {
             original_index: index,
             contact_id: c.id,
-            axes_world: axes,
-            gap_m: gap,
-            relative_velocity_m_s: relative_velocity,
-            point_world,
-            counterpart_point_world,
+            axes_world: geometry.rows.map(|row| row.axis_world),
+            gap_m: geometry.rows[0].gap,
+            relative_velocity_m_s: geometry.rows.map(|row| row.relative_normal_speed),
+            point_world: geometry.rows[0].world_point,
+            counterpart_point_world: geometry.counterpart_point_world,
         })?);
         poll(cancelled)?;
     }

@@ -264,8 +264,73 @@ Pose, joint positions and aerodynamic memory remain unchanged.
 computed dry and strip-local fluid momentum/energy, signed moving-support work,
 the zero-fluid original ABA response, and a rebound law that must refuse global
 energy creation. Atomic ownership/cancellation, exact gap admission and row
-caps are also covered. This entry point does not locate collision times or
-provide friction, persistent contact, penetration repair or multi-tree impacts.
+caps are also covered. This single-tree normal entry point does not locate collision times or
+provide friction, persistent contact or penetration repair. The shared mechanics
+also serves the multi-tree and Coulomb consumers below.
+
+### Impacts between independently fluid-bearing articulated trees
+
+`partitioned::articulated::impact::resolve_many` composes up to 128 native free
+articulated trees, each within the existing eight-joint/256-link bound, at one
+caller-located normal-impact event. Each tree's complete dry and attached-fluid
+mass is prepared once from the same native map used for contact projection.
+The assembly is block diagonal between trees before contact: cross-tree
+hydrodynamic added-mass blocks are explicitly absent. Shared contact rows
+retain cross-contact mobility through every common incident tree; no global
+dense body-coordinate matrix or independent scalar effective masses replace
+the coupled dynamics.
+
+The shared point-impact mechanics serves both normal and Coulomb consumers.
+It applies the accumulated impulse once per tree, checks actual native endpoint
+rates, complete global kinetic work, prescribed-support work and world-origin
+spatial momentum, and publishes all states atomically. Configuration and
+aerodynamic memory remain unchanged. The existing single-tree `resolve`
+delegates to this same owner; generalized travel-stop reset remains its existing
+physical-mass bridge.
+
+`articulated_impacts` compares two separate fluid-bearing articulated rotors
+against independent strip inertia, joint response and orbital-momentum
+formulas; a simultaneous three-body chain verifies shared-tree negative
+cross-contact mobility and complete inelastic loss. System/contact permutation,
+an uninvolved moving tree, late native-rate and fluid refusals, cancellation
+and system caps are covered. The normal law retains its existing
+singular-active-row refusal; contact detection, persistent contact and
+hydrodynamic interaction between trees are separate capabilities.
+
+### Coupled Coulomb impacts with complete articulated fluid inertia
+
+`partitioned::articulated::impact::friction::resolve` applies one simultaneous
+normal and two-tangent point-impact law across independent native articulated
+trees. It reuses the original `ArticulatedFrictionalContact` and shared native
+frame preparation, canonicalizes stable contact identities, and projects every
+row through each tree's prepared complete dry-plus-fluid mass. One original
+`fs-contact::frictional_multicontact::solve_frictional_contacts` call retains
+normal/tangent, cross-contact, base/joint and dynamic-counterpart coupling.
+Each tree receives one accumulated generalized impulse; no sequential tangent
+clipping, mass regularization or continuous force/bias contribution enters
+the reset.
+
+The original law's unique-impulse versus unique-velocity determinacy receipt
+remains public. Redundant reactions can establish physical motion without
+establishing individual pressure or heat. For a velocity-only witness, active
+prescribed supports must share one translation; independently moving supports
+refuse without a work-determinacy witness. The common mechanics owner
+reconstructs actual endpoint link velocities and audits complete dry/fluid
+kinetic work, support work and spatial momentum before publishing all returned
+states together. Actual rate limits remain enforced, while an impulse does not
+consume a continuous actuator-effort limit. Pose, joint configuration,
+aerodynamic memory and caller input remain unchanged.
+
+`tests/articulated_friction.rs` supplies independent analytic oracles for an
+off-centre fluid-loaded hinge with coupled normal/tangent recoil and
+moving-support/frame covariance; equal-and-opposite friction between separate
+fluid-loaded bodies with the zero-fluid native limit; a redundant four-foot
+contact with determined motion and canonical identity order; and ambiguous
+support-work, duplicate-identity and late-cancellation refusal. This bounded
+event admits at most 21 contacts and an explicit scalar Coulomb coefficient.
+It does not discover collision times, infer cross-tree hydrodynamic mass,
+supply persistent contact or finite-patch spin, choose material coefficients,
+or allocate impact loss to heat/deformation.
 
 ### Mechanical travel stops with coupled recoil and support
 

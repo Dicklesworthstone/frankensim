@@ -5,6 +5,7 @@
 
 use super::Kinematics;
 use fs_ga::{GaError, Vec3, Wrench};
+use std::borrow::Borrow;
 
 /// A material point on one link of one supplied system.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -74,6 +75,17 @@ pub struct NormalContactGeometry {
     pub relative_normal_speed: f64,
 }
 
+/// Original material-point geometry in an orthonormal contact frame.
+/// The first row is normal; the others are tangent and normal cross tangent.
+/// Every row retains the same signed NORMAL gap, while its speed and wrench
+/// are along that row's axis. No constitutive coefficient or impact law enters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactFrameGeometry {
+    pub rows: [NormalContactGeometry; 3],
+    /// Other material point, or the first point's normal projection onto a plane.
+    pub counterpart_point_world: Vec3,
+}
+
 /// Geometry-only refusal, independent of a contact law or mass operator.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ContactGeometryError {
@@ -109,13 +121,14 @@ impl From<GaError> for ContactGeometryError {
 pub fn prepare_point(
     point: LinkContactPoint,
     normal_world: Vec3,
-    kinematics: &[Kinematics],
+    kinematics: &[impl Borrow<Kinematics>],
 ) -> Result<(PointDirection, Vec3), ContactGeometryError> {
     let system = kinematics
         .get(point.system_index)
         .ok_or(ContactGeometryError::Invalid(
             "contact system index is out of range",
-        ))?;
+        ))?
+        .borrow();
     let pose =
         system
             .world_from_link
@@ -158,11 +171,27 @@ pub fn unit_normal(normal: Vec3) -> Result<Vec3, ContactGeometryError> {
 pub fn prepare_normal_contact(
     contact: &ArticulatedNormalContact,
     index: usize,
-    kinematics: &[Kinematics],
+    kinematics: &[impl Borrow<Kinematics>],
 ) -> Result<NormalContactGeometry, ContactGeometryError> {
-    let normal = unit_normal(contact.normal_world)?;
-    let (first, world_point) = prepare_point(contact.point, normal, kinematics)?;
-    let (second, other_point, plane_speed) = match contact.other {
+    prepare_normal_geometry(
+        contact.point,
+        contact.other,
+        contact.normal_world,
+        index,
+        kinematics,
+    )
+}
+
+fn prepare_normal_geometry(
+    point: LinkContactPoint,
+    other: ContactCounterpart,
+    normal_world: Vec3,
+    index: usize,
+    kinematics: &[impl Borrow<Kinematics>],
+) -> Result<NormalContactGeometry, ContactGeometryError> {
+    let normal = unit_normal(normal_world)?;
+    let (first, world_point) = prepare_point(point, normal, kinematics)?;
+    let (second, other_point, plane_speed) = match other {
         ContactCounterpart::Body(point) => {
             let (term, position) = prepare_point(point, normal.scale(-1.0), kinematics)?;
             (Some(term), position, 0.0)
@@ -190,8 +219,9 @@ pub fn prepare_normal_contact(
     let speed = core::iter::once(first)
         .chain(second)
         .map(|term| {
-            term.direction
-                .pairing(kinematics[term.point.system_index].body_twist[term.point.link_index])
+            term.direction.pairing(
+                kinematics[term.point.system_index].borrow().body_twist[term.point.link_index],
+            )
         })
         .sum::<f64>()
         - plane_speed;
@@ -203,6 +233,75 @@ pub fn prepare_normal_contact(
         plane_speed,
         gap,
         relative_normal_speed: finite(speed)?,
+    })
+}
+
+/// Prepare normal and two tangent rows using the native point and frame rules.
+/// Dynamic witnesses must be on distinct rigid links and share a normal line.
+/// A finite-gap tangential impulse can still create an artificial couple; the
+/// mechanical consumer must audit its actual spatial angular momentum.
+pub fn prepare_contact_frame(
+    point: LinkContactPoint,
+    other: ContactCounterpart,
+    normal_world: Vec3,
+    tangent_world: Vec3,
+    index: usize,
+    kinematics: &[impl Borrow<Kinematics>],
+) -> Result<ContactFrameGeometry, ContactGeometryError> {
+    if matches!(other, ContactCounterpart::Body(p)
+        if p.system_index == point.system_index && p.link_index == point.link_index)
+    {
+        return Err(ContactGeometryError::Invalid(
+            "contact requires distinct rigid links",
+        ));
+    }
+    let normal = prepare_normal_geometry(point, other, normal_world, index, kinematics)?;
+    // Scaling precedes crossing; the two crosses discard the hint's normal
+    // component without a cancellation-prone nearly parallel subtraction.
+    let hint = unit_normal(tangent_world)?;
+    let second_tangent = unit_normal(normal.axis_world.cross(hint))?;
+    let first_tangent = unit_normal(second_tangent.cross(normal.axis_world))?;
+    let mut rows = [normal; 3];
+    for (i, axis) in [first_tangent, second_tangent].into_iter().enumerate() {
+        let (first, world_point) = prepare_point(point, axis, kinematics)?;
+        let (second, plane_speed) = match other {
+            ContactCounterpart::Body(point) => {
+                let (term, _) = prepare_point(point, axis.scale(-1.0), kinematics)?;
+                (Some(term), 0.0)
+            }
+            ContactCounterpart::PrescribedPlane { velocity_world, .. } => {
+                (None, finite(axis.dot(velocity_world))?)
+            }
+        };
+        let speed = first.direction.pairing(
+            kinematics[first.point.system_index].borrow().body_twist[first.point.link_index],
+        ) + second.map_or(0.0, |term| {
+            term.direction.pairing(
+                kinematics[term.point.system_index].borrow().body_twist[term.point.link_index],
+            )
+        }) - plane_speed;
+        rows[i + 1] = NormalContactGeometry {
+            first,
+            second,
+            axis_world: axis,
+            world_point,
+            plane_speed,
+            gap: normal.gap,
+            relative_normal_speed: finite(speed)?,
+        };
+    }
+    let counterpart_point_world = match other {
+        ContactCounterpart::Body(point) => kinematics[point.system_index].borrow().world_from_link
+            [point.link_index]
+            .transform_point(point.point_body)?,
+        ContactCounterpart::PrescribedPlane { .. } => {
+            normal.world_point - normal.axis_world.scale(normal.gap)
+        }
+    };
+    vector(counterpart_point_world)?;
+    Ok(ContactFrameGeometry {
+        rows,
+        counterpart_point_world,
     })
 }
 

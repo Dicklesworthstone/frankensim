@@ -6,23 +6,29 @@
 //! integrated during an instantaneous event. The caller owns contact selection
 //! and event time; this API never advances or repairs configuration.
 
-use super::{ArticulatedState, MAX_ARTICULATED_LINKS};
+#[path = "impact/mechanics.rs"]
+pub(crate) mod mechanics;
+pub use mechanics::{ArticulatedImpactSystem, ImpactMechanics};
+
+/// Coupled Coulomb contacts through the same physical dry/fluid mechanics.
+#[path = "impact/friction.rs"]
+pub mod friction;
+
+use super::ArticulatedState;
 use crate::Refusal;
-use crate::addedmass::joint::native_index;
-use crate::addedmass::{AeroGeneralizedLoads, MAX_CONTROL_COORDS, PreparedArticulatedMass};
+use crate::addedmass::{AeroGeneralizedLoads, PreparedArticulatedMass};
 use fs_contact::multicontact::{
     MultiImpactConfig, MultiImpactError, MultiImpactResult, NormalContactImpact,
     solve_normal_impacts,
 };
-use fs_ga::{Twist, Vec3, Wrench};
+use fs_ga::Vec3;
+use fs_mbd::articulated::ArticulatedModel;
 use fs_mbd::articulated::contact_geometry::prepare_normal_contact;
 pub use fs_mbd::articulated::contact_geometry::{
     ArticulatedNormalContact, ContactCounterpart, LinkContactPoint,
 };
-use fs_mbd::articulated::generalized::{
-    GeneralizedError, GeneralizedKinematics, free_floating_terms,
-};
-use fs_mbd::articulated::{ArticulatedModel, BaseState, forward_kinematics};
+use fs_mbd::articulated::generalized::{GeneralizedError, GeneralizedKinematics};
+use mechanics::{ImpactWorkspace, PointImpactRow};
 
 /// Positive separating row in Flyer `[linear, angular, joints]` coordinates.
 /// Gap/rate use metres and m/s for points, radians and rad/s for revolute stops;
@@ -71,6 +77,17 @@ pub struct ArticulatedImpact {
     pub angular_momentum_residual: Vec3,
 }
 
+/// Simultaneous normal contact on independent fluid-bearing articulated trees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArticulatedImpacts {
+    /// All accepted states and complete global physical endpoint balances.
+    pub mechanics: ImpactMechanics,
+    /// Existing globally passive normal law in original contact order.
+    pub law: MultiImpactResult,
+    /// Full row-major contact mobility, including shared-tree cross contacts.
+    pub delassus: Vec<f64>,
+}
+
 fn refusal(code: &'static str, message: impl ToString) -> Refusal {
     Refusal {
         code,
@@ -102,9 +119,6 @@ fn finite(value: f64) -> Result<f64, Refusal> {
 }
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
-}
-fn vec(v: &[f64]) -> Vec3 {
-    Vec3::new(v[0], v[1], v[2])
 }
 fn native(error: GeneralizedError) -> Refusal {
     if error == GeneralizedError::Cancelled {
@@ -264,8 +278,8 @@ pub(crate) fn resolve_normal_rows(
 /// have zero applied-load fields. Bias is not integrated. All Delassus columns
 /// reuse one factor; impulses are accumulated before one rate update. Original
 /// global restitution/passivity, native rate limits and endpoint balances can
-/// refuse atomically. Friction, CCD, persistent contact and multiple independent
-/// trees are outside this entry point.
+/// refuse atomically. [`resolve_many`] exposes the same mechanics for multiple
+/// independent trees; this entry point retains its one-tree public API.
 pub fn resolve(
     model: &ArticulatedModel,
     state: &ArticulatedState,
@@ -274,151 +288,125 @@ pub fn resolve(
     evaluate_fluid: impl FnOnce(&GeneralizedKinematics) -> Result<AeroGeneralizedLoads, Refusal>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedImpact, Refusal> {
+    let mut callback = Some(evaluate_fluid);
+    let mut event = resolve_many(
+        &[ArticulatedImpactSystem { model, state }],
+        contacts,
+        config,
+        |_, map| {
+            callback.take().ok_or_else(|| {
+                refusal(
+                    "articulated-impact-invalid",
+                    "single-tree fluid callback repeated",
+                )
+            })?(map)
+        },
+        &mut cancelled,
+    )?;
+    let state = event.mechanics.states.pop().ok_or_else(|| {
+        refusal(
+            "articulated-impact-invalid",
+            "missing single-tree impact state",
+        )
+    })?;
+    let velocity_after = event.mechanics.velocities_after.pop().ok_or_else(|| {
+        refusal(
+            "articulated-impact-invalid",
+            "missing single-tree impact velocity",
+        )
+    })?;
+    let generalized = GeneralizedImpactResponse {
+        velocity_after,
+        law: event.law,
+        delassus: event.delassus,
+        kinetic_before: event.mechanics.kinetic_before,
+        kinetic_after: event.mechanics.kinetic_after,
+        kinetic_change: event.mechanics.kinetic_change,
+        support_work: event.mechanics.support_work,
+        energy_balance_residual: event.mechanics.energy_balance_residual,
+    };
+    Ok(ArticulatedImpact {
+        state,
+        generalized,
+        relative_normal_speeds_after: event.mechanics.relative_speeds_after,
+        linear_momentum_residual: event.mechanics.linear_momentum_residual,
+        angular_momentum_residual: event.mechanics.angular_momentum_residual,
+    })
+}
+
+/// Resolve a common normal-impact event across up to 128 articulated trees.
+///
+/// Each tree has its own complete dry and attached-fluid inertia, prepared
+/// once from its native map. Contacts can join different trees, act internally
+/// within one tree, or meet prescribed moving planes. Only shared incident
+/// trees contribute to a contact cross block; no global dense body mass is
+/// assembled. Impulses are solved together and accumulated before each tree's
+/// one velocity reset. States and aerodynamic memories remain atomic on refusal.
+///
+/// The fluid callback is invoked once per supplied tree in original order.
+/// Cross-tree hydrodynamic added-mass terms are not represented: this is the
+/// independent-fluid assembly used by the attached-strip model. Friction, CCD
+/// and persistent contact belong to their separate law/step consumers.
+pub fn resolve_many(
+    systems: &[ArticulatedImpactSystem<'_>],
+    contacts: &[ArticulatedNormalContact],
+    config: MultiImpactConfig,
+    evaluate_fluid: impl FnMut(usize, &GeneralizedKinematics) -> Result<AeroGeneralizedLoads, Refusal>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ArticulatedImpacts, Refusal> {
     poll(&mut cancelled)?;
-    if model.link_count() > MAX_ARTICULATED_LINKS
-        || model.dof_count() > MAX_CONTROL_COORDS
-        || contacts.len() > 64
-        || contacts.len() > config.solver.max_variables
-    {
+    if contacts.len() > 64 || contacts.len() > config.solver.max_variables {
         return Err(refusal(
             "articulated-impact-invalid",
-            "articulated contact event exceeds its size cap",
+            "articulated contact event exceeds its row cap",
         ));
     }
-    let motion = &state.motion;
-    let dry = free_floating_terms(
-        model,
-        motion.base,
-        &motion.joint_position,
-        &motion.joint_velocity,
-        &mut cancelled,
-    )
-    .map_err(native)?;
-    let fluid = evaluate_fluid(&dry.kinematics)?;
-    poll(&mut cancelled)?;
-    if fluid
-        .q_rigid_nonaccel
-        .iter()
-        .chain(&fluid.q_control_nonaccel)
-        .any(|x| *x != 0.0)
-    {
-        return Err(refusal(
-            "coupled-load-ownership",
-            "instantaneous fluid inertia must not contain applied force loads",
-        ));
-    }
-    let mass = PreparedArticulatedMass::new(&dry, &fluid)?;
-    let native_u = motion.base.twist_body.to_array();
-    let mut velocity: Vec<_> = (0..6).map(|i| native_u[native_index(i)]).collect();
-    velocity.extend(&motion.joint_velocity);
-    let mut geometries = Vec::with_capacity(contacts.len());
-    let mut rows = Vec::with_capacity(contacts.len());
-    for (i, contact) in contacts.iter().enumerate() {
+    let workspace = ImpactWorkspace::new(systems, evaluate_fluid, &mut cancelled)?;
+    let maps = workspace.kinematics();
+    let mut geometry = Vec::with_capacity(contacts.len());
+    for (index, contact) in contacts.iter().enumerate() {
         poll(&mut cancelled)?;
-        let geometry = prepare_normal_contact(
-            contact,
-            i,
-            std::slice::from_ref(dry.kinematics.native_kinematics()),
-        )
-        .map_err(|error| refusal("articulated-impact-invalid", error))?;
-        let mut jacobian = vec![0.0; mass.coordinate_count()];
-        for term in core::iter::once(geometry.first).chain(geometry.second) {
-            let columns = dry.kinematics.body_jacobian(term.point.link_index);
-            for (i, entry) in jacobian.iter_mut().enumerate() {
-                *entry += term.direction.pairing(columns[native_index(i)]);
-            }
-        }
-        rows.push(GeneralizedNormalRow {
-            jacobian,
-            gap: geometry.gap,
-            activation_tolerance: contact.activation_tolerance,
-            support_speed: geometry.plane_speed,
-            restitution: contact.restitution,
-        });
-        geometries.push(geometry);
+        geometry.push(
+            prepare_normal_contact(contact, index, &maps)
+                .map_err(|e| refusal("articulated-impact-invalid", e))?,
+        );
     }
-    let generalized = resolve_normal_rows(&mass, &velocity, &rows, config, &mut cancelled)?;
-    let mut accepted = state.clone();
-    let after = &generalized.velocity_after;
-    accepted.motion.base.twist_body = Twist::new(vec(&after[3..6]), vec(&after[..3]));
-    accepted.motion.joint_velocity.copy_from_slice(&after[6..]);
-    let after_kinematics = forward_kinematics(
-        model,
-        BaseState::prescribed(
-            accepted.motion.base.world_from_base,
-            accepted.motion.base.twist_body,
-            Twist::zero(),
-        ),
-        &accepted.motion.joint_position,
-        &accepted.motion.joint_velocity,
-    )
-    .map_err(|error| refusal("articulated-impact-invalid", error))?;
-    let mut speeds = Vec::with_capacity(contacts.len());
-    let mut external_linear = Vec3::default();
-    let mut external_angular = Vec3::default();
-    let (mut linear_scale, mut angular_scale) = (0.0, 0.0);
-    for (i, (geometry, lambda)) in geometries
+    let directions: Vec<_> = geometry.iter().copied().map(PointImpactRow::from).collect();
+    let prepared = workspace.project_rows(&directions, &mut cancelled)?;
+    let laws: Vec<_> = contacts
         .iter()
-        .zip(&generalized.law.normal_impulses)
+        .zip(&geometry)
         .enumerate()
-    {
-        poll(&mut cancelled)?;
-        let speed = finite(
-            core::iter::once(geometry.first)
-                .chain(geometry.second)
-                .map(|term| {
-                    term.direction
-                        .pairing(after_kinematics.body_twist[term.point.link_index])
-                })
-                .sum::<f64>()
-                - geometry.plane_speed,
-        )?;
-        let allowed = finite(
-            config.solver.gradient_tolerance
-                + 256.0 * f64::EPSILON * (speed.abs() + geometry.relative_normal_speed.abs()),
-        )?;
-        if (speed - generalized.law.relative_normal_speeds_after[i]).abs() > allowed {
-            return Err(refusal(
-                "articulated-impact-unresolved",
-                "native endpoint point speed does not match global contact law",
-            ));
-        }
-        speeds.push(speed);
-        for term in core::iter::once(geometry.first).chain(geometry.second) {
-            let world = term
-                .direction
-                .transform_by(&dry.kinematics.world_from_link(term.point.link_index));
-            linear_scale = finite(linear_scale + lambda.abs() * world.force.norm())?;
-            angular_scale = finite(angular_scale + lambda.abs() * world.torque.norm())?;
-        }
-        if geometry.second.is_none() {
-            let impulse = geometry.axis_world.scale(*lambda);
-            external_linear = external_linear + impulse;
-            external_angular = external_angular + geometry.world_point.cross(impulse);
-        }
-    }
-    let delta: Vec<_> = after.iter().zip(&velocity).map(|(b, a)| b - a).collect();
-    let dp = mass.momentum(&delta)?;
-    let world_delta =
-        Wrench::new(vec(&dp[3..6]), vec(&dp[..3])).transform_by(&motion.base.world_from_base);
-    let linear_momentum_residual = world_delta.force - external_linear;
-    let angular_momentum_residual = world_delta.torque - external_angular;
-    if finite(linear_momentum_residual.norm())?
-        > 2048.0 * f64::EPSILON * (linear_scale + world_delta.force.norm())
-        || finite(angular_momentum_residual.norm())?
-            > 2048.0 * f64::EPSILON * (angular_scale + world_delta.torque.norm())
-    {
-        return Err(refusal(
-            "articulated-impact-unresolved",
-            "complete dry/fluid spatial impulse does not close",
-        ));
-    }
-    poll(&mut cancelled)?;
-    Ok(ArticulatedImpact {
-        state: accepted,
-        generalized,
-        relative_normal_speeds_after: speeds,
-        linear_momentum_residual,
-        angular_momentum_residual,
+        .map(|(i, (contact, g))| NormalContactImpact {
+            gap: g.gap,
+            activation_tolerance: contact.activation_tolerance,
+            relative_normal_speed: prepared.relative_speeds_before[i],
+            restitution: contact.restitution,
+        })
+        .collect();
+    let law =
+        solve_normal_impacts(&laws, &prepared.delassus, config, &mut cancelled).map_err(|e| {
+            refusal(
+                if e == MultiImpactError::Cancelled {
+                    "articulated-impact-cancelled"
+                } else {
+                    "articulated-impact-law"
+                },
+                e,
+            )
+        })?;
+    let mechanics = workspace.apply(
+        &prepared,
+        &law.normal_impulses,
+        &law.relative_normal_speeds_after,
+        law.dissipated_energy,
+        config.solver.gradient_tolerance,
+        config.energy_tolerance,
+        &mut cancelled,
+    )?;
+    Ok(ArticulatedImpacts {
+        mechanics,
+        law,
+        delassus: prepared.delassus,
     })
 }

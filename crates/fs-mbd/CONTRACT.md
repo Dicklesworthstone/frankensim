@@ -1182,6 +1182,17 @@ refusals. The existing seven normal-contact regressions continue to cover
 coupled body/self contacts, moving support, frame transformations, global
 energy admission and atomic refusal through this shared geometry path.
 
+`prepare_contact_frame` supplies the same normal/tangent/normal-cross-tangent
+rows to the native Coulomb adapter and the fluid-augmented consumer. It
+normalizes and orthogonalizes the original tangent hint, retains both actual
+material witnesses, and measures all three incoming relative speeds from
+native link twists. Borrowed kinematics slices admit either owned maps or
+references without cloning the trees. The original
+`ArticulatedFrictionalContact` type and native public entry points remain in
+place. Finite-gap dynamic tangential couples are not hidden by witness
+projection; the consuming mechanics must retain its world-angular-momentum
+audit.
+
 ### Coupled articulated Coulomb contact
 
 `articulated_contacts::friction::resolve_articulated_frictional_contacts`
