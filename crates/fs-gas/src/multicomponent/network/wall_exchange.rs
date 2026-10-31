@@ -11,6 +11,8 @@
 //! halves and discard them when the complete wave/reaction step is retried.
 //! An optional original-source transport binding refreshes developed circular
 //! branch drag and conductance from each cell's current mixture at every half.
+//! A material wall-conduction binding composes the solid's k(T) and actual
+//! resistance geometry with that same film and finite-wall heat transaction.
 
 use super::MixtureNetwork1d;
 use crate::multicomponent::wall_exchange::{
@@ -25,6 +27,13 @@ mod caloric;
 mod transport;
 pub use transport::CircularLaminarWall;
 use transport::CircularWallTransport;
+
+#[cfg(feature = "material")]
+mod conduction;
+#[cfg(feature = "material")]
+pub use conduction::MaterialWallConduction;
+#[cfg(feature = "material")]
+use conduction::BoundWallConduction;
 
 /// Source-only exchanges over a complete interval, or both composed wall halves.
 ///
@@ -94,6 +103,8 @@ pub struct NetworkWallOperator<'law> {
     trial_active: bool,
     transport: Option<CircularWallTransport>,
     caloric: Vec<Option<MaterialWallCaloric<'law>>>,
+    #[cfg(feature = "material")]
+    conduction: Option<Vec<Option<BoundWallConduction>>>,
 }
 
 impl<'law> NetworkWallOperator<'law> {
@@ -186,6 +197,8 @@ impl<'law> NetworkWallOperator<'law> {
             trial_active: false,
             transport: None,
             caloric: allocated(count, None)?,
+            #[cfg(feature = "material")]
+            conduction: None,
         };
         poll(&mut cancelled)?;
         Ok(result)
@@ -309,12 +322,15 @@ impl<'law> NetworkWallOperator<'law> {
                     momentum: values[n],
                     energy: values[n + 1],
                 };
+                let contact = self.candidate_contacts[index];
+                #[cfg(feature = "material")]
+                let contact = self.film_contact(index, contact);
                 let contact = match self.transport.as_mut() {
                     Some(transport) => transport.resolve(
                         &self.gas, branch_index, state, shape.mesh.volumes()[i],
-                        self.candidate_contacts[index], cancelled,
+                        contact, cancelled,
                     )?,
-                    None => self.candidate_contacts[index],
+                    None => contact,
                 };
                 let update = self.exchange_for(
                     index,
@@ -348,12 +364,15 @@ impl<'law> NetworkWallOperator<'law> {
                 return Err(WallExchangeError::Invalid("wall plenum geometry changed"));
             }
             let index = self.plenum_start + i;
+            let contact = self.candidate_contacts[index];
+            #[cfg(feature = "material")]
+            let contact = self.film_contact(index, contact);
             let update = self.exchange_for(
                 index,
                 plenum.state(),
                 plenum.volume_m3,
                 duration,
-                self.candidate_contacts[index],
+                contact,
                 controls,
                 &mut *cancelled,
             )?;
@@ -406,12 +425,18 @@ impl<'law> NetworkWallOperator<'law> {
         controls: WallControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<crate::multicomponent::wall_exchange::WallUpdate, WallExchangeError> {
-        if let Some(source) = &self.caloric[index] {
-            return exchange_cell_with_heat_storage(
+        #[cfg(feature = "material")]
+        let contact = self.conduction_contact(index, contact)?;
+        let update = if let Some(source) = &self.caloric[index] {
+            exchange_cell_with_heat_storage(
                 &self.gas, state, volume, duration, contact, source, controls, cancelled,
-            );
-        }
-        exchange_cell(&self.gas, state, volume, duration, contact, controls, cancelled)
+            )?
+        } else {
+            exchange_cell(&self.gas, state, volume, duration, contact, controls, cancelled)?
+        };
+        #[cfg(feature = "material")]
+        self.admit_conduction_endpoint(index, update.contact)?;
+        Ok(update)
     }
 
     pub(super) fn publish_trial_report(&mut self) {

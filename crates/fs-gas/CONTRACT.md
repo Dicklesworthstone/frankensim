@@ -4,6 +4,36 @@
 `fs-thermochem`; this crate does not replace those sources with an independent
 caloric model. Production dependencies remain pure Rust and Franken-owned.
 
+## Material wall conduction in gas networks
+
+With `experimental-euler,material`, `NetworkWallOperator::with_material_conduction`
+binds the original `PreparedThermalTransport` conductivity source and explicit
+planar length/area to each selected branch or plenum thermal contact. The gas
+film and solid resistances add in series. Existing source-bound circular gas
+transport still supplies the film from the actual gas mixture, density, T and p;
+other contacts retain their originally authored film. The operator preserves
+that separate film so repeated steps do not compound the same solid resistance.
+
+Solid k(T) is evaluated at the actual starting wall temperature of each source
+half, then frozen for the original conservative implicit heat solve. The final
+wall state must remain inside the original source domain. Each next half reads
+the evolved wall temperature, including the existing reaction/wave composition.
+Finite wall storage remains exclusively with the original contact and optional
+material caloric binding; conductivity adds no second heat capacity or heat
+supply. Any source refusal or late cancellation preserves all accepted gas,
+wall temperatures and reports. Source lines, card identity and geometry remain
+inspectable, with no database query or allocation during coefficient refresh.
+
+This is a single-phase, fixed-geometry, lumped-wall approximation with first-order
+constitutive lag, not a resolved nonlinear through-wall temperature profile.
+For centre-temperature storage, the conduction length is the surface-to-centre
+distance. Adiabatic and latent energy-coordinate contacts refuse this binding;
+temperature alone cannot select conductivity on a melting plateau. Original
+phase-aware spatial owners remain responsible for that extension. Focused
+G1/G3 tests check independent two-body heat balances, source-only conductivity
+and capacity swaps, combined gas-film/solid response, actual chemical-rate and
+pressure feedback, endpoint-domain refusal, cancellation and deterministic replay.
+
 ## Experimental frozen-composition Euler flow
 
 Feature `experimental-euler` exposes `dynamics::{FrozenGas, Euler1d}`. It is an

@@ -181,6 +181,9 @@ pub enum WallExchangeError {
     /// Original fixed-amount wall heat-storage source refused.
     #[cfg(feature = "material")]
     Caloric(fs_material::thermal::transport::ThermalTransportError),
+    /// Original solid-wall conductivity source refused its actual temperature.
+    #[cfg(feature = "material")]
+    Conduction(fs_material::thermal::transport::ThermalTransportError),
     /// Original finite-wall thermal source refused its state or geometry.
     Thermal(fs_thermal::enthalpy::DepositionError),
     /// Actual cell state is outside the declared developed-wall approximation.
