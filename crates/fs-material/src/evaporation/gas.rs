@@ -19,6 +19,8 @@
 //! account is liquid enthalpy plus gas internal energy; this is not a moving
 //! liquid boundary, a rigid two-phase vessel, a boiling or a spray model.
 
+/// Simultaneous retained liquid films sharing one finite gas inventory.
+pub mod chamber;
 /// Implicit reciprocal sensible film heat, separately from vapor-carried energy.
 pub mod heat;
 /// Original heat transport and finite humidity feedback on one physical clock.
@@ -277,28 +279,39 @@ pub fn advance_surface_with_gas<'catalog, L: EvaporationLaw + ?Sized>(
     )
 }
 
-/// The same original film and caloric solve with a represented mass selector.
-///
-/// Native volume/mass owners may select the nearest increment they can store.
-/// The callback receives signed liquid-to-gas mass [kg] and runs BEFORE either
-/// caloric update. It cannot reverse a transfer, swallow a nonzero transfer,
-/// create one from zero or change it beyond the original absolute mass budget.
-/// Inventory, temperature and equilibrium limits apply to the selected amount.
-/// This does not permit clipping a physically inadmissible step to inventory.
+/// Prepared entirely against one original gas state. The chamber and legacy
+/// single-surface paths share this rate, liquid-caloric and source-alignment owner.
+struct PreparedGasLiquidSurface {
+    original: LiquidSurfaceState,
+    liquid: LiquidSurfaceState,
+    requested_dm: f64,
+    dm: f64,
+    surface_temperature_k: [f64; 2],
+    gas_temperature_k: f64,
+    vapor_partial_pressure_pa: f64,
+    old_vapor_mass_kg: f64,
+    relative_energy_into_gas_j: f64,
+    liquid_energy_residual_j: f64,
+    liquid_mass_residual_kg: f64,
+    liquid_enthalpy_change_j: f64,
+    latent_energy_j: f64,
+    recession_m: f64,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn advance_surface_with_gas_mass_selection<'catalog, L: EvaporationLaw + ?Sized>(
+fn prepare_surface<L: EvaporationLaw + ?Sized>(
     law: &L,
     binding: &GasLiquidBinding,
     liquid: LiquidSurfaceState,
     gas: &ClosedGasParcel,
-    catalog: &'catalog ThermochemicalGasModel,
+    catalog: &ThermochemicalGasModel,
     temperature_from_enthalpy: impl Fn(f64) -> Result<f64, EvaporationError>,
     mass_transfer_coefficient_m_s: f64,
     duration_s: f64,
     controls: GasEvaporationSolve,
     select_mass: impl FnOnce(f64) -> Result<f64, GasEvaporationError>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<GasEvaporationCandidate<'catalog>, GasEvaporationError> {
+) -> Result<PreparedGasLiquidSurface, GasEvaporationError> {
     use GasEvaporationError as Error;
     poll(&mut cancelled)?;
     validate_controls(controls, duration_s, mass_transfer_coefficient_m_s)?;
@@ -442,45 +455,6 @@ pub fn advance_surface_with_gas_mass_selection<'catalog, L: EvaporationLaw + ?Si
     } else {
         0.0
     };
-    poll(&mut cancelled)?;
-    let endpoint = gas.exchange_species_boundary_relative(
-        catalog,
-        &[SpeciesBoundaryRelativeTransfer {
-            species: binding.species.clone(),
-            mass_into_gas_kg: dm,
-            relative_energy_into_gas_j: relative_energy,
-        }],
-        controls.gas,
-        &mut cancelled,
-    )?;
-    let final_gas_t = endpoint.gas().state().state().temperature;
-    let final_pressure = endpoint
-        .gas()
-        .species_partial_pressure_pa(&binding.species)?;
-    if (final_gas_t - gas_t).abs() > controls.maximum_temperature_increment_k {
-        return Err(smaller_step(duration_s, "gas temperature departure"));
-    }
-    let final_flux = surface_flux(
-        law,
-        final_surface_t,
-        GasFilm {
-            total_pressure_pa: endpoint.gas().state().state().pressure,
-            vapor_partial_pressure_pa: final_pressure,
-            temperature_k: final_gas_t,
-            mass_transfer_coefficient_m_s,
-        },
-    )?;
-    if (dm > 0.0 && final_flux.mass_flux_kg_m2_s < 0.0)
-        || (dm < 0.0 && final_flux.mass_flux_kg_m2_s > 0.0)
-    {
-        return Err(smaller_step(
-            duration_s,
-            "finite-atmosphere equilibrium overshoot",
-        ));
-    }
-    let residual = liquid_residual + endpoint.step().energy_residual_j;
-    let mass_residual = (next_mass - liquid.mass_kg)
-        + (endpoint.gas().species_mass_kg(&binding.species)? - old_vapor_mass);
     let liquid_enthalpy_change = liquid_thermal_change
         - dm * (liquid.specific_enthalpy_j_kg + binding.liquid_enthalpy_offset_j_kg);
     let recession = if liquid.area_m2 == 0.0 {
@@ -488,23 +462,149 @@ pub fn advance_surface_with_gas_mass_selection<'catalog, L: EvaporationLaw + ?Si
     } else {
         dm / final_phase.liquid_density_kg_m3 / liquid.area_m2
     };
+    let latent_energy = dm * phase.latent_heat_j_kg;
     if ![
-        residual,
-        mass_residual,
+        liquid_residual,
         liquid_enthalpy_change,
         recession,
-        dm * phase.latent_heat_j_kg,
+        latent_energy,
+        relative_energy,
     ]
     .into_iter()
     .all(f64::is_finite)
-        || mass_residual.abs() > controls.gas.mass_tolerance_kg
     {
         return Err(Error::Invalid(
+            "prepared liquid/gas accounts are unrepresentable",
+        ));
+    }
+    Ok(PreparedGasLiquidSurface {
+        original: liquid,
+        liquid: LiquidSurfaceState {
+            mass_kg: next_mass,
+            specific_enthalpy_j_kg: next_h,
+            area_m2: liquid.area_m2,
+        },
+        requested_dm,
+        dm,
+        surface_temperature_k: [surface_t, final_surface_t],
+        gas_temperature_k: gas_t,
+        vapor_partial_pressure_pa: partial_pressure,
+        old_vapor_mass_kg: old_vapor_mass,
+        relative_energy_into_gas_j: relative_energy,
+        liquid_energy_residual_j: liquid_residual,
+        liquid_mass_residual_kg: liquid_mass_residual,
+        liquid_enthalpy_change_j: liquid_enthalpy_change,
+        latent_energy_j: latent_energy,
+        recession_m: recession,
+    })
+}
+
+/// Every surface checks the same accepted gas endpoint; local preparation is
+/// insufficient to certify a joint finite-atmosphere step.
+#[allow(clippy::too_many_arguments)]
+fn check_surface_endpoint<L: EvaporationLaw + ?Sized>(
+    prepared: &PreparedGasLiquidSurface,
+    law: &L,
+    binding: &GasLiquidBinding,
+    gas: &ClosedGasParcel,
+    mass_transfer_coefficient_m_s: f64,
+    duration_s: f64,
+    controls: GasEvaporationSolve,
+) -> Result<f64, GasEvaporationError> {
+    let final_gas_t = gas.state().state().temperature;
+    let final_pressure = gas.species_partial_pressure_pa(&binding.species)?;
+    if (final_gas_t - prepared.gas_temperature_k).abs() > controls.maximum_temperature_increment_k {
+        return Err(smaller_step(duration_s, "gas temperature departure"));
+    }
+    let final_flux = surface_flux(
+        law,
+        prepared.surface_temperature_k[1],
+        GasFilm {
+            total_pressure_pa: gas.state().state().pressure,
+            vapor_partial_pressure_pa: final_pressure,
+            temperature_k: final_gas_t,
+            mass_transfer_coefficient_m_s,
+        },
+    )?;
+    if (prepared.dm > 0.0 && final_flux.mass_flux_kg_m2_s < 0.0)
+        || (prepared.dm < 0.0 && final_flux.mass_flux_kg_m2_s > 0.0)
+    {
+        return Err(smaller_step(
+            duration_s,
+            "finite-atmosphere equilibrium overshoot",
+        ));
+    }
+    Ok(final_pressure)
+}
+
+/// The same original film and caloric solve with a represented mass selector.
+///
+/// Native volume/mass owners may select the nearest increment they can store.
+/// The callback receives signed liquid-to-gas mass [kg] and runs BEFORE either
+/// caloric update. It cannot reverse a transfer, swallow a nonzero transfer,
+/// create one from zero or change it beyond the original absolute mass budget.
+/// Inventory, temperature and equilibrium limits apply to the selected amount.
+/// This does not permit clipping a physically inadmissible step to inventory.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_surface_with_gas_mass_selection<'catalog, L: EvaporationLaw + ?Sized>(
+    law: &L,
+    binding: &GasLiquidBinding,
+    liquid: LiquidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    temperature_from_enthalpy: impl Fn(f64) -> Result<f64, EvaporationError>,
+    mass_transfer_coefficient_m_s: f64,
+    duration_s: f64,
+    controls: GasEvaporationSolve,
+    select_mass: impl FnOnce(f64) -> Result<f64, GasEvaporationError>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<GasEvaporationCandidate<'catalog>, GasEvaporationError> {
+    let prepared = prepare_surface(
+        law,
+        binding,
+        liquid,
+        gas,
+        catalog,
+        temperature_from_enthalpy,
+        mass_transfer_coefficient_m_s,
+        duration_s,
+        controls,
+        select_mass,
+        &mut cancelled,
+    )?;
+    poll(&mut cancelled)?;
+    let endpoint = gas.exchange_species_boundary_relative(
+        catalog,
+        &[SpeciesBoundaryRelativeTransfer {
+            species: binding.species.clone(),
+            mass_into_gas_kg: prepared.dm,
+            relative_energy_into_gas_j: prepared.relative_energy_into_gas_j,
+        }],
+        controls.gas,
+        &mut cancelled,
+    )?;
+    let final_pressure = check_surface_endpoint(
+        &prepared,
+        law,
+        binding,
+        endpoint.gas(),
+        mass_transfer_coefficient_m_s,
+        duration_s,
+        controls,
+    )?;
+    let residual = prepared.liquid_energy_residual_j + endpoint.step().energy_residual_j;
+    let mass_residual = (prepared.liquid.mass_kg - liquid.mass_kg)
+        + (endpoint.gas().species_mass_kg(&binding.species)? - prepared.old_vapor_mass_kg);
+    if !residual.is_finite()
+        || !mass_residual.is_finite()
+        || mass_residual.abs() > controls.gas.mass_tolerance_kg
+    {
+        return Err(GasEvaporationError::Invalid(
             "accepted liquid/gas accounts are unrepresentable or fail mass balance",
         ));
     }
     if residual.abs() > controls.gas.energy_tolerance_j {
-        return Err(Error::EnergyBalance {
+        return Err(GasEvaporationError::EnergyBalance {
             residual_j: residual,
             tolerance_j: controls.gas.energy_tolerance_j,
         });
@@ -512,25 +612,24 @@ pub fn advance_surface_with_gas_mass_selection<'catalog, L: EvaporationLaw + ?Si
     poll(&mut cancelled)?;
     let step = GasEvaporationStep {
         duration_s,
-        requested_transferred_mass_kg: requested_dm,
-        transferred_mass_kg: dm,
-        surface_temperature_k: [surface_t, final_surface_t],
-        gas_temperature_k: [gas_t, final_gas_t],
-        vapor_partial_pressure_pa: [partial_pressure, final_pressure],
-        latent_energy_j: dm * phase.latent_heat_j_kg,
+        requested_transferred_mass_kg: prepared.requested_dm,
+        transferred_mass_kg: prepared.dm,
+        surface_temperature_k: prepared.surface_temperature_k,
+        gas_temperature_k: [
+            prepared.gas_temperature_k,
+            endpoint.gas().state().state().temperature,
+        ],
+        vapor_partial_pressure_pa: [prepared.vapor_partial_pressure_pa, final_pressure],
+        latent_energy_j: prepared.latent_energy_j,
         energy_into_gas_j: endpoint.step().energy_into_gas_j,
-        liquid_enthalpy_change_j: liquid_enthalpy_change,
+        liquid_enthalpy_change_j: prepared.liquid_enthalpy_change_j,
         gas_internal_energy_change_j: endpoint.step().stored_energy_change_j,
         energy_residual_j: residual,
         mass_residual_kg: mass_residual,
-        recession_m: recession,
+        recession_m: prepared.recession_m,
     };
     Ok(GasEvaporationCandidate {
-        liquid: LiquidSurfaceState {
-            mass_kg: next_mass,
-            specific_enthalpy_j_kg: next_h,
-            area_m2: liquid.area_m2,
-        },
+        liquid: prepared.liquid,
         gas: endpoint,
         step,
     })

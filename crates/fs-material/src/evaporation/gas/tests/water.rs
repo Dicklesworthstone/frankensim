@@ -268,3 +268,108 @@ fn original_if97_condensation_keeps_upstream_nasa_vapor_sensible_heat() {
         1e-7,
     );
 }
+
+#[test]
+fn original_water_films_condense_and_evaporate_against_one_nasa_gas_endpoint() {
+    use crate::evaporation::gas::chamber::{
+        GasLiquidChamberSolve, GasLiquidChamberSurface, advance_chamber_with_gas,
+    };
+    let source = original_gas();
+    let water = original_water();
+    let vapor = SpeciesId::new("H2O").unwrap();
+    let carrier = SpeciesId::new("N2").unwrap();
+    let initial = ClosedGasParcel::new(
+        source
+            .with_composition(
+                Composition::new(CompositionBasis::MoleFraction, vec![0.04, 0.96]).unwrap(),
+            )
+            .unwrap(),
+        point(300.0, 100_000.0),
+        0.01,
+    )
+    .unwrap();
+    let binding = GasLiquidBinding {
+        species: vapor.clone(),
+        liquid_enthalpy_offset_j_kg: source
+            .species_specific_enthalpy_j_kg(&vapor, 300.0)
+            .unwrap()
+            - water.vapor_specific_enthalpy_j_kg(300.0).unwrap(),
+    };
+    let liquid = |temperature| LiquidSurfaceState {
+        mass_kg: 0.02,
+        area_m2: 0.01,
+        specific_enthalpy_j_kg: water
+            .liquid_state(temperature)
+            .unwrap()
+            .specific_enthalpy_j_kg(),
+    };
+    let inverse = |h| water.temperature_at_specific_enthalpy_k(h);
+    let cold = liquid(295.0);
+    let warm = liquid(305.0);
+    let surfaces = [
+        GasLiquidChamberSurface {
+            id: 1,
+            law: &water,
+            binding: &binding,
+            liquid: cold,
+            temperature_from_enthalpy: &inverse,
+            mass_transfer_coefficient_m_s: 0.005,
+        },
+        GasLiquidChamberSurface {
+            id: 2,
+            law: &water,
+            binding: &binding,
+            liquid: warm,
+            temperature_from_enthalpy: &inverse,
+            mass_transfer_coefficient_m_s: 0.005,
+        },
+    ];
+    let mut phase = controls();
+    phase.gas.gas.minimum_temperature_k = 280.0;
+    phase.gas.gas.maximum_temperature_k = 340.0;
+    phase.gas.gas.energy_tolerance_j_kg = 1e-6;
+    phase.gas.energy_tolerance_j = 1e-7;
+    phase.maximum_temperature_increment_k = 1.0;
+    // One fixed datum; retain the genuine NASA/IF97 vapor-source difference
+    // away from 300 K as part of carried energy, without fitting either law.
+    phase.latent_compatibility_tolerance_j_kg = 1000.0;
+    let candidate = advance_chamber_with_gas(
+        &surfaces,
+        &initial,
+        &source,
+        0.1,
+        GasLiquidChamberSolve {
+            surface: phase,
+            maximum_surfaces: 2,
+        },
+        || false,
+    )
+    .unwrap();
+    let cold_step = &candidate.surfaces()[0];
+    let warm_step = &candidate.surfaces()[1];
+    assert!(cold_step.transferred_mass_kg < 0.0);
+    assert!(warm_step.transferred_mass_kg > 0.0);
+    assert!(cold_step.liquid.mass_kg > cold.mass_kg);
+    assert!(warm_step.liquid.mass_kg < warm.mass_kg);
+    assert!(cold_step.surface_temperature_k[1] > 295.0);
+    assert!(warm_step.surface_temperature_k[1] < 305.0);
+    near(
+        initial.species_mass_kg(&vapor).unwrap() + cold.mass_kg + warm.mass_kg,
+        candidate.gas().species_mass_kg(&vapor).unwrap()
+            + cold_step.liquid.mass_kg
+            + warm_step.liquid.mass_kg,
+        phase.gas.mass_tolerance_kg,
+    );
+    near(
+        initial.species_mass_kg(&carrier).unwrap(),
+        candidate.gas().species_mass_kg(&carrier).unwrap(),
+        phase.gas.mass_tolerance_kg,
+    );
+    near(
+        candidate.step().liquid_enthalpy_change_j + candidate.step().gas_internal_energy_change_j,
+        0.0,
+        phase.gas.energy_tolerance_j,
+    );
+    assert!(candidate.step().sum_absolute_energy_residual_j <= phase.gas.energy_tolerance_j);
+    assert!(std::ptr::eq(candidate.catalog(), &source));
+}

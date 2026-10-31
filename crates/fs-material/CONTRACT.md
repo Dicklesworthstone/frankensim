@@ -6660,6 +6660,30 @@ thermal work spends that allowance; rejected events, births and transfers do
 not enter physical accounts. The original anchored time grid resumes when its
 endpoint is reached. Source/domain errors still refuse directly.
 
+### Several retained films sharing one finite atmosphere
+
+`evaporation::gas::chamber` advances multiple positive liquid inventories against
+one original gas snapshot. It reuses the single-surface Stefan-film preparation,
+liquid caloric update and endpoint checks. Stable surface IDs canonicalize input
+and native mass-selection order. Gross condensation of each species is bounded
+by its old vapor inventory; simultaneous evaporation cannot finance an excessive
+withdrawal. Canonical compensated species sums retain sensible energy when
+opposing transfers have zero net mass. One original gas reconstruction supplies
+the common final pressure, temperature and composition for every film's
+equilibrium check. Native mass selectors run before caloric updates and preserve
+both requested and represented donor limits.
+
+The complete interval has one mass and energy allowance. Actual local liquid,
+whole-gas and per-species inventory changes are checked independently. The sum
+of absolute local caloric defects and the sole gas defect bounds acceptance,
+so increasing surface count does not renew tolerance or hide opposing errors.
+An empty active roster admits and preserves the original gas. This remains a
+first-order phase-only frozen-film step with retained positive liquid mass and
+fixed gas volume; it adds no joint sensible-film heat, dry-wall nucleation,
+film extinction or volume-displacement work. Regression sources exercise shared
+inventory, opposite-signed exchange, input-order invariance and source-relative
+energy accounting; native execution remains a separate required validation.
+
 ### Reciprocal sensible heat through the gas film
 
 `evaporation::gas::advance_surface_with_gas_and_heat` adds a caller-supplied
