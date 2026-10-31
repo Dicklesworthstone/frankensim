@@ -1,4 +1,7 @@
 //! Actual simultaneous native rigid/solid Coulomb impacts and independent oracles.
+#[path = "contact/elliptic.rs"]
+mod elliptic;
+
 use super::*;
 use fs_contact::frictional_multicontact::NormalVelocityLaw;
 use fs_couple::finite_solid::contact::*;
@@ -41,7 +44,7 @@ fn witness(id: u64, rigid_body: usize, solid_point: FiniteSolidPoint) -> FiniteS
         normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 0.0 },
     }
 }
-fn audit(report: &FiniteSolidRigidContactReport) {
+fn audit<R>(report: &FiniteSolidRigidContactReport<R>) {
     near(norm(report.linear_momentum_residual_kg_m_s), 0.0, 2e-11);
     near(norm(report.angular_momentum_residual_kg_m2_s), 0.0, 2e-11);
     near(report.work_energy_residual_j, 0.0, 2e-11);

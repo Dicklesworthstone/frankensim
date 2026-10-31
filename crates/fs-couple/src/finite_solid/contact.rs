@@ -13,6 +13,9 @@
 //! repair, continuous-contact trajectory, or impact-loss heat partition is
 //! inferred. Material-point weights and rigid arms remain the original ones.
 
+/// Directional interface sources through the same coupled mechanical event.
+pub mod elliptic;
+
 use super::impulse::{FiniteSolidImpulse, FiniteSolidImpulseControls, FiniteSolidPoint};
 use super::{Cx, FiniteSolidBody, FiniteSolidError};
 use fs_contact::frictional_multicontact::{
@@ -24,7 +27,7 @@ use fs_solver::SolveReport;
 
 /// A rigid witness and a P1 material witness on the same contact normal line.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FiniteSolidRigidContact {
+pub struct FiniteSolidRigidContact<F = f64> {
     pub id: u64,
     pub rigid_body: usize,
     /// Centre-of-mass-relative point in this rigid body's material frame [m].
@@ -36,8 +39,41 @@ pub struct FiniteSolidRigidContact {
     pub tangent_world: Vec3,
     pub activation_tolerance_m: f64,
     /// Explicit coefficient resolved by the caller's interface law/source.
-    pub friction_coefficient: f64,
+    pub friction_coefficient: F,
     pub normal_law: NormalVelocityLaw,
+}
+
+impl<F> FiniteSolidRigidContact<F> {
+    /// Retain the original material witnesses while binding another friction law.
+    #[must_use]
+    pub fn with_friction<T>(self, friction_coefficient: T) -> FiniteSolidRigidContact<T> {
+        FiniteSolidRigidContact {
+            id: self.id,
+            rigid_body: self.rigid_body,
+            arm_body_m: self.arm_body_m,
+            solid_point: self.solid_point,
+            normal_world: self.normal_world,
+            tangent_world: self.tangent_world,
+            activation_tolerance_m: self.activation_tolerance_m,
+            friction_coefficient,
+            normal_law: self.normal_law,
+        }
+    }
+}
+
+/// Original native point velocities and frame supplied to material queries.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FiniteSolidRigidContactKinematics {
+    /// Original caller order, before canonical contact-ID sorting.
+    pub original_index: usize,
+    pub contact_id: u64,
+    /// Normal, tangent, bitangent; the exact orthonormal frame used by the solve.
+    pub axes_world: [Vec3; 3],
+    pub rigid_point_world: Vec3,
+    pub solid_point_world: Vec3,
+    pub gap_m: f64,
+    /// Rigid minus solid point velocity, projected onto `axes_world` [m/s].
+    pub relative_velocity_m_s: [f64; 3],
 }
 
 /// Bounded original mass/contact solves and independent physical tolerances.
@@ -69,12 +105,12 @@ impl Default for FiniteSolidRigidContactControls {
 
 /// All contact arrays follow stable contact-ID order, independent of input order.
 #[derive(Clone, Debug)]
-pub struct FiniteSolidRigidContactReport {
+pub struct FiniteSolidRigidContactReport<R = FrictionalContactResult> {
     pub contact_ids: Vec<u64>,
     /// Full rigid-plus-solid mobility, row-major 3N by 3N [1/kg].
     pub contact_mobility_per_kg: Vec<f64>,
     pub solid_mass_solves: Vec<SolveReport>,
-    pub contact: FrictionalContactResult,
+    pub contact: R,
     pub solid_impulse: FiniteSolidImpulse,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
@@ -90,21 +126,21 @@ pub struct FiniteSolidRigidContactReport {
 }
 
 #[derive(Debug)]
-pub enum FiniteSolidRigidContactError {
+pub enum FiniteSolidRigidContactError<R = FrictionalContactResult, E = FrictionalContactError> {
     Invalid(&'static str),
     Solid(FiniteSolidError),
     Rigid(DynamicsError),
-    Contact(FrictionalContactError),
+    Contact(E),
     Cancelled,
     /// Neither the solid nor any rigid state is published by a failed audit.
-    Audit(Box<FiniteSolidRigidContactReport>),
+    Audit(Box<FiniteSolidRigidContactReport<R>>),
 }
-impl From<FiniteSolidError> for FiniteSolidRigidContactError {
+impl<R, E> From<FiniteSolidError> for FiniteSolidRigidContactError<R, E> {
     fn from(error: FiniteSolidError) -> Self {
         Self::Solid(error)
     }
 }
-impl From<DynamicsError> for FiniteSolidRigidContactError {
+impl<R, E> From<DynamicsError> for FiniteSolidRigidContactError<R, E> {
     fn from(error: DynamicsError) -> Self {
         Self::Rigid(error)
     }
@@ -114,12 +150,40 @@ impl From<FrictionalContactError> for FiniteSolidRigidContactError {
         Self::Contact(error)
     }
 }
-impl core::fmt::Display for FiniteSolidRigidContactError {
+impl<R: core::fmt::Debug, E: core::fmt::Debug> core::fmt::Display
+    for FiniteSolidRigidContactError<R, E>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "finite solid/rigid contact: {self:?}")
     }
 }
-impl std::error::Error for FiniteSolidRigidContactError {}
+impl<R: core::fmt::Debug, E: core::fmt::Debug> std::error::Error
+    for FiniteSolidRigidContactError<R, E>
+{
+}
+
+/// Physical coordinates only: transformed solver witnesses never enter bodies.
+struct PhysicalImpulseView<'a> {
+    impulses: &'a [[f64; 3]],
+    relative_velocities_after: &'a [[f64; 3]],
+    relative_work: f64,
+    dissipated_energy: f64,
+}
+
+trait ImpactResponse {
+    fn physical(&self) -> PhysicalImpulseView<'_>;
+}
+
+impl ImpactResponse for FrictionalContactResult {
+    fn physical(&self) -> PhysicalImpulseView<'_> {
+        PhysicalImpulseView {
+            impulses: &self.impulses,
+            relative_velocities_after: &self.relative_velocities_after,
+            relative_work: self.relative_work,
+            dissipated_energy: self.dissipated_energy,
+        }
+    }
+}
 
 struct Prepared {
     original: usize,
@@ -136,7 +200,7 @@ impl<'a> FiniteSolidBody<'a> {
     /// impulses and zero work. A UniqueVelocity result retains the original
     /// solver's warning that individual redundant impulses are representatives.
     /// Sources, positions, time and accepted-step history are unchanged.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn rigid_contact_candidate(
         &self,
         rigid_bodies: &[RigidBodyState],
@@ -149,8 +213,51 @@ impl<'a> FiniteSolidBody<'a> {
         (Self, Vec<RigidBodyState>, FiniteSolidRigidContactReport),
         FiniteSolidRigidContactError,
     > {
+        self.rigid_contact_candidate_with(
+            rigid_bodies,
+            rigid_properties,
+            contacts,
+            origin_m,
+            controls,
+            cx,
+            |kinematics, matrix| {
+                let laws: Vec<_> = kinematics
+                    .iter()
+                    .map(|query| {
+                        let c = contacts[query.original_index];
+                        FrictionalContact {
+                            id: c.id,
+                            gap: query.gap_m,
+                            activation_tolerance: c.activation_tolerance_m,
+                            relative_velocity: query.relative_velocity_m_s,
+                            friction_coefficient: c.friction_coefficient,
+                            normal_law: c.normal_law,
+                        }
+                    })
+                    .collect();
+                solve_frictional_contacts(&laws, matrix, controls.contact, || {
+                    cx.checkpoint().is_err()
+                })
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn rigid_contact_candidate_with<F: Copy, R: ImpactResponse, CE>(
+        &self,
+        rigid_bodies: &[RigidBodyState],
+        rigid_properties: &[MassProperties],
+        contacts: &[FiniteSolidRigidContact<F>],
+        origin_m: [f64; 3],
+        controls: FiniteSolidRigidContactControls,
+        cx: &Cx<'_>,
+        solve: impl FnOnce(&[FiniteSolidRigidContactKinematics], &[f64]) -> Result<R, CE>,
+    ) -> Result<
+        (Self, Vec<RigidBodyState>, FiniteSolidRigidContactReport<R>),
+        FiniteSolidRigidContactError<R, CE>,
+    > {
         use FiniteSolidRigidContactError as E;
-        poll(cx)?;
+        poll::<R, CE>(cx)?;
         let origin = vector(origin_m);
         if !origin.is_finite()
             || rigid_bodies.len() != rigid_properties.len()
@@ -177,10 +284,10 @@ impl<'a> FiniteSolidBody<'a> {
         let mut order: Vec<_> = (0..contacts.len()).collect();
         order.sort_by_key(|&i| contacts[i].id);
         let mut prepared = Vec::with_capacity(contacts.len());
-        let mut laws = Vec::with_capacity(contacts.len());
+        let mut queries = Vec::with_capacity(contacts.len());
         let mut rows = Vec::with_capacity(dimension);
         for (slot, &index) in order.iter().enumerate() {
-            poll(cx)?;
+            poll::<R, CE>(cx)?;
             let c = contacts[index];
             if c.rigid_body >= rigid_bodies.len()
                 || (slot > 0 && contacts[order[slot - 1]].id == c.id)
@@ -189,7 +296,7 @@ impl<'a> FiniteSolidBody<'a> {
                     "valid rigid body and distinct contact IDs required",
                 ));
             }
-            let axes = contact_frame(c.normal_world, c.tangent_world)?;
+            let axes = contact_frame(c.normal_world, c.tangent_world).map_err(E::Invalid)?;
             let n = axes[0];
             let rigid = rigid_bodies[c.rigid_body];
             let property = rigid_properties[c.rigid_body];
@@ -212,13 +319,14 @@ impl<'a> FiniteSolidBody<'a> {
                     property.angular_velocity_body_checked(torque_body[axis])?;
                 rows.push((c.solid_point, array(axes[axis])));
             }
-            laws.push(FrictionalContact {
-                id: c.id,
-                gap,
-                activation_tolerance: c.activation_tolerance_m,
-                relative_velocity: axes.map(|axis| relative.dot(axis)),
-                friction_coefficient: c.friction_coefficient,
-                normal_law: c.normal_law,
+            queries.push(FiniteSolidRigidContactKinematics {
+                original_index: index,
+                contact_id: c.id,
+                axes_world: axes,
+                rigid_point_world: kinematics.point_world,
+                solid_point_world: point_s,
+                gap_m: gap,
+                relative_velocity_m_s: axes.map(|axis| relative.dot(axis)),
             });
             prepared.push(Prepared {
                 original: index,
@@ -235,7 +343,7 @@ impl<'a> FiniteSolidBody<'a> {
         )?;
         let mut matrix = mobility.matrix_per_kg;
         for i in 0..dimension {
-            poll(cx)?;
+            poll::<R, CE>(cx)?;
             let a = &prepared[i / 3];
             let body_a = contacts[a.original].rigid_body;
             for j in i..dimension {
@@ -250,15 +358,14 @@ impl<'a> FiniteSolidBody<'a> {
                 }
             }
         }
-        let contact = solve_frictional_contacts(&laws, &matrix, controls.contact, || {
-            cx.checkpoint().is_err()
-        })?;
+        let contact = solve(&queries, &matrix).map_err(E::Contact)?;
+        let physical = contact.physical();
         let mut rigid_next = rigid_bodies.to_vec();
         let mut solid_impulses = Vec::with_capacity(contacts.len());
         for (slot, p) in prepared.iter().enumerate() {
-            poll(cx)?;
+            poll::<R, CE>(cx)?;
             let c = contacts[p.original];
-            let j = world(p.axes, contact.impulses[slot]);
+            let j = world(p.axes, physical.impulses[slot]);
             rigid_next[c.rigid_body] = rigid_next[c.rigid_body]
                 .apply_impulse_at_body_point(rigid_properties[c.rigid_body], c.arm_body_m, j)?
                 .state_after;
@@ -279,7 +386,7 @@ impl<'a> FiniteSolidBody<'a> {
             .add(vector(solid_impulse.angular_residual_kg_m2_s));
         for ((&old, &new), &property) in rigid_bodies.iter().zip(&rigid_next).zip(rigid_properties)
         {
-            poll(cx)?;
+            poll::<R, CE>(cx)?;
             before += old.kinetic_energy(property)?;
             after += new.kinetic_energy(property)?;
             let dp = new.linear_momentum_world().sub(old.linear_momentum_world());
@@ -305,7 +412,7 @@ impl<'a> FiniteSolidBody<'a> {
         let mut relative_work = 0.0;
         let mut endpoint_error = 0.0_f64;
         for (slot, p) in prepared.iter().enumerate() {
-            poll(cx)?;
+            poll::<R, CE>(cx)?;
             let c = contacts[p.original];
             let rigid_v = rigid_next[c.rigid_body]
                 .point_kinematics(rigid_properties[c.rigid_body], c.arm_body_m)?
@@ -315,13 +422,14 @@ impl<'a> FiniteSolidBody<'a> {
             for axis in 0..3 {
                 let velocity = relative.dot(p.axes[axis]);
                 endpoint_error = endpoint_error
-                    .max((velocity - contact.relative_velocities_after[slot][axis]).abs());
-                relative_work += (0.5 * laws[slot].relative_velocity[axis] + 0.5 * velocity)
-                    * contact.impulses[slot][axis];
+                    .max((velocity - physical.relative_velocities_after[slot][axis]).abs());
+                relative_work += (0.5 * queries[slot].relative_velocity_m_s[axis] + 0.5 * velocity)
+                    * physical.impulses[slot][axis];
             }
         }
+        let contact_work = physical.relative_work;
         let report = FiniteSolidRigidContactReport {
-            contact_ids: laws.iter().map(|c| c.id).collect(),
+            contact_ids: queries.iter().map(|c| c.contact_id).collect(),
             contact_mobility_per_kg: matrix,
             solid_mass_solves: mobility.solves,
             kinetic_before_j: before,
@@ -329,7 +437,7 @@ impl<'a> FiniteSolidBody<'a> {
             kinetic_change_j: change,
             relative_impulse_work_j: relative_work,
             work_energy_residual_j: change - relative_work,
-            dissipation_residual_j: change + contact.dissipated_energy,
+            dissipation_residual_j: change + physical.dissipated_energy,
             linear_momentum_residual_kg_m_s: linear_residual,
             angular_momentum_residual_kg_m2_s: angular_residual,
             endpoint_velocity_residual_m_s: endpoint_error,
@@ -354,17 +462,17 @@ impl<'a> FiniteSolidBody<'a> {
             || magnitude(angular_residual) > controls.angular_tolerance_kg_m2_s
             || report.work_energy_residual_j.abs() > controls.energy_tolerance_j
             || report.dissipation_residual_j.abs() > controls.energy_tolerance_j
-            || (relative_work - report.contact.relative_work).abs() > controls.energy_tolerance_j
+            || (relative_work - contact_work).abs() > controls.energy_tolerance_j
             || change > controls.energy_tolerance_j
         {
             return Err(E::Audit(Box::new(report)));
         }
-        poll(cx)?;
+        poll::<R, CE>(cx)?;
         Ok((solid_next, rigid_next, report))
     }
 }
 
-fn poll(cx: &Cx<'_>) -> Result<(), FiniteSolidRigidContactError> {
+fn poll<R, E>(cx: &Cx<'_>) -> Result<(), FiniteSolidRigidContactError<R, E>> {
     cx.checkpoint()
         .map_err(|_| FiniteSolidRigidContactError::Cancelled)
 }
@@ -377,25 +485,21 @@ fn vector(v: [f64; 3]) -> Vec3 {
 fn magnitude(v: Vec3) -> f64 {
     v.x.hypot(v.y).hypot(v.z)
 }
-fn unit(v: Vec3) -> Result<Vec3, FiniteSolidRigidContactError> {
+fn unit(v: Vec3) -> Result<Vec3, &'static str> {
     let norm = magnitude(v);
     if !norm.is_finite() || norm <= 0.0 {
-        return Err(FiniteSolidRigidContactError::Invalid(
-            "finite independent contact axes required",
-        ));
+        return Err("finite independent contact axes required");
     }
     Ok(Vec3::new(v.x / norm, v.y / norm, v.z / norm))
 }
-fn contact_frame(normal: Vec3, tangent: Vec3) -> Result<[Vec3; 3], FiniteSolidRigidContactError> {
+fn contact_frame(normal: Vec3, tangent: Vec3) -> Result<[Vec3; 3], &'static str> {
     let n = unit(normal)?;
     let hint = unit(tangent)?;
     let cross = n.cross(hint);
     // Resolve the plane before normalizing it. A nearly parallel hint cannot
     // define a reliable Coulomb disk through projection-subtraction roundoff.
     if magnitude(cross) <= 128.0 * f64::EPSILON {
-        return Err(FiniteSolidRigidContactError::Invalid(
-            "unresolved contact tangent plane",
-        ));
+        return Err("unresolved contact tangent plane");
     }
     let b = unit(cross)?;
     let t = unit(b.cross(n))?;
@@ -404,9 +508,7 @@ fn contact_frame(normal: Vec3, tangent: Vec3) -> Result<[Vec3; 3], FiniteSolidRi
         for j in 0..3 {
             let expected = if i == j { 1.0 } else { 0.0 };
             if (axes[i].dot(axes[j]) - expected).abs() > 128.0 * f64::EPSILON {
-                return Err(FiniteSolidRigidContactError::Invalid(
-                    "unresolved orthonormal contact frame",
-                ));
+                return Err("unresolved orthonormal contact frame");
             }
         }
     }

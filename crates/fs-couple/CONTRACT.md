@@ -17558,3 +17558,42 @@ exchange, ionic transport into the solid, vapor-space storage, sorption heat or
 stress feedback into solvent chemical potential. New native regression sources
 manufacture a nonideal one-cell endpoint and verify the original sorption source
 queries, then exercise unsupported-concentration refusal and a supported retry.
+
+### Source-resolved directional rigid/solid impacts
+
+`finite_solid::contact::elliptic` extends the same native rigid/solid event to
+directional Coulomb friction. `rigid_elliptic_contact_candidate` delegates the
+complete contact matrix to the existing `fs-contact` ellipse solver; its physical
+impulses enter the original rigid-body and consistent solid-mass owners. Shared
+assembly and acceptance retain cross-point and normal/tangent coupling, full
+rigid inertia, stationary-support reaction, actual endpoint velocities, stable
+kinetic increments and world spin/orbital momentum. The circular API retains
+its default types and behavior. `with_friction` binds a new law without changing
+either original material witness.
+
+`rigid_source_elliptic_contact_candidate` reuses the existing ordered-interface
+binding and `SourceThermalEllipticCoulomb::sample_preimpact_coefficients`.
+Geometrically active contacts are queried once in canonical ID order, including
+initially separating contacts that shared mobility can close. Each query carries
+the actual native point velocity and exact normalized contact frame. The source
+owner substitutes actual incoming slip speed, retains accepted accumulated path
+and texture, and checks original claims, authority, domains and complete query
+context. The caller supplies admitted temperature and optional pressure and
+explicitly selects the static or kinetic coefficient role for the fixed event.
+Inactive contacts query no source and retain their accepted history.
+
+The returned source samples contain candidate states indexed by original input
+position; callers adopt these together with both mechanical candidates. Source,
+geometry, solver, cancellation or late balance failure changes no borrowed state.
+Changing a contact frame requires the existing objective history transport.
+Transformed numerical determinacy witnesses remain explicitly labeled; unique
+velocity does not establish unique individual impulses or contact heat shares.
+This is a preimpact-sampled instantaneous law. It introduces no pressure from
+impulse, event duration, impact heat partition, wear, penetration repair or
+classical adjoint.
+
+Focused G1/G3/G4 tests cover analytical off-center source-speed coupling,
+temperature/role/texture substitution, a rotated ellipse with full three-axis
+mobility, active/inactive source ordering, original claim retention and source,
+finite-gap angular-balance and cancellation refusal. Coefficients are synthetic.
+
