@@ -245,6 +245,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let area = self.law.dx_m * self.law.dx_m;
         let mut out = NsfBoundaryExchange {
             mass_out_kg: link.mass * mass_unit,
+            gross_mass_out_kg: link.gross_mass_out * mass_unit,
+            gross_mass_in_kg: link.gross_mass_in * mass_unit,
             momentum_out_kg_m_s: link.momentum.map(|p| p * mass_unit * velocity_unit),
             total_energy_out_j: 0.5
                 * (self.open_out.patch_total_out[side] + flux_after.patch_total_out[side])

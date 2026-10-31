@@ -1,7 +1,8 @@
 //! Transaction and quadrature checks using the unchanged original NSF step.
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{
-    NsfCharacteristicAxis, NsfCharacteristicBoundary, NsfGrid3, NsfSpec, WallThermal,
+    NsfBoundaryDrive, NsfBoundaryExchange, NsfCharacteristicAxis, NsfCharacteristicBoundary,
+    NsfCharacteristicPatch, NsfGrid3, NsfSpec, WallThermal,
 };
 use fs_material::gas::{GasSpec, GasState};
 use std::cell::Cell;
@@ -59,6 +60,64 @@ fn interval_accept_retains_exact_original_populations_charts_and_accounts() {
     assert_eq!(previewed.cumulative_ledger(), direct.cumulative_ledger());
     assert_eq!(previewed.last_boundary_exchange(), direct.last_boundary_exchange());
     for x in 0..12 { assert_eq!(previewed.cell([x, 0, 0]), direct.cell([x, 0, 0])); }
+}
+
+#[test]
+fn interval_retains_gross_mass_and_split_energy_on_both_faces_and_patches() {
+    let patch = NsfCharacteristicPatch { start: [0, 0], end: [1, 2] };
+    let warm = NsfBoundaryDrive::PressureTemperature {
+        pressure_offset_pa: 2.0,
+        inflow_temperature_k: 300.3,
+    };
+    let make = || grid(2.0)
+        .with_characteristic_patch(false, patch, warm).unwrap()
+        .with_characteristic_patch(true, patch, NsfBoundaryDrive::PressureOffset(-0.5)).unwrap();
+    let drives = [NsfBoundaryDrive::PressureTemperature {
+        pressure_offset_pa: 1.0,
+        inflow_temperature_k: 300.1,
+    }, NsfBoundaryDrive::PressureOffset(0.5)];
+    let channels = |face: &NsfBoundaryExchange| [
+        face.gross_mass_out_kg, face.gross_mass_in_kg,
+        face.advected_stagnation_enthalpy_out_j, face.nonadvective_energy_out_j,
+    ];
+    for steps in [1, 3] {
+        let mut direct = make();
+        let mut previewed = make();
+        direct.set_boundary_drives(drives).unwrap();
+        let mut face_sums = [[0.0; 4]; 2];
+        let mut patch_sums = [[0.0; 4]; 2];
+        for _ in 0..steps {
+            direct.step().unwrap();
+            for side in 0..2 {
+                let face = direct.last_boundary_exchange().unwrap()[side];
+                let patch = direct.last_patch_exchange_on(side == 1).unwrap();
+                // These count signed streaming populations before cancellation,
+                // so both directions remain nonzero in this low-Mach fixture.
+                assert!(patch.gross_mass_out_kg > 0.0 && patch.gross_mass_in_kg > 0.0);
+                assert!(patch.gross_mass_out_kg < face.gross_mass_out_kg);
+                assert!(patch.gross_mass_in_kg < face.gross_mass_in_kg);
+                for (sum, value) in face_sums[side].iter_mut().zip(channels(&face)) {
+                    *sum += value;
+                }
+                for (sum, value) in patch_sums[side].iter_mut().zip(channels(patch)) {
+                    *sum += value;
+                }
+            }
+        }
+        assert!(patch_sums[0][2].abs() > 0.0);
+        assert!(patch_sums[0][3].abs() > 0.0, "warm inflow must exercise boundary conduction");
+        let trial = previewed.preview_boundary_interval(drives, steps, 48 * steps, || false).unwrap();
+        assert_eq!(trial.grid().state_hash(), direct.state_hash());
+        for side in 0..2 {
+            assert_eq!(channels(&trial.boundary_exchange()[side]), face_sums[side]);
+            assert_eq!(channels(trial.patch_exchange_on(side == 1).unwrap()), patch_sums[side]);
+        }
+        trial.accept();
+        assert_eq!(previewed.last_boundary_exchange(), direct.last_boundary_exchange());
+        for high in [false, true] {
+            assert_eq!(previewed.last_patch_exchange_on(high), direct.last_patch_exchange_on(high));
+        }
+    }
 }
 
 #[test]

@@ -278,8 +278,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 candidate.last_boundary_exchange().expect("admitted characteristic step"))
             {
                 total.mass_out_kg += step.mass_out_kg;
+                total.gross_mass_out_kg += step.gross_mass_out_kg;
+                total.gross_mass_in_kg += step.gross_mass_in_kg;
                 for a in 0..3 { total.momentum_out_kg_m_s[a] += step.momentum_out_kg_m_s[a]; }
                 total.total_energy_out_j += step.total_energy_out_j;
+                total.advected_stagnation_enthalpy_out_j += step.advected_stagnation_enthalpy_out_j;
+                total.nonadvective_energy_out_j += step.nonadvective_energy_out_j;
                 total.mean_pressure_pa += step.mean_pressure_pa;
                 total.normal_volume_flow_m3_s += step.normal_volume_flow_m3_s;
                 total.pressure_work_out_j += step.pressure_work_out_j;
@@ -291,8 +295,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 let step = candidate.last_patch_exchange_on(side == 1)
                     .expect("admitted characteristic patch");
                 total.mass_out_kg += step.mass_out_kg;
+                total.gross_mass_out_kg += step.gross_mass_out_kg;
+                total.gross_mass_in_kg += step.gross_mass_in_kg;
                 for a in 0..3 { total.momentum_out_kg_m_s[a] += step.momentum_out_kg_m_s[a]; }
                 total.total_energy_out_j += step.total_energy_out_j;
+                total.advected_stagnation_enthalpy_out_j += step.advected_stagnation_enthalpy_out_j;
+                total.nonadvective_energy_out_j += step.nonadvective_energy_out_j;
                 total.mean_pressure_pa += step.mean_pressure_pa;
                 total.normal_volume_flow_m3_s += step.normal_volume_flow_m3_s;
                 total.pressure_work_out_j += step.pressure_work_out_j;
@@ -328,7 +336,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             - ledger.open_boundary_energy_j - ledger.open_energy_j - ledger.source_energy_j).abs()
             / energy_before_j.abs().max(energy.abs()).max(1e-300);
         if exchange.iter().chain(patch_exchange.iter().flatten()).any(|face| ![
-            face.mass_out_kg, face.total_energy_out_j, face.mean_pressure_pa,
+            face.mass_out_kg, face.gross_mass_out_kg, face.gross_mass_in_kg,
+            face.total_energy_out_j, face.advected_stagnation_enthalpy_out_j,
+            face.nonadvective_energy_out_j, face.mean_pressure_pa,
             face.normal_volume_flow_m3_s, face.pressure_work_out_j,
             face.mean_acoustic_pressure_pa, face.acoustic_pressure_work_out_j,
         ].into_iter().chain(face.momentum_out_kg_m_s).all(f64::is_finite))
