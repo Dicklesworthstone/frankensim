@@ -9,7 +9,7 @@ pub mod graph;
 /// Continuing pressure work after shared reacting gas and spatial-solid heat.
 pub mod solid;
 
-use super::{ClosedGasParcel, GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
+use super::{ClosedGasParcel, GasPiston, PistonError, PistonGas, PistonInput, PistonSolve, PistonStep};
 use fs_mbd_material::ResolvedBody;
 use super::thermal::{ConductanceSample, HeatExchangeSolve, ThermalPistonError};
 use super::exchange::thermal::NozzleThermalPistonCandidate;
@@ -37,12 +37,13 @@ use super::double_acting::{
 /// are constrained; centre-of-mass offsets and rotational inertia therefore do
 /// not replace its total translational mass with an ad hoc effective mass.
 /// Rigidity, geometry coverage and guide reactions remain model assumptions.
+/// Ideal and real-gas parcels share this same material-derived wall inertia.
 #[derive(Clone, Debug, PartialEq)]
-pub struct MaterialGasPiston {
+pub struct MaterialGasPiston<G: PistonGas = ClosedGasParcel> {
     body: ResolvedBody,
-    piston: GasPiston,
+    piston: GasPiston<G>,
 }
-impl MaterialGasPiston {
+impl<G: PistonGas> MaterialGasPiston<G> {
     /// Bind a source-resolved rigid specimen to the existing coupled dynamics.
     ///
     /// `body` is produced by `fs_mbd_material::resolve_body`, retaining density
@@ -56,7 +57,7 @@ impl MaterialGasPiston {
     /// This binds a new physical model; it does not replace a live body's mass,
     /// conserve momentum across a material swap or infer thermal expansion.
     pub fn new(
-        gas: ClosedGasParcel, body: ResolvedBody, area_m2: f64, velocity_m_s: f64,
+        gas: G, body: ResolvedBody, area_m2: f64, velocity_m_s: f64,
     ) -> Result<Self, PistonError> {
         let piston = GasPiston::new(gas, body.inertia().mass(), area_m2, velocity_m_s)?;
         Ok(Self { body, piston })
@@ -76,10 +77,10 @@ impl MaterialGasPiston {
     pub const fn body(&self) -> &ResolvedBody { &self.body }
     /// Existing accepted dynamics and gas state; no duplicate coordinates.
     #[must_use]
-    pub const fn piston(&self) -> &GasPiston { &self.piston }
+    pub const fn piston(&self) -> &GasPiston<G> { &self.piston }
     /// Accepted common thermal/flow/acoustic gas state and source model.
     #[must_use]
-    pub const fn gas(&self) -> &ClosedGasParcel { self.piston.gas() }
+    pub const fn gas(&self) -> &G { self.piston.gas() }
 
     /// Advance the original coupled gas and momentum equations unchanged.
     /// Failed input, source support, numerical balance or cancellation leaves
@@ -88,10 +89,12 @@ impl MaterialGasPiston {
     pub fn step(
         &mut self, input: PistonInput, controls: PistonSolve,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<PistonStep, PistonError> {
+    ) -> Result<PistonStep<G::State>, PistonError> {
         self.piston.step(input, controls, cancelled)
     }
+}
 
+impl MaterialGasPiston {
     /// Preserve the original source-resolved body while a declared reaction
     /// changes gas composition, temperature and the actual pressure/work load.
     /// The immutable candidate contains no separately supplied piston mass.

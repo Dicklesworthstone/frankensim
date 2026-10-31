@@ -55,6 +55,58 @@ fn density_card_swap_changes_inertia_and_the_coupled_thermal_trajectory() {
 }
 
 #[test]
+fn sourced_wall_density_changes_real_gas_motion_without_changing_either_inventory() {
+    use crate::cavity_phs::piston::tests::real_gas::{real_controls, real_parcel};
+
+    let initial = real_parcel(300.0, 5e6);
+    let controls = real_controls();
+    let input = PistonInput {
+        // Resolve the dense gas spring even for the 0.1 kg specimen.
+        duration_s: 5e-6,
+        heat_j: 200.0,
+        exterior_pressure_pa: initial.state().pressure_pa(),
+        external_force_n: 0.0,
+    };
+    let run = |density| {
+        let specimen = body(density);
+        let mut wall = MaterialGasPiston::new(
+            initial.clone(), specimen.clone(), 0.01, 0.0,
+        ).unwrap();
+        let report = wall.step(input, controls, || false).unwrap();
+        assert_eq!(wall.body(), &specimen);
+        (wall, report)
+    };
+    let (light, light_report) = run(1000.0);
+    let (dense, dense_report) = run(8000.0);
+    near(light.piston().mass_kg(), 0.1);
+    near(dense.piston().mass_kg(), 0.8);
+    assert!(light.piston().velocity_m_s() > dense.piston().velocity_m_s());
+    assert!(dense.piston().velocity_m_s() > 0.0);
+    assert!(light.gas().volume_m3() > dense.gas().volume_m3());
+    assert!(light_report.gas.work_by_gas_j > dense_report.gas.work_by_gas_j);
+    for (wall, report) in [(&light, &light_report), (&dense, &dense_report)] {
+        assert_eq!(wall.piston().mass_kg(), wall.body().inertia().mass());
+        assert_eq!(wall.gas().mass_kg(), initial.mass_kg());
+        near(wall.gas().state().density_kg_m3(),
+            initial.mass_kg() / wall.gas().volume_m3());
+        assert_ne!(wall.gas().state().density_kg_m3(),
+            wall.gas().state().source().state().density);
+        let stored = initial.mass_kg() * initial.model()
+            .specific_internal_energy_change_between_densities(
+                initial.density_kg_m3(), initial.state().temperature_k(),
+                wall.gas().density_kg_m3(), wall.gas().state().temperature_k(),
+            ).unwrap();
+        let independent_balance = stored
+            + 0.5 * wall.body().inertia().mass() * wall.piston().velocity_m_s().powi(2)
+            + input.exterior_pressure_pa * (wall.gas().volume_m3() - initial.volume_m3())
+            - input.heat_j;
+        assert!(independent_balance.abs() <= controls.energy_tolerance_j);
+        assert!(report.total_energy_residual_j.abs() <= controls.energy_tolerance_j);
+        assert!(report.momentum_residual_n_s.abs() <= controls.momentum_tolerance_n_s);
+    }
+}
+
+#[test]
 fn composite_regions_use_the_shared_inertia_and_identical_momentum_solver() {
     let a=card(1000.0); let b=card(8000.0);
     let point=QueryPoint::new().with("T",300.0).unwrap();

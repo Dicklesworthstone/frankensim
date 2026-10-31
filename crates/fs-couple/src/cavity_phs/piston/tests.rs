@@ -1,4 +1,6 @@
 //! Source-backed synthetic gases, actual public momentum coupling, no measured fit.
+pub(super) mod real_gas;
+
 use super::*;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

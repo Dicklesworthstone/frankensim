@@ -7298,6 +7298,25 @@ These synthetic source tests do not establish measured-material validation.
 
 `PlateValvePerformance` also admits explicit `dg_tube` source data through the original exact DG exponential and its gas-derived Bessel memory, coupled to the retained ExactZoh plate/contact/Maxwell aperture by the exact step-mean port law. The same ambient gas drives the column, aperture density and slit viscosity; the existing wind/ensemble renderer observes internal inlet pressure only. Full-state DOF, finite-band Bessel and exponential admissions remain separate from spatial/nonlinear convergence, and inferred duct loss is not an independent heat certificate. See `examples/PLATE_VALVE_PERFORMANCES.md` for the bounded cylinder scope and source grammar.
 
+### Source solid density driving a real-gas piston
+
+`MaterialGasPiston<G: PistonGas>` binds the original `ResolvedBody` to the
+existing ideal and Peng--Robinson piston mechanics. Source solid density
+changes acceleration and gas work through that body's resolved inertia, while
+gas mass and solid mass remain separate conserved inventories. The same
+midpoint pressure supplies force and boundary work; the gas retains its actual
+`rho=m/V`, source calorics and acoustic compressibility. Free-wall and
+fixed-support steps preserve the common residual gates and atomic cancellation.
+Reaction, nozzle and double-acting compositions retain their ideal specialization.
+
+Synthetic regression definitions in `piston/tests/real_gas.rs` compare dense
+motion with independent joint PR energy/impulse roots, reversal and continuing
+original-law energy balance. The material regression
+changes only the source solid density. `examples/real_gas_piston.rs` exposes
+the same continuing trajectory and original-law energy account as CSV. These
+homogeneous frozen-composition models require supported single-phase paths
+and time resolution; they do not establish experimental actuator accuracy.
+
 ### Fixed-volume chambers in the shared reacting gas assembly
 
 `GasPiston::with_fixed_support` and `MaterialGasPiston::with_fixed_support`
