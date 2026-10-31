@@ -3209,6 +3209,15 @@ the same explicit step. Final endpoints must preserve active total-pressure or
 species partial-pressure order and pass the existing extensive entropy gate.
 The original two-mechanism API delegates with empty porous/membrane slices.
 
+Material parcel and gas-field Maxwell–Stefan transport share the original
+`fs-thermochem::transport::maxwell_stefan` algebra. Parcel diffusion explicitly
+selects molar-averaged controls and results, retains its original pair material
+samples and absolute residual budgets, and preserves the isothermal/isobaric
+domain and selective partial-enthalpy/entropy checks. The shared owner polls
+during scaled assembly/elimination and keeps molar flux primary, independently
+of mass-flux underflow. This does not add Soret/Dufour transport or change the
+parcel frame to barycentric.
+
 The membrane owner uses source-selected, constant-at-fixed-temperature molar
 permeability and actual species partial pressures, allowing counterpermeation.
 It checks the selected claim at both gas boundaries, retains explicit zero

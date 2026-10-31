@@ -2,7 +2,8 @@
 //!
 //! At the central face, solve sum_j (x_j J_i - x_i J_j)/D_ij = -c grad(x_i)
 //! with sum_i J_i=0 (MOLAR-average frame, NOT zero mass flux). Use the existing
-//! dense LU, then check EVERY original equation and the molar-frame constraint.
+//! `fs-thermochem` friction owner, then check EVERY original equation and the
+//! molar-frame constraint. The gas-field and parcel paths share this algebra.
 //! A finite-volume step delegates species/partial-enthalpy transport and full
 //! endpoint reconstruction to exchange_species_with. Diffusivity is explicit
 //! pair material DATA; viscosity, species labels and air defaults never infer it.
@@ -23,8 +24,10 @@ use super::{ClosedGasParcel, GasEnergyError, GasSpeciesExchangeCandidate,
 use crate::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point};
 use fs_matdb::{MaterialCard, QueryPoint};
-use fs_qty::Dims;
-use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+use fs_qty::{Dims, Pressure, Temperature};
+use fs_thermochem::transport::maxwell_stefan::{
+    MaxwellStefanErrorV1, MaxwellStefanMolarSolveV1, MaxwellStefanV1,
+};
 use std::collections::BTreeMap;
 
 /// Hard bound on the indivisible local dense factorization, not a mesh limit.
@@ -121,8 +124,9 @@ impl ClosedGasParcel {
     /// Pair order and orientation do not affect the result. Exactly one source
     /// per active unordered pair is required (zero area is explicitly closed).
     /// The original source join refuses incompatible caloric/transport identities.
-    /// LU is bounded to 32 species and polled immediately before/after; all
-    /// original unscaled equations are checked, including the replaced gauge row.
+    /// The shared scaled solve is bounded here to 32 species and polled at its
+    /// row/elimination boundaries; all original unscaled equations are checked,
+    /// including the replaced gauge row. Molar flux remains the primary output.
     pub fn diffusion_flux_to(
         &self, right: &Self, geometry: GasDiffusionGeometry,
         pairs: &[BinaryDiffusionMaterial<'_>], controls: GasDiffusionSolve,
@@ -168,14 +172,9 @@ impl ClosedGasParcel {
             x.push(0.5*left + 0.5*right);
             gradient.push((right-left)/geometry.distance_m);
         }
-        let concentration = pressure/(UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K*temperature);
-        if !positive(concentration) || gradient.iter().any(|g| !g.is_finite()) || x.iter().any(|v| !positive(*v)) {
-            return Err(invalid("diffusion face concentration or gradient is unrepresentable"));
-        }
         let requirement = ScalarPropertyRequirement::try_new(BINARY_DIFFUSIVITY_PROPERTY,
             BINARY_DIFFUSIVITY_DIMS, ScalarAdmissibility::StrictlyPositive).map_err(source_error)?;
         let mut diffusion = vec![0.0; n*n];
-        let mut scale = f64::INFINITY;
         for ((i, j), binding) in ordered {
             poll(&mut cancelled)?;
             let point = super::super::updated_point(binding.context, temperature, pressure)?;
@@ -183,49 +182,27 @@ impl ClosedGasParcel {
                 std::slice::from_ref(&requirement), binding.selection.clone()).map_err(source_error)?;
             let d = material.property(BINARY_DIFFUSIVITY_PROPERTY)
                 .ok_or(invalid("resolved binary diffusivity missing"))?.value_si();
-            diffusion[i*n+j] = d; diffusion[j*n+i] = d; scale = scale.min(d);
+            diffusion[i*n+j] = d; diffusion[j*n+i] = d;
             report.pairs.push(BinaryDiffusionSample { species: [components[i].species().clone(),
                 components[j].species().clone()], diffusivity_m2_s: d, material });
         }
-        let mut flux = vec![0.0; n];
-        if n > 1 {
-            // D_min/D_ij scales the friction matrix without changing its solution.
-            let mut matrix = vec![0.0; n*n];
-            for i in 0..n {
-                for j in 0..n {
-                    if i != j {
-                        let ratio = scale/diffusion[i*n+j];
-                        if !positive(ratio) { return Err(invalid("diffusion coefficient ratio underflow")); }
-                        matrix[i*n+i] += x[j]*ratio;
-                        matrix[i*n+j] -= x[i]*ratio;
-                    }
-                }
-                flux[i] = -(concentration*scale)*gradient[i];
-            }
-            // This constraint defines the molar-average frame, not a mass frame.
-            matrix[(n-1)*n..].fill(1.0); flux[n-1] = 0.0;
-            if matrix.iter().chain(&flux).any(|v| !v.is_finite()) {
-                return Err(invalid("diffusion linear system is unrepresentable"));
-            }
-            poll(&mut cancelled)?;
-            let factor = fs_la::factor::lu(&matrix, n).map_err(source_error)?;
-            factor.solve(&mut flux);
-            poll(&mut cancelled)?;
-            if flux.iter().any(|v| !v.is_finite()) { return Err(invalid("diffusion flux solve overflow")); }
-            for i in 0..n {
-                let mut residual = Sum::default(); residual.add(gradient[i])?;
-                for j in 0..n {
-                    if i != j {
-                        let denominator = concentration*diffusion[i*n+j];
-                        if !positive(denominator) { return Err(invalid("diffusion residual scaling is unrepresentable")); }
-                        residual.add((x[j]*flux[i]-x[i]*flux[j])/denominator)?;
-                    }
-                }
-                report.maximum_gradient_residual_per_m = report.maximum_gradient_residual_per_m.max(residual.value.abs());
-            }
-        }
+        let owner = MaxwellStefanV1::new(components.iter()
+            .map(|species| (species.species().clone(), species.molar_mass())).collect())
+            .map_err(diffusion_error)?;
+        let mut workspace = owner.workspace().map_err(diffusion_error)?;
+        let evaluated = owner.evaluate_molar(&x, &gradient, Temperature::new(temperature),
+            Pressure::new(pressure), 0.0, &diffusion, MaxwellStefanMolarSolveV1 {
+                relative_tolerance: f64::EPSILON,
+                absolute_gradient_tolerance_per_m: controls.gradient_tolerance_per_m,
+                absolute_molar_flux_tolerance_mol_m2_s: controls.molar_flux_tolerance_mol_m2_s,
+            }, &mut workspace, &mut cancelled).map_err(diffusion_error)?;
+        // Preserve this public material adapter's absolute-only acceptance.
+        // Its declared small T/p differences still omit pressure/thermal drive;
+        // selecting the common owner does not silently extend that model.
+        report.maximum_gradient_residual_per_m = evaluated.maximum_gradient_residual_per_m();
+        let flux = evaluated.molar_fluxes();
         let mut net = Sum::default();
-        for (species, &j) in components.iter().zip(&flux) {
+        for (species, &j) in components.iter().zip(flux) {
             net.add(j)?;
             let rate = (j*species.molar_mass().value())*geometry.area_m2;
             if !rate.is_finite() || (j != 0.0 && rate == 0.0) {
@@ -279,6 +256,13 @@ impl ClosedGasParcel {
         }
         poll(&mut cancelled)?;
         Ok(GasDiffusionCandidate { exchange, flux, entropy_change_j_k: entropy })
+    }
+}
+
+fn diffusion_error(error: MaxwellStefanErrorV1) -> GasEnergyError {
+    match error {
+        MaxwellStefanErrorV1::Cancelled => GasEnergyError::Cancelled,
+        other => source_error(other),
     }
 }
 

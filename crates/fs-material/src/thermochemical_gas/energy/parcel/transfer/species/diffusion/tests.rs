@@ -7,7 +7,7 @@ use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim,
     PropertyKey, PropertyValue, Provenance, UncertaintyModel};
 use fs_qty::{Temperature, QuantitySpec, semantic::{QuantityKind, SemanticType, ValueForm}};
-use fs_thermochem::{Composition, CompositionBasis};
+use fs_thermochem::{Composition, CompositionBasis, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 
 fn controls() -> GasDiffusionSolve {
