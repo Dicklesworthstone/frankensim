@@ -7,6 +7,7 @@
 
 use fs_material::field_storage::dielectric::reversible::{
     ELECTRIC_FIELD_DIMS, REVERSIBLE_ELECTRIC_DISPLACEMENT_PROPERTY, ReversibleDielectricMaterial,
+    thermal::ResolvedThermalReversibleDielectricMaterial,
 };
 use fs_phs::circuit::capacitance::{CapacitorChargeCurve, CapacitorCurve, MAX_CAPACITOR_KNOTS};
 use fs_phs::circuit::{Branch, CircuitGraph, MutualInductance};
@@ -26,6 +27,7 @@ pub struct MaterialDielectricCapacitor {
     area_m2: f64,
     gap_m: f64,
     curve: CapacitorChargeCurve,
+    thermal: Option<ResolvedThermalReversibleDielectricMaterial>,
 }
 
 impl MaterialDielectricCapacitor {
@@ -43,6 +45,46 @@ impl MaterialDielectricCapacitor {
         material: ReversibleDielectricMaterial,
         area_m2: f64,
         gap_m: f64,
+    ) -> Result<Self, MaterialCircuitError> {
+        if material.is_temperature_scaled() {
+            return Err(invalid(
+                "temperature-dependent nonlinear storage requires its explicit thermal capacitor owner",
+            ));
+        }
+        Self::prepare(branch, material, area_m2, gap_m, None)
+    }
+
+    /// Bind an explicitly admitted thermal potential at its current temperature.
+    /// Every physical knot is q=A*D(E,T), V=g*E. The original reference receipts
+    /// are retained as reference evidence, never mistaken for the current charge
+    /// law. A thermal circuit owner must account for entropy and reversible heat;
+    /// ordinary closed-circuit and mechanical owners do not accept this binding.
+    pub fn new_thermal(
+        branch: usize,
+        thermal: ResolvedThermalReversibleDielectricMaterial,
+        area_m2: f64,
+        gap_m: f64,
+    ) -> Result<Self, MaterialCircuitError> {
+        if !thermal.dielectric().is_temperature_scaled() {
+            return Err(invalid(
+                "nonlinear thermal binding requires its admitted thermal potential",
+            ));
+        }
+        Self::prepare(
+            branch,
+            thermal.dielectric().clone(),
+            area_m2,
+            gap_m,
+            Some(thermal),
+        )
+    }
+
+    fn prepare(
+        branch: usize,
+        material: ReversibleDielectricMaterial,
+        area_m2: f64,
+        gap_m: f64,
+        thermal: Option<ResolvedThermalReversibleDielectricMaterial>,
     ) -> Result<Self, MaterialCircuitError> {
         if branch >= MAX_MATERIAL_CIRCUIT_BRANCHES
             || [area_m2, gap_m].iter().any(|v| !v.is_finite() || *v <= 0.0)
@@ -74,15 +116,15 @@ impl MaterialDielectricCapacitor {
                 invalid("original dielectric path exceeds native signed capacitor knot capacity")
             })?;
         let mut knots = Vec::with_capacity(count);
-        for &(field, ref answer) in path.iter().skip(1).rev() {
+        for &(field, _) in path.iter().skip(1).rev() {
             knots.push((
-                -finite(area_m2 * answer.evidence.value.value)?,
+                -finite(area_m2 * material.evaluate(field)?.displacement_c_m2)?,
                 -finite(gap_m * field)?,
             ));
         }
-        for &(field, ref answer) in path {
+        for &(field, _) in path {
             knots.push((
-                finite(area_m2 * answer.evidence.value.value)?,
+                finite(area_m2 * material.evaluate(field)?.displacement_c_m2)?,
                 finite(gap_m * field)?,
             ));
         }
@@ -93,7 +135,35 @@ impl MaterialDielectricCapacitor {
             area_m2,
             gap_m,
             curve,
+            thermal,
         })
+    }
+
+    /// Typed thermal potential behind the current native charge law, if any.
+    pub fn thermal_material(&self) -> Option<&ResolvedThermalReversibleDielectricMaterial> {
+        self.thermal.as_ref()
+    }
+
+    /// Refresh the same admitted thermal potential at fixed original geometry.
+    /// Source/scale selections and all nonthermal coordinates must be retained.
+    /// This constructs immutable constitutive data only; a circuit rebind owns
+    /// fixed-charge parameter work and publication of the accepted history.
+    pub fn at_resolved_temperature(
+        &self,
+        after: &ResolvedThermalReversibleDielectricMaterial,
+    ) -> Result<Self, MaterialCircuitError> {
+        let before = self.thermal.as_ref().ok_or_else(|| {
+            invalid("thermal refresh requires an original nonlinear thermal capacitor binding")
+        })?;
+        before.admit_source_refresh(after)?;
+        if before.displacement_scale().to_bits() == after.displacement_scale().to_bits() {
+            return Ok(Self {
+                material: after.dielectric().clone(),
+                thermal: Some(after.clone()),
+                ..self.clone()
+            });
+        }
+        Self::new_thermal(self.branch, after.clone(), self.area_m2, self.gap_m)
     }
 
     pub const fn branch(&self) -> usize {
@@ -140,6 +210,11 @@ impl MaterialDielectricCapacitor {
         &self,
         point: &fs_matdb::QueryPoint,
     ) -> Result<Self, MaterialCircuitError> {
+        if self.thermal.is_some() {
+            return Err(invalid(
+                "nonlinear thermal storage must refresh through its original admitted thermal potential",
+            ));
+        }
         let original = self.material.material();
         let refreshed = original.at_query_point(self.material.card(), point)?;
         fs_material::field_storage::admit_source_temperature_refresh(original, &refreshed)?;
@@ -181,6 +256,14 @@ fn canonical_sources(
 ) -> Result<(), MaterialCircuitError> {
     if sources.len() > MAX_MATERIAL_CIRCUIT_BRANCHES {
         return Err(invalid("dielectric bindings exceed native branch capacity"));
+    }
+    if sources
+        .iter()
+        .any(|source| source.thermal_material().is_some())
+    {
+        return Err(invalid(
+            "ordinary material circuits require field-only dielectric storage; nonlinear thermal storage needs its thermal owner",
+        ));
     }
     sources.sort_by_key(MaterialDielectricCapacitor::branch);
     if sources

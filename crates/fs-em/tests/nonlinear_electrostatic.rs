@@ -2,6 +2,8 @@
 //! Authored constitutive fixtures; these are not measured material predictions.
 #[path = "nonlinear_electrostatic/force.rs"]
 mod force;
+#[path = "nonlinear_electrostatic/thermal.rs"]
+mod thermal;
 
 use fs_em::electrostatic::{
     ElectrostaticControls, PlanarElectrostatics,

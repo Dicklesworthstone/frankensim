@@ -8,7 +8,46 @@
 
 use super::*;
 
+/// Explicit temperature-dependent field/polarization potentials on the same graph.
+pub mod thermal;
+
 fn admit_source(
+    source: &ResolvedDebyeCapacitor,
+    instantaneous: &MaterialDielectricCapacitor,
+) -> Result<(), MaterialCircuitError> {
+    if instantaneous.thermal_material().is_some() {
+        return Err(invalid(
+            "temperature-dependent nonlinear storage requires its explicit thermal authority",
+        ));
+    }
+    admit_pair(source, instantaneous)?;
+    // The bridge already admits field-only instantaneous storage. Constant
+    // source increments keep this closed history's polarization potential free
+    // of missing temperature/other parameter work; tau may be a fixed-context
+    // kinetic snapshot, since this owner never changes that context.
+    for name in std::iter::once(source.high_frequency_property()).chain(
+        source
+            .pole_properties()
+            .iter()
+            .map(|p| p.permittivity_increment.as_str()),
+    ) {
+        let property = source
+            .material()
+            .property(name)
+            .ok_or_else(|| invalid("original Debye energy source absent"))?;
+        if !property.source_axes().is_empty()
+            || property.answer().receipt.decision
+                != fs_matdb::EvaluationDecision::ConstantWithinValidity
+        {
+            return Err(invalid(
+                "closed nonlinear Debye storage requires constant original background and pole increments",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn admit_pair(
     source: &ResolvedDebyeCapacitor,
     instantaneous: &MaterialDielectricCapacitor,
 ) -> Result<(), MaterialCircuitError> {
@@ -35,28 +74,6 @@ fn admit_source(
         return Err(invalid(
             "instantaneous and Debye laws require the same original card, geometry and non-field context",
         ));
-    }
-    // The bridge already admits field-only instantaneous storage. Constant
-    // source increments keep this closed history's polarization potential free
-    // of missing temperature/other parameter work; tau may be a fixed-context
-    // kinetic snapshot, since this owner never changes that context.
-    for name in std::iter::once(source.high_frequency_property()).chain(
-        source
-            .pole_properties()
-            .iter()
-            .map(|p| p.permittivity_increment.as_str()),
-    ) {
-        let property = original
-            .property(name)
-            .ok_or_else(|| invalid("original Debye energy source absent"))?;
-        if !property.source_axes().is_empty()
-            || property.answer().receipt.decision
-                != fs_matdb::EvaluationDecision::ConstantWithinValidity
-        {
-            return Err(invalid(
-                "closed nonlinear Debye storage requires constant original background and pole increments",
-            ));
-        }
     }
     let declared = original
         .property(source.high_frequency_property())
@@ -89,8 +106,9 @@ impl DebyeCircuit {
     /// Geometry is fixed. Source changes require the explicit conservative
     /// reversible-source rebind, which retains every charge and returns its
     /// parameter work. The finite thermal owner admits temperature-independent
-    /// field/polarization potentials with supported tau(T); actual temperature-
-    /// dependent potentials need their own field entropy and remain refused.
+    /// field/polarization potentials with supported tau(T). Temperature-dependent
+    /// potentials require [`Self::new_with_thermal_reversible_instantaneous`]
+    /// and its retained field/polarization entropy authority.
     /// Native capacitor efforts close each original store's energy change;
     /// nonlinear work is not redistributed into another changing capacitor.
     /// Whole-circuit and dielectric terminal-work audits remain strict, and a

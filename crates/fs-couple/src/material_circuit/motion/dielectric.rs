@@ -48,7 +48,8 @@ impl ReversibleDielectricGap {
             .property(REVERSIBLE_ELECTRIC_DISPLACEMENT_PROPERTY)
             .ok_or_else(|| invalid("moving dielectric lost its constitutive source"))?
             .source_axes();
-        if axes.len() != 1
+        if material.is_temperature_scaled()
+            || axes.len() != 1
             || axes[0].0 != material.source_path().axis
             || axes[0].1 != ELECTRIC_FIELD_DIMS
         {

@@ -52,7 +52,7 @@ impl DebyeCircuit {
         inputs: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
-        self.rebind(source, None, None, inputs, cancelled)
+        self.rebind(source, None, None, None, inputs, cancelled)
     }
 
     /// The same refresh with a complete original conductor binding for every
@@ -66,18 +66,24 @@ impl DebyeCircuit {
         inputs: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
-        self.rebind(source, None, Some(resistors), inputs, cancelled)
+        self.rebind(source, None, None, Some(resistors), inputs, cancelled)
     }
 
     fn rebind(
         &self,
         source: ResolvedDebyeCapacitor,
         instantaneous: Option<MaterialDielectricCapacitor>,
+        thermal_storage: Option<&super::nonlinear::thermal::ThermalDebyeStorage>,
         resistors: Option<Vec<MaterialResistor>>,
         inputs: &[f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
         poll(&mut cancelled)?;
+        if self.thermal_reversible_storage() != thermal_storage {
+            return Err(invalid(
+                "source rebind must retain the explicit nonlinear thermal authority",
+            ));
+        }
         let polarization = self.polarization_charges_c();
         let parameter_work_j = match (self.reversible_instantaneous(), instantaneous.as_ref()) {
             (Some(before), Some(after)) => nonlinear::parameter_work(
@@ -167,7 +173,23 @@ impl DebyeCircuit {
             .iter()
             .map(|&i| self.state[i])
             .collect();
-        let mut rebound = if let Some(instantaneous) = instantaneous {
+        let mut rebound = if thermal_storage.is_some() {
+            Self::assemble_thermal_instantaneous(
+                graph,
+                source,
+                instantaneous.ok_or_else(|| invalid("thermal rebind lost its nonlinear source"))?,
+                self.prepared
+                    .reversible_thermal
+                    .as_ref()
+                    .ok_or_else(|| invalid("thermal rebind lost its retained authority"))?
+                    .clone(),
+                fluxes,
+                charges,
+                polarization,
+                inputs,
+                &mut cancelled,
+            )?
+        } else if let Some(instantaneous) = instantaneous {
             Self::new_with_reversible_instantaneous(
                 graph,
                 source,

@@ -7,7 +7,7 @@ use fs_couple::circuit_enthalpy::{
 };
 use fs_couple::material_circuit::{
     MaterialCircuitSolve, capacitance::dielectric::MaterialDielectricCapacitor,
-    dielectric::DebyeCircuit,
+    dielectric::DebyeCircuit, dielectric::ThermalDebyeStorage,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -23,17 +23,21 @@ use fs_material::{
             reversible::{
                 ELECTRIC_DISPLACEMENT_DIMS, ELECTRIC_FIELD_DIMS,
                 REVERSIBLE_ELECTRIC_DISPLACEMENT_PROPERTY, ReversibleDielectricMaterial,
+                thermal::ThermalReversibleDielectricMaterial,
             },
             thermal::ThermalDebyeCapacitor,
         },
     },
     phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase},
-    state_point::{MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS},
+    state_point::{
+        MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, ScalarAdmissibility,
+        ScalarPropertyRequirement, resolve_material_state_point,
+    },
     thermal::source::ThermalMaterialPoint,
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_qty::{
-    Density, QuantitySpec, Temperature, Time,
+    Density, Dims, QuantitySpec, Temperature, Time,
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 use fs_solver::NewtonKrylovConfig;
@@ -41,6 +45,16 @@ use fs_thermal::enthalpy::*;
 
 const DIELECTRIC: CellId = CellId(7);
 const RESISTOR: CellId = CellId(8);
+const SCALE: &str = "dielectric_scale";
+
+#[path = "dielectric_nonlinear_thermal/binder.rs"]
+mod binder;
+#[path = "dielectric_nonlinear_thermal/heating.rs"]
+mod heating;
+#[path = "dielectric_nonlinear_thermal/memory.rs"]
+mod memory;
+#[path = "dielectric_nonlinear_thermal/supply.rs"]
+mod supply;
 
 fn temperature_quantity() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
@@ -57,6 +71,31 @@ fn validity(range: [f64; 2]) -> ValidityDomain {
     ValidityDomain::unconstrained().with_quantity("T", temperature_quantity(), range[0], range[1])
 }
 fn fixture(cp: f64, tau_feedback: bool, rho_slope: f64, field_range: [f64; 2]) -> MaterialCard {
+    fixture_with_scale(cp, tau_feedback, rho_slope, field_range, None)
+}
+fn fixture_scaled(
+    cp: f64,
+    tau_feedback: bool,
+    rho_slope: f64,
+    field_range: [f64; 2],
+    alpha: f64,
+    pole_slope: f64,
+) -> MaterialCard {
+    fixture_with_scale(
+        cp,
+        tau_feedback,
+        rho_slope,
+        field_range,
+        Some((alpha, pole_slope)),
+    )
+}
+fn fixture_with_scale(
+    cp: f64,
+    tau_feedback: bool,
+    rho_slope: f64,
+    field_range: [f64; 2],
+    scaling: Option<(f64, f64)>,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     let mut add = |name: &str, dims, value, interpolation, validity| {
         claims
@@ -82,8 +121,66 @@ fn fixture(cp: f64, tau_feedback: bool, rho_slope: f64, field_range: [f64; 2]) -
         add(
             name,
             dims,
-            PropertyValue::Scalar { value, dims },
-            InterpolationPolicy::ConstantWithinValidity,
+            if let Some((alpha, pole_slope)) = scaling {
+                let slope = if name == "epsilon_inf" {
+                    2.0 * alpha
+                } else {
+                    pole_slope
+                };
+                PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![
+                        (250.0, value - 50.0 * slope),
+                        (300.0, value),
+                        (500.0, value + 200.0 * slope),
+                    ],
+                    dims,
+                }
+            } else {
+                PropertyValue::Scalar { value, dims }
+            },
+            if scaling.is_some() {
+                InterpolationPolicy::LinearInside
+            } else {
+                InterpolationPolicy::ConstantWithinValidity
+            },
+            validity([250.0, 500.0]),
+        );
+    }
+    if let Some((alpha, _)) = scaling {
+        add(
+            SCALE,
+            Dims([0; 6]),
+            PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![
+                    (250.0, 1.0 - 50.0 * alpha),
+                    (300.0, 1.0),
+                    (500.0, 1.0 + 200.0 * alpha),
+                ],
+                dims: Dims([0; 6]),
+            },
+            InterpolationPolicy::LinearInside,
+            validity([250.0, 500.0]),
+        );
+        // Same zero-field value, deliberately incompatible derivative. This
+        // independent original claim falsifies background-only point checks.
+        add(
+            "epsilon_inconsistent",
+            ELECTRIC_PERMITTIVITY_DIMS,
+            PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![
+                    (250.0, 2.0 - 150.0 * alpha),
+                    (300.0, 2.0),
+                    (500.0, 2.0 + 600.0 * alpha),
+                ],
+                dims: ELECTRIC_PERMITTIVITY_DIMS,
+            },
+            InterpolationPolicy::LinearInside,
             validity([250.0, 500.0]),
         );
     }
@@ -319,6 +416,114 @@ fn binding<'a>(law: &'a ThermalDebyeCapacitor, poles: &'a [f64]) -> DebyeThermal
         maximum_instantaneous_charge_c: 7.0,
         maximum_polarization_charges_c: poles,
     }
+}
+
+fn initial_scaled(
+    card: &MaterialCard,
+    q: f64,
+    p: Option<f64>,
+    resistor: bool,
+) -> (
+    DebyeCircuit,
+    ThermalDebyeCapacitor,
+    ThermalReversibleDielectricMaterial,
+) {
+    let poles = if p.is_some() {
+        vec![DebyePoleProperties {
+            permittivity_increment: "chi".into(),
+            relaxation_time: "tau".into(),
+        }]
+    } else {
+        vec![]
+    };
+    let source = ResolvedDebyeCapacitor::resolve(
+        card,
+        &point(300.0),
+        MaterialPropertySelection::SingleClaimOnly,
+        "epsilon_inf",
+        &poles,
+        1.0,
+        1.0,
+    )
+    .unwrap();
+    let pole_law = ThermalDebyeCapacitor::new(card, &source, "T", [250.0, 500.0]).unwrap();
+    let field_point = point(300.0)
+        .with_quantity("E", QuantitySpec::dimensional(ELECTRIC_FIELD_DIMS), 0.0)
+        .unwrap();
+    let reference = ReversibleDielectricMaterial::resolve(
+        card,
+        &field_point,
+        "E",
+        4.0,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let mut requirements = vec![
+        ScalarPropertyRequirement::try_new(
+            REVERSIBLE_ELECTRIC_DISPLACEMENT_PROPERTY,
+            ELECTRIC_DISPLACEMENT_DIMS,
+            ScalarAdmissibility::NonNegative,
+        )
+        .unwrap(),
+    ];
+    for (name, dims) in [
+        (SCALE, Dims([0; 6])),
+        ("epsilon_inf", ELECTRIC_PERMITTIVITY_DIMS),
+        ("chi", ELECTRIC_PERMITTIVITY_DIMS),
+        ("tau", Time::DIMS),
+        ("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+        ("density", Density::DIMS),
+        ("electrical_resistivity", ELECTRICAL_RESISTIVITY_DIMS),
+    ] {
+        requirements.push(
+            ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
+                .unwrap(),
+        );
+    }
+    let complete = resolve_material_state_point(
+        card,
+        &field_point,
+        &requirements,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let field_law = ThermalReversibleDielectricMaterial::new(
+        &reference,
+        &complete,
+        &PropertyKey::new(SCALE, Dims([0; 6])),
+        "T",
+        [250.0, 500.0],
+    )
+    .unwrap();
+    let instant = MaterialDielectricCapacitor::new_thermal(
+        0,
+        field_law.at_temperature(300.0).unwrap(),
+        1.0,
+        1.0,
+    )
+    .unwrap();
+    let authority = ThermalDebyeStorage::new(&pole_law, &field_law).unwrap();
+    let mut branches = vec![(1, 0, Branch::Capacitor { farads: f64::NAN })];
+    if resistor {
+        branches.push((1, 0, Branch::Resistor { ohms: 1.0 }));
+    }
+    let circuit = DebyeCircuit::new_with_thermal_reversible_instantaneous(
+        CircuitGraph {
+            node_count: 2,
+            branches,
+            transformers: vec![],
+        },
+        source,
+        instant,
+        authority,
+        vec![],
+        vec![q],
+        p.into_iter().collect(),
+        &[],
+        || false,
+    )
+    .unwrap();
+    (circuit, pole_law, field_law)
 }
 fn controls() -> CircuitEnthalpySolve {
     CircuitEnthalpySolve {

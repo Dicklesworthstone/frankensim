@@ -20,6 +20,7 @@ use super::{MaterialCircuitError, MaterialCircuitSolve, admit_graph, extended, p
 
 /// Source-backed nonlinear instantaneous response with the same Debye memory.
 pub mod nonlinear;
+pub use nonlinear::thermal::ThermalDebyeStorage;
 /// Conservative material refresh without erasing polarization history.
 pub mod rebind;
 
@@ -33,6 +34,7 @@ struct Prepared {
     loss_branches: Vec<usize>,
     material_resistors: Vec<super::MaterialResistor>,
     reversible_instantaneous: Option<MaterialDielectricCapacitor>,
+    reversible_thermal: Option<Arc<nonlinear::thermal::ThermalDebyeStorage>>,
 }
 
 /// Fixed source/geometry and an accepted native circuit state. The compiled
@@ -330,6 +332,7 @@ impl DebyeCircuit {
                 loss_branches,
                 material_resistors: Vec::new(),
                 reversible_instantaneous,
+                reversible_thermal: None,
             }),
             state,
         })

@@ -19596,10 +19596,11 @@ or partial memory publication.
 The legacy linear source-rebind path refuses the nonlinear profile. Explicit
 reversible-source rebinding retains the complete instantaneous law and every
 polarization charge and reports the actual fixed-charge parameter work. The
-finite thermal owner below supports temperature-independent field and
-polarization potentials with temperature-dependent relaxation times. Actual
-temperature-dependent nonlinear storage still needs its own potential and
-entropy chart; no linear C_infinity substitution supplies those quantities.
+legacy finite thermal entry point below supports temperature-independent
+field and polarization potentials with temperature-dependent relaxation times.
+The explicit reversible-storage sibling admits the sourced thermal potential
+profile described below; no linear C_infinity substitution supplies its energy
+or entropy.
 This extension adds no saturation of the relaxing polarization, hysteresis,
 fractional dispersion, fringing, breakdown or geometry motion.
 `tests/dielectric_nonlinear.rs` covers linear and zero-pole limits, nonlinear
@@ -19709,12 +19710,13 @@ finite caloric storage against electrical supply and actual external heat.
 The original nonlinear field claim must support the complete declared thermal
 interval and charge envelope, in addition to the original caloric/rate sources.
 A complete uniform fully solid dielectric volume, fixed density/geometry and
-positive combined capacity remain required. Actual D(E,T) or
-temperature-dependent polarization storage requires a reciprocal potential
-chart and is refused. Field support, source identity, ideal-clamp constraints,
-thermal event rules, bounded work and cancellation remain atomic gates on both
-histories. Endpoint material coefficients make the general thermal feedback
-first order; the local energy identity alone supplies no temporal-error bound.
+positive combined capacity remain required. This entry point retains its
+temperature-independent storage scope. The explicit reversible-storage sibling
+below supplies the admitted temperature-dependent field and polarization
+potentials. Field support, source identity, ideal-clamp constraints, thermal
+event rules, bounded work and cancellation remain atomic gates on both histories.
+Endpoint material coefficients make the general thermal feedback first order;
+the local energy identity alone supplies no temporal-error bound.
 
 Five groups in `tests/dielectric_nonlinear_thermal.rs` exercise source-knot
 crossing and finite self-heating against an independent discrete solve for both
@@ -19725,3 +19727,62 @@ R(T); and original temperature-support, charge-envelope and late-cancellation
 refusals. The accepted local-work case in `tests/dielectric_nonlinear.rs`
 separately checks dielectric and unrelated capacitor energy and heat at the
 original tight tolerances. All source data are authored numerical fixtures.
+
+## Temperature-dependent nonlinear dielectric energy and finite heat
+
+`ThermalDebyeStorage` retains the complete original nonlinear thermal field
+law together with the existing affine Debye storage/rate law.
+`DebyeCircuit::new_with_thermal_reversible_instantaneous` admits the explicitly
+sourced D_inf(E,T)=s(T)D_ref(E) profile, with positive affine s on a complete
+temperature interval. The source scale and reference curve remain distinct
+pinned material claims. The declared epsilon_infinity and its temperature
+derivative must match the scaled nonlinear zero-field tangent over that whole
+interval. The original affine polarization increments may vary with T; their
+potentials and derivatives remain owned by `ThermalDebyeCapacitor`.
+
+The same instantaneous and polarization charges enter the original native
+descriptor. Current physical charge knots are q=A*s(T)*D_ref(E), with V=g*E;
+reference receipts are never treated as current D values. Typed thermal source
+rebinding retains the original authority, geometry, branch identities, all
+charges/fluxes and conductor records. The immutable authority is shared through
+trials. Existing native union-of-knots work supplies the actual fixed-charge
+Helmholtz change, including each original pole's parameter work. Legacy closed
+constructors and generic source-rebind paths refuse this typed profile rather
+than dropping its thermodynamic authority.
+
+`circuit_enthalpy::dielectric::step_candidate_with_reversible_storage` uses
+the same finite caloric network, native electrical step and coupled residual
+as the existing entry point; `DebyeThermalBinding` is unchanged. It requires
+the circuit's exact retained field/pole laws. With z=D_inf/s, the instantaneous
+field contributes psi=A*g*s*w_ref(z), S=A*g*s'*coenergy_ref(z), and U=psi+T*S.
+The original thermal Debye law contributes only its polarization coordinates,
+so its low-field quadratic instantaneous proxy is never counted. The negative
+fixed-charge field capacity is admitted together with the original pole and
+finite caloric capacities over the complete charge/temperature envelopes.
+
+Stable signed parameter work and the original material delta(T*S) supply
+Q_rev=-W_parameter-delta(T*S). This reversible transfer is distinct from native
+polarization and conductor heat, each deposited once in its original receiver.
+The enclosing balance checks electrical internal-energy change plus finite
+caloric storage against actual electrical supply and external heat. Both
+charge polarities use the same even potentials. Nonlinear source-knot crossings
+and sign changes of the thermal scale slope preserve those source roles.
+
+The profile requires one complete uniform fully solid dielectric volume,
+constant density/geometry, positive combined capacity, full source support and
+a strictly positive affine scale. General two-coordinate D(E,T) surfaces,
+thermal hysteresis, phase changes, breakdown, changing geometry and ideal-source
+charging impulses need their own physical owners. Original support, source,
+bounded-work and cancellation checks publish neither history on refusal.
+Endpoint-temperature coefficients retain the existing generally first-order
+coupling; energy closure alone is not a temporal or entropy-production proof.
+
+The `dielectric_nonlinear_thermal` child targets independently check fixed-charge
+heating and moving physical charge knots, both thermal/charge signs, negative
+combined-capacity refusal, lossless source-driven reversible cooling/heating,
+retained typed source authority, incompatible background derivatives and legacy
+path refusal. A separate continuous memory oracle solves caloric-plus-field
+internal energy for T and integrates the original polarization dynamics with
+s(T), chi(T) and tau(T), then compares native timestep refinement. Existing
+temperature-independent nonlinear and linear Debye profiles remain regression
+cases. All material data are authored numerical fixtures.

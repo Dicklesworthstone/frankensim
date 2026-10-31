@@ -89,7 +89,7 @@ impl DebyeCircuit {
         inputs: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
-        self.rebind(source, Some(instantaneous), None, inputs, cancelled)
+        self.rebind(source, Some(instantaneous), None, None, inputs, cancelled)
     }
 
     /// The same conservative nonlinear replacement with one complete original
@@ -108,6 +108,53 @@ impl DebyeCircuit {
         self.rebind(
             source,
             Some(instantaneous),
+            None,
+            Some(resistors),
+            inputs,
+            cancelled,
+        )
+    }
+
+    /// Refresh the SAME admitted temperature-dependent field and polarization
+    /// potentials at conserved charges. The retained authority verifies the
+    /// complete new source pair; the signed free-energy change is parameter
+    /// work, whose reversible heat belongs to the enclosing thermal owner.
+    pub fn rebind_thermal_reversible_sources_candidate(
+        &self,
+        source: ResolvedDebyeCapacitor,
+        instantaneous: MaterialDielectricCapacitor,
+        inputs: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
+        let authority = self.thermal_reversible_storage().ok_or_else(|| {
+            invalid("nonlinear thermal rebind requires its retained original authority")
+        })?;
+        self.rebind(
+            source,
+            Some(instantaneous),
+            Some(authority),
+            None,
+            inputs,
+            cancelled,
+        )
+    }
+
+    /// The same typed thermal refresh with all original conductor bindings.
+    pub fn rebind_thermal_reversible_sources_and_resistors_candidate(
+        &self,
+        source: ResolvedDebyeCapacitor,
+        instantaneous: MaterialDielectricCapacitor,
+        resistors: Vec<MaterialResistor>,
+        inputs: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
+        let authority = self.thermal_reversible_storage().ok_or_else(|| {
+            invalid("nonlinear thermal rebind requires its retained original authority")
+        })?;
+        self.rebind(
+            source,
+            Some(instantaneous),
+            Some(authority),
             Some(resistors),
             inputs,
             cancelled,
