@@ -8,10 +8,12 @@
 
 /// Reversible adhesion work driving the same source-bound equilibrium wall.
 pub mod adhesion;
+/// Shared sourced contact-line friction and advancing/receding hysteresis.
+pub mod contact_line;
 
 use fs_matdb::{InterfaceSystemCard, MaterialCard, QueryPoint, SurfaceSpec, SystemContext};
-use fs_qty::{Density, Dims, Frequency, QuantitySpec};
 use fs_qty::semantic::QuantityKind;
+use fs_qty::{Density, Dims, Frequency, QuantitySpec};
 
 use super::{
     DYNAMIC_VISCOSITY_DIMS, DYNAMIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_DIMS,
@@ -85,7 +87,8 @@ impl ResolvedLiquidSurfaceState {
         let (dynamic_viscosity_pa_s, kinematic_viscosity_m2_s) = match viscosity_basis {
             LiquidViscosityBasis::Dynamic => (source_viscosity, source_viscosity / density_kg_m3),
             LiquidViscosityBasis::Kinematic => (
-                dynamic_viscosity_from_kinematic(density_kg_m3, source_viscosity)?, source_viscosity,
+                dynamic_viscosity_from_kinematic(density_kg_m3, source_viscosity)?,
+                source_viscosity,
             ),
         };
         if !kinematic_viscosity_m2_s.is_finite() || kinematic_viscosity_m2_s <= 0.0 {
@@ -96,12 +99,19 @@ impl ResolvedLiquidSurfaceState {
         let surface_tension_n_m = match capillarity {
             LiquidCapillarity::Neglected => None,
             LiquidCapillarity::Sourced => Some(coefficient(
-                &material, SURFACE_TENSION_PROPERTY, SURFACE_TENSION_DIMS,
+                &material,
+                SURFACE_TENSION_PROPERTY,
+                SURFACE_TENSION_DIMS,
             )?),
         };
         Ok(Self {
-            material, viscosity_basis, density_kg_m3, dynamic_viscosity_pa_s,
-            kinematic_viscosity_m2_s, surface_tension_n_m, rheology_axes: None,
+            material,
+            viscosity_basis,
+            density_kg_m3,
+            dynamic_viscosity_pa_s,
+            kinematic_viscosity_m2_s,
+            surface_tension_n_m,
+            rheology_axes: None,
         })
     }
 
@@ -121,8 +131,11 @@ impl ResolvedLiquidSurfaceState {
         shear_rate_axis: &str,
     ) -> Result<Self, MaterialStatePointError> {
         Self::try_for_shear_rate_evolution_with_capillarity(
-            material, viscosity_basis, LiquidCapillarity::Neglected,
-            temperature_axis, shear_rate_axis,
+            material,
+            viscosity_basis,
+            LiquidCapillarity::Neglected,
+            temperature_axis,
+            shear_rate_axis,
         )
     }
 
@@ -145,19 +158,27 @@ impl ResolvedLiquidSurfaceState {
     ) -> Result<Self, MaterialStatePointError> {
         let quantities = material.axis_quantities();
         let temperature_quantity = quantities.get(temperature_axis).copied();
-        let temperature_ok = temperature_quantity == Some(QuantitySpec::semantic(
-            fs_qty::semantic::SemanticType::new(
-                QuantityKind::AbsoluteTemperature, fs_qty::semantic::ValueForm::Static,
-            ),
-        )) || temperature_axis == "T" && (temperature_quantity.is_none()
-            || temperature_quantity == Some(QuantitySpec::dimensional(fs_qty::Temperature::DIMS)));
+        let temperature_ok = temperature_quantity
+            == Some(QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
+                QuantityKind::AbsoluteTemperature,
+                fs_qty::semantic::ValueForm::Static,
+            )))
+            || temperature_axis == "T"
+                && (temperature_quantity.is_none()
+                    || temperature_quantity
+                        == Some(QuantitySpec::dimensional(fs_qty::Temperature::DIMS)));
         if temperature_axis == shear_rate_axis
             || !temperature_ok
-            || !material.query_point().iter().find(|(axis, _)| axis == temperature_axis)
+            || !material
+                .query_point()
+                .iter()
+                .find(|(axis, _)| axis == temperature_axis)
                 .is_some_and(|(_, t)| t.is_finite() && *t > 0.0)
-            || quantities.get(shear_rate_axis)
-                != Some(&QuantitySpec::dimensional(Frequency::DIMS))
-            || !material.query_point().iter().find(|(axis, _)| axis == shear_rate_axis)
+            || quantities.get(shear_rate_axis) != Some(&QuantitySpec::dimensional(Frequency::DIMS))
+            || !material
+                .query_point()
+                .iter()
+                .find(|(axis, _)| axis == shear_rate_axis)
                 .is_some_and(|(_, rate)| rate.is_finite() && *rate >= 0.0)
         {
             return Err(MaterialStatePointError::InvalidDerived {
@@ -178,10 +199,12 @@ impl ResolvedLiquidSurfaceState {
         }
         let (name, dims) = viscosity_requirement(viscosity_basis);
         let value = |name: &'static str, dims| -> Result<f64, MaterialStatePointError> {
-            let property = material.property(name)
+            let property = material
+                .property(name)
                 .ok_or(MaterialStatePointError::InvalidDerived { quantity: name })?;
             if property.requirement().quantity() != QuantitySpec::dimensional(dims)
-                || !property.value_si().is_finite() || property.value_si() <= 0.0
+                || !property.value_si().is_finite()
+                || property.value_si() <= 0.0
             {
                 return Err(MaterialStatePointError::InvalidDerived { quantity: name });
             }
@@ -192,7 +215,8 @@ impl ResolvedLiquidSurfaceState {
         let (dynamic_viscosity_pa_s, kinematic_viscosity_m2_s) = match viscosity_basis {
             LiquidViscosityBasis::Dynamic => (source_viscosity, source_viscosity / density_kg_m3),
             LiquidViscosityBasis::Kinematic => (
-                dynamic_viscosity_from_kinematic(density_kg_m3, source_viscosity)?, source_viscosity,
+                dynamic_viscosity_from_kinematic(density_kg_m3, source_viscosity)?,
+                source_viscosity,
             ),
         };
         if !kinematic_viscosity_m2_s.is_finite() || kinematic_viscosity_m2_s <= 0.0 {
@@ -202,13 +226,17 @@ impl ResolvedLiquidSurfaceState {
         }
         let surface_tension_n_m = match capillarity {
             LiquidCapillarity::Neglected => None,
-            LiquidCapillarity::Sourced => Some(value(
-                SURFACE_TENSION_PROPERTY, SURFACE_TENSION_DIMS,
-            )?),
+            LiquidCapillarity::Sourced => {
+                Some(value(SURFACE_TENSION_PROPERTY, SURFACE_TENSION_DIMS)?)
+            }
         };
         Ok(Self {
-            material, viscosity_basis, density_kg_m3, dynamic_viscosity_pa_s,
-            kinematic_viscosity_m2_s, surface_tension_n_m,
+            material,
+            viscosity_basis,
+            density_kg_m3,
+            dynamic_viscosity_pa_s,
+            kinematic_viscosity_m2_s,
+            surface_tension_n_m,
             rheology_axes: Some((temperature_axis.to_owned(), shear_rate_axis.to_owned())),
         })
     }
@@ -217,32 +245,46 @@ impl ResolvedLiquidSurfaceState {
     /// `Some` is a prohibition on frozen use, not a grant of static authority.
     #[must_use]
     pub fn rheology_axes(&self) -> Option<(&str, &str)> {
-        self.rheology_axes.as_ref().map(|(temperature, rate)| (temperature.as_str(), rate.as_str()))
+        self.rheology_axes
+            .as_ref()
+            .map(|(temperature, rate)| (temperature.as_str(), rate.as_str()))
     }
 
     /// Complete source bundle, including original viscosity and interface context.
     #[must_use]
-    pub const fn material(&self) -> &ResolvedMaterialStatePoint { &self.material }
+    pub const fn material(&self) -> &ResolvedMaterialStatePoint {
+        &self.material
+    }
 
     /// Source-reported viscosity convention; no fallback or synthetic claim.
     #[must_use]
-    pub const fn viscosity_basis(&self) -> LiquidViscosityBasis { self.viscosity_basis }
+    pub const fn viscosity_basis(&self) -> LiquidViscosityBasis {
+        self.viscosity_basis
+    }
 
     /// Liquid density at this reference source point [kg/m³].
     #[must_use]
-    pub const fn density_kg_m3(&self) -> f64 { self.density_kg_m3 }
+    pub const fn density_kg_m3(&self) -> f64 {
+        self.density_kg_m3
+    }
 
     /// Dynamic viscosity [Pa s], derived with this same density for a ν source.
     #[must_use]
-    pub const fn dynamic_viscosity_pa_s(&self) -> f64 { self.dynamic_viscosity_pa_s }
+    pub const fn dynamic_viscosity_pa_s(&self) -> f64 {
+        self.dynamic_viscosity_pa_s
+    }
 
     /// Kinematic viscosity [m²/s] used by the momentum operator.
     #[must_use]
-    pub const fn kinematic_viscosity_m2_s(&self) -> f64 { self.kinematic_viscosity_m2_s }
+    pub const fn kinematic_viscosity_m2_s(&self) -> f64 {
+        self.kinematic_viscosity_m2_s
+    }
 
     /// Sourced constant surface tension [N/m], or an explicitly neglected law.
     #[must_use]
-    pub const fn surface_tension_n_m(&self) -> Option<f64> { self.surface_tension_n_m }
+    pub const fn surface_tension_n_m(&self) -> Option<f64> {
+        self.surface_tension_n_m
+    }
 
     /// The chosen capillary approximation, retained independently of material name.
     #[must_use]
@@ -275,15 +317,21 @@ pub fn resolve_liquid_surface_state(
     let (viscosity_property, viscosity_dims) = viscosity_requirement(viscosity_basis);
     let mut requirements = vec![
         ScalarPropertyRequirement::try_new(
-            DENSITY_PROPERTY, Density::DIMS, ScalarAdmissibility::StrictlyPositive,
+            DENSITY_PROPERTY,
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
         )?,
         ScalarPropertyRequirement::try_new(
-            viscosity_property, viscosity_dims, ScalarAdmissibility::StrictlyPositive,
+            viscosity_property,
+            viscosity_dims,
+            ScalarAdmissibility::StrictlyPositive,
         )?,
     ];
     if capillarity == LiquidCapillarity::Sourced {
         requirements.push(ScalarPropertyRequirement::try_new(
-            SURFACE_TENSION_PROPERTY, SURFACE_TENSION_DIMS, ScalarAdmissibility::StrictlyPositive,
+            SURFACE_TENSION_PROPERTY,
+            SURFACE_TENSION_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
         )?);
     }
     let material = resolve_material_state_point(card, point, &requirements, selection)?;
@@ -302,13 +350,16 @@ fn coefficient(
     name: &'static str,
     dims: Dims,
 ) -> Result<f64, MaterialStatePointError> {
-    let property = material.property(name)
+    let property = material
+        .property(name)
         .ok_or(MaterialStatePointError::InvalidDerived { quantity: name })?;
     require_frozen_coefficient(property, name, dims)?;
     let value = property.value_si();
     if !value.is_finite() || value <= 0.0 {
         return Err(MaterialStatePointError::OutsideConsumerDomain {
-            property: name.to_owned(), value, admissibility: ScalarAdmissibility::StrictlyPositive,
+            property: name.to_owned(),
+            value,
+            admissibility: ScalarAdmissibility::StrictlyPositive,
         });
     }
     Ok(value)
@@ -363,22 +414,52 @@ fn require_no_unowned_dynamic_axes(
 ) -> Result<(), MaterialStatePointError> {
     let name = property.requirement().name();
     for (axis, _) in &property.answer().receipt.query_point {
-        if shear_rate_axis == Some(axis.as_str()) { continue; }
-        if property.answer().evidence.model.validity.bound(axis).is_none() { continue; }
+        if shear_rate_axis == Some(axis.as_str()) {
+            continue;
+        }
+        if property
+            .answer()
+            .evidence
+            .model
+            .validity
+            .bound(axis)
+            .is_none()
+        {
+            continue;
+        }
         let quantity = property.answer().receipt.axis_quantities.get(axis).copied();
-        let kind = quantity.and_then(QuantitySpec::semantic_type).map(|ty| ty.kind());
-        let dynamic_kind = matches!(kind, Some(
-            QuantityKind::Frequency(_) | QuantityKind::AngularVelocity(_)
-                | QuantityKind::Strain { .. } | QuantityKind::Stress
-        ));
-        let dynamic_dimension = quantity.is_some_and(|q| {
-            q.dims() == Frequency::DIMS || q.dims() == Dims([1, 0, -1, 0, 0, 0])
-        });
-        let legacy_dynamic_axis = kind.is_none() && [
-            "omega", "frequency", "strain", "epsilon", "eps", "shear_strain",
-            "strain_rate", "shear_rate", "plastic_strain", "equivalent_plastic_strain", "stress",
-            "contact_line_speed", "velocity", "capillary_number",
-        ].contains(&axis.as_str());
+        let kind = quantity
+            .and_then(QuantitySpec::semantic_type)
+            .map(|ty| ty.kind());
+        let dynamic_kind = matches!(
+            kind,
+            Some(
+                QuantityKind::Frequency(_)
+                    | QuantityKind::AngularVelocity(_)
+                    | QuantityKind::Strain { .. }
+                    | QuantityKind::Stress
+            )
+        );
+        let dynamic_dimension = quantity
+            .is_some_and(|q| q.dims() == Frequency::DIMS || q.dims() == Dims([1, 0, -1, 0, 0, 0]));
+        let legacy_dynamic_axis = kind.is_none()
+            && [
+                "omega",
+                "frequency",
+                "strain",
+                "epsilon",
+                "eps",
+                "shear_strain",
+                "strain_rate",
+                "shear_rate",
+                "plastic_strain",
+                "equivalent_plastic_strain",
+                "stress",
+                "contact_line_speed",
+                "velocity",
+                "capillary_number",
+            ]
+            .contains(&axis.as_str());
         if dynamic_kind || dynamic_dimension || legacy_dynamic_axis {
             return Err(MaterialStatePointError::InvalidRequirement {
                 property: name.to_owned(),
@@ -421,7 +502,8 @@ impl ResolvedLiquidWettingState {
                 quantity: "wetting interface requires its original ordered surface card",
             });
         }
-        let angle = resolved.property(EQUILIBRIUM_CONTACT_ANGLE_PROPERTY)
+        let angle = resolved
+            .property(EQUILIBRIUM_CONTACT_ANGLE_PROPERTY)
             .ok_or_else(|| MaterialStatePointError::InvalidRequirement {
                 property: EQUILIBRIUM_CONTACT_ANGLE_PROPERTY.into(),
                 reason: "missing or ambiguous equilibrium contact angle",

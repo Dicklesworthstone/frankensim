@@ -6,6 +6,24 @@ use fs_contact::capillary_bridge::contact_line::*;
 use fs_exec::CancelGate;
 
 #[test]
+fn g3_bridge_uses_the_shared_original_material_contact_line_binding() {
+    use fs_material::liquid::surface::contact_line::FrozenContactLineWetting;
+    let original = original(1.0, [10.0; 2], 0.9, 1.1);
+    let identity = original.identity();
+    for wetting in original.wetting() {
+        let line = FrozenContactLineWetting::new(original.liquid(), wetting).unwrap();
+        assert!(core::ptr::eq(line.wetting(), wetting));
+        assert_eq!(line.friction_pa_s(), 10.0);
+        assert_eq!(line.receding_angle_radians(), 0.9);
+        assert_eq!(line.advancing_angle_radians(), 1.1);
+        assert_eq!(line.wetting().resolved().properties().len(), 4);
+    }
+    let dynamic = SourceContactLineBridge::new(original, config()).unwrap();
+    assert_eq!(dynamic.original().identity(), identity);
+    assert_eq!(dynamic.line_friction_pa_s(), 10.0);
+}
+
+#[test]
 fn g1_equilibrium_recovers_original_bridge_and_actual_young_force() {
     let model = source(1.0, 10.0, 0.9, 1.1);
     let state = model.initialize(GAP, 1.0).unwrap();

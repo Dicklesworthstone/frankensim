@@ -26,75 +26,20 @@
 use super::{BridgeError, SourcePlanarCapillaryBridge};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
-use fs_matdb::InterfaceSystemCard;
-use fs_material::liquid::DYNAMIC_VISCOSITY_DIMS;
-use fs_material::liquid::surface::adhesion::{
-    EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY, EquilibriumAngleOrigin,
-};
-use fs_material::liquid::surface::{
-    EQUILIBRIUM_CONTACT_ANGLE_PROPERTY, ResolvedLiquidSurfaceState, ResolvedLiquidWettingState,
-    SURFACE_TENSION_DIMS, require_frozen_coefficient_support,
-};
-use fs_material::state_point::{
-    MaterialPropertySelection, MaterialStatePointError, ScalarAdmissibility,
-    ScalarPropertyRequirement, resolve_interface_state_point,
-};
+use fs_material::liquid::surface::contact_line::FrozenContactLineWetting;
+use fs_material::state_point::MaterialStatePointError;
 use fs_math::det;
-use fs_qty::{Dims, QuantitySpec};
 
 mod geometry;
 
 /// Work-conjugate coupling of dynamic wetting to original mechanical compliance.
 pub mod load_line;
 
-pub const CONTACT_LINE_FRICTION_PROPERTY: &str = "contact-line-friction";
-pub const ADVANCING_CONTACT_ANGLE_PROPERTY: &str = "advancing-contact-angle";
-pub const RECEDING_CONTACT_ANGLE_PROPERTY: &str = "receding-contact-angle";
-
-/// One original ordered wetting bundle, with all active line-law receipts.
-pub fn resolve_contact_line_wetting(
-    card: &InterfaceSystemCard,
-    liquid: &ResolvedLiquidSurfaceState,
-    origin: EquilibriumAngleOrigin,
-    selection: MaterialPropertySelection,
-) -> Result<ResolvedLiquidWettingState, MaterialStatePointError> {
-    let (name, dims) = match origin {
-        EquilibriumAngleOrigin::SourcedAngle => (EQUILIBRIUM_CONTACT_ANGLE_PROPERTY, Dims::NONE),
-        EquilibriumAngleOrigin::YoungDupre => {
-            (EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY, SURFACE_TENSION_DIMS)
-        }
-    };
-    let requirements = [
-        ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)?,
-        ScalarPropertyRequirement::try_new(
-            CONTACT_LINE_FRICTION_PROPERTY,
-            DYNAMIC_VISCOSITY_DIMS,
-            ScalarAdmissibility::StrictlyPositive,
-        )?,
-        ScalarPropertyRequirement::try_new(
-            ADVANCING_CONTACT_ANGLE_PROPERTY,
-            Dims::NONE,
-            ScalarAdmissibility::StrictlyPositive,
-        )?,
-        ScalarPropertyRequirement::try_new(
-            RECEDING_CONTACT_ANGLE_PROPERTY,
-            Dims::NONE,
-            ScalarAdmissibility::StrictlyPositive,
-        )?,
-    ];
-    let resolved =
-        resolve_interface_state_point(card, &liquid.material().query(), &requirements, selection)?;
-    let wetting = match origin {
-        EquilibriumAngleOrigin::SourcedAngle => {
-            ResolvedLiquidWettingState::try_from_resolved(card, resolved)
-        }
-        EquilibriumAngleOrigin::YoungDupre => {
-            ResolvedLiquidWettingState::try_from_adhesion_work(card, resolved, liquid)
-        }
-    }?;
-    wetting.require_liquid_state(liquid)?;
-    Ok(wetting)
-}
+/// Shared material source binding, also consumed by capillary transport.
+pub use fs_material::liquid::surface::contact_line::{
+    ADVANCING_CONTACT_ANGLE_PROPERTY, CONTACT_LINE_FRICTION_PROPERTY,
+    RECEDING_CONTACT_ANGLE_PROPERTY, resolve_contact_line_wetting,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactLineConfig {
@@ -243,27 +188,12 @@ impl SourceContactLineBridge {
         let equilibrium = original.wetting()[0].contact_angle_radians();
         let mut values = [[0.0; 3]; 2];
         for (i, wetting) in original.wetting().iter().enumerate() {
-            for (j, (name, dims)) in [
-                (CONTACT_LINE_FRICTION_PROPERTY, DYNAMIC_VISCOSITY_DIMS),
-                (ADVANCING_CONTACT_ANGLE_PROPERTY, Dims::NONE),
-                (RECEDING_CONTACT_ANGLE_PROPERTY, Dims::NONE),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let property =
-                    wetting
-                        .resolved()
-                        .property(name)
-                        .ok_or(ContactLineError::Invalid(
-                            "missing original contact-line source property",
-                        ))?;
-                if property.requirement().quantity() != QuantitySpec::dimensional(dims) {
-                    return Err(ContactLineError::Invalid("contact-line source quantity"));
-                }
-                require_frozen_coefficient_support(property)?;
-                values[i][j] = property.value_si();
-            }
+            let coefficients = FrozenContactLineWetting::new(original.liquid(), wetting)?;
+            values[i] = [
+                coefficients.friction_pa_s(),
+                coefficients.advancing_angle_radians(),
+                coefficients.receding_angle_radians(),
+            ];
         }
         if values[0] != values[1]
             || values[0].iter().any(|v| !v.is_finite() || *v <= 0.0)
