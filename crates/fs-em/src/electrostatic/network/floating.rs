@@ -345,37 +345,16 @@ fn admit_references(
     retained: &[usize],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ElectrostaticError> {
-    fn root(parent: &mut [usize], mut v: usize) -> usize {
-        while parent[v] != v {
-            parent[v] = parent[parent[v]];
-            v = parent[v];
-        }
-        v
-    }
-    fn join(parent: &mut [usize], a: usize, b: usize) {
-        let a = root(parent, a);
-        let b = root(parent, b);
-        parent[a.max(b)] = a.min(b);
-    }
     let mesh = source.problem.mesh();
-    let mut parent: Vec<_> = (0..mesh.vertices().len()).collect();
-    for &[a, b] in mesh.edges() {
-        poll(cancelled)?;
-        join(&mut parent, a as usize, b as usize);
-    }
-    for terminal in &source.terminals {
-        for &v in terminal {
-            poll(cancelled)?;
-            join(&mut parent, terminal[0], v);
-        }
-    }
+    let terminals: Vec<_> = source.terminals.iter().map(Vec::as_slice).collect();
+    let parent = crate::scalar_potential::terminal_components(mesh, &terminals, cancelled)?;
     let mut anchored = vec![false; parent.len()];
     for &terminal in retained {
-        anchored[root(&mut parent, source.terminals[terminal][0])] = true;
+        anchored[parent[source.terminals[terminal][0]]] = true;
     }
-    for terminal in &source.terminals {
+    for &component in &parent {
         poll(cancelled)?;
-        if !anchored[root(&mut parent, terminal[0])] {
+        if !anchored[component] {
             return Err(invalid(
                 "every floating dielectric component needs a retained voltage reference",
             ));

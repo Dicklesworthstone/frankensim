@@ -346,6 +346,122 @@ fn direct_integrals_and_work_retain_small_values_under_large_bias() {
 }
 
 #[test]
+fn vector_coenergy_retains_transverse_work_and_midpoint_corrections_under_bias() {
+    let law = law(&curve(&[(0.0, 0.0), (2e16, 2e16)]), 2e16);
+    for sign in [-1.0, 1.0] {
+        let before = [1e16, 0.0];
+        let after = [1e16, sign];
+        assert_eq!(
+            law.coenergy_change_vector_density_j_m3(before, after)
+                .unwrap(),
+            0.5
+        );
+        assert_eq!(
+            law.coenergy_change_vector_density_j_m3(after, before)
+                .unwrap(),
+            -0.5
+        );
+    }
+    // Each large component contributes approximately +/-2e16. Their corrected
+    // midpoints retain the exact surviving sum: (2²+(-2)²)/2 = 4.
+    let before = [1e16, 1e16];
+    let after = [1e16 + 2.0, 1e16 - 2.0];
+    assert_eq!(
+        law.coenergy_change_vector_density_j_m3(before, after)
+            .unwrap(),
+        4.0
+    );
+    assert_eq!(
+        law.coenergy_change_vector_density_j_m3(after, before)
+            .unwrap(),
+        -4.0
+    );
+    assert_eq!(
+        law.coenergy_change_vector_density_j_m3([1e16, 1.0], [1e16, -1.0])
+            .unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn vector_coenergy_corrects_unequal_rounded_radii_on_the_original_nonlinear_curve() {
+    let source = curve(&[(0.0, 0.0), (5e7, 1e8), (2e8, 1.75e8)]);
+    let material = law(&source, 2e8);
+    let before = [1e8_f64, 1.0];
+    let after = [1e8_f64, 2.0];
+    let a = before[0].hypot(before[1]);
+    let b = after[0].hypot(after[1]);
+    assert_ne!(a, b);
+    // In this segment D(E)=E/2+7.5e7. The exact squared-radius increment
+    // is 3/2; the radial increment is 3/(sqrt(1e16+4)+sqrt(1e16+1)).
+    // To double precision, delta W*=0.5*(3/2)+7.5e7*(3/(2e8))=1.875.
+    near(
+        material
+            .coenergy_change_vector_density_j_m3(before, after)
+            .unwrap(),
+        1.875,
+        2e-14,
+    );
+    near(
+        material
+            .coenergy_change_vector_density_j_m3(after, before)
+            .unwrap(),
+        -1.875,
+        2e-14,
+    );
+    assert!((material.coenergy_change_density_j_m3(a, b).unwrap() - 1.875).abs() > 1e-3);
+    // The correction also retains the original exact crossed-segment integral.
+    let material = law(&nonlinear(), 4.0);
+    near(
+        material
+            .coenergy_change_vector_density_j_m3([0.6, 0.8], [1.8, 2.4])
+            .unwrap(),
+        5.0,
+        2e-14,
+    );
+    assert!(
+        material
+            .coenergy_change_vector_density_j_m3([0.0, 0.0], [4.0, 4.0])
+            .is_err()
+    );
+    assert!(
+        material
+            .coenergy_change_vector_density_j_m3([f64::NAN, 0.0], [0.0, 0.0])
+            .is_err()
+    );
+}
+
+#[test]
+fn vector_coenergy_weights_before_unrepresentable_squares_and_differences() {
+    for (field, displacement) in [(1e200, 1.0), (1e-200, 1.0)] {
+        let material = law(
+            &curve(&[(0.0, 0.0), (2.0 * field, 2.0 * displacement)]),
+            2.0 * field,
+        );
+        let actual = material
+            .coenergy_change_vector_density_j_m3([field, 0.0], [field, field])
+            .unwrap();
+        let expected = 0.5 * field * displacement;
+        assert!(
+            (actual / expected - 1.0).abs() < 2e-14,
+            "{actual} != {expected}"
+        );
+    }
+    let material = law(&curve(&[(0.0, 0.0), (1e308, 1.0)]), 1e308);
+    let actual = material
+        .coenergy_change_vector_density_j_m3([-1e308], [9e307])
+        .unwrap();
+    let expected = material.coenergy_change_density_j_m3(1e308, 9e307).unwrap();
+    assert!((actual / expected - 1.0).abs() < 2e-14);
+    assert_eq!(
+        material
+            .coenergy_change_vector_density_j_m3([-1e308], [1e308])
+            .unwrap(),
+        0.0
+    );
+}
+
+#[test]
 fn fixed_temperature_surface_retains_original_breakpoints_and_receipts() {
     let source = card(
         PropertyValue::Surface2D {

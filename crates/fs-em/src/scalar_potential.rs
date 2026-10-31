@@ -188,3 +188,45 @@ pub(crate) fn terminal_boundary(
     poll(cancelled)?;
     Ok(boundary)
 }
+
+/// Physical components after ideal equipotential terminals join mesh pieces.
+/// This owns connectivity only; the consumer must anchor every returned
+/// component with a voltage control, never a guessed floating voltage.
+pub(crate) fn terminal_components(
+    mesh: &TriComplex2,
+    terminals: &[&[usize]],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<usize>, PotentialError> {
+    fn root(parent: &mut [usize], mut v: usize) -> usize {
+        while parent[v] != v {
+            parent[v] = parent[parent[v]];
+            v = parent[v];
+        }
+        v
+    }
+    fn join(parent: &mut [usize], a: usize, b: usize) {
+        let a = root(parent, a);
+        let b = root(parent, b);
+        parent[a.max(b)] = a.min(b);
+    }
+    let n = mesh.vertices().len();
+    let mut parent: Vec<_> = (0..n).collect();
+    for &[a, b] in mesh.edges() {
+        poll(cancelled)?;
+        join(&mut parent, a as usize, b as usize);
+    }
+    for terminal in terminals {
+        if terminal.is_empty() || terminal.iter().any(|&v| v >= n) {
+            return Err(PotentialError::Invalid("complete valid terminal traces required"));
+        }
+        for &v in *terminal {
+            poll(cancelled)?;
+            join(&mut parent, terminal[0], v);
+        }
+    }
+    for v in 0..n {
+        poll(cancelled)?;
+        parent[v] = root(&mut parent, v);
+    }
+    Ok(parent)
+}

@@ -27,7 +27,13 @@ pub enum CellWeight2 {
 }
 
 impl CellWeight2 {
-    fn validate(self, cell: usize, degree: u8) -> Result<(), WeightedError> {
+    /// Admit the same coefficient used by assembled and matrix-free Hodge
+    /// operators. This checks coefficient positivity, not mesh geometry or a
+    /// boundary/gauge theorem; tensor positivity uses the original interval gate.
+    pub fn validate(self, cell: usize, degree: u8) -> Result<(), WeightedError> {
+        if degree > 2 {
+            return Err(WeightedError::InvalidDegree(degree));
+        }
         let refuse = |reason| WeightedError::InvalidCoefficient { cell, reason };
         match self {
             Self::Scalar(value) => {

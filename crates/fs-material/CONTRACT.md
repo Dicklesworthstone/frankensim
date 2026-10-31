@@ -7747,3 +7747,13 @@ ideal-dilute chemical-potential law is not an exact Fick law.
 With g(alpha) = alpha - (1 - exp(-b alpha))/b, additional free energy is Q g, entropy is -Q' g, and frozen-history coefficient work is (Q1 - Q0) g(alpha0). These enter the existing reversible heat and delta(T s) accounts. Neither saturation storage nor backward-Euler loss becomes physical heat. An exactly zero-Q endpoint retains its thermal entropy through a stable unit-Q shape; unselected and identically zero-Q paths preserve original arithmetic. Affine Q and fixed b add no frozen-history heat-capacity derivative.
 
 Kinked/negative Q, varying b, tangent-only inference and simultaneous existing overstress selection refuse. Feedback proposals retain the same old history and caloric chart; only balanced endpoint candidates publish. Focused regressions cover the full tangent, loaded heating, coefficient work and entropy, simultaneous thermal expansion/moduli changes, source support/pins, zero-Q limits, and retry/cancellation boundaries. These are small-strain, affine-coefficient verification results, not empirical thermal calibration or a Chaboche thermal-history extension.
+
+## Stable vector work for reversible dielectric response
+
+`ReversibleDielectricMaterial::coenergy_change_vector_density_j_m3` retains
+physical work from component changes even when rounded field magnitudes agree.
+It combines the original crossed-segment radial integral with compensated,
+permittivity-weighted component products. A small transverse field change under
+a large bias therefore retains its quadratic work, including in the linear
+material limit. This is the source-owned work operation used by spatial
+nonlinear backtracking; endpoint stored energies remain separate diagnostics.

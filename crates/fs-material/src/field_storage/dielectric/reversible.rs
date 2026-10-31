@@ -535,6 +535,64 @@ impl ReversibleDielectricMaterial {
         finite(work + correction)
     }
 
+    /// Stable isotropic coenergy change between actual field VECTORS [V/m].
+    ///
+    /// The source integral supplies the mean radial permittivity on the same
+    /// crossed segments. It weights the componentwise change of |E|²/2, keeping
+    /// transverse work even when rounded endpoint magnitudes coincide. The
+    /// local D/E limit is used in that case. Corrected midpoint products apply
+    /// also when the endpoint magnitudes differ, rather than relying on their
+    /// rounded squared-norm difference. All reductions are allocation-free.
+    ///
+    /// Multiplication by permittivity precedes squared products, so a raw field
+    /// square need not be representable when the physical work is. Magnitudes
+    /// still obey the original source support and floating-point admission;
+    /// this supplies no interval enclosure of a field near a source boundary.
+    pub fn coenergy_change_vector_density_j_m3<const N: usize>(
+        &self,
+        before: [f64; N],
+        after: [f64; N],
+    ) -> Result<f64, FieldStorageError> {
+        if before.iter().chain(&after).any(|v| !v.is_finite()) {
+            return Err(invalid("dielectric field vectors must be finite"));
+        }
+        let before_magnitude = before.iter().fold(0.0_f64, |m, v| m.hypot(*v));
+        let after_magnitude = after.iter().fold(0.0_f64, |m, v| m.hypot(*v));
+        let radial_permittivity = if before_magnitude == after_magnitude {
+            self.evaluate(before_magnitude)?.secant_permittivity_f_m
+        } else {
+            let work = self.coenergy_change_density_j_m3(before_magnitude, after_magnitude)?;
+            // Do not form (after²-before²)/2: either square can overflow,
+            // underflow, or erase the small increment that this method retains.
+            let mean_displacement = finite(work / (after_magnitude - before_magnitude))?;
+            finite(mean_displacement / f64::midpoint(before_magnitude, after_magnitude))?
+        };
+        if radial_permittivity <= 0.0 {
+            return Err(invalid(
+                "radial dielectric work coefficient is unrepresentable",
+            ));
+        }
+        let (mut work, mut correction) = (0.0, 0.0);
+        for (a, b) in before.into_iter().zip(after) {
+            // Halves keep both sum and difference finite even for opposite
+            // near-maximum components. TwoSum preserves each midpoint error.
+            let (midpoint, midpoint_error) = two_sum(0.5 * a, 0.5 * b);
+            let (half_delta, half_delta_error) = two_sum(0.5 * b, -0.5 * a);
+            for delta in [half_delta, half_delta_error] {
+                for middle in [midpoint, midpoint_error] {
+                    add_twice_weighted_product(
+                        &mut work,
+                        &mut correction,
+                        delta,
+                        middle,
+                        radial_permittivity,
+                    )?;
+                }
+            }
+        }
+        finite(work + correction)
+    }
+
     /// Stable integral_before^after [E(s)-E(reference)] ds [J/m3], accepting
     /// SIGNED scalar displacement on the odd inverse law. This supplies native
     /// discrete gradients and midpoint remainders without subtracting large
@@ -559,4 +617,52 @@ impl ReversibleDielectricMaterial {
         })?;
         self.integrate_relative_field(before_d, after_d, finite(offset + correction)?)
     }
+}
+
+// Inputs are half-components; their sum cannot overflow for finite vectors.
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let sum = a + b;
+    let recovered_b = sum - a;
+    (sum, (a - (sum - recovered_b)) + (b - recovered_b))
+}
+
+fn add_twice_weighted_product(
+    sum: &mut f64,
+    correction: &mut f64,
+    mut a: f64,
+    mut b: f64,
+    permittivity: f64,
+) -> Result<(), FieldStorageError> {
+    if a == 0.0 || b == 0.0 {
+        return Ok(());
+    }
+    // For a half-difference and midpoint at least one magnitude can be doubled
+    // without overflow. Double the smaller, retaining subnormal work too.
+    if a.abs() <= b.abs() {
+        a = finite(2.0 * a)?;
+    } else {
+        b = finite(2.0 * b)?;
+    }
+    // Small permittivity first scales the larger field; large permittivity
+    // first scales the smaller. This avoids unnecessary intermediate range loss.
+    let (scaled, other) = if (a.abs() >= b.abs()) == (permittivity < 1.0) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let displacement = finite(permittivity * scaled)?;
+    let displacement_error = finite(permittivity.mul_add(scaled, -displacement))?;
+    let product = finite(displacement * other)?;
+    if product == 0.0 {
+        return Err(invalid(
+            "nonzero vector dielectric work increment underflows",
+        ));
+    }
+    add(sum, correction, product)?;
+    add(
+        sum,
+        correction,
+        finite(displacement.mul_add(other, -product))?,
+    )?;
+    add(sum, correction, finite(displacement_error * other)?)
 }

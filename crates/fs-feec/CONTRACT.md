@@ -1532,3 +1532,11 @@ this path. The normal-only path retains its original asymptotic admission;
 spatial conduction uses the planar geometry admission instead. Complete mesh,
 clock, memory/work and cancellation bounds still apply. A stated source band
 alone establishes no spatial or waveform accuracy.
+
+## Shared planar coefficient admission for matrix-free fields
+
+`weighted2::CellWeight2::validate` exposes the existing scalar positivity and
+outward-interval tensor SPD admission to original matrix-free consumers. It
+rejects unsupported form degrees and preserves the same coefficient checks as
+assembled Hodge operators. Admission proves neither mesh validity nor a global
+boundary/gauge condition; those remain with each original field owner.

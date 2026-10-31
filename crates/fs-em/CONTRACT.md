@@ -1730,3 +1730,38 @@ resonances, independent E/H transfer matrices with magnetic media, original
 Debye/geometry invariance, weak-film loss, critical films/exits and thick absorbing/evanescent limits. This remains a coherent
 homogeneous isotropic planar model: finite coherence length, roughness,
 anisotropy and mesh Maxwell evolution are outside its scope.
+
+## Source-backed nonlinear electrostatics and differential capacitance
+
+`electrostatic::nonlinear::PlanarNonlinearElectrostatics` retains the original
+planar P1 mesh, physical extrusion depth and material sources. Linear scalar or
+explicitly framed tensor cells can coexist with the shared reversible radial
+`D(E)` material law. The voltage functional integrates `D.dE`; reported physical
+storage integrates `E.dD`. Their sum, rather than twice either quantity, is
+checked against the actual volume-charge and electrode work pairing.
+
+Prepared complete exterior-edge electrodes accept voltage or total free charge.
+A charged floating conductor has one unknown potential and its own total-charge
+equation. Shared traces can join disconnected mesh pieces; each resulting
+component must have an actual voltage reference. Relative potentials preserve
+representable small fields under a large common voltage bias. Volume charge,
+individual floating-charge constraints, free-node residuals and total charge
+balance are checked independently before a field is returned.
+
+The analytic radial material tangent distinguishes longitudinal differential
+permittivity from transverse secant permittivity. Bounded Newton steps use the
+original checked-CG owner, native interval coefficient admission and diagonal
+equilibration of the equipotential quotient. Prepared cell geometry applies the
+tangent without assembling a global matrix. Line search uses direct material
+coenergy increments, including source work, rather than subtracting two large
+stored objectives. Material support, cancellation and finite nonlinear/linear
+work budgets remain hard refusal boundaries; rejected trials publish no field.
+
+`NonlinearElectricField::differential_capacitance` differentiates that accepted
+operating point with volume charge and every floating total charge held fixed.
+One prepared tangent is reused across voltage-terminal columns. Recovered
+charge, reciprocity and gauge residuals must pass in farads. The result retains
+its field and source identity; it is a local `dQ/dV`, not a global `Q=C*V` law.
+A genuine source-law kink or exhausted field support refuses a unique two-sided
+differential response. These fixed-geometry, memoryless, reversible laws do not
+infer dielectric relaxation, hysteresis, thermal evolution or electrostriction.

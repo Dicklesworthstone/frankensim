@@ -15,6 +15,8 @@ mod force;
 pub mod network;
 /// Retained dielectric charge, native Ohmic current and physical relaxation heat.
 pub mod relaxation;
+/// Reversible nonlinear dielectrics, mixed electrode controls and bias tangents.
+pub mod nonlinear;
 
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
