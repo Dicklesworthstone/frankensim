@@ -7531,3 +7531,49 @@ tangents, rotation/reversal, energy, exact activation and refusal;
 hardening-basis conversion, whole-path admission and cancellation. This remains
 small-strain secondary creep with energetic isotropic hardening; it adds no
 finite-deformation, primary/tertiary creep, damage, rupture or service-life claim.
+
+## Source-backed reversible nonlinear dielectric storage
+
+`field_storage::dielectric::reversible::ReversibleDielectricMaterial` compiles
+the explicit absolute `reversible_electric_displacement` D(|E|) source [C/m2]
+on a caller-named electric-field axis [V/m]. The existing typed line-query
+owner pins one original claim and retains every canonical curve or fixed-context
+surface breakpoint, with its existing 4096-knot bound. The immutable card,
+zero-field material snapshot, receipts, slopes and direct integrals are shared
+across clones. Construction requires D(0)=0, strictly positive representable
+segment slopes and inverse slopes, continuous support, and typed fixed external
+conditions for every other query/source/applicability coordinate. Relative
+permittivity, polarization alone, source switching, extrapolation and unowned
+frequency, strain or history conditions are not alternative ingress paths.
+
+`evaluate` takes a nonnegative field magnitude; `evaluate_displacement` and
+`field_at_displacement` invert the same source at a nonnegative displacement
+magnitude. The allocation-free O(log knots) response supplies D/E and dD/dE,
+the transverse and longitudinal eigenvalues of the isotropic electric tangent.
+At zero the first slope is used; interior knots use their right derivative and
+the final knot its left derivative. Physical charge-form energy is
+`w(D)=integral_0^D E(s) ds`; voltage-form coenergy is
+`w*(E)=integral_0^E D(s) ds`. Each is integrated directly, preserving small
+positive energy that subtraction from E.D would lose. Their sum is the Legendre
+pairing E.D, not a license to replace either potential by E.D/2.
+
+Signed scalar `energy_change_density_j_m3` uses even w(D), integrating only the
+interval between displacement magnitudes. `energy_change_remainder_density_j_m3`
+integrates `E(s)-E(reference_D)` over signed displacement with the original odd
+inverse law. `coenergy_change_density_j_m3` integrates D dE between nonnegative
+field magnitudes. These allocation-free, compensated crossed-segment operations
+retain small circuit/mechanical work and line-search changes beneath large
+stored biases; the remainder is not physical heat. Work is bounded by the
+original path, and nonfinite, out-of-range or unrepresentable operations refuse.
+
+The owner is a reversible, isotropic, zero-remanence fixed-context snapshot.
+It supplies no leakage, hysteresis, polarization memory, thermal entropy,
+electrostriction or moving geometry. A static temperature-dependent source
+slice does not establish a closed conservative internal-energy model; such
+consumers must either retain a source-independent potential or separately own
+its thermal corrections. Original source axes remain inspectable for this
+admission. `tests/dielectric_reversible.rs` checks independent piecewise energy
+and coenergy, canonical source/inverse agreement, analytic tangents and the
+low-field limit, signed crossed-knot work, large-bias remainders, surface-slice
+receipts, and source/domain refusals. These authored fixtures establish numeric
+model behavior, not measured dielectric accuracy or floating-point enclosures.

@@ -21,6 +21,8 @@ use crate::state_point::{
     ScalarPropertyRequirement, resolve_material_state_point,
 };
 
+/// Source-backed reversible nonlinear D(E), its inverse and work potentials.
+pub mod reversible;
 /// Source-pinned temperature dependence and complete dielectric thermodynamics.
 pub mod thermal;
 
