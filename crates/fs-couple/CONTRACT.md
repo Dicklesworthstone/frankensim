@@ -16,20 +16,26 @@ the explicitly declared dilute-vapor cap; a dense vapor state is refused.
 Missing vapor density retains an explicit caller applicability assumption.
 
 The opt-in `cavitation` feature adds `cavitation::bubble::MaterialBubble`. One
-source and accepted physical clock drive the native Rayleigh--Plesset owner and
+source and accepted physical clock drive the selected native Rayleigh--Plesset
+or Keller--Miksis owner and
 the original compact monopole observer. Density and sound speed must match
 exactly. Both the complete integration interval and observer-domain admission
 finish before state publication; cancellation or a downstream observer failure
 leaves radius, velocity and time unchanged. Acoustic arrival time includes
 distance/c. The source bandwidth is explicitly declared and must include emitted
-harmonics. The observer is one-way; its radiated signal is not also debited from
-an incompressible model as a self-consistent radiation damping term.
+harmonics. `new_compressible` requires the pressure and its analytic derivative
+and uses the same accepted-state and observer path. Keller--Miksis owns its
+first-order liquid compressibility and acoustic back-reaction; the passive
+observer adds no second radiation loss. The Rayleigh--Plesset path remains
+incompressible. Source radius, wall-Mach, pressure/bulk-modulus and observer
+limits remain explicit and are never relaxed by the coupling wrapper.
 
 `examples/cavitation.rs` uses original IF97 saturation and transport for a
-separating/refilling film and a driven gas/vapor bubble. Surface tension remains
+separating/refilling film and a driven Keller--Miksis gas/vapor bubble. Surface tension remains
 explicit input. Focused integration regressions cover two-temperature material
 substitution, analytical mass/force, deterministic histories, exact medium
-binding and atomic cancellation/observer refusal. They do not claim finite
+binding, the analytic initial compressibility response, exact reuse of the
+native trajectory, and atomic cancellation/observer refusal. They do not claim finite
 latent-heat feedback, nonspherical collapse, wall jets, erosion, fully coupled
 multiphase CFD, or experimental validation.
 

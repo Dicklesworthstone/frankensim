@@ -3,14 +3,17 @@
 //! Run with `cargo run -p fs-couple --features cavitation --example cavitation`.
 //! Water saturation/transport comes from the original IF97 owner. The interface
 //! tension is explicitly prescribed; temperature remains fixed throughout.
-//! Film content is not vapor mass, and the compact sound observation is one-way.
+//! Film content is not vapor mass. Keller--Miksis supplies first-order liquid
+//! compressibility; the compact observer adds no second radiation loss.
 
 use fs_aeroac::monopole::MonopoleLimits;
 use fs_couple::cavitation::bubble::MaterialBubble;
 use fs_couple::cavitation::{
     CavitationFilmEnvironment, CavitationSolveConfig, MaterialCavitatingFilm,
 };
-use fs_flux::cavitation::{BubbleGas, BubbleLimits, BubbleNumerics, BubbleState};
+use fs_flux::cavitation::{
+    BubbleGas, BubbleLimits, BubbleNumerics, BubblePressureSample, BubbleState, KellerMiksisLimits,
+};
 use fs_material::cavitation::SaturatedWaterCavitation;
 use fs_qty::Temperature;
 use fs_thermochem::water::if97::If97SaturationPair;
@@ -75,17 +78,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let radius_m = 100e-6;
     let gas = BubbleGas::equilibrium(water.state(), radius_m, ambient_pa, 1.4)?;
-    let mut bubble = MaterialBubble::new(
+    let omega = 2.0 * std::f64::consts::PI * 2000.0;
+    let pressure = |t: f64| BubblePressureSample {
+        absolute_pressure_pa: ambient_pa + 200.0 * (omega * t).sin(),
+        time_derivative_pa_s: 200.0 * omega * (omega * t).cos(),
+    };
+    let mut bubble = MaterialBubble::new_compressible(
         &water,
         gas,
-        BubbleLimits {
-            minimum_radius_m: 0.5 * radius_m,
-            maximum_radius_m: 2.0 * radius_m,
-            maximum_wall_mach_number: 0.01,
-            maximum_vapor_density_ratio: 0.01,
+        KellerMiksisLimits {
+            bubble: BubbleLimits {
+                minimum_radius_m: 0.5 * radius_m,
+                maximum_radius_m: 2.0 * radius_m,
+                maximum_wall_mach_number: 0.01,
+                maximum_vapor_density_ratio: 0.01,
+            },
+            maximum_pressure_ratio: 0.01,
         },
         BubbleState::try_new(0.0, radius_m, 0.0)?,
-        ambient_pa,
+        pressure(0.0),
     )?;
     let observer = bubble.monopole_observer(
         0.1,
@@ -105,10 +116,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         maximum_step_s: 1e-7,
         maximum_attempts: 10_000,
     };
-    // A weak drive keeps this example in the declared spherical, incompressible
-    // and linear-radiation domains. Observation bandwidth includes the natural
-    // small-amplitude bubble response as well as this imposed frequency.
-    let pressure = |t: f64| ambient_pa + 200.0 * (2.0 * std::f64::consts::PI * 2000.0 * t).sin();
+    // A weak drive keeps this example in the declared spherical, weakly
+    // compressible and linear-radiation domains. The analytic drive derivative
+    // above is required by Keller--Miksis. Observation bandwidth includes the
+    // natural small-amplitude response as well as this imposed frequency.
+    println!("Keller--Miksis bubble with material-owned liquid compressibility");
     println!("source_us arrival_us radius_um acoustic_pressure_Pa (observer at 0.1 m)");
     for endpoint in [25e-6, 50e-6, 75e-6, 100e-6] {
         let step =

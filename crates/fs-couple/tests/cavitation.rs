@@ -1,6 +1,9 @@
 //! G1/G4/G5 integration of original water, conserved film inventory, bubble
 //! dynamics and causal acoustic observation. No measured-accuracy claim.
 
+#[path = "cavitation/compressible.rs"]
+mod compressible;
+
 use fs_aeroac::monopole::{CompactMonopoleObserver, MonopoleLimits};
 use fs_couple::cavitation::bubble::{MaterialBubble, MaterialBubbleError};
 use fs_couple::cavitation::{

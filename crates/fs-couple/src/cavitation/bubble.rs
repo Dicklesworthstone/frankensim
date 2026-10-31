@@ -2,16 +2,19 @@
 //!
 //! The material, bubble equation and sound propagation share rho and c. A
 //! proposal is committed only after the complete physical interval and acoustic
-//! observation are admitted. The observer is one-way: no extra radiation loss
-//! is removed from an incompressible Rayleigh--Plesset trajectory. Vapor pressure
-//! and liquid temperature stay frozen; no latent heat is manufactured from the
-//! total volume of a bubble that also contains noncondensable gas.
+//! observation are admitted. The selected equation owns its liquid response:
+//! Rayleigh--Plesset is incompressible, while Keller--Miksis includes the
+//! first-order compressibility correction. The passive observer removes no
+//! additional energy from either trajectory. Vapor pressure and liquid
+//! temperature stay frozen; no latent heat is manufactured from the total
+//! volume of a bubble that also contains noncondensable gas.
 
 use fs_aeroac::AeroacError;
 use fs_aeroac::monopole::{CompactMonopoleObserver, MonopoleLimits, MonopoleSample};
 use fs_flux::cavitation::{
-    BubbleGas, BubbleLimits, BubbleNumerics, BubbleObservation, BubbleState, BubbleStep,
-    CavitationError, RayleighPlessetBubble,
+    BubbleGas, BubbleLimits, BubbleNumerics, BubbleObservation, BubblePressureSample, BubbleState,
+    BubbleStep, CavitationError, KellerMiksisBubble, KellerMiksisLimits, RayleighPlessetBubble,
+    SphericalBubbleModel,
 };
 use fs_material::MaterialError;
 use fs_material::cavitation::{CavitationProperties, CavitationState};
@@ -64,14 +67,22 @@ pub struct ObservedBubbleStep {
 }
 
 /// Source-retaining spherical bubble with a single authoritative state clock.
-pub struct MaterialBubble<'a, F: CavitationProperties + ?Sized> {
+///
+/// The default equation is Rayleigh--Plesset. [`Self::new_compressible`] selects
+/// Keller--Miksis and requires a pressure value AND its analytic time derivative
+/// at every evaluation. Both use the same accepted-state and observation path.
+pub struct MaterialBubble<
+    'a,
+    F: CavitationProperties + ?Sized,
+    M: SphericalBubbleModel = RayleighPlessetBubble,
+> {
     source: &'a F,
     material: CavitationState,
-    model: RayleighPlessetBubble,
+    model: M,
     state: BubbleState,
 }
 
-impl<'a, F: CavitationProperties + ?Sized> MaterialBubble<'a, F> {
+impl<'a, F: CavitationProperties + ?Sized> MaterialBubble<'a, F, RayleighPlessetBubble> {
     /// Admit the initial state against the actual initial absolute pressure.
     pub fn new(
         source: &'a F,
@@ -90,7 +101,35 @@ impl<'a, F: CavitationProperties + ?Sized> MaterialBubble<'a, F> {
             state,
         })
     }
+}
 
+impl<'a, F: CavitationProperties + ?Sized> MaterialBubble<'a, F, KellerMiksisBubble> {
+    /// Admit a weakly compressible liquid trajectory with the original material.
+    ///
+    /// The equation itself includes first-order acoustic back-reaction. A
+    /// subsequent monopole observation adds no second radiation damping term.
+    /// The pressure derivative must come from the prescribed physical drive;
+    /// it is never approximated by differencing an opaque pressure callback.
+    pub fn new_compressible(
+        source: &'a F,
+        gas: BubbleGas,
+        limits: KellerMiksisLimits,
+        state: BubbleState,
+        initial_pressure: BubblePressureSample,
+    ) -> Result<Self, MaterialBubbleError> {
+        let material = source.cavitation_state()?;
+        let model = KellerMiksisBubble::try_new(material, gas, limits)?;
+        model.observe(&state, initial_pressure)?;
+        Ok(Self {
+            source,
+            material,
+            model,
+            state,
+        })
+    }
+}
+
+impl<'a, F: CavitationProperties + ?Sized, M: SphericalBubbleModel> MaterialBubble<'a, F, M> {
     /// Original material, including source/query provenance when present.
     pub const fn source(&self) -> &'a F {
         self.source
@@ -100,7 +139,7 @@ impl<'a, F: CavitationProperties + ?Sized> MaterialBubble<'a, F> {
         self.material
     }
     /// The original equation owner; no duplicate bubble solver is introduced.
-    pub const fn model(&self) -> &RayleighPlessetBubble {
+    pub const fn model(&self) -> &M {
         &self.model
     }
     /// Accepted radius, wall velocity and physical time.
@@ -124,12 +163,9 @@ impl<'a, F: CavitationProperties + ?Sized> MaterialBubble<'a, F> {
         )?)
     }
 
-    /// Read the accepted physical source at the supplied absolute pressure.
-    pub fn observe(
-        &self,
-        absolute_pressure_pa: f64,
-    ) -> Result<BubbleObservation, MaterialBubbleError> {
-        Ok(self.model.observe(&self.state, absolute_pressure_pa)?)
+    /// Read the accepted source with the pressure input required by its equation.
+    pub fn observe(&self, pressure: M::Pressure) -> Result<BubbleObservation, MaterialBubbleError> {
+        Ok(self.model.observe(&self.state, pressure)?)
     }
 
     /// Advance the native physical history atomically, without an observer.
@@ -141,7 +177,7 @@ impl<'a, F: CavitationProperties + ?Sized> MaterialBubble<'a, F> {
         cancelled: &mut Cancel,
     ) -> Result<BubbleStep, MaterialBubbleError>
     where
-        Pressure: Fn(f64) -> f64,
+        Pressure: Fn(f64) -> M::Pressure,
         Cancel: FnMut() -> bool,
     {
         Ok(self.model.advance_controlled(
@@ -168,7 +204,7 @@ impl<'a, F: CavitationProperties + ?Sized> MaterialBubble<'a, F> {
         cancelled: &mut Cancel,
     ) -> Result<ObservedBubbleStep, MaterialBubbleError>
     where
-        Pressure: Fn(f64) -> f64,
+        Pressure: Fn(f64) -> M::Pressure,
         Cancel: FnMut() -> bool,
     {
         if observer.medium() != self.material.acoustic_state()? {

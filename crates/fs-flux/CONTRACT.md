@@ -1610,12 +1610,31 @@ its separate existing physical law and permeability units.
 ## Material-driven spherical cavitation
 
 The `cavitation` feature (included by `continuum`) exposes
-`cavitation::RayleighPlessetBubble`. It consumes the existing material owner's
+`cavitation::RayleighPlessetBubble` and `KellerMiksisBubble`. Both consume the existing material owner's
 `CavitationState` and an explicit fixed polytropic gas inventory. Absolute
 liquid pressure, including metastable tension, drives spherical radius and wall
 velocity through vapor, gas, capillary and viscous stresses. The state and
 material definition are separate. No pressure floor, injected nucleus, gas EOS,
 minimum-radius rebound, or cavitation sound preset is inferred.
+
+Keller--Miksis adds first-order liquid compressibility and acoustic
+back-reaction while retaining the same spherical gas/vapor state. Its pressure
+input explicitly includes the analytic time derivative. The derivative of the
+complete pressure jump includes gas, surface tension, imposed pressure and
+Newtonian viscous stress; the latter contributes `4 mu/(rho c)` to the
+acceleration denominator. No finite difference of an opaque drive or extra
+authored damping constant is used. The wall-Mach cap remains at most 0.1,
+and an additional pressure/bulk-modulus limit admits the constant-density,
+constant-sound-speed approximation. This does not authorize shocks or sonic
+collapse. The Newtonian specialization follows
+[Warnez and Johnsen, equations 1--2](https://pmc.ncbi.nlm.nih.gov/articles/PMC4474959/).
+
+Both equations implement `SphericalBubbleModel` and share one integration
+kernel. Their native `BubbleLinearization` exposes the equilibrium stiffness,
+viscous/radiative damping, viscous inertia and forcing-derivative coefficients
+for fractional-radius response. Nonpositive restoring stiffness refuses a
+stable harmonic response. Frequency-domain consumers reuse these coefficients
+rather than reconstructing another bubble law.
 
 The numerical owner uses a two-component Dormand--Prince 5(4) pair, fixed stack
 storage and endpoint-derivative reuse. Radius and velocity have separate SI
@@ -1629,18 +1648,19 @@ Embedded local-error ratios are numerical indicators, not global enclosures;
 the caller resolves the pressure waveform and splits known discontinuities.
 
 Accepted observations expose geometric volume, its first and second time
-derivatives, liquid kinetic and surface energy, and instantaneous nonnegative
+derivatives, leading-order near-field liquid kinetic and surface energy, and instantaneous nonnegative
 viscous dissipation. Volume acceleration is a physical acoustic source input,
-not an observer pressure. The spherical infinite-liquid incompressible model
-excludes acoustic back-reaction, shocks, nonspherical collapse/erosion, nearby
-walls, interacting bubbles, gas diffusion, and evolving interfacial temperature.
+not an observer pressure. The kinetic quantity is the incompressible reference
+integral, not a complete compressible or radiated-energy account.
+Rayleigh--Plesset excludes acoustic back-reaction; Keller--Miksis includes its
+first-order correction. Both exclude shocks, nonspherical collapse/erosion,
+nearby walls, interacting bubbles, gas diffusion, and evolving interfacial temperature.
 It uses the small vapor/liquid density-ratio approximation to interface
 kinematics: supplied vapor density must satisfy the caller's explicit ratio
 limit, which cannot exceed 0.1. Without optional vapor density this remains a
 caller-declared negligible-mass assumption. Geometric bubble volume is not
-silently interpreted as vapor mass or deposited latent heat. A
-finite-compressibility or thermally limited
-successor must supply those equations explicitly.
+silently interpreted as vapor mass or deposited latent heat. A thermally
+limited or strongly compressible successor must supply those equations explicitly.
 
 Focused G0/G1/G3/G4/G5 sources check exact equilibrium, independent Rayleigh
 collapse quadrature and first-integral energy, the damped Minnaert limit,

@@ -1,4 +1,4 @@
-//! Spherical Rayleigh--Plesset bubble dynamics in a frozen Newtonian liquid.
+//! Spherical bubble dynamics in a frozen Newtonian liquid.
 //!
 //! `R R'' + 3 R'^2/2 = (p_v + p_g - p_inf - 2 sigma/R - 4 mu R'/R)/rho`.
 //! The noncondensable gas follows the explicitly supplied polytropic law;
@@ -7,7 +7,9 @@
 //! absolute reference and may be tensile. It is never clamped to vapor pressure.
 //!
 //! See [Brennen, chapters 2--4](https://media.library.caltech.edu/CaltechBOOK:1995.001/chap2.htm).
-//! This incompressible, spherical model excludes liquid acoustic back-reaction,
+//! The Rayleigh--Plesset model excludes liquid acoustic back-reaction;
+//! [`KellerMiksisBubble`] adds its first-order, weakly compressible correction.
+//! Both spherical models exclude
 //! shocks, walls, bubble interactions, gas diffusion and evolving interface
 //! temperature. Vapor remains at the supplied saturation pressure; phase mass
 //! and latent heat are not silently inferred from geometric volume. The small
@@ -20,6 +22,13 @@ use core::f64::consts::PI;
 use core::fmt;
 use fs_material::cavitation::CavitationState;
 
+#[path = "cavitation/keller_miksis.rs"]
+mod keller_miksis;
+#[path = "cavitation/stepper.rs"]
+mod stepper;
+
+pub use keller_miksis::{BubblePressureSample, KellerMiksisBubble, KellerMiksisLimits};
+
 /// Invalid input, an explicit model boundary, or an unsuccessful integration.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CavitationError {
@@ -31,7 +40,7 @@ pub enum CavitationError {
         minimum_radius_m: f64,
         maximum_radius_m: f64,
     },
-    /// The incompressible liquid approximation no longer applies.
+    /// The selected low-Mach liquid approximation no longer applies.
     WallMachExceeded {
         wall_mach_number: f64,
         maximum_wall_mach_number: f64,
@@ -40,6 +49,11 @@ pub enum CavitationError {
     VaporDensityRatioExceeded {
         vapor_liquid_density_ratio: f64,
         maximum_vapor_density_ratio: f64,
+    },
+    /// A pressure jump is too large for the frozen weakly compressible liquid.
+    PressureRatioExceeded {
+        pressure_ratio: f64,
+        maximum_pressure_ratio: f64,
     },
     /// A physical or numerical derived quantity is not representable.
     NonFiniteDerived(&'static str),
@@ -253,7 +267,9 @@ pub struct BubbleObservation {
     pub volume_m3: f64,
     pub volume_rate_m3_s: f64,
     pub volume_acceleration_m3_s2: f64,
-    /// Kinetic energy of the infinite incompressible exterior liquid [J].
+    /// Leading-order incompressible near-field kinetic energy [J]. This is
+    /// exact for the RP velocity field, but is only a reference diagnostic for
+    /// Keller--Miksis, not the total energy of a compressible/radiating liquid.
     pub liquid_kinetic_energy_j: f64,
     pub surface_energy_j: f64,
     /// Nonnegative instantaneous `16 pi mu R R'^2` [W], not an integrated heat.
@@ -270,6 +286,68 @@ pub struct BubbleStep {
     /// Largest accepted embedded-error ratio, at most one. This is a local
     /// numerical indicator, not a bound on global or physical-model error.
     pub maximum_normalized_local_error: f64,
+}
+
+/// Linearization at the gas reference radius and its corresponding equilibrium.
+///
+/// For fractional radius perturbation `eta = (R-R0)/R0`,
+/// `a eta'' + b eta' + omega0_squared eta = -(dp + tau dp')/(rho R0^2)`.
+/// The coefficients include only the selected radial model's actual losses.
+/// No thermal relaxation or effective gas exponent is inferred.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BubbleLinearization {
+    pub equilibrium_radius_m: f64,
+    pub equilibrium_absolute_pressure_pa: f64,
+    pub liquid_density_kg_m3: f64,
+    /// Dimensionless coefficient `a` multiplying radial acceleration.
+    pub inertia_multiplier: f64,
+    /// Coefficient `b` multiplying radial velocity [1/s], twice the damping
+    /// rate only when `inertia_multiplier == 1`.
+    pub damping_coefficient_per_s: f64,
+    /// Restoring coefficient `omega0_squared` [1/s²], before division by `a`.
+    pub stiffness_coefficient_per_s2: f64,
+    /// Coefficient `tau` multiplying the imposed pressure derivative [s].
+    pub pressure_derivative_time_s: f64,
+}
+
+/// Original physical spherical-bubble owner, with its own pressure sample type.
+///
+/// A material coupling can retain one model and physical clock without
+/// substituting an equation or discarding a compressible drive's derivative.
+pub trait SphericalBubbleModel {
+    type Pressure: Copy;
+
+    fn liquid(&self) -> CavitationState;
+    fn gas(&self) -> BubbleGas;
+    fn limits(&self) -> BubbleLimits;
+    fn linearization(&self) -> Result<BubbleLinearization, CavitationError>;
+    fn observe(
+        &self,
+        state: &BubbleState,
+        pressure: Self::Pressure,
+    ) -> Result<BubbleObservation, CavitationError>;
+    fn advance_controlled<Pressure, Cancel>(
+        &self,
+        state: &mut BubbleState,
+        end_time_s: f64,
+        numerics: &BubbleNumerics,
+        pressure: &Pressure,
+        cancelled: &mut Cancel,
+    ) -> Result<BubbleStep, CavitationError>
+    where
+        Pressure: Fn(f64) -> Self::Pressure,
+        Cancel: FnMut() -> bool;
+}
+
+// The shared fixed-size integrator needs only the physical derivative, not all
+// observation diagnostics, at each stage. Static dispatch keeps this hot path
+// allocation-free for both public equation owners.
+trait RadialDynamics: SphericalBubbleModel {
+    fn dynamics(
+        &self,
+        state: &BubbleState,
+        pressure: Self::Pressure,
+    ) -> Result<(f64, f64), CavitationError>;
 }
 
 /// Immutable physical model; runtime radius/velocity live in [`BubbleState`].
@@ -312,6 +390,11 @@ impl RayleighPlessetBubble {
         self.limits
     }
 
+    /// Stable linear response of this same polytropic/viscous equation at R0.
+    pub fn linearization(&self) -> Result<BubbleLinearization, CavitationError> {
+        reference_linearization(self.liquid, self.gas, self.limits)
+    }
+
     /// Evaluate the physical acceleration and source without advancing state.
     pub fn observe(
         &self,
@@ -319,35 +402,13 @@ impl RayleighPlessetBubble {
         absolute_pressure_pa: f64,
     ) -> Result<BubbleObservation, CavitationError> {
         let (gas_partial_pressure_pa, acceleration) = self.dynamics(state, absolute_pressure_pa)?;
-        let radius = state.radius_m;
-        let velocity = state.wall_velocity_m_s;
-        let area = 4.0 * PI * radius * radius;
-        let volume = area * (radius / 3.0);
-        if !positive(area) || !positive(volume) {
-            return Err(CavitationError::NonFiniteDerived("bubble area or volume"));
-        }
-        Ok(BubbleObservation {
-            state: *state,
-            imposed_absolute_pressure_pa: absolute_pressure_pa,
+        observation(
+            self.liquid,
+            state,
+            absolute_pressure_pa,
             gas_partial_pressure_pa,
-            wall_acceleration_m_s2: acceleration,
-            wall_mach_number: velocity.abs() / self.liquid.liquid_sound_speed_m_s(),
-            volume_m3: volume,
-            volume_rate_m3_s: finite(area * velocity, "volume rate")?,
-            volume_acceleration_m3_s2: finite(
-                4.0 * PI * radius * (2.0 * velocity * velocity + radius * acceleration),
-                "volume acceleration",
-            )?,
-            liquid_kinetic_energy_j: finite(
-                1.5 * self.liquid.liquid_density_kg_m3() * volume * velocity * velocity,
-                "exterior kinetic energy",
-            )?,
-            surface_energy_j: finite(area * self.liquid.surface_tension_n_m(), "surface energy")?,
-            viscous_dissipation_w: finite(
-                16.0 * PI * self.liquid.dynamic_viscosity_pa_s() * radius * velocity * velocity,
-                "viscous dissipation",
-            )?,
-        })
+            acceleration,
+        )
     }
 
     /// Advance under a deterministic, bounded-work pressure callback [Pa].
@@ -380,117 +441,13 @@ impl RayleighPlessetBubble {
         Pressure: Fn(f64) -> f64,
         Cancel: FnMut() -> bool,
     {
-        poll(cancelled)?;
-        numerics.validate()?;
-        if !end_time_s.is_finite()
-            || end_time_s < state.time_s
-            || !(end_time_s - state.time_s).is_finite()
-        {
-            return Err(CavitationError::InvalidInput("forward time interval"));
-        }
-        let mut current = *state;
-        let mut rhs_evaluations = 0;
-        let mut derivative = self.rhs(current, pressure, cancelled, &mut rhs_evaluations)?;
-        let mut step = numerics.initial_step_s;
-        let mut accepted_steps = 0;
-        let mut rejected_steps = 0;
-        let mut maximum_normalized_local_error: f64 = 0.0;
-        while current.time_s < end_time_s {
-            if accepted_steps + rejected_steps == numerics.maximum_attempts {
-                return Err(CavitationError::StepBudgetExceeded {
-                    attempts: numerics.maximum_attempts,
-                    accepted_steps,
-                });
-            }
-            poll(cancelled)?;
-            let remaining = end_time_s - current.time_s;
-            step = step.min(remaining);
-            let next_time = if step == remaining {
-                end_time_s
-            } else {
-                current.time_s + step
-            };
-            if next_time <= current.time_s || next_time > end_time_s {
-                return Err(CavitationError::StepUnderflow);
-            }
-            step = next_time - current.time_s;
-            // Compare represented endpoint times. Subtracting a rounded clock
-            // can make an already minimum-size step look slightly larger than
-            // the minimum and otherwise retry the same failed trial forever.
-            let can_refine = next_time > current.time_s + numerics.minimum_step_s;
-            let trial = self.trial(
-                current,
-                derivative,
-                next_time,
-                step,
-                numerics,
-                pressure,
-                cancelled,
-                &mut rhs_evaluations,
-            );
-            let (next, endpoint_derivative, error) = match trial {
-                Ok(trial) => trial,
-                Err(error) if refinable(&error) && can_refine => {
-                    rejected_steps += 1;
-                    step = (0.5 * step).max(numerics.minimum_step_s);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            if error > 1.0 {
-                rejected_steps += 1;
-                if !can_refine {
-                    return Err(CavitationError::ToleranceNotMet {
-                        normalized_error: error,
-                        step_s: step,
-                    });
-                }
-            } else {
-                current = next;
-                derivative = endpoint_derivative;
-                accepted_steps += 1;
-                maximum_normalized_local_error = maximum_normalized_local_error.max(error);
-            }
-            let factor = if error == 0.0 {
-                5.0
-            } else {
-                (0.9 * error.powf(-0.2)).clamp(0.2, 5.0)
-            };
-            step = (step * factor).clamp(numerics.minimum_step_s, numerics.maximum_step_s);
-        }
-        poll(cancelled)?;
-        let observation = self.observe(&current, pressure(current.time_s))?;
-        poll(cancelled)?;
-        *state = current;
-        Ok(BubbleStep {
-            observation,
-            accepted_steps,
-            rejected_steps,
-            rhs_evaluations,
-            maximum_normalized_local_error,
-        })
+        stepper::advance(self, state, end_time_s, numerics, pressure, cancelled)
     }
 
     fn dynamics(&self, state: &BubbleState, pressure: f64) -> Result<(f64, f64), CavitationError> {
+        validate_state(state, self.liquid, self.limits)?;
         let radius = state.radius_m;
-        if !radius.is_finite()
-            || radius < self.limits.minimum_radius_m
-            || radius > self.limits.maximum_radius_m
-        {
-            return Err(CavitationError::RadiusOutsideDomain {
-                radius_m: radius,
-                minimum_radius_m: self.limits.minimum_radius_m,
-                maximum_radius_m: self.limits.maximum_radius_m,
-            });
-        }
         let velocity = state.wall_velocity_m_s;
-        let mach = velocity.abs() / self.liquid.liquid_sound_speed_m_s();
-        if !mach.is_finite() || mach > self.limits.maximum_wall_mach_number {
-            return Err(CavitationError::WallMachExceeded {
-                wall_mach_number: mach,
-                maximum_wall_mach_number: self.limits.maximum_wall_mach_number,
-            });
-        }
         if !pressure.is_finite() {
             return Err(CavitationError::InvalidInput("imposed absolute pressure"));
         }
@@ -508,134 +465,150 @@ impl RayleighPlessetBubble {
         )?;
         Ok((gas_pressure, acceleration))
     }
+}
 
-    fn rhs<Pressure: Fn(f64) -> f64, Cancel: FnMut() -> bool>(
-        &self,
-        state: BubbleState,
-        pressure: &Pressure,
-        cancelled: &mut Cancel,
-        evaluations: &mut usize,
-    ) -> Result<[f64; 2], CavitationError> {
-        poll(cancelled)?;
-        *evaluations += 1;
-        let (_, acceleration) = self.dynamics(&state, pressure(state.time_s))?;
-        Ok([state.wall_velocity_m_s, acceleration])
+impl SphericalBubbleModel for RayleighPlessetBubble {
+    type Pressure = f64;
+
+    fn liquid(&self) -> CavitationState {
+        self.liquid
     }
-
-    #[allow(clippy::too_many_arguments)]
-    fn trial<Pressure: Fn(f64) -> f64, Cancel: FnMut() -> bool>(
+    fn gas(&self) -> BubbleGas {
+        self.gas
+    }
+    fn limits(&self) -> BubbleLimits {
+        self.limits
+    }
+    fn linearization(&self) -> Result<BubbleLinearization, CavitationError> {
+        RayleighPlessetBubble::linearization(self)
+    }
+    fn observe(
         &self,
-        state: BubbleState,
-        first_derivative: [f64; 2],
-        next_time: f64,
-        step: f64,
+        state: &BubbleState,
+        pressure: f64,
+    ) -> Result<BubbleObservation, CavitationError> {
+        RayleighPlessetBubble::observe(self, state, pressure)
+    }
+    fn advance_controlled<Pressure, Cancel>(
+        &self,
+        state: &mut BubbleState,
+        end_time_s: f64,
         numerics: &BubbleNumerics,
         pressure: &Pressure,
         cancelled: &mut Cancel,
-        evaluations: &mut usize,
-    ) -> Result<(BubbleState, [f64; 2], f64), CavitationError> {
-        let mut stages = [[0.0; 2]; 7];
-        stages[0] = first_derivative;
-        let initial = [state.radius_m, state.wall_velocity_m_s];
-        let mut values = initial;
-        for i in 0..6 {
-            for component in 0..2 {
-                let mut sum = 0.0;
-                for (j, stage) in stages.iter().enumerate().take(i + 1) {
-                    sum += A[i][j] * stage[component];
-                }
-                values[component] = initial[component] + step * sum;
-            }
-            let stage_time = if C[i] == 1.0 {
-                next_time
-            } else {
-                state.time_s + C[i] * step
-            };
-            stages[i + 1] = self.rhs(
-                BubbleState {
-                    time_s: stage_time,
-                    radius_m: values[0],
-                    wall_velocity_m_s: values[1],
-                },
-                pressure,
-                cancelled,
-                evaluations,
-            )?;
-        }
-        let absolute = [
-            numerics.radius_absolute_tolerance_m,
-            numerics.velocity_absolute_tolerance_m_s,
-        ];
-        let mut error: f64 = 0.0;
-        for component in 0..2 {
-            let mut difference = 0.0;
-            for (stage, weight) in stages.iter().zip(ERROR_WEIGHT) {
-                difference += weight * stage[component];
-            }
-            let scale = finite(
-                absolute[component]
-                    + numerics.relative_tolerance
-                        * initial[component].abs().max(values[component].abs()),
-                "local error scale",
-            )?;
-            error = error.max(finite(
-                (step * difference).abs() / scale,
-                "embedded local error",
-            )?);
-        }
-        Ok((
-            BubbleState {
-                time_s: next_time,
-                radius_m: values[0],
-                wall_velocity_m_s: values[1],
-            },
-            stages[6],
-            error,
-        ))
+    ) -> Result<BubbleStep, CavitationError>
+    where
+        Pressure: Fn(f64) -> f64,
+        Cancel: FnMut() -> bool,
+    {
+        RayleighPlessetBubble::advance_controlled(
+            self, state, end_time_s, numerics, pressure, cancelled,
+        )
     }
 }
 
-// Standard Dormand--Prince coefficients. The final A row is the fifth-order
-// endpoint; ERROR_WEIGHT is its difference from the embedded fourth-order rule.
-const C: [f64; 6] = [0.2, 0.3, 0.8, 8.0 / 9.0, 1.0, 1.0];
-const A: [[f64; 6]; 6] = [
-    [1.0 / 5.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [3.0 / 40.0, 9.0 / 40.0, 0.0, 0.0, 0.0, 0.0],
-    [44.0 / 45.0, -56.0 / 15.0, 32.0 / 9.0, 0.0, 0.0, 0.0],
-    [
-        19372.0 / 6561.0,
-        -25360.0 / 2187.0,
-        64448.0 / 6561.0,
-        -212.0 / 729.0,
-        0.0,
-        0.0,
-    ],
-    [
-        9017.0 / 3168.0,
-        -355.0 / 33.0,
-        46732.0 / 5247.0,
-        49.0 / 176.0,
-        -5103.0 / 18656.0,
-        0.0,
-    ],
-    [
-        35.0 / 384.0,
-        0.0,
-        500.0 / 1113.0,
-        125.0 / 192.0,
-        -2187.0 / 6784.0,
-        11.0 / 84.0,
-    ],
-];
-const ERROR_WEIGHT: [f64; 7] = [
-    35.0 / 384.0 - 5179.0 / 57600.0,
-    0.0,
-    500.0 / 1113.0 - 7571.0 / 16695.0,
-    125.0 / 192.0 - 393.0 / 640.0,
-    -2187.0 / 6784.0 + 92097.0 / 339200.0,
-    11.0 / 84.0 - 187.0 / 2100.0,
-    -1.0 / 40.0,
-];
+impl RadialDynamics for RayleighPlessetBubble {
+    fn dynamics(&self, state: &BubbleState, pressure: f64) -> Result<(f64, f64), CavitationError> {
+        RayleighPlessetBubble::dynamics(self, state, pressure)
+    }
+}
+
+fn validate_state(
+    state: &BubbleState,
+    liquid: CavitationState,
+    limits: BubbleLimits,
+) -> Result<(), CavitationError> {
+    let radius = state.radius_m;
+    if !radius.is_finite() || radius < limits.minimum_radius_m || radius > limits.maximum_radius_m {
+        return Err(CavitationError::RadiusOutsideDomain {
+            radius_m: radius,
+            minimum_radius_m: limits.minimum_radius_m,
+            maximum_radius_m: limits.maximum_radius_m,
+        });
+    }
+    let mach = state.wall_velocity_m_s.abs() / liquid.liquid_sound_speed_m_s();
+    if !mach.is_finite() || mach > limits.maximum_wall_mach_number {
+        return Err(CavitationError::WallMachExceeded {
+            wall_mach_number: mach,
+            maximum_wall_mach_number: limits.maximum_wall_mach_number,
+        });
+    }
+    Ok(())
+}
+
+fn observation(
+    liquid: CavitationState,
+    state: &BubbleState,
+    absolute_pressure_pa: f64,
+    gas_partial_pressure_pa: f64,
+    acceleration: f64,
+) -> Result<BubbleObservation, CavitationError> {
+    let radius = state.radius_m;
+    let velocity = state.wall_velocity_m_s;
+    let area = 4.0 * PI * radius * radius;
+    let volume = area * (radius / 3.0);
+    if !positive(area) || !positive(volume) {
+        return Err(CavitationError::NonFiniteDerived("bubble area or volume"));
+    }
+    Ok(BubbleObservation {
+        state: *state,
+        imposed_absolute_pressure_pa: absolute_pressure_pa,
+        gas_partial_pressure_pa,
+        wall_acceleration_m_s2: acceleration,
+        wall_mach_number: velocity.abs() / liquid.liquid_sound_speed_m_s(),
+        volume_m3: volume,
+        volume_rate_m3_s: finite(area * velocity, "volume rate")?,
+        volume_acceleration_m3_s2: finite(
+            4.0 * PI * radius * (2.0 * velocity * velocity + radius * acceleration),
+            "volume acceleration",
+        )?,
+        liquid_kinetic_energy_j: finite(
+            1.5 * liquid.liquid_density_kg_m3() * volume * velocity * velocity,
+            "exterior kinetic energy",
+        )?,
+        surface_energy_j: finite(area * liquid.surface_tension_n_m(), "surface energy")?,
+        viscous_dissipation_w: finite(
+            16.0 * PI * liquid.dynamic_viscosity_pa_s() * radius * velocity * velocity,
+            "viscous dissipation",
+        )?,
+    })
+}
+
+fn reference_linearization(
+    liquid: CavitationState,
+    gas: BubbleGas,
+    limits: BubbleLimits,
+) -> Result<BubbleLinearization, CavitationError> {
+    let radius = gas.reference_radius_m;
+    validate_state(&BubbleState::try_new(0.0, radius, 0.0)?, liquid, limits)?;
+    let density = liquid.liquid_density_kg_m3();
+    let capillary_pressure = 2.0 * liquid.surface_tension_n_m() / radius;
+    let pressure = finite(
+        gas.reference_pressure_pa + liquid.saturation_pressure_pa() - capillary_pressure,
+        "reference equilibrium pressure",
+    )?;
+    let inertia = density * radius * radius;
+    let restoring_pressure =
+        3.0 * gas.polytropic_exponent * gas.reference_pressure_pa - capillary_pressure;
+    let stiffness = restoring_pressure / inertia;
+    if !positive(inertia) || !positive(stiffness) {
+        return Err(CavitationError::InvalidInput(
+            "linear bubble response requires positive finite equilibrium stiffness",
+        ));
+    }
+    Ok(BubbleLinearization {
+        equilibrium_radius_m: radius,
+        equilibrium_absolute_pressure_pa: pressure,
+        liquid_density_kg_m3: density,
+        inertia_multiplier: 1.0,
+        damping_coefficient_per_s: finite(
+            4.0 * liquid.dynamic_viscosity_pa_s() / inertia,
+            "linear viscous damping",
+        )?,
+        stiffness_coefficient_per_s2: stiffness,
+        pressure_derivative_time_s: 0.0,
+    })
+}
 
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
@@ -657,15 +630,11 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), CavitationError> {
         Ok(())
     }
 }
-fn refinable(error: &CavitationError) -> bool {
-    matches!(
-        error,
-        CavitationError::RadiusOutsideDomain { .. }
-            | CavitationError::WallMachExceeded { .. }
-            | CavitationError::NonFiniteDerived(_)
-    )
-}
 
 #[cfg(test)]
 #[path = "cavitation/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cavitation/compressible_tests.rs"]
+mod compressible_tests;
