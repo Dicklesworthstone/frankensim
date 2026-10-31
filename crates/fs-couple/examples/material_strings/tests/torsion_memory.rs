@@ -99,7 +99,7 @@ fn torsional_memory_structure_and_joint_history_budget_refuse_before_material_io
     }
     assert!(input::Spec::parse(text.replace("tension 20 1 1 0.8","tension 20 1 0 0.8").as_bytes()).is_err());
     assert!(input::Spec::parse(text.replace("longitudinal-waves ",
-        "prepared-linear 64 67108864 200000000000\nlongitudinal-waves ").as_bytes()).is_err());
+        "prepared-linear 64 67108864 200000000000\nlongitudinal-waves ").as_bytes()).is_ok());
     scoped(|cx,gate| {
         let mut spec = input::Spec::parse(text.as_bytes()).unwrap();
         spec.strings[0].twist_modes=128;
@@ -109,9 +109,7 @@ fn torsional_memory_structure_and_joint_history_budget_refuse_before_material_io
         assert!(spec.compile(cx,gate,|name| { reads+=1; Ok(pack(name,7800.0,200_000.0,None)) }).is_err());
         assert_eq!(reads,0);
         let mut spec = input::Spec::parse(text.as_bytes()).unwrap();
-        spec.prepared_linear=Some(PreparedModalBudget {
-            max_modes:64,max_dense_bytes:67_108_864,max_multiply_terms:200_000_000_000,
-        });
+        spec.prepared_linear=Some(PreparedModalBudget {max_modes:1,..MEMORY_PREPARATION});
         let mut reads=0;
         assert!(spec.compile(cx,gate,|name| { reads+=1; Ok(pack(name,7800.0,200_000.0,None)) }).is_err());
         assert_eq!(reads,0);
@@ -124,5 +122,20 @@ fn missing_or_invalid_shear_memory_has_no_elastic_fallback() {
         assert!(build(cx,gate,&selected().replace("coating_tau_2","absent_time"),0.0004).is_err());
         assert!(build(cx,gate,&selected(),0.0).is_err());
         assert!(build(cx,gate,&selected(),-0.001).is_err());
+    });
+}
+
+#[test]
+fn prepared_torsional_memory_keeps_the_original_coupled_history_and_pressure() {
+    scoped(|cx,gate| {
+        let text=selected();
+        let mut spec=input::Spec::parse(text.as_bytes()).unwrap();
+        spec.prepared_linear=Some(MEMORY_PREPARATION);
+        let prepared=spec.compile(cx,gate,|name|Ok(match name {
+            "sleeve.fsmatpk"=>coating(name,0.0004),
+            _=>pack(name,7800.0,200_000.0,None),
+        })).unwrap();
+        assert_eq!(prepared.performance.bank().system().material_memory().len(),2);
+        assert_prepared_memory_parity(build(cx,gate,&text,0.0004).unwrap(),prepared);
     });
 }

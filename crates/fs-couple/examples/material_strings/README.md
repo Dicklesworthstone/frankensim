@@ -956,8 +956,8 @@ in the performance changes the constitutive history loading the common body.
 Its pressure is what the existing PCM writer receives. Static preload
 initializes relaxed histories, and neighboring-string motion uses the same
 reciprocal mechanics. The exclusive per-string selection supports homogeneous
-strings, bonded sections and close-wound cores on the exact solver;
-`prepared-linear` refuses constitutive histories. Core relaxation in a wound string keeps the original helix mass,
+strings, bonded sections and close-wound cores on both the ordinary and prepared
+exact solvers. Core relaxation in a wound string keeps the original helix mass,
 finished gas-loading radius and wrapping material identity. All participating
 source bands must cover the complete instantaneous coupled frequency bound. These models
 supply bending relaxation; the torsional selection below supplies independent
@@ -1088,9 +1088,12 @@ unsupported source bands and nonpositive times refuse instead of substituting
 an elastic response.
 
 Torsional modes must be present. All declared bending, torsional and body
-histories share the original 256-state and setup-work limits, reserved before
-material loading. Torsional memory requires the exact history owner;
-`prepared-linear` refuses it. This is small-strain torsion of perfectly bonded
+histories retain their original source-state and setup-work limits. Original
+bending plus torsional string histories still share the executable's 256-state
+ceiling. Declared counts and setup allowances are checked before material
+loading; after source resolution the prepared byte/work limits count every
+actual retained internal strain. Both ordinary and `prepared-linear`
+propagation retain these histories. This is small-strain torsion of perfectly bonded
 concentric sections with explicit linear shear relaxation. It does not model
 winding slip, finite-strain axial relaxation or measured instrument fidelity.
 
@@ -1956,7 +1959,7 @@ strings, end/axial flow, rotary drag, rarefaction or compressible radiation.
 The atmosphere remains fixed during one realization. Body/neck observation keeps
 its existing compact-radiation approximation.
 
-### Explicit preparation for larger coupled gas models
+### Explicit preparation for larger coupled models and material histories
 
 An optional record after `cylinder-gas-loading` (when present) and before
 `cavity` selects the shared prepared exact propagator:
@@ -1971,12 +1974,22 @@ and so does this executable's complete-coordinate limit.
 `MAX_MULTIPLY_TERMS` bounds cold scalar multiply-add work. Both are explicit
 refusal budgets, not accuracy parameters or permissions to drop weak modes.
 
-The selection is activated before torque joints and gas memory are attached.
-It caches the complete fixed-period transition and separate physical resistance
-integrals while retaining every original position, velocity, held-force input,
-material state and signed connection. Fluid kinetic energy, intrinsic material
-loss, body viscosity, contact compliance, pressure and per-connection work keep
-their existing owners. The ordinary path remains selected when the row is absent.
+The selection is activated during body construction, before original string
+histories, torque joints and gas memory are attached. This also applies to
+uniform and regional plate bodies with common or spatial bridge footprints.
+Original Prony bending, torsional memory, explicit layered bending, regional
+scalar/tensor body memory and axial memory retain their complete histories.
+For `N` mechanical modes and `M` linear internal strains, preparation uses
+`d = 3*N + M` coordinates including held forces, with the original `2*d <= 6144`
+exponential ceiling and explicit mode, byte and multiply-work budgets.
+
+The owner caches the complete fixed-period transition and separate physical
+resistance integrals while retaining every original position, velocity,
+held-force input, material state and signed connection. Finite-strain histories
+remain in their existing nonlinear material owner coupled to this prepared
+baseline. Fluid kinetic energy, intrinsic material loss, body viscosity, contact
+compliance, pressure and per-connection work keep their existing owners. The
+ordinary path remains selected when the row is absent.
 
 `prepared-cylinder-flow.material-strings` has one layered two-plane string with
 both bridge-direction components nonzero, one twist mode, two body modes and a
@@ -2204,8 +2217,9 @@ API `with_material_longitudinal_relaxation` also supports independent per-string
 and per-layer selections. Every equilibrium claim must equal that layer's
 original `young_modulus`. Modulus increments are nonnegative pascals and times
 are positive seconds, with explicit source frequency support. Missing data,
-inconsistent quantities, source-band escape, an insufficient complete history
-budget or a prepared backend without this input's exact state owner refuses.
+inconsistent quantities, source-band escape and an insufficient complete history
+or prepared resource budget refuse. Both ordinary and `prepared-linear`
+propagation preserve these source-bound histories.
 
 For axial sine index `n`, each layer and arm contributes
 `Delta_E * A_layer * (n*pi/L)^2 / mu_solid` to the instantaneous stiffness.

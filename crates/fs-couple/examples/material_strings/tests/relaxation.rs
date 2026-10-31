@@ -195,10 +195,13 @@ fn exclusive_and_additional_string_spectra_share_one_body_history_and_budget() {
         let text=include_str!("../orthotropic.body")
             .replace("elastic orthotropic12","elastic isotropic");
         let profile=body::Profile::parse(format!("{text}loss regional-maxwell relaxed 4 1000000 1 relaxing_bending_modulus bending_relaxation_time\n").as_bytes()).unwrap();
-        let build=|tau|s.clone().compile_with_body(cx,gate,Some(profile.clone()),|name|
-            Ok(source_pack(name,if name=="body.fsmatpk" {20e9} else {80e9},
-                if name=="parallel.fsmatpk" {tau} else {0.001},200_000.0,None))).unwrap();
-        let mut a=build(0.002);let mut b=build(0.008);
+        let build=|tau,preparation| {
+            let mut spec=s.clone();spec.prepared_linear=preparation;
+            spec.compile_with_body(cx,gate,Some(profile.clone()),|name|
+                Ok(source_pack(name,if name=="body.fsmatpk" {20e9} else {80e9},
+                    if name=="parallel.fsmatpk" {tau} else {0.001},200_000.0,None))).unwrap()
+        };
+        let mut a=build(0.002,None);let mut b=build(0.008,None);
         let source=a.performance.bank().source().bank();
         assert_eq!(source.string_bending_relaxation().unwrap().channels().len(),2);
         assert_eq!(source.material_chart_relaxation().unwrap().coupling_rows_per_s().len(),2);
@@ -212,9 +215,10 @@ fn exclusive_and_additional_string_spectra_share_one_body_history_and_budget() {
         assert_eq!(a.catalog["body.fsmatpk"].pack.content_hash(),b.catalog["body.fsmatpk"].pack.content_hash());
         let p=pressure(&mut a,1);let q=pressure(&mut b,37);
         assert!(p.iter().zip(&q).any(|(x,y)|(x-y).abs()>1e-15));
-        assert_eq!(p,pressure(&mut build(0.002),37));
+        assert_eq!(p,pressure(&mut build(0.002,None),37));
         let frame=a.performance.bank().system().last_frame().unwrap();
         assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+        assert_prepared_memory_parity(build(0.002,None),build(0.002,Some(MEMORY_PREPARATION)));
     });
 }
 
@@ -238,9 +242,9 @@ fn selected_sources_unsupported_models_and_duplicate_laws_refuse_before_they_can
             (80e9,0.001,1000.0)] {
             assert!(selected().compile(cx,gate,|name|Ok(source_pack(name,delta,time,band,None))).is_err());
         }
-        let mut unsupported=selected();
-        unsupported.prepared_linear=Some(PreparedModalBudget {
-            max_modes:64,max_dense_bytes:16_777_216,max_multiply_terms:16_777_216,
+        let mut too_few_modes=selected();
+        too_few_modes.prepared_linear=Some(PreparedModalBudget {
+            max_modes:1,..MEMORY_PREPARATION
         });
         let plain=spec();
         let mut twice=selected();
@@ -257,7 +261,7 @@ fn selected_sources_unsupported_models_and_duplicate_laws_refuse_before_they_can
                 vec![("relaxing_bending_modulus".into(),"bending_relaxation_time".into())],
                 &too_many.strings).unwrap(),
         ],&too_many.strings).unwrap());
-        for rejected in [unsupported,twice,too_many] {
+        for rejected in [too_few_modes,twice,too_many] {
             let mut calls=0;
             assert!(rejected.compile(cx,gate,|name| {
                 calls+=1; Ok(source_pack(name,80e9,0.001,200_000.0,None))
@@ -527,3 +531,52 @@ fn malformed_native_loss_and_unsupported_winding_selections_refuse() {
 
 #[path = "relaxation/layered.rs"]
 mod layered;
+
+#[test]
+fn prepared_plate_construction_keeps_source_histories_beyond_the_ordinary_block() {
+    scoped(|cx,gate| {
+        let mut spec=selected();spec.samples=32;spec.strings[0].bending_modes=16;
+        spec.strings[0].bending_loss=input::BendingLoss::Prony {
+            properties:(0..8).map(|i|BendingRelaxationProperties {
+                modulus:format!("delta_{i}"),relaxation_time:format!("tau_{i}"),
+            }).collect(),
+        };
+        assert_eq!(spec.string_memory_states().unwrap(),128);
+        let load=|name:&str|->Result<NormalizedPack> {
+            let base=source_pack(name,1e9,0.001,200_000.0,None);
+            let mut claims=base.claims().clone();
+            for i in 0..8 {
+                for (key,dims,value) in [(format!("delta_{i}"),Pressure::DIMS,1e9),
+                    (format!("tau_{i}"),Dims([0,0,1,0,0,0]),0.0002*(i+1) as f64)] {
+                    claims.insert_claim(PropertyClaim {key:PropertyKey::new(key,dims),
+                        value:PropertyValue::Scalar {value,dims},
+                        validity:ValidityDomain::unconstrained().with("T",280.0,320.0).with("omega",0.0,200_000.0),
+                        uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
+                        observations:vec![],provenance:Provenance {source:"manufactured eight-arm spectrum".into(),
+                            license:"test-only".into(),artifact:None},
+                    }).unwrap();
+                }
+            }
+            Ok(NormalizedPack::new(base.pack_id(),"prepared-source-memory",base.source_artifact(),
+                base.redistribution_terms(),claims,vec![],vec![]).unwrap())
+        };
+        let error=spec.clone().compile(cx,gate,load).err().expect("ordinary block must refuse all 128 histories").to_string();
+        assert!(error.contains("dense exponential block capacity"),"{error}");
+        spec.prepared_linear=Some(MEMORY_PREPARATION);
+        for (budget,reason) in [
+            (PreparedModalBudget {max_dense_bytes:1,..MEMORY_PREPARATION},"max_dense_bytes"),
+            (PreparedModalBudget {max_multiply_terms:1,..MEMORY_PREPARATION},"max_multiply_terms"),
+        ] {
+            let mut short=spec.clone();short.prepared_linear=Some(budget);
+            let error=short.compile(cx,gate,load).err().expect("explicit budget must refuse").to_string();
+            assert!(error.contains(reason),"{error}");
+        }
+        let mut ready=spec.compile(cx,gate,load).unwrap();
+        assert_eq!(ready.performance.bank().source().bank().prepared_linear_budget(),Some(MEMORY_PREPARATION));
+        assert_eq!(ready.performance.bank().system().material_memory().len(),128);
+        assert!(pressure(&mut ready,7).iter().any(|p|*p!=0.0));
+        assert!(ready.performance.bank().system().material_memory().iter().any(|z|*z!=0.0));
+        let frame=ready.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+    });
+}

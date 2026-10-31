@@ -5981,18 +5981,30 @@ MODULUS TIME ...`. It resolves only the chosen material properties and attaches
 the law after selected gas/torsion/axial construction, before the existing
 multibow performer and PCM writer. An omitted record keeps the prior tensor
 selection. Source bytes and identities remain inspectable. The performer's
-current `prepared-linear` input selection refuses this regional memory record
-before material-pack I/O, although the public prepared coupled owner supports
-internal strains as described above. Augmented
-setup work is reserved in the original budget. `regional-relaxing.body` is an
+`prepared-linear` selection retains regional scalar/tensor body histories,
+original bending/torsional histories, explicit layered bending and axial memory.
+Uniform, regional and spatial plate constructors select the requested owner
+before restoring original string histories, so a larger prepared realization
+never has to fit the smaller ordinary exponential first. Legacy library
+constructors still select the ordinary owner; their `_prepared` variants share
+the same physical assembly and original basis. Declared dimensions, source
+ceilings and setup allowances are checked before material-pack I/O. The
+executable retains its 256-state ceiling for original bending plus torsional
+string histories; other selectors retain their own history limits. After source
+resolution, every actual retained history also counts in the prepared owner's
+augmented byte/work/exponential bounds. `regional-relaxing.body` is an
 explicitly synthetic runnable example, not a measured instrument calibration.
 
 Focused G0/G3 regression sources check regional data-only substitutions reaching
 actual pressure, PCM and sympathetic-string motion; unchanged equilibrium
 modes; gas/axial attachment-order equality; torsion/cavity composition; explicit
 zero parity; callback partitions; source/budget refusals; and cancellation
-rollback. Rust parsing and scoped whitespace checks passed. Native compilation
-and execution remain required; no measured violin/cello/bass fidelity is claimed.
+rollback. Prepared-performer regression sources additionally compare retained
+q/v/history, pressure and dissipation for scalar/tensor body, bending/torsional
+and axial spectra, and exercise 128 original string histories beyond the ordinary
+exponential ceiling with explicit byte/work refusals. Rust parsing and scoped
+whitespace checks passed. Native compilation and execution remain required;
+no measured violin/cello/bass fidelity is claimed.
 
 ### Original string-material spectra in the shared instrument owner
 

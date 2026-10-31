@@ -115,7 +115,7 @@ fn g0_axial_memory_requires_original_waves_valid_sources_and_complete_history_bu
     }
     assert!(input::Spec::parse(input.replace(&format!("{RECORD}\n"),"").as_bytes()).is_err());
     assert!(input::Spec::parse(input.replace(RECORD,
-        &format!("prepared-linear 64 67108864 200000000000\n{RECORD}")).as_bytes()).is_err());
+        &format!("prepared-linear 64 67108864 200000000000\n{RECORD}")).as_bytes()).is_ok());
     scoped(|cx,gate| {
         for (delta,tau,high) in [(-1.0,0.004,200_000.0),(20e9,0.0,200_000.0),
             (20e9,0.004,1000.0)] {
@@ -252,5 +252,24 @@ fn late_full_strain_binding_readmits_the_existing_fiber_material_band() {
         assert!(make(&ribbon,narrow).is_ok(),"the original assembled ribbon fits its source band");
         let error=match make(&full,narrow) {Ok(_)=>panic!("late material binding bypassed ribbon support"),Err(e)=>e};
         assert!(error.to_string().contains("complete fiber band"),"{error}");
+    });
+}
+
+#[test]
+fn prepared_linear_and_full_strain_axial_histories_retain_physical_playback() {
+    scoped(|cx,gate| {
+        for finite in [false,true] {
+            let text=if finite {selected().replace(MEMORY,
+                "longitudinal-memory finite-strain 8 young_modulus 1 axial_delta axial_time")}
+                else {selected()};
+            let mut spec=input::Spec::parse(text.as_bytes()).unwrap();
+            spec.prepared_linear=Some(MEMORY_PREPARATION);
+            let prepared=spec.compile(cx,gate,|name|Ok(source_pack(name,20e9,
+                if name=="sleeve.fsmatpk" {0.004}else{0.001},200_000.0))).unwrap();
+            if finite {
+                assert_eq!(prepared.performance.bank().system().nonlinear_material_memory()[0].len(),6);
+            } else {assert_eq!(prepared.performance.bank().system().material_memory().len(),4);}
+            assert_prepared_memory_parity(build(cx,gate,&text,20e9,0.004,200_000.0).unwrap(),prepared);
+        }
     });
 }

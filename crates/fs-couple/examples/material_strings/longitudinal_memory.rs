@@ -49,9 +49,6 @@ impl Input {
         let Some((resolution, _)) = &spec.longitudinal_waves else {
             return Err("longitudinal-memory requires retained longitudinal-waves".into());
         };
-        if spec.prepared_linear.is_some() {
-            return Err("longitudinal-memory requires the exact owner with material history".into());
-        }
         let mut states = 0usize;
         for wire in &spec.strings {
             let layers = match &wire.section {

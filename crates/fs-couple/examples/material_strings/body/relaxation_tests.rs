@@ -132,12 +132,13 @@ fn incomplete_unresolved_and_over_budget_material_history_refuses() {
             LOSS.replace("relaxed 32","relaxed 1")).as_bytes()).unwrap();
         assert!(spec().compile_with_body(cx,gate,Some(tiny),|name|Ok(if name=="body.fsmatpk" {
             body_pack(name,4e9,0.002,200_000.0,None)} else {pack(name,1.0,None)})).is_err());
-        let prepared=input::Spec::parse(include_bytes!("../longitudinal-cylinder-bow.material-strings")).unwrap();
+        let mut prepared=input::Spec::parse(include_bytes!("../longitudinal-cylinder-bow.material-strings")).unwrap();
+        prepared.prepared_linear.as_mut().unwrap().max_modes=1;
         let mut reads=0;
         assert!(prepared.compile_with_body(cx,gate,Some(memory_profile(false)),|name| {
             reads+=1;Ok(pack(name,1.0,None))
         }).is_err());
-        assert_eq!(reads,0,"unsupported prepared owner must refuse before material I/O");
+        assert_eq!(reads,0,"incomplete prepared mode allowance must refuse before material I/O");
     });
 }
 
@@ -156,4 +157,18 @@ fn optional_loss_grammar_is_bounded_and_never_ignores_extra_fields() {
         assert!(Profile::parse(format!("{body}{loss}\n").as_bytes()).is_err(),"accepted {loss}");
     }
     assert!(Profile::parse(format!("{body}{LOSS}\n{LOSS}\n").as_bytes()).is_err());
+}
+
+#[test]
+fn prepared_regional_body_memory_keeps_all_cross_mode_histories_and_pressure() {
+    scoped(|cx,gate| {
+        for regional in [false,true] {
+            let mut ordinary=spec();ordinary.samples=32;
+            let mut prepared=ordinary.clone();prepared.prepared_linear=Some(crate::tests::MEMORY_PREPARATION);
+            let actual=memory_ready(cx,gate,prepared,memory_profile(regional),2e9);
+            assert_eq!(actual.performance.bank().system().material_memory().len(),if regional {6}else{3});
+            crate::tests::assert_prepared_memory_parity(
+                memory_ready(cx,gate,ordinary,memory_profile(regional),2e9),actual);
+        }
+    });
 }

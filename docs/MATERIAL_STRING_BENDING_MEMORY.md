@@ -74,8 +74,8 @@ Library callers use `LayerBendingRelaxationProperties` from
 Construction binds body memory first, then string memory, after gas and axial
 coordinates have been selected. New string memories start relaxed. All original
 schedules, bow interfaces, stops, pressure observation and PCM callbacks remain
-in the same performer. `prepared-linear` is incompatible and refuses before
-material loading. No instrument preset is changed.
+in the same performer. An explicit `prepared-linear` selection retains these
+histories in the prepared owner, subject to its full state, byte and work budgets.
 
 ## One energy and dynamics owner
 
@@ -110,9 +110,14 @@ The public coupled owner's `with_prepared_linear_propagation` path retains all
 original mechanical and material coordinates in its augmented exponential,
 including when preparation precedes material binding. Its explicit augmented
 state, byte and multiply-work budgets remain binding. The `material_strings`
-performer's current `prepared-linear` input selection still refuses this
-bending-memory record before loading sources. The ordinary exact owner's
-combined state/setup/energy/Nyquist limits remain binding.
+performer selects this owner during body construction, before original string
+histories are restored, then attaches explicit layered, body and axial histories
+in their existing order. Declared dimensions, source-state ceilings and setup
+allowances are checked before source loading. Original bending plus torsional
+string histories still share the executable's 256-state ceiling. After source
+resolution, each positive history also counts in the prepared exponential,
+byte and work bounds. The ordinary exact owner's combined
+state/setup/energy/Nyquist limits remain binding.
 Source validity covers DC through the complete coupled instantaneous stiffness
 bound. Each material arm joins the exact coupled exponential, so fast decay
 does not impose a midpoint `dt/tau <= 2` restriction. The declared physical

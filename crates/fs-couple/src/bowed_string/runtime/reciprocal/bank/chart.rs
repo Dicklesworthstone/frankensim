@@ -74,7 +74,22 @@ impl ReciprocalStringBank {
         body: SharedMaterialPlateChartBody, cavity: Option<MaterialBodyCavity>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
-        Self::build_material_plate_chart(cx, sources, gas, body, cavity, law, options, gate, None, None)
+        Self::from_material_plate_chart_prepared(cx, sources, gas, body, cavity,
+            None, law, options, gate)
+    }
+
+    /// Select the shared ordinary or prepared owner before original string
+    /// histories are restored. The same retained plate basis, bridges and
+    /// source budgets are used by both owners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_plate_chart_prepared(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialPlateChartBody, cavity: Option<MaterialBodyCavity>,
+        prepared: impl Into<ModalPreparation>, law: FrictionLaw,
+        options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate_chart(cx, sources, gas, body, cavity, prepared.into(),
+            law, options, gate, None, None)
     }
 
     /// Keep every regional viscous cross term in the shared string/body/bow solve.
@@ -95,15 +110,29 @@ impl ReciprocalStringBank {
         limits: PlateViscosityLimits, cavity: Option<MaterialBodyCavity>,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
-        Self::build_material_plate_chart(cx, sources, gas, body, cavity, law, options,
-            gate, Some((viscosity, limits)), None)
+        Self::from_viscous_material_plate_chart_prepared(cx, sources, gas, body,
+            viscosity, limits, cavity, None, law, options, gate)
+    }
+
+    /// Preserve the full viscous matrix with preparation selected before any
+    /// original string material histories enter the shared connected state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_viscous_material_plate_chart_prepared(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialPlateChartBody, viscosity: PlateViscosity,
+        limits: PlateViscosityLimits, cavity: Option<MaterialBodyCavity>,
+        prepared: impl Into<ModalPreparation>, law: FrictionLaw,
+        options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate_chart(cx, sources, gas, body, cavity, prepared.into(),
+            law, options, gate, Some((viscosity, limits)), None)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn build_material_plate_chart(
         cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
         body: SharedMaterialPlateChartBody, cavity: Option<MaterialBodyCavity>,
-        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+        prepared: ModalPreparation, law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
         tensor: Option<(PlateViscosity, PlateViscosityLimits)>,
         footprints: Option<PlateBridgeFootprints>,
     ) -> Result<Self, ReciprocalStringError> {
@@ -169,7 +198,7 @@ impl ReciprocalStringBank {
             body.modal_budget, body.listener_m, cavity.as_ref(), None, gate)?;
         if let Some(v) = &viscous { image.body_connections.extend(v.damping().connections(0)); }
         let mut bank = super::plate::finish_material_body_with_ports(cx, sources, &body.bridges,
-            string_modes, gas, image, footprints.as_ref().map(|_| ports.as_slice()), None, law, options, gate)?;
+            string_modes, gas, image, footprints.as_ref().map(|_| ports.as_slice()), prepared, law, options, gate)?;
         bank.source.material_chart = Some(body);
         bank.source.material_chart_basis = Some(basis);
         bank.source.material_chart_viscosity = viscous;

@@ -147,7 +147,7 @@ impl Profile {
         match &self.model {
             BodyModel::Plate(_) if spec.body.modes > input::MAX_PLATE_BODY_MODES => Err(format!(
                 "flat plate body profiles admit 1..={} retained body modes", input::MAX_PLATE_BODY_MODES).into()),
-            BodyModel::Plate(plate) => plate.loss.preflight(spec),
+            BodyModel::Plate(_) => Ok(()),
             BodyModel::Shell(shell) => shell.preflight(spec),
             BodyModel::Assembly(assembly) => assembly.preflight(spec),
         }?;
@@ -241,7 +241,7 @@ impl Profile {
         let bank = match &self.model {
             BodyModel::Plate(_) if matches!(preparation, ModalPreparation::HarmonicOnly(_)) =>
                 return Err("loaded body-response-only requires a curved or assembled shell".into()),
-            BodyModel::Plate(plate) => plate.compile(spec, sources, catalog, loader, settings, cx, gate),
+            BodyModel::Plate(plate) => plate.compile(spec, sources, catalog, loader, settings, preparation, cx, gate),
             BodyModel::Shell(shell) => shell.compile_with_preparation(spec, sources, catalog, loader,
                 settings, preparation, cx, gate),
             BodyModel::Assembly(assembly) => assembly.compile_with_preparation(spec, sources, catalog,
@@ -386,9 +386,12 @@ impl PlateProfile {
     /// Build the same original elastic basis for every bridge/radiation map.
     /// Tensor viscosity is projected here; selected material memory is attached
     /// after the complete mechanical coordinates are fixed. No scalar loss is added.
+    /// Select preparation here so original string histories never enter a smaller
+    /// ordinary owner before the requested prepared realization is constructed.
     pub fn compile(&self, spec:&input::Spec, sources:Vec<MaterialStringSource>,
         catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<MaterialPack>,
-        settings:StringBankOptions, cx:&Cx<'_>, gate:&CancelGate) -> Result<ReciprocalStringBank>
+        settings:StringBankOptions, preparation:ModalPreparation, cx:&Cx<'_>, gate:&CancelGate)
+        -> Result<ReciprocalStringBank>
     {
         poll(gate)?;
         let inputs=self.region_inputs();
@@ -441,17 +444,17 @@ impl PlateProfile {
             reference_resistance_n_s_m:1.0 };
         Ok(match (spatial, viscosity) {
             (Some(footprints), Some(viscosity)) =>
-                ReciprocalStringBank::from_viscous_material_plate_chart_with_force_ports(cx,sources,spec.gas,
-                    body,footprints,viscosity,limits,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?,
+                ReciprocalStringBank::from_viscous_material_plate_chart_with_force_ports_prepared(cx,sources,spec.gas,
+                    body,footprints,viscosity,limits,spec.cavity.clone(),preparation,spec.bow_law(0)?.clone(),settings,gate)?,
             (None, Some(viscosity)) =>
-                ReciprocalStringBank::from_viscous_material_plate_chart(cx,sources,spec.gas,body,viscosity,
-                    limits,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?,
+                ReciprocalStringBank::from_viscous_material_plate_chart_prepared(cx,sources,spec.gas,body,viscosity,
+                    limits,spec.cavity.clone(),preparation,spec.bow_law(0)?.clone(),settings,gate)?,
             (Some(footprints), None) =>
-                ReciprocalStringBank::from_material_plate_chart_with_force_ports(cx,sources,spec.gas,
-                    body,footprints,spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?,
+                ReciprocalStringBank::from_material_plate_chart_with_force_ports_prepared(cx,sources,spec.gas,
+                    body,footprints,spec.cavity.clone(),preparation,spec.bow_law(0)?.clone(),settings,gate)?,
             (None, None) =>
-                ReciprocalStringBank::from_material_plate_chart(cx,sources,spec.gas,body,
-                    spec.cavity.clone(),spec.bow_law(0)?.clone(),settings,gate)?,
+                ReciprocalStringBank::from_material_plate_chart_prepared(cx,sources,spec.gas,body,
+                    spec.cavity.clone(),preparation,spec.bow_law(0)?.clone(),settings,gate)?,
         })
     }
     fn footprint(&self,node:(usize,usize))->Vec<f64> {

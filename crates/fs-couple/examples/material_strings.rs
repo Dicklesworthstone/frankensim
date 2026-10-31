@@ -445,22 +445,17 @@ impl input::Spec {
                 bridges:self.strings.iter().map(|w|w.bridge).collect(),modal_budget:modal_budget(),listener_m:self.body.listener,
             };
             match self.cavity.clone() {
-                Some(cavity)=>ReciprocalStringBank::from_material_plate_with_cavity(cx,sources,self.gas,body,cavity,
-                    self.bow_law(0)?.clone(),settings.clone(),gate)?,
-                None=>ReciprocalStringBank::from_material_plate(cx,sources,self.gas,body,self.bow_law(0)?.clone(),settings.clone(),gate)?,
+                Some(cavity)=>ReciprocalStringBank::from_material_plate_with_cavity_prepared(cx,sources,self.gas,body,cavity,
+                    preparation,self.bow_law(0)?.clone(),settings.clone(),gate)?,
+                None=>ReciprocalStringBank::from_material_plate_prepared(cx,sources,self.gas,body,
+                    preparation,self.bow_law(0)?.clone(),settings.clone(),gate)?,
             }
         };
         let bank = if self.bridge_interfaces.bindings().is_empty() { bank } else {
             bank.with_material_bridge_interfaces(self.bridge_interfaces.bindings().to_vec(), gate)?
         };
-        // Select the active prepared owner before either attachment can enlarge
-        // its connected linear block. No record means the ordinary owner.
-        // A shell body bank is already built on this record (it cannot exist without it); binding it again refuses.
-        let bank = match self.prepared_linear {
-            Some(budget) if bank.source().prepared_linear_budget().is_none() =>
-                bank.with_prepared_linear_propagation(budget, gate)?,
-            _ => bank,
-        };
+        // Every body route selects preparation during construction, before
+        // original string histories or later attachments enlarge its state.
         // Omitted bending modes in series with every bridge, before any stop binds (pexfp.299).
         let bank = if self.residual_flexibility { bank.with_residual_flexibility(gate)? } else { bank };
         let bank = if self.rotational_bridges.is_empty() { bank } else {

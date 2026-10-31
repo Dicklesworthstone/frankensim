@@ -66,6 +66,43 @@ fn pressure(ready:&mut Ready,block:usize)->Vec<f64> {
     let mut out=vec![0.0;ready.spec.samples as usize];
     for chunk in out.chunks_mut(block) {ready.performance.block(chunk).unwrap();}out
 }
+/// One explicit resource declaration for the small manufactured memory fixtures.
+pub(super) const MEMORY_PREPARATION: PreparedModalBudget = PreparedModalBudget {
+    max_modes:96, max_dense_bytes:134_217_728, max_multiply_terms:1_000_000_000_000,
+};
+
+/// Compare physical outputs and retained histories, allowing floating-point
+/// differences between independently prepared dense exponential realizations.
+pub(super) fn assert_prepared_memory_parity(mut ordinary:Ready,mut prepared:Ready) {
+    assert!(ordinary.performance.bank().source().bank().prepared_linear_budget().is_none());
+    assert_eq!(prepared.performance.bank().source().bank().prepared_linear_budget(),Some(MEMORY_PREPARATION));
+    let near=|what:&str,a:&[f64],b:&[f64]| {
+        assert_eq!(a.len(),b.len(),"{what} extent");
+        let scale=a.iter().chain(b).map(|v|v.abs()).fold(0.0_f64,f64::max).max(1e-24);
+        assert!(a.iter().zip(b).all(|(a,b)|a.is_finite() && b.is_finite()
+            && (a-b).abs()<=5e-7*scale),"prepared {what} changed the physical trajectory");
+    };
+    let a=pressure(&mut ordinary,1);let b=pressure(&mut prepared,37);
+    assert!(a.iter().any(|p|*p!=0.0));near("pressure",&a,&b);
+    let a=ordinary.performance.bank().system();let b=prepared.performance.bank().system();
+    assert_eq!(a.components().len(),b.components().len());
+    for (a,b) in a.components().iter().zip(b.components()) {
+        assert_eq!(a.modes(),b.modes());
+        near("displacement",&a.states().iter().map(|s|s.displacement_m_sqrt_kg).collect::<Vec<_>>(),
+            &b.states().iter().map(|s|s.displacement_m_sqrt_kg).collect::<Vec<_>>());
+        near("velocity",&a.states().iter().map(|s|s.velocity_m_sqrt_kg_per_s).collect::<Vec<_>>(),
+            &b.states().iter().map(|s|s.velocity_m_sqrt_kg_per_s).collect::<Vec<_>>());
+    }
+    near("linear material history",a.material_memory(),b.material_memory());
+    let am=a.nonlinear_material_memory();let bm=b.nonlinear_material_memory();
+    assert_eq!(am.len(),bm.len());
+    for (a,b) in am.iter().zip(&bm) {near("nonlinear material history",a,b);}
+    let af=a.last_frame().unwrap();let bf=b.last_frame().unwrap();
+    near("stored energy",&[af.network_energy_j],&[bf.network_energy_j]);
+    near("dissipation",&[af.network_dissipation_j],&[bf.network_dissipation_j]);
+    for frame in [af,bf] {assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);}
+}
+
 #[test]
 fn material_pack_to_physical_pressure_and_wav_uses_the_same_sample_history() {
     scoped(|cx,gate| {

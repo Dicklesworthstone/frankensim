@@ -73,11 +73,7 @@ impl Input {
         Ok(())
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
-        self.validate(&spec.strings)?;
-        if spec.prepared_linear.is_some() {
-            return Err("bending-memory requires the original exact owner; prepared-linear has no material strain states".into());
-        }
-        Ok(())
+        self.validate(&spec.strings)
     }
     /// Resolve one shared pack once with the union of explicitly selected
     /// properties. Body packs and unrelated string packs gain no requirement.

@@ -59,7 +59,19 @@ impl ReciprocalStringBank {
         body: SharedMaterialPlateBody, law: FrictionLaw,
         options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
-        Self::build_material_plate(cx, sources, gas, body, None, law, options, gate)
+        Self::from_material_plate_prepared(cx, sources, gas, body, None, law, options, gate)
+    }
+
+    /// Select the shared propagator before original string histories are bound.
+    /// Every mechanical coordinate and internal strain remains subject to the
+    /// selected mode, byte and work budgets. `None` retains the ordinary owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_plate_prepared(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialPlateBody, prepared: impl Into<ModalPreparation>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate(cx, sources, gas, body, None, prepared.into(), law, options, gate)
     }
 
     /// Add one shared body-air cavity and physical neck to ALL material strings.
@@ -79,21 +91,34 @@ impl ReciprocalStringBank {
         body: SharedMaterialPlateBody, cavity: MaterialBodyCavity,
         law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
-        Self::build_material_plate(cx, sources, gas, body, Some(cavity), law, options, gate)
+        Self::from_material_plate_with_cavity_prepared(cx, sources, gas, body, cavity,
+            None, law, options, gate)
+    }
+
+    /// The shared plate/cavity image with preparation selected before material
+    /// histories enlarge the connected state. No source or history is omitted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_plate_with_cavity_prepared(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialPlateBody, cavity: MaterialBodyCavity,
+        prepared: impl Into<ModalPreparation>, law: FrictionLaw,
+        options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate(cx, sources, gas, body, Some(cavity), prepared.into(), law, options, gate)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn build_material_plate(
         cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
         body: SharedMaterialPlateBody, cavity: Option<MaterialBodyCavity>,
-        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+        prepared: ModalPreparation, law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         let string_modes = material_body_preflight(&sources, &body.bridges,
             body.specimen.plate().n_modes, cavity.as_ref(), &options, gate)?;
         let image = reduce_material_body(&body.specimen, &gas, options.sample_rate_hz,
             body.modal_budget, body.listener_m, cavity.as_ref(), gate)?;
         let mut bank = finish_material_body(cx, sources, &body.bridges,
-            string_modes, gas, image, law, options, gate)?;
+            string_modes, gas, image, prepared, law, options, gate)?;
         bank.source.material_plate = Some(body);
         bank.source.material_cavity = cavity;
         poll(gate)?;
@@ -143,11 +168,12 @@ pub(super) fn material_body_preflight(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_material_body(
     cx: &Cx<'_>, sources: Vec<MaterialStringSource>, bridges: &[SharedPlateBridge],
-    string_modes: usize, gas: GasState, image: MaterialBodyImage, law: FrictionLaw,
+    string_modes: usize, gas: GasState, image: MaterialBodyImage,
+    prepared: ModalPreparation, law: FrictionLaw,
     options: StringBankOptions, gate: &CancelGate,
 ) -> Result<ReciprocalStringBank, ReciprocalStringError> {
     finish_material_body_with_ports(cx, sources, bridges, string_modes, gas, image,
-        None, None, law, options, gate)
+        None, prepared, law, options, gate)
 }
 
 // Common and spatial bridge inputs differ only in the physical attachment map.

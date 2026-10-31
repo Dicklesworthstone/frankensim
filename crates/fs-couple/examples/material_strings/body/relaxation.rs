@@ -95,12 +95,6 @@ impl PlateLoss {
         }
     }
     pub(super) fn is_tensor(&self) -> bool { matches!(self, Self::Tensor) }
-    pub(super) fn preflight(&self, spec: &input::Spec) -> Result<()> {
-        if !matches!(self, Self::Tensor) && spec.prepared_linear.is_some() {
-            return Err("body material memory requires the original exact owner; the selected prepared mechanical-only owner has no internal strain states".into());
-        }
-        Ok(())
-    }
     pub(super) fn requirements(&self, model: PlateMaterialModel) -> Result<Vec<Requirement>> {
         if matches!(self, Self::RegionalMaxwell { .. }) && matches!(model,
             PlateMaterialModel::IsotropicYoungShear | PlateMaterialModel::IsotropicBulkShear) {

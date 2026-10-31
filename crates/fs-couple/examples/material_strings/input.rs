@@ -1366,9 +1366,6 @@ impl Spec {
                     WireSection::Measured { .. } => return Err("measured whole strings do not supply layer relaxation laws".into()),
                     WireSection::Homogeneous | WireSection::CloseWound { .. } => 1,
                 };
-                if self.prepared_linear.is_some() {
-                    return Err("string material memory requires the exact owner; prepared-linear has no internal-strain states".into());
-                }
                 let arms = layers.checked_mul(properties.len())
                     .ok_or("complete layer relaxation-arm count overflow")?;
                 if arms > fs_material::section::relaxation::MAX_SECTION_RELAXATION_BRANCHES {
@@ -1382,9 +1379,6 @@ impl Spec {
                 if states > 256 {
                     return Err("complete declared string memory exceeds the original exact-state ceiling".into());
                 }
-            }
-            if wire.torsion_memory.is_some() && self.prepared_linear.is_some() {
-                return Err("torsional material memory requires the exact owner; prepared-linear has no internal-strain states".into());
             }
             states = states.checked_add(wire.torsion_memory_states()?)
                 .ok_or("complete string memory-state count overflow")?;

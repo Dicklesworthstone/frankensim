@@ -394,3 +394,20 @@ fn g0_cantilever_geometry_and_tensor_grammar_never_invent_missing_rows() {
         assert!(Profile::parse(text.as_bytes()).is_err());
     }
 }
+
+#[test]
+fn prepared_tensor_body_memory_retains_local_and_shared_realisations() {
+    scoped(|cx,gate| {
+        for text in [include_str!("../tensor-body.body"),include_str!("../tensor-body-shared.body")] {
+            let build=|preparation| {
+                let mut spec=tensor_spec();spec.samples=32;spec.prepared_linear=preparation;
+                spec.compile_with_body(cx,gate,Some(Profile::parse(text.as_bytes()).unwrap()),|name|
+                    Ok(if name=="tensor-blade.fsmatpk" {tensor_pack(3e8,0.001,0.02,"",100000.0)}
+                        else {pack(name,1.0,None)})).unwrap()
+            };
+            let actual=build(Some(crate::tests::MEMORY_PREPARATION));
+            assert!(!actual.performance.bank().system().material_memory().is_empty());
+            crate::tests::assert_prepared_memory_parity(build(None),actual);
+        }
+    });
+}

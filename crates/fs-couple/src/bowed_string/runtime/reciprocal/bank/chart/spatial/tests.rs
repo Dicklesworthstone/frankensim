@@ -111,7 +111,7 @@ fn drive() -> FrictionDrive { FrictionDrive { speed_m_s: 0.01, normal_force_n: 0
 fn build(cx: &Cx<'_>, gate: &CancelGate, b: SharedMaterialPlateChartBody,
     ports: Option<PlateBridgeFootprints>, tensor: bool) -> ReciprocalStringBank {
     let viscosity = tensor.then(|| (PlateViscosity::from_chart(&b.specimen, V, gate).unwrap(), limits()));
-    ReciprocalStringBank::build_material_plate_chart(cx, sources(), gas(), b, Some(cavity()), law(),
+    ReciprocalStringBank::build_material_plate_chart(cx, sources(), gas(), b, Some(cavity()), ModalPreparation::Ordinary, law(),
         options(), gate, viscosity, ports).unwrap()
 }
 
@@ -165,7 +165,7 @@ fn opposite_string_loads_do_not_cancel_at_distinct_physical_body_contacts() {
     scoped(|cx, gate| {
         let mut s = sources(); s[1] = s[0].clone();
         let make = |ports| ReciprocalStringBank::build_material_plate_chart(cx, s.clone(), gas(), body(),
-            Some(cavity()), law(), options(), gate, None, ports).unwrap();
+            Some(cavity()), ModalPreparation::Ordinary, law(), options(), gate, None, ports).unwrap();
         let mut common = make(None); let mut spatial = make(Some(footprints()));
         let mut forces = vec![0.0; spatial.system().mode_count()];
         forces[0] = 1e-4; forces[3] = -1e-4;
@@ -253,7 +253,7 @@ fn missing_invalid_detached_and_unfunded_footprints_refuse_without_fallback() {
             }
             let viscous = tensor.then(|| (PlateViscosity::from_chart(&b.specimen, V, gate).unwrap(), limits()));
             assert!(ReciprocalStringBank::build_material_plate_chart(cx, sources(), gas(), b,
-                Some(cavity()), law(), options(), gate, viscous, Some(ports)).is_err());
+                Some(cavity()), ModalPreparation::Ordinary, law(), options(), gate, viscous, Some(ports)).is_err());
         } }
     });
 }

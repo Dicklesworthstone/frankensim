@@ -56,8 +56,21 @@ impl ReciprocalStringBank {
         cavity: Option<MaterialBodyCavity>, law: FrictionLaw,
         options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
-        Self::build_material_plate_chart(cx, sources, gas, body, cavity, law,
-            options, gate, None, Some(footprints))
+        Self::from_material_plate_chart_with_force_ports_prepared(cx, sources, gas,
+            body, footprints, cavity, None, law, options, gate)
+    }
+
+    /// Spatial plate contacts with preparation selected before string history
+    /// restoration. Each original force footprint shares the same full state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_plate_chart_with_force_ports_prepared(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialPlateChartBody, footprints: PlateBridgeFootprints,
+        cavity: Option<MaterialBodyCavity>, prepared: impl Into<ModalPreparation>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate_chart(cx, sources, gas, body, cavity, prepared.into(),
+            law, options, gate, None, Some(footprints))
     }
 
     /// The same spatial attachments WITH full, source-bound viscous cross terms.
@@ -77,8 +90,22 @@ impl ReciprocalStringBank {
         cavity: Option<MaterialBodyCavity>, law: FrictionLaw,
         options: StringBankOptions, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
-        Self::build_material_plate_chart(cx, sources, gas, body, cavity, law,
-            options, gate, Some((viscosity, limits)), Some(footprints))
+        Self::from_viscous_material_plate_chart_with_force_ports_prepared(cx, sources,
+            gas, body, footprints, viscosity, limits, cavity, None, law, options, gate)
+    }
+
+    /// Spatial contacts and complete viscous cross terms with the propagator
+    /// chosen before original material histories enlarge the connected state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_viscous_material_plate_chart_with_force_ports_prepared(
+        cx: &Cx<'_>, sources: Vec<MaterialStringSource>, gas: GasState,
+        body: SharedMaterialPlateChartBody, footprints: PlateBridgeFootprints,
+        viscosity: PlateViscosity, limits: PlateViscosityLimits,
+        cavity: Option<MaterialBodyCavity>, prepared: impl Into<ModalPreparation>,
+        law: FrictionLaw, options: StringBankOptions, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        Self::build_material_plate_chart(cx, sources, gas, body, cavity, prepared.into(),
+            law, options, gate, Some((viscosity, limits)), Some(footprints))
     }
 }
 

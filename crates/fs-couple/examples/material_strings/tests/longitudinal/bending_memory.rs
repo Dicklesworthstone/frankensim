@@ -86,16 +86,15 @@ fn malformed_memory_and_incompatible_backend_refuse_without_source_io() {
         assert!(input::Spec::parse(text.replace(MEMORY,record).as_bytes()).is_err());
     }
     assert!(input::Spec::parse(text.replace(RECORD,
-        &format!("prepared-linear 64 67108864 200000000000\n{RECORD}")).as_bytes()).is_err());
+        &format!("prepared-linear 64 67108864 200000000000\n{RECORD}")).as_bytes()).is_ok());
     scoped(|cx,gate| {
         let missing=text.replace("bending_delta bending_time","bending_delta absent_time");
         assert!(build(cx,gate,&missing,40e9,0.004).is_err());
         assert!(build(cx,gate,&text,-1.0,0.004).is_err());
         assert!(build(cx,gate,&text,40e9,0.0).is_err());
-        // Programmatic mutation cannot bypass parser-side refusal.
+        // Programmatic input still obeys the complete prepared mode allowance.
         let mut spec=input::Spec::parse(text.as_bytes()).unwrap();
-        spec.prepared_linear=Some(PreparedModalBudget {max_modes:64,max_dense_bytes:67108864,
-            max_multiply_terms:200000000000});
+        spec.prepared_linear=Some(PreparedModalBudget {max_modes:1,..MEMORY_PREPARATION});
         let mut reads=0;
         assert!(spec.compile(cx,gate,|name| {reads+=1;Ok(pack(name,7800.0,200_000.0,None))}).is_err());
         assert_eq!(reads,0);
