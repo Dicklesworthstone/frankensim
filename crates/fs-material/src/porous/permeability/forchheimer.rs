@@ -16,6 +16,8 @@ use super::{
     MaterialError, PorousGasLayer, PorousGasSupport, dot, invalid, nonnegative, positive, unit,
 };
 
+mod source;
+
 /// Explicit, immutable calibration of beta [1/m] in rho*beta*|q|q.
 ///
 /// q is superficial velocity through the total area, not pore velocity. The
@@ -31,6 +33,7 @@ pub struct ForchheimerCalibration {
     flow_constraint: DarcyFlowConstraint,
     support: PorousGasSupport,
     provenance: String,
+    source: Option<std::sync::Arc<source::ForchheimerSource>>,
 }
 
 impl ForchheimerCalibration {
@@ -60,6 +63,7 @@ impl ForchheimerCalibration {
             flow_constraint,
             support,
             provenance,
+            source: None,
         })
     }
 
@@ -138,6 +142,7 @@ impl PorousGasLayer {
         &self,
         calibration: ForchheimerCalibration,
     ) -> Result<Self, MaterialError> {
+        calibration.admit_layer_source(self)?;
         if calibration.beta_per_m > 0.0
             && (self.klinkenberg_slip_pa != 0.0 || self.wet_state.is_some())
         {

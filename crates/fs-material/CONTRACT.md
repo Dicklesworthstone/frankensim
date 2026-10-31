@@ -7362,3 +7362,29 @@ large-reservoir limits, disconnected seals, capacity-cache identity and
 transactional cancellation; all fifteen original/new numerical tests passed
 against the actual coefficient/slab/finite sources and original tridiagonal
 solver in the focused native lane.
+
+### Material-source calibration of porous inertial resistance
+
+`ForchheimerCalibration::from_material` selects the actual constant beta [1/m]
+from an existing resolved material bundle; `PorousGasLayer::with_material_forchheimer`
+selects it directly from the same bundle as intrinsic k. The complete original
+card, selected claim, observations, uncertainty, query coordinates and quantity
+metadata remain attached through an immutable shared source binding. This adds
+no Ergun fit, dimensionless-to-dimensional conversion or inferred fluid identity.
+
+Only exact inverse-metre, nonnegative validity-wide constant beta is admitted.
+Its original source temperature/absolute-pressure domain intersects the existing
+calibration support. An explicitly dimensional `superficial_speed` [m/s] axis
+can tighten the maximum speed consumed by the existing gas, frozen-graph and
+liquid owners. Pore velocity, unowned evolving coordinates and a source speed
+range excluding zero refuse. Direction and transverse constraint still require
+explicit calibration applicability; wrong specimen card, query context or
+quantity metadata cannot be attached to the original permeability layer.
+
+The existing scalar-authored API, anisotropic geometry, exact Darcy limit and
+wet/slip exclusions remain in force. Observation-backed synthetic regressions
+check original source retention, actual beta-dependent gas/continuum pressure
+loss, wrong quantity/curve/domain refusal and specimen/context/direction
+substitution. Three exact original source-domain tests passed in the focused
+native lane; complete material-card integration execution is not implied by
+those narrower domain checks.
