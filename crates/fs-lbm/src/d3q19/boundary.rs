@@ -767,6 +767,23 @@ impl BoundaryGrid3 {
         self.collision_model
     }
 
+    /// Refresh uniform viscous relaxation without replacing the evolving fluid.
+    ///
+    /// Populations, boundary topology, forcing and reusable work buffers are
+    /// preserved. The original collision family owns the rate conversion:
+    /// its higher-order rates stay unchanged, including D3Q19's existing tie
+    /// between shear and bulk second-order relaxation. This only changes the
+    /// next collision; it does not change density units or supply heat.
+    ///
+    /// # Errors
+    /// Refuses invalid or unrepresentable relaxation before changing any state.
+    pub fn rebind_shear_relaxation(&mut self, tau: f64) -> Result<(), CollisionError3> {
+        use crate::lattice3::{D3q19, ViscousLattice3};
+        let updated = D3q19::with_shear_relaxation(self.collision_model, tau)?;
+        self.collision_model = updated;
+        Ok(())
+    }
+
     /// Boundary specification used by the grid.
     #[must_use]
     pub const fn boundaries(&self) -> BoundarySpec3 {

@@ -8,7 +8,7 @@
 
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{
-    BodyFrameSampler3, BoundaryGrid3, BoundarySpec3, FaceBoundary3,
+    BodyFrameSampler3, BoundaryGrid3, BoundarySpec3, CollisionError3, FaceBoundary3,
     MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3, PartialSaturationError3,
     SphereLubrication3, TILE,
 };
@@ -29,6 +29,8 @@ pub enum MaterialImmersedError {
     Geometry(MaterialInertiaError),
     /// Original simultaneous flow/body owner refused, including cancellation.
     Native(PartialSaturationError3),
+    /// Original collision owner refused a live uniform transport update.
+    Relaxation(CollisionError3),
 }
 impl core::fmt::Display for MaterialImmersedError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -134,7 +136,7 @@ pub struct SphereStateSi {
     pub angular_momentum_body_kg_m2_s: [f64; 3],
 }
 
-/// Frozen Newtonian fluid and sourced carriers on ONE native motion solver.
+/// Newtonian fluid and sourced carriers on ONE native motion solver.
 ///
 /// The reference density maps to lattice density one. Thus the physical mass
 /// unit is rho*dx^3 and mu_lattice = mu*dt/(rho*dx^2) = nu_lattice. This equality
@@ -153,14 +155,15 @@ pub struct RetainedFluidSpheres<'a, F: FluidTransport + ?Sized, const N: usize> 
     impulse_unit: f64,
     angular_impulse_unit: f64,
     energy_unit: f64,
+    maximum_speed_m_s: f64,
     accepted_steps: u64,
 }
 
 impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F, N> {
     /// Construct a quiescent fluid and its material-derived moving carriers.
-    /// Source replacement builds a NEW model, never silently changes the mass
-    /// or momentum of an existing trajectory. Density, temperature and transport
-    /// stay frozen; this is not a thermal/phase or variable-density FSI closure.
+    /// The source stays fixed until an explicit [`Self::rebind_fluid`] call.
+    /// Density and lattice units remain fixed throughout a trajectory; this
+    /// is not a thermal/phase or variable-density FSI closure.
     pub fn new(
         fluid: &'a F,
         domain: ImmersedDomain,
@@ -270,11 +273,58 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
             impulse_unit,
             angular_impulse_unit,
             energy_unit,
+            maximum_speed_m_s: domain.maximum_speed_m_s,
             accepted_steps: 0,
         })
     }
 
-    /// Original source, receipts and one frozen transport snapshot.
+    /// Refresh bulk flow and every missing-film resistance from ONE new source.
+    ///
+    /// The accepted populations, poses, momenta, additional material inertia,
+    /// geometric quadrature, film cutoffs and physical clock are preserved
+    /// exactly. The next native step uses the new viscosity in both resolved
+    /// flow and all normal/tangential film modes. Density must remain bitwise
+    /// unchanged: replacing its unit conversion would silently change actual
+    /// fluid mass and momentum. The original dx/dt and speed admission remain.
+    ///
+    /// This explicit coefficient update can consume an independently evolved
+    /// temperature/composition snapshot; it does not itself evolve either or
+    /// assign dissipation to a finite heat store. There are no thermal
+    /// populations here, so heat capacity and conductivity are retained source
+    /// properties without an implied enthalpy transfer. Transport stays held
+    /// during each native step; assess time refinement for varying viscosity.
+    ///
+    /// # Errors
+    /// Invalid source/scaling, changed density, or cancellation preserves the
+    /// complete accepted material and mechanical/fluid state.
+    pub fn rebind_fluid(&mut self, fluid: &'a F, gate: &CancelGate) -> Result<(), Error> {
+        poll(gate)?;
+        let scaling = plan_scaling_from_material(
+            fluid,
+            self.scaling.cell_size_m(),
+            self.scaling.timestep_s(),
+            self.maximum_speed_m_s,
+        )?;
+        if scaling.transport().density_kg_m3().to_bits()
+            != self.scaling.transport().density_kg_m3().to_bits()
+        {
+            return Err(Error::Invalid(
+                "live fluid density changes require conservative mass and momentum transfer",
+            ));
+        }
+        let film = self.film.with_dynamic_viscosity(scaling.flow().viscosity)?;
+        poll(gate)?;
+        // The native rate owner admits its candidate before mutation. No
+        // fallible operation follows this first publication.
+        self.grid
+            .rebind_shear_relaxation(scaling.flow().tau)
+            .map_err(Error::Relaxation)?;
+        self.film = film;
+        self.scaling = scaling;
+        Ok(())
+    }
+
+    /// Current original source, receipts and the one shared transport snapshot.
     pub const fn scaling(&self) -> &MaterialScaling<'a, F> {
         &self.scaling
     }

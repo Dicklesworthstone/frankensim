@@ -185,6 +185,187 @@ fn momentum(model: &RetainedFluidSpheres<'_, ResolvedLiquidState, 2>) -> [f64; 3
 }
 
 #[test]
+fn live_material_refresh_preserves_history_and_changes_bulk_and_film_together() {
+    let first = fluid(1000.0, 0.11);
+    let second = fluid(1000.0, 0.22);
+    let carrier = body(3000.0);
+    let gate = CancelGate::new();
+    let mut model = assembly(&first, &carrier);
+    let mut held = assembly(&first, &carrier);
+    for _ in 0..2 {
+        let a = model
+            .step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate)
+            .unwrap();
+        let b = held.step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate).unwrap();
+        assert_eq!(a, b);
+    }
+    let populations = snapshot(&model);
+    let bodies = *model.bodies_lattice();
+    let before = momentum(&model);
+    let mass_unit = model.mass_kg(1.0).unwrap();
+    let energy_unit = model.energy_j(1.0).unwrap();
+    model.rebind_fluid(&second, &gate).unwrap();
+    assert!(core::ptr::eq(model.scaling().material(), &second));
+    assert_eq!(model.accepted_steps(), 2);
+    assert_eq!(snapshot(&model), populations);
+    assert_eq!(model.bodies_lattice(), &bodies);
+    assert_eq!(momentum(&model), before);
+    assert_eq!(model.mass_kg(1.0).unwrap(), mass_unit);
+    assert_eq!(model.energy_j(1.0).unwrap(), energy_unit);
+    close(
+        model.grid().viscosity(),
+        0.22 / 1000.0 * DT / DX.powi(2),
+        1e-16,
+    );
+
+    let report = model
+        .step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate)
+        .unwrap();
+    held.step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate).unwrap();
+    assert_ne!(snapshot(&model), snapshot(&held));
+    assert_ne!(model.bodies_lattice(), held.bodies_lattice());
+    assert_eq!(report.coupling.lubrication.active_pairs, 1);
+    let gap = (report.bodies[1].midpoint_center[0] - report.bodies[0].midpoint_center[0]) * DX
+        - 2.0 * RADIUS;
+    let relative = (report.coupling.bodies[0].velocity_midpoint[0]
+        - report.coupling.bodies[1].velocity_midpoint[0])
+        * DX
+        / DT;
+    // SI asymptote independently uses the NEW viscosity and ACTUAL midpoint
+    // gap/speed. Updating only the bulk or only a source receipt fails here.
+    let resistance = 6.0
+        * core::f64::consts::PI
+        * 0.22
+        * (RADIUS / 2.0).powi(2)
+        * (1.0 / gap.max(film().roughness_gap_m) - 1.0 / film().cutoff_gap_m);
+    close(
+        model
+            .impulse_ns(report.coupling.lubrication.body_impulses[0][0])
+            .unwrap(),
+        -resistance * relative * DT,
+        2e-20,
+    );
+    close(
+        model
+            .energy_j(report.coupling.lubrication.dissipated_energy)
+            .unwrap(),
+        resistance * relative.powi(2) * DT,
+        2e-23,
+    );
+    let after = momentum(&model);
+    for axis in 0..3 {
+        close(after[axis], before[axis], 3e-13);
+    }
+    assert_eq!(model.accepted_steps(), 3);
+}
+
+#[test]
+fn rejected_refresh_and_same_source_retry_keep_the_original_trajectory() {
+    let first = fluid(1000.0, 0.11);
+    let second = fluid(1000.0, 0.22);
+    let foreign_density = fluid(2000.0, 0.22);
+    let unresolved_viscosity = fluid(1000.0, 1e-20);
+    let carrier = body(3000.0);
+    let gate = CancelGate::new();
+    let stopped = CancelGate::new();
+    stopped.request();
+    let mut model = assembly(&first, &carrier);
+    let mut reference = assembly(&first, &carrier);
+    let loads = [[2e-6, 0.0, 0.0, 0.0, 0.0, 1e-10], [0.0; 6]];
+    model.step_forces_si(loads, [0.0; 3], &gate).unwrap();
+    reference.step_forces_si(loads, [0.0; 3], &gate).unwrap();
+    let populations = snapshot(&model);
+    let bodies = *model.bodies_lattice();
+    let collision = model.grid().collision_model();
+    assert!(matches!(
+        model.rebind_fluid(&foreign_density, &gate),
+        Err(MaterialImmersedError::Invalid(
+            "live fluid density changes require conservative mass and momentum transfer"
+        ))
+    ));
+    assert!(matches!(
+        model.rebind_fluid(&second, &stopped),
+        Err(MaterialImmersedError::Native(
+            PartialSaturationError3::Cancelled
+        ))
+    ));
+    assert!(matches!(
+        model.rebind_fluid(&unresolved_viscosity, &gate),
+        Err(MaterialImmersedError::Scaling(_))
+    ));
+    assert!(core::ptr::eq(model.scaling().material(), &first));
+    assert_eq!(snapshot(&model), populations);
+    assert_eq!(model.bodies_lattice(), &bodies);
+    assert_eq!(model.grid().collision_model(), collision);
+    assert_eq!(model.accepted_steps(), 1);
+    model.rebind_fluid(&first, &gate).unwrap();
+    assert_eq!(
+        model.step_forces_si(loads, [0.0; 3], &gate).unwrap(),
+        reference.step_forces_si(loads, [0.0; 3], &gate).unwrap()
+    );
+    assert_eq!(snapshot(&model), snapshot(&reference));
+    assert_eq!(model.bodies_lattice(), reference.bodies_lattice());
+    // A later valid intervention is independent of all refused trials.
+    model.rebind_fluid(&second, &gate).unwrap();
+    reference.rebind_fluid(&second, &gate).unwrap();
+    assert_eq!(
+        model.step_forces_si(loads, [0.0; 3], &gate).unwrap(),
+        reference.step_forces_si(loads, [0.0; 3], &gate).unwrap()
+    );
+}
+
+#[test]
+fn native_refresh_preserves_collision_family_higher_rates_and_populations() {
+    use fs_lbm::d3q19::{BoundaryGrid3, BoundarySpec3, CollisionModel3, FaceBoundary3};
+    let models = [
+        (
+            CollisionModel3::Bgk { tau: 0.8 },
+            CollisionModel3::Bgk { tau: 1.25 },
+        ),
+        (
+            CollisionModel3::CentralMoment {
+                second_order_rate: 1.25,
+                higher_order_rate: 0.9,
+            },
+            CollisionModel3::CentralMoment {
+                second_order_rate: 0.8,
+                higher_order_rate: 0.9,
+            },
+        ),
+        (
+            CollisionModel3::ReducedCumulant {
+                second_order_rate: 1.25,
+                third_order_rate: 0.9,
+                fourth_order_rate: 1.1,
+            },
+            CollisionModel3::ReducedCumulant {
+                second_order_rate: 0.8,
+                third_order_rate: 0.9,
+                fourth_order_rate: 1.1,
+            },
+        ),
+    ];
+    for (initial, updated) in models {
+        let boundaries = BoundarySpec3::new([FaceBoundary3::Periodic; 6]);
+        let mut grid =
+            BoundaryGrid3::with_collision_model(4, 4, 4, initial, [1e-6, -2e-6, 3e-6], boundaries);
+        let mut populations = grid.populations(1, 1, 1);
+        populations[1] += 1e-4;
+        populations[2] -= 1e-4;
+        grid.set_populations(1, 1, 1, &populations);
+        grid.rebind_shear_relaxation(1.25).unwrap();
+        assert_eq!(grid.collision_model(), updated);
+        assert_eq!(grid.populations(1, 1, 1), populations);
+        assert_eq!(grid.boundaries(), boundaries);
+        for tau in [0.5, 0.0, f64::INFINITY, f64::NAN] {
+            assert!(grid.rebind_shear_relaxation(tau).is_err());
+            assert_eq!(grid.collision_model(), updated);
+            assert_eq!(grid.populations(1, 1, 1), populations);
+        }
+    }
+}
+
+#[test]
 fn material_substitutions_drive_bulk_film_inertia_and_the_real_motion_together() {
     let mut endpoints = Vec::new();
     for (fluid_density, viscosity, carrier_density) in [

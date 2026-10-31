@@ -122,6 +122,23 @@ impl SphereLubrication3 {
         Ok(self)
     }
 
+    /// Refresh the same fluid's viscosity while preserving film geometry,
+    /// regularization, tangential terms and work limits.
+    ///
+    /// This changes no accepted body or fluid history. A material adapter must
+    /// update resolved-fluid viscosity from the same physical snapshot before
+    /// the next coupled step; this method does not infer that correspondence.
+    ///
+    /// # Errors
+    /// Refuses nonpositive or nonfinite dynamic viscosity before mutation.
+    pub fn with_dynamic_viscosity(mut self, dynamic_viscosity: f64) -> Result<Self> {
+        if !dynamic_viscosity.is_finite() || dynamic_viscosity <= 0.0 {
+            return Err(invalid("invalid sphere lubrication viscosity"));
+        }
+        self.dynamic_viscosity = dynamic_viscosity;
+        Ok(self)
+    }
+
     pub(in crate::d3q19::boundary) fn admit<const N: usize>(self, radii: [f64; N]) -> Result<()> {
         if N == 0 || N > 64 || !radii.into_iter().all(|r| r.is_finite() && r > 0.0) {
             return Err(invalid(
