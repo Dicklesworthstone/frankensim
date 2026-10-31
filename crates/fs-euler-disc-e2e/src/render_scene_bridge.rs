@@ -26,7 +26,8 @@ use fs_render::camera::{AnimatedCamera, CameraError, CutSide, KeyframeFocus};
 use fs_render::charts::TriMesh;
 use fs_render::conductor::{ConductorError, ConductorOptics, ConductorSurface};
 use fs_render::dielectric::{
-    BeerLambertParameters, DielectricError, DielectricGlass, DielectricSurface, GlassProvenance,
+    BeerLambertParameters, DielectricError, DielectricGlass, DielectricIor, DielectricSurface,
+    GlassProvenance,
 };
 use fs_render::instances::{GeometryInstance, InstanceError, RigidTransform, SharedGeometry};
 use fs_render::lighting::{EnvironmentMap, LightingError};
@@ -3391,9 +3392,23 @@ fn hash_material(hasher: &mut DomainHasher, style: EulerMaterialStyle) {
             hasher.update(&alpha.to_bits().to_le_bytes());
         }
         EulerMaterialStyle::Dielectric { glass, surface } => {
-            hasher.update(&[2]);
-            for coefficient in glass.ior().coefficients() {
-                hasher.update(&coefficient.to_bits().to_le_bytes());
+            match glass.ior() {
+                DielectricIor::Cauchy(law) => {
+                    hasher.update(&[2]);
+                    for coefficient in law.coefficients() {
+                        hasher.update(&coefficient.to_bits().to_le_bytes());
+                    }
+                }
+                DielectricIor::Sellmeier(_) => {
+                    // Additive law identity; existing Cauchy scene bytes stay frozen.
+                    hasher.update(&[4]);
+                    hasher.update(
+                        Material::Dielectric { glass, surface }
+                            .content_identity()
+                            .as_bytes(),
+                    );
+                    return;
+                }
             }
             match glass.absorption().parameters() {
                 BeerLambertParameters::Clear => hasher.update(&[0]),

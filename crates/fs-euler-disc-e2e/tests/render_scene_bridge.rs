@@ -39,7 +39,9 @@ use fs_render::camera::{
 };
 use fs_render::charts::TriMesh;
 use fs_render::conductor::{ConductorOptics, ConductorProvenance, ConductorSurface};
-use fs_render::dielectric::{CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance};
+use fs_render::dielectric::{
+    CauchyIor, DielectricGlass, DielectricIor, DielectricSurface, GlassProvenance,
+};
 use fs_render::instances::SharedGeometry;
 use fs_render::motion::{ShutterConvention, ShutterDistribution};
 use fs_render::tracer::{
@@ -1869,7 +1871,10 @@ fn e2e_zero_width_frame_traces_real_pixels_and_round_trips_exr_deterministically
         assert_eq!(cinematic.spp_done, settings.spp);
 
         let crown = DielectricGlass::representative_crown();
-        let [_, crown_b_um2, crown_c_um4] = crown.ior().coefficients();
+        let DielectricIor::Cauchy(crown_law) = crown.ior() else {
+            panic!("representative crown fixture must retain its declared Cauchy law");
+        };
+        let [_, crown_b_um2, crown_c_um4] = crown_law.coefficients();
         let low_index_ior = CauchyIor::try_new(1.0, crown_b_um2, crown_c_um4)
             .expect("same-dispersion-class low-index control");
         assert!(crown.ior().is_dispersive() && low_index_ior.is_dispersive());

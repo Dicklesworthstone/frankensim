@@ -103,6 +103,16 @@ impl CauchyIor {
         Ok(self.eval_unchecked(wavelength_nm))
     }
 
+    /// Narrowband group index `n_g = n - lambda dn/dlambda`.
+    pub fn group_index(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        validate_wavelength(wavelength_nm)?;
+        let wavelength_um = wavelength_nm * 1.0e-3;
+        let inverse_square = 1.0 / (wavelength_um * wavelength_um);
+        Ok(self.a
+            + 3.0 * self.b_um2 * inverse_square
+            + 5.0 * self.c_um4 * inverse_square * inverse_square)
+    }
+
     /// Canonical `(A, B_um2, C_um4)` parameters for content identity.
     #[must_use]
     pub const fn coefficients(self) -> [f64; 3] {
@@ -119,6 +129,163 @@ impl CauchyIor {
         let wavelength_um = wavelength_nm * 1.0e-3;
         let inverse_square = 1.0 / (wavelength_um * wavelength_um);
         self.a + self.b_um2 * inverse_square + self.c_um4 * inverse_square * inverse_square
+    }
+}
+
+/// Three-oscillator Sellmeier dispersion:
+/// `n²(lambda_um) = 1 + sum B_i lambda_um² / (lambda_um² - C_i)`.
+///
+/// Coefficients describe an absolute phase index at vacuum wavelengths. Importers
+/// must convert/refit air-relative catalog data before claiming absolute accuracy;
+/// accepting coefficients does not authenticate a measurement. The transparent
+/// visible-band model admits nonnegative oscillator strengths and squared
+/// resonances, no active pole in 380--780 nm, and phase indices in `[1, 3]`.
+/// Absorption resonances and anomalous dispersion require a complex-index model.
+///
+/// With `B_i, C_i >= 0`, every active term is nonincreasing between its poles.
+/// Endpoint checks therefore cover the whole pole-free band in real arithmetic,
+/// rather than overlooking resonances between a finite set of samples. Floating
+/// point evaluation is checked separately and is not an interval certificate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SellmeierIor {
+    strengths: [f64; 3],
+    resonances_um2: [f64; 3],
+}
+
+impl SellmeierIor {
+    /// Admit dimensionless strengths and squared resonance wavelengths in µm².
+    pub fn try_new(strengths: [f64; 3], resonances_um2: [f64; 3]) -> Result<Self, DielectricError> {
+        let min_square = (LAMBDA_MIN * 1.0e-3) * (LAMBDA_MIN * 1.0e-3);
+        let max_square = (LAMBDA_MAX * 1.0e-3) * (LAMBDA_MAX * 1.0e-3);
+        let mut candidate = Self {
+            strengths,
+            resonances_um2,
+        };
+        for i in 0..3 {
+            let strength = strengths[i];
+            let resonance = resonances_um2[i];
+            if !strength.is_finite()
+                || strength < 0.0
+                || !resonance.is_finite()
+                || resonance < 0.0
+                || (strength > 0.0 && (min_square..=max_square).contains(&resonance))
+            {
+                return Err(DielectricError::InvalidIor);
+            }
+            // An absent oscillator has no physical resonance and must not leave
+            // an arbitrary pole or signed zero in material identity.
+            if strength == 0.0 {
+                candidate.strengths[i] = 0.0;
+                candidate.resonances_um2[i] = 0.0;
+            } else if resonance == 0.0 {
+                candidate.resonances_um2[i] = 0.0;
+            }
+        }
+        candidate.eval(LAMBDA_MIN)?;
+        candidate.eval(LAMBDA_MAX)?;
+        Ok(candidate)
+    }
+
+    /// Evaluate the visible-band absolute phase index at a vacuum wavelength.
+    pub fn eval(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        validate_wavelength(wavelength_nm)?;
+        let wavelength_um = wavelength_nm * 1.0e-3;
+        let square = wavelength_um * wavelength_um;
+        let mut index_squared = 1.0;
+        for i in 0..3 {
+            index_squared += self.strengths[i] * (square / (square - self.resonances_um2[i]));
+        }
+        if !index_squared.is_finite()
+            || !(1.0..=MAX_GLASS_IOR * MAX_GLASS_IOR).contains(&index_squared)
+        {
+            return Err(DielectricError::InvalidIor);
+        }
+        Ok(det::sqrt(index_squared))
+    }
+
+    /// Group index `n_g = n - lambda dn/dlambda` for a narrowband wave packet.
+    ///
+    /// Refraction uses the phase index returned by [`Self::eval`]. This
+    /// derivative exposes dispersive propagation diagnostics, not a transient
+    /// light-transport or pulse-broadening solver.
+    pub fn group_index(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        let phase = self.eval(wavelength_nm)?;
+        let wavelength_um = wavelength_nm * 1.0e-3;
+        let square = wavelength_um * wavelength_um;
+        let mut correction = 0.0;
+        for i in 0..3 {
+            let denominator = square - self.resonances_um2[i];
+            correction +=
+                self.strengths[i] * (self.resonances_um2[i] / denominator) * (square / denominator);
+        }
+        let group = phase + correction / phase;
+        if !group.is_finite() {
+            return Err(DielectricError::InvalidIor);
+        }
+        Ok(group)
+    }
+
+    /// Canonical strengths and squared resonance wavelengths in µm².
+    #[must_use]
+    pub const fn coefficients(self) -> ([f64; 3], [f64; 3]) {
+        (self.strengths, self.resonances_um2)
+    }
+
+    /// Whether the phase index changes over the admitted visible interval.
+    #[must_use]
+    pub fn is_dispersive(self) -> bool {
+        self.strengths
+            .into_iter()
+            .zip(self.resonances_um2)
+            .any(|(strength, resonance)| strength > 0.0 && resonance > 0.0)
+    }
+}
+
+/// One spectral phase-index law shared by all dielectric transport paths.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DielectricIor {
+    /// Positive visible-band Cauchy approximation.
+    Cauchy(CauchyIor),
+    /// Transparent-band Sellmeier oscillator model.
+    Sellmeier(SellmeierIor),
+}
+
+impl DielectricIor {
+    /// Absolute phase index used by Fresnel and Snell transport.
+    pub fn eval(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        match self {
+            Self::Cauchy(law) => law.eval(wavelength_nm),
+            Self::Sellmeier(law) => law.eval(wavelength_nm),
+        }
+    }
+
+    /// Narrowband group index; geometry and Fresnel still use the phase index.
+    pub fn group_index(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        match self {
+            Self::Cauchy(law) => law.group_index(wavelength_nm),
+            Self::Sellmeier(law) => law.group_index(wavelength_nm),
+        }
+    }
+
+    /// Whether the phase index varies over the visible band.
+    #[must_use]
+    pub fn is_dispersive(self) -> bool {
+        match self {
+            Self::Cauchy(law) => law.is_dispersive(),
+            Self::Sellmeier(law) => law.is_dispersive(),
+        }
+    }
+}
+
+impl From<CauchyIor> for DielectricIor {
+    fn from(law: CauchyIor) -> Self {
+        Self::Cauchy(law)
+    }
+}
+
+impl From<SellmeierIor> for DielectricIor {
+    fn from(law: SellmeierIor) -> Self {
+        Self::Sellmeier(law)
     }
 }
 
@@ -401,7 +568,7 @@ pub enum GlassProvenance {
 /// A validated homogeneous dielectric medium.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DielectricGlass {
-    ior: CauchyIor,
+    ior: DielectricIor,
     absorption: BeerLambertAbsorption,
     provenance: GlassProvenance,
 }
@@ -409,13 +576,13 @@ pub struct DielectricGlass {
 impl DielectricGlass {
     /// Construct a custom homogeneous medium from already validated parts.
     #[must_use]
-    pub const fn new(
-        ior: CauchyIor,
+    pub fn new(
+        ior: impl Into<DielectricIor>,
         absorption: BeerLambertAbsorption,
         provenance: GlassProvenance,
     ) -> Self {
         Self {
-            ior,
+            ior: ior.into(),
             absorption,
             provenance,
         }
@@ -467,7 +634,7 @@ impl DielectricGlass {
 
     /// Spectral phase-index law.
     #[must_use]
-    pub const fn ior(self) -> CauchyIor {
+    pub const fn ior(self) -> DielectricIor {
         self.ior
     }
 
@@ -1134,6 +1301,124 @@ mod tests {
             (observed - expected).abs() <= tolerance,
             "{context}: observed {observed:.17e}, expected {expected:.17e}"
         );
+    }
+
+    fn sellmeier_reference() -> SellmeierIor {
+        // SCHOTT N-BK7 catalog coefficients, used only as an algebra oracle:
+        // https://www.schott.com/en-gb/products/optical-glass/-/media/Project/OnEx/Products/O/optical-glass/Downloads/schott-optical-glass-collection-datasheets-english-may2019.pdf
+        // Catalog n is relative to air (TIE-29), so this does not certify an
+        // absolute-index specimen or an atmospheric conversion.
+        SellmeierIor::try_new(
+            [1.039_612_12, 0.231_792_344, 1.010_469_45],
+            [0.006_000_698_67, 0.020_017_914_4, 103.560_653],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn g2_sellmeier_catalog_algebra_matches_independent_index_table() {
+        let law = sellmeier_reference();
+        for (wavelength_nm, index) in [
+            (404.7, 1.53024),
+            (435.8, 1.52668),
+            (486.1, 1.52238),
+            (546.1, 1.51872),
+            (587.6, 1.51680),
+            (656.3, 1.51432),
+            (706.5, 1.51289),
+        ] {
+            // Both wavelength (0.1 nm) and index (five decimals) are rounded.
+            assert_close(
+                law.eval(wavelength_nm).unwrap(),
+                index,
+                1.2e-5,
+                "catalog law",
+            );
+        }
+        assert!(law.is_dispersive());
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = Vec3::new(0.6, 0.0, 0.8);
+        let blue = law.eval(420.0).unwrap();
+        let red = law.eval(700.0).unwrap();
+        let blue_ray = sample_smooth_dielectric(normal, wo, 1.0, blue, 0.99).unwrap();
+        let red_ray = sample_smooth_dielectric(normal, wo, 1.0, red, 0.99).unwrap();
+        assert_eq!(blue_ray.event, DielectricEvent::Transmission);
+        assert_eq!(red_ray.event, DielectricEvent::Transmission);
+        assert_close(-blue_ray.direction.x * blue, 0.6, 2.0e-15, "blue Snell");
+        assert_close(-red_ray.direction.x * red, 0.6, 2.0e-15, "red Snell");
+        assert!(blue_ray.direction.x.abs() < red_ray.direction.x.abs());
+    }
+
+    #[test]
+    fn g1_group_index_matches_phase_derivative_for_both_laws() {
+        let laws = [
+            DielectricIor::from(CauchyIor::try_new(1.4, 0.01, 0.0001).unwrap()),
+            DielectricIor::from(sellmeier_reference()),
+        ];
+        for law in laws {
+            for wavelength in [400.0, 550.0, 750.0] {
+                let step = 0.001;
+                let phase = law.eval(wavelength).unwrap();
+                let derivative = (law.eval(wavelength + step).unwrap()
+                    - law.eval(wavelength - step).unwrap())
+                    / (2.0 * step);
+                let group = law.group_index(wavelength).unwrap();
+                assert_close(
+                    group,
+                    phase - wavelength * derivative,
+                    2.0e-10,
+                    "group index",
+                );
+                assert!(group > phase);
+            }
+        }
+        let constant = SellmeierIor::try_new([1.25, 0.0, 0.0], [0.0; 3]).unwrap();
+        assert!(!constant.is_dispersive());
+        for wavelength in [LAMBDA_MIN, 550.0, LAMBDA_MAX] {
+            assert_eq!(constant.eval(wavelength).unwrap(), 1.5);
+            assert_eq!(constant.group_index(wavelength).unwrap(), 1.5);
+        }
+    }
+
+    #[test]
+    fn g0_sellmeier_rejects_hidden_poles_and_unphysical_bands() {
+        for resonance in [
+            (LAMBDA_MIN * 1.0e-3) * (LAMBDA_MIN * 1.0e-3),
+            0.512_345 * 0.512_345,
+            (LAMBDA_MAX * 1.0e-3) * (LAMBDA_MAX * 1.0e-3),
+        ] {
+            assert_eq!(
+                SellmeierIor::try_new([1.0, 0.0, 0.0], [resonance, 0.0, 0.0]),
+                Err(DielectricError::InvalidIor),
+            );
+        }
+        for (strengths, resonances) in [
+            ([-1.0, 0.0, 0.0], [0.0; 3]),
+            ([f64::NAN, 0.0, 0.0], [0.0; 3]),
+            ([f64::INFINITY, 0.0, 0.0], [0.0; 3]),
+            ([1.0, 0.0, 0.0], [-0.1, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [f64::INFINITY, 0.0, 0.0]),
+            ([9.0, 0.0, 0.0], [0.0; 3]),
+            ([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ] {
+            assert_eq!(
+                SellmeierIor::try_new(strengths, resonances),
+                Err(DielectricError::InvalidIor),
+            );
+        }
+        let absent = SellmeierIor::try_new([-0.0; 3], [0.2, 0.3, 0.4]).unwrap();
+        assert_eq!(absent.coefficients(), ([0.0; 3], [0.0; 3]));
+        assert!(!absent.is_dispersive());
+        for wavelength in [f64::NAN, f64::INFINITY, 0.0, 379.0, 781.0] {
+            assert_eq!(
+                absent.eval(wavelength),
+                Err(DielectricError::InvalidWavelength)
+            );
+            assert_eq!(
+                absent.group_index(wavelength),
+                Err(DielectricError::InvalidWavelength)
+            );
+        }
     }
 
     #[test]

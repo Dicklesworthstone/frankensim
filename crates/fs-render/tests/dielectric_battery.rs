@@ -7,6 +7,7 @@ use fs_geom::{Point3, Vec3};
 use fs_render::charts::TriMesh;
 use fs_render::dielectric::{
     BeerLambertAbsorption, CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance,
+    SellmeierIor,
 };
 use fs_render::spectral::lift_rgb;
 use fs_render::tracer::{
@@ -506,4 +507,92 @@ fn dielectric_progressive_replay_is_bitwise_and_cancellation_is_transactional() 
             "cancelled glass render published partial data"
         );
     });
+}
+
+#[test]
+fn g3_sellmeier_constant_limit_matches_cauchy_through_nested_smooth_and_rough_media() {
+    for surface in [
+        DielectricSurface::SMOOTH,
+        DielectricSurface::try_rough(0.15).unwrap(),
+    ] {
+        let constant = |strength| Material::Dielectric {
+            glass: DielectricGlass::new(
+                SellmeierIor::try_new([strength, 0.0, 0.0], [0.0; 3]).unwrap(),
+                BeerLambertAbsorption::CLEAR,
+                GlassProvenance::Custom,
+            ),
+            surface,
+        };
+        let sellmeier_outer = constant(0.5625); // sqrt(1 + B) = 1.25 exactly
+        let sellmeier_inner = constant(1.25); // sqrt(1 + B) = 1.5 exactly
+        let cauchy_outer = material(1.25, 0.0, surface);
+        let cauchy_inner = material(1.5, 0.0, surface);
+        assert_ne!(
+            sellmeier_inner.content_identity(),
+            cauchy_inner.content_identity()
+        );
+        let make_scene = |outer, inner| {
+            scene_with_boundaries(
+                &[(0.0, -0.6, outer, false), (-0.2, -0.4, inner, false)],
+                -1.0,
+                2.0,
+            )
+        };
+        with_cx(|cx| {
+            let settings = settings(DirectStrategy::Mis, 32, 7);
+            let sellmeier = render(&make_scene(sellmeier_outer, sellmeier_inner), cx, &settings)
+                .expect("Sellmeier nested transport");
+            let cauchy = render(&make_scene(cauchy_outer, cauchy_inner), cx, &settings)
+                .expect("Cauchy nested transport");
+            assert!(sellmeier.xyz[0][1] > 0.0);
+            assert_film_bits_eq(&sellmeier, &cauchy, "constant-index law equivalence");
+        });
+    }
+}
+
+#[test]
+fn g3_sellmeier_dispersion_changes_nested_transport_and_replays_exactly() {
+    // Synthetic transparent-band oscillators; no catalog/specimen authority.
+    let law = SellmeierIor::try_new([1.1, 0.2, 0.8], [0.01, 0.04, 100.0]).unwrap();
+    for surface in [
+        DielectricSurface::SMOOTH,
+        DielectricSurface::try_rough(0.12).unwrap(),
+    ] {
+        let dispersive = Material::Dielectric {
+            glass: DielectricGlass::new(law, BeerLambertAbsorption::CLEAR, GlassProvenance::Custom),
+            surface,
+        };
+        let reference = material(law.eval(550.0).unwrap(), 0.0, surface);
+        let inner = material(1.65, 0.0, surface);
+        let make_scene = |outer| {
+            let mut scene = scene_with_boundaries(
+                &[(0.0, -0.6, outer, false), (-0.2, -0.4, inner, false)],
+                -1.0,
+                2.0,
+            );
+            scene.camera.forward = Vec3::new(0.6, 0.0, -0.8);
+            scene
+        };
+        with_cx(|cx| {
+            let settings = settings(DirectStrategy::Mis, 24, 7);
+            let scene = make_scene(dispersive);
+            let direct = render(&scene, cx, &settings).expect("dispersive nested render");
+            let nondispersive = render(&make_scene(reference), cx, &settings)
+                .expect("monochromatic-index reference");
+            assert!(
+                direct.xyz[0]
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0)
+            );
+            assert!(direct.xyz[0][1] > 0.0);
+            assert_ne!(
+                direct.xyz[0].map(f64::to_bits),
+                nondispersive.xyz[0].map(f64::to_bits)
+            );
+            let mut resumed = Film::new(1, 1);
+            render_range(&scene, cx, &settings, &mut resumed, 0, 7).unwrap();
+            render_range(&scene, cx, &settings, &mut resumed, 7, 24).unwrap();
+            assert_film_bits_eq(&direct, &resumed, "dispersive nested replay");
+        });
+    }
 }

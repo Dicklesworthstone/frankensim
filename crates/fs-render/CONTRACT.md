@@ -31,8 +31,23 @@ differentiable lift). Pure Rust throughout.
   `hero_wavelength_packet::<N>(hero, min, max)` /
   `spectral_integral(spectrum, min, max, samples)` — heap-backed and fixed-size
   hero-wavelength spectral integration surfaces.
-- `dielectric` module (feature `tracer`): validated Cauchy phase-index laws in
-  vacuum nanometres, homogeneous Beer-Lambert absorption in inverse metres,
+- `dielectric` module (feature `tracer`): validated Cauchy and three-oscillator
+  Sellmeier laws share `DielectricIor`, in vacuum nanometres. Sellmeier strengths
+  and squared resonance wavelengths are nonnegative; active resonances inside
+  the inclusive 380--780 nm band refuse. Monotonicity between poles makes the
+  endpoint admission meaningful across the whole transparent band, with
+  checked binary64 evaluation rather than an interval certificate. Both laws
+  expose the narrowband group index `n - lambda dn/dlambda`; every existing
+  smooth/rough, nested-medium, direct-connector and bidirectional transport path
+  continues to use the phase index. The new law is allocation-free and requires
+  three oscillator evaluations per wavelength, with validation at construction.
+  Existing Cauchy material/scene identities remain unchanged; Sellmeier identities
+  bind a distinct law tag and all six canonical coefficients.
+  Coefficients must describe absolute indices versus vacuum wavelength;
+  air-relative catalog data need an explicit conversion/refit before physical
+  accuracy is claimed. There is no built-in measured-glass preset or claim for
+  anomalous/absorptive resonance, transient propagation or pulse broadening.
+  Homogeneous Beer-Lambert absorption remains in inverse metres, with
   provenance-bearing representative glass presets, exact unpolarized Fresnel,
   Snell refraction and total internal reflection, plus smooth-delta and
   single-scattering isotropic-GGX reflection/transmission. Radiance transport

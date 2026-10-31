@@ -54,9 +54,9 @@ use crate::conductor::{
     CONDUCTOR_BSDF_SEMANTICS_VERSION, ConductorError, ConductorOptics, ConductorSurface,
 };
 use crate::dielectric::{
-    BeerLambertParameters, DielectricError, DielectricEvent, DielectricGlass, DielectricSurface,
-    GlassProvenance, evaluate_rough_dielectric, fresnel_dielectric, sample_rough_dielectric,
-    sample_smooth_dielectric,
+    BeerLambertParameters, DielectricError, DielectricEvent, DielectricGlass, DielectricIor,
+    DielectricSurface, GlassProvenance, evaluate_rough_dielectric, fresnel_dielectric,
+    sample_rough_dielectric, sample_smooth_dielectric,
 };
 #[cfg(test)]
 use crate::hero_wavelengths;
@@ -997,8 +997,19 @@ impl Material {
                 update_material_scalar(&mut hasher, alpha);
             }
             Self::Dielectric { glass, surface } => {
-                hasher.update(&[2]);
-                update_material_scalars(&mut hasher, glass.ior().coefficients());
+                match glass.ior() {
+                    DielectricIor::Cauchy(law) => {
+                        // Preserve existing Cauchy material identities.
+                        hasher.update(&[2]);
+                        update_material_scalars(&mut hasher, law.coefficients());
+                    }
+                    DielectricIor::Sellmeier(law) => {
+                        hasher.update(&[9]);
+                        let (strengths, resonances_um2) = law.coefficients();
+                        update_material_scalars(&mut hasher, strengths);
+                        update_material_scalars(&mut hasher, resonances_um2);
+                    }
+                }
                 match glass.absorption().parameters() {
                     BeerLambertParameters::Clear => hasher.update(&[0]),
                     BeerLambertParameters::Constant { extinction_per_m } => {
