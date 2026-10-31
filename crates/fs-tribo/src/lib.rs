@@ -11,6 +11,8 @@ pub mod partial_slip;
 pub mod adhesive;
 /// Solver-independent reciprocal Reynolds resistance of deforming thin films.
 pub mod resistive_film;
+/// Exact finite-gap shear from a monotone source viscosity line.
+pub mod journal;
 /// Solver-independent rolling and contour-deformation loss candidates.
 pub mod rolling_loss;
 /// Deterministic finite-patch filtering of measured surface-height traces.

@@ -712,6 +712,31 @@ approximation refusals, retained checkpoints and interval subdivision.
   the continuous periodic profile retains the requested RMS height to
   floating-point roundoff.
 
+## Source-line generalized-Newtonian journal shear
+
+`journal::GeneralizedNewtonianJournal` solves concentric, no-slip, finite-gap
+Couette flow from a bounded piecewise-affine dynamic-viscosity line in physical
+shear rate. The complete line must start at zero shear with positive viscosity;
+the stress derivative is positive at both endpoints of every segment. This
+admits monotone shear thinning and thickening without inventing a power law.
+The original angular-momentum relation `tau(r)=tau_i*(ri/r)^2` and no-slip
+angular-speed integral determine the actual nonlinear torque. Stress inversion
+and segment integrals are analytic; a capped scalar stress solve carries an
+explicit angular-rate residual. Each response allocates nothing. The constant
+line retains the exact Newtonian torque path. Geometry and the source line are
+immutable during a solve; the coupled source owner compiles a new thermal
+endpoint and keeps its original receipts.
+
+Signed torque and nonnegative power use the same conjugate angular velocity.
+This instantaneous power is not itself a time-integrated heat receipt. The
+caller owns Reynolds/quasisteady admission, mechanical integration, heat and
+source support. This owner does not infer yield surfaces, viscoelastic memory,
+pressure-supported loading, fluid inertia/storage, radial motion, end leakage
+or Taylor instability. Independent tests recover finite-gap Newtonian and
+power-law solutions, compare a piecewise thinning line against separate radial
+quadrature, retain the nearly constant limit, and refuse nonmonotone stress,
+unsupported shear and exhausted solve budgets.
+
 ## Quasistatic Reynolds film
 
 `resistive_film` owns the solver-independent incompressible thin-film pressure
