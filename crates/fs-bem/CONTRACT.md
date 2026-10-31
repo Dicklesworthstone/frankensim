@@ -558,6 +558,21 @@ deterministically into complete batches. The caller declares the output-entry
 budget for the full frequency sweep and a provenance hash. The bake declaration
 hash includes geometry, all traces, route, medium, frequencies and budget.
 
+For `k * source_diameter <= 0.5`, power-consistent Rayleigh resistance uses
+compensated Cartesian source moments and a positive angular Gram rule. This is
+the same point-area sinc operator, evaluated without subtracting almost equal
+monopole powers for a weak dipole, quadrupole or higher cancelling field.
+Degree-16 outgoing amplitudes have an absolute exponential remainder below
+`2.2e-20 * sum(abs(area * shape))`; the 17-point polar / 34-point azimuth rule
+integrates their degree-32 products exactly in exact arithmetic. Source moments
+and angular nodes are reused across frequencies, and their work is included in
+the existing modal ceiling. The equivalent-disc reactance remains bit-identical.
+G1 tests compare orders 1, 2 and 4 with independent positive sine-power angular
+integrals down to 0.001 Hz; G3 compares the overlapping sinc branch and translated,
+rotated and reordered sources. No eigenvalue clipping or loss floor is applied.
+This absolute approximation is not a relative guarantee for arbitrary dark modes,
+nor does it cure cancellation in a downstream ill-conditioned matrix quadratic form.
+
 Rows use `exp(-i omega t)`: resistance is `Re Z`, added mass is `-Im Z/omega`.
 The unchanged matrix must have relative reciprocity defect at most
 `DENSE_RECIPROCITY_BOUND` = 1e-12 (an iterative row's bound is below) and
@@ -1218,3 +1233,4 @@ independent high-precision phase/absorption references, oblique normal-power
 balance, shared-fluid substitution, original Robin solve equality, total-wall
 work and invalid source support. Authored Rust tests require native execution;
 the test definitions alone establish no passing numerical qualification.
+

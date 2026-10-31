@@ -15,6 +15,10 @@
 use super::{HelmholtzError, Medium, MIN_PANELS_PER_WAVELENGTH, green};
 use fs_math::{c64::C64, det};
 use core::f64::consts::PI;
+use std::sync::OnceLock;
+
+#[path = "rayleigh_modal_resistance.rs"]
+mod resistance;
 
 /// Complete structural velocity fields retained by the loading integral.
 /// Downstream passive realizations may project these fields into fewer acoustic
@@ -27,8 +31,9 @@ pub const MAX_MODAL_RAYLEIGH_FIELDS: usize = 128;
 /// `cells * modes` complex pressure field per frequency being evaluated.
 pub const MAX_MODAL_RAYLEIGH_CELLS: usize = 16_384;
 
-/// Bound on `cells^2 * modes + cells * modes^2` per frequency: a cost ceiling,
-/// not an accuracy gate. It admits the complete 128-field image up to about
+/// Bound on `cells^2 * modes + cells * modes^2` per frequency, plus the bounded
+/// source-moment/Gram work when low-frequency resistance needs it: a cost
+/// ceiling, not an accuracy gate. It admits the complete 128-field image up to about
 /// 12,000 cells (a board resolved to 2.4 kHz needs about 9,400); larger surfaces
 /// retain fewer fields. A caller preparing many frequencies must additionally
 /// bound its complete sweep. No cells or fields are silently discarded.
@@ -61,6 +66,10 @@ pub struct PreparedSurface {
     areas: Vec<f64>,
     radii: Vec<f64>,
     weighted_shape: Vec<f64>,
+    positions: Vec<[f64; 2]>,
+    /// Source moments are reusable across a low-frequency sweep. No modal
+    /// coordinate is removed; this only changes evaluation of the sinc kernel.
+    resistance_moments: OnceLock<Result<Vec<f64>, HelmholtzError>>,
     /// Strict upper triangle, in row order: about 1.07 GB at the cell cap.
     distances: Vec<f64>,
     maximum_radius_m: f64,
@@ -83,7 +92,8 @@ impl PreparedSurface {
     /// distinct physical self integrals cannot be inferred from area alone.
     /// The complete geometry and one impedance evaluation use about 1.1 GB at
     /// the cell cap; every reservation is fallible.
-    /// The modal work cap is checked before any geometry storage is allocated.
+    /// The base modal work cap is checked before geometry storage is allocated;
+    /// low-frequency moment work is also admitted before its first evaluation.
     pub fn new(samples: &[AreaSample]) -> Result<Self, HelmholtzError> {
         let count = samples.len();
         if count == 0 || count > MAX_MODAL_RAYLEIGH_CELLS {
@@ -99,6 +109,7 @@ impl PreparedSurface {
         let mut areas = reserved(count, "complete Rayleigh cell areas")?;
         let mut radii = reserved(count, "complete Rayleigh cell radii")?;
         let mut weighted_shape = reserved(count * modes, "complete Rayleigh weighted shapes")?;
+        let mut positions = reserved(count, "complete Rayleigh cell positions")?;
         let mut maximum_radius_m = 0.0_f64;
         for cell in samples {
             if !cell.area_m2.is_finite() || cell.area_m2 <= 0.0
@@ -113,6 +124,7 @@ impl PreparedSurface {
             }
             areas.push(cell.area_m2);
             radii.push(radius);
+            positions.push(cell.position_m);
             maximum_radius_m = maximum_radius_m.max(radius);
             for &shape in &cell.mode_shape {
                 let weighted = cell.area_m2 * shape;
@@ -137,7 +149,8 @@ impl PreparedSurface {
                 distances.push(r);
             }
         }
-        Ok(Self { count, modes, areas, radii, weighted_shape, distances, maximum_radius_m, maximum_distance_m })
+        Ok(Self { count, modes, areas, radii, weighted_shape, positions,
+            resistance_moments: OnceLock::new(), distances, maximum_radius_m, maximum_distance_m })
     }
 
     /// Largest distance between two cell centres [m]. The kernel's longest travel
@@ -189,6 +202,16 @@ impl PreparedSurface {
     /// kernel consistently; it does not clip eigenvalues or add empirical loss.
     /// The original [`Self::impedance`] image remains available for comparison.
     ///
+    /// At `k * maximum_distance <= 0.5`, a compensated source-moment expansion
+    /// evaluates this same angular Gram matrix before squaring. This preserves
+    /// weak multipole radiation that a difference of near-unit sinc entries
+    /// loses to roundoff. The degree-16 exponential remainder is below 2.2e-20
+    /// times the sum of absolute area-weighted shapes per angular amplitude;
+    /// the positive angular rule integrates the polynomial products exactly.
+    /// This is an absolute truncation estimate, not relative accuracy for an
+    /// arbitrarily dark mode or a remedy for ill-conditioned quadratic forms
+    /// subsequently assembled from the returned matrix.
+    ///
     /// Singular self reactance, work bounds, all cells/fields and reciprocal
     /// projection are unchanged. Positive resistance alone does not establish
     /// a causal positive-real time model: consumers must still pass their
@@ -217,6 +240,10 @@ impl PreparedSurface {
             }
             value
         } else { 0.0 };
+        let low_frequency_resistance = if power_consistent && self.count > 1
+            && k * self.maximum_distance_m <= 0.5 {
+            Some(resistance::matrix(self, k, resistance_scale)?)
+        } else { None };
         let mut pressure = reserved(self.count * self.modes, "complete Rayleigh pressure fields")?;
         pressure.resize(self.count * self.modes, C64::ZERO);
         for i in 0..self.count {
@@ -227,6 +254,7 @@ impl PreparedSurface {
             let scale = medium.density * medium.sound_speed / self.areas[i];
             let mut self_kernel = C64::new(2.0 * det::sin(0.5 * phase).powi(2), -det::sin(phase)).scale(scale);
             if power_consistent { self_kernel.re = resistance_scale; }
+            if low_frequency_resistance.is_some() { self_kernel.re = 0.0; }
             for mode in 0..self.modes {
                 pressure[i * self.modes + mode] = self_kernel.scale(self.weighted_shape[i * self.modes + mode]);
             }
@@ -244,6 +272,7 @@ impl PreparedSurface {
                 // rho*omega*k/(2*pi)*sinc(k*r). Reuse its sine evaluation.
                 // Retain the regular limit if only the phase underflows.
                 if power_consistent && k * r == 0.0 { kernel.re = resistance_scale; }
+                if low_frequency_resistance.is_some() { kernel.re = 0.0; }
                 for mode in 0..self.modes {
                     let a = i * self.modes + mode;
                     let b = j * self.modes + mode;
@@ -259,6 +288,9 @@ impl PreparedSurface {
                 let mut value = C64::ZERO;
                 for cell in 0..self.count {
                     value = value + pressure[cell * self.modes + column].scale(self.weighted_shape[cell * self.modes + row]);
+                }
+                if let Some(resistance) = &low_frequency_resistance {
+                    value.re = resistance[row * self.modes + column];
                 }
                 if !value.re.is_finite() || !value.im.is_finite() {
                     return Err(invalid("Rayleigh modal impedance exceeds finite numerical range"));

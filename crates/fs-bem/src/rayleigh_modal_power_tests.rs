@@ -170,3 +170,115 @@ fn new_image_preserves_scaling_and_refuses_unresolved_inputs() {
     }
     assert!(prepared.power_consistent_impedance(1.0,Medium {density:0.0,..air()}).is_err());
 }
+
+// Independent positive angular integral for an equally spaced order-L
+// difference source: |sum_j (-1)^j C(L,j) exp(-i j t mu)|^2
+// = [2 sin(t mu/2)]^(2L). No near-unit sinc subtraction occurs here.
+fn difference_power(order: usize, phase: f64) -> f64 {
+    let intervals = 2048;
+    let mut integral = 0.0;
+    for i in 0..=intervals {
+        let mu = i as f64 / intervals as f64;
+        let weight = if i == 0 || i == intervals { 1.0 }
+            else if i % 2 == 0 { 2.0 } else { 4.0 };
+        integral += weight * (2.0 * (0.5 * phase * mu).sin()).powi(2 * order as i32);
+    }
+    integral / (3.0 * intervals as f64)
+}
+
+#[test]
+fn g1_weak_quadrupole_radiation_survives_subtractive_sinc_roundoff() {
+    let area = 1e-4;
+    let spacing = 0.02;
+    let cells: Vec<_> = [-1.0, 0.0, 1.0].into_iter().zip([1.0, -2.0, 1.0])
+        .map(|(x, shape)| AreaSample {
+            position_m: [x * spacing, 0.0], area_m2: area, mode_shape: vec![shape],
+        }).collect();
+    let surface = PreparedSurface::new(&cells).unwrap();
+    for hz in [0.001, 0.01, 0.1, 1.0, 10.0, 100.0] {
+        let omega = TAU * hz;
+        let value = surface.power_consistent_impedance(omega, air()).unwrap()[0];
+        let scale = air().density * omega * omega / (TAU * air().sound_speed);
+        let expected = scale * area * area
+            * difference_power(2, omega * spacing / air().sound_speed);
+        assert!(value.re > 0.0, "quadrupole became active at {hz} Hz: {value:?}");
+        assert!((value.re / expected - 1.0).abs() < 2e-10,
+            "{hz} Hz: resistance {} vs independent outgoing {expected}", value.re);
+        let old = surface.impedance(omega, air()).unwrap()[0];
+        assert_eq!(value.im.to_bits(), old.im.to_bits(), "reactance changed");
+    }
+}
+
+#[test]
+fn g1_multipole_order_sets_the_physical_low_frequency_power_without_a_loss_floor() {
+    // Dyadic areas/positions retain the exact zero moments in the supplied
+    // floating-point data. Otherwise their own rounding is a real monopole
+    // contribution at sufficiently tiny k, not a kernel defect.
+    let area = 1.0 / 16_384.0;
+    let spacing = 1.0 / 64.0;
+    for coefficients in [vec![1.0, -1.0], vec![1.0, -2.0, 1.0],
+        vec![1.0, -4.0, 6.0, -4.0, 1.0]] {
+        let order = coefficients.len() - 1;
+        let cells: Vec<_> = coefficients.into_iter().enumerate().map(|(i, coefficient)| {
+            AreaSample { position_m: [(i as f64 - 0.5 * order as f64) * spacing, 0.0],
+                area_m2: area, mode_shape: vec![coefficient, -2.0 * coefficient] }
+        }).collect();
+        let prepared = PreparedSurface::new(&cells).unwrap();
+        for hz in [0.001, 0.1, 10.0] {
+            let omega = TAU * hz;
+            let z = prepared.power_consistent_impedance(omega, air()).unwrap();
+            let expected = air().density * omega * omega / (TAU * air().sound_speed)
+                * area * area * difference_power(order, omega * spacing / air().sound_speed);
+            assert!(z[0].re > 0.0 && (z[0].re / expected - 1.0).abs() < 2e-10,
+                "order {order} at {hz} Hz: {} vs {expected}", z[0].re);
+            assert!((z[1].re / expected + 2.0).abs() < 4e-10);
+            assert_eq!(z[1], z[2], "signed mutual reaction must stay reciprocal");
+            assert!((z[3].re / expected - 4.0).abs() < 8e-10);
+        }
+    }
+}
+
+#[test]
+fn g3_moment_gram_matches_sinc_across_the_branch_and_preserves_reference_frames() {
+    let cells = surface(3);
+    let prepared = PreparedSurface::new(&cells).unwrap();
+    for kd in [0.49, 0.5, 0.500_001, 0.6] {
+        let k = kd / prepared.maximum_distance_m();
+        let omega = k * air().sound_speed;
+        let scale = air().density * omega * k / TAU;
+        let actual = prepared.power_consistent_impedance(omega, air()).unwrap();
+        let gram = resistance::matrix(&prepared, k, scale).unwrap();
+        for row in 0..3 {
+            for column in 0..3 {
+                let mut direct = 0.0;
+                for a in &cells {
+                    for b in &cells {
+                        let phase = k * (a.position_m[0] - b.position_m[0])
+                            .hypot(a.position_m[1] - b.position_m[1]);
+                        let sinc = if phase == 0.0 { 1.0 } else { phase.sin() / phase };
+                        direct += scale * a.area_m2 * b.area_m2
+                            * a.mode_shape[row] * b.mode_shape[column] * sinc;
+                    }
+                }
+                let tolerance = 2e-12 * actual[0].re;
+                assert!((actual[row * 3 + column].re - direct).abs() < tolerance);
+                assert!((gram[row * 3 + column] - direct).abs() < tolerance);
+            }
+        }
+    }
+    let mut transformed = cells;
+    for cell in &mut transformed {
+        let [x, y] = cell.position_m;
+        cell.position_m = [-y + 2.0, x - 4.0];
+    }
+    transformed.reverse();
+    let omega = 30.0;
+    let original = prepared.power_consistent_impedance(omega, air()).unwrap();
+    let changed = PreparedSurface::new(&transformed).unwrap()
+        .power_consistent_impedance(omega, air()).unwrap();
+    let replay = prepared.power_consistent_impedance(omega, air()).unwrap();
+    for i in 0..original.len() {
+        assert!((changed[i].re - original[i].re).abs() < 2e-12 * original[0].re);
+        assert_eq!(replay[i], original[i], "cached source moments changed replay");
+    }
+}

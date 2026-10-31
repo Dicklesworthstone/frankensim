@@ -1771,9 +1771,10 @@ pub fn radiation_impedance_matrix(
     formulation: Formulation,
 ) -> Result<Vec<C64>, HelmholtzError> {
     let n = surface.centroids().len();
-    // Shared admission with the single-solve path.
+    // Share admission without assembling/factoring a zero-source problem;
+    // the one factorization below serves every coherent source column.
     let probe = vec![C64::ZERO; n];
-    let _ = solve_radiation(surface, k, medium, &probe, formulation)?;
+    admit_operator(surface, k, medium, &[&probe])?;
     let alpha = alpha_for(formulation, k);
     let omega_rho = k * medium.sound_speed * medium.density;
     let (amat, bmat) = assemble_dense(surface, k, alpha);
@@ -3085,6 +3086,21 @@ mod tests {
             let v: Vec<C64> = surface.normals().iter().map(pattern).collect();
             let sol = solve_radiation(&surface, 1.0, Medium::air(), &v, Formulation::BurtonMiller)
                 .expect("solve");
+            let pressure_scale = sol
+                .pressure
+                .iter()
+                .map(|p| p.abs())
+                .fold(0.0_f64, f64::max);
+            for (row, &pressure) in z.chunks_exact(n).zip(&sol.pressure) {
+                let coherent = row
+                    .iter()
+                    .zip(&v)
+                    .fold(C64::ZERO, |sum, (&zij, &vj)| sum + zij * vj);
+                assert!(
+                    (coherent - pressure).abs() < 1e-11 * pressure_scale,
+                    "matrix columns lost coherent source phase in probe {idx}"
+                );
+            }
             assert!(
                 sol.radiated_power > 0.0,
                 "passivity probe {idx}: W = {}",
