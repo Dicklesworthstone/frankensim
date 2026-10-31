@@ -10,13 +10,17 @@ use fs_math::det;
 /// Independent complete-system accounts over the prepared interval [J].
 #[derive(Clone, Copy, Debug)]
 pub struct MultiportScatteringStepRecord {
+    /// Change in original constitutive stored energy [J].
     pub delta_h: f64,
     /// Original physical resistance only; excludes every reference impedance.
     pub physical_heat: f64,
     /// Work at unselected original ports.
     pub external_work: f64,
+    /// Sum of the selected physical boundary works [J].
     pub boundary_work: f64,
+    /// Sum of the independently integrated incident wave energies [J].
     pub incident_energy: f64,
+    /// Sum of the independently integrated outgoing wave energies [J].
     pub outgoing_energy: f64,
 }
 
@@ -64,7 +68,7 @@ struct Scratch {
 /// Preparation retains all states, storage, physical damping and port coupling.
 /// Existing complete-state/port and dense-exponential capacities apply; no
 /// modes are discarded to fit them. Each port retains a positive factor of its
-/// own outgoing-wave integral, including arbitrarily weak matched reflection.
+/// own outgoing-wave integral, including small representable matched reflection.
 /// Cold factor work grows with the selected-port count. Warm calls reuse all
 /// owner scratch and never exponentiate, infer materials, or allocate.
 ///
@@ -96,23 +100,28 @@ impl PreparedMultiportScatteringZoh {
         budget: LinearSplitBudget,
     ) -> Result<Self, PhsError> {
         if ports.is_empty() || !duration.is_finite() || duration <= 0.0 {
-            return Err(refuse("scattering requires selected ports and a positive clock"));
+            return Err(refuse(
+                "scattering requires selected ports and a positive clock",
+            ));
         }
         for &(port, impedance) in ports {
             if port >= system.m {
                 return Err(PhsError::BadPortPairing);
             }
             let inverse = 1.0 / impedance;
-            if !impedance.is_finite() || impedance <= 0.0
-                || !inverse.is_finite() || inverse <= 0.0
+            if !impedance.is_finite() || impedance <= 0.0 || !inverse.is_finite() || inverse <= 0.0
             {
-                return Err(refuse("scattering impedance must be positive and representable"));
+                return Err(refuse(
+                    "scattering impedance must be positive and representable",
+                ));
             }
         }
         // Admit complete dimensions before allocating port-dependent caches.
         let original_split = split_quadratic(&system, budget)?;
         if !original_split.is_exact_quadratic() {
-            return Err(refuse("scattering requires declared identically quadratic storage"));
+            return Err(refuse(
+                "scattering requires declared identically quadratic storage",
+            ));
         }
         let (n, m, k) = (system.n, system.m, ports.len());
         let mut selected = vec![false; m];
@@ -153,7 +162,11 @@ impl PreparedMultiportScatteringZoh {
             })
             .collect();
         let flow = PreparedQuadraticFlow::new(
-            &robin, &split, duration, &[], &outputs,
+            &robin,
+            &split,
+            duration,
+            &[],
+            &outputs,
             DenseExponentialBudget {
                 max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
                 max_dense_bytes: usize::MAX,
@@ -180,7 +193,12 @@ impl PreparedMultiportScatteringZoh {
                 }
             }
             let energy = PositiveHeat::from_factor(&robin, &split, duration, &resistance, root)?;
-            references.push(ReferencePort { inverse, root_inverse, active, energy });
+            references.push(ReferencePort {
+                inverse,
+                root_inverse,
+                active,
+                energy,
+            });
             let (state_map, input_map) = flow.linear_integral_map(port)?;
             mean_state.extend(state_map.into_iter().map(|value| value / duration));
             mean_input.extend(input_map.into_iter().map(|value| value / duration));
@@ -195,9 +213,17 @@ impl PreparedMultiportScatteringZoh {
             }
         }
         Ok(Self {
-            original: system, robin, flow, physical_heat,
-            ports: ports.to_vec(), selected, references, dt: duration,
-            mean_state, mean_input, direct,
+            original: system,
+            robin,
+            flow,
+            physical_heat,
+            ports: ports.to_vec(),
+            selected,
+            references,
+            dt: duration,
+            mean_state,
+            mean_input,
+            direct,
             scratch: Scratch {
                 augmented: vec![0.0; n + m + 1],
                 balanced: vec![0.0; n],
@@ -214,32 +240,51 @@ impl PreparedMultiportScatteringZoh {
     }
 
     /// Original physical system, excluding all reference loading from its R.
-    pub fn system(&self) -> &PortHamiltonian { &self.original }
-    pub fn duration(&self) -> f64 { self.dt }
+    pub fn system(&self) -> &PortHamiltonian {
+        &self.original
+    }
+    /// Fixed prepared interval [s].
+    pub fn duration(&self) -> f64 {
+        self.dt
+    }
     /// Original slot and impedance, in the returned account/map order.
-    pub fn ports(&self) -> &[(usize, f64)] { &self.ports }
+    pub fn ports(&self) -> &[(usize, f64)] {
+        &self.ports
+    }
 
     /// Current-window relation y_bar=free+direct*a at selected ORIGINAL outputs.
     /// The row-major direct matrix and free vector follow ports() order.
     /// Selected input slots are ignored in free; other authored inputs remain.
     /// Refusal preserves both caller buffers; this call allocates no heap memory.
     pub fn average_relation_into(
-        &self, state: &[f64], inputs: &[f64], free: &mut [f64], direct: &mut [f64],
+        &self,
+        state: &[f64],
+        inputs: &[f64],
+        free: &mut [f64],
+        direct: &mut [f64],
     ) -> Result<(), PhsError> {
         self.admit_layout(state, inputs)?;
         let (n, m, k) = (self.original.n, self.original.m, self.ports.len());
         if free.len() != k || direct.len() != k * k {
-            return Err(refuse("scattering relation requires complete selected-port buffers"));
+            return Err(refuse(
+                "scattering relation requires complete selected-port buffers",
+            ));
         }
         // The admitted 2*(n+m+1)<=256 bound also bounds k, before this cache exists.
         let mut candidate = [0.0; MAX_LINEAR_EXPONENTIAL_BLOCK_DIM];
         for (row, value) in candidate[..k].iter_mut().enumerate() {
             *value = self.mean_state[row * n..(row + 1) * n]
-                .iter().zip(state).map(|(a, x)| a * x).sum::<f64>()
+                .iter()
+                .zip(state)
+                .map(|(a, x)| a * x)
+                .sum::<f64>()
                 + self.mean_input[row * m..(row + 1) * m]
-                    .iter().zip(inputs).enumerate()
+                    .iter()
+                    .zip(inputs)
+                    .enumerate()
                     .filter(|(p, _)| !self.selected[*p])
-                    .map(|(_, (a, u))| a * u).sum::<f64>();
+                    .map(|(_, (a, u))| a * u)
+                    .sum::<f64>();
         }
         if !finite(&candidate[..k]) {
             return Err(refuse("scattering free mean output is nonfinite"));
@@ -252,14 +297,20 @@ impl PreparedMultiportScatteringZoh {
     /// Complete original endpoint/mean outputs plus independent selected-port
     /// accounts. Publication is transactional across ALL three output buffers.
     pub fn step_into(
-        &mut self, state: &[f64], inputs: &[f64],
-        next: &mut [f64], mean_outputs: &mut [f64],
+        &mut self,
+        state: &[f64],
+        inputs: &[f64],
+        next: &mut [f64],
+        mean_outputs: &mut [f64],
         port_accounts: &mut [ScatteringPortRecord],
     ) -> Result<MultiportScatteringStepRecord, PhsError> {
-        if next.len() != self.original.n || mean_outputs.len() != self.original.m
+        if next.len() != self.original.n
+            || mean_outputs.len() != self.original.m
             || port_accounts.len() != self.ports.len()
         {
-            return Err(refuse("scattering output buffers require complete original layout"));
+            return Err(refuse(
+                "scattering output buffers require complete original layout",
+            ));
         }
         let account = self.evaluate(state, inputs)?;
         next.copy_from_slice(&self.scratch.endpoint);
@@ -269,49 +320,79 @@ impl PreparedMultiportScatteringZoh {
     }
 
     fn admit_layout(&self, state: &[f64], inputs: &[f64]) -> Result<(), PhsError> {
-        if state.len() != self.original.n || inputs.len() != self.original.m
-            || !finite(state) || !finite(inputs)
+        if state.len() != self.original.n
+            || inputs.len() != self.original.m
+            || !finite(state)
+            || !finite(inputs)
         {
-            return Err(refuse("scattering requires complete finite original state and input"));
+            return Err(refuse(
+                "scattering requires complete finite original state and input",
+            ));
         }
         Ok(())
     }
 
     fn evaluate(
-        &mut self, state: &[f64], inputs: &[f64],
+        &mut self,
+        state: &[f64],
+        inputs: &[f64],
     ) -> Result<MultiportScatteringStepRecord, PhsError> {
         self.admit_layout(state, inputs)?;
         let s = &mut self.scratch;
         self.flow.evaluate_into(
-            state, inputs, &mut s.augmented, &mut s.balanced,
-            &mut s.endpoint, &mut s.integrals,
+            state,
+            inputs,
+            &mut s.augmented,
+            &mut s.balanced,
+            &mut s.endpoint,
+            &mut s.integrals,
         )?;
         for (out, integral) in s.output.iter_mut().zip(&s.integrals) {
             *out = integral / self.dt;
         }
         let physical_heat = self.physical_heat.evaluate_into(
-            &self.robin, state, inputs, &mut s.effort,
-            &mut s.derivative, &mut s.heat_coordinates,
+            &self.robin,
+            state,
+            inputs,
+            &mut s.effort,
+            &mut s.derivative,
+            &mut s.heat_coordinates,
         )?;
-        let external_work: f64 = inputs.iter().zip(&s.integrals).enumerate()
+        let external_work: f64 = inputs
+            .iter()
+            .zip(&s.integrals)
+            .enumerate()
             .filter(|(p, _)| !self.selected[*p])
-            .map(|(_, (u, integral))| u * integral).sum();
+            .map(|(_, (u, integral))| u * integral)
+            .sum();
         let delta_h = storage_energy_change(
-            self.original.storage.as_ref(), state, &s.endpoint,
-            &mut s.midpoint, &mut s.effort,
+            self.original.storage.as_ref(),
+            state,
+            &s.endpoint,
+            &mut s.midpoint,
+            &mut s.effort,
         );
-        let mut scale = super::prepared_zoh::energetic_scale_into(
-            &self.original, state, &mut s.effort,
-        ).max(super::prepared_zoh::energetic_scale_into(
-            &self.original, &s.endpoint, &mut s.effort,
-        )).max(delta_h.abs()).max(physical_heat.abs()).max(external_work.abs());
+        let mut scale =
+            super::prepared_zoh::energetic_scale_into(&self.original, state, &mut s.effort)
+                .max(super::prepared_zoh::energetic_scale_into(
+                    &self.original,
+                    &s.endpoint,
+                    &mut s.effort,
+                ))
+                .max(delta_h.abs())
+                .max(physical_heat.abs())
+                .max(external_work.abs());
         let mut boundary_work = 0.0;
         let mut incident_energy = 0.0;
         let mut outgoing_energy = 0.0;
         for (slot, (&(port, _), reference)) in self.ports.iter().zip(&self.references).enumerate() {
             let reference_energy = reference.energy.evaluate_into(
-                &self.robin, state, inputs, &mut s.effort,
-                &mut s.derivative, &mut s.heat_coordinates,
+                &self.robin,
+                state,
+                inputs,
+                &mut s.effort,
+                &mut s.derivative,
+                &mut s.heat_coordinates,
             )?;
             let a = inputs[port];
             let shifted = a * reference.root_inverse;
@@ -319,8 +400,13 @@ impl PreparedMultiportScatteringZoh {
             let incoming = incident_amplitude * incident_amplitude;
             let outgoing = if reference.active {
                 reference.energy.evaluate_shifted_into(
-                    &self.robin, state, inputs, shifted, &mut s.effort,
-                    &mut s.derivative, &mut s.heat_coordinates,
+                    &self.robin,
+                    state,
+                    inputs,
+                    shifted,
+                    &mut s.effort,
+                    &mut s.derivative,
+                    &mut s.heat_coordinates,
                 )?
             } else {
                 incoming
@@ -331,15 +417,25 @@ impl PreparedMultiportScatteringZoh {
             scale = scale.max(selected_work.abs()).max(reference_energy.abs());
             let wave_scale = scale.max(incoming.abs()).max(outgoing.abs());
             let wave_balance = work - (incoming - outgoing);
-            if !finite(&[reference_energy, incoming, outgoing, selected_work,
-                work, outgoing_wave, wave_scale, wave_balance])
-                || outgoing < 0.0 || wave_balance.abs() > 1e-12 * wave_scale
+            if !finite(&[
+                reference_energy,
+                incoming,
+                outgoing,
+                selected_work,
+                work,
+                outgoing_wave,
+                wave_scale,
+                wave_balance,
+            ]) || outgoing < 0.0
+                || wave_balance.abs() > 1e-12 * wave_scale
             {
                 return Err(refuse("scattering independent port wave balance refused"));
             }
             s.accounts[slot] = ScatteringPortRecord {
-                boundary_work: work, incident_energy: incoming,
-                outgoing_energy: outgoing, outgoing_wave,
+                boundary_work: work,
+                incident_energy: incoming,
+                outgoing_energy: outgoing,
+                outgoing_wave,
             };
             boundary_work += work;
             incident_energy += incoming;
@@ -349,16 +445,35 @@ impl PreparedMultiportScatteringZoh {
         let balance = delta_h + physical_heat - external_work - boundary_work;
         let wave_scale = scale.max(incident_energy.abs()).max(outgoing_energy.abs());
         let wave_balance = boundary_work - (incident_energy - outgoing_energy);
-        if !finite(&s.output) || !self.original.hamiltonian(&s.endpoint).is_finite()
-            || !finite(&[physical_heat, external_work, delta_h, boundary_work,
-                incident_energy, outgoing_energy, scale, balance, wave_scale, wave_balance])
-            || physical_heat < 0.0 || balance.abs() > 1e-12 * scale
+        if !finite(&s.output)
+            || !self.original.hamiltonian(&s.endpoint).is_finite()
+            || !finite(&[
+                physical_heat,
+                external_work,
+                delta_h,
+                boundary_work,
+                incident_energy,
+                outgoing_energy,
+                scale,
+                balance,
+                wave_scale,
+                wave_balance,
+            ])
+            || physical_heat < 0.0
+            || balance.abs() > 1e-12 * scale
             || wave_balance.abs() > 1e-12 * wave_scale
         {
-            return Err(refuse("scattering original physical work and wave balance refused"));
+            return Err(refuse(
+                "scattering original physical work and wave balance refused",
+            ));
         }
         Ok(MultiportScatteringStepRecord {
-            delta_h, physical_heat, external_work, boundary_work, incident_energy, outgoing_energy,
+            delta_h,
+            physical_heat,
+            external_work,
+            boundary_work,
+            incident_energy,
+            outgoing_energy,
         })
     }
 }

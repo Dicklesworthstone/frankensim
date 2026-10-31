@@ -229,15 +229,15 @@ fn expm(a: &[C64], n: usize) -> Result<Vec<C64>, DuctError> {
 }
 
 /// Mode data shared by every generator evaluation of one propagation.
-struct Basis {
+pub(super) struct Basis {
     n: usize,
-    gammas: Vec<f64>,
+    pub(super) gammas: Vec<f64>,
     /// Real coupling matrix `A`, row-major `n x n`.
-    coupling: Vec<f64>,
+    pub(super) coupling: Vec<f64>,
 }
 
 impl Basis {
-    fn new(n: usize) -> Self {
+    pub(super) fn new(n: usize) -> Self {
         let mut gammas = vec![0.0];
         gammas.extend(j1_roots_unchecked(n - 1));
         let signs: Vec<f64> = gammas

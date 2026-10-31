@@ -19086,3 +19086,44 @@ did not happen. Rejected implicit steps preserve fluid, dry body, original sourc
 and accepted-step count. One fully immersed body only: stationary/periodic fluid
 boundaries, no contact film, no free surface, and no exact rigidity/GCL or
 unconditional light-body stability claim.
+
+### Continuous modal reflection on the complete exact flow
+
+`mm_line::continuous::ContinuousModalLine` is a full-state lossless
+smooth-profile reflection runtime. It consumes the original
+`fs_duct::modal::time_domain` source, retains every canonical state, and
+connects every inlet mode to ONE `PreparedMultiportScatteringZoh` instance.
+For original modal pressure P and inward volume flow U, every real wave
+reference is Z0=rho*c/S_in: U=(2a-P)/Z0 and b=P-a. This reference is a wave
+coordinate choice, not a falsely matched higher-mode characteristic. The
+physical coupling, transverse stiffness, propagating and evanescent response
+remain in the source. No scalar closure, fitted damping, removed state,
+extra processing delay or midpoint/Cayley propagator enters this path.
+
+`reflection_relation_into` exposes the current-interval mean reflected wave
+as a complete affine N-port relation, including off-diagonal entries.
+`push` advances the whole jointly closed system through the shared exact
+held-wave propagator and commits history only after every candidate state,
+output and independent port-energy account succeeds. Warm calls reuse
+prepared memory. Reflected output is the interval MEAN b, not a pointwise
+waveform or RMS amplitude. Original per-port integrals of b(t)^2/Z0 remain
+separately available; replacing them by dt*mean(b)^2 loses within-interval
+variation. Reference exchange is boundary work, never material absorption.
+
+The spatial image has rigid or pressure-release far ends, lossless fixed
+coherent gas and the original certified m=0 basis. Spatial and radial
+refinement remain independent of exact linear propagation; input-hold error
+for a varying source still needs a clock ladder. This bounded rung does not
+complete general modal radiation, nonlinear-junction qualification, bead .88,
+or an all-profile frequency-error certificate. Existing full-state exact-flow
+capacities remain unchanged; requests that exceed them refuse.
+
+`tests/continuous_modal_line.rs` drives coherent nonzero waves at every
+retained inlet port, checks same-window cross-mode reflection and the
+original energy balance with zero fictitious heat, and checks each integrated
+outgoing energy against its mean-wave lower bound. Exact held waves are
+invariant across 1/2/4 interval subdivisions. A separate 32/64/128 clock ladder
+refines a piecewise-held incident waveform obtained by midpoint SAMPLING of a
+prescribed smooth input; system propagation remains exact ZOH on EVERY
+interval. Wrong shapes, nonfinite input and finite-overflow candidates leave
+all accepted state, means and port accounts unchanged.

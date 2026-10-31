@@ -61,6 +61,9 @@ pub const MAX_MODES: usize = 8;
 /// Mouth modal flow from the same loaded staircase reflection recurrence.
 pub mod outlet;
 
+/// Full-state lossless continuous-profile spatial image for exact time evolution.
+pub mod time_domain;
+
 /// Continuous multimodal propagation on smooth profiles (M2.1-W3b).
 mod riccati;
 pub use riccati::{

@@ -2413,3 +2413,50 @@ extended reaction, cylindrical layer curvature and duplicate rigid-wall
 viscothermal losses are not supplied. Focused regressions cover original
 single-layer equivalence, cavity-backed line propagation, exact rigid limits,
 single fluid sampling, frequency/cancellation and legacy-law admission.
+
+### Full-state lossless continuous modal time image
+
+`modal::time_domain::assemble_lossless` assembles a finite-dimensional physical
+image of the SAME continuous m=0 modal equations as the Riccati owner. It reuses
+that owner's certified radial roots and signed coupling A without copying or
+retuning them. With C=(R'/R)A, P=q_dot and U=-(S/rho)(q'-Cq), the equations give
+
+```text
+M q_ddot + K q = B U_in
+M = integral S/(rho c^2) N^T N dx
+K = integral S/rho [(N'-CN)^T(N'-CN)
+                   + N^T diag(gamma^2/R^2) N] dx.
+```
+
+Continuous piecewise-linear axial functions and two positive Gauss nodes per
+element evaluate the original radius and slope. M is the consistent mass;
+K retains all cross-mode covariant-derivative terms. All axial/radial
+coordinates remain in canonical state [q; M q_dot], with Q=diag(K,M^-1),
+canonical J and physical R exactly zero. The mass inverse uses the existing
+Cholesky owner as a Gram product, without eigenvalue repair. Original inlet
+inputs are every modal volume flow INTO the region; outputs are their
+conjugate modal pressures. H_dot=P_in^T U_in for this represented source.
+
+The far end is explicitly rigid on every mode (natural zero flow, endpoint
+retained) or pressure release on every mode (fixed endpoint potential). The
+rigid plane-potential gauge remains represented. A complete state that exceeds
+the caller's ceiling or the shared exact-flow condition
+2*(states+original_ports+1)<=256 refuses before matrix allocation. No spatial
+or eigenmode resolution is silently discarded. Gas coherence and the common
+real inlet reference rho*c/S delegate to the original lossless wave owner;
+original geometry, gas, modes, nodes, M, K and M^-1 remain inspectable.
+
+This is a lossless, fixed-gas, axisymmetric spatial approximation with ideal
+far ends. Positive structure establishes passivity for represented
+states/inputs; it does not certify an acoustic frequency band. Axial h and
+retained-mode N are separate convergence axes. There is no scalar replacement
+for full exterior radiation, azimuthal modes, per-mode viscothermal losses or
+nonlinear-interface acceptance.
+
+`tests/modal_time_domain.rs` compares the actual canonical system through
+the independent shared harmonic owner with analytic uniform-cylinder
+propagating/evanescent formulas for both ideal ends. It checks the COMPLETE
+reflection matrix against the continuous Riccati authority over h=4/8/16
+elements and a separate N=1/2/4 taper rung, including live cross-mode
+reflection and reciprocity. These are bounded witnesses, not a general band
+certificate. Capacity/cancellation refuse explicitly.

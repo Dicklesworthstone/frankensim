@@ -38,6 +38,9 @@ use fs_vfit::discretize::{DelayedFilter, DiscretizeError, reflectance};
 
 mod matrix_admission;
 
+/// Full-state smooth-profile modal reflection on the shared exact-ZOH owner.
+pub mod continuous;
+
 /// Qualified passive causal realization of independently matched, lossless
 /// evanescent ports, including an explicit uniform-cylinder runtime.
 pub mod evanescent;

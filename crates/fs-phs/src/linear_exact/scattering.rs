@@ -36,6 +36,7 @@ pub struct PreparedScatteringZoh {
 }
 
 impl PreparedScatteringZoh {
+    /// Prepare a positive-impedance wave boundary at one original physical port.
     pub fn new_owned(
         system: PortHamiltonian,
         port: usize,
@@ -45,20 +46,33 @@ impl PreparedScatteringZoh {
     ) -> Result<Self, PhsError> {
         Ok(Self {
             inner: PreparedMultiportScatteringZoh::new_owned(
-                system, &[(port, impedance)], duration, budget,
+                system,
+                &[(port, impedance)],
+                duration,
+                budget,
             )?,
         })
     }
 
-    pub fn system(&self) -> &PortHamiltonian { self.inner.system() }
-    pub fn duration(&self) -> f64 { self.inner.duration() }
-    pub fn selected_port(&self) -> usize { self.inner.ports()[0].0 }
+    /// Original physical system, excluding reference loading.
+    pub fn system(&self) -> &PortHamiltonian {
+        self.inner.system()
+    }
+    /// Fixed prepared interval [s].
+    pub fn duration(&self) -> f64 {
+        self.inner.duration()
+    }
+    /// Selected original physical port slot.
+    pub fn selected_port(&self) -> usize {
+        self.inner.ports()[0].0
+    }
 
     /// Current-window relation y_bar=free+beta*a in original output units.
     /// The selected input value is ignored; all other authored inputs enter free.
     pub fn average_relation(&self, state: &[f64], inputs: &[f64]) -> Result<(f64, f64), PhsError> {
         let (mut free, mut direct) = ([0.0], [0.0]);
-        self.inner.average_relation_into(state, inputs, &mut free, &mut direct)?;
+        self.inner
+            .average_relation_into(state, inputs, &mut free, &mut direct)?;
         Ok((free[0], direct[0]))
     }
 
@@ -79,7 +93,9 @@ impl PreparedScatteringZoh {
         average_outputs: &mut [f64],
     ) -> Result<ScatteringStepRecord, PhsError> {
         let mut ports = [ScatteringPortRecord::default()];
-        let account = self.inner.step_into(state, inputs, next, average_outputs, &mut ports)?;
+        let account = self
+            .inner
+            .step_into(state, inputs, next, average_outputs, &mut ports)?;
         Ok(ScatteringStepRecord {
             delta_h: account.delta_h,
             physical_heat: account.physical_heat,
