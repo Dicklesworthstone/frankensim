@@ -1919,11 +1919,12 @@ tolerances. Physical heat and point volumes remain available to thermal
 consumers; numerical loss is not heat. Immutable proposals, explicit fiber-work
 budgets and cancellation checks preserve accepted history on refusal.
 
-This path admits stationary inertia, linear geometry and all-Norton sections.
+This path admits stationary inertia, linear geometry and Norton or joint
+Norton/J2 sections.
 It bounds nodal rotations, chord displacement and absolute quadrature curvature;
 unsampled spatial extrema require refinement. Corotational geometric work,
-inertia, thermal expansion, reciprocal temperature evolution, other inelastic
-fiber laws and measured-life qualification are outside this checked account.
+inertia, thermal expansion, reciprocal temperature evolution, unsupported
+inelastic fiber laws and measured-life qualification are outside this checked account.
 `tests/frame_creep.rs` exercises constant-force extension/permanent set,
 held-length tension relaxation, actual cantilever curvature/tip shape under
 sustained moment, source-temperature continuation and atomic refusal/cancellation.
@@ -3102,3 +3103,38 @@ actual native static-solver compression of a hollow twelve-tetrahedron specimen,
 and invalid geometry/selection/cancellation. Independent analytical and NumPy
 calculations verify the fixture and its tangent; the authored native Rust tests
 have not been executed in this disk-constrained session.
+
+
+### Simultaneous creep and yielding in native frames
+
+`FiberLaw::NortonJ2` and `FiberState::NortonJ2` retain the original free-sided
+joint axial law, separate signed creep/plastic strains and both accumulated
+paths. `Frame2d::solve_creep_step` shares its existing section/member/global
+Newton solve, reference quadrature, physical-duration checks, small-geometry
+admission and work gates across Norton and joint Norton/J2 fibers. Repeated
+section and equilibrium trials borrow the same accepted history; acceptance
+advances both memories once.
+
+`FrameCreepEnergy` reports separate physical creep and plastic dissipation.
+Energetic hardening remains storage and numerical loss never becomes heat.
+`creep_plastic_fiber` reads accepted histories without a constitutive update.
+`with_creep_laws` accepts either axial family and preserves the original family,
+elastic/hardening storage, kinetic coefficients, complete card/claim/query
+identities and fixed external coordinates. Yield may refresh with temperature
+only through its original pinned source. Authored and sourced histories cannot
+be silently exchanged.
+
+Untimed static, displacement, modal and inertial routes refuse both timed
+families. Corotational geometry, finite deformation, thermal strain and reciprocal
+heating remain outside this frame account. The `frame_creep_plastic` target
+contains independent axial load/hold/unload references, nonuniform-temperature
+cantilever curvature and tip-displacement references, and immutable-history
+checks for unsupported routes, source replacement, inconsistent clocks and
+cancellation. These manufactured fixtures are implementation checks, not
+measured service-life or structural-safety qualification.
+
+Verification for this increment: the complete native material/cut-cell/solid
+source chain and both frame integration targets passed pinned-compiler metadata
+checks. The joint material behavior passed its 22 focused executable regressions;
+the subsequent expanded material suite passed 56/56. Native frame tests were
+typechecked, not numerically executed. This is not the full Cargo/DSR gate.

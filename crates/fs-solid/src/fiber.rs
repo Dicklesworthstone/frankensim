@@ -15,6 +15,7 @@
 
 use crate::SolidError;
 use fs_la::batched::{BatchMat, BatchVec, batch_cholesky, batch_cholesky_solve};
+use fs_material::creep::plastic::uniaxial::{UniaxialNortonJ2, UniaxialNortonJ2State};
 use fs_material::creep::uniaxial::{UniaxialNorton, UniaxialNortonState};
 use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpState, Uniaxial};
 use fs_material::plastic::chaboche::axial::{UniaxialChaboche, UniaxialChabocheState};
@@ -32,6 +33,8 @@ pub enum FiberLaw {
     /// Free-sided axial Norton creep for one explicit physical interval.
     /// Original material receipts remain attached to source-bound laws.
     Norton(UniaxialNorton),
+    /// Simultaneous axial Norton creep and isotropic J2 with separate memories.
+    NortonJ2(UniaxialNortonJ2),
     /// Free-sided axial restriction of the shared three-dimensional J2 law.
     /// Isotropic and Prager hardening retain separate reversal histories.
     J2(UniaxialJ2),
@@ -52,6 +55,8 @@ pub enum FiberLaw {
 pub enum FiberState {
     /// Signed permanent axial creep and accumulated equivalent creep.
     Norton(UniaxialNortonState),
+    /// Signed creep/plastic strains and their separate accumulated path lengths.
+    NortonJ2(UniaxialNortonJ2State),
     /// Signed axial plastic strain and accumulated equivalent plastic strain.
     J2(UniaxialJ2State),
     /// The same exact axial plastic subspace, with a saturating yield radius.
@@ -75,6 +80,13 @@ pub struct Fiber {
     pub area: f64,
     /// The constitutive card.
     pub law: FiberLaw,
+}
+
+impl From<UniaxialNorton> for FiberLaw {
+    fn from(law: UniaxialNorton) -> Self { Self::Norton(law) }
+}
+impl From<UniaxialNortonJ2> for FiberLaw {
+    fn from(law: UniaxialNortonJ2) -> Self { Self::NortonJ2(law) }
 }
 
 /// A section: fibers plus committed states.
@@ -105,6 +117,7 @@ impl Section {
             .iter()
             .map(|f| match &f.law {
                 FiberLaw::Norton(l) => FiberState::Norton(l.initial_state()),
+                FiberLaw::NortonJ2(l) => FiberState::NortonJ2(l.initial_state()),
                 FiberLaw::J2(l) => FiberState::J2(l.initial_state()),
                 FiberLaw::Voce(l) => FiberState::Voce(l.initial_state()),
                 FiberLaw::Chaboche(l) => FiberState::Chaboche(l.initial_state()),
@@ -157,6 +170,11 @@ impl Section {
                 (FiberLaw::Norton(l), FiberState::Norton(s)) => {
                     let response = l
                         .response(eps, s)
+                        .map_err(|error| refused(&error.to_string()))?;
+                    (response.stress_pa, response.tangent_pa)
+                }
+                (FiberLaw::NortonJ2(l), FiberState::NortonJ2(s)) => {
+                    let response = l.response(eps, s)
                         .map_err(|error| refused(&error.to_string()))?;
                     (response.stress_pa, response.tangent_pa)
                 }
@@ -244,6 +262,7 @@ impl Section {
             let eps = eps0 - f.y * kappa;
             match (&f.law, st) {
                 (FiberLaw::Norton(l), FiberState::Norton(s)) => *s = l.update_state(eps, s),
+                (FiberLaw::NortonJ2(l), FiberState::NortonJ2(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::J2(l), FiberState::J2(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Voce(l), FiberState::Voce(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Chaboche(l), FiberState::Chaboche(s)) => *s = l.update_state(eps, s),

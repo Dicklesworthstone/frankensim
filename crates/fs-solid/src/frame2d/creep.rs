@@ -3,18 +3,21 @@
 //! The existing section inversion, member compatibility, global Newton solve and
 //! backtracking remain the mechanical owners. Every trial uses accepted fiber
 //! history. Work is integrated with the original fiber areas, Lobatto weights
-//! and reference lengths; only physical creep loss is available as heat.
+//! and reference lengths; only physical creep/plastic loss is available as heat.
 //!
 //! This checked path admits linear geometry, stationary supports and exclusively
-//! Norton fibers. It has no inertial or reciprocal thermal evolution. Temperature
-//! may be prescribed through original source-bound laws between intervals.
+//! Norton or joint Norton/J2 fibers. It has no inertial or reciprocal thermal
+//! evolution. Temperature may be prescribed through original source-bound laws
+//! between intervals.
 //! Nodal rotations and the sum of absolute quadrature curvature are bounded;
 //! unsampled spatial extrema still require section/member refinement.
 
 use super::{Frame2d, Geometry, SectionModel, SolidError, StaticStep};
 use crate::fiber::{FiberLaw, FiberState};
+use fs_material::creep::plastic::uniaxial::{UniaxialNortonJ2, UniaxialNortonJ2State};
 use fs_material::creep::uniaxial::{UniaxialNorton, UniaxialNortonState};
-use fs_material::creep::{CreepEnergy, CreepError, CreepTolerances};
+use fs_material::creep::{CreepEnergy, CreepError, CreepTolerances, NortonCreep};
+use fs_material::state_point::ResolvedMaterialStatePoint;
 use std::cell::Cell;
 
 /// Independent physical-unit gates and work bound for one native frame step.
@@ -67,6 +70,8 @@ pub struct FrameCreepEnergy {
     pub final_stored_j: f64,
     pub applied_work_j: f64,
     pub support_work_j: f64,
+    pub creep_dissipation_j: f64,
+    pub plastic_dissipation_j: f64,
     pub physical_dissipation_j: f64,
     pub numerical_dissipation_j: f64,
     pub equilibrium_work_residual_j: f64,
@@ -111,6 +116,116 @@ fn energy_gate(residual: f64, tolerance: f64) -> Result<(), FrameCreepError> {
     }
 }
 
+/// Borrow the original law and history; this dispatch adds no constitutive solve.
+#[derive(Clone, Copy)]
+enum CreepPoint<'a> {
+    Norton(&'a UniaxialNorton, &'a UniaxialNortonState),
+    NortonJ2(&'a UniaxialNortonJ2, &'a UniaxialNortonJ2State),
+}
+impl<'a> CreepPoint<'a> {
+    fn new(law: &'a FiberLaw, state: &'a FiberState) -> Result<Self, FrameCreepError> {
+        match (law, state) {
+            (FiberLaw::Norton(law), FiberState::Norton(state)) => Ok(Self::Norton(law, state)),
+            (FiberLaw::NortonJ2(law), FiberState::NortonJ2(state)) => {
+                Ok(Self::NortonJ2(law, state))
+            }
+            _ => Err(FrameCreepError::Invalid(
+                "checked creep work requires matching timed fiber histories",
+            )),
+        }
+    }
+    fn kinetics(self) -> &'a NortonCreep {
+        match self {
+            Self::Norton(law, _) => law.backbone(),
+            Self::NortonJ2(law, _) => law.backbone().creep(),
+        }
+    }
+    fn material(self) -> Option<&'a ResolvedMaterialStatePoint> {
+        match self {
+            Self::Norton(law, _) => law.material(),
+            Self::NortonJ2(law, _) => law.material(),
+        }
+    }
+    fn hardening(self) -> Option<f64> {
+        match self {
+            Self::Norton(..) => None,
+            Self::NortonJ2(law, _) => Some(law.backbone().plastic().hardening),
+        }
+    }
+    fn yield_stress(self) -> Option<f64> {
+        match self {
+            Self::Norton(..) => None,
+            Self::NortonJ2(law, _) => Some(law.backbone().plastic().yield_stress),
+        }
+    }
+    fn tensor_strain(self, strain: f64) -> Result<(), FrameCreepError> {
+        match self {
+            Self::Norton(law, state) => law.tensor_strain(strain, state),
+            Self::NortonJ2(law, state) => law.tensor_strain(strain, state),
+        }
+        .map(|_| ())
+        .map_err(FrameCreepError::Material)
+    }
+    fn audit(
+        self,
+        committed: Self,
+        old_strain: f64,
+        new_strain: f64,
+        tolerances: CreepTolerances,
+    ) -> Result<CreepEnergy, FrameCreepError> {
+        let modulus = self.kinetics().elastic().youngs;
+        let close = |a: &[f64; 6], b: &[f64; 6], pa: f64, pb: f64| {
+            a.iter()
+                .zip(b)
+                .all(|(a, b)| (a - b).abs() * modulus <= tolerances.stress_pa)
+                && (pa - pb).abs() * modulus <= tolerances.stress_pa
+        };
+        let (energy, agrees) = match (self, committed) {
+            (Self::Norton(law, state), Self::Norton(_, accepted)) => {
+                let increment = law
+                    .advance_with_energy(old_strain, state, new_strain, tolerances)
+                    .map_err(FrameCreepError::Material)?;
+                let history = accepted.tensor_history();
+                let agrees = close(
+                    &history.creep_strain,
+                    &increment.state.creep_strain,
+                    history.equivalent_creep_strain,
+                    increment.state.equivalent_creep_strain,
+                );
+                (increment.energy, agrees)
+            }
+            (Self::NortonJ2(law, state), Self::NortonJ2(_, accepted)) => {
+                let increment = law
+                    .advance_with_energy(old_strain, state, new_strain, tolerances)
+                    .map_err(FrameCreepError::Material)?;
+                let history = accepted.tensor_history();
+                let agrees = close(
+                    &history.creep.creep_strain,
+                    &increment.state.creep.creep_strain,
+                    history.creep.equivalent_creep_strain,
+                    increment.state.creep.equivalent_creep_strain,
+                ) && close(
+                    &history.plastic.plastic_strain,
+                    &increment.state.plastic.plastic_strain,
+                    history.plastic.alpha,
+                    increment.state.plastic.alpha,
+                );
+                (increment.energy, agrees)
+            }
+            _ => {
+                return Err(FrameCreepError::Invalid(
+                    "timed fiber family changed during native solve",
+                ));
+            }
+        };
+        require(
+            agrees,
+            "published native history disagrees with the checked constitutive step",
+        )?;
+        Ok(energy)
+    }
+}
+
 impl Frame2d {
     /// Existing static, modal and inertial routes do not own a creep clock.
     /// A duration-bearing fiber trial must stay inside the checked physical step.
@@ -120,13 +235,13 @@ impl Frame2d {
                 SectionModel::Fiber(section) => section
                     .fibers
                     .iter()
-                    .any(|fiber| matches!(&fiber.law, FiberLaw::Norton(_))),
+                    .any(|fiber| matches!(&fiber.law, FiberLaw::Norton(_) | FiberLaw::NortonJ2(_))),
                 SectionModel::Elastic { .. } => false,
             })
         });
         if has_creep {
             Err(SolidError::MaterialRefused {
-                what: "Norton fibers require solve_creep_step with an explicit physical interval; untimed static/modal and inertial frame paths do not own creep history".into(),
+                what: "timed creep fibers require solve_creep_step with an explicit physical interval; untimed static/modal and inertial frame paths do not own creep history".into(),
             })
         } else {
             Ok(())
@@ -150,15 +265,33 @@ impl Frame2d {
         }
     }
 
+    /// Read both accepted memories and source receipts without another trial.
+    pub fn creep_plastic_fiber(
+        &self,
+        element: usize,
+        section: usize,
+        fiber: usize,
+    ) -> Option<(&UniaxialNortonJ2, &UniaxialNortonJ2State)> {
+        let SectionModel::Fiber(s) = self.elements.get(element)?.sections.get(section)? else {
+            return None;
+        };
+        match (&s.fibers.get(fiber)?.law, s.states.get(fiber)?) {
+            (FiberLaw::NortonJ2(law), FiberState::NortonJ2(state)) => Some((law, state)),
+            _ => None,
+        }
+    }
+
     /// Rebind the next explicit interval/temperature without evolving history.
     /// Laws are ordered by member, original Lobatto section, then fiber. Elastic
-    /// coefficients, kinetic parameters, card identities, selected claims and
+    /// and hardening coefficients, kinetic parameters, card identities, selected claims and
     /// nonthermal source coordinates must remain identical. `temperature_axis`
     /// is the original explicit coordinate used by each sourced family; authored
     /// laws have no source coordinate. Reference geometry and inertia stay fixed.
-    pub fn with_creep_laws(
+    /// Norton and joint Norton/J2 laws retain their original history family.
+    /// Sourced yield stress may follow temperature; authored yield stays fixed.
+    pub fn with_creep_laws<L: Clone + Into<FiberLaw>>(
         &self,
-        laws: &[UniaxialNorton],
+        laws: &[L],
         temperature_axis: &str,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, FrameCreepError> {
@@ -169,7 +302,7 @@ impl Frame2d {
             for (p, section) in e.sections.iter_mut().enumerate() {
                 let SectionModel::Fiber(section) = section else {
                     return Err(FrameCreepError::Invalid(
-                        "creep rebinding requires native Norton fibers",
+                        "creep rebinding requires native timed fibers",
                     ));
                 };
                 require(
@@ -178,22 +311,24 @@ impl Frame2d {
                 )?;
                 for (fiber, state) in section.fibers.iter_mut().zip(&section.states) {
                     poll(&mut cancelled)?;
-                    let (FiberLaw::Norton(old), FiberState::Norton(state)) = (&fiber.law, state)
-                    else {
-                        return Err(FrameCreepError::Invalid(
-                            "creep rebinding requires matching Norton history",
-                        ));
-                    };
-                    let law = laws
+                    let old = CreepPoint::new(&fiber.law, state)?;
+                    let next_law: FiberLaw = laws
                         .get(index)
-                        .ok_or(FrameCreepError::Invalid("missing next fiber law"))?;
+                        .ok_or(FrameCreepError::Invalid("missing next fiber law"))?
+                        .clone()
+                        .into();
+                    let law = CreepPoint::new(&next_law, state)?;
                     require(
-                        old.backbone().elastic() == law.backbone().elastic()
-                            && old.backbone().parameters() == law.backbone().parameters(),
-                        "creep history cannot silently change elasticity or kinetic parameters",
+                        old.kinetics().elastic() == law.kinetics().elastic()
+                            && old.kinetics().parameters() == law.kinetics().parameters()
+                            && old.hardening() == law.hardening(),
+                        "creep history cannot silently change elastic/hardening storage or kinetic parameters",
                     )?;
                     match (old.material(), law.material()) {
-                        (None, None) => {}
+                        (None, None) => require(
+                            old.yield_stress() == law.yield_stress(),
+                            "changing authored yield requires an explicit source evolution owner",
+                        )?,
                         (Some(a), Some(b)) => {
                             require(
                                 a.card_identity() == b.card_identity()
@@ -209,8 +344,8 @@ impl Frame2d {
                                         |((ka, va), (kb, vb))| {
                                             ka == kb
                                                 && if ka == temperature_axis {
-                                                    *va == old.backbone().temperature_k()
-                                                        && *vb == law.backbone().temperature_k()
+                                                    *va == old.kinetics().temperature_k()
+                                                        && *vb == law.kinetics().temperature_k()
                                                 } else {
                                                     va.to_bits() == vb.to_bits()
                                                 }
@@ -226,16 +361,15 @@ impl Frame2d {
                             ));
                         }
                     }
-                    law.tensor_strain(e.commit.d[p].0 - fiber.y * e.commit.d[p].1, state)
-                        .map_err(FrameCreepError::Material)?;
-                    fiber.law = FiberLaw::Norton(law.clone());
+                    law.tensor_strain(e.commit.d[p].0 - fiber.y * e.commit.d[p].1)?;
+                    fiber.law = next_law;
                     index += 1;
                 }
             }
         }
         require(
             index == laws.len() && index > 0,
-            "one next law per original Norton fiber required",
+            "one next law per original timed fiber required",
         )?;
         next.reset_rayleigh_reference();
         poll(&mut cancelled)?;
@@ -287,7 +421,7 @@ impl Frame2d {
             for (p, section) in e.sections.iter().enumerate() {
                 let SectionModel::Fiber(section) = section else {
                     return Err(FrameCreepError::Invalid(
-                        "checked creep work requires Norton fiber sections",
+                        "checked creep work requires timed fiber sections",
                     ));
                 };
                 require(
@@ -303,17 +437,12 @@ impl Frame2d {
                         count <= tolerances.maximum_fiber_points,
                         "fiber work budget exceeded",
                     )?;
-                    let (FiberLaw::Norton(law), FiberState::Norton(state)) = (&fiber.law, state)
-                    else {
-                        return Err(FrameCreepError::Invalid(
-                            "checked creep work requires matching Norton histories",
-                        ));
-                    };
+                    let law = CreepPoint::new(&fiber.law, state)?;
                     require(
                         positive(fiber.area) && fiber.y.is_finite(),
                         "invalid fiber area or position",
                     )?;
-                    let dt = law.backbone().duration_s();
+                    let dt = law.kinetics().duration_s();
                     if let Some(previous) = duration {
                         require(
                             dt == previous,
@@ -323,9 +452,8 @@ impl Frame2d {
                         duration = Some(dt);
                     }
                     let strain = e.commit.d[p].0 - fiber.y * e.commit.d[p].1;
-                    law.tensor_strain(strain, state)
-                        .map_err(FrameCreepError::Material)?;
-                    self.admit_creep_geometry(e, law.backbone().elastic().strain_limit)?;
+                    law.tensor_strain(strain)?;
+                    self.admit_creep_geometry(e, law.kinetics().elastic().strain_limit)?;
                 }
             }
         }
@@ -388,42 +516,26 @@ impl Frame2d {
                 };
                 for (f, (fiber, state)) in section.fibers.iter().zip(&section.states).enumerate() {
                     poll(&mut cancelled)?;
-                    let (FiberLaw::Norton(law), FiberState::Norton(state)) = (&fiber.law, state)
-                    else {
-                        unreachable!()
-                    };
-                    next.admit_creep_geometry(new, law.backbone().elastic().strain_limit)?;
+                    let law = CreepPoint::new(&fiber.law, state)?;
+                    next.admit_creep_geometry(new, law.kinetics().elastic().strain_limit)?;
                     let old_strain = old.commit.d[p].0 - fiber.y * old.commit.d[p].1;
                     let new_strain = new.commit.d[p].0 - fiber.y * new.commit.d[p].1;
-                    let increment = law
-                        .advance_with_energy(old_strain, state, new_strain, tolerances.material)
-                        .map_err(FrameCreepError::Material)?;
-                    let (_, committed) = next
-                        .creep_fiber(element, p, f)
-                        .expect("same native fiber topology");
-                    let history = committed.tensor_history();
-                    let modulus = law.backbone().elastic().youngs;
-                    require(
-                        history
-                            .creep_strain
-                            .iter()
-                            .zip(increment.state.creep_strain)
-                            .all(|(a, b)| (a - b).abs() * modulus <= tolerances.material.stress_pa)
-                            && (history.equivalent_creep_strain
-                                - increment.state.equivalent_creep_strain)
-                                .abs()
-                                * modulus
-                                <= tolerances.material.stress_pa,
-                        "published native history disagrees with the checked constitutive step",
-                    )?;
+                    let SectionModel::Fiber(committed) = &new.sections[p] else {
+                        unreachable!()
+                    };
+                    let committed =
+                        CreepPoint::new(&committed.fibers[f].law, &committed.states[f])?;
+                    let account =
+                        law.audit(committed, old_strain, new_strain, tolerances.material)?;
                     let volume = fiber.area * old.w[p] * old.l0;
                     require(
                         positive(volume),
                         "fiber reference volume is not representable",
                     )?;
-                    let account = increment.energy;
                     energy.initial_stored_j += volume * account.initial_stored_j_m3;
                     energy.final_stored_j += volume * account.final_stored_j_m3;
+                    energy.creep_dissipation_j += volume * account.creep_dissipation_j_m3;
+                    energy.plastic_dissipation_j += volume * account.plastic_dissipation_j_m3;
                     energy.physical_dissipation_j += volume * account.physical_dissipation_j_m3;
                     energy.numerical_dissipation_j += volume * account.numerical_dissipation_j_m3;
                     material_work += volume * account.mechanical_work_j_m3;

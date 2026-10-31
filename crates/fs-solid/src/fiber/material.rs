@@ -13,6 +13,7 @@
 use super::{Fiber, FiberLaw, Section};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
+use fs_material::creep::plastic::uniaxial::UniaxialNortonJ2;
 use fs_material::creep::uniaxial::UniaxialNorton;
 use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
 use fs_material::plastic::chaboche::axial::UniaxialChaboche;
@@ -142,6 +143,7 @@ impl FiberMaterial {
     pub fn authored(law: FiberLaw, density_kg_m3: f64) -> Result<Self> {
         match law {
             FiberLaw::Norton(law) => Self::norton(law, density_kg_m3),
+            FiberLaw::NortonJ2(law) => Self::norton_j2(law, density_kg_m3),
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
             FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
@@ -172,6 +174,19 @@ impl FiberMaterial {
         )?;
         Ok(Self {
             law: FiberLaw::Norton(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Joint axial creep/plasticity with explicit reference density. Original
+    /// mechanical claims remain in a source-bound law; this does not turn an
+    /// authored density into a sourced mass or infer thermal expansion.
+    pub fn norton_j2(law: UniaxialNortonJ2, density_kg_m3: f64) -> Result<Self> {
+        require(positive(density_kg_m3), "creep/plastic fiber density must be finite and positive")?;
+        Ok(Self {
+            law: FiberLaw::NortonJ2(law),
             density_kg_m3,
             source: None,
             chaboche_branch_properties: None,
