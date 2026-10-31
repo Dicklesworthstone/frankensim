@@ -274,8 +274,19 @@ impl<const N: usize> OpticalHeating<N> {
             residual_w,
             thermal_input_w,
         };
-        let energy = power.integrate(0.0)?;
         checkpoint()?;
+        Self::from_admitted_sources(power, sources_w, thermal)
+    }
+
+    // Shared initialization after the original optical owner has validated
+    // its immutable report, recipient map and complete power accounting.
+    // Constituent-aware admission reuses this SAME thermal observer/clock.
+    pub(crate) fn from_admitted_sources(
+        power: OpticalPowerBudget<N>,
+        sources_w: BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<Self, OpticalHeatingError> {
+        let energy = power.integrate(0.0)?;
         Ok(Self {
             power,
             sources_w,

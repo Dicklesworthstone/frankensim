@@ -7,6 +7,9 @@
 //! wavelength; particle indices, asymmetry parameters and endpoint mixtures
 //! are never averaged to invent a replacement optical material.
 
+/// True incident-beam absorption assigned to the original constituents.
+pub mod deposition;
+
 use super::gas_scattering::MaterialGasScatteringBinding;
 use super::particle_scattering::MaterialParticleSpectrum;
 use crate::volumes::VolumeGrid;
@@ -16,7 +19,7 @@ use crate::volumes::transport::scattering::{
 use crate::volumes::transport::{
     AbsorbingGrid, AbsorbingGridBudget, CellPalette, CellPaletteBudget,
     MAX_OPTICAL_MIXTURE_COMPONENTS, MassAbsorptionSpectrum, OpticalMixtureBudget,
-    VolumeTransportError,
+    ThermalEmissionComponent, ThermalEmissionModel, VolumeTransportError,
 };
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -32,6 +35,22 @@ pub enum MaterialOpticalComponent<'a> {
     Gas(&'a MaterialGasScatteringBinding),
     /// One prepared material and particle size distribution.
     Particles(&'a MaterialParticleSpectrum),
+}
+
+/// Explicit thermal-source choice for the original accepted mixture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MaterialMixtureEmission<'a> {
+    /// Absorption and scattering only; no thermal radiation is added.
+    None,
+    /// One borrowed positive temperature per native cell. Every original gas
+    /// and particle endpoint must agree with that common LTE temperature.
+    CommonLte(&'a [f64]),
+    /// Each internally equilibrated particle population emits at its OWN
+    /// accepted material temperature. Populations need not be in mutual thermal
+    /// equilibrium. The original gas temperature remains independent; its
+    /// current nonabsorbing molecular law contributes no thermal source.
+    /// An absorbing particle with no accepted temperature refuses admission.
+    ConstituentTemperatures,
 }
 
 /// Fixed mass fractions and original component references, prepared once.
@@ -166,6 +185,35 @@ impl<'a> MaterialOpticalMixture<'a> {
     pub const fn scattering_optics(&self) -> &ScatteringOptics {
         &self.optics
     }
+
+    fn thermal_emission_model(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalEmissionModel, MaterialOpticalMixtureError> {
+        let mut components = Vec::with_capacity(self.components.len());
+        for (component, &mass_weight) in self.components.iter().zip(self.composition.fractions()) {
+            checkpoint(cx)?;
+            let (absorption, temperature_k) = match component {
+                MaterialOpticalComponent::Gas(_) => (MassAbsorptionSpectrum::constant(0.0)?, None),
+                MaterialOpticalComponent::Particles(particles) => (
+                    particles.spectrum().absorption,
+                    particles.accepted_temperature_k(),
+                ),
+            };
+            components.push(ThermalEmissionComponent {
+                mass_weight,
+                absorption,
+                temperature_k,
+            });
+        }
+        Ok(ThermalEmissionModel::try_new(
+            cx,
+            &components,
+            OpticalMixtureBudget {
+                max_components: self.components.len(),
+            },
+        )?)
+    }
 }
 
 /// Coexisting materials in native cells, retaining the original source palette
@@ -210,7 +258,49 @@ impl<'a> MaterialOpticalMixtureGrid<'a> {
         maximum_volume_fraction: f64,
         budget: AbsorbingGridBudget,
     ) -> Result<Self, MaterialOpticalMixtureError> {
+        Self::try_new_with_emission(
+            cx,
+            grid,
+            mixtures,
+            gas_states,
+            temperature_k.map_or(
+                MaterialMixtureEmission::None,
+                MaterialMixtureEmission::CommonLte,
+            ),
+            maximum_volume_fraction,
+            budget,
+        )
+    }
+
+    /// Bind the original mixture with an explicit thermal-source model.
+    ///
+    /// Density, phase-volume closure, material endpoints and dilution obey the
+    /// same admission as [`Self::try_new`]. `None` and `CommonLte` retain that
+    /// constructor's native paths and temperature checks.
+    ///
+    /// `ConstituentTemperatures` prepares each recipe's native source directly
+    /// from its original particle temperatures and mass-weighted absorption:
+    /// `j_lambda = rho_total * sum(w_i * kappa_a_i(lambda) * B_lambda(T_i))`.
+    /// No averaged temperature, additional emissivity, gas heating, or spectral
+    /// continuation is inferred. Sources share the original cell map; no
+    /// per-cell temperature field is created. A changed particle temperature
+    /// requires a freshly accepted material spectrum, as for its optical law.
+    pub fn try_new_with_emission(
+        cx: &Cx<'_>,
+        grid: VolumeGrid<'a>,
+        mixtures: CellPalette<MaterialOpticalMixture<'a>>,
+        gas_states: Option<&'a [RayleighGasState]>,
+        emission: MaterialMixtureEmission<'a>,
+        maximum_volume_fraction: f64,
+        budget: AbsorbingGridBudget,
+    ) -> Result<Self, MaterialOpticalMixtureError> {
         checkpoint(cx)?;
+        let temperature_k = match emission {
+            MaterialMixtureEmission::CommonLte(temperatures) => Some(temperatures),
+            _ => None,
+        };
+        let constituent_temperatures =
+            matches!(emission, MaterialMixtureEmission::ConstituentTemperatures);
         if grid.data.len() > budget.max_grid_cells || budget.max_steps_per_segment == 0 {
             return Err(VolumeTransportError::Budget.into());
         }
@@ -314,13 +404,27 @@ impl<'a> MaterialOpticalMixtureGrid<'a> {
             max_models: mixtures.values().len(),
             max_cells: mixtures.cell_indices().len(),
         };
-        let mut absorption = Vec::with_capacity(palette_budget.max_models);
+        let mut absorption = Vec::new();
+        let mut thermal_sources = Vec::new();
+        if constituent_temperatures {
+            thermal_sources
+                .try_reserve_exact(palette_budget.max_models)
+                .map_err(|_| VolumeTransportError::Budget)?;
+        } else {
+            absorption
+                .try_reserve_exact(palette_budget.max_models)
+                .map_err(|_| VolumeTransportError::Budget)?;
+        }
         let mut scattering = Vec::with_capacity(palette_budget.max_models);
         let mut hash = DomainHasher::new("org.frankensim.render.optical-mixture-grid.v1");
         hash.update(&(mixtures.values().len() as u64).to_le_bytes());
         for mixture in mixtures.values() {
             checkpoint(cx)?;
-            absorption.push(mixture.absorption);
+            if constituent_temperatures {
+                thermal_sources.push(mixture.thermal_emission_model(cx)?);
+            } else {
+                absorption.push(mixture.absorption);
+            }
             scattering.push(mixture.optics.clone());
             hash.update(mixture.source_identity.as_bytes());
         }
@@ -333,10 +437,15 @@ impl<'a> MaterialOpticalMixtureGrid<'a> {
                 }
             }
         }
-        let absorption = mixtures.with_values(cx, absorption, palette_budget)?;
         let scattering = mixtures.with_values(cx, scattering, palette_budget)?;
-        let absorption =
-            AbsorbingGrid::try_new_indexed(cx, grid, absorption, temperature_k, budget)?;
+        let absorption = if constituent_temperatures {
+            hash.update(b"constituent-temperatures-v1");
+            let sources = mixtures.with_values(cx, thermal_sources, palette_budget)?;
+            AbsorbingGrid::try_new_thermal_sources(cx, grid, sources, budget)?
+        } else {
+            let absorption = mixtures.with_values(cx, absorption, palette_budget)?;
+            AbsorbingGrid::try_new_indexed(cx, grid, absorption, temperature_k, budget)?
+        };
         let medium = ScatteringGrid::try_new_indexed(cx, absorption, scattering)?;
         hash.update(medium.content_identity().as_bytes());
         hash.update(&maximum_volume_fraction.to_bits().to_le_bytes());

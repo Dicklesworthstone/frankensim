@@ -16,6 +16,9 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, QuantitySpec};
 use std::sync::Arc;
 
+#[path = "deposition/tests.rs"]
+mod deposition;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new_clock_free();
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
@@ -53,13 +56,24 @@ fn gas(source: u8) -> MolecularRayleighMixture {
 // Actual source-card admission and Mie preparation, not fabricated spectra or
 // replacement material physics. These are declared synthetic fixture sources.
 fn particles(cx: &Cx<'_>, variant: usize, temperature: f64) -> MaterialParticleSpectrum {
+    particles_with_temperature(cx, variant, Some(temperature))
+}
+
+fn particles_with_temperature(
+    cx: &Cx<'_>,
+    variant: usize,
+    temperature: Option<f64>,
+) -> MaterialParticleSpectrum {
     let temperature_quantity = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
     ));
-    let point = QueryPoint::new()
-        .with_quantity("thermal", temperature_quantity, temperature)
-        .unwrap();
+    let point = match temperature {
+        Some(temperature) => QueryPoint::new()
+            .with_quantity("thermal", temperature_quantity, temperature)
+            .unwrap(),
+        None => QueryPoint::new(),
+    };
     let mut values = vec![(
         DENSITY_PROPERTY,
         Density::DIMS,
@@ -83,12 +97,14 @@ fn particles(cx: &Cx<'_>, variant: usize, temperature: f64) -> MaterialParticleS
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
                 value: PropertyValue::Scalar { value, dims },
-                validity: ValidityDomain::unconstrained().with_quantity(
-                    "thermal",
-                    temperature_quantity,
-                    temperature,
-                    temperature,
-                ),
+                validity: temperature.map_or_else(ValidityDomain::unconstrained, |temperature| {
+                    ValidityDomain::unconstrained().with_quantity(
+                        "thermal",
+                        temperature_quantity,
+                        temperature,
+                        temperature,
+                    )
+                }),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::LinearInside,
                 observations: Vec::new(),
@@ -564,5 +580,302 @@ fn g0_common_lte_and_sum_of_particle_volumes_are_required_before_publication() {
                 VolumeTransportError::Cancelled
             ))
         ));
+    });
+}
+
+#[test]
+fn g1_constituent_temperatures_emit_original_particle_sources_with_independent_gas_state() {
+    with_cx(|cx, _| {
+        let state = gas(1).evaluate(250.0, 100_000.0).unwrap();
+        let carrier = MaterialGasScatteringBinding::try_new(state).unwrap();
+        let a = particles(cx, 0, 300.0);
+        let b = particles(cx, 1, 400.0);
+        let components = [
+            MaterialOpticalComponent::Gas(&carrier),
+            MaterialOpticalComponent::Particles(&a),
+            MaterialOpticalComponent::Particles(&b),
+        ];
+        let fractions = composition(&[1.0 - 3e-8, 1e-8, 2e-8]);
+        let recipe =
+            MaterialOpticalMixture::try_new(cx, &components, &fractions, mixture_budget()).unwrap();
+        let recipes = palette(cx, vec![recipe], &[0]);
+        let density = [total_density(&state, &fractions, &a, &b)];
+        let states = [state];
+        let legacy = MaterialOpticalMixtureGrid::try_new(
+            cx,
+            grid(&density),
+            recipes.clone(),
+            Some(&states),
+            None,
+            1e-6,
+            grid_budget(),
+        )
+        .unwrap();
+        let field = MaterialOpticalMixtureGrid::try_new_with_emission(
+            cx,
+            grid(&density),
+            recipes.clone(),
+            Some(&states),
+            MaterialMixtureEmission::ConstituentTemperatures,
+            1e-6,
+            grid_budget(),
+        )
+        .unwrap();
+        assert!(field.medium().has_thermal_emission());
+        assert!(field.medium().absorption_grid().has_emission_proposal());
+        assert_eq!(field.gas_states().unwrap().as_ptr(), states.as_ptr());
+        assert_eq!(field.gas_states().unwrap()[0].gas().temperature, 250.0);
+        assert_eq!(
+            field.medium().phase_at_cell(0).unwrap(),
+            legacy.medium().phase_at_cell(0).unwrap()
+        );
+        assert_ne!(field.content_identity(), legacy.content_identity());
+        assert!(Arc::ptr_eq(
+            field
+                .medium()
+                .absorption_grid()
+                .absorption_palette()
+                .unwrap()
+                .cell_indices(),
+            recipes.cell_indices(),
+        ));
+        let sources = field.medium().absorption_grid().thermal_sources().unwrap();
+        assert!(Arc::ptr_eq(sources.cell_indices(), recipes.cell_indices()));
+        let source_components = sources.values()[0].components();
+        assert_eq!(source_components[0].temperature_k, None);
+        assert_eq!(
+            source_components[1].temperature_k,
+            a.accepted_temperature_k()
+        );
+        assert_eq!(
+            source_components[2].temperature_k,
+            b.accepted_temperature_k()
+        );
+        assert_eq!(source_components[1].absorption, a.spectrum().absorption);
+        assert_eq!(source_components[2].absorption, b.spectrum().absorption);
+        let wavelengths = [417.3, 550.0, 760.0];
+        let origin = Point3::new(0.5, 0.5, -1.0);
+        let direction = Vec3::new(0.0, 0.0, 1.0);
+        let transport = field
+            .medium()
+            .transport(cx, origin, direction, 1002.0, &wavelengths)
+            .unwrap();
+        assert_eq!(
+            transport.transmittance,
+            legacy
+                .medium()
+                .transmittance(cx, origin, direction, 1002.0, &wavelengths)
+                .unwrap()
+        );
+        for (lane, wavelength) in wavelengths.into_iter().enumerate() {
+            let w = fractions.fractions();
+            let absorption = [
+                w[1] * a.spectrum().absorption.at(wavelength).unwrap(),
+                w[2] * b.spectrum().absorption.at(wavelength).unwrap(),
+            ];
+            let scattering = w[0] * state.mass_scattering_m2_kg(wavelength).unwrap()
+                + w[1] * a.spectrum().scattering.at(wavelength).unwrap()
+                + w[2] * b.spectrum().scattering.at(wavelength).unwrap();
+            let extinction = absorption.iter().sum::<f64>() + scattering;
+            let source = absorption[0]
+                * crate::thermal_surface::planck_radiance_w_m2_sr_nm(300.0, wavelength).unwrap()
+                + absorption[1]
+                    * crate::thermal_surface::planck_radiance_w_m2_sr_nm(400.0, wavelength)
+                        .unwrap();
+            let tau = 1000.0 * density[0] * extinction;
+            close(
+                transport.emission_w_m2_sr_nm[lane],
+                source / extinction * -(-tau).exp_m1(),
+            );
+        }
+        // The original common-LTE constructor still rejects this independent
+        // gas temperature instead of overriding either material endpoint.
+        assert!(matches!(
+            MaterialOpticalMixtureGrid::try_new(
+                cx,
+                grid(&density),
+                recipes,
+                Some(&states),
+                Some(&[300.0]),
+                1e-6,
+                grid_budget()
+            ),
+            Err(MaterialOpticalMixtureError::TemperatureMismatch {
+                cell: 0,
+                component: 0
+            })
+        ));
+    });
+}
+
+#[test]
+fn g1_equal_constituent_temperatures_recover_common_lte_and_keep_legacy_identity() {
+    with_cx(|cx, gate| {
+        let model = gas(1);
+        let states = [
+            model.evaluate(300.0, 100_000.0).unwrap(),
+            model.evaluate(300.0, 50_000.0).unwrap(),
+        ];
+        let carrier = MaterialGasScatteringBinding::try_new(states[0]).unwrap();
+        let a = particles(cx, 0, 300.0);
+        let b = particles(cx, 1, 300.0);
+        let components = [
+            MaterialOpticalComponent::Gas(&carrier),
+            MaterialOpticalComponent::Particles(&a),
+            MaterialOpticalComponent::Particles(&b),
+        ];
+        let fractions = composition(&[1.0 - 3e-8, 1e-8, 2e-8]);
+        let recipe =
+            MaterialOpticalMixture::try_new(cx, &components, &fractions, mixture_budget()).unwrap();
+        let recipes = palette(cx, vec![recipe], &[0, 0]);
+        let density = states.map(|state| total_density(&state, &fractions, &a, &b));
+        let temperatures = [300.0; 2];
+        let old = MaterialOpticalMixtureGrid::try_new(
+            cx,
+            grid(&density),
+            recipes.clone(),
+            Some(&states),
+            Some(&temperatures),
+            1e-6,
+            grid_budget(),
+        )
+        .unwrap();
+        let common = MaterialOpticalMixtureGrid::try_new_with_emission(
+            cx,
+            grid(&density),
+            recipes.clone(),
+            Some(&states),
+            MaterialMixtureEmission::CommonLte(&temperatures),
+            1e-6,
+            grid_budget(),
+        )
+        .unwrap();
+        let independent = MaterialOpticalMixtureGrid::try_new_with_emission(
+            cx,
+            grid(&density),
+            recipes.clone(),
+            Some(&states),
+            MaterialMixtureEmission::ConstituentTemperatures,
+            1e-6,
+            grid_budget(),
+        )
+        .unwrap();
+        assert_eq!(old.content_identity(), common.content_identity());
+        assert_eq!(
+            independent
+                .medium()
+                .absorption_grid()
+                .thermal_sources()
+                .unwrap()
+                .values()
+                .len(),
+            1
+        );
+        let origin = Point3::new(0.5, 0.5, -1.0);
+        let direction = Vec3::new(0.0, 0.0, 1.0);
+        let wavelengths = [417.3, 550.0, 760.0];
+        let expected = old
+            .medium()
+            .transport(cx, origin, direction, 2002.0, &wavelengths)
+            .unwrap();
+        let actual = independent
+            .medium()
+            .transport(cx, origin, direction, 2002.0, &wavelengths)
+            .unwrap();
+        assert_eq!(actual.transmittance, expected.transmittance);
+        for (got, want) in actual
+            .emission_w_m2_sr_nm
+            .into_iter()
+            .zip(expected.emission_w_m2_sr_nm)
+        {
+            close(got, want);
+        }
+        gate.request();
+        assert!(matches!(
+            MaterialOpticalMixtureGrid::try_new_with_emission(
+                cx,
+                grid(&density),
+                recipes,
+                Some(&states),
+                MaterialMixtureEmission::ConstituentTemperatures,
+                1e-6,
+                grid_budget()
+            ),
+            Err(MaterialOpticalMixtureError::Transport(
+                VolumeTransportError::Cancelled
+            ))
+        ));
+    });
+}
+
+#[test]
+fn g0_constituent_mode_never_invents_an_absorber_temperature_or_a_gas_source() {
+    with_cx(|cx, _| {
+        let unknown = particles_with_temperature(cx, 0, None);
+        assert_eq!(unknown.accepted_temperature_k(), None);
+        let components = [MaterialOpticalComponent::Particles(&unknown)];
+        let fractions = composition(&[1.0]);
+        let recipe =
+            MaterialOpticalMixture::try_new(cx, &components, &fractions, mixture_budget()).unwrap();
+        let recipes = palette(cx, vec![recipe], &[0]);
+        let density = [1e-5];
+        MaterialOpticalMixtureGrid::try_new(
+            cx,
+            grid(&density),
+            recipes.clone(),
+            None,
+            None,
+            1e-6,
+            grid_budget(),
+        )
+        .unwrap();
+        assert!(matches!(
+            MaterialOpticalMixtureGrid::try_new_with_emission(
+                cx,
+                grid(&density),
+                recipes,
+                None,
+                MaterialMixtureEmission::ConstituentTemperatures,
+                1e-6,
+                grid_budget()
+            ),
+            Err(MaterialOpticalMixtureError::Transport(
+                VolumeTransportError::Temperature
+            ))
+        ));
+        let state = gas(1).evaluate(300.0, 100_000.0).unwrap();
+        let carrier = MaterialGasScatteringBinding::try_new(state).unwrap();
+        let gas_components = [MaterialOpticalComponent::Gas(&carrier)];
+        let gas_recipe =
+            MaterialOpticalMixture::try_new(cx, &gas_components, &fractions, mixture_budget())
+                .unwrap();
+        let gas_states = [state];
+        let gas_density = [state.gas().density];
+        let gas_field = MaterialOpticalMixtureGrid::try_new_with_emission(
+            cx,
+            grid(&gas_density),
+            palette(cx, vec![gas_recipe], &[0]),
+            Some(&gas_states),
+            MaterialMixtureEmission::ConstituentTemperatures,
+            1e-6,
+            grid_budget(),
+        )
+        .unwrap();
+        assert!(!gas_field.medium().has_thermal_emission());
+        let transfer = gas_field
+            .medium()
+            .transport(
+                cx,
+                Point3::new(0.5, 0.5, -1.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                1002.0,
+                &[550.0],
+            )
+            .unwrap();
+        assert_eq!(transfer.emission_w_m2_sr_nm, [0.0]);
+        close(
+            transfer.transmittance[0],
+            (-1000.0 * state.scattering_per_m(550.0).unwrap()).exp(),
+        );
     });
 }

@@ -2983,6 +2983,41 @@ constructors retain their source semantics and identities. These finite-band
 sources describe observed radiation, not a thermal-state debit, net radiation
 exchange, fluorescence, or an inferred spectrum beyond admitted support.
 
+### Material temperatures and constituent heating
+
+`MaterialOpticalMixtureGrid::try_new_with_emission` selects
+`MaterialMixtureEmission::None`, `CommonLte` or `ConstituentTemperatures`.
+The original constructor forwards to the first two modes. Constituent mode
+binds each prepared particle population's original accepted temperature and
+absorption to the native thermal-source model. The current molecular gas law
+absorbs no radiation, so it contributes no emission and retains its independent
+accepted thermodynamic state. Gas EOS phase-volume closure, aggregate particle
+dilution and source identity checks remain unchanged. An absorbing particle
+without an accepted temperature refuses. No per-cell temperature copy is needed.
+
+`deposit_beam_power_by_component` performs the existing native beam transport
+once, then partitions each cell's true absorption using its original spectral
+shares `w_i*kappa_ai(lambda)/sum_j(w_j*kappa_aj(lambda))`. The immutable
+`ConstituentBeamDeposition` retains the complete original beam report,
+mixture identity and sparse cell/component/source rows. Nonabsorbers and
+zero-power cells receive exactly zero heat. Explicit row and component-work
+budgets bound partitioning; cancellation or a nonrepresentable positive share
+refuses the complete report. Compensated reductions check closure and retain
+the native-minus-partition roundoff residual. Scattered power remains radiation
+in the unchanged beam balance.
+
+Under `optical-heating`, `ConstituentBeamDeposition::prepare_heating` binds
+each retained `(optical cell, component)` exactly once to an active
+`fs_thermal::CellId`. Constituents may heat different cells, and multiple
+contributions may feed one cell. Admission checks complete power accounting
+against the caller's tolerance. The returned owner is the existing
+`OpticalHeating`, with its native thermal clock, accepted-substep energy
+accounts, caloric laws and transactional observer composition. The caller owns
+physical control-volume/mass assignments and constituent thermal contacts.
+Optics and source power remain a fixed accepted snapshot; changed states need
+rebinding. This bridge adds incident absorption, not an emission debit or a
+net radiative-equilibrium solve.
+
 ### Calibrated spectral fixture paths
 
 `PathLuminanceJob` connects the same `PhotometricSource` states to the original
