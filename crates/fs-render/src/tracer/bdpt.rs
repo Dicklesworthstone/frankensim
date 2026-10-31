@@ -26,7 +26,9 @@ use super::*;
 /// path class the proposal's only admissible competitor is the camera random
 /// walk, so both sides use an explicit complementary power-heuristic weight;
 /// more general manifold-path MIS remains outside this estimator's claim.
-pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 6;
+/// Version 7 retains the direct-source technique in environment-only scenes,
+/// where there is no finite emitter from which to launch a light subpath.
+pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 7;
 
 /// Admitted finite-light BDPT technique set.
 ///
@@ -159,7 +161,7 @@ enum VertexKind {
 }
 
 #[derive(Clone, Copy)]
-struct Vertex {
+struct Vertex<'scene> {
     kind: VertexKind,
     point: Point3,
     geometric_normal: Option<Vec3>,
@@ -169,11 +171,11 @@ struct Vertex {
     pdf_fwd: f64,
     pdf_rev: f64,
     delta: bool,
-    positive_medium: Option<MediumEntry>,
-    negative_medium: Option<MediumEntry>,
+    positive_medium: Option<MediumEntry<'scene>>,
+    negative_medium: Option<MediumEntry<'scene>>,
 }
 
-impl Vertex {
+impl<'scene> Vertex<'scene> {
     fn camera(point: Point3) -> Self {
         Self {
             kind: VertexKind::Camera,
@@ -210,17 +212,17 @@ impl Vertex {
     }
 
     fn surface(
-        scene: &Scene,
+        scene: &'scene Scene,
         intersection: SceneIntersection,
         ray: Ray,
         frame: SurfaceFrame,
-        stack: &MediumStack,
+        stack: &MediumStack<'scene>,
         beta: f64,
         pdf_fwd: f64,
     ) -> Self {
         let primitive_index = intersection.primitive_index;
         let primitive = &scene.primitives[primitive_index];
-        let (positive_medium, negative_medium) = match primitive.material {
+        let (positive_medium, negative_medium) = match &primitive.material {
             Material::Dielectric { glass, .. } => {
                 let positive = if frame.entering {
                     stack.last().copied()
@@ -286,7 +288,7 @@ impl Vertex {
         }
     }
 
-    fn medium_toward(self, direction: Vec3) -> Option<MediumEntry> {
+    fn medium_toward(self, direction: Vec3) -> Option<MediumEntry<'scene>> {
         let Some(normal) = self.geometric_normal else {
             return None;
         };
@@ -317,8 +319,8 @@ struct CameraEscape {
     previous_delta: bool,
 }
 
-struct CameraSubpath {
-    vertices: Vec<Vertex>,
+struct CameraSubpath<'scene> {
+    vertices: Vec<Vertex<'scene>>,
     escape: Option<CameraEscape>,
 }
 
@@ -430,7 +432,8 @@ fn same_medium(left: Option<MediumEntry>, right: Option<MediumEntry>) -> bool {
     match (left, right) {
         (None, None) => true,
         (Some(left), Some(right)) => {
-            left.boundary_primitive == right.boundary_primitive && left.glass == right.glass
+            left.boundary_primitive == right.boundary_primitive
+                && (core::ptr::eq(left.glass, right.glass) || left.glass == right.glass)
         }
         (None, Some(_)) | (Some(_), None) => false,
     }
@@ -489,7 +492,7 @@ fn surface_scattering(
         | Material::Conductor { .. } => {
             let medium = vertex
                 .medium_toward(predecessor_direction)
-                .map(|entry| entry.glass);
+                .map(|entry| *entry.glass);
             opaque_bsdf_eval(
                 material,
                 normal,
@@ -510,10 +513,10 @@ fn surface_scattering(
             };
             let incident = vertex
                 .medium_toward(predecessor_direction)
-                .map(|entry| entry.glass);
+                .map(|entry| *entry.glass);
             let transmitted = vertex
                 .medium_toward(predecessor_direction.scale(-1.0))
-                .map(|entry| entry.glass);
+                .map(|entry| *entry.glass);
             let eta_i = medium_ior(incident, wavelength_nm)?;
             let eta_t = medium_ior(transmitted, wavelength_nm)?;
             let evaluation = evaluate_rough_dielectric(
@@ -572,10 +575,10 @@ fn surface_pdf_solid_angle(
             };
             let incident = vertex
                 .medium_toward(predecessor_direction)
-                .map(|entry| entry.glass);
+                .map(|entry| *entry.glass);
             let transmitted = vertex
                 .medium_toward(predecessor_direction.scale(-1.0))
-                .map(|entry| entry.glass);
+                .map(|entry| *entry.glass);
             let eta_i = medium_ior(incident, wavelength_nm)?;
             let eta_t = medium_ior(transmitted, wavelength_nm)?;
             Ok(evaluate_rough_dielectric(
@@ -618,7 +621,7 @@ fn sample_surface(
                 return Ok(None);
             };
             let cosine = normal.dot(wi).max(0.0);
-            let incident_medium = vertex.medium_toward(wo).map(|entry| entry.glass);
+            let incident_medium = vertex.medium_toward(wo).map(|entry| *entry.glass);
             let value = opaque_bsdf_eval(
                 material,
                 normal,
@@ -642,10 +645,10 @@ fn sample_surface(
             )
         }
         Material::Dielectric { surface, .. } => {
-            let incident = vertex.medium_toward(wo).map(|entry| entry.glass);
+            let incident = vertex.medium_toward(wo).map(|entry| *entry.glass);
             let transmitted = vertex
                 .medium_toward(wo.scale(-1.0))
-                .map(|entry| entry.glass);
+                .map(|entry| *entry.glass);
             let eta_i = medium_ior(incident, wavelength_nm)?;
             let eta_t = medium_ior(transmitted, wavelength_nm)?;
             if let Some(alpha) = surface.roughness_alpha() {
@@ -714,10 +717,10 @@ fn split_smooth_dielectric_surface(
     }
     let wo = vertex.wo.ok_or(TracerError::InvalidInput)?;
     let normal = oriented_normal(vertex, wo).ok_or(TracerError::MissingNormal)?;
-    let incident = vertex.medium_toward(wo).map(|entry| entry.glass);
+    let incident = vertex.medium_toward(wo).map(|entry| *entry.glass);
     let transmitted = vertex
         .medium_toward(wo.scale(-1.0))
-        .map(|entry| entry.glass);
+        .map(|entry| *entry.glass);
     let eta_i = medium_ior(incident, wavelength_nm)?;
     let eta_t = medium_ior(transmitted, wavelength_nm)?;
     let incident_cosine = admitted_unit_dot(normal, wo).clamp(0.0, 1.0);
@@ -760,10 +763,10 @@ fn split_smooth_dielectric_surface(
     }))
 }
 
-fn update_stack_after_sample(
-    scene: &Scene,
+fn update_stack_after_sample<'scene>(
+    scene: &'scene Scene,
     vertex: &Vertex,
-    stack: &mut MediumStack,
+    stack: &mut MediumStack<'scene>,
     sample: ScatterSample,
 ) -> Result<(), TracerError> {
     if sample.event != Some(DielectricEvent::Transmission) {
@@ -772,7 +775,7 @@ fn update_stack_after_sample(
     let VertexKind::Surface { primitive_index } = vertex.kind else {
         return Ok(());
     };
-    let Material::Dielectric { glass, .. } = scene.primitives[primitive_index].material else {
+    let Material::Dielectric { glass, .. } = &scene.primitives[primitive_index].material else {
         return Ok(());
     };
     let geometric = vertex.geometric_normal.ok_or(TracerError::MissingNormal)?;
@@ -783,8 +786,8 @@ fn update_stack_after_sample(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn random_walk(
-    scene: &Scene,
+fn random_walk<'scene>(
+    scene: &'scene Scene,
     cx: &Cx<'_>,
     ray_time: Option<&PathTime>,
     wavelength_nm: f64,
@@ -793,7 +796,7 @@ fn random_walk(
     mut beta: f64,
     mut pdf_fwd_solid_angle: f64,
     max_vertices: usize,
-    vertices: &mut Vec<Vertex>,
+    vertices: &mut Vec<Vertex<'scene>>,
     rng: &mut SubpathRng<'_>,
     forced_first_smooth_event: Option<DielectricEvent>,
 ) -> Result<WalkOutcome, TracerError> {
@@ -930,8 +933,8 @@ fn random_walk(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generate_camera_subpaths(
-    scene: &Scene,
+fn generate_camera_subpaths<'scene>(
+    scene: &'scene Scene,
     cx: &Cx<'_>,
     settings: &Settings,
     physical_camera: &PhysicalCamera,
@@ -941,7 +944,7 @@ fn generate_camera_subpaths(
     pixel: u32,
     sample: u32,
     path_sobol: Option<&Sobol>,
-) -> Result<Vec<CameraSubpath>, TracerError> {
+) -> Result<Vec<CameraSubpath<'scene>>, TracerError> {
     let raster = physical_camera
         .pinhole_raster_sample(ray.origin.offset(ray.dir), settings.width, settings.height)?
         .ok_or(TracerError::InvalidInput)?;
@@ -998,8 +1001,8 @@ fn generate_camera_subpaths(
     Ok(paths)
 }
 
-fn generate_light_subpath(
-    scene: &Scene,
+fn generate_light_subpath<'scene>(
+    scene: &'scene Scene,
     lighting: &AdmittedLighting<'_>,
     cx: &Cx<'_>,
     settings: &Settings,
@@ -1008,7 +1011,7 @@ fn generate_light_subpath(
     pixel: u32,
     sample: u32,
     path_sobol: Option<&Sobol>,
-) -> Result<Vec<Vertex>, TracerError> {
+) -> Result<Vec<Vertex<'scene>>, TracerError> {
     let mut rng = SubpathRng::new(settings, pixel, sample, LIGHT_WALK_DOMAIN, path_sobol);
     let random = rng.next4();
     let Some(emission) =
@@ -1198,7 +1201,7 @@ fn segment_transmittance(
     }
     let distance = distance_squared.sqrt();
     medium_transmittance(
-        from_medium.map(|entry| entry.glass),
+        from_medium.map(|entry| *entry.glass),
         wavelength_nm,
         distance,
     )
@@ -2028,7 +2031,11 @@ fn evaluate_strategies(
     }
 
     for t in 1..=camera_vertices.len() {
-        for s in 0..=light_vertices.len() {
+        // The s=1 endpoint is sampled directly by connect_s1, independently
+        // of the launched light walk. Environment-only scenes have no finite
+        // launch vertex, but still need this proposal to complement the MIS
+        // weight on camera paths that escape after non-delta scattering.
+        for s in 0..=light_vertices.len().max(1) {
             let Some(depth) = s.checked_add(t).and_then(|sum| sum.checked_sub(2)) else {
                 continue;
             };
@@ -3236,11 +3243,11 @@ mod tests {
         let glass = DielectricGlass::representative_borosilicate();
         let left = MediumEntry {
             boundary_primitive: 3,
-            glass,
+            glass: &glass,
         };
         let right = MediumEntry {
             boundary_primitive: 4,
-            glass,
+            glass: &glass,
         };
         assert!(!same_medium(Some(left), Some(right)));
         assert!(same_medium(Some(left), Some(left)));
@@ -3687,6 +3694,215 @@ mod tests {
             assert_eq!(rendered.film.xyz[0], expected);
             assert_eq!(rendered.strategies.evaluated, PACKET as u64);
             assert_eq!(rendered.strategies.nonzero, PACKET as u64);
+        });
+    }
+
+    #[test]
+    fn g0_environment_only_nee_retains_rough_reflection_and_transmission() {
+        with_test_cx(|cx| {
+            let glass = DielectricGlass::representative_borosilicate();
+            let alpha = 0.25;
+            let (mut scene, _, _) = direct_emitter_scene(true);
+            scene.primitives[0].material = Material::Dielectric {
+                glass,
+                surface: DielectricSurface::try_rough(alpha).unwrap(),
+            };
+            scene.primitives[0].emission = None;
+            scene.lights.clear();
+            scene.environment = Some(
+                crate::lighting::EnvironmentMap::try_from_linear_srgb(2, 2, vec![[1.0; 3]; 4], 0.0)
+                    .unwrap(),
+            );
+            let lighting = AdmittedLighting::try_new(&[], scene.environment.as_ref()).unwrap();
+            let physical = PhysicalCamera::try_legacy_compatible(
+                scene.camera.eye,
+                scene.camera.forward,
+                scene.camera.up,
+                scene.camera.half_tan,
+                2.0,
+                Aperture::try_circular(0.0).unwrap(),
+            )
+            .unwrap();
+            let settings = Settings {
+                width: 1,
+                height: 1,
+                spp: 32,
+                max_depth: 1,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::Mis,
+                seed: 0x454e_5649,
+            };
+            let wavelength = 550.0;
+            let point = Point3::new(0.0, 0.0, 0.0);
+            let eta = glass.ior().eval(wavelength).unwrap();
+            // Isolate the last boundary vertex: reflection arrives from air,
+            // transmission arrives from glass. Both connect to the exterior.
+            for side in [1.0, -1.0] {
+                let normal = Vec3::new(0.0, 0.0, side);
+                let path = CameraSubpath {
+                    vertices: vec![
+                        Vertex::camera(point.offset(normal)),
+                        Vertex {
+                            kind: VertexKind::Surface { primitive_index: 0 },
+                            point,
+                            geometric_normal: Some(Vec3::new(0.0, 0.0, 1.0)),
+                            wo: Some(normal),
+                            beta: 1.0,
+                            pdf_fwd: 1.0,
+                            pdf_rev: 0.0,
+                            delta: false,
+                            positive_medium: None,
+                            negative_medium: Some(MediumEntry {
+                                boundary_primitive: 0,
+                                glass: &glass,
+                            }),
+                        },
+                    ],
+                    escape: None,
+                };
+                let mut checked = 0;
+                for sample in 0..settings.spp {
+                    let mut rng = SubpathRng::new(&settings, 0, sample, CONNECTION_DOMAIN, None);
+                    rng.dimension = (1 << 16) ^ 2;
+                    let random = rng.next4();
+                    let LightSample::Environment(light) =
+                        lighting.sample(point, random[0], random[1]).unwrap()
+                    else {
+                        panic!("environment is the only source");
+                    };
+                    if light.direction.z <= 0.0 {
+                        continue;
+                    }
+                    let (eta_i, eta_t) = if side > 0.0 { (1.0, eta) } else { (eta, 1.0) };
+                    let response = evaluate_rough_dielectric(
+                        normal,
+                        normal,
+                        light.direction,
+                        eta_i,
+                        eta_t,
+                        alpha,
+                    )
+                    .unwrap();
+                    if response.value == 0.0 {
+                        continue;
+                    }
+                    let emitted = light.emission.0.eval(wavelength) * light.emission.1;
+                    let expected = scalar_to_xyz(
+                        response.value * light.direction.z * emitted
+                            / (light.pdf_solid_angle + response.pdf),
+                        wavelength,
+                    );
+                    for strategy_set in [
+                        BidirectionalStrategySet::Complete,
+                        BidirectionalStrategySet::CameraConnected,
+                    ] {
+                        let mut film = Film::try_new(1, 1).unwrap();
+                        let mut stats = BidirectionalStrategyStats::default();
+                        let mut splats = Vec::new();
+                        evaluate_strategies(
+                            &scene,
+                            &lighting,
+                            &physical,
+                            cx,
+                            None,
+                            &settings,
+                            strategy_set,
+                            0,
+                            sample,
+                            0,
+                            wavelength,
+                            1.0,
+                            None,
+                            &[],
+                            &path,
+                            true,
+                            &mut film,
+                            &mut splats,
+                            &mut stats,
+                        )
+                        .unwrap();
+                        for (actual, expected) in film.xyz[0].into_iter().zip(expected) {
+                            assert!(
+                                (actual - expected).abs()
+                                    <= 32.0 * f64::EPSILON * expected.abs().max(1.0),
+                                "missing rough interface environment proposal: {actual} != {expected}"
+                            );
+                        }
+                        assert_eq!(stats.nonzero, 1);
+                        assert!(splats.is_empty());
+                    }
+                    checked += 1;
+                }
+                assert!(checked > 0, "must exercise both interface sides");
+            }
+        });
+    }
+
+    #[test]
+    fn g2_environment_only_diffuse_furnace_conserves_energy() {
+        with_test_cx(|cx| {
+            let (mut scene, camera, shutter) = direct_emitter_scene(true);
+            let reflectance = lift_rgb([0.6; 3]);
+            scene.primitives[0].material = Material::Lambertian { reflectance };
+            scene.primitives[0].emission = None;
+            scene.lights.clear();
+            scene.environment = Some(
+                crate::lighting::EnvironmentMap::try_from_linear_srgb(2, 2, vec![[1.0; 3]; 4], 0.0)
+                    .unwrap(),
+            );
+            let settings = Settings {
+                width: 1,
+                height: 1,
+                spp: 1024,
+                max_depth: 1,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::Mis,
+                seed: 0x4645_4e56,
+            };
+            let output = render_cinematic_bidirectional(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                shutter,
+            )
+            .unwrap();
+            let environment = scene
+                .environment
+                .as_ref()
+                .unwrap()
+                .evaluate(Vec3::new(0.0, 0.0, 1.0))
+                .unwrap();
+            let key = [
+                (settings.seed & 0xffff_ffff) as u32,
+                (settings.seed >> 32) as u32,
+            ];
+            let mut expected = [0.0; 3];
+            for sample in 0..settings.spp {
+                let (_, _, draw) = pixel_dims(&settings, None, key, 0, sample).unwrap();
+                let hero = LAMBDA_MIN + draw * (LAMBDA_MAX - LAMBDA_MIN);
+                for wavelength in hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX) {
+                    // Analytic Lambertian furnace: integral f*cos(theta) dω = rho.
+                    add_scaled_xyz(
+                        &mut expected,
+                        scalar_to_xyz(
+                            reflectance.eval(wavelength)
+                                * environment.emission.0.eval(wavelength)
+                                * environment.emission.1
+                                / PACKET as f64,
+                            wavelength,
+                        ),
+                    );
+                }
+            }
+            for (actual, expected) in output.film.xyz[0].into_iter().zip(expected) {
+                assert!(
+                    (actual / expected - 1.0).abs() < 0.04,
+                    "environment furnace lost energy: {actual} != {expected}"
+                );
+            }
+            assert_eq!(output.strategies.camera_splats, 0);
         });
     }
 

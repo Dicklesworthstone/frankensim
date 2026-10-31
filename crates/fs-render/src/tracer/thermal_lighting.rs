@@ -92,8 +92,8 @@ pub(super) fn direct_contribution(
     point: Point3,
     frame: SurfaceFrame,
     outgoing: Vec3,
-    media: &MediumStack,
-    boundary: Option<BoundaryMedia>,
+    media: &MediumStack<'_>,
+    boundary: Option<BoundaryMedia<'_>>,
     brushed: Option<&crate::surface_detail::ShadingFrame>,
     wavelengths: &[f64; PACKET],
     #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
@@ -122,7 +122,7 @@ pub(super) fn direct_contribution(
         return Ok(result);
     }
     let shadow_medium = boundary.map_or_else(
-        || media.last().map(|entry| entry.glass),
+        || media.last().map(|entry| *entry.glass),
         |boundary| {
             if cosine > 0.0 {
                 boundary.incident

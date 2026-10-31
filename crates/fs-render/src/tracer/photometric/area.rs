@@ -58,7 +58,7 @@ pub(in crate::tracer) enum Receiver<'a> {
         frame: SurfaceFrame,
         outgoing: Vec3,
         incident_medium: Option<DielectricGlass>,
-        boundary: Option<BoundaryMedia>,
+        boundary: Option<BoundaryMedia<'a>>,
         brushed: Option<&'a crate::surface_detail::ShadingFrame>,
         intersection: &'a SceneIntersection,
         incoming_ray: &'a Ray,

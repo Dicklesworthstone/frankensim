@@ -428,18 +428,20 @@ struct SurfaceFrame {
 }
 
 #[derive(Clone, Copy)]
-struct MediumEntry {
+struct MediumEntry<'scene> {
     boundary_primitive: usize,
-    glass: DielectricGlass,
+    // Materials are immutable for a complete trace. Borrow the scene's optical
+    // law so spectral tables are not replicated 64 times in every path suffix.
+    glass: &'scene DielectricGlass,
 }
 
 #[derive(Clone, Copy)]
-struct MediumStack {
-    entries: [Option<MediumEntry>; MAX_MEDIUM_STACK_DEPTH],
+struct MediumStack<'scene> {
+    entries: [Option<MediumEntry<'scene>>; MAX_MEDIUM_STACK_DEPTH],
     len: usize,
 }
 
-impl MediumStack {
+impl<'scene> MediumStack<'scene> {
     const fn new() -> Self {
         Self {
             entries: [None; MAX_MEDIUM_STACK_DEPTH],
@@ -451,25 +453,25 @@ impl MediumStack {
         self.len
     }
 
-    fn last(&self) -> Option<&MediumEntry> {
+    fn last(&self) -> Option<&MediumEntry<'scene>> {
         self.len
             .checked_sub(1)
             .and_then(|index| self.entries[index].as_ref())
     }
 
-    fn get(&self, index: usize) -> Option<&MediumEntry> {
+    fn get(&self, index: usize) -> Option<&MediumEntry<'scene>> {
         (index < self.len)
             .then(|| self.entries[index].as_ref())
             .flatten()
     }
 
-    fn iter(&self) -> impl Iterator<Item = &MediumEntry> {
+    fn iter(&self) -> impl Iterator<Item = &MediumEntry<'scene>> {
         self.entries[..self.len]
             .iter()
             .map(|entry| entry.as_ref().expect("occupied medium-stack prefix"))
     }
 
-    fn push(&mut self, entry: MediumEntry) -> Result<(), TracerError> {
+    fn push(&mut self, entry: MediumEntry<'scene>) -> Result<(), TracerError> {
         if self.len == MAX_MEDIUM_STACK_DEPTH {
             return Err(TracerError::MediumStackOverflow);
         }
@@ -487,16 +489,16 @@ impl MediumStack {
 }
 
 #[derive(Clone, Copy)]
-enum MediumTransition {
-    Enter(MediumEntry),
+enum MediumTransition<'scene> {
+    Enter(MediumEntry<'scene>),
     Exit { boundary_primitive: usize },
 }
 
 #[derive(Clone, Copy)]
-struct BoundaryMedia {
+struct BoundaryMedia<'scene> {
     incident: Option<DielectricGlass>,
     transmitted: Option<DielectricGlass>,
-    transition: MediumTransition,
+    transition: MediumTransition<'scene>,
 }
 
 #[derive(Clone, Copy)]
@@ -611,13 +613,13 @@ struct DielectricLaneContinuation {
 }
 
 #[derive(Clone, Copy)]
-struct SpectralPathState {
+struct SpectralPathState<'scene> {
     ray: Ray,
     throughput: [f64; PACKET],
     previous_bsdf: Option<PreviousBsdf>,
     prev_origin: Point3,
     segment_origin: Point3,
-    medium_stack: MediumStack,
+    medium_stack: MediumStack<'scene>,
     rng: PathRng,
     next_depth: u32,
     /// `None` is the unsplit four-wavelength packet. At the first wavelength-
@@ -12353,7 +12355,7 @@ fn previous_after_dielectric_sample(
     sampled_delta: bool,
     wavelength_nm: f64,
 ) -> Result<PreviousBsdf, TracerError> {
-    let boundary = boundary_media(boundary_primitive, glass, frame.entering, medium_stack)?;
+    let boundary = boundary_media(boundary_primitive, &glass, frame.entering, medium_stack)?;
     let mut next = PreviousBsdf {
         #[cfg(feature = "volumes")]
         volume_emission_competitor: false,
@@ -13225,8 +13227,8 @@ fn competing_dielectric_event_probability(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one integrator, one story
-fn trace_path(
-    scene: &Scene,
+fn trace_path<'scene>(
+    scene: &'scene Scene,
     lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     s: &Settings,
@@ -13240,7 +13242,7 @@ fn trace_path(
     camera_path: CameraPath<'_>,
     capture_primary: bool,
     path_sobol: Option<&Sobol>,
-    resume: Option<SpectralPathState>,
+    resume: Option<SpectralPathState<'scene>>,
 ) -> Result<PathTraceSample, TracerError> {
     trace_path_with_medium(
         scene,
@@ -13264,8 +13266,8 @@ fn trace_path(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn trace_path_with_medium(
-    scene: &Scene,
+fn trace_path_with_medium<'scene>(
+    scene: &'scene Scene,
     lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     s: &Settings,
@@ -13279,7 +13281,7 @@ fn trace_path_with_medium(
     camera_path: CameraPath<'_>,
     capture_primary: bool,
     path_sobol: Option<&Sobol>,
-    resume: Option<SpectralPathState>,
+    resume: Option<SpectralPathState<'scene>>,
     #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
 ) -> Result<PathTraceSample, TracerError> {
     trace_path_with_emitters(
@@ -13306,8 +13308,8 @@ fn trace_path_with_medium(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn trace_path_with_emitters(
-    scene: &Scene,
+fn trace_path_with_emitters<'scene>(
+    scene: &'scene Scene,
     lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     s: &Settings,
@@ -13321,7 +13323,7 @@ fn trace_path_with_emitters(
     camera_path: CameraPath<'_>,
     capture_primary: bool,
     path_sobol: Option<&Sobol>,
-    resume: Option<SpectralPathState>,
+    resume: Option<SpectralPathState<'scene>>,
     #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
     #[cfg(feature = "photometry")] fixtures: Option<&photometric::FixtureLighting<'_>>,
 ) -> Result<PathTraceSample, TracerError> {
@@ -13351,8 +13353,8 @@ fn trace_path_with_emitters(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn trace_path_with_regions(
-    scene: &Scene,
+fn trace_path_with_regions<'scene>(
+    scene: &'scene Scene,
     lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     s: &Settings,
@@ -13366,7 +13368,7 @@ fn trace_path_with_regions(
     camera_path: CameraPath<'_>,
     capture_primary: bool,
     path_sobol: Option<&Sobol>,
-    resume: Option<SpectralPathState>,
+    resume: Option<SpectralPathState<'scene>>,
     #[cfg(feature = "volumes")] medium: Option<PathMedium<'_, '_>>,
     #[cfg(feature = "photometry")] fixtures: Option<&photometric::FixtureLighting<'_>>,
     #[cfg(feature = "volumes")] scene_media: Option<&SceneMedia<'_, '_>>,
@@ -14104,7 +14106,7 @@ fn trace_path_with_regions(
             }
         }
 
-        let dielectric_boundary = match prim.material {
+        let dielectric_boundary = match &prim.material {
             Material::Dielectric { glass, .. } => Some(boundary_media(
                 prim_idx,
                 glass,
@@ -14160,7 +14162,7 @@ fn trace_path_with_regions(
                         material: &prim.material,
                         frame,
                         outgoing: ray.dir.scale(-1.0),
-                        incident_medium: medium_stack.last().map(|entry| entry.glass),
+                        incident_medium: medium_stack.last().map(|entry| *entry.glass),
                         boundary: dielectric_boundary,
                         brushed: brushed_frame.as_ref(),
                         intersection: &intersection,
@@ -14695,14 +14697,14 @@ fn trace_path_with_regions(
                                                 wo,
                                                 wi,
                                                 l,
-                                                Some(active.glass),
+                                                Some(*active.glass),
                                                 brushed_frame.as_ref(),
                                             )?;
                                             #[cfg(feature = "volumes")]
                                             let absorption_medium =
                                                 active_region.homogeneous_host();
                                             #[cfg(not(feature = "volumes"))]
-                                            let absorption_medium = Some(active.glass);
+                                            let absorption_medium = Some(*active.glass);
                                             let attenuation = medium_transmittance(
                                                 absorption_medium,
                                                 l,
@@ -14974,7 +14976,7 @@ fn trace_path_with_regions(
                         |direction: Vec3,
                          child_throughput: [f64; PACKET],
                          child_previous_bsdf: PreviousBsdf,
-                         child_medium_stack: MediumStack,
+                         child_medium_stack: MediumStack<'scene>,
                          child_active_lane: Option<usize>| {
                             trace_path_with_regions(
                                 scene,
@@ -15358,7 +15360,7 @@ fn trace_path_with_regions(
                         wo,
                         wi,
                         l,
-                        medium_stack.last().map(|active| active.glass),
+                        medium_stack.last().map(|active| *active.glass),
                         brushed_frame.as_ref(),
                     )? * cos_s
                         / pdf;
@@ -15502,12 +15504,12 @@ fn surface_frame(hit: &Hit, ray: &Ray) -> Result<SurfaceFrame, TracerError> {
     })
 }
 
-fn boundary_media(
+fn boundary_media<'scene>(
     boundary_primitive: usize,
-    glass: DielectricGlass,
+    glass: &'scene DielectricGlass,
     entering: bool,
-    stack: &MediumStack,
-) -> Result<BoundaryMedia, TracerError> {
+    stack: &MediumStack<'scene>,
+) -> Result<BoundaryMedia<'scene>, TracerError> {
     if entering {
         if stack.len() >= MAX_MEDIUM_STACK_DEPTH {
             return Err(TracerError::MediumStackOverflow);
@@ -15522,8 +15524,8 @@ fn boundary_media(
             });
         }
         Ok(BoundaryMedia {
-            incident: stack.last().map(|entry| entry.glass),
-            transmitted: Some(glass),
+            incident: stack.last().map(|entry| *entry.glass),
+            transmitted: Some(*glass),
             transition: MediumTransition::Enter(MediumEntry {
                 boundary_primitive,
                 glass,
@@ -15543,20 +15545,20 @@ fn boundary_media(
             });
         }
         Ok(BoundaryMedia {
-            incident: Some(active.glass),
+            incident: Some(*active.glass),
             transmitted: stack
                 .len()
                 .checked_sub(2)
                 .and_then(|index| stack.get(index))
-                .map(|entry| entry.glass),
+                .map(|entry| *entry.glass),
             transition: MediumTransition::Exit { boundary_primitive },
         })
     }
 }
 
-fn apply_medium_transition(
-    stack: &mut MediumStack,
-    transition: MediumTransition,
+fn apply_medium_transition<'scene>(
+    stack: &mut MediumStack<'scene>,
+    transition: MediumTransition<'scene>,
 ) -> Result<(), TracerError> {
     match transition {
         MediumTransition::Enter(entry) => {
@@ -17224,7 +17226,7 @@ mod tests {
                 medium_stack
                     .push(MediumEntry {
                         boundary_primitive: 0,
-                        glass,
+                        glass: &glass,
                     })
                     .unwrap();
                 let origin = Point3::new(0.0, 0.0, 0.1);
@@ -17743,7 +17745,7 @@ mod tests {
             medium_stack
                 .push(MediumEntry {
                     boundary_primitive: 0,
-                    glass,
+                    glass: &glass,
                 })
                 .unwrap();
             let origin = Point3::new(0.0, 0.0, 0.25);
@@ -18294,7 +18296,7 @@ mod tests {
             medium_stack
                 .push(MediumEntry {
                     boundary_primitive: 0,
-                    glass,
+                    glass: &glass,
                 })
                 .unwrap();
             let reflected_direction = vec_add(
@@ -19940,16 +19942,42 @@ mod tests {
     }
 
     #[test]
+    fn medium_stack_borrows_optical_tables_without_replicating_them() {
+        assert_eq!(
+            size_of::<MediumStack<'_>>(),
+            (2 * MAX_MEDIUM_STACK_DEPTH + 1) * size_of::<usize>(),
+            "a path stack stores only boundary IDs and optical-law references",
+        );
+        let glass = DielectricGlass::representative_crown();
+        let mut original = MediumStack::new();
+        for boundary_primitive in 0..MAX_MEDIUM_STACK_DEPTH {
+            original
+                .push(MediumEntry {
+                    boundary_primitive,
+                    glass: &glass,
+                })
+                .unwrap();
+        }
+        let mut continuation = original;
+        continuation.pop();
+        assert_eq!(original.len(), MAX_MEDIUM_STACK_DEPTH);
+        assert_eq!(continuation.len(), MAX_MEDIUM_STACK_DEPTH - 1);
+        for entry in original.iter().chain(continuation.iter()) {
+            assert!(core::ptr::eq(entry.glass, &glass));
+        }
+    }
+
+    #[test]
     fn exiting_medium_selects_ambient_or_the_actual_enclosing_layer() {
         let glass = DielectricGlass::representative_crown();
         let inner = MediumEntry {
             boundary_primitive: 7,
-            glass,
+            glass: &glass,
         };
 
         let mut single_layer = MediumStack::new();
         single_layer.push(inner).unwrap();
-        let exit_to_ambient = boundary_media(7, glass, false, &single_layer).unwrap();
+        let exit_to_ambient = boundary_media(7, &glass, false, &single_layer).unwrap();
         assert_eq!(exit_to_ambient.incident, Some(glass));
         assert_eq!(exit_to_ambient.transmitted, None);
 
@@ -19957,19 +19985,19 @@ mod tests {
         nested
             .push(MediumEntry {
                 boundary_primitive: 3,
-                glass,
+                glass: &glass,
             })
             .unwrap();
         nested.push(inner).unwrap();
-        let exit_to_enclosing_layer = boundary_media(7, glass, false, &nested).unwrap();
+        let exit_to_enclosing_layer = boundary_media(7, &glass, false, &nested).unwrap();
         assert_eq!(exit_to_enclosing_layer.incident, Some(glass));
         assert_eq!(exit_to_enclosing_layer.transmitted, Some(glass));
     }
 
-    fn test_entry_boundary(glass: DielectricGlass) -> BoundaryMedia {
+    fn test_entry_boundary(glass: &DielectricGlass) -> BoundaryMedia<'_> {
         BoundaryMedia {
             incident: None,
-            transmitted: Some(glass),
+            transmitted: Some(*glass),
             transition: MediumTransition::Enter(MediumEntry {
                 boundary_primitive: 7,
                 glass,
@@ -19977,9 +20005,9 @@ mod tests {
         }
     }
 
-    fn test_exit_boundary(glass: DielectricGlass) -> BoundaryMedia {
+    fn test_exit_boundary(glass: &DielectricGlass) -> BoundaryMedia<'_> {
         BoundaryMedia {
-            incident: Some(glass),
+            incident: Some(*glass),
             transmitted: None,
             transition: MediumTransition::Exit {
                 boundary_primitive: 7,
@@ -20001,7 +20029,8 @@ mod tests {
 
     #[test]
     fn dispersive_split_is_unbiased_deterministic_and_uses_lane_snell_directions() {
-        let boundary = test_entry_boundary(DielectricGlass::representative_crown());
+        let glass = DielectricGlass::representative_crown();
+        let boundary = test_entry_boundary(&glass);
         let lambdas = hero_wavelengths(411.25, PACKET, LAMBDA_MIN, LAMBDA_MAX);
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let wo = test_oblique_wo();
@@ -20064,7 +20093,8 @@ mod tests {
 
     #[test]
     fn rough_split_proposal_replays_bsdf_and_children_cannot_resplit() {
-        let boundary = test_entry_boundary(DielectricGlass::representative_crown());
+        let glass = DielectricGlass::representative_crown();
+        let boundary = test_entry_boundary(&glass);
         let lambdas = hero_wavelengths(437.0, PACKET, LAMBDA_MIN, LAMBDA_MAX);
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let wo = test_oblique_wo();
@@ -20116,7 +20146,7 @@ mod tests {
     #[test]
     fn dispersive_exit_split_preserves_companion_transmission_across_tir_threshold() {
         let glass = DielectricGlass::representative_crown();
-        let boundary = test_exit_boundary(glass);
+        let boundary = test_exit_boundary(&glass);
         let lambdas = hero_wavelengths(411.25, PACKET, LAMBDA_MIN, LAMBDA_MAX);
         let mut high_ior_lane = 0;
         let mut low_ior_lane = 0;
@@ -20200,7 +20230,7 @@ mod tests {
             BeerLambertAbsorption::CLEAR,
             GlassProvenance::Custom,
         );
-        let boundary = test_entry_boundary(glass);
+        let boundary = test_entry_boundary(&glass);
         let lambdas = hero_wavelengths(463.0, PACKET, LAMBDA_MIN, LAMBDA_MAX);
         assert!(!boundary_direction_is_wavelength_dependent(&boundary, &lambdas).unwrap());
         assert!(!should_split_dispersive_boundary(None, &boundary, &lambdas).unwrap());
@@ -20243,7 +20273,8 @@ mod tests {
     #[test]
     fn four_lane_split_reduces_equal_sample_chroma_variance_without_mean_shift() {
         const SAMPLES: u32 = 4_096;
-        let boundary = test_entry_boundary(DielectricGlass::representative_crown());
+        let glass = DielectricGlass::representative_crown();
+        let boundary = test_entry_boundary(&glass);
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let wo = test_oblique_wo();
         let mut collapsed = AdaptivePixelAccumulator::EMPTY;

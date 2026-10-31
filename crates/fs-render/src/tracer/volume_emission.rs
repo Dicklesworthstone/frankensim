@@ -56,7 +56,7 @@ pub(super) enum Receiver<'a> {
     Dielectric {
         frame: SurfaceFrame,
         outgoing: Vec3,
-        boundary: BoundaryMedia,
+        boundary: BoundaryMedia<'a>,
         alpha: f64,
         source_side: SourceSide,
     },

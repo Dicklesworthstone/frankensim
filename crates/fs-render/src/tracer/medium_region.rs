@@ -16,7 +16,7 @@ pub(super) struct MediumRegion<'view, 'field> {
 
 impl<'view, 'field> MediumRegion<'view, 'field> {
     fn from_entry(
-        entry: Option<&MediumEntry>,
+        entry: Option<&MediumEntry<'_>>,
         ambient: Option<PathMedium<'view, 'field>>,
         media: Option<&SceneMedia<'view, 'field>>,
     ) -> Self {
@@ -25,7 +25,7 @@ impl<'view, 'field> MediumRegion<'view, 'field> {
                 let volume = media.and_then(|media| media.interior_path(entry.boundary_primitive));
                 Self {
                     volume,
-                    host: Some(entry.glass),
+                    host: Some(*entry.glass),
                     replaces_host_extinction: volume.is_some(),
                 }
             }
@@ -38,7 +38,7 @@ impl<'view, 'field> MediumRegion<'view, 'field> {
     }
 
     pub(super) fn incident(
-        stack: &MediumStack,
+        stack: &MediumStack<'_>,
         ambient: Option<PathMedium<'view, 'field>>,
         media: Option<&SceneMedia<'view, 'field>>,
     ) -> Self {
@@ -46,8 +46,8 @@ impl<'view, 'field> MediumRegion<'view, 'field> {
     }
 
     pub(super) fn transmitted(
-        stack: &MediumStack,
-        transition: MediumTransition,
+        stack: &MediumStack<'_>,
+        transition: MediumTransition<'_>,
         ambient: Option<PathMedium<'view, 'field>>,
         media: Option<&SceneMedia<'view, 'field>>,
     ) -> Self {
