@@ -66,6 +66,32 @@ differentiable lift). Pure Rust throughout.
   linear-alpha approximation and weakly absorbing dielectric interface model.
   No RGB fit, opacity floor, or extrapolation is introduced. Thin-path absorbed
   fractions use `expm1`, and material identities retain every admitted knot.
+- `gradient_index` module (feature `tracer`): allocation-free adaptive
+  Dormand--Prince 5(4) propagation of the geometric-optics ray equation
+  `d(n t)/ds = grad(n)`. An immutable field supplies local phase index,
+  analytic spatial gradient, true power absorption and optional group index.
+  Position, direction, parallel-transported transverse frame, phase/group
+  optical lengths and absorption depth evolve along physical arc length.
+  Explicit local tolerances, metric step bounds and a hard attempted-step cap
+  govern execution; cancellation is polled before every attempted step,
+  including rejections. Local estimates are not global error certificates.
+  Native homogeneous spectral glass has a one-sample analytic fast path;
+  a bounded affine field retains the same dispersion/absorption owner.
+  Missing or nonpositive tabulated group derivatives suppress the delay claim
+  while retaining supported phase propagation. `PolarizedBeam` consumes the
+  propagator directly: all Stokes power components receive integrated
+  Beer--Lambert attenuation in the transported frame, and subsequent native
+  smooth/rough interfaces use the endpoint's actual phase index. Its
+  `BeamMedium` distinguishes homogeneous laws from position/wavelength-bound
+  field samples, refusing straight advancement of a gradient medium and
+  mismatched local state. Calibrated fixtures can emit into either medium.
+  The caller owns curved boundary/event location and the same accepted field
+  snapshot. No scalar camera/BDPT curved visibility, ray-bundle Jacobians,
+  scattering, diffraction, birefringence or full-wave accuracy is claimed.
+  G1 checks include analytic affine-index trajectories, Snell invariants,
+  phase/group separation, absorption and tolerance refinement; G3 checks
+  cover reverse paths, transported frames and composed segments; G4 checks
+  include cancellation during rejected adaptive trials.
 - `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
   absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
   nanometres, strict inclusive 380--780 nm support, deterministic linear
@@ -1111,7 +1137,7 @@ original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to
 isotropic visible-normal sampling while preserving the same BSDF integral in
 expectation.
-Current no-claims: no gradient-index propagation or arbitrary overlapping media,
+Current scalar scene-integrator no-claims: no gradient-index propagation or arbitrary overlapping media,
 no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
 are single-scattering without multiple-scattering compensation, and standalone
