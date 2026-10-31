@@ -130,6 +130,44 @@ impl MaterialDielectricCapacitor {
     pub fn stored_energy_j(&self, charge_c: f64) -> Result<f64, MaterialCircuitError> {
         Ok(self.curve.stored_energy_j(charge_c)?)
     }
+
+    /// Refresh the original field-only law's temperature applicability while
+    /// keeping its selected claim, complete field support, geometry and every
+    /// nonthermal coordinate. The prepared native curve is shared unchanged;
+    /// this operation cannot create thermal field storage or parameter work.
+    /// The query must retain the original typed field coordinate at zero.
+    pub fn at_temperature_query_point(
+        &self,
+        point: &fs_matdb::QueryPoint,
+    ) -> Result<Self, MaterialCircuitError> {
+        let original = self.material.material();
+        let refreshed = original.at_query_point(self.material.card(), point)?;
+        fs_material::field_storage::admit_source_temperature_refresh(original, &refreshed)?;
+        let selected = original
+            .property(REVERSIBLE_ELECTRIC_DISPLACEMENT_PROPERTY)
+            .ok_or_else(|| invalid("original nonlinear capacitor source absent"))?
+            .answer()
+            .receipt
+            .selected;
+        let material = ReversibleDielectricMaterial::resolve(
+            self.material.card(),
+            point,
+            &self.material.source_path().axis,
+            self.material.maximum_field_strength_v_m(),
+            fs_material::state_point::MaterialPropertySelection::PinnedByProperty(vec![(
+                REVERSIBLE_ELECTRIC_DISPLACEMENT_PROPERTY.to_owned(),
+                selected,
+            )]),
+        )?;
+        // Value dependence is field-only by construction. Re-querying the
+        // original full support above proves applicability at the new T;
+        // there is no new constitutive table to fit or native curve to build.
+        Ok(Self {
+            material,
+            ..self.clone()
+        })
+    }
+
     fn binding(&self) -> CapacitorCurve {
         CapacitorCurve {
             branch: self.branch,

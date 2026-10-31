@@ -19380,3 +19380,34 @@ Liquid temperature and saturation pressure remain frozen in this slice.
 Vapor phase mass, latent heat, gas dissolution and gas transport must be
 supplied by their corresponding physical owners; cavity volume does not
 invent those inventories.
+
+## Conservative nonlinear dielectric source replacement
+
+`DebyeCircuit::rebind_reversible_sources_candidate` and its complete-resistor
+variant replace an explicitly supplied instantaneous D(E) source and original
+Debye source together at fixed geometry, native branch identities and ordered
+polarization roles. The proposed pair passes the same source-card/context,
+zero-field tangent and temperature-independent-storage admission as initial
+construction. Every instantaneous/polarization charge and original flux linkage
+is retained bit-for-bit. Source/transformer topology, unrelated storage and
+complete original conductor records remain owned by the same native circuit.
+
+The existing capacitor work owner integrates `V_new - V_old` on the union of
+the exact original charge knots; each polarization contribution uses its
+fixed-charge capacitance-change identity. Compensated summation retains signed
+work beneath unrelated stored-energy bias. Relaxation-time changes contribute
+exactly zero stored work. This reversible parameter work belongs to the
+physical source-change owner and is never deposited as irreversible heat.
+Incompatible clamps, insufficient support, switched pole order, missing source
+partners, incomplete conductor bindings and cancellation refuse atomically.
+
+`MaterialDielectricCapacitor::at_temperature_query_point` re-queries the same
+pinned D(E) claim and complete original field support at a temperature-only
+applicability change, retaining every nonthermal coordinate. Its native curve
+is shared unchanged, so kinetic tau(T) and conductor refresh can feed the
+thermal owner without inventing nonlinear field entropy or storage work. This
+does not admit temperature-dependent nonlinear storage, moving geometry,
+source-switching impulses or relaxation-model identification. Three focused
+tests in `dielectric_nonlinear_rebind.rs` cover independent nonlinear/pole work,
+both polarities, large unrelated bias, complete source/history retention,
+zero-work kinetic refresh, native-curve sharing and atomic refusals.

@@ -6,6 +6,8 @@ use super::*;
 use crate::material_circuit::MaterialResistor;
 use fs_material::field_storage::admit_source_temperature_refresh;
 
+mod nonlinear;
+
 /// Atomic parameter proposal; no electrical time or charge history is advanced.
 pub struct DebyeRebindCandidate {
     circuit: DebyeCircuit,
@@ -50,7 +52,7 @@ impl DebyeCircuit {
         inputs: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
-        self.rebind(source, None, inputs, cancelled)
+        self.rebind(source, None, None, inputs, cancelled)
     }
 
     /// The same refresh with a complete original conductor binding for every
@@ -64,28 +66,39 @@ impl DebyeCircuit {
         inputs: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
-        self.rebind(source, Some(resistors), inputs, cancelled)
+        self.rebind(source, None, Some(resistors), inputs, cancelled)
     }
 
     fn rebind(
         &self,
         source: ResolvedDebyeCapacitor,
+        instantaneous: Option<MaterialDielectricCapacitor>,
         resistors: Option<Vec<MaterialResistor>>,
         inputs: &[f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DebyeRebindCandidate, MaterialCircuitError> {
         poll(&mut cancelled)?;
-        if self.reversible_instantaneous().is_some() {
-            return Err(invalid(
-                "nonlinear instantaneous dielectric refresh needs its own parameter and thermal entropy work",
-            ));
-        }
         let polarization = self.polarization_charges_c();
-        let parameter_work_j = self.source().fixed_charge_free_energy_change_j(
-            &source,
-            self.instantaneous_charge_c(),
-            &polarization,
-        )?;
+        let parameter_work_j = match (self.reversible_instantaneous(), instantaneous.as_ref()) {
+            (Some(before), Some(after)) => nonlinear::parameter_work(
+                self,
+                &source,
+                before,
+                after,
+                &polarization,
+                &mut cancelled,
+            )?,
+            (None, None) => self.source().fixed_charge_free_energy_change_j(
+                &source,
+                self.instantaneous_charge_c(),
+                &polarization,
+            )?,
+            _ => {
+                return Err(invalid(
+                    "dielectric source refresh must retain its instantaneous profile and complete source pair",
+                ));
+            }
+        };
         let original_count = self.original_branch_count();
         let mut graph = CircuitGraph {
             node_count: self.graph().node_count - self.source().poles().len(),
@@ -154,16 +167,29 @@ impl DebyeCircuit {
             .iter()
             .map(|&i| self.state[i])
             .collect();
-        let mut rebound = Self::new(
-            graph,
-            self.dielectric_branch(),
-            source,
-            fluxes,
-            charges,
-            polarization,
-            inputs,
-            &mut cancelled,
-        )?;
+        let mut rebound = if let Some(instantaneous) = instantaneous {
+            Self::new_with_reversible_instantaneous(
+                graph,
+                source,
+                instantaneous,
+                fluxes,
+                charges,
+                polarization,
+                inputs,
+                &mut cancelled,
+            )?
+        } else {
+            Self::new(
+                graph,
+                self.dielectric_branch(),
+                source,
+                fluxes,
+                charges,
+                polarization,
+                inputs,
+                &mut cancelled,
+            )?
+        };
         // A new prepared owner has no aliases until this candidate is published.
         Arc::get_mut(&mut rebound.prepared)
             .ok_or_else(|| invalid("unexpected shared dielectric preparation"))?

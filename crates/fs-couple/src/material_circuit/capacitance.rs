@@ -73,7 +73,7 @@ fn energy(
 // cell is exactly linear, so trapezoidal integration is exact for the declared
 // curves. Subtract voltages before multiplying by dq: biased endpoint energies
 // can coincide after rounding while this parameter work is still resolvable.
-fn parameter_work(
+pub(super) fn parameter_work(
     before: Option<&CapacitorChargeCurve>,
     after: Option<&CapacitorChargeCurve>,
     farads: f64,
