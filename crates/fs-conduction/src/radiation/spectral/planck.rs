@@ -88,6 +88,73 @@ impl BlackbodyBand {
         self.upper_wavelength_m
     }
 
+    /// Hemispherical blackbody power density per unit log vacuum wavelength
+    /// [W/m²]. Integrating this quantity over `d(ln lambda)` reproduces the
+    /// finite-band power returned by [`Self::evaluate`]. This is the shared
+    /// spectral primitive for solid and participating-gas radiation owners.
+    pub fn spectral_power_per_log_wavelength(
+        wavelength_m: f64,
+        temperature_k: f64,
+    ) -> Result<f64, ConductionError> {
+        require_temperature("blackbody-spectrum", "temperature", temperature_k)?;
+        if !wavelength_m.is_finite() || wavelength_m <= 0.0 {
+            return Err(invalid("finite positive vacuum wavelength is required"));
+        }
+        let (x, log_x) = dimensionless(wavelength_m, temperature_k);
+        if !x.is_finite() || x <= 0.0 {
+            return Err(invalid("blackbody wavelength/temperature is unrepresentable"));
+        }
+        let log_shape = if x <= 1.0 {
+            3.0 * log_x + (x / x.exp_m1()).ln()
+        } else {
+            4.0 * log_x - x - (-(-x).exp_m1()).ln()
+        };
+        let log_power = (STEFAN_BOLTZMANN_W_M2_K4 * NORMALIZATION).ln()
+            + 4.0 * temperature_k.ln()
+            + log_shape;
+        finite_nonnegative(log_power.exp())
+    }
+
+    /// Signed difference of blackbody power densities per unit log vacuum
+    /// wavelength [W/m²]. Equal temperatures return exactly zero and nearby
+    /// temperatures use `expm1` rather than subtracting two large spectra.
+    pub fn spectral_difference_per_log_wavelength(
+        wavelength_m: f64,
+        temperature_k: f64,
+        reference_temperature_k: f64,
+    ) -> Result<f64, ConductionError> {
+        require_temperature("blackbody-spectrum", "temperature", temperature_k)?;
+        require_temperature(
+            "blackbody-spectrum",
+            "reference temperature",
+            reference_temperature_k,
+        )?;
+        if !wavelength_m.is_finite() || wavelength_m <= 0.0 {
+            return Err(invalid("finite positive vacuum wavelength is required"));
+        }
+        if temperature_k == reference_temperature_k {
+            return Ok(0.0);
+        }
+        let (hot, cold, sign) = if temperature_k > reference_temperature_k {
+            (temperature_k, reference_temperature_k, 1.0)
+        } else {
+            (reference_temperature_k, temperature_k, -1.0)
+        };
+        let hot_emission = Self::spectral_power_per_log_wavelength(wavelength_m, hot)?;
+        let x_hot = C2_M_K / wavelength_m / hot;
+        let x_cold = C2_M_K / wavelength_m / cold;
+        if !x_hot.is_finite() || !x_cold.is_finite() || x_hot <= 0.0 || x_cold <= 0.0 {
+            return Err(invalid("blackbody wavelength/temperature is unrepresentable"));
+        }
+        let exponent_difference = x_hot * ((hot - cold) / cold);
+        let value = sign * hot_emission * (-exponent_difference).exp_m1() / (-x_cold).exp_m1();
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(invalid("blackbody spectral difference is unrepresentable"))
+        }
+    }
+
     /// Resolve emission at an absolute temperature. Logarithmic scaling retains
     /// representable Wien-tail powers even when the corresponding fraction
     /// underflows; no overflowing full-spectrum T^4 intermediate is necessary.

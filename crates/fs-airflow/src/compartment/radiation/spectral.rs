@@ -39,7 +39,7 @@ use super::{
     LayerAbsorption, MAX_RADIATION_SURFACES, ParticipatingEnclosure, RadiationError,
     RadiationSolve, RadiationWorkspace, checkpoint, finite, nonnegative, positive,
 };
-use fs_conduction::radiation::{STEFAN_BOLTZMANN_W_M2_K4, SurfaceEmissivity};
+use fs_conduction::radiation::{BlackbodyBand, STEFAN_BOLTZMANN_W_M2_K4, SurfaceEmissivity};
 use fs_gas::multicomponent::compartment::{Layer, LayerRates, TwoZone};
 use fs_qty::{Length, Power, Temperature};
 use std::sync::Arc;
@@ -50,13 +50,6 @@ pub const MAX_SPECTRAL_BANDS: usize = 256;
 pub const MAX_SPECTRAL_EVALUATIONS: usize = 65_536;
 const MAX_DEPTH: usize = 24;
 const MAX_CHANNELS: usize = 2 * MAX_RADIATION_SURFACES + 3;
-const C2_M_K: f64 = 6.626_070_15e-34 * 299_792_458.0 / 1.380_649e-23;
-const PLANCK_NORMALIZATION: f64 = 15.0
-    / (core::f64::consts::PI
-        * core::f64::consts::PI
-        * core::f64::consts::PI
-        * core::f64::consts::PI);
-
 /// Explicit molecular/background absorption over a finite wavelength interval.
 /// Adjacent bands must touch exactly; gaps are never assumed transparent.
 #[derive(Clone, Debug, PartialEq)]
@@ -790,99 +783,39 @@ const GL16: [(f64, f64); 8] = [
 ];
 
 fn planck_log_emission(wavelength: f64, temperature: f64) -> Result<f64, RadiationError> {
-    let x = finite(C2_M_K / wavelength / temperature)?;
-    if !positive(x) {
-        return Err(RadiationError::Invalid(
-            "unresolvable Planck wavelength/temperature",
-        ));
-    }
-    let shape = if x <= 1.0 {
-        x.powi(3) * (x / x.exp_m1())
-    } else {
-        (4.0 * x.ln() - x).exp() / -(-x).exp_m1()
-    };
-    finite(STEFAN_BOLTZMANN_W_M2_K4 * temperature.powi(4) * PLANCK_NORMALIZATION * shape)
+    BlackbodyBand::spectral_power_per_log_wavelength(wavelength, temperature)
+        .map_err(|_| RadiationError::Invalid("shared blackbody spectral evaluation refused"))
 }
 
-// The common background subtraction uses expm1 of the actual temperature
-// difference, retaining flux even between adjacent representable temperatures.
 fn planck_log_difference(
     wavelength: f64,
     temperature: f64,
     reference: f64,
 ) -> Result<f64, RadiationError> {
-    if temperature == reference {
-        return Ok(0.0);
-    }
-    let (hot, cold, sign) = if temperature > reference {
-        (temperature, reference, 1.0)
-    } else {
-        (reference, temperature, -1.0)
-    };
-    let hot_emission = planck_log_emission(wavelength, hot)?;
-    let x_hot = finite(C2_M_K / wavelength / hot)?;
-    let x_cold = finite(C2_M_K / wavelength / cold)?;
-    let difference = finite(x_hot * ((hot - cold) / cold))?;
-    finite(sign * hot_emission * (-difference).exp_m1() / (-x_cold).exp_m1())
+    BlackbodyBand::spectral_difference_per_log_wavelength(wavelength, temperature, reference)
+        .map_err(|_| RadiationError::Invalid("shared blackbody spectral evaluation refused"))
 }
 
-// Fraction integral_0^x t^3/(exp(t)-1) dt, normalized by pi^4/15.
-fn longwave_fraction(x: f64) -> f64 {
-    if x > 1.0 {
-        return 1.0 - shortwave_fraction(x);
-    }
-    let z = x * x;
-    let series = 1.0 / 60.0
-        + z * (-1.0 / 5040.0
-            + z * (1.0 / 272_160.0
-                + z * (-1.0 / 13_305_600.0
-                    + z * (1.0 / 622_702_080.0
-                        + z * (-691.0 / 19_615_115_520_000.0
-                            + z * (1.0 / 1_270_312_243_200.0
-                                + z * (-3617.0 / 202_741_834_014_720_000.0
-                                    + z * (43867.0 / 107_290_978_560_589_824_000.0))))))));
-    PLANCK_NORMALIZATION * x.powi(3) * (1.0 / 3.0 - x / 8.0 + z * series)
-}
-// Complementary integral from x to infinity. At x>=1 its exponential series
-// converges geometrically; 64 bounded terms put truncation below f64 roundoff.
-fn shortwave_fraction(x: f64) -> f64 {
-    if x <= 1.0 {
-        return 1.0 - longwave_fraction(x);
-    }
-    if x >= 800.0 {
-        return 0.0;
-    }
-    let mut sum = 0.0;
-    let mut correction = 0.0;
-    for k in 1..=64 {
-        let inverse = 1.0 / k as f64;
-        let term = (-x * k as f64).exp()
-            * inverse
-            * (x * x * x + inverse * (3.0 * x * x + inverse * (6.0 * x + 6.0 * inverse)));
-        let y = term - correction;
-        let next = sum + y;
-        correction = (next - sum) - y;
-        sum = next;
-    }
-    PLANCK_NORMALIZATION * sum
-}
 fn coverage_at(
     wavelengths: [Length; 2],
     temperature: Temperature,
     participating: bool,
 ) -> Result<SpectralCoverage, RadiationError> {
-    let short = shortwave_fraction(finite(
-        C2_M_K / wavelengths[0].value() / temperature.value(),
-    )?);
-    let long = longwave_fraction(finite(
-        C2_M_K / wavelengths[1].value() / temperature.value(),
-    )?);
-    let omitted = finite((short + long) * STEFAN_BOLTZMANN_W_M2_K4 * temperature.value().powi(4))?;
+    let window = BlackbodyBand::new(wavelengths[0].value(), wavelengths[1].value())
+        .map_err(|_| RadiationError::Invalid("shared blackbody spectral window refused"))?;
+    let emission = window
+        .evaluate(temperature.value())
+        .map_err(|_| RadiationError::Invalid("shared blackbody spectral coverage refused"))?;
+    let omitted = finite(
+        (emission.short_wave_fraction + emission.long_wave_fraction)
+            * STEFAN_BOLTZMANN_W_M2_K4
+            * temperature.value().powi(4),
+    )?;
     Ok(SpectralCoverage {
         temperature,
         participating,
-        shortwave_fraction: short,
-        longwave_fraction: long,
+        shortwave_fraction: emission.short_wave_fraction,
+        longwave_fraction: emission.long_wave_fraction,
         omitted_blackbody_w_m2: omitted,
     })
 }
