@@ -102,9 +102,21 @@ unlike multiple facet penalties, it does not impose incompatible spin targets
 on a curved fan. Its positive strength is an explicit numerical input, not a
 material modulus. Both the flat patch and every finest benchmark carry the
 required alpha=1e-4/1e-3/1e-2 displacement-insensitivity check (<1e-4 relative).
-Consistent translational and enriched rotary mass is explicit; `ShellMass`
-also exposes a separate nodal lumped choice. Drilling inertia is a coordinate
-regularization, not a measured physical loss or rotational material law.
+Consistent mass integrates the physical reference-area/director velocity with
+the supplied `I0`, signed `I1`, and `I2`, using the original enriched
+interpolation and bubble condensation. Its numerical drilling inertia acts on
+the same single area-averaged relative membrane-spin equation per node as
+stiffness, with weight `sum(area * I2 / 3)` over the incident facets. It
+contributes zero work to every rigid velocity and preserves physical
+translation/rotation cross inertia on curved fans. `ShellMass::Lumped` retains
+its original separate nodal matrix. The drilling inertia remains a coordinate
+regularization, not a measured rotational material law.
+`tests/mitc_inertia.rs` checks the complete rigid 6-by-6 mass against independent
+barycentric moment integration for flat and varying-director shells, both signs
+of `I1`, rotated/translated fixtures, gauge separation, supported positive mass,
+and unchanged lumped inertia. These checks certify the declared
+reference-area/director model; they do not add a curved three-dimensional
+volume-Jacobian model.
 
 `MitcBudget` checks node/triangle caps before assembly allocation. Assembly
 polls its caller cancellation callback before work, per element and per

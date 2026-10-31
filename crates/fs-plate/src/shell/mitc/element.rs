@@ -135,29 +135,25 @@ impl Kinematics {
         (constant, twisting)
     }
 
-    fn director_inertia_basis(&self, r: f64, s: f64, col: usize)
-        -> ([f64; 3], [f64; 3], f64)
-    {
-        let h = [1.0-r-s, r, s];
-        let bubble = 27.0*r*s*h[0];
+    fn director_inertia_basis(&self, r: f64, s: f64, col: usize) -> ([f64; 3], [f64; 3]) {
+        let h = [1.0 - r - s, r, s];
+        let bubble = 27.0 * r * s * h[0];
         let mut translation = [0.0; 3];
         let mut motion = [0.0; 3];
-        let mut drilling = 0.0;
         if col < 18 {
-            let node = col/6;
-            let component = col%6;
+            let node = col / 6;
+            let component = col % 6;
             if component < 3 {
                 translation[component] = h[node];
             } else {
                 let mut rotation = [0.0; 3];
-                rotation[component-3] = 1.0;
-                motion = cross(rotation, self.normals[node]).map(|v| (h[node]-bubble/3.0)*v);
-                drilling = h[node]*self.normals[node][component-3];
+                rotation[component - 3] = 1.0;
+                motion = cross(rotation, self.normals[node]).map(|v| (h[node] - bubble / 3.0) * v);
             }
         } else {
-            motion = cross(self.bubble_axes[col-18], self.average).map(|v| bubble*v);
+            motion = cross(self.bubble_axes[col - 18], self.average).map(|v| bubble * v);
         }
-        (translation, motion, drilling)
+        (translation, motion)
     }
 }
 
@@ -332,19 +328,20 @@ pub(super) fn matrices(
             if cancelled() {
                 return Err(PlateError::Cancelled);
             }
-            let basis: Vec<_> = (0..N)
-                .map(|c| kin.director_inertia_basis(lambda[1], lambda[2], c)).collect();
-            for i in 0..N { for j in i..N {
-                // Bare and coated shells use the SAME material velocity
-                // u_dot + z*director_dot. I1 is its work-conjugate cross
-                // inertia, not an angular/translation scalar product.
-                m[i][j] += weight*g.area_m2
-                    * (section.areal_mass_kg_m2*dot(basis[i].0, basis[j].0)
-                        + section.mass_first_moment_kg_m
-                            * (dot(basis[i].0, basis[j].1)+dot(basis[i].1, basis[j].0))
-                        + section.rotary_inertia_kg
-                            * (dot(basis[i].1, basis[j].1)+basis[i].2*basis[j].2));
-            } }
+            let basis: [([f64; 3], [f64; 3]); N] =
+                core::array::from_fn(|c| kin.director_inertia_basis(lambda[1], lambda[2], c));
+            for i in 0..N {
+                for j in i..N {
+                    // Bare and coated shells use the SAME material velocity
+                    // u_dot + z*director_dot. I1 is its work-conjugate cross
+                    // inertia, not an angular/translation scalar product.
+                    m[i][j] += weight * g.area_m2
+                        * (section.areal_mass_kg_m2 * dot(basis[i].0, basis[j].0)
+                            + section.mass_first_moment_kg_m
+                                * (dot(basis[i].0, basis[j].1) + dot(basis[i].1, basis[j].0))
+                            + section.rotary_inertia_kg * dot(basis[i].1, basis[j].1));
+                }
+            }
         }
     } else {
         for i in 0..18 {

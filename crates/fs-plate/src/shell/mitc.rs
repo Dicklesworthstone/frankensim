@@ -33,7 +33,8 @@ pub mod connections;
 /// Explicit displacement/director inertia discretization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMass {
-    /// Exact polynomial mass, congruently condensed with the bubble rotations.
+    /// Exact polynomial physical mass, congruently condensed with the bubble
+    /// rotations, plus inertia on the existing relative drilling gauge.
     Consistent,
     /// Nodal translational/rotary inertia and first-moment cross inertia,
     /// without a bubble inertia field.
@@ -184,9 +185,10 @@ impl ShearShellSection {
     /// `[A B; B D]` block and `[I0 I1; I1 I2]` inertia must be positive definite.
     ///
     /// Physical inertia integrates `u + z*(theta cross director)` using the
-    /// same director interpolation as the strain field. A separate director-
-    /// axis drilling inertia keeps the existing numerical gauge invertible;
-    /// it is not an additional physical rotation of material about its normal.
+    /// same director interpolation as the strain field. Consistent mass uses
+    /// the existing relative membrane-spin gauge for numerical drilling inertia;
+    /// that contribution vanishes on every rigid motion. The explicit lumped
+    /// choice retains its original nodal rotational regularization.
     #[allow(clippy::too_many_arguments)]
     pub fn new_coupled(
         membrane: SheetMatrix,
@@ -1489,6 +1491,11 @@ pub fn assemble_mitc3p(
     let mut drill = vec![BTreeMap::<usize, f64>::new(); mesh.nodes.len()];
     let mut node_area = vec![0.0; mesh.nodes.len()];
     let mut drill_scale = vec![0.0; mesh.nodes.len()];
+    let mut drill_inertia = if mass == ShellMass::Consistent {
+        vec![0.0; mesh.nodes.len()]
+    } else {
+        Vec::new()
+    };
     for (e, tri) in mesh.tris.iter().enumerate() {
         if cancelled() {
             return Err(PlateError::Cancelled);
@@ -1548,6 +1555,9 @@ pub fn assemble_mitc3p(
             let weight = g.area_m2 / 3.0;
             node_area[node] += weight;
             drill_scale[node] += weight * a66;
+            if mass == ShellMass::Consistent {
+                drill_inertia[node] += weight * sections[e].rotary_inertia_kg;
+            }
             for c in 0..3 {
                 *drill[node].entry(6 * node + 3 + c).or_default() += weight * g.frame[2][c];
             }
@@ -1589,6 +1599,20 @@ pub fn assemble_mitc3p(
         for (&i, &a) in &row {
             for (&j, &b) in &row {
                 k.push(i, j, scale * a * b);
+                if mass == ShellMass::Consistent {
+                    // The SAME one-per-node relative-spin row regularizes
+                    // inertia. It annihilates every rigid velocity, including
+                    // curved fans, and leaves physical I0/I1/I2 storage intact.
+                    let value = drill_inertia[node] * a * b;
+                    if !value.is_finite() {
+                        return Err(PlateError::BadSection {
+                            what: "nonfinite MITC drilling inertia",
+                        });
+                    }
+                    if value != 0.0 {
+                        m.push(i, j, value);
+                    }
+                }
             }
         }
     }
