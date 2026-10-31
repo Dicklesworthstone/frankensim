@@ -184,6 +184,8 @@ pub struct PreparedThermoviscousTime<'a, 'c> {
     conductive_wall_fields: wall::WallFields,
     system: PortHamiltonian,
     flow: PreparedQuadraticFlow,
+    mean_state: Vec<f64>,
+    mean_input: Vec<f64>,
     maximum_relative_energy_residual: f64,
 }
 
@@ -450,6 +452,20 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             &mut *cancelled,
         )?;
         poll(cancelled)?;
+        // Exact original observation maps from this SAME cached trajectory.
+        // Keeping the complete state columns includes caloric, conductive-wall
+        // and structural memory; no probe solve or reduced response is used.
+        let mut mean_state = Vec::with_capacity(ports * n);
+        let mut mean_input = Vec::with_capacity(ports * ports);
+        for port in 0..ports {
+            poll(cancelled)?;
+            let (state, input) = flow.linear_integral_map(HEAT_CHANNELS + port)?;
+            mean_state.extend(state.into_iter().map(|value| value / duration_s));
+            mean_input.extend(input.into_iter().map(|value| value / duration_s));
+        }
+        if mean_state.iter().chain(&mean_input).any(|value| !value.is_finite()) {
+            return Err(invalid("original transient mean-port map is nonfinite"));
+        }
         Ok(Self {
             model,
             duration_s,
@@ -461,6 +477,8 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             conductive_wall_fields,
             system,
             flow,
+            mean_state,
+            mean_input,
             maximum_relative_energy_residual: limits.maximum_relative_energy_residual,
         })
     }
@@ -507,6 +525,46 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
     ) -> Result<f64, ThermoviscousTimeError> {
         let x = self.encode(state)?;
         Ok(self.system.hamiltonian(&x))
+    }
+
+    /// Exact same-window relation `inward_flow = free + mobility * traction`
+    /// for one original pressure port. All other held pressures, wall forces
+    /// and complete initial fields contribute to `free`. The selected traction
+    /// slot is ignored, so an owning junction can solve it before propagation.
+    /// This contracts cached original-coordinate maps; it runs no trial step,
+    /// exponential, constitutive fit or physical state mutation.
+    pub fn average_relation(
+        &self,
+        initial: &ThermoviscousTimeState,
+        traction_pa: &[f64],
+        wall_forces_n_per_sqrt_kg: &[f64],
+        selected_port: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, f64), ThermoviscousTimeError> {
+        poll(cancelled)?;
+        let pressure_ports = self.model.loads.len();
+        if selected_port >= pressure_ports
+            || traction_pa.len() != pressure_ports
+            || wall_forces_n_per_sqrt_kg.len() != self.wall_scale.len()
+            || traction_pa.iter().enumerate().any(|(p, value)| p != selected_port && !value.is_finite())
+            || wall_forces_n_per_sqrt_kg.iter().any(|value| !value.is_finite())
+        {
+            return Err(invalid("complete original fields and finite other held drives required"));
+        }
+        let state = self.encode(initial)?;
+        let n = self.system.state_dim();
+        let ports = pressure_ports + self.wall_scale.len();
+        let mut free: f64 = self.mean_state[selected_port * n..(selected_port + 1) * n]
+            .iter().zip(state).map(|(a, x)| a * x).sum();
+        let row = &self.mean_input[selected_port * ports..(selected_port + 1) * ports];
+        free += row.iter().zip(traction_pa.iter().chain(wall_forces_n_per_sqrt_kg))
+            .enumerate().filter(|(p, _)| *p != selected_port)
+            .map(|(_, (a, u))| a * u).sum::<f64>();
+        if !free.is_finite() {
+            return Err(invalid("original transient free mean flow is nonfinite"));
+        }
+        poll(cancelled)?;
+        Ok((free, row[selected_port]))
     }
 
     fn encode(&self, state: &ThermoviscousTimeState) -> Result<Vec<f64>, ThermoviscousTimeError> {

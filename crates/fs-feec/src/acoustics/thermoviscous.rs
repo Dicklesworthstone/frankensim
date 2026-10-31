@@ -725,6 +725,41 @@ impl<'c> ThermoviscousFe<'c> {
     pub fn port_areas_m2(&self) -> &[f64] {
         &self.areas
     }
+
+    /// Area of a unit, planar pressure port that owns its faces exclusively.
+    /// Its dual flow is actual inward volume flow, suitable for a plane-wave
+    /// duct. Arbitrary mode normalizations, curved interfaces and faces shared
+    /// with another pressure mode require an explicit modal junction instead.
+    pub fn plane_wave_port_area_m2(&self, port: usize) -> Option<f64> {
+        let traces = self.physical_modes.get(port)?;
+        let first = traces.first()?;
+        if traces.iter().any(|trace| {
+            trace.values.iter().any(|value| *value != 1.0)
+                || trace.outward_normal.iter().zip(first.outward_normal)
+                    .any(|(a, b)| (*a - b).abs() > 64.0 * f64::EPSILON)
+        }) {
+            return None;
+        }
+        let origin = first.vertices[0].map(f64::from_bits);
+        let length = det::sqrt(self.areas[port]);
+        for trace in traces {
+            for vertex in trace.vertices {
+                let delta = std::array::from_fn::<_, 3, _>(|i| f64::from_bits(vertex[i]) - origin[i]);
+                let distance: f64 = delta.iter().zip(first.outward_normal).map(|(x, n)| x * n).sum();
+                let scale = delta.iter().map(|x| x.abs()).sum::<f64>().max(length);
+                if !distance.is_finite() || !scale.is_finite()
+                    || distance.abs() > 128.0 * f64::EPSILON * scale {
+                    return None;
+                }
+            }
+            if self.physical_modes.iter().enumerate().any(|(other, modes)| {
+                other != port && modes.iter().any(|mode| mode.vertices == trace.vertices)
+            }) {
+                return None;
+            }
+        }
+        Some(self.areas[port])
+    }
     /// Largest admitted geometric aspect ratio.
     #[must_use]
     pub const fn max_element_aspect_ratio(&self) -> f64 {

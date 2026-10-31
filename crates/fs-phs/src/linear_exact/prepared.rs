@@ -386,10 +386,14 @@ impl PreparedQuadraticFlow {
         Ok(PreparedQuadraticStep { state: endpoint, integrals })
     }
 
-    // Recover a declared linear observation's cached integral in ORIGINAL
-    // coordinates. Its Gramian has only the constant row/column: no trial
-    // physical state, constitutive probe or second exponential is needed.
-    pub(super) fn linear_integral_map(
+    /// Recover a declared linear observation's cached integral in ORIGINAL
+    /// coordinates as `(state_coefficients, held_input_coefficients)`.
+    /// The index follows `evaluate().integrals`, including any preceding
+    /// quadratic forms. A nonlinear observation is refused. Its Gramian has
+    /// only the constant row/column: no trial physical state, constitutive
+    /// probe or second exponential is needed. This allocates a cold-path map;
+    /// consumers may retain it with this immutable prepared owner.
+    pub fn linear_integral_map(
         &self,
         index: usize,
     ) -> Result<(Vec<f64>, Vec<f64>), PhsError> {

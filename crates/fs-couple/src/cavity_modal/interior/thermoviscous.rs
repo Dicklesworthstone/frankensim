@@ -27,6 +27,9 @@ use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::fluid_transport::ThermalFluidTransport;
 use fs_material::thermal::transport::ThermalTransportSample;
 use fs_material::{MaterialError, gas::GasState, relaxation::RelaxationState};
+
+/// Complete resolved fluid, molecular and wall fields coupled to an original duct.
+pub mod dg;
 use fs_math::c64::C64;
 
 /// Finite solid-wall patches evaluated by the original material owner.

@@ -1,4 +1,25 @@
 use super::*;
+use super::super::dg::{ThermoviscousDg, ThermoviscousDgLimits};
+use crate::dg_port::DgPortLoad;
+use fs_duct::dg::{DgBoundary, DgDuct, DgMesh, PortId, MAX_DG_PROPAGATOR_DOFS};
+use fs_exec::CancelGate;
+
+fn time_dg_load(gas: &GasState, duration_s: f64, outlet: DgBoundary) -> DgPortLoad {
+    let duct = DgDuct::new(
+        &fs_duct::Duct {
+            segments: vec![Segment::Cylinder {
+                radius: (HEIGHT * WIDTH / std::f64::consts::PI).sqrt(),
+                length: 0.05,
+            }],
+        },
+        gas,
+        DgMesh { elements: 2, order: 2 },
+        DgBoundary::Port(PortId(7)),
+        outlet,
+    )
+    .unwrap();
+    DgPortLoad::new(duct, duration_s, 1e-11, MAX_DG_PROPAGATOR_DOFS).unwrap()
+}
 
 #[test]
 fn original_gas_source_reaches_causal_field_work_without_caloric_shortcuts() {
@@ -269,9 +290,279 @@ fn source_wall_material_changes_actual_shared_time_fields_and_physical_heat() {
         assert!(step.work.solid_conductive_heat_j > 0.0);
         assert!(step.state.temperature_k.iter().any(|t| *t != 0.0));
         assert!(step.work.balance_residual_j().abs() < 1e-10 * step.work.initial_energy_j);
+        // The original finite wall and molecular fields also survive actual
+        // reciprocal bore loading; their heat must move pressure and bore state.
+        let gate = CancelGate::new_clock_free();
+        let mut coupled = ThermoviscousDg::new(
+            &source,
+            prepared,
+            time_dg_load(&gas, 1e-7, DgBoundary::Closed),
+            1,
+            ThermoviscousDgLimits::default(),
+            &gate,
+        )
+        .unwrap()
+        .with_initial_state(initial)
+        .unwrap();
+        let frame = coupled.step(&[0.0, 0.0], &[], &gate).unwrap().clone();
+        assert!(frame.field.work.solid_conductive_heat_j > 0.0);
+        assert!(frame.field.state.temperature_k.iter().any(|t| *t != 0.0));
+        assert!(frame.field.state.molecular_temperature_k[0].iter().any(|t| *t != 0.0));
+        assert!(coupled.load().state().pressure().iter().any(|p| *p != 0.0));
+        assert_eq!(coupled.prepared().caloric_reservoirs().len(), source.relaxation().unwrap().processes().len());
+        assert!(frame.balance_residual_j.abs() <= frame.balance_tolerance_j);
         heats.push(step.work.solid_conductive_heat_j);
         identities.push(sample.path_identity());
     }
     assert_ne!(identities[0], identities[1]);
     assert!(heats[1] > 3.8 * heats[0]);
+}
+
+#[test]
+fn resolved_molecular_bore_coupling_replays_both_original_owners_and_closes_work() {
+    let (mesh, cube) = kuhn_cube(1);
+    let xyz = points(&cube);
+    let gas = gas();
+    let source = ThermoviscousInterior::from_relaxation(
+        build(&mesh, &xyz, &gas, true), source(gas, true, 1.0), BAND,
+    ).unwrap();
+    let dt = 1.0 / 96_000.0;
+    let prepared = source.prepare_time(dt, ThermoviscousTimeLimits::default(), &mut || false).unwrap();
+    let mut initial = prepared.zero_state();
+    initial.molecular_temperature_k[0][0] = 0.01;
+    let gate = CancelGate::new_clock_free();
+    let mut coupled = ThermoviscousDg::new(
+        &source, prepared, time_dg_load(&gas, dt, DgBoundary::Closed), 1,
+        ThermoviscousDgLimits::default(), &gate,
+    ).unwrap().with_initial_state(initial).unwrap();
+    let mut molecular_heat = 0.0;
+    let mut inlet_work = 0.0;
+    for drive in [1.0, 1.0, 0.0, -0.5, 0.0] {
+        let original_field = coupled.state().clone();
+        let mut original_bore = coupled.load().clone();
+        let frame = coupled.step(&[drive, 0.0], &[], &gate).unwrap().clone();
+        let replay = coupled.prepared().step(
+            &original_field, &[drive, frame.mean_pressure_pa], &[], &mut || false,
+        ).unwrap();
+        let bore = original_bore.preview_step(frame.mean_flow_m3_s).unwrap().accept();
+        assert_eq!(coupled.state(), &replay.state);
+        assert_eq!(coupled.load().state(), original_bore.state());
+        assert_eq!(frame.duct, bore);
+        assert_eq!(frame.field.mean_inward_flow_m3_s, replay.mean_inward_flow_m3_s);
+        let scale = frame.mean_flow_m3_s.abs().max(1e-30);
+        assert!((frame.mean_flow_m3_s + replay.mean_inward_flow_m3_s[1]).abs() < 2e-12 * scale);
+        let work = -frame.mean_pressure_pa * replay.mean_inward_flow_m3_s[1] * dt;
+        let bore_work = frame.duct.ledger.port_work_step_j;
+        assert!((work - bore_work).abs() <= 2e-12 * work.abs().max(1e-30));
+        assert!(frame.interface_work_residual_j.abs() <= frame.balance_tolerance_j);
+        assert!(frame.balance_residual_j.abs() <= frame.balance_tolerance_j);
+        assert!((frame.storage_change_j + frame.material_dissipation_j + frame.terminal_work_j
+            - frame.authored_external_work_j).abs() <= frame.balance_tolerance_j);
+        molecular_heat += frame.field.work.molecular_relaxation_heat_j;
+        inlet_work += work.abs();
+    }
+    assert!(molecular_heat > 0.0 && inlet_work > 0.0);
+    assert_eq!(coupled.accepted_steps(), 5);
+}
+
+#[test]
+fn resolved_field_responds_to_bore_termination_and_failed_steps_publish_nothing() {
+    let (mesh, cube) = kuhn_cube(1);
+    let xyz = points(&cube);
+    let gas = gas();
+    let source = ThermoviscousInterior::from_gas(build(&mesh, &xyz, &gas, true), gas, BAND).unwrap();
+    let dt = 1.0 / 96_000.0;
+    let gate = CancelGate::new_clock_free();
+    let make = |outlet, limits| ThermoviscousDg::new(
+        &source,
+        source.prepare_time(dt, ThermoviscousTimeLimits::default(), &mut || false).unwrap(),
+        time_dg_load(&gas, dt, outlet), 1, limits, &gate,
+    ).unwrap();
+    let mut closed = make(DgBoundary::Closed, ThermoviscousDgLimits::default());
+    let mut matched = make(DgBoundary::Matched, ThermoviscousDgLimits::default());
+    for sample in 0..64 {
+        let drive = if sample < 16 { 1.0 } else { 0.0 };
+        closed.step(&[drive, 0.0], &[], &gate).unwrap();
+        matched.step(&[drive, 0.0], &[], &gate).unwrap();
+    }
+    let reaction = closed.state().pressure_pa.iter().zip(&matched.state().pressure_pa)
+        .map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+    assert!(reaction > 1e-7, "downstream termination must alter the original FE pressure: {reaction:e}");
+
+    let accepted_field = closed.state().clone();
+    let accepted_bore = closed.load().state().clone();
+    let accepted_response = closed.load().port_response().unwrap();
+    for traction in [[f64::NAN, 0.0], [0.0, 1.0]] {
+        assert!(closed.step(&traction, &[], &gate).is_err());
+        assert_eq!(closed.state(), &accepted_field);
+        assert_eq!(closed.load().state(), &accepted_bore);
+        assert_eq!(closed.load().port_response().unwrap(), accepted_response);
+        assert_eq!(closed.accepted_steps(), 64);
+    }
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(closed.step(&[0.0, 0.0], &[], &cancelled).is_err());
+    assert_eq!(closed.state(), &accepted_field);
+    assert_eq!(closed.load().state(), &accepted_bore);
+    assert_eq!(closed.last_frame().unwrap().step, 64);
+    closed.step(&[0.0, 0.0], &[], &gate).unwrap();
+
+    // Force a late physical-energy refusal after private FE and bore proposals.
+    let mut bounded = make(DgBoundary::Closed, ThermoviscousDgLimits {
+        maximum_total_energy_j: 1e-100, ..ThermoviscousDgLimits::default()
+    });
+    let initial_field = bounded.state().clone();
+    let initial_bore = bounded.load().state().clone();
+    assert!(bounded.step(&[1.0, 0.0], &[], &gate).is_err());
+    assert_eq!(bounded.state(), &initial_field);
+    assert_eq!(bounded.load().state(), &initial_bore);
+    assert_eq!(bounded.accepted_steps(), 0);
+    assert!(bounded.last_frame().is_none());
+    bounded.step(&[0.0, 0.0], &[], &gate).unwrap();
+    assert_eq!(bounded.accepted_steps(), 1);
+}
+
+#[test]
+fn resolved_bore_binding_requires_original_source_clock_and_owned_port() {
+    let (mesh, cube) = kuhn_cube(1);
+    let xyz = points(&cube);
+    let gas = gas();
+    let source = ThermoviscousInterior::from_gas(build(&mesh, &xyz, &gas, true), gas, BAND).unwrap();
+    let other = ThermoviscousInterior::from_gas(build(&mesh, &xyz, &gas, true), gas, BAND).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let dt = 1.0 / 96_000.0;
+    let prepare = || source.prepare_time(dt, ThermoviscousTimeLimits::default(), &mut || false).unwrap();
+    assert!(ThermoviscousDg::new(&other, prepare(), time_dg_load(&gas, dt, DgBoundary::Closed),
+        1, ThermoviscousDgLimits::default(), &gate).is_err());
+    assert!(ThermoviscousDg::new(&source, prepare(), time_dg_load(&gas, 0.5 * dt, DgBoundary::Closed),
+        1, ThermoviscousDgLimits::default(), &gate).is_err());
+    assert!(ThermoviscousDg::new(&source, prepare(), time_dg_load(&gas, dt, DgBoundary::Closed),
+        2, ThermoviscousDgLimits::default(), &gate).is_err());
+    let different = GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, gas.pressure).unwrap();
+    assert!(ThermoviscousDg::new(&source, prepare(), time_dg_load(&different, dt, DgBoundary::Closed),
+        1, ThermoviscousDgLimits::default(), &gate).is_err());
+    // The same FE pointer and gas are insufficient when bare preparation
+    // drops the source's original molecular caloric fields.
+    let molecular = ThermoviscousInterior::from_relaxation(
+        build(&mesh, &xyz, &gas, true), super::source(gas, true, 1.0), BAND,
+    ).unwrap();
+    let bare = molecular.inner().prepare_time(dt, ThermoviscousTimeLimits::default(), &mut || false).unwrap();
+    assert!(ThermoviscousDg::new(&molecular, bare, time_dg_load(&gas, dt, DgBoundary::Closed),
+        1, ThermoviscousDgLimits::default(), &gate).is_err());
+}
+
+#[test]
+fn resolved_pressure_playback_retains_full_states_across_callback_partitions() {
+    use super::super::dg::performance::{
+        ThermoviscousDgControl, ThermoviscousDgPerformance, ThermoviscousDgPerformanceConfig,
+    };
+    use crate::bernoulli_aperture::performance::ApertureObservation;
+    use crate::pcm_wav::observation::PressureRenderer;
+    use std::sync::Arc;
+
+    let (mesh, cube) = kuhn_cube(1);
+    let xyz = points(&cube);
+    let gas = gas();
+    let source = ThermoviscousInterior::from_relaxation(
+        build(&mesh, &xyz, &gas, true), source(gas, true, 1.0), BAND,
+    ).unwrap();
+    let dt = 1.0 / 96_000.0;
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let controls: Vec<_> = (0..24).map(|i| ThermoviscousDgControl {
+        traction_pa: vec![if i < 8 { 0.1 } else { 0.0 }, 0.0],
+        wall_forces_n_per_sqrt_kg: vec![],
+    }).collect();
+    let make = |maximum_block| {
+        let prepared = source.prepare_time(dt, ThermoviscousTimeLimits::default(), &mut || false).unwrap();
+        let mut initial = prepared.zero_state();
+        initial.molecular_temperature_k[0][0] = 0.005;
+        let system = ThermoviscousDg::new(
+            &source, prepared, time_dg_load(&gas, dt, DgBoundary::Closed), 1,
+            ThermoviscousDgLimits::default(), &gate,
+        ).unwrap().with_initial_state(initial).unwrap();
+        ThermoviscousDgPerformance::new(system, controls.clone(), ApertureObservation::Inlet,
+            ThermoviscousDgPerformanceConfig {
+                sample_rate_hz: 96_000, maximum_block, maximum_control_values: 48,
+            }, Arc::clone(&gate)).unwrap()
+    };
+    let mut whole = make(24);
+    let mut divided = make(5);
+    let mut a = [0.0; 24];
+    let mut b = [0.0; 24];
+    whole.block(&mut a).unwrap();
+    for chunk in b.chunks_mut(5) { divided.block(chunk).unwrap(); }
+    assert_eq!(a, b);
+    assert!(a.iter().any(|p| *p != 0.0));
+    assert_eq!(whole.system().state(), divided.system().state());
+    assert_eq!(whole.system().load().state(), divided.system().load().state());
+    assert_eq!(whole.controls(), divided.controls());
+    assert_eq!(whole.samples_rendered(), 24);
+    assert_eq!(whole.remaining_samples(), 0);
+    assert_eq!(a[23].to_bits(), whole.last_frame().unwrap().mean_pressure_pa.to_bits());
+    assert!(whole.validate_sample_count(1).is_err());
+}
+
+#[test]
+fn resolved_pressure_admits_complete_controls_and_preserves_cancelled_prefix() {
+    use super::super::dg::performance::{
+        ThermoviscousDgControl, ThermoviscousDgPerformance, ThermoviscousDgPerformanceConfig,
+    };
+    use crate::bernoulli_aperture::performance::ApertureObservation;
+    use crate::pcm_wav::observation::PressureRenderer;
+    use crate::render::RenderError;
+    use std::sync::Arc;
+
+    let (mesh, cube) = kuhn_cube(1);
+    let xyz = points(&cube);
+    let gas = gas();
+    let source = ThermoviscousInterior::from_gas(build(&mesh, &xyz, &gas, true), gas, BAND).unwrap();
+    let dt = 1.0 / 96_000.0;
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let make = |maximum_steps| ThermoviscousDg::new(
+        &source,
+        source.prepare_time(dt, ThermoviscousTimeLimits::default(), &mut || false).unwrap(),
+        time_dg_load(&gas, dt, DgBoundary::Closed), 1,
+        ThermoviscousDgLimits { maximum_steps, ..ThermoviscousDgLimits::default() }, &gate,
+    ).unwrap();
+    let config = ThermoviscousDgPerformanceConfig {
+        sample_rate_hz: 96_000, maximum_block: 4, maximum_control_values: 16,
+    };
+    let valid = ThermoviscousDgControl {
+        traction_pa: vec![1.0, 0.0], wall_forces_n_per_sqrt_kg: vec![],
+    };
+    for bad in [
+        ThermoviscousDgControl { traction_pa: vec![1.0], ..valid.clone() },
+        ThermoviscousDgControl { traction_pa: vec![0.0, 1.0], ..valid.clone() },
+        ThermoviscousDgControl { traction_pa: vec![f64::NAN, 0.0], ..valid.clone() },
+        ThermoviscousDgControl { wall_forces_n_per_sqrt_kg: vec![1.0], ..valid.clone() },
+    ] {
+        assert!(ThermoviscousDgPerformance::new(make(8), vec![bad], ApertureObservation::Inlet,
+            config, Arc::clone(&gate)).is_err());
+    }
+    assert!(ThermoviscousDgPerformance::new(make(1), vec![valid.clone(); 2], ApertureObservation::Inlet,
+        config, Arc::clone(&gate)).is_err());
+    for bad in [
+        ThermoviscousDgPerformanceConfig { sample_rate_hz: 48_000, ..config },
+        ThermoviscousDgPerformanceConfig { maximum_control_values: 1, ..config },
+    ] {
+        assert!(ThermoviscousDgPerformance::new(make(8), vec![valid.clone()], ApertureObservation::Inlet,
+            bad, Arc::clone(&gate)).is_err());
+    }
+    let mut stream = ThermoviscousDgPerformance::new(make(8), vec![valid; 8], ApertureObservation::Inlet,
+        config, Arc::clone(&gate)).unwrap();
+    let mut prefix = [0.0; 2];
+    stream.block(&mut prefix).unwrap();
+    let accepted_field = stream.system().state().clone();
+    let accepted_bore = stream.system().load().state().clone();
+    gate.request();
+    let mut tail = [f64::MAX; 2];
+    assert!(stream.block(&mut tail).is_err());
+    assert_eq!(tail, [f64::MAX; 2]);
+    assert_eq!(stream.system().state(), &accepted_field);
+    assert_eq!(stream.system().load().state(), &accepted_bore);
+    assert_eq!(stream.samples_rendered(), 2);
+    assert_eq!(stream.system().accepted_steps(), 2);
+    assert_eq!(stream.remaining_samples(), 6);
+    assert!(matches!(stream.block(&mut tail), Err(RenderError::Poisoned)));
+    assert_eq!(tail, [f64::MAX; 2]);
 }
