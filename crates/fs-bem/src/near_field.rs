@@ -100,32 +100,7 @@ impl<'a> Geometry<'a> {
     /// Nonfinite/unresolved coordinates, open/inward surfaces, an interior or
     /// near-surface point, missing triangle geometry, or cold resource bounds.
     pub fn new(surface: &'a SpherePanels, points: &[Point], minimum_clearance_m: f64) -> Result<Self,HelmholtzError> {
-        let triangles=surface.triangles().ok_or_else(||bad("near-field receivers require retained triangles"))?;
-        if triangles.is_empty() || triangles.len()>MAX_PANELS || points.is_empty() || points.len()>MAX_RECEIVERS
-            || !minimum_clearance_m.is_finite() || minimum_clearance_m<=0.
-            || triangles.iter().flatten().flatten().chain(points.iter().flatten()).any(|v|!v.is_finite()||v.abs()>1e9) {
-            return Err(bad("invalid bounded near-field surface, receiver or clearance"));
-        }
-        let components=components(triangles)?;
-        let scale=triangles.iter().flatten().flatten().chain(points.iter().flatten())
-            .fold(0.0_f64,|s,v|s.max(v.abs()));
-        let guard=minimum_clearance_m.max(128.*f64::EPSILON*scale);
-        let mut clearances=Vec::with_capacity(points.len());
-        for &point in points {
-            let clearance=triangles.iter().map(|&t|distance(point,t)).fold(f64::INFINITY,f64::min);
-            if !clearance.is_finite() || clearance<guard { return Err(bad("receiver touches or is too close to a source triangle")); }
-            for component in &components {
-                let(mut sum,mut correction)=(0.,0.);
-                for &i in component { compensated(&mut sum,&mut correction,angle(point,triangles[i])); }
-                // Refuse ambiguous values instead of guessing from a half-space
-                // or approximate centroid solid-angle sign. No cancellation
-                // between different components can hide an interior receiver.
-                if !sum.is_finite() || (sum/FOUR_PI).abs()>1e-7 {
-                    return Err(bad("receiver is interior or its exterior winding is unresolved"));
-                }
-            }
-            clearances.push(clearance);
-        }
+        let clearances=admit_exterior_points(surface,points,minimum_clearance_m,MAX_PANELS)?;
         Ok(Self {surface,points:points.to_vec(),clearances})
     }
     /// Minimum Euclidean point-to-triangle distance [m], in receiver order.
@@ -158,6 +133,40 @@ impl<'a> Geometry<'a> {
         }
         Ok(Prepared {surface:self.surface,k,medium,rows,with_velocity,kernel_evaluations:work.evaluations})
     }
+}
+
+// Shared by finite receivers and exterior incident sources. The latter needs
+// only geometry admission, including for the existing iterative panel range;
+// it must not inherit the dense observer's smaller integration/storage cap.
+pub(crate) fn admit_exterior_points(surface:&SpherePanels, points:&[Point], minimum_clearance_m:f64, maximum_panels:usize)
+    -> Result<Vec<f64>,HelmholtzError> {
+        let triangles=surface.triangles().ok_or_else(||bad("near-field receivers require retained triangles"))?;
+        if triangles.is_empty() || triangles.len()>maximum_panels || points.is_empty() || points.len()>MAX_RECEIVERS
+            || !minimum_clearance_m.is_finite() || minimum_clearance_m<=0.
+            || triangles.iter().flatten().flatten().chain(points.iter().flatten()).any(|v|!v.is_finite()||v.abs()>1e9) {
+            return Err(bad("invalid bounded near-field surface, receiver or clearance"));
+        }
+        let components=components(triangles)?;
+        let scale=triangles.iter().flatten().flatten().chain(points.iter().flatten())
+            .fold(0.0_f64,|s,v|s.max(v.abs()));
+        let guard=minimum_clearance_m.max(128.*f64::EPSILON*scale);
+        let mut clearances=Vec::with_capacity(points.len());
+        for &point in points {
+            let clearance=triangles.iter().map(|&t|distance(point,t)).fold(f64::INFINITY,f64::min);
+            if !clearance.is_finite() || clearance<guard { return Err(bad("receiver touches or is too close to a source triangle")); }
+            for component in &components {
+                let(mut sum,mut correction)=(0.,0.);
+                for &i in component { compensated(&mut sum,&mut correction,angle(point,triangles[i])); }
+                // Refuse ambiguous values instead of guessing from a half-space
+                // or approximate centroid solid-angle sign. No cancellation
+                // between different components can hide an interior receiver.
+                if !sum.is_finite() || (sum/FOUR_PI).abs()>1e-7 {
+                    return Err(bad("receiver is interior or its exterior winding is unresolved"));
+                }
+            }
+            clearances.push(clearance);
+        }
+        Ok(clearances)
 }
 
 // Exact-coordinate seam welding; no tolerance repair. Component-wise winding

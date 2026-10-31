@@ -16,8 +16,15 @@ use super::*;
 use crate::near_field;
 use std::f64::consts::PI;
 
+#[path = "helmholtz_incident_traces.rs"]
+mod traces;
+pub use traces::IncidentTraces;
+
 /// Maximum number of coherent point sources in one incident field.
 pub const MAX_MONOPOLES: usize = near_field::MAX_RECEIVERS;
+
+/// Maximum total number of coherent plane-wave and monopole source terms.
+pub const MAX_INCIDENT_SOURCES: usize = MAX_MONOPOLES;
 
 /// Ideal point emitter in the same stationary medium as the scatterer.
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +35,14 @@ pub struct Monopole {
     pub volume_velocity_m3_s: C64,
 }
 
+/// One analytic source term at the common incident frequency. Combining
+/// plane waves and nearby emitters retains their complex interference.
+#[derive(Clone, Copy, Debug)]
+pub enum IncidentSource {
+    PlaneWave(PlaneWave),
+    Monopole(Monopole),
+}
+
 /// Coherent incident field. Sources are summed before scattering; their
 /// phases and volume flows are not replaced by incoherent source power.
 #[derive(Clone, Copy)]
@@ -36,6 +51,8 @@ pub enum IncidentField<'a> {
     PlaneWave(PlaneWave),
     /// Coherent finite emitters with individually specified volume flows.
     Monopoles(&'a [Monopole]),
+    /// A coherent mixture of plane waves and finite-distance emitters.
+    Sources(&'a [IncidentSource]),
 }
 
 /// Pressure and Euler particle velocity of the unscattered incident field.
@@ -47,7 +64,7 @@ pub struct IncidentSample {
     pub velocity_m_s: [C64; 3],
 }
 
-fn validate_frequency(k: f64, medium: Medium) -> Result<(), HelmholtzError> {
+pub(super) fn validate_frequency(k: f64, medium: Medium) -> Result<(), HelmholtzError> {
     let omega_rho = k * medium.sound_speed * medium.density;
     let rho_c = medium.sound_speed * medium.density;
     if !k.is_finite()
@@ -92,6 +109,19 @@ impl IncidentField<'_> {
                     return Err(bad(
                         "incident monopoles require a nonempty bounded finite source array",
                     ));
+                }
+            }
+            Self::Sources(sources) => {
+                if sources.is_empty() || sources.len() > MAX_INCIDENT_SOURCES {
+                    return Err(bad("coherent source array must be nonempty and bounded"));
+                }
+                for source in sources {
+                    match source {
+                        IncidentSource::PlaneWave(plane) => Self::PlaneWave(*plane).validate()?,
+                        IncidentSource::Monopole(source) => {
+                            Self::Monopoles(std::slice::from_ref(source)).validate()?;
+                        }
+                    }
                 }
             }
         }
@@ -166,6 +196,23 @@ impl IncidentField<'_> {
                     }
                 }
             }
+            Self::Sources(sources) => {
+                for source in sources {
+                    let sample = match source {
+                        IncidentSource::PlaneWave(plane) => {
+                            Self::PlaneWave(*plane).sample(k, medium, point)?
+                        }
+                        IncidentSource::Monopole(source) => {
+                            Self::Monopoles(std::slice::from_ref(source))
+                                .sample(k, medium, point)?
+                        }
+                    };
+                    out.pressure_pa = out.pressure_pa + sample.pressure_pa;
+                    for (velocity, value) in out.velocity_m_s.iter_mut().zip(sample.velocity_m_s) {
+                        *velocity = *velocity + value;
+                    }
+                }
+            }
         }
         if !finite(out.pressure_pa) || out.velocity_m_s.iter().any(|v| !finite(*v)) {
             return Err(bad("incident pressure or velocity overflow"));
@@ -180,37 +227,34 @@ impl IncidentField<'_> {
         medium: Medium,
         law: Admittance<'_>,
         minimum_source_clearance_m: f64,
-    ) -> Result<(Vec<C64>, Vec<C64>), HelmholtzError> {
+    ) -> Result<(Vec<C64>, Vec<C64>, Vec<C64>), HelmholtzError> {
         self.validate()?;
         if !minimum_source_clearance_m.is_finite() || minimum_source_clearance_m <= 0.0 {
             return Err(bad("incident source clearance must be positive and finite"));
         }
         if let Self::PlaneWave(plane) = self {
             // Preserve the established plane-wave arithmetic and regression bits.
-            return scattering_drive(surface, k, medium, law, plane);
+            let (pressure, drive) = scattering_drive(surface, k, medium, law, plane)?;
+            let velocity = plane_wave_normal_velocity(surface, medium, plane, &pressure);
+            return Ok((pressure, velocity, drive));
         }
-        if let Self::Monopoles(sources) = self {
-            let positions: Vec<_> = sources.iter().map(|s| s.position_m).collect();
-            near_field::Geometry::new(surface, &positions, minimum_source_clearance_m)?;
-        }
-        let mut pressures = Vec::with_capacity(surface.areas().len());
-        let mut normal_velocity = Vec::with_capacity(surface.areas().len());
-        for (&point, &normal) in surface.centroids().iter().zip(surface.normals()) {
-            let sample = self.sample(k, medium, point)?;
-            pressures.push(sample.pressure_pa);
-            normal_velocity.push((0..3).fold(C64::ZERO, |v, a| {
-                v + sample.velocity_m_s[a].scale(normal[a])
-            }));
-        }
-        let absorbed = law.image(&pressures)?;
-        let rho_c = medium.density * medium.sound_speed;
-        let drive = normal_velocity
-            .into_iter()
-            .zip(absorbed)
-            .map(|(v, y)| -v - y.scale(1.0 / rho_c))
-            .collect();
-        Ok((pressures, drive))
+        let traces =
+            IncidentTraces::from_field(surface, k, medium, self, minimum_source_clearance_m)?;
+        let drive = traces.drive(law)?;
+        let (pressure, velocity) = traces.into_boundary_traces();
+        Ok((pressure, velocity, drive))
     }
+}
+
+/// Exact coherent free-space pressure and velocity of the declared sources.
+/// Body-source clearance is admitted by [`IncidentTraces::from_sources`].
+pub fn sample_incident_sources(
+    k: f64,
+    medium: Medium,
+    sources: &[IncidentSource],
+    point_m: [f64; 3],
+) -> Result<IncidentSample, HelmholtzError> {
+    IncidentField::Sources(sources).pressure_velocity_at(k, medium, point_m)
 }
 
 /// One solved scattering problem with its immutable incident-source and body
@@ -264,11 +308,14 @@ impl ScatteredField<'_, '_> {
     /// Outgoing incident+scattered amplitude F [Pa*m], with p~F exp(ikr)/r.
     /// A plane wave has no outgoing 1/r total far field and is refused here.
     pub fn total_far_field(&self, direction: [f64; 3]) -> Result<C64, HelmholtzError> {
-        let IncidentField::Monopoles(sources) = self.incident else {
+        if matches!(self.incident, IncidentField::PlaneWave(_))
+            || matches!(self.incident, IncidentField::Sources(sources)
+                if sources.iter().any(|s| matches!(s, IncidentSource::PlaneWave(_))))
+        {
             return Err(bad(
                 "a plane wave has no outgoing total far-field amplitude",
             ));
-        };
+        }
         if direction.iter().any(|v| !v.is_finite()) || (norm(direction) - 1.0).abs() > 1e-10 {
             return Err(bad("total far field requires a unit direction"));
         }
@@ -278,11 +325,22 @@ impl ScatteredField<'_, '_> {
             0.0,
             -trace.k * trace.medium.sound_speed * trace.medium.density / (4.0 * PI),
         );
-        for source in sources {
+        let mut add_source = |source: &Monopole| {
             value = value
                 + factor
                     * source.volume_velocity_m3_s
                     * expik(-trace.k * dot(direction, source.position_m));
+        };
+        match self.incident {
+            IncidentField::Monopoles(sources) => sources.iter().for_each(&mut add_source),
+            IncidentField::Sources(sources) => {
+                for source in sources {
+                    if let IncidentSource::Monopole(source) = source {
+                        add_source(source);
+                    }
+                }
+            }
+            IncidentField::PlaneWave(_) => unreachable!("plane waves refused above"),
         }
         if !finite(value) {
             return Err(bad("total far-field amplitude overflow"));
@@ -315,15 +373,34 @@ pub fn solve_scattering<'s, 'i>(
     .remove(0))
 }
 
-/// Solve the same finite-source boundary data through the existing FMM/GMRES
-/// Robin owner, avoiding a dense boundary factorization. The caller declares
-/// its FMM accuracy, iteration and storage budgets. Only a converged result
-/// becomes a field; original residual and resource receipts are returned.
-///
-/// Source winding/clearance and adaptive receivers retain their 8192-panel
-/// geometry cap. This route does not claim to extend that admission envelope.
-/// Cancellation is checked around source admission and within the existing
-/// iterative owner; its indivisible FMM-pass limit remains unchanged.
+impl<'s> PreparedBoundary<'s> {
+    /// Scatter a new analytic field using this existing factorization, while
+    /// retaining its source identity for coherent finite receiver observations.
+    pub fn scatter_field<'i>(
+        &self,
+        incident: IncidentField<'i>,
+        minimum_source_clearance_m: f64,
+    ) -> Result<ScatteredField<'s, 'i>, HelmholtzError> {
+        let (pressure, velocity, drive) = incident.boundary_drive(
+            self.surface,
+            self.k,
+            self.medium,
+            self.law,
+            minimum_source_clearance_m,
+        )?;
+        let solution = self.solve(&drive)?;
+        Ok(ScatteredField {
+            surface: self.surface,
+            incident,
+            solution: finish_scattering(self.surface, solution, pressure, velocity, self.law)?,
+        })
+    }
+}
+
+/// Finite-source or mixed illumination through the existing FMM/GMRES owner.
+/// Source admission supports its original surface range; finite receivers
+/// retain their independent dense observer cap. The original convergence,
+/// cancellation and work receipts remain authoritative.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_scattering_iterative<'s, 'i>(
     surface: &'s SpherePanels,
@@ -346,38 +423,25 @@ pub fn solve_scattering_iterative<'s, 'i>(
     if gate.is_requested() {
         return Err(IterativeError::Cancelled { matvecs: 0 });
     }
-    validate_frequency(k, medium)?;
-    admit_resolution(surface, k)?;
-    validate_closed(surface)?;
     law.validate(surface.areas().len())?;
-    let (pressure, drive) =
-        incident.boundary_drive(surface, k, medium, law, minimum_source_clearance_m)?;
-    if gate.is_requested() {
-        return Err(IterativeError::Cancelled { matvecs: 0 });
-    }
-    let (solution, report, receipt) = solve_radiation_bc_iterative(
-        surface,
-        k,
-        medium,
-        SurfaceBc {
-            drive_velocity: &drive,
-            admittance: law,
-        },
-        formulation,
-        options,
-        gate,
-    )?;
-    let field = ScatteredField {
-        surface,
-        incident,
-        solution: finish_scattering(surface, solution, pressure, law)?,
-    };
+    let traces =
+        IncidentTraces::from_field(surface, k, medium, incident, minimum_source_clearance_m)?;
+    let (solution, report, receipt) =
+        solve_incident_bc_iterative(surface, k, medium, law, &traces, formulation, options, gate)?;
     if gate.is_requested() {
         return Err(IterativeError::Cancelled {
             matvecs: receipt.matvecs,
         });
     }
-    Ok((field, report, receipt))
+    Ok((
+        ScatteredField {
+            surface,
+            incident,
+            solution,
+        },
+        report,
+        receipt,
+    ))
 }
 
 /// Independent incident fields through one boundary assembly and LU. Source
@@ -405,17 +469,17 @@ pub fn solve_scattering_batch<'s, 'i>(
         .iter()
         .map(|&field| field.boundary_drive(surface, k, medium, law, minimum_source_clearance_m))
         .collect::<Result<_, _>>()?;
-    let drives: Vec<_> = traces.iter().map(|(_, v)| v.as_slice()).collect();
+    let drives: Vec<_> = traces.iter().map(|(_, _, v)| v.as_slice()).collect();
     let solved = solve_radiation_bc_batch(surface, k, medium, &drives, law, formulation)?;
     solved
         .into_iter()
         .zip(traces)
         .zip(incidents)
-        .map(|((solution, (p, _)), &incident)| {
+        .map(|((solution, (p, v, _)), &incident)| {
             Ok(ScatteredField {
                 surface,
                 incident,
-                solution: finish_scattering(surface, solution, p, law)?,
+                solution: finish_scattering(surface, solution, p, v, law)?,
             })
         })
         .collect()

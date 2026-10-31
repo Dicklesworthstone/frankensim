@@ -1012,6 +1012,47 @@ while the outgoing field remains the scattered trace. Reported surface work is
 not an independent far-field accuracy certificate. The inherited dense solve
 has no mid-factorization cancellation guarantee.
 
+`helmholtz::bc::incident::IncidentField::Sources` extends the finite-source
+owner above to coherent mixtures of plane waves and monopoles, using the same
+analytic kernels and velocity convention. `IncidentTraces` samples that field
+or accepts pressure/normal-velocity traces from a caller-owned Helmholtz field.
+`ScatteringSolution` retains incident pressure and normal velocity separately
+from the outgoing scattered solution, with explicit total boundary accessors.
+Absorption uses total wall pressure, including interference; its passivity
+tolerance scales with apparent wall power. A field containing a plane wave
+has no outgoing total `1/r` far field and the existing observer refuses it.
+
+The analytic source list is bounded at 64. Monopole positions share finite
+receivers' component-wise winding and point-to-triangle clearance admission,
+including the original iterative surface range; interior, touching and
+unresolved source positions refuse. A positive source clearance is required,
+but it is not a near-source discretization error bound. Analytic sampling is
+fixed-order and binds traces immutably to geometry, frequency and medium.
+External traces must represent a field regular in the bodies; their producer
+owns that PDE/transfer obligation. This lane is uniform, stationary, lossless
+acoustics; it does not extend molecular-relaxation or convected-wave physics.
+
+`PreparedBoundary` factors the same dense Robin operator once and reuses its
+matrix/LU across separate calls and source batches, with the inherited
+256-field batch cap. Rigid/all-zero admittance uses the original radiation
+operator and batch worker scheduling unchanged. `scatter_field` retains the
+source-bound finite receiver observer; `scatter` consumes bound traces.
+Local and nonlocal wall laws are retained; a changed nonlocal fingerprint
+refuses reuse. `solve_incident_bc_iterative` and
+`incident::solve_scattering_iterative` send the same coherent traces through
+the existing bounded FMM/GMRES owner. Its cancellation, residual, resolution
+and work admissions remain in force. The finite receiver observer retains
+its independent dense panel cap. Dense preparation retains its original
+cancellation limitations.
+
+`tests/incident_scattering.rs` covers analytic monopole Euler velocity and
+conserved outward power (G0/G2), coherent cancellation/superposition and total
+Robin absorption (G0/G3), agreement with the original plane-wave solve,
+rigid/all-zero-beta bit preservation and prepared-batch replay (G5), and
+source/trace admission. An independent spherical-Bessel addition-theorem
+oracle supplies a three-rung finite-source Robin-sphere far-field ladder
+(G1/G2), with an explicit 3% finest-rung gate, not a 1e-3 qualification.
+
 `reciprocal_radiation::open_screen` admits indexed oriented open two-manifolds,
 with every component having a free edge. It refuses closed components,
 duplicate faces, inconsistent/nonmanifold edges, disconnected vertex links and
@@ -1145,8 +1186,9 @@ HRTF model.
 
 `solve_scattering_iterative` sends the identical admitted incident boundary
 data through the existing FMM/GMRES Robin owner and returns its original
-convergence report and resource receipt. It avoids dense factorization while
-retaining the source/receiver geometry's 8192-panel ceiling. Cancellation is
+convergence report and resource receipt. It avoids dense factorization; source
+geometry supports the existing iterative panel range while adaptive receiver
+geometry retains its 8192-panel ceiling. Cancellation is
 checked before source admission and around the existing iterative solve;
 source winding and individual FMM passes remain bounded indivisible work.
 The inline dense-versus-iterative Robin-source check uses an 80-panel direct
