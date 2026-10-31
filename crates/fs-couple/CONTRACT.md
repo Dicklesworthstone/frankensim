@@ -16650,6 +16650,37 @@ source assembly; no existing accepted state or prepared coefficients mutate.
 This is fixed-equilibrium planar solid heat spreading, with the original common
 temperature and physical thickness. It does not add mean-temperature evolution,
 phase changes, curved extrusions or a measured instrument-realism claim.
+
+### Condensate storage in finite gas/body heat exchange
+
+`finite_gas_thermal::condensation` consumes the original source-bound
+`fs-material::phase::condensation::WetGasParcel` and the existing uniform-body
+enthalpy callback. `heat_candidate` solves the actual combined gas/liquid
+internal-energy increment against supplied joules, using the same bounded
+scalar feedback owner as other finite thermal couplings. Initial nonequilibrium
+water may change phase and temperature even at zero external heat. Film
+evaporation is limited by its actual inventory; every carrier species remains
+fixed. The material owner aligns the NASA/IAPWS caloric reference once, and its
+reference-invariant sensible-plus-latent increment drives the thermal root.
+
+`CondensingGasThermalEnvironment` closes one backward-Euler reciprocal transfer
+between that wet parcel and the original finite body. Radiation belongs to its
+separate enclosure. The convection callback sees the accepted candidate's
+actual vapor depletion, source-selected transport and temperature. Reports
+retain the phase/species account, the body trajectory, source-law residual and
+measured body + gas + liquid storage residual. The enclosing joule limit must
+pass independently; a latent-heat diagnostic is never reapplied as an external
+source. No accepted input is mutated on success, error or cancellation: the
+caller publishes both candidate physical states together.
+
+This is homogeneous near-atmospheric liquid-water equilibrium within the
+material owner's explicit temperature/pressure bounds. The retained liquid
+shares gas temperature and does not displace its prescribed volume. Wall-film
+kinetics, droplets, ice, pressure work, gas flow, nucleation and a coupled
+entropy/passivity theorem are outside this lane. The original body conductivity,
+source-domain, radiation and Biot restrictions still apply. Focused G0/G3/G4
+tests cover dew-point crossing, finite-film reheating, continuing finite-body
+cooling, source-aware convection, mass/energy conservation and refusal rollback.
 ## Finite solution activity, bound-water transport and native swelling
 
 `moisture::solution::FiniteMoistureSolution` retains the shared

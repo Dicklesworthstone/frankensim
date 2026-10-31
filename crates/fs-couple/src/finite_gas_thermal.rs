@@ -10,6 +10,9 @@
 mod entropy;
 pub use entropy::FiniteGasEntropyReport;
 
+/// Finite water condensation/evaporation in the same reciprocal thermal solve.
+pub mod condensation;
+
 mod wall;
 pub use wall::{WallConvectionError, WallConvectionSample, WallConvectionSolve};
 
