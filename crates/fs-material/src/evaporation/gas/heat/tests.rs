@@ -397,3 +397,218 @@ fn heat_source_limits_and_late_cancellation_publish_neither_original_owner() {
         assert_eq!(original_liquid, liquid(300.0));
     }
 }
+
+#[test]
+fn native_mass_selection_runs_once_on_the_phase_flux_after_sensible_heat() {
+    let source = catalog(0.0);
+    let original_gas = gas(&source, 340.0, 1000.0, 0.01);
+    let original_liquid = liquid(300.0);
+    let initial_phase = advance_surface_with_gas(
+        &Phase,
+        &binding(0.0),
+        original_liquid,
+        &original_gas,
+        &source,
+        temperature,
+        0.02,
+        0.5,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let baseline = advance_surface_with_gas_and_heat(
+        &Phase,
+        &binding(0.0),
+        original_liquid,
+        &original_gas,
+        &source,
+        temperature,
+        0.02,
+        60.0,
+        0.5,
+        controls(),
+        heat_controls(),
+        || false,
+    )
+    .unwrap();
+    let requested = baseline.step().requested_transferred_mass_kg;
+    assert!(requested > 0.0 && baseline.heat().heat_into_liquid_j > 0.0);
+    assert_ne!(
+        requested,
+        initial_phase.step().requested_transferred_mass_kg
+    );
+    assert!(
+        baseline.phase().step().surface_temperature_k[0] > baseline.step().surface_temperature_k[0]
+    );
+    let selected = requested.next_down();
+    let mut calls = 0;
+    let candidate = advance_surface_with_gas_and_heat_mass_selection(
+        &Phase,
+        &binding(0.0),
+        original_liquid,
+        &original_gas,
+        &source,
+        temperature,
+        0.02,
+        60.0,
+        0.5,
+        controls(),
+        heat_controls(),
+        |mass| {
+            calls += 1;
+            assert_eq!(mass, requested);
+            Ok(selected)
+        },
+        || false,
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(candidate.heat(), baseline.heat());
+    assert_eq!(
+        temperature(candidate.phase_initial_liquid().specific_enthalpy_j_kg).unwrap(),
+        candidate.phase().step().surface_temperature_k[0]
+    );
+    assert_eq!(candidate.step().requested_transferred_mass_kg, requested);
+    assert_eq!(candidate.step().transferred_mass_kg, selected);
+    assert_eq!(candidate.phase().step().transferred_mass_kg, selected);
+    assert_eq!(
+        candidate.liquid().mass_kg,
+        original_liquid.mass_kg - selected
+    );
+    assert_eq!(
+        candidate.step().gas_temperature_k[0],
+        original_gas.state().state().temperature
+    );
+    near(
+        candidate.step().energy_residual_j,
+        0.0,
+        controls().gas.energy_tolerance_j,
+    );
+    near(
+        candidate.step().liquid_enthalpy_change_j + candidate.step().gas_internal_energy_change_j,
+        0.0,
+        controls().gas.energy_tolerance_j,
+    );
+}
+
+#[test]
+fn zero_heat_exactly_delegates_to_selected_phase_without_using_heat_controls() {
+    let source = catalog(0.0);
+    let original_gas = gas(&source, 310.0, 1000.0, 0.01);
+    let original_liquid = liquid(300.0);
+    let phase = advance_surface_with_gas_mass_selection(
+        &Phase,
+        &binding(0.0),
+        original_liquid,
+        &original_gas,
+        &source,
+        temperature,
+        0.02,
+        0.2,
+        controls(),
+        |requested| Ok(requested.next_up()),
+        || false,
+    )
+    .unwrap();
+    let mut calls = 0;
+    let candidate = advance_surface_with_gas_and_heat_mass_selection(
+        &Phase,
+        &binding(0.0),
+        original_liquid,
+        &original_gas,
+        &source,
+        temperature,
+        0.02,
+        0.0,
+        0.2,
+        controls(),
+        GasFilmHeatSolve {
+            pure_liquid_enthalpy_range_j_kg: [f64::NAN; 2],
+            temperature_tolerance_k: f64::NAN,
+            maximum_iterations: 0,
+        },
+        |requested| {
+            calls += 1;
+            Ok(requested.next_up())
+        },
+        || false,
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(candidate.phase(), &phase);
+    assert_eq!(candidate.step(), phase.step());
+    assert_eq!(candidate.heat(), &GasFilmHeatStep::default());
+    assert_eq!(candidate.gas(), phase.gas());
+    assert_eq!(candidate.liquid(), phase.liquid());
+}
+
+#[test]
+fn selector_failure_invalid_mass_and_early_cancellation_publish_no_heat_or_phase() {
+    let source = catalog(0.0);
+    let original_gas = gas(&source, 340.0, 1000.0, 0.01);
+    let original_liquid = liquid(300.0);
+    let before = original_gas.clone();
+    let refusal = GasEvaporationError::Invalid("native inventory refuses transfer");
+    let mut calls = 0;
+    let rejected = advance_surface_with_gas_and_heat_mass_selection(
+        &Phase,
+        &binding(0.0),
+        original_liquid,
+        &original_gas,
+        &source,
+        temperature,
+        0.02,
+        60.0,
+        0.5,
+        controls(),
+        heat_controls(),
+        |_| {
+            calls += 1;
+            Err(refusal.clone())
+        },
+        || false,
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(rejected, Err(refusal));
+    assert!(matches!(
+        advance_surface_with_gas_and_heat_mass_selection(
+            &Phase,
+            &binding(0.0),
+            original_liquid,
+            &original_gas,
+            &source,
+            temperature,
+            0.02,
+            60.0,
+            0.5,
+            controls(),
+            heat_controls(),
+            |_| Ok(f64::NAN),
+            || false,
+        ),
+        Err(GasEvaporationError::Invalid(_))
+    ));
+    let mut calls = 0;
+    let cancelled = advance_surface_with_gas_and_heat_mass_selection(
+        &Phase,
+        &binding(0.0),
+        original_liquid,
+        &original_gas,
+        &source,
+        temperature,
+        0.02,
+        60.0,
+        0.5,
+        controls(),
+        heat_controls(),
+        |requested| {
+            calls += 1;
+            Ok(requested)
+        },
+        || true,
+    );
+    assert_eq!(cancelled, Err(GasEvaporationError::Cancelled));
+    assert_eq!(calls, 0);
+    assert_eq!(original_gas, before);
+    assert_eq!(original_liquid, liquid(300.0));
+}

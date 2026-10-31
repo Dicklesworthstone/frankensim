@@ -25,7 +25,7 @@ pub mod heat;
 pub mod timeline;
 pub use heat::{
     GasEvaporationHeatCandidate, GasFilmHeatSolve, GasFilmHeatStep,
-    advance_surface_with_gas_and_heat,
+    advance_surface_with_gas_and_heat, advance_surface_with_gas_and_heat_mass_selection,
 };
 
 use crate::thermochemical_gas::{

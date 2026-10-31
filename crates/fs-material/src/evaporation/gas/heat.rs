@@ -14,7 +14,8 @@
 
 use super::{
     GasEvaporationCandidate, GasEvaporationError, GasEvaporationSolve, GasEvaporationStep,
-    GasLiquidBinding, advance_surface_with_gas, nonnegative, poll, positive, smaller_step,
+    GasLiquidBinding, advance_surface_with_gas, advance_surface_with_gas_mass_selection,
+    nonnegative, poll, positive, smaller_step,
 };
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::parcel::ClosedGasParcel};
 use fs_qty::Temperature;
@@ -49,6 +50,7 @@ pub struct GasFilmHeatStep {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GasEvaporationHeatCandidate<'catalog> {
     phase: GasEvaporationCandidate<'catalog>,
+    phase_initial_liquid: LiquidSurfaceState,
     heat: GasFilmHeatStep,
     step: GasEvaporationStep,
 }
@@ -74,6 +76,11 @@ impl<'catalog> GasEvaporationHeatCandidate<'catalog> {
     /// Phase-only receipt, whose starting states already include sensible heat.
     pub const fn phase(&self) -> &GasEvaporationCandidate<'catalog> {
         &self.phase
+    }
+    /// Exact liquid state passed from sensible heat into the phase owner.
+    /// Its enthalpy is retained directly, without a heat/mass round trip.
+    pub const fn phase_initial_liquid(&self) -> LiquidSurfaceState {
+        self.phase_initial_liquid
     }
     pub fn into_parts(
         self,
@@ -352,6 +359,45 @@ pub fn advance_surface_with_gas_and_heat<'catalog, L: EvaporationLaw + ?Sized>(
     duration_s: f64,
     phase_controls: GasEvaporationSolve,
     heat_controls: GasFilmHeatSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasEvaporationHeatCandidate<'catalog>, GasEvaporationError> {
+    advance_surface_with_gas_and_heat_mass_selection(
+        law,
+        binding,
+        liquid,
+        gas,
+        catalog,
+        temperature_from_enthalpy,
+        mass_transfer_coefficient_m_s,
+        heat_transfer_coefficient_w_m2_k,
+        duration_s,
+        phase_controls,
+        heat_controls,
+        Ok,
+        cancelled,
+    )
+}
+
+/// The same reciprocal heat and phase step with a native mass representation.
+/// The selector receives the phase transfer requested AFTER sensible heating,
+/// exactly once on a successful call, before either phase caloric update.
+/// Initial zero-duration phase admission keeps its identity transfer and never
+/// consumes the selector. All original selected-mass limits remain active.
+/// A zero heat coefficient delegates directly to the selected phase owner.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_surface_with_gas_and_heat_mass_selection<'catalog, L: EvaporationLaw + ?Sized>(
+    law: &L,
+    binding: &GasLiquidBinding,
+    liquid: LiquidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    temperature_from_enthalpy: impl Fn(f64) -> Result<f64, EvaporationError>,
+    mass_transfer_coefficient_m_s: f64,
+    heat_transfer_coefficient_w_m2_k: f64,
+    duration_s: f64,
+    phase_controls: GasEvaporationSolve,
+    heat_controls: GasFilmHeatSolve,
+    select_mass: impl FnOnce(f64) -> Result<f64, GasEvaporationError>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasEvaporationHeatCandidate<'catalog>, GasEvaporationError> {
     if !nonnegative(heat_transfer_coefficient_w_m2_k) {
@@ -360,7 +406,7 @@ pub fn advance_surface_with_gas_and_heat<'catalog, L: EvaporationLaw + ?Sized>(
         ));
     }
     if heat_transfer_coefficient_w_m2_k == 0.0 {
-        let phase = advance_surface_with_gas(
+        let phase = advance_surface_with_gas_mass_selection(
             law,
             binding,
             liquid,
@@ -370,11 +416,13 @@ pub fn advance_surface_with_gas_and_heat<'catalog, L: EvaporationLaw + ?Sized>(
             mass_transfer_coefficient_m_s,
             duration_s,
             phase_controls,
+            select_mass,
             cancelled,
         )?;
         return Ok(GasEvaporationHeatCandidate {
             step: phase.step().clone(),
             phase,
+            phase_initial_liquid: liquid,
             heat: GasFilmHeatStep::default(),
         });
     }
@@ -405,7 +453,7 @@ pub fn advance_surface_with_gas_and_heat<'catalog, L: EvaporationLaw + ?Sized>(
         heat_controls,
         &mut cancelled,
     )?;
-    let phase = advance_surface_with_gas(
+    let phase = advance_surface_with_gas_mass_selection(
         law,
         binding,
         heated_liquid,
@@ -415,6 +463,7 @@ pub fn advance_surface_with_gas_and_heat<'catalog, L: EvaporationLaw + ?Sized>(
         mass_transfer_coefficient_m_s,
         duration_s,
         phase_controls,
+        select_mass,
         &mut cancelled,
     )?;
     let mut step = phase.step().clone();
@@ -443,7 +492,12 @@ pub fn advance_surface_with_gas_and_heat<'catalog, L: EvaporationLaw + ?Sized>(
         ));
     }
     poll(&mut cancelled)?;
-    Ok(GasEvaporationHeatCandidate { phase, heat, step })
+    Ok(GasEvaporationHeatCandidate {
+        phase,
+        phase_initial_liquid: heated_liquid,
+        heat,
+        step,
+    })
 }
 
 #[cfg(test)]

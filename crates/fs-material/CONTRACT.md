@@ -6430,6 +6430,14 @@ subsequent temperature/equilibrium gates remain unchanged. The report retains
 the original film request and the selected debit. The original entry point
 delegates with the identity selector and retains its numerical behavior.
 
+`advance_surface_with_gas_and_heat_mass_selection` preserves that native mass
+selection when reciprocal sensible film heat precedes phase transfer. The
+original implicit heat solver and source calorics remain unchanged. Initial
+zero-duration phase admission uses the identity selector; the caller's selector
+runs exactly once on the actual post-heating phase request. With zero sensible
+coefficient it delegates directly to the selected phase path. The original
+heat API delegates with identity selection and retains its existing behavior.
+
 `evaporation::gas::timeline::advance_deposition_with_gas` advances one admitted
 pure-liquid cell, its original heat/contact/source network and one finite gas
 on the same event-clipped clock. Births and every heat substep retain original

@@ -611,11 +611,23 @@ inventory energy/mass checks, reference shifts, capacity/geometry refusal and
 atomic cancellation. Its authored phase and transport data are manufactured
 coupling checks, not empirical water-rate validation.
 
+`advance_liquid_with_gas_and_heat` additionally uses the original implicit
+reciprocal gas-film heat solve before phase transfer over the SAME interval.
+Its explicit sensible coefficient excludes vapor-carried sensible and latent
+heat. The caller supplies the original pure-liquid enthalpy branch; temperature
+still comes from the native caloric chart. Native mass selection occurs only
+for the actual phase debit after heating. The final native enthalpy includes
+both heat and phase, followed by exactly one native flow step. Reports retain
+the separate heat receipt, phase-only receipt after heat, and original-to-final
+`exchange` receipt, with one combined energy budget. A zero heat coefficient
+retains the original phase-only endpoint and bypasses unused heat controls.
+
 This bounded first-order split needs timestep refinement. Gas occupies a fixed
 connected control volume; native liquid volume follows its original constant
 density. Phase-law recession is diagnostic, not a second interface update.
-There is no inferred sealed-vessel displacement, gas traction/recoil, sensible
-film conduction, nucleation or phase-front overflow/exhaustion remap. Existing
+The phase-only entry point supplies no separate sensible film conduction.
+Neither path infers sealed-vessel displacement, gas traction/recoil,
+nucleation or phase-front overflow/exhaustion remap. Existing
 solved-surface stress and dynamic-contact histories retain their native refusal
 boundary. Exposure is held during this one interval and re-admitted on the next.
 

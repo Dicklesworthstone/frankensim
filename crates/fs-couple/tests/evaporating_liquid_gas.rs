@@ -1,14 +1,16 @@
 //! Finite original gas and phase sources drive real native mass, h and flow.
 
 use fs_couple::liquid_gas::evaporation::{
-    EvaporatingLiquidGasError, EvaporatingLiquidGasSolve, LiquidGasEvaporationSurface,
-    advance_liquid_with_gas,
+    EvaporatingLiquidGasCandidate, EvaporatingLiquidGasError, EvaporatingLiquidGasSolve,
+    LiquidGasEvaporationSurface, advance_liquid_with_gas, advance_liquid_with_gas_and_heat,
 };
 use fs_exec::CancelGate;
 use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceMassExchangeControls, MaterialFreeSurfaceEnthalpy3,
 };
-use fs_material::evaporation::gas::{GasEvaporationSolve, GasLiquidBinding};
+use fs_material::evaporation::gas::{
+    GasEvaporationSolve, GasFilmHeatSolve, GasFilmHeatStep, GasLiquidBinding,
+};
 use fs_material::thermochemical_gas::{
     ThermochemicalGasModel,
     energy::{
@@ -26,6 +28,44 @@ fn near(a: f64, b: f64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance,
         "{a:e} != {b:e}, tolerance {tolerance:e}"
+    );
+}
+
+fn heat_controls() -> GasFilmHeatSolve {
+    GasFilmHeatSolve {
+        pure_liquid_enthalpy_range_j_kg: [CP * (280.0 - 300.0), CP * (340.0 - 300.0)],
+        temperature_tolerance_k: 1e-8,
+        maximum_iterations: 128,
+    }
+}
+
+fn check_complete_inventory(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>,
+    gas: &ClosedGasParcel,
+    binding: &GasLiquidBinding,
+    next: &EvaporatingLiquidGasCandidate<'_, '_, '_>,
+) {
+    let liquid_mass_change =
+        next.liquid().flow().ledger_mass_kg().unwrap() - liquid.flow().ledger_mass_kg().unwrap();
+    let liquid_h_change =
+        next.liquid().total_enthalpy_j().unwrap() - liquid.total_enthalpy_j().unwrap();
+    let gas_u_change = next.gas().mass_kg() * next.gas().state().specific_internal_energy_j_kg()
+        - gas.mass_kg() * gas.state().specific_internal_energy_j_kg();
+    let flow = next.report().flow;
+    near(
+        liquid_mass_change + next.gas().mass_kg() - gas.mass_kg(),
+        0.0,
+        controls().mass_tolerance_kg,
+    );
+    near(
+        liquid_h_change + binding.liquid_enthalpy_offset_j_kg * liquid_mass_change + gas_u_change,
+        flow.external_heat_j + flow.viscous_heat_j + flow.body_heat_j,
+        controls().energy_tolerance_j,
+    );
+    near(
+        liquid_h_change,
+        next.report().native_liquid_enthalpy_change_j,
+        1e-12,
     );
 }
 
@@ -280,5 +320,167 @@ fn g4_condensation_cannot_overfill_a_native_interface_or_publish_only_its_gas() 
         ));
         assert_eq!(liquid.flow().ledger_mass_kg().unwrap(), before);
         assert_eq!(gas, original_gas);
+    });
+}
+
+#[test]
+fn g1_reciprocal_film_heat_cools_or_warms_before_phase_and_one_native_flow_step() {
+    for (temperature, vapor_pressure) in [(290.0, 1000.0), (320.0, 6000.0)] {
+        with_liquid(0.0, 0.4, |liquid, gate| {
+            let source = source(-13.4e6);
+            let gas = gas(&source, temperature, vapor_pressure);
+            let binding = binding(&source, 0.0);
+            let face = surface(&Phase, &binding);
+            let legacy =
+                advance_liquid_with_gas(liquid, &gas, &source, face, controls(), gate).unwrap();
+            let next = advance_liquid_with_gas_and_heat(
+                liquid,
+                &gas,
+                &source,
+                face,
+                50.0,
+                controls(),
+                heat_controls(),
+                gate,
+            )
+            .unwrap();
+            let report = next.report();
+            let heat = report.heat.unwrap();
+            assert!(heat.heat_into_liquid_j * (temperature - 300.0) > 0.0);
+            assert!(report.phase.transferred_mass_kg != 0.0);
+            assert_ne!(
+                report.phase.requested_transferred_mass_kg,
+                legacy.report().phase.requested_transferred_mass_kg
+            );
+            assert_eq!(report.exchange.surface_temperature_k[0], 300.0);
+            assert_eq!(report.exchange.gas_temperature_k[0], temperature);
+            assert_ne!(report.phase.surface_temperature_k[0], 300.0);
+            // The reciprocal equation refers to the postheat/prephase states,
+            // not the states after phase exchange or native advection.
+            let conductance_time = 50.0 * face.area_m2 * DT;
+            near(
+                heat.heat_into_liquid_j,
+                conductance_time
+                    * (report.phase.gas_temperature_k[0] - report.phase.surface_temperature_k[0]),
+                conductance_time * heat_controls().temperature_tolerance_k + 1e-18,
+            );
+            near(
+                heat.liquid_enthalpy_change_j + heat.gas_internal_energy_change_j,
+                0.0,
+                controls().phase.gas.energy_tolerance_j,
+            );
+            near(
+                report.exchange.gas_internal_energy_change_j,
+                report.phase.gas_internal_energy_change_j + heat.gas_internal_energy_change_j,
+                1e-15,
+            );
+            near(
+                report.exchange.liquid_enthalpy_change_j,
+                report.phase.liquid_enthalpy_change_j + heat.liquid_enthalpy_change_j,
+                1e-15,
+            );
+            assert_eq!(
+                report.mass_exchange.mass_change_kg,
+                -report.exchange.transferred_mass_kg
+            );
+            assert_eq!(report.phase.duration_s, DT);
+            assert_eq!(report.exchange.duration_s, DT);
+            assert_eq!(next.liquid().accepted_steps(), 1);
+            assert_eq!(next.liquid().physical_time_s(), DT);
+            near(report.energy_residual_j, 0.0, controls().energy_tolerance_j);
+            check_complete_inventory(liquid, &gas, &binding, &next);
+        });
+    }
+}
+
+#[test]
+fn g3_zero_sensible_coefficient_retains_the_exact_legacy_native_and_gas_endpoints() {
+    with_liquid(0.0, 0.4, |liquid, gate| {
+        let source = source(-13.4e6);
+        let gas = gas(&source, 320.0, 6000.0);
+        let binding = binding(&source, 0.0);
+        let face = surface(&Phase, &binding);
+        let legacy =
+            advance_liquid_with_gas(liquid, &gas, &source, face, controls(), gate).unwrap();
+        let coupled = advance_liquid_with_gas_and_heat(
+            liquid,
+            &gas,
+            &source,
+            face,
+            0.0,
+            controls(),
+            heat_controls(),
+            gate,
+        )
+        .unwrap();
+        assert!(legacy.report().heat.is_none());
+        assert_eq!(coupled.report().heat, Some(GasFilmHeatStep::default()));
+        assert_eq!(legacy.report().phase, legacy.report().exchange);
+        assert_eq!(coupled.report().phase, legacy.report().phase);
+        assert_eq!(coupled.report().exchange, legacy.report().exchange);
+        assert_eq!(
+            coupled.report().mass_exchange,
+            legacy.report().mass_exchange
+        );
+        assert_eq!(coupled.gas(), legacy.gas());
+        assert_eq!(
+            coupled.liquid().flow().lattice().grid().state_bits(),
+            legacy.liquid().flow().lattice().grid().state_bits()
+        );
+        assert_eq!(
+            coupled.liquid().total_enthalpy_j().unwrap(),
+            legacy.liquid().total_enthalpy_j().unwrap()
+        );
+        assert_eq!(coupled.liquid().physical_time_s(), DT);
+    });
+}
+
+#[test]
+fn g1_zero_mass_transfer_keeps_reciprocal_heat_and_matches_finite_capacity_reference() {
+    with_liquid(0.0, 0.4, |liquid, gate| {
+        let source = source(-13.4e6);
+        let gas = gas(&source, 320.0, 6000.0);
+        let binding = binding(&source, 0.0);
+        let mut face = surface(&Phase, &binding);
+        face.mass_transfer_coefficient_m_s = 0.0;
+        let next = advance_liquid_with_gas_and_heat(
+            liquid,
+            &gas,
+            &source,
+            face,
+            50.0,
+            controls(),
+            heat_controls(),
+            gate,
+        )
+        .unwrap();
+        let report = next.report();
+        let heat = report.heat.unwrap();
+        // Both authored gases have Cp/R=3.5 and the native chart has constant
+        // cp. This independent two-capacity backward-Euler result is exact for
+        // this fixture, without replacing the production caloric owners.
+        let liquid_capacity = liquid
+            .project_interface_mass_exchange(INTERFACE, 0.0)
+            .unwrap()
+            .initial_mass_kg
+            * CP;
+        let gas_capacity = gas.mass_kg() * 2.5 * gas.state().state().specific_gas_constant;
+        let conductance_time = 50.0 * face.area_m2 * DT;
+        let expected_heat = conductance_time * 20.0
+            / (1.0 + conductance_time * (1.0 / liquid_capacity + 1.0 / gas_capacity));
+        near(heat.heat_into_liquid_j, expected_heat, 2e-14);
+        assert_eq!(report.phase.transferred_mass_kg, 0.0);
+        assert_eq!(report.mass_exchange.mass_change_kg, 0.0);
+        assert_eq!(report.phase.latent_energy_j, 0.0);
+        assert_eq!(next.gas().mass_kg(), gas.mass_kg());
+        near(report.mass_exchange.heat_j, heat.heat_into_liquid_j, 1e-15);
+        near(
+            report.exchange.gas_internal_energy_change_j,
+            -expected_heat,
+            2e-14,
+        );
+        assert_eq!(next.liquid().accepted_steps(), 1);
+        assert_eq!(next.liquid().physical_time_s(), DT);
+        check_complete_inventory(liquid, &gas, &binding, &next);
     });
 }

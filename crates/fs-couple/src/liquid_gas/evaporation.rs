@@ -13,7 +13,8 @@ use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceMassExchangeControls, FreeSurfaceMassExchangeReport, MaterialFreeSurfaceEnthalpy3,
 };
 use fs_material::evaporation::gas::{
-    GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasLiquidBinding,
+    GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasFilmHeatSolve,
+    GasFilmHeatStep, GasLiquidBinding, advance_surface_with_gas_and_heat_mass_selection,
     advance_surface_with_gas_mass_selection,
 };
 use fs_material::thermochemical_gas::{ThermochemicalGasModel, energy::parcel::ClosedGasParcel};
@@ -77,19 +78,27 @@ impl From<GasEvaporationError> for EvaporatingLiquidGasError {
 #[derive(Clone, Debug)]
 pub struct EvaporatingLiquidGasReport {
     pub duration_s: f64,
+    /// Phase-only account, starting AFTER optional sensible film heating.
     pub phase: GasEvaporationStep,
+    /// Original-to-final combined heat/phase storage and temperatures. Its
+    /// energy_into_gas_j is the vapor stream ONLY; subtract heat_into_liquid_j
+    /// to obtain the net supplied gas energy. Equals phase without film heat.
+    pub exchange: GasEvaporationStep,
+    /// Original reciprocal sensible heat, already included in exchange.
+    pub heat: Option<GasFilmHeatStep>,
     pub mass_exchange: FreeSurfaceMassExchangeReport,
     pub flow: FreeSurfaceEnthalpyReport,
     /// Actual native liquid change in its retained caloric datum [J].
     pub native_liquid_enthalpy_change_j: f64,
-    /// Native phase endpoint minus the original phase candidate's sensible
+    /// Native heat/phase endpoint minus the original candidate's sensible
     /// storage, evaluated before adding any formation reference [J].
     pub native_phase_caloric_defect_j: f64,
     /// Actual gas + native phase + subsequent native-flow mass change [kg].
     pub mass_residual_kg: f64,
     /// Same account using the actual volatile species instead of total gas [kg].
     pub volatile_mass_residual_kg: f64,
-    /// Original phase defect + native caloric adjustment + native flow defect.
+    /// Combined original heat/phase defect + native caloric adjustment + native
+    /// flow defect. The separate heat report's defect is not added again.
     /// Gas-species representation rounding remains separately mass-budgeted,
     /// as in the original source-relative boundary owner.
     pub energy_residual_j: f64,
@@ -164,6 +173,56 @@ pub fn advance_liquid_with_gas<'s, 'm, 'catalog>(
     controls: EvaporatingLiquidGasSolve,
     gate: &CancelGate,
 ) -> Result<EvaporatingLiquidGasCandidate<'s, 'm, 'catalog>, EvaporatingLiquidGasError> {
+    advance_native(liquid, gas, catalog, surface, controls, None, gate)
+}
+
+/// Reciprocal sensible film heat, phase exchange and native flow on ONE clock.
+///
+/// The existing material owner solves the gas/liquid sensible heat implicitly,
+/// then evaluates its Stefan-film transfer on those heated states. Native mass
+/// selection still occurs before the phase caloric solve. Both thermal stages
+/// span the retained native timestep, followed by one original flow step; they
+/// do not advance two intervals. The original native h-to-T chart supplies every
+/// thermal trial, and its complete original-to-final h change is stored once.
+///
+/// The explicit sensible coefficient must exclude latent and vapor-carried
+/// sensible energy, which the phase owner already transports. Refine the full
+/// physical timestep to assess this first-order heat/phase/flow split. The
+/// geometry, capacity, momentum and attached-owner limits of the phase-only
+/// entry point remain. Zero sensible coefficient reproduces its native/gas
+/// endpoints and adds a zero original heat report.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_liquid_with_gas_and_heat<'s, 'm, 'catalog>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surface: LiquidGasEvaporationSurface<'_>,
+    heat_transfer_coefficient_w_m2_k: f64,
+    controls: EvaporatingLiquidGasSolve,
+    heat_controls: GasFilmHeatSolve,
+    gate: &CancelGate,
+) -> Result<EvaporatingLiquidGasCandidate<'s, 'm, 'catalog>, EvaporatingLiquidGasError> {
+    advance_native(
+        liquid,
+        gas,
+        catalog,
+        surface,
+        controls,
+        Some((heat_transfer_coefficient_w_m2_k, heat_controls)),
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_native<'s, 'm, 'catalog>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surface: LiquidGasEvaporationSurface<'_>,
+    controls: EvaporatingLiquidGasSolve,
+    heat_controls: Option<(f64, GasFilmHeatSolve)>,
+    gate: &CancelGate,
+) -> Result<EvaporatingLiquidGasCandidate<'s, 'm, 'catalog>, EvaporatingLiquidGasError> {
     type Error = EvaporatingLiquidGasError;
     poll(gate)?;
     if [controls.mass_tolerance_kg, controls.energy_tolerance_j]
@@ -185,47 +244,84 @@ pub fn advance_liquid_with_gas<'s, 'm, 'catalog>(
     let chart_error = RefCell::new(None);
     let mut mass_error = None;
     let mut selected = None;
-    let proposal = advance_surface_with_gas_mass_selection(
-        surface.law,
-        surface.binding,
-        LiquidSurfaceState {
-            mass_kg: initial.initial_mass_kg,
-            specific_enthalpy_j_kg: h0,
-            area_m2: surface.area_m2,
-        },
-        gas,
-        catalog,
-        |h| {
-            liquid
-                .liquid_temperature_at_specific_enthalpy_k(h)
-                .map_err(|error| {
-                    *chart_error.borrow_mut() = Some(error);
-                    EvaporationError::Invalid("original native liquid caloric branch refused")
-                })
-        },
-        surface.mass_transfer_coefficient_m_s,
-        duration_s,
-        controls.phase,
-        |dm| match liquid.project_interface_mass_exchange(surface.liquid, -dm) {
-            Ok(projection) => {
-                selected = Some(projection);
-                Ok(-projection.mass_change_kg)
-            }
-            Err(error) => {
-                mass_error = Some(error);
-                Err(GasEvaporationError::Invalid(
-                    "original native interface mass selection refused",
-                ))
-            }
-        },
-        || gate.is_requested(),
-    );
+    let original_liquid = LiquidSurfaceState {
+        mass_kg: initial.initial_mass_kg,
+        specific_enthalpy_j_kg: h0,
+        area_m2: surface.area_m2,
+    };
+    let temperature = |h| {
+        liquid
+            .liquid_temperature_at_specific_enthalpy_k(h)
+            .map_err(|error| {
+                *chart_error.borrow_mut() = Some(error);
+                EvaporationError::Invalid("original native liquid caloric branch refused")
+            })
+    };
+    let select_mass = |dm: f64| match liquid.project_interface_mass_exchange(surface.liquid, -dm) {
+        Ok(projection) => {
+            selected = Some(projection);
+            Ok(-projection.mass_change_kg)
+        }
+        Err(error) => {
+            mass_error = Some(error);
+            Err(GasEvaporationError::Invalid(
+                "original native interface mass selection refused",
+            ))
+        }
+    };
+    let proposal = match heat_controls {
+        None => advance_surface_with_gas_mass_selection(
+            surface.law,
+            surface.binding,
+            original_liquid,
+            gas,
+            catalog,
+            temperature,
+            surface.mass_transfer_coefficient_m_s,
+            duration_s,
+            controls.phase,
+            select_mass,
+            || gate.is_requested(),
+        )
+        .map(|candidate| {
+            let (liquid, gas, catalog, phase) = candidate.into_parts();
+            (liquid, gas, catalog, phase.clone(), phase, None, h0)
+        }),
+        Some((coefficient, heat)) => advance_surface_with_gas_and_heat_mass_selection(
+            surface.law,
+            surface.binding,
+            original_liquid,
+            gas,
+            catalog,
+            temperature,
+            surface.mass_transfer_coefficient_m_s,
+            coefficient,
+            duration_s,
+            controls.phase,
+            heat,
+            select_mass,
+            || gate.is_requested(),
+        )
+        .map(|candidate| {
+            let phase = candidate.phase().step().clone();
+            let phase_initial_h = candidate.phase_initial_liquid().specific_enthalpy_j_kg;
+            let (liquid, gas, catalog, exchange, heat) = candidate.into_parts();
+            (
+                liquid,
+                gas,
+                catalog,
+                phase,
+                exchange,
+                Some(heat),
+                phase_initial_h,
+            )
+        }),
+    };
     if let Some(error) = chart_error.into_inner().or(mass_error) {
         return Err(error.into());
     }
-    let phase = proposal?;
+    let (phase_liquid, next_gas, catalog, phase, exchange, film_heat, phase_initial_h) = proposal?;
     let projection = selected.ok_or(Error::Invalid("phase owner did not select native mass"))?;
-    let (phase_liquid, next_gas, catalog, phase) = phase.into_parts();
     // The native post-transfer mass owns its actual caloric update. Any last-bit
     // difference from SI subtraction in the phase owner is audited below.
     let target_delta_h = phase_liquid.specific_enthalpy_j_kg - h0;
@@ -246,14 +342,24 @@ pub fn advance_liquid_with_gas<'s, 'm, 'catalog>(
         controls.native,
         gate,
     )?;
-    if mass_exchange.mass_change_kg != -phase.transferred_mass_kg {
+    if mass_exchange.mass_change_kg != -exchange.transferred_mass_kg {
         return Err(Error::Invalid(
             "native phase transfer differs from its selected gas debit",
         ));
     }
     let stored_delta_h = mass_exchange.samples[0].specific_enthalpy_j_kg[1] - h0;
+    let source_relative_storage = if let Some(heat) = film_heat {
+        // Retain the original two caloric increments before changing their
+        // reference to h0. Mass leaving after heating carries the heated h;
+        // neither that sensible part nor the reciprocal heat is credited twice.
+        heat.liquid_enthalpy_change_j
+            + phase_liquid.mass_kg * (phase_liquid.specific_enthalpy_j_kg - phase_initial_h)
+            - exchange.transferred_mass_kg * (phase_initial_h - h0)
+    } else {
+        phase_liquid.mass_kg * target_delta_h
+    };
     let native_phase_caloric_defect_j =
-        projection.final_mass_kg * stored_delta_h - phase_liquid.mass_kg * target_delta_h;
+        projection.final_mass_kg * stored_delta_h - source_relative_storage;
     poll(gate)?;
     let flow = next_liquid.step(gate)?;
     let native_transport_mass = flow.mass_after_kg - flow.mass_before_kg;
@@ -267,7 +373,7 @@ pub fn advance_liquid_with_gas<'s, 'm, 'catalog>(
                 .species_mass_kg(&surface.binding.species)
                 .map_err(GasEvaporationError::from)?);
     let energy_residual_j =
-        phase.energy_residual_j + native_phase_caloric_defect_j + flow.balance_defect_j;
+        exchange.energy_residual_j + native_phase_caloric_defect_j + flow.balance_defect_j;
     let native_liquid_enthalpy_change_j =
         mass_exchange.enthalpy_change_j + (flow.enthalpy_after_j - flow.enthalpy_before_j);
     if ![
@@ -309,6 +415,8 @@ pub fn advance_liquid_with_gas<'s, 'm, 'catalog>(
         report: EvaporatingLiquidGasReport {
             duration_s,
             phase,
+            exchange,
+            heat: film_heat,
             mass_exchange,
             flow,
             native_liquid_enthalpy_change_j,
