@@ -2002,3 +2002,36 @@ Source-backed regressions cover complete-window conservation, rejected-trial
 accounting, continuous adiabatic refinement, heated depinning against an
 independent onset split, explicit source-domain refusals, cancellation,
 bounded work, minimum-step failure and final-tail accounting.
+
+## Inertial capillary motion and reservoir exchange
+
+`capillary::inertia` adds physical velocity to the circular-tube state.
+Both incompressible columns share one mean velocity, with moving mass
+`M(x) = A*(rho_l*x + rho_d*(L-x)) + added_mass`. Added mass and advancing
+and receding reservoir coefficients are explicit inputs. The force
+`M*u_dot + M_prime*u^2/2` and directional reservoir loss `C*abs(u)*u`
+are separate. For a single liquid, `C=rho*A/2` gives the bidirectional
+reservoir convention in Fricke et al., Physica D 455 (2023) 133895,
+doi:10.1016/j.physd.2023.133895, corrected preprint
+https://arxiv.org/html/2305.05939v3. The two-fluid form follows the same
+energy account; no universal entrance coefficient is inferred.
+
+The midpoint discrete gradient balances actual endpoint kinetic energy,
+Young wall free energy, signed open-system gravity and pressure work against
+separate liquid, displaced-fluid, contact-line, threshold and reservoir losses.
+A moving meniscus can coast through the static hysteresis band. A resolved
+zero-velocity event returns its actual elapsed time and exact zero endpoint;
+the caller restarts the remaining interval to pin or reverse. Pure viscous
+coasting is not replaced by a fabricated finite stopping time. Tube-end
+crossings, unsupported angle/speed domains and non-monotone oversized trials
+are typed refusals. Cancellation and bounded iterations publish no state.
+
+This optional closure admits inertial startup and damped rise/oscillation.
+It uses lumped mean-flow inertia and instantaneous laminar resistance; developing
+radial profiles, turbulent or compressible columns, films and universal
+entrance-flow corrections remain outside its scope. Dry startup requires an
+explicit positive effective mass. Temporal accuracy requires refinement;
+a small mechanical residual alone is not a trajectory-error estimate.
+Focused executable checks cover independent startup, drainage and damped-rise
+limits, both motion directions, hysteretic stopping, all energy channels,
+timed downstream pressure and refusal/cancellation boundaries.

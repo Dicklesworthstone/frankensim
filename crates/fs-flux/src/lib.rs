@@ -17,7 +17,7 @@ pub mod ale;
 #[cfg(feature = "continuum")]
 pub mod bdm;
 /// Newtonian circular-tube flow and gravity-aware capillary meniscus motion,
-/// each with an explicit quasisteady applicability boundary.
+/// with explicit quasisteady and optional mean-flow inertial applicability.
 pub mod capillary;
 /// Material-driven spherical bubble dynamics with bounded adaptive stepping.
 #[cfg(feature = "cavitation")]
@@ -46,6 +46,10 @@ pub mod resistive_film;
 #[cfg(feature = "continuum")]
 pub mod trimesh;
 
+pub use capillary::inertia::{
+    InertialCapillaryEnd, InertialCapillaryError, InertialCapillaryInput, InertialCapillarySolve,
+    InertialCapillaryStep, InertialContactLine, step_inertial_circular_meniscus,
+};
 pub use capillary::{
     CircularCapillaryError, CircularCapillaryInput, CircularCapillaryStep, CircularMeniscusEnd,
     CircularMeniscusInput, CircularMeniscusStep, ContactLineCircularMeniscusInput,

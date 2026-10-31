@@ -20,6 +20,13 @@ mod sealed_mechanics;
 #[cfg(feature = "continuum")]
 pub mod material;
 
+/// Energy-consistent mean-flow inertia, reservoir exchange and stopping events.
+pub mod inertia;
+pub use inertia::{
+    InertialCapillaryEnd, InertialCapillaryError, InertialCapillaryInput, InertialCapillarySolve,
+    InertialCapillaryStep, InertialContactLine, step_inertial_circular_meniscus,
+};
+
 mod two_fluid;
 pub use two_fluid::{
     ContactLineCircularMeniscusInput, ContactLineCircularMeniscusStep, ContactLineMotion,
