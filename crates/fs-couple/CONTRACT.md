@@ -3544,7 +3544,14 @@ clarinet is one filling of those objects.
   with local-radius lossy substations) is the FIR path. 3-D jet broadband remains a
   no-claim. Plate ×
   Helmholtz in `cavity_phs` is the same transformer, not a
-  staggered pair of steps.
+  staggered pair of steps. Its classical and ISO-air observers use the same
+  causal complex transfer and linear batch convolution as acoustic assemblies.
+  `realize_plate_cavity_with_observer` additionally accepts an explicitly
+  evaluated molecular-relaxation state belonging to the supplied gas, or
+  lossless observation. These source-time histories include FIR latency;
+  remaining receiver delay is not placed on an absolute arrival clock.
+  Exterior molecular propagation does not change the finite cavity's existing
+  equilibrium lumped gas law.
   Its modal damping inputs are complete: it never selects aluminum/steel from
   density or takes the solid's temperature from the gas. `PlateCavitySpec::bind_plate`
   uses the ordinary `certified_radiators` owner to rebuild frequency, material

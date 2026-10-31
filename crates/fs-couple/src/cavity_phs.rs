@@ -12,9 +12,10 @@ pub mod modal;
 pub mod piston;
 
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::air_path::{GasAbsorptionModel, absorb_pressure_history_with_model};
+use crate::air_path::{GasAbsorptionModel, propagate_pressure_history_with_model};
 use crate::thin_plate::certified_radiators;
 use fs_material::gas::GasState;
+use fs_material::relaxation::RelaxationState;
 use fs_phs::linear_exact::{LinearPropagator, LinearSplitBudget, split_quadratic, step_split};
 use fs_phs::{PortHamiltonian, QuadraticStorage, helmholtz_resonator_flow, transformer};
 
@@ -114,8 +115,9 @@ impl PlateCavitySpec {
 /// `force_n[i]` is the external force at sample `i`. The far-field
 /// observer is the baffled compact sum `ρ A ÿ / (2π r)`.
 /// The supplied gas drives cavity storage, radiation and classical
-/// Stokes-Kirchhoff propagation. Molecular relaxation is not modeled here;
-/// terrestrial-air ISO absorption requires [`realize_plate_cavity_in_air`].
+/// causal Stokes-Kirchhoff propagation. Terrestrial-air ISO absorption requires
+/// [`realize_plate_cavity_in_air`]; an evaluated molecular relaxation law can
+/// be supplied through [`realize_plate_cavity_with_observer`].
 ///
 /// # Errors
 /// Empty/mismatched modes, incoherent gas, non-physical cavity, or a pHS/
@@ -126,12 +128,13 @@ pub fn realize_plate_cavity(
     sample_rate_hz: u32,
     listener_m: f64,
 ) -> Result<Vec<f64>, CavityPhsError> {
-    realize_with_absorption(
+    realize_plate_cavity_with_observer(
         spec,
         force_n,
         sample_rate_hz,
         listener_m,
         GasAbsorptionModel::StokesKirchhoff,
+        None,
     )
 }
 
@@ -152,7 +155,7 @@ pub fn realize_plate_cavity_in_air(
     sample_rate_hz: u32,
     listener_m: f64,
 ) -> Result<Vec<f64>, CavityPhsError> {
-    realize_with_absorption(
+    realize_plate_cavity_with_observer(
         spec,
         force_n,
         sample_rate_hz,
@@ -161,15 +164,35 @@ pub fn realize_plate_cavity_in_air(
             relative_humidity: spec.relative_humidity,
             air: *air,
         },
+        None,
     )
 }
 
-fn realize_with_absorption(
+/// Realize the same plate/cavity mechanics with an explicit exterior gas law.
+///
+/// Pressure uses the shared causal complex transfer and linear convolution:
+/// molecular absorption and dispersion come from one evaluated wavenumber,
+/// ISO air keeps its Debye phase, and classical loss uses its declared in-band
+/// minimum-phase realization. `Lossless` preserves the unfiltered pressure.
+/// A molecular state must belong to `spec.gas` and is accepted only with
+/// `MolecularRelaxation`; no air composition or relaxation is inferred.
+///
+/// The returned history follows source time and includes FIR implementation
+/// latency, as the other offline acoustic realizers do. The remaining receiver
+/// delay is not applied here. The finite cavity retains its existing equilibrium
+/// lumped gas model; the selected law governs exterior observer propagation.
+///
+/// # Errors
+/// All [`realize_plate_cavity`] refusals, missing/mismatched molecular data,
+/// a nonmatching terrestrial-air admission, and the shared response designer's
+/// finite-band/FIR-length refusals. No partial pressure history is returned.
+pub fn realize_plate_cavity_with_observer(
     spec: &PlateCavitySpec,
     force_n: &[f64],
     sample_rate_hz: u32,
     listener_m: f64,
     absorption: GasAbsorptionModel,
+    relaxation: Option<&RelaxationState>,
 ) -> Result<Vec<f64>, CavityPhsError> {
     let n_m = spec.omegas.len();
     if n_m == 0 || spec.zetas.len() != n_m || spec.drive.len() != n_m || spec.areas.len() != n_m {
@@ -251,8 +274,10 @@ fn realize_with_absorption(
         }
         out.push(p_obs);
     }
-    absorb_pressure_history_with_model(&mut out, dt, listener_m, &spec.gas, absorption)
-        .map_err(CavityPhsError::Plate)?;
+    propagate_pressure_history_with_model(
+        &mut out, dt, listener_m, &spec.gas, absorption, relaxation,
+    )
+    .map_err(CavityPhsError::Plate)?;
     Ok(out)
 }
 
@@ -528,6 +553,163 @@ mod tests {
             "the shared guard must preserve an admitted moist state"
         );
         assert!(realize_plate_cavity_in_air(&spec, &air, &[1.0], 8_000, 1.0).is_ok());
+    }
+
+    /// The actual cavity renderer must preserve phase and cannot produce
+    /// pressure before a late driving force through periodic FFT wraparound.
+    #[test]
+    fn cavity_observers_share_streaming_dispersion_without_wraparound() {
+        use crate::air_path::ObserverFilter;
+        let (gas, air) =
+            fs_material::iso9613::TerrestrialAir::moist_air(293.15, 101_325.0, 0.5).unwrap();
+        let mut spec = panel(0.008);
+        spec.gas = gas;
+        spec.relative_humidity = 0.5;
+        let mut input = vec![0.0; 513];
+        input[400] = 1.0;
+        let raw = realize_plate_cavity_with_observer(
+            &spec,
+            &input,
+            8_000,
+            30.0,
+            GasAbsorptionModel::Lossless,
+            None,
+        )
+        .unwrap();
+        let peak = raw
+            .iter()
+            .fold(0.0_f64, |peak, value| peak.max(value.abs()));
+        assert!(peak > 0.0);
+        for law in [
+            GasAbsorptionModel::StokesKirchhoff,
+            GasAbsorptionModel::Iso9613Air {
+                relative_humidity: 0.5,
+                air,
+            },
+        ] {
+            let actual = match law {
+                GasAbsorptionModel::StokesKirchhoff => {
+                    realize_plate_cavity(&spec, &input, 8_000, 30.0).unwrap()
+                }
+                _ => realize_plate_cavity_in_air(&spec, &air, &input, 8_000, 30.0).unwrap(),
+            };
+            let mut observer = ObserverFilter::for_law(law, &gas, None, 30.0, 8_000).unwrap();
+            let expected: Vec<_> = raw.iter().map(|&value| observer.process(value)).collect();
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| (a - b).abs() < 1e-12 * peak)
+            );
+            assert!(actual[..400].iter().all(|value| value.abs() < 1e-12 * peak));
+            assert!(actual[400..].iter().any(|value| value.abs() > 1e-6 * peak));
+        }
+    }
+
+    #[test]
+    fn cavity_molecular_observer_uses_the_matching_evaluated_gas() {
+        use crate::air_path::ObserverFilter;
+        use fs_material::relaxation::{
+            InternalReservoir, RelaxationAbsorption, RelaxationProcess, RelaxationRateLaw,
+            RelaxingMedium, SpeciesRelaxation, VibrationalMode,
+        };
+        let spec = panel(0.008);
+        // Synthetic reservoir tests the physical consumer; it is not air data.
+        let species = fs_thermochem::SpeciesId::new("cavity-test-gas").unwrap();
+        let law = RelaxationAbsorption::new(vec![SpeciesRelaxation {
+            species: species.clone(),
+            processes: vec![RelaxationProcess {
+                reservoir: InternalReservoir::Vibrational(vec![VibrationalMode {
+                    theta_k: 960.0,
+                    degeneracy: 2,
+                }]),
+                rate: RelaxationRateLaw::PartnerIndependent {
+                    p_tau_ref_pa_s: 1e-4 * spec.gas.pressure,
+                    t_ref_k: 293.15,
+                    exponent: 0.0,
+                    t_min_k: 100.0,
+                    t_max_k: 2000.0,
+                },
+            }],
+        }])
+        .unwrap();
+        let relaxation = law
+            .evaluate(&RelaxingMedium::new(spec.gas, vec![(species, 1.0)]).unwrap())
+            .unwrap();
+        let mut input = vec![0.0; 513];
+        input[400] = 1.0;
+        let raw = realize_plate_cavity_with_observer(
+            &spec,
+            &input,
+            8_000,
+            30.0,
+            GasAbsorptionModel::Lossless,
+            None,
+        )
+        .unwrap();
+        let actual = realize_plate_cavity_with_observer(
+            &spec,
+            &input,
+            8_000,
+            30.0,
+            GasAbsorptionModel::MolecularRelaxation,
+            Some(&relaxation),
+        )
+        .unwrap();
+        let mut observer = ObserverFilter::molecular_relaxation(&relaxation, 30.0, 8_000).unwrap();
+        let expected: Vec<_> = raw.iter().map(|&value| observer.process(value)).collect();
+        let peak = raw
+            .iter()
+            .fold(0.0_f64, |peak, value| peak.max(value.abs()));
+        assert!(peak > 0.0);
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 1e-12 * peak)
+        );
+        assert!(actual[..400].iter().all(|value| value.abs() < 1e-12 * peak));
+        assert!(
+            actual
+                .iter()
+                .zip(&raw)
+                .any(|(a, b)| (a - b).abs() > 1e-4 * peak)
+        );
+        assert!(
+            realize_plate_cavity_with_observer(
+                &spec,
+                &[],
+                8_000,
+                30.0,
+                GasAbsorptionModel::MolecularRelaxation,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            realize_plate_cavity_with_observer(
+                &spec,
+                &[],
+                8_000,
+                30.0,
+                GasAbsorptionModel::StokesKirchhoff,
+                Some(&relaxation),
+            )
+            .is_err()
+        );
+        let mut other = spec;
+        other.gas = air_at(323.15);
+        assert!(
+            realize_plate_cavity_with_observer(
+                &other,
+                &[],
+                8_000,
+                30.0,
+                GasAbsorptionModel::MolecularRelaxation,
+                Some(&relaxation),
+            )
+            .is_err()
+        );
     }
 
     #[test]
