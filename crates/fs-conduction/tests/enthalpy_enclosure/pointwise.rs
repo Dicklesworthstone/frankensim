@@ -524,3 +524,5 @@ fn strong_self_view_keeps_negative_exact_diagonal_without_breaking_positive_prec
 mod adjoint;
 #[path = "pointwise/open.rs"]
 mod open;
+#[path = "pointwise/spectral.rs"]
+mod spectral;

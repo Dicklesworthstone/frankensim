@@ -1,10 +1,12 @@
 //! Local P1 emission with reflected exchange through an admitted patch system.
 //!
-//! Each patch has uniform irradiation G_i, but the surface flux is
-//! epsilon_i * (sigma T_h(x)^4 - G_i). The radiosity RHS uses the integral
-//! of T_h^4, never the fourth power of a mean temperature. Geometry, emissivity
-//! and view factors stay fixed. This resolves local emission and absorption
-//! under the supplied patch irradiation model, not a spatial visibility kernel.
+//! Each patch has uniform irradiation G_i, but local surface emission follows
+//! its actual P1 temperature. Gray flux is epsilon_i*(sigma*T_h(x)^4-G_i).
+//! Spectral surfaces instead integrate their own Planck band and solve the
+//! reflected exchange separately in each band. The radiosity RHS uses the
+//! area mean of emitted power, never emission at a mean temperature. Geometry,
+//! source emissivities and view factors stay fixed. This is patch irradiation,
+//! not a spatial visibility kernel or a participating-medium model.
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
@@ -13,9 +15,16 @@ use std::{collections::BTreeMap, sync::Arc};
 use super::{
     GrayDiffuseEnclosure, OpenDiffuseEnclosure, PreparedRadiosity, RadiationSurface,
     ViewFactorMatrix, STEFAN_BOLTZMANN_W_M2_K4 as SIGMA,
-    SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity, balance, pointwise::TRIANGLE_DEGREE_FIVE,
+    SURFACE_EMISSIVITY_PROPERTY, balance, pointwise::TRIANGLE_DEGREE_FIVE,
     radiation_error, pointwise::PointwiseRadiationParameterGradient,
 };
+use super::spectral::{
+    BlackbodyBand, PointwisePatchEmissivity, SpectralBandEmissivity,
+    SpectralBandExchange, SpectralEmissivityGradient, SpectralPointwiseControls,
+    SpectralPointwiseReport, SpectralSurfaceEmissivity, SurfaceSpectralBands,
+    spatial,
+};
+use super::prepared::DenseRadiosityFactorization;
 use crate::{ConductionError, ConductionMesh, ThermalBc, ThermalBoundary, assemble::ASSEMBLY_TILE};
 
 /// Independent watt gates for the radiosity equations and closed heat sum.
@@ -38,12 +47,13 @@ impl Default for PointwiseEnclosureTolerance {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointwiseEnclosurePatchReport {
     pub name: String,
-    pub emissivity: SurfaceEmissivity,
+    pub emissivity: PointwisePatchEmissivity,
     pub area_m2: f64,
     pub mean_temperature_k: f64,
     pub minimum_temperature_k: f64,
     pub maximum_temperature_k: f64,
-    /// Area mean of sigma T_h^4, W/m2; not sigma mean(T_h)^4.
+    /// Area mean of blackbody emission, W/m2. Gray reports cover sigma T_h^4;
+    /// spectral reports cover their explicit band/window, never a mean-T law.
     pub mean_blackbody_emission_w_m2: f64,
     pub radiosity_w_m2: f64,
     pub irradiation_w_m2: f64,
@@ -77,13 +87,16 @@ pub struct PointwiseEnclosureReport {
     pub ambient: Option<PointwiseBlackBathReport>,
     /// Sum of surface and bath powers; neither term is forced to close.
     pub system_energy_closure_w: f64,
+    /// Present only for genuine finite-window band data. Integrated quantities
+    /// above then cover this window; individual bands retain their own powers.
+    pub spectral: Option<SpectralPointwiseReport>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PatchGeometry {
-    vertices: Vec<usize>,
+    vertices: Arc<[usize]>,
     /// Exact P1 integral of N_i, m2, in local vertex order.
-    weights: Vec<f64>,
+    weights: Arc<[f64]>,
     emissivity: f64,
 }
 
@@ -99,11 +112,13 @@ struct FaceGeometry {
 struct Geometry {
     vertices: usize,
     patches: Vec<PatchGeometry>,
-    faces: Vec<FaceGeometry>,
+    faces: Arc<[FaceGeometry]>,
     /// Sparse memberships permit exact diagonal assembly at shared edges.
-    memberships: Vec<(usize, Vec<(usize, usize)>)>,
+    memberships: Arc<[(usize, Vec<(usize, usize)>)]>,
     /// F [I-(1-epsilon)F]^-1 diag(epsilon), prepared once.
     irradiation_response: Vec<Vec<f64>>,
+    /// F [I-(1-epsilon)F]^-1, retaining zero-emissivity column derivatives.
+    unit_irradiation_response: Vec<Vec<f64>>,
     /// Same reflected response to unit BLACK BATH emission, when present.
     ambient_irradiation_response: Option<Vec<f64>>,
 }
@@ -131,6 +146,10 @@ pub struct PointwiseEnclosureAssembly {
     emission_diagonal: Vec<f64>,
     irradiation_corrections: Vec<f64>,
     emission_minus_irradiation: Vec<f64>,
+    band: Option<BlackbodyBand>,
+    /// Further wavelength bands share trace topology and add their actual
+    /// local/reflected operators. They never form a dense nodal matrix.
+    additional_bands: Vec<PointwiseEnclosureAssembly>,
 }
 
 impl PointwiseEnclosureAssembly {
@@ -158,6 +177,17 @@ impl PointwiseEnclosureAssembly {
         scale: f64,
         include_row: impl Fn(usize) -> bool,
         output: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        self.add_band_tangent(cx, direction, column_scale, scale, &include_row, output)?;
+        for band in &self.additional_bands {
+            band.add_band_tangent(cx, direction, column_scale, scale, &include_row, output)?;
+        }
+        Ok(())
+    }
+
+    fn add_band_tangent(
+        &self, cx: &Cx<'_>, direction: &[f64], column_scale: Option<&[f64]>,
+        scale: f64, include_row: &dyn Fn(usize) -> bool, output: &mut [f64],
     ) -> Result<(), ConductionError> {
         poll(cx, 0)?;
         self.check_fields(direction.len(), output.len())?;
@@ -207,7 +237,7 @@ impl PointwiseEnclosureAssembly {
             let irradiation = dot(&self.geometry.irradiation_response[patch], &emission)?;
             let coefficient = finite(-scale * geometry.emissivity * irradiation)?;
             for (slot, (&vertex, &weight)) in
-                geometry.vertices.iter().zip(&geometry.weights).enumerate()
+                geometry.vertices.iter().zip(geometry.weights.iter()).enumerate()
             {
                 if slot % ASSEMBLY_TILE == 0 {
                     poll(cx, slot)?;
@@ -243,6 +273,17 @@ impl PointwiseEnclosureAssembly {
         include_row: impl Fn(usize) -> bool,
         output: &mut [f64],
     ) -> Result<(), ConductionError> {
+        self.add_band_transpose(cx, direction, column_scale, scale, &include_row, output)?;
+        for band in &self.additional_bands {
+            band.add_band_transpose(cx, direction, column_scale, scale, &include_row, output)?;
+        }
+        Ok(())
+    }
+
+    fn add_band_transpose(
+        &self, cx: &Cx<'_>, direction: &[f64], column_scale: Option<&[f64]>,
+        scale: f64, include_row: &dyn Fn(usize) -> bool, output: &mut [f64],
+    ) -> Result<(), ConductionError> {
         poll(cx, 0)?;
         self.check_fields(direction.len(), output.len())?;
         if column_scale.is_some_and(|s| s.len() != direction.len()) {
@@ -273,7 +314,7 @@ impl PointwiseEnclosureAssembly {
             poll(cx, patch)?;
             let mut integral = 0.0;
             for (slot, (&vertex, &weight)) in
-                geometry.vertices.iter().zip(&geometry.weights).enumerate()
+                geometry.vertices.iter().zip(geometry.weights.iter()).enumerate()
             {
                 if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
                 integral = finite(weight.mul_add(value(vertex)?, integral))?;
@@ -310,6 +351,32 @@ impl PointwiseEnclosureAssembly {
         cx: &Cx<'_>,
         outward_load_weights: &[f64],
     ) -> Result<PointwiseRadiationParameterGradient, ConductionError> {
+        let mut gradient = self.band_parameter_pullback(cx, outward_load_weights)?;
+        if let Some(band) = self.band {
+            gradient.spectral_emissivities.push(SpectralEmissivityGradient {
+                wavelengths_m: [band.lower_wavelength_m(), band.upper_wavelength_m()],
+                emissivities: std::mem::take(&mut gradient.emissivities),
+            });
+            for component in &self.additional_bands {
+                let next = component.band_parameter_pullback(cx, outward_load_weights)?;
+                let band = component.band.expect("spectral component has its band");
+                gradient.spectral_emissivities.push(SpectralEmissivityGradient {
+                    wavelengths_m: [band.lower_wavelength_m(), band.upper_wavelength_m()],
+                    emissivities: next.emissivities,
+                });
+                for (total, value) in gradient.reservoir_temperatures.iter_mut()
+                    .zip(next.reservoir_temperatures)
+                {
+                    *total = finite(*total + value)?;
+                }
+            }
+        }
+        Ok(gradient)
+    }
+
+    fn band_parameter_pullback(
+        &self, cx: &Cx<'_>, outward_load_weights: &[f64],
+    ) -> Result<PointwiseRadiationParameterGradient, ConductionError> {
         self.check_fields(outward_load_weights.len(), outward_load_weights.len())?;
         self.admit_adjoint(cx)?;
         for (vertex, &weight) in outward_load_weights.iter().enumerate() {
@@ -322,7 +389,7 @@ impl PointwiseEnclosureAssembly {
         for (patch, geometry) in self.geometry.patches.iter().enumerate() {
             poll(cx, patch)?;
             for (slot, (&vertex, &area)) in
-                geometry.vertices.iter().zip(&geometry.weights).enumerate()
+                geometry.vertices.iter().zip(geometry.weights.iter()).enumerate()
             {
                 if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
                 area_weights[patch] = finite(
@@ -346,14 +413,9 @@ impl PointwiseEnclosureAssembly {
         }
         for (column, derivative) in emissivities.iter_mut().enumerate() {
             poll(cx, column)?;
-            let epsilon = self.geometry.patches[column].emissivity;
             let mut irradiation_bar = 0.0;
             for (row, &area_weight) in area_weights.iter().enumerate() {
-                // B = F A^-1 diag(epsilon); divide its column before the
-                // contraction to avoid forming (E-G)/epsilon at small epsilon.
-                let response = finite(
-                    self.geometry.irradiation_response[row][column] / epsilon,
-                )?;
+                let response = self.geometry.unit_irradiation_response[row][column];
                 irradiation_bar = finite(
                     response.mul_add(
                         finite(self.geometry.patches[row].emissivity * area_weight)?,
@@ -370,7 +432,9 @@ impl PointwiseEnclosureAssembly {
             let response = self.geometry.ambient_irradiation_response.as_ref()
                 .ok_or_else(|| invalid("open radiation lost its prepared ambient response"))?;
             let t = ambient.temperature_k;
-            let derivative = finite(4.0 * SIGMA * t * t * t)?;
+            let derivative = if let Some(band) = self.band {
+                band.evaluate(t)?.temperature_derivative_w_m2_k
+            } else { finite(4.0 * SIGMA * t * t * t)? };
             let mut contraction = 0.0;
             for (patch, &weight) in area_weights.iter().enumerate() {
                 let coefficient = finite(-self.geometry.patches[patch].emissivity
@@ -384,6 +448,7 @@ impl PointwiseEnclosureAssembly {
             radiation_regions: self.report.patches.iter().map(|p| p.name.clone()).collect(),
             emissivities,
             reservoir_temperatures,
+            spectral_emissivities: Vec::new(),
         })
     }
 
@@ -405,6 +470,7 @@ impl PointwiseEnclosureAssembly {
                 }
             }
         }
+        for component in &self.additional_bands { component.admit_adjoint(cx)?; }
         Ok(())
     }
 
@@ -422,29 +488,76 @@ enum PatchSystem<'a> {
     // Own an immutable snapshot so a caller may lower a local open declaration
     // and return this spatial owner. Bath-temperature changes clone the Arc.
     Open(Arc<OpenDiffuseEnclosure>),
+    Spectral(Arc<SpectralPatchSystem>),
+}
+
+#[derive(Debug)]
+struct SpectralPatchSystem {
+    // Reuse admitted traces and reciprocal geometry. Their gray-card payloads
+    // are not queried, reported or used by this spectral optical owner.
+    surfaces: Arc<[RadiationSurface]>,
+    view_factors: Arc<ViewFactorMatrix>,
+    sources: Arc<[SpectralSurfaceEmissivity]>,
+    band: BlackbodyBand,
+    factors: DenseRadiosityFactorization,
 }
 
 impl PatchSystem<'_> {
     fn surfaces(&self) -> &[RadiationSurface] {
         match self { Self::Closed { enclosure, .. } => enclosure.surfaces(),
-            Self::Open(enclosure) => enclosure.surfaces() }
+            Self::Open(enclosure) => enclosure.surfaces(),
+            Self::Spectral(system) => &system.surfaces }
     }
 
     fn view_factors(&self) -> &ViewFactorMatrix {
         match self { Self::Closed { enclosure, .. } => enclosure.view_factors(),
-            Self::Open(enclosure) => enclosure.view_factors() }
+            Self::Open(enclosure) => enclosure.view_factors(),
+            Self::Spectral(system) => &system.view_factors }
     }
 
     fn solve_rhs(&self, cx: &Cx<'_>, rhs: &[f64]) -> Result<Vec<f64>, ConductionError> {
         match self { Self::Closed { factors, .. } => factors.solve_rhs(cx, rhs),
-            Self::Open(enclosure) => enclosure.solve_rhs(cx, rhs) }
+            Self::Open(enclosure) => enclosure.solve_rhs(cx, rhs),
+            Self::Spectral(system) => system.factors.solve(cx, rhs) }
+    }
+
+    fn emissivity(&self, patch: usize) -> f64 {
+        match self {
+            Self::Spectral(system) => system.sources[patch].value(),
+            _ => self.surfaces()[patch].emissivity().value(),
+        }
+    }
+
+    fn temperature_validity_k(&self, patch: usize) -> Option<(f64, f64)> {
+        match self {
+            Self::Spectral(system) => {
+                let [low, high] = system.sources[patch].temperature_support_k();
+                Some((low, high))
+            }
+            _ => self.surfaces()[patch].emissivity().temperature_validity_k(),
+        }
+    }
+
+    fn source(&self, patch: usize) -> PointwisePatchEmissivity {
+        match self {
+            Self::Spectral(system) => PointwisePatchEmissivity::Spectral(vec![SpectralBandEmissivity {
+                wavelengths_m: [system.band.lower_wavelength_m(), system.band.upper_wavelength_m()],
+                emissivity: system.sources[patch].clone(),
+            }].into()),
+            _ => PointwisePatchEmissivity::Gray(self.surfaces()[patch].emissivity().clone()),
+        }
+    }
+
+    fn band(&self) -> Option<BlackbodyBand> {
+        match self { Self::Spectral(system) => Some(system.band), _ => None }
     }
 }
 
-/// Prepared fixed-geometry enclosure, with sparse trace geometry and one small
-/// radiosity factorization. At most 64 patches; trace storage is linear in
-/// boundary faces/vertices and the reflected matrix is O(patches^2). An open
-/// owner includes one external black bath without any corresponding solid node.
+/// Prepared fixed-geometry enclosure, with shared sparse trace topology and
+/// one small radiosity factorization per optical band (one for gray data).
+/// At most 64 patches and 64 spectral bands; local tangent storage is linear
+/// in boundary faces per band, with O(bands*patches^2) reflected storage.
+/// An open owner includes one black bath without a corresponding solid node.
 #[derive(Debug)]
 pub struct PointwiseEnclosureRadiation<'a> {
     mesh: &'a ConductionMesh,
@@ -453,6 +566,8 @@ pub struct PointwiseEnclosureRadiation<'a> {
     ambient_temperature_k: Option<f64>,
     geometry: Arc<Geometry>,
     tolerance: PointwiseEnclosureTolerance,
+    spectral_controls: Option<SpectralPointwiseControls>,
+    additional_bands: Vec<PointwiseEnclosureRadiation<'a>>,
 }
 
 impl<'a> PointwiseEnclosureRadiation<'a> {
@@ -495,6 +610,93 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             Some(ambient_temperature_k), tolerance)
     }
 
+    /// Replace the geometry carrier's gray optical declarations with explicit
+    /// spectral data. Its traces, areas and reciprocal view factors are reused;
+    /// its total-gray emissivities are never used as spectral measurements.
+    /// The returned owner borrows only mesh/boundary and enters every existing
+    /// pointwise enthalpy, adaptive, endpoint and accepted-adjoint consumer.
+    pub fn new_spectral(
+        cx: &Cx<'_>, mesh: &'a ConductionMesh, boundary: &'a ThermalBoundary,
+        enclosure: &GrayDiffuseEnclosure, spectrum: &SurfaceSpectralBands,
+        controls: SpectralPointwiseControls, tolerance: PointwiseEnclosureTolerance,
+    ) -> Result<Self, ConductionError> {
+        Self::prepare_spectrum(cx, mesh, boundary, enclosure.surfaces(),
+            enclosure.view_factors(), None, spectrum, controls, tolerance)
+    }
+
+    /// Finite-window spectral surface exchange with one black ambient bath.
+    /// All reflected spectra and the bath's emitted Planck spectrum use the
+    /// same wavelength partition. Omitted wavelengths pass an explicit gate.
+    pub fn new_open_spectral(
+        cx: &Cx<'_>, mesh: &'a ConductionMesh, boundary: &'a ThermalBoundary,
+        enclosure: &OpenDiffuseEnclosure, ambient_temperature_k: f64,
+        spectrum: &SurfaceSpectralBands, controls: SpectralPointwiseControls,
+        tolerance: PointwiseEnclosureTolerance,
+    ) -> Result<Self, ConductionError> {
+        super::require_temperature("spectral-ambient", "black ambient temperature", ambient_temperature_k)?;
+        Self::prepare_spectrum(cx, mesh, boundary, enclosure.surfaces(),
+            enclosure.view_factors(), Some(ambient_temperature_k), spectrum, controls, tolerance)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_spectrum(
+        cx: &Cx<'_>, mesh: &'a ConductionMesh, boundary: &'a ThermalBoundary,
+        surfaces: &[RadiationSurface], view_factors: &ViewFactorMatrix,
+        ambient_temperature_k: Option<f64>, spectrum: &SurfaceSpectralBands,
+        controls: SpectralPointwiseControls, tolerance: PointwiseEnclosureTolerance,
+    ) -> Result<Self, ConductionError> {
+        poll(cx, 0)?;
+        controls.admit()?;
+        admit_configuration(surfaces.len(), tolerance)?;
+        if spectrum.surface_count() != surfaces.len() {
+            return Err(invalid("spectral sources must match the admitted enclosure surface order"));
+        }
+        let surfaces: Arc<[RadiationSurface]> = surfaces.to_vec().into();
+        let view_factors = Arc::new(view_factors.clone());
+        let mut owners: Vec<Self> = Vec::with_capacity(spectrum.bands().len());
+        for (index, band) in spectrum.bands().iter().enumerate() {
+            poll(cx, index)?;
+            let n = view_factors.len();
+            let mut matrix = vec![vec![0.0; n]; n];
+            for (i, row) in matrix.iter_mut().enumerate() {
+                let epsilon = band.surfaces.get(i).map_or(1.0, SpectralSurfaceEmissivity::value);
+                for (j, entry) in row.iter_mut().enumerate() {
+                    *entry = if i == j { 1.0 } else { 0.0 }
+                        - (1.0 - epsilon) * view_factors.factors()[i][j];
+                }
+            }
+            let system = PatchSystem::Spectral(Arc::new(SpectralPatchSystem {
+                surfaces: Arc::clone(&surfaces), view_factors: Arc::clone(&view_factors),
+                sources: band.surfaces.clone().into(),
+                band: BlackbodyBand::new(band.wavelengths_m[0], band.wavelengths_m[1])?,
+                factors: DenseRadiosityFactorization::new(cx, &matrix)?,
+            }));
+            let mut owner = if let Some(first) = owners.first() {
+                let mut patches = first.geometry.patches.clone();
+                for (patch, geometry) in patches.iter_mut().enumerate() {
+                    geometry.emissivity = system.emissivity(patch);
+                }
+                let (irradiation_response, unit_irradiation_response, ambient_irradiation_response)
+                    = prepare_response(cx, &system, &patches, ambient_temperature_k.is_some())?;
+                Self { mesh, boundary, system, ambient_temperature_k, tolerance,
+                    spectral_controls: Some(controls), additional_bands: Vec::new(),
+                    geometry: Arc::new(Geometry { vertices: first.geometry.vertices, patches,
+                        faces: Arc::clone(&first.geometry.faces),
+                        memberships: Arc::clone(&first.geometry.memberships),
+                        irradiation_response, unit_irradiation_response, ambient_irradiation_response }),
+                }
+            } else {
+                Self::prepare(cx, mesh, boundary, system, ambient_temperature_k, tolerance)?
+            };
+            owner.spectral_controls = Some(controls);
+            owners.push(owner);
+        }
+        let mut owners = owners.into_iter();
+        let mut first = owners.next().expect("admitted nonempty spectrum");
+        first.additional_bands = owners.collect();
+        Ok(first)
+    }
+
     /// Change a prescribed black-bath temperature without rebuilding geometry,
     /// refactoring radiosity or advancing thermal history. Closed owners refuse.
     /// The caller chooses the endpoint bath temperature for each time interval.
@@ -502,13 +704,21 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         -> Result<Self, ConductionError>
     {
         super::require_temperature("open-ambient", "black ambient temperature", ambient_temperature_k)?;
-        let PatchSystem::Open(enclosure) = &self.system else {
-            return Err(invalid("a closed enclosure has no ambient temperature to replace"));
+        let system = match &self.system {
+            PatchSystem::Open(enclosure) => PatchSystem::Open(Arc::clone(enclosure)),
+            PatchSystem::Spectral(system) if self.ambient_temperature_k.is_some() =>
+                PatchSystem::Spectral(Arc::clone(system)),
+            _ => return Err(invalid("a closed enclosure has no ambient temperature to replace")),
         };
         Ok(Self { mesh: self.mesh, boundary: self.boundary,
-            system: PatchSystem::Open(Arc::clone(enclosure)),
+            system,
             ambient_temperature_k: Some(ambient_temperature_k),
-            geometry: Arc::clone(&self.geometry), tolerance: self.tolerance })
+            geometry: Arc::clone(&self.geometry), tolerance: self.tolerance,
+            spectral_controls: self.spectral_controls,
+            additional_bands: self.additional_bands.iter()
+                .map(|band| band.with_ambient_temperature_k(ambient_temperature_k))
+                .collect::<Result<_, _>>()?,
+        })
     }
 
     fn prepare(
@@ -581,9 +791,9 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 memberships.entry(vertex).or_default().push((patch, local));
             }
             patches.push(PatchGeometry {
-                vertices,
-                weights,
-                emissivity: surface.emissivity().value(),
+                vertices: vertices.into(),
+                weights: weights.into(),
+                emissivity: system.emissivity(patch),
             });
         }
         let mut faces = Vec::new();
@@ -608,32 +818,23 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 });
             }
         }
-        let mut irradiation_response = vec![vec![0.0; count]; count];
-        let mut ambient_irradiation_response = ambient_temperature_k.map(|_| vec![0.0; count]);
-        let equations = system.view_factors().len();
-        for column in 0..equations {
-            poll(cx, column)?;
-            let mut rhs = vec![0.0; equations];
-            rhs[column] = if column < count { patches[column].emissivity } else { 1.0 };
-            let response = system.solve_rhs(cx, &rhs)?;
-            for (row, values) in irradiation_response.iter_mut().enumerate() {
-                let value = dot(&system.view_factors().factors()[row], &response)?;
-                if column < count { values[column] = value; }
-                else if let Some(ambient) = &mut ambient_irradiation_response { ambient[row] = value; }
-            }
-        }
+        let (irradiation_response, unit_irradiation_response, ambient_irradiation_response)
+            = prepare_response(cx, &system, &patches, ambient_temperature_k.is_some())?;
         Ok(Self {
             mesh,
             boundary,
             system,
             ambient_temperature_k,
             tolerance,
+            spectral_controls: None,
+            additional_bands: Vec::new(),
             geometry: Arc::new(Geometry {
                 vertices: mesh.vertex_count(),
                 patches,
-                faces,
-                memberships: memberships.into_iter().collect(),
+                faces: faces.into(),
+                memberships: memberships.into_iter().collect::<Vec<_>>().into(),
                 irradiation_response,
+                unit_irradiation_response,
                 ambient_irradiation_response,
             }),
         })
@@ -641,12 +842,16 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
 
     pub(crate) fn patch_count(&self) -> usize { self.geometry.patches.len() }
 
+    pub(crate) fn band_count(&self) -> usize { 1 + self.additional_bands.len() }
+
     pub(crate) fn matches(&self, mesh: &ConductionMesh, boundary: &ThermalBoundary) -> bool {
         std::ptr::eq(self.mesh, mesh) && std::ptr::eq(self.boundary, boundary)
     }
 
-    /// Integrate local emission and solve reflected irradiation, with the exact
-    /// temperature tangent. Use the nonsymmetric Krylov lane for this operator.
+    /// Integrate local emission and solve reflected irradiation. Gray moments
+    /// are polynomial-exact; spectral integration retains a controlled estimate
+    /// and the analytic tangent of its accepted quadrature subdivision. Use
+    /// the nonsymmetric Krylov lane for either reflected operator.
     pub fn assemble(
         &self,
         cx: &Cx<'_>,
@@ -669,6 +874,102 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         cx: &Cx<'_>,
         temperature: &[f64],
     ) -> Result<PointwiseEnclosureAssembly, ConductionError> {
+        let Some(controls) = self.spectral_controls else {
+            return self.integrate_single::<TANGENT>(cx, temperature, None, 1);
+        };
+        poll(cx, 0)?;
+        if temperature.len() != self.geometry.vertices {
+            return Err(ConductionError::FieldLength { field: "spectral surface temperature",
+                expected: self.geometry.vertices, found: temperature.len() });
+        }
+        let first = self.system.band().expect("spectral controls have spectral data");
+        let last = self.additional_bands.last().and_then(|band| band.system.band()).unwrap_or(first);
+        let window = BlackbodyBand::new(first.lower_wavelength_m(), last.upper_wavelength_m())?;
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+        for (patch, geometry) in self.geometry.patches.iter().enumerate() {
+            poll(cx, patch)?;
+            for (slot, &vertex) in geometry.vertices.iter().enumerate() {
+                if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+                let value = temperature[vertex];
+                super::require_temperature("spectral-surface", "radiating node", value)?;
+                minimum = minimum.min(value);
+                maximum = maximum.max(value);
+            }
+        }
+        // Each tail is monotone in T. Their separate endpoint maxima bound
+        // the omitted fraction everywhere on the continuous P1 field.
+        let mut omitted = finite(window.evaluate(maximum)?.short_wave_fraction
+            + window.evaluate(minimum)?.long_wave_fraction)?;
+        if let Some(t) = self.ambient_temperature_k {
+            let bath = window.evaluate(t)?;
+            omitted = omitted.max(finite(bath.short_wave_fraction + bath.long_wave_fraction)?);
+        }
+        if omitted > controls.maximum_omitted_blackbody_fraction {
+            return Err(invalid("declared spectral window omits more blackbody emission than its budget permits"));
+        }
+        let mut work = spatial::Work::new(controls);
+        let mut assembly = self.integrate_single::<TANGENT>(cx, temperature, Some(&mut work), self.band_count())?;
+        let mut reports = vec![band_report(&assembly)];
+        let mut sources: Vec<Vec<SpectralBandEmissivity>> = assembly.report.patches.iter()
+            .map(|patch| patch.emissivity.spectral().expect("spectral patch source").to_vec()).collect();
+        for owner in &self.additional_bands {
+            let component = owner.integrate_single::<TANGENT>(cx, temperature, Some(&mut work), self.band_count())?;
+            reports.push(band_report(&component));
+            for (index, (patch, next)) in assembly.report.patches.iter_mut()
+                .zip(&component.report.patches).enumerate()
+            {
+                sources[index].extend_from_slice(next.emissivity.spectral().expect("spectral patch source"));
+                patch.mean_blackbody_emission_w_m2 = finite(patch.mean_blackbody_emission_w_m2 + next.mean_blackbody_emission_w_m2)?;
+                patch.radiosity_w_m2 = finite(patch.radiosity_w_m2 + next.radiosity_w_m2)?;
+                patch.irradiation_w_m2 = finite(patch.irradiation_w_m2 + next.irradiation_w_m2)?;
+                patch.outward_heat_w = finite(patch.outward_heat_w + next.outward_heat_w)?;
+            }
+            if let (Some(bath), Some(next)) = (&mut assembly.report.ambient, &component.report.ambient) {
+                bath.radiosity_w_m2 = finite(bath.radiosity_w_m2 + next.radiosity_w_m2)?;
+                bath.irradiation_w_m2 = finite(bath.irradiation_w_m2 + next.irradiation_w_m2)?;
+                bath.outward_heat_w = finite(bath.outward_heat_w + next.outward_heat_w)?;
+            }
+            for vertex in 0..self.geometry.vertices {
+                if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+                assembly.outward_load_w[vertex] = finite(assembly.outward_load_w[vertex] + component.outward_load_w[vertex])?;
+                if TANGENT {
+                    assembly.temperature_diagonal_w_k[vertex] = finite(assembly.temperature_diagonal_w_k[vertex] + component.temperature_diagonal_w_k[vertex])?;
+                    assembly.emission_diagonal[vertex] = finite(assembly.emission_diagonal[vertex] + component.emission_diagonal[vertex])?;
+                }
+            }
+            assembly.report.linear_residual_max_w_m2 = assembly.report.linear_residual_max_w_m2.max(component.report.linear_residual_max_w_m2);
+            assembly.additional_bands.push(component);
+        }
+        let mut total = 0.0;
+        let mut absolute = 0.0;
+        for (patch, sources) in assembly.report.patches.iter_mut().zip(sources) {
+            patch.emissivity = PointwisePatchEmissivity::Spectral(sources.into());
+            total = finite(total + patch.outward_heat_w)?;
+            absolute = finite(absolute + patch.outward_heat_w.abs())?;
+        }
+        let bath_heat = assembly.report.ambient.as_ref().map_or(0.0, |bath| bath.outward_heat_w);
+        let closure = finite(total + bath_heat)?;
+        let gate = finite(self.tolerance.absolute_heat_w
+            + self.tolerance.relative_heat * finite(absolute + bath_heat.abs())?)?;
+        if closure.abs() > gate {
+            return Err(invalid("summed spectral surface and bath heat exceeds the complete-system watt budget"));
+        }
+        assembly.report.outward_heat_w = total;
+        assembly.report.absolute_patch_heat_w = absolute;
+        assembly.report.system_energy_closure_w = closure;
+        assembly.report.spectral = Some(SpectralPointwiseReport {
+            bands: reports,
+            wavelengths_m: [window.lower_wavelength_m(), window.upper_wavelength_m()],
+            maximum_omitted_blackbody_fraction: omitted, spatial: work.report,
+        });
+        Ok(assembly)
+    }
+
+    fn integrate_single<const TANGENT: bool>(
+        &self, cx: &Cx<'_>, temperature: &[f64],
+        mut spatial_work: Option<&mut spatial::Work>, bands: usize,
+    ) -> Result<PointwiseEnclosureAssembly, ConductionError> {
         poll(cx, 0)?;
         let n = self.geometry.vertices;
         let p = self.geometry.patches.len();
@@ -689,7 +990,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 }
                 let t = temperature[vertex];
                 super::require_temperature(surface.name(), "radiating surface node", t)?;
-                if let Some((lo, hi)) = surface.emissivity().temperature_validity_k()
+                if let Some((lo, hi)) = self.system.temperature_validity_k(patch)
                     && !(lo..=hi).contains(&t)
                 {
                     return Err(ConductionError::MaterialQuery {
@@ -708,7 +1009,10 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         let surface_reference = minimum.iter().copied().fold(f64::INFINITY, f64::min);
         let reference = self.ambient_temperature_k
             .map_or(surface_reference, |ambient| ambient.min(surface_reference));
-        let background = finite(SIGMA * reference * reference * reference * reference)?;
+        let band = self.system.band();
+        let background = if let Some(band) = band { band.evaluate(reference)?.power_w_m2 }
+            else { finite(SIGMA * reference * reference * reference * reference)? };
+        let total_area = finite(self.system.surfaces().iter().map(RadiationSurface::area_m2).sum())?;
         let mut emission_delta = vec![0.0; p];
         let mut load = vec![0.0; n];
         let mut diagonal = if TANGENT { vec![0.0; n] } else { Vec::new() };
@@ -734,7 +1038,21 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             let epsilon = self.geometry.patches[face.patch].emissivity;
             let mut matrix = [[0.0; 3]; 3];
             let mut emission_delta_load = [0.0; 3];
-            for (bary, weight) in TRIANGLE_DEGREE_FIVE {
+            if let Some(band) = band {
+                let integral = spatial::integrate(cx, band, t, reference, face.area,
+                    face.area / total_area / bands as f64,
+                    spatial_work.as_deref_mut().ok_or_else(|| invalid("spectral assembly lost its quadrature budget"))?)?;
+                emission_delta[face.patch] = finite(emission_delta[face.patch] + integral.load.iter().sum::<f64>())?;
+                for i in 0..3 {
+                    load[face.vertices[i]] = finite(load[face.vertices[i]] + epsilon * integral.load[i])?;
+                    if TANGENT {
+                        emission_delta_load[i] = integral.load[i];
+                        let value = &mut slopes[face.patch][face.local[i]];
+                        *value = finite(*value + integral.tangent[i].iter().sum::<f64>())?;
+                        for j in 0..3 { matrix[i][j] = finite(epsilon * integral.tangent[i][j])?; }
+                    }
+                }
+            } else { for (bary, weight) in TRIANGLE_DEGREE_FIVE {
                 let tq = finite(t[0] + (t[1] - t[0]).mul_add(bary[1], (t[2] - t[0]) * bary[2]))?;
                 let area_weight = finite(face.area * weight)?;
                 let emission =
@@ -758,7 +1076,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                         }
                     }
                 }
-            }
+            } }
             if TANGENT {
                 for i in 0..3 {
                     diagonal[face.vertices[i]] = finite(diagonal[face.vertices[i]] + matrix[i][i])?;
@@ -798,7 +1116,8 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         // A black bath's radiosity is its Planck integral independently of
         // incoming light. It contributes a source equation, never a solid row.
         if let Some(ambient) = self.ambient_temperature_k {
-            rhs.push(finite(balance::emission_difference(SIGMA, ambient, reference))?);
+            rhs.push(if let Some(band) = band { band.difference(ambient, reference)? }
+                else { finite(balance::emission_difference(SIGMA, ambient, reference))? });
         }
         let radiosity_delta = self.system.solve_rhs(cx, &rhs)?;
         let mut reports = Vec::with_capacity(p);
@@ -826,7 +1145,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             }
             let mut mean_delta = 0.0;
             for (slot, (&vertex, &weight)) in
-                geometry.vertices.iter().zip(&geometry.weights).enumerate()
+                geometry.vertices.iter().zip(geometry.weights.iter()).enumerate()
             {
                 if slot % ASSEMBLY_TILE == 0 {
                     poll(cx, slot)?;
@@ -855,7 +1174,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             }
             reports.push(PointwiseEnclosurePatchReport {
                 name: surface.name().to_owned(),
-                emissivity: surface.emissivity().clone(),
+                emissivity: self.system.source(patch),
                 area_m2: surface.area_m2(),
                 mean_temperature_k: finite(reference + mean_delta / surface.area_m2())?,
                 minimum_temperature_k: minimum[patch],
@@ -928,6 +1247,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 view_factor_identity: self.system.view_factors().identity(),
                 ambient,
                 system_energy_closure_w,
+                spectral: None,
             },
             geometry: Arc::clone(&self.geometry),
             local,
@@ -935,8 +1255,49 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             emission_diagonal,
             irradiation_corrections,
             emission_minus_irradiation,
+            band,
+            additional_bands: Vec::new(),
         })
     }
+}
+
+fn band_report(assembly: &PointwiseEnclosureAssembly) -> SpectralBandExchange {
+    let band = assembly.band.expect("spectral assembly retains its wavelength band");
+    SpectralBandExchange {
+        wavelengths_m: [band.lower_wavelength_m(), band.upper_wavelength_m()],
+        patches: assembly.report.patches.clone(), ambient: assembly.report.ambient.clone(),
+        outward_heat_w: assembly.report.outward_heat_w,
+        system_energy_closure_w: assembly.report.system_energy_closure_w,
+        linear_residual_max_w_m2: assembly.report.linear_residual_max_w_m2,
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn prepare_response(
+    cx: &Cx<'_>, system: &PatchSystem<'_>, patches: &[PatchGeometry], has_ambient: bool,
+) -> Result<(Vec<Vec<f64>>, Vec<Vec<f64>>, Option<Vec<f64>>), ConductionError> {
+    let count = patches.len();
+    let mut irradiation = vec![vec![0.0; count]; count];
+    let mut unit = vec![vec![0.0; count]; count];
+    let mut ambient = has_ambient.then(|| vec![0.0; count]);
+    let equations = system.view_factors().len();
+    for column in 0..equations {
+        poll(cx, column)?;
+        let epsilon = if column < count { patches[column].emissivity } else { 1.0 };
+        let mut rhs = vec![0.0; equations];
+        // Keep the original gray arithmetic, but retain the unit column at
+        // exactly zero emissivity for a genuine spectral perfect reflector.
+        rhs[column] = if epsilon == 0.0 { 1.0 } else { epsilon };
+        let response = system.solve_rhs(cx, &rhs)?;
+        for row in 0..count {
+            let value = dot(&system.view_factors().factors()[row], &response)?;
+            if column < count {
+                irradiation[row][column] = if epsilon == 0.0 { 0.0 } else { value };
+                unit[row][column] = if epsilon == 0.0 { value } else { finite(value / epsilon)? };
+            } else if let Some(values) = &mut ambient { values[row] = value; }
+        }
+    }
+    Ok((irradiation, unit, ambient))
 }
 
 fn admit_configuration(count: usize, tolerance: PointwiseEnclosureTolerance) -> Result<(), ConductionError> {

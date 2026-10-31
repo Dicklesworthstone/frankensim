@@ -56,6 +56,14 @@ mod equilibrium;
 pub mod pointwise;
 /// Local P1 emission coupled to reflected, patch-uniform irradiation.
 pub mod pointwise_enclosure;
+/// Explicit spectral surface data, shared Planck bands and spatial controls.
+pub mod spectral;
+pub use spectral::{
+    BlackbodyBand, BlackbodyBandEmission, PointwisePatchEmissivity,
+    SpectralBandEmissivity, SpectralBandExchange, SpectralEmissivityGradient,
+    SpectralPointwiseControls, SpectralPointwiseReport, SpectralSpatialReport,
+    SpectralSurfaceEmissivity, SurfaceSpectralBand, SurfaceSpectralBands,
+};
 pub use pointwise_enclosure::{
     PointwiseBlackBathReport, PointwiseEnclosureAssembly, PointwiseEnclosurePatchReport, PointwiseEnclosureRadiation,
     PointwiseEnclosureReport, PointwiseEnclosureTolerance,

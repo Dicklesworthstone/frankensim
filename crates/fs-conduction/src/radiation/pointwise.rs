@@ -59,6 +59,9 @@ pub struct PointwiseRadiationParameterGradient {
     /// Ambient reservoir-temperature derivatives, K: one per ambient patch,
     /// one shared bath for an open enclosure, and none for a closed enclosure.
     pub reservoir_temperatures: Vec<f64>,
+    /// Genuine band-emissivity derivatives in wavelength order. Empty for
+    /// gray owners; spectral owners keep the gray `emissivities` vector empty.
+    pub spectral_emissivities: Vec<super::spectral::SpectralEmissivityGradient>,
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +203,7 @@ impl PointwiseRadiationAssembly {
                 .map(|report| report.patch.region().to_owned()).collect(),
             emissivities: vec![0.0; self.report.patches.len()],
             reservoir_temperatures: vec![0.0; self.report.patches.len()],
+            spectral_emissivities: Vec::new(),
         };
         for (slot, face) in self.tangent.iter().enumerate() {
             if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }

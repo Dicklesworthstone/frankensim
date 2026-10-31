@@ -50,6 +50,7 @@ fn admit(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     patches: usize,
+    bands: usize,
     physical_target_j: f64,
     max_radiation_entries: usize,
 ) -> Result<(), EnthalpyAdjointError> {
@@ -61,7 +62,9 @@ fn admit(
     }
     let entries = workspace_entries(
         problem.mesh.vertex_count(), problem.mesh.boundary().len(), patches,
-    )?;
+    )?.checked_mul(bands).ok_or(EnthalpyAdjointError::InvalidInput(
+        "spectral pointwise adjoint workspace overflow",
+    ))?;
     if entries > max_radiation_entries {
         return Err(EnthalpyAdjointError::InvalidInput(
             "pointwise radiation adjoint workspace exceeds the declared entry cap",
@@ -91,7 +94,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         physical_target_j: f64,
         max_radiation_entries: usize,
     ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
-        admit(cx, problem, radiation.patch_count(), physical_target_j, max_radiation_entries)?;
+        admit(cx, problem, radiation.patch_count(), 1, physical_target_j, max_radiation_entries)?;
         if !radiation.matches(problem.mesh, problem.boundary)
             || accepted.pointwise_radiation.is_none()
             || accepted.pointwise_enclosure_radiation.is_some()
@@ -124,7 +127,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         physical_target_j: f64,
         max_radiation_entries: usize,
     ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
-        admit(cx, problem, radiation.patch_count(), physical_target_j, max_radiation_entries)?;
+        admit(cx, problem, radiation.patch_count(), radiation.band_count(), physical_target_j, max_radiation_entries)?;
         if !radiation.matches(problem.mesh, problem.boundary)
             || accepted.pointwise_enclosure_radiation.is_none()
             || accepted.pointwise_radiation.is_some()

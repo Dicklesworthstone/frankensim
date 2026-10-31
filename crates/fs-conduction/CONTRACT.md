@@ -264,6 +264,49 @@ patch-uniform-irradiation models: no spatial visibility kernel, spectral bath,
 emissivity-state derivative, or automatic bath-temperature time schedule is
 inferred.
 
+`PointwiseEnclosureRadiation::new_spectral` and `new_open_spectral` extend
+that same spatial/enthalpy owner to 1..=64 explicit contiguous wavelength
+bands. Each band supplies independent opaque diffuse surface data with its
+source and temperature support. Emissivity equals absorptivity in that band;
+reflectivity is their complement. The admitted enclosure supplies traces,
+areas and reciprocal geometry only: its total-gray material cards are not
+used or reported as spectral measurements. The returned patch source is
+explicitly `PointwisePatchEmissivity::Gray` or `Spectral`.
+
+Each band prepares its radiosity factorization once and shares sparse trace
+topology. Local Planck-band emission uses the actual P1 temperature field;
+the complete reflected tangent and true transpose sum the original band
+operators without a dense nodal radiation matrix. The existing homogeneous,
+heterogeneous, adaptive, endpoint and accepted-adjoint paths consume this same
+owner. Spectral emissivity cotangents retain their wavelength rows separately
+from gray controls, and the shared open-bath derivative sums every band once.
+Accepted-adjoint workspace admission includes the retained band count.
+
+The shared `radiation::spectral::BlackbodyBand` primitive supplies finite-band
+power, its analytic derivative with wavelength endpoints fixed, stable
+near-equilibrium differences and spectral coverage fractions. It uses NIST
+Planck conventions and defining SI constants while retaining this crate's
+Stefan--Boltzmann normalization. Positive adaptive spatial quadrature estimates
+both emitted loads and temperature tangents with explicit depth/evaluation
+limits; nonpolynomial spectral emission has no degree-five exactness claim.
+The finite window must meet its explicit omitted-blackbody-fraction budget
+over the complete P1 temperature envelope and the black bath. This coverage
+gate is not a certified net-heat error bound, and omitted wavelengths carry
+no invented heat. Per-band reports retain original sources, powers, algebraic
+closure and spatial work/error estimates.
+
+Focused spectral regressions exercise selective plates against independent
+Planck/resistance equations, nonuniform open loads and transposes, every
+original nodal enthalpy equation, actual latent storage, accepted bath
+sensitivities, source/coverage refusal and bounded cancellation. Five actual
+Planck leaf tests passed through an isolated Rust wrapper around the original
+source; full-crate spectral integration tests remain pending native execution.
+This is fixed spectral-band emissivity with patch-uniform irradiation. It
+does not introduce a spectral material database, temperature-dependent
+emissivity, directional/specular optics, participating media in the solid
+owner, automatic visibility, a native spectral project declaration or an
+experimental-validation claim.
+
 `transient::enthalpy::heterogeneous::EnthalpyRadiation` selects the existing
 prescribed, mean ambient, mean enclosure, pointwise ambient or pointwise
 enclosure owner through `advance_with_radiation`. The selection borrows the
