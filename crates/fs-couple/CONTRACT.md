@@ -10521,6 +10521,30 @@ exterior-radiation refresh. The wider gas-chemistry ladder remains open.
 
 ### Source-bound finite-strain dynamics (MR58 bounded increment)
 
+`finite_solid::impulse` connects this same accepted solid to instantaneous nodal
+and material-point impulses. `FiniteSolidPoint` uses original P1 barycentric
+coordinates; its velocity trace and transpose impulse map are power-conjugate.
+`point_directional_inverse_mass_per_kg` solves against the original consistent
+reference mass, with stationary support elimination, so a contact consumer can
+compute its effective mass without an unrelated lumped approximation.
+`point_impulse_candidate` and `nodal_impulse_candidate` apply the resulting
+velocity jump through the existing bounded native mass solver. Point queries
+require no whole-mesh allocation; impulse solves retain sparse mass actions.
+
+`momentum_about` integrates linear and angular momentum using consistent nodal
+momenta and **current deformed** coordinates about an explicit world origin.
+An impulse candidate retains all applied and support impulses, their angular
+moments, actual representable momentum changes, and average-velocity work.
+Absolute linear/angular/work gates refuse unresolved transfers; inputs remain
+unchanged on late rejection or cancellation. Displacement, source/material
+state, acceleration, clock and accepted-step history remain unchanged because
+the event has zero duration and the admitted conservative force is independent
+of velocity. No impact/friction law, event location or impulse adjoint is inferred.
+The caller supplies a partner's equal/opposite impulse at the SAME physical
+point. `tests/finite_solid/impulse.rs` checks an independent tetrahedral mass
+inverse, off-center impulse/energy, fixed-support reactions, origin changes,
+native continuation, rigid/solid sticking impact and atomic refusal.
+
 `finite_solid::FiniteSolidMaterial::resolve` binds an explicit model index and reference
 density from the same immutable `MaterialCard` at the exact
 `ResolvedHyperelastic` context, retaining the original model, typed source

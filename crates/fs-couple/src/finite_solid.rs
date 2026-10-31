@@ -24,6 +24,9 @@
 /// Source-declared engineering thermal reference preparation.
 pub mod thermal;
 
+/// Power-conjugate point impulses on the original consistent reference mass.
+pub mod impulse;
+
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -198,6 +201,12 @@ pub enum FiniteSolidError {
     Time(TimeSolveError),
     /// Signed mechanical integration defect exceeded its requested gate.
     Energy { defect_j: f64, allowance_j: f64 },
+    /// A fixed-configuration impulse failed its physical balance gates.
+    ImpulseBalance {
+        linear_residual_kg_m_s: [f64; 3],
+        angular_residual_kg_m2_s: [f64; 3],
+        work_residual_j: f64,
+    },
 }
 
 impl std::fmt::Display for FiniteSolidError {
@@ -210,6 +219,11 @@ impl std::fmt::Display for FiniteSolidError {
             Self::Time(error) => std::fmt::Display::fmt(error, f),
             Self::Energy { defect_j, allowance_j } => write!(
                 f, "FS-COUPLE-FINITE-SOLID-ENERGY: signed defect {defect_j:e} J exceeds {allowance_j:e} J"
+            ),
+            Self::ImpulseBalance {
+                linear_residual_kg_m_s, angular_residual_kg_m2_s, work_residual_j,
+            } => write!(f,
+                "FS-COUPLE-FINITE-SOLID-IMPULSE: linear residual {linear_residual_kg_m_s:?} kg m/s, angular residual {angular_residual_kg_m2_s:?} kg m2/s, work residual {work_residual_j:e} J"
             ),
         }
     }
