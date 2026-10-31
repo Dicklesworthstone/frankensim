@@ -9,6 +9,31 @@ Ambition tags: elastic/hyperelastic/J2/RC-fiber laws + calibration [S];
 multi-case identifiability authority schema [F]. Ogden and tension-only
 HGO/GOH are [S] constitutive laws; specimen/tissue calibration is separate.
 
+## Layer-resolved thermal expansion of elastic laminates
+
+`laminate::thermal::PreparedLaminateThermal` shares the original immutable
+`LaminateSection`, its ordered source layers, physical faces, reference surface,
+rotated stiffness and inertia. Each layer receives its own integrated engineering
+free strain, uniform or affine between its faces in its principal 1/2 plane.
+Adapters lower the existing isotropic and orthotropic temperature-path owners;
+callers retain those original paths and source receipts. No CTE averaging,
+endpoint-CTE shortcut or inferred thickness restraint enters this plane-stress law.
+
+Two-point thickness integration prepares thermal membrane force and signed
+bending moment, and evaluates physical layer stress and elastic energy without
+allocation, source lookup or trigonometry. Energy is integrated from the actual
+elastic strain before squaring; a freely bending incompatible stack retains its
+residual self-stress energy even when net force and moment vanish. Cancellation
+is polled per layer before publication. Invalid profiles, overflow and Prony
+layers refuse: frequency-reference stiffness is not a thermal-history law.
+
+The numerical fixtures in `tests/laminate_thermal.rs` cover equal and unequal
+bimetals, compatible thickness gradients, reference-surface shifts, rotated
+orthotropy, work derivatives, source integration and refusal/cancellation.
+This is prescribed-temperature infinitesimal-strain elasticity with fixed
+section properties; heat evolution, viscoelastic relaxation, interlaminar
+traction, debonding and measured laminate validation remain outside this lane.
+
 ## Equilibrium ionized-gas DC transport
 
 `ionized_gas::IonizedGasConductivity` consumes the exact source-bound

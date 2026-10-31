@@ -30,6 +30,9 @@ use crate::visco::ViscoError;
 use crate::visco::tensor::TensorProny;
 use fs_math::c64::C64;
 
+/// Layer-resolved thermal loading, stored energy and stress recovery.
+pub mod thermal;
+
 /// Largest laminate the section admits, matching the rod precedent
 /// [`crate::section::MAX_CONCENTRIC_LAYERS`].
 pub const MAX_LAMINA_LAYERS: usize = 128;
