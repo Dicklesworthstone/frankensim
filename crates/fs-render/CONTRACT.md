@@ -363,6 +363,21 @@ differentiable lift). Pure Rust throughout.
   `bvh_fingerprint` is a stable diagnostic receipt over its sorted layout.
   `trace_scene` mixes all three backend kinds by closest hit.
 
+  `charts::proximity` adds bounded point-to-surface queries over that same
+  native mesh BVH. Interval separating-plane bounds provide conservative
+  clearance, while convex surface witnesses independently bound proximity;
+  a supporting-plane bound retains precision close to broad planar faces.
+  Prepared `MeshPlanarPatches` borrows immutable geometry, validates retained
+  BVH bounds once and shares them across repeated queries. Exact-coordinate
+  duplicate vertices and consistently oriented coplanar neighbors form one
+  patch, so internal triangulation diagonals do not block refraction.
+  Patch edges and every other face, including a thin object's opposite wall,
+  bound its departure neighborhood. Direct unprepared queries validate their
+  authoring arrays before using cached bounds. Exact-distance charts can
+  provide upper proximity; Lipschitz implicit fields provide only clearance.
+  The queries retain deterministic feature ties, cumulative work limits and
+  cancellation. They return separate surface witnesses, never invented ray hits.
+
 - `instances` module (bead `frankensim-h7xu5.3.1`, default-on through
   `chart-backends`): `RigidTransform` admits only finite proper-rigid
   body-to-world placements (a near-unit quaternion and translation in metres),

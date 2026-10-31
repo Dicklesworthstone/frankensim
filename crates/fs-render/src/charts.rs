@@ -20,6 +20,8 @@ use fs_geom::{Chart, ChartSample, Point3, TraceStepClaim, Vec3};
 use fs_math::eft::two_sum;
 use fs_rep_nurbs::{NurbsError, NurbsSurface};
 
+pub mod proximity;
+
 /// Bit-affecting semantics of certified sphere tracing and scalar-BVH
 /// traversal. Downstream image goldens pin this surface separately from the
 /// spectral estimator so geometry changes cannot silently move image bytes.
