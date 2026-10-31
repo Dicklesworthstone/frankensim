@@ -17591,6 +17591,43 @@ heat refinement, finite-bend gradient probes, collective spin, full-tensor
 eccentric/frame momentum balance, source mismatch, thermal refresh and atomic
 refusal. They do not establish experimental material validity.
 
+## Finite-cell heating from intrinsic shaft viscosity
+
+`RodThermoelasticSystem::step_torsional` and `step_spatial_torsional` connect
+the original source-bound torsional loss flow to the existing whole-layer
+finite-cell enthalpy owner. An explicit `RodTorsionalViscosity` identifies the
+shear-viscosity property and one claim-selection policy per original layer.
+The existing material extension API preserves every mechanical receipt and the
+complete accepted typed query while resolving viscosity from that same card.
+Temperature-dependent viscosity is freshly resolved at each accepted step.
+
+Mechanics runs once with accepted-temperature coefficients. Each segment's
+physical heat is partitioned by its actual layer eta_s J contributions and added
+only to those already-bound whole caloric cells. This source and partition stay
+frozen during nonlinear thermal trials. Explicit zero viscosity deposits zero;
+no link, unbound store, imposed source work or numerical defect is heated.
+The receipt retains the used section sources, per-layer viscosity/polar moment,
+native mechanical heat, actual deposited heat and their independently gated
+partition residual.
+
+True external thermal input excludes both signed reversible transfer and the
+actual intrinsic-loss deposits. Complete mechanical plus caloric storage thus
+retains the original native integration defect as its separate numerical
+account. Nonnegative `sum(Q_layer/T_end)` is reported separately as endpoint
+torsional entropy-production quadrature under the existing first-order split,
+not as an exact continuous integral of dissipation divided by temperature.
+Reversible, thermoelastic temporal and caloric temporal accounts remain distinct.
+
+After the original endpoint mechanical-source refresh, the SAME selected
+viscosity claims are checked at the final actual material state. Another claim
+cannot conceal an exhausted interval source domain. Both histories publish only
+after that check and all existing energy/caloric gates; failure permits an
+unchanged-state retry. This remains the original fixed-geometry, solid-layer
+thermoelastic model, without phase change, fluid-film heat or a new time solver.
+Focused manufactured fixtures check unequal-layer partition and temperature rise,
+changing eta(T) across continuing steps, energy/entropy closure, zero-loss parity,
+prepared spatial loads, and late endpoint-source refusal.
+
 ## Point impulses on continuing geometrically exact rods
 
 `rod_motion::RodMotion::apply_point_impulses` applies simultaneous terminal or

@@ -1,6 +1,6 @@
 //! Native rod motion and complete layer thermodynamics on original finite cells.
 //!
-//! First advance the accepted-temperature Hamiltonian rod. At its unchanged
+//! First advance the accepted-temperature native rod. At its unchanged
 //! endpoint pose solve the original finite enthalpy residual, with each layer's
 //! Q_rev = -Delta_T Psi - Delta(T S). This equals frozen-temperature strain work
 //! minus the layer's complete internal-energy change, without thermalizing the
@@ -11,12 +11,17 @@
 //! density/alpha, affine E/G, complete concentric layers and wholly solid caloric
 //! charts are admitted. Fixed reference geometry, original small fibre strains,
 //! stationary supports and separately bound unheated links retain their native
-//! limits. No phase transition, cross-section expansion, material damping or
-//! alternate rod/thermal integrator is introduced.
+//! limits. Optional source-bound torsional viscosity deposits its native physical
+//! heat into these same original layer cells. No phase transition, cross-section
+//! expansion or alternate rod/thermal integrator is introduced.
+
+/// Intrinsic torsional shear heat on the same finite-cell timeline.
+pub mod torsional;
+pub use torsional::{RodLayerTorsionalHeat, RodTorsionalHeating, RodTorsionalViscosity};
 
 use super::{
-    PreparedRodLoads, RodMotion, RodMotionControls, RodMotionError, RodMotionInertia, RodMotionStep,
-    RodNodalWrench, StageLoads,
+    PreparedRodLoads, RodMotion, RodMotionControls, RodMotionError, RodMotionInertia,
+    RodMotionStep, RodNodalWrench, StageLoads,
 };
 use crate::circuit_enthalpy::material::{
     MaterialNetwork, MaterialNetworkError, MaterialNetworkSample, PreparedMaterialNetwork,
@@ -186,6 +191,9 @@ pub struct RodThermoelasticEntropy {
     pub mechanical_storage_change_j_k: f64,
     pub reservoir_entropy_input_j_k: f64,
     pub conduction_generation_j_k: f64,
+    /// Nonnegative endpoint sum Q_torsion/T_end [J/K], a production quadrature
+    /// under the first-order split, not the exact continuous integral of P/T.
+    pub torsional_generation_j_k: f64,
     pub external_source_at_cell_j_k: f64,
     pub has_unclassified_external_sources: bool,
     pub reversible_transfer_entropy_j_k: f64,
@@ -204,6 +212,8 @@ pub struct RodThermoelasticReport {
     pub source: MaterialNetworkSample,
     pub sections: Vec<ConcentricRodThermoelasticState>,
     pub layers: Vec<RodThermoelasticExchange>,
+    /// Frozen viscosity sources and actual original-layer heat deposits, if enabled.
+    pub torsional: Option<RodTorsionalHeating>,
     pub entropy: RodThermoelasticEntropy,
     pub reversible_heat_j: f64,
     pub external_thermal_heat_j: f64,
@@ -586,6 +596,30 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         energy_guess_j: &[f64],
         gate: &CancelGate,
     ) -> Result<RodThermoelasticReport> {
+        self.step_with_torsion(
+            thermal,
+            target_s,
+            loads,
+            None,
+            mechanical_controls,
+            controls,
+            energy_guess_j,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_torsion(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        target_s: f64,
+        loads: StageLoads<'_>,
+        viscosity: Option<RodTorsionalViscosity<'_>>,
+        mechanical_controls: RodMotionControls,
+        controls: RodThermoelasticSolve,
+        energy_guess_j: &[f64],
+        gate: &CancelGate,
+    ) -> Result<RodThermoelasticReport> {
         check(gate)?;
         let before = self.mechanical.time_s();
         if thermal.time_s().to_bits() != before.to_bits()
@@ -608,10 +642,40 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         }
         let dt = target_s - before;
         let internal_before = self.mechanical_internal_energy_j()?;
+        let prepared_loss = viscosity
+            .map(|selection| {
+                torsional::prepare(
+                    self.mechanical.model(),
+                    self.source,
+                    &self.segments,
+                    selection,
+                    gate,
+                )
+            })
+            .transpose()?;
         let (frozen, mechanical) = self
             .mechanical
-            .step_with_loads(dt, loads, mechanical_controls, gate)
+            .step_with_torsion_loads(
+                dt,
+                loads,
+                prepared_loss.as_ref().map(|p| &p.loss),
+                mechanical_controls,
+                gate,
+            )
             .map_err(motion)?;
+        let torsional = prepared_loss
+            .as_ref()
+            .map(|prepared| {
+                prepared.partition(
+                    mechanical
+                        .torsional_heat
+                        .as_ref()
+                        .ok_or_else(|| invalid("native torsional step lost its heat receipt"))?,
+                    controls.coupling_energy_tolerance_j,
+                    gate,
+                )
+            })
+            .transpose()?;
         if frozen.time_s().to_bits() != target_s.to_bits() {
             return Err(invalid(
                 "rod and thermal endpoint clocks do not represent the same interval",
@@ -666,7 +730,13 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
                     gate,
                 )?;
                 let mut exchanges = Vec::with_capacity(states.len());
-                for ((old, frozen), new) in self.states.iter().zip(&frozen_states).zip(&states) {
+                for (index, ((old, frozen), new)) in self
+                    .states
+                    .iter()
+                    .zip(&frozen_states)
+                    .zip(&states)
+                    .enumerate()
+                {
                     let parameter = finite(new.free_energy_j - frozen.free_energy_j)?;
                     let entropy_energy = finite(
                         new.temperature_k * new.entropy_j_k - old.temperature_k * old.entropy_j_k,
@@ -690,6 +760,23 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
                         .entry(new.destination.cell)
                         .or_insert(0.0);
                     *p = finite(*p + power)?;
+                    if let Some(heating) = &torsional {
+                        let layer = &heating.layers[index];
+                        if layer.destination != new.destination {
+                            return Err(invalid(
+                                "torsional heat cannot move to another caloric layer",
+                            ));
+                        }
+                        if layer.heat_j != 0.0 {
+                            let loss_power = finite(layer.heat_j / dt)?;
+                            if loss_power <= 0.0 {
+                                return Err(invalid(
+                                    "positive torsional heat rate is unrepresentable",
+                                ));
+                            }
+                            *p = finite(*p + loss_power)?;
+                        }
+                    }
                     exchanges.push(RodThermoelasticExchange {
                         states: [*old, *new],
                         frozen_strain_work_j: work,
@@ -726,6 +813,18 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         let (candidate, _) = frozen
             .rebind_material_temperatures_candidate(self.source, &temperatures, gate)
             .map_err(motion)?;
+        // The interval's loss/partition remains frozen. Check its SAME selected
+        // viscosity claims at the actual thermal endpoint before publication.
+        if let (Some(selection), Some(heating)) = (viscosity, torsional.as_ref()) {
+            torsional::admit_endpoint(
+                candidate.model(),
+                self.source,
+                &self.segments,
+                selection,
+                heating,
+                gate,
+            )?;
+        }
         let native = candidate
             .model()
             .segment_strain_states(candidate.pose(), gate)
@@ -745,7 +844,11 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
                 + sum(states.iter().map(|s| s.temperature_k * s.entropy_j_k))?,
         )?;
         let reversible_heat_j = sum(layers.iter().map(|l| l.reversible_heat_j))?;
-        let external_thermal_heat_j = finite(audit.thermal.external_heat_j - reversible_heat_j)?;
+        let mut external_thermal_heat_j =
+            finite(audit.thermal.external_heat_j - reversible_heat_j)?;
+        if let Some(heating) = &torsional {
+            external_thermal_heat_j = finite(external_thermal_heat_j - heating.deposited_heat_j)?;
+        }
         let total = finite(
             internal_after - internal_before + audit.thermal.stored_energy_change_j
                 - external_thermal_heat_j
@@ -769,7 +872,21 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
             .iter()
             .map(|l| l.reversible_heat_j / l.states[1].temperature_k))?;
         let thermoelastic_defect = finite(mechanical_entropy + reversible_entropy)?;
-        let accounting = finite(
+        let torsional_generation = if let Some(heating) = &torsional {
+            sum(heating
+                .layers
+                .iter()
+                .zip(&states)
+                .map(|(heat, state)| heat.heat_j / state.temperature_k))?
+        } else {
+            0.0
+        };
+        if torsional_generation < 0.0 {
+            return Err(invalid(
+                "negative intrinsic torsional entropy production quadrature",
+            ));
+        }
+        let mut accounting = finite(
             entropy.thermal_storage_change_j_k + mechanical_entropy
                 - entropy.reservoir_entropy_input_j_k
                 - entropy.conduction_generation_j_k
@@ -778,6 +895,9 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
                 - thermoelastic_defect
                 - entropy.algebraic_residual_j_k,
         )?;
+        if torsional.is_some() {
+            accounting = finite(accounting - torsional_generation)?;
+        }
         check(gate)?;
         let report = RodThermoelasticReport {
             mechanical,
@@ -785,11 +905,13 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
             source,
             sections: sections.clone(),
             layers,
+            torsional,
             entropy: RodThermoelasticEntropy {
                 caloric_storage_change_j_k: entropy.thermal_storage_change_j_k,
                 mechanical_storage_change_j_k: mechanical_entropy,
                 reservoir_entropy_input_j_k: entropy.reservoir_entropy_input_j_k,
                 conduction_generation_j_k: entropy.conduction_generation_j_k,
+                torsional_generation_j_k: torsional_generation,
                 external_source_at_cell_j_k: external_source_entropy,
                 has_unclassified_external_sources: has_external_source,
                 reversible_transfer_entropy_j_k: reversible_entropy,

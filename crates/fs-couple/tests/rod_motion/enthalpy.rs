@@ -19,11 +19,23 @@ use fs_solid::rod::material_field::thermal::source::{
 use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::*;
 
+#[path = "enthalpy/torsional.rs"]
+mod torsional;
+
 const LENGTH: f64 = 0.8;
 const RADIUS: f64 = 0.05;
 const RHO: f64 = 3.0;
 const YOUNG: f64 = 1200.0;
 const SHEAR: f64 = 480.0;
+
+#[derive(Clone, Copy)]
+struct ViscositySpec {
+    value_pa_s: f64,
+    slope_pa_s_k: f64,
+    lower_k: f64,
+    upper_k: f64,
+    upper_rad_s: f64,
+}
 
 #[derive(Clone, Copy)]
 struct Spec {
@@ -36,6 +48,7 @@ struct Spec {
     conductivity: f64,
     mechanical_upper_k: f64,
     kinked_shear: bool,
+    viscosity: Option<ViscositySpec>,
 }
 impl Default for Spec {
     fn default() -> Self {
@@ -49,6 +62,7 @@ impl Default for Spec {
             conductivity: 0.01,
             mechanical_upper_k: 500.0,
             kinked_shear: false,
+            viscosity: None,
         }
     }
 }
@@ -56,6 +70,13 @@ fn point(t: f64) -> QueryPoint {
     QueryPoint::new()
         .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), t)
         .unwrap()
+}
+fn context_point(t: f64, viscosity: bool) -> QueryPoint {
+    if viscosity {
+        point(t).with("omega", 10.0).unwrap()
+    } else {
+        point(t)
+    }
 }
 fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let mut claims = ClaimSet::new();
@@ -142,6 +163,50 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
             })
             .unwrap();
     }
+    if let Some(eta) = spec.viscosity {
+        let dims = fs_qty::DynViscosity::DIMS;
+        let curve = eta.slope_pa_s_k != 0.0;
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new("shear_viscosity", dims),
+                value: if curve {
+                    PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: Temperature::DIMS,
+                        knots: [eta.lower_k, eta.upper_k]
+                            .map(|t| (t, eta.value_pa_s + eta.slope_pa_s_k * (t - 300.0)))
+                            .to_vec(),
+                        dims,
+                    }
+                } else {
+                    PropertyValue::Scalar {
+                        value: eta.value_pa_s,
+                        dims,
+                    }
+                },
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity(
+                        "T",
+                        QuantitySpec::dimensional(Temperature::DIMS),
+                        eta.lower_k,
+                        eta.upper_k,
+                    )
+                    .with("omega", 0.0, eta.upper_rad_s),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: if curve {
+                    InterpolationPolicy::LinearInside
+                } else {
+                    InterpolationPolicy::ConstantWithinValidity
+                },
+                observations: vec![],
+                provenance: Provenance {
+                    source: "manufactured temperature-dependent shaft viscosity".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
     let card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: format!("manufactured rod layer {index}"),
@@ -159,8 +224,8 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
             heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
             density: &PropertyKey::new("density", Density::DIMS),
             temperature_axis: "T",
-            lower: &point(200.0),
-            upper: &point(500.0),
+            lower: &context_point(200.0, spec.viscosity.is_some()),
+            upper: &context_point(500.0, spec.viscosity.is_some()),
             selection: SelectionPolicy::SingleClaimOnly,
         },
         SolidLiquidPhase::Solid,
@@ -190,6 +255,13 @@ fn destinations(layers: usize, segments: usize) -> Vec<RodLayerCell> {
         .collect()
 }
 fn source<'a>(cards: &[&'a MaterialCard], segments: usize) -> RodMaterialSource<'a> {
+    source_with_context(cards, segments, &point(300.0))
+}
+fn source_with_context<'a>(
+    cards: &[&'a MaterialCard],
+    segments: usize,
+    context: &QueryPoint,
+) -> RodMaterialSource<'a> {
     RodMaterialSource::try_new(
         LENGTH,
         (0..segments)
@@ -202,7 +274,7 @@ fn source<'a>(cards: &[&'a MaterialCard], segments: usize) -> RodMaterialSource<
                     .map(|(i, card)| RodLayerSource {
                         outer_radius_m: RADIUS * (i + 1) as f64 / cards.len() as f64,
                         card,
-                        reference_point: point(300.0),
+                        reference_point: context.clone(),
                         mechanical_selection: MaterialPropertySelection::SingleClaimOnly,
                         expansion_selection: MaterialPropertySelection::SingleClaimOnly,
                     })
@@ -229,8 +301,8 @@ fn fixture<R>(
         .map(|(i, s)| material(i, *s))
         .collect();
     let cards: Vec<_> = sources.iter().map(|s| &s.0).collect();
-    let source = source(&cards, segments);
-    let context = point(300.0);
+    let context = context_point(300.0, specs.iter().any(|s| s.viscosity.is_some()));
+    let source = source_with_context(&cards, segments, &context);
     let routes = destinations(specs.len(), segments);
     assert_eq!(temperatures.len(), routes.len());
     assert_eq!(powers.len(), routes.len());
