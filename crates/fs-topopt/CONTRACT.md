@@ -229,11 +229,35 @@ Explicit response and minimum-material refits accept a candidate study with
 its own freshly prepared body load. Both studies must have matching body-load
 presence, and the caller must keep the reference acceleration law unchanged.
 Existing DWR and automatic refinement factories refuse attached material body
-loads because they cannot reconstruct the fine-grid load and its transfer
-identity. Continuous zero-centered spectral load-space envelopes likewise
-refuse a material body-load offset; finite lists of independent load cases are
-supported. An unsupported route returns its typed refusal before invoking
-reference-load callbacks or publishing a replacement study.
+loads without an acceleration recipe. For adaptive work, configure the study
+with `with_material_acceleration(law, max_terms, checkpoint)` instead. It retains
+one pure, fixed acceleration law and prepares a fresh native stencil on each
+probe or candidate operator, using the same explicit term allowance. Preparation
+does not recur during density iterations. Replacing the stencil with
+`with_material_body_load` discards the old recipe rather than silently reusing
+a potentially different acceleration on the next grid.
+
+Compliance DWR accepts the actual coarse projected field through
+`estimate_reference_compliance_enrichment_with_occupancy` (and its coarse-level
+variant); legacy field-only calls cannot infer physical occupancy from SIMP.
+Response/reaction and response-limit estimators already retain that field.
+Probes inherit it directly through the checked parent map. Native `B*rho`
+enters both equilibrium and the localized weak residual, while total-force
+compliance retains its load-dependent goal transfer and reactions retain their
+affine offsets. Joint response/stress assessment reuses those same fine primals.
+
+Automatic response, minimum-mass, robust-compliance, finite compliance-cap and
+continuation refitters rebuild the candidate body load before optimization and
+promote it together with the complete study. Candidate raw controls still pass
+through the rebuilt filter/projection; they are distinct from inherited probe
+occupancy. Failures retain the source study. `material_body_refinement_sdf3`
+adds regressions for actual fine-grid force balance, reaction/displacement DWR,
+protected regions, kg inventory and selective adaptive promotion.
+
+Continuous zero-centered spectral load-space envelopes still refuse a material
+body-load offset; that requires an affine uncertainty formulation. Finite lists
+of independent load cases are supported. No follower-load, continuum-error or
+globally optimal design claim is added by adaptive body-load support.
 
 Run:
 

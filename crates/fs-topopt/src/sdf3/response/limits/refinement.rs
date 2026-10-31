@@ -11,9 +11,10 @@ use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
 use fs_cutfem::octree3::Octant3;
 use fs_dwr::elasticity3::{GoalError3, GoalFields3, GoalMarking3, GoalOptions3, dorfler3};
 use fs_dwr::elasticity3::reaction::{AffineGoalEstimate3, AffineMotionGoal3,
-    assemble_affine_motion_goal3, estimate_affine_motion_goal3};
+    MaterialBodyLoads3, assemble_affine_motion_goal3, estimate_affine_assembled_goal3};
 use fs_dwr::elasticity3::response::EquilibriumLoad3;
-use crate::sdf3_goal::GoalRefinementError3;
+use crate::sdf3::body::{add_force, controlled};
+use crate::sdf3_goal::{GoalRefinementError3, controlled_goal3};
 use super::design::MinimumMaterialObjective3;
 
 pub mod adaptive;
@@ -208,9 +209,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         control: &mut SolveControl<'_>)
         -> Result<(ResponseLimitRefinement3, F), GoalRefinementError3> {
         control.checkpoint("response-limit-goal-start")?;
-        if self.has_material_body_load() {
-            return Err(invalid("material body loads are not supported by response-limit goal refinement"));
-        }
+        self.require_material_body_recipe("response-limit-goal-requires-material-acceleration")?;
         admit_reference_limits(self, cases, options.limits).map_err(|_| invalid("invalid reference response-limit family"))?;
         inventory::admit(&self.operator, &enriched, accepted, options)?;
         if options.max_transfer_terms == 0 || cases.len() != accepted.displacements.len()
@@ -236,6 +235,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         if coarse_mass_kg != accepted.mass_kg {
             return Err(invalid("retained response-limit mass belongs to another material field"));
         }
+        let coarse_body_force = self.material_body_force(&design.projected, control)?;
         let previous = self.operator.scales().to_vec();
         self.operator.set_scales(&design.scales)?;
         let result = (|| {
@@ -243,7 +243,8 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             let mut all_coarse = Vec::new();
             for (i, case) in cases.iter().enumerate() {
                 let u = &accepted.displacements[i];
-                let rhs = coarse.reference_load_with_motion(case.load, case.prescribed, || poll(control))?;
+                let mut rhs = coarse.reference_load_with_motion(case.load, case.prescribed, || poll(control))?;
+                add_force(&mut rhs, coarse_body_force.as_deref(), control)?;
                 let residual = coarse.field_residual(u, &rhs, || poll(control))?;
                 if !residual.is_finite() || residual > options.numerical.residual_tolerance {
                     return Err(GoalError3::FieldResidual { field: "coarse-limit-primal", value: residual }.into());
@@ -275,6 +276,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             if total <= 0.0 { return Err(invalid("nonpositive enriched cut volume")); }
             let fine_projected_rho: Vec<f64> = transfer.parents().iter()
                 .map(|&p| design.projected[p]).collect();
+            let fine_body = self.material_body_load_for(&enriched, control)?;
+            let fine_body_force = fine_body.as_ref().map(|load|
+                controlled(control, |poll| load.load(&fine_projected_rho, poll))).transpose()?;
             let fine_volume = number(volumes.iter().zip(&fine_projected_rho)
                 .map(|(v, r)| (v/total)*r).sum())?;
             let (fine_mass_kg, fine_objective) = inventory::measure(&enriched,
@@ -297,7 +301,8 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 fine_projected_rho, marking_mass, work: control.work() };
             let mut all_fine = Vec::new();
             for (i, case) in cases.iter().enumerate() {
-                let rhs = enriched.adaptive().reference_load_with_motion(case.load, case.prescribed, || poll(control))?;
+                let mut rhs = enriched.adaptive().reference_load_with_motion(case.load, case.prescribed, || poll(control))?;
+                add_force(&mut rhs, fine_body_force.as_deref(), control)?;
                 let uf = checked_solve_preconditioned(&enriched, &pf, &rhs, 1e-11, "response-limit-goal-primal", control)?;
                 let uc = &accepted.displacements[i];
                 let mut changes = Vec::with_capacity(case.limits.len());
@@ -310,10 +315,14 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                         "response-limit-goal-coarse-adjoint", control)?;
                     let zf = checked_solve_preconditioned(&enriched, &pf, &qf.gradient, 1e-11,
                         "response-limit-goal-fine-adjoint", control)?;
-                    let estimate = estimate_affine_motion_goal3(&transfer,
-                        EquilibriumLoad3 { external: case.load, prescribed: case.prescribed }, goal,
-                        GoalFields3 { coarse_primal: uc, fine_primal: &uf, coarse_adjoint: &zc, fine_adjoint: &zf },
-                        options.numerical, || poll(control))?;
+                    let body = self.material_body_load().zip(fine_body.as_ref()).map(|(coarse, fine)|
+                        MaterialBodyLoads3 { coarse, fine, coarse_occupancy: &design.projected,
+                            fine_occupancy: &report.fine_projected_rho });
+                    let estimate = controlled_goal3(control, "response-limit-goal-estimate", |poll|
+                        estimate_affine_assembled_goal3(&transfer,
+                            EquilibriumLoad3 { external: case.load, prescribed: case.prescribed }, body, &qc, &qf,
+                            GoalFields3 { coarse_primal: uc, fine_primal: &uf, coarse_adjoint: &zc, fine_adjoint: &zf },
+                            options.numerical, poll))?;
                     let cr = number(limit.sense.sign()*number(estimate.coarse_value-limit.bound)?/limit.scale)?;
                     let fr = number(limit.sense.sign()*number(estimate.fine_value-limit.bound)?/limit.scale)?;
                     number(fr-cr)?; number(estimate.correction()/limit.scale)?;

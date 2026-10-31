@@ -126,9 +126,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         &self, operator: F, rho: &[f64], params: SimpParams, laws: &[ReferenceLoad3<'_>],
         caps: &ComplianceCaps3, options: ComplianceCapRefitOptions3, control: &mut SolveControl<'_>,
     ) -> Result<ComplianceCapRefit3<F>, ComplianceCapRefitError3> {
-        if self.has_material_body_load() {
-            return Err(invalid("material body-load refits require a load prepared on the candidate geometry"));
-        }
+        self.require_material_body_recipe("sdf3-cap-refit-requires-material-acceleration")?;
         admit_grid(self.cells(), rho, params, laws, caps, options)?;
         options.design.optimizer.validate::<EvaluationStop>(operator.cells())?;
         control.checkpoint("sdf3-cap-refit-start")?;
@@ -150,6 +148,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             crate::sdf3::regions::inherit_physical_regions(regions, transfer.parents(), control)).transpose()?;
         drop(transfer);
         let mut study = CutDensityStudy3::new(operator, self.filter_radius, params);
+        self.inherit_material_acceleration(&mut study, control)?;
         if let Some(regions) = regions { study = study.with_physical_regions(regions)?; }
         study.solve_reference_compliance_caps(&inherited_rho, laws, caps, options, control)
     }

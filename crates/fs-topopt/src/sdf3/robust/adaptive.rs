@@ -158,9 +158,7 @@ pub fn controlled_adaptive_robust_design<O: AdaptiveSdf3Elasticity>(
     control: &mut SolveControl<'_>,
     mut build: impl FnMut(&Octree3, &mut dyn FnMut() -> ControlFlow<()>) -> Result<O, GoalRefinementError3>,
 ) -> Result<RobustAdaptiveReport3, RobustAdaptiveError3> {
-    if study.has_material_body_load() {
-        return Err(GoalRefinementError3::Invalid("automatic robust refinement cannot transfer a material body load").into());
-    }
+    study.require_material_body_recipe("sdf3-robust-adapt-requires-material-acceleration")?;
     if !options.marking_fraction.is_finite() || options.marking_fraction <= 0.0
         || options.marking_fraction > 1.0 || options.max_marks == 0
         || options.eroded_relative_tolerance.is_some_and(|t| !t.is_finite() || t <= 0.0 || t >= 1.0)

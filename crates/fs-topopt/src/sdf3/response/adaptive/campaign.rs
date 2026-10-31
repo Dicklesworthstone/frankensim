@@ -218,9 +218,8 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveResponseStudy3<'a, O> {
         cases: &'a [ReferenceResponseCase3<'a>], reactions: Option<&'a [&'a [ReactionTarget3<'a>]]>,
         rho: &[f64], options: AdaptiveResponseOptions3, control: &mut SolveControl<'_>)
         -> Result<Self, FitError> {
-        if study.has_material_body_load() {
-            return Err(ProjectedAlError::Invalid("automatic response refinement cannot transfer a material body load"));
-        }
+        study.require_material_body_recipe("response-adapt-requires-material-acceleration")
+            .map_err(|e| ProjectedAlError::Evaluation(e.into()))?;
         options.validate()?;
         if !tree_matches(&tree, &study.operator) {
             return Err(ProjectedAlError::Invalid("source operator does not match adaptive background"));
@@ -301,6 +300,7 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveResponseStudy3<'a, O> {
             let op = build(&tree, AdaptiveResponseBuild3::Refit).map_err(Error::Build)?;
             if !tree_matches(&tree, &op) { return Err(Error::Invalid("refit factory returned another background")); }
             let mut candidate = CutDensityStudy3::new(op, self.study.filter_radius, self.study.params);
+            self.study.inherit_material_acceleration(&mut candidate, control).map_err(Error::Evaluation)?;
             if let Some(regions) = self.study.physical_regions() {
                 let labels = {
                     let transfer = AdaptiveTransfer3::new(self.study.operator.adaptive(), candidate.operator.adaptive(),

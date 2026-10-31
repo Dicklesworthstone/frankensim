@@ -200,9 +200,8 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveMinimumMaterialStudy3<'a, O> {
     pub fn new(study: &'a mut CutDensityStudy3<O>, tree: Octree3,
         cases: &'a [ReferenceResponseLimitCase3<'a>], rho: &[f64], options: AdaptiveMinimumMaterialOptions3,
         control: &mut SolveControl<'_>) -> Result<Self, FitError> {
-        if study.has_material_body_load() {
-            return Err(ProjectedAlError::Invalid("automatic minimum-material refinement cannot transfer a material body load"));
-        }
+        study.require_material_body_recipe("minimum-material-adapt-requires-material-acceleration")
+            .map_err(|e| ProjectedAlError::Evaluation(e.into()))?;
         options.validate()?;
         if !on_tree(&tree, &study.operator) { return Err(ProjectedAlError::Invalid("initial minimum-material background mismatch")); }
         let fit = study.fit_reference_minimum_material(cases, rho, options.fit, options.steps_per_grid, control)?;
@@ -261,7 +260,8 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveMinimumMaterialStudy3<'a, O> {
             control.checkpoint("minimum-material-adapt-rebuild").map_err(Error::Evaluation)?;
             let op = build(&tree, MinimumMaterialBuild3::Refit).map_err(Error::Build)?;
             if !on_tree(&tree, &op) { return Err(Error::Invalid("refit factory returned a different background")); }
-            let candidate = CutDensityStudy3::new(op, self.study.filter_radius, self.study.params);
+            let mut candidate = CutDensityStudy3::new(op, self.study.filter_radius, self.study.params);
+            self.study.inherit_material_acceleration(&mut candidate, control).map_err(Error::Evaluation)?;
             let mut next = self.study.refit_reference_minimum_material(candidate, selected(&self.fit), self.cases,
                 self.options.fit, self.options.steps_per_grid, self.options.max_transfer_terms, control).map_err(Error::Fit)?;
             if let Err(error) = &next.fit.outcome {

@@ -10,9 +10,10 @@ use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
 use fs_cutfem::elastic3::surface::{ReferenceLoad3, SurfaceForce3};
 use fs_cutfem::octree3::Octant3;
 use fs_dwr::elasticity3::{estimate_motion_goal3, dorfler3, GoalError3, GoalEstimate3, GoalFields3, GoalMarking3, GoalOptions3};
-use fs_dwr::elasticity3::reaction::{AffineMotionGoal3, assemble_affine_motion_goal3, estimate_affine_motion_goal3};
+use fs_dwr::elasticity3::reaction::{AffineGoalForm3, AffineMotionGoal3, assemble_affine_motion_goal3,
+    estimate_affine_assembled_goal3, estimate_affine_motion_goal3};
 use fs_dwr::elasticity3::response::EquilibriumLoad3;
-use crate::sdf3_goal::GoalRefinementError3;
+use crate::sdf3_goal::{GoalRefinementError3, controlled_goal3, prepare_material_goal3};
 
 /// The same observation law on either grid, never a transferred nodal q.
 #[derive(Clone, Copy)]
@@ -140,9 +141,11 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// must match the retained evaluation. Reactions are reintegrated, never
     /// transferred nodally or differentiated through the iterative solver.
     ///
-    /// Each backend prepares once for its family. Fine stiffness is inherited,
-    /// not obtained by refiltering raw density. The entire coarse family is
-    /// revalidated before preparation. All work uses the shared control; incoming
+    /// Each backend prepares once for its family. Fine stiffness and physical
+    /// occupancy are inherited without refiltering. A retained material
+    /// acceleration prepares its native body-force map once on the fine grid.
+    /// The entire coarse family is revalidated before solver preparation.
+    /// All work uses the shared control; incoming
     /// coarse scales are restored on success AND returned errors. No continuum,
     /// actuator-work, follower-load, or shape-derivative claim.
     #[allow(clippy::too_many_arguments)]
@@ -159,9 +162,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         options: ResponseRefinementOptions3, control: &mut SolveControl<'_>)
         -> Result<ResponseRefinement3, GoalRefinementError3> {
         control.checkpoint("response-goal-start")?;
-        if self.has_material_body_load() {
-            return Err(GoalRefinementError3::Invalid("material body loads are not supported by response goal refinement"));
-        }
+        self.require_material_body_recipe("response-goal-material-recipe")?;
         let mut count=0usize;
         if cases.is_empty() || cases.len()>options.response.max_cases
             || cases.len()!=accepted.displacements.len() || cases.len()!=accepted.responses.len()
@@ -199,11 +200,18 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         self.operator.set_scales(&design.scales)?;
         let result=(|| {
             let coarse=self.operator.adaptive();
-            // Validate the COMPLETE family before preparation or fine solves.
+            let initial_transfer=AdaptiveTransfer3::new(coarse,enriched.adaptive(),options.max_transfer_terms,||poll(control))?;
+            let inherited=initial_transfer.inherited_scales();
+            let material=prepare_material_goal3(self,&enriched,initial_transfer.parents(),Some(&design.projected),control)?;
+            drop(initial_transfer);
+            enriched.set_scales(&inherited)?;
+            let transfer=AdaptiveTransfer3::new(coarse,enriched.adaptive(),options.max_transfer_terms,||poll(control))?;
+            // Validate the COMPLETE family before solver preparation or fine solves.
             let mut retained_loss=0.0;
             for (index,case) in cases.iter().enumerate() {
                 let u=&accepted.displacements[index];
-                let rhs=coarse.reference_load_with_motion(case.load,case.prescribed,||poll(control))?;
+                let mut rhs=coarse.reference_load_with_motion(case.load,case.prescribed,||poll(control))?;
+                crate::sdf3::body::add_force(&mut rhs,material.as_ref().map(|m|m.coarse_force.as_slice()),control)?;
                 let residual=coarse.field_residual(u,&rhs,||poll(control))?;
                 if residual>options.numerical.residual_tolerance {
                     return Err(GoalError3::FieldResidual{field:"coarse-response-primal",value:residual}.into());
@@ -228,9 +236,6 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 accepted.objective,options.numerical.identity_tolerance) {
                 return Err(GoalRefinementError3::Invalid("retained objective differs from supplied response targets"));
             }
-            let inherited=AdaptiveTransfer3::new(coarse,enriched.adaptive(),options.max_transfer_terms,||poll(control))?.inherited_scales();
-            enriched.set_scales(&inherited)?;
-            let transfer=AdaptiveTransfer3::new(coarse,enriched.adaptive(),options.max_transfer_terms,||poll(control))?;
             if !transfer.fine().leaves().iter().zip(transfer.parents()).any(|(f,&c)| f.level()>coarse.leaves()[c].level()) {
                 return Err(GoalRefinementError3::Invalid("response goal requires active-space enrichment"));
             }
@@ -250,7 +255,8 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             for (index,case) in cases.iter().enumerate() {
                 control.checkpoint("response-goal-case")?;
                 let uc=&accepted.displacements[index];let rt=reactions.map_or(&[][..],|r|r[index]);
-                let rhs=transfer.fine().reference_load_with_motion(case.load,case.prescribed,||poll(control))?;
+                let mut rhs=transfer.fine().reference_load_with_motion(case.load,case.prescribed,||poll(control))?;
+                crate::sdf3::body::add_force(&mut rhs,material.as_ref().map(|m|m.fine_force.as_slice()),control)?;
                 let uf=checked_solve_preconditioned(&enriched,&fine_prepared,&rhs,1e-11,"response-goal-primal",control)?;
                 let mut vc=Vec::with_capacity(case.targets.len());let mut vf=Vec::with_capacity(case.targets.len());
                 let mut weights=Vec::with_capacity(case.targets.len());
@@ -284,16 +290,23 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 };
                 let mode=|p,n|weighted_reaction(rt,&rw,p,n);
                 let affine=AffineMotionGoal3{displacement:goal,reaction_mode:Some(&mode)};
-                let (qc,qf)=if rt.is_empty() {
-                    (coarse.reference_load(goal,||poll(control))?,transfer.fine().reference_load(goal,||poll(control))?)
+                let (coarse_goal,fine_goal)=if rt.is_empty() {
+                    (AffineGoalForm3{gradient:coarse.reference_load(goal,||poll(control))?,offset:0.0},
+                     AffineGoalForm3{gradient:transfer.fine().reference_load(goal,||poll(control))?,offset:0.0})
                 } else {
-                    (assemble_affine_motion_goal3(coarse,affine,case.prescribed,||poll(control))?.gradient,
-                     assemble_affine_motion_goal3(transfer.fine(),affine,case.prescribed,||poll(control))?.gradient)
+                    (assemble_affine_motion_goal3(coarse,affine,case.prescribed,||poll(control))?,
+                     assemble_affine_motion_goal3(transfer.fine(),affine,case.prescribed,||poll(control))?)
                 };
-                let zc=checked_solve_preconditioned(&self.operator,&coarse_prepared,&qc,1e-11,"response-goal-coarse-adjoint",control)?;
-                let zf=checked_solve_preconditioned(&enriched,&fine_prepared,&qf,1e-11,"response-goal-fine-adjoint",control)?;
+                let zc=checked_solve_preconditioned(&self.operator,&coarse_prepared,&coarse_goal.gradient,1e-11,"response-goal-coarse-adjoint",control)?;
+                let zf=checked_solve_preconditioned(&enriched,&fine_prepared,&fine_goal.gradient,1e-11,"response-goal-fine-adjoint",control)?;
                 let fields=GoalFields3{coarse_primal:uc,fine_primal:&uf,coarse_adjoint:&zc,fine_adjoint:&zf};
-                let (evidence,offset)=if rt.is_empty() {
+                let (evidence,offset)=if let Some(material)=material.as_ref() {
+                    let e=controlled_goal3(control,"response-goal-material-estimate",|poll|
+                        estimate_affine_assembled_goal3(&transfer,
+                            EquilibriumLoad3{external:case.load,prescribed:case.prescribed},Some(material.loads()),
+                            &coarse_goal,&fine_goal,fields,options.numerical,poll))?;
+                    (e.linearized,e.offset_transfer)
+                } else if rt.is_empty() {
                     (estimate_motion_goal3(&transfer,case.load,case.prescribed,goal,fields,options.numerical,||poll(control))?,0.0)
                 } else {
                     let e=estimate_affine_motion_goal3(&transfer,EquilibriumLoad3{external:case.load,prescribed:case.prescribed},

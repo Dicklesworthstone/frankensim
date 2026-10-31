@@ -247,9 +247,7 @@ pub fn controlled_adaptive_sdf3_continuation_with_coarse_levels_observed<O: Adap
     for (stage, &params) in schedule.iter().enumerate() {
         let result = (|| -> Result<MultiLoadContinuationReport, AdaptiveContinuationError3> {
             control.checkpoint("sdf3-adaptive-stage")?;
-            if study.has_material_body_load() {
-                return Err(GoalRefinementError3::Invalid("automatic continuation refinement cannot transfer a material body load").into());
-            }
+            study.require_material_body_recipe("sdf3-adaptive-requires-material-acceleration")?;
             check_tree(study.operator(), tree)?;
             if stage == 0 {
                 return Ok(reference_stage(study, loads, &rho, params, options, control)?);
@@ -259,9 +257,21 @@ pub fn controlled_adaptive_sdf3_continuation_with_coarse_levels_observed<O: Adap
             let probe_tree = tree.refined(source.leaves(), || poll(control, "sdf3-adaptive-enrichment-tree"))?;
             let probe = build_operator(&probe_tree, control, "sdf3-adaptive-enrichment-geometry", &mut build)?;
             check_tree(&probe, &probe_tree)?;
-            let estimate = study.estimate_reference_compliance_enrichment_with_coarse_levels(
-                probe.into_adaptive(), coarser, loads, &accepted.displacements, options.enrichment, control,
-            )?;
+            // The legacy OC report retains raw controls, not physical density.
+            // Reapply the SAME source design map when a body load needs it;
+            // never infer occupancy from SIMP stiffness or refilter the probe.
+            let estimate = if study.has_material_body_load() {
+                let design = study.design(&accepted.rho, control)?;
+                if design.scales != source.scales() {
+                    return Err(GoalRefinementError3::Invalid("accepted continuation material changed before refinement").into());
+                }
+                study.estimate_reference_compliance_enrichment_with_occupancy_and_coarse_levels(
+                    probe.into_adaptive(), coarser, loads, &accepted.displacements, &design.projected,
+                    options.enrichment, control)?
+            } else {
+                study.estimate_reference_compliance_enrichment_with_coarse_levels(
+                    probe.into_adaptive(), coarser, loads, &accepted.displacements, options.enrichment, control)?
+            };
             let marking = estimate.mark(options.marking_fraction, options.max_marks,
                 || poll(control, "sdf3-adaptive-mark")).map_err(GoalRefinementError3::from)?;
             if marking.marked.is_empty() { return Err(AdaptiveContinuationError3::NoRefinementSignal); }
@@ -291,6 +301,7 @@ pub fn controlled_adaptive_sdf3_continuation_with_coarse_levels_observed<O: Adap
                 target_active_cells: operator.cells(), estimate, marking, installed: false,
             });
             let mut candidate = CutDensityStudy3::new(operator, study.filter_radius, study.params());
+            study.inherit_material_acceleration(&mut candidate, control)?;
             if let Some(regions) = regions { candidate = candidate.with_physical_regions(regions)?; }
             let next = reference_stage(&mut candidate, loads, &seed, params, options, control)?;
             if next.termination == ContinuationTermination::ScheduleComplete && next.last.is_some() {

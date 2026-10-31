@@ -129,9 +129,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         loads: &[GoalReferenceLoad3<'_>], options: RobustRefitOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<RobustReferenceRefit3<F>, RobustRefitError3> {
-        if self.has_material_body_load() {
-            return Err(invalid("operator-only robust refit cannot transfer a material body load"));
-        }
+        self.require_material_body_recipe("sdf3-robust-refit-requires-material-acceleration")?;
         admit(self.cells(), rho, loads, &[params], options)?;
         options.continuation.design.optimizer.validate::<EvaluationStop>(operator.cells())?;
         control.checkpoint("sdf3-robust-refit-start")?;
@@ -154,6 +152,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             (inherited, regions)
         };
         let mut study = CutDensityStudy3::new(operator, self.filter_radius, params);
+        self.inherit_material_acceleration(&mut study, control)?;
         if let Some(regions) = regions { study = study.with_physical_regions(regions)?; }
         let report = reference_design(&mut study, loads, &inherited_rho, &[params], options, control)?;
         // Do not discard an admitted candidate prefix with a post-run poll.

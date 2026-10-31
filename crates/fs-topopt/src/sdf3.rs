@@ -19,7 +19,7 @@
 //! graph Helmholtz filter is not the tetrahedral FEEC filter.
 
 mod operator;
-mod body;
+pub(crate) mod body;
 mod refine;
 pub mod regions;
 pub mod continuation;
@@ -75,6 +75,9 @@ pub struct CutDensityStudy3<O: Sdf3Elasticity = CutElasticity3> {
     /// Optional common environmental acceleration, prepared on this exact
     /// operator. The native density columns multiply PHYSICAL occupancy.
     material_body_load: Option<MaterialBodyLoad3>,
+    /// Pure acceleration law retained only when native loads may be rebuilt
+    /// on an enriched or selectively refined displacement space.
+    material_acceleration: Option<body::MaterialAcceleration3>,
 }
 
 struct Design3 { projected: Vec<f64>, slope: Vec<f64>, scales: Vec<f64>, volume: f64 }
@@ -119,7 +122,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             coo.push(i,j,-weight); coo.push(j,i,-weight);
         }
         Self { operator, filter: CsrOp::symmetric(coo.assemble()), mass, params, filter_radius: radius,
-            physical_regions: None, material_body_load: None }
+            physical_regions: None, material_body_load: None, material_acceleration: None }
     }
 
     /// Read-only access to the geometry, accepted scales, and field ordering.

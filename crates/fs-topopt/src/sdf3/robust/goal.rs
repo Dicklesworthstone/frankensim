@@ -34,7 +34,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// retains its original nominal model. Cached input fields are not trusted:
     /// the raw design is freshly solved with the exact supplied load laws.
     /// Weights remain independent and unnormalized. Reference laws must be
-    /// pure, density-independent and identical on both grids. Enriched geometry,
+    /// pure, density-independent and identical on both grids. Any retained
+    /// material acceleration is integrated on the fine grid with inherited
+    /// eroded physical occupancy. Enriched geometry,
     /// supports and base material must represent the same physical problem.
     /// Nonzero prescribed motion is not part of this homogeneous-support path.
     ///
@@ -47,9 +49,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         rho: &[f64], params: SimpParams, robustness: RobustOptions3,
         options: GoalRefinementOptions3, control: &mut SolveControl<'_>,
     ) -> Result<RobustComplianceRefinement3, GoalRefinementError3> {
-        if self.has_material_body_load() {
-            return Err(GoalRefinementError3::Invalid("material body loads are not supported by robust goal refinement"));
-        }
+        self.require_material_body_recipe("sdf3-robust-goal-material-recipe")?;
         robustness.assert_valid(params);
         if rho.len() != self.cells() || rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r))
             || loads.is_empty() || loads.len() > options.max_load_cases
@@ -78,8 +78,8 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             // This is exactly the robust evaluator's eroded map, sharing its
             // filter/projection/SIMP implementation and physical-region rules.
             let eroded = self.evaluate(rho, &cases, control)?;
-            let estimate = self.estimate_reference_compliance_enrichment(enriched,
-                loads, &eroded.objective.displacements, options, control)?;
+            let estimate = self.estimate_reference_compliance_enrichment_with_occupancy(enriched,
+                loads, &eroded.objective.displacements, &eroded.projected_rho, options, control)?;
             control.checkpoint("sdf3-robust-goal-publish")?;
             Ok(RobustComplianceRefinement3 { params, robustness, rho: rho.to_vec(), eroded, estimate })
         })();

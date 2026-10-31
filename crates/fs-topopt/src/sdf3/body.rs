@@ -2,10 +2,17 @@
 use super::*;
 use fs_cutfem::elastic3::ElasticityError3;
 use std::ops::ControlFlow;
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub(super) struct MaterialAcceleration3 {
+    law: Arc<dyn Fn([f64; 3]) -> [f64; 3] + Send + Sync>,
+    max_terms: usize,
+}
 
 // Preserve the actual cumulative-control stop instead of collapsing it to the
 // native callback's cancellation sentinel.
-fn controlled<T>(
+pub(crate) fn controlled<T>(
     control: &mut SolveControl<'_>,
     action: impl FnOnce(&mut dyn FnMut() -> ControlFlow<()>) -> Result<T, ElasticityError3>,
 ) -> Result<T, EvaluationStop> {
@@ -26,6 +33,31 @@ fn controlled<T>(
     result.map_err(|_| failure("sdf3-material-body-load"))
 }
 
+// Both vectors already belong to the same reduced native displacement space.
+// Kept separate from load integration so each case can reuse the common B*rho.
+pub(crate) fn add_force(
+    rhs: &mut [f64],
+    body: Option<&[f64]>,
+    control: &mut SolveControl<'_>,
+) -> Result<(), EvaluationStop> {
+    let Some(body) = body else {
+        return Ok(());
+    };
+    if rhs.len() != body.len() {
+        return Err(failure("sdf3-material-body-force-shape"));
+    }
+    for (i, (value, load)) in rhs.iter_mut().zip(body).enumerate() {
+        if i % 192 == 0 {
+            control.checkpoint("sdf3-material-body-force")?;
+        }
+        *value += load;
+        if !value.is_finite() {
+            return Err(failure("sdf3-material-body-force-overflow"));
+        }
+    }
+    Ok(())
+}
+
 impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// Add one fixed reference-configuration acceleration to EVERY independent
     /// experiment in this study. Prepare it with the native operator's
@@ -41,15 +73,104 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     ///
     /// The stencil is bound to this exact operator and displacement space.
     /// Explicitly refitted studies must prepare their own load on the new
-    /// operator with the same acceleration law. Current DWR/adaptive factories
-    /// and zero-centered spectral load envelopes refuse this configuration.
+    /// operator with the same acceleration law. Use `with_material_acceleration`
+    /// to retain that law for DWR probes and automatic refinement. Replacing a
+    /// prepared load here discards any previous acceleration recipe.
     pub fn with_material_body_load(
         mut self,
         load: MaterialBodyLoad3,
     ) -> Result<Self, ElasticityError3> {
         self.operator.validate_material_body_load(&load)?;
         self.material_body_load = Some(load);
+        self.material_acceleration = None;
         Ok(self)
+    }
+
+    /// Prepare a common material acceleration and retain its pure reference-
+    /// configuration law for refinement. Every new grid integrates its own
+    /// native source density, retained cut quadrature, clamps and hanging-node
+    /// constraints; neither nodal forces nor SIMP stiffness scales stand in
+    /// for the physical body load.
+    ///
+    /// The law must remain independent of design, deformation and mutable
+    /// external state for the entire study/campaign. Own any environmental
+    /// parameters captured by the closure. It is evaluated during preparation
+    /// once per grid, never during a density iteration or an adjoint solve.
+    /// `max_terms` bounds each grid's native stencil, including refined grids.
+    /// A failed or cancelled rebuild leaves the source study intact.
+    ///
+    /// This supports gravity and spatially varying fixed acceleration, not
+    /// follower loads. Zero-centered spectral load envelopes still require a
+    /// separate affine uncertainty formulation when this common load is present.
+    pub fn with_material_acceleration(
+        mut self,
+        acceleration: impl Fn([f64; 3]) -> [f64; 3] + Send + Sync + 'static,
+        max_terms: usize,
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Self, ElasticityError3> {
+        let recipe = MaterialAcceleration3 {
+            law: Arc::new(acceleration),
+            max_terms,
+        };
+        let load =
+            self.operator
+                .prepare_material_body_load(recipe.law.as_ref(), max_terms, checkpoint)?;
+        self.material_body_load = Some(load);
+        self.material_acceleration = Some(recipe);
+        Ok(self)
+    }
+
+    /// Whether this study can rebuild its current native body load on a new
+    /// grid. A study without a body load needs no acceleration recipe.
+    #[must_use]
+    pub fn can_refine_material_body_load(&self) -> bool {
+        self.material_body_load.is_none() || self.material_acceleration.is_some()
+    }
+
+    pub(crate) fn require_material_body_recipe(
+        &self,
+        stage: &'static str,
+    ) -> Result<(), EvaluationStop> {
+        if self.can_refine_material_body_load() {
+            Ok(())
+        } else {
+            Err(failure(stage))
+        }
+    }
+
+    // Build on the destination's exact native owner before preparing its
+    // elasticity backend. Preserve the cumulative control's original stop.
+    pub(crate) fn material_body_load_for<F: Sdf3Elasticity>(
+        &self,
+        operator: &F,
+        control: &mut SolveControl<'_>,
+    ) -> Result<Option<MaterialBodyLoad3>, EvaluationStop> {
+        if self.material_body_load.is_none() {
+            return Ok(None);
+        }
+        self.require_material_body_recipe("sdf3-material-body-refinement-requires-acceleration")?;
+        let recipe = self
+            .material_acceleration
+            .as_ref()
+            .expect("admitted acceleration recipe");
+        controlled(control, |poll| {
+            operator.prepare_material_body_load(recipe.law.as_ref(), recipe.max_terms, poll)
+        })
+        .map(Some)
+    }
+
+    // All automatic refitters use this same bounded rebuild. Install only
+    // after complete preparation; the source and candidate are untouched on
+    // failure. Physical occupancy remains the refitter's parent-map concern.
+    pub(crate) fn inherit_material_acceleration<F: Sdf3Elasticity>(
+        &self,
+        candidate: &mut CutDensityStudy3<F>,
+        control: &mut SolveControl<'_>,
+    ) -> Result<(), EvaluationStop> {
+        let load = self.material_body_load_for(&candidate.operator, control)?;
+        candidate.material_body_load = load;
+        candidate.material_acceleration = self.material_acceleration.clone();
+        Ok(())
     }
 
     /// Whether every physical experiment includes a native material body load.
@@ -76,7 +197,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     }
 
     // Once per realized design, then shared by all independent cases.
-    pub(super) fn material_body_force(
+    pub(crate) fn material_body_force(
         &self,
         projected: &[f64],
         control: &mut SolveControl<'_>,
