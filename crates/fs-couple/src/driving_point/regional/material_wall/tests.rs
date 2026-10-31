@@ -284,3 +284,105 @@ fn changing_only_source_relaxation_reaches_feedback_and_physical_outlet_pressure
     assert!(a.characteristic_line(Termination::FlangedOpen, 10000, 4801, Some(512)).is_err());
     assert!(a.baffled_outlet(10000, 512, receiver()).is_err());
 }
+
+/// G1: solve two different local membranes and gases by independent analytical
+/// pressure/volume-flow matrices. Neither wall nor gas is averaged at the join.
+#[test]
+fn regional_wall_sources_match_independent_two_material_transfer() {
+    let gases = [*field(300.0).state_at(0.0).unwrap().state(),
+        *field(270.0).state_at(LENGTH).unwrap().state()];
+    let radii = [RADIUS, 1.3 * RADIUS];
+    let lengths = [0.2, LENGTH - 0.2];
+    let times = [0.0003, 0.003];
+    let geometry = Duct { segments: (0..2).map(|i| Segment::Cylinder {
+        radius: radii[i], length: lengths[i],
+    }).collect() };
+    let walls = times.map(wall);
+    let bound = RegionalDuct::new(&geometry, &gases).unwrap()
+        .with_material_wall_regions(&walls).unwrap();
+    for frequency in [30.0, 100.0, 430.0, 700.0] {
+        let omega = TAU * frequency;
+        let blocks = [0, 1].map(|i| {
+            let s = C64::new(0.0, -omega);
+            let r = radii[i];
+            let area = core::f64::consts::PI * r * r;
+            // Original manufactured Maxwell source: E_inf=30 MPa,
+            // delta E=20 MPa, rho=1000 kg/m^3, free axial stress.
+            let wall_z = s.scale(1000.0 * THICKNESS)
+                + s.recip().scale(3e7 * THICKNESS / (r * r))
+                + (s + C64::from_re(1.0 / times[i])).recip()
+                    .scale(2e7 * THICKNESS / (r * r));
+            let z = s.scale(gases[i].density / area);
+            let y = s.scale(area / (gases[i].density * gases[i].sound_speed.powi(2)))
+                + wall_z.recip().scale(TAU * r);
+            let gamma = (z * y).sqrt();
+            let x = gamma.re * lengths[i];
+            let phase = gamma.im * lengths[i];
+            let cosine = C64::new(x.cosh() * phase.cos(), x.sinh() * phase.sin());
+            let sine = C64::new(x.sinh() * phase.cos(), x.cosh() * phase.sin());
+            [cosine, z / gamma * sine, y / gamma * sine, cosine]
+        });
+        let [a, b, c, d] = blocks[0];
+        let [_, f, _, h] = blocks[1];
+        let numerator = a * f + b * h;
+        let denominator = c * f + d * h;
+        let actual = bound.response(omega, LossModel::Lossless, Termination::IdealOpen, None).unwrap();
+        assert!(relative(actual.impedance, numerator / denominator) < 5e-11);
+        assert!(relative(actual.u_mouth_over_u_in, denominator.recip()) < 5e-11);
+        assert!(actual.impedance.re >= 0.0);
+        let reflection = bound.reflection_with_wall(omega, LossModel::Lossless,
+            Termination::IdealOpen, WallModel::Rigid).unwrap();
+        let zc = C64::from_re(bound.inlet_impedance());
+        assert!(relative(reflection, (actual.impedance - zc) / (actual.impedance + zc)) < 2e-12);
+        assert!(reflection.abs() <= 1.0 + 1e-12);
+    }
+}
+
+/// G3/G4: regional subdivision preserves the local material, while incomplete
+/// source partitions and external overrides cannot erase its constitutive law.
+#[test]
+fn regional_wall_partition_preserves_uniform_limit_and_source_refusals() {
+    let gas = *field(300.0).state_at(0.0).unwrap().state();
+    let law = wall(0.0003);
+    let geometry = Duct { segments: vec![Segment::Cylinder {
+        radius: RADIUS, length: LENGTH / 2.0,
+    }; 2] };
+    let original = RegionalDuct::new(&geometry, &[gas; 2]).unwrap();
+    let bound = original.clone().with_material_wall_regions(&[law.clone(), law.clone()]).unwrap();
+    let uniform = original.clone().with_material_wall(law.clone());
+    for frequency in [30.0, 430.0, 1700.0] {
+        let actual = bound.response(TAU * frequency, LossModel::Bessel,
+            Termination::FlangedOpen, None).unwrap();
+        let expected = uniform.response(TAU * frequency, LossModel::Bessel,
+            Termination::FlangedOpen).unwrap();
+        assert_eq!(actual.impedance, expected.impedance);
+        assert_eq!(actual.u_mouth_over_u_in, expected.u_mouth_over_u_in);
+    }
+    let split_geometry = Duct { segments: vec![Segment::Cylinder {
+        radius: RADIUS, length: LENGTH / 4.0,
+    }; 4] };
+    let split = RegionalDuct::new(&split_geometry, &[gas; 4]).unwrap()
+        .with_material_wall_regions(&vec![law.clone(); 4]).unwrap();
+    let omega = TAU * 430.0;
+    let actual = bound.response(omega, LossModel::Bessel, Termination::FlangedOpen, None).unwrap();
+    let refined = split.response(omega, LossModel::Bessel, Termination::FlangedOpen, None).unwrap();
+    assert!(relative(actual.impedance, refined.impedance) < 2e-12);
+    assert!(relative(actual.u_mouth_over_u_in, refined.u_mouth_over_u_in) < 2e-12);
+    assert!(original.clone().with_material_wall_regions(&[law.clone()]).is_err());
+    assert!(bound.clone().with_material_wall_regions(&[law.clone(), law.clone()]).is_err());
+    assert!(bound.response_with_wall(omega, LossModel::Bessel, Termination::FlangedOpen,
+        WallModel::Law(&law)).is_err());
+    assert!(bound.response(TAU * 5000.0, LossModel::Bessel, Termination::FlangedOpen, None).is_err());
+    let continuous = RegionalDuct::from_continuous_gas_field(&cylinder(), &field(270.0),
+        RiccatiSteps(16)).unwrap();
+    assert!(continuous.with_material_wall_regions(&[law]).is_err());
+    let table = fs_duct::TabulatedLoad::try_new(
+        vec![TAU * 10.0, TAU * 4000.0], vec![C64::ZERO; 2],
+        "ideal-open source-domain test", 0.0,
+    ).unwrap().with_mouth(fs_duct::TabulatedMouth {
+        axial_position_m: LENGTH, radius_m: RADIUS, gas, dc_impedance: 0.0,
+    }).unwrap();
+    // The old constant-pin shortcut must not bypass the source's missing DC.
+    assert!(bound.characteristic_line_with_wall(MouthLoad::Tabulated(&table),
+        8000, 4801, WallModel::Rigid, Some(512)).is_err());
+}

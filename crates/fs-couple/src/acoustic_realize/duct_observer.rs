@@ -12,7 +12,7 @@ use super::{
 };
 use crate::air_path::{GasAbsorptionModel, ObserverFilter, ObserverFilterReceipt};
 use crate::driving_point::regional::RegionalDuct;
-use crate::driving_point::regional::material_wall::LocalMaterialWall;
+use crate::driving_point::regional::material_wall::MaterialWallLayout;
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::render::ReedBoreVoice;
 use crate::thin_plate::PlateBank;
@@ -45,13 +45,14 @@ pub struct BaffledDuctObserver<'a> {
     /// the actual last interior region supplies radiation loading and observation.
     /// Its density/speed change the outlet load as well as the microphone.
     pub exterior_gas: Option<GasState>,
-    /// Original material state, thickness, axial restraint and local membrane
-    /// law shared by pressure feedback and terminal flow. Every sampled radius
-    /// and frequency retains that source's admission. The scenario's authored
+    /// Original uniform or complete segment material layout, including each
+    /// state, thickness, axial restraint and local membrane spectrum. Pressure
+    /// feedback and terminal flow share that same assignment. Every sampled
+    /// radius and frequency retains its source's admission. The scenario's authored
     /// `duct.wall` must be absent when this binding is supplied.
     /// This does not add radiation from the wall or equilibrate its temperature
     /// with the independently specified interior or exterior gas.
-    pub material_wall: Option<&'a LocalMaterialWall>,
+    pub material_wall: Option<&'a MaterialWallLayout>,
     /// Receiver position and quadrature in the outlet's outward baffle frame.
     /// Its actual range replaces the legacy scalar listener distance.
     pub receiver: CircularOutletReceiver,
@@ -64,10 +65,10 @@ pub struct BaffledDuctObservation {
     pub segment_gases: Vec<GasState>,
     /// Same homogeneous exterior used by the load and the pressure receiver.
     pub exterior_gas: GasState,
-    /// Exact source-backed wall used by both feedback and observation, when
-    /// explicitly selected. The original material identity and loss spectrum
-    /// remain inspectable instead of becoming anonymous wall coefficients.
-    pub material_wall: Option<LocalMaterialWall>,
+    /// Exact source-backed layout used by both feedback and observation, when
+    /// explicitly selected. Every original material identity, state and loss
+    /// spectrum remains inspectable in authored segment order.
+    pub material_wall: Option<MaterialWallLayout>,
     /// Original receiver geometry and quadrature, not an output gain.
     pub receiver: CircularOutletReceiver,
     /// Original causal atmospheric law. Its declared excess/realization delay
@@ -156,6 +157,11 @@ pub(super) fn realize(
             .map_err(AcousticRealizeError::Duct)?,
         None => regional,
     };
+    let regional = match binding.material_wall {
+        Some(MaterialWallLayout::Segments(walls)) => regional
+            .with_material_wall_regions(walls).map_err(AcousticRealizeError::Duct)?,
+        _ => regional,
+    };
     let exterior = *regional.exterior_gas();
     let [x, y, z] = binding.receiver.position_m;
     let range_m = x.hypot(y).hypot(z);
@@ -208,7 +214,8 @@ pub(super) fn realize(
     let count = sample_count(assembly.sample_rate_hz, assembly.duration_s)?;
     let authored_wall = wall_pin(duct.wall);
     let wall = match binding.material_wall {
-        Some(material) => WallModel::Law(material),
+        Some(MaterialWallLayout::Uniform(material)) => WallModel::Law(material),
+        Some(MaterialWallLayout::Segments(_)) => WallModel::Rigid,
         None => WallModel::from_pin(authored_wall.as_ref()),
     };
     let mut voice = ReedBoreVoice::new_with_regional_wall(

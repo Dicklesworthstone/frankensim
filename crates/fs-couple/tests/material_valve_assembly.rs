@@ -207,7 +207,7 @@ fn compiled_material_reed_reaches_the_physical_exterior_microphone() {
     use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
     use fs_couple::bernoulli_aperture::wall::material::AxialConstraint;
     use fs_couple::material_assembly::duct::{
-        DuctWallMaterialBinding, WallConstitutiveSource, WallMaterialLossSource,
+        DuctWallMaterialBinding, DuctWallMaterialBindings, WallConstitutiveSource, WallMaterialLossSource,
     };
     use fs_matdb::*;
     use fs_material::state_point::MaterialPropertySelection;
@@ -241,13 +241,13 @@ fn compiled_material_reed_reaches_the_physical_exterior_microphone() {
         }, claims, vec![]).unwrap();
         let point = QueryPoint::new().with("T", 293.15).unwrap();
         let materials = AcousticMaterialBindings {
-            duct_wall: Some(DuctWallMaterialBinding {
+            duct_wall: Some(DuctWallMaterialBindings::Uniform(DuctWallMaterialBinding {
                 source: MaterialSource { card: &card, point: &point,
                     selection: MaterialPropertySelection::SingleClaimOnly },
                 constitutive: WallConstitutiveSource::Isotropic(WallMaterialLossSource::Elastic),
                 thickness_m: 0.0001, axial: AxialConstraint::StressFree,
                 band_hz: [1e-6, 30_000.0],
-            }), ..AcousticMaterialBindings::default()
+            })), ..AcousticMaterialBindings::default()
         };
         let options = RealizeOptions {
             gas: Some(gas), observer_absorption: Some(GasAbsorptionModel::Lossless),
@@ -267,7 +267,7 @@ fn compiled_material_reed_reaches_the_physical_exterior_microphone() {
             assert_eq!(resolved.duct_observer.as_ref().unwrap().segment_gases, vec![gas]);
             assert_eq!(resolved.duct_observer.as_ref().unwrap().material_wall.as_ref(),
                 compiled.compiled().duct_wall());
-            assert_eq!(compiled.compiled().duct_wall().unwrap().material().query(), point);
+            assert_eq!(compiled.compiled().duct_wall().unwrap().uniform().unwrap().material().query(), point);
             assert!(resolved.pressure_pa.iter().all(|p| p.is_finite()));
             assert!(resolved.pressure_pa.iter().any(|p| *p != 0.0));
             resolved

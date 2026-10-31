@@ -5,6 +5,7 @@ use fs_couple::acoustic_realize::{
 };
 use fs_couple::air_path::{GasAbsorptionModel, ObserverFilter};
 use fs_couple::driving_point::regional::RegionalDuct;
+use fs_couple::driving_point::regional::material_wall::MaterialWallLayout;
 use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
 use fs_couple::render::ReedBoreVoice;
 use fs_couple::thin_plate::PlateBank;
@@ -90,7 +91,7 @@ fn material_wall(young_pa: f64, relaxation_s: Option<f64>, band_hz: [f64; 2]) ->
 fn common_material_compiler_carries_elastic_and_relaxing_walls_into_pressure() {
     use fs_couple::material_assembly::{
         AcousticMaterialBindings, MaterialSource, compile_material_assembly,
-        duct::{DuctWallMaterialBinding, WallConstitutiveSource, WallMaterialLossSource},
+        duct::{DuctWallMaterialBinding, DuctWallMaterialBindings, WallConstitutiveSource, WallMaterialLossSource},
     };
     let template = input();
     let gases = [gas(293.15), gas(310.15)];
@@ -116,24 +117,24 @@ fn common_material_compiler_carries_elastic_and_relaxing_walls_into_pressure() {
                 }
             } else { WallMaterialLossSource::Elastic };
             let compiled = compile_material_assembly(&template, &AcousticMaterialBindings {
-                duct_wall: Some(DuctWallMaterialBinding {
+                duct_wall: Some(DuctWallMaterialBindings::Uniform(DuctWallMaterialBinding {
                     source: MaterialSource { card: &card, point: &point, selection },
                     constitutive: WallConstitutiveSource::Isotropic(loss),
                     thickness_m: 0.00005,
                     axial: AxialConstraint::StressFree,
                     band_hz: band,
-                }),
+                })),
                 ..AcousticMaterialBindings::default()
             }).unwrap();
             assert_eq!(compiled.assembly(), &template);
             let wall = compiled.duct_wall().unwrap();
-            assert_eq!(wall.material().query(), point);
-            assert_eq!(wall.material().properties().len(), requirements.len());
+            assert_eq!(wall.uniform().unwrap().material().query(), point);
+            assert_eq!(wall.uniform().unwrap().material().properties().len(), requirements.len());
             let actual = compiled.realize_with_options(&options(observer)).unwrap();
             assert_eq!(actual.duct_observer.as_ref().unwrap().material_wall.as_ref(), Some(wall));
             assert_eq!(actual.duct_observer.as_ref().unwrap().segment_gases, gases);
             assert_eq!(actual.gas, observer.exterior_gas.unwrap());
-            let direct_wall = material_wall(young, relaxation, band);
+            let direct_wall = MaterialWallLayout::Uniform(material_wall(young, relaxation, band));
             let direct = realize_assembly_with_options(&template, &options(BaffledDuctObserver {
                 material_wall: Some(&direct_wall), ..observer
             })).unwrap();
@@ -151,7 +152,7 @@ fn common_material_compiler_carries_elastic_and_relaxing_walls_into_pressure() {
 fn common_material_compiler_refuses_ambiguous_unrouted_and_invalid_wall_sources() {
     use fs_couple::material_assembly::{
         AcousticMaterialBindings, MaterialSource, compile_material_assembly,
-        duct::{DuctWallMaterialBinding, WallConstitutiveSource, WallMaterialLossSource},
+        duct::{DuctWallMaterialBinding, DuctWallMaterialBindings, WallConstitutiveSource, WallMaterialLossSource},
     };
     let template = input();
     let band = [1e-6, 4500.0];
@@ -166,7 +167,7 @@ fn common_material_compiler_refuses_ambiguous_unrouted_and_invalid_wall_sources(
     };
     let compile = |input: &AcousticAssembly, wall: DuctWallMaterialBinding<'_>| {
         compile_material_assembly(input, &AcousticMaterialBindings {
-            duct_wall: Some(wall), ..AcousticMaterialBindings::default()
+            duct_wall: Some(DuctWallMaterialBindings::Uniform(wall)), ..AcousticMaterialBindings::default()
         })
     };
     let compiled = compile(&template, binding.clone()).unwrap();
@@ -451,7 +452,7 @@ fn physical_assembly_refuses_incomplete_or_inconsistent_physical_bindings() {
 fn material_wall_reaches_feedback_and_physical_observation() {
     let input = input();
     let gases = [gas(293.15); 2];
-    let wall = material_wall(3e7, None, [1e-6, 4500.0]);
+    let wall = MaterialWallLayout::Uniform(material_wall(3e7, None, [1e-6, 4500.0]));
     let bound = BaffledDuctObserver { material_wall: Some(&wall),
         ..binding(Some(&gases), None) };
     let actual = realize_assembly_with_options(&input, &options(bound)).unwrap();
@@ -471,12 +472,12 @@ fn material_wall_reaches_feedback_and_physical_observation() {
     let error = actual.pressure_pa.iter().zip(&expected.pressure_pa)
         .map(|(a, b)| (a-b).abs()).fold(0.0, f64::max);
     assert!(error / peak < 1e-8, "relative pressure discrepancy {}", error / peak);
-    let stiff = material_wall(6e7, None, [1e-6, 4500.0]);
+    let stiff = MaterialWallLayout::Uniform(material_wall(6e7, None, [1e-6, 4500.0]));
     let changed = realize_assembly_with_options(&input,
         &options(BaffledDuctObserver { material_wall: Some(&stiff), ..bound })).unwrap();
     assert_ne!(actual.pressure_pa, changed.pressure_pa);
     assert_eq!(actual.gas, changed.gas);
-    assert_ne!(wall.material().identity(), stiff.material().identity());
+    assert_ne!(wall.uniform().unwrap().material().identity(), stiff.uniform().unwrap().material().identity());
 }
 
 /// G3/G5: a relaxation-time edit reaches the complete material law; it is not
@@ -486,9 +487,9 @@ fn material_wall_preserves_hereditary_spectrum_and_independent_gases() {
     let input = input();
     let gases = [gas(293.15), gas(305.15)];
     let exterior = gas(283.15);
-    let fast = material_wall(3e7, Some(0.0003), [1e-6, 4500.0]);
-    let slow = material_wall(3e7, Some(0.003), [1e-6, 4500.0]);
-    let render = |wall: &LocalMaterialWall| {
+    let fast = MaterialWallLayout::Uniform(material_wall(3e7, Some(0.0003), [1e-6, 4500.0]));
+    let slow = MaterialWallLayout::Uniform(material_wall(3e7, Some(0.003), [1e-6, 4500.0]));
+    let render = |wall: &MaterialWallLayout| {
         realize_assembly_with_options(&input, &options(BaffledDuctObserver {
             material_wall: Some(wall), ..binding(Some(&gases), Some(exterior))
         })).unwrap()
@@ -502,7 +503,7 @@ fn material_wall_preserves_hereditary_spectrum_and_independent_gases() {
     assert_eq!(retained.segment_gases, gases);
     assert_eq!(retained.material_wall.as_ref(), Some(&fast));
     // A wall's original 300 K source is independent of both gas temperatures.
-    assert_eq!(fast.material().query().axes()["T"], 300.0);
+    assert_eq!(fast.uniform().unwrap().material().query().axes()["T"], 300.0);
     assert_eq!(retained.exterior_gas, exterior);
 }
 
@@ -512,7 +513,7 @@ fn material_wall_preserves_hereditary_spectrum_and_independent_gases() {
 fn material_wall_refuses_conflicting_and_unsupported_bindings() {
     let mut input = input();
     let gases = [gas(293.15); 2];
-    let wall = material_wall(3e7, None, [1e-6, 4500.0]);
+    let wall = MaterialWallLayout::Uniform(material_wall(3e7, None, [1e-6, 4500.0]));
     let bound = BaffledDuctObserver { material_wall: Some(&wall),
         ..binding(Some(&gases), None) };
     input.duct.as_mut().unwrap().wall = Some(fs_scenario::acoustic::LocallyReactingWall {
@@ -520,11 +521,114 @@ fn material_wall_refuses_conflicting_and_unsupported_bindings() {
     });
     assert!(realize_assembly_with_options(&input, &options(bound)).is_err());
     input.duct.as_mut().unwrap().wall = None;
-    let narrow = material_wall(3e7, None, [1e-6, 1000.0]);
+    let narrow = MaterialWallLayout::Uniform(material_wall(3e7, None, [1e-6, 1000.0]));
     assert!(realize_assembly_with_options(&input,
         &options(BaffledDuctObserver { material_wall: Some(&narrow), ..bound })).is_err());
     let duct = input.duct.as_mut().unwrap();
     duct.segments[0].radius_m = 0.0005;
     duct.segments[0].outlet_radius_m = 0.0005;
     assert!(realize_assembly_with_options(&input, &options(bound)).is_err());
+}
+
+/// G1/G3: a mixed-material assembly retains each original local source, while
+/// a change to ONE segment's relaxation data reaches both the inlet and receiver.
+#[test]
+fn segmented_material_compiler_preserves_local_sources_and_changes_actual_pressure() {
+    use fs_couple::material_assembly::{
+        AcousticMaterialBindings, MaterialSource, compile_material_assembly,
+        duct::{DuctWallMaterialBinding, DuctWallMaterialBindings, WallConstitutiveSource, WallMaterialLossSource},
+    };
+    let template = input();
+    let gases = [gas(293.15), gas(310.15)];
+    let observer = binding(Some(&gases), Some(gas(283.15)));
+    let band = [1e-6, 4500.0];
+    let (first, _, _) = wall_source(3e7, None, band);
+    let points = [295.0, 305.0].map(|temperature| QueryPoint::new()
+        .with("T", temperature).unwrap().with("omega", 1000.0).unwrap());
+    let mut outputs = Vec::new();
+    let mut impedances = Vec::new();
+    for time_s in [0.0003, 0.003] {
+        let (second, _, _) = wall_source(6e7, Some(time_s), band);
+        let bindings = [&first, &second].into_iter().enumerate().map(|(i, card)| {
+            DuctWallMaterialBinding {
+                source: MaterialSource { card, point: &points[i],
+                    selection: MaterialPropertySelection::SingleClaimOnly },
+                constitutive: WallConstitutiveSource::Isotropic(if i == 0 {
+                    WallMaterialLossSource::Elastic
+                } else { WallMaterialLossSource::Maxwell {
+                    properties: vec![("wall_delta_e".into(), "wall_tau".into())],
+                    max_dt_over_tau: 0.5, max_angular_step: 0.5,
+                } }),
+                thickness_m: [0.00005, 0.00007][i],
+                axial: AxialConstraint::StressFree, band_hz: band,
+            }
+        }).collect();
+        let compiled = compile_material_assembly(&template, &AcousticMaterialBindings {
+            duct_wall: Some(DuctWallMaterialBindings::Segments(bindings)),
+            ..AcousticMaterialBindings::default()
+        }).unwrap();
+        let layout = compiled.duct_wall().unwrap();
+        let walls = layout.segments().unwrap();
+        assert_eq!(walls.len(), 2);
+        assert_eq!(walls[0].material().query(), points[0]);
+        assert_eq!(walls[1].material().query(), points[1]);
+        assert_ne!(walls[0].material().identity(), walls[1].material().identity());
+        let actual = compiled.realize_with_options(&options(observer)).unwrap();
+        let info = actual.duct_observer.as_ref().unwrap();
+        assert_eq!(info.material_wall.as_ref(), Some(layout));
+        assert_eq!(info.segment_gases, gases);
+        assert_eq!(info.exterior_gas, observer.exterior_gas.unwrap());
+        let physical = Duct { segments: template.duct.as_ref().unwrap().segments.iter()
+            .map(|s| Segment::Cylinder { radius: s.radius_m, length: s.length_m }).collect() };
+        let regional = RegionalDuct::new(&physical, &gases).unwrap()
+            .with_exterior_gas(actual.gas).unwrap().with_material_wall_regions(walls).unwrap();
+        impedances.push(regional.response(core::f64::consts::TAU * 430.0,
+            fs_duct::LossModel::Bessel, Termination::FlangedOpen, None).unwrap().impedance);
+        let direct = realize_assembly_with_options(&template, &options(BaffledDuctObserver {
+            material_wall: Some(layout), ..observer
+        })).unwrap();
+        assert_eq!(actual, direct);
+        assert_eq!(actual, compiled.realize_with_options(&options(observer)).unwrap());
+        outputs.push(actual.pressure_pa);
+    }
+    assert_ne!(impedances[0], impedances[1]);
+    assert_ne!(outputs[0], outputs[1]);
+}
+
+/// G4: a partial material partition is never completed with a uniform default,
+/// and the actual failing segment remains visible in the original source error.
+#[test]
+fn segmented_material_compiler_refuses_missing_and_unsupported_local_sources() {
+    use fs_couple::material_assembly::{
+        AcousticMaterialBindings, MaterialAssemblyError, MaterialSource, compile_material_assembly,
+        duct::{DuctWallMaterialBinding, DuctWallMaterialBindings, WallConstitutiveSource, WallMaterialLossSource},
+    };
+    let template = input();
+    let band = [1e-6, 4500.0];
+    let (card, point, _) = wall_source(3e7, None, band);
+    let source = DuctWallMaterialBinding {
+        source: MaterialSource { card: &card, point: &point,
+            selection: MaterialPropertySelection::SingleClaimOnly },
+        constitutive: WallConstitutiveSource::Isotropic(WallMaterialLossSource::Elastic),
+        thickness_m: 0.00005, axial: AxialConstraint::StressFree, band_hz: band,
+    };
+    let compile = |bindings| compile_material_assembly(&template, &AcousticMaterialBindings {
+        duct_wall: Some(DuctWallMaterialBindings::Segments(bindings)),
+        ..AcousticMaterialBindings::default()
+    });
+    let compiled = compile(vec![source.clone(); 2]).unwrap();
+    let retained = compiled.duct_wall().unwrap().clone();
+    for count in [0, 1, 3, 257] {
+        assert!(compile(vec![source.clone(); count]).is_err());
+    }
+    let bad = DuctWallMaterialBinding { thickness_m: 0.001, ..source.clone() };
+    assert!(matches!(compile(vec![source.clone(), bad]),
+        Err(MaterialAssemblyError::Binding { component, .. }) if component == "duct wall segment 1"));
+    let outside = QueryPoint::new().with("T", 330.0).unwrap().with("omega", 1000.0).unwrap();
+    let mut bad = source.clone();
+    bad.source.point = &outside;
+    assert!(matches!(compile(vec![source.clone(), bad]),
+        Err(MaterialAssemblyError::Resolution { component, .. }) if component == "duct wall segment 1"));
+    assert_eq!(compiled.duct_wall(), Some(&retained));
+    assert_eq!(compiled.assembly(), &template);
 }

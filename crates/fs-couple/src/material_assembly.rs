@@ -152,8 +152,8 @@ pub struct AcousticMaterialBindings<'a> {
     pub string: Option<StringMaterialBinding<'a>>,
     /// Uniform or regional plate binding. Other body modes remain authored.
     pub plate: Option<PlateMaterialBinding<'a>>,
-    /// Original wall source; physical observation remains an explicit option.
-    pub duct_wall: Option<duct::DuctWallMaterialBinding<'a>>,
+    /// Uniform or complete segment wall sources; the receiver remains explicit.
+    pub duct_wall: Option<duct::DuctWallMaterialBindings<'a>>,
 }
 
 /// Retained plate specimen and any chart-specific realization controls.
@@ -177,7 +177,7 @@ pub struct CompiledMaterialAssembly {
     assembly: AcousticAssembly,
     string: Option<ResolvedStringSpecimen>,
     plate: Option<CompiledMaterialPlate>,
-    duct_wall: Option<crate::bernoulli_aperture::wall::material::LocalMaterialWall>,
+    duct_wall: Option<duct::MaterialWallLayout>,
 }
 
 impl CompiledMaterialAssembly {
@@ -200,11 +200,11 @@ impl CompiledMaterialAssembly {
         self.plate.as_ref()
     }
 
-    /// Original wall source, constitutive spectrum, thickness and applicability.
+    /// Original wall layout, with each source, spectrum, thickness and applicability.
     #[must_use]
     pub const fn duct_wall(
         &self,
-    ) -> Option<&crate::bernoulli_aperture::wall::material::LocalMaterialWall> {
+    ) -> Option<&duct::MaterialWallLayout> {
         self.duct_wall.as_ref()
     }
 

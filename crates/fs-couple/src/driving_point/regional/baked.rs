@@ -15,6 +15,7 @@ impl RegionalDuct {
         load: C64,
         wall: WallModel<'_>,
     ) -> Result<C64, DuctError> {
+        self.admit_wall_override(wall)?;
         let zc = self.inlet_impedance();
         let exterior = self.exterior_gas();
         if let Some(field) = &self.continuous {
@@ -29,7 +30,7 @@ impl RegionalDuct {
         let mut response =
             fs_duct::exterior::input_impedance_load(&terminal.duct, &terminal.gas,
                 exterior,
-                omega, LossModel::Bessel, load, wall)?;
+                omega, LossModel::Bessel, load, Self::region_wall(terminal, wall))?;
         for region in runs {
             response = fs_duct::exterior::input_impedance_load(
                 &region.duct,
@@ -38,7 +39,7 @@ impl RegionalDuct {
                 omega,
                 LossModel::Bessel,
                 response.impedance,
-                wall,
+                Self::region_wall(region, wall),
             )?;
         }
         Ok(impedance_reflectance(&response, zc))
@@ -75,6 +76,7 @@ impl RegionalDuct {
         super::super::baked::validate_band(table, rate, band_n)?;
         // Keep the uniform path identical, including its arithmetic and refusals.
         if self.continuous.is_none()
+            && !self.has_material_wall_regions()
             && self.regions.len() == 1
             && self.exterior_gas() == self.outlet_gas()
             && let WallModel::Rigid | WallModel::Pin(_) = wall

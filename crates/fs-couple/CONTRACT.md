@@ -5144,6 +5144,15 @@ axes are refreshed from that trajectory's actual bulk voltage/current; native
 Joule work stays authoritative and constitutive residuals never become heat.
 Resistance and power gates both precede joint acceptance.
 
+`MaterialFieldMotion::conductivity_with_contact_response_candidate` closes
+original series-interface V/I/J responses inside that same iteration. Each
+interface uses its own native drop, conducting area and explicit
+branch-to-ordered-surface orientation. Full original pinned bundles refresh
+together; `FieldConductivityStep::evaluated_contacts` retains actual-point
+responses separately from applied native coefficients. Electrically independent
+contacts use the same path without response bindings; operating-dependent
+sources cannot silently remain fixed.
+
 `circuit_enthalpy::motion::conductivity` deposits those native losses through the
 existing finite-enthalpy driver. Its global work cap includes all inner native
 descriptor solves, discarded thermal stencils and final admission.
@@ -5152,15 +5161,32 @@ cards, cells, source pins, geometry and heat destinations directly. The same
 solved E/J bundle also refreshes thermal conductivity and original link transport;
 temperature, operating point, charge/flux and actual motion close together.
 
+`circuit_enthalpy::motion::conductivity::step_with_contact_response_candidate`
+carries those complete contact bindings through every proposed thermal endpoint
+and final admission. Explicit A/B partitions route native contact heat once into
+the original finite cells, while field/body work remains internal reversible
+transfer. The transport callback sees the same solved bulk/contact operating
+point. Charge/flux, gap, momentum, thermal state and source snapshots return only
+as one admitted candidate.
+
 The original uniform-gap, constant field coefficient, guided inertia and optional
 conservative-support scope remains. Conductor geometry is stationary; no moving
-conductor transport, Hall law, hysteresis, field entropy or series-contact
-response is added. The coupled thermal time level remains generally first order.
+conductor transport, Hall law, hysteresis, field entropy, live thermoelastic
+support, interface storage, opening contact or arcing model is added. The
+coupled thermal time level remains generally first order.
 Focused synthetic regressions cover native constant-law parity, E/J-source
 substitution, both electrical polarities, magnetic linkage, refinement against
 an independent RC/Maxwell-force ODE, closed-form external work/heating, complete
 prepared data, continuation, budget refusal and cancellation. Syntax parsing and
 independent equation checks passed; native Rust execution remains unverified.
+
+Four additional G1/G3/G4 cases compare electric and magnetic contact-driven
+motion with independent continuous circuit/gap equations, measure refinement
+against a five-state electrothermal-motion ODE, substitute only contact data,
+check separate bulk/contact heat and retained sources, and exercise continuation,
+work/domain/route refusal and cancellation retry. Constant-contact behavior also
+matches the original descriptor. These new Rust cases remain unexecuted; all four
+changed Rust files passed pinned syntax parsing and scoped whitespace checks.
 
 ### Mutual inductance through material circuits and finite heat
 
@@ -16970,8 +16996,9 @@ receiver geometry and both propagation/filter delay accounts. Solid-reduced reed
 mass, stiffness, area and loss remain those of the existing material compilation.
 
 `BaffledDuctObserver::material_wall` binds the existing source-resolved
-`LocalMaterialWall` directly to BOTH the reed's characteristic feedback and the
-terminal-flow observation. The same density, elasticity, thickness, axial
+`LocalMaterialWall` through an explicit `MaterialWallLayout::Uniform` or complete
+`Segments` assignment to BOTH the reed's characteristic feedback and the
+terminal-flow observation. The local density, elasticity, thickness, axial
 restraint, anisotropy and optional Kelvin/Maxwell spectrum are evaluated at each
 actual radius and frequency; no wall coefficients or pressure samples are fitted.
 The observation retains the complete original wall source. Supplying this binding
@@ -16981,12 +17008,13 @@ is independent of the gas states; neither thermal equilibration nor wall radiati
 is inferred. G1/G3 tests compare the independent thin-cylinder reduction, change
 only elastic or relaxation data, and check source/geometry refusal.
 
-`AcousticMaterialBindings::duct_wall` compiles that source through the common
+`AcousticMaterialBindings::duct_wall` selects `DuctWallMaterialBindings::Uniform`
+or `Segments` and compiles those sources through the common
 material-assembly entry point, including assemblies with material-derived reeds.
 The caller supplies the original card/query/claim selection, constitutive source
 model, thickness, restraint and frequency applicability. The compiler reuses the
 existing wall requirements and reduction, checks both endpoint radii of each
-segment, and retains the resulting `LocalMaterialWall`. Realization forwards it
+segment, and retains the resulting `MaterialWallLayout`. Realization forwards it
 to the same physical feedback and microphone path while preserving the requested
 regional gases, exterior medium and receiver. Authored wall coefficients or a
 second observer wall override refuse; an absent physical observer also refuses.
@@ -16994,6 +17022,27 @@ G1/G3/G4 regressions compare the direct physical path, swap only elastic or
 relaxation source values, retain independent gas/material states, and exercise
 unsupported sources, geometry and conflicting bindings. These checks add no
 thermal equilibration, shell evolution or experimental validation claim.
+
+`RegionalDuct::with_material_wall_regions` attaches one original wall source to
+each authored axial segment, independently of the gas partition. Adjacent runs
+coalesce only when BOTH gas and complete wall state agree. Other joins use the
+existing pressure/volume-flow continuity and local TMM; material properties are
+not averaged and no reflection coefficient is fitted. The retained walls reach
+analytic and tabulated terminal loads, stable inlet reflection, characteristic
+feedback and physical outlet pressure. Constant-pin shortcuts cannot bypass a
+bound source. A second external wall override refuses.
+
+This segment binding is cold and fixed-geometry, with the original 256-segment
+cap. Continuous gas fields and tone holes require their existing spatial or
+mutual-mouth owner and refuse on this segmented-wall path; the uniform-wall
+path retains its previous support. It does not model axial shell transmission,
+joint mechanics or thermal evolution. Four added G1/G3/G4 tests compare an
+independent two-material Maxwell transfer matrix, uniform/subdivision limits,
+source-domain and partition refusals, and a one-segment-only material change
+through common compilation and actual microphone pressure. Original wall states
+remain independent of interior and exterior gases. These new Rust cases are
+unexecuted; nine changed Rust files passed pinned parsing and bounded source/API
+review, with scoped whitespace checks passing.
 
 This explicit image currently admits unbranched cylinder/cone bores, their local
 wall law, a flanged terminal and the original default characteristic ladder.

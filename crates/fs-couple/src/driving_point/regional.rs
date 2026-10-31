@@ -39,6 +39,7 @@ pub const MAX_REGIONAL_SEGMENTS: usize = 256;
 struct Region {
     duct: Duct,
     gas: GasState,
+    wall: Option<material_wall::LocalMaterialWall>,
 }
 
 /// Static regional duct composed from the existing uniform TMM owners.
@@ -89,7 +90,7 @@ impl RegionalDuct {
                 return Err(invalid("regional duct needs a common static pressure; mean flow is not modeled"));
             }
             if regions.last().is_none_or(|r| r.gas != *gas) {
-                regions.push(Region { duct: Duct { segments: Vec::new() }, gas: *gas });
+                regions.push(Region { duct: Duct { segments: Vec::new() }, gas: *gas, wall: None });
             }
             match *segment {
                 Segment::Profile { .. } => {}
@@ -175,6 +176,7 @@ impl RegionalDuct {
     /// Complete local wall response with the same gas, geometry and terminal load.
     pub fn response_with_wall(&self, omega: f64, loss: LossModel, termination: Termination,
         wall: WallModel<'_>) -> Result<DuctResponse, DuctError> {
+        self.admit_wall_override(wall)?;
         if !omega.is_finite() || omega <= 0.0 {
             return Err(invalid("frequency must be positive and finite"));
         }
@@ -184,7 +186,8 @@ impl RegionalDuct {
         }
         let mut runs = self.regions.iter().rev();
         let terminal = runs.next().expect("nonempty binding");
-        let mut response = self.terminal_response(terminal, omega, loss, termination, wall)?;
+        let mut response = self.terminal_response(terminal, omega, loss, termination,
+            Self::region_wall(terminal, wall))?;
         for region in runs {
             let upstream = fs_duct::exterior::input_impedance_load(
                 &region.duct,
@@ -193,7 +196,7 @@ impl RegionalDuct {
                 omega,
                 loss,
                 response.impedance,
-                wall,
+                Self::region_wall(region, wall),
             )?;
             // A downstream one-port receives the upstream run's output flow.
             // Keep the REAL mouth's ka and load; this interface is not another
@@ -216,6 +219,7 @@ impl RegionalDuct {
         termination: Termination,
         wall: WallModel<'_>,
     ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+        self.admit_wall_override(wall)?;
         if !omega.is_finite() || omega <= 0.0 {
             return Err(invalid("frequency must be positive and finite"));
         }
@@ -239,7 +243,8 @@ impl RegionalDuct {
         let mut runs = self.regions.iter().enumerate().rev();
         let (terminal_idx, terminal) = runs.next().expect("nonempty binding");
         let (mut response, mut holes) =
-            self.terminal_response_with_holes(terminal, omega, loss, termination, wall)?;
+            self.terminal_response_with_holes(terminal, omega, loss, termination,
+                Self::region_wall(terminal, wall))?;
         for hole in &mut holes {
             hole.axial_position_m += offsets[terminal_idx];
         }
@@ -252,7 +257,7 @@ impl RegionalDuct {
                     omega,
                     loss,
                     response.impedance,
-                    wall,
+                    Self::region_wall(region, wall),
                 )?;
             for hole in &mut holes {
                 hole.u_hole_over_u_in = hole.u_hole_over_u_in * upstream.u_mouth_over_u_in;
@@ -278,6 +283,7 @@ impl RegionalDuct {
     /// Continuous fields and uniform regions use their stable reflection owner.
     pub fn reflection_with_wall(&self, omega: f64, loss: LossModel,
         termination: Termination, wall: WallModel<'_>) -> Result<fs_math::c64::C64, DuctError> {
+        self.admit_wall_override(wall)?;
         let zc = self.inlet_impedance();
         let exterior = self.exterior_gas();
         if let Some(field) = &self.continuous {
@@ -293,7 +299,7 @@ impl RegionalDuct {
                 omega,
                 loss,
                 termination,
-                wall,
+                Self::region_wall(region, wall),
             )?
             .referenced_to(zc);
         }
@@ -339,6 +345,7 @@ impl RegionalDuct {
     pub fn characteristic_line_with_wall_realized<'a>(&self, termination: impl Into<MouthLoad<'a>>, sample_rate_hz: u32,
         n: usize, wall: WallModel<'_>, n_fft_override: Option<usize>)
         -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+        self.admit_wall_override(wall).map_err(DrivingPointError::Duct)?;
         let termination = match termination.into() {
             MouthLoad::Analytic(t) => t,
             MouthLoad::Tabulated(table) => return self.tabulated_line(table, sample_rate_hz, n, wall, n_fft_override),
@@ -347,6 +354,7 @@ impl RegionalDuct {
         // Delegate constant pins verbatim, including travel-time arithmetic.
         // A closed/ideal-open terminal does not remove radiation at side holes.
         if let WallModel::Rigid | WallModel::Pin(_) = wall
+            && !self.has_material_wall_regions()
             && self.continuous.is_none() && self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
             || (matches!(termination, Termination::Closed | Termination::IdealOpen)
                 && !self.regions[0].duct.segments.iter().any(|segment| {
