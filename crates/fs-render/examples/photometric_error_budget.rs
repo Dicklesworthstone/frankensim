@@ -10,6 +10,9 @@
 //! `--direct-power` and `--direct-power-haze` use a fractional narrow beam
 //! with exponent 73.5 and independently derived references on the same plane.
 //! These are authored cases, not additional CIE validation cases.
+//! `--direct-flux` and `--direct-flux-haze` propagate explicitly ASSUMED
+//! scalar flux ranges for two sources at 3 m and 6 m; they are not measured
+//! fixture calibrations. Numerical and conditional flux accounts remain separate.
 //! These use the original source, geometry, material and medium owners.
 //!
 //! An inward-facing 2 m cube emits uniform Le=8 cd/m² and reflects rho=0.5.
@@ -30,6 +33,7 @@ use std::error::Error;
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::io::{self, Write};
 
+use fs_blake3::DomainHasher;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::charts::TriMesh;
@@ -43,6 +47,9 @@ use fs_render::photometry::path::{
 };
 use fs_render::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum};
 use fs_render::photometry::source::validation::{EnclosedIlluminance, EnclosedIlluminanceJob};
+use fs_render::photometry::source::validation::flux::{
+    FluxBoundedIlluminance, FluxEnclosureJob, FluxScaleBound,
+};
 use fs_render::photometry::{IlluminanceProbe, PhotometricScene, TransportOptions};
 use fs_render::spectral::SpectralReflectance;
 use fs_render::tracer::{Camera, Material, Primitive, Sampler, Scene, Shape};
@@ -262,6 +269,61 @@ fn direct_reference(cx: &Cx<'_>, haze: bool, shadow: bool, exponent: f64) -> Res
     Ok(())
 }
 
+// Authored, deterministic scalar-gain assumptions. No measured fixtures or
+// confidence levels are implied by these source-bound evidence records.
+fn flux_reference(cx: &Cx<'_>, haze: bool) -> Result<(), Box<dyn Error>> {
+    let sources = [
+        PhotometricSource::try_new(
+            RigidTransform::try_new([0.0,0.0,0.0,1.0], [0.0,0.0,3.0])?,
+            3600.0 * PI, 1.0, AngularDistribution::isotropic(), SourceSpectrum::equal_energy(),
+        )?,
+        PhotometricSource::try_new(
+            RigidTransform::try_new([0.0,0.0,0.0,1.0], [0.0,0.0,6.0])?,
+            7200.0 * PI, 1.0, AngularDistribution::isotropic(), SourceSpectrum::equal_energy(),
+        )?,
+    ];
+    let declarations = [
+        (0.9, 1.1, "authored example: source 0 emitted-flux gain in [0.9,1.1], NOT measured"),
+        (0.8, 1.05, "authored example: source 1 emitted-flux gain in [0.8,1.05], NOT measured"),
+    ];
+    let mut bounds = [None;2];
+    for (index, &(lo, hi, record)) in declarations.iter().enumerate() {
+        let mut hash = DomainHasher::new("org.frankensim.example.assumed-flux.v1");
+        hash.update(record.as_bytes());
+        bounds[index] = Some(FluxScaleBound::try_new(lo, hi, hash.finalize())?);
+        eprintln!("{record}");
+    }
+    let extinction = if haze { 0.2 } else { 0.0 };
+    let medium = HomogeneousMedium::try_new(extinction, 0.0, PhaseFunction::Isotropic)?;
+    let scene = PhotometricScene::try_new(&[], &sources, medium, TransportOptions::default(), cx)?;
+    let positions: [f64;5] = [0.0,0.5,1.0,2.0,3.0];
+    let probes: Vec<_> = positions.iter().map(|&x| {
+        IlluminanceProbe::try_new(Point3::new(x,0.0,0.0), Vec3::new(0.0,0.0,1.0))
+    }).collect::<Result<_,_>>()?;
+    let mut job = FluxEnclosureJob::new(&scene, &probes, &bounds, cx)?;
+    while !job.is_complete() { job.advance(cx,2)?; }
+    eprintln!("conditional fixed-shape direct transport only; total physical accuracy unknown");
+    eprintln!("independent reference: E_i=I_i*h_i/(h_i*h_i+x*x)^(3/2)*exp(-extinction*r_i)");
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    FluxBoundedIlluminance::write_csv_header(&mut writer)?;
+    for (index, (report, x)) in job.results().iter().zip(positions).enumerate() {
+        let mut reference = [0.0;2];
+        for (value, (height, intensity)) in reference.iter_mut().zip([(3.0,900.0),(6.0,1800.0)]) {
+            let r = (height * height + x * x).sqrt();
+            *value = intensity * height / (r*r*r) * (-extinction*r).exp();
+        }
+        // Diagnostic f64 formula only; the production range comes from the
+        // original outward transport, not from these expected values.
+        let lower = 0.9*reference[0] + 0.8*reference[1];
+        let upper = 1.1*reference[0] + 1.05*reference[1];
+        eprintln!("probe={index} x_m={x} analytic_nominal_lux={} assumed_lower_lux={lower} assumed_upper_lux={upper}", reference[0]+reference[1]);
+        report.write_csv_row(index,&mut writer)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let mode = match args.as_slice() {
@@ -272,9 +334,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         [arg] if arg == "--direct-shadow-haze" => 4,
         [arg] if arg == "--direct-power" => 5,
         [arg] if arg == "--direct-power-haze" => 6,
+        [arg] if arg == "--direct-flux" => 7,
+        [arg] if arg == "--direct-flux-haze" => 8,
         _ => return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: photometric_error_budget [--direct | --direct-haze | --direct-shadow | --direct-shadow-haze | --direct-power | --direct-power-haze]",
+            "usage: photometric_error_budget [--direct | --direct-haze | --direct-shadow | --direct-shadow-haze | --direct-power | --direct-power-haze | --direct-flux | --direct-flux-haze]",
         ).into()),
     };
     let gate = CancelGate::new_clock_free();
@@ -299,6 +363,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             4 => direct_reference(&cx, true, true, 1.0),
             5 => direct_reference(&cx, false, false, 73.5),
             6 => direct_reference(&cx, true, false, 73.5),
+            7 => flux_reference(&cx, false),
+            8 => flux_reference(&cx, true),
             _ => calculate(&cx),
         }
     })
