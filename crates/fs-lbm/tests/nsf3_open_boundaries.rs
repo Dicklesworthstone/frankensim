@@ -87,6 +87,17 @@ fn uniform_throughflow_exchanges_actual_mass_momentum_enthalpy_and_work_on_every
                 let momentum_out =
                     sign * (state.pressure + state.density * speed * speed) * area * dt;
                 assert!((e.mass_out_kg - mass_out).abs() < 2e-11 * mass_out.abs());
+                if side == 0 {
+                    assert!(e.gross_mass_out_kg < 2e-11 * mass_out.abs());
+                    assert!((e.gross_mass_in_kg + mass_out).abs() < 2e-11 * mass_out.abs());
+                } else {
+                    assert!((e.gross_mass_out_kg - mass_out).abs() < 2e-11 * mass_out.abs());
+                    assert!(e.gross_mass_in_kg < 2e-11 * mass_out.abs());
+                }
+                assert!(
+                    (e.mass_out_kg - (e.gross_mass_out_kg - e.gross_mass_in_kg)).abs()
+                        < 2e-11 * mass_out.abs()
+                );
                 assert!((e.total_energy_out_j - energy_out).abs() < 2e-10 * energy_out.abs());
                 assert!(
                     (e.advected_stagnation_enthalpy_out_j - energy_out).abs()

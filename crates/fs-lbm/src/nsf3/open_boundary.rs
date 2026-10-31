@@ -111,7 +111,14 @@ pub struct NsfBoundaryTrace {
 /// characteristic volume flow; their discretization defect is not hidden.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NsfBoundaryExchange {
+    /// Net streamed mass leaving this boundary [kg].
     pub mass_out_kg: f64,
+    /// Gross streamed mass leaving this boundary [kg], before cancellation
+    /// against simultaneous incoming links. Always nonnegative.
+    pub gross_mass_out_kg: f64,
+    /// Gross streamed mass entering this boundary [kg], before cancellation
+    /// against simultaneous outgoing links. Always nonnegative.
+    pub gross_mass_in_kg: f64,
     /// Streamed momentum plus the trapezoidal thermal-pressure impulse.
     /// This includes pressure traction, not just advected momentum.
     pub momentum_out_kg_m_s: [f64; 3],
@@ -199,6 +206,8 @@ pub(super) struct IncomingPopulations {
 #[derive(Clone, Copy, Default)]
 pub(super) struct LinkExchange {
     mass: f64,
+    gross_mass_out: f64,
+    gross_mass_in: f64,
     momentum: [f64; 3],
 }
 
@@ -825,6 +834,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         continue;
                     };
                     output.mass += exchanged;
+                    if exchanged >= 0.0 {
+                        output.gross_mass_out += exchanged;
+                    } else {
+                        output.gross_mass_in -= exchanged;
+                    }
                     for a in 0..3 {
                         output.momentum[a] += f64::from(c[a]) * exchanged;
                     }
@@ -833,6 +847,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     {
                         let patch = patch_exchange[side].as_mut().expect("selected patch");
                         patch.mass += exchanged;
+                        if exchanged >= 0.0 {
+                            patch.gross_mass_out += exchanged;
+                        } else {
+                            patch.gross_mass_in -= exchanged;
+                        }
                         for a in 0..3 {
                             patch.momentum[a] += f64::from(c[a]) * exchanged;
                         }
@@ -862,6 +881,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let out = &mut result[side];
             let reference_pressure = self.open.as_ref()?.faces[side].reference_pressure_pa;
             out.mass_out_kg = links[side].mass * mass_unit;
+            out.gross_mass_out_kg = links[side].gross_mass_out * mass_unit;
+            out.gross_mass_in_kg = links[side].gross_mass_in * mass_unit;
             out.momentum_out_kg_m_s = links[side].momentum.map(|p| p * mass_unit * velocity_unit);
             out.total_energy_out_j = 0.5
                 * (self.open_out.total_out[side] + flux_after.total_out[side])
