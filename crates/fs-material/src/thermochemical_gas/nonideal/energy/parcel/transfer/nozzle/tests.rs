@@ -1,33 +1,13 @@
 use super::*;
-use crate::thermochemical_gas::nonideal::{
-    PengRobinsonSpeciesBinding, ThermochemicalPengRobinsonModel,
-};
-use crate::thermochemical_gas::tests::{model, point};
+use crate::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;
+use crate::thermochemical_gas::nonideal::energy::tests::bound_with_reference;
+use crate::thermochemical_gas::tests::point;
 use crate::thermochemical_gas::energy::{GasEnergySolve, entropy::GasEntropySolve};
 use crate::thermochemical_gas::energy::parcel::transfer::nozzle::GasNozzle;
-use fs_qty::{Pressure, Temperature};
-use fs_thermochem::SpeciesId;
 use fs_thermochem::eos::peng_robinson::PengRobinsonPhaseV1;
 
 fn bound() -> ThermochemicalPengRobinsonModel {
-    ThermochemicalPengRobinsonModel::new(
-        model(vec![0.75, 0.25], 0.001),
-        vec![
-            PengRobinsonSpeciesBinding {
-                species: SpeciesId::new("A").unwrap(),
-                critical_temperature: Temperature::new(190.564),
-                critical_pressure: Pressure::new(4.5992e6),
-                acentric_factor: 0.01142,
-            },
-            PengRobinsonSpeciesBinding {
-                species: SpeciesId::new("B").unwrap(),
-                critical_temperature: Temperature::new(150.687),
-                critical_pressure: Pressure::new(4.863e6),
-                acentric_factor: -0.00219,
-            },
-        ],
-        vec![0.0, 0.03, 0.03, 0.0],
-    ).unwrap()
+    bound_with_reference(0.0)
 }
 fn parcel(model: ThermochemicalPengRobinsonModel, pressure: f64, volume: f64) -> IsochoricRealGasParcel {
     IsochoricRealGasParcel::new(
@@ -56,7 +36,9 @@ fn controls() -> RealGasNozzleStepSolve {
             mass_tolerance_kg: 1e-14,
             energy_tolerance_j: 1e-7,
         },
-        minimum_density_fraction: 0.2,
+        // The original source only admits T >= 200 K. At rho/rho0=.5,
+        // this isentrope reaches 220.6928 K and brackets its sonic state.
+        minimum_density_fraction: 0.5,
         pressure_tolerance_pa: 1e-5,
         sonic_tolerance_m2_s2: 1e-5,
         maximum_iterations: 128,
@@ -85,6 +67,12 @@ fn modest_pressure_drop_resolves_an_unchoked_pr_throat() {
         flow.upstream_enthalpy_j_kg,
         gas.state().specific_enthalpy_j_kg()
     );
+    // Independent 65-digit PR/NASA isentrope. The manufactured mixture has
+    // x=[.75,.25], M=.022, Cp/R=3.25+.00075*T (not constant Cp).
+    close(flow.throat().temperature_k(), 296.327_413_254_839_35, 2e-8);
+    close(flow.throat().density_kg_m3(), 46.586_933_930_034_394, 2e-8);
+    close(flow.velocity_m_s, 92.021_757_539_019_58, 2e-7);
+    close(flow.mass_flow_kg_s, 0.003_429_609_230_876_759_5, 2e-11);
 }
 
 #[test]
@@ -96,6 +84,39 @@ fn deep_backpressure_selects_the_source_backed_sonic_state() {
     assert!(flow.throat().pressure_pa() > 1.0e6);
     assert!(flow.throat().temperature_k() < gas.state().temperature_k());
     assert!(flow.throat().density_kg_m3() < gas.density_kg_m3());
+    // Same independent variable-Cp PR/NASA oracle, solving c^2=-2*Delta h
+    // separately from pressure matching before selecting the sonic throat.
+    close(flow.throat().temperature_k(), 246.138_609_574_328_88, 2e-8);
+    close(flow.throat().pressure_pa(), 2_606_775.478_614_349_7, 5e-4);
+    close(flow.throat().density_kg_m3(), 30.672_132_687_941_348, 2e-8);
+    close(flow.velocity_m_s, 350.440_664_370_255_6, 2e-7);
+    close(flow.mass_flow_kg_s, 0.008_599_010_045_451_84, 2e-11);
+}
+
+#[test]
+fn formation_references_cannot_erase_choked_unchoked_or_small_pressure_drives() {
+    let plain = parcel(bound(), 5e6, 0.01);
+    for back_pressure in [4.8e6, 1e6, 5e6 - 1.0] {
+        let expected = plain.nozzle_flow_to(back_pressure, nozzle(), controls(), || false).unwrap();
+        assert!(expected.mass_flow_kg_s > 0.0);
+        for reference in [-1e24, 1e24] {
+            let shifted = parcel(bound_with_reference(reference), 5e6, 0.01);
+            let actual = shifted.nozzle_flow_to(back_pressure, nozzle(), controls(), || false).unwrap();
+            assert_eq!(actual.choked, expected.choked);
+            assert_eq!(actual.velocity_m_s, expected.velocity_m_s);
+            assert_eq!(actual.mass_flow_kg_s, expected.mass_flow_kg_s);
+            assert_eq!(actual.mach_number, expected.mach_number);
+            assert_eq!(actual.throat().density_kg_m3(), expected.throat().density_kg_m3());
+            assert_eq!(actual.throat().temperature_k(), expected.throat().temperature_k());
+            assert_eq!(actual.throat().pressure_pa(), expected.throat().pressure_pa());
+            assert_eq!(actual.upstream_enthalpy_j_kg, shifted.state().specific_enthalpy_j_kg());
+            // Absolute subtraction really is unusable at this reference,
+            // including the represented 1-Pa drive next to the shut boundary.
+            let naive_drop = actual.upstream_enthalpy_j_kg - actual.throat().specific_enthalpy_j_kg();
+            let physical_drop = 0.5 * actual.velocity_m_s.powi(2);
+            assert!((naive_drop - physical_drop).abs() > 0.5 * physical_drop);
+        }
+    }
 }
 
 #[test]

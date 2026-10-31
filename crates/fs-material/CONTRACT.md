@@ -7267,6 +7267,18 @@ layer pressures, mass/drag work, zero-beta behavior, actual speed admission,
 source support, confinement, seals and unsupported combined-law refusal.
 
 
+## Formation-reference-independent real-gas nozzle energy
+
+`ThermochemicalPengRobinsonModel::specific_enthalpy_change_between_densities`
+evaluates the original NASA/PR internal-energy increment and the change in
+`p/rho` from the same two density/temperature samples. Symmetric product
+differences preserve small flow-work changes and endpoint reversal. The nozzle
+uses `velocity^2 = -2 Delta h`; absolute upstream enthalpy remains the stream
+datum, never a subtraction-based kinetic-energy law. This retains the existing
+frozen-composition homogeneous source domain and bounded entropy/sonic roots.
+Regression sources cover positive and negative formation-reference shifts,
+near-shut pressure drives, and independent variable-Cp PR throat references.
+
 ## Reversible volume work on source-bound real gas
 
 `IsochoricRealGasParcel::at_volume_isentropic` constructs an immutable reversible

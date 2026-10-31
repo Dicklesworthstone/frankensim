@@ -112,7 +112,6 @@ impl IsochoricRealGasParcel {
         &self,
         density: f64,
         controls: GasEntropySolve,
-        h0: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<IsentropicSample, GasEnergyError> {
         let solved = self.model().reconstruct_density_entropy_change(
@@ -121,7 +120,13 @@ impl IsochoricRealGasParcel {
         let inner_iterations = solved.iterations();
         let entropy_residual = solved.residual_j_kg_k();
         let state = solved.into_state();
-        let velocity_squared = 2.0 * (h0 - state.specific_enthalpy_j_kg());
+        // Original-law Delta h cancels formation references before rounding.
+        // Absolute h0 remains the stream datum, never the kinetic-energy law.
+        let enthalpy_change = self.model().specific_enthalpy_change_between_densities(
+            self.density_kg_m3(), self.state().temperature_k(),
+            state.density_kg_m3(), state.temperature_k(),
+        )?;
+        let velocity_squared = -2.0 * enthalpy_change;
         if !velocity_squared.is_finite() || velocity_squared < 0.0 {
             return Err(GasEnergyError::Invalid(
                 "real-gas nozzle isentrope produced negative or nonfinite kinetic energy",
@@ -138,12 +143,11 @@ impl IsochoricRealGasParcel {
         mut hi: f64,
         tolerance: f64,
         controls: RealGasNozzleStepSolve,
-        h0: f64,
         mut residual: impl FnMut(&IsentropicSample) -> f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(IsentropicSample, usize), GasEnergyError> {
-        let mut low = self.nozzle_isentropic_sample(lo, controls.entropy, h0, cancelled)?;
-        let mut high = self.nozzle_isentropic_sample(hi, controls.entropy, h0, cancelled)?;
+        let mut low = self.nozzle_isentropic_sample(lo, controls.entropy, cancelled)?;
+        let mut high = self.nozzle_isentropic_sample(hi, controls.entropy, cancelled)?;
         let mut fl = residual(&low);
         let fh = residual(&high);
         if !fl.is_finite() || !fh.is_finite() || fl > 0.0 || fh < 0.0 {
@@ -170,7 +174,7 @@ impl IsochoricRealGasParcel {
                 });
             }
             poll(cancelled)?;
-            let sample = self.nozzle_isentropic_sample(mid, controls.entropy, h0, cancelled)?;
+            let sample = self.nozzle_isentropic_sample(mid, controls.entropy, cancelled)?;
             let fm = residual(&sample);
             if !fm.is_finite() {
                 return Err(GasEnergyError::Invalid(
@@ -239,13 +243,13 @@ impl IsochoricRealGasParcel {
             ));
         }
         let low = self.nozzle_isentropic_sample(
-            rho_min, controls.entropy, h0, &mut cancelled,
+            rho_min, controls.entropy, &mut cancelled,
         )?;
         let pressure_root = if back_pressure_pa > 0.0
             && low.state.pressure_pa() <= back_pressure_pa
         {
             Some(self.nozzle_density_root(
-                rho_min, rho0, controls.pressure_tolerance_pa, controls, h0,
+                rho_min, rho0, controls.pressure_tolerance_pa, controls,
                 |sample| sample.state.pressure_pa() - back_pressure_pa,
                 &mut cancelled,
             )?)
@@ -255,7 +259,7 @@ impl IsochoricRealGasParcel {
         let sonic_low = low.state.sound_speed_m_s().powi(2) - low.velocity_squared;
         let sonic_root = if sonic_low <= 0.0 {
             Some(self.nozzle_density_root(
-                rho_min, rho0, controls.sonic_tolerance_m2_s2, controls, h0,
+                rho_min, rho0, controls.sonic_tolerance_m2_s2, controls,
                 |sample| sample.state.sound_speed_m_s().powi(2) - sample.velocity_squared,
                 &mut cancelled,
             )?)

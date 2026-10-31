@@ -1,12 +1,29 @@
 //! G0/G1 conservative-state inversion; continuing-vessel tests live in parcel.
 use super::*;
+use crate::thermochemical_gas::ThermochemicalGasModel;
 use crate::thermochemical_gas::nonideal::PengRobinsonSpeciesBinding;
-use crate::thermochemical_gas::tests::{model, point};
+use crate::thermochemical_gas::tests::{point, species_with_energy_reference, transport};
 use fs_qty::Pressure;
-use fs_thermochem::SpeciesId;
+use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
+use fs_thermochem::{Composition, CompositionBasis, SpeciesId};
 
 fn bound() -> ThermochemicalPengRobinsonModel {
-    ThermochemicalPengRobinsonModel::new(model(vec![0.75, 0.25], 0.001), vec![
+    bound_with_reference(0.0)
+}
+
+pub(super) fn bound_with_reference(reference_j_kg: f64) -> ThermochemicalPengRobinsonModel {
+    let source = ThermochemicalGasModel::new(
+        FrozenIdealGasMixtureModelV1::new(
+            vec![
+                species_with_energy_reference("A", 0.028, 3.5, 0.001, reference_j_kg),
+                species_with_energy_reference("B", 0.004, 2.5, 0.0, reference_j_kg),
+            ],
+            Composition::new(CompositionBasis::MoleFraction, vec![0.75, 0.25]).unwrap(),
+        ).unwrap(),
+        vec![transport("A", 1.7e-5, 0.025), transport("B", 2.0e-5, 0.15)],
+        None,
+    ).unwrap();
+    ThermochemicalPengRobinsonModel::new(source, vec![
         PengRobinsonSpeciesBinding { species: SpeciesId::new("A").unwrap(),
             critical_temperature: Temperature::new(190.564),
             critical_pressure: Pressure::new(4.5992e6), acentric_factor: 0.01142 },
@@ -117,5 +134,34 @@ fn g1_general_energy_increment_keeps_both_density_endpoints_and_heat_direction()
             &context, bad, rho1, target, controls(), || false).is_err());
         assert!(model.reconstruct_density_internal_energy_increment_between_densities(
             &context, rho0, bad, target, controls(), || false).is_err());
+    }
+}
+
+#[test]
+fn original_law_enthalpy_closes_energy_and_flow_work_and_reverses() {
+    let model = bound();
+    let rho = 47.889_003_167_633_395;
+    for ((rho0, t0), (rho1, t1)) in [
+        ((40.0, 300.0), (60.0, 350.0)),
+        ((rho, 300.0), (rho, 360.0)),
+        ((rho, 300.0), (0.5 * rho, 220.692_821_099_187_96)),
+        ((rho, 300.0), (rho * (1.0 + 1e-8), 300.000_001)),
+    ] {
+        let initial = model.evaluate_density_temperature(&point(t0, 5e6), rho0).unwrap();
+        let final_state = model.evaluate_density_temperature(&point(t1, 5e6), rho1).unwrap();
+        let change = model.specific_enthalpy_change_between_densities(rho0, t0, rho1, t1).unwrap();
+        let du = model.specific_internal_energy_change_between_densities(rho0, t0, rho1, t1).unwrap();
+        let flow_work = final_state.pressure_pa() / rho1 - initial.pressure_pa() / rho0;
+        assert!((change - du - flow_work).abs() < 2e-8);
+        // With the unshifted datum, absolute subtraction is independently
+        // resolved well enough to check h = u + p/rho at the material boundary.
+        assert!((change - (final_state.specific_enthalpy_j_kg()
+            - initial.specific_enthalpy_j_kg())).abs() < 2e-8);
+        assert_eq!(model.specific_enthalpy_change_between_densities(rho1, t1, rho0, t0).unwrap(), -change);
+        assert_eq!(model.specific_enthalpy_change_between_densities(rho0, t0, rho0, t0).unwrap(), 0.0);
+        for reference in [-1e24, 1e24] {
+            let shifted = bound_with_reference(reference);
+            assert_eq!(shifted.specific_enthalpy_change_between_densities(rho0, t0, rho1, t1).unwrap(), change);
+        }
     }
 }

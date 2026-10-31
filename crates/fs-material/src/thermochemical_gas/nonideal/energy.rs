@@ -142,6 +142,35 @@ impl ThermochemicalPengRobinsonModel {
             initial.residual_energy_j_kg, final_state.residual_energy_j_kg)
     }
 
+    /// Original-law Delta h [J/kg] between explicit density/temperature states.
+    /// The same two EOS/caloric samples supply Delta u and Delta(p/rho); no
+    /// absolute formation enthalpies are subtracted or extra EOS pass required.
+    /// Pressure and density differences retain small flow-work changes, using
+    /// the exact product identity Delta(p/rho) =
+    /// [Delta p - mean(p/rho) Delta rho] / mean(rho).
+    /// The means are symmetric, including when the endpoints are reversed.
+    pub fn specific_enthalpy_change_between_densities(
+        &self, initial_density_kg_m3: f64, initial_temperature_k: f64,
+        final_density_kg_m3: f64, final_temperature_k: f64,
+    ) -> Result<f64, GasEnergyError> {
+        let initial = self.caloric_at_density(initial_density_kg_m3, initial_temperature_k)?;
+        let final_state = self.caloric_at_density(final_density_kg_m3, final_temperature_k)?;
+        let internal_energy_change = self.caloric_increment(
+            initial_temperature_k, final_temperature_k,
+            initial.residual_energy_j_kg, final_state.residual_energy_j_kg,
+        )?;
+        let mean_density = 0.5 * initial_density_kg_m3 + 0.5 * final_density_kg_m3;
+        let mean_flow_work = 0.5 * (initial.pressure_pa / initial_density_kg_m3)
+            + 0.5 * (final_state.pressure_pa / final_density_kg_m3);
+        let flow_work_change = (final_state.pressure_pa - initial.pressure_pa) / mean_density
+            - mean_flow_work * ((final_density_kg_m3 - initial_density_kg_m3) / mean_density);
+        let change = internal_energy_change + flow_work_change;
+        if !change.is_finite() {
+            return Err(GasEnergyError::Invalid("real-gas enthalpy increment is unrepresentable"));
+        }
+        Ok(change)
+    }
+
     fn caloric_increment(&self, initial: f64, final_t: f64, residual_initial: f64,
         residual_final: f64) -> Result<f64, GasEnergyError> {
         let ideal = self.source().thermodynamics().specific_internal_energy_change(
