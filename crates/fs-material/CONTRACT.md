@@ -37,6 +37,34 @@ tests cover stress-controlled creep, strain-held relaxation and timestep
 convergence, shear, temperature, reversal, objectivity, tangent consistency,
 hydrostatic invariance, work/heat and unchanged inputs on refusal.
 
+`creep::thermal::ZeroExpansionCaloricPoint` couples the source-bound native
+history to the existing uniform enthalpy-transport protocol. Its type explicitly
+selects zero thermal expansion, fixed reference density/volume and constant
+elastic storage; absent expansion data is not a measured zero. One immutable
+card, every fixed source condition, paired pinned Cp/density receipts and a
+bounded wholly solid caloric interval must agree before execution. Every thermal
+proposal starts from the same accepted state and physical clock; final mechanics
+are reevaluated at the returned temperature. Physical creep heat alone enters
+caloric storage. Separate transport, temperature, heat and combined work gates
+precede immutable candidate publication, with bounded iterations and cancellation.
+The adiabatic convenience path uses the existing caloric energy-step owner.
+This reduction provides no phase change, pressure work, expansion coupling,
+spatial-temperature resolution or unconditional thermal stability guarantee.
+
+`creep::source::NortonCreepSource` binds seven explicitly selected claims from
+one immutable material card: E, Poisson ratio, reference stress/rate, stress
+exponent, molar activation energy and reference temperature. It checks complete
+pinned temperature lines, including every original interior knot, and refuses
+unsupported spans or changes in those reference coefficients. The Arrhenius law
+owns kinetic temperature dependence; elastic storage stays fixed. No yield data
+or material-name defaults are used. Each physical step refreshes the original
+receipts at its actual absolute temperature and duration, preserving the
+original source axis schema. Source-bound
+laws implement the same `SmallStrainLaw`, preserving native stresses, tangents
+and history. The source checks and manufactured temperature/material swaps in
+`tests/creep_source.rs` establish implementation behavior, not measured creep
+or service-life qualification.
+
 ## Elastic wave and hydrostatic response
 
 `elastic::acoustic::ElasticAcousticState` derives wave and pressure properties

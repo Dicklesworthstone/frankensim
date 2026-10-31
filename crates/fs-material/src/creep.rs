@@ -16,6 +16,11 @@
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.039.html>.
 //! Parameters are authored model inputs until separately bound to source data.
 
+/// Immutable material-card binding for the same permanent creep law.
+pub mod source;
+/// Source-bound uniform physical-heat feedback with explicit zero expansion.
+pub mod thermal;
+
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, trace};
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
