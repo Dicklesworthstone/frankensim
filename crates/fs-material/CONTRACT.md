@@ -71,6 +71,29 @@ This is prescribed-temperature infinitesimal-strain elasticity with fixed
 section properties; heat evolution, viscoelastic relaxation, interlaminar
 traction, debonding and measured laminate validation remain outside this lane.
 
+### Temperature-resolved elastic laminate sources
+
+`laminate::thermal::source::LaminateThermalSource` binds each original immutable
+card, full reference context, source selection, layer geometry and reference
+density once. Each current layer temperature refreshes the pinned elastic
+claims and integrates the pinned CTE claims from that layer's reference point.
+The returned section contains the current stiffness and must be used in native
+shell assembly. Reference thickness, orientation, density and all mass moments
+remain unchanged; density is not queried at the new temperature.
+
+Isotropic E/nu, E/G and K/G schemas and measured orthotropic plane-12 elasticity
+are supported independently of isotropic or principal-direction expansion.
+The orthotropic plane requires both transverse shear moduli without inventing
+E3 or out-of-plane Poisson ratios. Original reference/current receipts and
+expansion paths remain accessible. An explicit thermal-cell subdivision keeps
+one temperature per sublamina; no average temperature or CTE is substituted.
+This is held-temperature elastic preparation, with no implied mechanical
+history, heat/work feedback, or solved-strain calibration admission.
+
+`tests/laminate_thermal_source.rs` checks independent stiffness/resultant
+formulas, nonlinear CTE integration, fixed mass, heating/cooling, claim pinning,
+directional response and source/domain/cancellation refusals.
+
 ## Ionized-gas DC transport from actual populations
 
 `ionized_gas::IonizedGasConductivity` consumes the exact source-bound

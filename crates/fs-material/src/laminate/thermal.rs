@@ -19,6 +19,9 @@ use crate::state_point::{
 use fs_math::det;
 use std::sync::Arc;
 
+/// Source-bound elastic snapshots at one admitted temperature per layer.
+pub mod source;
+
 /// Refusal of one complete preparation or response; no partial state is returned.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LaminateThermalError {
@@ -235,6 +238,20 @@ impl PreparedLaminateThermal {
     /// Original integrated profiles in original layer order and principal axes.
     pub fn profiles(&self) -> &[LaminaThermalStrain] {
         &self.profiles
+    }
+    /// Cached bottom/top engineering free strains in section axes, for native
+    /// strain admission and recovery without repeating material-frame rotation.
+    pub fn layer_free_strain_in_section(
+        &self,
+        layer: usize,
+    ) -> Result<[[f64; 3]; 2], LaminateThermalError> {
+        self.samples
+            .get(layer)
+            .map(|sample| sample.face_free)
+            .ok_or(LaminateThermalError::LayerIndex {
+                index: layer,
+                count: self.samples.len(),
+            })
     }
     /// Equivalent thermal membrane loading `[Nxx, Nyy, Nxy]` [N/m].
     pub const fn membrane_force_n_m(&self) -> [f64; 3] {
