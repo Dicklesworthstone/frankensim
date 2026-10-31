@@ -6379,7 +6379,44 @@ and before-birth requests. Initial exposure survives endpoint covering; no
 phase transfer precedes birth. Selected birth-datum offsets enter incoming
 and stored energy once. Source-relative defects accumulate before diagnostic
 formation references, with unchanged whole-window mass/energy tolerances and
-one original thermal work allowance.
+one original thermal work allowance. Explicit inventory, temperature and
+saturation step limits discard the complete proposed interval and retry from
+the same accepted state at a strictly shorter representable endpoint. Rejected
+thermal work spends that allowance; rejected events, births and transfers do
+not enter physical accounts. The original anchored time grid resumes when its
+endpoint is reached. Source/domain errors still refuse directly.
+
+### Reciprocal sensible heat through the gas film
+
+`evaporation::gas::advance_surface_with_gas_and_heat` adds a caller-supplied
+heat-transfer coefficient on the same exposed area. Implicit backward-Euler
+heat exchange uses the original liquid enthalpy inverse and a prepared original
+gas caloric branch. Scalar trials evaluate the original gas internal-energy
+increment; a single original-owner reconstruction publishes the heat endpoint.
+The same represented heat enters the liquid and leaves the gas. The gas keeps
+its mass, composition, volume, sources and auxiliary coordinates, while its
+temperature, pressure, transport and acoustic properties are reevaluated.
+
+Implicit sensible heat precedes the existing phase transfer over the same
+interval. `GasFilmHeatSolve` supplies the admitted liquid enthalpy range,
+temperature residual tolerance and iteration bound. Original-state datum
+compatibility, whole-step temperature limits and the same absolute combined
+energy budget apply. A zero heat coefficient delegates to the original phase
+path. Film heat excludes the sensible energy already advected by vapor.
+The composed heat/phase method is first order and requires timestep refinement;
+implicit heat stability does not certify split accuracy.
+
+`timeline::advance_deposition_with_gas_and_heat` uses this same exchange on the
+original event clock and bounded retry driver. Heat controls are admitted even
+for no-op or before-birth requests, and the complete heat branch lies within
+the original caller-admitted liquid range. Signed sensible heat is reported
+separately from vapor-stream energy and included once in both storage accounts.
+The `water_evaporation` example loads the existing N2/H2O species, NASA-9 and
+transport packs and exposes evaporation/condensation modes, both film
+coefficients and timestep refinement. Its CSV retains liquid mass/temperature,
+gas humidity/pressure/temperature, transport and acoustic response together.
+The supplied film coefficients and geometry are explicit example choices,
+not experimental evaporation-rate evidence.
 
 The conserved thermal account is liquid enthalpy plus gas internal energy in
 fixed reference geometry. It is not the total internal energy of a sealed
@@ -6388,9 +6425,11 @@ storage balances, finite backpressure, heat/event coupling, datum shifts,
 cancellation/refusals and timestep refinement. Two source tests retain the
 checked-in NASA-9 water/nitrogen coefficients and original IF97 water chart;
 their transport cards and film coefficient are explicit numerical choices,
-not experimental evaporation-rate evidence. Sensible gas-film conduction,
-moving interfaces, dryout, boiling, gas momentum and spatial two-phase flow
-remain outside this bounded owner.
+not experimental evaporation-rate evidence. Nonlinear sensible-heat regressions
+cover reciprocal storage, zero-heat parity, stiff approach to common
+temperature, complete split refinement and transactional source/cancellation
+refusal. Moving interfaces, dryout, boiling, gas momentum and spatial two-phase
+flow remain outside this bounded owner.
 
 ### Anisotropic permeability with an explicit transverse constraint
 

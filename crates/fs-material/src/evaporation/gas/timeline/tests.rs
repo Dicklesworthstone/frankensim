@@ -144,6 +144,13 @@ fn controls() -> GasEvaporationSolve {
         latent_compatibility_tolerance_j_kg: 1e-5,
     }
 }
+fn film_controls() -> GasFilmHeatSolve {
+    GasFilmHeatSolve {
+        pure_liquid_enthalpy_range_j_kg: [h(250.0), h(350.0)],
+        temperature_tolerance_k: 1e-8,
+        maximum_iterations: 128,
+    }
+}
 fn surface(binding: &GasLiquidBinding) -> GasEvaporationTimelineSurface<'_> {
     GasEvaporationTimelineSurface {
         cell_id: CellId(1),
@@ -410,6 +417,32 @@ fn full_timeline_cancellation_and_work_refusal_publish_neither_owner() {
     assert!(future.cells().is_empty());
     assert_eq!(initial_gas, before);
     assert_eq!(humid_gas, before_humid);
+
+    let mut invalid_heat = film_controls();
+    invalid_heat.maximum_iterations = 0;
+    let mut different_branch = film_controls();
+    different_branch.pure_liquid_enthalpy_range_j_kg[0] += 1.0;
+    for (coefficient, heat_controls) in [
+        (-1.0, film_controls()),
+        (0.0, invalid_heat),
+        (1.0, different_branch),
+    ] {
+        assert!(
+            advance_deposition_with_gas_and_heat(
+                &future,
+                surface(&binding),
+                &initial_gas,
+                &catalog,
+                0.0,
+                heat(0.05),
+                controls(),
+                coefficient,
+                heat_controls,
+                || Ok(()),
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]
@@ -574,4 +607,158 @@ fn rejected_intervals_spend_work_and_late_retry_cancellation_preserves_both_inpu
     assert!(original.cells().is_empty());
     assert_eq!(original.time_s(), 0.0);
     assert_eq!(initial_gas, before_gas);
+}
+
+#[test]
+fn sensible_heat_retries_are_reciprocal_and_stop_at_the_covering_event() {
+    let catalog = catalog(0.0);
+    let initial_gas = ClosedGasParcel::new(
+        gas(&catalog, 1e-3).model().clone(),
+        point(340.0, 100000.0),
+        1e-3,
+    )
+    .unwrap();
+    let binding = GasLiquidBinding {
+        species: id(),
+        liquid_enthalpy_offset_j_kg: 0.0,
+    };
+    let mut covered = boundary(0.0);
+    covered.reservoir = Some(Reservoir {
+        area_m2: 1e-3,
+        conductance_w_k: 0.0,
+        temperature_k: 300.0,
+    });
+    let original = thermal(
+        vec![
+            birth(0.0, 0.0),
+            TimedEvent {
+                time_s: 0.5,
+                event: Event::Boundary(CellId(1), covered),
+            },
+        ],
+        1000,
+    )
+    .advance_to(0.0, heat(1.0), || Ok(()))
+    .unwrap()
+    .0;
+    let mut selected = surface(&binding);
+    selected.mass_transfer_coefficient_m_s = 0.0;
+    let result = advance_deposition_with_gas_and_heat(
+        &original,
+        selected,
+        &initial_gas,
+        &catalog,
+        1.0,
+        heat(1.0),
+        controls(),
+        1000.0,
+        film_controls(),
+        || Ok(()),
+    )
+    .unwrap();
+    let audit = result.audit();
+    assert!(audit.rejected_intervals > 0);
+    assert!(audit.attempted_thermal_substeps >= audit.thermal.substeps + audit.rejected_intervals);
+    assert!(audit.sensible_heat_into_liquid_j > 0.0);
+    assert_eq!(audit.transferred_mass_kg, 0.0);
+    assert_eq!(audit.energy_into_gas_j, 0.0);
+    assert_eq!(audit.thermal.external_heat_j, 0.0);
+    assert_eq!(audit.thermal.events, 1);
+    assert_eq!(result.thermal().exposed_area_m2(CellId(1)), Ok(0.0));
+    assert_eq!(result.thermal().mass_kg(), original.mass_kg());
+    assert_eq!(result.gas().mass_kg(), initial_gas.mass_kg());
+    assert!(result.thermal().temperature_k(CellId(1)).unwrap() > 300.0);
+    assert!(result.gas().state().state().temperature < 340.0);
+    near(
+        result.thermal().energy_j() - original.energy_j(),
+        audit.sensible_heat_into_liquid_j,
+        1e-8,
+    );
+    near(
+        audit.thermal_energy_change_j + audit.gas_energy_change_j,
+        0.0,
+        1e-6,
+    );
+    near(
+        audit.gas_energy_change_j,
+        -audit.sensible_heat_into_liquid_j,
+        1e-6,
+    );
+    assert!(audit.energy_residual_j.abs() <= 1e-6);
+    let last = audit.last_step.as_ref().unwrap();
+    assert_eq!(last.surface_temperature_k[0], last.surface_temperature_k[1]);
+    assert_eq!(last.gas_temperature_k[0], last.gas_temperature_k[1]);
+    assert_eq!(original.exposed_area_m2(CellId(1)), Ok(1e-3));
+}
+
+#[test]
+fn complete_sensible_heat_phase_feedback_refines_and_zero_heat_preserves_old_path() {
+    let catalog = catalog(0.0);
+    let initial_gas = ClosedGasParcel::new(
+        gas(&catalog, 1e-3).model().clone(),
+        point(340.0, 100000.0),
+        1e-3,
+    )
+    .unwrap();
+    let binding = GasLiquidBinding {
+        species: id(),
+        liquid_enthalpy_offset_j_kg: 0.0,
+    };
+    let original = thermal(vec![birth(0.0, 2.0)], 1000)
+        .advance_to(0.0, heat(0.05), || Ok(()))
+        .unwrap()
+        .0;
+    let run = |dt, coefficient| {
+        let result = advance_deposition_with_gas_and_heat(
+            &original,
+            surface(&binding),
+            &initial_gas,
+            &catalog,
+            2.0,
+            heat(dt),
+            controls(),
+            coefficient,
+            film_controls(),
+            || Ok(()),
+        )
+        .unwrap();
+        let audit = result.audit();
+        near(audit.thermal.external_heat_j, 4.0, 1e-12);
+        near(
+            audit.thermal_energy_change_j + audit.gas_energy_change_j,
+            4.0,
+            1e-6,
+        );
+        near(audit.mass_residual_kg, 0.0, 1e-14);
+        assert!(audit.energy_residual_j.abs() <= 1e-6);
+        assert!(audit.transferred_mass_kg > 0.0);
+        if coefficient > 0.0 {
+            assert!(audit.sensible_heat_into_liquid_j > 0.0);
+        }
+        result
+    };
+    let reference = run(0.0125, 100.0).gas().state().state().temperature;
+    let a = (run(0.2, 100.0).gas().state().state().temperature - reference).abs();
+    let b = (run(0.1, 100.0).gas().state().state().temperature - reference).abs();
+    let c = (run(0.05, 100.0).gas().state().state().temperature - reference).abs();
+    assert!(a > 1e-5);
+    assert!(b < 0.75 * a, "{a}, {b}");
+    assert!(c < 0.75 * b, "{b}, {c}");
+
+    let old = advance_deposition_with_gas(
+        &original,
+        surface(&binding),
+        &initial_gas,
+        &catalog,
+        2.0,
+        heat(0.05),
+        controls(),
+        || Ok(()),
+    )
+    .unwrap();
+    let disabled = run(0.05, 0.0);
+    assert_eq!(disabled.gas(), old.gas());
+    assert_eq!(disabled.thermal().cells(), old.thermal().cells());
+    assert_eq!(disabled.audit(), old.audit());
+    assert_eq!(disabled.audit().sensible_heat_into_liquid_j, 0.0);
 }

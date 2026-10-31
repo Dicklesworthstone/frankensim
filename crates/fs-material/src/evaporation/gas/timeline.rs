@@ -8,8 +8,8 @@
 //! state; rejected attempts spend work but contribute no physical exchange.
 
 use super::{
-    GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasLiquidBinding,
-    advance_surface_with_gas,
+    GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasFilmHeatSolve,
+    GasLiquidBinding, advance_surface_with_gas, advance_surface_with_gas_and_heat,
 };
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::parcel::ClosedGasParcel};
 use fs_thermal::enthalpy::{
@@ -59,7 +59,10 @@ pub struct GasEvaporationTimelineAudit {
     pub thermal: EnergyAudit,
     pub transferred_mass_kg: f64,
     pub latent_energy_j: f64,
+    /// Vapor-carried energy only, including its original thermochemical datum.
     pub energy_into_gas_j: f64,
+    /// Reciprocal sensible film heat, positive from gas into liquid [J].
+    pub sensible_heat_into_liquid_j: f64,
     /// All original thermal cells, including births and the liquid datum offset.
     pub thermal_energy_change_j: f64,
     pub gas_energy_change_j: f64,
@@ -213,9 +216,78 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
     target_s: f64,
     thermal_config: StepConfig,
     phase_config: GasEvaporationSolve,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasEvaporationTimelineCandidate<'thermal, 'catalog>, GasEvaporationTimelineError> {
+    advance_deposition(
+        thermal,
+        surface,
+        gas,
+        catalog,
+        target_s,
+        thermal_config,
+        phase_config,
+        None,
+        checkpoint,
+    )
+}
+
+/// Original thermal network, reciprocal sensible film heat, then signed phase
+/// exchange, all on the same event-clipped physical clock.
+///
+/// The sensible coefficient excludes heat already carried by the vapor stream.
+/// The heat solve must admit the same original liquid branch as `surface`.
+/// Heat and phase share each interval's original gas energy allowance; the
+/// complete timeline retains one whole-window energy and attempted-work budget.
+/// Rejected attempts discard sensible heat together with conduction and phase.
+/// Refine the complete timestep to assess the first-order splitting error.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_deposition_with_gas_and_heat<'thermal, 'catalog>(
+    thermal: &DepositionSimulation<'thermal>,
+    surface: GasEvaporationTimelineSurface<'_>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasEvaporationSolve,
+    heat_transfer_coefficient_w_m2_k: f64,
+    heat_config: GasFilmHeatSolve,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasEvaporationTimelineCandidate<'thermal, 'catalog>, GasEvaporationTimelineError> {
+    advance_deposition(
+        thermal,
+        surface,
+        gas,
+        catalog,
+        target_s,
+        thermal_config,
+        phase_config,
+        Some((heat_transfer_coefficient_w_m2_k, heat_config)),
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_deposition<'thermal, 'catalog>(
+    thermal: &DepositionSimulation<'thermal>,
+    surface: GasEvaporationTimelineSurface<'_>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasEvaporationSolve,
+    film_heat: Option<(f64, GasFilmHeatSolve)>,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasEvaporationTimelineCandidate<'thermal, 'catalog>, GasEvaporationTimelineError> {
     checkpoint()?;
+    if let Some((coefficient, heat_config)) = film_heat {
+        super::heat::validate_heat_controls(coefficient, heat_config)?;
+        if heat_config.pure_liquid_enthalpy_range_j_kg != surface.pure_liquid_enthalpy_range_j_kg {
+            return Err(DepositionError::InvalidInput(
+                "sensible heat and phase must share the original liquid branch",
+            )
+            .into());
+        }
+    }
     let id = surface.cell_id;
     let [lo, hi] = surface.pure_liquid_enthalpy_range_j_kg;
     if !target_s.is_finite()
@@ -283,6 +355,7 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
         transferred_mass_kg: 0.0,
         latent_energy_j: 0.0,
         energy_into_gas_j: 0.0,
+        sensible_heat_into_liquid_j: 0.0,
         thermal_energy_change_j: 0.0,
         gas_energy_change_j: 0.0,
         incoming_energy_j: 0.0,
@@ -342,39 +415,67 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
                 let expected = heated.cells()[&id].clone();
                 let chart_error = std::cell::RefCell::new(None);
                 let mut checkpoint_error = None;
-                let proposal = advance_surface_with_gas(
-                    surface.law,
-                    surface.binding,
-                    LiquidSurfaceState {
-                        mass_kg: expected.mass_kg,
-                        specific_enthalpy_j_kg: expected.specific_h_j_kg,
-                        area_m2: area,
-                    },
-                    &next_gas,
-                    catalog,
-                    |h| {
-                        let value = if (lo..=hi).contains(&h) {
-                            heated.temperature_at_specific_enthalpy_k(id, h)
-                        } else {
-                            Err(DepositionError::MaterialDomain)
-                        };
-                        value.map_err(|error| {
-                            *chart_error.borrow_mut() = Some(error);
-                            EvaporationError::Invalid("original pure-liquid caloric branch refused")
-                        })
-                    },
-                    surface.mass_transfer_coefficient_m_s,
-                    stop - start,
-                    phase_config,
-                    || {
-                        if let Err(error) = checkpoint() {
-                            checkpoint_error = Some(error);
-                            true
-                        } else {
-                            false
-                        }
-                    },
-                );
+                let liquid = LiquidSurfaceState {
+                    mass_kg: expected.mass_kg,
+                    specific_enthalpy_j_kg: expected.specific_h_j_kg,
+                    area_m2: area,
+                };
+                let temperature = |h| {
+                    let value = if (lo..=hi).contains(&h) {
+                        heated.temperature_at_specific_enthalpy_k(id, h)
+                    } else {
+                        Err(DepositionError::MaterialDomain)
+                    };
+                    value.map_err(|error| {
+                        *chart_error.borrow_mut() = Some(error);
+                        EvaporationError::Invalid("original pure-liquid caloric branch refused")
+                    })
+                };
+                let cancelled = || {
+                    if let Err(error) = checkpoint() {
+                        checkpoint_error = Some(error);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                let proposal = if let Some((coefficient, heat_config)) = film_heat {
+                    advance_surface_with_gas_and_heat(
+                        surface.law,
+                        surface.binding,
+                        liquid,
+                        &next_gas,
+                        catalog,
+                        temperature,
+                        surface.mass_transfer_coefficient_m_s,
+                        coefficient,
+                        stop - start,
+                        phase_config,
+                        heat_config,
+                        cancelled,
+                    )
+                    .map(|candidate| {
+                        let (liquid, gas, catalog, step, heat) = candidate.into_parts();
+                        (liquid, gas, catalog, step, heat.heat_into_liquid_j)
+                    })
+                } else {
+                    advance_surface_with_gas(
+                        surface.law,
+                        surface.binding,
+                        liquid,
+                        &next_gas,
+                        catalog,
+                        temperature,
+                        surface.mass_transfer_coefficient_m_s,
+                        stop - start,
+                        phase_config,
+                        cancelled,
+                    )
+                    .map(|candidate| {
+                        let (liquid, gas, catalog, step) = candidate.into_parts();
+                        (liquid, gas, catalog, step, 0.0)
+                    })
+                };
                 if let Some(error) = checkpoint_error {
                     return Err(error.into());
                 }
@@ -411,7 +512,7 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
                         return Err(error.into());
                     }
                 };
-                let (liquid, evolved_gas, _, step) = candidate.into_parts();
+                let (liquid, evolved_gas, _, step, sensible_heat) = candidate;
                 heated.apply_liquid_exchanges(
                     &[LiquidCellExchange {
                         expected,
@@ -425,6 +526,7 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
                 add(&mut audit.transferred_mass_kg, step.transferred_mass_kg)?;
                 add(&mut audit.latent_energy_j, step.latent_energy_j)?;
                 add(&mut audit.energy_into_gas_j, step.energy_into_gas_j)?;
+                add(&mut audit.sensible_heat_into_liquid_j, sensible_heat)?;
                 add(
                     &mut audit.thermal_energy_change_j,
                     step.liquid_enthalpy_change_j,
