@@ -204,6 +204,36 @@ and five multi-pocket tests execute against the same shared implementation.
 The simultaneous-collapse fixture also preserves atomic refusal when the
 subsequent dispersive collision cavitates at an undeclared liquid station.
 
+### Trapped noncondensable gas on the same pocket trajectory
+
+`CavitatingDuctPockets::new_with_trapped_gas` attaches an original
+`BubbleGas` to a declared pocket through `pockets::gas::TrappedGasPocket`.
+Positive fixed gas inventory contributes p_g(V) to the saturation pressure.
+Differentiating p_abs=p_sat+p_g(V) and V'=Q changes the joint constraint to
+`(B_A^T B_A + diag(-dp_g/dV)) Q_A = -B_A^T L x`.
+The existing liquid generator, ports, adaptive trajectory and simultaneous
+vapor-contact solve remain shared. A bounded native LU workspace is allocated
+once per interval and reused by gas-bearing RHS solves; the pure-vapor
+constant-gain path is unchanged.
+
+Gas-pocket mechanical storage adds -integral(V0..V) p_g dV to the existing
+vapor displacement potential. The original duct pressure-work account and
+this combined storage close before publication. Positive gas never silently
+closes: its authored positive minimum volume is an atomic refusal boundary.
+Exactly zero authored inventory reproduces the pure-vapor states and reports.
+Nonlinear pressure constraints are checked at accepted endpoints; no liquid
+pressure or pocket volume is projected. Original strain, interface-Mach and
+local/total pocket-size admissions remain in force.
+
+Four new coupling regressions cover an independently derived distributed
+liquid-column/gas-cushion resonance and complete-cycle work, exact zero-gas
+reduction, simultaneous gas support and neighboring vapor collapse, and atomic
+cancellation/minimum-volume/initial-pressure refusals. All eleven existing
+native duct/pocket regressions also pass. These short uniform-pressure pockets
+retain fixed liquid geometry and negligible vapor mass. Gas transport,
+dissolution, finite thermal exchange and finite-rate phase kinetics require
+their own physical owners; the polytropic work is not labelled latent heat.
+
 ## Shared material cavitation, films and bubble acoustic history
 
 `cavitation::MaterialCavitatingFilm` retains the original `CavitationProperties`

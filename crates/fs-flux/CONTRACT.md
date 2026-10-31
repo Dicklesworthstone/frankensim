@@ -1677,6 +1677,19 @@ the independent collapse oracle uses
 These checks establish mathematical-model behavior, not experimental accuracy
 or a resolved multiphase CFD/film-cavitation result.
 
+## Fixed gas inventory in volume coordinates
+
+The original `BubbleGas` also exposes `from_reference_volume_m3`,
+`reference_volume_m3` and `volume_response`. The same polytropic inventory
+supplies pressure, analytic positive compression stiffness -dp_g/dV, and the
+mechanical work potential -integral(V0..V) p_g dV. The kappa=1 limit is
+logarithmic; exp_m1 preserves the near-isothermal limit. An authored zero
+inventory gives exactly zero response, while unrepresentable positive
+pressure, stiffness or nonzero work refuses. Four native regressions compare
+radius and volume coordinates, independent pressure/work derivatives, the
+isothermal limit and representability. This is barotropic mechanical work,
+not a new gas caloric model, phase-change energy or thermal closure.
+
 ## Anisotropic Stokes–Brinkman permeability (`continuum`)
 
 `FluxSystem::assemble_brinkman_mixed` adds `nu K^-1 u` to the existing

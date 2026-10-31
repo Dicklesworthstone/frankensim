@@ -4,12 +4,15 @@
 //! numerical pressure is the original DG pressure trace, and its volume rate
 //! is Q = q_right - q_left, the original side-port flow jump. It approximates
 //! a short pure-vapor separation between liquid columns, with no added liquid
-//! inertia or finite-length moving mesh. Surface tension, gas and phase heat
-//! remain outside this isothermal, negligible-vapor-mass model.
+//! inertia or finite-length moving mesh. The optional gas inventory adds its
+//! original nonlinear volume response; surface tension and phase heat remain
+//! outside this negligible-vapor-mass model.
 //!
 //! All active pressures are constrained TOGETHER by the Gram system
-//! (B_A^T B_A) Q_A = -B_A^T L x. One native dense trajectory locates every
-//! rupture/collapse. Overlapping event brackets are sampled at one common
+//! (B_A^T B_A + diag(K_g)) Q_A = -B_A^T L x, where K_g = -dp_g/dV.
+//! Pure vapor has K_g=0 and retains its cached constant solve. One native
+//! dense trajectory locates every rupture/collapse. Overlapping event
+//! brackets are sampled at one common
 //! time and resolved by the coupled contact complementarity, not port order.
 //! No event resets pressure, liquid coordinates or integrated cavity volume.
 
@@ -22,6 +25,10 @@ use fs_time::adaptive::events::multiple::{
 use fs_time::adaptive::events::{EventDirection, InitialEvent};
 use fs_time::adaptive::{AdaptiveState, AdaptiveStatus, PiController};
 use std::cell::RefCell;
+
+/// Fixed noncondensable gas on the SAME coupled pocket trajectory.
+pub mod gas;
+use gas::{GasFlowWorkspace, TrappedGasPocket};
 
 /// Bounds the coupled Gram solve and the 2^k contact-branch search.
 pub const MAX_DUCT_POCKETS: usize = 8;
@@ -63,6 +70,8 @@ pub struct DuctPocketStep {
 pub struct DuctPocketsStep {
     pub duct: DgStepOutput,
     pub pockets: Vec<DuctPocketStep>,
+    /// Vapor displacement potential plus original gas barotropic work potential.
+    /// This is not a gas thermal or latent-energy report.
     pub cavity_potential_j: f64,
     pub total_stored_energy_j: f64,
     pub energy_balance_residual_j: f64,
@@ -89,6 +98,7 @@ struct Site {
     upstream_area_m2: f64,
     downstream_area_m2: f64,
     upstream_flow: ObservationRow,
+    gas: Option<TrappedGasPocket>,
 }
 struct ConstraintGain {
     active: u16,
@@ -111,6 +121,7 @@ pub struct CavitatingDuctPockets<F: CavitationProperties + FluidAcoustics + Clon
     material: CavitationState,
     pub(super) limits: DuctCavityLimits,
     sites: Vec<Site>,
+    has_gas: bool,
     gram: Vec<f64>,
     column_norms: Vec<f64>,
     pressure_rates: Vec<f64>,
@@ -146,6 +157,20 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         specifications: &[DuctPocket],
         limits: DuctCavityLimits,
     ) -> Result<Self, DuctCavityError> {
+        Self::new_with_trapped_gas(duct, initial, time_s, specifications, &[], limits)
+    }
+
+    /// Bind optional fixed gas inventories without changing the original liquid
+    /// owner. Exactly zero gas inventory retains the pure-vapor event path.
+    /// Positive gas never closes and must stay above its declared minimum V.
+    pub fn new_with_trapped_gas(
+        duct: DgDuct<DgFluidMaterial<F>>,
+        initial: DgState,
+        time_s: f64,
+        specifications: &[DuctPocket],
+        gas_pockets: &[TrappedGasPocket],
+        limits: DuctCavityLimits,
+    ) -> Result<Self, DuctCavityError> {
         let material = duct.material().cavitation_state()?;
         if material.acoustic_state()? != duct.acoustic_material() {
             return Err(DuctCavityError::InvalidInput(
@@ -179,6 +204,21 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 "vapor mass is not negligible relative to liquid",
             ));
         }
+        if gas_pockets.len() > count {
+            return Err(DuctCavityError::InvalidInput(
+                "too many trapped-gas specifications",
+            ));
+        }
+        for (i, gas) in gas_pockets.iter().enumerate() {
+            if !positive(gas.minimum_volume_m3)
+                || !view.ports().iter().any(|(id, _)| *id == gas.port)
+                || gas_pockets[..i].iter().any(|other| other.port == gas.port)
+            {
+                return Err(DuctCavityError::InvalidInput(
+                    "unknown/duplicate gas port or invalid minimum gas volume",
+                ));
+            }
+        }
         let mut sites = Vec::with_capacity(count);
         let n_local = duct.mesh().order + 1;
         for (id, _) in view.ports() {
@@ -194,6 +234,16 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             {
                 return Err(DuctCavityError::InvalidInput(
                     "duplicate pocket or invalid local cavity volume",
+                ));
+            }
+            let gas = gas_pockets.iter().find(|gas| gas.port == *id).copied();
+            if gas.is_some_and(|g| {
+                g.has_inventory()
+                    && (specification.initial_volume_m3 < g.minimum_volume_m3
+                        || g.minimum_volume_m3 >= specification.maximum_volume_m3)
+            }) {
+                return Err(DuctCavityError::InvalidInput(
+                    "positive gas inventory requires an admitted nonzero initial volume",
                 ));
             }
             let (station_m, pressure_node, upstream_node, upstream_area_m2, downstream_area_m2) =
@@ -226,6 +276,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 upstream_area_m2,
                 downstream_area_m2,
                 upstream_flow: ObservationRow(Vec::new()),
+                gas,
             });
         }
         let total_volume: f64 = sites
@@ -315,11 +366,15 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             })
             .collect();
         let first = pocket_states[0];
+        let has_gas = sites
+            .iter()
+            .any(|s| s.gas.is_some_and(TrappedGasPocket::has_inventory));
         let mut model = Self {
             duct,
             material,
             limits,
             sites,
+            has_gas,
             gram,
             column_norms,
             pressure_rates,
@@ -339,10 +394,21 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         let volumes: Vec<_> = model.state.pockets.iter().map(|p| p.volume_m3).collect();
         let roundoff = 128.0 * f64::EPSILON * limits.reference_pressure_pa.max(1.0);
         let gain = model.resolve_contacts(initial_x, &volumes, 0.0, roundoff, &mut || false)?;
-        let mut flows = [0.0; MAX_DUCT_POCKETS];
-        for (i, flow) in flows[..count].iter_mut().enumerate() {
-            *flow = gain.flow(i, initial_x);
-        }
+        let flows = if model.has_gas {
+            model.gas_flows(
+                gain.active,
+                initial_x,
+                1.0,
+                &volumes,
+                &mut GasFlowWorkspace::new(count)?,
+            )?
+        } else {
+            let mut flows = [0.0; MAX_DUCT_POCKETS];
+            for (i, flow) in flows[..count].iter_mut().enumerate() {
+                *flow = gain.flow(i, initial_x);
+            }
+            flows
+        };
         model.check_field(initial_x, 1.0, &flows[..count], roundoff)?;
         for (i, pocket) in model.state.pockets.iter_mut().enumerate() {
             pocket.mode = mode(gain.active, i);
@@ -367,7 +433,11 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         self.limits
     }
 
-    fn factor(&self, active_mask: u16) -> Result<(Vec<usize>, Option<Cholesky>), DuctCavityError> {
+    fn factor(
+        &self,
+        active_mask: u16,
+        stiffness: &[f64],
+    ) -> Result<(Vec<usize>, Option<Cholesky>), DuctCavityError> {
         let count = self.sites.len();
         let indices: Vec<_> = (0..count).filter(|&i| active(active_mask, i)).collect();
         if indices.is_empty() {
@@ -380,6 +450,8 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                     / self.column_norms[row]
                     / self.column_norms[column];
             }
+            normalized[i * indices.len() + i] +=
+                stiffness[row] / self.column_norms[row] / self.column_norms[row];
         }
         let factor = cholesky(&normalized, indices.len()).map_err(|_| {
             DuctCavityError::ActiveConstraints(
@@ -390,9 +462,17 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
     }
 
     fn gain(&self, active_mask: u16) -> Result<ConstraintGain, DuctCavityError> {
+        if self.has_gas {
+            // Its volume-dependent coefficients are evaluated in the reused LU
+            // workspace; pure-vapor models retain their cached constant gain.
+            return Ok(ConstraintGain {
+                active: active_mask,
+                coefficients: Vec::new(),
+            });
+        }
         let n = self.duct.total_dofs();
         let count = self.sites.len();
-        let (indices, factor) = self.factor(active_mask)?;
+        let (indices, factor) = self.factor(active_mask, &[0.0; MAX_DUCT_POCKETS])?;
         let mut coefficients = vec![0.0; count * n];
         if let Some(factor) = factor {
             let mut rhs = vec![0.0; indices.len()];
@@ -435,9 +515,11 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         let mut mandatory = 0u16;
         let mut contacts = Vec::new();
         let mut rates = [0.0; MAX_DUCT_POCKETS];
+        let stiffness = self.gas_stiffness(volumes)?;
         for i in 0..count {
             let gap = self.limits.reference_pressure_pa + dot(&view.ports()[i].1, x)
-                - self.material.saturation_pressure_pa();
+                - self.material.saturation_pressure_pa()
+                - self.gas_response(i, volumes[i])?.pressure_pa;
             if !volumes[i].is_finite()
                 || volumes[i] < -volume_tolerance
                 || gap < -pressure_tolerance
@@ -446,10 +528,10 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                     "joint pressure/volume contact is outside root tolerance",
                 ));
             }
-            if volumes[i] > volume_tolerance {
+            if self.has_inventory(i) || volumes[i] > volume_tolerance {
                 if gap.abs() > pressure_tolerance {
                     return Err(DuctCavityError::InvalidInput(
-                        "nonempty pocket does not have vapor pressure",
+                        "nonempty pocket pressure disagrees with original vapor/gas pressure",
                     ));
                 }
                 mandatory |= 1 << i;
@@ -469,7 +551,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                     active_mask |= 1 << i;
                 }
             }
-            let (indices, factor) = self.factor(active_mask)?;
+            let (indices, factor) = self.factor(active_mask, &stiffness)?;
             let mut flows = [0.0; MAX_DUCT_POCKETS];
             if let Some(factor) = factor {
                 let mut rhs: Vec<_> = indices
@@ -490,7 +572,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 .map(|i| {
                     flows[i]
                         .abs()
-                        .max((rates[i] / self.gram[i * count + i]).abs())
+                        .max((rates[i] / (self.gram[i * count + i] + stiffness[i])).abs())
                 })
                 .fold(1e-300, f64::max);
             let flow_roundoff = 512.0 * f64::EPSILON * scale;
@@ -642,6 +724,11 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         let mut integration =
             AdaptiveState::new(self.state.time_s, &y, numerics.maximum_step_s.min(dt));
         let mut gain = self.gain(mask(&self.state.pockets))?;
+        let flow_workspace = if self.has_gas {
+            Some(RefCell::new(GasFlowWorkspace::new(count)?))
+        } else {
+            None
+        };
         let mut ruptures = [0usize; MAX_DUCT_POCKETS];
         let mut collapses = [0usize; MAX_DUCT_POCKETS];
         let mut last_ruptures = [None; MAX_DUCT_POCKETS];
@@ -651,6 +738,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         let specs: Vec<_> = self
             .sites
             .iter()
+            .filter(|s| !s.gas.is_some_and(TrappedGasPocket::has_inventory))
             .map(|s| EventSpec {
                 id: u64::from(s.specification.port.0),
                 direction: EventDirection::Falling,
@@ -681,10 +769,34 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             let failure = RefCell::new(None);
             let rhs = |_: f64, u: &[f64], out: &mut [f64]| {
                 multiply(view.generator_per_s(), &u[..n], &mut out[..n]);
-                let mut flows = [0.0; MAX_DUCT_POCKETS];
-                for (i, flow) in flows[..count].iter_mut().enumerate() {
-                    *flow = coordinate_scale * gain.flow(i, &u[..n]);
+                let mut volumes = [0.0; MAX_DUCT_POCKETS];
+                for (i, volume) in volumes[..count].iter_mut().enumerate() {
+                    *volume = u[n + i] * self.sites[i].specification.maximum_volume_m3;
                 }
+                let flows = if let Some(workspace) = &flow_workspace {
+                    match self.gas_flows(
+                        gain.active,
+                        &u[..n],
+                        coordinate_scale,
+                        &volumes[..count],
+                        &mut workspace.borrow_mut(),
+                    ) {
+                        Ok(flows) => flows,
+                        Err(error) => {
+                            if failure.borrow().is_none() {
+                                *failure.borrow_mut() = Some(error);
+                            }
+                            out.fill(f64::NAN);
+                            return;
+                        }
+                    }
+                } else {
+                    let mut flows = [0.0; MAX_DUCT_POCKETS];
+                    for (i, flow) in flows[..count].iter_mut().enumerate() {
+                        *flow = coordinate_scale * gain.flow(i, &u[..n]);
+                    }
+                    flows
+                };
                 let domain = self
                     .check_field(
                         &u[..n],
@@ -704,7 +816,11 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                             }
                             let pressure = self.limits.reference_pressure_pa
                                 + coordinate_scale * dot(&view.ports()[i].1, &u[..n]);
+                            // Nonlinear RK stage points need not lie exactly
+                            // on the gas manifold. Its residual is checked on
+                            // accepted endpoints/events, never projected.
                             if active(gain.active, i)
+                                && !self.has_inventory(i)
                                 && (pressure - vapor).abs()
                                     > numerics.absolute_pressure_tolerance_pa
                             {
@@ -739,9 +855,10 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 out[n + 3 * count] = quadratic_loss(view.generator_per_s(), &u[..n]);
             };
             let guard = |id: u64, _: f64, u: &[f64]| {
-                let i = specs
+                let i = self
+                    .sites
                     .iter()
-                    .position(|s| s.id == id)
+                    .position(|s| u64::from(s.specification.port.0) == id)
                     .expect("native event ID");
                 if active(gain.active, i) {
                     u[n + i]
@@ -782,9 +899,10 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                         ));
                     }
                     for contender in &hit.contenders {
-                        let i = specs
+                        let i = self
+                            .sites
                             .iter()
-                            .position(|s| s.id == contender.id)
+                            .position(|s| u64::from(s.specification.port.0) == contender.id)
                             .expect("native event contender");
                         let residual = if active(gain.active, i) {
                             integration.u[n + i] * self.sites[i].specification.maximum_volume_m3
@@ -850,6 +968,25 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             .iter()
             .map(|x| x * coordinate_scale)
             .collect();
+        let mut end_volumes = [0.0; MAX_DUCT_POCKETS];
+        for (i, volume) in end_volumes[..count].iter_mut().enumerate() {
+            *volume = integration.u[n + i] * self.sites[i].specification.maximum_volume_m3;
+        }
+        let end_flows = if let Some(workspace) = &flow_workspace {
+            self.gas_flows(
+                gain.active,
+                &endpoint,
+                1.0,
+                &end_volumes[..count],
+                &mut workspace.borrow_mut(),
+            )?
+        } else {
+            let mut flows = [0.0; MAX_DUCT_POCKETS];
+            for (i, flow) in flows[..count].iter_mut().enumerate() {
+                *flow = gain.flow(i, &endpoint);
+            }
+            flows
+        };
         let mut receipts = Vec::with_capacity(count);
         let mut pockets = Vec::with_capacity(count);
         let mut states = Vec::with_capacity(count);
@@ -858,10 +995,11 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         for (i, site) in self.sites.iter().enumerate() {
             let volume = integration.u[n + i] * site.specification.maximum_volume_m3;
             let pressure = self.limits.reference_pressure_pa + dot(&view.ports()[i].1, &endpoint);
+            let target_pressure = vapor + self.gas_response(i, volume)?.pressure_pa;
             if volume < -numerics.absolute_volume_tolerance_m3
                 || volume > site.specification.maximum_volume_m3
                 || (active(gain.active, i)
-                    && (pressure - vapor).abs() > numerics.absolute_pressure_tolerance_pa)
+                    && (pressure - target_pressure).abs() > numerics.absolute_pressure_tolerance_pa)
                 || (!active(gain.active, i)
                     && (volume.abs() > numerics.absolute_volume_tolerance_m3
                         || pressure < vapor - numerics.absolute_pressure_tolerance_pa))
@@ -881,7 +1019,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 volume_m3: volume,
                 displaced_liquid_volume_m3: volume - self.state.pockets[i].volume_m3,
                 end_absolute_pressure_pa: pressure,
-                end_inflow_m3_s: gain.flow(i, &endpoint),
+                end_inflow_m3_s: end_flows[i],
                 rupture_events: ruptures[i],
                 collapse_events: collapses[i],
                 last_rupture_time_s: last_ruptures[i],
@@ -892,8 +1030,8 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 volume_m3: volume,
                 mode: mode(gain.active, i),
             });
-            potential += (self.limits.reference_pressure_pa - vapor) * volume;
-            before += (self.limits.reference_pressure_pa - vapor) * self.state.pockets[i].volume_m3;
+            potential += self.pocket_potential(i, volume)?;
+            before += self.pocket_potential(i, self.state.pockets[i].volume_m3)?;
         }
         let loss = integration.u[n + 3 * count] * energy_scale;
         let (candidate, duct_report) = view.candidate_from_trajectory(

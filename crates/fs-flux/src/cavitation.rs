@@ -22,6 +22,9 @@ use core::f64::consts::PI;
 use core::fmt;
 use fs_material::cavitation::CavitationState;
 
+/// Original polytropic gas inventory expressed in volume coordinates.
+#[path = "cavitation/gas_volume.rs"]
+pub mod gas_volume;
 #[path = "cavitation/keller_miksis.rs"]
 mod keller_miksis;
 #[path = "cavitation/population.rs"]
