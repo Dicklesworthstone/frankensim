@@ -733,6 +733,41 @@ outside this law. The existing nine pressure-law tests run through the fs-flux
 compatibility surface, while fs-couple tests exercise reciprocal mechanical
 reaction, joint dissipation and atomic retry in its existing time integrator.
 
+## Mass-conserving cavitating liquid films
+
+`resistive_film::cavitation` extends the same `ResistiveFilm` cell/channel/gap
+geometry with retained liquid content and absolute pressure. Its Elrod--Adams
+complementarity is `p >= p_c`, `0 <= theta <= 1`,
+`(p-p_c)*(1-theta)=0`; liquid mass is `rho*area*gap*theta`. A bounded implicit
+finite-volume step uses the original Poiseuille conductances and signed,
+upwinded Couette entrainment. Both sides of each internal face use exactly the
+same flux. Reservoir pressure and incoming liquid content are explicit; partial
+reservoir filling is admissible only at cavitation pressure. No material name,
+pressure floor, artificial leakage or replacement gap supplies missing physics.
+
+Rupture, starvation and reformation change retained liquid content, preserving
+mass under wall motion and refill. Each candidate reports cell and global liquid
+mass residuals, signed boundary mass, absolute pressures, face fluxes and the
+original work-conjugate endpoint normal force. A deterministic active-set solve
+is capped at the caller's budget; local dense elimination is required because
+upwind transport is nonsymmetric. Cancellation is polled at assembly, active-set
+and elimination boundaries. Invalid state, singular saturated trapped pockets,
+pressure/gap-domain violations, exhausted budget or failed mass closure leave
+accepted state unchanged. Geometry remains capped at 64 cells, 256 channels and
+256 ports. An opaque shared owner token prevents another liquid/geometry model
+from reinterpreting retained content as a different mass; immutable model clones
+can continue the same state. Iterations allocate no memory.
+
+This is an isothermal incompressible-liquid, negligible-void-mass lubrication
+model. Content is not vapor mass; missing liquid volume is not a latent-heat
+receipt. Endpoint forces do not certify time-integrated coupled work. Finite
+vapor density, bubble inertia, dissolved gas, EHL, thermal evolution and sealed
+full-liquid compression require additional owners. Focused G0/G1/G3/G5 tests
+cover the original full-film pressure limit, analytical rupture/refill, sealed
+liquid conservation, bidirectional starved Couette transport, positivity,
+transactional refusals and deterministic replay. No experimental accuracy or
+cross-ISA execution claim follows from these tests.
+
 ## Error model
 
 `TriboError` is a total refusal surface for missing identity, non-dry media,

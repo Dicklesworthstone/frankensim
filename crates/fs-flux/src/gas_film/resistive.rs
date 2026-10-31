@@ -9,6 +9,7 @@ pub use fs_tribo::resistive_film::{
     FilmCell, FilmChannel, FilmError, FilmLimits, FilmReport, GapPort, MAX_CELLS, MAX_PORTS,
     ResistiveFilm,
 };
+pub use fs_tribo::resistive_film::cavitation;
 
 #[cfg(test)]
 #[path = "resistive/tests.rs"]

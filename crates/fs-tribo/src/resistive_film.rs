@@ -15,6 +15,8 @@
 //! topology and fluid acoustic radiation are not part of this image.
 /// Compressible mass storage and transport on the same geometric pressure graph.
 pub mod isothermal;
+/// Mass-conserving liquid-film rupture, starvation and reformation on this graph.
+pub mod cavitation;
 
 use core::fmt;
 
