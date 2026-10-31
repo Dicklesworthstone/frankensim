@@ -4,13 +4,14 @@
 //! state and both current temperatures. This adapter owns no energy store,
 //! flow field, gas law or timestepper.
 
-use super::super::{NaturalConvectionGeometry, evaluate_natural_from_material};
+use super::super::{NaturalConvectionGeometry, evaluate_vertical_plate_from_thermal_material};
 use super::{
     ConductanceSample, EquilibriumPhaseState, FiniteGasConvectionSample, GasConvectionEvaluation,
-    GasPiston, HeatExchangeSolve, Length, MaterialConvectionError, PistonInput, PistonSolve,
-    ResolvedThermochemicalGasState, ThermalPistonCandidate, ThermalPistonError,
-    UniformEnthalpyStepInput, invalid,
+    GasPiston, HeatExchangeSolve, Length, MaterialConvectionError, PistonGas, PistonGasState,
+    PistonInput, PistonSolve, ThermalPistonCandidate, ThermalPistonError, UniformEnthalpyStepInput,
+    invalid,
 };
+use fs_material::fluid_transport::ThermalFluidTransport;
 use fs_qty::Temperature;
 
 /// Exposed isothermal natural-convection surface with declared geometry/gravity.
@@ -60,10 +61,11 @@ impl NaturalGasSurface {
     /// bound to that same gas evaluation. Heating and cooling use the vertical
     /// plate's admitted symmetry; the signed heat remains with the outer owner.
     ///
-    /// This concrete gas owns `IdealGasEosEvaluationV1`. Its fixed-composition
-    /// constant-pressure derivative is `beta = -(1/rho) d(rho)/dT = 1/T`, using
-    /// the EOS's actual query temperature. This identity is not imposed on an
-    /// arbitrary FluidTransport implementation or inferred from a gas name.
+    /// The source-owned thermal view supplies the local isobaric expansion
+    /// `beta = -(1/rho) d(rho)/dT` at that same state. Ideal and real gases retain
+    /// their own EOS derivative alongside their density and Cp. This local
+    /// derivative does not establish a finite-temperature validity interval
+    /// for the bulk-property approximation.
     ///
     /// Exact equal temperatures have exactly zero transfer. Return G=0 and no
     /// correlation evaluation for that state, retaining both original sources;
@@ -71,14 +73,14 @@ impl NaturalGasSurface {
     /// contrast must pass the original correlation's Rayleigh-domain admission.
     /// Zero area likewise returns explicit isolation. Nonzero subnormal heat
     /// response is not silently clipped to either of these exact limits.
-    pub fn resolve(
+    pub fn resolve<S: PistonGasState + ThermalFluidTransport>(
         self,
-        gas: &ResolvedThermochemicalGasState,
+        gas: &S,
         body: EquilibriumPhaseState,
-    ) -> Result<ConductanceSample<FiniteGasConvectionSample>, MaterialConvectionError> {
+    ) -> Result<ConductanceSample<FiniteGasConvectionSample<S>>, MaterialConvectionError> {
         self.validate()?;
         let wall_temperature_k = body.temperature_k();
-        let gas_temperature_k = gas.equation_of_state().temperature().value();
+        let gas_temperature_k = gas.temperature_k();
         if !wall_temperature_k.is_finite() || wall_temperature_k <= 0.0 {
             return Err(invalid(
                 "finite gas natural convection needs a positive body temperature",
@@ -100,13 +102,10 @@ impl NaturalGasSurface {
                 "horizontal and spherical natural convection require source-resolved FilmGasSurface properties",
             ));
         }
-        let evaluated = evaluate_natural_from_material(
-            self.geometry,
+        let evaluated = evaluate_vertical_plate_from_thermal_material(
             gas,
             self.gravity_m_s2,
-            1.0 / gas_temperature_k,
             Temperature::new(wall_temperature_k),
-            Temperature::new(gas_temperature_k),
             self.characteristic_length,
         )?;
         let (transport, nusselt, coefficient) = evaluated.into_parts();
@@ -141,18 +140,21 @@ impl NaturalGasSurface {
     /// Gravity drives the correlation, not a resolved momentum field. There is
     /// no added gravitational storage, viscous heat or radiation path.
     #[allow(clippy::too_many_arguments)]
-    pub fn finite_body_candidate(
+    pub fn finite_body_candidate<G: PistonGas>(
         self,
-        piston: &GasPiston,
+        piston: &GasPiston<G>,
         input: PistonInput,
         body: UniformEnthalpyStepInput<'_>,
         controls: PistonSolve,
         exchange: HeatExchangeSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<
-        ThermalPistonCandidate<FiniteGasConvectionSample>,
+        ThermalPistonCandidate<FiniteGasConvectionSample<G::State>, G>,
         ThermalPistonError<MaterialConvectionError>,
-    > {
+    >
+    where
+        G::State: ThermalFluidTransport,
+    {
         if cancelled() {
             return Err(ThermalPistonError::Cancelled);
         }

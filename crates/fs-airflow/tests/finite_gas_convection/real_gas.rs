@@ -1,6 +1,8 @@
 //! Dense homogeneous gas through the original reciprocal thermal/convection path.
 //! Manufactured source packs and invariants; no empirical validation is implied.
 
+mod natural;
+
 use super::{body, near, scope, source, surface, uniform_boundary};
 use fs_airflow::graph::thermal::medium::convection::{
     evaluate_forced_from_material, finite_gas::ForcedGasSurface,

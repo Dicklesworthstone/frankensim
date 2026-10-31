@@ -758,8 +758,8 @@ Prandtl and the live coefficient; the accepted parcel retains its real pressure,
 caloric storage, entropy and acoustic state. No ideal-reference density enters
 that transfer. `tests/finite_gas_convection/real_gas.rs` covers dense-gas heating
 and cooling, reciprocal energy/entropy accounting, wall feedback, formation
-reference invariance and transactional source/cancellation refusals. Film and
-natural-convection adapters retain their existing source assumptions.
+reference invariance and transactional source/cancellation refusals. The film
+adapter retains its dilute ideal-gas source assumption.
 A positive patch must cover the whole body surface; zero area explicitly
 insulates it. Bulk-gas property evaluation and prescribed relative flow retain
 their correlation limits. Dittus-Boelter selects its heating/cooling branch
@@ -821,12 +821,23 @@ Rayleigh/heat algebra, actual piston/body energy closure and atomic refusal.
 natural-convection geometry from the coupling owner's actual gas and body query
 states. Its raw bulk-property entry retains vertical-plate behavior; active
 horizontal plate/cylinder and sphere exchange require `FilmGasSurface`, which
-evaluates the original gas at the actual mean film temperature. The retained ideal-gas
-EOS supplies beta = 1/T at that property state; the same resolved
-thermochemical gas supplies density, Cp, viscosity and conductivity. Pressure
-and composition therefore propagate through Ra, Pr, h and the original signed
-gas/body heat residual. The existing piston, phase-enthalpy and gas owners
-advance their own energy, including latent heat and piston work.
+evaluates the original dilute ideal gas at the actual mean film temperature.
+The bulk vertical-plate path accepts ideal and Peng--Robinson gas states and
+uses the existing `evaluate_vertical_plate_from_thermal_material` owner. Its
+coherent thermal/transport view supplies actual temperature, density, Cp,
+viscosity, conductivity and local isobaric volumetric expansion. The real EOS
+derivative replaces the ideal-only beta = 1/T shortcut. Pressure and composition
+therefore propagate through Ra, Pr, h and the original signed gas/body heat
+residual. The same generic piston, phase-enthalpy and gas owners advance their
+own energy, including latent heat and piston work.
+
+`tests/finite_gas_convection/real_gas/natural.rs` reconstructs Rayleigh, Prandtl
+and Churchill--Chu heat transfer from the actual source state, compares the
+real derivative with the ideal shortcut, and exercises small hot/cold contrasts
+through moving-piston energy closure. Exact equilibrium/isolation, correlation
+and geometry refusals and late cancellation preserve both inputs. This local
+derivative does not certify the bulk-property approximation over an arbitrary
+temperature range or replace the existing correlation evidence and domain.
 
 `finite_gas::network::exchange::GasHeatLaw::NaturalConvection` carries that
 same law into the material electrical/contact/radiation/thermal network and its
