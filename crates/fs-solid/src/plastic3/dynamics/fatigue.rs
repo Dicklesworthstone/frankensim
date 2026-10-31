@@ -3,14 +3,15 @@
 //! Each accepted interval calls `advance_backward_euler` with the complete
 //! previous displacement, velocity and J2/Prager history. Every actual native
 //! stress and total mechanical strain sample enters the same fixed-plane
-//! observer used by the quasistatic J2 path. Initial velocity can therefore
+//! observer used by the quasistatic J2 path, including separately calibrated
+//! Fatemi-Socie shear-strain life and tensile SWT. Initial velocity can therefore
 //! produce fatigue with no applied force; load factors are not fatigue samples.
 //!
 //! The source-resolved reference density, constitutive coefficients, external
 //! conditions, mesh and support DOFs stay fixed. Absolute endpoint load factors
 //! scale the original prescribed displacement and dead-force patterns. This
 //! adapter supplies no thermal eigenstrain, evolving-temperature law, arbitrary
-//! imported state, nonproportional correction or fatigue-to-stiffness feedback.
+//! imported state, nonproportional cyclic hardening or fatigue-to-stiffness feedback.
 //!
 //! Backward Euler has numerical damping. Its original inertial energy receipt
 //! remains distinct from physical plastic dissipation and Miner damage. The
@@ -22,6 +23,9 @@ use std::sync::Arc;
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::critical_plane::SwtCycleResult;
+use fs_material::fatigue::critical_plane::fatemi_socie::{
+    FatemiSocieCalibration, FatemiSocieCycleResult,
+};
 use fs_material::fatigue::strain_life::{StrainLifeCurve, StrainLifeSummary};
 use fs_material::plastic::J2State;
 use fs_material::plastic::source::ResolvedJ2Plasticity;
@@ -30,8 +34,8 @@ use fs_qty::{Density, QuantitySpec};
 
 use super::InertialEnergy;
 use crate::plastic3::fatigue::{
-    J2CriticalPlaneGauge, J2FatigueConfig, J2FatigueError, J2FatigueGauge, J2FatigueObserver,
-    J2FatigueSample, poll, with_path,
+    J2CriticalPlaneGauge, J2FatemiSocieGauge, J2FatigueConfig, J2FatigueError, J2FatigueGauge,
+    J2FatigueObserver, J2FatigueSample, poll, with_path,
 };
 use crate::plastic3::{SmallStrainTetProblem, SmallStrainTetSolution};
 
@@ -124,6 +128,34 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
         initial_velocity_mps: Vec<[f64; 3]>,
         cx: &Cx<'_>,
     ) -> Result<Self, J2FatigueError> {
+        Self::new_with_fatemi_socie(
+            problem,
+            mesh_frame,
+            gauges,
+            critical,
+            Vec::new(),
+            config,
+            initial_time_s,
+            initial_velocity_mps,
+            cx,
+        )
+    }
+
+    /// Attach fixed CMB, tensile SWT and/or calibrated Fatemi-Socie shear-life
+    /// gauges to the same physical-time J2 trajectory. All banks share native
+    /// accepted tensor samples, conditioning restart and atomic cycle closure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_fatemi_socie(
+        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        mesh_frame: ContentHash,
+        gauges: Vec<J2FatigueGauge>,
+        critical: Vec<J2CriticalPlaneGauge>,
+        fatemi_socie: Vec<J2FatemiSocieGauge>,
+        config: J2DynamicFatigueConfig,
+        initial_time_s: f64,
+        initial_velocity_mps: Vec<[f64; 3]>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, J2FatigueError> {
         poll(cx)?;
         if problem.load_path != [1.0]
             || !initial_time_s.is_finite()
@@ -146,8 +178,15 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
         {
             return Err(J2FatigueError::Budget);
         }
-        let mut observer =
-            J2FatigueObserver::new(problem, mesh_frame, gauges, critical, config.fatigue, cx)?;
+        let mut observer = J2FatigueObserver::new(
+            problem,
+            mesh_frame,
+            gauges,
+            critical,
+            fatemi_socie,
+            config.fatigue,
+            cx,
+        )?;
         let reference_density_kg_m3 = source_density(problem, cx)?;
         // This original solve validates the complete mesh, supports, law field
         // and native budgets before any constrained velocity is indexed.
@@ -222,6 +261,12 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     }
     pub fn critical_plane_curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
         self.observer.critical_plane_curve(gauge)
+    }
+    pub fn fatemi_socie_results(&self) -> Vec<Option<FatemiSocieCycleResult>> {
+        self.observer.fatemi_socie_results()
+    }
+    pub fn fatemi_socie_calibration(&self, gauge: usize) -> Option<&FatemiSocieCalibration> {
+        self.observer.fatemi_socie_calibration(gauge)
     }
     /// Discard only the critical window/result and begin at the current accepted
     /// native state. Physical time, velocity, plastic history and all fixed-gauge
@@ -309,59 +354,68 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
         }
         let mut solution = self.solution.clone();
         let mut velocity = self.velocity_mps.clone();
-        let mut observer = self.observer.clone();
+        let checkpoint = self.observer.checkpoint();
         let mut prescribed = self.problem.prescribed_m.to_vec();
         let mut forces = self.problem.nodal_forces_n.to_vec();
         let mut time_s = self.time_s;
         let mut last_step = None;
-        for (offset, target) in targets.iter().enumerate() {
-            observer.check_sample(cx)?;
-            scale_pattern(
-                self.problem.prescribed_m,
-                &mut prescribed,
-                target.load_factor,
-                cx,
-            )?;
-            scale_pattern(
-                self.problem.nodal_forces_n,
-                &mut forces,
-                target.load_factor,
-                cx,
-            )?;
-            let endpoint = SmallStrainTetProblem {
-                prescribed_m: &prescribed,
-                nodal_forces_n: &forces,
-                ..with_path(self.problem, &[1.0])
-            };
-            let dt_s = target.time_s - time_s;
-            let motion = endpoint.advance_backward_euler(
-                solution.displacement_m.as_flattened(),
-                &velocity,
-                &solution.element_states,
-                &self.reference_density_kg_m3,
-                dt_s,
-                cx,
-            )?;
-            observer.observe(self.problem, &motion.solution, cx)?;
-            last_step = Some(J2DynamicFatigueStep {
-                index: self.accepted_steps + offset + 1,
-                time_s: target.time_s,
-                dt_s,
-                load_factor: target.load_factor,
-                energy: motion.energy,
-            });
-            solution = motion.solution;
-            velocity = motion.velocity_mps;
-            time_s = target.time_s;
-        }
-        let report = last_step.ok_or(J2FatigueError::Invalid("missing physical endpoint"))?;
-        if close_cycle {
-            observer.close_critical_plane_cycle(cx)?;
-        }
-        poll(cx)?;
+        let proposal = (|| {
+            for (offset, target) in targets.iter().enumerate() {
+                self.observer.check_sample(cx)?;
+                scale_pattern(
+                    self.problem.prescribed_m,
+                    &mut prescribed,
+                    target.load_factor,
+                    cx,
+                )?;
+                scale_pattern(
+                    self.problem.nodal_forces_n,
+                    &mut forces,
+                    target.load_factor,
+                    cx,
+                )?;
+                let endpoint = SmallStrainTetProblem {
+                    prescribed_m: &prescribed,
+                    nodal_forces_n: &forces,
+                    ..with_path(self.problem, &[1.0])
+                };
+                let dt_s = target.time_s - time_s;
+                let motion = endpoint.advance_backward_euler(
+                    solution.displacement_m.as_flattened(),
+                    &velocity,
+                    &solution.element_states,
+                    &self.reference_density_kg_m3,
+                    dt_s,
+                    cx,
+                )?;
+                self.observer.observe(self.problem, &motion.solution, cx)?;
+                last_step = Some(J2DynamicFatigueStep {
+                    index: self.accepted_steps + offset + 1,
+                    time_s: target.time_s,
+                    dt_s,
+                    load_factor: target.load_factor,
+                    energy: motion.energy,
+                });
+                solution = motion.solution;
+                velocity = motion.velocity_mps;
+                time_s = target.time_s;
+            }
+            let report = last_step.ok_or(J2FatigueError::Invalid("missing physical endpoint"))?;
+            if close_cycle {
+                self.observer.close_critical_plane_cycle(cx)?;
+            }
+            poll(cx)?;
+            Ok(report)
+        })();
+        let report = match proposal {
+            Ok(report) => report,
+            Err(error) => {
+                self.observer.restore(checkpoint);
+                return Err(error);
+            }
+        };
         self.solution = solution;
         self.velocity_mps = velocity;
-        self.observer = observer;
         self.time_s = time_s;
         self.accepted_steps += targets.len();
         self.last_step = Some(report);

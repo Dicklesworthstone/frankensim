@@ -1,5 +1,35 @@
 # fs-solid CONTRACT
 
+## Shear-strain Fatemi–Socie life from native J2 cycles
+
+The shared quasistatic and inertial J2 fatigue observer now admits
+`J2FatemiSocieGauge` alongside fixed-plane CMB and critical-plane SWT gauges,
+or as the only fatigue bank. Both owners consume the original native stress
+and total mechanical strain, including plastic history and unforced inertial
+motion. Existing cycle closure, conditioning restart and finish operations
+include both critical-plane banks; no alternative constitutive or motion
+solver is introduced.
+
+Admission binds the actual immutable material identity, temperature, native
+shear modulus and initial yield stress. Source-backed calibrations additionally
+match the original card, named state, typed operating coordinates and exact
+selected E, nu and initial-yield answers. The evolving hardened yield surface
+cannot replace the fitted initial-yield reference. Original material and
+calibration evidence remain inspectable.
+
+A native block and every fatigue bank publish together only after requested
+closure succeeds. Failure restores mechanics, fixed/SWT snapshots, each
+Fatemi–Socie accepted prefix and any provisional result. Ordinary advances do
+not copy the retained shear tensor histories. Restart samples the actual
+accepted mechanical state and preserves fixed-plane counters and the global
+sample budget. A decaying or ratcheting path that fails closure cannot silently
+become a stabilized periodic-life result.
+
+This extension predicts bounded empirical shear-controlled life for a declared
+resolved representative cycle at fixed source conditions. It does not establish
+stabilization or experimental component validity, count multiaxial
+variable-amplitude cycles, or evolve fatigue stiffness loss or crack geometry.
+
 ## Findley shear-path fatigue from native elastic and Newmark responses
 
 `fatigue::TetFatiguePath::new_with_findley` and
