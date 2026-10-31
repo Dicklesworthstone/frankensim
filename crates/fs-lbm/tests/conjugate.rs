@@ -17,6 +17,8 @@ use fs_exec::CancelGate;
 
 #[path = "conjugate/nonlinear_contact.rs"]
 mod nonlinear_contact;
+#[path = "conjugate/nonlinear_compact.rs"]
+mod nonlinear_compact;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::turbulence::{eddy_viscosity_ratio, law_of_the_wall_ratios, wall_distance};
 use fs_lbm::conjugate::{

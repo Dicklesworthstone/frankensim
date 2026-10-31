@@ -2603,8 +2603,20 @@ are included. `tests/conjugate/nonlinear_contact.rs` checks different nonlinear
 materials with known interface temperatures, graded axes, reversal, contact
 jumps, solid/fluid observations and an independent transient storage balance.
 
-Compact-component links still use their cell-centred series model. The analytic film is
-the declared stationary scalar Robin law, not a resolved fluid boundary layer.
+Compact-component links integrate the native conductivity law of the outside
+solid's half cell in series with the declared junction-to-board or
+junction-to-case resistor. Its area-specific resistance is `R_junction * A_total`;
+the existing analytic film law resolves the outside surface without a nested
+iteration. Each face receives its correct parallel area share, and the collapsed
+package adds no bulk resistance. Frozen material fields and fluid links retain
+their declared coefficients. Junction powers, fixed-cell reactions and observers
+all use the same stored links. Ordinary boundary conditions on collapsed component
+sides contribute no heat, matching the assembly's adiabatic side ownership.
+`tests/conjugate/nonlinear_compact.rs` checks independently derived heating and
+cooling profiles with unequal face areas, branch powers, and the compact-side
+heat-balance regression. Compact components remain steady-state models without
+an invented junction heat capacity. The analytic film is the declared stationary
+scalar Robin law, not a resolved fluid boundary layer.
 
 The existing steady and transient Picard/Krylov owner evaluates these
 coefficients from the previous pass and warm-starts the next solve until the

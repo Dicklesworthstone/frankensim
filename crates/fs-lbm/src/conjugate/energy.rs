@@ -995,13 +995,14 @@ fn solve_energy_field(
         }
         contacts.push(((a.min(b), a.max(b)), contact.resistance_m2_k_w));
     }
-    let compact = Compact::new(domain, &k, setup)?;
+    let conductivity_temperature = nonlinear.and_then(|(_, temperature)| temperature);
+    let compact = Compact::new(domain, solids, &k, setup, conductivity_temperature)?;
     let face_contacts = face_contact::prepare(domain, flow, setup, &compact, gate)?;
     let ctx = Context {
         domain,
         flow,
         solids,
-        conductivity_temperature: nonlinear.and_then(|(_, temperature)| temperature),
+        conductivity_temperature,
         faces: setup.faces,
         k,
         contacts,
@@ -1206,7 +1207,12 @@ fn solve_energy_field(
     let mut solid_fluid_links = Vec::new();
     for c in 0..cells {
         if c.is_multiple_of(4096) { super::poll(gate)?; }
-        if !domain.is_fluid(c) && compact.owner(c).is_none() {
+        // Collapsed cells have no ordinary face, source or sink equations.
+        // Their junction power and stored links own all component exchange.
+        if compact.owner(c).is_some() {
+            continue;
+        }
+        if !domain.is_fluid(c) {
             for f in 0..6 {
                 if let Some(n) = domain.neighbor(c, f) && domain.is_fluid(n) {
                     let term = ctx.checked_term(c, f)?;
@@ -1343,7 +1349,13 @@ struct Compact {
 }
 
 impl Compact {
-    fn new(domain: &VoxelDomain, k: &[[f64; 3]], setup: &ThermalSetup) -> Result<Self, ChtError> {
+    fn new(
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        k: &[[f64; 3]],
+        setup: &ThermalSetup,
+        conductivity_temperature: Option<&[f64]>,
+    ) -> Result<Self, ChtError> {
         let parts = &setup.compact_components;
         let cells = domain.cell_count();
         let n = domain.dims();
@@ -1423,11 +1435,36 @@ impl Compact {
                                 Some(m) => {
                                     // The resistor's area share in series
                                     // with the outside cell's half width.
+                                    // A native nonlinear solid uses the same
+                                    // analytic bulk/film law as a Robin face:
+                                    // R'' = R_junction * total face area.
+                                    // The collapsed package adds no bulk path.
                                     let face_area = domain.face_area(m, axis);
+                                    let half_width = 0.5 * domain.widths(m)[axis];
+                                    let mut conductivity = k[m][axis];
+                                    if let Some(previous) = conductivity_temperature
+                                        && let Voxel::Solid(material) = domain.voxel_at(m)
+                                    {
+                                        let solid = &solids[usize::from(material)];
+                                        if !solid.conductivity_table.is_empty() {
+                                            let axis_k = solid.axis_conductivity()[axis];
+                                            let junction = domain.index(
+                                                part.lo[0], part.lo[1], part.lo[2],
+                                            );
+                                            conductivity = axis_k * solid.film_conductivity_factor(
+                                                previous[m], previous[junction], axis_k,
+                                                half_width, 1.0 / (resistance * area),
+                                            );
+                                        }
+                                    }
                                     let g = 1.0
                                         / (resistance * area / face_area
-                                            + 0.5 * domain.widths(m)[axis]
-                                                / (k[m][axis] * face_area));
+                                            + half_width / (conductivity * face_area));
+                                    if !g.is_finite() || g <= 0.0 {
+                                        return Err(refuse(format!(
+                                            "component {i}: link to cell {m} has unrepresentable conductance"
+                                        )));
+                                    }
                                     list.push((m, g, f == board));
                                     by_cell.entry(m).or_default().push((i, g));
                                 }
