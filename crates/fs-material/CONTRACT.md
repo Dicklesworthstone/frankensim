@@ -8025,6 +8025,33 @@ a phase-pressure relation and must not be added as another hydraulic drag or
 heat source. Synthetic analytic and source-preservation fixtures check the
 equations and coupling; they do not establish a measured material calibration.
 
+### Adaptive coupled gas, adsorption and sensible-heat transport
+
+`AdsorbingPoreDomain::{step_candidate_adaptive_to,advance_adaptive_to}` control
+the complete adsorbing-pore transient by comparing one original native interval
+with two original half intervals. Componentwise actual gas-species masses,
+bound-species moles, gas temperatures and solid temperatures each use explicit
+absolute tolerances plus an optional relative allowance on changes. Large
+background inventories and absolute temperatures cannot hide a small transient.
+
+Only the fine path can publish or contribute directional gas-species,
+adsorption, skeleton-heat or gas/solid-heat transfers, original caloric defects
+or entropy. Every probe is a single existing unsplit candidate. Its original
+source, material, geometry and physical refusal owners remain active; source
+and domain errors remain fatal. Existing pore work limits count all native
+probes and accepted physical half steps. Representable midpoint/final clocks,
+late cancellation and no-prefix publication are mandatory.
+
+Complete original-to-final gas-plus-bound species inventories and compensated
+accepted energy/entropy must fit the same single physical budgets, independent
+of subdivision. Reports retain the last native source state and accepted gross
+directional transfers. The first-order local step-doubling estimate is
+asymptotic; it is neither a global error certificate nor a replacement
+thermodynamic model. The public heat integration tests check independent
+two-body thermal decay, tighter error convergence, independent gas/bound/thermal
+accuracy controls, coupled porous transport, exact replay, and atomic work,
+source, entropy and cancellation refusals.
+
 ### Finite multicomponent membrane separation
 
 `transient::mixture::IsothermalGasMembraneMixture` couples two original finite

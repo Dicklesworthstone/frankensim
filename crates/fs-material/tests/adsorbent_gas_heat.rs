@@ -61,6 +61,20 @@ const HEAT: &str = "gas_solid_thermal_conductance";
 const MASS: f64 = 0.028;
 const CP_R: f64 = 3.5;
 
+use fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::pore_domain::adsorption::adaptive::{
+    AdsorbingPoreAdvanceError, AdsorbingPoreTimeControls,
+};
+
+fn temporal() -> AdsorbingPoreTimeControls {
+    AdsorbingPoreTimeControls {
+        gas_species_tolerance_kg: 1e-9,
+        bound_species_tolerance_mol: 1e-8,
+        gas_temperature_tolerance_k: 1e-3,
+        solid_temperature_tolerance_k: 1e-3,
+        relative_tolerance: 0.0,
+    }
+}
+
 fn typed(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
 }
@@ -929,4 +943,495 @@ fn unowned_source_axes_and_late_original_domain_refusal_publish_nothing() {
         "{result:?}"
     );
     assert_eq!(original, saved);
+}
+
+#[test]
+fn adaptive_pore_heat_controls_independent_transient_error_and_only_counts_fine_heat() {
+    let medium = medium();
+    let original = domain(&medium, 301.0, 0.0, 0.005);
+    let saved = original.clone();
+    let context = point(300.0, 1e5);
+    let faces = faces(&medium, &context, 0.0);
+    let source = source(0.5);
+    let links = [AdsorbentGasHeatLink {
+        id: 5,
+        solid: 0,
+        source: &source,
+    }];
+    let local = BTreeMap::from([(0, local())]);
+    let endpoints = [local[&0].gas.gas; 3];
+    let gas = original.pore_domain().pore_gas(0).unwrap();
+    let cg = gas.mass_kg() / MASS * (CP_R - 1.0) * R;
+    let cs = 50.0 + 0.005 * CP_R * R;
+    let equilibrium = (cg * 300.0 + cs * 301.0) / (cg + cs);
+    let exact = equilibrium + (300.0 - equilibrium) * (-0.5 * (1.0 / cg + 1.0 / cs)).exp();
+    let run = |gas_tolerance, solid_tolerance| {
+        original
+            .step_candidate_adaptive_to(
+                1.0,
+                &faces,
+                &endpoints,
+                window(1.0),
+                &local,
+                &[],
+                &links,
+                AdsorbingPoreTimeControls {
+                    gas_temperature_tolerance_k: gas_tolerance,
+                    solid_temperature_tolerance_k: solid_tolerance,
+                    ..temporal()
+                },
+                || false,
+            )
+            .unwrap()
+    };
+    let coarse = run(0.05, 1.0);
+    let fine = run(0.00005, 1.0);
+    let solid_limited = run(10.0, 1e-5);
+    let gas_temperature = |domain: &AdsorbingPoreDomain| {
+        domain
+            .pore_domain()
+            .pore_gas(0)
+            .unwrap()
+            .state()
+            .state()
+            .temperature
+    };
+    let coarse_error = (gas_temperature(coarse.domain()) - exact).abs();
+    let fine_error = (gas_temperature(fine.domain()) - exact).abs();
+    assert!(
+        fine_error < 0.15 * coarse_error,
+        "coarse={coarse_error}, fine={fine_error}"
+    );
+    assert!(fine.report().evaluations > coarse.report().evaluations);
+    assert!(solid_limited.report().evaluations > coarse.report().evaluations);
+    assert!(solid_limited.report().maximum_accepted_error_ratios[3] > 0.1);
+    assert!(solid_limited.report().maximum_accepted_error_ratios[2] < 0.01);
+    for candidate in [&coarse, &fine, &solid_limited] {
+        let report = candidate.report();
+        let physical = &report.physical;
+        assert_eq!(report.interval_s, [0.0, 1.0]);
+        assert_eq!(candidate.domain().pore_domain().time_s(), 1.0);
+        assert!(report.rejected_intervals > 0);
+        assert!(
+            report
+                .maximum_accepted_error_ratios
+                .iter()
+                .all(|r| *r <= 1.0)
+        );
+        assert_eq!(
+            physical.pore.accepted_substeps,
+            2 * report.accepted_intervals
+        );
+        assert_eq!(
+            report.evaluations,
+            3 * (report.accepted_intervals + report.rejected_intervals)
+        );
+        assert_eq!(physical.pore.attempts, report.evaluations);
+        let tg = gas_temperature(candidate.domain());
+        let ts = candidate.domain().solids()[&0].temperature_k();
+        near(
+            physical.gas_heat[0].gross_solid_to_gas_j,
+            cg * (tg - 300.0),
+            2e-9,
+        );
+        near(cg * (tg - 300.0) + cs * (ts - 301.0), 0.0, 2e-9);
+        near(
+            physical.pore.entropy_change_j_k,
+            cg * (tg / 300.0).ln() + cs * (ts / 301.0).ln(),
+            1e-10,
+        );
+        near(physical.pore.total_energy_residual_j, 0.0, 2e-9);
+        near(physical.pore.total_mass_residual_kg, 0.0, 1e-13);
+        assert_eq!(physical.gas_heat[0].gross_gas_to_solid_j, 0.0);
+        let sample = &physical.pore.last_substep.gas_heat[0];
+        assert_eq!(
+            sample.source[1].state_coordinate("gas_temperature"),
+            Some(tg)
+        );
+        assert_eq!(
+            sample.source[1].state_coordinate("solid_temperature"),
+            Some(ts)
+        );
+    }
+    assert_eq!(original, saved);
+}
+
+#[test]
+fn adaptive_pore_gas_and_bound_species_each_control_coupled_adsorption_and_transport() {
+    let medium = medium();
+    let original = domain(&medium, 301.0, 0.4, 0.0);
+    let context = point(300.0, 1e5);
+    let faces = faces(&medium, &context, 0.001);
+    let source = source(20.0);
+    let links = [AdsorbentGasHeatLink {
+        id: 5,
+        solid: 0,
+        source: &source,
+    }];
+    let local = BTreeMap::from([(0, local())]);
+    let endpoints = [local[&0].gas.gas; 3];
+    let duration = 0.008;
+    let reference = original
+        .step_candidate_with_heat(
+            duration,
+            &faces,
+            &endpoints,
+            window(0.00003125),
+            &local,
+            &[],
+            &links,
+            || false,
+        )
+        .unwrap();
+    let coarse = original
+        .step_candidate_with_heat(
+            duration,
+            &faces,
+            &endpoints,
+            window(0.004),
+            &local,
+            &[],
+            &links,
+            || false,
+        )
+        .unwrap();
+    let species = SpeciesId::new("A").unwrap();
+    let reference_loading = reference.domain().solids()[&0]
+        .adsorbed_moles(&species)
+        .unwrap();
+    let coarse_error = (coarse.domain().solids()[&0]
+        .adsorbed_moles(&species)
+        .unwrap()
+        - reference_loading)
+        .abs();
+    for (controlled, gas_tolerance, bound_tolerance) in [(0, 2e-10, 1.0), (1, 1.0, 1e-9)] {
+        let candidate = original
+            .step_candidate_adaptive_to(
+                duration,
+                &faces,
+                &endpoints,
+                window(0.004),
+                &local,
+                &[],
+                &links,
+                AdsorbingPoreTimeControls {
+                    gas_species_tolerance_kg: gas_tolerance,
+                    bound_species_tolerance_mol: bound_tolerance,
+                    gas_temperature_tolerance_k: 10.0,
+                    solid_temperature_tolerance_k: 10.0,
+                    relative_tolerance: 0.0,
+                },
+                || false,
+            )
+            .unwrap();
+        let report = candidate.report();
+        assert!(report.rejected_intervals > 0);
+        assert!(report.maximum_accepted_error_ratios[controlled] > 0.1);
+        assert!(
+            report
+                .maximum_accepted_error_ratios
+                .iter()
+                .all(|r| *r <= 1.0)
+        );
+        let error = (candidate.domain().solids()[&0]
+            .adsorbed_moles(&species)
+            .unwrap()
+            - reference_loading)
+            .abs();
+        assert!(
+            error < coarse_error,
+            "controlled={controlled}, adaptive={error}, coarse={coarse_error}"
+        );
+        assert!(!report.physical.pore.faces.is_empty());
+        assert!(report.physical.adsorption[0].gross_adsorption_mol > 0.0);
+        let gas_change: f64 = original
+            .pore_domain()
+            .parcels()
+            .iter()
+            .map(|(id, before)| {
+                candidate.domain().pore_domain().parcels()[id].mass_kg() - before.mass_kg()
+            })
+            .sum();
+        near(
+            gas_change
+                + candidate.domain().solids()[&0]
+                    .adsorbed_moles(&species)
+                    .unwrap()
+                    * MASS,
+            0.0,
+            1e-13,
+        );
+        near(report.physical.pore.total_energy_residual_j, 0.0, 2e-9);
+        assert!(report.physical.pore.entropy_change_j_k >= -1e-10);
+        assert!(report.physical.pore.maximum_species_mass_residual_kg <= 1e-13);
+    }
+}
+
+#[test]
+fn adaptive_pore_replay_exact_time_work_limits_and_late_cancellation_are_atomic() {
+    let medium = medium();
+    let original = domain(&medium, 301.0, 0.0, 0.0);
+    let mut current = original.clone();
+    let context = point(300.0, 1e5);
+    let faces = faces(&medium, &context, 0.0);
+    let source = source(0.5);
+    let links = [AdsorbentGasHeatLink {
+        id: 5,
+        solid: 0,
+        source: &source,
+    }];
+    let local = BTreeMap::from([(0, local())]);
+    let endpoints = [local[&0].gas.gas; 3];
+    let accuracy = AdsorbingPoreTimeControls {
+        gas_temperature_tolerance_k: 1.0,
+        solid_temperature_tolerance_k: 1.0,
+        ..temporal()
+    };
+    let mut controls = window(0.125);
+    controls.minimum_step_s = 0.125;
+    let mut polls = 0;
+    let whole = original
+        .step_candidate_adaptive_to(
+            1.0,
+            &faces,
+            &endpoints,
+            controls,
+            &local,
+            &[],
+            &links,
+            accuracy,
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    current
+        .advance_adaptive_to(
+            0.5,
+            &faces,
+            &endpoints,
+            controls,
+            &local,
+            &[],
+            &links,
+            accuracy,
+            || false,
+        )
+        .unwrap();
+    current
+        .advance_adaptive_to(
+            1.0,
+            &faces,
+            &endpoints,
+            controls,
+            &local,
+            &[],
+            &links,
+            accuracy,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(&current, whole.domain());
+    current = original.clone();
+    let mut limited = controls;
+    limited.maximum_attempts = 4;
+    assert!(matches!(
+        current.advance_adaptive_to(
+            1.0,
+            &faces,
+            &endpoints,
+            limited,
+            &local,
+            &[],
+            &links,
+            accuracy,
+            || false
+        ),
+        Err(AdsorbingPoreAdvanceError::WorkLimit {
+            accepted_substeps: 2,
+            evaluations: 4,
+            ..
+        })
+    ));
+    assert_eq!(current, original);
+    limited = controls;
+    limited.maximum_substeps = 2;
+    assert!(matches!(
+        current.advance_adaptive_to(
+            1.0,
+            &faces,
+            &endpoints,
+            limited,
+            &local,
+            &[],
+            &links,
+            accuracy,
+            || false
+        ),
+        Err(AdsorbingPoreAdvanceError::WorkLimit {
+            accepted_substeps: 2,
+            evaluations: 3,
+            ..
+        })
+    ));
+    assert_eq!(current, original);
+    let mut calls = 0;
+    assert!(matches!(
+        current.advance_adaptive_to(
+            1.0,
+            &faces,
+            &endpoints,
+            controls,
+            &local,
+            &[],
+            &links,
+            accuracy,
+            || {
+                calls += 1;
+                calls >= polls
+            }
+        ),
+        Err(AdsorbingPoreAdvanceError::Cancelled)
+    ));
+    assert_eq!(current, original);
+    let strict = AdsorbingPoreTimeControls {
+        gas_temperature_tolerance_k: 1e-14,
+        ..accuracy
+    };
+    assert!(matches!(
+        current.advance_adaptive_to(
+            0.125,
+            &faces,
+            &endpoints,
+            controls,
+            &local,
+            &[],
+            &links,
+            strict,
+            || false
+        ),
+        Err(AdsorbingPoreAdvanceError::Accuracy { .. })
+    ));
+    assert_eq!(current, original);
+    // Advance a sealed, frozen state to a large exactly representable clock.
+    // An adjacent target has no representable midpoint and cannot bypass error.
+    let start = 2.0_f64.powi(50);
+    current
+        .advance(start, &faces, &endpoints, window(start), &local, || false)
+        .unwrap();
+    let saved = current.clone();
+    assert!(matches!(
+        current.advance_adaptive_to(
+            start.next_up(),
+            &faces,
+            &endpoints,
+            controls,
+            &local,
+            &[],
+            &links,
+            accuracy,
+            || false
+        ),
+        Err(AdsorbingPoreAdvanceError::TimeResolution { .. })
+    ));
+    assert_eq!(current, saved);
+}
+
+#[test]
+fn adaptive_pore_keeps_typed_native_refusal_and_discards_prefix_on_late_source_failure() {
+    let medium = medium();
+    let original = domain(&medium, 301.0, 0.0, 0.0);
+    let mut current = original.clone();
+    let context = point(300.0, 1e5);
+    let faces = faces(&medium, &context, 0.0);
+    let mut local_control = local();
+    local_control.maximum_temperature_change_k = 10.0;
+    local_control.maximum_gas_surface_temperature_difference_k = 10.0;
+    let local = BTreeMap::from([(0, local_control)]);
+    let endpoints = [local[&0].gas.gas; 3];
+    let source = source(1.0);
+    let links = [AdsorbentGasHeatLink {
+        id: 5,
+        solid: 0,
+        source: &source,
+    }];
+    let accuracy = AdsorbingPoreTimeControls {
+        gas_temperature_tolerance_k: 1.0,
+        solid_temperature_tolerance_k: 1.0,
+        ..temporal()
+    };
+    let mut controls = window(3.0);
+    controls.minimum_step_s = 3.0;
+    let error = current
+        .advance_adaptive_to(
+            3.0,
+            &faces,
+            &endpoints,
+            controls,
+            &local,
+            &[],
+            &links,
+            accuracy,
+            || false,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            AdsorbingPoreAdvanceError::Physical {
+                error: PoreDomainError::Adsorption {
+                    error: AdsorptionNetworkError::Thermodynamic(
+                        fs_material::adsorption::AdsorptionError::EntropyDecreased { .. }
+                    ),
+                    ..
+                },
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(current, original);
+    let key = PropertyKey::new(HEAT, GAS_SOLID_THERMAL_CONDUCTANCE_DIMS);
+    let narrow = AdsorbentGasHeatSource::try_new(
+        card(
+            "late original thermal support",
+            vec![heat_claim(0.5, [300.995, 302.0])],
+        ),
+        &key,
+        &heat_point(300.0, 301.0, 1e5),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let links = [AdsorbentGasHeatLink {
+        id: 5,
+        solid: 0,
+        source: &narrow,
+    }];
+    let error = current
+        .advance_adaptive_to(
+            1.0,
+            &faces,
+            &endpoints,
+            window(0.125),
+            &local,
+            &[],
+            &links,
+            accuracy,
+            || false,
+        )
+        .unwrap_err();
+    match error {
+        AdsorbingPoreAdvanceError::Physical {
+            time_s,
+            error:
+                PoreDomainError::Adsorption {
+                    error: AdsorptionNetworkError::Conduction { id: 5, .. },
+                    ..
+                },
+            ..
+        } => assert!(time_s > 0.25),
+        other => panic!("unexpected late refusal: {other:?}"),
+    }
+    assert_eq!(current, original);
 }

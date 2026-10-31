@@ -11,6 +11,9 @@
 //! pore volume or separate Darcy heating is inferred. Explicit skeleton heat
 //! paths retain the original dry caloric, conductivity and interface sources.
 
+/// Componentwise temporal accuracy for the complete original gas/site/heat system.
+pub mod adaptive;
+
 use super::*;
 use crate::adsorption::{
     AdsorptionError,
