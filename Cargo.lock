@@ -2190,6 +2190,7 @@ dependencies = [
 name = "fs-nlmodal"
 version = "0.0.1"
 dependencies = [
+ "fs-material",
  "fs-math",
  "fs-phs",
 ]

@@ -1,7 +1,9 @@
 //! Maxwell stress on the SAME retained moderate-slope strain as elastic storage.
 //! Each original layer/arm retains mean and cosine relaxed strains. Their
-//! midpoint update and mechanical pullback close discrete work exactly for the
-//! quadratic epsilon=u_x+(y_x^2+z_x^2)/2; no fitted modal damping is substituted.
+//! exact linear-strain material update and midpoint-coordinate pullback close
+//! discrete work for quadratic epsilon=u_x+(y_x^2+z_x^2)/2. Interval-mean stress
+//! and independently integrated heat come from the shared material owner; the
+//! joint nonlinear motion remains a time discretization requiring refinement.
 use super::*;
 mod maxwell;
 use fs_nlmodal::longitudinal::relaxation::{StrainRelaxation, StrainRelaxationArm as Arm};
@@ -26,9 +28,9 @@ impl StrainHistory {
         let transverse=0.5*self.string.slope_scales.iter().map(|s|s*s).sum::<f64>();
         let strain=self.string.resolution.maximum_strain;
         self.material.arms().iter().enumerate().map(|(i,arm)| {
-            // For dt/tau<=2 each updated z is a convex combination of its
-            // accepted value and the mean endpoint strain. Thus this original
-            // continuous-span bound remains valid through the entire history.
+            // Exact ramp relaxation keeps updated z in the convex hull of its
+            // accepted value and the endpoint strains for every dt/tau. Thus
+            // this continuous-span bound remains valid through the history.
             let z_bound=memory.map_or(strain,|m|m[i*self.width()..(i+1)*self.width()]
                 .iter().map(|v|v.abs()).sum::<f64>().max(strain));
             arm.stiffness_j*(axial+transverse*(self.string.resolution.maximum_slope.powi(2)
@@ -167,9 +169,18 @@ mod tests {
             for (arm,z) in law.material.arms().iter().zip(memory.chunks_exact(law.width())) {
                 let z=z[0]+z[1..].iter().enumerate().map(|(i,z)|
                     z*((i+1) as f64*core::f64::consts::PI*s).cos()).sum::<f64>();
-                let rate=dt/arm.relaxation_time_s;let r=(0.5*(ea+eb)-z)/(1.0+0.5*rate);
-                spatial_loss+=arm.stiffness_j*rate*r*r/512.0;
-                for (force,g) in spatial_force.iter_mut().zip(&gradient) {*force-=arm.stiffness_j*r*g/512.0;}
+                let rate=dt/arm.relaxation_time_s;
+                let slope=(eb-ea)/rate;let transient=ea-z-slope;
+                // Integrate the independent spatial Maxwell solution in time.
+                let (mut mean,mut square)=(0.0,0.0);
+                for sample in 0..=128 {
+                    let t=sample as f64/128.0;
+                    let q=slope+transient*(-rate*t).exp();
+                    let w=if sample==0 || sample==128 {1.0} else if sample%2==0 {2.0} else {4.0};
+                    mean+=w*q/384.0;square+=w*q*q/384.0;
+                }
+                spatial_loss+=arm.stiffness_j*rate*square/512.0;
+                for (force,g) in spatial_force.iter_mut().zip(&gradient) {*force-=arm.stiffness_j*mean*g/512.0;}
             }
         }
         assert!((loss-spatial_loss).abs()<1e-12*loss);

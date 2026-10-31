@@ -130,15 +130,24 @@ the crash cascade with structurally exact energy accounting.
   and 32 explicit axial modes with indices at most 1024; it never drops
   a mode to satisfy a frequency cutoff. The caller owns the cutoff,
   resolved bandwidth, moving-end pullback, clock, and finite-strain domain.
-- `longitudinal::relaxation::StrainRelaxation` retains original positive
-  Maxwell arms on mean/cosine material-strain coordinates. `stage` eliminates
-  memory inside the caller's existing joint trial; it never publishes accepted
-  state. `stage_with_arm_dissipation` performs that same update while retaining
-  each original arm's heat, with one output per arm. Total heat, candidate
-  memory, stress and their arithmetic order remain unchanged. Mean/cosine
-  orthogonality weights enter both storage and dissipation. The original
-  `0 < dt/tau <= 2` admission remains; the caller owns geometry, source material
-  domains, force pullback and finite-body routing.
+- `longitudinal::relaxation::StrainRelaxation` retains each original positive
+  Maxwell arm's mean/cosine relaxed strains. Its trial calls the canonical
+  `fs_material::visco::PronyRamp` for a piecewise-linear strain history,
+  preparing once per source arm and reusing coefficients across its
+  mean/cosine coordinates. It returns exact endpoint memory, interval-mean
+  stress and independently integrated nonnegative dashpot heat.
+  `stage_with_arm_dissipation` performs that same update while retaining
+  each original arm's physical heat for finite-body routing. Mean/cosine
+  orthogonality weights enter both storage and dissipation.
+  No midpoint relaxation or dt/tau <= 2 limit remains in this update.
+  Work is mean stress times the endpoint strain increment; consumers pull it
+  back through their quadratic strain map at midpoint coordinates. This
+  preserves storage balance without treating endpoint-stress trapezoids as
+  physical work. Exact history integration does not make nonlinear mechanics
+  exact: the hosting coupled solve, source bandwidth, strain domain and other
+  physical participants retain their time-resolution requirements. Accepted
+  memory is never mutated by a trial. Zero/infinite rate use the
+  elastic/fully-relaxed limits.
 - `duffing_backbone` / `single_mode_beta` — the analytic
   perturbation pins.
 - Time stepping, striking, damping, and the energy ledger are
@@ -239,6 +248,15 @@ single-sine doubling of the axial drive index; moving-chord reciprocal
 pullback and whole-span strain bounds; finite and declared-cap admission.
 These are G0/G1/G3 model tests, not measured piano calibration.
 
+`src/longitudinal/relaxation.rs` checks independent spatial Maxwell stress
+and Simpson-integrated heat; exact fixed-strain decay under 1/4/16/64
+partitions including stiff material times; linear-strain work, heat and memory
+partition invariance; and transactional repeated/invalid trials. The immediate
+string and fiber-ribbon consumers check their actual nonlinear geometric
+pullbacks against independent spatial and temporal integrations. These G0/G1/G3
+tests establish the coded constitutive law and work semantics, not experimental
+loss calibration or unrestricted nonlinear time-step accuracy.
+
 `tests/nlmodal.rs` (10): construction certificates (quadrature
 residual, mode counts, assembly); non-vacuous coupling + asymmetry
 refusal; Duffing backbone vs perturbation formula; Kirchhoff-Carrier
@@ -268,9 +286,9 @@ modal energies, leaked fractions, tensor size); typed refusals.
   transcription); the executed cross-check is an independent
   INTEGRATOR over the same coded vector field — it validates the
   stepper, not the tensor physics (review-corrected wording).
-- Damping is per-mode viscous `zeta_k` supplied by the caller;
-  frequency-dependent loss models remain the visco-damping
-  facility's.
+- Viscous ratios or full damping matrices are supplied by the caller.
+  Frequency-dependent loss remains the shared material facility's;
+  the longitudinal history adapter consumes its actual source Maxwell arms.
 - The finite longitudinal string image fixes longitudinal endpoint
   displacements while allowing caller-supplied transverse chord motion.
   Omitted axial coordinates are statically condensed, not resolved waves;

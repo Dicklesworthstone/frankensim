@@ -62,8 +62,8 @@ impl FiberStrainHistory {
             .iter()
             .enumerate()
             .map(|(i, arm)| {
-                // dt/tau <= 2 retains this continuous-span envelope for every
-                // accepted future memory, including geometric-stress stiffness.
+                // Exact material-ramp relaxation retains this continuous-span
+                // convex envelope at every dt/tau, including stress stiffness.
                 let z = memory.map_or(epsilon, |m| {
                     m[i * self.material.width()..(i + 1) * self.material.width()]
                         .iter()
@@ -344,13 +344,30 @@ mod tests {
                         .map(|(j, z)| z * ((j + 1) as f64 * core::f64::consts::PI * x).cos())
                         .sum::<f64>();
                 let rate = dt / arm.relaxation_time_s;
-                let z1 = ((1.0 - rate / 2.0) * z + rate * (ea + eb) / 2.0) / (1.0 + rate / 2.0);
-                let residual = (ea + eb - z - z1) / 2.0;
+                let slope = (eb - ea) / rate;
+                let transient = ea - z - slope;
+                let endpoint = slope + transient * (-rate).exp();
+                // Independent temporal integration of the spatial branch
+                // solution; no modal-history or material-ramp helper is used.
+                let (mut mean, mut squared) = (0.0, 0.0);
+                for sample in 0..=128 {
+                    let t = sample as f64 / 128.0;
+                    let q = slope + transient * (-rate * t).exp();
+                    let w = if sample == 0 || sample == 128 {
+                        1.0
+                    } else if sample % 2 == 0 {
+                        2.0
+                    } else {
+                        4.0
+                    };
+                    mean += w * q / 384.0;
+                    squared += w * q * q / 384.0;
+                }
                 initial += 0.5 * arm.stiffness_j * (ea - z).powi(2) / 512.0;
-                stored += 0.5 * arm.stiffness_j * (eb - z1).powi(2) / 512.0;
-                heat += arm.stiffness_j * rate * residual.powi(2) / 512.0;
+                stored += 0.5 * arm.stiffness_j * endpoint.powi(2) / 512.0;
+                heat += arm.stiffness_j * rate * squared / 512.0;
                 for (force, g) in spatial_force.iter_mut().zip(gradient) {
-                    *force -= arm.stiffness_j * residual * g / 512.0;
+                    *force -= arm.stiffness_j * mean * g / 512.0;
                 }
             }
         }

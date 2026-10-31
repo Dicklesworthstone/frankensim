@@ -862,12 +862,26 @@ complete coupled instantaneous band, physical clock and history/setup budgets
 are admitted before playback. Existing body/string material history survives
 the appended fiber channels, and support-motion/contact rebuilds retain them.
 
-This is fixed-state, small-strain linear viscoelasticity at maintained tensile
-preload. Source-selected Kelvin--Voigt viscosities remain explicit additional
-parallel losses; they must describe independent mechanisms. Nonlinear fiber
-strain refuses in either attachment order because linear history cannot stand
-in for a hereditary `u_x+y_x^2/2` law. Preload creep, thermal evolution, stick
-flexure and measured horsehair parameters are not supplied by this binding.
+The source law remains fixed-state linear Maxwell viscoelasticity. With
+axial/transverse strain selected, axial arms act on the same retained
+`u_x+y_x^2/2` through `fs_nlmodal::longitudinal::relaxation::StrainRelaxation`.
+The shared material owner integrates each endpoint-strain ramp exactly;
+interval-mean stress is pulled back at midpoint mechanical coordinates and
+physical heat is integrated independently. This keeps nonlinear geometric
+work and original source memory together. Bending histories retain their own
+linear owner and clock admission. Source-selected Kelvin--Voigt viscosities
+remain explicit independent parallel losses. Nonlinear mechanical motion,
+material bandwidth and strain require their original resolution checks;
+exact constitutive integration does not imply exact coupled trajectories.
+Preload creep, thermal evolution, stick flexure and measured horsehair
+parameters are not supplied by this binding.
+
+The full-strain longitudinal string binding uses this same constitutive
+update and quadratic-strain work pullback. Its source admission no longer
+requires dt/tau <= 2 for these exact ramp histories; the complete instantaneous
+mechanical frequency, original material support, strain bounds and all other
+participants' clock limits remain binding. Linear axial branch selection
+retains its existing clock check.
 Synthetic layered-continuum tests compare complex displacement and dissipated
 power with independent Young-modulus assembly, and exercise source substitution
 through real contact, support reversal, accepted work and callback invariance.

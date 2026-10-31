@@ -11,6 +11,7 @@ authors.workspace = true
 layer = "L3"
 
 [dependencies]
+fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-phs = { path = "../fs-phs" }
 

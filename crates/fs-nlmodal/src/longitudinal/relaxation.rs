@@ -5,6 +5,7 @@
 //! A trial never mutates accepted memory or independently advances mechanics.
 use super::{MAX_LONGITUDINAL_MODES, invalid};
 use crate::NlModalError;
+use fs_material::visco::PronyRamp;
 
 /// One original source arm; no averaging over layers or relaxation times.
 #[derive(Clone, Debug)]
@@ -116,8 +117,12 @@ impl StrainRelaxation {
     }
 
     /// Propose memory and stress for one interval of the original joint solve.
-    /// The midpoint of ENDPOINT strains preserves work for quadratic geometry.
-    /// Returns physical dissipation [J]; accepted memory remains untouched.
+    /// The material owner integrates a linear ramp between ENDPOINT strains
+    /// exactly, returning the interval-mean work-conjugate stress and positive
+    /// dashpot heat. Pulling this stress back at midpoint coordinates preserves
+    /// work for quadratic strain geometry. Mechanical motion still requires
+    /// time refinement; exact constitutive integration is not an exact joint
+    /// nonlinear trajectory. Returns heat [J]; accepted memory is untouched.
     pub fn stage(
         &self,
         before: &[f64],
@@ -146,10 +151,19 @@ impl StrainRelaxation {
         arm_dissipation_j: &mut [f64],
     ) -> Result<f64, NlModalError> {
         if arm_dissipation_j.len() != self.arms.len() {
-            return Err(invalid("one dissipation output per original Maxwell arm required"));
+            return Err(invalid(
+                "one dissipation output per original Maxwell arm required",
+            ));
         }
-        self.stage_inner(before, after, memory, dt, candidate, stress,
-            Some(arm_dissipation_j))
+        self.stage_inner(
+            before,
+            after,
+            memory,
+            dt,
+            candidate,
+            stress,
+            Some(arm_dissipation_j),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -184,18 +198,21 @@ impl StrainRelaxation {
             .enumerate()
         {
             let rate = dt / arm.relaxation_time_s;
+            // Every harmonic in this source arm shares one relaxation clock.
+            // Prepare the exponential coefficients once per trial, then reuse
+            // the positive scalar ramp without per-coordinate transcendental work.
+            let ramp = PronyRamp::new(rate);
             let mut arm_loss = 0.0;
             for j in 0..self.width {
-                let (next, effort, heat) = maxwell_step(
+                let (next, effort, heat) = maxwell_step_prepared(
                     before[j],
                     after[j],
                     z0[j],
                     rate,
                     arm.stiffness_j * weight(j),
+                    &ramp,
                 )
-                .ok_or_else(|| {
-                    invalid("material clock is unresolved or strain-history step overflows")
-                })?;
+                .ok_or_else(|| invalid("material strain-history step overflows"))?;
                 z1[j] = next;
                 stress[j] += effort;
                 loss += heat;
@@ -217,8 +234,14 @@ fn weight(index: usize) -> f64 {
 }
 
 /// One Maxwell strain coordinate, eliminated inside the existing joint trial.
-/// Returns relaxed strain, midpoint stress coefficient, and heat. dt/tau <= 2
-/// keeps the update a convex combination of accepted memory and endpoint strain.
+/// Returns relaxed strain, interval-mean stress coefficient, and physical heat
+/// for a linear ramp between the two supplied total strains.
+///
+/// The shared material owner retains exponential relaxation at every dt/tau,
+/// including stiff arms; it does not use midpoint decay or extrapolate a
+/// damping ratio. Memory remains a convex combination of its initial value
+/// and the endpoint strains. Zero/infinite rate are the elastic/fully-relaxed
+/// limits, including underflow/overflow of positive finite dt/tau.
 pub fn maxwell_step(
     before: f64,
     after: f64,
@@ -226,22 +249,45 @@ pub fn maxwell_step(
     rate: f64,
     stiffness: f64,
 ) -> Option<(f64, f64, f64)> {
-    if [before, after, memory, rate, stiffness]
+    if rate.is_nan() || rate < 0.0 {
+        return None;
+    }
+    let ramp = PronyRamp::new(rate);
+    maxwell_step_prepared(before, after, memory, rate, stiffness, &ramp)
+}
+
+fn maxwell_step_prepared(
+    before: f64,
+    after: f64,
+    memory: f64,
+    rate: f64,
+    stiffness: f64,
+    ramp: &PronyRamp,
+) -> Option<(f64, f64, f64)> {
+    if [before, after, memory, stiffness]
         .iter()
         .any(|v| !v.is_finite())
-        || rate <= 0.0
-        || rate > 2.0
         || stiffness <= 0.0
     {
         return None;
     }
-    let residual = (f64::midpoint(before, after) - memory) / (1.0 + 0.5 * rate);
-    let next = memory + rate * residual;
-    let force = stiffness * residual;
-    let loss = stiffness * rate * residual * residual;
-    [next, force, loss]
-        .iter()
-        .all(|v| v.is_finite())
+    let elastic = before - memory;
+    let increment = after - before;
+    if !elastic.is_finite() || !increment.is_finite() {
+        return None;
+    }
+    let (endpoint, mean, heat) = ramp.apply(elastic, increment);
+    // z' = elastic_strain/tau. Integrating its mean retains tiny memory
+    // changes without subtracting two large endpoint strains. For stiff
+    // histories use the decayed elastic strain, avoiding infinity * zero.
+    let next = if rate <= 1.0 {
+        memory + rate * mean
+    } else {
+        after - endpoint
+    };
+    let force = stiffness * mean;
+    let loss = stiffness * heat;
+    ([next, force, loss].iter().all(|v| v.is_finite()) && loss >= 0.0)
         .then_some((next, force, loss))
 }
 
@@ -287,13 +333,30 @@ mod tests {
             for (arm, z) in law.arms().iter().zip(memory.chunks_exact(3)) {
                 let (ea, eb, z) = (field(&a), field(&b), field(z));
                 let rate = dt / arm.relaxation_time_s;
-                let z1 = ((1.0 - rate / 2.0) * z + rate * (ea + eb) / 2.0) / (1.0 + rate / 2.0);
-                let residual = (ea + eb - z - z1) / 2.0;
+                // Independent continuum solution q(t)=slope+(q0-slope)e^-t/tau,
+                // integrated by composite Simpson quadrature, not the owner.
+                let slope = (eb - ea) / rate;
+                let transient = ea - z - slope;
+                let endpoint = slope + transient * (-rate).exp();
+                let (mut mean, mut squared) = (0.0, 0.0);
+                for sample in 0..=128 {
+                    let t = sample as f64 / 128.0;
+                    let q = slope + transient * (-rate * t).exp();
+                    let w = if sample == 0 || sample == 128 {
+                        1.0
+                    } else if sample % 2 == 0 {
+                        2.0
+                    } else {
+                        4.0
+                    };
+                    mean += w * q / 384.0;
+                    squared += w * q * q / 384.0;
+                }
                 initial += 0.5 * arm.stiffness_j * (ea - z).powi(2) / 512.0;
-                final_energy += 0.5 * arm.stiffness_j * (eb - z1).powi(2) / 512.0;
-                heat += arm.stiffness_j * rate * residual.powi(2) / 512.0;
+                final_energy += 0.5 * arm.stiffness_j * endpoint.powi(2) / 512.0;
+                heat += arm.stiffness_j * rate * squared / 512.0;
                 for (f, s) in spatial_stress.iter_mut().zip(shapes) {
-                    *f += arm.stiffness_j * residual * s / 512.0;
+                    *f += arm.stiffness_j * mean * s / 512.0;
                 }
             }
         }
@@ -312,46 +375,80 @@ mod tests {
     }
 
     #[test]
-    fn g1_strain_memory_recovers_source_relaxation_time() {
-        let law = StrainRelaxation::new(
-            1,
-            vec![StrainRelaxationArm {
-                stiffness_j: 1700.0,
-                relaxation_time_s: 0.001,
-            }],
-        )
-        .unwrap();
-        let epsilon = [0.002, 0.0003];
-        let original = [0.0003, -0.0001];
-        let mut errors = Vec::new();
-        for steps in [16, 32, 64] {
-            let dt = 0.002 / steps as f64;
-            let mut memory = original.to_vec();
-            let mut candidate = memory.clone();
-            let mut stress = [0.0; 2];
-            let mut heat = 0.0;
-            for _ in 0..steps {
-                heat += law
-                    .stage(&epsilon, &epsilon, &memory, dt, &mut candidate, &mut stress)
-                    .unwrap();
-                core::mem::swap(&mut memory, &mut candidate);
+    fn g1_strain_memory_recovers_source_relaxation_time_without_clock_ringing() {
+        for tau in [0.001, 1e-6] {
+            let law = StrainRelaxation::new(
+                1,
+                vec![StrainRelaxationArm {
+                    stiffness_j: 1700.0,
+                    relaxation_time_s: tau,
+                }],
+            )
+            .unwrap();
+            let epsilon = [0.002, 0.0003];
+            let original = [0.0003, -0.0001];
+            for steps in [1, 4, 16, 64] {
+                let dt = 0.002 / steps as f64;
+                let mut memory = original.to_vec();
+                let mut candidate = memory.clone();
+                let mut stress = [0.0; 2];
+                let mut heat = 0.0;
+                for _ in 0..steps {
+                    let loss = law
+                        .stage(&epsilon, &epsilon, &memory, dt, &mut candidate, &mut stress)
+                        .unwrap();
+                    assert!(loss >= 0.0);
+                    for ((&next, &old), &target) in candidate.iter().zip(&memory).zip(&epsilon) {
+                        assert!(next >= old && next <= target, "relaxation cannot overshoot");
+                    }
+                    core::mem::swap(&mut memory, &mut candidate);
+                    heat += loss;
+                }
+                for ((&actual, &initial), &target) in memory.iter().zip(&original).zip(&epsilon) {
+                    let exact = target + (initial - target) * (-0.002 / tau).exp();
+                    assert!((actual - exact).abs() < 8e-18);
+                }
+                assert!(
+                    (law.energy(&epsilon, &memory).unwrap() + heat
+                        - law.energy(&epsilon, &original).unwrap())
+                    .abs()
+                        < 1e-14
+                );
             }
-            let exact = epsilon[0] + (original[0] - epsilon[0]) * (-2.0_f64).exp();
-            errors.push((memory[0] - exact).abs());
-            assert!(
-                (law.energy(&epsilon, &memory).unwrap() + heat
-                    - law.energy(&epsilon, &original).unwrap())
-                .abs()
-                    < 1e-14
-            );
-        }
-        for pair in errors.windows(2) {
-            assert!((pair[0] / pair[1] - 4.0).abs() < 0.02);
         }
     }
 
     #[test]
-    fn g0_strain_trials_preserve_accepted_memory_and_reject_unresolved_clock() {
+    fn g3_linear_strain_partition_preserves_memory_work_and_positive_heat() {
+        let (before, after, memory, stiffness) = (0.004, -0.001, -0.002, 1300.0);
+        for rate in [1e-12, 1e-5, 0.7, 2.0, 1000.0] {
+            let (end, mean, heat) = maxwell_step(before, after, memory, rate, stiffness).unwrap();
+            let work = mean * (after - before);
+            for steps in [2, 16, 64] {
+                let mut z = memory;
+                let (mut split_work, mut split_heat) = (0.0, 0.0);
+                for n in 0..steps {
+                    let a = before + (after - before) * n as f64 / steps as f64;
+                    let b = before + (after - before) * (n + 1) as f64 / steps as f64;
+                    let (next, stress, loss) =
+                        maxwell_step(a, b, z, rate / steps as f64, stiffness).unwrap();
+                    assert!(loss >= 0.0);
+                    split_work += stress * (b - a);
+                    split_heat += loss;
+                    z = next;
+                }
+                assert!((z - end).abs() < 5e-16, "rate={rate}, steps={steps}");
+                assert!((split_work - work).abs() < 2e-14);
+                assert!((split_heat - heat).abs() < 2e-14);
+            }
+            let old = 0.5 * stiffness * (before - memory).powi(2);
+            let new = 0.5 * stiffness * (after - end).powi(2);
+            assert!((new - old + heat - work).abs() < 2e-14);
+        }
+    }
+
+    #[test]
+    fn g0_strain_trials_preserve_accepted_memory_and_reject_invalid_clock() {
         let law = StrainRelaxation::new(
             1,
             vec![StrainRelaxationArm {
@@ -379,19 +476,37 @@ mod tests {
         assert_eq!(next, repeat);
         assert_eq!(force, again);
         assert_eq!(memory, original);
+        // A stiff source arm is now integrated directly, without midpoint
+        // ringing or the old dt/tau <= 2 refusal.
         assert!(
-            law.stage(&a, &b, &memory, 0.0021, &mut repeat, &mut again)
-                .is_err()
+            law.stage(&a, &b, &memory, 0.021, &mut repeat, &mut again)
+                .is_ok()
         );
+        for dt in [0.0, -0.1, f64::INFINITY, f64::NAN] {
+            assert!(
+                law.stage(&a, &b, &memory, dt, &mut repeat, &mut again)
+                    .is_err()
+            );
+        }
         assert_eq!(memory, original);
     }
 
     #[test]
     fn g1_original_arm_heat_matches_spatial_integrals_and_preserves_the_joint_update() {
-        let law = StrainRelaxation::new(2, vec![
-            StrainRelaxationArm { stiffness_j: 1200.0, relaxation_time_s: 0.001 },
-            StrainRelaxationArm { stiffness_j: 310.0, relaxation_time_s: 0.0004 },
-        ]).unwrap();
+        let law = StrainRelaxation::new(
+            2,
+            vec![
+                StrainRelaxationArm {
+                    stiffness_j: 1200.0,
+                    relaxation_time_s: 0.001,
+                },
+                StrainRelaxationArm {
+                    stiffness_j: 310.0,
+                    relaxation_time_s: 0.0004,
+                },
+            ],
+        )
+        .unwrap();
         let before = [0.004, -0.002, 0.001];
         let after = [0.002, 0.003, -0.0005];
         let memory = [0.0006, 0.0002, -0.0003, -0.0008, 0.0005, 0.0001];
@@ -399,46 +514,125 @@ mod tests {
         let dt = 0.0002;
         let (mut ordinary, mut candidate) = ([0.0; 6], [0.0; 6]);
         let (mut ordinary_stress, mut stress) = ([0.0; 3], [0.0; 3]);
-        let total = law.stage(&before, &after, &memory, dt, &mut ordinary,
-            &mut ordinary_stress).unwrap();
+        let total = law
+            .stage(
+                &before,
+                &after,
+                &memory,
+                dt,
+                &mut ordinary,
+                &mut ordinary_stress,
+            )
+            .unwrap();
         let mut channels = [f64::NAN; 2];
-        assert_eq!(total, law.stage_with_arm_dissipation(&before, &after, &memory,
-            dt, &mut candidate, &mut stress, &mut channels).unwrap());
+        assert_eq!(
+            total,
+            law.stage_with_arm_dissipation(
+                &before,
+                &after,
+                &memory,
+                dt,
+                &mut candidate,
+                &mut stress,
+                &mut channels
+            )
+            .unwrap()
+        );
         assert_eq!(candidate, ordinary);
         assert_eq!(stress, ordinary_stress);
-        let field = |coeff: &[f64], x: f64| coeff[0] + coeff[1..].iter().enumerate()
-            .map(|(j, v)| v * ((j + 1) as f64 * core::f64::consts::PI * x).cos())
-            .sum::<f64>();
+        let field = |coeff: &[f64], x: f64| {
+            coeff[0]
+                + coeff[1..]
+                    .iter()
+                    .enumerate()
+                    .map(|(j, v)| v * ((j + 1) as f64 * core::f64::consts::PI * x).cos())
+                    .sum::<f64>()
+        };
         let mut spatial = [0.0; 2];
         for point in 0..512 {
             let x = (point as f64 + 0.5) / 512.0;
             for (arm, source) in law.arms().iter().enumerate() {
                 let rate = dt / source.relaxation_time_s;
-                let strain = 0.5 * (field(&before, x) + field(&after, x));
+                let ea = field(&before, x);
+                let eb = field(&after, x);
                 let old = field(&memory[arm * 3..(arm + 1) * 3], x);
-                let next = ((1.0 - rate / 2.0) * old + rate * strain) / (1.0 + rate / 2.0);
-                let elastic = strain - 0.5 * (old + next);
-                spatial[arm] += source.stiffness_j * rate * elastic.powi(2) / 512.0;
+                // Independent continuous Maxwell solution, integrated in time
+                // at each spatial quadrature point. The tight source-channel
+                // comparison uses a resolved 2048-panel Simpson rule.
+                let slope = (eb - ea) / rate;
+                let transient = ea - old - slope;
+                let mut squared = 0.0;
+                for sample in 0..=2048 {
+                    let t = sample as f64 / 2048.0;
+                    let elastic = slope + transient * (-rate * t).exp();
+                    let w = if sample == 0 || sample == 2048 {
+                        1.0
+                    } else if sample % 2 == 0 {
+                        2.0
+                    } else {
+                        4.0
+                    };
+                    squared += w * elastic * elastic / 6144.0;
+                }
+                spatial[arm] += source.stiffness_j * rate * squared / 512.0;
             }
         }
         for (observed, expected) in channels.iter().zip(spatial) {
-            assert!((*observed - expected).abs() < 2e-14 * expected);
+            assert!(
+                (*observed - expected).abs() < 2e-14 * expected,
+                "arm heat {observed:e} vs {expected:e}, relative error {}",
+                (*observed - expected).abs() / expected
+            );
         }
         assert!(channels[0] > 0.0 && channels[1] > 0.0 && channels[0] != channels[1]);
         assert!((channels.iter().sum::<f64>() - total).abs() < 2e-15 * total);
         assert_eq!(memory, accepted);
-        assert!(law.stage_with_arm_dissipation(&before, &after, &memory,
-            0.001, &mut candidate, &mut stress, &mut channels).is_err());
-        assert_eq!(law.stage_with_arm_dissipation(&before, &after, &memory,
-            dt, &mut candidate, &mut stress, &mut channels).unwrap(), total);
+        assert!(
+            law.stage_with_arm_dissipation(
+                &before,
+                &after,
+                &memory,
+                0.0,
+                &mut candidate,
+                &mut stress,
+                &mut channels
+            )
+            .is_err()
+        );
+        assert_eq!(
+            law.stage_with_arm_dissipation(
+                &before,
+                &after,
+                &memory,
+                dt,
+                &mut candidate,
+                &mut stress,
+                &mut channels
+            )
+            .unwrap(),
+            total
+        );
         assert_eq!(candidate, ordinary);
         assert_eq!(stress, ordinary_stress);
         assert_eq!(memory, accepted);
         for (observed, expected) in channels.iter().zip(spatial) {
-            assert!((*observed - expected).abs() < 2e-14 * expected);
+            assert!(
+                (*observed - expected).abs() < 2e-14 * expected,
+                "arm heat {observed:e} vs {expected:e}, relative error {}",
+                (*observed - expected).abs() / expected
+            );
         }
-        assert!(law.stage_with_arm_dissipation(&before, &after, &memory,
-            dt, &mut candidate, &mut stress, &mut channels[..1]).is_err());
+        assert!(
+            law.stage_with_arm_dissipation(
+                &before,
+                &after,
+                &memory,
+                dt,
+                &mut candidate,
+                &mut stress,
+                &mut channels[..1]
+            )
+            .is_err()
+        );
     }
-
 }
