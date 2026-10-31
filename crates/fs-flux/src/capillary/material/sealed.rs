@@ -1,4 +1,4 @@
-//! Source-bound overdamped capillary filling against a closed gas pocket.
+//! Source-owned capillary filling against a closed gas pocket.
 //!
 //! Liquid viscosity/density and equilibrium wetting remain at their original
 //! declared source state. The actual frozen-composition gas evolves through its
@@ -12,13 +12,17 @@
 //! steps refuse reversal of the overdamped endpoint driving pressure.
 //! An optional original contact-line source adds advancing/receding pinning
 //! and linear friction while retaining the equilibrium wall free energy.
-//! The gas is spatially uniform: gas through-flow resistance, inertia,
+//! Optional mean-flow inertia is admitted explicitly through [inertia]. The gas
+//! remains spatially uniform: gas through-flow resistance/inertia, resolved
 //! meniscus end-cap storage, liquid heating and phase change are outside this law.
 
 pub mod advance;
+/// Source-bound column inertia with authentic gas work and stopping events.
+pub mod inertia;
 
 use super::MaterialCapillaryTube;
 use crate::capillary::ContactLineMotion;
+use crate::capillary::inertia::InertialCapillaryEnd;
 use crate::capillary::sealed_mechanics as mechanics;
 use core::f64::consts::PI;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
@@ -64,7 +68,7 @@ impl SealedCapillaryGeometry {
     }
 }
 
-/// Full-step boundary conditions. Inlet pressure is ABSOLUTE, never gauge.
+/// Requested-interval boundary values. Inlet pressure is ABSOLUTE, never gauge.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SealedCapillaryInput {
     pub inlet_pressure_pa: f64,
@@ -115,6 +119,7 @@ pub struct SealedGasCapillary<'a> {
     tube: MaterialCapillaryTube<'a>,
     geometry: SealedCapillaryGeometry,
     gas: ClosedGasParcel,
+    inertia: Option<inertia::InertiaState>,
 }
 /// Independent incremental accounts; gas heating appears exactly once.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -130,6 +135,14 @@ pub struct SealedCapillaryStep {
     pub liquid_viscous_dissipation_j: f64,
     pub contact_line_viscous_dissipation_j: f64,
     pub pinning_dissipation_j: f64,
+    /// Kinetic-energy exchange loss in the explicitly declared liquid reservoir.
+    pub reservoir_dissipation_j: f64,
+    /// Change in the liquid column plus declared end-mass kinetic storage.
+    pub kinetic_energy_change_j: f64,
+    pub initial_velocity_m_s: Option<f64>,
+    pub velocity_m_s: Option<f64>,
+    /// Inertial stopping events consume only elapsed_time_s; advance owns the remainder.
+    pub inertial_end: Option<InertialCapillaryEnd>,
     /// Absent for equilibrium-only wetting; otherwise the admitted midpoint branch.
     pub contact_line_motion: Option<ContactLineMotion>,
     /// Angle conjugate to the discrete mean contact-line velocity, when enabled.
@@ -138,7 +151,7 @@ pub struct SealedCapillaryStep {
     pub gas: GasHeatVolumeStep,
     pub midpoint_gas_pressure_pa: f64,
     pub pressure_residual_pa: f64,
-    /// Inlet work + heat - gas storage - wall/gravity storage - all dissipation.
+    /// Inlet work + heat - gas/kinetic/wall/gravity storage - all dissipation.
     pub energy_balance_residual_j: f64,
     pub iterations: usize,
 }
@@ -173,6 +186,7 @@ impl<'a> MaterialCapillaryTube<'a> {
             tube: self,
             geometry,
             gas,
+            inertia: None,
         })
     }
 }
@@ -190,8 +204,11 @@ impl<'a> SealedGasCapillary<'a> {
         self.geometry
     }
 
-    /// Propose one complete, immutable step. Cancellation, invalid source
-    /// states, tube ends and energy refusal leave this owner exactly unchanged.
+    /// Propose one immutable step. The overdamped path consumes the full interval.
+    /// Explicit inertia can return a resolved velocity-zero event with its actual
+    /// elapsed time; use advance_candidate to consume the remaining interval.
+    /// Cancellation, invalid source states, tube ends and energy refusal leave
+    /// this owner exactly unchanged.
     /// Viscous loss is reported as dissipation, not implicitly injected into gas heat.
     /// Contact-line speed/angle limits are checked at the original and candidate
     /// endpoints and at the discrete mean, with adaptive substeps resolving the
@@ -212,6 +229,9 @@ impl<'a> SealedGasCapillary<'a> {
             return Err(SealedCapillaryError::Invalid(
                 "finite heat power and explicit nonnegative energy tolerances required",
             ));
+        }
+        if self.inertia.is_some() {
+            return inertia::step(self, input, controls, &mut cancelled);
         }
         let heat = input.gas_heat_power_w * input.duration_s;
         if !heat.is_finite()
@@ -423,6 +443,7 @@ impl<'a> SealedGasCapillary<'a> {
                 tube: self.tube,
                 geometry,
                 gas,
+                inertia: None,
             },
             step: SealedCapillaryStep {
                 initial_wet_length_m: g.wet_length_m,
@@ -436,6 +457,11 @@ impl<'a> SealedGasCapillary<'a> {
                 liquid_viscous_dissipation_j: motion.dissipation,
                 contact_line_viscous_dissipation_j: motion.contact_line_dissipation,
                 pinning_dissipation_j: motion.pinning_dissipation,
+                reservoir_dissipation_j: 0.0,
+                kinetic_energy_change_j: 0.0,
+                initial_velocity_m_s: None,
+                velocity_m_s: None,
+                inertial_end: None,
                 contact_line_motion: motion.contact_line_motion,
                 apparent_contact_angle_radians,
                 gas: gas_step,

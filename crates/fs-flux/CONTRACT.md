@@ -2020,9 +2020,10 @@ checks reject hidden reversals, oversized stopping crossings and heated pinned
 steps that end outside the static interval. Mean and physical endpoint speeds
 and apparent angles must satisfy the declared operating limits. Adaptive
 substeps sample the interior; these checks are not a continuous-trajectory
-domain enclosure. Tube inertia, deposited films, changing meniscus end-cap
-storage, temperature-dependent liquid evolution and a general Cox--Voinov or
-molecular-kinetic law remain outside this bounded linear-friction closure.
+domain enclosure. Deposited films, changing meniscus end-cap storage, temperature-dependent
+liquid evolution and a general Cox--Voinov or molecular-kinetic law remain
+outside this bounded linear-friction closure. Column inertia is admitted
+through the explicit opt-in described below.
 
 ## Adaptive sealed capillary intervals
 
@@ -2114,3 +2115,46 @@ coast/stop/pin behavior, purely viscous asymptotic coasting and refusal boundari
 The numerical owner/driver paths have executed with explicit numeric source-view
 doubles; native original-card integration tests are supplied for the normal
 workspace build and must not be confused with that narrower execution evidence.
+
+## Inertial sealed-gas capillary dynamics
+
+`SealedGasCapillary::with_inertia` adds physical liquid velocity and explicit
+added/end inertance to the existing owner. The declared geometry must match
+the actual sealed tube; gas bulk inertia remains excluded from the spatially
+uniform closed-parcel model. The same original wetting source supplies friction
+and advancing/receding thresholds. `SealedCapillaryInertiaAccuracy` provides
+independent velocity and stopping-time scales without changing the existing
+overdamped controls or choosing physical coefficients implicitly.
+
+Every trial obtains midpoint pressure, endpoint pressure and both pressure
+derivatives from the original NASA-9 gas heat/volume candidate. The shared
+inertial mechanics receives the analytic chain-rule derivatives
+`dP/dx = -A*dP/dV_final` and `dP/dt = heat_power*dP/dQ`. The accepted gas
+candidate and its authentic receipt move together. A stopping segment consumes
+only its actual elapsed heat. The whole-system energy gate balances inlet
+work plus external heat against gas internal-energy change, liquid/end-mass
+kinetic change, Young wall and gravity storage, and independent bulk, line,
+pinning and reservoir losses. Dissipation is never silently added to gas heat.
+
+The existing adaptive driver now controls optional velocity and event time
+alongside meniscus position, gas temperature and pressure. A stopped coarse
+path and refined path reach a common post-stop time through their own authentic
+gas operations. At most five bounded step evaluations are needed per attempt;
+the normal overdamped path still uses three. Accepted fine receipts are summed
+individually, including any post-stop remainder. This avoids fake aggregate
+gas derivatives, heat from rejected attempts and repeated shrinking toward an
+earlier coarse stop. A second unresolved stop in a tail requires refinement.
+
+An initially resting state must honor the original pressure's depinning branch:
+heating cannot average an initially active force into false pinning or immediate
+opposite motion. Nonzero incoming velocity remains free to coast through the
+static band. Source/angle limits, tube-end refusal, atomic cancellation and
+complete-interval energy checks remain in force.
+
+Source-bound regressions cover independently manufactured advancing/receding
+motion, pressure sensitivities, actual stopping heat and direct gas-receipt
+identity, adaptive stop/pin completion, initial thermal branch changes, and
+unchanged owners on refusal. Focused numerical execution uses explicit
+constant-heat-capacity gas and material-view doubles with the actual new
+mechanics/owner/driver; full NASA-9 dependency integration remains a separate
+native workspace test requirement.

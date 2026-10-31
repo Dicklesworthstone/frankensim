@@ -368,3 +368,6 @@ fn finite_dead_volume_allows_full_tube_but_crossing_its_end_never_publishes() {
     ));
     assert_eq!(owner.geometry(), g);
 }
+
+#[path = "sealed/inertia.rs"]
+mod inertia;
