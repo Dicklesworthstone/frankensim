@@ -4,10 +4,11 @@
 //! motion. Each width cell keeps its original share of mass, EA and preload.
 //! This is the moderate-slope, fixed-end rod limit: omitted axial harmonics
 //! equilibrate statically, and the retained axial/normal modes must be refined
-//! together. Linear material viscosities remain the original small-strain
-//! operators; finite-slope viscous cross terms and thermal evolution are absent.
+//! together. The original axial viscosity acts on this same complete strain
+//! rate, including normal/axial cross terms. Its linear axial damping is removed
+//! once; bending viscosity remains independent. Thermal evolution is absent.
 
-use super::{FiberRibbonError, TensionedFiberRibbon};
+use super::{FiberRibbonError, ModalAcousticTimeModel, TensionedFiberRibbon};
 use crate::render::schedule::force::coupled::ModalCouplingError;
 use crate::render::schedule::force::coupled::contact::friction::nonlinear::{
     MappedModalPotentialBinding, ModalCoordinate, ModalPotential, NonlinearModalConfig,
@@ -65,6 +66,8 @@ pub struct FiberStrain {
     slope_scales: Vec<f64>,
     tension_n: f64,
     axial_rigidity_n: f64,
+    /// C_a L for this original strip [J s], from the same axial source bundle.
+    viscous_coefficient_j_s: f64,
     limits: FiberStrainLimits,
     config: NonlinearModalConfig,
 }
@@ -77,6 +80,8 @@ impl TensionedFiberRibbon {
     /// reaction and pressure history. When attached to a string bank, this law
     /// joins its original exact-linear/discrete-gradient contact solve. Existing
     /// nonlinear constituents must use this SAME explicit solve configuration.
+    /// The selected axial viscosity follows the complete material strain rate;
+    /// its original linear modal damping is replaced, never counted twice.
     ///
     /// No modes are introduced or silently discarded. This fixed-end,
     /// moderate-slope rung refuses loss of local tension, excess strain, and
@@ -129,11 +134,41 @@ impl TensionedFiberRibbon {
                 "fiber strain map is unrepresentable",
             ));
         }
+        let viscosity = self.axial.viscous_rigidity_n_s();
+        let viscous_coefficient_j_s = viscosity * share * self.geometry.length_m;
+        if !viscous_coefficient_j_s.is_finite()
+            || (viscosity > 0.0 && viscous_coefficient_j_s == 0.0)
+        {
+            return Err(FiberRibbonError::Invalid(
+                "fiber strain viscosity is unrepresentable",
+            ));
+        }
+        if viscosity > 0.0 {
+            let mut modes = self.cell.modes().to_vec();
+            for mode in &mut modes[..self.resolution.axial_modes] {
+                mode.damping_ratio = 0.0;
+            }
+            // This cold source model was constructed from an integer sample
+            // rate. Rebuild only the linear kernel and require its exact clock,
+            // original budgets, complete mode order and original state.
+            let rate = self.cell.sample_period_s().recip().round() as u32;
+            let mut cell = ModalAcousticTimeModel::try_new(rate, modes, self.cell.budget())
+                .map_err(FiberRibbonError::Modal)?;
+            if cell.sample_period_s() != self.cell.sample_period_s() {
+                return Err(FiberRibbonError::Invalid(
+                    "fiber strain must retain its original clock",
+                ));
+            }
+            cell.restore_states(self.cell.states())
+                .map_err(FiberRibbonError::Modal)?;
+            self.cell = cell;
+        }
         self.strain = Some(FiberStrain {
             model,
             slope_scales,
             tension_n,
             axial_rigidity_n,
+            viscous_coefficient_j_s,
             limits,
             config,
         });
@@ -270,6 +305,52 @@ impl ModalPotential for FiberStrain {
             || mean.abs() + variation > self.limits.maximum_strain
             || self.tension_n + self.axial_rigidity_n * (mean - variation) <= 0.0
         {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    fn has_constitutive_loss(&self) -> bool {
+        self.viscous_coefficient_j_s > 0.0
+    }
+
+    fn dissipative_reaction(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), ModalCouplingError> {
+        self.validate_coordinates(q)?;
+        if velocity.len() != q.len()
+            || out.len() != q.len()
+            || velocity.iter().any(|v| !v.is_finite())
+        {
+            return Err(ModalCouplingError::Invalid {
+                what: "fiber strain loss needs complete original modal velocities",
+            });
+        }
+        let axial_count = self.model.axial_modes().len();
+        let slopes = self.slopes(q);
+        let mut reaction = vec![0.0; slopes.len()];
+        let (axial_out, normal_out) = out.split_at_mut(axial_count);
+        self.model
+            .viscous_strain_reaction(
+                &slopes,
+                &self.slopes(velocity),
+                &velocity[..axial_count],
+                self.viscous_coefficient_j_s,
+                &mut reaction,
+                axial_out,
+            )
+            .map_err(|_| invalid())?;
+        for ((force, &scale), &reaction) in normal_out
+            .iter_mut()
+            .zip(&self.slope_scales)
+            .zip(&reaction[1..])
+        {
+            *force = scale * reaction;
+        }
+        if out.iter().any(|force| !force.is_finite()) {
             return Err(invalid());
         }
         Ok(())

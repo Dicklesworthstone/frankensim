@@ -13,8 +13,8 @@
 //! resolved propagation; a small selection is not a full axial-wave claim.
 //! With no retained coordinates this is the Kirchhoff--Carrier potential.
 //!
-//! This module owns energy and its work-conjugate discrete gradient, not a
-//! propagator, damping law, force lag, or instrument-specific material.
+//! This module owns energy, its work-conjugate discrete gradient, and the
+//! matching strain-rate pullback. It selects no material or time propagator.
 //! Derivation uses cosine product identities, with no spatial quadrature in
 //! the runtime. Boundary motion and modal-coordinate pullback are caller-owned.
 
@@ -37,7 +37,12 @@ fn invalid(what: &'static str) -> NlModalError {
 fn dot4(a: &[f64], b: &[f64]) -> f64 {
     let mut sums = [0.0_f64; 4];
     let (ca, cb) = (a.chunks_exact(4), b.chunks_exact(4));
-    let tail: f64 = ca.remainder().iter().zip(cb.remainder()).map(|(x, y)| x * y).sum();
+    let tail: f64 = ca
+        .remainder()
+        .iter()
+        .zip(cb.remainder())
+        .map(|(x, y)| x * y)
+        .sum();
     for (x, y) in ca.zip(cb) {
         for i in 0..4 {
             sums[i] += x[i] * y[i];
@@ -172,15 +177,21 @@ impl LongitudinalString {
     /// Refuses nonfinite fractions or positions outside the closed span.
     pub fn axial_displacement_shapes(&self, fraction: f64) -> Result<Vec<f64>, NlModalError> {
         if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
-            return Err(invalid("axial displacement needs a physical station on the complete span"));
+            return Err(invalid(
+                "axial displacement needs a physical station on the complete span",
+            ));
         }
         if fraction == 0.0 || fraction == 1.0 {
             return Ok(vec![0.0; self.axial_modes.len()]);
         }
-        Ok(self.axial_modes.iter().map(|&mode| {
-            self.axial_displacement_scale
-                * det::sin(mode as f64 * core::f64::consts::PI * fraction)
-        }).collect())
+        Ok(self
+            .axial_modes
+            .iter()
+            .map(|&mode| {
+                self.axial_displacement_scale
+                    * det::sin(mode as f64 * core::f64::consts::PI * fraction)
+            })
+            .collect())
     }
 
     fn validate_state(&self, slopes: &[f64], axial: &[f64]) -> Result<(), NlModalError> {
@@ -318,7 +329,11 @@ impl LongitudinalString {
     ///
     /// # Errors
     /// Refuses incomplete/nonfinite slopes or a wrong output length.
-    pub fn geometric_strain(&self, slopes: &[f64], harmonics: &mut [f64]) -> Result<f64, NlModalError> {
+    pub fn geometric_strain(
+        &self,
+        slopes: &[f64],
+        harmonics: &mut [f64],
+    ) -> Result<f64, NlModalError> {
         if slopes.len() != self.slope_count()
             || harmonics.len() != self.axial_modes.len()
             || slopes.iter().any(|x| !x.is_finite())
@@ -330,7 +345,8 @@ impl LongitudinalString {
             let mut total = 0.0;
             for plane in slopes.chunks_exact(n + 1) {
                 if mode <= n {
-                    total += plane[0] * plane[mode] + 0.5 * dot4(&plane[1..=n - mode], &plane[1 + mode..]);
+                    total += plane[0] * plane[mode]
+                        + 0.5 * dot4(&plane[1..=n - mode], &plane[1 + mode..]);
                 }
                 let low = mode.saturating_sub(n).max(1);
                 let high = (mode - 1).min(n);
@@ -372,12 +388,23 @@ impl LongitudinalString {
         }
         let n = self.transverse_modes;
         let mut mean = 0.0;
-        for (a, v) in slopes.chunks_exact(n + 1).zip(slope_velocity.chunks_exact(n + 1)) {
+        for (a, v) in slopes
+            .chunks_exact(n + 1)
+            .zip(slope_velocity.chunks_exact(n + 1))
+        {
             mean += a[0] * v[0] + 0.5 * dot4(&a[1..], &v[1..]);
         }
-        for (j, (&mode, out)) in self.axial_modes.iter().zip(harmonics.iter_mut()).enumerate() {
+        for (j, (&mode, out)) in self
+            .axial_modes
+            .iter()
+            .zip(harmonics.iter_mut())
+            .enumerate()
+        {
             let mut rate = self.axial_slope_scales[j] * axial_velocity[j];
-            for (a, v) in slopes.chunks_exact(n + 1).zip(slope_velocity.chunks_exact(n + 1)) {
+            for (a, v) in slopes
+                .chunks_exact(n + 1)
+                .zip(slope_velocity.chunks_exact(n + 1))
+            {
                 if mode <= n {
                     rate += a[0] * v[mode] + v[0] * a[mode];
                     for k in 1..=n - mode {
@@ -398,6 +425,69 @@ impl LongitudinalString {
         Ok(mean)
     }
 
+    /// Kelvin--Voigt reaction on the SAME retained material strain.
+    ///
+    /// `viscous_coefficient_j_s` is the caller's sourced axial viscous rigidity
+    /// `C_a = sum(eta_i A_i)` times the physical span length. The returned
+    /// power is `C_a L * (edot_0² + sum(edot_j²)/2)` [W]. The outputs are
+    /// its negative half-gradient with respect to slope and axial velocities,
+    /// so their work is minus that dissipated power. The caller pulls slope
+    /// reactions back to its own transverse coordinates and boundary ports.
+    ///
+    /// Both transverse directions, their moving chords, and the original
+    /// retained axial harmonics participate. No strain channel, viscosity,
+    /// material state, or independent time integrator is inferred.
+    ///
+    /// # Errors
+    /// Refuses negative/nonfinite viscosity, incomplete inputs, or overflow.
+    /// Output contents are unspecified after an error.
+    pub fn viscous_strain_reaction(
+        &self,
+        slopes: &[f64],
+        slope_velocity: &[f64],
+        axial_velocity: &[f64],
+        viscous_coefficient_j_s: f64,
+        slope_reaction: &mut [f64],
+        axial_reaction: &mut [f64],
+    ) -> Result<f64, NlModalError> {
+        let c = viscous_coefficient_j_s;
+        if !c.is_finite()
+            || c < 0.0
+            || slope_reaction.len() != self.slope_count()
+            || axial_reaction.len() != self.axial_modes.len()
+        {
+            return Err(invalid(
+                "complete strain-viscosity reaction and nonnegative coefficient",
+            ));
+        }
+        let mut rates = vec![0.0; self.axial_modes.len()];
+        let mean = self.strain_rate(slopes, slope_velocity, axial_velocity, &mut rates)?;
+        let power = c * (mean * mean + 0.5 * rates.iter().map(|r| r * r).sum::<f64>());
+        for rate in &mut rates {
+            *rate *= 0.5 * c;
+        }
+        self.geometric_strain_gradient(slopes, c * mean, &rates, slope_reaction)?;
+        for force in slope_reaction.iter_mut() {
+            *force = -*force;
+        }
+        for ((force, &rate), &scale) in axial_reaction
+            .iter_mut()
+            .zip(&rates)
+            .zip(&self.axial_slope_scales)
+        {
+            *force = -rate * scale;
+        }
+        if !power.is_finite()
+            || slope_reaction
+                .iter()
+                .chain(axial_reaction.iter())
+                .any(|force| !force.is_finite())
+        {
+            return Err(invalid("strain-viscosity power or force overflows"));
+        }
+        Ok(power)
+    }
+
     /// Storage and nonuniform strain bound from [`Self::geometric_strain`]'s
     /// output and the axial coordinates; writes each retained mode's total
     /// strain coefficient `d_j u_j + s_j` to `strain`. Same arithmetic as
@@ -413,14 +503,22 @@ impl LongitudinalString {
         strain: &mut [f64],
     ) -> Result<(f64, f64), NlModalError> {
         let n = self.axial_modes.len();
-        if harmonics.len() != n || axial.len() != n || strain.len() != n
-            || !mean.is_finite() || harmonics.iter().chain(axial).any(|x| !x.is_finite())
+        if harmonics.len() != n
+            || axial.len() != n
+            || strain.len() != n
+            || !mean.is_finite()
+            || harmonics.iter().chain(axial).any(|x| !x.is_finite())
         {
             return Err(invalid("complete finite longitudinal string strain"));
         }
         let mut energy = self.mean_energy_coefficient * mean * mean;
         let mut nonuniform = 0.0;
-        for (((slot, &s), &u), &scale) in strain.iter_mut().zip(harmonics).zip(axial).zip(&self.axial_slope_scales) {
+        for (((slot, &s), &u), &scale) in strain
+            .iter_mut()
+            .zip(harmonics)
+            .zip(axial)
+            .zip(&self.axial_slope_scales)
+        {
             *slot = scale * u + s;
             energy += 0.5 * self.mean_energy_coefficient * *slot * *slot;
             nonuniform += slot.abs();
@@ -453,7 +551,9 @@ impl LongitudinalString {
             || !mean_weight.is_finite()
             || slopes.iter().chain(weights).any(|x| !x.is_finite())
         {
-            return Err(invalid("complete finite longitudinal string gradient input"));
+            return Err(invalid(
+                "complete finite longitudinal string gradient input",
+            ));
         }
         let n = self.transverse_modes;
         for (a, out) in slopes.chunks_exact(n + 1).zip(out.chunks_exact_mut(n + 1)) {
@@ -637,3 +737,132 @@ impl LongitudinalString {
 #[cfg(test)]
 #[path = "longitudinal_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod viscous_tests {
+    use super::*;
+
+    #[test]
+    fn g1_viscous_pullback_matches_two_plane_spatial_power_and_reaction() {
+        let (length, density, coefficient) = (1.2, 0.002, 2.7);
+        let model = LongitudinalString::new(
+            KcStringParams {
+                length,
+                lin_density: density,
+                tension: 20.0,
+                ea: 2500.0,
+            },
+            2,
+            2,
+            &[1, 2, 3, 4],
+        )
+        .unwrap();
+        let slopes = [0.001, 0.004, -0.003, -0.002, 0.002, 0.001];
+        let slope_velocity = [0.04, 0.1, -0.03, 0.02, -0.01, 0.03];
+        let axial_velocity = [2e-5, -1e-5, 3e-5, -2e-5];
+        let (mut force, mut axial_force) = ([0.0; 6], [0.0; 4]);
+        let power = model
+            .viscous_strain_reaction(
+                &slopes,
+                &slope_velocity,
+                &axial_velocity,
+                coefficient,
+                &mut force,
+                &mut axial_force,
+            )
+            .unwrap();
+        let (mut expected_power, mut expected_force, mut expected_axial) =
+            (0.0, [0.0; 6], [0.0; 4]);
+        for cell in 0..2048 {
+            let x = (cell as f64 + 0.5) / 2048.0;
+            let shape = [
+                1.0,
+                (core::f64::consts::PI * x).cos(),
+                (2.0 * core::f64::consts::PI * x).cos(),
+            ];
+            let mut slope = [0.0; 2];
+            let mut rate = 0.0;
+            for plane in 0..2 {
+                let mut velocity = 0.0;
+                for i in 0..3 {
+                    slope[plane] += slopes[3 * plane + i] * shape[i];
+                    velocity += slope_velocity[3 * plane + i] * shape[i];
+                }
+                rate += slope[plane] * velocity;
+            }
+            let mut axial_shape = [0.0; 4];
+            for (i, shape) in axial_shape.iter_mut().enumerate() {
+                let k = (i + 1) as f64 * core::f64::consts::PI;
+                *shape = (2.0 / (density * length)).sqrt() * k / length * (k * x).cos();
+                rate += *shape * axial_velocity[i];
+            }
+            expected_power += coefficient * rate * rate / 2048.0;
+            for plane in 0..2 {
+                for i in 0..3 {
+                    expected_force[3 * plane + i] -=
+                        coefficient * rate * slope[plane] * shape[i] / 2048.0;
+                }
+            }
+            for i in 0..4 {
+                expected_axial[i] -= coefficient * rate * axial_shape[i] / 2048.0;
+            }
+        }
+        assert!((power / expected_power - 1.0).abs() < 2e-13);
+        for (actual, expected) in force
+            .iter()
+            .chain(&axial_force)
+            .zip(expected_force.iter().chain(&expected_axial))
+        {
+            assert!((actual - expected).abs() < 2e-12 * expected.abs().max(1e-10));
+        }
+        let work = force
+            .iter()
+            .zip(slope_velocity)
+            .map(|(f, v)| f * v)
+            .sum::<f64>()
+            + axial_force
+                .iter()
+                .zip(axial_velocity)
+                .map(|(f, v)| f * v)
+                .sum::<f64>();
+        assert!((power + work).abs() < 2e-14 * power);
+        assert_eq!(
+            model
+                .viscous_strain_reaction(
+                    &slopes,
+                    &slope_velocity,
+                    &axial_velocity,
+                    0.0,
+                    &mut force,
+                    &mut axial_force
+                )
+                .unwrap(),
+            0.0
+        );
+        assert!(force.iter().chain(&axial_force).all(|f| *f == 0.0));
+        assert!(
+            model
+                .viscous_strain_reaction(
+                    &slopes,
+                    &slope_velocity,
+                    &axial_velocity,
+                    -1.0,
+                    &mut force,
+                    &mut axial_force
+                )
+                .is_err()
+        );
+        assert!(
+            model
+                .viscous_strain_reaction(
+                    &slopes,
+                    &slope_velocity,
+                    &axial_velocity[..3],
+                    coefficient,
+                    &mut force,
+                    &mut axial_force
+                )
+                .is_err()
+        );
+    }
+}
