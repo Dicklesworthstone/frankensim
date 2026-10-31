@@ -17,6 +17,7 @@
 //! mechanism evolution, kinetics integrator, or L3 protocol.
 
 mod caloric;
+pub mod coulomb;
 mod enthalpy;
 mod entropy;
 pub mod electron_collision;
