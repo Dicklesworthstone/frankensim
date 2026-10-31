@@ -31,6 +31,9 @@
 //! vapour-air mixtures: The benefits of interferometry*, §3.3.1,
 //! <https://doi.org/10.1016/j.ces.2020.116433>.
 
+/// Optical attachment to the original source-backed thermochemical gas state.
+pub mod thermochemical;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_qty::{MolarMass, semantic::Composition};
 
@@ -207,9 +210,7 @@ impl MolecularRayleighMixture {
             .composition
             .to_mole_fractions(&masses)
             .map_err(|_| GasScatteringError::Components)?;
-        let mut sigma = 0.0;
-        let mut isotropic_sigma = 0.0;
-        let mut refractive_volume = 0.0;
+        let mut optics = MolecularOpticsSum::default();
         let mut molar_mass = 0.0;
         let mut hash = DomainHasher::new("org.frankensim.material.rayleigh-gas.v2");
         hash.update(&(self.specs.len() as u64).to_le_bytes());
@@ -221,13 +222,7 @@ impl MolecularRayleighMixture {
             .zip(&self.optical)
             .zip(&self.specs)
         {
-            let weighted = fraction * optical.cross_section_m2(RAYLEIGH_REFERENCE_NM)?;
-            sigma += weighted;
-            refractive_volume += fraction * optical.lorentz_lorenz_volume_m3();
-            // Depolarized Rayleigh = w_iso * isotropic + (1-w_iso)*Rayleigh.
-            // Weight the PHASE by scattering, never average delta directly.
-            let delta = optical.depolarization_ratio;
-            isotropic_sigma += weighted * (3.0 * delta / (2.0 + delta));
+            optics.add(fraction, optical)?;
             molar_mass += fraction * mass.value();
             optical.hash_into(&mut hash);
             for value in [
@@ -244,6 +239,66 @@ impl MolecularRayleighMixture {
                 ConductivityModel::Eucken => 1,
             }]);
         }
+        // Snapshot the declared mixture before adding its local thermodynamic
+        // state. Spatial consumers can then admit varying T/p without accepting
+        // a different composition or optical source with coincident coefficients.
+        let model_identity = hash.finalize();
+        optics.finish(gas, molar_mass, model_identity, hash)
+    }
+
+    /// Attach optics to an existing accepted gas only if the original gas owner
+    /// reproduces its entire numerical state exactly. A differing transport or
+    /// density refuses. `GasState` alone carries no species identity: the caller
+    /// must use these same declared component inputs in the simulation. Numeric
+    /// equality is not evidence that two thermodynamically identical species
+    /// have the same optical properties.
+    pub fn bind_gas_state(
+        &self,
+        accepted: &GasState,
+    ) -> Result<RayleighGasState, GasScatteringError> {
+        accepted
+            .validate_coherence()
+            .map_err(GasScatteringError::Gas)?;
+        let result = self.evaluate(accepted.temperature, accepted.pressure)?;
+        if result.gas != *accepted {
+            return Err(GasScatteringError::StateMismatch);
+        }
+        Ok(result)
+    }
+}
+
+/// One molecular addition/phase formula for both original gas owners.
+#[derive(Default)]
+struct MolecularOpticsSum {
+    sigma: f64,
+    isotropic_sigma: f64,
+    refractive_volume: f64,
+}
+
+impl MolecularOpticsSum {
+    fn add(&mut self, fraction: f64, optical: MolecularRayleigh) -> Result<(), GasScatteringError> {
+        let weighted = fraction * optical.cross_section_m2(RAYLEIGH_REFERENCE_NM)?;
+        self.sigma += weighted;
+        self.refractive_volume += fraction * optical.lorentz_lorenz_volume_m3();
+        // Depolarized Rayleigh = w_iso * isotropic + (1-w_iso)*Rayleigh.
+        // Weight the PHASE by scattering, never average delta directly.
+        let delta = optical.depolarization_ratio;
+        self.isotropic_sigma += weighted * (3.0 * delta / (2.0 + delta));
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        gas: GasState,
+        molar_mass: f64,
+        model_identity: ContentHash,
+        mut hash: DomainHasher,
+    ) -> Result<RayleighGasState, GasScatteringError> {
+        let Self {
+            sigma,
+            isotropic_sigma,
+            refractive_volume,
+        } = self;
         finite_nonnegative(sigma)?;
         if !molar_mass.is_finite() || molar_mass <= 0.0 {
             return Err(GasScatteringError::Unrepresentable);
@@ -290,32 +345,13 @@ impl MolecularRayleighMixture {
             molecular_cross_section_reference_m2: sigma,
             mass_refractivity_m3_kg,
             molar_mass_kg_mol: molar_mass,
+            model_identity,
             identity: hash.finalize(),
         };
         // Admission proves representability over the entire visible band,
         // including the maximum coefficient at the short-wavelength endpoint.
         result.scattering_per_m(380.0)?;
         result.scattering_per_m(780.0)?;
-        Ok(result)
-    }
-
-    /// Attach optics to an existing accepted gas only if the original gas owner
-    /// reproduces its entire numerical state exactly. A differing transport or
-    /// density refuses. `GasState` alone carries no species identity: the caller
-    /// must use these same declared component inputs in the simulation. Numeric
-    /// equality is not evidence that two thermodynamically identical species
-    /// have the same optical properties.
-    pub fn bind_gas_state(
-        &self,
-        accepted: &GasState,
-    ) -> Result<RayleighGasState, GasScatteringError> {
-        accepted
-            .validate_coherence()
-            .map_err(GasScatteringError::Gas)?;
-        let result = self.evaluate(accepted.temperature, accepted.pressure)?;
-        if result.gas != *accepted {
-            return Err(GasScatteringError::StateMismatch);
-        }
         Ok(result)
     }
 }
@@ -330,6 +366,7 @@ pub struct RayleighGasState {
     mass_refractivity_m3_kg: f64,
     molar_mass_kg_mol: f64,
     depolarization_ratio: f64,
+    model_identity: ContentHash,
     identity: ContentHash,
 }
 
@@ -343,6 +380,15 @@ impl RayleighGasState {
     #[must_use]
     pub const fn content_identity(&self) -> ContentHash {
         self.identity
+    }
+    /// Fixed component data, canonical mole composition, water label and optical
+    /// reference sources, independent of local temperature and pressure.
+    /// A thermochemical attachment retains selected NASA-9 region and local
+    /// transport evaluations separately in its complete state identity.
+    /// Equal numerical coefficients alone do not establish a shared model.
+    #[must_use]
+    pub const fn model_identity(&self) -> ContentHash {
+        self.model_identity
     }
     /// Mean molar mass using the gas owner's exact mole-fraction conversion.
     #[must_use]

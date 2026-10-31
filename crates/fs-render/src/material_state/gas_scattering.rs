@@ -5,6 +5,9 @@
 //! approximation is introduced. Scattering and absorption remain distinct:
 //! this elastic molecular model emits no heat and supplies no absorption.
 
+mod cells;
+pub use cells::MaterialGasScatteringCellGrid;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
@@ -98,9 +101,9 @@ impl MaterialGasScatteringBinding {
     ///
     /// This is explicitly the elastic, nonabsorbing molecular component. It
     /// does not claim spectral gas absorption, thermal emission, refraction,
-    /// polarization or a spatially varying composition. For spatially varying
-    /// mass density at fixed composition, use the exposed spectrum and phase
-    /// with `ScatteringGrid`'s independently admitted physical field.
+    /// polarization or a spatially varying composition. Use
+    /// [`Self::bind_cell_grid`] for accepted gas cells whose pressure,
+    /// temperature and density vary at fixed composition and optical references.
     pub fn bind_homogeneous_grid<'a>(
         &self,
         cx: &Cx<'_>,
@@ -309,7 +312,14 @@ impl<'a> MaterialGasScatteringGrid<'a> {
 /// Atomic refusal before a mismatched gas density enters light transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GasGridBindingError {
-    /// The borrowed cell does not carry the accepted homogeneous density.
+    /// Accepted state and borrowed density buffers have different cell counts.
+    StateCount,
+    /// A cell has different declared gas specs, composition or optical sources.
+    ModelMismatch {
+        /// Index in the original borrowed simulation buffer.
+        index: usize,
+    },
+    /// The borrowed cell does not carry its accepted material density.
     DensityMismatch {
         /// Index in the original borrowed simulation buffer.
         index: usize,
@@ -336,7 +346,7 @@ mod tests {
     };
     use fs_qty::semantic::{Composition, CompositionBasis};
 
-    fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
+    pub(super) fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
         let gate = CancelGate::new_clock_free();
         fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
             f(
@@ -371,7 +381,7 @@ mod tests {
         MaterialGasScatteringBinding::try_new(model.evaluate(300.0, pressure).unwrap()).unwrap()
     }
 
-    fn budget() -> AbsorbingGridBudget {
+    pub(super) fn budget() -> AbsorbingGridBudget {
         AbsorbingGridBudget {
             max_grid_cells: 2,
             max_steps_per_segment: 8,

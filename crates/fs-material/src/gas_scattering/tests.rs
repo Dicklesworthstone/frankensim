@@ -80,6 +80,8 @@ fn g3_pressure_temperature_follow_original_gas_density() {
         pressure.mass_scattering_reference_m2_kg()
     );
     assert_ne!(a.content_identity(), pressure.content_identity());
+    assert_eq!(a.model_identity(), pressure.model_identity());
+    assert_eq!(a.model_identity(), temperature.model_identity());
     near(
         a.scattering_per_m(550.0).unwrap(),
         a.gas().density / a.molar_mass_kg_mol()
