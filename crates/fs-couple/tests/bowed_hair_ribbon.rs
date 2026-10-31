@@ -768,29 +768,42 @@ fn g1_compute_wall_blocks_the_mode_scaled_ladder() {
     });
 }
 
-/// o7qbp fix: the 5-cell narrow compliant ribbon must now step through the first
-/// stick<->slip transition (step 106) instead of refusing, because the active-set
-/// rescue resolves the joint partition the Gauss-Seidel sweep cannot converge.
-/// RED before the fix (refuses at 106); GREEN after (converges, and the rescue
-/// fires at least once).
+// The state the active-set rescue is for. The original o7qbp repro (0.8 mm ribbon, 5 cells, 20
+// modes, first transition at step 106) no longer reaches it: at 95b9c9e5a its Gauss-Seidel sweep
+// converges alone, peaking at 23-26 of the 128 sweeps over 270 steps, and so does the same string
+// at 0.4, 0.2 and 0.1 mm; at e3ee30781 these two tests, unchanged, failed for that reason. Why the
+// original state stopped needing the rescue is not known. A probe over width x cells x modes found
+// a state that does reach the rescue through `step()`: 0.4 mm, 7 cells, 28 modes (4 per cell, the
+// least the ribbon admits), where the sweep hits its 128 cap at step 84 and the rescue fires.
+const RESCUE_WIDTH_M: f64 = 0.0004;
+const RESCUE_CELLS: usize = 7;
+const RESCUE_MODES: usize = 28;
+const RESCUE_STEPS: usize = 110;
+
+/// o7qbp fix: the narrow compliant ribbon must step through the first stick<->slip
+/// transition instead of refusing, because the active-set rescue resolves the joint
+/// partition the Gauss-Seidel sweep cannot converge. RED without the rescue
+/// (refuses); GREEN with it (converges, and the rescue fires at least once).
 #[test]
 fn narrow_ribbon_converges_through_the_first_transition_via_active_set() {
     with_cx(|cx, gate| {
-        let mut bank = tuned_base(cx, gate, 20)
+        let mut bank = tuned_base(cx, gate, RESCUE_MODES)
             .unwrap()
-            .with_compliant_bow_ribbon(0.0008, 5, violin_hair(), ladder_limits(), gate)
+            .with_compliant_bow_ribbon(RESCUE_WIDTH_M, RESCUE_CELLS, violin_hair(), ladder_limits(), gate)
             .unwrap();
-        bank.restore_string_states(0, &helmholtz_start(20)).unwrap();
+        bank.restore_string_states(0, &helmholtz_start(RESCUE_MODES)).unwrap();
         let zero = vec![0.0; bank.system().mode_count()];
-        let drives = ribbon_drives(5, BOW_SPEED_M_S, BOW_FORCE_N);
+        let drives = ribbon_drives(RESCUE_CELLS, BOW_SPEED_M_S, BOW_FORCE_N);
         let mut total_rescues = 0usize;
-        for s in 0..300 {
+        for s in 0..RESCUE_STEPS {
             let f = bank
                 .step(&zero, &drives)
                 .unwrap_or_else(|e| panic!("narrow refused at step {s}: {e:?}"));
             total_rescues += f.active_set_rescues;
         }
-        println!("{{\"test\":\"narrow_active_set\",\"steps\":300,\"total_rescues\":{total_rescues}}}");
+        println!(
+            "{{\"test\":\"narrow_active_set\",\"steps\":{RESCUE_STEPS},\"total_rescues\":{total_rescues}}}"
+        );
         assert!(
             total_rescues > 0,
             "active-set rescue never fired; the GS sweep converged alone (did the o7qbp repro regress?)"
@@ -804,28 +817,28 @@ fn narrow_ribbon_converges_through_the_first_transition_via_active_set() {
 #[test]
 fn active_set_refuses_with_a_named_error_when_the_budget_is_too_small() {
     with_cx(|cx, gate| {
-        let drives = ribbon_drives(5, BOW_SPEED_M_S, BOW_FORCE_N);
+        let drives = ribbon_drives(RESCUE_CELLS, BOW_SPEED_M_S, BOW_FORCE_N);
         // Default budget: the narrow converges through the first transition.
-        let mut ok = tuned_base(cx, gate, 20)
+        let mut ok = tuned_base(cx, gate, RESCUE_MODES)
             .unwrap()
-            .with_compliant_bow_ribbon(0.0008, 5, violin_hair(), ladder_limits(), gate)
+            .with_compliant_bow_ribbon(RESCUE_WIDTH_M, RESCUE_CELLS, violin_hair(), ladder_limits(), gate)
             .unwrap();
-        ok.restore_string_states(0, &helmholtz_start(20)).unwrap();
+        ok.restore_string_states(0, &helmholtz_start(RESCUE_MODES)).unwrap();
         let zero = vec![0.0; ok.system().mode_count()];
-        for s in 0..150 {
+        for s in 0..RESCUE_STEPS {
             ok.step(&zero, &drives)
                 .unwrap_or_else(|e| panic!("default budget refused at step {s}: {e:?}"));
         }
         // Budget 1: the rescue cannot resolve the partition, so the step refuses
         // with the named active-set error.
-        let mut starved = tuned_base(cx, gate, 20)
+        let mut starved = tuned_base(cx, gate, RESCUE_MODES)
             .unwrap()
-            .with_compliant_bow_ribbon(0.0008, 5, violin_hair(), ladder_limits(), gate)
+            .with_compliant_bow_ribbon(RESCUE_WIDTH_M, RESCUE_CELLS, violin_hair(), ladder_limits(), gate)
             .unwrap();
         starved.force_active_set_budget(1);
-        starved.restore_string_states(0, &helmholtz_start(20)).unwrap();
+        starved.restore_string_states(0, &helmholtz_start(RESCUE_MODES)).unwrap();
         let mut refusal = None;
-        for s in 0..150 {
+        for s in 0..RESCUE_STEPS {
             if let Err(e) = starved.step(&zero, &drives) {
                 refusal = Some((s, format!("{e:?}")));
                 break;
