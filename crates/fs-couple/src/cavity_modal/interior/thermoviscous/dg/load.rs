@@ -1,4 +1,5 @@
-//! Original complete field and finite ducts behind one external acoustic port.
+//! Original complete field and finite ducts behind one external acoustic port,
+//! optionally sharing the primary duct's independently driven exterior mouths.
 //!
 //! Internal duct pressures are eliminated through the full FE mean-flow map.
 //! The resulting `p = H + Z Q` is a same-window port relation, not a fitted
@@ -8,7 +9,8 @@
 //! independent interface, spatial and coupling-clock refinement.
 
 use super::*;
-use crate::dg_port::DgPortTrial;
+use crate::bernoulli_aperture::radiation::environment::multiport::bake::mixed::DrivenMouthSurface;
+use crate::dg_port::{DgIndependentMouthsFrame, DgIndependentMouthsResponse, DgPortTrial};
 use fs_duct::dg::DgPortResponse;
 use fs_la::factor::{Lu, lu};
 
@@ -24,11 +26,24 @@ pub struct ThermoviscousDgLoad<'a, 'c> {
     impedance: Vec<f64>,
     matrix: Vec<f64>,
     factor: Lu,
-    /// Internal pressures are `free_duct_pressure - pressure_slope * p_ext`.
+    /// Internal pressures at zero mouth flow are
+    /// `free_duct_pressure - pressure_slope * p_ext`.
     pressure_slope: Vec<f64>,
     effective_mobility: f64,
     zero_traction: Vec<f64>,
     zero_forces: Vec<f64>,
+    mouths: Option<PreparedMouths>,
+}
+
+/// Original primary-DG mouth coordinates after eliminating every FE/DG
+/// interface. Only fixed mean maps are cached; all histories stay original.
+struct PreparedMouths {
+    original_impedance: Vec<f64>,
+    /// Row-major internal held pressures per original outward mouth flow.
+    internal_pressure_per_mouth: Vec<f64>,
+    /// Complete [external FE flow, mouth flows] mean effort response.
+    impedance: Vec<f64>,
+    count: usize,
 }
 
 struct PortHistory {
@@ -36,6 +51,33 @@ struct PortHistory {
     ducts: Vec<DgPortResponse>,
     free_duct_pressure: Vec<f64>,
     response: DgPortResponse,
+    mouths: Option<DgIndependentMouthsResponse>,
+}
+
+fn duct_responses(system: &ThermoviscousDg<'_, '_>)
+    -> Result<(Vec<DgPortResponse>, Option<DgIndependentMouthsResponse>), ThermoviscousDgError>
+{
+    let mouths = system.load.has_driven_mouth()
+        .then(|| system.load.independent_mouths_response()).transpose()?;
+    let primary = if let Some(response) = &mouths {
+        let width = response.history_pressure_pa.len();
+        if width < 2 || width.checked_mul(width) != Some(response.impedance_pa_s_m3.len())
+            || response.history_pressure_pa.iter().chain(&response.impedance_pa_s_m3)
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid("resolved acoustic mouths lost their original complete pressure basis"));
+        }
+        DgPortResponse { history_pressure_pa: response.history_pressure_pa[0],
+            impedance_pa_s_m3: response.impedance_pa_s_m3[0] }
+    } else { system.load.port_response()? };
+    let mut ducts = vec![primary];
+    for load in &system.additional {
+        if load.has_driven_mouth() {
+            return Err(invalid("resolved mouths must share the primary duct's one exterior owner"));
+        }
+        ducts.push(load.port_response()?);
+    }
+    Ok((ducts, mouths))
 }
 
 fn solve_checked(matrix: &[f64], factor: &Lu, rhs: &[f64], tolerance: f64,
@@ -72,6 +114,16 @@ impl<'a, 'c> ThermoviscousDgLoad<'a, 'c> {
         -> Result<Self, ThermoviscousDgError>
     {
         poll(gate)?;
+        if system.load.has_driven_mouth() {
+            return Err(invalid("attach resolved exterior mouths explicitly after the complete field load"));
+        }
+        Self::prepare(system, port, gate)
+    }
+
+    fn prepare(system: ThermoviscousDg<'a, 'c>, port: usize, gate: &CancelGate)
+        -> Result<Self, ThermoviscousDgError>
+    {
+        poll(gate)?;
         let area_m2 = system.source.inner().plane_wave_port_area_m2(port)
             .ok_or_else(|| invalid("resolved acoustic load requires an exclusive planar unit-pressure FE port"))?;
         if system.accepted_steps != 0 || system.ports.contains(&port) {
@@ -87,9 +139,8 @@ impl<'a, 'c> ThermoviscousDgLoad<'a, 'c> {
         )?;
         let n = system.ports.len();
         let width = selected.len();
-        let impedance = std::iter::once(&system.load).chain(&system.additional)
-            .map(|load| load.port_response().map(|response| response.impedance_pa_s_m3))
-            .collect::<Result<Vec<_>, _>>()?;
+        let (ducts, mouth_response) = duct_responses(&system)?;
+        let impedance: Vec<_> = ducts.iter().map(|response| response.impedance_pa_s_m3).collect();
         if free.iter().any(|value| *value != 0.0)
             || mobility.iter().any(|value| !value.is_finite())
             || impedance.iter().any(|value| !value.is_finite() || *value <= 0.0)
@@ -126,20 +177,120 @@ impl<'a, 'c> ThermoviscousDgLoad<'a, 'c> {
         {
             return Err(invalid("resolved acoustic load requires strictly positive finite effective mobility"));
         }
+        let mouths = if let Some(original) = mouth_response {
+            let mouth_count = original.history_pressure_pa.len() - 1;
+            let response_width = mouth_count + 1;
+            let mut complete = vec![0.0; response_width * response_width];
+            let mut internal_pressure_per_mouth = vec![0.0; n * mouth_count];
+            complete[0] = 1.0 / effective_mobility;
+            // The primary DG's actual inward flow is -Q_FE,K0. Derive its
+            // coefficients from the complete FE row, preserving cancellation
+            // and every finite passage's reaction rather than fitting a load.
+            let primary_row = &mobility[width..2 * width];
+            let primary_per_external = -(primary_row[0] - primary_row[1..].iter()
+                .zip(&pressure_slope).map(|(b, slope)| b * slope).sum::<f64>())
+                / effective_mobility;
+            for row in 1..response_width {
+                complete[row * response_width] = original.impedance_pa_s_m3[row * response_width]
+                    * primary_per_external;
+            }
+            for mouth in 0..mouth_count {
+                let mut rhs = vec![0.0; n];
+                rhs[0] = original.impedance_pa_s_m3[mouth + 1];
+                let column = solve_checked(&matrix, &factor, &rhs,
+                    system.limits.interface_relative_tolerance, gate)?;
+                let external = -mobility[1..width].iter().zip(&column)
+                    .map(|(b, value)| b * value).sum::<f64>() / effective_mobility;
+                complete[mouth + 1] = external;
+                let mut primary_per_mouth = -primary_row[0] * external;
+                for i in 0..n {
+                    internal_pressure_per_mouth[i * mouth_count + mouth] = column[i];
+                    primary_per_mouth -= primary_row[i + 1]
+                        * (column[i] - pressure_slope[i] * external);
+                }
+                for row in 1..response_width {
+                    complete[row * response_width + mouth + 1] =
+                        original.impedance_pa_s_m3[row * response_width + mouth + 1]
+                        + original.impedance_pa_s_m3[row * response_width] * primary_per_mouth;
+                }
+            }
+            if complete.iter().chain(&internal_pressure_per_mouth).any(|value| !value.is_finite()) {
+                return Err(invalid("resolved acoustic mouths overflowed the complete original response"));
+            }
+            Some(PreparedMouths { original_impedance: original.impedance_pa_s_m3,
+                internal_pressure_per_mouth, impedance: complete, count: mouth_count })
+        } else { None };
         poll(gate)?;
         Ok(Self { system, port, area_m2, selected, mobility, impedance, matrix,
-            factor, pressure_slope, effective_mobility, zero_traction, zero_forces })
+            factor, pressure_slope, effective_mobility, zero_traction, zero_forces, mouths })
+    }
+
+    /// Attach independently driven rectangular mouths to the primary duct's
+    /// original computed exterior, retaining its circular outlets and every
+    /// self/mutual term. All FE/DG states survive this cold preparation. The
+    /// source adapter must admit aperture geometry, gas and work projection.
+    pub fn with_independent_mouths(self, surfaces: &[DrivenMouthSurface],
+        mechanics_rate_hz: u32, gate: &CancelGate) -> Result<Self, ThermoviscousDgError>
+    {
+        poll(gate)?;
+        if self.system.accepted_steps != 0 || self.mouths.is_some() || surfaces.is_empty() {
+            return Err(invalid("resolved mouths require one nonempty cold exterior attachment"));
+        }
+        let mut system = self.system;
+        system.load = system.load.with_independent_mouths(surfaces, mechanics_rate_hz, gate)
+            .map_err(|error| if gate.is_requested() { ThermoviscousDgError::Cancelled }
+                else { ThermoviscousDgError::Duct(AcousticRealizeError::Nonlinear(error.to_string())) })?;
+        Self::prepare(system, self.port, gate)
     }
 
     pub const fn system(&self) -> &ThermoviscousDg<'a, 'c> { &self.system }
     pub const fn port(&self) -> usize { self.port }
     pub const fn area_m2(&self) -> f64 { self.area_m2 }
     pub fn duration_s(&self) -> f64 { self.system.prepared.duration_s() }
+    /// Number of independently driven mouths sharing the original exterior.
+    pub const fn mouth_count(&self) -> usize {
+        match &self.mouths { Some(mouths) => mouths.count, None => 0 }
+    }
 
     /// Exact affine relation of the original mean-port partition at this state.
     /// Positive flow enters the external FE opening. No owner is advanced.
     pub fn port_response(&self, gate: &CancelGate) -> Result<DgPortResponse, ThermoviscousDgError> {
+        poll(gate)?;
+        if self.mouths.is_some() {
+            return Err(invalid("resolved exterior mouths require every independent flow coordinate"));
+        }
         Ok(self.history(gate)?.response)
+    }
+
+    /// Mean efforts for [flow into the external FE port, outward mouth flows].
+    /// Mouth order is the original shared radiation owner's attachment order.
+    /// This preserves the full field/duct/exterior history and all cross terms.
+    pub fn independent_mouths_response(&self, gate: &CancelGate)
+        -> Result<DgIndependentMouthsResponse, ThermoviscousDgError>
+    {
+        poll(gate)?;
+        let prepared = self.mouths.as_ref()
+            .ok_or_else(|| invalid("resolved exterior mouth coordinates are not attached"))?;
+        let history = self.history(gate)?;
+        let original = history.mouths.as_ref().expect("admitted mouth history");
+        let pressure = history.response.history_pressure_pa;
+        let internal: Vec<_> = history.free_duct_pressure.iter().zip(&self.pressure_slope)
+            .map(|(free, slope)| free - slope * pressure).collect();
+        let width = self.selected.len();
+        let row = &self.mobility[width..2 * width];
+        let primary_flow = -history.free_flow[1] - row[0] * pressure
+            - row[1..].iter().zip(&internal).map(|(b, p)| b * p).sum::<f64>();
+        let mut history_pressure_pa = vec![pressure];
+        let response_width = prepared.count + 1;
+        for mouth in 0..prepared.count {
+            history_pressure_pa.push(original.history_pressure_pa[mouth + 1]
+                + original.impedance_pa_s_m3[(mouth + 1) * response_width] * primary_flow);
+        }
+        if history_pressure_pa.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("resolved acoustic mouth history pressure overflowed"));
+        }
+        Ok(DgIndependentMouthsResponse { history_pressure_pa,
+            impedance_pa_s_m3: prepared.impedance.clone() })
     }
 
     fn history(&self, gate: &CancelGate) -> Result<PortHistory, ThermoviscousDgError> {
@@ -147,9 +298,17 @@ impl<'a, 'c> ThermoviscousDgLoad<'a, 'c> {
             self.system.state(), &self.zero_traction, &self.zero_forces, &self.selected,
             &mut || gate.is_requested(),
         )?;
-        let ducts = std::iter::once(&self.system.load).chain(&self.system.additional)
-            .map(DgPortLoad::port_response).collect::<Result<Vec<_>, _>>()?;
+        let (ducts, mouths) = duct_responses(&self.system)?;
+        let mouths_match = match (&self.mouths, &mouths) {
+            (None, None) => true,
+            (Some(prepared), Some(original)) => original.history_pressure_pa.len() == prepared.count + 1
+                && original.impedance_pa_s_m3.len() == prepared.original_impedance.len()
+                && original.impedance_pa_s_m3.iter().zip(&prepared.original_impedance)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+            _ => false,
+        };
         if mobility.iter().zip(&self.mobility).any(|(a, b)| a.to_bits() != b.to_bits())
+            || !mouths_match
             || ducts.iter().zip(&self.impedance).any(|(response, z)|
                 !response.history_pressure_pa.is_finite() || response.impedance_pa_s_m3.to_bits() != z.to_bits())
         {
@@ -169,7 +328,7 @@ impl<'a, 'c> ThermoviscousDgLoad<'a, 'c> {
             return Err(invalid("resolved acoustic load history pressure overflowed"));
         }
         poll(gate)?;
-        Ok(PortHistory { free_flow, ducts, free_duct_pressure, response })
+        Ok(PortHistory { free_flow, ducts, free_duct_pressure, response, mouths })
     }
 
     /// Propagate private candidates at the requested external mean inward flow.
@@ -178,16 +337,50 @@ impl<'a, 'c> ThermoviscousDgLoad<'a, 'c> {
     pub(crate) fn preview_step(&mut self, flow_m3_s: f64, gate: &CancelGate)
         -> Result<ThermoviscousDgLoadTrial<'_>, ThermoviscousDgError>
     {
+        self.preview_step_inner(flow_m3_s, None, gate)
+    }
+
+    /// Stage the complete field, every finite duct and the original shared
+    /// exterior at independent external-FE and outward-mouth mean flows.
+    pub(crate) fn preview_step_with_mouth_flows(&mut self, flow_m3_s: f64,
+        mouth_flows_m3_s: &[f64], gate: &CancelGate)
+        -> Result<ThermoviscousDgLoadTrial<'_>, ThermoviscousDgError>
+    {
+        self.preview_step_inner(flow_m3_s, Some(mouth_flows_m3_s), gate)
+    }
+
+    fn preview_step_inner(&mut self, flow_m3_s: f64, mouths: Option<&[f64]>, gate: &CancelGate)
+        -> Result<ThermoviscousDgLoadTrial<'_>, ThermoviscousDgError>
+    {
         poll(gate)?;
+        let mouth_flows = match (&self.mouths, mouths) {
+            (None, None) => &[][..],
+            (Some(prepared), Some(flows)) if flows.len() == prepared.count
+                && flows.iter().all(|value| value.is_finite()) => flows,
+            _ => return Err(invalid("resolved exterior mouths require every finite independent flow")),
+        };
         let limits = self.system.limits;
         if !flow_m3_s.is_finite() || self.system.accepted_steps >= limits.maximum_steps {
             return Err(invalid("resolved acoustic load requires finite flow and an unexhausted clock"));
         }
         let history = self.history(gate)?;
-        let pressure = history.response.history_pressure_pa
+        let mut pressure = history.response.history_pressure_pa
             + history.response.impedance_pa_s_m3 * flow_m3_s;
+        if let Some(prepared) = &self.mouths {
+            for (mouth, flow) in mouth_flows.iter().enumerate() {
+                pressure += prepared.impedance[mouth + 1] * flow;
+            }
+        }
         let internal: Vec<_> = history.free_duct_pressure.iter().zip(&self.pressure_slope)
-            .map(|(p, slope)| p - slope * pressure).collect();
+            .enumerate().map(|(i, (p, slope))| {
+                let mut value = p - slope * pressure;
+                if let Some(prepared) = &self.mouths {
+                    for (mouth, flow) in mouth_flows.iter().enumerate() {
+                        value += prepared.internal_pressure_per_mouth[i * prepared.count + mouth] * flow;
+                    }
+                }
+                value
+            }).collect();
         if !pressure.is_finite() || pressure.abs() > limits.maximum_abs_pressure_pa
             || internal.iter().any(|p| !p.is_finite() || p.abs() > limits.maximum_abs_pressure_pa)
         {
@@ -219,9 +412,11 @@ impl<'a, 'c> ThermoviscousDgLoad<'a, 'c> {
         let inlets: Vec<_> = std::iter::once(&self.system.load).chain(&self.system.additional)
             .map(DgPortLoad::inlet).collect();
         let trials = std::iter::once(&mut self.system.load).chain(self.system.additional.iter_mut())
-            .zip(&actual_flow).map(|(load, &flow)| {
+            .zip(&actual_flow).enumerate().map(|(i, (load, &flow))| {
                 poll(gate)?;
-                Ok(load.preview_step(flow)?)
+                Ok(if i == 0 && !mouth_flows.is_empty() {
+                    load.preview_step_with_mouth_flows(flow, mouth_flows)?
+                } else { load.preview_step(flow)? })
             }).collect::<Result<Vec<_>, ThermoviscousDgError>>()?;
         let mut stored_energy_j = field.work.final_energy_j;
         let mut storage_change_j = field.work.delta_energy_j;
@@ -236,8 +431,22 @@ impl<'a, 'c> ThermoviscousDgLoad<'a, 'c> {
             let actual = output.port_outputs.iter().find(|port| port.id == inlets[i])
                 .ok_or_else(|| invalid("original DG candidate lost its resolved-field inlet"))?.conjugate_rate;
             let relation = history.ducts[i];
-            let pressure_scale = internal[i].abs() + relation.history_pressure_pa.abs()
+            let mut pressure_scale = internal[i].abs() + relation.history_pressure_pa.abs()
                 + (relation.impedance_pa_s_m3 * actual_flow[i]).abs();
+            if i == 0 {
+                if let Some(original) = &history.mouths {
+                    pressure_scale += original.impedance_pa_s_m3[1..mouth_flows.len() + 1]
+                        .iter().zip(mouth_flows).map(|(z, q)| (z * q).abs()).sum::<f64>();
+                    let receipt = trial.independent_mouths_frame().ok_or_else(||
+                        invalid("resolved acoustic mouth candidate lost its original exterior receipt"))?;
+                    if receipt.mouths.len() != mouth_flows.len()
+                        || receipt.mouths.iter().any(|mouth| !mouth.mean_pressure_pa.is_finite()
+                            || mouth.mean_pressure_pa.abs() > limits.maximum_abs_pressure_pa)
+                    {
+                        return Err(invalid("resolved acoustic mouth pressure exceeds the original physical budget"));
+                    }
+                }
+            }
             if !actual.is_finite() || !pressure_scale.is_finite()
                 || (actual - internal[i]).abs() > limits.interface_relative_tolerance * pressure_scale.max(1e-300)
             {
@@ -305,6 +514,13 @@ impl ThermoviscousDgLoadTrial<'_> {
     pub(crate) const fn mean_pressure_pa(&self) -> f64 { self.pressure }
     pub(crate) const fn inlet_work_j(&self) -> f64 { self.inlet_work_j }
     pub(crate) const fn frame(&self) -> &ThermoviscousDgFrame { &self.frame }
+    /// Original primary-DG/exterior receipt. Its inlet pressure/work belong to
+    /// that internal DG inlet, while `mean_pressure_pa`/`inlet_work_j` above
+    /// belong to the external FE opening. Mouth work enters the exterior
+    /// directly; it is not FE/DG storage or an extra debit of FE inlet work.
+    pub(crate) fn independent_mouths_frame(&self) -> Option<&DgIndependentMouthsFrame> {
+        self.trials[0].independent_mouths_frame()
+    }
 
     /// All checks, allocation and cancellation belong before this publication.
     pub(crate) fn accept(self) {

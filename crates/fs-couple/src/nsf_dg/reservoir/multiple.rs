@@ -2,6 +2,7 @@
 //! All rectangular escape channels belong to one original mutual radiation
 //! owner. Newton--Krylov changes trial controls, never physical histories.
 use super::*;
+use crate::dg_port::DgIndependentMouthsResponse;
 use fs_lbm::nsf3::MAX_NSF_RESERVOIR_APERTURES;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{NewtonKrylovConfig, NewtonKrylovState, SolverRunProgress};
@@ -44,12 +45,12 @@ impl NsfDgRadiationSolve {
 }
 
 pub(in crate::nsf_dg) struct ReservoirRadiations {
-    inputs: Vec<(usize, NsfDgReservoirRadiation)>,
-    temperatures_k: Vec<f64>,
-    solve: NsfDgRadiationSolve,
+    pub(in crate::nsf_dg) inputs: Vec<(usize, NsfDgReservoirRadiation)>,
+    pub(in crate::nsf_dg) temperatures_k: Vec<f64>,
+    pub(in crate::nsf_dg) solve: NsfDgRadiationSolve,
     // Warm-start controls publish only with all physical participants. A cold
     // later upstream attachment can change the dimension before the first step.
-    previous_coordinates: Vec<f64>,
+    pub(in crate::nsf_dg) previous_coordinates: Vec<f64>,
 }
 
 fn numerical(error: FiniteDifferenceError<NsfDgError>) -> NsfDgError {
@@ -77,6 +78,116 @@ fn coordinates(normalized: &[f64], domains: &[[f64; 2]]) -> Result<Vec<f64>, Nsf
         }
         Ok(physical)
     }).collect()
+}
+
+/// The original joint NSF pressure solve, shared by direct ducts and complete
+/// acoustic fields. One final private fluid interval enters the caller's
+/// original-owner acceptance. Warm-start coordinates are returned only after
+/// that acceptance succeeds; no rejected trial changes physical histories.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::nsf_dg) fn solve_joint_interval<L: Lattice3<27>, T>(
+    zone: &mut NsfGrid3<L>, inputs: &[(usize, NsfDgReservoirRadiation)],
+    temperatures: &[f64], external: NsfBoundaryDrive,
+    breath: Option<(usize, NsfOpenState)>, side: usize,
+    patch: [Option<NsfBoundaryDrive>; 2], reference_pressure: f64,
+    limits: NsfDgLimits, solve: NsfDgRadiationSolve, previous_coordinates: &[f64],
+    relation: &DgIndependentMouthsResponse, upstream: Option<(DgPortResponse, f64)>,
+    gate: &CancelGate,
+    accept: impl for<'trial> FnOnce(NsfCharacteristicTrial<'trial, L>, &[f64], usize)
+        -> Result<T, NsfDgError>,
+) -> Result<(T, Vec<f64>), NsfDgError> {
+    let width = inputs.len() + 1;
+    if inputs.is_empty() || inputs.len() > MAX_NSF_RESERVOIR_APERTURES
+        || temperatures.len() != inputs.len()
+        || relation.history_pressure_pa.len() != width
+        || relation.impedance_pa_s_m3.len() != width * width
+        || !relation.history_pressure_pa.iter().chain(&relation.impedance_pa_s_m3)
+            .all(|value| value.is_finite())
+    {
+        return Err(NsfDgError::Input("joint exterior lost its complete original pressure basis"));
+    }
+    let mut domains = vec![limits.incoming_bracket_m_s];
+    domains.extend(inputs.iter().map(|(_, input)| input.pressure_bracket_pa));
+    if upstream.is_some() { domains.push(limits.incoming_bracket_m_s); }
+    let seed = if previous_coordinates.len() == domains.len() {
+        previous_coordinates.to_vec()
+    } else {
+        domains.iter().map(|&[low, high]| {
+            if low <= 0.0 && high >= 0.0 {
+                -f64::midpoint(low, high) / (0.5 * high - 0.5 * low)
+            } else { 0.0 }
+        }).collect()
+    };
+    let evaluations = Cell::new(0usize);
+    let last_residual = Cell::new(0.0);
+    let normalized = {
+        let zone = RefCell::new(&mut *zone);
+        let problem = FallibleFiniteDifference::new(domains.len(), solve.difference_step,
+            |normalized: &[f64]| {
+                poll(gate)?;
+                let physical = coordinates(normalized, &domains)?;
+                if evaluations.get() + 1 >= limits.maximum_evaluations {
+                    return Err(NsfDgError::Convergence {
+                        residual_pa: last_residual.get(), evaluations: evaluations.get(),
+                    });
+                }
+                evaluations.set(evaluations.get() + 1);
+                let mut zone = zone.borrow_mut();
+                let trial = preview_multiple(&mut **zone, &physical, inputs, temperatures,
+                    external, breath, side, patch, upstream.is_some(),
+                    reference_pressure, limits, gate)?;
+                let bore = coupled_exchange(&trial, side)?;
+                let mut flows = vec![bore.normal_volume_flow_m3_s];
+                let mut pressures = vec![bore.mean_acoustic_pressure_pa];
+                for &(aperture, _) in inputs {
+                    let mouth = exchange(&trial, aperture)?;
+                    flows.push(mouth.normal_volume_flow_m3_s);
+                    pressures.push(mouth.mean_acoustic_pressure_pa);
+                }
+                let mut residuals = Vec::with_capacity(domains.len());
+                for row in 0..width {
+                    let mut expected = relation.history_pressure_pa[row];
+                    for (column, flow) in flows.iter().enumerate() {
+                        expected += relation.impedance_pa_s_m3[row * width + column] * flow;
+                    }
+                    residuals.push(pressures[row] - expected);
+                }
+                if let Some((upstream, rise)) = upstream {
+                    let face = coupled_exchange(&trial, 1 - side)?;
+                    residuals.push(face.mean_acoustic_pressure_pa - (upstream.history_pressure_pa
+                        + upstream.impedance_pa_s_m3 * face.normal_volume_flow_m3_s + rise));
+                }
+                if residuals.iter().any(|value| !value.is_finite()) {
+                    return Err(NsfDgError::Input("joint reservoir pressure equation overflowed"));
+                }
+                last_residual.set(residuals.iter().copied().map(f64::abs).fold(0.0, f64::max));
+                Ok(residuals)
+            }).map_err(numerical)?;
+        // The constructor's first evaluation and all Jacobian/globalization
+        // actions remain charged to the same original source-work allowance.
+        let state = NewtonKrylovState::new(&problem, seed, solve.newton);
+        if let Some(error) = problem.take_failure() { return Err(numerical(error)); }
+        let mut state = state.map_err(NsfDgError::Nonlinear)?;
+        let report = state.run_controlled(&problem, solve.maximum_iterations,
+            &mut || gate.is_requested() || problem.has_failed());
+        if let Some(error) = problem.take_failure() { return Err(numerical(error)); }
+        poll(gate)?;
+        if report.progress != SolverRunProgress::Complete {
+            return Err(NsfDgError::Input("joint reservoir nonlinear callbacks did not complete"));
+        }
+        if !report.report.converged {
+            return Err(NsfDgError::NonlinearConvergence {
+                evaluations: evaluations.get(), report: report.report,
+            });
+        }
+        state.x
+    };
+    let physical = coordinates(&normalized, &domains)?;
+    evaluations.set(evaluations.get() + 1);
+    let fluid = preview_multiple(zone, &physical, inputs, temperatures,
+        external, breath, side, patch, upstream.is_some(), reference_pressure, limits, gate)?;
+    let accepted = accept(fluid, &physical, evaluations.get())?;
+    Ok((accepted, normalized))
 }
 
 impl<L: Lattice3<27>> NsfDg<L> {
@@ -181,15 +292,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let inputs = owner.inputs.clone();
         let temperatures = owner.temperatures_k.clone();
         let solve = owner.solve;
+        let previous_coordinates = owner.previous_coordinates.clone();
         let relation = self.load.independent_mouths_response().map_err(NsfDgError::Acoustic)?;
         let width = inputs.len() + 1;
-        if relation.history_pressure_pa.len() != width
-            || relation.impedance_pa_s_m3.len() != width * width
-            || !relation.history_pressure_pa.iter().chain(&relation.impedance_pa_s_m3)
-                .all(|value| value.is_finite())
-        {
-            return Err(NsfDgError::Input("joint exterior lost its complete original pressure basis"));
-        }
         let upstream_relation = self.upstream.as_ref()
             .map(|owner| owner.load.port_response().map_err(NsfDgError::Acoustic)).transpose()?;
         let upstream_reference = self.upstream.as_ref().map(|owner| owner.reference);
@@ -199,87 +304,14 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let other = 1 - side;
         let patch = self.patch_boundaries();
         let reference = self.reference;
-        let mut domains = vec![limits.incoming_bracket_m_s];
-        domains.extend(inputs.iter().map(|(_, input)| input.pressure_bracket_pa));
-        if upstream_relation.is_some() { domains.push(limits.incoming_bracket_m_s); }
-        let seed = if owner.previous_coordinates.len() == domains.len() {
-            owner.previous_coordinates.clone()
-        } else {
-            domains.iter().map(|&[low, high]| {
-                if low <= 0.0 && high >= 0.0 {
-                    -f64::midpoint(low, high) / (0.5 * high - 0.5 * low)
-                } else { 0.0 }
-            }).collect()
-        };
-        let evaluations = Cell::new(0usize);
-        let last_residual = Cell::new(0.0);
-        let normalized = {
-            let zone = RefCell::new(&mut self.zone);
-            let problem = FallibleFiniteDifference::new(domains.len(), solve.difference_step,
-                |normalized: &[f64]| {
-                    poll(gate)?;
-                    let physical = coordinates(normalized, &domains)?;
-                    if evaluations.get() + 1 >= limits.maximum_evaluations {
-                        return Err(NsfDgError::Convergence {
-                            residual_pa: last_residual.get(), evaluations: evaluations.get(),
-                        });
-                    }
-                    evaluations.set(evaluations.get() + 1);
-                    let mut zone = zone.borrow_mut();
-                    let trial = preview_multiple(&mut **zone, &physical, &inputs, &temperatures,
-                        external, breath, side, patch, upstream_relation.is_some(),
-                        reference.pressure, limits, gate)?;
-                    let bore = coupled_exchange(&trial, side)?;
-                    let mut flows = vec![bore.normal_volume_flow_m3_s];
-                    let mut pressures = vec![bore.mean_acoustic_pressure_pa];
-                    for &(aperture, _) in &inputs {
-                        let mouth = exchange(&trial, aperture)?;
-                        flows.push(mouth.normal_volume_flow_m3_s);
-                        pressures.push(mouth.mean_acoustic_pressure_pa);
-                    }
-                    let mut residuals = Vec::with_capacity(domains.len());
-                    for row in 0..width {
-                        let mut expected = relation.history_pressure_pa[row];
-                        for (column, flow) in flows.iter().enumerate() {
-                            expected += relation.impedance_pa_s_m3[row * width + column] * flow;
-                        }
-                        residuals.push(pressures[row] - expected);
-                    }
-                    if let Some(upstream) = upstream_relation {
-                        let face = coupled_exchange(&trial, other)?;
-                        residuals.push(face.mean_acoustic_pressure_pa - (upstream.history_pressure_pa
-                            + upstream.impedance_pa_s_m3 * face.normal_volume_flow_m3_s + rise));
-                    }
-                    if residuals.iter().any(|value| !value.is_finite()) {
-                        return Err(NsfDgError::Input("joint reservoir pressure equation overflowed"));
-                    }
-                    last_residual.set(residuals.iter().copied().map(f64::abs).fold(0.0, f64::max));
-                    Ok(residuals)
-                }).map_err(numerical)?;
-            // The original constructor evaluates once; the source callback
-            // itself polls cancellation and charges that physical preview.
-            let state = NewtonKrylovState::new(&problem, seed, solve.newton);
-            if let Some(error) = problem.take_failure() { return Err(numerical(error)); }
-            let mut state = state.map_err(NsfDgError::Nonlinear)?;
-            let report = state.run_controlled(&problem, solve.maximum_iterations,
-                &mut || gate.is_requested() || problem.has_failed());
-            if let Some(error) = problem.take_failure() { return Err(numerical(error)); }
-            poll(gate)?;
-            if report.progress != SolverRunProgress::Complete {
-                return Err(NsfDgError::Input("joint reservoir nonlinear callbacks did not complete"));
-            }
-            if !report.report.converged {
-                return Err(NsfDgError::NonlinearConvergence {
-                    evaluations: evaluations.get(), report: report.report,
-                });
-            }
-            state.x
-        };
-        let physical = coordinates(&normalized, &domains)?;
-        evaluations.set(evaluations.get() + 1);
-        let fluid = preview_multiple(&mut self.zone, &physical, &inputs, &temperatures,
-            external, breath, side, patch, upstream_relation.is_some(),
-            reference.pressure, limits, gate)?;
+        let step = self.steps + 1;
+        let load = &mut self.load;
+        let upstream_owner = &mut self.upstream;
+        let finite_owner = &mut self.finite_reservoir;
+        let (frame, normalized) = solve_joint_interval(&mut self.zone, &inputs, &temperatures,
+            external, breath, side, patch, reference.pressure, limits, solve,
+            &previous_coordinates, &relation, upstream_relation.map(|relation| (relation, rise)), gate,
+            |fluid, physical, evaluations| {
         let faces = *fluid.boundary_exchange();
         let coupled_patch = fluid.patch_exchange_on(side != 0).copied();
         let source_patch = fluid.patch_exchange_on(other != 0).copied();
@@ -298,9 +330,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
             DgPortResponse { history_pressure_pa: history,
                 impedance_pa_s_m3: relation.impedance_pa_s_m3[row * width + row] }
         };
-        let dt = self.load.propagator().dt();
-        let inlet = self.load.inlet();
-        let acoustic = self.load.preview_step_with_mouth_flows(
+        let dt = load.propagator().dt();
+        let inlet = load.inlet();
+        let acoustic = load.preview_step_with_mouth_flows(
             bore.normal_volume_flow_m3_s, &mouth_flows).map_err(NsfDgError::Acoustic)?;
         let bore_pressure = acoustic.output().port_outputs.iter().find(|port| port.id == inlet)
             .ok_or(NsfDgError::Input("joint DG inlet observation disappeared"))?.conjugate_rate;
@@ -328,7 +360,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 acoustic_work_residual_j: audit.work, mass_projection_difference_kg: audit.mass,
             });
         }
-        let source = self.upstream.as_mut().map(|owner|
+        let source = upstream_owner.as_mut().map(|owner|
             owner.load.preview_step(source_face.normal_volume_flow_m3_s)
                 .map_err(NsfDgError::Acoustic)).transpose()?;
         let upstream_values = if let Some(source) = &source {
@@ -351,7 +383,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             return Err(NsfDgError::Input("joint reservoir extensive accounts overflowed"));
         }
         let finite_candidate = finite_reservoir::prepare(
-            self.finite_reservoir.as_ref(), &fluid, drive, dt, gate,
+            finite_owner.as_ref(), &fluid, drive, dt, gate,
         )?;
         poll(gate)?;
         // Nothing below can refuse: one fluid candidate, both original ducts,
@@ -367,12 +399,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 projection_covariance_j: audit.covariance, acoustic_work_residual_j: audit.work,
                 port_work_residual_j: audit.port, mass_projection_difference_kg: audit.mass,
             });
-        let finite_reservoir = finite_reservoir::publish(&mut self.finite_reservoir, finite_candidate);
-        self.reservoir_radiations.as_mut().expect("original joint owner")
-            .previous_coordinates = normalized;
-        self.steps += 1;
+        let finite_reservoir = finite_reservoir::publish(finite_owner, finite_candidate);
         Ok(NsfDgFrame {
-            step: self.steps, evaluations: evaluations.get(), incoming_characteristic_m_s: physical[0],
+            step, evaluations, incoming_characteristic_m_s: physical[0],
             drive, upstream, faces, coupled_patch, source_patch, bore_exchange: bore,
             reservoir_mass_out_kg,
             reservoir_flows, reservoir_exchanges, reservoir_radiation: None,
@@ -383,6 +412,11 @@ impl<L: Lattice3<27>> NsfDg<L> {
             acoustic_work_residual_j: bore_audit.work, port_work_residual_j: bore_audit.port,
             mass_projection_difference_kg: bore_audit.mass,
         })
+        })?;
+        self.reservoir_radiations.as_mut().expect("original joint owner")
+            .previous_coordinates = normalized;
+        self.steps = step;
+        Ok(frame)
     }
 }
 

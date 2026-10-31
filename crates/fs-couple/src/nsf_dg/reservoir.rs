@@ -92,68 +92,10 @@ impl<L: Lattice3<27>> NsfDg<L> {
         poll(gate)?;
         if self.steps != 0 || self.reservoir_radiation.is_some() || self.reservoir_radiations.is_some()
             || self.finite_reservoir_aperture() == Some(aperture)
-            || !input.origin_m.iter().chain(input.pressure_bracket_pa.iter()).all(|x| x.is_finite())
-            || input.pressure_bracket_pa[0] >= input.pressure_bracket_pa[1]
-            || input.cells.iter().any(|n| !(1..=512).contains(n))
         {
             return Err(NsfDgError::Input("resolved reservoir radiation needs one cold finite placement, quadrature and pressure bracket"));
         }
-        let opening = self.zone.reservoir_aperture_at(aperture).ok_or(NsfDgError::Input(
-            "resolved radiation requires the original transverse reservoir"))?;
-        let record = self.load.radiation_record().ok_or(NsfDgError::Input(
-            "resolved mouth reaction requires the bore's original computed exterior"))?;
-        let gas = record.gas_record().state();
-        let near = |a: f64, b: f64| (a-b).abs() <= 32.0*f64::EPSILON*a.abs().max(b.abs());
-        if gas != &self.reference
-            || self.zone.reservoir_reference_pressure_pa().to_bits() != self.reference.pressure.to_bits()
-            || !near(opening.state.density_kg_m3, gas.density)
-            || !near(opening.state.temperature_k, gas.temperature)
-            || opening.state.velocity_m_s != [0.0; 3]
-        {
-            return Err(NsfDgError::Input("joint reservoir reaction needs one quiescent source/exterior reference gas"));
-        }
-        let temperature_k = opening.state.temperature_k;
-        let a = (opening.axis + 1) % 3;
-        let b = (opening.axis + 2) % 3;
-        let mut low = [usize::MAX; 2];
-        let mut high = [0usize; 2];
-        for cell in &opening.cells {
-            for (d, axis) in [a, b].into_iter().enumerate() {
-                low[d] = low[d].min(cell[axis]);
-                high[d] = high[d].max(cell[axis]);
-            }
-        }
-        let width = high[0].checked_sub(low[0]).and_then(|n| n.checked_add(1));
-        let height = high[1].checked_sub(low[1]).and_then(|n| n.checked_add(1));
-        if width.zip(height).and_then(|(x,y)| x.checked_mul(y)) != Some(opening.cells.len()) {
-            return Err(NsfDgError::Input("joint radiation requires the complete original rectangular reservoir tile set"));
-        }
-        // The original aperture constructor already enforces unique cells on
-        // one face. Count equals its bounding rectangle only for a complete set.
-        let dx = self.zone.law().dx_m;
-        let sign = if opening.high { 1.0 } else { -1.0 };
-        let surface = DrivenMouthSurface {
-            center_m: [
-                input.origin_m[0] + 0.5*(low[0] as f64 + high[0] as f64 + 1.0)*dx,
-                input.origin_m[1] + sign*0.5*(low[1] as f64 + high[1] as f64 + 1.0)*dx,
-            ],
-            size_m: [width.expect("checked rectangle") as f64*dx,
-                height.expect("checked rectangle") as f64*dx],
-            cells: input.cells,
-            terminal_radial_rings: input.terminal_radial_rings,
-            terminal_angular_points: input.terminal_angular_points,
-        };
-        for offset in input.pressure_bracket_pa {
-            self.zone.reservoir_aperture_state_for(aperture, self.reference.pressure + offset, temperature_k)
-                .map_err(NsfDgError::Flow)?;
-        }
-        // Reuse the original source's integer-Hz bake ceiling. Its runtime
-        // retains the exact physical dt, including a fractional reciprocal.
-        let rate = 2.0*record.band_hz()[1];
-        if !rate.is_finite() || rate.fract() != 0.0 || !(1.0..=f64::from(u32::MAX)).contains(&rate) {
-            return Err(NsfDgError::Input("joint radiation lost its original source bake clock"));
-        }
-        Ok((surface, temperature_k, rate as u32))
+        radiation_surface(&self.zone, self.reference, &self.load, aperture, input, gate)
     }
 
     pub fn reservoir_radiation(&self) -> Option<&NsfDgReservoirRadiation> {
@@ -399,7 +341,7 @@ fn preview<'a, L: Lattice3<27>>(
     preview_interval(zone, drives, patch, controls, limits, gate)
 }
 
-fn exchange<L: Lattice3<27>>(
+pub(in crate::nsf_dg) fn exchange<L: Lattice3<27>>(
     trial: &NsfCharacteristicTrial<'_, L>, aperture: usize,
 ) -> Result<NsfBoundaryExchange, NsfDgError> {
     let source = trial.reservoir_exchange_at(aperture).ok_or(NsfDgError::Input(
@@ -418,4 +360,75 @@ fn exchange<L: Lattice3<27>>(
         acoustic_pressure_work_out_j: source.acoustic_pressure_work_out_j,
         ..NsfBoundaryExchange::default()
     })
+}
+
+/// Original tile geometry and material/pressure admission shared by acoustic
+/// assemblies. Callers separately check cold topology and source ownership.
+pub(in crate::nsf_dg) fn radiation_surface<L: Lattice3<27>>(
+    zone: &NsfGrid3<L>, reference: GasState, load: &DgPortLoad,
+    aperture: usize, input: NsfDgReservoirRadiation, gate: &CancelGate,
+) -> Result<(DrivenMouthSurface, f64, u32), NsfDgError> {
+    poll(gate)?;
+    if !input.origin_m.iter().chain(input.pressure_bracket_pa.iter()).all(|x| x.is_finite())
+        || input.pressure_bracket_pa[0] >= input.pressure_bracket_pa[1]
+        || input.cells.iter().any(|n| !(1..=512).contains(n))
+    {
+        return Err(NsfDgError::Input("resolved reservoir radiation needs one cold finite placement, quadrature and pressure bracket"));
+    }
+    let opening = zone.reservoir_aperture_at(aperture).ok_or(NsfDgError::Input(
+        "resolved radiation requires the original transverse reservoir"))?;
+    let record = load.radiation_record().ok_or(NsfDgError::Input(
+        "resolved mouth reaction requires the bore's original computed exterior"))?;
+    let gas = record.gas_record().state();
+    let near = |a: f64, b: f64| (a-b).abs() <= 32.0*f64::EPSILON*a.abs().max(b.abs());
+    if gas != &reference
+        || zone.reservoir_reference_pressure_pa().to_bits() != reference.pressure.to_bits()
+        || !near(opening.state.density_kg_m3, gas.density)
+        || !near(opening.state.temperature_k, gas.temperature)
+        || opening.state.velocity_m_s != [0.0; 3]
+    {
+        return Err(NsfDgError::Input("joint reservoir reaction needs one quiescent source/exterior reference gas"));
+    }
+    let temperature_k = opening.state.temperature_k;
+    let a = (opening.axis + 1) % 3;
+    let b = (opening.axis + 2) % 3;
+    let mut low = [usize::MAX; 2];
+    let mut high = [0usize; 2];
+    for cell in &opening.cells {
+        for (d, axis) in [a, b].into_iter().enumerate() {
+            low[d] = low[d].min(cell[axis]);
+            high[d] = high[d].max(cell[axis]);
+        }
+    }
+    let width = high[0].checked_sub(low[0]).and_then(|n| n.checked_add(1));
+    let height = high[1].checked_sub(low[1]).and_then(|n| n.checked_add(1));
+    if width.zip(height).and_then(|(x,y)| x.checked_mul(y)) != Some(opening.cells.len()) {
+        return Err(NsfDgError::Input("joint radiation requires the complete original rectangular reservoir tile set"));
+    }
+    // The original aperture constructor already enforces unique cells on
+    // one face. Count equals its bounding rectangle only for a complete set.
+    let dx = zone.law().dx_m;
+    let sign = if opening.high { 1.0 } else { -1.0 };
+    let surface = DrivenMouthSurface {
+        center_m: [
+            input.origin_m[0] + 0.5*(low[0] as f64 + high[0] as f64 + 1.0)*dx,
+            input.origin_m[1] + sign*0.5*(low[1] as f64 + high[1] as f64 + 1.0)*dx,
+        ],
+        size_m: [width.expect("checked rectangle") as f64*dx,
+            height.expect("checked rectangle") as f64*dx],
+        cells: input.cells,
+        terminal_radial_rings: input.terminal_radial_rings,
+        terminal_angular_points: input.terminal_angular_points,
+    };
+    for offset in input.pressure_bracket_pa {
+        zone.reservoir_aperture_state_for(aperture, reference.pressure + offset, temperature_k)
+            .map_err(NsfDgError::Flow)?;
+    }
+    // Reuse the original source's integer-Hz bake ceiling. Its runtime
+    // retains the exact physical dt, including a fractional reciprocal.
+    let rate = 2.0*record.band_hz()[1];
+    if !rate.is_finite() || rate.fract() != 0.0 || !(1.0..=f64::from(u32::MAX)).contains(&rate) {
+        return Err(NsfDgError::Input("joint radiation lost its original source bake clock"));
+    }
+    Ok((surface, temperature_k, rate as u32))
 }

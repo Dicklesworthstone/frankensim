@@ -16,12 +16,14 @@
 //! own refinement; this adapter does not qualify a jet or instrument.
 
 use super::{
-    NsfDgDrive, NsfDgError, NsfDgLimits, NsfFiniteReservoirFrame,
+    NsfDgDrive, NsfDgError, NsfDgLimits, NsfDgReservoirFrame, NsfFiniteReservoirFrame,
     NsfFiniteReservoirInventory, NsfFiniteReservoirLimits, coupled_exchange,
     finite_reservoir::{self, FiniteReservoir}, poll, same_clock,
-    solve_characteristic_interval, upstream,
+    reservoir::multiple::ReservoirRadiations, solve_characteristic_interval, upstream,
 };
-use crate::cavity_modal::interior::thermoviscous::dg::load::ThermoviscousDgLoad;
+use crate::cavity_modal::interior::thermoviscous::dg::load::{
+    ThermoviscousDgLoad, ThermoviscousDgLoadTrial,
+};
 use fs_duct::dg::DgPortResponse;
 use fs_exec::CancelGate;
 use fs_lbm::lattice3::Lattice3;
@@ -35,6 +37,7 @@ use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 
 /// Original pressure/PCM observation of the complete resolved assembly.
 pub mod performance;
+mod radiation;
 
 /// Accepted interface and original fluid accounts. Complete accepted FE and
 /// duct states remain available through `load().system().last_frame()` without
@@ -55,6 +58,9 @@ pub struct NsfThermoviscousDgFrame {
     pub reservoir_mass_out_kg: f64,
     pub reservoir_flows: Vec<NsfReservoirFlow>,
     pub reservoir_exchanges: Vec<NsfReservoirExchange>,
+    /// Original shared exterior's reciprocal exchange at each attached mouth,
+    /// in attachment order. Its work is not another FE/DG storage debit.
+    pub reservoir_radiations: Vec<NsfDgReservoirFrame>,
     /// Original material-owned storage and conservative exchange, when bound.
     pub finite_reservoir: Option<NsfFiniteReservoirFrame>,
     pub flow: EnergyLedger,
@@ -91,6 +97,7 @@ pub struct NsfThermoviscousDg<'a, 'c, L: Lattice3<27>> {
     steps: u64,
     patch_background: [Option<NsfBoundaryDrive>; 2],
     finite_reservoir: Option<FiniteReservoir>,
+    reservoir_radiations: Option<ReservoirRadiations>,
 }
 
 impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDg<'a, 'c, L> {
@@ -149,7 +156,7 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDg<'a, 'c, L> {
             .ok_or(NsfDgError::Input("resolved field coupling needs original interface quadrature"))?;
         let area = traces.first().ok_or(NsfDgError::Input("resolved field interface is empty"))?
             .area_m2 * traces.len() as f64;
-        if zone.steps() != 0 || load.system().accepted_steps() != 0
+        if zone.steps() != 0 || load.system().accepted_steps() != 0 || load.mouth_count() != 0
             || open.faces.iter().any(|face| face.reference_velocity_m_s != [0.0; 3])
             || load.system().source().gas() != &reference
             || !area.is_finite() || area <= 0.0
@@ -157,11 +164,11 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDg<'a, 'c, L> {
             || !same_clock(zone.law().dt_s * limits.substeps as f64, load.duration_s())
         {
             return Err(NsfDgError::Input(
-                "NSF/complete field requires cold original owners, equal gas/area/clock and zero reference flow"));
+                "NSF/complete field requires cold original owners, equal gas/area/clock, zero reference flow and explicitly attached mouths"));
         }
         poll(gate)?;
         Ok(Self { zone, load, limits, high, reference, area_m2: area, steps: 0,
-            patch_background, finite_reservoir: None })
+            patch_background, finite_reservoir: None, reservoir_radiations: None })
     }
 
     /// Attach the original finite material owner at one quiescent transverse
@@ -177,9 +184,11 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDg<'a, 'c, L> {
         limits: NsfFiniteReservoirLimits, gate: &CancelGate,
     ) -> Result<Self, NsfDgError> {
         poll(gate)?;
-        if self.steps != 0 || self.finite_reservoir.is_some() {
+        if self.steps != 0 || self.finite_reservoir.is_some()
+            || self.reservoir_radiation_at(aperture).is_some()
+        {
             return Err(NsfDgError::Input(
-                "finite reservoir can only be attached once to a cold complete-field source",
+                "finite reservoir needs one cold complete-field source aperture distinct from every passive mouth",
             ));
         }
         self.finite_reservoir = Some(FiniteReservoir::bind(
@@ -238,7 +247,7 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDg<'a, 'c, L> {
         }
         FiniteReservoir::admit_drive(self.finite_reservoir.as_ref(), drive)?;
         let zero = NsfBoundaryDrive::IncomingCharacteristic(0.0);
-        match drive {
+        let conditions = match drive {
             NsfDgDrive::Boundary(value) => Ok((value, None)),
             NsfDgDrive::Reservoir { pressure_pa, temperature_k } => Ok((zero, Some((0,
                 self.zone.reservoir_aperture_state_at(pressure_pa, temperature_k)
@@ -252,7 +261,12 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDg<'a, 'c, L> {
                     .state(&self.zone)?)))),
             NsfDgDrive::UpstreamPressureRise(_) => Err(NsfDgError::Input(
                 "complete-field source has no second NSF-side acoustic load for a series pressure rise")),
+        }?;
+        if conditions.1.is_some_and(|(aperture, _)| self.reservoir_radiation_at(aperture).is_some()) {
+            return Err(NsfDgError::Input(
+                "prescribed or finite breath and every passive mouth must have distinct original owners"));
         }
+        Ok(conditions)
     }
 
     pub fn step(&mut self, incoming_m_s: f64, gate: &CancelGate)
@@ -284,6 +298,9 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDg<'a, 'c, L> {
             return Err(NsfDgError::Input("resolved field coupling exhausted its physical horizon"));
         }
         let (external, reservoir) = self.source_conditions(drive)?;
+        if self.reservoir_radiations.is_some() {
+            return self.step_with_radiations(drive, external, reservoir, gate);
+        }
         let reservoirs: Vec<_> = reservoir.into_iter().collect();
         let relation = self.load.port_response(gate).map_err(NsfDgError::Thermoviscous)?;
         let limits = self.limits;
@@ -313,6 +330,22 @@ fn accept<L: Lattice3<27>>(
     let q = face.normal_volume_flow_m3_s;
     let dt = load.duration_s();
     let acoustic = load.preview_step(q, gate).map_err(NsfDgError::Thermoviscous)?;
+    accept_trial(fluid, acoustic, finite, side, relation, reference, limits, dt,
+        incoming, drive, evaluations, step, Vec::new(), gate)
+}
+
+/// One acceptance owner for scalar and reciprocal-mouth source equations.
+/// All caller-specific mouth audits precede this final shared publication.
+#[allow(clippy::too_many_arguments)]
+fn accept_trial<L: Lattice3<27>>(
+    fluid: NsfCharacteristicTrial<'_, L>, acoustic: ThermoviscousDgLoadTrial<'_>,
+    finite: &mut Option<FiniteReservoir>,
+    side: usize, relation: DgPortResponse, reference: GasState, limits: NsfDgLimits,
+    dt: f64, incoming: f64, drive: NsfDgDrive, evaluations: usize, step: u64,
+    reservoir_radiations: Vec<NsfDgReservoirFrame>, gate: &CancelGate,
+) -> Result<NsfThermoviscousDgFrame, NsfDgError> {
+    let face = coupled_exchange(&fluid, side)?;
+    let q = face.normal_volume_flow_m3_s;
     let pressure = acoustic.mean_pressure_pa();
     let work = acoustic.inlet_work_j();
     let audit = upstream::audit(face, pressure, work, 0.0, relation, reference, dt, limits)?;
@@ -330,7 +363,7 @@ fn accept<L: Lattice3<27>>(
         source_patch: fluid.patch_exchange_on(side == 0).copied(), field_exchange: face,
         reservoir_mass_out_kg: reservoir_mass, reservoir_flows: fluid.reservoir_flows().to_vec(),
         reservoir_exchanges: fluid.reservoir_exchanges().to_vec(), flow: *fluid.energy_ledger(),
-        finite_reservoir: None,
+        finite_reservoir: None, reservoir_radiations,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change,
         inlet_flow_m3_s: q, inlet_pressure_pa: pressure, inlet_work_j: work,
         acoustic_stored_energy_j: acoustic.frame().stored_energy_j,
