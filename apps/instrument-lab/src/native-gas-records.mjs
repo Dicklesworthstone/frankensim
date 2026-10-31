@@ -36,7 +36,7 @@ export function nativeGasRegions(source) {
     const fields = words.slice(first);
     const resolvedPrimary = resolved && key === 'gas';
     const supportedKinds = bare ? ['thermochemical']
-      : resolvedPrimary ? ['dry-air', 'thermochemical'] : ['moist-air', 'mixture', 'thermochemical'];
+      : resolvedPrimary ? ['dry-air', 'mixture', 'thermochemical'] : ['moist-air', 'mixture', 'thermochemical'];
     let kind = fields[0], count, consumed, values, pressureIndex;
     if (kind === 'dry-air') {
       if (!resolvedPrimary || !finite(fields[1]) || !finite(fields[2])) continue;
@@ -178,15 +178,25 @@ export function editNativeGasRegion(source, region, values, commonPressure = fal
   if (source !== region.source) throw new Error('The performance changed. Select the gas region again before applying.');
   if (!region.supportedKinds.includes(values.kind)) {
     throw new Error(`This native gas owner supports ${region.supportedKinds.join(' or ')}.`
-      + (region.supportedKinds.includes('dry-air') ? ' A resolved flow cannot evolve a mixture or moist-air snapshot.' : ''));
+      + (region.supportedKinds.includes('dry-air') ? ' A resolved flow requires an evolving gas law; a moist-air snapshot is not supported.' : ''));
   }
   if (region.supportedKinds.includes('dry-air')) {
     const hasEnergySolve = sourceRows(source).some(line => /^energy_solve(?:\s|$)/.test(line));
     if (values.kind === 'thermochemical' && !hasEnergySolve) {
       throw new Error('For resolved thermochemical gas, author an energy_solve TOLERANCE_J_PER_KG MAX_ITERATIONS record after fluid_limits in the performance editor. Its numerical limits are not inferred.');
     }
-    if (values.kind === 'dry-air' && hasEnergySolve) {
-      throw new Error('For resolved dry-air gas, remove the thermochemical energy_solve record in the performance editor before applying. It is not removed automatically.');
+    if (values.kind !== 'thermochemical' && hasEnergySolve) {
+      throw new Error('For resolved dry-air or named-mixture gas, remove the thermochemical energy_solve record in the performance editor before applying. It is not removed automatically.');
+    }
+    if (values.kind === 'mixture') {
+      // The native named-mixture law evolves each cell within its source domain.
+      // Keep authored numerical limits; do not silently clamp them when switching.
+      const limits = sourceRows(source).filter(line => /^fluid_limits(?:\s|$)/.test(line));
+      const fields = limits[0]?.split(/\s+/) ?? [];
+      if (limits.length !== 1 || fields.length !== 8 || !finite(fields[2]) || !finite(fields[3])
+          || Number(fields[2]) < 273.15 || Number(fields[3]) > 323.15 || Number(fields[2]) >= Number(fields[3])) {
+        throw new Error('Resolved named mixtures require fluid_limits MINIMUM_TEMPERATURE_K and MAXIMUM_TEMPERATURE_K (the two fields immediately after MAXIMUM_CELLS) to form an increasing window within 273.15–323.15 K. Choose Discard changes to unlock the performance editor, author those bounds for the intended physical states, then select the mixture again. Numerical limits are not changed automatically.');
+      }
     }
   }
   if (region.field) {

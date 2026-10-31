@@ -63,13 +63,14 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
     modelHelp.textContent = station
       ? "Edit this station's temperature and mole fractions in the declared column order. Position, gas model and species columns belong to the complete field header; change them and their source registry in the performance editor. Static pressure is inherited: select the ambient gas region to change it."
       : kind.value === "dry-air"
-      ? "The native dry-air law evolves the resolved gas fields. To select thermochemical species, first author energy_solve TOLERANCE_J_PER_KG MAX_ITERATIONS after fluid_limits in the performance editor. Switching back requires removing that record yourself."
+      ? "Dry air and declared named mixtures each retain their native evolving material law. Named mixtures require an authored fluid_limits temperature window within 273.15–323.15 K. To select attached thermochemical species, first author energy_solve TOLERANCE_J_PER_KG MAX_ITERATIONS after fluid_limits in the performance editor; remove that record before selecting dry air or a named mixture."
       : legacy
       ? `The native moist-air owner derives the gas state from temperature, pressure and relative humidity.${selected?.inherited ? " This segment inherits ambient pressure; select ambient to change it." : ""}`
       : kind.value === "mixture"
         ? "Use the native species IDs N2, O2, Ar, CO2, H2O or He. Fractions must sum to 1; they are never normalized or converted between mole and mass automatically. Native material domains still apply."
+          + (selected?.supportedKinds.includes("dry-air") ? " Resolved flow evolves this mixture at each cell. In fluid_limits, the two temperature fields after MAXIMUM_CELLS must form an increasing window within 273.15–323.15 K; its pressure domain is 10000–200000 Pa, with native saturation checks. To edit these bounds, choose Discard changes, edit the performance source, then select the mixture again. Remove any thermochemical energy_solve record." : "")
         : "Use exact species IDs from the attached species packs. Keep their NASA-9 and transport associations below. Every selected species needs its original sources; the native model derives its state and rejects missing data."
-          + (selected?.supportedKinds.includes("dry-air") ? " Resolved flow also requires an explicitly authored energy_solve record after fluid_limits. Remove it in the performance editor before switching to dry air." : "");
+          + (selected?.supportedKinds.includes("dry-air") ? " Resolved flow also requires an explicitly authored energy_solve record after fluid_limits. Remove it in the performance editor before switching to dry air or a named mixture." : "");
   };
   const changed = (): void => {
     dirty = true; status.textContent = "Atmosphere changes are pending. Apply them to this source or discard them.";

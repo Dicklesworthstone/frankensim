@@ -298,11 +298,20 @@ Temperature and composition changes can alter the original material-derived
 physical timestep while the declared observation clock and source duration stay
 fixed. The native interval projection records its clock and bandwidth limits in
 the provenance; refine both clocks for the intended physical frequency range.
-The primary resolved gas offers dry-air and source-backed thermochemical models.
-For a model change, author the thermochemical `energy_solve` row in the source
-editor, or remove it when returning to dry air; the controls preserve those
-numerical choices instead of supplying implicit tolerances. Common-pressure
-edits include both the resolved primary gas and its exterior region.
+The primary resolved gas offers dry air, declared named mixtures and source-backed
+thermochemical models. Named mixtures retain their declared mole or mass basis
+and the native evolving material law; they are not frozen gas snapshots. The
+native model enforces its 273.15–323.15 K and 10000–200000 Pa domain and saturation
+limits. Before switching to a named mixture, author an increasing temperature
+window within that domain in `fluid_limits`: its minimum and maximum temperature
+fields follow `MAXIMUM_CELLS`. The supplied 250–600 K window is intentionally
+not clamped. If atmosphere edits are pending, choose **Discard changes** to
+unlock the performance editor, author the bounds for the intended physical
+states, then select the mixture again. For thermochemical gas, author its
+`energy_solve` row after `fluid_limits`, or remove it when returning to dry air
+or a named mixture; the controls preserve those numerical choices instead of
+supplying implicit tolerances. Common-pressure edits include both the resolved
+primary gas and its exterior region; reservoir bindings and geometry stay exact.
 The existing native pressure receipt enables the same calibrated A/B comparison
 as the other performers, including refusal of comparisons with mismatched scales
 or clipped outputs.

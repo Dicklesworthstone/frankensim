@@ -6,6 +6,8 @@ import {mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile} from 'node:fs
 import {tmpdir} from 'node:os';
 import {join, isAbsolute} from 'node:path';
 import http from 'node:http';
+import {nativeGasRegions, editNativeGasRegion} from '../src/native-gas-records.mjs';
+import {serializeNativeExperiment} from '../src/native-experiment.mjs';
 import {createNativeWindServer} from '../tools/serve-native-wind.mjs';
 import {MAX_SOURCE_BYTES, MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, validateInput, validateSource} from '../tools/native-wind-protocol.mjs';
 
@@ -137,6 +139,30 @@ test('resolved gas fields and material sources run through their own native comm
       '--self-contained', '--decimate', ...names.flatMap(name => ['--attached-source', name]),
       '--gas-water', 'none', '--gas-phase', 'frozen', '--gas-component', 'gas/species', 'gas/nasa9', 'gas/transport']);
     assert.deepEqual(record.files.map(file => [file.path, file.bytes]), files.map(([path, bytes]) => [path, bytes.toString('base64')]));
+  } finally { await app.cleanup(); }
+});
+
+
+test('edited resolved named mixtures reach the native service as the exact portable source', native, async () => {
+  const app = await setup();
+  try {
+    const original = await readFile(new URL('../../../crates/fs-couple/examples/resolved-dg-radiating-mouth.performance', import.meta.url), 'utf8');
+    const source = original.replace('fluid_limits 144 250 600', 'fluid_limits 144 280 320');
+    const primary = nativeGasRegions(source).find(region => region.key === 'gas');
+    const values = {kind:'mixture', temperature:'310', pressure:'90000', basis:'mass',
+      components:[{species:'N2', fraction:'0.7'}, {species:'O2', fraction:'0.2'}, {species:'He', fraction:'0.1'}]};
+    const changed = editNativeGasRegion(source, primary, values, true);
+    assert.equal(changed, source.replace('gas dry-air 300 100000',
+      'gas mixture 310 90000 mass 3 N2 0.7 O2 0.2 He 0.1')
+      .replace('dg_exterior 300 100000 0', 'dg_exterior 300 90000 0'));
+    const response = await app.runBundle(serializeNativeExperiment(changed, [], {renderer:'resolved', decimate:true}));
+    assert.equal(response.status, 200);
+    assert.equal((await response.arrayBuffer()).byteLength, 48);
+    const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+    assert.equal(record.bytes, Buffer.from(changed).toString('base64'));
+    assert.deepEqual(record.args, ['resolved', join(record.cwd, 'input.performance'),
+      join(record.cwd, 'output.wav'), '--self-contained', '--decimate']);
+    assert.deepEqual(record.files, []);
   } finally { await app.cleanup(); }
 });
 
