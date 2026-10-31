@@ -7998,3 +7998,37 @@ Richards/two-phase dynamics, capillary work or hysteresis. Capillary pressure is
 a phase-pressure relation and must not be added as another hydraulic drag or
 heat source. Synthetic analytic and source-preservation fixtures check the
 equations and coupling; they do not establish a measured material calibration.
+
+### Finite multicomponent membrane separation
+
+`transient::mixture::IsothermalGasMembraneMixture` couples two original finite
+ideal-gas mixtures to independently sourced linear Henry/Fick channels on one
+shared rigid laminate. Every joined catalog species needs an explicit channel,
+with the same layer thicknesses, grid and held temperature. A source-selected
+D=0 channel blocks transport and retains its authored sorbed inventory; missing
+species data never imply impermeability.
+
+Each channel reuses the original conservative finite-reservoir tridiagonal solve
+with C=V/(R T). All species transfers enter one original source-relative gas
+boundary reconstruction per endpoint. The complete original catalog remains
+available when a species is absent from one gas. Fluxes are relative to the
+stationary membrane and driven by partial pressure, with no gas-diffusion
+zero-sum constraint. Changing composition updates the original gas EOS,
+thermochemistry, transport and acoustics together.
+
+Original layer and ordered-interface source support is checked against SUMMED
+gas-equivalent pressure at cells and both local face traces, including original
+EOS total pressures at exterior boundaries. Old, solved and actual reconstructed
+states are admitted; interior totals may exceed both reservoir totals during
+selective counterpermeation. Per-species and combined actual gas-plus-sorbed
+mass budgets are checked after EOS pressure reseeding. Canonical species order
+and each channel's existing model/capacity/duration factor cache are retained.
+Failure or cancellation returns no partial gas, membrane or clock update.
+
+Independent sorption is an explicit model assumption, and original claims must
+already qualify the intended mixture. Selected composition, humidity or
+concentration applicability restrictions refuse rather than staying silently
+fixed as composition evolves. This does not promote pure-gas measurements,
+infer competitive sorption, cross-diffusion, swelling or sorbed calorics.
+Original gas enthalpy streams and exact isothermal thermostat flow-work offsets
+are separate reports, without a whole-membrane energy certificate.

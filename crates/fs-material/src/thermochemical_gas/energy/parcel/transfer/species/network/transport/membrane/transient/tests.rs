@@ -155,3 +155,6 @@ fn absent_wrong_basis_and_pressure_dependent_sorption_are_not_inferred() {
 
 #[path="tests/reservoir.rs"]
 mod reservoir;
+
+#[path="tests/mixture.rs"]
+mod mixture;

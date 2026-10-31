@@ -27,6 +27,8 @@ use fs_thermochem::SpeciesId;
 pub mod slab;
 /// Finite original gas parcels coupled to sorbed storage at a fixed temperature.
 pub mod reservoir;
+/// Independent source-qualified species permeation between finite gas mixtures.
+pub mod mixture;
 pub use slab::{MembraneDiffusion, MembraneDiffusionLayer, MembraneDiffusionState,
     MembraneDiffusionWorkspace, MembraneDiffusionSolve, MembraneDiffusionFlux,
     MembraneDiffusionStep, MembraneDiffusionCandidate, MembraneDiffusionError,
@@ -134,6 +136,20 @@ impl<'a> ResolvedMembraneDiffusion<'a> {
         interfaces:&[Option<MembraneInterfaceMaterial<'a>>],initial_partial_pressures_pa:&[f64],
         initial_reservoirs_pa:[f64;2],mut cancelled:impl FnMut()->bool)->Result<Self,Error>
     {
+        let (bindings,state)=Self::resolve_parts(temperature_k,area_m2,layers,interfaces,
+            initial_partial_pressures_pa,&mut cancelled)?;
+        let flux=state.sample_fluxes(initial_reservoirs_pa,&mut cancelled)?;
+        let sample=(&state,flux.face_partial_pressures_pa.as_slice());
+        let support=bindings.admit([sample,sample],&mut cancelled)?;
+        poll(&mut cancelled)?;Ok(Self {bindings,state,support})
+    }
+
+    // Resolve the same original claims and geometry before choosing the gas
+    // pressure coordinate used to qualify this particular consumer.
+    fn resolve_parts(temperature_k:f64,area_m2:f64,layers:&[MembraneDiffusionLayerSource<'a>],
+        interfaces:&[Option<MembraneInterfaceMaterial<'a>>],initial_partial_pressures_pa:&[f64],
+        mut cancelled:impl FnMut()->bool)->Result<(Arc<Bindings<'a>>,MembraneDiffusionState),Error>
+    {
         poll(&mut cancelled)?;
         if !temperature_k.is_finite()||temperature_k<=0.0||!area_m2.is_finite()||area_m2<=0.0
             ||layers.is_empty()||layers.len()>MAX_TRANSIENT_MEMBRANE_LAYERS
@@ -191,12 +207,8 @@ impl<'a> ResolvedMembraneDiffusion<'a> {
         }
         let model=MembraneDiffusion::new(area_m2,&coefficients,&permeances,&mut cancelled)?;
         let state=model.initial_state(initial_partial_pressures_pa,&mut cancelled)?;
-        let flux=state.sample_fluxes(initial_reservoirs_pa,&mut cancelled)?;
         let bindings=Arc::new(Bindings {species,temperature_k,layers:bound_layers,interfaces:bound_interfaces});
-        let sample=(&state,flux.face_partial_pressures_pa.as_slice());
-        let support=bindings.admit([sample,sample],&mut cancelled)?;
-        poll(&mut cancelled)?;
-        Ok(Self {bindings,state,support})
+        poll(&mut cancelled)?;Ok((bindings,state))
     }
     pub fn species(&self)->&SpeciesId {&self.bindings.species}
     pub fn temperature_k(&self)->f64 {self.bindings.temperature_k}
@@ -225,13 +237,22 @@ impl Bindings<'_> {
     fn admit<const N:usize>(&self,samples:[(&MembraneDiffusionState,&[[Option<f64>;2]]);N],
         cancelled:&mut impl FnMut()->bool)->Result<MembraneDiffusionSourceSupport,Error>
     {
+        self.admit_pressures(samples.map(|(state,faces)|(state,state.partial_pressures_pa(),faces)),cancelled)
+    }
+
+    // Pure-gas q equals total pressure. A mixture supplies SUM_i q_i on the
+    // common grid, plus actual EOS totals at its exterior boundary faces.
+    fn admit_pressures<const N:usize>(&self,
+        samples:[(&MembraneDiffusionState,&[f64],&[[Option<f64>;2]]);N],
+        cancelled:&mut impl FnMut()->bool)->Result<MembraneDiffusionSourceSupport,Error>
+    {
         let mut layers=Vec::with_capacity(self.layers.len());
         for (i,binding) in self.layers.iter().enumerate() {
             poll(cancelled)?;
             let mut lo=f64::INFINITY;let mut hi:f64=0.0;
-            for (state,faces) in samples {
+            for (state,pressures,faces) in samples {
                 let range=&state.model().layer_cell_ranges()[i];
-                for (local,&q) in state.partial_pressures_pa()[range.clone()].iter().enumerate() {
+                for (local,&q) in pressures[range.clone()].iter().enumerate() {
                     if local%128==0 {poll(cancelled)?;}
                     lo=lo.min(q);hi=hi.max(q);
                 }
@@ -253,7 +274,7 @@ impl Bindings<'_> {
             poll(cancelled)?;
             let Some(binding)=binding else {interfaces.push(None);continue;};
             let mut lo=f64::INFINITY;let mut hi:f64=0.0;
-            for (state,faces) in samples {
+            for (state,_,faces) in samples {
                 let face=state.model().layer_cell_ranges()[i].end;
                 for q in faces[face] {
                     let q=q.ok_or(Error::Invalid("coincident seals leave an interface trace unknown; cannot qualify that interface source"))?;

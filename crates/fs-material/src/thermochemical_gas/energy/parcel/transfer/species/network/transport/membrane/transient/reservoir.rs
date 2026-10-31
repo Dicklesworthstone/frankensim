@@ -34,7 +34,7 @@ pub struct IsothermalGasMembraneSolve {
     pub mass_tolerance_kg:f64,
 }
 impl IsothermalGasMembraneSolve {
-    fn validate(self,temperature_k:f64)->Result<(),IsothermalGasMembraneError> {
+    pub(super) fn validate(self,temperature_k:f64)->Result<(),IsothermalGasMembraneError> {
         self.membrane.validate()?;
         if !positive(self.mass_tolerance_kg) {return Err(Error::Invalid("positive combined membrane/gas mass tolerance required"));}
         for (i,gas) in self.gas.iter().enumerate() {
@@ -73,15 +73,30 @@ impl From<GasEnergyError> for IsothermalGasMembraneError {
     fn from(error:GasEnergyError)->Self {ResolvedMembraneDiffusionError::from(error).into()}
 }
 use IsothermalGasMembraneError as Error;
-fn positive(x:f64)->bool {x.is_finite()&&x>0.0}
-fn finite(x:f64)->Result<f64,Error> {
+pub(super) fn positive(x:f64)->bool {x.is_finite()&&x>0.0}
+pub(super) fn finite(x:f64)->Result<f64,Error> {
     if x.is_finite() {Ok(x)}else{Err(Error::Invalid("gas/membrane conversion is unrepresentable"))}
 }
-fn poll(cancelled:&mut impl FnMut()->bool)->Result<(),Error> {
+pub(super) fn poll(cancelled:&mut impl FnMut()->bool)->Result<(),Error> {
     if cancelled() {Err(Error::Cancelled)}else{Ok(())}
 }
-fn gas_error(reservoir:usize,error:GasEnergyError)->Error {
+pub(super) fn gas_error(reservoir:usize,error:GasEnergyError)->Error {
     if error==GasEnergyError::Cancelled {Error::Cancelled}else{Error::Gas {reservoir,error}}
+}
+
+
+/// One original gas enthalpy stream and its exact isothermal flow-work offset.
+pub(super) fn isothermal_stream(species:&SpeciesId,amount_mol:f64,molar_mass:f64,
+    molar_enthalpy:f64,temperature:f64)->Result<(SpeciesBoundaryRelativeTransfer,f64),Error>
+{
+    let dm=finite(amount_mol*molar_mass)?;
+    if amount_mol!=0.0&&dm==0.0 {return Err(Error::Invalid("gas/membrane species mass transfer underflowed"));}
+    // Match boundary.rs grouping so the source-relative thermal target is
+    // exactly zero before any arbitrarily large formation datum enters.
+    let heat=finite(-dm*(R*temperature/molar_mass))?;
+    let enthalpy=finite(dm*molar_enthalpy/molar_mass)?;
+    Ok((SpeciesBoundaryRelativeTransfer {species:species.clone(),mass_into_gas_kg:dm,
+        relative_energy_into_gas_j:heat},enthalpy))
 }
 
 #[derive(Clone,Debug)]
@@ -215,15 +230,11 @@ impl<'a> IsothermalGasMembrane<'a> {
         let mut stream=[0.0;2];let mut heat=[0.0;2];let mut pressure_error=[0.0;2];let mut mass_error=[0.0;2];
         for i in 0..2 {
             poll(&mut cancelled)?;
-            let dm=finite(amounts[i]*self.molar_mass_kg_mol)?;
-            if amounts[i]!=0.0&&dm==0.0 {return Err(Error::Invalid("gas/membrane species mass transfer underflowed"));}
-            // EXACT grouping of boundary.rs pressure-flow work. Its relative
-            // thermal target is zero before any large formation datum enters.
-            heat[i]=finite(-dm*(R*self.temperature_k()/self.molar_mass_kg_mol))?;
-            stream[i]=finite(dm*self.molar_enthalpy_j_mol/self.molar_mass_kg_mol)?;
+            let (transfer,enthalpy)=isothermal_stream(self.species(),amounts[i],self.molar_mass_kg_mol,
+                self.molar_enthalpy_j_mol,self.temperature_k())?;
+            heat[i]=transfer.relative_energy_into_gas_j;stream[i]=enthalpy;
             let proposed=self.gases[i].exchange_species_boundary_relative(&self.catalog,
-                &[SpeciesBoundaryRelativeTransfer {species:self.species().clone(),mass_into_gas_kg:dm,
-                    relative_energy_into_gas_j:heat[i]}],self.controls.gas[i],&mut cancelled)
+                &[transfer],self.controls.gas[i],&mut cancelled)
                 .map_err(|error|gas_error(i,error))?;
             let (gas,_,step)=proposed.into_parts();
             if gas.state().state().temperature!=self.temperature_k() {
