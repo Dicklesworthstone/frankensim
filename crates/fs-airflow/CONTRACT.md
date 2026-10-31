@@ -815,13 +815,33 @@ boundary-layer solver or chemical evolution. Focused finite-gas regressions
 exercise mixed and pure species, mass-basis preservation, independent film
 Rayleigh/heat algebra, actual piston/body energy closure and atomic refusal.
 
+`PengRobinsonFilmSource` extends that same surface and reciprocal heat/motion
+owner to real gas with an explicit Vapor or Liquid branch. The material owner
+pins the original PR critical properties, both interaction-matrix axes and
+actual active source composition; ambiguous Stable selection or a bulk-root
+mismatch refuses. Forced, oriented natural and aiding mixed correlations use
+the actual film density and Cp. Buoyancy uses its source-owned isobaric expansion
+derivative, including real-gas departure from `1/T`. The full wall/bulk contrast
+remains in Rayleigh forcing and signed heat. A shared immutable PR law avoids
+rebuilding its vectors and interaction matrix during ordinary thermal trials.
+Focused regressions independently reconstruct the dimensionless groups and
+correlation results, close gas/body/mechanical energy in both heat directions,
+and preserve live storage on phase/source/cancellation refusal.
+
+`examples/real_gas_heated_chamber.rs` joins the original real-gas nozzle,
+finite reservoir, finite thermal body, PR film convection and moving piston.
+Its CSV trajectory reports changing densities and inventories, heat, work,
+mass defect and a common-reference whole-system energy balance. Synthetic
+sources, homogeneous branches, an isothermal solid body, prescribed relative
+flow and first-order splitting remain explicit; timestep refinement is needed.
+
 ### Natural convection in finite gas and coupled surface networks
 
 `medium::convection::finite_gas::NaturalGasSurface` evaluates the shared
 natural-convection geometry from the coupling owner's actual gas and body query
 states. Its raw bulk-property entry retains vertical-plate behavior; active
 horizontal plate/cylinder and sphere exchange require `FilmGasSurface`, which
-evaluates the original dilute ideal gas at the actual mean film temperature.
+evaluates the original ideal or explicit-branch PR gas at the mean film temperature.
 The bulk vertical-plate path accepts ideal and Peng--Robinson gas states and
 uses the existing `evaluate_vertical_plate_from_thermal_material` owner. Its
 coherent thermal/transport view supplies actual temperature, density, Cp,

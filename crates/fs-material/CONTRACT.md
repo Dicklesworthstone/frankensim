@@ -6846,6 +6846,25 @@ differences, the full geometric tangent with displaced-state force differences,
 and refined generalized-force quadrature with caloric compression work plus
 the declared exterior-pressure work.
 
+## Original-law real-gas property-temperature queries
+
+`ThermochemicalPengRobinsonModel::evaluate_temperature_from_snapshot` retains
+the accepted bulk pressure, active composition and declared basis, source
+coordinates, transport claims and exact original PR law while querying a new
+property temperature. Snapshots share immutable critical data and interactions;
+normal repeated queries avoid rebuilding the PR vectors and pair matrix. A
+different source bank must reproduce the actual active critical data and both
+interaction-matrix axes. Inactive species remain inactive. Source admission
+also runs when the original mechanical law is shared.
+
+The caller explicitly selects Vapor or Liquid, which must reproduce the
+accepted bulk root. Stable-root selection refuses. The returned homogeneous
+property state supplies real density, Cp, acoustic and expansion derivatives;
+it has no new inventory or storage. This does not establish equilibrium or a
+continuous single-phase path through the intervening temperatures. Focused
+regressions cover active-subset mapping, source substitution, branch mismatch
+and original property-domain refusal.
+
 ## Conservative real-gas heating at fixed mass and volume
 
 `thermochemical_gas::nonideal::energy` reconstructs a complete source-bound

@@ -1,11 +1,14 @@
 //! Film-temperature properties on the original finite gas/body heat residual.
 //! Film evaluation has no independent energy or mass; bulk gas keeps both.
+mod source;
+pub use source::{FilmGasSource, PengRobinsonFilmSource};
+
 use super::super::{
     AidingVerticalPlateSettings, evaluate_aiding_vertical_plate_from_material,
     evaluate_natural_from_material, mixed,
 };
 use super::*;
-use fs_material::fluid_transport::FluidTransport;
+use fs_material::fluid_transport::{FluidTransport, ThermalFluidTransport};
 use fs_material::thermochemical_gas::ThermochemicalGasModel;
 use fs_qty::Temperature;
 
@@ -47,19 +50,22 @@ impl AidingVerticalPlateGasSurface {
 /// The bank may contain more species than the current gas, or different initial
 /// fractions. Each query reconstructs the ACTUAL active gas composition and
 /// preserves its original source claims before evaluating film properties.
-#[derive(Clone, Copy)]
-pub struct FilmGasSurface<'a> {
-    pub model: &'a ThermochemicalGasModel,
+pub struct FilmGasSurface<'a, M: FilmGasSource = ThermochemicalGasModel> {
+    pub model: &'a M,
     pub law: FilmGasHeatLaw,
+}
+impl<M: FilmGasSource> Copy for FilmGasSurface<'_, M> {}
+impl<M: FilmGasSource> Clone for FilmGasSurface<'_, M> {
+    fn clone(&self) -> Self { *self }
 }
 
 /// The actual bulk gas/body states and the separate property evaluation.
 /// Bulk gas remains the thermodynamic/acoustic state; film never replaces it.
 #[derive(Debug)]
-pub struct FilmGasConvectionSample {
-    pub interface: FiniteGasConvectionSample,
+pub struct FilmGasConvectionSample<S = ResolvedThermochemicalGasState> {
+    pub interface: FiniteGasConvectionSample<S>,
     /// None only for an explicitly isolated zero-area patch.
-    pub property_gas: Option<ResolvedThermochemicalGasState>,
+    pub property_gas: Option<S>,
 }
 
 impl FilmGasHeatLaw {
@@ -81,25 +87,26 @@ impl FilmGasHeatLaw {
     }
 }
 
-impl FilmGasSurface<'_> {
+impl<M: FilmGasSource> FilmGasSurface<'_, M> {
     /// Re-query source-pinned properties at (T_wall + T_bulk)/2 and actual bulk
     /// pressure. Both signed heat flow and Rayleigh forcing retain the FULL
     /// wall-to-bulk temperature contrast. The film is not a replacement gas
     /// endpoint, a second parcel, or an invented finite-capacity reservoir.
     ///
     /// The original correlation must support this property convention and the
-    /// declared geometry. The model remains dilute ideal, frozen composition
-    /// during this evaluation, with no boundary-layer or chemical heat solver.
+    /// declared geometry. The original ideal or explicit-branch real-gas owner
+    /// retains frozen composition and its single-phase source domain. This is
+    /// a property query with no boundary-layer or chemical heat solver.
     /// The callback works with existing powered/reactive/multi-boundary owners;
     /// their complete exposed-area checks and source budgets remain mandatory.
     pub fn resolve(
         self,
-        gas: &ResolvedThermochemicalGasState,
+        gas: &M::State,
         body: EquilibriumPhaseState,
-    ) -> Result<ConductanceSample<FilmGasConvectionSample>, MaterialConvectionError> {
+    ) -> Result<ConductanceSample<FilmGasConvectionSample<M::State>>, MaterialConvectionError> {
         let area_m2 = self.law.area()?;
         let wall = body.temperature_k();
-        let bulk = gas.state().temperature;
+        let bulk = gas.temperature_k();
         if !wall.is_finite() || wall <= 0.0 {
             return Err(invalid("film convection needs a positive body temperature"));
         }
@@ -119,7 +126,15 @@ impl FilmGasSurface<'_> {
         }
         let film = self
             .model
-            .evaluate_temperature_from_snapshot(gas, Temperature::new(0.5 * wall + 0.5 * bulk))?;
+            .evaluate_property_temperature(gas, Temperature::new(0.5 * wall + 0.5 * bulk))?;
+        let expansion = || -> Result<f64, MaterialConvectionError> {
+            let thermal = film.thermal_transport_state()?;
+            if thermal.transport() != film.transport_state()? || thermal.temperature_k() != film.temperature_k() {
+                return Err(invalid("film thermal and momentum views must describe the same material state"));
+            }
+            thermal.volumetric_expansion_per_k()
+                .ok_or_else(|| invalid("film buoyancy requires source-owned volumetric expansion"))
+        };
         let evaluated = match self.law {
             FilmGasHeatLaw::Forced(surface) => {
                 let mut settings = surface.settings;
@@ -144,7 +159,7 @@ impl FilmGasSurface<'_> {
                         surface.geometry,
                         &film,
                         surface.gravity_m_s2,
-                        1.0 / film.state().temperature,
+                        expansion()?,
                         Temperature::new(wall),
                         Temperature::new(bulk),
                         surface.characteristic_length,
@@ -154,12 +169,12 @@ impl FilmGasSurface<'_> {
             FilmGasHeatLaw::AidingVerticalPlate(surface) => {
                 if wall == bulk && surface.settings.speed_up_m_s == 0.0 {
                     mixed::inputs(film.transport_state()?, surface.settings,
-                        1.0 / film.state().temperature, Temperature::new(wall),
+                        expansion()?, Temperature::new(wall),
                         Temperature::new(bulk), surface.characteristic_length)?;
                     None
                 } else {
                     Some(evaluate_aiding_vertical_plate_from_material(
-                        &film, surface.settings, 1.0 / film.state().temperature,
+                        &film, surface.settings, expansion()?,
                         Temperature::new(wall), Temperature::new(bulk),
                         surface.characteristic_length,
                     )?)
@@ -206,16 +221,16 @@ impl FilmGasSurface<'_> {
     /// only the transfer coefficient uses its source-pinned film properties.
     /// Both original physical endpoints are returned together or neither.
     #[allow(clippy::too_many_arguments)]
-    pub fn finite_body_candidate(
+    pub fn finite_body_candidate<G: PistonGas<State = M::State>>(
         self,
-        piston: &GasPiston,
+        piston: &GasPiston<G>,
         input: PistonInput,
         body: UniformEnthalpyStepInput<'_>,
         controls: PistonSolve,
         exchange: HeatExchangeSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<
-        ThermalPistonCandidate<FilmGasConvectionSample>,
+        ThermalPistonCandidate<FilmGasConvectionSample<M::State>, G>,
         ThermalPistonError<MaterialConvectionError>,
     > {
         if cancelled() {

@@ -5,17 +5,19 @@
 //! density with ideal-gas sound speed or caloric departures by accident.
 
 use fs_matdb::QueryPoint;
+use std::sync::Arc;
 use fs_qty::{Density, Pressure, Temperature};
 use fs_thermochem::SpeciesId;
 use fs_thermochem::eos::IdealGasMolarVolumeQuantityV1 as MolarVolume;
 use fs_thermochem::eos::peng_robinson::{
     PengRobinsonComponentV1, PengRobinsonEvaluationV1, PengRobinsonMixtureV1,
-    PengRobinsonPhaseRootV1, PengRobinsonPhaseV1,
+    PengRobinsonPhaseRootV1,
     flash::{PengRobinsonFlashOptionsV1, PengRobinsonFlashV1},
     saturation::{
         PengRobinsonSaturatedMixtureV1, PengRobinsonSaturationOptionsV1, PengRobinsonSaturationV1,
     },
 };
+pub use fs_thermochem::eos::peng_robinson::PengRobinsonPhaseV1;
 use fs_thermochem::mixture::FrozenIdealGasMixtureEvaluationV1;
 
 use super::{
@@ -28,6 +30,7 @@ use crate::fluid_transport::{
 
 /// Conservative density/energy reconstruction on a homogeneous PR branch.
 pub mod energy;
+mod temperature;
 /// Conserved-density calorics with liquid/vapor equilibrium and phase changes.
 pub mod equilibrium;
 
@@ -42,7 +45,7 @@ pub struct PengRobinsonSpeciesBinding {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThermochemicalPengRobinsonModel {
     source: ThermochemicalGasModel,
-    mechanics: PengRobinsonMixtureV1,
+    mechanics: Arc<PengRobinsonMixtureV1>,
 }
 
 impl ThermochemicalPengRobinsonModel {
@@ -102,14 +105,14 @@ impl ThermochemicalPengRobinsonModel {
             source.thermodynamics().mole_composition().fractions().to_vec(),
             binary_interactions,
         ).map_err(|error| failure("Peng-Robinson binding", error))?;
-        Ok(Self { source, mechanics })
+        Ok(Self { source, mechanics: Arc::new(mechanics) })
     }
 
     #[must_use]
     pub const fn source(&self) -> &ThermochemicalGasModel { &self.source }
 
     #[must_use]
-    pub const fn mechanics(&self) -> &PengRobinsonMixtureV1 { &self.mechanics }
+    pub fn mechanics(&self) -> &PengRobinsonMixtureV1 { &self.mechanics }
 
     pub fn evaluate_mechanics(
         &self,
@@ -143,7 +146,7 @@ impl ThermochemicalPengRobinsonModel {
         let mechanics = self.mechanics.evaluate_pt(temperature, pressure)
             .map_err(|error| failure("Peng-Robinson mechanics", error))?;
         let root = mechanics.select(phase).clone();
-        Self::resolve_real_gas(source, mechanics, root)
+        Self::resolve_real_gas(source, Arc::clone(&self.mechanics), mechanics, root)
     }
 
     /// Resolve the same constitutive state at the supplied mass density.
@@ -175,11 +178,12 @@ impl ThermochemicalPengRobinsonModel {
         }) {
             return Err(invalid("Peng-Robinson PT inventory cannot resolve the retained density branch"));
         }
-        Self::resolve_real_gas(source, mechanics, direct.root().clone())
+        Self::resolve_real_gas(source, Arc::clone(&self.mechanics), mechanics, direct.root().clone())
     }
 
     fn resolve_real_gas(
         source: ResolvedThermochemicalGasState,
+        law: Arc<PengRobinsonMixtureV1>,
         mechanics: PengRobinsonEvaluationV1,
         root: PengRobinsonPhaseRootV1,
     ) -> Result<ResolvedThermochemicalRealGasState, MaterialError> {
@@ -224,6 +228,7 @@ impl ThermochemicalPengRobinsonModel {
         }
         Ok(ResolvedThermochemicalRealGasState {
             source,
+            law,
             mechanics,
             root,
             transport,
@@ -391,6 +396,7 @@ impl ResolvedThermochemicalPengRobinsonState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedThermochemicalRealGasState {
     source: ResolvedThermochemicalGasState,
+    law: Arc<PengRobinsonMixtureV1>,
     mechanics: PengRobinsonEvaluationV1,
     root: PengRobinsonPhaseRootV1,
     transport: FluidTransportState,
@@ -411,6 +417,9 @@ impl ResolvedThermochemicalRealGasState {
     /// Actual EOS pressure used for all original material source queries.
     #[must_use]pub const fn pressure_pa(&self) -> f64 { self.source.state().pressure }
     #[must_use]pub const fn source(&self) -> &ResolvedThermochemicalGasState { &self.source }
+    /// Original critical properties, pair interactions and active composition.
+    /// Shared immutable storage keeps repeated material snapshots inexpensive.
+    #[must_use]pub fn constitutive_law(&self) -> &PengRobinsonMixtureV1 { &self.law }
     #[must_use]pub const fn mechanics(&self) -> &PengRobinsonEvaluationV1 { &self.mechanics }
     #[must_use]pub const fn root(&self) -> &PengRobinsonPhaseRootV1 { &self.root }
     #[must_use]pub const fn density_kg_m3(&self) -> f64 { self.density_kg_m3 }
@@ -494,7 +503,7 @@ mod tests {
         assert_eq!(bound.source(), &source);
     }
 
-    fn ternary_source() -> ThermochemicalGasModel {
+    pub(super) fn ternary_source() -> ThermochemicalGasModel {
         // Manufactured caloric/transport data; this exercises species binding,
         // not empirical accuracy of a particular real mixture.
         ThermochemicalGasModel::new(
@@ -518,7 +527,7 @@ mod tests {
         .unwrap()
     }
 
-    fn ternary_bindings() -> Vec<PengRobinsonSpeciesBinding> {
+    pub(super) fn ternary_bindings() -> Vec<PengRobinsonSpeciesBinding> {
         let mut values = bindings();
         values.swap(0, 1);
         values.push(PengRobinsonSpeciesBinding {
