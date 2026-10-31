@@ -177,10 +177,32 @@ internal-work and cancellation checks. Returning waves from either duct can
 therefore affect the original nonlinear source through the shared field.
 
 Whole characteristic faces and explicit source/downstream aperture patches are
-supported. Drives are original boundary pressure/characteristic controls or
-original transverse reservoir states. This constructor does not silently
-convert an existing finite chamber or finite upstream acoustic attachment into
-prescribed data. Such compositions require their own joint attachment.
+supported. Drives are original boundary pressure/characteristic controls,
+original transverse reservoir states, or an explicitly attached finite material
+source. `with_finite_reservoir(aperture, volume_m3, limits, gate)` binds one
+existing quiescent transverse opening to the same named-mixture or NASA9
+material owner. Its accepted inventory supplies the opening's pressure and
+temperature; `FiniteReservoir` and `FiniteReservoirActuation` are then its
+exclusive drive forms. Prescribed boundary/reservoir controls cannot overwrite
+that owner.
+
+Actual streamed mass and conservative total energy update the retained chamber.
+`FiniteReservoirActuation` adds explicit volume motion and heat through the
+original simultaneous midpoint law after that exchange. Positive volume rate
+expands the chamber; positive heat enters its gas. This held-source, flow-first
+partition requires interval refinement. It keeps no chamber momentum: incoming
+resolved kinetic energy thermalizes in the original well-mixed inventory.
+Pressure work already included in the NSF total-energy flux is not debited
+again as acoustic work.
+
+The finite chamber's storage, mass/energy residuals, streamed exchange and
+original midpoint heat/work receipt remain in `frame.finite_reservoir`.
+`finite_reservoir_inventory()` exposes the accepted named or NASA9 source
+without manufacturing a NASA9 parcel for a named-mixture law. Its candidate
+publishes together with the original NSF trial, complete field and all ducts.
+A rejected caloric reconstruction, inventory bound, acoustic check or cancelled
+trial preserves every accepted owner. A finite upstream acoustic duct remains
+a distinct attachment; `UpstreamPressureRise` is still refused on this path.
 
 This is still an acoustic projection about zero reference flow. The FE region
 does not receive mean mass, species or advected enthalpy. The complete NSF mass
@@ -202,34 +224,76 @@ failure preserves the accepted physical/output prefix and poisons the stream.
 cargo run --release -p fs-couple --example nsf_thermoviscous_bore -- output.wav
 ```
 
-The new example uses an explicit named near-ambient air mixture in a
-manufactured 8 × 8 × 2-cell nonlinear flow region with one interior constriction.
+The example uses an explicit named near-ambient air mixture in a manufactured
+12 × 32 × 5-cell nonlinear flow region. A finite 10 mL chamber at a transverse
+opening feeds an internal plenum, a two-cell-high windway, a seven-cell free
+gap and a stationary staircase labium. All flow from the source plenum toward
+the edge must pass through the windway. The velocity field comes from the
+original nonlinear NSF solver; no prescribed jet velocity or jet card is used.
+
 The actual NSF material law determines its timestep from the supplied cell
 size. Eight original fluid substeps share each 48 kHz acoustic interval; the
 coupling checks the derived clock instead of changing it. The field keeps the
 same gas reference and original molecular source, and both ducts retain their
-original molecular and 12-pole viscothermal states.
+original molecular and 12-pole viscothermal states. The source chamber keeps
+the original bounded named-mixture calorics used by the NSF region.
 
-With cell size `dx`, the fluid occupies `[0,8dx] × [-8dx,0] × [0,2dx]` and
-the FE region occupies `[0,8dx] × [0,2dx] × [0,2dx]`. The common opening is
-the fluid's high-y face and FE port 2 at y=0. Left/right FE ports connect the
-20 mm closed cork-side passage and 50 mm radiating bore. No volume is counted
-in both source and acoustic owners. The circular duct interfaces still use
-one equal-area uniform mode and require their own spatial comparison.
+With cell size `dx`, the fluid occupies `[0,12dx] × [-32dx,0] × [0,5dx]` and
+the FE region occupies `[0,6dx] × [0,2dx] × [0,5dx]`. Local integer indices
+in the following table start at the low corner of the fluid volume:
 
-An authored pressure offset on the opposite fluid boundary rises to one pascal
-over 2 ms, remains there until 6 ms and releases by 8 ms. The field and duct
-pressures are solved responses to that physical boundary control. The existing
-computed microphone 0.1 m from the main outlet supplies 10 ms of fixed-scale
-PCM output. Console output retains original mass/energy differences and the
-acoustic/projection residuals. The explicit projection allowance is 5% of the
-sum of absolute exchanged works plus 1e-16 J; this exploratory budget is not
-an interface-transparency qualification.
+| Part | Declared local geometry |
+| --- | --- |
+| Source opening | Low-x face, y indices 4–6 and z indices 1–3: nine original reservoir tiles |
+| Internal plenum | Fluid y layers 3–7, before the windway |
+| Windway | Fluid x indices 5–6 through y layers 8–12, across all five z cells |
+| Free gap | Fluid y layers 13–19 |
+| Labium | Solid y layers 20–29, with `6 <= x < 7 + floor((y-20)/3)` |
+| Field opening | Lower half of the high-y face, x indices 0–5, adjoining FE port 2 |
+| Escape opening | Upper half of the high-y face, retaining zero incoming characteristic |
 
-The constriction, wall conditions, bulk-viscosity ratio, geometry and controls
-are declared numerical choices. They are not a measured embouchure, free jet,
-flute, register-transition result or listening reference. The current flute
-and whistle descriptions are not automatically rerouted through this example.
+The original source aperture's three-by-three tangential and two-layer inward
+fluid collar is explicit. Both characteristic faces retain their required two
+all-fluid layers. A solid wall at y index 2 isolates the unused low-y ambient
+pocket, preventing source flow from escaping behind the windway. The two fluid
+layers after the labium remain part of the original characteristic interface;
+the staircase does not invent a solid edge inside that mandatory collar.
+
+Left/right FE ports connect the 20 mm closed cork-side passage and 50 mm
+radiating bore. No volume is counted in both source and acoustic owners.
+The circular duct interfaces use one equal-area uniform mode and require
+their own spatial comparison. The microphone observes the main bore's original
+computed finite-aperture exterior 0.1 m from its outlet. The escape opening's
+mass and energy remain in the NSF account; that opening is not silently assigned
+a radiation impedance or added to this microphone as a point monopole.
+
+The chamber starts at the common reference pressure and temperature. Its
+volume rate ramps from zero to -1e-6 m³/s over 4 ms, remains there until 12 ms,
+and returns to zero by 16 ms. A simultaneous heat supply follows the same
+envelope with a 0.5 mW peak. The authored total volume reduction is 12 µL and
+the total supplied heat is 6 µJ. Actual chamber pressure, temperature, mass
+loss and pressure-volume work are responses of the retained material source.
+Four final milliseconds continue the original dynamics with zero actuation.
+The writer exports 20 ms of fixed one-pascal-scale PCM and reports clipping.
+It refuses to replace an existing file.
+
+Console output reports the accepted finite inventory, last original source
+mass/total-energy exchange, midpoint heat/work receipt, source conservation
+residuals, actual final windway axial velocity and prior acoustic/projection
+accounts. The finite source admits at most 1% relative mass and energy movement
+per interval, bounds volume movement independently at 1%, and checks original
+mass and energy balances. The explicit acoustic projection allowance remains
+5% of the sum of absolute exchanged works plus 1e-16 J. These declared limits
+refuse inadmissible trajectories; they are not interface-transparency or
+source-convergence qualifications.
+
+The chamber, geometry, wall conditions, bulk-viscosity ratio and actuation are
+declared numerical choices. The two-cell windway and staircase edge are coarse
+geometry, not measured anatomy, a converged edge tone, a register-transition
+result or a listening reference. Geometry, coupling/source partition and
+source/observer bands require independent refinement; the actuation is not
+asserted to be band-limited. The current flute and whistle descriptions are
+not automatically rerouted through this example.
 
 Native regression coverage includes original-owner replay, molecular and
 finite-wall evolution, downstream and finite cork-side feedback, the full

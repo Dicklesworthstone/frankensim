@@ -2,9 +2,10 @@
 //!
 //! cargo run --release -p fs-couple --example nsf_thermoviscous_bore -- output.wav
 //!
-//! This manufactured channel/constriction is a composition example, not measured
-//! anatomy or a qualified flute jet. The pressure history acts on the original
-//! NSF source boundary; pressure and flow at the acoustic field are solved.
+//! A finite material-owned chamber feeds a manufactured windway, free gap and
+//! labium through an original transverse NSF opening. Only chamber volume and
+//! heat are authored; its pressure, temperature and emitted flow are solved.
+//! This coarse stationary geometry is not measured anatomy or a qualified jet.
 
 use fs_couple::bernoulli_aperture::performance::ApertureObservation;
 use fs_couple::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
@@ -14,7 +15,7 @@ use fs_couple::cavity_modal::interior::thermoviscous::{
 };
 use fs_couple::dg_port::DgPortLoad;
 use fs_couple::nsf_dg::{
-    NsfDgDrive, NsfDgLimits, performance::source_intervals_for,
+    NsfDgDrive, NsfDgLimits, NsfFiniteReservoirLimits, performance::source_intervals_for,
     thermoviscous::{NsfThermoviscousDg, performance::NsfThermoviscousDgPerformance},
 };
 use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
@@ -32,7 +33,8 @@ use fs_feec::fixtures::kuhn_cube;
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{
     NamedMixtureNsfGas, NsfBoundaryDrive, NsfCharacteristicAxis,
-    NsfCharacteristicBoundary, NsfGrid3, NsfSpec, WallThermal,
+    NsfCharacteristicBoundary, NsfCharacteristicPatch, NsfGrid3, NsfOpenState,
+    NsfReservoirAperture, NsfSpec, WallThermal,
 };
 use fs_material::gas_species::input::{GasRecord, read_gas_record};
 use fs_material::relaxation::{RelaxationAbsorption, input::medium_from_record};
@@ -41,13 +43,16 @@ use std::fs::OpenOptions;
 use std::sync::Arc;
 
 const RATE: u32 = 48_000;
-const SAMPLES: u64 = 480;
+const SAMPLES: u64 = 960;
 const BLOCK: usize = 32;
 const SUBSTEPS: usize = 8;
-const DIMS: [usize; 3] = [8, 8, 2];
+const DIMS: [usize; 3] = [12, 32, 5];
 const CELLS: usize = DIMS[0] * DIMS[1] * DIMS[2];
 const EVALUATIONS: usize = 64;
 const BAND_HZ: [f64; 2] = [20.0, 2_000.0];
+const CHAMBER_VOLUME_M3: f64 = 1e-5;
+const PEAK_VOLUME_RATE_M3_S: f64 = -1e-6;
+const PEAK_HEAT_POWER_W: f64 = 5e-4;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os().skip(1);
@@ -85,9 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reference_velocity_m_s: [0.0; 3],
         incoming_characteristic_m_s: 0.0,
     };
-    // Physical NSF box: [0,8dx] x [-8dx,0] x [0,2dx]. The high-y
-    // characteristic face adjoins the FE low-y opening at y=0. These are
-    // distinct volumes. A one-cell-thick interior constriction is manufactured.
+    // Physical NSF box: [0,12dx] x [-32dx,0] x [0,5dx]. The high-y
+    // lower half adjoins FE port 2 at y=0; its upper half keeps the original
+    // zero incoming characteristic. The FE and NSF occupy distinct volumes.
+    // Cell geometry below is a manufactured halfway-bounce-back staircase.
     let zone = NsfGrid3::<D3q27>::new(
         NsfSpec {
             dims: DIMS, periodic: [false; 3], gas: named,
@@ -98,17 +104,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             maximum_cells: CELLS, wall: WallThermal::Adiabatic,
             workers: 1, transport_points: 17,
         },
-        |cell| cell[1] == 3 && (cell[0] < 2 || cell[0] >= 6),
+        |[x, y, _]| {
+            // Both characteristic faces require two all-fluid collar layers.
+            // A wall behind the unused low-y collar isolates its ambient
+            // pocket: chamber gas cannot bypass the windway through that face.
+            let back_wall = y == 2;
+            let windway = (8..13).contains(&y) && !(5..7).contains(&x);
+            // Seven fluid layers separate the windway exit and edge tip.
+            // The wedge thickens above x=6; y=30,31 retain the fluid collar.
+            let edge = (20..30).contains(&y) && x >= 6 && x < 7 + (y - 20) / 3;
+            back_wall || windway || edge
+        },
         |_| (1.0, [0.0; 3], gas.temperature),
     )?.with_characteristic_axis(NsfCharacteristicAxis {
         axis: 1, faces: [face; 2], maximum_relative_perturbation: 0.05,
-    })?;
+    })?.with_characteristic_patch(true, NsfCharacteristicPatch {
+        start: [0, 0], end: [6, DIMS[2]],
+    }, NsfBoundaryDrive::IncomingCharacteristic(0.0))?
+        .with_reservoir_aperture(NsfReservoirAperture {
+            axis: 0, high: false,
+            // The original ghost boundary requires a 3x3 tangential and
+            // two-layer inward fluid collar. All nine tiles satisfy it.
+            cells: (4..7).flat_map(|y| (1..4).map(move |z| [0, y, z])).collect(),
+            state: NsfOpenState { density_kg_m3: gas.density,
+                velocity_m_s: [0.0; 3], temperature_k: gas.temperature },
+        })?;
     let physical_dt = zone.law().dt_s * SUBSTEPS as f64;
     let intervals = source_intervals_for(physical_dt, RATE, SAMPLES)?;
     // The actual derived NSF clock is checked against the original acoustic
     // clock by the coupling constructor below; no clock is changed to fit it.
 
-    let length = DIMS[0] as f64 * dx;
+    let length = 6.0 * dx;
     let height = 2.0 * dx;
     let width = DIMS[2] as f64 * dx;
     let (mesh, unit_points) = kuhn_cube(1);
@@ -157,23 +183,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..ThermoviscousDgLimits::default() }, &gate)?
         .with_additional_duct(0, cork, &gate)?;
     let load = ThermoviscousDgLoad::new(acoustic, 2, &gate)?;
-    let system = NsfThermoviscousDg::new(zone, load, true, NsfDgLimits {
+    let system = NsfThermoviscousDg::new_on_patch(zone, load, true, NsfDgLimits {
         substeps: SUBSTEPS, maximum_cells: CELLS,
         maximum_cell_steps: CELLS * SUBSTEPS * EVALUATIONS,
         maximum_evaluations: EVALUATIONS, maximum_steps: intervals as u64,
-        incoming_bracket_m_s: [-0.05, 0.05],
+        incoming_bracket_m_s: [-0.5, 0.5],
         pressure_absolute_tolerance_pa: 1e-7, pressure_relative_tolerance: 1e-9,
         // An explicit exploratory projection budget, not a transparency claim.
         // A refusal retains every physical state; no covariance is called heat.
         projection_absolute_tolerance_j: 1e-16, projection_relative_tolerance: 0.05,
+    }, &gate)?.with_finite_reservoir(0, CHAMBER_VOLUME_M3, NsfFiniteReservoirLimits {
+        maximum_relative_mass_exchange: 0.01,
+        maximum_relative_energy_exchange: 0.01,
+        mass_absolute_tolerance_kg: 1e-18, energy_absolute_tolerance_j: 1e-10,
+        relative_tolerance: 1e-9,
     }, &gate)?;
+    // One gentle squeeze and explicit heating of the SAME finite gas owner.
+    // Its held p/T comes from its accepted inventory, then actual NSF flux
+    // and original midpoint heat/volume work update that inventory together.
+    // There is no prescribed jet velocity, oscillating pressure or jet card.
     let controls = (0..intervals).map(|sample| {
         let time = (sample as f64 + 0.5) * physical_dt;
-        let pressure = if time < 0.002 { time / 0.002 }
-            else if time < 0.006 { 1.0 }
-            else if time < 0.008 { (0.008 - time) / 0.002 }
+        let envelope = if time < 0.004 { time / 0.004 }
+            else if time < 0.012 { 1.0 }
+            else if time < 0.016 { (0.016 - time) / 0.004 }
             else { 0.0 };
-        NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(pressure))
+        NsfDgDrive::FiniteReservoirActuation { aperture: 0,
+            volume_rate_m3_s: PEAK_VOLUME_RATE_M3_S * envelope,
+            heat_power_w: PEAK_HEAT_POWER_W * envelope,
+            maximum_relative_volume_change: 0.01 }
     }).collect();
     let mut renderer = NsfThermoviscousDgPerformance::new_with_drives(system, 1,
         ApertureObservation::TubeBaffled(CircularOutletReceiver {
@@ -195,5 +233,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frame.projection_covariance_j, frame.acoustic_work_residual_j);
     println!("NSF mass change={} kg, total-energy change={} J, mass projection difference={} kg",
         frame.flow_mass_change_kg, frame.flow_energy_change_j, frame.mass_projection_difference_kg);
+    let chamber = renderer.system().finite_reservoir_inventory()
+        .ok_or("the finite source inventory is missing")?;
+    let source_frame = frame.finite_reservoir.as_ref()
+        .ok_or("the accepted finite source receipt is missing")?;
+    println!("finite chamber: volume={} m^3, mass={} kg, pressure={} Pa, temperature={} K, sensible energy={} J",
+        chamber.volume_m3, chamber.mass_kg, chamber.gas.pressure,
+        chamber.gas.temperature, chamber.sensible_energy_j);
+    println!("last source interval: streamed mass={} kg, streamed total energy={} J, mass residual={} kg, energy residual={} J",
+        source_frame.source_exchange.mass_out_kg, source_frame.source_exchange.total_energy_out_j,
+        source_frame.mass_residual_kg, source_frame.energy_residual_j);
+    if let Some(actuation) = source_frame.actuation {
+        println!("last source actuation: midpoint pressure={} Pa, heat={} J, work by gas={} J",
+            actuation.midpoint_pressure_pa, actuation.step.supplied_heat_j,
+            actuation.step.work_by_gas_j);
+    }
+    let fluid = renderer.system().zone();
+    let windway_velocity = fluid.cell([5, 12, 2]).1[1]
+        * (fluid.law().dx_m / fluid.law().dt_s);
+    println!("final resolved windway axial velocity={windway_velocity} m/s");
     Ok(())
 }
