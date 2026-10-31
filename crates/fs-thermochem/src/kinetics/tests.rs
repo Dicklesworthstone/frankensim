@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 
 #[path = "pressure/tests.rs"]
 mod pressure_rates;
+#[path = "tests/electron_impact.rs"]
+mod electron_impact;
 
 fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()

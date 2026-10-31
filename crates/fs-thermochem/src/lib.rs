@@ -19,6 +19,7 @@
 mod caloric;
 mod enthalpy;
 mod entropy;
+pub mod electron_collision;
 pub mod eos;
 pub mod equilibrium;
 pub mod kinetics;

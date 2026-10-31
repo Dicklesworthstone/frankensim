@@ -209,6 +209,73 @@ fn g1_ionization_reactor_freezes_actual_endpoint_without_equilibrium_projection(
 }
 
 #[test]
+fn g1_ionization_nist_cross_section_drives_the_conservative_stiff_reactor() {
+    use fs_thermochem::electron_collision::{MaxwellianRateControlsV1, nist};
+    use fs_thermochem::kinetics::ElectronImpactRateV1;
+    let original = hydrogen_ionization();
+    let reaction = ElementaryReactionV1::new(
+        ReactionId::new("NIST-H-electron-impact").unwrap(),
+        vec![(id("H"), 1), (id("e-"), 1)],
+        vec![(id("H+"), 1), (id("e-"), 2)],
+        ElectronImpactRateV1::new(
+            id("e-"),
+            nist::hydrogen(id("H")),
+            MaxwellianRateControlsV1 {
+                relative_tolerance: 1e-8,
+                maximum_subdivisions: 2048,
+            },
+            0.03,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mechanism = IdealGasKineticsV1::new(
+        original.thermodynamics().clone(),
+        "NIST-BEB-H-2004-common-T",
+        1,
+        vec![reaction],
+        1e-12,
+    )
+    .unwrap();
+    let mut solve = controls();
+    solve.method = IsochoricKineticsMethod::Sdirk2;
+    solve.initial_step_s = 1e-8;
+    solve.maximum_step_s = 1e-6;
+    let result = advance_adiabatic(
+        &mechanism,
+        &feed(0.01),
+        Volume::new(1.0),
+        Temperature::new(16000.0),
+        Time::new(1e-6),
+        solve,
+        || false,
+    )
+    .unwrap();
+    let x = amount(&result, "H+");
+    assert!(x > 0.01);
+    assert!(result.temperature().value() < 16000.0);
+    relative(amount(&result, "e-"), x, 1e-12);
+    relative(amount(&result, "H") + x, 1.0, 1e-12);
+    relative(result.mass().value(), M_H * N_A, 1e-12);
+    relative(
+        result.internal_energy().value(),
+        energy(16000.0, 0.01),
+        1e-11,
+    );
+    assert!(result.balance().energy_residual_j.abs() <= solve.energy_tolerance_j);
+    assert!(
+        result.balance().maximum_relative_charge_residual <= solve.relative_conservation_tolerance
+    );
+    assert!(result.balance().entropy_change_j_k > 0.0);
+    assert_eq!(
+        result.frozen_state(1e-10, || false).unwrap().amounts(),
+        result.amounts()
+    );
+    // This checks consumption of NIST's theoretical cross section and energy
+    // bookkeeping. It is not experimental validation of a discharge history.
+}
+
+#[test]
 fn g1_ionization_finite_rate_reactor_conserves_energy_mass_and_charge() {
     let mechanism = hydrogen_ionization();
     let initial_x = 0.01;

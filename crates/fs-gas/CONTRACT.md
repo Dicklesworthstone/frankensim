@@ -464,6 +464,15 @@ diffusion, non-Maxwellian electron distributions, radiation-driven ionization,
 and nonideal plasma corrections require separate owners and are not supplied
 by this reactor.
 
+Both owned `IsochoricKineticsResult` and borrowed `IsochoricKineticsView` expose
+`frozen_state`. This explicit owning conversion retains the accepted actual
+amounts, source bank, volume and common temperature in L1's
+`FrozenIonizedGasStateV1`, for nonequilibrium charged-transport consumers. It
+performs no Saha/equilibrium projection. The original reactor still preserves
+an authored nonzero feed charge, but conversion to this quasineutral material
+lane refuses it. State cloning shares the immutable sources and populations;
+the prepared reactor's ordinary advance remains allocation-free.
+
 The ionization regressions use `H + e- <-> H+ + 2 e-`, ideal monatomic
 Sackur--Tetrode thermodynamics and NIST's H I ionization energy. They compare
 detailed balance and the final adiabatic state with independent Saha formulas,
@@ -476,6 +485,14 @@ these numerical tests do not validate an empirical ionization time or discharge
 mechanism. Source reference: NASA RP-1311, Part I, section 3.7,
 https://ntrs.nasa.gov/citations/19950013764, and NIST H I ionization energy,
 https://physics.nist.gov/cgi-bin/ASD/ie.pl?spectra=H+I.
+
+An additional source-backed regression runs the original stiff SDIRK2 reactor
+with L1's NIST H BEB electron-impact law, including its Maxwellian temperature
+derivative and the original Gibbs-derived reverse law. Ionization increases
+the electron count and consumes thermal energy while mass, nuclei, charge and
+total internal energy remain conserved. This proves that the retained physical
+rate reaches the existing evolution path; it is not empirical validation of
+ionization time or an electrical discharge.
 
 ## Common material gas integration
 

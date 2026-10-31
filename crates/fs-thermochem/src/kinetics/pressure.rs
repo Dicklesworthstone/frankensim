@@ -410,11 +410,12 @@ pub(super) fn effective_rate(
     reaction: &BoundReaction,
     temperature: f64,
     log_c: &[f64],
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<RateScale, KineticsErrorV1> {
     // Exact authored shutdown takes precedence over unused limiting-rate
     // arithmetic. In particular, k0=0 must not evaluate an irrelevant kinfinity
     // law that cannot be represented at this temperature.
-    if source.forward_rate.reference_rate().value() == 0.0
+    if source.forward_rate.disabled()
         || matches!(&source.pressure_dependence,
             PressureDependenceV1::Falloff { low_pressure_rate, .. }
                 if low_pressure_rate.reference_rate().value() == 0.0)
@@ -426,7 +427,7 @@ pub(super) fn effective_rate(
     {
         return Ok(RateScale::zero());
     }
-    let (high, high_t) = source.forward_rate.log_rate(temperature)?;
+    let (high, high_t) = source.forward_rate.log_rate(temperature, cancelled)?;
     if high == f64::NEG_INFINITY {
         return Ok(RateScale::zero());
     }

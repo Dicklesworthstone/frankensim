@@ -850,6 +850,26 @@ TP/TV populations, electron pressure, ionization energy, HP/UV cooling and
 equilibrium caloric/acoustic response, plus negative/multiply charged species,
 trace charge balance, feed scaling and source-binding refusals.
 
+`equilibrium::composition::FrozenIonizedGasStateV1` is the separate
+actual-population boundary for transport and energy consumers. It keeps dense
+canonical amounts, volume, the complete immutable source bank, heavy temperature
+Th and electron temperature Te. It never solves equilibrium or creates a seed.
+The nucleus-free charge -1 row identifies the electron independently of its
+name. Quasineutrality is checked against actual charged amounts, including
+subnormal traces, independently of the neutral inventory. Net charge requires
+a different field-owning state. Positive populated-source Cv and the exact
+source temperature domain are checked before publication.
+
+Pressure is `R/V * (sum_heavy n_i Th + n_e Te)`; internal energy is the sum of
+the original species `n_i u_i(T_i)`, with formation references counted once.
+The two pool energies and frozen heat capacities are retained. Heavy internal
+modes are at Th and the electron distribution is Maxwellian at Te; this does
+not establish a two-temperature reaction law or chemical equilibrium.
+Absent species impose no source-temperature domain on an actual frozen state;
+a consumer creating products must admit their sources separately. Original
+element, charge, source-model and coefficient arrays are shared immutably, as
+are cloned frozen populations. The state contains matter energy only.
+
 This closure does not infer a chemical mechanism,
 authenticate a source-to-species declaration, determine phase stability, or
 implement condensed phases, finite-rate combustion or a real-gas EOS.
@@ -898,8 +918,9 @@ and the manufactured fixtures are not an external CEA validation.
 
 ## Elementary finite-rate kinetics algebra
 
-`kinetics` binds up to 512 caller-authored elementary Arrhenius
-reactions to the original NASA-9 bank and the exact `fs-qty`
+`kinetics` binds up to 512 caller-authored elementary reactions, with an
+explicit `ForwardRateV1::Arrhenius` or `ForwardRateV1::ElectronImpact`,
+to the original NASA-9 bank and the exact `fs-qty`
 conservation certificate. Separate integer reactant/product orders retain
 explicit catalysts. Molecular-mass consistency is independently checked against
 the caller's bounded tolerance; species inventories are never repaired.
@@ -930,8 +951,50 @@ or cross-ISA qualification. The primary rate convention follows the
 
 This L1 module owns immutable laws and algebra. It supplies no time integrator,
 empirical mechanism inference, unsupported pressure laws, fractional-order
-global reactions, ions, or real-gas kinetics. A supplied
+global reactions, or real-gas kinetics. A supplied
 mechanism's physical accuracy remains a property of its original source data.
+
+## Electron collision cross sections and kinetic rates
+
+`electron_collision` owns source-retained incident-energy cross sections in
+SI, with distinct ionization and elastic momentum-transfer meanings. A table
+declares piecewise-linear interpolation, its complete threshold-to-maximum
+energy coverage, and a nonnegative upper envelope for its unresolved tail.
+Missing high-energy data are never implicitly zero. Immutable tables are
+shared across evaluated sources. Independent implementations of NIST SRD 107's
+generalized BEB Eq. (1) provide neutral H/He single-ionization sources with the
+published orbital constants and dipole Q, explicit 10 keV model limit, citation
+and original compilation terms. They are theoretical models, not experimental
+validation or a license to redistribute NIST's compiled database.
+
+The bounded, allocation-free Maxwellian evaluator integrates event
+`<sigma v>` or displaced-Maxwellian fluid drag `(2/3)<sigma_mt v E/(kB Te)>`.
+These are different moments: a constant momentum cross section gives
+`(4/3) sigma <v>`. The latter is not the exact energy-dependent
+Lorentz-Boltzmann mobility. Analytic temperature derivatives use the same
+integral. Threshold shifting preserves finite log rates after direct
+underflow; unrepresentable direct coefficients are `None`. Positive Gauss
+rules estimate quadrature error for both required moments, while an explicit
+source envelope bounds the omitted tail. Exhausted work or unresolved tails
+refuse. Numerical estimates and conditional model-tail bounds do not certify
+experimental uncertainty or non-Maxwellian physics.
+
+`ElectronImpactRateV1` feeds the existing exact stoichiometric kinetics owner
+with `NA <sigma v> c_e c_target`, for a binary electron/neutral single-ionization
+channel. It verifies the source target, structural electron, physical electron
+mass, target-speed approximation, exact reaction orders and absence of a
+pressure multiplier. No arbitrary Arrhenius surrogate is constructed. The
+original common-temperature Gibbs source still sets the reverse coefficient;
+this does not evaluate molecular detailed balance at a separate Te. Both
+zero-electron absence and the conservative stiff gas reactor are preserved.
+
+Primary model equations and parameter sources:
+https://physics.nist.gov/PhysRefData/Ionization/Eqs/latex.html,
+https://physics.nist.gov/cgi-bin/Ionization/bun.php?Id=HeI,
+and Banks (1966), https://doi.org/10.1016/0032-0633(66)90024-9.
+Analytic and independently evaluated numerical moment tests check source
+thresholds, derivatives, molar conversion, detailed balance, coverage and
+refusals; they do not validate an observed plasma history.
 
 ### Shared caloric-path admission for evolving gas
 

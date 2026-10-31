@@ -1,7 +1,8 @@
 //! Source-consistent elementary ideal-gas kinetics, without time integration.
 //!
 //! Each caller-authored reaction uses integer elementary orders and
-//! an explicitly declared Arrhenius, third-body or falloff forward law. Reverse
+//! an explicitly declared Arrhenius, third-body, falloff or source-bound
+//! Maxwellian electron-impact forward law. Reverse
 //! rates of reversible reactions follow the original NASA-9 Gibbs energies,
 //! including the pressure-to-concentration standard-state conversion. No empirical mechanism,
 //! ignition criterion or falloff law is inferred. An explicitly irreversible
@@ -9,7 +10,7 @@
 //! such a source does not acquire a detailed-balance theorem. L3 consumers own
 //! state evolution and numerical step acceptance. Charged elementary reactions
 //! share the same exact elemental/charge conservation and species calorics;
-//! single-temperature rates must be supplied explicitly. An electron-impact
+//! single-temperature rates retain their explicitly selected source. An electron-impact
 //! channel with zero electron concentration does not invent an ionization seed.
 //!
 //! Concentrations are mol/m3. The rate scale is mol/(m3 s) at the reference
@@ -32,6 +33,8 @@ use fs_qty::{Pressure, Temperature};
 
 mod caloric;
 pub use caloric::admit_caloric_interval;
+mod electron_impact;
+pub use electron_impact::{ElectronImpactRateV1, ForwardRateV1};
 /// Complete pinned GRI-Mech 3.0 source using these same kinetic owners.
 pub mod gri30;
 /// Pinned hydrogen/oxygen source mechanism using these same kinetic owners.
@@ -47,7 +50,7 @@ pub const MAX_KINETIC_REACTIONS_V1: usize = 512;
 /// Maximum sum of elementary exponents on either side of one reaction.
 pub const MAX_ELEMENTARY_ORDER_V1: u32 = 32;
 /// Fixed operation-tree version of the concentration-based kinetic closure.
-pub const IDEAL_GAS_KINETICS_VERSION_V1: u32 = 3;
+pub const IDEAL_GAS_KINETICS_VERSION_V1: u32 = 4;
 
 /// Invalid source declaration, input domain, arithmetic range or cancellation.
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +59,8 @@ pub enum KineticsErrorV1 {
     Invalid(&'static str),
     /// Exact elemental/charge conservation refused the mechanism.
     Conservation(ChemistryError),
+    /// Original electron cross-section model, tail or integration refusal.
+    ElectronCollision(crate::electron_collision::ElectronCollisionErrorV1),
     /// One admitted reaction disagrees with source molecular masses.
     MolecularMassBalance {
         /// Canonical reaction whose declared masses disagree.
@@ -168,7 +173,7 @@ pub struct ElementaryReactionV1 {
     reaction: ReactionId,
     reactants: Vec<(SpeciesId, u32)>,
     products: Vec<(SpeciesId, u32)>,
-    forward_rate: ArrheniusRateV1,
+    forward_rate: ForwardRateV1,
     pressure_dependence: PressureDependenceV1,
     reversible: bool,
 }
@@ -178,7 +183,7 @@ impl ElementaryReactionV1 {
         reaction: ReactionId,
         mut reactants: Vec<(SpeciesId, u32)>,
         mut products: Vec<(SpeciesId, u32)>,
-        forward_rate: ArrheniusRateV1,
+        forward_rate: impl Into<ForwardRateV1>,
     ) -> Result<Self, KineticsErrorV1> {
         for side in [&mut reactants, &mut products] {
             if side.is_empty() || side.len() > MAX_ELEMENTARY_ORDER_V1 as usize {
@@ -206,7 +211,7 @@ impl ElementaryReactionV1 {
             reaction,
             reactants,
             products,
-            forward_rate,
+            forward_rate: forward_rate.into(),
             pressure_dependence: PressureDependenceV1::Independent,
             reversible: true,
         })
@@ -241,9 +246,10 @@ impl ElementaryReactionV1 {
     pub fn products(&self) -> &[(SpeciesId, u32)] {
         &self.products
     }
-    /// Original forward Arrhenius law; a retained reverse is thermodynamically derived.
-    pub const fn forward_rate(&self) -> ArrheniusRateV1 {
-        self.forward_rate
+    /// Original forward law; a retained reverse uses the common-temperature
+    /// thermodynamics, including for an electron-impact source.
+    pub const fn forward_rate(&self) -> &ForwardRateV1 {
+        &self.forward_rate
     }
     /// Exact caller-authored pressure law, including collider efficiencies.
     pub const fn pressure_dependence(&self) -> &PressureDependenceV1 {
@@ -312,6 +318,9 @@ impl IdealGasKineticsV1 {
             .try_reserve_exact(reactions.len())
             .map_err(|_| KineticsErrorV1::AllocationRefused)?;
         for (column, reaction) in reactions.iter().enumerate() {
+            if let ForwardRateV1::ElectronImpact(impact) = &reaction.forward_rate {
+                impact.admit(reaction, &thermodynamics)?;
+            }
             let bind = |side: &[(SpeciesId, u32)]| -> Result<Vec<(usize, u32)>, KineticsErrorV1> {
                 side.iter()
                     .map(|(id, order)| {
@@ -426,6 +435,12 @@ impl IdealGasKineticsV1 {
         }
         for model in self.thermodynamics.models() {
             admit_caloric_interval(model, lower, upper, &mut cancelled)?;
+        }
+        for reaction in &self.reactions {
+            if matches!(reaction.forward_rate, ForwardRateV1::ElectronImpact(_)) {
+                reaction.forward_rate.log_rate(lower.value(), &mut cancelled)?;
+                reaction.forward_rate.log_rate(upper.value(), &mut cancelled)?;
+            }
         }
         Ok(())
     }
@@ -546,7 +561,7 @@ impl IdealGasKineticsV1 {
             }
             let log_kc = -dg.value() / (R * t) + reaction.delta_molecules * standard_c_log;
             let dlog_kc = (du.value() / (R * t)) / t;
-            let scale = pressure::effective_rate(source, reaction, t, &work.log_c)?;
+            let scale = pressure::effective_rate(source, reaction, t, &work.log_c, &mut cancelled)?;
             let log_forward_scale = scale.log_forward;
             let dlog_forward_scale = scale.dlog_temperature;
             if !log_kc.is_finite() || !dlog_kc.is_finite() {
