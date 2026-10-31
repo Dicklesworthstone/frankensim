@@ -1,4 +1,4 @@
-//! Bounded Cox contact-line closure with a declared outer/liquid viscosity ratio.
+//! Bounded Cox contact-line closure with explicit two-phase viscosities.
 //!
 //! Chan et al., JFM 900 A8 (2020), equations (1.1)-(1.3):
 //! https://doi.org/10.1017/jfm.2020.499
@@ -12,8 +12,10 @@
 //! hydrophobic surfaces. Effective cutoff l and observation scale L are
 //! explicit model inputs; l is not silently identified with a measured slip
 //! length. Newtonian creeping flow in both phases and separated scales remain
-//! assumptions. The optional finite ratio is a caller-declared, fixed model
-//! coefficient, not an inferred gas property or a second-fluid momentum solver.
+//! assumptions. The original finite-ratio API keeps its declared coefficient.
+//! The material boundary can instead supply the actual sourced gas/liquid ratio
+//! and reuse this same quadrature at that ratio. Neither path supplies a
+//! second-fluid momentum solver.
 //! This closure does not resolve wall slip, nucleation, film entrainment, or a
 //! conservative surface-energy transfer.
 
@@ -38,8 +40,9 @@ pub struct CoxVoinovControls {
     pub maximum_angle_radians: f64,
 }
 
-/// Declared hydrodynamic model and shared, fixed-order angular quadrature table.
-/// Clones share the table; accepted VOF steps do not rebuild or integrate it.
+/// Declared hydrodynamic model and shared, fixed-order reference angular table.
+/// Clones and unchanged material ratios share that table. An evolving sourced
+/// ratio uses the same bounded quadrature for its moving contact-line sample.
 #[derive(Clone, Debug)]
 pub struct CoxVoinovLaw {
     controls: CoxVoinovControls,
@@ -58,7 +61,9 @@ pub struct CoxVoinovSample {
     pub dynamic_viscosity_pa_s: f64,
     /// The native owner's admitted constant surface tension [N/m].
     pub surface_tension_n_m: f64,
-    /// Caller-declared fixed outer/liquid dynamic-viscosity ratio, not a source claim.
+    /// Applied outer/liquid dynamic-viscosity ratio. A sourced outer gas uses
+    /// its actual viscosity and the local liquid viscosity; the original API
+    /// retains its explicitly declared fixed ratio.
     pub outer_to_liquid_viscosity_ratio: f64,
 }
 
@@ -137,7 +142,9 @@ impl CoxVoinovLaw {
         &self.controls
     }
 
-    /// Fixed model ratio of outer-phase to liquid dynamic viscosity.
+    /// Reference table's outer/liquid viscosity ratio. This remains the applied
+    /// ratio for the original fixed-ratio API; sourced local ratios are retained
+    /// separately in the accepted contact-line samples.
     #[must_use]
     pub const fn outer_to_liquid_viscosity_ratio(&self) -> f64 {
         self.outer_to_liquid_viscosity_ratio
@@ -156,9 +163,21 @@ impl CoxVoinovLaw {
     }
 
     pub(super) fn admit_capillary_number(&self, capillary_number: f64) -> Result<(), Error> {
+        self.admit_capillary_number_at_ratio(
+            capillary_number, self.outer_to_liquid_viscosity_ratio,
+        )
+    }
+
+    pub(super) fn admit_capillary_number_at_ratio(
+        &self,
+        capillary_number: f64,
+        viscosity_ratio: f64,
+    ) -> Result<(), Error> {
         if !capillary_number.is_finite()
+            || !viscosity_ratio.is_finite()
+            || viscosity_ratio < 0.0
             || capillary_number.abs() > self.controls.maximum_capillary_number
-            || (capillary_number * self.outer_to_liquid_viscosity_ratio).abs()
+            || (capillary_number * viscosity_ratio).abs()
                 > self.controls.maximum_capillary_number
         {
             return Err(Error::Invalid(
@@ -166,6 +185,29 @@ impl CoxVoinovLaw {
             ));
         }
         Ok(())
+    }
+
+    /// Reuse the original bounded two-wedge quadrature at an actual material
+    /// ratio. No accumulated ratio cache or independent contact-line model is
+    /// introduced. Unchanged ratios reuse the original table; pinned/zero-speed
+    /// samples do not build one. A changed moving ratio uses one temporary table.
+    pub(super) fn apparent_angle_at_ratio(
+        &self,
+        microscopic_angle_radians: f64,
+        signed_capillary_number: f64,
+        viscosity_ratio: f64,
+        gate: &CancelGate,
+    ) -> Result<f64, Error> {
+        self.admit_angle(microscopic_angle_radians)?;
+        self.admit_capillary_number_at_ratio(signed_capillary_number, viscosity_ratio)?;
+        if signed_capillary_number == 0.0 {
+            return Ok(microscopic_angle_radians);
+        }
+        if viscosity_ratio.to_bits() == self.outer_to_liquid_viscosity_ratio.to_bits() {
+            return self.apparent_angle_radians(microscopic_angle_radians, signed_capillary_number);
+        }
+        Self::try_new_with_viscosity_ratio(self.controls, viscosity_ratio, gate)?
+            .apparent_angle_radians(microscopic_angle_radians, signed_capillary_number)
     }
 
     /// Apparent angle from a microscopic endpoint and SIGNED capillary number.

@@ -9,6 +9,7 @@
 //! dynamic wetting, or closed surface/mechanical/thermal energy conservation.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::*;
 use crate::d3q19::freesurface3::wetting::WallFill3;
@@ -21,6 +22,7 @@ use fs_material::state_point::{
     MaterialPropertySelection, ResolvedInterfaceStatePoint, ScalarAdmissibility,
     ScalarPropertyRequirement, resolve_interface_state_point,
 };
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_qty::{Dims, QuantitySpec};
 
 mod cox_voinov;
@@ -38,6 +40,7 @@ struct HydrodynamicWetting {
     law: CoxVoinovLaw,
     reference_viscosity_pa_s: f64,
     surface_tension_n_m: f64,
+    outer_gas: Option<Arc<ResolvedThermochemicalGasState>>,
 }
 
 /// Explicit model/numerical inputs; the deadband has no invented source receipt.
@@ -62,6 +65,10 @@ pub struct FreeSurfaceWettingSample {
     pub applied_angle_radians: f64,
     /// Optional explicit hydrodynamic prediction, separate from static source claims.
     pub hydrodynamic: Option<CoxVoinovSample>,
+    /// Explicit outer-phase transport source, including its own temperature,
+    /// pressure and composition. Shared by this wall field, never substituted
+    /// for the liquid/interface temperature. None for a declared fixed ratio.
+    pub outer_gas: Option<Arc<ResolvedThermochemicalGasState>>,
     /// Both pinned endpoint claims, ordered surfaces, source point and receipts.
     pub material: ResolvedInterfaceStatePoint,
 }
@@ -332,15 +339,55 @@ impl WettingBinding<'_> {
             law,
             reference_viscosity_pa_s: scaling.material.dynamic_viscosity_pa_s(),
             surface_tension_n_m,
+            outer_gas: None,
         });
         let mut samples = BTreeMap::new();
         for (&position, current) in &self.geometry {
             checkpoint(gate)?;
             let speed = self.samples[&position].signed_speed_m_s;
-            samples.insert(position, self.sample(current, speed, None)?);
+            samples.insert(position, self.sample(current, speed, None, gate)?);
         }
         self.samples = samples;
         Ok(self)
+    }
+
+    pub(super) fn with_cox_voinov_gas(
+        self,
+        controls: CoxVoinovControls,
+        gas: &ResolvedThermochemicalGasState,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        let ratio = gas.state().dynamic_viscosity / scaling.material.dynamic_viscosity_pa_s();
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return Err(Error::Invalid("Cox outer gas requires positive representable source viscosities"));
+        }
+        let law = CoxVoinovLaw::try_new_with_viscosity_ratio(controls, ratio, gate)?;
+        let mut candidate = self.with_cox_voinov(law, scaling, gate)?;
+        let source = Arc::new(gas.clone());
+        candidate.hydrodynamic.as_mut().expect("admitted Cox law").outer_gas = Some(source.clone());
+        for sample in candidate.samples.values_mut() {
+            checkpoint(gate)?;
+            sample.outer_gas = Some(source.clone());
+        }
+        Ok(candidate)
+    }
+
+    pub(super) fn outer_gas(&self) -> Option<&ResolvedThermochemicalGasState> {
+        self.hydrodynamic.as_ref().and_then(|binding| binding.outer_gas.as_deref())
+    }
+
+    /// The finite-atmosphere timeline admits original transport sources before
+    /// passing this prepared snapshot. Existing fixed-ratio bindings stay fixed.
+    pub(super) fn at_prepared_outer_gas(&self, gas: &ResolvedThermochemicalGasState) -> Self {
+        let mut candidate = self.clone();
+        if let Some(binding) = &mut candidate.hydrodynamic
+            && binding.outer_gas.is_some()
+            && binding.outer_gas.as_deref() != Some(gas)
+        {
+            binding.outer_gas = Some(Arc::new(gas.clone()));
+        }
+        candidate
     }
 
     pub(super) fn source(&self) -> &ResolvedInterfaceStatePoint {
@@ -393,7 +440,7 @@ impl WettingBinding<'_> {
             checkpoint(gate)?;
             let speed = self.samples[&position].signed_speed_m_s;
             let temperature = temperatures.get(&position).map(|&t| (axis, t));
-            samples.insert(position, self.sample(current, speed, temperature)?);
+            samples.insert(position, self.sample(current, speed, temperature, gate)?);
         }
         Ok(Self { samples, ..self.clone() })
     }
@@ -404,12 +451,14 @@ impl WettingBinding<'_> {
         axis: &str,
         temperature_k: f64,
         dynamic_viscosity_pa_s: f64,
+        gate: &CancelGate,
     ) -> Result<(), Error> {
         if let Some(current) = self.geometry.get(&position) {
             self.sample(
                 current,
                 self.samples[&position].signed_speed_m_s,
                 Some((axis, WettingThermalPoint { temperature_k, dynamic_viscosity_pa_s })),
+                gate,
             )?;
         }
         Ok(())
@@ -437,7 +486,7 @@ impl WettingBinding<'_> {
             )?;
             let temperature = temperatures
                 .and_then(|(axis, field)| field.get(&position).map(|&t| (axis, t)));
-            result.insert(position, self.sample(current, speed, temperature)?);
+            result.insert(position, self.sample(current, speed, temperature, gate)?);
         }
         Ok(result)
     }
@@ -447,6 +496,7 @@ impl WettingBinding<'_> {
         current: &WallFill3,
         speed: f64,
         temperature: Option<(&str, WettingThermalPoint)>,
+        gate: &CancelGate,
     ) -> Result<FreeSurfaceWettingSample, Error> {
         // A hydrodynamic prediction uses zero-speed endpoint measurements.
         // Its rate dependence must never be laundered into a material receipt.
@@ -479,17 +529,24 @@ impl WettingBinding<'_> {
                 ));
             }
             let capillary = (viscosity * speed) / binding.surface_tension_n_m;
-            binding.law.admit_capillary_number(capillary)?;
+            let ratio = binding.outer_gas.as_ref().map_or(
+                binding.law.outer_to_liquid_viscosity_ratio(),
+                |gas| gas.state().dynamic_viscosity / viscosity,
+            );
+            if binding.outer_gas.is_some() && ratio <= 0.0 {
+                return Err(Error::Invalid("Cox source viscosity ratio is not representable"));
+            }
+            binding.law.admit_capillary_number_at_ratio(capillary, ratio)?;
             if regime != ContactLineRegime2::Pinned {
                 applied_angle_radians = binding
                     .law
-                    .apparent_angle_radians(applied_angle_radians, capillary)?;
+                    .apparent_angle_at_ratio(applied_angle_radians, capillary, ratio, gate)?;
             }
             Some(CoxVoinovSample {
                 signed_capillary_number: capillary,
                 dynamic_viscosity_pa_s: viscosity,
                 surface_tension_n_m: binding.surface_tension_n_m,
-                outer_to_liquid_viscosity_ratio: binding.law.outer_to_liquid_viscosity_ratio(),
+                outer_to_liquid_viscosity_ratio: ratio,
             })
         } else {
             None
@@ -500,6 +557,7 @@ impl WettingBinding<'_> {
             geometric_angle_radians: current.angle_radians,
             applied_angle_radians,
             hydrodynamic,
+            outer_gas: self.hydrodynamic.as_ref().and_then(|binding| binding.outer_gas.clone()),
             material,
         })
     }

@@ -603,7 +603,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
         self.advance_prepared_enthalpy_with_surface(
             heated, external, viscous, body_heat, absolute_heat,
-            additional_forces, None, gate,
+            additional_forces, None, None, gate,
         )
     }
 
@@ -617,6 +617,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         absolute_heat: f64,
         additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
         mut surface: Option<&mut SurfaceTensionResolver<'_>>,
+        wetting_outer_gas: Option<&fs_material::thermochemical_gas::ResolvedThermochemicalGasState>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
         poll(gate)?;
@@ -670,7 +671,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         if let Some(surface_tensions) = resolved.surface_tensions {
             lattice.rebind_surface_tensions(surface_tensions, gate)?;
         }
-        let prepared_wetting = self.prepare_wetting(&mut lattice, &resolved.states, gate)?;
+        let prepared_wetting = self.prepare_wetting(
+            &mut lattice, &resolved.states, wetting_outer_gas, gate,
+        )?;
         let mut trace = lattice.step_with_mass_transport(
             gate,
             &resolved.tau,

@@ -201,7 +201,20 @@ struct Samples {
     solids: Vec<FreeSurfaceBodyConductionSample>,
 }
 
-impl Conduction<'_, '_> {
+impl<'a, 'm> Conduction<'a, 'm> {
+    fn current_wetting(&self) -> Result<Option<WettingBinding<'m>>, Error> {
+        let Some(binding) = &self.wetting else { return Ok(None); };
+        if let (Some(original), Some(atmosphere)) = (binding.outer_gas(), &self.finite_atmosphere) {
+            let gas = atmosphere.parcel.state();
+            if !environment::same_sources(original, gas) {
+                return Err(Error::Invalid("Cox outer gas left its original transport source claims"));
+            }
+            Ok(Some(binding.at_prepared_outer_gas(gas)))
+        } else {
+            Ok(Some(binding.clone()))
+        }
+    }
+
     fn sample_liquid(
         &self,
         id: CellId,
@@ -225,16 +238,18 @@ impl Conduction<'_, '_> {
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Samples, Error> {
         let mut states = BTreeMap::new();
+        let wetting = self.current_wetting()?;
         for &id in &self.liquid_cells {
             check()?;
             let cell = &thermal.cells()[&id];
             let state = self.sample_liquid(id, cell.specific_h_j_kg, check)?;
             phase_conduction::resolve(&state, self.phase_conduction)?;
-            if let Some(wetting) = &self.wetting {
+            if let Some(wetting) = &wetting {
                 wetting.admit_temperature(
                     self.liquid_coordinates[&id], self.law.temperature_axis(),
                     super::wetting::temperature(&state, self.law.temperature_axis())?,
                     state.dynamic_viscosity_pa_s(),
+                    self.gate,
                 )?;
             }
             states.insert(id, state);
@@ -467,16 +482,6 @@ impl DepositionObserver for Conduction<'_, '_> {
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Error> {
-        // Admit all accepted thermal substeps, including isolated heated cells.
-        let samples = self.sample(thermal, check)?;
-        self.endpoint = samples.liquid;
-        self.body_endpoint = samples.contacts;
-        self.body_states_endpoint = samples.bodies;
-        self.solid_endpoint = samples.solids;
-        if let Some(endpoint) = self.sample_current(thermal, check)? {
-            self.electrical.as_mut().expect("bound electrical core")
-                .accept(start_s, duration_s, endpoint)?;
-        }
         let mut gas_heat = 0.0;
         for sample in &self.environment_last {
             check()?;
@@ -510,6 +515,18 @@ impl DepositionObserver for Conduction<'_, '_> {
         }
         if let Some(gas) = &mut self.finite_atmosphere {
             gas.accept_heat(-gas_heat, check)?;
+        }
+        // Admit local liquid and contact-line material response against BOTH
+        // accepted thermal endpoints. The finite gas keeps its own T/p/mixture,
+        // rather than freezing a pre-heat outer/liquid viscosity ratio.
+        let samples = self.sample(thermal, check)?;
+        self.endpoint = samples.liquid;
+        self.body_endpoint = samples.contacts;
+        self.body_states_endpoint = samples.bodies;
+        self.solid_endpoint = samples.solids;
+        if let Some(endpoint) = self.sample_current(thermal, check)? {
+            self.electrical.as_mut().expect("bound electrical core")
+                .accept(start_s, duration_s, endpoint)?;
         }
         // Both film endpoints use the actually accepted gas T and EOS pressure.
         self.environment_endpoint = self.sample_environment(thermal, check)?;
@@ -1200,6 +1217,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             + observer.body_atmosphere.absolute_heat_j
             + observer.body_radiation.absolute_heat_j
             + joule_heat;
+        // Source-pinned finite-gas endpoint accompanies the SAME native liquid
+        // candidate. Publication occurs only after wetting/flow/transport gates.
+        let endpoint_wetting = observer.current_wetting()?;
+        let wetting_outer_gas = endpoint_wetting.as_ref().and_then(WettingBinding::outer_gas);
         let flow = if surface_stress {
             let surface = self.thermocapillary.expect("admitted surface-stress geometry");
             let scaling = self.flow.scaling;
@@ -1214,12 +1235,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             };
             self.advance_prepared_enthalpy_with_surface(
                 heated, external, viscous_heat, body_heat, absolute_exchange,
-                electrical_forces.as_ref(), Some(&mut surface_field), gate,
+                electrical_forces.as_ref(), Some(&mut surface_field), wetting_outer_gas, gate,
             )?
         } else {
-            self.advance_prepared_enthalpy(
+            self.advance_prepared_enthalpy_with_surface(
                 heated, external, viscous_heat, body_heat, absolute_exchange,
-                electrical_forces.as_ref(), gate,
+                electrical_forces.as_ref(), None, wetting_outer_gas, gate,
             )?
         };
         // Every native surface/source/geometry gate has passed. Moving report

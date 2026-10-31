@@ -4230,6 +4230,39 @@ right-angle relation, phase exchange, small-angle resolution, native flow
 changes and thermal coefficient use. G0/G4 tests retain transactional refusal
 when either phase leaves the capillary-number envelope.
 
+`MaterialFreeSurfaceEnthalpy3::with_cox_voinov_gas_wetting` instead binds the
+original resolved thermochemical gas transport state. Each contact sample uses
+`M = mu_gas(T_gas,p,composition) / mu_liquid(T_liquid)` with separate phase
+temperatures and source receipts. Changing gas transport data therefore changes
+the apparent angle and its subsequent native capillary response without a
+material-specific fluid branch. The original fixed-ratio API is unchanged.
+An explicitly bound gas snapshot remains fixed during ordinary liquid-only
+steps. Finite-atmosphere conduction and solved-interface entry points consume
+their actual evolving gas parcel, including callers that already change its
+composition through the existing reaction owner. They admit the same original
+transport claims at thermal source/endpoint checks, then pass that accepted gas
+into the original native wetting preparation and advected endpoint acceptance.
+Gas heat and composition remain with their existing owners; no second gas
+momentum or thermal model is introduced.
+
+`wetting_outer_gas` exposes the accepted outer source. Each wall sample retains
+the same immutable gas receipt through an `Arc`, alongside its distinct local
+liquid viscosity, applied ratio and interface claim bundle. The declared static
+microscopic-angle claims and their fixed context remain authoritative; this
+hydrodynamic connection does not invent a new equilibrium contact angle for a
+different chemical environment. Surface tension remains the native constant.
+Both phase capillary bounds, source support, native transport and cancellation
+must pass before any liquid, finite gas or wall candidate publishes.
+
+The original reference-ratio table is reused exactly when ratio bits match.
+Changed moving ratios use one temporary table from the SAME bounded Gauss/
+Hermite owner; pinned or zero-speed samples do not construct it. There is no
+growing ratio cache. These constitutive evaluations remain bounded by the
+existing wall-cell and thermal-substep limits. This supplies a two-viscous-wedge
+closure at the declared local phase conditions, with the existing geometric
+contact-speed and scale-separation assumptions; it adds no resolved gas motion,
+contact-line heat, surface-energy theorem or calibrated entrainment model.
+
 G1/G3 tests compare full-angle predictions against independent Simpson
 quadrature, recover the cubic small-angle limit, check length-scale similarity,
 and exercise actual capillary flow from static source data. Thermal integration

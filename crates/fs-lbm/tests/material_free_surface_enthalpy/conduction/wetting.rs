@@ -15,6 +15,9 @@ use fs_matdb::{InterfaceSystemCard, SurfaceSpec, SystemContext};
 use fs_material::state_point::resolve_interface_state_point;
 use fs_material::thermal::source::ThermalMaterialPoint;
 
+#[path = "wetting/gas.rs"]
+mod gas;
+
 const WALL_CELL: [usize; 3] = [0, 1, 3];
 
 fn wetting_controls() -> FreeSurfaceWettingControls {

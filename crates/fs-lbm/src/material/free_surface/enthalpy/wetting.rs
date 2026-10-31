@@ -15,12 +15,54 @@
 use super::*;
 use crate::d3q19::freesurface3::PlanarWall3;
 use crate::material::free_surface::wetting::{
-    CoxVoinovLaw, FreeSurfaceWettingControls, FreeSurfaceWettingSample, WettingThermalPoint,
+    CoxVoinovControls, CoxVoinovLaw, FreeSurfaceWettingControls, FreeSurfaceWettingSample,
+    WettingThermalPoint,
 };
 use fs_matdb::InterfaceSystemCard;
 use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint};
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 
 impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
+    /// Couple the original Cox boundary to an explicitly sourced outer gas.
+    /// Its actual mu_gas divided by the local mu_liquid(T) supplies the two-phase
+    /// wedge ratio. The two phases retain separate temperatures and receipts;
+    /// the bulk gas is not evaluated at the liquid temperature.
+    ///
+    /// Ordinary stepping holds this explicit gas snapshot. Existing finite-gas
+    /// conduction and solved-interface entry points instead consume their SAME
+    /// evolving parcel at each thermal endpoint and native flow preparation.
+    /// Original gas transport claims stay pinned while admitted composition,
+    /// temperature and pressure follow that owner. No second gas momentum or
+    /// heat model is created. Microscopic interface-angle claims, constant sigma,
+    /// Newtonian creeping-wedge assumptions and matching scales remain explicit.
+    pub fn with_cox_voinov_gas_wetting(
+        mut self,
+        controls: CoxVoinovControls,
+        gas: &ResolvedThermochemicalGasState,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        poll(gate)?;
+        if self.rheology.is_some() {
+            return Err(Error::Invalid("Cox wetting requires a Newtonian liquid"));
+        }
+        let binding = self.wetting.take()
+            .ok_or(Error::Invalid("Cox wetting requires a sourced static hysteresis binding"))?
+            .with_cox_voinov_gas(controls, gas, &self.flow.scaling, gate)?;
+        let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
+        let binding = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        poll(gate)?;
+        self.wetting = Some(binding);
+        Ok(self)
+    }
+
+    /// The outer gas used by accepted contact-line samples. Its source T/p and
+    /// composition remain distinct from each local liquid/interface query.
+    #[must_use]
+    pub fn wetting_outer_gas(&self) -> Option<&ResolvedThermochemicalGasState> {
+        self.wetting.as_ref().and_then(WettingBinding::outer_gas)
+    }
+
     /// Bind one ordered substrate/liquid interface to a stationary planar wall.
     /// The same native contact geometry, speed estimate and hysteresis owner is
     /// shared with isothermal flow. Source selection occurs once at the original
@@ -116,9 +158,12 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         &self,
         lattice: &mut FreeSurface3,
         states: &BTreeMap<MassLocation3, ResolvedLiquidState>,
+        outer_gas: Option<&ResolvedThermochemicalGasState>,
         gate: &CancelGate,
     ) -> Result<Option<WettingBinding<'m>>, Error> {
         let Some(binding) = &self.wetting else { return Ok(None); };
+        let prepared = outer_gas.map(|gas| binding.at_prepared_outer_gas(gas));
+        let binding = prepared.as_ref().unwrap_or(binding);
         let temperatures = temperatures(states, self.law.temperature_axis(), gate)?;
         let candidate = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
         candidate.install(lattice, gate)?;
