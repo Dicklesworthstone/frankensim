@@ -231,6 +231,14 @@ pub struct NsfDgFrame {
     /// upstream duct or its series-source work. This is already part of the
     /// complete face account and must not be added to the fluid totals again.
     pub source_patch: Option<NsfBoundaryExchange>,
+    /// Original conservative material exchange through the exact NSF quadrature
+    /// connected to the downstream DG inlet. Positive mass/energy leave the
+    /// resolved zone and enter the bore. This is the selected patch when one is
+    /// coupled, otherwise the complete coupled characteristic face.
+    ///
+    /// This retains streamed mass plus the advected/non-advective energy split
+    /// independently of the acoustic volume-flow projection.
+    pub bore_exchange: NsfBoundaryExchange,
     /// Original streamed mass leaving all transverse reservoir apertures [kg].
     /// This is separate from both characteristic faces; zero when absent.
     pub reservoir_mass_out_kg: f64,
@@ -713,6 +721,7 @@ fn accept_candidate<L: Lattice3<27>>(
     Ok(NsfDgFrame {
         step, evaluations, incoming_characteristic_m_s: incoming,
         drive: control, upstream: None, faces, coupled_patch, source_patch,
+        bore_exchange: face,
         reservoir_mass_out_kg, reservoir_flows, reservoir_exchanges, reservoir_radiation: None,
         reservoir_radiations: Vec::new(), finite_reservoir, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,

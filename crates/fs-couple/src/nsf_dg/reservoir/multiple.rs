@@ -373,7 +373,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
         self.steps += 1;
         Ok(NsfDgFrame {
             step: self.steps, evaluations: evaluations.get(), incoming_characteristic_m_s: physical[0],
-            drive, upstream, faces, coupled_patch, source_patch, reservoir_mass_out_kg,
+            drive, upstream, faces, coupled_patch, source_patch, bore_exchange: bore,
+            reservoir_mass_out_kg,
             reservoir_flows, reservoir_exchanges, reservoir_radiation: None,
             reservoir_radiations, finite_reservoir, flow, flow_mass_change_kg: mass_change,
             flow_energy_change_j: energy_change, duct, terminals,

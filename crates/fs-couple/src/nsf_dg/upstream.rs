@@ -326,6 +326,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             faces,
             coupled_patch,
             source_patch,
+            bore_exchange: main_face,
             reservoir_mass_out_kg,
             reservoir_flows,
             reservoir_exchanges,

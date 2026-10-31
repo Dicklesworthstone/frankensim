@@ -358,7 +358,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
         self.steps += 1;
         Ok(NsfDgFrame {
             step: self.steps, evaluations, incoming_characteristic_m_s: downstream, drive,
-            upstream, faces, coupled_patch, source_patch, reservoir_mass_out_kg, reservoir_flows,
+            upstream, faces, coupled_patch, source_patch, bore_exchange: bore,
+            reservoir_mass_out_kg, reservoir_flows,
             reservoir_exchanges, finite_reservoir, reservoir_radiations: Vec::new(),
             reservoir_radiation: Some(NsfDgReservoirFrame {
                 resolved_exchange,

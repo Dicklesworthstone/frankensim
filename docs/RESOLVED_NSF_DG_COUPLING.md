@@ -172,7 +172,14 @@ flow_energy_change_j = flow.open_energy_j + flow.open_boundary_energy_j
 ```
 
 The optional `coupled_patch` is already contained in its complete characteristic
-face account. Native reservoir provenance names the mass and energy fields,
+face account. `NsfDgFrame::bore_exchange` identifies the exact quadrature that
+actually enters the downstream bore: the selected patch when one is coupled,
+otherwise the complete coupled face. It retains the original streamed mass,
+advected stagnation enthalpy and non-advective Fourier/viscous-work contribution
+as separate receipts while preserving their total-energy sum. This is the
+authoritative material-transfer coordinate for a bore inventory owner; the
+acoustic projection itself still deposits no mass or enthalpy. Native reservoir
+provenance names the mass and energy fields,
 their SI units and their opposite sign conventions explicitly. Complementary
 tests in `nsf_dg/performance/file/tests/aperture.rs` check original fluid/duct
 replay, retained thermochemical sources and finite-upstream feedback together

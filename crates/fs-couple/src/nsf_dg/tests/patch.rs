@@ -159,7 +159,13 @@ fn oriented_aperture_uses_its_area_flow_and_work_without_absorbing_the_escape_op
                 let energy = owner.zone().total_energy_j();
                 let frame = owner.step_with_boundary(boundary, &gate).unwrap();
                 let patch = frame.coupled_patch.unwrap();
+                assert_eq!(frame.bore_exchange, patch);
                 assert_eq!(frame.inlet_flow_m3_s, patch.normal_volume_flow_m3_s);
+                assert_eq!(
+                    frame.bore_exchange.total_energy_out_j,
+                    frame.bore_exchange.advected_stagnation_enthalpy_out_j
+                        + frame.bore_exchange.nonadvective_energy_out_j
+                );
                 assert!(frame.pressure_residual_pa.abs() < 1e-6);
 
                 // Replay the accepted controls through the original owners,
@@ -240,6 +246,7 @@ fn finite_upstream_retains_the_complete_face_while_main_bore_receives_only_the_p
             let frame = owner.step_with_upstream_pressure_rise(rise, &gate).unwrap();
             let upstream = frame.upstream.as_ref().unwrap();
             let patch = frame.coupled_patch.unwrap();
+            assert_eq!(frame.bore_exchange, patch);
             assert_eq!(upstream.face, usize::from(!high));
             assert_eq!(frame.inlet_flow_m3_s, patch.normal_volume_flow_m3_s);
             assert_eq!(
