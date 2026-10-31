@@ -44,6 +44,13 @@ use crate::material::plan_momentum_scaling;
 
 mod transport;
 
+/// Conservative condensation/evaporation ingress on existing native interfaces.
+pub mod mass_exchange;
+pub use mass_exchange::{
+    FreeSurfaceMassExchange, FreeSurfaceMassExchangeControls, FreeSurfaceMassExchangeReport,
+    FreeSurfaceMassExchangeSample,
+};
+
 mod phase_conduction;
 pub use phase_conduction::FreeSurfaceConductivity;
 

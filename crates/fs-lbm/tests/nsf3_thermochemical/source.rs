@@ -40,16 +40,77 @@ pub fn model_with_temperature_limit(
     k_scale: f64,
     temperature_max: f64,
 ) -> ThermochemicalGasModel {
+    let (species, nasa9, transport) = source_packs(
+        "manufactured",
+        0.028,
+        a7,
+        pressure_max,
+        k_scale,
+        temperature_max,
+    );
+    from_packs(
+        &[SpeciesPackRef {
+            species: &species,
+            nasa9: Some(&nasa9),
+            transport: Some((&transport, MaterialPropertySelection::SingleClaimOnly)),
+        }],
+        Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+        None,
+    )
+    .unwrap()
+}
+
+/// The same authored source construction with explicit water and carrier IDs.
+/// Water's thermal coefficients remain a synthetic coupling fixture.
+#[allow(dead_code)]
+pub fn moist_model(water_fraction: f64, a7: f64) -> ThermochemicalGasModel {
+    let carrier = source_packs("manufactured", 0.028, a7, 250000.0, 1.0, 700.0);
+    let water = source_packs("water", 0.01801528, a7, 250000.0, 1.0, 700.0);
+    from_packs(
+        &[
+            SpeciesPackRef {
+                species: &carrier.0,
+                nasa9: Some(&carrier.1),
+                transport: Some((&carrier.2, MaterialPropertySelection::SingleClaimOnly)),
+            },
+            SpeciesPackRef {
+                species: &water.0,
+                nasa9: Some(&water.1),
+                transport: Some((&water.2, MaterialPropertySelection::SingleClaimOnly)),
+            },
+        ],
+        Composition::new(
+            CompositionBasis::MoleFraction,
+            vec![1.0 - water_fraction, water_fraction],
+        )
+        .unwrap(),
+        Some(&SpeciesId::new("water").unwrap()),
+    )
+    .unwrap()
+}
+
+fn source_packs(
+    name: &str,
+    molar_mass: f64,
+    a7: f64,
+    pressure_max: f64,
+    k_scale: f64,
+    temperature_max: f64,
+) -> (
+    NormalizedSpeciesPack,
+    NormalizedModelPack,
+    NormalizedMaterialCardPack,
+) {
     let artifact = hash("synthetic gas");
     let provenance = Provenance {
         source: "authored synthetic NSF fixture; not measured".into(),
         license: "CC0-1.0".into(),
         artifact: Some(artifact),
     };
-    let species_id = SpeciesId::new("manufactured").unwrap();
+    let species_id = SpeciesId::new(name).unwrap();
     let association = SpeciesAssociation::new(
         species_id,
-        0.028,
+        molar_mass,
         "gas",
         "ideal-gas",
         100000.0,
@@ -59,7 +120,7 @@ pub fn model_with_temperature_limit(
     )
     .unwrap();
     let species = NormalizedSpeciesPack::new(
-        "manufactured",
+        name,
         "nsf-v1",
         artifact,
         "CC0-1.0",
@@ -159,15 +220,9 @@ pub fn model_with_temperature_limit(
             None,
         ));
     }
-    let nasa9 = NormalizedModelPack::new(
-        "manufactured",
-        "nsf-v1",
-        artifact,
-        "CC0-1.0",
-        vec![law],
-        normalized,
-    )
-    .unwrap();
+    let nasa9 =
+        NormalizedModelPack::new(name, "nsf-v1", artifact, "CC0-1.0", vec![law], normalized)
+            .unwrap();
     let mut claims = ClaimSet::new();
     let observation = claims
         .register_observation(ObservationDataset {
@@ -227,7 +282,7 @@ pub fn model_with_temperature_limit(
     .unwrap();
     let transport = NormalizedMaterialCardPack::new(
         MaterialStateId {
-            chemistry: "manufactured".into(),
+            chemistry: name.into(),
             phase: "gas".into(),
             process: "authored".into(),
             revision: 0,
@@ -235,14 +290,5 @@ pub fn model_with_temperature_limit(
         pack,
     )
     .unwrap();
-    from_packs(
-        &[SpeciesPackRef {
-            species: &species,
-            nasa9: Some(&nasa9),
-            transport: Some((&transport, MaterialPropertySelection::SingleClaimOnly)),
-        }],
-        Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
-        None,
-    )
-    .unwrap()
+    (species, nasa9, transport)
 }

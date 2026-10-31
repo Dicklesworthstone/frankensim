@@ -350,6 +350,45 @@ evaluations use that value, retaining their original conservation/rollback
 boundaries. Source bounds narrow the surface bracket; unsupported trials refuse.
 Temperature-dependent emissivity does not imply a spectral radiation model.
 
+### Condensation/evaporation inventory on existing native liquid interfaces
+
+`MaterialFreeSurfaceEnthalpy3::exchange_interface_mass` accepts integrated
+signed mass, carried liquid specific enthalpy and separately partitioned heat.
+It changes the actual original VOF interface fill and extensive liquid enthalpy
+in one transaction. Positive mass grows liquid; negative mass removes it. The
+external phase-change owner supplies the flux and latent-heat partition and
+explicitly maps any gas formation reference to the native liquid caloric datum.
+The actual represented transfer is reported separately from the request, and
+the external owner must debit that represented amount within its own balance
+budget. Latent heat is never inferred a second time from the carried enthalpy.
+
+Material crosses at the accepted local liquid velocity. Its carried momentum
+is independently checked against actual endpoint momentum after the original
+buoyancy/thermocapillary force frame is refreshed. No population-equilibrium
+reset, recoil impulse, numerical dissipation heat or hidden mass carry is added.
+Energy is audited using centered local increments, so a large common caloric
+datum cannot provide artificial tolerance for lost thermal exchange. Every
+source, geometry, mass, energy, momentum and cancellation check precedes state
+publication. Source viscosity, rheology and supported capillary geometry remain
+owned by the original liquid; its accepted clock is unchanged for the outer
+coupling owner to advance the normal thermal/flow interval exactly once.
+
+The bounded rung requires occupied native interface cells with positive final
+fill at most one. Nucleation in gas, complete interface exhaustion, overfill,
+relative gas/liquid velocity and phase-front remapping are outside this API.
+An active solved-surface stress or dynamic contact history requires its complete
+coupling owner and refuses this instantaneous update. This is a conservative
+physical ingress seam, not an independently inferred condensation rate or gas
+energy model. G0/G1/G3/G4 regressions in `material_free_surface_enthalpy/mass_exchange.rs`
+cover real fill growth/recession, caloric-source refresh, carried momentum,
+subsequent native mass/enthalpy transport, reference shifts and atomic refusal.
+The shared condensation regression exports the original wet-gas proposal's film
+into the native liquid exactly once, retaining only its gas endpoint. It checks
+combined gas/liquid mass, maps IAPWS and native caloric datums explicitly, and
+reconciles the phase owner's internal energy with native enthalpy using the
+reported saturation-pressure volume work. The isothermal phase owner's latent
+heat duty is retained rather than deposited a second time into the liquid.
+
 ### Finite atmosphere on the native free-surface thermal timeline
 
 `step_with_finite_gas_environment` gives the same moving-liquid thermal owner

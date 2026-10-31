@@ -37,6 +37,9 @@ mod rheology;
 #[path = "material_free_surface_enthalpy/height_graph.rs"]
 mod height_graph;
 
+#[path = "material_free_surface_enthalpy/mass_exchange.rs"]
+mod mass_exchange;
+
 fn card(hot_viscosity: f64, hot_density: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [

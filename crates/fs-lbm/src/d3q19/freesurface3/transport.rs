@@ -102,6 +102,47 @@ mod viscous_tests {
 }
 
 impl FreeSurface3 {
+    /// Replace only the represented liquid inventory of an existing interface.
+    /// The caller owns a private candidate and the physical mass/energy audit.
+    /// Populations and their physical velocity are unchanged: material crosses
+    /// at the local liquid velocity. Exhaustion/overfill need a phase-front
+    /// remap and are refused rather than hidden in the conversion carry.
+    pub(crate) fn transport_set_interface_mass(
+        &mut self,
+        location: MassLocation3,
+        mass: f64,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let MassLocation3::Cell(key, lane) = location else {
+            return Err(FreeSurfaceError3::Transport("phase transfer needs a located interface"));
+        };
+        let slot = self.grid.slot_of(key).ok_or(FreeSurfaceError3::Transport(
+            "phase transfer requires an active interface",
+        ))?;
+        let tile = self.tiles.get(&key).ok_or(FreeSurfaceError3::Transport(
+            "phase transfer requires an active interface",
+        ))?;
+        let density = self.grid.populations(slot, lane).iter().sum::<f64>();
+        if tile.cells[lane] != Cell3::Interface
+            || !density.is_finite()
+            || density <= 0.0
+            || !tile.mass[lane].is_finite()
+            || tile.mass[lane] <= 0.0
+            || tile.mass[lane] > density
+            || !mass.is_finite()
+            || mass <= 0.0
+            || mass > density
+        {
+            return Err(FreeSurfaceError3::Transport(
+                "phase transfer must retain positive bounded interface fill; refine or remap",
+            ));
+        }
+        self.tiles.get_mut(&key).expect("admitted interface").mass[lane] = mass;
+        self.fill_smooth.clear();
+        Ok(())
+    }
+
     /// Permanent mechanical wall, not an inactive tile that can later be gas.
     /// Thermal contacts must not turn an absent liquid neighbor into a solid.
     pub(crate) fn transport_wall_at(&self, coordinates: [i64; 3]) -> bool {
