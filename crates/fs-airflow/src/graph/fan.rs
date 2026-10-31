@@ -102,8 +102,8 @@ impl LossGraph {
     /// pressure scaling is at most one, so it cannot amplify the reference
     /// graph's absolute conservation tolerance. Final flows, conservation, and
     /// fan mismatch are nevertheless recomputed and checked before returning.
-    /// Graphs containing linear Darcy drag instead solve the actual pressure
-    /// graph at each bracketed trial: quadratic homogeneity does not apply.
+    /// Graphs containing linear Darcy drag or gravity instead solve the actual
+    /// pressure graph at each bracketed trial: quadratic homogeneity does not apply.
     ///
     /// This numerical reduction is NOT a certified equivalent resistance or
     /// uncertainty enclosure. It cannot be used to mint `OperatingPoint`'s
@@ -129,6 +129,10 @@ impl LossGraph {
         let peak = finite(fan.pressure_at(VolumetricFlowRate::new(minimum))?.value(), "peak fan pressure")?;
         if peak < 0.0 {
             return Err(GraphFanError::InvalidInput("fan pressure must be nonnegative"));
+        }
+        if self.gravity.is_some() {
+            return self.solve_mixed_with_fan(inlet, outlet, fan, graph_config, fan_config,
+                minimum, maximum, peak, cx);
         }
         if peak == 0.0 {
             if minimum != 0.0 {
@@ -204,7 +208,7 @@ impl LossGraph {
 
     // Pressure increases graph flow monotonically; the retained fan curve is
     // nonincreasing in flow. Bracket in pressure and solve the native graph at
-    // every trial, retaining the quadratic-only fast path above unchanged.
+    // every trial, retaining the gravity-free quadratic fast path unchanged.
     #[allow(clippy::too_many_arguments)]
     fn solve_mixed_with_fan(
         &self, inlet: usize, outlet: usize, fan: &FanBank,

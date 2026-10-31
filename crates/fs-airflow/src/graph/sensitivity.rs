@@ -14,6 +14,9 @@
 //! coefficient supplies its true finite zero-flow slope without regularization.
 //! Mixed-edge coefficient directions scale both coefficients together; separate
 //! linear/quadratic parameter directions are not represented by this API.
+//! With gravity, `dp` here is the dissipative drive (static dp plus gravity
+//! head). These derivatives hold gravity, positions and density samples fixed;
+//! scaling resistance never scales the conservative gravitational head.
 
 use core::fmt;
 use std::cell::RefCell;
@@ -195,7 +198,7 @@ impl LossGraph {
             let g = if linear == 0.0 {
                 // Preserve the original separate-root quadratic evaluation.
                 finite((0.5 / self.sqrt_resistance[edge])
-                    / det::sqrt(branch.pressure_drop.value().abs()), "branch conductance")?
+                    / det::sqrt(branch.dissipative_pressure_drop.value().abs()), "branch conductance")?
             } else {
                 let quadratic = finite(branch.loss.resistance.value() * q.abs(),
                     "quadratic derivative coefficient")?;
@@ -204,7 +207,7 @@ impl LossGraph {
                     "mixed branch conductance")?
             };
             let response = if linear == 0.0 { 0.5 * q }
-                else { finite(g * branch.pressure_drop.value(), "resistance scale response")? };
+                else { finite(g * branch.dissipative_pressure_drop.value(), "resistance scale response")? };
             if g <= 0.0 || (q != 0.0 && response == 0.0) {
                 return Err(GraphError::NonFinite("branch derivative underflowed").into());
             }

@@ -1,6 +1,7 @@
 //! Steady passive linear/quadratic-loss networks with arbitrary graph topology.
 //!
-//! An edge directed from `u` to `v` obeys `p[u] - p[v] = A Q + B Q |Q|`.
+//! An edge directed from `u` to `v` obeys
+//! `p[u] - p[v] + rho g·(x[v]-x[u]) = A Q + B Q |Q|` when gravity is bound.
 //! The direction is bookkeeping: negative flow is permitted. Free nodes obey
 //! volume conservation; every connected component needs a prescribed pressure.
 //! Node-wise bracketed equilibration avoids dividing by a zero-flow derivative.
@@ -30,6 +31,9 @@ pub mod sensitivity;
 pub mod thermal;
 pub mod porous;
 pub use porous::{LinearLossElement, LinearLossResistance, PassiveBranch};
+/// Material-derived hydrostatic heads and bounded Boussinesq circulation.
+pub mod gravity;
+pub use gravity::GraphGravity;
 
 /// An oriented passive branch; its orientation does not constrain flow sign.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +109,11 @@ pub struct GraphBranchFlow {
     pub linear_loss: Option<Arc<LinearLossElement>>,
     /// Signed `pressure[from] - pressure[to]` in Pa.
     pub pressure_drop: Pressure,
+    /// Signed gravitational pressure supply `rho g·(x[to]-x[from])` in Pa.
+    pub gravity_pressure_head: Pressure,
+    /// Actual passive loss `A Q + B Q |Q|` in Pa, including gravity's drive.
+    /// Its product with signed flow is dissipation; static dp alone is not.
+    pub dissipative_pressure_drop: Pressure,
     /// Signed nominal flow in m^3/s.
     pub flow: VolumetricFlowRate,
 }
@@ -127,6 +136,8 @@ pub struct GraphSolution {
     pub max_node_imbalance: VolumetricFlowRate,
     /// Signed sum of the reservoir exchanges in m^3/s.
     pub boundary_imbalance: VolumetricFlowRate,
+    /// Original geometry, reference storage and material-density head samples.
+    pub gravity: Option<Arc<GraphGravity>>,
 }
 
 /// Structured input, arithmetic, interruption, and convergence failures.
@@ -176,6 +187,7 @@ pub struct LossGraph {
     sqrt_resistance: Vec<f64>,
     linear_resistance: Vec<f64>,
     linear_losses: Vec<Option<Arc<LinearLossElement>>>,
+    gravity: Option<Arc<GraphGravity>>,
 }
 
 impl LossGraph {
@@ -249,7 +261,7 @@ impl LossGraph {
             adjacency[branch.from].push(index);
             adjacency[branch.to].push(index);
         }
-        Ok(Self { branches, adjacency, sqrt_resistance, linear_resistance, linear_losses })
+        Ok(Self { branches, adjacency, sqrt_resistance, linear_resistance, linear_losses, gravity: None })
     }
 
     /// Number of nodes, including explicit isolated nodes.
@@ -297,9 +309,15 @@ impl LossGraph {
     ) -> Result<GraphSolution, GraphError> {
         checkpoint(cx)?;
         config.validate()?;
-        let fixed = self.fixed_pressures(boundaries, cx)?;
-        let low = boundaries.iter().map(|b| b.pressure.value()).fold(f64::INFINITY, f64::min);
-        let high = boundaries.iter().map(|b| b.pressure.value()).fold(f64::NEG_INFINITY, f64::max);
+        // Validate original endpoints before using them to index the gravity chart.
+        let mut fixed = self.fixed_pressures(boundaries, cx)?;
+        let reduced = self.reduce_boundaries(boundaries)?;
+        let numerical_boundaries = reduced.as_deref().unwrap_or(boundaries);
+        if reduced.is_some() {
+            for boundary in numerical_boundaries { fixed[boundary.node] = Some(boundary.pressure.value()); }
+        }
+        let low = numerical_boundaries.iter().map(|b| b.pressure.value()).fold(f64::INFINITY, f64::min);
+        let high = numerical_boundaries.iter().map(|b| b.pressure.value()).fold(f64::NEG_INFINITY, f64::max);
         let midpoint = 0.5 * low + 0.5 * high;
         let mut pressures: Vec<f64> = fixed.iter().map(|value| value.unwrap_or(midpoint)).collect();
         let mut state = FlowState::new(self.node_count(), self.branches.len());
@@ -380,7 +398,10 @@ impl LossGraph {
     }
 
     fn flow(&self, edge: usize, from_pressure: f64, to_pressure: f64) -> Result<f64, GraphError> {
-        let difference = finite(from_pressure - to_pressure, "pressure difference")?;
+        self.flow_from_difference(edge, self.driving_pressure(edge, from_pressure, to_pressure)?)
+    }
+
+    fn flow_from_difference(&self, edge: usize, difference: f64) -> Result<f64, GraphError> {
         if difference == 0.0 {
             return Ok(0.0);
         }
@@ -420,7 +441,7 @@ impl LossGraph {
         let mut sum = Sum::default();
         for (ordinal, &edge) in self.adjacency[node].iter().enumerate() {
             periodic_checkpoint(ordinal, cx)?;
-            sum.add(self.flow(edge, pressure, pressures[self.other(edge, node)])?)?;
+            sum.add(self.outward_flow(edge, node, pressure, pressures[self.other(edge, node)])?)?;
         }
         sum.value()
     }
@@ -432,7 +453,8 @@ impl LossGraph {
         let mut high = f64::NEG_INFINITY;
         for (ordinal, &edge) in self.adjacency[node].iter().enumerate() {
             periodic_checkpoint(ordinal, cx)?;
-            let value = pressures[self.other(edge, node)];
+            let value = finite(pressures[self.other(edge, node)] - self.outward_head(edge, node),
+                "gravity-adjusted pressure bracket")?;
             low = low.min(value);
             high = high.max(value);
         }
@@ -483,7 +505,7 @@ impl LossGraph {
         for (edge, branch) in self.branches.iter().enumerate() {
             periodic_checkpoint(edge, cx)?;
             if fixed[branch.from].is_none() && fixed[branch.to].is_none()
-                && (pressures[branch.from] - pressures[branch.to]).abs() <= flat_limit
+                && self.driving_pressure(edge, pressures[branch.from], pressures[branch.to])?.abs() <= flat_limit
             {
                 let a = representative(&mut parents, branch.from);
                 let b = representative(&mut parents, branch.to);
@@ -509,7 +531,8 @@ impl LossGraph {
                     let other = self.other(edge, node);
                     if parents[other] != root {
                         cut.push((edge, node, other));
-                        let difference = finite(pressures[other] - pressures[node], "block pressure bracket")?;
+                        let difference = finite((pressures[other] - pressures[node])
+                            - self.outward_head(edge, node), "block pressure bracket")?;
                         low = low.min(difference);
                         high = high.max(difference);
                     }
@@ -546,7 +569,7 @@ impl LossGraph {
         for (ordinal, &(edge, inside, outside)) in cut.iter().enumerate() {
             periodic_checkpoint(ordinal, cx)?;
             let shifted = finite(pressures[inside] + shift, "block trial pressure")?;
-            sum.add(self.flow(edge, shifted, pressures[outside])?)?;
+            sum.add(self.outward_flow(edge, inside, shifted, pressures[outside])?)?;
         }
         sum.value()
     }
@@ -592,6 +615,18 @@ impl LossGraph {
         &self, pressures: Vec<f64>, boundaries: &[FixedPressure], state: FlowState,
         sweeps: usize, cx: &Cx<'_>,
     ) -> Result<GraphSolution, GraphError> {
+        let actual_pressures = if let Some(gravity) = &self.gravity {
+            let mut actual = pressures.clone();
+            for (node, pressure) in actual.iter_mut().enumerate() {
+                periodic_checkpoint(node, cx)?;
+                *pressure = finite(*pressure + gravity.reference_pressure(node), "static pressure reconstruction")?;
+            }
+            // Prescribed pressure is a physical input. Do not round it through
+            // subtract/add of a large hydrostatic reference before publishing it.
+            for boundary in boundaries { actual[boundary.node] = boundary.pressure.value(); }
+            Some(actual)
+        } else { None };
+        let physical = actual_pressures.as_deref().unwrap_or(&pressures);
         let mut branches = Vec::with_capacity(self.branches.len());
         for (edge, branch) in self.branches.iter().enumerate() {
             periodic_checkpoint(edge, cx)?;
@@ -600,18 +635,24 @@ impl LossGraph {
                 to: branch.to,
                 loss: branch.loss.clone(),
                 linear_loss: self.linear_losses[edge].clone(),
-                pressure_drop: Pressure::new(pressures[branch.from] - pressures[branch.to]),
+                pressure_drop: Pressure::new(finite(physical[branch.from]
+                    - physical[branch.to], "static branch pressure drop")?),
+                gravity_pressure_head: Pressure::new(self.gravity.as_ref()
+                    .map_or(0.0, |gravity| gravity.pressure_heads_pa()[edge])),
+                dissipative_pressure_drop: Pressure::new(self.driving_pressure(edge,
+                    pressures[branch.from], pressures[branch.to])?),
                 flow: VolumetricFlowRate::new(state.flows[edge]),
             });
         }
         let solution = GraphSolution {
-            pressures: pressures.into_iter().map(Pressure::new).collect(),
+            pressures: actual_pressures.unwrap_or(pressures).into_iter().map(Pressure::new).collect(),
             branches,
             node_outflows: state.balances.into_iter().map(VolumetricFlowRate::new).collect(),
             boundaries: boundaries.to_vec(),
             sweeps,
             max_node_imbalance: VolumetricFlowRate::new(state.max_node_imbalance),
             boundary_imbalance: VolumetricFlowRate::new(state.boundary_imbalance),
+            gravity: self.gravity.clone(),
         };
         checkpoint(cx)?;
         Ok(solution)

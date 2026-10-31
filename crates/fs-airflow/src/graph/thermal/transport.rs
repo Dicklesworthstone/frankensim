@@ -2,8 +2,10 @@
 //!
 //! Incoming streams mix by heat-capacity flow at each zero-volume junction.
 //! Every outgoing branch receives that mixture, then applies the existing
-//! exponential `AirPath` law. A passive nonzero flow strictly descends pressure,
-//! so its directed graph is acyclic even when the undirected loss graph loops.
+//! exponential `AirPath` law. A uniform-density gravitational flow descends
+//! pressure plus specific-potential head, so its directed graph is acyclic
+//! even when static pressure rises along a downward stream. A frozen Boussinesq
+//! circulation can contain a directed cycle, which this DAG owner refuses.
 //! Without return links a deterministic topological pass needs no thermal
 //! matrix solve. Optional imposed return links close a bounded supply system.
 //!
@@ -175,6 +177,14 @@ impl<'a> TransportNetwork<'a> {
         poll(cx)?;
         positive(air.density.value(), "air density")?;
         positive(air.specific_heat_j_kg_k, "air specific heat")?;
+        if flow.gravity.as_ref().is_some_and(|gravity| {
+            let reference = gravity.reference_transport();
+            reference.density_kg_m3() != air.density.value()
+                || reference.specific_heat_j_kg_k() != air.specific_heat_j_kg_k
+        }) {
+            return Err(TransportError::InvalidInput(
+                "gravity and thermal transport must use the same reference density and heat capacity"));
+        }
         positive(config.absolute_flow_tolerance.value(), "absolute flow tolerance")?;
         positive(config.absolute_heat_tolerance_w, "absolute heat tolerance")?;
         for relative in [config.relative_flow_tolerance, config.relative_heat_tolerance] {
@@ -218,8 +228,25 @@ impl<'a> TransportNetwork<'a> {
             }
             let q = finite(branch.flow.value(), "branch volume flow")?;
             let (up, down) = if q < 0.0 { (branch.to, branch.from) } else { (branch.from, branch.to) };
-            if q != 0.0 && flow.pressures[up].value() <= flow.pressures[down].value() {
-                return Err(bad("nonzero passive flow must descend pressure"));
+            let drive = finite(branch.dissipative_pressure_drop.value(), "dissipative pressure drive")?;
+            let head = flow.gravity.as_ref().map_or(Ok(0.0), |gravity| {
+                gravity.pressure_heads_pa().get(index).copied()
+                    .ok_or_else(|| bad("gravity binding does not cover this branch"))
+            })?;
+            let from_pressure = flow.pressures[branch.from].value();
+            let to_pressure = flow.pressures[branch.to].value();
+            let reconstructed = finite((from_pressure - to_pressure) + head, "pressure and gravity drive")?;
+            let scale = from_pressure.abs().max(to_pressure.abs()).max(head.abs()).max(drive.abs());
+            // A reduced hydrostatic solve can retain a tiny drive that rounds
+            // in published static pressures. Permit only that reconstruction
+            // roundoff, not a different public pressure field or head binding.
+            if branch.gravity_pressure_head.value() != head
+                || (reconstructed - drive).abs() > (64.0 * f64::EPSILON) * scale
+            {
+                return Err(bad("hydraulic pressure field and gravity binding disagree"));
+            }
+            if q != 0.0 && (drive == 0.0 || drive.is_sign_positive() != q.is_sign_positive()) {
+                return Err(bad("nonzero passive flow must follow the total pressure and gravity drive"));
             }
             let mass = finite(q.abs() * air.density.value(), "branch mass flow")?;
             let capacity = finite(mass * air.specific_heat_j_kg_k, "branch capacity rate")?;

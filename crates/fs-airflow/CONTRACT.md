@@ -1371,6 +1371,49 @@ series/parallel/loop balances, gas substitution, source admission, fan operating
 points and sensitivity agreement. These remain nominal model estimates, with
 source uncertainty retained rather than promoted to a numerical certificate.
 
+### Gravity in material pressure networks
+
+`LossGraph::with_gravity` binds caller-supplied Cartesian node positions and
+signed gravitational acceleration to one actual `FluidTransport` snapshot.
+There is no Earth-gravity default. Each edge obeys
+`p_from - p_to + rho g·(x_to-x_from) = A Q + B Q |Q|`; gravity is a conservative
+pressure supply, never a resistance or a heat source. The solver works in
+pressure relative to the uniform reference-density hydrostatic field, so a
+quiescent column or loop balances without numerical relaxation. Source queries
+and head construction happen once at binding; hot iterations use the existing
+cached resistances and cached head coefficients. Node and edge traversals keep
+the original cancellation and deterministic-order behavior.
+
+`with_boussinesq_gravity` additionally binds one source density per edge and an
+explicit bound on `abs(rho-rho0)/rho0` in `[0,1)`. Only density departures drive
+the reduced pressure equations. This enables frozen hot-leg/cold-leg natural
+circulation while retaining ONE reference density for volume/mass conservation.
+The original source snapshots remain inspectable. Drag coefficients are not
+silently reinterpreted; updating temperature, composition or material requires
+rebinding the affected source/loss descriptions. Bound Darcy gas density must
+agree with the reference density. This approximation does not provide a
+variable-density mass solve, self-consistent compressible atmosphere, evolving
+thermal circulation or experimental validation.
+
+Every accepted branch retains static pressure drop, full gravitational head and
+the actual dissipative drive separately. `dissipative_pressure_drop * flow` is
+the passive loss; static pressure alone may rise downstream. Fan intersections
+use actual pressure-graph trials when gravity is present, because quadratic
+homogeneity no longer applies. Existing tangents/adjoints hold gravity,
+positions and density fixed, differentiating the dissipative drive rather than
+mistaking conservative head for a resistance coefficient.
+
+The existing `TransportNetwork` consumes gravity-driven flows, including
+downward paths with increasing static pressure, using the same reference rho/Cp.
+It still owns a directed-acyclic sensible-heat model: Boussinesq circulation
+cycles explicitly refuse and require a recirculating thermal owner. Neither
+gravity work nor hydraulic dissipation is automatically deposited as heat.
+G0/G1/G3/G5 focused tests cover arbitrary-axis hydrostatics, zero/reversed g,
+material-density substitution, closed-loop density-driven circulation and power
+closure, fan operating points, fixed-head derivatives, heat-transport coherence,
+invalid inputs and deterministic repetition. These are analytic-model tests,
+not a measured performance or physical-validation claim.
+
 
 ### Permeability with mixed finite-gas heat laws
 
@@ -2024,4 +2067,3 @@ mapping, then continues cooling through unloading with retained plastic
 history. Physical heat, finite internal exchange, original mechanical storage
 and numerical loss remain separate. Fixed geometry and the existing thermal
 and mechanical refinement requirements continue to apply.
-
