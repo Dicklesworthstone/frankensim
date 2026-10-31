@@ -6,10 +6,17 @@
 //! matters: adding torque alone violates angular momentum and energy balance.
 //! All quantities use SI and one caller-identified inertial frame.
 
+/// Conservative point-field values and analytic spatial derivatives.
+pub mod field;
+pub use field::{PointGravityField, PointGravitySample};
+
 use crate::{
     DynamicsDiagnostics, DynamicsError, Gravity, MassProperties, Pose, RigidBodyIntegrator,
     RigidBodyState, StepReceipt, Vec3, Wrench,
 };
+
+/// Closed, recoiling systems with explicitly bounded direct Newtonian interactions.
+pub mod mutual;
 
 /// Invalid field/frame, inadmissible finite-body approximation, or native failure.
 #[derive(Clone, Debug, PartialEq)]

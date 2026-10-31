@@ -2,6 +2,18 @@
 
 ## Spatial gravity on native rigid-body dynamics
 
+`gravity::PointGravityField` exposes specific potential, acceleration and the
+analytic world-coordinate acceleration gradient in one conservative sample.
+The uniform and central implementations retain the same original field, frame,
+domain and potential datum. Central derivatives use radial factors without
+cubing radius or taking numerical differences; the point path allocates nothing.
+Sample admission requires finite values and a symmetric gradient. It cannot
+prove that a custom implementation differentiates one stationary potential.
+`tests/gravity_field.rs` checks spatial/potential finite differences, zero vacuum
+trace, rotations, the native rigid mass owner, frame/domain refusals and extreme
+radius arithmetic. The derivative API refuses unrepresentable gradients without
+changing the legacy acceleration-only admission domain.
+
 `gravity::CentralGravity` owns frame-checked Newtonian acceleration and specific
 potential, with caller-supplied source position and G M. Rocket environments
 reuse this owner. `UniformGravity` binds the existing acceleration to an explicit
@@ -34,6 +46,39 @@ and long-time energy behavior, tidal angular-momentum balance, singular/frame/
 extent refusal and late cancellation (G1/G2/G3). Endpoint samples do not certify
 that a trajectory avoids the source or the model boundary between samples;
 the caller must resolve close approaches and provide required event admission.
+
+### Closed mutual-gravity systems with source recoil
+
+`gravity::mutual::MutualGravity` advances slices of the original `RigidBodyState`
+and `MassProperties` under direct Newtonian monopole interactions. Every unordered
+pair supplies one potential `-G*m_i*m_j/r` and equal/opposite world COM forces.
+Both source masses move. The caller supplies G in SI, one inertial frame, a
+nonnegative separation cutoff and an explicit pair-count budget; no Earth value,
+softening or far-field solver is inferred. Work is O(N²), storage is O(N), and
+compensated force/diagnostic reductions follow the supplied deterministic order.
+Binary-scaled pair coefficients avoid intermediate overflow/underflow for widely
+separated mass scales; pair admission is unchanged when its bodies are exchanged.
+
+All first half-kicks precede the original native force-free rigid drift; all
+endpoint forces are then sampled together before the final half-kicks. Native
+full-inertia spin is retained without a monopole torque. The receipt accounts for
+translational/rotational kinetic energy, pair potential counted once, total linear
+momentum and orbital-plus-spin world angular momentum. Smooth fixed-step motion
+is second order and symplectic; energy is not exact, and bounded long-time behavior
+requires resolved bounded trajectories. No momentum or energy projection is used.
+
+Pair work is admitted before allocation. Cancellation is polled per body/pair and
+at publication; refused allocation, arithmetic, frame, budget or separation leaves
+the immutable input system untouched and returns no candidate. Both endpoints and
+the complete straight relative drift segments must clear the separation cutoff,
+preventing a split drift from tunneling through a source. This is not a validated
+enclosure of a true curved encounter: callers must resolve near-field motion.
+`tests/mutual_gravity.rs` covers analytic finite-source recoil, independent force/
+potential derivatives, the two-body Kepler period and second-order apocenter error,
+20-orbit energy/momentum behavior, frame/boost/permutation covariance, reversal,
+native rotated-inertia spin, hidden interior source crossing and late cancellation
+(G1/G2/G3). Finite-body mutual multipoles, self-energy within a body, collisions,
+deformation, external loads, variable mass, adaptivity and FMM remain outside scope.
 
 ## Configuration-dependent loads on the original rigid integrator
 
