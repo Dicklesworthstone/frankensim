@@ -348,9 +348,9 @@ fn elastic_source(
         let coefficient = state.property(key).ok_or_else(|| {
             invalid("longitudinal elasticity requires original density and Young modulus receipts")
         })?;
-        if !coefficient.is_constant_at_fixed_temperature() {
+        if !coefficient.is_constant_at_fixed_environment() {
             return Err(invalid(
-                "longitudinal elastic coefficients must be constant at the frozen material temperature",
+                "longitudinal elastic coefficients require the original held material environment",
             ));
         }
         if let Some(next) = coefficient
@@ -399,7 +399,10 @@ impl ReciprocalStringBank {
     /// Retain explicit longitudinal waves for every original material string.
     ///
     /// Geometry and the original homogeneous/bonded material determine EA,
-    /// solid axial mass and every axial frequency. Both transverse directions
+    /// solid axial mass and every axial frequency. Typed held temperature,
+    /// pressure, composition and moisture responses use the same resolved source
+    /// states as transverse motion; they do not supply environmental evolution.
+    /// Both transverse directions
     /// contribute to the SAME strain. Original body, twist, gas memory, material
     /// interfaces, pressure observers and nonzero initial states survive.
     /// Select connections/gas/prepared propagation first. Subsequent bows,
