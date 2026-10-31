@@ -1661,3 +1661,67 @@ node does not imply a representable finite Robin admittance: this conversion
 explicitly refuses such a pole. The porous-boundary tests also cover the
 single-layer reduction, porous/air-gap phase and wall work, dense/iterative
 agreement and original-fluid propagation.
+
+
+## Penetrable homogeneous-fluid interface
+
+`helmholtz::transmission::FluidInterface` solves reflection, transmission and
+diffraction through one bounded homogeneous fluid body, with continuous pressure
+and outward normal velocity. Both the exterior and interior retain their original
+`FluidAcoustics` owner and one coherent numerical snapshot at a shared angular
+frequency. Each source is queried once during preparation; repeated incident
+fields reuse the coupled factorization. The snapshots do not independently
+confer measured or calibrated material authority.
+
+The scope is stationary, inviscid, nondispersive, positive-density fluids, a
+source-free bounded interior and one consistently outward closed triangle
+component. Original closure and winding checks do not certify global mesh
+nonintersection. Interior sources, disconnected/nested material regions, solid
+shear, mean flow, porous-frame motion and bulk attenuation are outside this
+interface. Both material wavelengths must satisfy the existing six-panel
+resolution gate.
+
+The direct Green identities use `exp(-i omega t)` and the original outgoing
+`exp(i k r)` kernel. Pressure is common to both sides; `q_i/rho_i=q_o/rho_o`
+enforces velocity continuity. Subtracting interior/exterior trace identities
+yields the weakly singular direct transmission combination (Bruno and
+Perez-Arancibia, *Proceedings of the Royal Society A* 473 (2017), 20170161,
+equations 3.3–3.7, doi:10.1098/rspa.2017.0161). Unknowns `(p,q_o/k_o)` have
+matching pressure units. Original off-diagonal constant-panel kernels,
+equivalent-disc self integrals and static double-layer closure remain the
+discretization.
+
+The implementation solves scattered traces directly using `M-I`. Saved diagonal
+contrasts and analytically cancelled outgoing-kernel differences retain weak
+density/speed reflections. A midpoint sine identity removes the common
+hypersingular static term before floating-point subtraction. Equivalent-disc
+self contrasts use a factored series within the original wavelength admission
+(`k*a <= sqrt(pi)/3`). Identical exterior/interior acoustic coefficients return
+exact zero scattered traces and unchanged incident boundary data.
+
+Preparation admits the doubled dense dimension and caller-declared matrix/vector
+byte budget before quadratic allocation. Its peak includes the actual
+worker-dependent LU descriptor workspace through the original algebra owner's
+`lu_complex_blocked_workspace_bytes`, and is compared with the solve/output
+peak. This is a logical payload budget excluding allocator/thread runtime
+metadata and stacks, not a process-RSS limit. Assembly polls cancellation;
+the original cancellable blocked complex LU and triangular solves remain the
+factorization/solve owners. The inherited condition diagnostic is a probe-based
+lower bound, not a conditioning certificate.
+
+`IncidentTraces` and `scatter_field` retain the original regular exterior
+plane-wave/coherent-monopole sampling and source-clearance admission. The
+outgoing `RadiationSolution` feeds existing finite and far-field observers.
+`FluidScatteredField::total_pressure_at` adds the same retained incident field.
+Interior pressure uses `S_i q_i-D_i p`: negating both total traces reuses the
+original adaptive triangle receiver, with exact winding, face/edge clearance
+and its existing quadrature/depth/work controls. Its quadrature discrepancy
+excludes boundary discretization and material-model error.
+
+Signed total interface work is published separately. Its real part vanishes
+for the continuum lossless, source-free interior; a discrete defect is not
+reported as absorption or repaired by clipping. Imaginary work is the physical
+reactive exchange. Regression controls compare complex fluid-sphere partial-wave
+solutions on 20, 80 and 320 panels for density-only, speed-only and combined
+contrasts, check actual interior/exterior receivers and finite-source phase,
+and resolve the first-Born forward limit down to a `1e-12` speed contrast.

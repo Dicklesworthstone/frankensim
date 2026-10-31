@@ -852,3 +852,23 @@ second superdiagonal, original-system residuals, repeated RHS/refactor reuse,
 empty/scalar/tiny-unit systems, singular/nonfinite refusal and every observed
 cancellation boundary. The bounded native test run passes; it is not a claim
 that the full workspace dependency/build gates ran.
+
+
+## Blocked complex LU temporary storage admission
+
+`eigen_complex::lu_complex_blocked_workspace_bytes(n, workers)` returns the
+additional logical slice-descriptor payload of the existing fixed-block complex
+factorization. The bound uses that owner's actual block size and descriptor
+types: per-worker borrowed row-pair arrays, outer vector descriptors and split
+edges. The widest first upper-block phase bounds later phases; a matrix with no
+upper-block phase requires zero such workspace. Arithmetic overflow returns
+`None`. Worker normalization matches the factorization entry point.
+
+The caller separately accounts for its input matrix, copied LU, permutation and
+other retained vectors, and must use the same worker count for admission and
+factorization. Allocator bookkeeping, thread runtime metadata and stacks remain
+outside this logical payload bound. `fs-bem` uses it when admitting a doubled
+fluid-interface solve and compares that peak against solve/output storage. The
+80-panel/64-worker regression refuses the former serial-sized allowance before
+factorization. This helper changes no pivots, arithmetic, cancellation or solver
+results.

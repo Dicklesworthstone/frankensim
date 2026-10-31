@@ -95,6 +95,10 @@ pub use iterative::{
 #[path = "helmholtz_bc.rs"]
 pub mod bc;
 
+/// Source-bound pressure/velocity transmission through a penetrable fluid body.
+#[path = "helmholtz_transmission.rs"]
+pub mod transmission;
+
 /// Declared triangle near rule for the closed Burton-Miller rows.
 #[path = "helmholtz_triangle_rule.rs"]
 mod triangle_rule;

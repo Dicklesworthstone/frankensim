@@ -155,6 +155,30 @@ pub fn lu_complex_with_cancel(
     Ok(LuComplex { n, data: m, perm })
 }
 
+/// Logical temporary slice-descriptor payload of the fixed-block complex LU.
+///
+/// This is additional to the input matrix, copied factor, pivot permutation
+/// and caller vectors. The first U12 phase bounds every later phase: it has
+/// BLOCK rows and the widest trailing region. Includes the per-worker inner
+/// tuple arrays, outer Vec descriptors and split edges. Excludes allocator
+/// bookkeeping, thread stacks and runtime metadata; it is not an RSS bound.
+/// Returns None when the logical byte count cannot be represented.
+pub fn lu_complex_blocked_workspace_bytes(n: usize, threads: usize) -> Option<usize> {
+    let width = n.saturating_sub(blocked::BLOCK);
+    if width == 0 {
+        return Some(0);
+    }
+    let parts = threads.max(1).min(width);
+    let tuples = blocked::BLOCK
+        .checked_mul(parts)?
+        .checked_mul(core::mem::size_of::<(&[C64], &mut [C64])>())?;
+    let outer = parts.checked_mul(core::mem::size_of::<Vec<(&[C64], &mut [C64])>>())?;
+    let edges = parts
+        .checked_add(1)?
+        .checked_mul(core::mem::size_of::<usize>())?;
+    tuples.checked_add(outer)?.checked_add(edges)
+}
+
 /// Factor with the blocked, thread-parallel elimination.
 ///
 /// The result is bit-identical to [`lu_complex_with_cancel`] for every thread

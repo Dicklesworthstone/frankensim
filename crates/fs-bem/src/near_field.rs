@@ -103,6 +103,16 @@ impl<'a> Geometry<'a> {
         let clearances=admit_exterior_points(surface,points,minimum_clearance_m,MAX_PANELS)?;
         Ok(Self {surface,points:points.to_vec(),clearances})
     }
+    /// Interior transmission receiver: the same exact clearance and winding
+    /// owner, requiring exactly one containing component. The transmission
+    /// solve supplies the sign-reversed interior Green traces.
+    pub(crate) fn new_interior(
+        surface: &'a SpherePanels, points: &[Point], minimum_clearance_m: f64,
+    ) -> Result<Self,HelmholtzError> {
+        let clearances=admit_region_points_controlled(
+            surface,points,minimum_clearance_m,MAX_PANELS,None,true)?;
+        Ok(Self {surface,points:points.to_vec(),clearances})
+    }
     /// Explicit matrix-free surface range, with the same exterior winding,
     /// exact triangle clearance and receiver cardinality admission. Integration
     /// still has its original kernel-evaluation/depth budget; this is not a
@@ -175,6 +185,11 @@ fn poll_receiver(gate:Option<&fs_exec::CancelGate>) -> Result<(),HelmholtzError>
 
 fn admit_exterior_points_controlled(surface:&SpherePanels, points:&[Point], minimum_clearance_m:f64,
     maximum_panels:usize,gate:Option<&fs_exec::CancelGate>) -> Result<Vec<f64>,HelmholtzError> {
+        admit_region_points_controlled(surface,points,minimum_clearance_m,maximum_panels,gate,false)
+}
+
+fn admit_region_points_controlled(surface:&SpherePanels, points:&[Point], minimum_clearance_m:f64,
+    maximum_panels:usize,gate:Option<&fs_exec::CancelGate>,interior:bool) -> Result<Vec<f64>,HelmholtzError> {
         poll_receiver(gate)?;
         let triangles=surface.triangles().ok_or_else(||bad("near-field receivers require retained triangles"))?;
         if triangles.is_empty() || triangles.len()>maximum_panels || points.is_empty() || points.len()>MAX_RECEIVERS
@@ -195,6 +210,7 @@ fn admit_exterior_points_controlled(surface:&SpherePanels, points:&[Point], mini
                 clearance=clearance.min(distance(point,triangle));
             }
             if !clearance.is_finite() || clearance<guard { return Err(bad("receiver touches or is too close to a source triangle")); }
+            let mut containing_components=0;
             for component in &components {
                 let(mut sum,mut correction)=(0.,0.);
                 for (index,&i) in component.iter().enumerate() {
@@ -204,9 +220,14 @@ fn admit_exterior_points_controlled(surface:&SpherePanels, points:&[Point], mini
                 // Refuse ambiguous values instead of guessing from a half-space
                 // or approximate centroid solid-angle sign. No cancellation
                 // between different components can hide an interior receiver.
-                if !sum.is_finite() || (sum/FOUR_PI).abs()>1e-7 {
+                if interior && sum.is_finite() && ((sum/FOUR_PI).abs()-1.).abs()<=1e-7 {
+                    containing_components+=1;
+                } else if !sum.is_finite() || (sum/FOUR_PI).abs()>1e-7 {
                     return Err(bad("receiver is interior or its exterior winding is unresolved"));
                 }
+            }
+            if interior && containing_components!=1 {
+                return Err(bad("transmission receiver must be inside exactly one closed component"));
             }
             clearances.push(clearance);
         }
