@@ -2678,6 +2678,25 @@ constant across the complete line; the declared modulus/time/free-strain laws
 provide the supported temperature response. Source gaps and discrete-only
 intervals refuse rather than supplying interpolated coverage.
 
+`ThermoMaxwell::with_history_integration` and the corresponding selector on
+`ResolvedThermoMaxwell` opt into `HistoryIntegration::ExactStrainRamp` before
+creating material points. Backward Euler remains the default. Exact strain
+ramps use the shared `visco::PronyRamp`, preparing once per arm for endpoint
+memory, interval-mean stress, endpoint tangent and independent nonnegative heat.
+The exact mode has zero constitutive algorithmic dissipation. Original source
+coefficients, birth references, thermal eigenstrain, modulus-change work and
+applicability limits remain attached. Coefficients are held at the proposed
+endpoint temperature within each interval; changing-temperature trajectories
+still require refinement, and no exact thermal path or measured accuracy is
+claimed. `CaloricPoint::advance` deposits this physical heat and the same signed
+reversible exchange into the existing caloric owner. Its endpoint stress and
+affine-stress control modes refuse exact strain ramps because those controls
+specify endpoint-load work rather than a complete compatible loading history.
+Existing structural endpoint-work conjugacy gates remain binding. G0/G1/G3
+tests cover scalar-Prony parity, partition-invariant isothermal decay, thermal
+work and endpoint tangents, unchanged state on refusal, source selection and
+prescribed-strain caloric feedback.
+
 Hyperelastic, hereditary and J2 source bindings share a single
 fixed-external-coordinate policy. Typed pressure, composition, moisture and
 concentration may describe fixed external conditions. Evolving mechanical

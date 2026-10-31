@@ -3,7 +3,8 @@
 //! One accepted mechanical history and one accepted caloric state are held fixed
 //! through all within-step trials. Physical dashpot dissipation and signed
 //! reversible thermoelastic exchange enter the SAME transport owner.
-//! Backward-Euler numerical dissipation remains a separate, nonthermal loss.
+//! Backward-Euler numerical dissipation remains a separate, nonthermal loss;
+//! the opt-in exact strain-ramp law has no such constitutive loss.
 //!
 //! This rung admits globally affine common spring-modulus and free-strain laws,
 //! a strictly increasing single-solid-phase caloric chart, and constant density.
@@ -19,7 +20,7 @@
 
 use core::{convert::Infallible, fmt};
 
-use super::{Energy, Point};
+use super::{Energy, HistoryIntegration, Point};
 use crate::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState,
     PhaseStateError, UniformEnthalpyStep, UniformEnthalpyStepInput};
 
@@ -195,9 +196,10 @@ pub struct FeedbackStep<'a, R> {
     pub control: MechanicalControl,
     /// Actual minus prescribed endpoint/load-line stress [Pa]; None for strain control.
     pub stress_residual_pa: Option<f64>,
-    /// Endpoint boundary work [J]. For stress control this uses the prescribed
+    /// Boundary work [J]. For stress control this uses the prescribed
     /// load, not a possibly imperfect constitutive reaction. Under strain
-    /// control it is the original law's mechanical work times reference volume.
+    /// control it is the original law's mechanical work times reference volume,
+    /// including interval-mean stress when exact strain ramps are selected.
     pub external_mechanical_work_j: f64,
     /// Original Maxwell endpoint audit, in J/m3; not recomputed by this adapter.
     /// Its spring storage is FREE energy. The terms below complete the caloric account.
@@ -335,12 +337,21 @@ impl<'a> CaloricPoint<'a> {
     /// The original transport transaction, source-domain, work and cancellation
     /// limits apply to all control modes. A rejected proposal changes neither
     /// strain, branch memory, enthalpy nor the accepted clock.
+    /// Exact strain-ramp integration admits prescribed strain here. Stress and
+    /// affine-stress controls retain endpoint-load work and therefore refuse
+    /// that integration mode; their complete loading path is not supplied by
+    /// an endpoint stress alone.
     pub fn advance_controlled<R, E>(&self, control: MechanicalControl, duration_s: f64,
         config: FeedbackConfig,
         mut transport: impl FnMut(UniformEnthalpyStepInput<'_>) -> Result<UniformEnthalpyStep<R>, E>,
         mut cancelled: impl FnMut() -> bool) -> Result<FeedbackStep<'a, R>, FeedbackError<E>> {
         poll(&mut cancelled)?;
         control.validate()?;
+        if self.point.law.history_integration == HistoryIntegration::ExactStrainRamp
+            && !matches!(control, MechanicalControl::TotalStrain(_)) {
+            return Err(FeedbackError::Invalid(
+                "exact strain-ramp history requires prescribed strain; endpoint load work is a different boundary history"));
+        }
         let final_time = self.time_s + duration_s;
         let material_tolerance = config.energy_tolerance_j / self.volume_m3;
         if config.max_iterations == 0 || config.max_iterations > MAX_FEEDBACK_ITERATIONS
@@ -427,7 +438,8 @@ impl<'a> CaloricPoint<'a> {
                 - product(self.point.temperature_k(), self.mechanical_entropy_j_k)?)?
         };
         // The original native balance is delta(psi)+D+N=W+C_psi+W_thermal,
-        // with W_thermal=-sigma_new*delta(f) from the original eigenstrain.
+        // with W_thermal=-sigma_work*delta(f) from the original eigenstrain:
+        // endpoint stress for BE, interval-mean stress for exact strain ramps.
         // Adding delta(T*s) gives internal energy; caloric exchange cancels
         // C_psi+W_thermal+delta(T*s), with N never supplied to transport.
         let reversible_heat_j = finite(-product(self.volume_m3, step.energy.modulus_work)?
@@ -459,8 +471,10 @@ fn thermodynamics<E>(point: &Point<'_>, slope_per_k: f64, expansion_per_k: f64, 
         product(volume_m3, product(-slope_per_k, point.unscaled_storage())?)?
     };
     let entropy_j_k = if expansion_per_k == 0.0 { modulus_entropy_j_k } else {
-        // With v_j=e-q_j, native BE gives v_new=(1-a)*e_new+a*v_old.
-        // Born v=0 and admitted |e|<=limit therefore imply |q|<=2*limit.
+        // With v_j=e-q_j, BE gives v_new=(1-a)*e_new+a*v_old.
+        // Exact ramps give a*v_old+(b-a)*e_old+(1-b)*e_new, where
+        // a=exp(-r) <= b=(1-exp(-r))/r <= 1. Both are convex combinations;
+        // born v=0 and admitted |e|<=limit therefore imply |q|<=2*limit.
         // Enforce that envelope on the actual history as well: the conservative
         // heat-capacity admission must never silently cover a larger state.
         let bound = product(2.0, point.law.limits.max_strain)?;

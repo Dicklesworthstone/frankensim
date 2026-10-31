@@ -13,7 +13,7 @@ use fs_material::thermovisco::source::{
     ResolvedThermoMaxwell, SourceError, ThermoMaxwellSourceQuery,
 };
 use fs_material::thermovisco::thermal::{FeedbackConfig, MechanicalControl};
-use fs_material::thermovisco::{Limits, ThermalKnot, ThermoMaxwell};
+use fs_material::thermovisco::{HistoryIntegration, Limits, ThermalKnot, ThermoMaxwell};
 use fs_qty::semantic::{
     FrequencyConvention, QuantityKind, SemanticType, StrainBasis, StrainComponent, ValueForm,
 };
@@ -235,6 +235,39 @@ fn replacing_only_caloric_source_data_changes_actual_stress_and_self_heating() {
     }
     assert!(output[0].0 > output[1].0);
     assert!(output[0].1 < output[1].1);
+}
+
+#[test]
+fn source_selected_exact_ramps_retain_receipts_and_drive_caloric_feedback() {
+    let card = card(claims(100.0));
+    let source = resolve(&card, &point(280.0), &point(320.0)).unwrap();
+    let keys = source.keys().to_vec();
+    let samples = source.samples().len();
+    let source = source.with_history_integration(HistoryIntegration::ExactStrainRamp);
+    assert_eq!(source.law().history_integration(), HistoryIntegration::ExactStrainRamp);
+    assert_eq!(source.keys(), keys.as_slice());
+    assert_eq!(source.samples().len(), samples);
+    for sample in source.samples() {
+        assert_eq!(sample.card_identity(), card.content_hash());
+    }
+    let thermal = caloric(&card, 100.0, &point(280.0), &point(320.0));
+    let old = source.caloric_point(&thermal, 300.0, 0.0, 1e-6, 0.001).unwrap();
+    let step = old.advance(0.02, 0.2, FeedbackConfig {
+        max_iterations: 100, temperature_tolerance_k: 1e-10,
+        energy_tolerance_j: 1e-9, relaxation: 1.0,
+    }, |input| {
+        Ok::<_, Infallible>(UniformEnthalpyStep {
+            state: input.curve.state_at_specific_enthalpy(
+                input.initial.specific_enthalpy_j_kg()+input.internal_heat_j/input.mass_kg).unwrap(),
+            external_heat_j: 0.0, energy_residual_tolerance_j: 1e-10, report: (),
+        })
+    }, || false).unwrap();
+    let native = old.mechanical().advance(step.next.caloric_state().temperature_k(),
+        0.02, 0.2, 1e-3).unwrap();
+    assert_eq!(step.next.mechanical(), &native.point);
+    assert_eq!(step.mechanical_energy.numerical_dissipation, 0.0);
+    assert!(step.applied_heat_j > 0.0 && step.combined_residual_j.abs() < 1e-9);
+    assert_eq!(old.time_s(), 0.0);
 }
 
 #[test]

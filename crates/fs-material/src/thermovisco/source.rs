@@ -267,6 +267,14 @@ impl ResolvedThermoMaxwell {
     pub const fn law(&self) -> &ThermoMaxwell {
         &self.law
     }
+    /// Select the existing law's history integrator while retaining every
+    /// source sample, original role key and material context. Select before
+    /// creating points; the caloric prescribed-strain path uses this same law.
+    #[must_use]
+    pub fn with_history_integration(mut self, integration: super::HistoryIntegration) -> Self {
+        self.law = self.law.with_history_integration(integration);
+        self
+    }
     /// Original card/claim/query receipts in increasing temperature order.
     #[must_use]
     pub fn samples(&self) -> &[ResolvedMaterialStatePoint] {

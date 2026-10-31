@@ -4,9 +4,9 @@ use core::convert::Infallible;
 use std::cell::Cell;
 
 use fs_blake3::ContentHash;
-use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve,
+use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase,
     UniformEnthalpyStep, UniformEnthalpyStepInput};
-use fs_material::thermovisco::{Limits, ThermalKnot, ThermoMaxwell};
+use fs_material::thermovisco::{HistoryIntegration, Limits, ThermalKnot, ThermoMaxwell};
 use fs_material::thermovisco::thermal::{CaloricPoint, FeedbackConfig, FeedbackError, MechanicalControl};
 
 const VOLUME: f64 = 1e-6;
@@ -23,7 +23,8 @@ fn law(hot_relaxation: f64) -> ThermoMaxwell {
     ], Limits { max_strain: 0.04, max_strain_rate_s: 10.0 }).unwrap()
 }
 fn chart(cp: f64, tag: u8) -> EquilibriumEnthalpyPhaseCurve {
-    EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([tag; 32]), [280.0, 300.0, 600.0]
+    EquilibriumEnthalpyPhaseCurve::try_single_phase(ContentHash([tag; 32]), SolidLiquidPhase::Solid,
+        [280.0, 300.0, 600.0]
         .into_iter().map(|t| EnthalpyPhaseKnot {
             specific_enthalpy_j_kg: (t - 300.0) * cp, temperature_k: t,
             liquid_mass_fraction: 0.0, bulk_density_kg_m3: 1000.0,
@@ -61,6 +62,57 @@ fn only_physical_dissipation_heats_and_the_original_endpoint_balance_closes() {
     }
     assert_eq!(old.time_s(), 0.0);
     assert_eq!(old.mechanical().branch_strains(), &[0.0]);
+}
+
+#[test]
+fn exact_strain_ramp_deposits_integrated_physical_heat_without_algorithmic_loss() {
+    let material = law(1.0).with_history_integration(HistoryIntegration::ExactStrainRamp);
+    let curve = chart(100.0, 71);
+    let old = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(),
+        &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+    for dt in [0.01_f64, 0.2, 2.0] {
+        let strain = 0.02;
+        let step = old.advance(strain, dt, config(), adiabatic, || false).unwrap();
+        let decay = (-dt).exp();
+        let q = strain*(1.0-decay)/dt;
+        // Independent time integral of q(t)^2/tau for q(t)=strain/dt*(1-exp(-t)).
+        let heat = VOLUME*3e8*(strain/dt).powi(2)
+            * (dt-2.0*(1.0-decay)+0.5*(1.0-(-2.0*dt).exp()));
+        close(step.next.mechanical().branch_strains()[0], q, 1e-15);
+        close(step.applied_heat_j, heat, 1e-11);
+        close(MASS*step.next.caloric_state().specific_enthalpy_j_kg(), heat, 1e-11);
+        assert_eq!(step.mechanical_energy.numerical_dissipation, 0.0);
+        assert!(step.combined_residual_j.abs() < 1e-10);
+        close(step.external_mechanical_work_j,
+            VOLUME*step.mechanical_energy.mechanical_work, 1e-15);
+        assert_eq!(step.next.mechanical().temperature_k(), step.next.caloric_state().temperature_k());
+    }
+    assert_eq!(old.time_s(), 0.0);
+    assert_eq!(old.mechanical().branch_strains(), &[0.0]);
+}
+
+#[test]
+fn exact_ramp_refuses_endpoint_load_work_before_transport_or_publication() {
+    let material = law(1.0).with_history_integration(HistoryIntegration::ExactStrainRamp);
+    let curve = chart(100.0, 72);
+    let old = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(),
+        &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+    let saved = old.clone();
+    let calls = Cell::new(0);
+    for control in [
+        MechanicalControl::Stress { stress_pa: 1e5, tolerance_pa: 1e-6 },
+        MechanicalControl::AffineStress { reference_strain: 0.0,
+            stress_at_reference_pa: 1e5, stiffness_pa: 1e8, tolerance_pa: 1e-6 },
+    ] {
+        let result = old.advance_controlled(control, 0.1, config(), |input| {
+            calls.set(calls.get()+1);
+            adiabatic(input)
+        }, || false);
+        assert!(matches!(result, Err(FeedbackError::Invalid(message))
+            if message.contains("endpoint load work")));
+        assert_eq!(old, saved);
+    }
+    assert_eq!(calls.get(), 0);
 }
 
 #[test]
@@ -189,7 +241,11 @@ fn unsupported_caloric_physics_is_refused_instead_of_inventing_missing_work() {
         let last = knots.last_mut().unwrap();
         last.liquid_mass_fraction = fraction;
         last.bulk_density_kg_m3 = density;
-        let unsupported = EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([10;32]), knots).unwrap();
+        let unsupported = if fraction == 0.0 {
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(ContentHash([10;32]), SolidLiquidPhase::Solid, knots)
+        } else {
+            EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([10;32]), knots)
+        }.unwrap();
         assert!(CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(), &unsupported, 0.0, MASS, VOLUME, 0.001).is_err());
     }
     assert!(CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(), &curve, 0.0, 2.0*MASS, VOLUME, 0.001).is_err());
@@ -526,23 +582,25 @@ fn expansion_and_softening_preserve_branch_memory_and_close_an_independent_therm
 
 #[test]
 fn expansion_capacity_admission_covers_all_chart_segments_branches_and_modulus_coupling() {
-    let material=expanding_law(0.0,1e-4,vec![(3e8,1.0)]);
     // Initial Cp=100 would pass. The supported hot segment has Cp=.5;
     // its 500 J/(m3 K) exceeds the equilibrium-spring term but not all springs.
-    let curve=EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([23;32]),
+    let curve=EquilibriumEnthalpyPhaseCurve::try_single_phase(ContentHash([23;32]), SolidLiquidPhase::Solid,
         [(280.0,-2000.0),(300.0,0.0),(320.0,10.0)].into_iter()
             .map(|(temperature_k,specific_enthalpy_j_kg)|EnthalpyPhaseKnot {
                 temperature_k,specific_enthalpy_j_kg,liquid_mass_fraction:0.0,
                 bulk_density_kg_m3:1000.0 }).collect()).unwrap();
-    assert!(matches!(CaloricPoint::try_new(material.birth(295.0,0.0).unwrap(),
-        &curve,-500.0,MASS,VOLUME,0.001),Err(FeedbackError::Invalid(_))));
-    let coupled=expanding_law(-0.005,1e-4,vec![(3e8,1.0)]);
     let low=chart(5.0,24);
     let adequate=chart(20.0,25);
     // The alpha² term alone would pass Cp=5. The mixed alpha*S' term must
     // also cover previously loaded histories, even at this stress-free birth.
-    assert!(matches!(CaloricPoint::try_new(coupled.birth(300.0,0.0).unwrap(),
-        &low,0.0,MASS,VOLUME,0.001),Err(FeedbackError::Invalid(_))));
-    assert!(CaloricPoint::try_new(coupled.birth(300.0,0.0).unwrap(),
-        &adequate,0.0,MASS,VOLUME,0.001).is_ok());
+    for integration in [HistoryIntegration::BackwardEuler, HistoryIntegration::ExactStrainRamp] {
+        let material=expanding_law(0.0,1e-4,vec![(3e8,1.0)]).with_history_integration(integration);
+        assert!(matches!(CaloricPoint::try_new(material.birth(295.0,0.0).unwrap(),
+            &curve,-500.0,MASS,VOLUME,0.001),Err(FeedbackError::Invalid(_))));
+        let coupled=expanding_law(-0.005,1e-4,vec![(3e8,1.0)]).with_history_integration(integration);
+        assert!(matches!(CaloricPoint::try_new(coupled.birth(300.0,0.0).unwrap(),
+            &low,0.0,MASS,VOLUME,0.001),Err(FeedbackError::Invalid(_))));
+        assert!(CaloricPoint::try_new(coupled.birth(300.0,0.0).unwrap(),
+            &adequate,0.0,MASS,VOLUME,0.001).is_ok());
+    }
 }

@@ -1,13 +1,15 @@
 //! Bounded uniaxial thermoviscoelasticity for deposition and thermal histories.
 //!
 //! Reference `(E_j, tau_j)` pairs have the same meaning as `visco::GeneralizedMaxwell`.
-//! This extension uses backward Euler, not that model's fixed-temperature exact
-//! exponential update: `q_new = a * (q_old + delta mechanical_strain)` where
-//! `a = tau(T_new)/(tau(T_new)+dt)`. Temperature changes never reset branch strains.
+//! Backward Euler is the default; an explicit [`HistoryIntegration::ExactStrainRamp`]
+//! selection reuses that model's exact exponential strain-ramp update. Both
+//! freeze material coefficients at the proposed endpoint temperature for one
+//! interval. Changing temperature therefore still requires time refinement.
+//! Temperature changes never reset branch strains.
 //! All springs share an explicitly tabulated positive modulus multiplier and
 //! relaxation-time multiplier. Free thermal strain is a separate tabulated law.
 //!
-//! The endpoint work audit separates mechanical work, thermal-eigenstrain work,
+//! The work audit separates mechanical work, thermal-eigenstrain work,
 //! modulus-change work, physical dashpot dissipation, and backward-Euler numerical
 //! dissipation. The mechanical update alone is a discrete free-energy balance;
 //! `thermal` supplies affine-modulus/expansion entropy and internal energy when explicitly
@@ -46,6 +48,19 @@ pub struct Limits {
     pub max_strain_rate_s: f64,
 }
 
+/// Constitutive history integration, independent of the declared material data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HistoryIntegration {
+    /// Endpoint integration with separately accounted algorithmic dissipation.
+    #[default]
+    BackwardEuler,
+    /// Exact Maxwell integration for linear mechanical strain with coefficients
+    /// held at the proposed endpoint temperature. Work uses interval-mean stress
+    /// and physical dashpot heat is integrated independently; numerical loss is
+    /// zero. This is not exact integration of continuously varying temperature.
+    ExactStrainRamp,
+}
+
 /// A constitutive refusal leaves the accepted point unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
@@ -72,6 +87,7 @@ pub struct ThermoMaxwell {
     branches: Vec<(f64, f64)>,
     knots: Vec<ThermalKnot>,
     limits: Limits,
+    history_integration: HistoryIntegration,
 }
 
 impl ThermoMaxwell {
@@ -110,7 +126,22 @@ impl ThermoMaxwell {
         if knots.windows(2).any(|p| p[0].temperature_k >= p[1].temperature_k) {
             return Err(Error::Invalid("temperature knots must strictly increase"));
         }
-        Ok(Self { equilibrium_pa, branches, knots, limits })
+        Ok(Self { equilibrium_pa, branches, knots, limits,
+            history_integration: HistoryIntegration::BackwardEuler })
+    }
+
+    /// Select history integration before creating material points. The immutable
+    /// law retains every source coefficient and applicability limit; existing
+    /// points cannot silently switch their history update.
+    #[must_use]
+    pub fn with_history_integration(mut self, integration: HistoryIntegration) -> Self {
+        self.history_integration = integration;
+        self
+    }
+
+    #[must_use]
+    pub const fn history_integration(&self) -> HistoryIntegration {
+        self.history_integration
     }
 
     /// Number of retained relaxation branches (bounded by construction).
@@ -171,22 +202,22 @@ pub struct AffineStress {
     pub offset_pa: f64,
 }
 
-/// Work/energy densities for the actual accepted endpoint, all in J/m3.
+/// Work/energy densities for the actual accepted interval, all in J/m3.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Energy {
     pub mechanical_work: f64,
     pub thermal_strain_work: f64,
     pub modulus_work: f64,
     pub stored_change: f64,
-    /// Nonnegative backward-Euler dashpot dissipation, not numerical damping.
+    /// Nonnegative physical dashpot dissipation of the selected history update.
     pub dissipated: f64,
-    /// Nonnegative algorithmic dissipation from endpoint integration.
+    /// Nonnegative algorithmic dissipation; zero for exact strain ramps.
     pub numerical_dissipation: f64,
     /// Storage + both dissipations - all three work contributions.
     pub residual: f64,
 }
 
-/// Proposed next point and independently evaluated endpoint balance.
+/// Proposed next point and independently evaluated interval balance.
 #[derive(Debug, Clone)]
 pub struct Step<'a> {
     pub point: Point<'a>,
@@ -237,9 +268,18 @@ impl<'a> Point<'a> {
         let mut tangent = self.law.equilibrium_pa;
         let mut history = 0.0;
         for (&(e, tau), &q) in self.law.branches.iter().zip(&self.q) {
-            let (a, _) = factors(tau*thermal.relaxation_scale, duration_s);
-            tangent += e*a;
-            history += e*a*(q-old_e);
+            match self.law.history_integration {
+                HistoryIntegration::BackwardEuler => {
+                    let (a, _) = factors(tau*thermal.relaxation_scale, duration_s);
+                    tangent += e*a;
+                    history += e*a*(q-old_e);
+                }
+                HistoryIntegration::ExactStrainRamp => {
+                    let ramp = crate::visco::PronyRamp::new(duration_s/(tau*thermal.relaxation_scale));
+                    tangent += e*ramp.apply(0.0, 1.0).0;
+                    history += e*ramp.apply(q, -old_e).0;
+                }
+            }
         }
         tangent = finite(tangent*thermal.modulus_scale)?;
         let offset = finite(thermal.modulus_scale*history
@@ -248,11 +288,17 @@ impl<'a> Point<'a> {
         Ok(AffineStress { tangent_pa: tangent, offset_pa: offset })
     }
 
-    /// Propose a backward-Euler update without mutating any accepted history.
+    /// Propose the selected history update without mutating accepted state.
+    /// Exact strain ramps use mean stress for total/eigenstrain work and
+    /// independently integrated physical heat. The temperature-dependent
+    /// coefficient change is still held at the proposed endpoint temperature.
     pub fn advance(&self, temperature_k: f64, total_strain: f64, duration_s: f64,
         energy_tolerance_j_m3: f64) -> Result<Step<'a>, Error> {
         positive(energy_tolerance_j_m3)?;
-        let affine = self.linearize(temperature_k, duration_s)?;
+        positive(duration_s)?;
+        let backward_affine = if self.law.history_integration == HistoryIntegration::BackwardEuler {
+            Some(self.linearize(temperature_k, duration_s)?)
+        } else { None };
         self.law.check_strain(total_strain)?;
         let old = self.law.at(self.temperature_k)?;
         let thermal = self.law.at(temperature_k)?;
@@ -270,19 +316,45 @@ impl<'a> Point<'a> {
         next.temperature_k = temperature_k;
         next.total_strain = total_strain;
         let mut dissipated = 0.0;
-        let mut numerical = 0.5*self.law.equilibrium_pa*de*de;
-        for (j, &(e, tau)) in self.law.branches.iter().enumerate() {
-            let (a, b) = factors(tau*thermal.relaxation_scale, duration_s);
-            let drive = self.q[j] + (e_new-e_old);
-            next.q[j] = finite(a*drive)?;
-            dissipated += (e*a*drive)*(b*drive);
-            let dq = next.q[j]-self.q[j];
-            numerical += 0.5*e*dq*dq;
+        let mut numerical = 0.0;
+        let mut mean_stress = self.law.equilibrium_pa*(e_old+0.5*(e_new-e_old));
+        let mut exact_tangent = self.law.equilibrium_pa;
+        match self.law.history_integration {
+            HistoryIntegration::BackwardEuler => {
+                numerical = 0.5*self.law.equilibrium_pa*de*de;
+                for (j, &(e, tau)) in self.law.branches.iter().enumerate() {
+                    let (a, b) = factors(tau*thermal.relaxation_scale, duration_s);
+                    let drive = self.q[j] + (e_new-e_old);
+                    next.q[j] = finite(a*drive)?;
+                    dissipated += (e*a*drive)*(b*drive);
+                    let dq = next.q[j]-self.q[j];
+                    numerical += 0.5*e*dq*dq;
+                }
+            }
+            HistoryIntegration::ExactStrainRamp => {
+                for (j, &(e, tau)) in self.law.branches.iter().enumerate() {
+                    let ramp = crate::visco::PronyRamp::new(duration_s/(tau*thermal.relaxation_scale));
+                    let (q, mean, heat) = ramp.apply(self.q[j], e_new-e_old);
+                    next.q[j] = finite(q)?;
+                    exact_tangent += e*ramp.apply(0.0, 1.0).0;
+                    mean_stress += e*mean;
+                    dissipated += e*heat;
+                }
+            }
         }
         let stress = finite(next.stress_pa())?;
+        let work_stress = match self.law.history_integration {
+            HistoryIntegration::BackwardEuler => stress,
+            HistoryIntegration::ExactStrainRamp => finite(thermal.modulus_scale*mean_stress)?,
+        };
+        let tangent_pa = match backward_affine {
+            Some(affine) => affine.tangent_pa,
+            None => finite(thermal.modulus_scale*exact_tangent)?,
+        };
+        positive(tangent_pa)?;
         let mut energy = Energy {
-            mechanical_work: finite(stress*d_total)?,
-            thermal_strain_work: finite(-stress*d_thermal)?,
+            mechanical_work: finite(work_stress*d_total)?,
+            thermal_strain_work: finite(-work_stress*d_thermal)?,
             modulus_work: finite((thermal.modulus_scale-old.modulus_scale)*self.unscaled_storage())?,
             stored_change: finite(next.stored_energy_j_m3()-self.stored_energy_j_m3())?,
             dissipated: finite(thermal.modulus_scale*dissipated)?,
@@ -294,7 +366,7 @@ impl<'a> Point<'a> {
         if energy.residual.abs() > energy_tolerance_j_m3 {
             return Err(Error::Energy(energy.residual));
         }
-        Ok(Step { point: next, stress_pa: stress, tangent_pa: affine.tangent_pa, energy })
+        Ok(Step { point: next, stress_pa: stress, tangent_pa, energy })
     }
 }
 
@@ -396,5 +468,87 @@ mod tests {
         let step = law.birth(300.0, 0.0).unwrap().advance(300.0, 0.01, 1.0, 1e-7).unwrap();
         close(step.point.q[0], 0.0, 1e-100); close(step.point.q[1], 0.01, 1e-14);
         assert!(step.energy.residual.abs() < 1e-7);
+    }
+
+    #[test]
+    fn exact_history_matches_the_original_prony_owner_on_reversing_ramps() {
+        let law = law(vec![(3e8, 0.1), (2e8, 10.0)])
+            .with_history_integration(HistoryIntegration::ExactStrainRamp);
+        let reference = crate::visco::GeneralizedMaxwell::new(1e8, law.branches.clone()).unwrap();
+        let mut native = reference.state();
+        let mut point = law.birth(300.0, 0.0).unwrap();
+        for (strain, dt) in [(0.01, 0.01), (-0.005, 0.2), (0.002, 20.0), (0.002, 1e200)] {
+            let (old_work, old_heat) = (native.work, native.dissipated);
+            let stress = reference.step(&mut native, strain, dt);
+            let step = point.advance(300.0, strain, dt, 1e-7).unwrap();
+            close(step.stress_pa, stress, 1e-8);
+            for (&actual, &expected) in step.point.q.iter().zip(&native.q) {
+                close(actual, expected, 1e-16);
+            }
+            close(step.energy.mechanical_work, native.work-old_work, 1e-8);
+            close(step.energy.dissipated, native.dissipated-old_heat, 1e-8);
+            assert_eq!(step.energy.numerical_dissipation, 0.0);
+            assert!(step.energy.dissipated >= 0.0);
+            point = step.point;
+        }
+    }
+
+    #[test]
+    fn exact_hold_retains_the_original_relaxation_time_under_partition() {
+        let law = law(vec![(3e8, 0.001)])
+            .with_history_integration(HistoryIntegration::ExactStrainRamp);
+        let loaded = law.birth(300.0, 0.0).unwrap()
+            .advance(300.0, 0.001, 0.001, 1e-7).unwrap().point;
+        let expected = loaded.q[0]*(-10.0_f64).exp();
+        let expected_heat = 0.5*3e8*(loaded.q[0]*loaded.q[0]-expected*expected);
+        for count in [1, 4, 16, 64] {
+            let mut point = loaded.clone();
+            let mut heat = 0.0;
+            for _ in 0..count {
+                let step = point.advance(300.0, 0.001, 0.01/f64::from(count), 1e-7).unwrap();
+                assert!(step.point.q[0] >= 0.0 && step.point.q[0] <= point.q[0]);
+                assert_eq!(step.energy.numerical_dissipation, 0.0);
+                heat += step.energy.dissipated;
+                point = step.point;
+            }
+            close(point.q[0], expected, 1e-18);
+            close(heat, expected_heat, 1e-10);
+        }
+    }
+
+    #[test]
+    fn exact_thermal_ramp_has_mean_work_and_the_matching_endpoint_tangent() {
+        let spring = law(vec![]).with_history_integration(HistoryIntegration::ExactStrainRamp);
+        let held = spring.birth(500.0, 0.0).unwrap().advance(300.0, 0.0, 1.0, 1e-8).unwrap();
+        close(held.energy.thermal_strain_work, 200.0, 1e-10);
+        close(held.energy.stored_change, 200.0, 1e-10);
+        assert_eq!(held.energy.numerical_dissipation, 0.0);
+
+        let law = law(vec![(3e8, 2.0), (2e8, 10.0)])
+            .with_history_integration(HistoryIntegration::ExactStrainRamp);
+        let old = law.birth(450.0, 0.001).unwrap().advance(400.0, 0.002, 0.3, 1e-7).unwrap().point;
+        let affine = old.linearize(350.0, 0.4).unwrap();
+        let a = old.advance(350.0, 0.003, 0.4, 1e-7).unwrap();
+        let b = old.advance(350.0, 0.003+1e-7, 0.4, 1e-7).unwrap();
+        close(a.stress_pa, affine.tangent_pa*0.003+affine.offset_pa, 1e-6);
+        close(a.tangent_pa, affine.tangent_pa, 1e-6);
+        close((b.stress_pa-a.stress_pa)/1e-7/affine.tangent_pa, 1.0, 1e-8);
+        assert!(a.energy.modulus_work > 0.0 && a.energy.dissipated > 0.0);
+        assert_eq!(a.energy.numerical_dissipation, 0.0);
+    }
+
+    #[test]
+    fn exact_history_refusals_leave_accepted_state_unchanged() {
+        let law = law(vec![(3e8, 1.0)])
+            .with_history_integration(HistoryIntegration::ExactStrainRamp);
+        let point = law.birth(400.0, 0.0).unwrap();
+        let original = point.clone();
+        for dt in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+            assert!(point.advance(400.0, 0.001, dt, 1e-7).is_err());
+        }
+        assert!(point.advance(299.0, 0.0, 1.0, 1e-7).is_err());
+        assert!(point.advance(400.0, 0.04, 1.0, 1e-7).is_err());
+        assert!(point.advance(400.0, 0.01, 1e-8, 1e-7).is_err());
+        assert_eq!(point, original);
     }
 }
