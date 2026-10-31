@@ -19,6 +19,9 @@ pub mod driven;
 pub mod impulse;
 pub use impulse::SourceFrictionConditions;
 
+/// Accept an admitted finite motion into original source and native slip history.
+pub mod history;
+
 use fs_tribo::tangential::elliptic::{
     EllipticCoulomb, EllipticCoulombState, SymmetricTangentialCompliance,
 };

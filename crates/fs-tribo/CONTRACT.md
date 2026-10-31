@@ -1,5 +1,11 @@
 # CONTRACT: fs-tribo
 
+## Accept independently resolved directional slip history
+
+`EllipticCoulomb::accept_resolved_slip` records an independently admitted two-component displacement in the existing native state's tangent frame. Original law identity, coefficients and material axis remain intact. It validates explicit temperature and componentwise representability, returning actual represented increments and residuals. Lost nonzero increments refuse independently of the caller's absolute length tolerance. The state has zero elastic storage and no clock; physical time, contact admissibility and objective frame transport remain with their original owners.
+
+This operation performs no force, normal-load, compliance or impulse solve and makes no work, heat, wear or pressure claim. It is specific to the existing zero-storage elliptical Coulomb state and does not authorize arbitrary internal-variable updates in other material models. Focused regressions cover reversal, frame covariance, identity and numerical-resolution refusal. Source/format review passed; these new native fixtures have not been executed under the current disk/memory block.
+
 > Status: `frankensim-ext-tribo-dry-baseline-tgbj` baseline. This is not an
 > admitted material-data result or an Euler-disc validation result.
 

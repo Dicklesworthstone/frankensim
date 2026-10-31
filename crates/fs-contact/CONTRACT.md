@@ -1,5 +1,13 @@
 # CONTRACT: fs-contact
 
+## Original source history after admitted finite contact motion
+
+`SourceThermalEllipticCoulomb::accept_postcontact_motion` accepts an independently resolved finite phase without solving another impulse, compliance or traction response. Its declared first-order quadrature uses delta-slip = h v_post and unsigned path = |h v_post|. The original source query owner replaces speed and accumulated-distance coordinates from that motion, retains each principal source's accepted path origin and pinned claims, and refreshes coefficients for the next phase. Explicit temperature/pressure conditions retain their original schema and range checks. The original native law records the same resolved slip.
+
+Independent absolute length gates check actual represented vector and source-path increments; a nonzero increment that disappears entirely refuses even with a loose tolerance. Cancellation/source/range failures publish no candidate. Input/output share the phase tangent frame, whose objective material transport belongs to the mechanical composition. The scene owns physical time. No pressure, physical contact duration, heat allocation or second mechanical response is inferred from an impulse. The caller must independently admit the finite contact path before adopting this candidate.
+
+Three native and four source regression groups cover vector reversal, unsigned travel, objective transport, source pins/origins, actual speed, representation limits and atomic refusal. Pinned rustfmt and scoped whitespace checks passed; native compilation/test execution remains blocked by the available environment's full filesystem and exhausted dependency-build memory. These new fixtures are not claimed as executed.
+
 > Status: ACTIVE (Stage 1, increment 1 — bead tqag). Capability-routed
 > body-to-body contact over certified motion.
 

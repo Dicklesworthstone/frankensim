@@ -8,6 +8,9 @@ mod driven;
 #[path = "impulse.rs"]
 mod impulse;
 
+#[path = "history.rs"]
+mod history;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::elliptic::motion::{
     MotionQueryError, MotionQuerySolve,

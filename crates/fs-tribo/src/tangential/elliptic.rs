@@ -39,6 +39,9 @@ pub mod driven;
 /// Instantaneous directional impulses without advancing physical slip history.
 pub mod impulse;
 
+/// Accept independently resolved physical slip without solving another traction.
+pub mod history;
+
 /// Constant static/kinetic principal coefficients and an initial texture axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EllipticCoulomb {
