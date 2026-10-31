@@ -198,11 +198,27 @@ differentiable lift). Pure Rust throughout.
   irradiance divides spectral intensity by this area and applies central
   Beer--Lambert attenuation once; it needs no additional cosine or index-square
   factor. Explicit grazing, footprint-area and conditioning thresholds refuse
-  unresolved caustic results. This is a local differential of one supplied ray
-  through a smooth field, not a connecting-ray search, visibility test,
-  discontinuous-interface differential, finite-pixel caustic integral or MIS
-  density. Analytic homogeneous obliquity, quadratic focusing/defocusing and
+  unresolved caustic results. This is a local differential of one supplied ray,
+  not a connecting-ray search, visibility test, finite-pixel caustic integral
+  or MIS density. Analytic homogeneous obliquity, quadratic focusing/defocusing and
   independently perturbed affine/mixed-Hessian trajectories check the result.
+  `BundleContinuation` preserves the original emission ray, wavelength and
+  launch-angle basis across smooth legs and explicit interface maps. The same
+  solver accepts arbitrary validated endpoint columns; its uniform fast path
+  advances `X` by `distance*V`. Distance, phase/group optical lengths, absorption
+  and checked work counts accumulate. The next field must match the retained
+  endpoint sample, and mapped endpoints cannot relocate the ray. Integration
+  budgets remain per leg with cumulative counts available to the path owner.
+  `bundle::interface` differentiates surface arrival, the geometric normal and
+  vector Snell/reflection laws. Both incident and transmitted phase-index
+  spatial gradients enter the ratio derivative, including equal local indices
+  with different gradients. Grazing incidence, critical transmission and
+  forbidden total-internal-reflection transmission refuse. The caller supplies
+  the admitted normal Jacobian and actual target sample at the existing hit;
+  this fixed-branch map does not find boundaries or supply Fresnel power.
+  Independent affine-index rays and tangential optical-momentum identities
+  check the gradient terms. Normal Jacobians and local integration tolerances
+  do not turn a numerical contact collar into a global derivative certificate.
 
 - `photometry::source::bundle` consumes those smooth-field angular bundles in
   the native calibrated point-source path. `PlanarIrradianceReceiver` binds a

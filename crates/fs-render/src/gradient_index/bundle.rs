@@ -1,4 +1,4 @@
-//! Differential ray tubes through one smooth, isotropic refractive field.
+//! Differential ray tubes through smooth, isotropic refractive field segments.
 //!
 //! Two derivatives with respect to orthonormal launch angles travel alongside
 //! the central ray. The field explicitly supplies its analytic spatial Hessian;
@@ -17,7 +17,10 @@
 //! It describes a plane THROUGH the integrated endpoint; it does not search
 //! for an intersection or a connecting ray. Local estimates are not global
 //! derivative certificates. Caustics and poorly conditioned/grazing projections
-//! refuse an irradiance result. Interfaces, visibility changes, field-parameter
+//! refuse an irradiance result. Validated continuation preserves the original
+//! angular coordinates across separately differentiated interface maps. This
+//! geometric owner does not supply Fresnel power weights; a physical interface
+//! consumer must retain those separately. Visibility changes, field-parameter
 //! gradients, diffraction and scalar-camera/BDPT MIS remain separate problems.
 //!
 //! Continuous-ray differentiation and the need for analytic field Hessians:
@@ -28,8 +31,14 @@
 use super::*;
 use fs_ivl::Interval;
 
+pub mod continuation;
+pub mod interface;
+pub use continuation::{
+    BundleContinuation, propagate_seeded_bundle, propagate_seeded_bundle_with_control,
+};
+
 /// Numerical semantics of smooth-field angular ray bundles.
-pub const RAY_BUNDLE_SEMANTICS_VERSION: u32 = 1;
+pub const RAY_BUNDLE_SEMANTICS_VERSION: u32 = 2;
 
 /// Analytic, symmetric spatial Hessian of phase index, in inverse square metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -289,6 +298,10 @@ pub enum BundleError {
     GrazingProjection,
     SingularProjection,
     InvalidIntensity,
+    /// A mapped endpoint changed position or violated differential invariants.
+    InvalidContinuation,
+    /// The next field does not match the optical state retained at the endpoint.
+    InitialSampleMismatch,
     NumericalRange,
 }
 impl From<GradientIndexError> for BundleError {
@@ -354,6 +367,7 @@ pub struct RayBundlePropagation {
     launch_basis: [Vec3; 2],
     propagation: GradientIndexPropagation,
     derivatives: [AngularDerivative; 2],
+    interface_events: u32,
 }
 impl RayBundlePropagation {
     pub const fn initial_ray(&self) -> Ray {
@@ -370,6 +384,11 @@ impl RayBundlePropagation {
     }
     pub const fn angular_derivatives(&self) -> [AngularDerivative; 2] {
         self.derivatives
+    }
+    /// Number of explicitly mapped discrete interfaces in this geometric path.
+    /// Their Fresnel power/polarization weights are owned by the caller.
+    pub const fn interface_events(&self) -> u32 {
+        self.interface_events
     }
 
     /// Derivatives of arrival at the plane through the EXISTING endpoint.
@@ -517,6 +536,8 @@ impl PlanarBundleProjection {
     /// intensity [W/(sr nm)] instead produces spectral irradiance [W/(m² nm)].
     /// Source intensity must belong to the retained launch and wavelength.
     /// Includes absorption once; no extra cosine or n² factor is required.
+    /// This geometric utility excludes Fresnel weights for any retained
+    /// interface events; physical interface consumers must apply those once.
     /// Multiple arrival branches add separately; this is a local ray tube,
     /// not a finite-pixel average or a diffraction-regularized caustic.
     pub fn point_source_irradiance(&self, intensity: f64) -> Result<f64, BundleError> {
@@ -592,10 +613,69 @@ pub fn propagate_bundle_with_control<F: SecondOrderIndexField + ?Sized>(
         dir: direction,
     };
     let basis = [axis, vertical];
+    let columns = basis.map(|e| AngularDerivative {
+        position_m_per_rad: Vec3::new(0.0, 0.0, 0.0),
+        direction_per_rad: e,
+    });
+    let (propagation, derivatives) = propagate_segment(
+        field,
+        BundleSegmentStart {
+            ray: launch,
+            axis,
+            columns,
+            expected_sample: None,
+        },
+        wavelength_nm,
+        distance_m,
+        options,
+        &mut control,
+    )?;
+    Ok(RayBundlePropagation {
+        initial_ray: launch,
+        wavelength_nm,
+        launch_basis: basis,
+        propagation,
+        derivatives,
+        interface_events: 0,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BundleSegmentStart {
+    ray: Ray,
+    axis: Vec3,
+    columns: [AngularDerivative; 2],
+    expected_sample: Option<GradientIndexSample>,
+}
+
+// One solver handles both fresh launch angles and arbitrary validated
+// endpoint columns. Its displacement and optical integrals remain local to
+// this segment; the continuation owner then accumulates the physical path.
+fn propagate_segment<F: SecondOrderIndexField + ?Sized>(
+    field: &F,
+    start: BundleSegmentStart,
+    wavelength_nm: f64,
+    distance_m: f64,
+    options: BundleOptions,
+    control: &mut impl FnMut() -> bool,
+) -> Result<(GradientIndexPropagation, [AngularDerivative; 2]), BundleError> {
+    options.validate()?;
+    if !distance_m.is_finite() || distance_m < 0.0 {
+        return Err(BundleError::InvalidOptions);
+    }
+    let ray = start.ray;
+    let direction = ray.dir;
+    let axis = start.axis;
     if !control() {
         return Err(GradientIndexError::Cancelled.into());
     }
     let initial = field.sample_second_order(ray.origin, wavelength_nm)?;
+    if start
+        .expected_sample
+        .is_some_and(|sample| sample != initial.optical)
+    {
+        return Err(BundleError::InitialSampleMismatch);
+    }
     if field.is_spatially_uniform() {
         if initial.optical.phase_gradient_per_m != Vec3::new(0.0, 0.0, 0.0)
             || initial.hessian != IndexHessian::ZERO
@@ -615,30 +695,35 @@ pub fn propagate_bundle_with_control<F: SecondOrderIndexField + ?Sized>(
         }
         let propagation = super::propagate(
             &ConstantSample(initial.optical),
-            launch,
+            ray,
             axis,
             wavelength_nm,
             distance_m,
             options.integration,
         )?;
-        let derivatives = basis.map(|e| AngularDerivative {
-            position_m_per_rad: e.scale(distance_m),
-            direction_per_rad: e,
+        let derivatives = start.columns.map(|column| AngularDerivative {
+            position_m_per_rad: sub(
+                column.position_m_per_rad,
+                column.direction_per_rad.scale(-distance_m),
+            ),
+            direction_per_rad: column.direction_per_rad,
         });
-        return Ok(RayBundlePropagation {
-            initial_ray: launch,
-            wavelength_nm,
-            launch_basis: basis,
-            propagation,
-            derivatives,
-        });
+        if derivatives
+            .iter()
+            .any(|column| !finite_vec(column.position_m_per_rad))
+        {
+            return Err(BundleError::NumericalRange);
+        }
+        return Ok((propagation, derivatives));
     }
     let track_group = initial.optical.group_index.is_some();
     let mut state = [0.0; 24];
     write_vec(&mut state, 3, direction);
     write_vec(&mut state, 6, axis);
-    write_vec(&mut state, 15, axis);
-    write_vec(&mut state, 21, vertical);
+    for (i, column) in start.columns.iter().enumerate() {
+        write_vec(&mut state, 12 + 6 * i, column.position_m_per_rad);
+        write_vec(&mut state, 15 + 6 * i, column.direction_per_rad);
+    }
     let mut jet = initial;
     let mut derivative = bundle_rhs(&state, jet, track_group)?;
     let mut distance = 0.0;
@@ -722,13 +807,7 @@ pub fn propagate_bundle_with_control<F: SecondOrderIndexField + ?Sized>(
         position_m_per_rad: read_vec(&state, 12 + 6 * i),
         direction_per_rad: read_vec(&state, 15 + 6 * i),
     });
-    Ok(RayBundlePropagation {
-        initial_ray: launch,
-        wavelength_nm,
-        launch_basis: basis,
-        propagation,
-        derivatives,
-    })
+    Ok((propagation, derivatives))
 }
 
 type BundleState = [f64; 24];
