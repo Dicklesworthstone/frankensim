@@ -18,6 +18,7 @@ use super::{
     assemble_circuit_with_mutual_inductance,
 };
 use crate::{QuadraticStorage, Storage, linear_exact::QuadraticPart};
+use std::sync::Arc;
 
 /// Maximum retained knots per capacitor, bounding each crossed-segment sum.
 pub const MAX_CAPACITOR_KNOTS: usize = 4096;
@@ -41,11 +42,13 @@ fn finite(value: f64) -> Result<f64, CircuitError> {
 /// An explicit (0,0) knot sets the uncharged minimum of this reversible energy.
 /// Both polarities need support so an initially uncharged element admits the
 /// original centered Newton probes. Asymmetry between polarities is allowed.
+/// Prepared knots, slopes and energies are immutable and shared across clones,
+/// so material/thermal circuit trials do not copy the constitutive tables.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CapacitorChargeCurve {
-    knots: Vec<(f64, f64)>,
-    inverse_capacitance: Vec<f64>,
-    energy_at_knots: Vec<f64>,
+    knots: Arc<[(f64, f64)]>,
+    inverse_capacitance: Arc<[f64]>,
+    energy_at_knots: Arc<[f64]>,
 }
 
 impl CapacitorChargeCurve {
@@ -103,9 +106,9 @@ impl CapacitorChargeCurve {
             }
         }
         Ok(Self {
-            knots,
-            inverse_capacitance,
-            energy_at_knots,
+            knots: knots.into(),
+            inverse_capacitance: inverse_capacitance.into(),
+            energy_at_knots: energy_at_knots.into(),
         })
     }
 

@@ -1463,30 +1463,68 @@ pub fn step_descriptor(
     // be admitted against a volt-sized node scale. No uncertain constitutive
     // gradient enters these rows, so their original evaluated operands give
     // a componentwise roundoff floor.
-    let direct_rows: Vec<usize> = (0..n).filter(|&row| {
+    let direct_rows: Vec<bool> = (0..n).map(|row| {
         (0..n_d).all(|col| sys.j[row * n + col] == 0.0 && sys.r[row * n + col] == 0.0)
     }).collect();
-    let continuity = |x: &[f64], dg: &[f64], res: &[f64], iterations, stagnant_iterations|
+    let mut storage_endpoint = x0.to_vec();
+    let mut storage_midpoint = x0.to_vec();
+    let mut continuity = |x: &[f64], dg: &[f64], res: &[f64], iterations, stagnant_iterations|
         -> Option<(f64, f64, SolveCertificate)> {
+        storage_endpoint[..n_d].copy_from_slice(&x[..n_d]);
+        storage_endpoint[n_d..].copy_from_slice(&x0[n_d..]);
+        for i in 0..n_d {
+            storage_midpoint[i] = f64::midpoint(x0[i], x[i]);
+        }
+        // An analytic remainder removes the raw endpoint-energy quotient's
+        // cancellation noise. Constitutive rows can then retain their OWN
+        // evaluated effort/flow scales too. This arithmetic certificate is
+        // conditional on the storage callbacks, not a bound on model error or
+        // on cancellation inside an independently supplied analytic gradient.
+        let analytic_remainder = sys.storage
+            .midpoint_energy_remainder(x0, &storage_endpoint, &storage_midpoint)
+            .filter(|value| value.is_finite());
+        let mut correction = 0.0;
+        if let Some(remainder) = analytic_remainder {
+            // The endpoint scratch is free after evaluating the remainder.
+            // Keep both original DG operands in the arithmetic envelope: a
+            // nearly cancelled final effort alone loses their roundoff scale.
+            storage_endpoint.fill(0.0);
+            sys.storage.gradient(&storage_midpoint, &mut storage_endpoint);
+            let mut length2 = 0.0;
+            for i in 0..n_d {
+                let change = x[i] - x0[i];
+                length2 += change * change;
+            }
+            if length2 > 0.0 && length2.is_finite() {
+                correction = remainder / length2;
+            }
+            if !correction.is_finite()
+                || storage_endpoint.iter().any(|value| !value.is_finite()) { return None; }
+        }
         let mut relative = 0.0_f64;
         let mut worst_score = 0.0_f64;
         let mut worst_certificate = SolveBudget::default().certificate(
             NewtonSite::Descriptor, 0.0, 1.0, 0.0, iterations, stagnant_iterations)
             .with_rounding_allowance();
-        for &row in &direct_rows {
+        for row in 0..n {
+            if !direct_rows[row] && analytic_remainder.is_none() { continue; }
             let factor = if row < n_d { dt } else { 1.0 };
             let mut magnitude = factor * gu[row].abs()
                 + if row < n_d { x0[row].abs() + x[row].abs() } else { 0.0 };
             let mut rounding_magnitude = magnitude;
-            for col in n_d..n {
+            for col in 0..n {
                 let coefficient = factor
                     * (sys.j[row * n + col].abs() + sys.r[row * n + col].abs());
+                if coefficient == 0.0 { continue; }
                 magnitude += coefficient * dg[col].abs();
                 // Opposite multiplier endpoints can have an almost-zero
                 // midpoint. Its attainable resolution still depends on those
                 // SAME coupled endpoints, not on unrelated voltages/currents.
-                rounding_magnitude += coefficient
-                    * (0.5 * x0[col].abs() + 0.5 * x[col].abs());
+                rounding_magnitude += coefficient * if col < n_d {
+                    storage_endpoint[col].abs() + (correction * (x[col] - x0[col])).abs()
+                } else {
+                    0.5 * x0[col].abs() + 0.5 * x[col].abs()
+                };
             }
             if !magnitude.is_finite() || !rounding_magnitude.is_finite() { return None; }
             if magnitude > 0.0 {
@@ -1541,7 +1579,7 @@ pub fn step_descriptor(
         let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
         let (coordinate_residual, coordinate_score, _) = continuity(&x1, &dg, &res, iters, stagnant)
             .ok_or(PhsError::DescriptorDomain {
-                what: "direct descriptor row residual scale is nonfinite",
+                what: "descriptor row residual scale is nonfinite",
             })?;
         let score = (rnorm / scale / NEWTON_TOL).max(coordinate_score);
         let improved = best.as_ref().is_none_or(|(_, b)| score < *b);
@@ -1568,7 +1606,7 @@ pub fn step_descriptor(
                 NewtonSite::Descriptor, brnorm, scale, floor, iters, stagnant).with_rounding_allowance())?;
             let (_, _, certificate) = continuity(&bx, &dg, &res, iters, stagnant)
                 .ok_or(PhsError::DescriptorDomain {
-                    what: "direct descriptor row residual scale is nonfinite",
+                    what: "descriptor row residual scale is nonfinite",
                 })?;
             // The row with the largest residual/allowance ratio controls
             // admission; its certificate retains that row's physical units.
@@ -1732,7 +1770,7 @@ pub fn step_descriptor(
     )?;
     let (_, _, certificate) = continuity(&x1, &dg, &res, iters, stagnant)
         .ok_or(PhsError::DescriptorDomain {
-            what: "accepted direct descriptor row residual scale is nonfinite",
+            what: "accepted descriptor row residual scale is nonfinite",
         })?;
     admit_default_newton_iterate(certificate)?;
     Ok(StepRecord {
@@ -1797,18 +1835,25 @@ fn discrete_gradient_into_prefix_unchecked(
         dx_norm_sq += dx * dx;
         mid_dot += dg[i] * dx;
     }
-    // Cancellation guard (review finding): for |dx| below the roundoff
-    // scale the correction quotient amplifies eps*|H|/|dx| without
-    // bound; grad(mid) is already exact to available precision there.
-    let state_scale = a[..n_diff]
-        .iter()
-        .chain(b[..n_diff].iter())
-        .fold(f64::MIN_POSITIVE, |acc, &v| acc.max(v.abs()));
-    let dx_floor = 1.0e-14 * state_scale;
-    if dx_norm_sq > dx_floor * dx_floor {
-        let remainder = storage
-            .midpoint_energy_remainder(a, b, mid)
-            .unwrap_or_else(|| storage.hamiltonian(b) - storage.hamiltonian(a) - mid_dot);
+    if dx_norm_sq > 0.0 && dx_norm_sq.is_finite() {
+        let remainder = if let Some(remainder) = storage.midpoint_energy_remainder(a, b, mid) {
+            // An analytic constitutive remainder has no large endpoint-energy
+            // subtraction. A stationary biased branch must not suppress the
+            // correction for another branch's resolved small charge change.
+            remainder
+        } else {
+            // Raw endpoint subtraction needs the cancellation guard: below
+            // this scale its quotient amplifies eps*|H|/|dx| without bound.
+            let state_scale = a[..n_diff]
+                .iter()
+                .chain(b[..n_diff].iter())
+                .fold(f64::MIN_POSITIVE, |acc, &v| acc.max(v.abs()));
+            let dx_floor = 1.0e-14 * state_scale;
+            if dx_norm_sq <= dx_floor * dx_floor {
+                return;
+            }
+            storage.hamiltonian(b) - storage.hamiltonian(a) - mid_dot
+        };
         let corr = remainder / dx_norm_sq;
         for i in 0..n_diff {
             dg[i] += corr * (b[i] - a[i]);

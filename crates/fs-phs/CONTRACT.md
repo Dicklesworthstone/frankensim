@@ -1214,3 +1214,21 @@ authority, interpolation-error bound, extrapolation, absorption, leakage,
 hysteresis, breakdown, temperature evolution or switching behavior.
 `MaterialCircuit` thermal/material rebuilds do not yet retain these nonlinear
 bindings; the native `CircuitDae` API is their current integration boundary.
+
+Cancellation-stable analytic midpoint remainders are applied for every finite,
+nonzero represented squared increment. A large stationary coordinate cannot
+suppress the energy correction for a separate picofarad capacitor crossing a
+knot. The existing state-scale guard still protects the fallback that subtracts
+raw endpoint energies. Neither path invents a correction for an unrepresentable
+or zero squared increment.
+
+For storage supplying a finite analytic midpoint remainder, descriptor
+constitutive rows also receive componentwise residual admission in their own
+physical units. An unrelated stored bias cannot relax a small branch's voltage
+law. Arithmetic floors retain the separate midpoint-gradient and Gonzalez
+correction magnitudes before cancellation, plus the original coupled multiplier
+endpoints. This certifies evaluated residual arithmetic conditional on the
+storage callbacks; it does not bound constitutive model error or arithmetic
+hidden inside an independently supplied analytic callback. Owners using raw
+endpoint subtraction retain the original direct-row policy. The prepared
+analytic Jacobian uses the same correction admission as the canonical residual.

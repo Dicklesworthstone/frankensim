@@ -26,16 +26,20 @@ impl StepWorkspace {
         let scale = x0.iter().chain(&self.x)
             .fold(f64::MIN_POSITIVE, |s, &x| s.max(x.abs()));
         let floor = 1.0e-14 * scale;
-        // Exactly the same cancellation guard as the canonical DG kernel.
-        let corrected = length2 > floor*floor;
+        // Exactly the same admission as the canonical DG kernel: an analytic
+        // numerator has no raw endpoint subtraction and needs no bias guard.
+        let represented_increment = length2 > 0.0 && length2.is_finite();
+        let remainder = if represented_increment {
+            sys.storage.midpoint_energy_remainder(x0, &self.x, &self.midpoint)
+        } else { None };
+        let corrected = represented_increment && (remainder.is_some() || length2 > floor*floor);
         let alpha = if corrected {
             self.minus.fill(0.0);
             sys.storage.gradient(&self.x, &mut self.minus);
             norm(&self.minus)?;
             let mid_dot = self.effort.iter().zip(&self.delta).map(|(g,d)| g*d).sum::<f64>();
             // Same cancellation-stable numerator as the canonical residual.
-            sys.storage.midpoint_energy_remainder(x0, &self.x, &self.midpoint)
-                .unwrap_or_else(|| sys.hamiltonian(&self.x) - sys.hamiltonian(x0) - mid_dot) / length2
+            remainder.unwrap_or_else(|| sys.hamiltonian(&self.x) - sys.hamiltonian(x0) - mid_dot) / length2
         } else { 0.0 };
         norm(&[length2, alpha])?;
         if dissipation.is_some() {

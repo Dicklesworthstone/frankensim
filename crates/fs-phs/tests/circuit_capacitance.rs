@@ -153,6 +153,66 @@ fn uncharged_small_capacitors_use_the_actual_finite_charge_support() {
 }
 
 #[test]
+fn picofarad_knot_crossing_keeps_local_accuracy_beside_a_large_held_bias() {
+    let scale = 1e-12;
+    let law = CapacitorChargeCurve::try_new(vec![
+        (-4.0 * scale, -13.0),
+        (-scale, -1.0),
+        (0.0, 0.0),
+        (scale, 1.0),
+        (4.0 * scale, 13.0),
+    ])
+    .unwrap();
+    let graph = CircuitGraph {
+        node_count: 3,
+        branches: vec![
+            (1, 0, Branch::Capacitor { farads: 1.0 }),
+            (1, 0, Branch::VoltageSource { port: 0 }),
+            (2, 0, Branch::Capacitor { farads: scale }),
+            (2, 0, Branch::Resistor { ohms: 1e6 }),
+        ],
+        transformers: vec![],
+    };
+    let dae = assemble_circuit_with_capacitor_curves(
+        &graph,
+        &[CapacitorCurve {
+            branch: 2,
+            curve: law,
+        }],
+        &[],
+    )
+    .unwrap();
+    let mut x = vec![0.0; dae.system.state_dim()];
+    x[dae.charge_index[0]] = 1e8;
+    x[dae.charge_index[1]] = 2.0 * scale;
+    let (record, _) = dae.step_audited(&x, &[1e8], 0.5e-6).unwrap();
+
+    // V(z)=z below the knot and V(z)=4z-3 above it, z=q/scale.
+    // H(2)/scale=3.5. Combining the exact voltage integral with RC
+    // continuity gives 5*z1^2-16*z1+9=0 across this single crossing.
+    let expected_charge = (8.0 - 19.0_f64.sqrt()) / 5.0;
+    assert!(expected_charge > 0.0 && expected_charge < 1.0);
+    near(
+        record.x[dae.charge_index[1]],
+        scale * expected_charge,
+        1e-24,
+    );
+    assert_eq!(
+        record.x[dae.charge_index[0]].to_bits(),
+        x[dae.charge_index[0]].to_bits()
+    );
+    assert_eq!(
+        dae.system.hamiltonian(&x),
+        dae.system.hamiltonian(&record.x)
+    );
+    let expected_change = scale * (0.5 * expected_charge * expected_charge - 3.5);
+    near(record.delta_h, expected_change, 1e-23);
+    near(record.dissipated, -expected_change, 1e-22);
+    near(record.supplied, 0.0, 0.0);
+    near(record.balance_residual(), 0.0, 1e-22);
+}
+
+#[test]
 fn nonlinear_lc_oscillates_across_both_polarities_without_artificial_loss() {
     let graph = CircuitGraph {
         node_count: 2,
