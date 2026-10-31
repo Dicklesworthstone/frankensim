@@ -6792,3 +6792,44 @@ transfer history or establish a temperature-dependent energy law. Static
 recovery, time-dependent creep, finite strain, damage and experimentally
 calibrated ratcheting or fatigue life remain outside this implementation.
 
+
+
+## Nonideal aqueous thermodynamics and finite-bath Donnan equilibrium
+
+`osmosis::nonideal::VirialSolutionModel` prepares an explicit, bounded,
+isothermal free energy on solvent-volume concentrations. The symmetric input
+matrix B [m³/mol] enters `F_mix/(RT V) = sum(c_i*(ln(c_i/c_ref)-1)) + c^T B c/2`;
+the conventional osmotic second-virial matrix is B/2. Pressure, water activity,
+solute chemical potentials, their Jacobian and dilution stiffness derive from
+that same potential. Native Cholesky certifies a numerically convex declared
+concentration box at preparation. Coefficients, concentration support, species
+ordering and fixed temperature are caller supplied; none establish experimental
+material authority. Exact absent species have finite solvent thermodynamics;
+singular solute logarithms/derivatives return named refusals, never floors.
+
+`osmosis::AqueousSolution` retains the original finite inventory with either
+ideal thermodynamics or an immutable shared virial model. Trial pressure and
+atomic inventory replacement allocate nothing. Existing ideal inventories
+convert directly. Owned volume replacement copies the amount array. Consumers
+must use the selected model's activity/pressure consistently: a fully retaining
+membrane or vapor-equilibrium boundary is supported, while the existing ideal
+leaky membrane and Fick film laws are not silently made nonideal.
+
+`osmosis::donnan::IdealDonnan` solves ideal, fast-ion electrochemical equilibrium
+in two finite baths. Every mobile ion's total moles are conserved; fixed charge
+is supplied separately in mol of elementary-charge equivalents. Independent
+trapped osmotic particles are distinct from fixed charge. Both baths must admit
+electroneutrality without fabricated counterions. Equal valences share a
+monotone scalar solve, with stable minority partitions, bounded work and
+cancellation. Counterion-only endpoints return typed infinite-potential limits
+with finite physical inventories and pressure. Both output arrays publish
+atomically. The report includes full ionic-plus-trapped pressure, charge
+residuals and a nonnegative water-transfer stiffness when representable.
+
+These are separate admissible constitutive closures. Ideal Donnan partition
+must not be mixed with a nonideal pressure correction alone. Neither owner
+supplies association, precipitation, double-layer storage, imposed currents,
+transient Nernst--Planck transport or solute partial-volume corrections. Focused
+native regressions exercise thermodynamic derivatives, convexity including the
+64-species blocked factorization, analytical finite-bath partitions, multivalent
+charge balance, salt-free limits, free-energy minimization and atomic refusals.

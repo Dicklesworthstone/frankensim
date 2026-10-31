@@ -1,15 +1,18 @@
-//! Shared isothermal dilute-solution thermodynamics and selective membranes.
+//! Shared isothermal aqueous thermodynamics and selective membranes.
 //!
 //! Concentrations count independent dissolved particles in mol/m³: a millimolar
 //! concentration is 1 mol/m³, and an already enumerated ion is not dissociated a
 //! second time. The solvent is incompressible with an explicitly supplied
-//! partial molar volume. Solute partial volumes, ion reactions, Donnan/electric
-//! potentials and temperature differences are not modeled here. Optional
-//! external concentration polarization is provided by [`polarization`].
+//! partial molar volume. [`aqueous::AqueousSolution`] keeps finite inventories
+//! with either the ideal law or the consistent free energy in [`nonideal`].
+//! [`donnan`] separately supplies finite-bath, ideal ionic equilibrium; it must
+//! not be combined with a nonideal pressure correction alone. Solute partial
+//! volumes, ion reactions and temperature differences are not modeled. Optional
+//! steady concentration polarization is provided by [`polarization`].
 //! Coefficients need their own measured
 //! applicability; raw numerical constructors do not confer material authority.
 //!
-//! Positive flux is left to right. The common law is
+//! Positive flux is left to right. The ideal selective membrane law is
 //! `Jv = Lp (p_left - p_right - RT sum(sigma_i (c_left_i - c_right_i)))`.
 //! Solute transport integrates the constant-coefficient Spiegler–Kedem equation
 //! through the membrane, retaining both diffusion and solvent drag at arbitrary
@@ -27,6 +30,14 @@ use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 /// Exact steady diffusive films coupled to the original selective membrane.
 pub mod polarization;
+
+/// Thermodynamically consistent finite-domain solution interactions.
+pub mod nonideal;
+/// Shared finite aqueous inventories with their selected thermodynamics.
+pub mod aqueous;
+pub use aqueous::AqueousSolution;
+/// Finite-bath ideal ionic partition with fixed charge and explicit trapped particles.
+pub mod donnan;
 
 /// Bounded independent-solute layout; an empty layout represents pure solvent.
 pub const MAX_OSMOTIC_SOLUTES: usize = 64;
@@ -47,6 +58,8 @@ pub enum OsmosisError {
     Arithmetic(&'static str),
     /// The original fluid owner refused its transport snapshot.
     Fluid(crate::MaterialError),
+    /// Nonideal thermodynamics refused its declared concentration support.
+    Nonideal(nonideal::NonidealSolutionError),
 }
 
 impl core::fmt::Display for OsmosisError {
@@ -55,6 +68,12 @@ impl core::fmt::Display for OsmosisError {
     }
 }
 impl std::error::Error for OsmosisError {}
+
+impl From<nonideal::NonidealSolutionError> for OsmosisError {
+    fn from(value: nonideal::NonidealSolutionError) -> Self {
+        Self::Nonideal(value)
+    }
+}
 
 type Result<T> = core::result::Result<T, OsmosisError>;
 
