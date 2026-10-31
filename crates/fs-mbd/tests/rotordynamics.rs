@@ -1,6 +1,6 @@
 //! Independent Jeffcott, gyroscopic, full-coordinate and work references.
 use fs_math::c64::C64;
-use fs_mbd::rotordynamics::{MAX_CAMPBELL_SAMPLES, MAX_ROTOR_DOFS, RotorBearingModel, RotorError};
+use fs_mbd::rotordynamics::{MAX_CAMPBELL_SAMPLES, MAX_ROTOR_DOFS, MAX_STABILITY_BISECTIONS, RotorBearingModel, RotorError};
 use std::cell::Cell;
 
 fn near(a: f64, b: f64, tolerance: f64) {
@@ -282,6 +282,95 @@ fn fixed_coefficient_campbell_samples_preserve_order_and_cancel_without_partial_
             .harmonic_response(1.3, &force, 1e-12, || false)
             .unwrap()
     );
+}
+
+#[test]
+fn stability_transition_bracket_matches_exact_cross_coupled_marginal_speed() {
+    // K = k I + q J and G = g J. In the +i circular subspace:
+    // s^2 + (c + i Omega g)s + (k + i q)=0.
+    // With c=.5, g=1, k=5, q=-1, s=i*2 is exactly marginal at
+    // Omega=(k-omega^2)/(g*omega)=0.5 rad/s.
+    let model = RotorBearingModel::new(
+        2,
+        &[1.0, 0.0, 0.0, 1.0],
+        &[0.5, 0.0, 0.0, 0.5],
+        &[5.0, 1.0, -1.0, 5.0],
+        &[0.0, -1.0, 1.0, 0.0],
+        || false,
+    )
+    .unwrap();
+    let stable = model
+        .at_speed(0.0, || false)
+        .unwrap()
+        .spectral_abscissa(|| false)
+        .unwrap();
+    let unstable = model
+        .at_speed(1.0, || false)
+        .unwrap()
+        .spectral_abscissa(|| false)
+        .unwrap();
+    assert!(stable < 0.0, "{stable:e}");
+    assert!(unstable > 0.0, "{unstable:e}");
+
+    let brackets = model
+        .stability_transition_brackets(&[0.0, 1.0], 1e-9, 64, || false)
+        .unwrap();
+    assert_eq!(brackets.len(), 1);
+    let bracket = &brackets[0];
+    assert!(bracket.lower_spin_rad_s <= 0.5 && bracket.upper_spin_rad_s >= 0.5);
+    assert!(bracket.upper_spin_rad_s - bracket.lower_spin_rad_s <= 1e-9);
+    assert!(
+        bracket.lower_spectral_abscissa_per_s <= 0.0
+            && bracket.upper_spectral_abscissa_per_s >= 0.0,
+        "{bracket:?}"
+    );
+    assert!(bracket.bisections <= 31);
+
+    // A nonsingular coordinate congruence q=Tz cannot change the physical
+    // poles or the isolated stability speed.
+    let transformed = RotorBearingModel::new(
+        2,
+        &[4.0, 2.0, 2.0, 10.0],
+        &[2.0, 1.0, 1.0, 5.0],
+        &[20.0, 14.0, 6.0, 44.0],
+        &[0.0, -6.0, 6.0, 0.0],
+        || false,
+    )
+    .unwrap();
+    let other = transformed
+        .stability_transition_brackets(&[0.0, 1.0], 1e-9, 64, || false)
+        .unwrap();
+    assert_eq!(other.len(), 1);
+    assert!(
+        other[0].lower_spin_rad_s <= 0.5 && other[0].upper_spin_rad_s >= 0.5,
+        "{other:?}"
+    );
+    assert!(
+        (other[0].lower_spin_rad_s - bracket.lower_spin_rad_s).abs() <= 1e-9
+            && (other[0].upper_spin_rad_s - bracket.upper_spin_rad_s).abs() <= 1e-9
+    );
+}
+
+#[test]
+fn stability_transition_search_is_bounded_ordered_and_cancellable() {
+    let model = isotropic(1.0, 0.05, 4.0, 0.4);
+    assert!(model
+        .stability_transition_brackets(&[0.0, 1.0], 1e-6, MAX_STABILITY_BISECTIONS, || false)
+        .unwrap()
+        .is_empty());
+    assert!(model
+        .stability_transition_brackets(&[1.0, 0.0], 1e-6, 10, || false)
+        .is_err());
+    assert!(model
+        .stability_transition_brackets(&[0.0, 1.0], 0.0, 10, || false)
+        .is_err());
+    assert!(model
+        .stability_transition_brackets(&[0.0, 1.0], 1e-6, 0, || false)
+        .is_err());
+    assert!(matches!(
+        model.stability_transition_brackets(&[0.0, 1.0], 1e-6, 10, || true),
+        Err(RotorError::Cancelled)
+    ));
 }
 
 #[test]
