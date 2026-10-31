@@ -44,6 +44,8 @@ pub mod salisbury;
 pub mod sphere_pair;
 /// Ballistic sphere/plane impacts, sustained support, sliding, and rolling.
 pub mod sphere_plane;
+/// World-held torques and forces at rotating material points.
+pub mod spatial_loads;
 /// Coupled finite-patch friction on native rigid-body momenta.
 pub mod tangential_friction;
 pub mod tri_wheel_cluster;

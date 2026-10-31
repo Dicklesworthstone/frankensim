@@ -1210,13 +1210,13 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   positions plus canonical `fs-ga::So3` frames updated
   MULTIPLICATIVELY through body/right group operations; strains Γ = Rᵀr′ − e₁ and
   κ = Log(Rᵢ⁻¹Rᵢ₊₁)/L₀ from RELATIVE quantities (rigid motions give
-  exactly zero strain — energy-invariance battery). Statics: FD
+  exactly zero strain — energy-invariance battery). Statics: analytical native
   residual/tangent Newton with residual backtracking and load
   stepping, fixture-gated; fixture slenderness matters — a
   penalty-stiff EA puts a quadratic spurious-stretch wall around
   every Newton iterate (measured, documented in the battery).
-  Analytic tangents and SE(3) DYNAMICS under fs-time symplectic
-  integrators are recorded successor scope.
+  Arbitrary energy callbacks retain an element-local finite-difference fallback;
+  SE(3) dynamics under fs-time integrators remain successor scope.
 - `fiber` (bead tfz.14): fiber sections over fs-material `Uniaxial`
   cards (Menegotto–Pinto steel; Mander concrete with the
   compression-positive convention flipped at the section boundary);
@@ -1585,6 +1585,34 @@ No-claims (`plastic3`): small strain and rotation; rate independence;
 constant-strain tetrahedra lock under confined plastic incompressibility
 (confined limit loads are over-predicted; no B-bar/mixed formulation); dead
 loads; no limit-load continuation; no mesh-convergence claim.
+
+### Rod couples held in laboratory coordinates
+
+`rod::WorldTipLoad` declares a world-held tip force in newtons and a free couple
+about that moving tip in newton metres. `Rod`, `MaterialRod` and
+`SpatialMaterialRod::solve_static_world` use the original energy, Lie-group
+Newton, load stepping and residual backtracking. Each trial evaluates
+`M_body = R_tip^T M_world`; the exact external contribution to the body/right
+residual tangent is `-hat(M_body)`. It is included alongside both native
+analytical internal tangents and the arbitrary-energy finite-difference fallback.
+The constant couple is not replaced by the gradient of `-M dot Log(R)`.
+
+`TipLoad` continues to express a world-held force plus a body-held follower
+couple. These are distinct physical load laws when a tip turns. World loading
+composes with the existing source-resolved shear/torsional stiffness, spatial
+materials, thermal sections, intrinsic geometry, gravity, tensile links and
+fixed supports. `support_reactions_world` uses the identical load transform at
+the accepted pose. The material owners retain atomic publication, source
+admission and existing cancellation boundaries; no separate rod solver,
+material averaging or load-induced change of reference mass is introduced.
+
+G1/G3 tests check the load tangent against independent rotation differences,
+laboratory-frame covariance, actual whole-rod force/torque balance after finite
+bending, distinction from follower loading, fixed-support frame conversion,
+source-bound torsional compliance and temperature-dependent shear modulus.
+These remain bounded static equilibrium results. A residual is not a stability
+or continuum-error certificate; no dynamic trajectory, accumulated torque work,
+general conservative torque potential or material calibration is claimed.
 
 ### Intrinsically curved material rods
 
@@ -2560,3 +2588,4 @@ Complete unloading in the native frame iteration retains its independent
 compatibility and relative force checks while admitting a local constitutive
 roundoff floor derived from section tangent and strain. This avoids rejecting
 a physically equilibrated permanent bend solely because endpoint load is zero.
+

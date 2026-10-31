@@ -510,6 +510,50 @@ a dynamic, contact, grasp-stability, or force-closure result.
 
 ## Rigid dynamics in arbitrary body coordinates
 
+### Spatial torques and forces on moving material points
+
+`spatial_loads::PreparedSpatialLoads` combines the original `Wrench` (world
+COM force and body-held free couple), an independently world-held free couple,
+and world forces at fixed body material points. The latter produce
+`sum (R r) cross F`; their moment is reevaluated at the actual attitude.
+The declared body coordinates, original full inertia and center-of-mass
+reference are shared with `RigidBodyState`, not replaced by a new state owner.
+
+Preparation is a deterministic compensated O(points) reduction to the force
+resultant and three first-moment vectors, with constant storage and no heap
+allocation. At most 16,384 points are admitted; cancellation is checked before
+work, every 64 points and before return. All input vectors, moment products and
+reductions must be finite and representable. A compiled load can be reused at
+any body attitude; both moment evaluation and each subsequent step have
+constant work independent of the number of input points. This is an algorithmic
+complexity statement, not a machine-specific performance measurement.
+
+`RigidBodyIntegrator::step_spatial` delegates its endpoint momentum half-kicks
+and Hamiltonian free-rotation map to the original `step_verlet_with` owner.
+It applies gravity once at the COM
+and integrates the constant resultant force exactly. A pure world-held couple
+obeys `R1 L1 - R0 L0 = dt tau_world` to roundoff; body couples and point forces
+contribute their endpoint spatial moments. The receipt reports actual linear
+and total angular momentum change minus that applied impulse, including the
+orbital moment of force about the world origin.
+
+Held point-force work is reconstructed from actual endpoint point displacement,
+using the same first moments. Free-couple work uses the two kick power
+quadratures, with the original full inverse inertia. Mechanical-energy change
+minus these work terms remains an explicit numerical defect, never heat or
+physical damping. The held-load composition is second order; exact forced
+energy preservation is not claimed. Conservative point forces retain the
+Hamiltonian split. State-dependent drag, springs, contacts, changing fields or
+deforming attachments require their own stage evaluation and are not modeled
+by freezing a prepared load. `advance_spatial` commits only complete accepted
+steps and checks cancellation at each whole-step boundary.
+
+Focused G0/G1/G3 regressions in `tests/spatial_loads.rs` exercise world angular
+impulse, exact axial forcing, direct point-moment/work reconstruction,
+full-inertia coordinate changes, refinement and atomic refusal/cancellation.
+
+### Shared full-inertia representation
+
 The native `MassProperties` and `RigidBodyState` owners now accept fixed full
 COM inertia tensors while keeping geometry, contact arms, body torques and
 angular momentum in the caller's declared body coordinates. Known principal
