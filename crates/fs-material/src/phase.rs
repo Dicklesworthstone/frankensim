@@ -1188,7 +1188,15 @@ impl EquilibriumEnthalpyPhaseCurve {
         Ok(self.state_from_values(specific_enthalpy_j_kg, values))
     }
 
-    fn values_at_specific_enthalpy(
+    /// Evaluate the original numeric caloric state without constructing an identity.
+    ///
+    /// Constitutive consumers can share this exact temperature, liquid mass
+    /// fraction and density interpolation in nonlinear trials without hashing
+    /// a new `EquilibriumPhaseState`. The returned knot is an evaluated sample,
+    /// not an additional source knot or an independently selected material.
+    /// Domain and density-representability refusals are unchanged from
+    /// [`Self::state_at_specific_enthalpy`]. This operation allocates nothing.
+    pub fn values_at_specific_enthalpy(
         &self,
         specific_enthalpy_j_kg: f64,
     ) -> Result<EnthalpyPhaseKnot, PhaseStateError> {

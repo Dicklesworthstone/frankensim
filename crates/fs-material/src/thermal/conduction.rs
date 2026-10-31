@@ -21,3 +21,5 @@ pub use geometry::LayerGeometry;
 pub mod network;
 /// Source-qualified preparation on an original pure-phase caloric branch.
 pub mod source;
+/// Source-bound conductivity through sensible branches and latent plateaus.
+pub mod phase;

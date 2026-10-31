@@ -8254,3 +8254,35 @@ Validation for this increment: all 56 focused creep/material regressions,
 including the five expansion cases, compiled, linked and executed successfully
 with the pinned compiler and genuine dependency libraries. This was an exact-source
 material-owner assembly, not a Cargo workspace acceptance gate.
+
+### Source-bound conductivity through latent phase change
+
+`thermal::conduction::phase::PreparedPhaseConductivity` binds one selected
+scalar static conductivity claim to an explicit enthalpy interval of the original
+borrowed `EquilibriumEnthalpyPhaseCurve`. Pure-phase temperature paths and
+isothermal liquid-mass-fraction paths use the canonical source-line evaluator;
+every original source crossing and caloric knot is retained. The initial claim
+is pinned throughout. Caloric and conductivity sources share the same material
+card and fixed external conditions. An evolving fraction requires a declared
+fraction axis, even for a phase-independent conductivity source.
+
+The compiled law implements the native `ConductivityLaw` and
+`ImplicitConductionLaw`, including nonzero `dk/dh` on a plateau where `dT/dh=0`.
+Interior breakpoints use right derivatives and the admitted upper bound uses
+left derivatives. The caloric owner's public numeric sample supplies unchanged
+temperature, fraction and density without constructing a state identity. Runtime
+evaluation allocates nothing and performs no source query or hashing. Original
+source lines retain their receipts; compiled samples are numerical responses,
+not new measurements. A combined knot cap bounds preparation, with cancellation
+around source queries and during copying. Typed source/caloric failures remain
+available; native thermal traits retain their `MaterialDomain` refusal contract.
+
+The existing explicit observer and implicit chain/graph own storage, heat flux,
+time stepping and acceptance. No phase mixing rule, liquid fluid properties,
+reference-mass update or second thermal solver is introduced. Simultaneous T
+and fraction variation, sensible transport at a fixed mixed fraction, negative
+conductivity and unsupported source paths refuse. Explicit zero insulation is
+admitted only with the zero tangent required by the native implicit owner.
+Constitutive regressions cover source crossings, one-sided tangents, original
+caloric values, insulation, source/domain refusals and cancelled preparation;
+cross-owner latent transport and contact tests live in `fs-couple`.
