@@ -24,6 +24,7 @@
 //! ISAs).
 
 pub mod affine;
+pub mod angle;
 pub mod expansion;
 pub mod formal_binding;
 pub mod formal_manifest;
