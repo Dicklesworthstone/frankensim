@@ -3,18 +3,23 @@
 //! The existing section inversion, member compatibility, global Newton solve and
 //! backtracking remain the mechanical owners. Every trial uses accepted fiber
 //! history. Work is integrated with the original fiber areas, Lobatto weights
-//! and reference lengths; only physical creep/plastic loss is available as heat.
+//! and reference lengths. Physical creep/plastic loss, thermoelastic storage,
+//! and signed reciprocal heat remain distinct.
 //!
-//! This checked path admits linear geometry, stationary supports and exclusively
-//! Norton or joint Norton/J2 fibers. It has no inertial or reciprocal thermal
-//! evolution. Temperature may be prescribed through original source-bound laws
-//! between intervals.
+//! This checked path admits linear geometry, stationary supports and Norton,
+//! joint Norton/J2, or their sourced thermal-expansion wrappers. Temperature
+//! is prescribed through original source-bound laws between intervals; this
+//! owner reports reciprocal heat but does not itself solve a caloric field.
 //! Nodal rotations and the sum of absolute quadrature curvature are bounded;
 //! unsampled spatial extrema still require section/member refinement.
 
 use super::{Frame2d, Geometry, SectionModel, SolidError, StaticStep};
 use crate::fiber::{FiberLaw, FiberState};
 use fs_material::creep::plastic::uniaxial::{UniaxialNortonJ2, UniaxialNortonJ2State};
+use fs_material::creep::thermal::uniaxial::{
+    UniaxialThermalNorton, UniaxialThermalNortonJ2, UniaxialThermalNortonJ2State,
+    UniaxialThermalNortonState,
+};
 use fs_material::creep::uniaxial::{UniaxialNorton, UniaxialNortonState};
 use fs_material::creep::{CreepEnergy, CreepError, CreepTolerances, NortonCreep};
 use fs_material::state_point::ResolvedMaterialStatePoint;
@@ -73,9 +78,20 @@ pub struct FrameCreepEnergy {
     pub creep_dissipation_j: f64,
     pub plastic_dissipation_j: f64,
     pub physical_dissipation_j: f64,
+    /// Change in T times mechanical entropy, separate from free-energy storage.
+    pub thermoelastic_storage_change_j: f64,
+    /// Signed reciprocal transfer into a caloric owner; may be negative.
+    pub reversible_heat_j: f64,
     pub numerical_dissipation_j: f64,
     pub equilibrium_work_residual_j: f64,
     pub balance_residual_j: f64,
+}
+
+impl FrameCreepEnergy {
+    /// Irreversible material heat plus signed reciprocal thermal exchange.
+    pub fn caloric_heat_j(self) -> f64 {
+        self.physical_dissipation_j + self.reversible_heat_j
+    }
 }
 
 /// Immutable proposal; accepting `frame` advances history exactly once.
@@ -121,6 +137,8 @@ fn energy_gate(residual: f64, tolerance: f64) -> Result<(), FrameCreepError> {
 enum CreepPoint<'a> {
     Norton(&'a UniaxialNorton, &'a UniaxialNortonState),
     NortonJ2(&'a UniaxialNortonJ2, &'a UniaxialNortonJ2State),
+    ThermalNorton(&'a UniaxialThermalNorton, &'a UniaxialThermalNortonState),
+    ThermalNortonJ2(&'a UniaxialThermalNortonJ2, &'a UniaxialThermalNortonJ2State),
 }
 impl<'a> CreepPoint<'a> {
     fn new(law: &'a FiberLaw, state: &'a FiberState) -> Result<Self, FrameCreepError> {
@@ -128,6 +146,12 @@ impl<'a> CreepPoint<'a> {
             (FiberLaw::Norton(law), FiberState::Norton(state)) => Ok(Self::Norton(law, state)),
             (FiberLaw::NortonJ2(law), FiberState::NortonJ2(state)) => {
                 Ok(Self::NortonJ2(law, state))
+            }
+            (FiberLaw::ThermalNorton(law), FiberState::ThermalNorton(state)) => {
+                Ok(Self::ThermalNorton(law, state))
+            }
+            (FiberLaw::ThermalNortonJ2(law), FiberState::ThermalNortonJ2(state)) => {
+                Ok(Self::ThermalNortonJ2(law, state))
             }
             _ => Err(FrameCreepError::Invalid(
                 "checked creep work requires matching timed fiber histories",
@@ -138,30 +162,45 @@ impl<'a> CreepPoint<'a> {
         match self {
             Self::Norton(law, _) => law.backbone(),
             Self::NortonJ2(law, _) => law.backbone().creep(),
+            Self::ThermalNorton(law, _) => law.kinetics(),
+            Self::ThermalNortonJ2(law, _) => law.kinetics(),
         }
     }
     fn material(self) -> Option<&'a ResolvedMaterialStatePoint> {
         match self {
             Self::Norton(law, _) => law.material(),
             Self::NortonJ2(law, _) => law.material(),
+            Self::ThermalNorton(law, _) => law.material(),
+            Self::ThermalNortonJ2(law, _) => law.material(),
+        }
+    }
+    fn expansion_material(self) -> Option<&'a ResolvedMaterialStatePoint> {
+        match self {
+            Self::ThermalNorton(law, _) => Some(law.expansion_material()),
+            Self::ThermalNortonJ2(law, _) => Some(law.expansion_material()),
+            Self::Norton(..) | Self::NortonJ2(..) => None,
         }
     }
     fn hardening(self) -> Option<f64> {
         match self {
-            Self::Norton(..) => None,
+            Self::Norton(..) | Self::ThermalNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().hardening),
+            Self::ThermalNortonJ2(law, _) => Some(law.hardening()),
         }
     }
     fn yield_stress(self) -> Option<f64> {
         match self {
-            Self::Norton(..) => None,
+            Self::Norton(..) | Self::ThermalNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().yield_stress),
+            Self::ThermalNortonJ2(law, _) => Some(law.yield_stress()),
         }
     }
     fn tensor_strain(self, strain: f64) -> Result<(), FrameCreepError> {
         match self {
             Self::Norton(law, state) => law.tensor_strain(strain, state),
             Self::NortonJ2(law, state) => law.tensor_strain(strain, state),
+            Self::ThermalNorton(law, state) => law.tensor_strain(strain, state),
+            Self::ThermalNortonJ2(law, state) => law.tensor_strain(strain, state),
         }
         .map(|_| ())
         .map_err(FrameCreepError::Material)
@@ -212,6 +251,18 @@ impl<'a> CreepPoint<'a> {
                 );
                 (increment.energy, agrees)
             }
+            (Self::ThermalNorton(law, state), Self::ThermalNorton(_, accepted)) => {
+                let increment = law
+                    .advance_with_energy(old_strain, state, new_strain, tolerances)
+                    .map_err(FrameCreepError::Material)?;
+                (increment.energy, increment.state == *accepted)
+            }
+            (Self::ThermalNortonJ2(law, state), Self::ThermalNortonJ2(_, accepted)) => {
+                let increment = law
+                    .advance_with_energy(old_strain, state, new_strain, tolerances)
+                    .map_err(FrameCreepError::Material)?;
+                (increment.energy, increment.state == *accepted)
+            }
             _ => {
                 return Err(FrameCreepError::Invalid(
                     "timed fiber family changed during native solve",
@@ -235,7 +286,13 @@ impl Frame2d {
                 SectionModel::Fiber(section) => section
                     .fibers
                     .iter()
-                    .any(|fiber| matches!(&fiber.law, FiberLaw::Norton(_) | FiberLaw::NortonJ2(_))),
+                    .any(|fiber| matches!(
+                        &fiber.law,
+                        FiberLaw::Norton(_)
+                            | FiberLaw::NortonJ2(_)
+                            | FiberLaw::ThermalNorton(_)
+                            | FiberLaw::ThermalNortonJ2(_)
+                    )),
                 SectionModel::Elastic { .. } => false,
             })
         });
@@ -277,6 +334,42 @@ impl Frame2d {
         };
         match (&s.fibers.get(fiber)?.law, s.states.get(fiber)?) {
             (FiberLaw::NortonJ2(law), FiberState::NortonJ2(state)) => Some((law, state)),
+            _ => None,
+        }
+    }
+
+    /// Read accepted sourced thermocreep history without another physical trial.
+    pub fn thermal_creep_fiber(
+        &self,
+        element: usize,
+        section: usize,
+        fiber: usize,
+    ) -> Option<(&UniaxialThermalNorton, &UniaxialThermalNortonState)> {
+        let SectionModel::Fiber(s) = self.elements.get(element)?.sections.get(section)? else {
+            return None;
+        };
+        match (&s.fibers.get(fiber)?.law, s.states.get(fiber)?) {
+            (FiberLaw::ThermalNorton(law), FiberState::ThermalNorton(state)) => {
+                Some((law, state))
+            }
+            _ => None,
+        }
+    }
+
+    /// Read accepted thermal creep/plastic histories and temperature without aging them.
+    pub fn thermal_creep_plastic_fiber(
+        &self,
+        element: usize,
+        section: usize,
+        fiber: usize,
+    ) -> Option<(&UniaxialThermalNortonJ2, &UniaxialThermalNortonJ2State)> {
+        let SectionModel::Fiber(s) = self.elements.get(element)?.sections.get(section)? else {
+            return None;
+        };
+        match (&s.fibers.get(fiber)?.law, s.states.get(fiber)?) {
+            (FiberLaw::ThermalNortonJ2(law), FiberState::ThermalNortonJ2(state)) => {
+                Some((law, state))
+            }
             _ => None,
         }
     }
@@ -358,6 +451,27 @@ impl Frame2d {
                         _ => {
                             return Err(FrameCreepError::Invalid(
                                 "authored and sourced histories cannot be interchanged",
+                            ));
+                        }
+                    }
+                    match (old.expansion_material(), law.expansion_material()) {
+                        (None, None) => {}
+                        (Some(a), Some(b)) => {
+                            require(
+                                a.card_identity() == b.card_identity()
+                                    && a.axis_quantities() == b.axis_quantities()
+                                    && a.properties().len() == b.properties().len()
+                                    && a.properties().iter().zip(b.properties()).all(|(a, b)| {
+                                        a.requirement() == b.requirement()
+                                            && a.answer().receipt.selected
+                                                == b.answer().receipt.selected
+                                    }),
+                                "thermal creep refresh must retain its original expansion source",
+                            )?;
+                        }
+                        _ => {
+                            return Err(FrameCreepError::Invalid(
+                                "thermal and zero-expansion creep histories cannot be interchanged",
                             ));
                         }
                     }
@@ -537,6 +651,9 @@ impl Frame2d {
                     energy.creep_dissipation_j += volume * account.creep_dissipation_j_m3;
                     energy.plastic_dissipation_j += volume * account.plastic_dissipation_j_m3;
                     energy.physical_dissipation_j += volume * account.physical_dissipation_j_m3;
+                    energy.thermoelastic_storage_change_j +=
+                        volume * account.thermoelastic_storage_change_j_m3;
+                    energy.reversible_heat_j += volume * account.reversible_heat_j_m3;
                     energy.numerical_dissipation_j += volume * account.numerical_dissipation_j_m3;
                     material_work += volume * account.mechanical_work_j_m3;
                     fibers.push(FrameFiberCreepEnergy {
@@ -553,7 +670,9 @@ impl Frame2d {
         energy.equilibrium_work_residual_j = work - material_work;
         energy.balance_residual_j = work
             - (energy.final_stored_j - energy.initial_stored_j)
+            - energy.thermoelastic_storage_change_j
             - energy.physical_dissipation_j
+            - energy.reversible_heat_j
             - energy.numerical_dissipation_j;
         energy_gate(energy.equilibrium_work_residual_j, tolerances.energy_j)?;
         energy_gate(energy.balance_residual_j, tolerances.energy_j)?;

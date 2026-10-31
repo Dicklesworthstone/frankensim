@@ -14,6 +14,7 @@ use super::{Fiber, FiberLaw, Section};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::creep::plastic::uniaxial::UniaxialNortonJ2;
+use fs_material::creep::thermal::uniaxial::{UniaxialThermalNorton, UniaxialThermalNortonJ2};
 use fs_material::creep::uniaxial::UniaxialNorton;
 use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
 use fs_material::plastic::chaboche::axial::UniaxialChaboche;
@@ -144,6 +145,8 @@ impl FiberMaterial {
         match law {
             FiberLaw::Norton(law) => Self::norton(law, density_kg_m3),
             FiberLaw::NortonJ2(law) => Self::norton_j2(law, density_kg_m3),
+            FiberLaw::ThermalNorton(law) => Self::thermal_norton(law, density_kg_m3),
+            FiberLaw::ThermalNortonJ2(law) => Self::thermal_norton_j2(law, density_kg_m3),
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
             FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
@@ -187,6 +190,44 @@ impl FiberMaterial {
         require(positive(density_kg_m3), "creep/plastic fiber density must be finite and positive")?;
         Ok(Self {
             law: FiberLaw::NortonJ2(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Sourced thermal expansion plus Norton creep with explicit reference density.
+    /// The law retains its original expansion/mechanical receipts; this density
+    /// remains a separate authored reference-mass input.
+    pub fn thermal_norton(
+        law: UniaxialThermalNorton,
+        density_kg_m3: f64,
+    ) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "thermal creep fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::ThermalNorton(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Sourced thermal expansion plus simultaneous Norton/J2 response with
+    /// explicit reference density. No thermal mass or expansion coefficient is
+    /// inferred from this independently supplied density.
+    pub fn thermal_norton_j2(
+        law: UniaxialThermalNortonJ2,
+        density_kg_m3: f64,
+    ) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "thermal creep/plastic fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::ThermalNortonJ2(law),
             density_kg_m3,
             source: None,
             chaboche_branch_properties: None,
