@@ -3,8 +3,8 @@
 //! The optical model is an ideal thin lens. Focus distance is the positive
 //! axial distance from the lens plane, not distance along each raster ray.
 //! Opt-in circular and bladed pupil diffraction covers incoherent, paraxial,
-//! in-focus imaging. Lens distortion, chromatic aberration, rolling shutter,
-//! and autofocus heuristics are outside this contract.
+//! focused and declared-plane defocused imaging. Lens distortion, chromatic
+//! aberration, rolling shutter, and autofocus heuristics are outside this contract.
 
 use core::fmt;
 
@@ -16,7 +16,7 @@ use crate::charts::Ray;
 use crate::motion::ShutterInterval;
 
 mod diffraction;
-pub use diffraction::{FocusedDiffraction, SpectralCameraRay};
+pub use diffraction::{DefocusedDiffraction, FocusedDiffraction, SpectralCameraRay};
 
 const PI: f64 = core::f64::consts::PI;
 const LOOK_AT_SINE_MIN: f64 = 1.0e-10;
@@ -62,7 +62,7 @@ pub enum CameraError {
     InvalidDiffraction,
     /// A diffraction camera requires wavelength-aware ray generation.
     DiffractionRequiresSpectralPath,
-    /// The visible depth exceeds the declared in-focus pupil phase budget.
+    /// The modeled defocus or residual visible-depth phase exceeds its budget.
     DefocusOutsideDiffractionModel,
     /// A shot contains no keyframes.
     EmptyShot,
@@ -171,8 +171,8 @@ impl CameraError {
         }];
         const DIFFRACTION: &[CameraFix] = &[CameraFix {
             rank: 1,
-            code: "focused_pupil_diffraction",
-            message: "use a nonzero circular or regular bladed pupil, spectral rays, and opaque diffuse primary surfaces within the declared focus phase budget",
+            code: "pupil_diffraction",
+            message: "use spectral rays and a clear nonzero pupil with opaque diffuse sources in the declared depth model; finite defocus requires a circular pupil",
         }];
         const EXPOSURE_METADATA: &[CameraFix] = &[
             CameraFix {
@@ -271,13 +271,13 @@ impl fmt::Display for CameraError {
             Self::InvalidExposureMetadata => "camera exposure metadata is invalid",
             Self::InvalidLensSample => "lens sample is outside [0,1)^2",
             Self::InvalidDiffraction => {
-                "focused diffraction inputs or primary surface are unsupported"
+                "diffraction inputs, pupil, or primary scene are unsupported"
             }
             Self::DiffractionRequiresSpectralPath => {
                 "diffraction camera requires a wavelength-aware path"
             }
             Self::DefocusOutsideDiffractionModel => {
-                "visible depth exceeds the in-focus diffraction phase budget"
+                "visible depth exceeds the declared diffraction phase budget"
             }
             Self::EmptyShot => "camera shot has no keyframes",
             Self::InvalidShot => "camera shot bounds or identity are invalid",
@@ -661,6 +661,7 @@ pub struct PhysicalCamera {
     aperture: Aperture,
     exposure: ExposureMetadata,
     diffraction: Option<FocusedDiffraction>,
+    defocused_diffraction: Option<DefocusedDiffraction>,
 }
 
 /// Projection of a world point through the deterministic optical centre.
@@ -825,6 +826,7 @@ impl PhysicalCamera {
             aperture,
             exposure,
             diffraction: None,
+            defocused_diffraction: None,
         })
     }
 
@@ -1022,7 +1024,7 @@ impl PhysicalCamera {
         lens_sample: LensSample,
     ) -> Result<Ray, CameraError> {
         cx.checkpoint()?;
-        if self.diffraction.is_some() {
+        if self.has_diffraction() {
             return Err(CameraError::DiffractionRequiresSpectralPath);
         }
         if !x_tan.is_finite() || !y_tan.is_finite() {
@@ -1072,6 +1074,7 @@ impl PhysicalCamera {
             self.exposure,
         )?;
         camera.diffraction = self.diffraction;
+        camera.defocused_diffraction = self.defocused_diffraction;
         Ok(camera)
     }
 
@@ -1080,6 +1083,7 @@ impl PhysicalCamera {
             && self.aperture == other.aperture
             && self.exposure == other.exposure
             && self.diffraction == other.diffraction
+            && self.defocused_diffraction == other.defocused_diffraction
     }
 }
 

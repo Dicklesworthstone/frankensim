@@ -212,7 +212,7 @@ pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 6;
 /// Dedicated Philox counter domain for the two lens coordinates. Lens draws
 /// never advance [`PathRng`] and therefore cannot perturb light or BSDF draws.
 const CAMERA_LENS_SAMPLE_DOMAIN_V1: u32 = 0x6c65_6e73;
-/// Independent circular-pupil diffraction coordinates; no existing stream is
+/// Independent pupil diffraction coordinates; no existing stream is
 /// advanced, including the geometric lens and hero-wavelength streams.
 const CAMERA_DIFFRACTION_SAMPLE_DOMAIN_V1: u32 = 0x6469_6672;
 /// Moving thermal proposals have disjoint support from the static mixture and
@@ -4118,6 +4118,12 @@ fn render_range_with_scene_exposure_impl(
     #[cfg(feature = "volumes")]
     let prepared_lighting = prepared_lighting || scene_media.is_some();
     let (owned_lighting, requested_mode) = if prepared_lighting {
+        if defocused_exposure_camera(camera_path)?.is_some() {
+            // A history can change the primary plane or conceal a pupil
+            // occluder. Its ordinary lighting admission does not prove the
+            // static single-plane optical contract.
+            return Err(CameraError::InvalidDiffraction.into());
+        }
         (
             None,
             preflight_render_buffers(cx, s, Some(film), from, to, shutter, camera_path)?,
@@ -6017,6 +6023,12 @@ fn render_range_parallel_with_scene_exposure_impl<R: RenderPoolRunner>(
     #[cfg(feature = "volumes")]
     let prepared_lighting = prepared_lighting || scene_media.is_some();
     let (owned_lighting, requested_mode) = if prepared_lighting {
+        if defocused_exposure_camera(camera_path)
+            .map_err(TracerError::from)?
+            .is_some()
+        {
+            return Err(TracerError::Camera(CameraError::InvalidDiffraction).into());
+        }
         (
             None,
             preflight_render_buffers(cx, settings, base_film, from, to, shutter, camera_path)?,
@@ -9841,6 +9853,17 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
         hasher.update(b"focused-circular-diffraction-v1");
         update_continuity_f64(hasher, diffraction.maximum_defocus_phase_rad());
     }
+    if let Some(diffraction) = camera.defocused_diffraction() {
+        hasher.update(b"single-plane-defocused-diffraction-v1");
+        match diffraction.object_distance_m() {
+            Some(distance) => {
+                hasher.update(&[1]);
+                update_continuity_f64(hasher, distance);
+            }
+            None => hasher.update(&[0]),
+        }
+        update_continuity_f64(hasher, diffraction.maximum_depth_phase_error_rad());
+    }
 }
 
 fn update_continuity_point(hasher: &mut DomainHasher, point: Point3) {
@@ -13455,7 +13478,7 @@ fn trace_path_with_regions<'scene>(
     };
     #[cfg(not(feature = "photometry"))]
     let lambdas = hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX);
-    let mut focused_camera = None;
+    let mut diffraction_camera = None;
     let state = if let Some(state) = resume {
         state
     } else {
@@ -13487,7 +13510,7 @@ fn trace_path_with_regions<'scene>(
                 let x_tan = (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * half_tan;
                 let y_tan = (1.0 - 2.0 * (f64::from(py) + jy) / h) * half_tan;
                 #[cfg(feature = "volumes")]
-                if physical.in_focus_diffraction().is_some()
+                if physical.has_diffraction()
                     && (medium.is_some() || scene_media.is_some())
                 {
                     // A single primary depth cannot certify distributed
@@ -13495,10 +13518,10 @@ fn trace_path_with_regions<'scene>(
                     return Err(CameraError::InvalidDiffraction.into());
                 }
                 #[cfg(feature = "photometry")]
-                if physical.in_focus_diffraction().is_some() && fixtures.is_some() {
+                if physical.has_diffraction() && fixtures.is_some() {
                     return Err(CameraError::InvalidDiffraction.into());
                 }
-                let diffraction_sample = if physical.in_focus_diffraction().is_some() {
+                let diffraction_sample = if physical.has_diffraction() {
                     camera_diffraction_sample(key, pixel, sample)?
                 } else {
                     LensSample::CENTER
@@ -13511,8 +13534,8 @@ fn trace_path_with_regions<'scene>(
                     diffraction_sample,
                     &lambdas,
                 )?;
-                if physical.in_focus_diffraction().is_some() {
-                    focused_camera = Some(physical);
+                if physical.has_diffraction() {
+                    diffraction_camera = Some(physical);
                 }
                 (spectral_ray.ray, spectral_ray.weights)
             }
@@ -13567,7 +13590,7 @@ fn trace_path_with_regions<'scene>(
         #[cfg(not(feature = "photometry"))]
         let intersection = intersect(scene, cx, &ray, ray_time)?;
         if depth == 0
-            && let Some(camera) = &focused_camera
+            && let Some(camera) = &diffraction_camera
             && (intersection.is_some() || scene.environment.is_some())
         {
             camera.admit_diffraction_depth(intersection.map(|hit| hit.hit.point), &lambdas)?;
@@ -16234,6 +16257,132 @@ fn validate_scene_with_medium_emission<'scene>(
     Ok(lighting)
 }
 
+fn defocused_exposure_camera<'a>(
+    camera_path: CameraPath<'a>,
+) -> Result<Option<&'a PhysicalCamera>, CameraError> {
+    let CameraPath::Cinematic { camera, exposure } = camera_path else {
+        return Ok(None);
+    };
+    let shot = camera
+        .shots()
+        .iter()
+        .find(|shot| shot.shot_id() == exposure.shot_id())
+        .ok_or(CameraError::InvalidShot)?;
+    let physical = shot
+        .keyframes()
+        .first()
+        .ok_or(CameraError::InvalidKeyframes)?
+        .camera();
+    Ok(physical.defocused_diffraction().map(|_| physical))
+}
+
+/// A single depth check on a sampled centre ray cannot detect a partially
+/// occluded pupil. This bounded scene class establishes that every primary
+/// pupil-to-object segment is clear: all forward geometry shares one axial
+/// plane, and all other geometry lies strictly behind the pupil plane.
+/// Inspect vertices once per render admission, never once per camera sample.
+fn admit_defocused_scene(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    camera_path: CameraPath<'_>,
+) -> Result<(), TracerError> {
+    let Some(physical) = defocused_exposure_camera(camera_path)? else {
+        return Ok(());
+    };
+    let policy = physical
+        .defocused_diffraction()
+        .ok_or(CameraError::InvalidDiffraction)?;
+    let CameraPath::Cinematic { camera, exposure } = camera_path else {
+        return Err(CameraError::InvalidDiffraction.into());
+    };
+    let shot = camera
+        .shots()
+        .iter()
+        .find(|shot| shot.shot_id() == exposure.shot_id())
+        .ok_or(CameraError::InvalidShot)?;
+    for keyframe in shot.keyframes() {
+        cx.checkpoint()?;
+        let state = keyframe.camera();
+        if state.eye() != physical.eye()
+            || state.forward() != physical.forward()
+            || state.up() != physical.up()
+            || state.right() != physical.right()
+        {
+            // Focus racks are admitted; changing pose changes the object
+            // plane and needs a separate moving-pupil visibility model.
+            return Err(CameraError::InvalidDiffraction.into());
+        }
+    }
+    if policy.object_distance_m().is_some() && scene.environment.is_some() {
+        return Err(CameraError::InvalidDiffraction.into());
+    }
+    let eye = physical.eye();
+    let forward = physical.forward();
+    let mut object_plane: Option<(f64, f64)> = None;
+    for primitive in &scene.primitives {
+        cx.checkpoint()?;
+        let (mesh, transform): (&TriMesh, Option<RigidTransform>) = match &primitive.shape {
+            Shape::Mesh(mesh) => (mesh, None),
+            Shape::Instance(instance) => match instance.geometry() {
+                SharedGeometry::Mesh(mesh) => (mesh.as_ref(), Some(instance.transform())),
+                SharedGeometry::Chart(_) => return Err(CameraError::InvalidDiffraction.into()),
+            },
+            Shape::Chart(_) | Shape::AnimatedInstance(_) => {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+        };
+        let mut behind_pupil = None;
+        for (index, &vertex) in mesh.vertices.iter().enumerate() {
+            if index % 256 == 0 {
+                cx.checkpoint()?;
+            }
+            let point = Point3::new(vertex[0], vertex[1], vertex[2]);
+            let point = transform.map_or(point, |transform| transform.transform_point(point));
+            let depth = point.delta_from(eye).dot(forward);
+            let scale = [point.x, point.y, point.z, eye.x, eye.y, eye.z]
+                .into_iter()
+                .map(f64::abs)
+                .fold(1.0_f64, f64::max);
+            let roundoff_m = 128.0 * f64::EPSILON * scale;
+            if !depth.is_finite() || !roundoff_m.is_finite() || depth.abs() <= roundoff_m {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+            let behind = depth < 0.0;
+            if behind_pupil.is_some_and(|previous| previous != behind) {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+            behind_pupil = Some(behind);
+            if behind {
+                continue;
+            }
+            if policy.object_distance_m().is_none()
+                || !matches!(
+                    primitive.material,
+                    Material::Lambertian { .. }
+                        | Material::SpectralDiffuse { .. }
+                        | Material::GrayDiffuseThermal { .. }
+                        | Material::SpectralDiffuseThermal { .. }
+                )
+            {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+            if let Some((plane_depth, plane_roundoff)) = object_plane {
+                if (depth - plane_depth).abs() > roundoff_m + plane_roundoff {
+                    return Err(CameraError::InvalidDiffraction.into());
+                }
+            } else {
+                object_plane = Some((depth, roundoff_m));
+            }
+            // Geometric coplanarity above is independent of the optical
+            // residual phase budget. A shallow 3D occluder cannot be admitted
+            // merely because its phase differs by less than that budget.
+            physical.admit_diffraction_depth(Some(point), &[LAMBDA_MIN])?;
+        }
+    }
+    cx.checkpoint()?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn preflight_render<'a>(
     scene: &'a Scene,
@@ -16272,6 +16421,7 @@ fn preflight_render_with_medium_emission<'a>(
 ) -> Result<(SceneLighting<'a>, FilmTimeMode), TracerError> {
     let requested_mode =
         preflight_render_buffers(cx, settings, film, from, to, shutter, camera_path)?;
+    admit_defocused_scene(scene, cx, camera_path)?;
     let lighting = validate_scene_with_medium_emission(scene, cx, shutter, has_medium_emission)?;
     cx.checkpoint()?;
     Ok((lighting, requested_mode))

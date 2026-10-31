@@ -7,7 +7,7 @@ use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::camera::{
     AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraProjection, CameraShot, CutSide,
-    FocusedDiffraction, LensSample, PhysicalCamera,
+    DefocusedDiffraction, FocusedDiffraction, LensSample, PhysicalCamera,
 };
 use fs_render::instances::RigidTransform;
 use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, ShutterInterval};
@@ -1321,4 +1321,204 @@ fn bladed_diffraction_sampling_rotates_with_the_actual_aperture() {
             }
         }
     });
+}
+
+#[test]
+fn defocused_camera_preserves_physical_phase_and_spectral_psf() {
+    let radius = 1.0e-3;
+    let wavelength = 550.0;
+    let lambda_m = wavelength * 1.0e-9;
+    let focus = 0.25;
+    let inverse_shift = 2.0 * lambda_m / (radius * radius);
+    let object_depth = 1.0 / (1.0 / focus + inverse_shift);
+    let policy = DefocusedDiffraction::try_new(Some(object_depth), 0.0).unwrap();
+    let camera = axial_camera(Aperture::try_circular(radius).unwrap(), focus)
+        .with_defocused_diffraction(policy)
+        .unwrap();
+    assert!(camera.has_diffraction());
+    assert_eq!(camera.defocused_diffraction(), Some(policy));
+    assert_eq!(camera.in_focus_diffraction(), None);
+    let focused_peak = core::f64::consts::PI * radius * radius / (lambda_m * lambda_m);
+    assert!(
+        camera
+            .defocused_diffraction_density([0.0; 2], wavelength)
+            .unwrap()
+            < 1.0e-25 * focused_peak,
+        "two-pi rim phase has an axial null, not a broadened positive Airy core"
+    );
+    for wavelength_nm in [400.0, 700.0] {
+        let phase = 2.0 * core::f64::consts::PI * wavelength / wavelength_nm;
+        let expected = core::f64::consts::PI * radius * radius / (wavelength_nm * 1.0e-9).powi(2)
+            * ((0.5 * phase).sin() / (0.5 * phase)).powi(2);
+        assert_close(
+            camera
+                .defocused_diffraction_density([0.0; 2], wavelength_nm)
+                .unwrap(),
+            expected,
+            1.0e-12 * focused_peak,
+            "physical on-axis defocus and chromatic phase",
+        );
+    }
+    let opposite = axial_camera(Aperture::try_circular(radius).unwrap(), focus)
+        .with_defocused_diffraction(
+            DefocusedDiffraction::try_new(Some(1.0 / (1.0 / focus - inverse_shift)), 0.0).unwrap(),
+        )
+        .unwrap();
+    let offset = [2.0e-4, -1.0e-4];
+    let density = camera
+        .defocused_diffraction_density(offset, wavelength)
+        .unwrap();
+    assert_close(
+        opposite
+            .defocused_diffraction_density(offset, wavelength)
+            .unwrap(),
+        density,
+        1.0e-12 * focused_peak,
+        "opposite wavefront curvature has the same circular-pupil intensity",
+    );
+    let scaled = axial_camera(Aperture::try_circular(2.0 * radius).unwrap(), 2.0 * focus)
+        .with_defocused_diffraction(
+            DefocusedDiffraction::try_new(Some(2.0 * object_depth), 0.0).unwrap(),
+        )
+        .unwrap();
+    assert_close(
+        scaled
+            .defocused_diffraction_density(offset, 2.0 * wavelength)
+            .unwrap(),
+        density,
+        1.0e-12 * focused_peak,
+        "common SI-length and wavelength scaling preserves angular imaging",
+    );
+    assert!(
+        camera
+            .admit_diffraction_depth(Some(Point3::new(0.1, 0.2, -object_depth)), &[400.0])
+            .is_ok()
+    );
+    assert_eq!(
+        camera.admit_diffraction_depth(Some(Point3::new(0.0, 0.0, -focus)), &[550.0]),
+        Err(CameraError::DefocusOutsideDiffractionModel)
+    );
+    assert_eq!(
+        camera.admit_diffraction_depth(None, &[550.0]),
+        Err(CameraError::DefocusOutsideDiffractionModel)
+    );
+    with_cx(|_, cx| {
+        let first = camera
+            .generate_spectral_ray_from_tangent_offsets(
+                cx,
+                0.0,
+                0.0,
+                LensSample::CENTER,
+                LensSample::try_new(0.0, 0.0).unwrap(),
+                &[400.0, 550.0, 700.0],
+            )
+            .unwrap();
+        assert!(first.weights[1] < 1.0e-24);
+        assert!(first.weights[0] > 0.01 && first.weights[2] > 0.01);
+        for u in [0.37, 1.0 - 0.5 * f64::EPSILON] {
+            let sample = LensSample::try_new(u, 0.23).unwrap();
+            let draw = |lens_sample| {
+                camera
+                    .generate_spectral_ray_from_tangent_offsets(
+                        cx,
+                        0.0,
+                        0.0,
+                        lens_sample,
+                        sample,
+                        &[400.0, 550.0, 700.0],
+                    )
+                    .unwrap()
+            };
+            let a = draw(LensSample::CENTER);
+            let b = draw(LensSample::try_new(0.23, 0.71).unwrap());
+            assert_eq!(a.ray.origin, camera.eye());
+            assert_eq!(a.ray.dir, b.ray.dir);
+            assert_eq!(a.weights, b.weights, "no extra geometric pupil defocus");
+            assert!(a.weights.iter().all(|v| v.is_finite() && *v >= 0.0));
+        }
+        assert_eq!(
+            camera.generate_ray_from_tangent_offsets(cx, 0.0, 0.0, LensSample::CENTER),
+            Err(CameraError::DiffractionRequiresSpectralPath)
+        );
+    });
+}
+
+#[test]
+fn finite_defocus_admission_and_focus_rack_preserve_the_declared_object_plane() {
+    for depth in [0.0, -1.0, f64::NAN, f64::INFINITY, 1.0e-320] {
+        assert!(DefocusedDiffraction::try_new(Some(depth), 0.01).is_err());
+    }
+    for error in [-0.01, 0.10001, f64::NAN] {
+        assert!(DefocusedDiffraction::try_new(None, error).is_err());
+    }
+    let policy = DefocusedDiffraction::try_new(Some(0.5), 0.01).unwrap();
+    assert!(
+        axial_camera(pinhole(), 0.5)
+            .with_defocused_diffraction(policy)
+            .is_err()
+    );
+    assert!(
+        axial_camera(Aperture::try_regular_polygon(0.001, 6, 0.0).unwrap(), 0.5)
+            .with_defocused_diffraction(policy)
+            .is_err()
+    );
+    let camera = |focus| {
+        axial_camera(Aperture::try_circular(0.001).unwrap(), focus)
+            .with_defocused_diffraction(policy)
+            .unwrap()
+    };
+    let animation = AnimatedCamera::try_new(vec![
+        CameraShot::try_new(
+            902,
+            0.0,
+            1.0,
+            vec![
+                CameraKeyframe::try_new(0.0, camera(0.5)).unwrap(),
+                CameraKeyframe::try_new(1.0, camera(1.0)).unwrap(),
+            ],
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    with_cx(|_, cx| {
+        let middle = animation.evaluate(cx, 0.5, CutSide::After).unwrap();
+        assert_eq!(middle.defocused_diffraction(), Some(policy));
+        assert_eq!(middle.focus_distance_m(), 0.75);
+        assert!(
+            middle
+                .admit_diffraction_depth(Some(Point3::new(0.0, 0.0, -0.5)), &[400.0, 700.0])
+                .is_ok()
+        );
+        let focused = middle
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+            .unwrap();
+        assert_eq!(focused.defocused_diffraction(), None);
+        assert!(focused.in_focus_diffraction().is_some());
+    });
+    let beyond = axial_camera(Aperture::try_circular(0.001).unwrap(), 2.0)
+        .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(0.3), 0.01).unwrap())
+        .unwrap();
+    assert!(
+        beyond
+            .defocused_diffraction_density([0.0; 2], 700.0)
+            .is_ok()
+    );
+    assert_eq!(
+        beyond.defocused_diffraction_density([0.0; 2], 400.0),
+        Err(CameraError::DefocusOutsideDiffractionModel)
+    );
+    let infinity = axial_camera(Aperture::try_circular(0.001).unwrap(), 1.0)
+        .with_defocused_diffraction(DefocusedDiffraction::try_new(None, 0.0).unwrap())
+        .unwrap();
+    assert!(
+        infinity
+            .admit_diffraction_depth(None, &[400.0, 700.0])
+            .is_ok()
+    );
+    assert!(
+        infinity
+            .defocused_diffraction_density([0.0; 2], 550.0)
+            .unwrap()
+            > 0.0
+    );
 }

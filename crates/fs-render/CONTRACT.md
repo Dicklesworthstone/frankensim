@@ -1915,6 +1915,77 @@ fixed Hammersley cubature for 3, 4, 6, 9 and 64 blades (0.4% power band).
 Camera tests bind pupil area, wavelength scaling and sampled orientation to
 that kernel. These are numerical model checks, not measured lens validation.
 
+### Finite-defocus circular-pupil imaging
+
+`PhysicalCamera::with_defocused_diffraction(DefocusedDiffraction)` selects
+scalar propagation of a circular pupil at a declared object plane. The
+policy takes a positive axial object distance in metres (`Some(z0)`) or
+infinity (`None`), plus a residual depth-phase budget in `[0,0.1]` radians.
+It replaces the focused policy rather than combining the two. The camera's
+focus still sets the sensor conjugate. At each wavelength, the modeled
+pupil-rim phase is `phi=pi*a²/lambda*(1/z0-1/focus)` with `1/z0=0` for
+infinity; `abs(phi)<=16` is required. Actual first-hit depths must separately
+meet `pi*a²/lambda_min*abs(1/z_actual-1/z0)<=maximum_depth_phase_error`.
+Thus finite defocus is explicitly propagated, while the residual budget
+only admits a small mismatch from the declared source plane.
+
+The real spectral renderer preflights a deliberately bounded scene model.
+Forward geometry must be static triangle meshes (including fixed rigid
+mesh instances) in one frontoparallel opaque diffuse object plane. Vertex
+coplanarity uses coordinate-roundoff tolerance, independently of the optical
+residual-phase budget. Finite-plane scenes have black misses and no competing
+environment. Other geometry may lie wholly behind the pupil plane, where it
+can illuminate the object without clipping a primary pupil-to-object path.
+Infinity mode permits an environment with all geometry behind the pupil.
+The camera eye and basis stay fixed throughout the owning shot; focus racks
+remain supported. Unknown charts, animated geometry, prepared scene histories,
+primary media, calibrated photometric fixtures and specular primary surfaces
+refuse. The mesh scan occurs once at render admission, and actual sampled
+hits retain the depth check. Camera-only consumers must establish equivalent
+clear-pupil and pupil-independent-radiance conditions themselves: a first-hit
+depth check cannot detect an obstacle that clips only part of a pupil.
+
+For dimensionless image radius `q=2*pi*a*abs(theta)/lambda`, the propagated
+amplitude is `A(q,phi)=2*integral_0^1 r*J0(q*r)*exp(i*phi*r²) dr`; the
+two-dimensional normalized density is `abs(A)²/(4*pi)`. Its angular density
+integrates to one. On axis, `A=exp(i*phi/2)*sinc(phi/2)`, retaining central
+nulls and changing ring structure through focus. At zero phase it recovers
+the existing Airy function. Opposite defocus signs have the same intensity
+for this uniform circular pupil. Each wavelength has its own phase, angular
+scale and importance weight; neither an achromatic blur nor a convolution
+of focused Airy and geometric DOF is substituted. Rays originate at the
+optical centre and the geometric lens draw is not applied again.
+
+The stack-only numerical owner evaluates a 40-term Bauer/Zernike expansion,
+whose convergence depends on the admitted phase rather than sampled radius.
+The omitted amplitude is at most `1.849e-23` for `abs(phi)<=16`, before
+floating-point error. Spherical coefficients use bounded backward recurrence
+with a nonvanishing normalization anchor. Cylindrical Bessel values use
+rescaled Miller recurrence and Neumann normalization through `q=128`, then
+stable upward recurrence from Hankel order-zero and shared `fs-math` order-one
+starts. Small arguments use explicit ratio series; angle addition preserves
+Hankel phase at large arguments. No pupil raster, FFT, runtime dependency,
+per-ray allocation, rejection loop or radial cutoff is introduced. A Cauchy
+proposal of scale `max(2,2*abs(phi_reference))` covers the broadened core and
+inverse-cubic tails; packet wavelengths share a ray and receive independent
+PSF/proposal weights. Cancellation is polled between spectral lanes.
+`defocused_diffraction_density` exposes the same physical angular density.
+The expansion follows Braat et al., *Progress in Optics* 51 (2008), equations
+2.45 and 2.61, <https://nijboerzernike.nl/_PDF/BraatProgOpt2008_20140413.pdf>,
+with the coefficient bound from NIST DLMF 10.54.1 and 10.60.7.
+
+Pure kernel tests check the axial sinc law, exact focused limit, sign
+symmetry, independent adaptive-integral landmarks across all numerical
+branches and into the far tail, and three-wavelength unit power with 65,536
+deterministic radial draws (0.4% quadrature band). The last representable
+open-unit draw retains finite importance weights. Camera tests cover physical
+depth and SI scaling, chromatic axial nulls, lens-sample independence,
+shortest-wavelength phase refusal, infinity and focus-rack retention. The
+phase cap bounds numerical work; it does not certify the paraxial, high-NA,
+wide-angle, lens-aberration or measured-lens error. General multi-depth
+occlusion, defocused polygon pupils, virtual images, coherent scene transport
+and vector diffraction remain outside this mode.
+
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
 declared contact/terminal discontinuity, validate the source dynamics, or claim

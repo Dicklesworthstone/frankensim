@@ -21,8 +21,8 @@ use fs_render::animated_instances::{
     AnimatedGeometryInstance, RigidTransformTrajectory, TransformKeyframe,
 };
 use fs_render::camera::{
-    AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraShot, CutSide, FocusedDiffraction,
-    PhysicalCamera,
+    AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraShot, CutSide, DefocusedDiffraction,
+    FocusedDiffraction, PhysicalCamera,
 };
 use fs_render::charts::TriMesh;
 use fs_render::instances::{GeometryInstance, RigidTransform, SharedGeometry};
@@ -1990,6 +1990,185 @@ fn diffraction_render_preserves_uniform_environment_and_refuses_defocus() {
                 &film,
                 &previous,
                 "refused specular diffraction film",
+            );
+        }
+    });
+}
+
+/// Finite defocus changes the physical pupil PSF before tracing the same
+/// admitted object plane. It retains diffraction outside a geometric image
+/// and replays the exact absolute-sample stream across progressive chunks.
+#[test]
+fn defocused_plane_render_transports_light_and_replays() {
+    let mut scene = focus_probe_scene(0.0, 1.0e-3);
+    scene.primitives[0].shape = Shape::Mesh(quad(
+        [1.0e-4, -1.0e-3, 0.0],
+        [1.0e-3, -1.0e-3, 0.0],
+        [1.0e-3, 1.0e-3, 0.0],
+        [1.0e-4, 1.0e-3, 0.0],
+    ));
+    let aperture = Aperture::try_circular(1.0e-3).unwrap();
+    let focused = static_cinematic_camera(
+        physical_from_legacy(&scene.camera, 2.0, aperture.clone())
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+            .unwrap(),
+    );
+    let defocused = static_cinematic_camera(
+        physical_from_legacy(&scene.camera, 1.0, aperture)
+            .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.05).unwrap())
+            .unwrap(),
+    );
+    let settings = motion_settings(2_048);
+    let shutter = motion_shutter(0.5, 0.0);
+    with_cx(|cx| {
+        let sharp =
+            render_cinematic(&scene, &focused, CutSide::After, cx, &settings, shutter).unwrap();
+        let actual =
+            render_cinematic(&scene, &defocused, CutSide::After, cx, &settings, shutter).unwrap();
+        assert!(
+            actual.xyz[0]
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+        );
+        assert!(
+            (actual.xyz[0][1] - sharp.xyz[0][1]).abs() > 0.01 * sharp.xyz[0][1],
+            "finite pupil phase must change this nonuniform image"
+        );
+        let mut progressive = Film::try_new(1, 1).unwrap();
+        for (from, to) in [(0, 1_024), (1_024, 2_048)] {
+            render_cinematic_range(
+                &scene,
+                &defocused,
+                CutSide::After,
+                cx,
+                &settings,
+                &mut progressive,
+                from,
+                to,
+                shutter,
+            )
+            .unwrap();
+        }
+        assert_film_bits_eq(&actual, &progressive, "defocused plane progressive replay");
+    });
+}
+
+/// The geometric plane admission must catch a shallow foreground patch even
+/// when its defocus-phase mismatch fits the numerical source-depth budget.
+#[test]
+fn defocused_plane_refuses_pupil_occluders_before_changing_film() {
+    let mut scene = focus_probe_scene(0.0, 1.0e-3);
+    let physical =
+        physical_from_legacy(&scene.camera, 1.0, Aperture::try_circular(1.0e-3).unwrap())
+            .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.05).unwrap())
+            .unwrap();
+    // This point passes optical depth admission but is a different plane.
+    physical
+        .admit_diffraction_depth(Some(Point3::new(0.0, 0.0, 1.0e-5)), &[LAMBDA_MIN])
+        .unwrap();
+    scene.primitives.push(Primitive {
+        shape: Shape::Mesh(quad(
+            [0.01, -0.01, 1.0e-5],
+            [0.02, -0.01, 1.0e-5],
+            [0.02, 0.01, 1.0e-5],
+            [0.01, 0.01, 1.0e-5],
+        )),
+        material: Material::Lambertian {
+            reflectance: lift_rgb([0.5; 3]),
+        },
+        emission: None,
+    });
+    let camera = static_cinematic_camera(physical);
+    let settings = motion_settings(1);
+    let shutter = motion_shutter(0.5, 0.0);
+    with_cx(|cx| {
+        let mut film = Film::try_new(1, 1).unwrap();
+        let before = film.clone();
+        assert!(matches!(
+            render_cinematic_range(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                &mut film,
+                0,
+                1,
+                shutter,
+            ),
+            Err(TracerError::Camera(CameraError::InvalidDiffraction))
+        ));
+        assert_film_state_bits_eq(&film, &before, "refused pupil occluder");
+
+        // Move the same patch wholly behind the pupil: it can now serve
+        // secondary illumination without clipping any forward primary ray.
+        scene.primitives[2].shape = Shape::Mesh(quad(
+            [0.01, -0.01, 3.0],
+            [0.02, -0.01, 3.0],
+            [0.02, 0.01, 3.0],
+            [0.01, 0.01, 3.0],
+        ));
+        render_cinematic_range(
+            &scene,
+            &camera,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut film,
+            0,
+            1,
+            shutter,
+        )
+        .unwrap();
+        assert_eq!(film.spp_done, 1);
+    });
+}
+
+/// A spatially uniform infinite source remains uniform under a defocused,
+/// unit-power pupil. This checks actual spectral transport into the film.
+#[test]
+fn defocused_infinite_plane_preserves_uniform_radiance() {
+    let scene = Scene {
+        primitives: Vec::new(),
+        lights: Vec::new(),
+        environment: Some(
+            fs_render::lighting::EnvironmentMap::try_from_linear_srgb(
+                2,
+                1,
+                vec![[0.4, 0.5, 0.6]; 2],
+                0.0,
+            )
+            .unwrap(),
+        ),
+        camera: Camera {
+            eye: Point3::new(0.0, 0.0, 0.0),
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+            half_tan: 0.0,
+        },
+    };
+    let geometric = static_cinematic_camera(physical_from_legacy(
+        &scene.camera,
+        2.0,
+        Aperture::try_circular(0.0).unwrap(),
+    ));
+    let defocused = static_cinematic_camera(
+        physical_from_legacy(&scene.camera, 2.0, Aperture::try_circular(1.0e-3).unwrap())
+            .with_defocused_diffraction(DefocusedDiffraction::try_new(None, 0.0).unwrap())
+            .unwrap(),
+    );
+    let settings = motion_settings(8_192);
+    let shutter = motion_shutter(0.5, 0.0);
+    with_cx(|cx| {
+        let reference =
+            render_cinematic(&scene, &geometric, CutSide::After, cx, &settings, shutter).unwrap();
+        let actual =
+            render_cinematic(&scene, &defocused, CutSide::After, cx, &settings, shutter).unwrap();
+        for lane in 0..3 {
+            let relative = (actual.xyz[0][lane] / reference.xyz[0][lane] - 1.0).abs();
+            assert!(
+                relative < 0.06,
+                "defocused flat radiance channel {lane}: {relative}"
             );
         }
     });
