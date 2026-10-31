@@ -25,9 +25,9 @@
 //! Hertz area, unloading from a permanent set (Thornton 1997). The Hertz area is half the edge's
 //! truncation of the undeformed shaft, which is the area a hardness test divides by at depth, so at
 //! a given crush depth this is the lower of the two readings of the same datum. The card's
-//! compression perpendicular to the grain, the proportional limit of a plate-loaded block where
-//! crushing begins, is stated with each strike and not used: it would crush at a seventh of the
-//! pressure.
+//! compression perpendicular to the grain, reported as the stress at the proportional limit with
+//! no clearly defined ultimate stress (FPL-GTR-282 chapter 5), is stated with each strike and not
+//! used: as the crush pressure it would be a seventh of the hardness pressure.
 //!
 //! Not modelled: friction along the edge and the stick's bending (normal force only); each hit
 //! crushes fresh wood. Unsourced and declared: the stick's angle (the shaft perpendicular to the
