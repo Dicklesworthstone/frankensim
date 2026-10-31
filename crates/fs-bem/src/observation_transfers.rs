@@ -1,4 +1,7 @@
-//! Exterior observation realization, never an acoustic load. The producer
+//! Exterior observation realization and matching physical boundary fields.
+//! The observation FIR is never an acoustic load: sampled work-conjugate loads
+//! come separately from the retained, unwindowed physical boundary response.
+//! The producer
 //! supplies exp(-iwt) BEM fields; conjugation is performed exactly once at the
 //! DFT boundary. A declared C4 spectral taper and explicit reconstruction
 //! latency make the sampled observation finite-band. Neither is hidden in a
@@ -30,9 +33,11 @@ pub use harmonic::{
 };
 mod wall;
 pub use wall::{
-    BoundaryObservationBake, IterativeBoundaryObservation, IterativeBoundaryObservationBake,
-    IterativeObservationError, IterativeObservationOptions, IterativeObservationSample,
-    IterativeSourceReport, LocalBoundary, LocalBoundaryObservation, LocalWall, LowerBandWindow,
+    BoundaryObservationBake, BoundaryPortImpedance, IterativeBoundaryObservation,
+    IterativeBoundaryObservationBake, IterativeBoundaryResponse, IterativeCoherentDirectivity,
+    IterativeDirectivityOptions, IterativeFarFieldSample, IterativeObservationError,
+    IterativeObservationOptions, IterativeObservationSample, IterativeSourceReport, LocalBoundary,
+    LocalBoundaryObservation, LocalWall, LowerBandWindow,
 };
 
 /// Largest admitted DFT/CQ size. Work budgets may be stricter.

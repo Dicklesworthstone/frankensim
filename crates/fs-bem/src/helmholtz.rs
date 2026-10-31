@@ -213,6 +213,13 @@ pub enum HelmholtzError {
         /// Last relative change in integrated angular power.
         power_change: Option<f64>,
     },
+    /// Requested far-field quadrature exceeds the caller's kernel-work cap.
+    FarFieldBudget {
+        /// Complex phase/kernel evaluations needed for the complete request.
+        required_evaluations: usize,
+        /// Caller-admitted maximum across the complete angular operation.
+        maximum_evaluations: usize,
+    },
 }
 
 impl core::fmt::Display for HelmholtzError {
@@ -264,6 +271,13 @@ impl core::fmt::Display for HelmholtzError {
             } => write!(
                 f,
                 "FS-BEM-HELM-SH-QUADRATURE: angular projection unresolved after {evaluated_directions} of {maximum_directions} directions; coefficient change {coefficient_change:?}, power change {power_change:?}"
+            ),
+            HelmholtzError::FarFieldBudget {
+                required_evaluations,
+                maximum_evaluations,
+            } => write!(
+                f,
+                "FS-BEM-HELM-FAR-FIELD-BUDGET: {required_evaluations} kernel evaluations exceeds the declared {maximum_evaluations}"
             ),
         }
     }
@@ -1661,6 +1675,76 @@ pub fn far_field_integrated(
     far_field_impl(surface, solution, medium, directions, true)
 }
 
+/// Checked, cancellable evaluation of the SAME integrated far-field owner.
+/// The cap counts 16 phase evaluations per triangle/direction, or one per
+/// centroid-only panel/direction. It is checked before allocating output.
+/// Cancellation is polled at every direction and each 256-panel tile.
+/// Directions must already be unit vectors. The retained four-by-four
+/// triangle rule has the same spatial approximation as [`far_field_integrated`];
+/// the work receipt does not certify boundary or quadrature convergence.
+pub fn far_field_integrated_cancellable(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+    directions: &[[f64; 3]],
+    maximum_kernel_evaluations: usize,
+    cancelled: impl Fn() -> bool,
+) -> Result<Vec<C64>, HelmholtzError> {
+    sh_check_cancel(&cancelled)?;
+    let panels = surface.areas().len();
+    if solution.pressure.len() != panels
+        || solution.velocity.len() != panels
+        || solution.surface_fingerprint != surface_fingerprint(surface)
+        || solution.medium != medium
+    {
+        return Err(HelmholtzError::ShapeMismatch {
+            what: "far-field trace belongs to a different surface or medium",
+        });
+    }
+    if !solution.k.is_finite()
+        || solution.k <= 0.0
+        || !medium.density.is_finite()
+        || medium.density <= 0.0
+        || !medium.sound_speed.is_finite()
+        || medium.sound_speed <= 0.0
+        || directions.iter().any(|&direction| {
+            direction.iter().any(|v| !v.is_finite()) || (norm(direction) - 1.0).abs() > 1e-10
+        })
+        || solution
+            .pressure
+            .iter()
+            .chain(&solution.velocity)
+            .any(|v| !v.re.is_finite() || !v.im.is_finite())
+    {
+        return Err(HelmholtzError::BadParameter {
+            what: "far-field frequency, medium, unit direction or trace is invalid",
+        });
+    }
+    let nodes = if surface.triangles().is_some() { 16 } else { 1 };
+    let required = directions
+        .len()
+        .checked_mul(panels)
+        .and_then(|v| v.checked_mul(nodes));
+    if required.is_none_or(|value| value > maximum_kernel_evaluations) {
+        return Err(HelmholtzError::FarFieldBudget {
+            required_evaluations: required.unwrap_or(usize::MAX),
+            maximum_evaluations: maximum_kernel_evaluations,
+        });
+    }
+    let output =
+        far_field_impl_cancellable(surface, solution, medium, directions, true, &cancelled)?;
+    if output
+        .iter()
+        .any(|v| !v.re.is_finite() || !v.im.is_finite())
+    {
+        return Err(HelmholtzError::BadParameter {
+            what: "far-field amplitude exceeds finite numerical range",
+        });
+    }
+    sh_check_cancel(&cancelled)?;
+    Ok(output)
+}
+
 fn far_field_impl(
     surface: &SpherePanels,
     solution: &RadiationSolution,
@@ -1668,6 +1752,35 @@ fn far_field_impl(
     directions: &[[f64; 3]],
     integrate_triangles: bool,
 ) -> Vec<C64> {
+    far_field_impl_cancellable(
+        surface,
+        solution,
+        medium,
+        directions,
+        integrate_triangles,
+        &|| false,
+    )
+    .expect("uncancelled far-field allocation")
+}
+
+/// Shared normalization keeps direct and boundary phases on the same ray.
+pub(crate) fn far_field_unit_direction(direction: [f64; 3]) -> [f64; 3] {
+    let length = norm(direction);
+    [
+        direction[0] / length,
+        direction[1] / length,
+        direction[2] / length,
+    ]
+}
+
+fn far_field_impl_cancellable(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+    directions: &[[f64; 3]],
+    integrate_triangles: bool,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Vec<C64>, HelmholtzError> {
     let k = solution.k;
     let omega_rho = k * medium.sound_speed * medium.density;
     let centroids = surface.centroids();
@@ -1678,25 +1791,32 @@ fn far_field_impl(
     } else {
         None
     };
-    directions
-        .iter()
-        .map(|&dir| {
-            let len = norm(dir);
-            let d = [dir[0] / len, dir[1] / len, dir[2] / len];
-            let mut f = C64::ZERO;
-            for j in 0..centroids.len() {
-                let qj = solution.velocity[j] * C64::new(0.0, omega_rho);
-                let term = solution.pressure[j] * C64::new(0.0, -k * dot(d, normals[j])) - qj;
-                let contribution = if let Some(triangles) = triangles {
-                    term * triangle_far_phase(k, d, triangles[j])
-                } else {
-                    (term * expik(-k * dot(d, centroids[j]))).scale(areas[j])
-                };
-                f = f + contribution;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(directions.len())
+        .map_err(|_| HelmholtzError::AllocationFailed {
+            what: "integrated far-field samples",
+        })?;
+    for &dir in directions {
+        sh_check_cancel(cancelled)?;
+        let d = far_field_unit_direction(dir);
+        let mut f = C64::ZERO;
+        for j in 0..centroids.len() {
+            if j % 256 == 0 {
+                sh_check_cancel(cancelled)?;
             }
-            f.scale(1.0 / (4.0 * core::f64::consts::PI))
-        })
-        .collect()
+            let qj = solution.velocity[j] * C64::new(0.0, omega_rho);
+            let term = solution.pressure[j] * C64::new(0.0, -k * dot(d, normals[j])) - qj;
+            let contribution = if let Some(triangles) = triangles {
+                term * triangle_far_phase(k, d, triangles[j])
+            } else {
+                (term * expik(-k * dot(d, centroids[j]))).scale(areas[j])
+            };
+            f = f + contribution;
+        }
+        output.push(f.scale(1.0 / (4.0 * core::f64::consts::PI)));
+    }
+    Ok(output)
 }
 
 /// Solver-neutral far-field table: `p → F(ω, dir) e^{ikr}/r`.

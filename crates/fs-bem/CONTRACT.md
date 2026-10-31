@@ -1423,6 +1423,75 @@ porous band-limited playback and changed-nonlocal-law refusal. Native execution
 is required before claiming these numerical regressions pass. This extension
 does not qualify measured player/chair geometry or close the full W9 milestone.
 
+### Shared material diffraction, finite-source reaction and angular fields
+
+`IterativeBoundaryObservation::solve_frequency` retains the original pressure
+and actual normal velocity for every source at one positive physical frequency.
+One shared FMM/preconditioner solves every original source column; the streaming
+receiver path and retained path use the same solve traversal and finalizers.
+The caller explicitly budgets both pressure and velocity coefficients before
+any source solve, within `MAX_OBSERVATION_ENTRIES`. Native material support and
+solver refusals propagate unchanged; DC and unsupported material frequencies
+do not manufacture retained fields. This response is unwindowed even when its
+observer declares a lower FIR reconstruction window.
+
+`IterativeBoundaryResponse::observe_receivers` applies the original adaptive
+vector observation owner without another boundary solve. Finite radiator
+fields are the total outgoing field. Point-source traces are the scattered
+field; the exact original unit-flow monopole is added once at receivers and
+exposed separately for angular consumers. Immutable geometry, medium, source
+coordinates, materials and numerical settings remain bound by the borrowed
+observer and its operator identity. Individual original GMRES and resource
+reports remain available; sharing field arrays does not upgrade their error
+claims.
+
+`velocity_port_impedance` projects those same finite-source pressure fields
+against the original real velocity basis: `Z_ij = integral b_i p_j dA`.
+Disconnected passive material bodies participate in the same solve, so their
+multiple scattering changes both the self/mutual source reaction and observed
+sound. Prescribed nonzero source support still requires rigid patches, keeping
+each source coordinate's actual velocity unchanged. The matrix is row-major
+(effort, rate), with no symmetrization, diagonal replacement or positivity
+repair. Structural velocity coordinates retain force as their work-dual effort;
+unit-volume-flow apertures retain work-equivalent pressure. Only an all-aperture
+basis exposes `acoustic_impedance` in Pa s/m^3. Point monopoles have no finite
+surface self-work port and refuse loading extraction.
+
+`resisting_efforts` returns `Z * rates`; the fluid's reaction on the driven
+structure has the opposite sign. `input_power_w` evaluates
+`Re(rates^H Z rates)/2`, preserving coherent cross terms and phases. For passive
+walls this is the sum of outgoing boundary work and wall absorption of the same
+combined discrete fields, not the sum of individual source powers. Matrix
+entries and all source-pair/panel products have separate explicit budgets;
+projection polls cancellation in bounded panel tiles. Transpose reciprocity is
+measured on the unrepaired matrix. The normalized smallest Hermitian-work
+eigenvalue uses the original aperture/Jacobi diagnostic only within fs-la's
+conservative unpolled-work allowance; `passivity_margin == None` explicitly
+leaves that diagnostic unresolved for larger port counts while retaining the
+complete physical matrix. A negative measured margin remains negative. These
+coordinate-dependent diagnostics are not an in-loop reciprocal/passive rational
+realization or an error bound for the continuum problem.
+
+`far_field` returns total outgoing amplitudes under `p ~ F exp(ikr)/r` using
+the original integrated triangle phase owner and exact direct monopoles.
+`coherent_directivity` first combines complex-driven pressure and velocity
+traces, then applies the original refined SH projection; all source phases and
+interference remain present without another boundary solve. Explicit angular,
+temporary-entry and total kernel-work budgets apply across every refinement
+grid. Kernel integration polls between bounded panel tiles. SH captured fraction
+and power by degree describe the requested angular representation; they do not
+bound BEM/FMM or panel-integration error, and truncated coefficients alone do not
+establish total radiated power.
+
+Focused regressions define a two-body, two-finite-source material load and
+receiver case, independent coherent surface-work balance, obstacle-removal
+sensitivity, a three-order iterative-to-dense mutual-loading ladder, signed
+structural-coordinate units, point-source total-field parity, budget refusals
+and cancellation. These tests require native execution before a passing
+numerical claim. The synthetic bodies do not qualify measured player/chair
+models, open two-sided shells, a full-band compact aperture model or the full
+W9 milestone.
+
 ## Reciprocal complete source loads and matched receiver transfers
 
 `modal_loading::modal_radiation_loading_reciprocal` exposes the existing

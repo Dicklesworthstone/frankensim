@@ -7,6 +7,12 @@ use crate::helmholtz::{IterativeError, IterativeOptions, Preconditioner, Resourc
 use fs_exec::CancelGate;
 use fs_solver::krylov::SolveReport;
 
+mod response;
+pub use response::{
+    BoundaryPortImpedance, IterativeBoundaryResponse, IterativeCoherentDirectivity,
+    IterativeDirectivityOptions, IterativeFarFieldSample,
+};
+
 /// Explicit spatial/numerical controls; the material and physical sources are
 /// separate inputs. The same solver settings apply throughout the FFT ladder.
 #[derive(Clone, Debug)]
@@ -264,15 +270,38 @@ impl<'a> IterativeBoundaryObservation<'a> {
             }
             return Ok(self.zero_sample(omega));
         }
-        let beta = self
-            .observation
-            .boundary
-            .normalized_admittance(omega, || gate.is_requested())?;
-        let law = Admittance::Local {
-            beta: &beta,
-            declared_active: false,
-        };
-        let (surface, medium, geometry, quadrature) = match &self.observation.excitation {
+        let (_, medium, geometry, quadrature) = self.field_geometry();
+        let (_, output) = self.visit_solutions(
+            omega,
+            gate,
+            || {
+                Ok((
+                    geometry.prepare_velocity_cancellable(
+                        omega / medium.sound_speed,
+                        medium,
+                        quadrature,
+                        gate,
+                    )?,
+                    IterativeObservationSample {
+                        omega_rad_s: omega,
+                        operator_hash: self.operator_hash(),
+                        transfer: Vec::with_capacity(self.observation.channel_count()),
+                        sources: Vec::with_capacity(self.sources().len()),
+                    },
+                ))
+            },
+            |(rows, output), index, radiation, report| {
+                self.append_receiver_field(omega, index, rows, &radiation, &mut output.transfer)?;
+                output.sources.push(report);
+                Ok(())
+            },
+        )?;
+        self.admit_sample(&output)?;
+        Ok(output)
+    }
+
+    fn field_geometry(&self) -> (&'a SpherePanels, Medium, &Geometry<'a>, Options) {
+        match &self.observation.excitation {
             Excitation::Point(owner) => (
                 owner.surface,
                 owner.medium,
@@ -284,7 +313,41 @@ impl<'a> IterativeBoundaryObservation<'a> {
                 geometry,
                 quadrature,
             } => (owner.surface, owner.medium, geometry, *quadrature),
+        }
+    }
+
+    // One original solve traversal for streaming observation and retained
+    // boundary responses. The consumer is prepared after the boundary owner,
+    // preserving material refusal and receiver-admission order.
+    fn visit_solutions<T>(
+        &self,
+        omega: f64,
+        gate: &CancelGate,
+        prepare: impl FnOnce() -> Result<T, IterativeObservationError>,
+        mut receive: impl FnMut(
+            &mut T,
+            usize,
+            helmholtz::RadiationSolution,
+            IterativeSourceReport,
+        ) -> Result<(), IterativeObservationError>,
+    ) -> Result<T, IterativeObservationError> {
+        poll(gate)?;
+        self.observation.admit_frequency(omega)?;
+        if omega == 0.0 {
+            return Err(TransferError::Invalid(
+                "retained boundary fields require positive frequency",
+            )
+            .into());
+        }
+        let beta = self
+            .observation
+            .boundary
+            .normalized_admittance(omega, || gate.is_requested())?;
+        let law = Admittance::Local {
+            beta: &beta,
+            declared_active: false,
         };
+        let (surface, medium, _, _) = self.field_geometry();
         let k = omega / medium.sound_speed;
         let prepared = PreparedIterativeBoundary::new(
             surface,
@@ -295,13 +358,7 @@ impl<'a> IterativeBoundaryObservation<'a> {
             &self.solver,
             gate,
         )?;
-        let rows = geometry.prepare_velocity_cancellable(k, medium, quadrature, gate)?;
-        let mut output = IterativeObservationSample {
-            omega_rad_s: omega,
-            operator_hash: self.operator_hash(),
-            transfer: Vec::with_capacity(self.observation.channel_count()),
-            sources: Vec::with_capacity(self.sources().len()),
-        };
+        let mut output = prepare()?;
         for (index, source) in self.sources().iter().enumerate() {
             poll(gate)?;
             let (radiation, solve, resources, absorbed_power_w) = match &self.observation.excitation
@@ -337,46 +394,69 @@ impl<'a> IterativeBoundaryObservation<'a> {
                     )
                 }
             };
-            let received = rows.evaluate_velocity(&radiation)?;
-            let momentum = C64::new(0.0, omega * medium.density);
-            for (receiver, (&pressure, velocity)) in self.receivers().iter().zip(
-                received
-                    .scalar
-                    .pressure
-                    .iter()
-                    .zip(&received.particle_velocity_m_s),
-            ) {
-                let (pressure, velocity) = match &self.observation.excitation {
-                    Excitation::Point(owner) => {
-                        let monopoles = [Monopole {
-                            position_m: owner.point_sources[index].position_m,
-                            volume_velocity_m3_s: C64::ONE,
-                        }];
-                        let direct = IncidentField::Monopoles(&monopoles).pressure_velocity_at(
-                            k,
-                            medium,
-                            receiver.position_m,
-                        )?;
-                        (
-                            pressure + direct.pressure_pa,
-                            std::array::from_fn(|axis| velocity[axis] + direct.velocity_m_s[axis]),
-                        )
-                    }
-                    Excitation::Surface { .. } => (pressure, *velocity),
-                };
-                output.transfer.push(pressure);
-                output
-                    .transfer
-                    .extend(velocity.iter().map(|&component| momentum * component));
-            }
-            output.sources.push(IterativeSourceReport {
-                source: source.clone(),
-                solve,
-                resources,
-                absorbed_power_w,
-            });
+            receive(
+                &mut output,
+                index,
+                radiation,
+                IterativeSourceReport {
+                    source: source.clone(),
+                    solve,
+                    resources,
+                    absorbed_power_w,
+                },
+            )?;
         }
         poll(gate)?;
+        Ok(output)
+    }
+
+    fn append_receiver_field(
+        &self,
+        omega: f64,
+        index: usize,
+        rows: &crate::near_field::Prepared<'a>,
+        radiation: &helmholtz::RadiationSolution,
+        output: &mut Vec<C64>,
+    ) -> Result<(), IterativeObservationError> {
+        let medium = self.field_geometry().1;
+        let k = omega / medium.sound_speed;
+        let received = rows.evaluate_velocity(radiation)?;
+        let momentum = C64::new(0.0, omega * medium.density);
+        for (receiver, (&pressure, velocity)) in self.receivers().iter().zip(
+            received
+                .scalar
+                .pressure
+                .iter()
+                .zip(&received.particle_velocity_m_s),
+        ) {
+            let (pressure, velocity) = match &self.observation.excitation {
+                Excitation::Point(owner) => {
+                    let monopoles = [Monopole {
+                        position_m: owner.point_sources[index].position_m,
+                        volume_velocity_m3_s: C64::ONE,
+                    }];
+                    let direct = IncidentField::Monopoles(&monopoles).pressure_velocity_at(
+                        k,
+                        medium,
+                        receiver.position_m,
+                    )?;
+                    (
+                        pressure + direct.pressure_pa,
+                        std::array::from_fn(|axis| velocity[axis] + direct.velocity_m_s[axis]),
+                    )
+                }
+                Excitation::Surface { .. } => (pressure, *velocity),
+            };
+            output.push(pressure);
+            output.extend(velocity.iter().map(|&component| momentum * component));
+        }
+        Ok(())
+    }
+
+    fn admit_sample(
+        &self,
+        output: &IterativeObservationSample,
+    ) -> Result<(), IterativeObservationError> {
         if output.transfer.len() != self.observation.channel_count()
             || output.transfer.iter().any(|&value| !finite(value))
         {
@@ -384,7 +464,7 @@ impl<'a> IterativeBoundaryObservation<'a> {
                 TransferError::Invalid("nonfinite or incomplete iterative observation").into(),
             );
         }
-        Ok(output)
+        Ok(())
     }
 
     pub fn band_limited_frequency_sample(

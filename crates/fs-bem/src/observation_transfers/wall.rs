@@ -12,8 +12,10 @@ mod boundary;
 pub use boundary::{LocalBoundary, LocalWall};
 mod iterative;
 pub use iterative::{
-    IterativeBoundaryObservation, IterativeBoundaryObservationBake, IterativeObservationError,
-    IterativeObservationOptions, IterativeObservationSample, IterativeSourceReport,
+    BoundaryPortImpedance, IterativeBoundaryObservation, IterativeBoundaryObservationBake,
+    IterativeBoundaryResponse, IterativeCoherentDirectivity, IterativeDirectivityOptions,
+    IterativeFarFieldSample, IterativeObservationError, IterativeObservationOptions,
+    IterativeObservationSample, IterativeSourceReport,
 };
 
 /// Declared C4 lower reconstruction window: zero at/below `stop_hz`, one at/

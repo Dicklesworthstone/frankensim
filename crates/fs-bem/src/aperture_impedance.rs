@@ -348,13 +348,38 @@ pub(super) fn project_pressures(
     apertures: &[Aperture],
     pressures: &[&[C64]],
 ) -> Result<Vec<C64>, HelmholtzError> {
-    let n = apertures.len();
+    project_real_velocity_rows(
+        surface,
+        apertures.len(),
+        |row, panel| apertures[row].shape[panel],
+        pressures,
+        None,
+    )
+}
+
+/// Shared work-conjugate projection for original real velocity shapes. The
+/// accessor avoids allocating another copy of a retained complex-real basis.
+/// Callers own matrix/projection budgets; this owner retains the exact sum and
+/// polls the optional gate between bounded panel tiles.
+pub(crate) fn project_real_velocity_rows(
+    surface: &SpherePanels,
+    n: usize,
+    shape: impl Fn(usize, usize) -> f64,
+    pressures: &[&[C64]],
+    gate: Option<&CancelGate>,
+) -> Result<Vec<C64>, HelmholtzError> {
+    if pressures.len() != n || pressures.iter().any(|p| p.len() != surface.areas().len()) {
+        return Err(bad("source-pressure projection dimensions disagree"));
+    }
     let mut impedance = vec![C64::ZERO; n * n];
     for (b, pressure) in pressures.iter().enumerate() {
-        for (a, aperture) in apertures.iter().enumerate() {
+        for a in 0..n {
             let mut force = C64::ZERO;
-            for ((&shape, &p), &area) in aperture.shape.iter().zip(*pressure).zip(surface.areas()) {
-                force = force + p.scale(area * shape);
+            for (panel, (&p, &area)) in pressure.iter().zip(surface.areas()).enumerate() {
+                if panel % 256 == 0 && gate.is_some_and(CancelGate::is_requested) {
+                    return Err(HelmholtzError::Cancelled);
+                }
+                force = force + p.scale(area * shape(a, panel));
             }
             if !finite(force) {
                 return Err(bad("nonfinite aperture force projection"));
@@ -383,11 +408,9 @@ pub(super) fn row(omega: f64, impedance: Vec<C64>, n: usize, route: &'static str
 #[must_use]
 pub fn reciprocity_and_passivity(impedance: &[C64], n: usize) -> (f64, f64) {
     let norm = det::sqrt(impedance.iter().map(|z| z.norm_sq()).sum::<f64>());
-    let mut asymmetry = 0.0;
     let mut embedding = vec![0.0; 4 * n * n];
     for a in 0..n {
         for b in 0..n {
-            asymmetry += (impedance[a * n + b] - impedance[b * n + a]).norm_sq();
             let h = (impedance[a * n + b] + impedance[b * n + a].conj()).scale(0.5);
             embedding[a * 2 * n + b] = h.re;
             embedding[(a + n) * 2 * n + b + n] = h.re;
@@ -396,7 +419,19 @@ pub fn reciprocity_and_passivity(impedance: &[C64], n: usize) -> (f64, f64) {
         }
     }
     let (values, _) = fs_la::eigen::jacobi_eigh(&embedding, 2 * n);
-    (det::sqrt(asymmetry) / norm, values[0] / norm)
+    (reciprocity_defect(impedance, n), values[0] / norm)
+}
+
+/// The same original transpose defect without allocating an eigenproblem.
+pub(crate) fn reciprocity_defect(impedance: &[C64], n: usize) -> f64 {
+    let norm = det::sqrt(impedance.iter().map(|z| z.norm_sq()).sum::<f64>());
+    let mut asymmetry = 0.0;
+    for a in 0..n {
+        for b in 0..n {
+            asymmetry += (impedance[a * n + b] - impedance[b * n + a]).norm_sq();
+        }
+    }
+    det::sqrt(asymmetry) / norm
 }
 
 /// One coplanar circular piston in an infinite rigid baffle.
