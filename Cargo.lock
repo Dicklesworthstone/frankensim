@@ -1486,6 +1486,7 @@ dependencies = [
  "fs-exec",
  "fs-feec",
  "fs-ga",
+ "fs-gas",
  "fs-la",
  "fs-lbm",
  "fs-matdb",

@@ -20,9 +20,8 @@
 
 use fs_qty::{Energy, Power, Temperature, Time};
 use fs_thermochem::electron_collision::{
-    AVOGADRO_PER_MOL, ELECTRON_MASS_KG, ElectronCollisionErrorV1,
-    ElectronCollisionKindV1, ElectronCrossSectionV1, MaxwellianRateControlsV1,
-    MaxwellianRateWeightingV1,
+    AVOGADRO_PER_MOL, ELECTRON_MASS_KG, ElectronCollisionErrorV1, ElectronCollisionKindV1,
+    ElectronCrossSectionV1, MaxwellianRateControlsV1, MaxwellianRateWeightingV1,
 };
 use fs_thermochem::equilibrium::composition::{
     FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1, MAX_EQUILIBRIUM_SPECIES_V1,

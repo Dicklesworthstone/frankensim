@@ -26,6 +26,7 @@ fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
+fs-gas = { path = "../fs-gas" }
 fs-thermochem = { path = "../fs-thermochem" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }

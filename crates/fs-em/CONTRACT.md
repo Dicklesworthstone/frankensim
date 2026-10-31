@@ -57,8 +57,9 @@ evolution and causal transient realization of the terminal matrix are not claime
 `PlanarConduction` accepts the sealed `PlanarOhmicResponse` material response,
 including `fs-material::ionized_gas::IonizedGasConductivity`. The same weighted
 FEEC assembly, boundary current solve, source-work audit, cell current and
-`E.J` heat integration are used for source-property conductors and equilibrium
-ionized gas. Gas populations and collisional rates remain in the original
+`E.J` heat integration are used for source-property conductors and ionized gas
+with actual frozen populations. Gas populations, separate electron/heavy
+temperatures and collisional rates remain in the original
 material snapshot. Contact construction and material refresh keep their
 stronger source-material requirements; no gas/solid contact law is inferred.
 
@@ -72,14 +73,26 @@ basis. The retained reference field is admitted at its actual voltage;
 `V/Vref` before independently checking the actual field, current and power.
 The gas response is static, unmagnetized and local, with a prescribed massive
 neutral collision background. It does not add a discharge, Hall, radiation,
-space-charge or magnetohydrodynamic solver. Thermal or flow feedback must
-re-equilibrate and resolve collision rates to construct a new accepted snapshot.
+space-charge or magnetohydrodynamic solver. Thermal, flow or finite-rate
+chemistry feedback must carry its actual new populations and temperatures into
+a new accepted snapshot and resolve collision rates there. A kinetic endpoint
+is never projected back onto LTE merely to obtain conductivity.
+
+The material's checked Joule partition consumes the actual recovered FEEC
+electric field and supplies electron/heavy electrical work separately. Each
+power density uses that field cell's physical volume before entering the
+conservative thermal-pool update. Their sum is the original field's `E.J`;
+the native resistor heat is not added a second time. Updated temperatures feed
+the same source-owned material and field owners.
 
 G1/G3 tests in `tests/ionized_gas.rs` use analytic H/H+/electron thermodynamics
 and explicit synthetic collision sources, then solve the actual native mesh.
 Affine voltage, current density, Joule power, native circuit resistance and
 voltage reversal agree with independent slab formulas at two temperatures.
 G0 tests refuse actual PDE and circuit fields above the carrier drift domain.
+Further G1/G3 tests carry an accepted finite-rate ionization endpoint through
+actual neutral-density momentum drag, field current, Joule power and native
+circuit resistance, and vary electron temperature with populations held fixed.
 
 ## Prescribed Eulerian moving-conductor induction
 

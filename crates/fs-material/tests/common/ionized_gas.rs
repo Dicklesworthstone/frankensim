@@ -15,7 +15,12 @@ use fs_material::state_point::{
     resolve_material_state_point,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Amount, MolarMass, Pressure, QuantitySpec, Temperature};
+use fs_qty::{Amount, Area, Energy, MolarMass, Pressure, QuantitySpec, Temperature, Volume};
+use fs_thermochem::electron_collision::{
+    ElectronCollisionKindV1, ElectronCrossSectionPointV1, ElectronCrossSectionV1,
+    MaxwellianRateControlsV1, MaxwellianRateWeightingV1,
+};
+use fs_thermochem::equilibrium::composition::state::FrozenIonizedGasStateV1;
 use fs_thermochem::equilibrium::composition::{
     EquilibriumSolveV1, IdealGasEquilibriumSolutionV1, IdealGasEquilibriumV1,
 };
@@ -116,6 +121,23 @@ pub fn equilibrium(owner: &IdealGasEquilibriumV1, t: f64, p: f64) -> IdealGasEqu
         .unwrap()
 }
 pub fn source(species: &str, t: f64, p: f64, rate: f64) -> CarrierMomentumRelaxation {
+    collision_source(species, &[("T", t)], p, rate)
+}
+pub fn source_two_temperature(
+    species: &str,
+    th: f64,
+    te: f64,
+    p: f64,
+    rate: f64,
+) -> CarrierMomentumRelaxation {
+    collision_source(species, &[("T_h", th), ("T_e", te)], p, rate)
+}
+fn collision_source(
+    species: &str,
+    temperatures: &[(&str, f64)],
+    p: f64,
+    rate: f64,
+) -> CarrierMomentumRelaxation {
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -126,6 +148,12 @@ pub fn source(species: &str, t: f64, p: f64, rate: f64) -> CarrierMomentumRelaxa
         "effective_momentum_relaxation_rate",
         MOMENTUM_RELAXATION_RATE_DIMS,
     );
+    let mut validity = ValidityDomain::unconstrained().with_quantity("p", pressure, 1.0, 1e8);
+    let mut query = QueryPoint::new().with_quantity("p", pressure, p).unwrap();
+    for &(axis, value) in temperatures {
+        validity = validity.with_quantity(axis, temperature, 2000.0, 20000.0);
+        query = query.with_quantity(axis, temperature, value).unwrap();
+    }
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
@@ -134,9 +162,7 @@ pub fn source(species: &str, t: f64, p: f64, rate: f64) -> CarrierMomentumRelaxa
                 value: rate,
                 dims: MOMENTUM_RELAXATION_RATE_DIMS,
             },
-            validity: ValidityDomain::unconstrained()
-                .with_quantity("T", temperature, 2000.0, 20000.0)
-                .with_quantity("p", pressure, 1.0, 1e8),
+            validity,
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: vec![],
@@ -158,11 +184,6 @@ pub fn source(species: &str, t: f64, p: f64, rate: f64) -> CarrierMomentumRelaxa
         vec![],
     )
     .unwrap();
-    let query = QueryPoint::new()
-        .with_quantity("T", temperature, t)
-        .unwrap()
-        .with_quantity("p", pressure, p)
-        .unwrap();
     let resolved = resolve_material_state_point(
         &card,
         &query,
@@ -173,7 +194,11 @@ pub fn source(species: &str, t: f64, p: f64, rate: f64) -> CarrierMomentumRelaxa
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
-    CarrierMomentumRelaxation::new(id(species), resolved, key).unwrap()
+    if temperatures.len() == 1 {
+        CarrierMomentumRelaxation::new(id(species), resolved, key).unwrap()
+    } else {
+        CarrierMomentumRelaxation::new_two_temperature(id(species), resolved, key).unwrap()
+    }
 }
 pub fn limits() -> IonizedGasDcLimits {
     IonizedGasDcLimits {
@@ -193,6 +218,75 @@ pub fn material(t: f64, p: f64) -> IonizedGasConductivity {
     let owner = chemistry();
     let state = equilibrium(&owner, t, p);
     IonizedGasConductivity::new(&owner, state, rates(t, p, 1.0), limits(), || false).unwrap()
+}
+pub fn frozen_state(x: f64, th: f64, te: f64, volume: f64) -> FrozenIonizedGasStateV1 {
+    FrozenIonizedGasStateV1::new(
+        &chemistry(),
+        &[Amount::new(1.0 - x), Amount::new(x), Amount::new(x)],
+        Volume::new(volume),
+        Temperature::new(th),
+        Temperature::new(te),
+        1e-12,
+        || false,
+    )
+    .unwrap()
+}
+pub fn frozen_rates(state: &FrozenIonizedGasStateV1) -> Vec<CarrierMomentumRelaxation> {
+    let th = state.heavy_temperature().value();
+    let te = state.electron_temperature().value();
+    let p = state.pressure().value();
+    vec![
+        source_two_temperature("e-", th, te, p, 1e10),
+        source_two_temperature("H+", th, te, p, 1e9),
+    ]
+}
+pub fn momentum_cross_section(target: &str, sigma: f64) -> ElectronCrossSectionV1 {
+    ElectronCrossSectionV1::tabulated(
+        id(target),
+        ElectronCollisionKindV1::ElasticMomentumTransfer,
+        Provenance {
+            source:
+                "manufactured constant electron-neutral momentum cross section and tail envelope"
+                    .into(),
+            license: "analytic test fixture".into(),
+            artifact: None,
+        },
+        vec![
+            ElectronCrossSectionPointV1 {
+                energy: Energy::new(0.0),
+                cross_section: Area::new(sigma),
+            },
+            ElectronCrossSectionPointV1 {
+                energy: Energy::new(128.0 * E),
+                cross_section: Area::new(sigma),
+            },
+        ],
+        Area::new(sigma),
+    )
+    .unwrap()
+}
+pub fn electron_relaxation(
+    state: &FrozenIonizedGasStateV1,
+    sigma: f64,
+) -> CarrierMomentumRelaxation {
+    let evaluated = momentum_cross_section("H", sigma)
+        .evaluate(
+            state.electron_temperature(),
+            MaxwellianRateWeightingV1::WeakDriftMomentum,
+            MaxwellianRateControlsV1 {
+                relative_tolerance: 1e-10,
+                maximum_subdivisions: 1024,
+            },
+            || false,
+        )
+        .unwrap();
+    CarrierMomentumRelaxation::from_electron_neutral_cross_sections(
+        state,
+        vec![evaluated],
+        0.1,
+        || false,
+    )
+    .unwrap()
 }
 pub fn relative(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance * b.abs(), "{a:e} != {b:e}");

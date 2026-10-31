@@ -397,18 +397,43 @@ fn missing_or_inadequate_collision_source_and_cancellation_leave_original_state_
 fn slow_but_light_target_does_not_acquire_massive_target_physics() {
     let ids = vec![id("H"), id("H+"), id("e")];
     let bank = IdealGasEquilibriumV1::new(
-        ElementalMatrix::new(vec![ElementId::new("H").unwrap()], ids.clone(), vec![vec![1, 1, 0]]).unwrap(),
+        ElementalMatrix::new(
+            vec![ElementId::new("H").unwrap()],
+            ids.clone(),
+            vec![vec![1, 1, 0]],
+        )
+        .unwrap(),
         ChargeVector::new(ids, vec![0, 1, -1]).unwrap(),
-        vec![species("H", ELECTRON_MASS_KG, 0.0),
-             species("H+", 1.672_621_925_95e-27, 0.0),
-             species("e", ELECTRON_MASS_KG, 0.0)],
-    ).unwrap();
-    let initial = FrozenIonizedGasStateV1::new(&bank,
+        vec![
+            species("H", ELECTRON_MASS_KG, 0.0),
+            species("H+", 1.672_621_925_95e-27, 0.0),
+            species("e", ELECTRON_MASS_KG, 0.0),
+        ],
+    )
+    .unwrap();
+    let initial = FrozenIonizedGasStateV1::new(
+        &bank,
         &[Amount::new(0.9999), Amount::new(1e-4), Amount::new(1e-4)],
-        Volume::new(1.0), Temperature::new(1000.0), Temperature::new(30000.0), 1e-12, || false).unwrap();
+        Volume::new(1.0),
+        Temperature::new(1000.0),
+        Temperature::new(30000.0),
+        1e-12,
+        || false,
+    )
+    .unwrap();
     let mut c = controls();
     c.maximum_target_thermal_speed_ratio = 0.2;
     assert!((1000.0_f64 / 30000.0).sqrt() < c.maximum_target_thermal_speed_ratio);
-    assert_eq!(advance_frozen_energy(&initial, &[collision(1e-24,200.0)], Power::new(0.0),
-        Power::new(0.0), Time::new(0.001), c, || false), Err(ElectronHeavyEnergyError::OutsideDomain));
+    assert_eq!(
+        advance_frozen_energy(
+            &initial,
+            &[collision(1e-24, 200.0)],
+            Power::new(0.0),
+            Power::new(0.0),
+            Time::new(0.001),
+            c,
+            || false
+        ),
+        Err(ElectronHeavyEnergyError::OutsideDomain)
+    );
 }

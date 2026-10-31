@@ -34,27 +34,57 @@ This is prescribed-temperature infinitesimal-strain elasticity with fixed
 section properties; heat evolution, viscoelastic relaxation, interlaminar
 traction, debonding and measured laminate validation remain outside this lane.
 
-## Equilibrium ionized-gas DC transport
+## Ionized-gas DC transport from actual populations
 
 `ionized_gas::IonizedGasConductivity` consumes the exact source-bound
-`fs-thermochem::IdealGasEquilibriumV1` solution. Original charge numbers,
-particle masses and ideal-gas number densities supply the charged carriers.
+`FrozenIonizedGasStateV1`, including actual finite-rate amounts, volume and
+separate electron/heavy temperatures. Its original LTE constructor retains
+the accepted `IdealGasEquilibriumV1` solution and delegates to the same
+transport calculation. `equilibrium()` is optional; a frozen state does not
+acquire an equilibrium receipt. Original charge numbers, particle masses and
+actual number densities supply the carriers. There is no Saha projection of a
+kinetic endpoint and no invented electron seed.
 Each present carrier requires a separately selected positive material property
 in reciprocal seconds for its effective momentum-relaxation rate. The complete
 original source bundle, claim/key, query and usage receipts remain attached;
-temperature and pressure must match the equilibrium endpoint. No neutral-gas
+temperature and pressure must match the actual endpoint. Common-temperature
+sources use typed `T,p`; separate-temperature sources explicitly use typed
+`T_h,T_e,p` and cannot reuse a stale common-temperature rate. No neutral-gas
 viscosity rule, species-name constant or fabricated electrical-property claim
 is substituted for these sources.
+
+Electron drag can also consume the original source-retained Maxwellian
+momentum-transfer evaluations. Every present neutral requires exactly one
+matching target source; actual densities supply `nu_e=sum(n_target*k_m)`.
+The displaced-Maxwellian moment is `k_m=(2/3)<sigma_mt*v*E/(kTe)>`, not the
+event-count rate `<sigma*v>`. Ionization/event coefficients refuse as drag.
+Original cross sections, evaluation controls, target densities and the exact
+frozen state remain attached. The electron source mass must agree with the
+collision velocity model. A caller-declared bound on
+both `sqrt(me/m_target)` and `sqrt((Th/m_target)/(Te/me))` admits the
+stationary-heavy approximation. Cold targets cannot bypass the recoil-mass
+requirement by having a small thermal speed.
+This is a Maxwellian fluid momentum closure, not an exact solution of the
+energy-dependent Lorentz-Boltzmann electrical mobility problem.
 
 The declared scalar law is `sigma=sum(n_s*(z_s*e)^2/(m_s*nu_s))`, with drag
 against a prescribed massive neutral background, zero magnetic field and zero
 frequency. It is a local constitutive closure; background dynamics, nonlocal
 transport, electron-ion two-fluid momentum transfer, Hall effects, electrical
-breakdown, non-LTE excitation and radiation are outside its scope. Explicit
+breakdown, non-Maxwellian distributions, excited-state kinetics and radiation
+are outside its scope. Explicit
 caller bounds admit the charged mole fraction, classical phase-space density,
 Coulomb coupling and carrier drift relative to thermal speed. These are domain
-limits, not certified error bounds or empirical validation. The actual field
+limits, not certified error bounds or empirical validation. Each carrier's
+actual temperature supplies its classical phase-space and drift screens;
+the coldest present carrier temperature supplies a conservative Coulomb screen.
+The actual field
 must satisfy the weak-drift limit before current and heat can be published.
+`joule_heating_w_m3` checks that same actual field and partitions `E.J` by the
+structural electron row and remaining charged carriers. The resulting electron
+and heavy power densities feed separate thermal budgets; the unsplit total
+must not be charged a second time. Thermal exchange remains a separate
+conservative process, and state changes require newly resolved transport.
 
 The sealed `conductor::planar::PlanarOhmicResponse` trait exposes the common
 static field response. Existing source-material conductor implementations use
@@ -64,8 +94,9 @@ refresh APIs still require `PlanarConductorMaterial`.
 
 G0/G1/G3 tests in `tests/ionized_gas.rs` check actual carrier number density and
 mass conversion, conductivity and collision-rate scaling, temperature-driven
-ionization, complete source coverage and matching state, and separate transport
-domain refusals. Cancellation is polled per species before publication. There
+ionization, frozen carrier abundance, separate temperatures, complete source
+coverage, momentum/event distinction, stale-state and stationary-target
+refusals. Cancellation is polled per species before publication. There
 is no unsafe code, evolving state, default source, or new runtime dependency.
 
 ## Permanent secondary creep

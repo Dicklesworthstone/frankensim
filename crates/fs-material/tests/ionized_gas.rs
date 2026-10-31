@@ -5,15 +5,19 @@ use fixture::*;
 use fs_material::conductor::planar::{PlanarConductivity, PlanarOhmicResponse};
 use fs_material::ionized_gas::{IonizedGasConductivity, IonizedGasError};
 
+#[path = "ionized_gas/frozen.rs"]
+mod frozen;
+
 #[test]
 fn g1_saha_populations_and_particle_masses_drive_current_without_neutral_transport() {
     let m = material(8000.0, 100_000.0);
-    let t = m.equilibrium().temperature().value();
-    let p = m.equilibrium().pressure().value();
+    let t = m.equilibrium().unwrap().temperature().value();
+    let p = m.equilibrium().unwrap().pressure().value();
     let mut expected = 0.0;
     for carrier in m.carriers() {
         let f = m
             .equilibrium()
+            .unwrap()
             .species()
             .iter()
             .find(|s| &s.species == carrier.species())

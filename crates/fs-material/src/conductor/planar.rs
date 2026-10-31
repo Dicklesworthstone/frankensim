@@ -95,7 +95,7 @@ mod sealed {
 }
 
 /// Immutable positive DC response for the shared spatial current/heat owner.
-/// Source-resolved solid conductors and equilibrium-derived gas transport keep
+/// Source-resolved solid conductors and frozen-population gas transport keep
 /// their own complete physical inputs. A derived gas law need not fabricate a
 /// measured electrical-property claim to use the same FEEC operator.
 pub trait PlanarOhmicResponse: sealed::Sealed + Clone {
