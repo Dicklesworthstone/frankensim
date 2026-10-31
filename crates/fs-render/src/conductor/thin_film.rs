@@ -13,7 +13,7 @@ use crate::dielectric::DielectricIor;
 use fs_blake3::DomainHasher;
 use fs_math::det;
 
-mod polarization;
+pub(super) mod polarization;
 
 /// Upper thickness of this explicitly coherent, uniform local coating model.
 /// This 100 micrometre bound limits phase arguments and does not establish

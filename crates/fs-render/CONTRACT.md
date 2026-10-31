@@ -163,10 +163,38 @@ differentiable lift). Pure Rust throughout.
   is bounded and allocation-free, and all native conductor BSDF consumers use
   the same owner. Opaque substrate absorption remains implicit in `1-R`; this
   interface does not resolve heat deposition between film and substrate.
-  The caller declares sufficient coherence and locally parallel, laterally
-  uniform boundaries. This is local single-film interference, with no arbitrary
-  multilayer stack, thickness distribution, polarization
-  transport between bounces, diffraction, or scene-wide coherent field claim.
+  `ConductorOptics::with_periodic_coating(CoherentPeriodicCoating)` additionally
+  integrates explicitly ordered multilayers into those same scalar BSDF and
+  Mueller consumers. One to four `CauchyCoatingLayer` laws form a unit cell,
+  repeated coherently up to 64 total physical layers. Each layer declares its
+  shared Cauchy phase dispersion, constant visible-band extinction coefficient,
+  and normal thickness; the whole coating carries a source/status binding.
+  These are authored optical laws, not a silent constant-index or constant-loss
+  fit to arbitrary measured data. One repeat admits any ordering of four such
+  layers; multiple repeats support Bragg stacks. Cell propagation is prepared
+  once per wavelength/angle and reused across repeats. Storage fits inside the
+  existing absorbing-film payload, preserving Copy material size and avoiding
+  per-hit allocation. Identity binds physical ordering, repetition count, every
+  coefficient, thickness and source; existing bare and single-film identities
+  retain their original bytes.
+  `CoherentCoatingStack` separately borrows up to 64 arbitrary ordered transparent
+  or absorbing layers, retaining each full Sellmeier/Cauchy/tabulated law or
+  nine-knot eta/k spectrum and source. It evaluates scalar reflectance and the
+  signed Mueller response through the same kernel. This general borrowed API
+  replaces any coating on its supplied substrate for that evaluation; it does
+  not attach arbitrary heap-backed spectral stacks to Copy scene materials.
+  Backward boundary-field propagation normalizes each field/flux pair after
+  every layer and shares the passive scaled propagation and analytic critical
+  limit with single films. No exponentially growing fields, intensity-only
+  mixing, effective-medium replacement, or amplitude-based layer pruning is
+  used. Zero-thickness layers disappear exactly. Bare, incident-matched prefix
+  and substrate-matched suffix limits retain established scalar/Mueller bits.
+  The caller declares sufficient coherence over the full stack and locally
+  parallel, laterally uniform boundaries. This is local multilayer interference;
+  it does not infer thickness distributions, spatial diffraction or scene-wide
+  coherent fields, or make the scalar tracer transport polarization between
+  bounces. Absorption remains the total opaque-system `1-R`, with no claim to
+  layer-resolved heat deposition or broadband thermal emissivity.
   G0/G1/G3 tests cover independent complex Airy answers, quarter-wave
   cancellation, half-wave/zero-thickness/bare limits, incident-medium effects,
   critical/evanescent continuity, passivity and both native conductor BSDFs.
@@ -177,6 +205,11 @@ differentiable lift). Pure Rust throughout.
   screening of the substrate, retained spectral knots, passivity across optical
   depth, and both native conductor BSDFs. A supplied visible-band table does not
   establish a broadband causal dispersion law or measured specimen fidelity.
+  Multilayer regressions additionally cover independent nested complex Airy
+  and signed Mueller answers, closed-form quarter-wave Bragg admittance in both
+  orders, full eta/k spectral interpolation, expanded/repeated-cell equivalence,
+  critical and evanescent weak-loss limits, zero/split-layer reductions, opaque
+  front-layer screening, bounded storage/work, and native isotropic/brushed BSDFs.
   The derivation follows [Byrnes, *Multilayer optical calculations*,
   sections 2--5 and appendix D](https://arxiv.org/abs/1603.02720).
 

@@ -19197,6 +19197,75 @@ mod tests {
     }
 
     #[test]
+    fn g1_multilayer_bragg_coating_reaches_isotropic_and_brushed_bsdfs() {
+        use crate::conductor::{
+            CauchyCoatingLayer, CoherentPeriodicCoating, ConductorDataStatus,
+            ConductorIorSample, ConductorSource,
+        };
+        let source = ConductorSource::try_new(
+            hash_domain("org.frankensim.test.multilayer-bsdf", b"synthetic"),
+            ConductorDataStatus::Representative,
+        )
+        .unwrap();
+        let bare = ConductorOptics::try_new(
+            core::array::from_fn(|i| {
+                ConductorIorSample::try_new(380.0 + 50.0 * i as f64, 0.25, 2.7).unwrap()
+            }),
+            source,
+        )
+        .unwrap();
+        let cell = [2.4, 1.4].map(|eta| {
+            CauchyCoatingLayer::try_new(
+                crate::dielectric::CauchyIor::try_constant(eta).unwrap(),
+                0.0,
+                550.0e-9 / (4.0 * eta),
+            )
+            .unwrap()
+        });
+        let coated = bare.with_periodic_coating(
+            CoherentPeriodicCoating::try_new(&cell, 5, source).unwrap(),
+        );
+        let detail = crate::surface_detail::SurfaceDetail::none(0.18);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let frame =
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.4, 0.25, 0.1), normal)
+                .unwrap();
+        for brushed in [false, true] {
+            let material = |optics| {
+                if brushed {
+                    Material::BrushedConductor { optics, detail }
+                } else {
+                    Material::Conductor {
+                        optics,
+                        surface: ConductorSurface::try_rough(0.18).unwrap(),
+                    }
+                }
+            };
+            let (plain, stack) = (material(bare), material(coated));
+            assert_ne!(plain.content_identity(), stack.content_identity());
+            for wavelength in [380.0, 550.0, 780.0] {
+                let evaluate = |mat| {
+                    opaque_bsdf_eval(
+                        mat, normal, normal, normal, wavelength, None,
+                        brushed.then_some(&frame),
+                    )
+                    .unwrap()
+                };
+                let ratio = coated.fresnel(wavelength, 1.0, 1.0).unwrap()
+                    / bare.fresnel(wavelength, 1.0, 1.0).unwrap();
+                assert!((evaluate(&stack) / evaluate(&plain) - ratio).abs() < 1.0e-13);
+                if wavelength == 550.0 {
+                    assert!(ratio > 1.1, "Bragg interference must reach actual transport");
+                }
+                assert_eq!(
+                    bsdf_pdf(&plain, normal, normal, normal, brushed.then_some(&frame)).to_bits(),
+                    bsdf_pdf(&stack, normal, normal, normal, brushed.then_some(&frame)).to_bits(),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn aniso_reduces_to_isotropic_and_samples_match_pdf() {
         // Reduction: alpha_x == alpha_y must reproduce the isotropic
         // kernels exactly (same algebra, so exact equality is demanded).

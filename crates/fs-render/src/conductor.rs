@@ -6,7 +6,7 @@
 //! complex interface equations.  Built-in metal tables are representative
 //! look-development assets, not measurements of a specimen or finish.
 //! An explicitly supplied [`CoherentDielectricCoating`] or
-//! [`CoherentAbsorbingCoating`] adds local thin-film interference without
+//! [`CoherentAbsorbingCoating`] or [`CoherentPeriodicCoating`] adds local film interference without
 //! introducing coherence between independent scene paths.
 
 use fs_blake3::{ContentHash, DomainHasher};
@@ -18,6 +18,11 @@ mod thin_film;
 pub use thin_film::{CoherentDielectricCoating, MAX_COHERENT_COATING_THICKNESS_M};
 mod absorbing_film;
 pub use absorbing_film::{CoatingIorSample, CoherentAbsorbingCoating};
+mod multilayer;
+pub use multilayer::{
+    CauchyCoatingLayer, CoatingLayer, CoherentCoatingStack, CoherentPeriodicCoating,
+    MAX_COHERENT_STACK_LAYERS, MAX_COHERENT_UNIT_CELL_LAYERS,
+};
 
 /// Bit semantics of table validation, interpolation, and Fresnel evaluation.
 pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 1;
@@ -54,6 +59,8 @@ pub enum ConductorError {
     InvalidSource,
     /// A coherent coating thickness was non-finite or outside its domain.
     InvalidCoating,
+    /// A coating unit cell or expanded stack exceeded the admitted layer budget.
+    InvalidCoatingStack,
     /// Valid inputs nevertheless produced an invalid complex intermediate.
     NumericalFailure,
 }
@@ -69,6 +76,7 @@ impl core::fmt::Display for ConductorError {
             Self::InvalidRoughness => "invalid conductor GGX roughness",
             Self::InvalidSource => "invalid conductor source identity",
             Self::InvalidCoating => "invalid coherent coating thickness",
+            Self::InvalidCoatingStack => "invalid coherent coating layer count",
             Self::NumericalFailure => "conductor Fresnel evaluation was non-finite",
         })
     }
@@ -211,6 +219,7 @@ pub struct ConductorOptics {
 enum CoherentCoating {
     Dielectric(CoherentDielectricCoating),
     Absorbing(CoherentAbsorbingCoating),
+    Periodic(CoherentPeriodicCoating),
 }
 
 impl ConductorOptics {
@@ -268,7 +277,7 @@ impl ConductorOptics {
     /// Attach one explicitly declared transparent, conformal coherent film.
     /// Its thickness and phase-index law are independent of the substrate
     /// table and GGX roughness; no oxide is inferred from the metal's name.
-    /// This replaces any previously attached transparent or absorbing film.
+    /// This replaces any previously attached coating or multilayer stack.
     /// All conductor BSDF consumers evaluate the same coated Fresnel law.
     #[must_use]
     pub fn with_coating(mut self, coating: CoherentDielectricCoating) -> Self {
@@ -282,6 +291,16 @@ impl ConductorOptics {
     #[must_use]
     pub fn with_absorbing_coating(mut self, coating: CoherentAbsorbingCoating) -> Self {
         self.coating = Some(CoherentCoating::Absorbing(coating));
+        self
+    }
+
+    /// Attach an explicitly ordered, source-bound multilayer unit cell. Its
+    /// Cauchy phase-index laws and constant extinction coefficients are declared
+    /// inputs, never approximations inferred from measured spectral tables.
+    /// Repetition is coherent and bounded; this replaces any existing coating.
+    #[must_use]
+    pub fn with_periodic_coating(mut self, coating: CoherentPeriodicCoating) -> Self {
+        self.coating = Some(CoherentCoating::Periodic(coating));
         self
     }
 
@@ -299,6 +318,15 @@ impl ConductorOptics {
     pub const fn absorbing_coating(self) -> Option<CoherentAbsorbingCoating> {
         match self.coating {
             Some(CoherentCoating::Absorbing(coating)) => Some(coating),
+            _ => None,
+        }
+    }
+
+    /// Explicit scene-integrated multilayer unit cell, if supplied.
+    #[must_use]
+    pub const fn periodic_coating(self) -> Option<CoherentPeriodicCoating> {
+        match self.coating {
+            Some(CoherentCoating::Periodic(coating)) => Some(coating),
             _ => None,
         }
     }
@@ -333,6 +361,9 @@ impl ConductorOptics {
             Some(CoherentCoating::Absorbing(coating)) => {
                 coating.fresnel(wavelength_nm, incident_eta, ior, incidence_cosine)
             }
+            Some(CoherentCoating::Periodic(coating)) => {
+                coating.fresnel(wavelength_nm, incident_eta, ior, incidence_cosine)
+            }
             None => fresnel_conductor(incident_eta, ior.eta, ior.k, incidence_cosine),
         }
     }
@@ -345,7 +376,7 @@ impl ConductorOptics {
 
     /// Substrate source identity and declared status. A coating, if present,
     /// retains its separate source through [`Self::coating`] or
-    /// [`Self::absorbing_coating`].
+    /// [`Self::absorbing_coating`] or [`Self::periodic_coating`].
     #[must_use]
     pub const fn source(self) -> ConductorSource {
         self.source
@@ -386,6 +417,7 @@ impl ConductorOptics {
         match self.coating {
             Some(CoherentCoating::Dielectric(coating)) => coating.update_identity(&mut hasher),
             Some(CoherentCoating::Absorbing(coating)) => coating.update_identity(&mut hasher),
+            Some(CoherentCoating::Periodic(coating)) => coating.update_identity(&mut hasher),
             None => {}
         }
         hasher.finalize()

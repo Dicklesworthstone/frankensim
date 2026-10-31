@@ -216,7 +216,7 @@ pub(super) fn reflection_amplitudes(
     [r_s, r_p]
 }
 
-fn propagation(q_squared: Complex, phase_scale: f64) -> (Complex, Complex) {
+pub(super) fn propagation(q_squared: Complex, phase_scale: f64) -> (Complex, Complex) {
     let q = super::thin_film::forward_sqrt(q_squared);
     let delta = q * phase_scale;
     if det::hypot(delta.re, delta.im) < 1.0e-4 {

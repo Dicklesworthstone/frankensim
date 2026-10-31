@@ -12,7 +12,7 @@ use fs_math::det;
 
 impl ConductorOptics {
     /// Reflected Stokes power at a smooth conductor interface, including its
-    /// explicitly authored transparent or absorbing coherent coating, when present.
+    /// explicitly authored transparent, absorbing or multilayer coherent coating.
     ///
     /// The incoming and reflected frames both have +Q along s. Their p axes
     /// make (s,p,propagation) right-handed. U=2 Re(E_s conj(E_p)),
@@ -72,29 +72,39 @@ impl ConductorOptics {
                         ior, film.thickness_m())
                 }
             }
+            Some(CoherentCoating::Periodic(coating)) => coating.amplitudes(
+                wavelength_nm, incident_eta, substrate, incidence_cosine,
+            )?,
             None => bare_amplitudes(incident_eta, substrate, incidence_cosine),
         };
-        let s = passive_amplitude(amplitudes[0])?;
-        let p = if incidence_cosine == 1.0 {
-            // Isotropy fixes this relation exactly, including an interference
-            // null where separately rounded s/p formulas can lose their ratio.
-            Complex::new(-s.re, -s.im)
-        } else {
-            passive_amplitude(amplitudes[1])?
-        };
-        let s_power = s.norm_squared();
-        let p_power = p.norm_squared();
-        let mean = 0.5 * s_power + 0.5 * p_power;
-        let difference = 0.5 * s_power - 0.5 * p_power;
-        let real = s.re * p.re + s.im * p.im;
-        let imaginary = s.im * p.re - s.re * p.im;
-        Ok(Mueller([
-            [mean, difference, 0.0, 0.0],
-            [difference, mean, 0.0, 0.0],
-            [0.0, 0.0, real, -imaginary],
-            [0.0, 0.0, imaginary, real],
-        ]))
+        mueller_from_amplitudes(amplitudes, incidence_cosine)
     }
+}
+
+pub(in crate::conductor) fn mueller_from_amplitudes(
+    amplitudes: [Complex; 2],
+    incidence_cosine: f64,
+) -> Result<Mueller, ConductorError> {
+    let s = passive_amplitude(amplitudes[0])?;
+    let p = if incidence_cosine == 1.0 {
+        // Isotropy fixes this relation exactly, including an interference
+        // null where separately rounded s/p formulas can lose their ratio.
+        Complex::new(-s.re, -s.im)
+    } else {
+        passive_amplitude(amplitudes[1])?
+    };
+    let s_power = s.norm_squared();
+    let p_power = p.norm_squared();
+    let mean = 0.5 * s_power + 0.5 * p_power;
+    let difference = 0.5 * s_power - 0.5 * p_power;
+    let real = s.re * p.re + s.im * p.im;
+    let imaginary = s.im * p.re - s.re * p.im;
+    Ok(Mueller([
+        [mean, difference, 0.0, 0.0],
+        [difference, mean, 0.0, 0.0],
+        [0.0, 0.0, real, -imaginary],
+        [0.0, 0.0, imaginary, real],
+    ]))
 }
 
 // This is the original scalar coating assembly, retaining its operation order.
@@ -124,7 +134,7 @@ pub(super) fn coated_amplitudes(
     [r_s, r_p]
 }
 
-fn bare_amplitudes(incident_eta: f64, substrate: ComplexIor, cosine: f64) -> [Complex; 2] {
+pub(in crate::conductor) fn bare_amplitudes(incident_eta: f64, substrate: ComplexIor, cosine: f64) -> [Complex; 2] {
     let n = Complex::new(substrate.eta, substrate.k);
     if cosine == 1.0 {
         let incident = Complex::new(incident_eta, 0.0);
