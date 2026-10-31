@@ -5,7 +5,7 @@
 
 use super::{MitcShellModel, PlateError, dd_add, two_prod};
 use fs_math::det;
-use fs_sparse::{Coo, DirectOrdering, LdltFactor, LdltOptions, NdOptions, SymbolicLdlt};
+use fs_sparse::{Coo, Csr, DirectOrdering, LdltFactor, LdltOptions, NdOptions, SymbolicLdlt};
 use std::sync::Arc;
 
 /// An immutable shell and its positive-definite static factorization.
@@ -34,7 +34,7 @@ impl PreparedMitcStatic {
     ) -> Result<Self, PlateError> {
         checkpoint(&mut cancelled)?;
         let model = model.into();
-        let factor = StaticFactor::try_new(&model, &mut cancelled)?;
+        let factor = StaticFactor::try_new(&model.pencil.k, &mut cancelled)?;
         Ok(Self { model, factor })
     }
 
@@ -63,7 +63,12 @@ impl PreparedMitcStatic {
     ) -> Result<Vec<f64>, PlateError> {
         checkpoint(&mut cancelled)?;
         let rhs = self.model.project_load(full_world_load)?;
-        self.factor.solve_reduced(&self.model, &rhs, &mut cancelled)
+        let reduced = self
+            .factor
+            .solve_reduced(&self.model.pencil.k, &rhs, &mut cancelled)?;
+        let world = self.model.expand(&reduced)?;
+        checkpoint(&mut cancelled)?;
+        Ok(world)
     }
 }
 
@@ -75,27 +80,28 @@ pub(super) fn solve_static(
     // Preserve the existing load-admission order before expensive factor work.
     let rhs = model.project_load(full_load_6n)?;
     let mut cancelled = || false;
-    let factor = StaticFactor::try_new(model, &mut cancelled)?;
-    factor.solve_reduced(model, &rhs, &mut cancelled)
+    let factor = StaticFactor::try_new(&model.pencil.k, &mut cancelled)?;
+    let reduced = factor.solve_reduced(&model.pencil.k, &rhs, &mut cancelled)?;
+    model.expand(&reduced)
 }
 
 #[derive(Debug)]
-struct StaticFactor {
+pub(super) struct StaticFactor {
     scale: Vec<f64>,
     factor: LdltFactor,
 }
 
 impl StaticFactor {
-    fn try_new(
-        model: &MitcShellModel,
+    pub(super) fn try_new(
+        matrix: &Csr,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, PlateError> {
         checkpoint(cancelled)?;
-        let n = model.pencil.free;
+        let n = matrix.nrows();
         let mut scale = vec![0.0; n];
         for (row, s) in scale.iter_mut().enumerate() {
             row_checkpoint(row, cancelled)?;
-            let (cols, vals) = model.pencil.k.row(row);
+            let (cols, vals) = matrix.row(row);
             let mut diag = 0.0;
             for (&col, &val) in cols.iter().zip(vals) {
                 if col == row {
@@ -114,7 +120,7 @@ impl StaticFactor {
         for row in 0..n {
             row_checkpoint(row, cancelled)?;
             let sr = scale[row];
-            let (cols, vals) = model.pencil.k.row(row);
+            let (cols, vals) = matrix.row(row);
             for (&col, &val) in cols.iter().zip(vals) {
                 k_eq.push(row, col, sr * val * scale[col]);
             }
@@ -144,14 +150,19 @@ impl StaticFactor {
         Ok(Self { scale, factor })
     }
 
-    fn solve_reduced(
+    pub(super) fn solve_reduced(
         &self,
-        model: &MitcShellModel,
+        matrix: &Csr,
         rhs: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<f64>, PlateError> {
         checkpoint(cancelled)?;
-        let n = model.pencil.free;
+        let n = matrix.nrows();
+        if rhs.len() != n || rhs.iter().any(|v| !v.is_finite()) {
+            return Err(PlateError::StaticSolve {
+                what: "finite factor right-hand side of matching extent required",
+            });
+        }
         let scale = &self.scale;
         let mut rhs_eq = vec![0.0; n];
         for row in 0..n {
@@ -177,7 +188,7 @@ impl StaticFactor {
             checkpoint(cancelled)?;
             for (row, &b_i) in rhs.iter().enumerate() {
                 row_checkpoint(row, cancelled)?;
-                let (cols, vals) = model.pencil.k.row(row);
+                let (cols, vals) = matrix.row(row);
                 let mut sum = (b_i, 0.0_f64);
                 for (&col, &val) in cols.iter().zip(vals) {
                     let (p_hi, p_lo) = two_prod(-val, x_hi[col]);
@@ -208,9 +219,8 @@ impl StaticFactor {
                 what: "static shell true residual exceeds 1e-8 relative",
             });
         }
-        let displacement = model.expand(&x_hi)?;
         checkpoint(cancelled)?;
-        Ok(displacement)
+        Ok(x_hi)
     }
 }
 

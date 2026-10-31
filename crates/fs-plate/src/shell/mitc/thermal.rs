@@ -30,6 +30,9 @@ pub use laminate::LaminateThermalField;
 /// Signed transverse initial-stress stiffness on admitted planar panels.
 pub mod prestress;
 
+/// Native transient shell motion retaining both interior director rotations.
+pub mod transient;
+
 use super::{MitcShellModel, PlateError, element, solve_static};
 use element::thermal::{PreparedThermalFacet, ThermalLoading};
 use fs_material::state_point::{

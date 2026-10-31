@@ -949,6 +949,37 @@ world/support-frame covariance, hidden bubble motion and atomic refusals.
 legacy equivalence, shared ownership and refusal recovery. Targeted metadata
 checks pass; these are not claims of executed numerical or measured validation.
 
+### Retained thermal director inertia
+
+`thermal::transient::EnrichedMitcShell` restores both independent internal
+director coordinates per facet in the invertible basis `y=Tq+Br`. Original
+nodal stiffness, consistent mass, support maps and drilling gauge are retained,
+with cross inertia `T^T M B`, bubble inertia and the original bubble stiffness.
+Thermal forces enter both momentum equations; internal motion is evolved,
+never prescribed by a moving thermal lift or reset to its static equilibrium.
+
+Fixed-step implicit midpoint reuses the existing scaled sparse LDLT and
+compensated refinement kernels, with an owned effective factor shared by all
+trials and reusable across accepted equal-dt intervals without copying the
+sparse operators. The native report separates endpoint total-load work,
+polarized quadratic storage change and complete kinetic-energy change. Actual
+strain polynomials, transformed nodal and internal material forces, gauge
+storage and whole-facet director bounds are recovered from the accepted full
+motion. The current native consistent mass carries physical translation and
+director motion, with no invented drilling inertia. The midpoint effective
+operator retains the original algebraic drilling stiffness. Fully free
+massless director-axis directions require compatible initial displacement and
+velocity; unsupported efforts on those numerical directions refuse.
+State/operator identity,
+stationary support compatibility, finite arithmetic and final cancellation
+are admitted before returning immutable proposals.
+
+The scope is fixed linear elasticity, reference geometry and consistent mass.
+No nonlinear prestress, material damping, changing elastic tensors, remesh,
+adjoint or experimental accuracy follows. `tests/thermal_shell_inertia.rs`
+checks analytic bubble/cross inertia, independent dynamic internal motion,
+static-limit recovery, repeated midpoint conservation and atomic refusals.
+
 ## Equilibrium of tied shell assemblies before modal reduction
 
 `shell::preload::assembly::equilibrate_shell_assembly` solves the full CST/DKT

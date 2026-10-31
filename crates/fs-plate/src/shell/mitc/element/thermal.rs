@@ -16,6 +16,7 @@ pub(in crate::shell::mitc) struct PreparedThermalFacet {
     matrices: Matrices,
     loading: ThermalLoading,
     bubble_offset: [f64; 2],
+    bubble_load: [f64; 2],
     pub(in crate::shell::mitc) load: [f64; 18],
 }
 
@@ -40,13 +41,30 @@ fn resultants(
 }
 
 impl PreparedThermalFacet {
+    pub(in crate::shell::mitc) const fn equilibrium_bubble(&self) -> [f64; 2] {
+        self.bubble_offset
+    }
+
+    pub(in crate::shell::mitc) const fn bubble_load(&self) -> [f64; 2] {
+        self.bubble_load
+    }
+
     pub(in crate::shell::mitc) fn director_motion_bound(
         &self,
         nodal: &[f64; 18],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, PlateError> {
+        self.director_motion_bound_with_bubble(nodal, self.bubble_offset, cancelled)
+    }
+
+    pub(in crate::shell::mitc) fn director_motion_bound_with_bubble(
+        &self,
+        nodal: &[f64; 18],
+        bubble: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, PlateError> {
         let mut q = self.field.expand(nodal);
-        for i in 0..2 { q[18 + i] += self.bubble_offset[i]; }
+        for i in 0..2 { q[18 + i] += bubble[i]; }
         let mut motion = [[0.0; 3]; 4];
         for (point, (r, s)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0/3.0, 1.0/3.0)]
             .into_iter().enumerate() {
@@ -79,9 +97,18 @@ impl PreparedThermalFacet {
         nodal: &[f64; 18],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<crate::shell::mitc::strain::RealElementStrain, PlateError> {
+        self.strain_field_with_bubble(nodal, self.bubble_offset, cancelled)
+    }
+
+    pub(in crate::shell::mitc) fn strain_field_with_bubble(
+        &self,
+        nodal: &[f64; 18],
+        bubble: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<crate::shell::mitc::strain::RealElementStrain, PlateError> {
         let mut q = self.field.expand(nodal);
         for i in 0..2 {
-            q[18 + i] += self.bubble_offset[i];
+            q[18 + i] += bubble[i];
         }
         crate::shell::mitc::strain::real_field_from_expanded(&self.field, &q, cancelled)
     }
@@ -144,6 +171,7 @@ impl PreparedThermalFacet {
             matrices,
             loading,
             bubble_offset,
+            bubble_load: [full[18], full[19]],
             load,
         })
     }
@@ -157,6 +185,37 @@ impl PreparedThermalFacet {
         for i in 0..2 {
             q[18 + i] += self.bubble_offset[i];
         }
+        self.recover_expanded(&q, cancelled).map(|(response, _)| response)
+    }
+
+    /// Work-conjugate forces in y = T q + B r, with the actual independent r.
+    /// Dynamic bubble forces generally do not vanish, so their T contribution
+    /// must be retained in the eighteen world nodal generalized forces.
+    pub(in crate::shell::mitc) fn recover_with_bubble(
+        &self,
+        nodal: &[f64; 18],
+        bubble: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(ThermalFacetResponse, [f64; 2]), PlateError> {
+        let mut q = self.field.expand(nodal);
+        for i in 0..2 { q[18+i] += bubble[i]; }
+        let (mut response, force) = self.recover_expanded(&q, cancelled)?;
+        for i in 0..18 {
+            response.material_nodal_force[i] +=
+                self.field.bubble[0][i]*force[0] + self.field.bubble[1][i]*force[1];
+        }
+        if response.material_nodal_force.iter().any(|v| !v.is_finite()) {
+            return Err(PlateError::BadSection { what: "nonfinite enriched material nodal force" });
+        }
+        Ok((response, force))
+    }
+
+    fn recover_expanded(
+        &self,
+        q: &[f64; 20],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(ThermalFacetResponse, [f64; 2]), PlateError> {
+        let mut bubble_force = [0.0; 2];
         let mut out = ThermalFacetResponse {
             membrane_force_n_m: [0.0; 3],
             bending_moment_n: [0.0; 3],
@@ -205,7 +264,7 @@ impl PreparedThermalFacet {
                 out.transverse_shear_n_m[i] += weight * shear[i];
             }
             out.strain_energy_j += weight * self.field.g.area_m2 * energy;
-            for c in 0..18 {
+            for c in 0..20 {
                 let (bm, bb, _) = self.field.kin.basis(&self.field.g, lambda[1], lambda[2], c);
                 let cov = [
                     self.field.constant[0][c] + self.field.twisting[c] * (lambda[2] - 1.0 / 3.0),
@@ -219,7 +278,11 @@ impl PreparedThermalFacet {
                                 * shear[i]
                         })
                         .sum::<f64>();
-                out.material_nodal_force[c] += weight * self.field.g.area_m2 * work;
+                if c < 18 {
+                    out.material_nodal_force[c] += weight * self.field.g.area_m2 * work;
+                } else {
+                    bubble_force[c-18] += weight * self.field.g.area_m2 * work;
+                }
             }
         }
         if out
@@ -228,6 +291,7 @@ impl PreparedThermalFacet {
             .chain(&out.bending_moment_n)
             .chain(&out.transverse_shear_n_m)
             .chain(&out.material_nodal_force)
+            .chain(&bubble_force)
             .any(|v| !v.is_finite())
             || !out.strain_energy_j.is_finite()
         {
@@ -235,6 +299,6 @@ impl PreparedThermalFacet {
                 what: "nonfinite thermal shell response",
             });
         }
-        Ok(out)
+        Ok((out, bubble_force))
     }
 }

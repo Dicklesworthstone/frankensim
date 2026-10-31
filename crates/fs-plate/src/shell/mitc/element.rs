@@ -178,6 +178,7 @@ pub(super) struct PreparedStrainField {
     twisting: [f64; N],
     bubble: [[f64; 18]; 2],
     bubble_compliance: [[f64; 2]; 2],
+    bubble_stiffness: [[f64; 2]; 2],
     g: FacetGeometry,
 }
 
@@ -211,6 +212,7 @@ impl PreparedStrainField {
             twisting,
             bubble: [transform[18], transform[19]],
             bubble_compliance,
+            bubble_stiffness: [[k[18][18], k[18][19]], [k[19][18], k[19][19]]],
         })
     }
 
@@ -222,6 +224,31 @@ impl PreparedStrainField {
             q[19] += self.bubble[1][j] * u_18[j];
         }
         q
+    }
+
+    /// Extra blocks in the invertible enriched coordinates y = T q + B r.
+    /// Keeping r independent restores both native director inertia modes;
+    /// the original statically condensed nodal blocks remain unchanged.
+    pub(super) fn enrichment_blocks(
+        &self,
+        section: &ShearShellSection,
+        mass: ShellMass,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<([[f64; 2]; 18], [[f64; 2]; 2], [[f64; 2]; 2]), PlateError> {
+        let m = mass_matrix(&self.kin, &self.g, section, mass, cancelled)?;
+        let mut cross = [[0.0; 2]; 18];
+        for i in 0..18 {
+            for b in 0..2 {
+                cross[i][b] = m[i][18+b]
+                    + self.bubble[0][i]*m[18][18+b]
+                    + self.bubble[1][i]*m[19][18+b];
+            }
+        }
+        let mb = [[m[18][18], m[18][19]], [m[19][18], m[19][19]]];
+        if cross.iter().flatten().chain(mb.iter().flatten()).any(|v| !v.is_finite()) {
+            return Err(PlateError::BadSection { what: "nonfinite enriched shell inertia" });
+        }
+        Ok((cross, mb, self.bubble_stiffness))
     }
 
     pub(super) fn eval(&self, q: &[f64; N], r: f64, s: f64)
@@ -322,46 +349,7 @@ pub(super) fn matrices(
 ) -> Result<(Condensed, Condensed), PlateError> {
     let kin = Kinematics::new(mesh, tri, g, normals);
     let mut k = strain_matrix(&kin, g, section.coupled_matrices(), cancelled)?;
-    let mut m: Matrix = [[0.0; N]; N];
-    if mass == ShellMass::Consistent {
-        for (lambda, weight) in mass_rule() {
-            if cancelled() {
-                return Err(PlateError::Cancelled);
-            }
-            let basis: [([f64; 3], [f64; 3]); N] =
-                core::array::from_fn(|c| kin.director_inertia_basis(lambda[1], lambda[2], c));
-            for i in 0..N {
-                for j in i..N {
-                    // Bare and coated shells use the SAME material velocity
-                    // u_dot + z*director_dot. I1 is its work-conjugate cross
-                    // inertia, not an angular/translation scalar product.
-                    m[i][j] += weight * g.area_m2
-                        * (section.areal_mass_kg_m2 * dot(basis[i].0, basis[j].0)
-                            + section.mass_first_moment_kg_m
-                                * (dot(basis[i].0, basis[j].1) + dot(basis[i].1, basis[j].0))
-                            + section.rotary_inertia_kg * dot(basis[i].1, basis[j].1));
-                }
-            }
-        }
-    } else {
-        for i in 0..18 {
-            m[i][i] = g.area_m2 / 3.0
-                * if i % 6 < 3 {
-                    section.areal_mass_kg_m2
-                } else {
-                    section.rotary_inertia_kg
-                };
-        }
-        for node in 0..3 { for component in 0..3 {
-            let mut rotation = [0.0; 3];
-            rotation[component] = 1.0;
-            let motion = cross(rotation, normals[node]);
-            for axis in 0..3 {
-                m[6*node+axis][6*node+3+component] =
-                    g.area_m2/3.0*section.mass_first_moment_kg_m*motion[axis];
-            }
-        } }
-    }
+    let mut m = mass_matrix(&kin, g, section, mass, cancelled)?;
     for i in 0..N {
         for j in i..N {
             k[j][i] = k[i][j];
@@ -395,6 +383,61 @@ pub(super) fn matrices(
         }
     }
     Ok((kc, mc))
+}
+
+fn mass_matrix(
+    kin: &Kinematics,
+    g: &FacetGeometry,
+    section: &ShearShellSection,
+    mass: ShellMass,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Matrix, PlateError> {
+    let mut m: Matrix = [[0.0; N]; N];
+    if mass == ShellMass::Consistent {
+        for (lambda, weight) in mass_rule() {
+            if cancelled() {
+                return Err(PlateError::Cancelled);
+            }
+            let basis: [([f64; 3], [f64; 3]); N] =
+                core::array::from_fn(|c| kin.director_inertia_basis(lambda[1], lambda[2], c));
+            for i in 0..N {
+                for j in i..N {
+                    // Bare and coated shells use the SAME material velocity
+                    // u_dot + z*director_dot. I1 is its work-conjugate cross
+                    // inertia, not an angular/translation scalar product.
+                    m[i][j] += weight * g.area_m2
+                        * (section.areal_mass_kg_m2 * dot(basis[i].0, basis[j].0)
+                            + section.mass_first_moment_kg_m
+                                * (dot(basis[i].0, basis[j].1) + dot(basis[i].1, basis[j].0))
+                            + section.rotary_inertia_kg * dot(basis[i].1, basis[j].1));
+                }
+            }
+        }
+    } else {
+        for i in 0..18 {
+            m[i][i] = g.area_m2 / 3.0
+                * if i % 6 < 3 {
+                    section.areal_mass_kg_m2
+                } else {
+                    section.rotary_inertia_kg
+                };
+        }
+        for node in 0..3 { for component in 0..3 {
+            let mut rotation = [0.0; 3];
+            rotation[component] = 1.0;
+            let motion = cross(rotation, kin.normals[node]);
+            for axis in 0..3 {
+                m[6*node+axis][6*node+3+component] =
+                    g.area_m2/3.0*section.mass_first_moment_kg_m*motion[axis];
+            }
+        } }
+    }
+    for i in 0..N {
+        for j in i..N {
+            m[j][i] = m[i][j];
+        }
+    }
+    Ok(m)
 }
 
 type Transform = [[f64; 18]; N];
