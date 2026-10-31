@@ -3073,3 +3073,32 @@ Focused verification covers cyclic axial response and permanent set, complete di
 Checked section responses refuse material-domain and branch/history-shape mismatches without changing accepted history. Raw multi-branch responses return NaNs on these failures, including newly introduced single/multi Chaboche mismatches. Existing force-based beam and static-frame owners use the same retained fiber histories. RC reinforcement retains the original geometry-consistent density and line mass.
 
 Seven focused regressions cover every supported branch count through cycling, independent three-scale bending/tangent/backstress formulas and reversal, failed-response isolation, complete ordered source metadata and RC mass, custom-density alias refusal, sourced beam/frame loaded and permanent deflection with reversal, and an independent one-interval Norton relaxation oracle. Existing fiber plasticity regressions remain required. These are fixed-condition small-strain cyclic laws, not thermal Chaboche history transfer, new frame kinematics, damage or fatigue calibration.
+
+
+## Enclosed gas-cavity geometry on deforming solids
+
+`hyper3::pressure::cavity::ClosedTetCavity` selects one connected closed inner
+boundary of an already admitted tetrahedral solid. Enclosed gas volume is
+separate from total material volume. Gas-outward orientation supplies the volume
+and its derivatives while canonical solid-face pressure signs are preserved.
+Evaluated geometry stores compact boundary-node `dV/du` and analytic
+O(boundary faces) Hessian-vector actions. Positive differential gas pressure
+produces `+p grad(V)`; held-pressure endpoint work is exactly `p ΔV`.
+The generated canonical face field feeds the existing static and dynamic
+pressure owners without a second solid solver or equation of state.
+
+Preparation rejects duplicate, out-of-range, open, disconnected and outer-shell
+selections. Each evaluation admits every material tetrahedron and requires
+positive current cavity volume. Relative reference and displacement coordinates
+preserve a large common translation. These local checks do not certify
+self-intersection, global injectivity or contact. Geometry supports the admitted
+boundary size; `GasMechanicalLoad` retains its separate 256-coordinate chart
+bound. Gas evolution, heat exchange, mixed incompressibility and time integration
+remain with their respective owners.
+
+Five focused regression groups cover independent volume/cofactor derivatives,
+work and pressure signs, matrix-free tangent action and symmetry, objectivity,
+actual native static-solver compression of a hollow twelve-tetrahedron specimen,
+and invalid geometry/selection/cancellation. Independent analytical and NumPy
+calculations verify the fixture and its tangent; the authored native Rust tests
+have not been executed in this disk-constrained session.

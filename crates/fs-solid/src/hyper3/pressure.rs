@@ -26,6 +26,9 @@ use super::{HyperTetError, checkpoint};
 use crate::linear3::TetAssemblyBudget;
 use crate::loads3::{LoadError3, TetLoadGeometry3};
 
+/// Enclosed void volume and work-conjugate pressure geometry for gas cavities.
+pub mod cavity;
+
 /// Signed differential pressure in Pa, held in material-face coordinates.
 /// Positive pressure acts inward; negative pressure prescribes outward traction.
 #[derive(Debug, Clone, Copy)]
@@ -368,6 +371,15 @@ impl ClosedTetPressureSurface {
         displacement_m: &[f64],
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 3]>, f64), HyperTetError> {
+        self.positions_and_volume_about(displacement_m, 0, cx)
+    }
+
+    fn positions_and_volume_about(
+        &self,
+        displacement_m: &[f64],
+        origin_node: usize,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 3]>, f64), HyperTetError> {
         checkpoint(cx)?;
         if displacement_m.len() != 3 * self.nodes_m.len() {
             return Err(invalid(
@@ -377,11 +389,11 @@ impl ClosedTetPressureSurface {
         // Pressure geometry depends only on relative positions. Remove the
         // common motion before adding it to reference coordinates, otherwise
         // a large rigid translation can round a small face or tet to zero.
-        let reference_origin = self.nodes_m[0];
+        let reference_origin = self.nodes_m[origin_node];
         let displacement_origin = [
-            finite(displacement_m[0])?,
-            finite(displacement_m[1])?,
-            finite(displacement_m[2])?,
+            finite(displacement_m[3 * origin_node])?,
+            finite(displacement_m[3 * origin_node + 1])?,
+            finite(displacement_m[3 * origin_node + 2])?,
         ];
         let mut positions = Vec::with_capacity(self.nodes_m.len());
         for (node, reference) in self.nodes_m.iter().enumerate() {
