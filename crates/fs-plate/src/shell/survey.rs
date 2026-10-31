@@ -4,7 +4,7 @@
 //! a second FEM or a reconstruction algorithm. It retains the supplied vertices,
 //! triangles, nodal thickness and per-facet isotropic material. No smoothing,
 //! welding, hole filling, resampling or inferred manufacturing data is applied.
-use super::{ShellMesh, ShellModel, ShellSupport, FacetGeometry, CstDktMass, assemble_shell_sections_with_mass};
+use super::{ShellMesh, ShellModel, ShellSupport, FacetGeometry, CstDktMass, assemble_with_inertia, DRILLING_ALPHA};
 use super::profile::{ProfileBudget, ProfileShell};
 use crate::{PlateError, PlateSection};
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,7 +81,7 @@ pub struct MeshShell {
     pub mesh: ShellMesh,
     /// Existing section law, with nodal thickness averaged within each facet.
     pub sections: Vec<PlateSection>,
-    /// Original physical thickness [m], also consumed by exterior-surface lifting.
+    /// Physical P1 thickness [m], consumed by consistent inertia and exterior-surface lifting.
     pub nodal_thickness_m: Vec<f64>,
     /// Sum rho*h*A over actual three-dimensional facets [kg].
     pub mass_kg: f64,
@@ -143,6 +143,8 @@ impl MeshShell {
 
     /// Assemble the existing CST/DKT stiffness with consistent P1/director
     /// inertia, including the full orientation-dependent through-thickness tensor.
+    /// Inertia integrates the measured P1 thickness field; stiffness retains
+    /// the existing facet-average section. Thickness is symmetric about each facet.
     /// # Errors
     /// Propagates the existing physical-section, support and shell assembly errors.
     pub fn assemble(&self, nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
@@ -153,7 +155,9 @@ impl MeshShell {
     /// The same physical-section and support refusals as [`Self::assemble`].
     pub fn assemble_with_mass(&self, nodes: &[usize], support: ShellSupport, mass: CstDktMass)
         -> Result<ShellModel, PlateError> {
-        assemble_shell_sections_with_mass(&self.mesh, &self.sections, nodes, support, mass)
+        let thickness = (mass == CstDktMass::Consistent).then_some(self.nodal_thickness_m.as_slice());
+        assemble_with_inertia(&self.mesh, &self.sections, false, nodes, support,
+            DRILLING_ALPHA, mass, thickness)
     }
 }
 

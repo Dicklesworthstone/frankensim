@@ -297,3 +297,266 @@ fn affine_kinetic_integral_is_frame_covariant_and_subdivision_invariant() {
         mesh=inertia_refine(mesh);
     }
 }
+
+// Independent polynomial volume oracle. Each factor is a+b*xi+c*eta on the
+// reference triangle; integrate monomials using p!q!/(p+q+2)!, not quadrature.
+fn inertia_product_integral(factors: &[[f64; 3]], area: f64) -> f64 {
+    assert!(factors.len() <= 5);
+    let mut p = [[0.; 6]; 6];
+    p[0][0] = 1.;
+    for (degree, &[a, b, c]) in factors.iter().enumerate() {
+        let mut next = [[0.; 6]; 6];
+        for i in 0..=degree {
+            for j in 0..=degree - i {
+                next[i][j] += a * p[i][j];
+                next[i + 1][j] += b * p[i][j];
+                next[i][j + 1] += c * p[i][j];
+            }
+        }
+        p = next;
+    }
+    let factorial = [1., 1., 2., 6., 24., 120., 720., 5040.];
+    let mut integral = 0.;
+    for i in 0..=factors.len() {
+        for j in 0..=factors.len() - i {
+            integral += 2. * area * p[i][j] * factorial[i] * factorial[j] / factorial[i + j + 2];
+        }
+    }
+    integral
+}
+
+#[test]
+fn variable_thickness_recovers_the_wedges_full_rigid_spatial_inertia() {
+    let thickness = vec![0.002, 0.006, 0.014];
+    let h = [0.002, 0.004, 0.012];
+    let rho = bronze().density_kg_m3;
+    for turned in [false, true] {
+        let mut mesh = inertia_triangle();
+        if turned {
+            for p in &mut mesh.nodes {
+                *p = super::rotate(*p);
+                for (x, shift) in p.iter_mut().zip([0.4, -0.2, 0.7]) {
+                    *x += shift;
+                }
+            }
+        }
+        let source = MeshShell::new(mesh, thickness.clone(), &[bronze()], budget()).unwrap();
+        let model = source.assemble(&[], ShellSupport::Free).unwrap();
+        let g = source.mesh.facet(0).unwrap();
+        let area = g.area_m2;
+        let n = g.frame[2];
+        let r: [[f64; 3]; 3] = std::array::from_fn(|c| {
+            [
+                source.mesh.nodes[0][c],
+                source.mesh.nodes[1][c] - source.mesh.nodes[0][c],
+                source.mesh.nodes[2][c] - source.mesh.nodes[0][c],
+            ]
+        });
+        let mass = rho * inertia_product_integral(&[h], area);
+        let first: [f64; 3] =
+            std::array::from_fn(|i| rho * inertia_product_integral(&[h, r[i]], area));
+        let through = rho * inertia_product_integral(&[h, h, h], area) / 12.;
+        let second: [[f64; 3]; 3] = std::array::from_fn(|i| {
+            std::array::from_fn(|j| {
+                rho * inertia_product_integral(&[h, r[i], r[j]], area) + through * n[i] * n[j]
+            })
+        });
+        let trace = (0..3).map(|i| second[i][i]).sum::<f64>();
+        let mut exact = [[0.; 6]; 6];
+        for i in 0..3 {
+            exact[i][i] = mass;
+            let mut axis = [0.; 3];
+            axis[i] = 1.;
+            let cross = inertia_cross(axis, first);
+            for j in 0..3 {
+                exact[j][3 + i] = cross[j];
+                exact[3 + i][j] = cross[j];
+                exact[3 + i][3 + j] = if i == j {
+                    trace - second[i][j]
+                } else {
+                    -second[i][j]
+                };
+            }
+        }
+        let rigid: [Vec<f64>; 6] = std::array::from_fn(|i| {
+            let mut v = [0.; 3];
+            let mut w = [0.; 3];
+            if i < 3 {
+                v[i] = 1.;
+            } else {
+                w[i - 3] = 1.;
+            }
+            source
+                .mesh
+                .nodes
+                .iter()
+                .flat_map(|p| {
+                    let spin = inertia_cross(w, *p);
+                    [
+                        v[0] + spin[0],
+                        v[1] + spin[1],
+                        v[2] + spin[2],
+                        w[0],
+                        w[1],
+                        w[2],
+                    ]
+                })
+                .collect()
+        });
+        for j in 0..6 {
+            let mut momentum = vec![0.; model.free];
+            model.m.spmv(&rigid[j], &mut momentum);
+            for i in 0..6 {
+                let got = rigid[i]
+                    .iter()
+                    .zip(&momentum)
+                    .map(|(a, b)| a * b)
+                    .sum::<f64>();
+                let scale = (exact[i][i] * exact[j][j]).sqrt();
+                assert!(
+                    (got - exact[i][j]).abs() < 3e-13 * scale,
+                    "spatial inertia {i},{j}: {got} != {}",
+                    exact[i][j]
+                );
+            }
+        }
+        assert!((mass / source.mass_kg - 1.).abs() < 2e-14);
+        let averaged = fs_plate::shell::assemble_shell_sections_with_mass(
+            &source.mesh,
+            &source.sections,
+            &[],
+            ShellSupport::Free,
+            CstDktMass::Consistent,
+        )
+        .unwrap();
+        assert_eq!(model.k, averaged.k);
+        assert_ne!(model.m, averaged.m);
+    }
+}
+
+#[test]
+fn variable_thickness_affine_work_is_exact_covariant_and_subdivision_invariant() {
+    let mut mesh = inertia_triangle();
+    let q = inertia_affine_state(&mesh);
+    let thickness = |p: [f64; 3]| 0.004 + 0.02 * p[0] + 0.07 * p[1];
+    let values = mesh
+        .nodes
+        .iter()
+        .copied()
+        .map(thickness)
+        .collect::<Vec<_>>();
+    let h = [values[0], values[1] - values[0], values[2] - values[0]];
+    let area = mesh.facet(0).unwrap().area_m2;
+    let rho = bronze().density_kg_m3;
+    let field = |c: usize| [q[c], q[6 + c] - q[c], q[12 + c] - q[c]];
+    let translation = rho
+        * (0..3)
+            .map(|c| inertia_product_integral(&[h, field(c), field(c)], area))
+            .sum::<f64>();
+    let rotary = rho / 12.
+        * (3..5)
+            .map(|c| inertia_product_integral(&[h, h, h, field(c), field(c)], area))
+            .sum::<f64>();
+    let mut spin = field(5);
+    spin[0] -= 0.45;
+    let gauge = rho / 12. * inertia_product_integral(&[h, h, h, spin, spin], area);
+    for _ in 0..3 {
+        let h = mesh
+            .nodes
+            .iter()
+            .copied()
+            .map(thickness)
+            .collect::<Vec<_>>();
+        let source = MeshShell::new(
+            mesh.clone(),
+            h.clone(),
+            &vec![bronze(); mesh.tris.len()],
+            budget(),
+        )
+        .unwrap();
+        let model = source.assemble(&[], ShellSupport::Free).unwrap();
+        let rotated = ShellMesh::new(
+            mesh.nodes.iter().copied().map(super::rotate).collect(),
+            mesh.tris.clone(),
+        )
+        .unwrap();
+        let other = MeshShell::new(rotated, h, &vec![bronze(); mesh.tris.len()], budget())
+            .unwrap()
+            .assemble(&[], ShellSupport::Free)
+            .unwrap();
+        let q = inertia_affine_state(&mesh);
+        // Isolate the small director and numerical-gauge terms, so agreement
+        // in the much larger translational energy cannot hide an h^3 error.
+        let director = q
+            .chunks_exact(6)
+            .flat_map(|p| [0., 0., 0., p[3], p[4], 0.])
+            .collect::<Vec<_>>();
+        let drill = q
+            .chunks_exact(6)
+            .flat_map(|p| [0., 0., 0., 0., 0., p[5] - 0.45])
+            .collect::<Vec<_>>();
+        for (state, expected) in [
+            (q, translation + rotary + gauge),
+            (director, rotary),
+            (drill, gauge),
+        ] {
+            assert!((super::energy(&model.m, &state) / expected - 1.).abs() < 3e-13);
+            let turned: Vec<_> = state
+                .chunks_exact(3)
+                .flat_map(|p| super::rotate([p[0], p[1], p[2]]))
+                .collect();
+            assert!((super::energy(&other.m, &turned) / expected - 1.).abs() < 3e-13);
+        }
+        let supported = source.assemble(&[0], ShellSupport::Clamped).unwrap();
+        let factor = fs_sparse::SymbolicLdlt::analyze(&supported.m, fs_sparse::DirectOrdering::Amd)
+            .unwrap()
+            .factor(&supported.m, &fs_sparse::LdltOptions::default())
+            .unwrap();
+        assert_eq!(factor.inertia().positive, supported.free);
+        assert_eq!(factor.inertia().negative, 0);
+        mesh = inertia_refine(mesh);
+    }
+}
+
+#[test]
+fn nodal_inertia_preserves_uniform_and_legacy_pencils_and_refuses_invalid_fields() {
+    for h in [
+        vec![0.001; 4],
+        vec![0.011; 4],
+        vec![0.002, 0.006, 0.013, 0.009],
+    ] {
+        let source = MeshShell::new(panel(), h, &[bronze(); 2], budget()).unwrap();
+        for mass in [CstDktMass::Lumped, CstDktMass::Consistent] {
+            if mass == CstDktMass::Consistent
+                && source.nodal_thickness_m[0] != source.nodal_thickness_m[1]
+            {
+                continue;
+            }
+            let model = source
+                .assemble_with_mass(&[0], ShellSupport::Clamped, mass)
+                .unwrap();
+            let old = fs_plate::shell::assemble_shell_sections_with_mass(
+                &source.mesh,
+                &source.sections,
+                &[0],
+                ShellSupport::Clamped,
+                mass,
+            )
+            .unwrap();
+            assert_eq!(model.k, old.k);
+            assert_eq!(model.m, old.m);
+            assert_eq!(model.dof_map, old.dof_map);
+        }
+    }
+    for h in [
+        vec![0.001; 3],
+        vec![0., 0.002, 0.003, 0.004],
+        vec![-0.001; 4],
+        vec![f64::NAN; 4],
+        vec![f64::INFINITY; 4],
+    ] {
+        let mut source = shell(panel(), 0.001);
+        source.nodal_thickness_m = h;
+        assert!(source.assemble(&[], ShellSupport::Free).is_err());
+    }
+}

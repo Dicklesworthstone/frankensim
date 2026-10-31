@@ -454,14 +454,15 @@ against CST/DKT.
 
 `shell::CstDktMass::Consistent` integrates the existing P1 midsurface velocity
 and P1 physical director rotations over each flat triangular facet and its
-homogeneous thickness. It retains inter-node mass terms and rotates the
+physical thickness. It retains inter-node mass terms and rotates the
 through-thickness transverse inertia into global axes. This is a declared
 kinetic interpolation on the existing CST/DKT stiffness, not an exact dynamic
 interpolation of the DKT interior or a replacement for the MITC shell model.
 
 All six rigid velocities reproduce the exact mass and spatial inertia of the
-represented triangular prism. The original endpoint-lumped triangle instead
-has four times its continuum centroidal midsurface orbital inertia. Physical
+represented triangular prism or variable-thickness wedge. For uniform thickness,
+the original vertex-lumped triangle has four times its continuum centroidal
+midsurface orbital inertia. Physical
 normal spin is already carried by the midsurface translations; it receives no
 additional fictitious through-thickness rotational inertia in the consistent
 model. The drilling coordinate remains numerically invertible through a
@@ -471,13 +472,21 @@ stabilization and is not a material micro-rotation law.
 
 `MeshShell::assemble` consumes consistent inertia by default;
 `MeshShell::assemble_with_mass` admits the original lumped comparison. The
-`assemble_shell[_sections|_materials]_with_mass` entry points expose the same
-choice for original shell data. Existing assembly entry points, generated
+survey's measured nodal thickness is P1 within each facet, symmetric about its
+reference midsurface, with the supplied piecewise constant material density.
+A positive seven-point degree-five triangle rule integrates `rho*h*Ni*Nj`
+and `rho*h^3*Ni*Nj/12`, preserving the thickness-dependent center of mass,
+orbital inertia and transverse director storage. The relative drilling gauge
+uses that same local `rho*h^3/12`. Constant-thickness facets retain the original
+homogeneous arithmetic exactly; stiffness retains its facet-average section.
+The `assemble_shell[_sections|_materials]_with_mass` entry points expose the same
+mass choice for homogeneous section data. Existing assembly entry points, generated
 profile defaults, and the frozen bonded piano pencil retain their original
 arithmetic. Stiffness, support maps and original signed shell-tie/offset
 congruences are shared. No laminate first mass moment is guessed from a
 homogeneous section. Tests exercise the actual survey consumer against an
-independent triangular-prism inertia, affine velocity/director integration,
+independent triangular-prism and variable-thickness spatial inertia,
+factorial-moment affine velocity/director integration through degree five,
 frame changes, three subdivision levels, sparse positive-definite supported
 mass, and explicit legacy profile equivalence.
 

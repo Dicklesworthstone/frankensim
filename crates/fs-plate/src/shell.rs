@@ -200,21 +200,21 @@ pub fn assemble_shell_materials(mesh: &ShellMesh, sections: &[ShellSection],
 pub fn assemble_shell_with_mass(mesh: &ShellMesh, section: &PlateSection,
     boundary_nodes: &[usize], support: ShellSupport, mass: CstDktMass) -> Result<ShellModel, PlateError> {
     assemble_with_inertia(mesh, core::slice::from_ref(section), true, boundary_nodes,
-        support, DRILLING_ALPHA, mass)
+        support, DRILLING_ALPHA, mass, None)
 }
 /// Piecewise material/thickness sections with explicit shell inertia.
 /// # Errors
 /// The same refusals as [`assemble_shell_sections`].
 pub fn assemble_shell_sections_with_mass(mesh: &ShellMesh, sections: &[PlateSection],
     boundary_nodes: &[usize], support: ShellSupport, mass: CstDktMass) -> Result<ShellModel, PlateError> {
-    assemble_with_inertia(mesh, sections, false, boundary_nodes, support, DRILLING_ALPHA, mass)
+    assemble_with_inertia(mesh, sections, false, boundary_nodes, support, DRILLING_ALPHA, mass, None)
 }
 /// Independent membrane/bending sections with explicit shell inertia.
 /// # Errors
 /// The same refusals as [`assemble_shell_materials`].
 pub fn assemble_shell_materials_with_mass(mesh: &ShellMesh, sections: &[ShellSection],
     boundary_nodes: &[usize], support: ShellSupport, mass: CstDktMass) -> Result<ShellModel, PlateError> {
-    assemble_with_inertia(mesh, sections, false, boundary_nodes, support, DRILLING_ALPHA, mass)
+    assemble_with_inertia(mesh, sections, false, boundary_nodes, support, DRILLING_ALPHA, mass, None)
 }
 fn assemble<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
     boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
@@ -222,12 +222,19 @@ fn assemble<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
 }
 fn assemble_with_alpha<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
     boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64) -> Result<ShellModel, PlateError> {
-    assemble_with_inertia(mesh, sections, uniform, boundary_nodes, support, drilling_alpha, CstDktMass::Lumped)
+    assemble_with_inertia(mesh, sections, uniform, boundary_nodes, support, drilling_alpha, CstDktMass::Lumped, None)
 }
+#[allow(clippy::too_many_arguments)] // Same assembler, with an optional measured kinetic thickness field.
 fn assemble_with_inertia<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
-    boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64, inertia: CstDktMass)
+    boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64, inertia: CstDktMass,
+    nodal_thickness: Option<&[f64]>)
     -> Result<ShellModel, PlateError> {
     mesh.validate()?;
+    if let Some(h) = nodal_thickness {
+        if h.len() != mesh.nodes.len() || h.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+            return Err(PlateError::BadSection { what: "shell inertia requires positive finite thickness at every node" });
+        }
+    }
     let expected = if uniform { 1 } else { mesh.tris.len() };
     if sections.len() != expected {
         return Err(PlateError::SectionCount { expected, actual: sections.len() });
@@ -251,7 +258,10 @@ fn assemble_with_inertia<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: 
         let g = mesh.facet(e)?;
         let local = local_stiffness_with_alpha(&g,section,e,drilling_alpha)?;
         let local_mass = if inertia == CstDktMass::Consistent {
-            Some(self::inertia::consistent_mass(&g, section.plate())?)
+            Some(match nodal_thickness {
+                Some(h) => self::inertia::consistent_mass_with_thickness(&g, section.plate(), tri.map(|i| h[i]))?,
+                None => self::inertia::consistent_mass(&g, section.plate())?,
+            })
         } else { None };
         // Transform translations and physical axial rotations with the same R.
         for i in 0..18 {
