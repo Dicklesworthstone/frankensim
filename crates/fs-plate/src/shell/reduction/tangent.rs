@@ -44,32 +44,73 @@ impl ShellReduction {
     /// This O(facets*n^2) kernel may round differently from repeated actions.
     /// Invalid dimensions/nonfinite input fills `out` with NaN; callers must
     /// reject nonfinite trial results before numerical or physical publication.
-    pub fn hessian_matrix(&self, q: &[f64], out: &mut [f64], strain_gradients: &mut [[f64;3]]) {
-        let n=self.mode_count();
-        if q.len()!=n || n.checked_mul(n)!=Some(out.len()) || strain_gradients.len()!=n
-            || q.iter().any(|v|!v.is_finite()) {
-            out.fill(f64::NAN);return;
+    pub fn hessian_matrix(&self, q: &[f64], out: &mut [f64], strain_gradients: &mut [[f64; 3]]) {
+        let _ = self.hessian_matrix_with_cancel(q, out, strain_gradients, || false);
+    }
+
+    /// The same original Hessian arithmetic with cancellation at bounded rows
+    /// and facet boundaries. A failure leaves caller-owned scratch partially
+    /// written; it must not be published as a physical tangent.
+    pub fn hessian_matrix_with_cancel(
+        &self,
+        q: &[f64],
+        out: &mut [f64],
+        strain_gradients: &mut [[f64; 3]],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), super::PlateError> {
+        if cancelled() {
+            return Err(super::PlateError::Cancelled);
+        }
+        let n = self.mode_count();
+        if q.len() != n
+            || n.checked_mul(n) != Some(out.len())
+            || strain_gradients.len() != n
+            || q.iter().any(|v| !v.is_finite())
+        {
+            out.fill(f64::NAN);
+            return Err(super::bad(
+                "shell Hessian dimensions or finite set are invalid",
+            ));
         }
         out.copy_from_slice(&self.remainder);
         for f in &self.facets {
-            let (strain,dx,dy)=Self::strain(f,q);
-            let stress=mul(&f.membrane,strain);
-            for (b,s) in strain_gradients.iter_mut().zip(&f.strains) {
-                *b=[s.linear[0]+dot(dx,s.dx),s.linear[1]+dot(dy,s.dy),
-                    s.linear[2]+dot(dy,s.dx)+dot(dx,s.dy)];
+            if cancelled() {
+                return Err(super::PlateError::Cancelled);
+            }
+            let (strain, dx, dy) = Self::strain(f, q);
+            let stress = mul(&f.membrane, strain);
+            for (b, s) in strain_gradients.iter_mut().zip(&f.strains) {
+                *b = [
+                    s.linear[0] + dot(dx, s.dx),
+                    s.linear[1] + dot(dy, s.dy),
+                    s.linear[2] + dot(dy, s.dx) + dot(dx, s.dy),
+                ];
             }
             for i in 0..n {
-                let stress_direction=mul(&f.membrane,strain_gradients[i]);
-                let a=&f.strains[i];
+                if i % 64 == 0 && cancelled() {
+                    return Err(super::PlateError::Cancelled);
+                }
+                let stress_direction = mul(&f.membrane, strain_gradients[i]);
+                let a = &f.strains[i];
                 for j in 0..=i {
-                    let b=&f.strains[j];
-                    let second=[dot(a.dx,b.dx),dot(a.dy,b.dy),dot(a.dx,b.dy)+dot(a.dy,b.dx)];
-                    let tangent=dot(strain_gradients[j],stress_direction)+dot(second,stress);
-                    out[i*n+j]+=tangent;
-                    if i!=j {out[j*n+i]+=tangent;}
+                    let b = &f.strains[j];
+                    let second = [
+                        dot(a.dx, b.dx),
+                        dot(a.dy, b.dy),
+                        dot(a.dx, b.dy) + dot(a.dy, b.dx),
+                    ];
+                    let tangent = dot(strain_gradients[j], stress_direction) + dot(second, stress);
+                    out[i * n + j] += tangent;
+                    if i != j {
+                        out[j * n + i] += tangent;
+                    }
                 }
             }
         }
+        if cancelled() {
+            return Err(super::PlateError::Cancelled);
+        }
+        Ok(())
     }
 }
 
@@ -135,5 +176,29 @@ mod tests {
         law.hessian_matrix(&[0.0],&mut matrix,&mut []);assert!(matrix[0].is_nan());
         law.hessian_matrix(&[],&mut matrix,&mut scratch);assert!(matrix[0].is_nan());
         law.hessian_matrix(&[0.0],&mut [],&mut scratch);
+    }
+
+    #[test]
+    fn cancellable_hessian_reuses_original_arithmetic_and_refuses_partial_work() {
+        let law = specimen(8);
+        let q = vec![0.03; 8];
+        let mut expected = vec![0.0; 64];
+        let mut scratch = vec![[0.0; 3]; 8];
+        law.hessian_matrix(&q, &mut expected, &mut scratch);
+        let mut actual = vec![0.0; 64];
+        law.hessian_matrix_with_cancel(&q, &mut actual, &mut scratch, || false)
+            .unwrap();
+        assert_eq!(actual, expected);
+        let mut calls = 0;
+        assert!(matches!(
+            law.hessian_matrix_with_cancel(&q, &mut actual, &mut scratch, || {
+                calls += 1;
+                calls > 2
+            }),
+            Err(super::super::PlateError::Cancelled)
+        ));
+        law.hessian_matrix_with_cancel(&q, &mut actual, &mut scratch, || false)
+            .unwrap();
+        assert_eq!(actual, expected);
     }
 }

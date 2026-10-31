@@ -1238,6 +1238,65 @@ error gates passed at 96/192/384 kHz against a 1.536 MHz fixed-spatial reference
 This is fixture convergence evidence, not a universal timestep certificate or
 a continuum validation.
 
+### Open-shell forced response with two-sided diffraction reaction
+
+`bem_loaded_modes::open_screen::OpenScreenLoadedModes::from_shell` binds the
+original `ShellReduction` midsurface and every mass-normalized translation to
+the native open P1 pressure-jump owner. It retains the complete zero-state
+potential Hessian K and the supplied admitted full `ModalPlateViscosity` C;
+matching viscosity dimensions does not itself establish source-basis provenance.
+Both faces contact the same homogeneous exterior. The selected acoustic chart
+has zero thickness and no cavity-backed face. Physical source thickness remains
+in the mechanical mass/K/C, and rotations have zero midsurface offset.
+
+`prepare` preserves the original open topology, dense-screen ceiling and
+independent edge/triangle/angular resolution and work admission. Optional
+conforming acoustic midpoint subdivisions interpolate the source's facet-local
+P1 motion exactly. Adjacent folded normals are not averaged and free-edge drive
+velocities are not zeroed. This refinement leaves the source's piecewise-flat
+geometry and structural basis fixed; it supplies neither edge grading nor a
+structural convergence receipt.
+
+`PreparedOpenScreenModes::harmonic_response_batch` solves the real-frequency
+equations `D = K - omega^2 I - i*omega*(C + Z_screen)` in `exp(-i*omega*t)`.
+The original boundary assembly/LU serves all source columns, and one original
+cancellable complex LU of D serves every complete authored force case. All
+self/mutual entries and source signs remain in place. Fluid reaction is
+`-Z_screen*modal_velocity`; no area conversion, duplicate wet face, fitted
+damping or hidden broadening is applied. Returned force-scaled displacement,
+velocity, reaction, source structural energy and original mechanical-row
+residual accompany a separate numerical balance of external input, complete
+viscous heat and exact P1 pressure-jump work. Raw signed boundary work is not
+clipped, symmetrized or presented as a continuum passivity certificate.
+
+`OpenScreenHarmonicBatch` retains the original unit-source jump solutions.
+`pressure_jump`, `pressure_at`, `far_field` and `radiated_power_w` combine them
+with the actual loaded modal velocities before the original field integration,
+preserving coherent phase and cross terms without another solve. Adaptive
+near-field receiver/clearance/kernel-work limits and the original angular rule
+still apply on both sides. The independently integrated angular power remains
+distinct from pressure work; the maximum unit-source backward residual is
+neither a coherent cancellation error bound nor a spatial error estimate.
+
+Source modes are capped at 256 and never truncated. Before a frequency solve,
+the declared mechanical live-payload allowance includes
+`cases*(48*modes+512) + 48*modes^2 + 160*modes + 4096` bytes for responses,
+original/scaled matrices, LU and scratch. Boundary/source storage is separately
+bounded; these logical counts exclude allocator overhead and process RSS.
+Mechanical work is bounded by `32*modes^3 + 256*(cases+1)*modes^2`, with all
+native boundary work additional. Source tangent assembly uses the original
+cancellable Hessian loop. A failed batch returns no partial result.
+
+Four authored physical-source regressions compare full reaction with an
+independent two-coordinate dynamic-stiffness inversion, expose omitted mutual
+loading, verify coherent jumps/two-sided fields/power, and pin work/payload,
+native topology/band and cancellation/replay refusals. They have not run under
+the current missing canonical dependency checkout. This is a linear forced
+response about the reference source; it does not provide nonlinear motion,
+loaded eigenpoles, a time-domain screen realization, a finite-thickness or
+interior-cavity model, or the independent spherical/open-cylinder acceptance
+required by M2.5-W4b.
+
 ### Continuous loaded modal and cavity response
 
 `CoupledModalSystem::harmonic_response` solves the original continuous linear

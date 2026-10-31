@@ -1172,6 +1172,32 @@ Each drive passes the single solve's backward-residual and passive-work
 checks; one failure, a drive count above the declared ceiling, or a
 cancellation (also polled between back-substitutions) refuses the whole call.
 
+`PreparedScreen::solve_velocity_ports` adds complete structural self and mutual
+loading on this same impermeable screen. Each real source trace retains all
+three normal-velocity corner values of every oriented facet. Curved/folded
+facets may therefore use their own normal projections of one shared structural
+nodal vector; no averaged normal or free-edge velocity clamp is introduced.
+The exact P1 triangle mass pairing supplies both the weak acoustic drive and
+its mechanical work transpose. With `exp(-i*w*t)`, the unchanged matrix is
+`Z_rs = integral b_r [p_s] dS`, the fluid force is `-Z*rate`, and source power
+is `0.5 Re(rate^H Z rate)`. The jump already represents both wetted faces in
+one fluid, without a factor two or an invented closing wall.
+
+One original assembly/LU serves every source. Declared whole-matrix, retained
+jump, source-count and solve/projection-work caps precede batch allocation;
+all original geometry, resolution and source-residual gates remain in force.
+The result retains the original unit-source `JumpSolution` columns. Coherent
+near pressure, far field and radiated power combine those jumps before applying
+the original P1 observer once, retaining every interference term. Failed or
+cancelled batches publish no partial matrix. This is real-frequency response;
+it supplies neither a causal loading realization nor complex loaded poles.
+
+Three focused tests authored in `open_screen_many.rs` compare work with
+independent degree-two triangle quadrature, coherent fields with an original
+combined-drive solve, folded-facet traces with an independently projected
+equivalent weak load, and whole-batch caps/cancellation/replay. These tests have
+not been executed in the current workspace with its missing pinned dependencies.
+
 `reciprocal_radiation::pipe_end` (IRP .100, RULING (2)) measures the open
 end of a thin unflanged pipe on this owner, in Levine and Schwinger's own
 geometry.

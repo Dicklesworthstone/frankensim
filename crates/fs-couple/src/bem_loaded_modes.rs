@@ -39,6 +39,8 @@ mod shell;
 mod memory;
 mod harmonic;
 pub use harmonic::{BemHarmonicOptions, BemHarmonicPower, BemHarmonicResponse};
+/// Source-owned open-shell reaction and two-sided forced radiation.
+pub mod open_screen;
 
 /// Explicit physical accuracy, discretization and callback resources.
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +76,10 @@ pub enum BemModesError {
         what: String,
     },
     Boundary(ComplexError),
+    /// Original two-sided pressure-jump boundary refusal.
+    ScreenBoundary(fs_bem::helmholtz::HelmholtzError),
+    /// Original shell/midsurface source refusal, without string conversion.
+    ScreenSource(fs_plate::PlateError),
     Pole(NonlinearEigError),
     Contour(BeynError),
     SeedSolve(LuComplexError),

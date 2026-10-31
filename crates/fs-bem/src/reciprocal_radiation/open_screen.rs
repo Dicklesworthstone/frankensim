@@ -12,6 +12,9 @@ use crate::helmholtz::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod ports;
+pub use ports::{ScreenPortLimits, ScreenVelocityPortSolution};
+
 /// A conforming indexed, oriented open two-manifold. Every component must have
 /// a free edge. No closure, thickness or orientation repair is synthesized.
 pub struct OpenPanels {
@@ -809,10 +812,7 @@ impl<'a> PreparedScreen<'a> {
         lu: &fs_la::eigen_complex::LuComplex,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<JumpSolution<'_, 'a>, HelmholtzError> {
-        let n = self.n;
-        let ik = C64::new(0.0, 1.0) * wave.value();
-        let mut rhs = vec![C64::ZERO; n];
-        let mut drive_work = vec![C64::ZERO; n];
+        let mut drive_work = vec![C64::ZERO; self.n];
         for f in &self.facets {
             for a in 0..3 {
                 if let Some(u) = self.dof[f.ids[a]] {
@@ -824,6 +824,35 @@ impl<'a> PreparedScreen<'a> {
                 }
             }
         }
+        self.finish_weak_drive(
+            wave,
+            real_frequency,
+            medium,
+            bc.admittance,
+            &drive_work,
+            h,
+            lu,
+            cancelled,
+        )
+    }
+
+    /// The pressure-test/velocity work pairing is the RHS and its transpose.
+    /// A facet-local shell trace and a continuous nodal drive share this solve.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_weak_drive<K: WaveNumber>(
+        &self,
+        wave: K,
+        real_frequency: bool,
+        medium: Medium,
+        admittance: Admittance<'_>,
+        drive_work: &[C64],
+        h: &[C64],
+        lu: &fs_la::eigen_complex::LuComplex,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<JumpSolution<'_, 'a>, HelmholtzError> {
+        let n = self.n;
+        let ik = C64::new(0.0, 1.0) * wave.value();
+        let mut rhs = vec![C64::ZERO; n];
         for i in 0..n {
             rhs[i] = ik.scale(medium.density * medium.sound_speed) * drive_work[i];
         }
@@ -855,7 +884,7 @@ impl<'a> PreparedScreen<'a> {
             .iter()
             .map(|d| d.map_or(C64::ZERO, |i| x[i]))
             .collect();
-        let weak = self.weak_image(bc.admittance, &jump)?;
+        let weak = self.weak_image(admittance, &jump)?;
         let absorption = 0.5 / (medium.density * medium.sound_speed)
             * (0..n).map(|i| (x[i].conj() * weak[i]).re).sum::<f64>();
         let driving = 0.5
@@ -863,7 +892,7 @@ impl<'a> PreparedScreen<'a> {
                 .map(|i| (x[i] * drive_work[i].conj()).re)
                 .sum::<f64>();
         if real_frequency
-            && !bc.admittance.declared_active()
+            && !admittance.declared_active()
             && absorption < -1e-10 * driving.abs().max(f64::MIN_POSITIVE)
         {
             return Err(bad("open nonlocal boundary failed passive-work check"));
@@ -877,7 +906,7 @@ impl<'a> PreparedScreen<'a> {
             absorbed_power_w: absorption,
             driving_power_w: driving,
             backward_residual,
-            declared_active: bc.admittance.declared_active(),
+            declared_active: admittance.declared_active(),
         })
     }
     fn solve_wave<K: WaveNumber>(
@@ -931,6 +960,9 @@ impl JumpSolution<'_, '_> {
     }
     /// r exp(-ikr) p(r*d), in Pa*m. Both sides are represented by D[p].
     pub fn far_field(&self, direction: Point) -> Result<C64, HelmholtzError> {
+        self.far_field_with_jump(&self.jump, direction)
+    }
+    fn far_field_with_jump(&self, jump: &[C64], direction: Point) -> Result<C64, HelmholtzError> {
         if !self.real_frequency
             || direction.iter().any(|v| !v.is_finite())
             || (norm(direction) - 1.0).abs() > 1e-10
@@ -946,7 +978,7 @@ impl JumpSolution<'_, '_> {
             .iter()
             .enumerate()
             .fold(C64::ZERO, |sum, (v, d)| {
-                sum + d.map_or(C64::ZERO, |u| c[u] * self.jump[v])
+                sum + d.map_or(C64::ZERO, |u| c[u] * jump[v])
             })
             .scale(1.0 / (4.0 * PI)))
     }
@@ -967,6 +999,16 @@ impl JumpSolution<'_, '_> {
         options: crate::near_field::Options,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<C64>, HelmholtzError> {
+        self.pressure_at_with_jump(&self.jump, points, separation, options, cancelled)
+    }
+    fn pressure_at_with_jump(
+        &self,
+        jump: &[C64],
+        points: &[Point],
+        separation: f64,
+        options: crate::near_field::Options,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, HelmholtzError> {
         if !self.real_frequency {
             return Err(bad("open adaptive receivers require real frequency"));
         }
@@ -976,7 +1018,7 @@ impl JumpSolution<'_, '_> {
             .prepared
             .facets
             .iter()
-            .map(|f| f.ids.map(|v| self.jump[v]))
+            .map(|f| f.ids.map(|v| jump[v]))
             .collect();
         crate::near_field::linear::open_pressure(
             self.k.re, &triangles, &normals, &jumps, points, separation, options, cancelled,

@@ -17,6 +17,9 @@ use std::collections::BTreeMap;
 mod surface;
 pub use surface::{ShellFace, ShellSurfacePort};
 
+/// Zero-thickness midsurface traces for a two-sided pressure-jump owner.
+pub mod open_screen;
+
 /// Explicit cold-work ceilings, independent of an acoustic solver's limits.
 #[derive(Debug, Clone, Copy)]
 pub struct RadiationSurfaceBudget {

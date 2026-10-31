@@ -194,6 +194,24 @@ tests check closed-surface rigid motion, affine volume, pressure work, signed
 orientation and exclusion of internal structure. This owner does not extrude
 skins, infer fluid ownership, certify closure or supply radiation impedance.
 
+`ShellReduction::open_screen_radiation` supplies an explicit zero-thickness
+midsurface chart in the original mass-normalized source basis. Every facet
+corner retains `n_f dot translation_mode,node`; adjacent folded facets keep
+their distinct normals and prescribed free-edge velocities. Physical rotations
+have zero acoustic offset in this chart. Thickness still determines source
+mass, stiffness and damping; the separate extruded-skin chart is unchanged.
+Optional conforming midpoint refinement shares vertices topologically and
+interpolates each original facet's P1 trace exactly. It adds acoustic resolution
+without adding structural modes, smoothing the geometry, grading the edge or
+certifying source convergence. Final vertex/facet/complete-corner limits and
+bounded cancellation polls apply before publication. Open topology and frequency
+admission remain with the pressure-jump owner. `hessian_matrix_with_cancel`
+shares the original complete Hessian arithmetic, with facet/row cancellation;
+the existing unchecked scratch API retains its numerical order. Two source
+tests cover folded traces, exact P1 work on three refinement rungs, topology
+sharing, complete budgets and cancellation/replay; a tangent test pins arithmetic
+parity. These are authored regression sources, not executed numerical acceptance.
+
 
 `shell::arching` (IRP M1.2-W6) admits explicit cubic-Hermite section curves or
 a sampled bicubic height grid, with a required unloaded/declared-loaded
