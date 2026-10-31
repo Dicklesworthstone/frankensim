@@ -1460,7 +1460,7 @@ fn finite_defocus_admission_and_focus_rack_preserve_the_declared_object_plane() 
     assert!(
         axial_camera(Aperture::try_regular_polygon(0.001, 6, 0.0).unwrap(), 0.5)
             .with_defocused_diffraction(policy)
-            .is_err()
+            .is_ok()
     );
     let camera = |focus| {
         axial_camera(Aperture::try_circular(0.001).unwrap(), focus)
@@ -1521,4 +1521,124 @@ fn finite_defocus_admission_and_focus_rack_preserve_the_declared_object_plane() 
             .unwrap()
             > 0.0
     );
+}
+
+#[test]
+fn bladed_finite_defocus_keeps_aperture_phase_orientation_and_packet_weights() {
+    let radius = 0.001;
+    let wavelength_nm = 550.0;
+    let lambda = wavelength_nm * 1.0e-9;
+    let focus = 0.25;
+    let scale = lambda / (2.0 * core::f64::consts::PI * radius);
+    let camera = |blades, rotation, phase| {
+        let inverse_depth =
+            1.0 / focus + phase * lambda / (core::f64::consts::PI * radius * radius);
+        axial_camera(
+            Aperture::try_regular_polygon(radius, blades, rotation).unwrap(),
+            focus,
+        )
+        .with_defocused_diffraction(
+            DefocusedDiffraction::try_new(Some(1.0 / inverse_depth), 0.01).unwrap(),
+        )
+        .unwrap()
+    };
+    let square = camera(4, core::f64::consts::FRAC_PI_4, 8.0);
+    let expected = 0.002345119344354164 / (scale * scale);
+    assert_close(
+        square
+            .defocused_diffraction_density([0.0; 2], wavelength_nm)
+            .unwrap(),
+        expected,
+        2.0e-11 * expected,
+        "square Fresnel integral and physical pupil area",
+    );
+    let triangle = camera(3, 0.0, 6.0);
+    let negative = camera(3, 0.0, -6.0);
+    let offset = [3.0 * scale, 2.0 * scale];
+    let density = triangle
+        .defocused_diffraction_density(offset, wavelength_nm)
+        .unwrap();
+    let reflected = negative
+        .defocused_diffraction_density(offset.map(|v| -v), wavelength_nm)
+        .unwrap();
+    assert_close(
+        reflected,
+        density,
+        1.0e-11 * density,
+        "signed triangular-pupil propagation",
+    );
+    assert!(
+        (negative
+            .defocused_diffraction_density(offset, wavelength_nm)
+            .unwrap()
+            - density)
+            .abs()
+            > 0.05 * density
+    );
+    let red_same_phase = camera(3, 0.0, 12.0);
+    assert_close(
+        red_same_phase
+            .defocused_diffraction_density(offset.map(|v| 2.0 * v), 2.0 * wavelength_nm)
+            .unwrap(),
+        0.25 * density,
+        1.0e-11 * density,
+        "wavelength scaling at equal pupil phase",
+    );
+    with_cx(|_, cx| {
+        let rotation = 0.37;
+        let rotated = camera(3, rotation, 6.0);
+        let sample = LensSample::try_new(0.37, 0.23).unwrap();
+        let draw = |camera: &PhysicalCamera, lens| {
+            camera
+                .generate_spectral_ray_from_tangent_offsets(
+                    cx,
+                    0.0,
+                    0.0,
+                    lens,
+                    sample,
+                    &[400.0, 550.0, 700.0],
+                )
+                .unwrap()
+        };
+        let a = draw(&triangle, LensSample::CENTER);
+        let b = draw(&rotated, LensSample::try_new(0.9, 0.1).unwrap());
+        assert_eq!(a.ray.origin, triangle.eye());
+        assert_close(
+            b.ray.dir.x,
+            rotation.cos() * a.ray.dir.x - rotation.sin() * a.ray.dir.y,
+            1.0e-12,
+            "rotated bladed PSF ray x",
+        );
+        assert_close(
+            b.ray.dir.y,
+            rotation.sin() * a.ray.dir.x + rotation.cos() * a.ray.dir.y,
+            1.0e-12,
+            "rotated bladed PSF ray y",
+        );
+        assert_close(
+            b.ray.dir.z,
+            a.ray.dir.z,
+            1.0e-12,
+            "rotated bladed PSF ray depth",
+        );
+        for (left, right) in a.weights.into_iter().zip(b.weights) {
+            assert_close(
+                left,
+                right,
+                1.0e-9 * left.max(1.0),
+                "rotated spectral pupil weights",
+            );
+        }
+        assert!(a.weights.windows(2).any(|v| (v[0] - v[1]).abs() > 1.0e-4));
+        for count in [3, 4, 7, 64] {
+            let model = camera(count, 0.0, 6.0);
+            let packet = draw(&model, LensSample::CENTER);
+            assert!(
+                packet
+                    .weights
+                    .iter()
+                    .all(|weight| weight.is_finite() && *weight >= 0.0)
+            );
+        }
+    });
 }

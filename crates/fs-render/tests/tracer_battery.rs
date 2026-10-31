@@ -2007,38 +2007,107 @@ fn defocused_plane_render_transports_light_and_replays() {
         [1.0e-3, 1.0e-3, 0.0],
         [1.0e-4, 1.0e-3, 0.0],
     ));
-    let aperture = Aperture::try_circular(1.0e-3).unwrap();
-    let focused = static_cinematic_camera(
-        physical_from_legacy(&scene.camera, 2.0, aperture.clone())
-            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
-            .unwrap(),
-    );
-    let defocused = static_cinematic_camera(
-        physical_from_legacy(&scene.camera, 1.0, aperture)
-            .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.05).unwrap())
-            .unwrap(),
-    );
     let settings = motion_settings(2_048);
     let shutter = motion_shutter(0.5, 0.0);
     with_cx(|cx| {
-        let sharp =
-            render_cinematic(&scene, &focused, CutSide::After, cx, &settings, shutter).unwrap();
-        let actual =
-            render_cinematic(&scene, &defocused, CutSide::After, cx, &settings, shutter).unwrap();
+        for (name, aperture) in [
+            ("circular", Aperture::try_circular(1.0e-3).unwrap()),
+            (
+                "triangular",
+                Aperture::try_regular_polygon(1.0e-3, 3, 0.37).unwrap(),
+            ),
+        ] {
+            let focused = static_cinematic_camera(
+                physical_from_legacy(&scene.camera, 2.0, aperture.clone())
+                    .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+                    .unwrap(),
+            );
+            let defocused = static_cinematic_camera(
+                physical_from_legacy(&scene.camera, 1.0, aperture)
+                    .with_defocused_diffraction(
+                        DefocusedDiffraction::try_new(Some(2.0), 0.05).unwrap(),
+                    )
+                    .unwrap(),
+            );
+            let sharp =
+                render_cinematic(&scene, &focused, CutSide::After, cx, &settings, shutter).unwrap();
+            let actual =
+                render_cinematic(&scene, &defocused, CutSide::After, cx, &settings, shutter)
+                    .unwrap();
+            assert!(
+                actual.xyz[0]
+                    .iter()
+                    .all(|value| value.is_finite() && *value > 0.0)
+            );
+            assert!(
+                (actual.xyz[0][1] - sharp.xyz[0][1]).abs() > 0.01 * sharp.xyz[0][1],
+                "{name}: finite pupil phase must change this nonuniform image"
+            );
+            let mut progressive = Film::try_new(1, 1).unwrap();
+            for (from, to) in [(0, 1_024), (1_024, 2_048)] {
+                render_cinematic_range(
+                    &scene,
+                    &defocused,
+                    CutSide::After,
+                    cx,
+                    &settings,
+                    &mut progressive,
+                    from,
+                    to,
+                    shutter,
+                )
+                .unwrap();
+            }
+            assert_film_bits_eq(
+                &actual,
+                &progressive,
+                &format!("{name} defocused plane replay"),
+            );
+        }
+    });
+}
+
+/// A fixed-orientation pan keeps the pupil and source planes invariant for
+/// every interpolated shutter time. Axial motion still changes the declared
+/// object distance and must refuse before publishing any film state.
+#[test]
+fn defocused_bladed_camera_pans_with_motion_blur_and_refuses_axial_motion() {
+    let scene = focus_probe_scene(0.0, 1.0e-3);
+    let make_camera = |last_z| {
+        let mut keyframes = Vec::new();
+        for (time, x, z, focus) in [(0.0, -3.0e-4, 2.0, 1.0), (1.0, 3.0e-4, last_z, 1.1)] {
+            let legacy = Camera {
+                eye: Point3::new(x, 0.0, z),
+                ..scene.camera
+            };
+            let physical = physical_from_legacy(
+                &legacy,
+                focus,
+                Aperture::try_regular_polygon(1.0e-3, 5, 0.21).unwrap(),
+            )
+            .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.05).unwrap())
+            .unwrap();
+            keyframes.push(CameraKeyframe::try_new(time, physical).unwrap());
+        }
+        AnimatedCamera::try_new(vec![CameraShot::try_new(705, 0.0, 1.0, keyframes).unwrap()])
+            .unwrap()
+    };
+    let camera = make_camera(2.0);
+    let settings = motion_settings(512);
+    let shutter = motion_shutter(0.0, 1.0);
+    with_cx(|cx| {
+        let complete =
+            render_cinematic(&scene, &camera, CutSide::After, cx, &settings, shutter).unwrap();
         assert!(
-            actual.xyz[0]
+            complete.xyz[0]
                 .iter()
                 .all(|value| value.is_finite() && *value > 0.0)
         );
-        assert!(
-            (actual.xyz[0][1] - sharp.xyz[0][1]).abs() > 0.01 * sharp.xyz[0][1],
-            "finite pupil phase must change this nonuniform image"
-        );
         let mut progressive = Film::try_new(1, 1).unwrap();
-        for (from, to) in [(0, 1_024), (1_024, 2_048)] {
+        for (from, to) in [(0, 173), (173, 512)] {
             render_cinematic_range(
                 &scene,
-                &defocused,
+                &camera,
                 CutSide::After,
                 cx,
                 &settings,
@@ -2049,7 +2118,30 @@ fn defocused_plane_render_transports_light_and_replays() {
             )
             .unwrap();
         }
-        assert_film_bits_eq(&actual, &progressive, "defocused plane progressive replay");
+        assert_film_bits_eq(
+            &complete,
+            &progressive,
+            "defocused bladed lateral pan replay",
+        );
+
+        let moving_axially = make_camera(2.0001);
+        let mut film = Film::try_new(1, 1).unwrap();
+        let before = film.clone();
+        assert!(matches!(
+            render_cinematic_range(
+                &scene,
+                &moving_axially,
+                CutSide::After,
+                cx,
+                &settings,
+                &mut film,
+                0,
+                1,
+                shutter
+            ),
+            Err(TracerError::Camera(CameraError::InvalidDiffraction))
+        ));
+        assert_film_state_bits_eq(&film, &before, "refused axial defocus motion");
     });
 }
 
@@ -2152,24 +2244,33 @@ fn defocused_infinite_plane_preserves_uniform_radiance() {
         2.0,
         Aperture::try_circular(0.0).unwrap(),
     ));
-    let defocused = static_cinematic_camera(
-        physical_from_legacy(&scene.camera, 2.0, Aperture::try_circular(1.0e-3).unwrap())
-            .with_defocused_diffraction(DefocusedDiffraction::try_new(None, 0.0).unwrap())
-            .unwrap(),
-    );
     let settings = motion_settings(8_192);
     let shutter = motion_shutter(0.5, 0.0);
     with_cx(|cx| {
         let reference =
             render_cinematic(&scene, &geometric, CutSide::After, cx, &settings, shutter).unwrap();
-        let actual =
-            render_cinematic(&scene, &defocused, CutSide::After, cx, &settings, shutter).unwrap();
-        for lane in 0..3 {
-            let relative = (actual.xyz[0][lane] / reference.xyz[0][lane] - 1.0).abs();
-            assert!(
-                relative < 0.06,
-                "defocused flat radiance channel {lane}: {relative}"
+        for (name, aperture) in [
+            ("circular", Aperture::try_circular(1.0e-3).unwrap()),
+            (
+                "pentagonal",
+                Aperture::try_regular_polygon(1.0e-3, 5, 0.21).unwrap(),
+            ),
+        ] {
+            let defocused = static_cinematic_camera(
+                physical_from_legacy(&scene.camera, 2.0, aperture)
+                    .with_defocused_diffraction(DefocusedDiffraction::try_new(None, 0.0).unwrap())
+                    .unwrap(),
             );
+            let actual =
+                render_cinematic(&scene, &defocused, CutSide::After, cx, &settings, shutter)
+                    .unwrap();
+            for lane in 0..3 {
+                let relative = (actual.xyz[0][lane] / reference.xyz[0][lane] - 1.0).abs();
+                assert!(
+                    relative < 0.06,
+                    "{name} defocused flat radiance channel {lane}: {relative}"
+                );
+            }
         }
     });
 }

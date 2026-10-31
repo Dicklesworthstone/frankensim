@@ -2114,10 +2114,10 @@ fixed Hammersley cubature for 3, 4, 6, 9 and 64 blades (0.4% power band).
 Camera tests bind pupil area, wavelength scaling and sampled orientation to
 that kernel. These are numerical model checks, not measured lens validation.
 
-### Finite-defocus circular-pupil imaging
+### Finite-defocus pupil imaging
 
 `PhysicalCamera::with_defocused_diffraction(DefocusedDiffraction)` selects
-scalar propagation of a circular pupil at a declared object plane. The
+scalar propagation of a circular or regular 3–64-blade pupil at a declared object plane. The
 policy takes a positive axial object distance in metres (`Some(z0)`) or
 infinity (`None`), plus a residual depth-phase budget in `[0,0.1]` radians.
 It replaces the focused policy rather than combining the two. The camera's
@@ -2136,7 +2136,8 @@ residual-phase budget. Finite-plane scenes have black misses and no competing
 environment. Other geometry may lie wholly behind the pupil plane, where it
 can illuminate the object without clipping a primary pupil-to-object path.
 Infinity mode permits an environment with all geometry behind the pupil.
-The camera eye and basis stay fixed throughout the owning shot; focus racks
+The camera basis and axial eye coordinate stay fixed throughout the owning
+shot; lateral translation parallel to the object plane and focus racks
 remain supported. Unknown charts, animated geometry, prepared scene histories,
 primary media, calibrated photometric fixtures and specular primary surfaces
 refuse. The mesh scan occurs once at render admission, and actual sampled
@@ -2155,7 +2156,7 @@ scale and importance weight; neither an achromatic blur nor a convolution
 of focused Airy and geometric DOF is substituted. Rays originate at the
 optical centre and the geometric lens draw is not applied again.
 
-The stack-only numerical owner evaluates a 40-term Bauer/Zernike expansion,
+The circular numerical owner evaluates a stack-only 40-term Bauer/Zernike expansion,
 whose convergence depends on the admitted phase rather than sampled radius.
 The omitted amplitude is at most `1.849e-23` for `abs(phi)<=16`, before
 floating-point error. Spherical coefficients use bounded backward recurrence
@@ -2173,6 +2174,43 @@ The expansion follows Braat et al., *Progress in Optics* 51 (2008), equations
 2.45 and 2.61, <https://nijboerzernike.nl/_PDF/BraatProgOpt2008_20140413.pdf>,
 with the coefficient bound from NIST DLMF 10.54.1 and 10.60.7.
 
+Bladed defocus instead propagates the actual polygon by exact Fresnel boundary
+identities. Its normalized density is `abs(F(q,phi))²/(4*pi²*area)`, where
+`F=integral_pupil exp(i*phi*abs(r)²-i*q.r) dA`; the circumradius remains the
+phase/coordinate scale and the actual polygon area remains the normalization.
+Near the stationary point, the analytically regularized `exprel` edge formula
+retains its finite limit even on an edge or vertex. In the exterior region,
+`F=i*integral_boundary [(q-2*phi*r).n/abs(q-2*phi*r)²]*exp(iS) ds` avoids
+large completed-square phases. At very small image radius and defocus, exact
+polygon second/fourth radial moments give an intensity expansion with a
+fourth-order remainder below `1.07e-19`. Zero phase calls the existing focused
+polygon owner exactly.
+
+Bounded tangential frequencies use positive 16- or 32-point Gauss rules,
+choosing the cheaper composite rule from an explicit derivative-remainder
+bound. Positive recurrences bound the quadratic exponential and the separated
+rational edge factor. Subdivision is capped at 64 segments per edge; unresolved
+work refuses rather than publishing a fallback blur. For `abs(q)>=8*abs(phi)+32`
+(with actual-vertex roundoff clearance) and tangential phase at least 96,
+a fixed 32-term endpoint integration-by-parts expansion replaces oscillatory
+quadrature. Its derivative remainder is bounded separately and must meet the
+same `2e-13` normalized edge budget. These analytic truncation bounds exclude
+floating-point evaluation error. Small-phase subtraction, compensated sums and
+separate bounded defocus/large linear phases protect the removable limits and
+far tails. This adds no runtime dependency, pupil raster, Fourier grid,
+rejection loop, per-ray allocation or tail cutoff.
+
+The existing blade-aligned product-Cauchy mixture widens with defocus to cover
+the geometric pupil footprint and its directional diffraction ridges. Each
+packet lane evaluates the actual signed phase and its own PSF/proposal weight.
+For odd blade counts, changing defocus sign mirrors the intensity pattern:
+`I(q,-phi)=I(-q,phi)`; using `abs(phi)` would be physically wrong. Circular
+and even-blade pupils also have central symmetry. The boundary identities
+follow Barnett, *arXiv:2010.05978*, Appendix A, equations 19 and 22,
+<https://arxiv.org/pdf/2010.05978>, and Huang, Christian and McDonald,
+*JOSA A* 23, 2768 (2006), equations 14–16,
+<https://www.salfordphysics.com/gsmcdonald/32_JOSAA_v23_p2768_2006.pdf>.
+
 Pure kernel tests check the axial sinc law, exact focused limit, sign
 symmetry, independent adaptive-integral landmarks across all numerical
 branches and into the far tail, and three-wavelength unit power with 65,536
@@ -2180,9 +2218,16 @@ deterministic radial draws (0.4% quadrature band). The last representable
 open-unit draw retains finite importance weights. Camera tests cover physical
 depth and SI scaling, chromatic axial nulls, lens-sample independence,
 shortest-wavelength phase refusal, infinity and focus-rack retention. The
+polygon kernel adds independent separable-square Fresnel and direct triangle
+area-integral landmarks through stationary edge/vertex points, branch
+transitions and far tails; signed odd-blade patterns; rotation; focused-bit
+preservation; extreme full-support draws; and three-wavelength unit power with
+16,384 Hammersley samples for triangular and heptagonal pupils (1% integration
+band). Camera tests bind these kernels to physical aperture area, wavelength
+scaling, rotated rays and separate packet weights. The
 phase cap bounds numerical work; it does not certify the paraxial, high-NA,
 wide-angle, lens-aberration or measured-lens error. General multi-depth
-occlusion, defocused polygon pupils, virtual images, coherent scene transport
+occlusion, virtual images, coherent scene transport
 and vector diffraction remain outside this mode.
 
 The motion path reconstructs only the supplied interpolation model. It does not

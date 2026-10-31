@@ -13,6 +13,9 @@
 
 use fs_math::det;
 
+#[path = "polygon/defocus.rs"]
+mod defocus;
+
 const PI: f64 = core::f64::consts::PI;
 const PROPOSAL_SCALE: f64 = 2.0;
 
@@ -109,6 +112,17 @@ impl<'a> PolygonPupil<'a> {
         let normal = self.normal(index);
         let q = [normal[0] * x - normal[1] * y, normal[1] * x + normal[0] * y];
         (q, self.proposal_density(q))
+    }
+
+    /// Broaden the blade-aligned mixture with the propagated geometrical
+    /// pupil footprint, while preserving its full directional tail support.
+    pub(super) fn sample_defocused(&self, sample: [f64; 2], phase: f64) -> ([f64; 2], f64) {
+        let (q, density) = self.sample(sample);
+        let widening = phase.abs().max(1.0);
+        (
+            q.map(|value| value * widening),
+            density / widening / widening,
+        )
     }
 
     fn proposal_density(&self, q: [f64; 2]) -> f64 {

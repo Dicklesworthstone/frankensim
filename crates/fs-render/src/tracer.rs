@@ -16300,24 +16300,33 @@ fn admit_defocused_scene(
         .iter()
         .find(|shot| shot.shot_id() == exposure.shot_id())
         .ok_or(CameraError::InvalidShot)?;
+    let eye = physical.eye();
+    let forward = physical.forward();
     for keyframe in shot.keyframes() {
         cx.checkpoint()?;
         let state = keyframe.camera();
-        if state.eye() != physical.eye()
-            || state.forward() != physical.forward()
+        let other_eye = state.eye();
+        let axial_translation = other_eye.delta_from(eye).dot(forward);
+        let eye_scale = [eye.x, eye.y, eye.z, other_eye.x, other_eye.y, other_eye.z]
+            .into_iter()
+            .map(f64::abs)
+            .fold(1.0_f64, f64::max);
+        if !axial_translation.is_finite()
+            || axial_translation.abs() > 128.0 * f64::EPSILON * eye_scale
+            || state.forward() != forward
             || state.up() != physical.up()
             || state.right() != physical.right()
         {
-            // Focus racks are admitted; changing pose changes the object
-            // plane and needs a separate moving-pupil visibility model.
+            // CameraShot linearly interpolates the eye. Equal axial eye
+            // coordinates and a fixed orientation keep both planes invariant
+            // throughout a lateral pan; focus racks remain admitted too.
+            // Axial motion or rotation needs a different source-plane model.
             return Err(CameraError::InvalidDiffraction.into());
         }
     }
     if policy.object_distance_m().is_some() && scene.environment.is_some() {
         return Err(CameraError::InvalidDiffraction.into());
     }
-    let eye = physical.eye();
-    let forward = physical.forward();
     let mut object_plane: Option<(f64, f64)> = None;
     for primitive in &scene.primitives {
         cx.checkpoint()?;

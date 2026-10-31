@@ -172,7 +172,7 @@ impl CameraError {
         const DIFFRACTION: &[CameraFix] = &[CameraFix {
             rank: 1,
             code: "pupil_diffraction",
-            message: "use spectral rays and a clear nonzero pupil with opaque diffuse sources in the declared depth model; finite defocus requires a circular pupil",
+            message: "use spectral rays and a clear nonzero circular or regular bladed pupil with opaque diffuse sources in the declared depth model",
         }];
         const EXPOSURE_METADATA: &[CameraFix] = &[
             CameraFix {

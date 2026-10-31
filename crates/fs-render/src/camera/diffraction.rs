@@ -62,7 +62,7 @@ impl FocusedDiffraction {
     }
 }
 
-/// Scalar incoherent circular-pupil propagation at a declared object plane.
+/// Scalar incoherent pupil propagation at a declared object plane.
 ///
 /// The plane is perpendicular to the evaluated camera axis. Its axial depth
 /// is in metres from the optical centre; `None` denotes a source at infinity.
@@ -80,7 +80,7 @@ pub struct DefocusedDiffraction {
 
 impl DefocusedDiffraction {
     /// Largest modeled pupil-rim phase magnitude at every packet wavelength.
-    /// This bounds the numerical expansion; it is not a high-NA admission.
+    /// This bounds numerical work; it is not a high-NA admission.
     pub const MAXIMUM_DEFOCUS_PHASE_RAD: f64 = circular::MAX_PHASE_RAD;
 
     /// Declare a positive finite object-plane distance, or `None` for infinity,
@@ -158,7 +158,7 @@ impl PhysicalCamera {
         self.diffraction
     }
 
-    /// Select finite-defocus scalar propagation through a circular pupil.
+    /// Select finite-defocus propagation through a circular or regular bladed pupil.
     /// The sensor remains at the conjugate of the camera's focus distance;
     /// the declared object plane may lie in front of or behind that focus.
     /// The wavelength-dependent rim phase must remain within 16 radians.
@@ -168,7 +168,7 @@ impl PhysicalCamera {
         mut self,
         policy: DefocusedDiffraction,
     ) -> Result<Self, CameraError> {
-        if !matches!(&self.aperture.kind, ApertureKind::Circular { .. }) {
+        if self.aperture.is_pinhole() {
             return Err(CameraError::InvalidDiffraction);
         }
         self.admit_diffraction_projection()?;
@@ -197,7 +197,7 @@ impl PhysicalCamera {
     /// importance weights. Bladed pupils use an analytic polygon Fourier
     /// transform and an edge-aligned product-Cauchy mixture, retaining their
     /// directional spikes without a pupil raster or an image convolution.
-    /// The finite-defocus circular policy evaluates the propagated pupil
+    /// The finite-defocus policy evaluates the propagated pupil
     /// itself and widens the proposal to cover its geometric blur radius.
     /// The lens and diffraction draws must be independent
     /// of pixel, wavelength, BSDF and shutter draws. Geometric cameras ignore
@@ -235,28 +235,52 @@ impl PhysicalCamera {
         let scale = (reference_nm * 1.0e-9 / self.aperture.radius_m()) / (2.0 * PI);
         let (x, y, weights) = if let Some(policy) = self.defocused_diffraction {
             let reference_phase = self.defocus_phase(policy, reference_nm)?;
-            let proposal_radius = PROPOSAL_RADIUS.max(2.0 * reference_phase.abs());
-            let u = diffraction_sample.u();
-            let remainder = 1.0 - u;
-            let radius = proposal_radius * det::sqrt(u * (2.0 - u)) / remainder;
-            let (sin_phi, cos_phi) = det::sin_cos(2.0 * PI * diffraction_sample.v());
-            let proposal =
-                remainder * remainder * remainder / (2.0 * PI * proposal_radius * proposal_radius);
-            let mut weights = [0.0; N];
-            for (weight, &wavelength_nm) in weights.iter_mut().zip(wavelengths_nm) {
-                cx.checkpoint()?;
-                let ratio = reference_nm / wavelength_nm;
-                let pupil = CircularDefocus::new(self.defocus_phase(policy, wavelength_nm)?);
-                *weight = ratio * ratio * pupil.density(ratio * radius) / proposal;
-                if !weight.is_finite() || *weight < 0.0 {
-                    return Err(CameraError::InvalidDiffraction);
+            if let ApertureKind::RegularPolygon { vertices, .. } = &self.aperture.kind {
+                let pupil = PolygonPupil::new(self.aperture.radius_m(), vertices);
+                let (q, proposal) = pupil.sample_defocused(
+                    [diffraction_sample.u(), diffraction_sample.v()],
+                    reference_phase,
+                );
+                let mut weights = [0.0; N];
+                for (weight, &wavelength_nm) in weights.iter_mut().zip(wavelengths_nm) {
+                    cx.checkpoint()?;
+                    let ratio = reference_nm / wavelength_nm;
+                    let density = pupil
+                        .defocused_density(
+                            q.map(|value| ratio * value),
+                            self.defocus_phase(policy, wavelength_nm)?,
+                        )
+                        .ok_or(CameraError::InvalidDiffraction)?;
+                    *weight = ratio * ratio * density / proposal;
+                    if !weight.is_finite() || *weight < 0.0 {
+                        return Err(CameraError::InvalidDiffraction);
+                    }
                 }
+                (x_tan + scale * q[0], y_tan + scale * q[1], weights)
+            } else {
+                let proposal_radius = PROPOSAL_RADIUS.max(2.0 * reference_phase.abs());
+                let u = diffraction_sample.u();
+                let remainder = 1.0 - u;
+                let radius = proposal_radius * det::sqrt(u * (2.0 - u)) / remainder;
+                let (sin_phi, cos_phi) = det::sin_cos(2.0 * PI * diffraction_sample.v());
+                let proposal = remainder * remainder * remainder
+                    / (2.0 * PI * proposal_radius * proposal_radius);
+                let mut weights = [0.0; N];
+                for (weight, &wavelength_nm) in weights.iter_mut().zip(wavelengths_nm) {
+                    cx.checkpoint()?;
+                    let ratio = reference_nm / wavelength_nm;
+                    let pupil = CircularDefocus::new(self.defocus_phase(policy, wavelength_nm)?);
+                    *weight = ratio * ratio * pupil.density(ratio * radius) / proposal;
+                    if !weight.is_finite() || *weight < 0.0 {
+                        return Err(CameraError::InvalidDiffraction);
+                    }
+                }
+                (
+                    x_tan + scale * radius * cos_phi,
+                    y_tan + scale * radius * sin_phi,
+                    weights,
+                )
             }
-            (
-                x_tan + scale * radius * cos_phi,
-                y_tan + scale * radius * sin_phi,
-                weights,
-            )
         } else if let ApertureKind::RegularPolygon { vertices, .. } = &self.aperture.kind {
             let pupil = PolygonPupil::new(self.aperture.radius_m(), vertices);
             let (q, proposal) = pupil.sample([diffraction_sample.u(), diffraction_sample.v()]);
@@ -352,7 +376,8 @@ impl PhysicalCamera {
 
     /// Evaluate the selected finite-defocus PSF per angular-raster area.
     /// The integral is one; the on-axis value is physical pupil area divided
-    /// by wavelength squared, times `sinc(phase/2)^2`. No finite image radius
+    /// by wavelength squared, times `sinc(phase/2)^2` for a circular pupil;
+    /// bladed pupils propagate their actual polygon. No finite image radius
     /// truncates the rings or tails. This stack-only query uses the same
     /// bounded kernel and wavelength admission as the spectral ray path.
     pub fn defocused_diffraction_density(
@@ -373,9 +398,16 @@ impl PhysicalCamera {
         if !scale.is_finite() || scale <= 0.0 || !radius.is_finite() {
             return Err(CameraError::InvalidDiffraction);
         }
-        let density = CircularDefocus::new(self.defocus_phase(policy, wavelength_nm)?)
-            .density(radius)
-            / scale
+        let phase = self.defocus_phase(policy, wavelength_nm)?;
+        let density = match &self.aperture.kind {
+            ApertureKind::RegularPolygon { vertices, .. } => {
+                PolygonPupil::new(self.aperture.radius_m(), vertices)
+                    .defocused_density(q, phase)
+                    .ok_or(CameraError::InvalidDiffraction)?
+            }
+            ApertureKind::Circular { .. } => CircularDefocus::new(phase).density(radius),
+            ApertureKind::Pinhole => return Err(CameraError::InvalidDiffraction),
+        } / scale
             / scale;
         if !density.is_finite() || density < 0.0 {
             return Err(CameraError::InvalidDiffraction);
