@@ -198,6 +198,30 @@ requested path before printing successful output. Its explicit
 the catalog's compression-reference tests exercise four actual foam grades
 and reinforced PEEK through the production compiler and this owner.
 
+## Source-resolved strain-life calibration
+
+`fatigue::strain_life::source::resolve_cmb` resolves the original elastic modulus
+and four fitted fatigue coefficients from one immutable material card. Every
+property retains its selected claim, full material answer, uncertainty and query
+receipt. The four fatigue coefficients must share one declared fit provenance,
+observation population, fully reversed stress baseline and finite life interval.
+Missing cyclic coefficients are never inferred from monotonic material properties.
+
+The source power convention is explicit: a coefficient multiplying `N^p` becomes
+`A * 2^(-p)` in the native `(2N)^p` law. The original coefficient is unchanged in
+its receipt. Source life bounds are converted to full cycles and become the
+curve's strict model domain. Coefficients may be scalar or vary with the declared
+fixed temperature; a life-dependent coefficient is not a CMB fit and refuses.
+Source interpolation remains owned by the material database.
+
+The retained calibration can check the actual structural material card, named
+state, external query coordinates and quantity conventions, and original modulus
+claim. Calibration-only life and stress-ratio coordinates are distinguished from
+operating conditions. This source binding establishes traceability and supported
+numerical use, not measured component life or a validated population transfer.
+Eight focused tests in `tests/fatigue_strain_source.rs` exercise analytical count
+conversions, original receipts, source selection, context and fit-domain refusals.
+
 ## Purpose and layer
 
 ### Shared stress-life and total mechanical strain-life fatigue

@@ -19,6 +19,9 @@ use super::{CycleLife, FatigueError, FatigueScope, RainflowHistory, RainflowLimi
 use fs_math::det;
 use std::sync::Arc;
 
+/// Source-backed CMB calibration with explicit full-cycle/reversal fit conventions.
+pub mod source;
+
 /// Coefficients of the total mechanical strain-amplitude relation. Both
 /// exponents are strictly negative. A zero coefficient admits the corresponding
 /// single-term Basquin or Coffin-Manson limit; at least one term must be present.
@@ -43,6 +46,7 @@ pub struct StrainLifeCurve {
     log_maximum_reversals: f64,
     minimum_amplitude: f64,
     maximum_amplitude: f64,
+    source: Option<Arc<source::CmbCalibrationSource>>,
 }
 
 impl StrainLifeCurve {
@@ -103,6 +107,7 @@ impl StrainLifeCurve {
             log_maximum_reversals,
             minimum_amplitude: 0.0,
             maximum_amplitude: 0.0,
+            source: None,
         };
         curve.maximum_amplitude = curve.evaluate_log_reversals(log_minimum_reversals).0;
         curve.minimum_amplitude = curve.evaluate_log_reversals(log_maximum_reversals).0;
@@ -117,6 +122,10 @@ impl StrainLifeCurve {
             ));
         }
         Ok(curve)
+    }
+
+    pub fn source(&self) -> Option<&source::CmbCalibrationSource> {
+        self.source.as_deref()
     }
 
     pub fn scope(&self) -> &FatigueScope {
