@@ -53,13 +53,13 @@ pub mod linear3;
 pub mod loads3;
 /// Source-bound finite-deformation textile membranes on the shared P1 mesh.
 pub mod membrane;
-/// Initial-stress vibration pencils from the existing thermal equilibrium owner.
-pub mod prestress;
 pub mod mesh2;
 /// History-dependent P1/Q1 plane-stress and plane-strain continua.
 pub mod plastic2;
 /// Incremental small-strain inelasticity (J2 and any `SmallStrainLaw`) on tetrahedra.
 pub mod plastic3;
+/// Initial-stress vibration pencils from the existing thermal equilibrium owner.
+pub mod prestress;
 pub mod reduce;
 pub mod rod;
 pub mod shell;
@@ -113,6 +113,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Teaching errors (P10).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SolidError {
+    /// The caller cancelled a context-aware solve before publication.
+    Cancelled,
     /// The linear solve missed its residual gate. Repair: refine the
     /// load step, enable a stabilized formulation, or raise the
     /// iteration cap.
@@ -165,6 +167,7 @@ pub enum SolidError {
 impl core::fmt::Display for SolidError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            SolidError::Cancelled => write!(f, "solid solve cancelled"),
             SolidError::SolveFailed {
                 iters,
                 rel_residual,

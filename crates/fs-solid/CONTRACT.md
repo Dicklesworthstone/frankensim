@@ -71,6 +71,30 @@ continuation, complete rollback and source/history refusals. All fatigue data
 in those tests is explicitly synthetic; the regressions are implementation
 checks, not experimental material calibration.
 
+## Finite-strain Q1 mean dilatation
+
+`HyperProblem::solve_mean_dilatation(&Cx)` adds an opt-in plane-strain Q1
+formulation for quasi-incompressible compression. Its condensed element energy
+integrates the original material remainder at all four Gauss points and the
+original bulk energy at reference-volume-mean det F. Eight-DOF nested automatic
+differentiation supplies the complete residual/Hessian, including geometric and
+cross-quadrature terms. NH, MR, Ogden and full-invariant HGO retain their original
+material split; no alternate constitutive coefficients are substituted.
+
+Reference geometry is prepared once. The original load stepping/Newton owner
+is reused, with bounded cancellation and an independently recomputed linear
+residual. `mean_dilatation_states` distinguishes local det F, mean det F and
+tension-positive condensed bulk Cauchy stress from the full constitutive stress.
+Reference/current corners and every local material state must remain admissible;
+an admissible mean cannot hide local inversion or a stretch-domain violation.
+
+Focused G0/G1 regressions in `tests/mean_dilatation.rs` cover energy derivatives,
+analytic finite compression/reactions on two meshes, an independent bulk-stiffness
+identity, a nonuniform compressed-block reference, objectivity and refusal.
+This mitigates the finite bulk penalty's excess local constraints. It supplies
+no 3D/P1/TDNNS, fully incompressible, hourglass-stability, continuum-convergence
+or contact guarantee. Existing `solve()` and continuation retain standard behavior.
+
 ## Static compression by spatial follower pressure
 
 `HyperTetProblem::solve_with_face_pressures` consumes the existing canonical

@@ -11,14 +11,31 @@
 //! (det F ≤ 0 on a trial state) absorbed by step halving, plus load
 //! stepping — the battery drives a buckling-adjacent fixture through
 //! exactly this recipe.
+//!
+//! [`mean_dilatation`] adds an explicit Q1 condensed-volumetric formulation
+//! for quasi-incompressible finite compression, sharing this Newton driver.
+//! Its energy and stress recovery differ from the default pointwise law.
 
 use crate::SolidError;
 use crate::mesh2::{Mesh2, Patch, quad_points, shapes_at};
+use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
 use fs_solver::krylov::MinresState;
-use fs_solver::op::CsrOp;
+use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::Coo;
 use std::collections::BTreeMap;
+
+/// Opt-in Q1 mean-dilatation finite-strain compression.
+pub mod mean_dilatation;
+
+type Projection<'a, 'cx> = Option<(&'a mean_dilatation::Prepared, &'a Cx<'cx>)>;
+
+fn checkpoint(projection: Projection<'_, '_>) -> Result<(), SolidError> {
+    if let Some((_, cx)) = projection {
+        cx.checkpoint().map_err(|_| SolidError::Cancelled)?;
+    }
+    Ok(())
+}
 
 /// Newton controls.
 #[derive(Debug, Clone, Copy)]
@@ -79,10 +96,19 @@ impl HyperProblem<'_> {
     /// [`SolidError::MaterialRefused`] (only if globalization cannot
     /// absorb a refusal), [`SolidError::UnknownPatch`].
     pub fn solve(&self) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        self.solve_with_projection(None)
+    }
+
+    fn solve_with_projection(
+        &self,
+        projection: Projection<'_, '_>,
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        checkpoint(projection)?;
         let n = self.mesh.node_count();
         let mut u = vec![0.0f64; 2 * n];
         let mut report = NewtonReport::default();
         for step in 1..=self.settings.load_steps {
+            checkpoint(projection)?;
             #[allow(clippy::cast_precision_loss)]
             let load = step as f64 / self.settings.load_steps as f64;
             let fixed = self.fixed_dofs(load)?;
@@ -92,7 +118,9 @@ impl HyperProblem<'_> {
             let mut history = Vec::new();
             let mut converged = false;
             for _ in 0..self.settings.max_iters {
-                let (resid, tangent) = self.assemble(&u, load, &fixed)?;
+                checkpoint(projection)?;
+                let (resid, tangent) =
+                    self.assemble_with_projection(&u, load, &fixed, projection)?;
                 let rnorm = norm(&resid);
                 history.push(rnorm);
                 if rnorm < self.settings.tol {
@@ -104,7 +132,33 @@ impl HyperProblem<'_> {
                 let b: Vec<f64> = resid.iter().map(|r| -r).collect();
                 let op = CsrOp::symmetric(tangent);
                 let mut st = MinresState::new(&op, &b);
-                let _ = st.run(&op, 1e-10, 20_000);
+                if projection.is_some() {
+                    while st.iters < 20_000 && st.rel_residual() >= 1e-10 {
+                        checkpoint(projection)?;
+                        let before = st.iters;
+                        let allowance = (20_000 - before).min(32);
+                        let _ = st.run(&op, 1e-10, allowance);
+                        if st.iters == before {
+                            break;
+                        }
+                    }
+                    // The Lanczos recurrence is an estimate. Recheck the
+                    // actual Newton equation before accepting a direction.
+                    let mut defect = vec![0.0; b.len()];
+                    op.apply(&st.x, &mut defect);
+                    for (value, rhs) in defect.iter_mut().zip(&b) {
+                        *value -= rhs;
+                    }
+                    let relative = norm(&defect) / norm(&b).max(f64::MIN_POSITIVE);
+                    if !relative.is_finite() || relative > 1e-6 {
+                        return Err(SolidError::SolveFailed {
+                            iters: st.iters,
+                            rel_residual: relative,
+                        });
+                    }
+                } else {
+                    let _ = st.run(&op, 1e-10, 20_000);
+                }
                 if !st.rel_residual().is_finite() || st.rel_residual() > 1e-6 {
                     return Err(SolidError::SolveFailed {
                         iters: st.iters,
@@ -114,17 +168,22 @@ impl HyperProblem<'_> {
                 // Armijo backtracking on the potential energy; material
                 // refusals (det F ≤ 0) halve the step.
                 let slope: f64 = resid.iter().zip(&st.x).map(|(r, d)| r * d).sum();
-                let e0 = self.energy(&u, load);
+                let e0 = self.energy_with_projection(&u, load, projection)?;
                 let mut alpha = 1.0f64;
                 let mut taken = false;
                 for _ in 0..self.settings.max_backtracks {
+                    checkpoint(projection)?;
                     let trial: Vec<f64> = u
                         .iter()
                         .zip(&st.x)
                         .map(|(ui, di)| ui + alpha * di)
                         .collect();
-                    if let Some(e1) = self.try_energy(&trial, load)
-                        && (e1 <= e0 + 1e-4 * alpha * slope || rnorm < 1e-6)
+                    if let Some(e1) = self.try_energy_with_projection(&trial, load, projection)?
+                        && (e1 <= e0 + 1e-4 * alpha * slope
+                            || (projection.is_none() && rnorm < 1e-6)
+                            || (projection.is_some()
+                                && slope < 0.0
+                                && e1 <= e0 + 64.0 * f64::EPSILON * (1.0 + e0.abs())))
                     {
                         u = trial;
                         taken = true;
@@ -142,7 +201,47 @@ impl HyperProblem<'_> {
             }
             report.histories.push(history);
         }
+        checkpoint(projection)?;
         Ok(((0..n).map(|i| [u[2 * i], u[2 * i + 1]]).collect(), report))
+    }
+
+    fn assemble_with_projection(
+        &self,
+        u: &[f64],
+        load: f64,
+        fixed: &BTreeMap<usize, f64>,
+        projection: Projection<'_, '_>,
+    ) -> Result<(Vec<f64>, fs_sparse::Csr), SolidError> {
+        match projection {
+            Some((prepared, cx)) => prepared.assemble(self, u, load, fixed, cx),
+            None => self.assemble(u, load, fixed),
+        }
+    }
+
+    fn try_energy_with_projection(
+        &self,
+        u: &[f64],
+        load: f64,
+        projection: Projection<'_, '_>,
+    ) -> Result<Option<f64>, SolidError> {
+        match projection {
+            Some((prepared, cx)) => match prepared.potential_energy(self, u, load, cx) {
+                Ok(energy) => Ok(Some(energy)),
+                Err(SolidError::MaterialRefused { .. }) => Ok(None),
+                Err(error) => Err(error),
+            },
+            None => Ok(self.try_energy(u, load)),
+        }
+    }
+
+    fn energy_with_projection(
+        &self,
+        u: &[f64],
+        load: f64,
+        projection: Projection<'_, '_>,
+    ) -> Result<f64, SolidError> {
+        self.try_energy_with_projection(u, load, projection)
+            .map(|value| value.unwrap_or(f64::INFINITY))
     }
 
     /// Public probe for the consistency merge gate: residual and
@@ -363,10 +462,6 @@ impl HyperProblem<'_> {
         });
         ok.then_some(internal - external)
     }
-
-    fn energy(&self, u: &[f64], load: f64) -> f64 {
-        self.try_energy(u, load).unwrap_or(f64::INFINITY)
-    }
 }
 
 /// Continuation plumbing: a [`HyperProblem`] with HOMOGENEOUS
@@ -510,10 +605,7 @@ mod tests {
             // Dyadic geometry and motion survive the translation exactly, while
             // the inverse element Jacobian has non-dyadic shape gradients.
             for x in &mut mesh.nodes {
-                *x = [
-                    1.125 * x[0] + 0.375 * x[1],
-                    0.25 * x[0] + 0.875 * x[1],
-                ];
+                *x = [1.125 * x[0] + 0.375 * x[1], 0.25 * x[0] + 0.875 * x[1]];
             }
             let problem = HyperProblem {
                 mesh: &mesh,
@@ -551,7 +643,10 @@ mod tests {
                 );
                 assert_eq!(
                     problem.potential_energy(&u, 0.0).unwrap().to_bits(),
-                    problem.potential_energy(&translated, 0.0).unwrap().to_bits()
+                    problem
+                        .potential_energy(&translated, 0.0)
+                        .unwrap()
+                        .to_bits()
                 );
                 for i in 0..u.len() {
                     for j in 0..u.len() {
@@ -564,5 +659,4 @@ mod tests {
             }
         }
     }
-
 }
