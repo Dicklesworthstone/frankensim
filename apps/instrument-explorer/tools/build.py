@@ -885,7 +885,7 @@ def main() -> int:
                                     "date": stamp_of(wav), "era": f"Ungraded render with the flute's exterior body (commit {wav.parent.name[:9]})"})
     tp = mirror / "renders" / "timpani"
     for wav in sorted(tp.glob("*/*.wav")) if tp.is_dir() else []:
-        extras["timpani"].append({"id": wav.stem, "title": "Kettle B, one strike (0.5 s)", "audio": media.audio(wav, f"audio/extra/timpani/{wav.stem}"),
+        extras["timpani"].append({"id": wav.stem, "title": "Kettle B, one strike (4 s)", "audio": media.audio(wav, f"audio/extra/timpani/{wav.stem}"),
                                   "date": stamp_of(wav), "era": f"timpani/render.sh at commit {wav.parent.name[:9]}: partial ratios checked "
                                                                 "against the model's own coupled modes, not graded against a recording"})
 

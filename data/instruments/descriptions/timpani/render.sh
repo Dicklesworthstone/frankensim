@@ -4,11 +4,12 @@
 #   render.sh BIN_SHA12 [DATA_SHA12 [OUT_DIR]]
 # BIN_SHA12 names a wa.sh build that produced the `kettle` example:
 #   ssh trj /data/tmp/wa-inst/wa.sh build <sha> --release -p fs-couple --example kettle
-# A SHORT STRIKE: 0.5 s at 48 kHz mono (24000 frames), 16-bit PCM with 20 Pa full scale (a clip
+# A STRIKE OF 4 s at 48 kHz mono (192000 frames), 16-bit PCM with 20 Pa full scale (a clip
 # refuses the WAV), observed 1 m off the axis and 1 m above the head plane in free field. Pitch and
 # partial ratios are graded; the decay is not (ruling 8371). The exterior load's 272 poles make each
-# 288 kHz step cost about 50x the mechanics (pexfp.376.2), so 0.5 s takes most of a day
-# single-threaded on loaded trj. The bake's receipt (reciprocity defect, power margin, load fit
+# 288 kHz step cost about 50x the mechanics (pexfp.376.2), so 4 s took 19.5 h on ts1. At 16 bits
+# the signal ends between 2 and 3 s; this can't write float32 until `kettle` does, which it has to
+# before the next full render. The bake's receipt (reciprocity defect, power margin, load fit
 # errors) is the head of timpani-2b.log.
 # Reference (grading only, never an input): VCSL Timpani 2B one-shots, principal 112.1 Hz, ids
 # timpani-vcsl-timpani2b-hit-* in data/instruments/references-screened.json.
@@ -27,7 +28,7 @@ cp "${D}/timpani-2b.fsk" .
 # retained head mode's coupled frequency (the highest, (5,1), near 330 Hz).
 # The WAV is published only whole: a failed render (a refusal, a missing binary, a kill) leaves
 # timpani-2b.wav.part and prints the log's end.
-if ! nice -n 10 "${BIN}" timpani-2b.fsk 24000 --wav 20 40 400 20 10 1.0 0 1.53 \
+if ! nice -n 10 "${BIN}" timpani-2b.fsk 192000 --wav 20 40 400 20 10 1.0 0 1.53 \
   > timpani-2b.wav.part 2> timpani-2b.log; then
   tail -n 4 timpani-2b.log >&2
   echo "render.sh: the kettle render failed; see ${OUT}/timpani-2b.log" >&2

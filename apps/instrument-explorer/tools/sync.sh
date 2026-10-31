@@ -21,7 +21,7 @@ SSH="ssh -o ConnectTimeout=15"
 KIT="/data/tmp/mb-phrases/kit16/"  # on TRJ: source.json (render commits), renders/, grade/ (kitgrade.py: data/kit.json, data/decays.json, audio/*.wav, img/*.webp)
 VIOLIN_ASSEMBLED="/home/ubuntu/irp-verify/out-ProudBison/violin-g3-rung-v2/violin-g3-rung-2s.wav"  # on TS1
 FLUTE_EXTERIOR="/data/tmp/wa-inst/renders/flute-exterior/25a5514944ea/"             # on TRJ
-TIMPANI="/home/ubuntu/irp-verify/mb-timpani-land/render/timpani-2b.wav"  # on TS1: kettle B at a95d54fa4, timpani/render.sh's card and command (mb-timpani/run-timpani2.sh; pexfp.376)
+TIMPANI="/home/ubuntu/irp-verify/sb-timpani-full/timpani-2b-4s.wav"  # on TS1: kettle B at a95d54fa4, timpani/render.sh's card and command, 192000 frames (pexfp.376)
 PLAYABLE="/data/tmp/mb-phrases/scales18/"   # on TRJ: every note each family can play today, per family dir with its own source.json (the commit it was rendered at), and pitch.json (measured f0). scales18 = scales17 with the three notes that changed at 30fa619b4816 (trumpet pramp-t1.25e0, voice a-A3, viola open G3)
 # On TRJ: regradings made outside the shared tree with the committed grader. Each <family>/<note>/ here replaces that note
 # of the grading tree (its superseded/ carries the earlier gradings forward). Every graded pair the site shows was regraded
@@ -113,7 +113,7 @@ rsync -a -e "$SSH" --include='*.wav' --include='*.provenance.json' --exclude='*'
 done_step $?
 
 step "timpani render at its landing commit (not graded)"
-rsync -a -e "$SSH" "$TS1:$TIMPANI" "$M/renders/timpani/a95d54fa4/"
+rsync -a -e "$SSH" "$TS1:$TIMPANI" "$M/renders/timpani/a95d54fa4/timpani-2b.wav"
 done_step $?
 
 step "playable notes per family (listening renders, not graded)"
