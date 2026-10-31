@@ -134,3 +134,111 @@ fn zero_interval_is_identity_and_wrong_volume_or_source_refuses_before_publicati
     assert_eq!(fields(&n), original);
     assert_eq!(op.last_report(), accepted);
 }
+
+#[test]
+fn g0_moving_valve_halves_close_each_tank_work_and_finite_enthalpy_transfer() {
+    let (mut network, mut valves) = fixture();
+    let initial = network.plenums().to_vec();
+    let before = network.totals();
+    let duration = Time::new(0.01);
+    let half = Time::new(0.5 * duration.value());
+    let rates = [-0.2, 0.08, -0.1];
+    valves
+        .admit_plenum_volumes(&network, &mut || false)
+        .unwrap();
+    valves.begin_trial(&mut || false).unwrap();
+    let first = valves
+        .advance_for_moving_trial(
+            &mut network,
+            half,
+            ValveSolve::default(),
+            false,
+            &mut || false,
+        )
+        .unwrap();
+    let motion = network
+        .step_with_volume_rates(
+            duration,
+            crate::multicomponent::StepControl::default(),
+            &rates,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(motion.elapsed, duration);
+    let work = network.accepted_plenum_boundary_work().unwrap().to_vec();
+    let second = valves
+        .advance_for_moving_trial(&mut network, half, ValveSolve::default(), true, &mut || {
+            false
+        })
+        .unwrap();
+    assert!(valves.last_report().is_none());
+    // The trial endpoint must not silently replace the accepted binding.
+    assert!(
+        valves
+            .admit_plenum_volumes(&network, &mut || false)
+            .is_err()
+    );
+    valves.publish_trial_report();
+    valves
+        .admit_plenum_volumes(&network, &mut || false)
+        .unwrap();
+
+    let report = valves.last_report().unwrap();
+    assert_eq!(report.elapsed, duration);
+    assert_eq!(report.sweeps, 2);
+    assert_eq!(report.iterations, first.iterations + second.iterations);
+    let exchanges = valves.accepted_exchanges().unwrap();
+    assert!(exchanges.iter().all(|x| x.mass_to_second_kg() > 1e-8));
+    for (i, plenum) in network.plenums().iter().enumerate() {
+        let mut species = [0.0; 2];
+        let mut energy = work[i].work_on_gas_j;
+        for (link, exchange) in valves.links().iter().zip(exchanges) {
+            let sign = if link.first == i {
+                -1.0
+            } else if link.second == i {
+                1.0
+            } else {
+                0.0
+            };
+            for k in 0..2 {
+                species[k] += sign * exchange.species_to_second_kg[k];
+            }
+            energy += sign * exchange.energy_to_second_j;
+        }
+        let old = &initial[i];
+        close(
+            plenum.volume_m3() - old.volume_m3(),
+            rates[i] * duration.value(),
+            3e-17,
+        );
+        for k in 0..2 {
+            close(
+                plenum.volume_m3() * plenum.state().partial_densities[k]
+                    - old.volume_m3() * old.state().partial_densities[k],
+                species[k],
+                3e-14,
+            );
+        }
+        close(
+            plenum.volume_m3() * plenum.state().energy - old.volume_m3() * old.state().energy,
+            energy,
+            3e-12,
+        );
+        assert!(work[i].work_on_gas_j * rates[i] < 0.0);
+    }
+    // Source defects include only the two fixed-volume valve intervals.
+    // Mechanical work is an external supply, and every valve transfer is internal.
+    close(report.conservation_residual.energy, 0.0, 3e-12);
+    close(report.absolute_energy_residual_j, 0.0, 3e-12);
+    close(
+        network.totals().energy - before.energy,
+        motion.boundary_work_on_gas_j,
+        3e-12,
+    );
+    close(
+        network.totals().absolute_energy(network.gas()).unwrap()
+            - before.absolute_energy(network.gas()).unwrap(),
+        motion.boundary_work_on_gas_j,
+        3e-12,
+    );
+}

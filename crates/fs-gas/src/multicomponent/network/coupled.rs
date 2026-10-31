@@ -62,12 +62,8 @@ impl NetworkSources<'_, '_> {
         network: &MixtureNetwork1d,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), SourceError> {
-        // Valve sweeps retain a separate rigid-volume ownership contract.
-        // Refuse before any source trial rather than silently rebind that owner.
-        if self.valves.is_some() {
-            return Err(
-                ValveError::Invalid("moving plenums with valve sources are not supported").into(),
-            );
+        if let Some((valves, _)) = &self.valves {
+            valves.admit_plenum_volumes(network, cancelled)?;
         }
         if let Some((wall, _)) = &self.wall {
             wall.admit_plenum_volumes(network, cancelled)?;
@@ -102,7 +98,7 @@ impl NetworkSources<'_, '_> {
         if let Some((op, _)) = &mut self.wall { op.begin_trial(cancelled)?; }
         if let Some((op, _)) = &mut self.valves { op.begin_trial(cancelled)?; }
         let wall = self.wall_half(network, duration, moving, cancelled)?;
-        let valves = self.valve_half(network, duration, false, cancelled)?;
+        let valves = self.valve_half(network, duration, false, moving, cancelled)?;
         Ok(SourceStage { wall, valves })
     }
     pub(super) fn second_half(
@@ -128,7 +124,7 @@ impl NetworkSources<'_, '_> {
         moving: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SourceStage, SourceError> {
-        let valves = self.valve_half(network, duration, true, cancelled)?;
+        let valves = self.valve_half(network, duration, true, moving, cancelled)?;
         let wall = self.wall_half(network, duration, moving, cancelled)?;
         Ok(SourceStage { wall, valves })
     }
@@ -149,11 +145,19 @@ impl NetworkSources<'_, '_> {
         }
     }
     fn valve_half(
-        &mut self, network: &mut MixtureNetwork1d, duration: Time, reverse: bool,
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        reverse: bool,
+        moving: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Option<ValveSourceReport>, SourceError> {
         match &mut self.valves {
-            Some((op, controls)) => Ok(Some(op.advance_for_trial(network, duration, *controls, reverse, cancelled)?)),
+            Some((op, controls)) => Ok(Some(if moving {
+                op.advance_for_moving_trial(network, duration, *controls, reverse, cancelled)?
+            } else {
+                op.advance_for_trial(network, duration, *controls, reverse, cancelled)?
+            })),
             None => Ok(None),
         }
     }

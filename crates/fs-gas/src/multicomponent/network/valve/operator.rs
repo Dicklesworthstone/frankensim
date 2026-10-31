@@ -3,6 +3,8 @@
 //! The original nozzle and finite-blowdown solvers remain the only valve laws.
 //! All plenums are staged before any source interval publishes. Coupled owners
 //! retain trial receipts across both halves and publish them only with the gas.
+//! Each source half holds its supplied chamber volumes fixed; a composing owner
+//! may move them between halves and separately account for mechanical work.
 
 use super::{Orifice, ValveControl, ValveError, ValveExchange, ValveLink, MAX_VALVE_LINKS, pair, poll};
 use crate::multicomponent::network::{Accumulator, MixtureNetwork1d, NetworkTotals, Plenum};
@@ -83,15 +85,17 @@ pub struct SplitNetworkValveReport {
 
 /// Prepared source operator over the original plenum axis and gas source.
 ///
-/// Preparation allocates one plenum scratch bank and two receipt banks. Every
-/// successful sweep reuses them. Changes to branch meshes are irrelevant to this
-/// compact-volume operator; the exact gas source, plenum count and each original
-/// volume must match. Equal volumes do not identify physical tanks: the caller
-/// must retain the original plenum ordering, just as for branch connections.
+/// Preparation allocates one plenum scratch bank, an accepted-volume binding and
+/// two receipt banks. Every successful sweep reuses them. Changes to branch meshes
+/// are irrelevant to this compact-volume operator; the exact gas source, plenum
+/// count and accepted volumes must match. A moving composition adopts new volume
+/// bindings only when its complete step publishes. Equal volumes do not identify
+/// physical tanks: retain the original ordering, just as for branch connections.
 pub struct NetworkValveOperator {
     gas: MixtureGas,
     links: Vec<ValveLink>,
     candidate: Vec<Plenum>,
+    accepted_plenum_volumes: Vec<f64>,
     exchanges: Vec<ValveExchange>,
     trial_exchanges: Vec<ValveExchange>,
     last_report: Option<ValveSourceReport>,
@@ -116,8 +120,10 @@ impl NetworkValveOperator {
         let mut candidate = Vec::new();
         candidate.try_reserve_exact(network.plenums().len())
             .map_err(|_| ValveError::Invalid("valve plenum allocation"))?;
-        for p in network.plenums() {
+        let mut accepted_plenum_volumes = allocated(network.plenums().len(), 0.0)?;
+        for (index, p) in network.plenums().iter().enumerate() {
             poll(&mut cancelled)?;
+            accepted_plenum_volumes[index] = p.volume_m3();
             let mut partial_densities = allocated(network.gas().species_count(), 0.0)?;
             partial_densities.copy_from_slice(p.state().partial_densities);
             candidate.push(Plenum::new(p.volume_m3(), Conserved {
@@ -128,7 +134,7 @@ impl NetworkValveOperator {
         let exchanges = allocated(links.len(), empty)?;
         let trial_exchanges = allocated(links.len(), empty)?;
         poll(&mut cancelled)?;
-        Ok(Self { gas: network.gas().clone(), links, candidate, exchanges, trial_exchanges,
+        Ok(Self { gas: network.gas().clone(), links, candidate, accepted_plenum_volumes, exchanges, trial_exchanges,
             last_report: None, trial_report: None, trial_active: false })
     }
     /// Original source bank, caloric domain and energy gauges.
@@ -178,9 +184,41 @@ impl NetworkValveOperator {
         self.trial_active = true;
         Ok(())
     }
+    /// Authorize motion only from the last whole-step accepted geometry.
+    pub(in crate::multicomponent::network) fn admit_plenum_volumes(
+        &self,
+        network: &MixtureNetwork1d,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), ValveError> {
+        if self.accepted_plenum_volumes.len() != network.plenums().len() {
+            return Err(ValveError::Invalid("valve plenum count changed"));
+        }
+        for (&accepted, source) in self.accepted_plenum_volumes.iter().zip(&network.plenums) {
+            poll(cancelled)?;
+            if accepted.to_bits() != source.volume_m3().to_bits() {
+                return Err(ValveError::Invalid("valve plenum volume changed"));
+            }
+        }
+        Ok(())
+    }
     /// An unsuccessful interval must be discarded by the composing owner and
     /// followed by begin_trial, never resumed from a partially computed sweep.
     pub(in crate::multicomponent::network) fn advance_for_trial(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        controls: ValveSolve,
+        reverse: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ValveSourceReport, ValveError> {
+        self.admit_plenum_volumes(network, cancelled)?;
+        self.advance_for_moving_trial(network, duration, controls, reverse, cancelled)
+    }
+    /// The composing owner must first admit its accepted volumes, then supply
+    /// only geometry reached by its prescribed motion. Every valve interval is
+    /// isochoric at that stage's actual volumes: pressure work belongs to the
+    /// intervening moving-transport stage, never to this internal exchange.
+    pub(in crate::multicomponent::network) fn advance_for_moving_trial(
         &mut self,
         network: &mut MixtureNetwork1d,
         duration: Time,
@@ -197,9 +235,10 @@ impl NetworkValveOperator {
         let mut before = Accumulator::new(n);
         for (candidate, source) in self.candidate.iter_mut().zip(&network.plenums) {
             poll(cancelled)?;
-            if candidate.volume_m3().to_bits() != source.volume_m3().to_bits() {
-                return Err(ValveError::Invalid("valve plenum volume changed"));
+            if !positive(source.volume_m3()) {
+                return Err(ValveError::Invalid("valve trial plenum volume"));
             }
+            candidate.volume_m3 = source.volume_m3();
             before.add_cell(source.state(), source.volume_m3())?;
             candidate.state.partial_densities.copy_from_slice(source.state().partial_densities);
             candidate.state.energy = source.state().energy;
@@ -256,6 +295,9 @@ impl NetworkValveOperator {
     pub(in crate::multicomponent::network) fn publish_trial_report(&mut self) {
         if self.trial_active {
             if let Some(report) = self.trial_report {
+                for (accepted, candidate) in self.accepted_plenum_volumes.iter_mut().zip(&self.candidate) {
+                    *accepted = candidate.volume_m3();
+                }
                 core::mem::swap(&mut self.exchanges, &mut self.trial_exchanges);
                 self.last_report = Some(report);
             }

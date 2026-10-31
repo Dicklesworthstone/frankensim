@@ -1,4 +1,4 @@
-//! Conservative, controllable valve links between finite rigid plenums.
+//! Conservative, controllable valve links between finite compact plenums.
 //!
 //! A converging-nozzle closure uses each donor's original temperature-dependent
 //! calorics, species and stagnation enthalpy. An explicit discharge coefficient
@@ -13,8 +13,10 @@
 //! identical species and energy into the receiver. A backward endpoint mass-rate
 //! equation bounds the transferred inventory. This is a first-order, ordered
 //! pair-split network model, not a simultaneous implicit junction solve. The
-//! estimated closure has no valve inertia, lift/contact dynamics, moving-volume
-//! work, resolved jet/mixing region, empirical calibration or entropy theorem.
+//! estimated closure has no valve inertia, lift/contact dynamics, resolved
+//! jet/mixing region, empirical calibration or entropy theorem. Source intervals
+//! hold their supplied volumes fixed; a moving network composition supplies its
+//! own pressure work between valve halves and publishes geometry with the gas.
 //!
 //! Reference equations: NASA Glenn, "Mass Flow Rate Equations" and
 //! "Conservation of Energy"; <https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/mass-flow-rate-equations/>.

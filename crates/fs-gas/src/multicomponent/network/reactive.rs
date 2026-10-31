@@ -295,11 +295,13 @@ impl ReactingNetwork1d {
             cancelled,
         )
     }
-    /// Add finite-wall heat exchange to the moving reacting network transaction.
+    /// Add finite-wall heat exchange and valves to the moving reacting transaction.
     /// Authored wall conductances and compact mixing lengths remain fixed model
     /// inputs; volume motion alone does not infer a changing contact area.
-    /// Nonzero motion with valve sources explicitly refuses. Zero rates retain
-    /// the original rigid composition, including its valve support, bit for bit.
+    /// Valve halves exchange finite donor enthalpy at their actual stage volumes;
+    /// mechanical pressure work remains with moving transport. All geometry
+    /// bindings publish with the complete step. Zero rates retain the original
+    /// rigid composition, including its valve support, bit for bit.
     pub fn step_with_volume_rates_and_sources(
         &mut self,
         maximum_duration: Time,
@@ -387,7 +389,7 @@ impl ReactingNetwork1d {
             sources, None, Some(reservoirs), cancelled,
         )
     }
-    /// Compose molecular transport, chemistry, moving-volume advection and walls.
+    /// Compose molecular transport, chemistry, moving-volume advection, valves and walls.
     ///
     /// All sources use the common accepted duration. Complete retries restore
     /// original fields and volumes; operator geometry and finite-wall storage

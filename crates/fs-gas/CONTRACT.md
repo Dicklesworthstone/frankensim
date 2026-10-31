@@ -2023,26 +2023,37 @@ inertia require other physical owners; this is not a spatial ALE solver.
 
 `ReactingNetwork1d` composes prescribed plenum volume rates with finite-rate
 chemistry, molecular species/heat transport, viscosity and finite-wall storage.
-The existing split remains W/2 -> D/2 -> C/2 -> moving transport -> C/2 -> D/2
--> W/2, omitting absent operators. Source halves before transport use the
+The existing split is W/2 -> V/2 -> D/2 -> C/2 -> moving transport -> C/2
+-> D/2 -> V/2 -> W/2, omitting absent operators. Source halves before transport use the
 original volume; halves afterward use the actual accepted endpoint volume.
 Boundary work has its own report field and is subtracted exactly once from
 referenced and physical-energy residuals.
 
-Prepared wall and molecular operators keep accepted geometry separate from
-unpublished interval volumes. Complete-step acceptance publishes the new
+Prepared wall, molecular and valve operators keep accepted geometry separate
+from unpublished interval volumes. Complete-step acceptance publishes the new
 bindings, while shortened-duration retries restore original fields AND volumes.
-Final cancellation preserves accepted geometry, reports and wall storage.
-All-zero rates retain the original rigid path. Nonzero motion with valve
-sources explicitly refuses because those sources retain rigid-volume semantics.
+Final cancellation preserves accepted geometry, reports, valve exchanges and
+wall storage. All-zero rates retain the original rigid path, including valves.
+
+Valve halves use the actual original/final chamber volumes in the unchanged
+source-owned nozzle and finite donor-blowdown solve. Each half holds its stage
+volumes fixed and transfers identical species and finite enthalpy to the
+receiver; only moving transport supplies mechanical pressure work. Source
+receipts sum the two valve intervals' storage defects, excluding intervening
+compression, chemistry and heat. Public standalone valve calls still require
+the accepted geometry, and failed trials cannot rebind it.
 
 Authored wall conductances, contact areas and compact mixing lengths remain
 fixed inputs; a volume rate does not determine their changing geometry.
 The compact mixing and existing reaction/source-splitting approximations remain.
 Focused regressions exercise live reaction/transport/compression/wall energy,
-duration restart, final cancellation and reuse, accepted geometry rebinding,
-exact zero-motion identity and valve admission. No new global temporal-order
-or entropy-stability claim is made.
+duration restart, final cancellation and reuse, accepted geometry rebinding and
+exact zero-motion identity. Moving-valve cases additionally reconstruct each
+tank's species and energy change from finite enthalpy exchanges and pressure
+work, close physical gas-plus-wall storage with all sources active, and check
+complete-duration retries and cancellation/restart. These new valve-composition
+regressions are added but have not been executed in this resource-constrained
+session. No new global temporal-order or entropy-stability claim is made.
 
 ## Original material calorics in finite gas walls
 
