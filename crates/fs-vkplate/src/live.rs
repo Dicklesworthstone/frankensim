@@ -848,6 +848,15 @@ mod tests {
         }
     }
 
+    /// `Live` exists only after its constructor has stepped the whole settle, so no stroke can reach a
+    /// snare whose wires are still coming on, in the piece or in a clone of it.
+    #[test]
+    fn no_stroke_can_land_before_the_snare_wires_are_on() {
+        let live = Live::new("snare", 8.0).unwrap();
+        assert!(!live.ins.load_is_coming_on());
+        assert!(!live.clone().ins.load_is_coming_on());
+    }
+
     /// A clone, taken settled or mid-ring, renders bit for bit what the original goes on to render.
     #[test]
     fn a_clone_renders_what_the_original_would() {

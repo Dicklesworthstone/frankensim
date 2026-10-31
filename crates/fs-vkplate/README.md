@@ -487,6 +487,12 @@ presets' tension, preload and contact law were adopted in a kit retuning
 graded against the recording (96ccf8f1b); the card route's are 88cccbb78's
 declared estimates (ruling 7486, `kit::card_drum`), but for the computed
 contact stiffness.
+
+The wires' load comes on from zero as a raised cosine over the 0.25 s that
+`Piece::settle` discards (`Instrument::load_from_rest`), so the drum is at rest
+under it when the stick lands. Applied all at once it rang the drum near 113 Hz,
+0.77 Pa at the overhead, before every strike. A clone carries the ramp's clock,
+and `Live` finishes the ramp before any stroke can reach it.
 The ends
 are pinned with no strand-end or cord damping, so the lowest coil modes keep
 their long material decay. On the 14x6 snare this leaves 63-125 Hz louder than

@@ -377,6 +377,9 @@ impl Plan {
         if img.step_index != 0 {
             return Err("export the instrument before its first step (the microphone rings are not exported)".into());
         }
+        if ins.load_is_coming_on() {
+            return Err("this piece's static load comes on from rest and the GPU kernel holds it constant: render the instrument natively".into());
+        }
         if img.rate != ins.rate || img.bodies.len() != ins.bodies.len() {
             return Err("exported and live instrument clocks or bodies differ".into());
         }

@@ -2826,6 +2826,15 @@ pub struct Instrument {
     materials: Option<std::sync::Arc<materials::KitMaterials>>,
     prepared: bool,
     cq: ContactQueue,
+    /// Set by `load_from_rest`. It lives with the state, so a clone finishes the ramp.
+    load_on: Option<LoadOn>,
+}
+
+/// A static load coming on from zero: the steps it takes, and each loaded body's full bias.
+#[derive(Clone)]
+struct LoadOn {
+    steps: u64,
+    full: Vec<(usize, Vec<f64>)>,
 }
 
 impl Instrument {
@@ -2840,7 +2849,22 @@ impl Instrument {
         if !rate.is_finite() || rate <= 0.0 {
             return Err("instrument sample rate must be positive and finite".into());
         }
-        Ok(Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default() })
+        Ok(Instrument { bodies: vec![], cavities: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), load_on: None })
+    }
+    /// Bring every body's bias on from zero as a raised cosine over `seconds`, not all at once, so
+    /// the piece ends that time at rest under its load. A step rings every mode it reaches. This
+    /// leaves a mode of frequency f at most 1 / ((2 f T)^2 - 1) of that, and the load rate has no jump.
+    pub(crate) fn load_from_rest(&mut self, seconds: f64) {
+        let full: Vec<(usize, Vec<f64>)> = self.bodies.iter().enumerate()
+            .filter(|(_, b)| b.bias.iter().any(|&x| x != 0.0))
+            .map(|(i, b)| (i, b.bias.clone()))
+            .collect();
+        self.load_on = Some(LoadOn { steps: (seconds * self.rate).round() as u64, full });
+    }
+    /// Whether the static load is still coming on. `InstrumentImage` carries the bias as a constant,
+    /// so a stepper outside this crate must refuse a piece that says so.
+    pub fn load_is_coming_on(&self) -> bool {
+        self.load_on.as_ref().is_some_and(|load| self.step_index < load.steps)
     }
     /// A new trajectory retaining the same elastic sources its kit builder uses.
     pub(crate) fn with_materials(rate: f64, gas: GasState, materials: materials::KitMaterials) -> Result<Instrument, String> {
@@ -3113,6 +3137,14 @@ impl Instrument {
         if !self.prepared {
             self.prepare();
         }
+        if let Some(load) = self.load_on.as_ref().filter(|load| self.step_index <= load.steps) {
+            let g = 0.5 * (1.0 - (PI * self.step_index as f64 / load.steps as f64).cos());
+            for (body, full) in &load.full {
+                for (x, f) in self.bodies[*body].bias.iter_mut().zip(full) {
+                    *x = f * g;
+                }
+            }
+        }
         let k = self.k();
         let t = self.time();
         for b in self.bodies.iter_mut() {
@@ -3245,8 +3277,8 @@ impl Instrument {
     }
 
     /// Everything one time step reads, as plain data: for a stepper outside this crate, the CUDA renderer
-    /// in apps/instrument-lab/render-gpu. A head's film law and radiation load are not in it, so such a
-    /// stepper must refuse them (render-gpu's plan does). Exporting changes nothing the steps compute, and
+    /// in apps/instrument-lab/render-gpu. A head's film law, its radiation load and a load still coming
+    /// on are not in it, so such a stepper must refuse them (render-gpu's plan does). Exporting changes nothing the steps compute, and
     /// `step` stays the reference that stepper is checked against. It prepares the microphones' taps as the
     /// first step would, so place microphones and bodies before exporting (a later move would no longer
     /// re-prepare them).

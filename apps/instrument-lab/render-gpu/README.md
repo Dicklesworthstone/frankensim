@@ -35,7 +35,9 @@ The sourced heads carry a head-radiation load, and the film loss curve's heads a
 film law on their bending operator, that this GPU path does not model (the plan
 refuses either), so render those natively with fs-vkplate's examples. `--preset-heads`
 renders the fitted heads on purpose, and the notes name them as fitted. The
-cymbals and the hi-hat are unchanged.
+snare with its wires on refuses even then: its wires' load comes on from rest and
+this kernel holds a load constant, so it isn't ported. The cymbals and the hi-hat
+are unchanged.
 
 **Options.**
 

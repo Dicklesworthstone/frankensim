@@ -26,7 +26,7 @@ pub const BRONZE: (f64, f64, f64) = (1.05e11, 0.33, 8600.0);
 pub struct Piece {
     pub instrument: Instrument,
     pub oversample: usize,
-    /// Seconds of simulation to discard at the start (snare-wire preload settling, hi-hat closing).
+    /// Seconds of simulation to discard at the start (the snare wires' load coming on, hi-hat closing).
     pub settle: f64,
     pub notes: Vec<String>,
 }
@@ -397,6 +397,10 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     } else { s.oversample };
     ins.validate_bending_loss_clock()?;
     ins.validate_head_radiation()?;
+    // last, on the final clock: the wires reach their load at rest, so only the stick starts the drum
+    if settle > 0.0 {
+        ins.load_from_rest(settle);
+    }
     Ok(Piece { instrument: ins, oversample, settle, notes })
 }
 
@@ -1142,6 +1146,58 @@ mod settling_render_tests {
             assert!(channel[skip - 16 * p.oversample..skip].iter().any(|x| x.abs() > 1e-12));
             assert_ne!(decimate(&channel[skip..], p.oversample), continuous[skip_frames..]);
             assert_eq!(output, &continuous[skip_frames..]);
+        }
+    }
+
+    /// Wires at rest on a head at rest make no sound until the stick lands. The bound comes from the
+    /// card, not from a render. A load F on a film of areal mass sigma gives it a volume acceleration
+    /// of at most F / sigma. That reaches a microphone at r as at most rho F / (2 pi r sigma), and the
+    /// floor's image can double it. Coming on as a raised cosine over T, the load leaves a mode of
+    /// frequency f at most 1 / ((2 f T)^2 - 1) of that, a share that only falls with f, so the
+    /// assembly's slowest motion, the wire's own fundamental, is the worst case.
+    #[test]
+    fn a_snare_under_its_wire_load_is_quiet_before_the_strike() {
+        let mut spec = card_drum(&snare()).unwrap();
+        spec.grid *= 6.0;
+        let wires = spec.wires.unwrap();
+        let mut p = drum(&spec, &[]).unwrap();
+        let load: f64 = p.instrument.bodies.iter().flat_map(|b| &b.bias).map(|b| b.abs()).sum();
+        let sigma = MYLAR.2 * spec.reso.thickness;
+        let r = spec.mic.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let step_ring = p.instrument.gas().density * load / (PI * r * sigma);
+        let slowest = (wires.tension / wires.mass_per_m).sqrt() / (2.0 * wires.length);
+        let bound = step_ring / ((2.0 * slowest * p.settle).powi(2) - 1.0);
+        let output = render(&mut p, 0.02, |_| {});
+        let loudest = output[0].iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        eprintln!("{loudest:.3e} Pa before any strike, bound {bound:.3e} Pa");
+        assert!(loudest <= bound, "{loudest} Pa before any strike, against {bound} Pa");
+    }
+
+    /// The browser kit plays clones, so the ramp's clock travels with the state: a clone taken while
+    /// the load comes on finishes it, and both end on exactly the full load.
+    #[test]
+    fn a_clone_taken_while_the_load_comes_on_finishes_it() {
+        let mut spec = snare();
+        spec.grid *= 8.0;
+        let p = drum(&spec, &[]).unwrap();
+        let steps = (p.settle * p.instrument.rate).round() as usize;
+        let full: Vec<Vec<f64>> = p.instrument.bodies.iter().map(|b| b.bias.clone()).collect();
+        let mut original = p.instrument;
+        let mut out = vec![0.0; original.mics.len()];
+        for _ in 0..steps / 2 {
+            original.step(&mut out);
+        }
+        assert!(original.load_is_coming_on());
+        let mut clone = original.clone();
+        for _ in steps / 2..=steps {
+            original.step(&mut out);
+            clone.step(&mut out);
+        }
+        assert!(!original.load_is_coming_on() && !clone.load_is_coming_on());
+        for ((a, b), f) in original.bodies.iter().zip(&clone.bodies).zip(&full) {
+            assert_eq!(&a.bias, f);
+            assert_eq!(&b.bias, f);
+            assert_eq!(a.w, b.w);
         }
     }
 }
