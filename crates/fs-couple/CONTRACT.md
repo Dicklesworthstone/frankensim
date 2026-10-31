@@ -3185,8 +3185,15 @@ clarinet is one filling of those objects.
   and its species' data, and supplied as `RealizeOptions::observer_relaxation`
   at exactly the realized gas state. It is applied as the causal transfer
   `air_path::propagate_pressure_history_relaxing`: absorption and dispersion
-  come from one wavenumber, Stokes-Kirchhoff is counted once, and the bulk
-  delay is not applied. The receipt names it, with nothing omitted.
+  come from one wavenumber and Stokes-Kirchhoff is counted once. Batch and
+  streaming propagation share one energy-bounded FIR; batch uses the exact
+  reciprocal-dt clock and linear overlap-add convolution. Finite records are
+  zero-extended, so late arrivals cannot wrap into the start, and the tail
+  beyond the supplied record is discarded. The returned receiver delay is
+  `r/c_0 - FIR_DC_group_delay`, including the FIR's realization latency, and
+  remains signed; it is not applied to the source-time history here. Invalid
+  input, response or output refuses without changing that history. The receipt
+  names the law, with nothing omitted.
   These refuse rather than being ignored:
   - the law without its state;
   - a state of another gas;

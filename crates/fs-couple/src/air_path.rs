@@ -505,27 +505,28 @@ pub fn omitted_observer_absorption(
     Ok(ObserverOmission { range_m, band_top_hz, figure, classical_db })
 }
 
-/// Propagate a pressure history over `range_m` through a gas whose molecular
-/// relaxation has been evaluated, as a causal complex transfer.
+/// Propagate a pressure history through the evaluated gas's molecular relaxation.
 ///
-/// Every positive-frequency DFT bin is multiplied by
-/// `exp(-Im k r) exp(-i (Re k - w / c_inf) r)`, where `k` is
-/// [`RelaxationState::causal_wavenumber`] and `c_inf` is the frozen sound
-/// speed. This is fs-duct's `e^{-iwt}` wave `e^{i(kr - wt)}` written for the
-/// DFT's `e^{+iwt}` synthesis. Unlike the zero-phase map above, absorption and
-/// dispersion come from one wavenumber, counted once, and the frequency
-/// response is that of a causal medium.
+/// Uses the same energy-bounded causal FIR as [`ObserverFilter::molecular_relaxation`],
+/// on the exact clock `1 / dt`, and linear convolution with zero input before
+/// the record. A late impulse cannot wrap around into its beginning. Output
+/// after the supplied slice is discarded; short histories are filtered too.
 ///
-/// The bulk delay `r / c_inf` is not applied; it is returned so the caller can
-/// place the arrival. The Nyquist bin of the even transform keeps only the real
-/// part of its transfer, as a real signal requires. Sampling the response on
-/// the DFT grid is exact for the bins; between them it inherits the usual
-/// band-limiting of a response that is not itself band-limited. A zero range
-/// and histories shorter than four samples are no-ops.
+/// The FIR includes its Nyquist alignment and precursor-padding latency.
+/// Returns the receiver delay still to apply: `r / c_0` minus the FIR's DC
+/// group delay, exactly as [`ObserverFilterReceipt::receiver_delay_s`]. This
+/// replaces the former bare `r / c_inf` return, which did not account for
+/// realization latency. A negative return remains visible: that clock and
+/// range cannot place the causal FIR at the physical arrival without an advance.
+///
+/// No receiver delay is applied here. The retained samples are the same
+/// source-time history as the streaming filter, up to FFT roundoff. A zero
+/// range leaves the history untouched and returns zero.
 ///
 /// # Errors
-/// Invalid samples, time/range, or an unrepresentable wavenumber or output
-/// refuse WITHOUT changing the history.
+/// Invalid samples, time/range, an unrepresentable response or output, or a
+/// response exceeding the observer FIR's energy/length limits refuses WITHOUT
+/// changing the history.
 pub fn propagate_pressure_history_relaxing(
     pressure_pa: &mut [f64],
     dt: f64,
@@ -537,38 +538,70 @@ pub fn propagate_pressure_history_relaxing(
     {
         return Err(invalid("propagation needs finite pressure, positive dt and nonnegative range"));
     }
-    let c_inf = relaxation.frozen_sound_speed_m_s();
-    let delay_s = range_m / c_inf;
-    if !(delay_s.is_finite() && delay_s >= 0.0) {
-        return Err(invalid("relaxation bulk delay is unrepresentable"));
+    if range_m == 0.0 { return Ok(0.0); }
+    let response = molecular_response(relaxation, range_m, 1.0 / dt)?;
+    let delay_s = response.receiver_delay_s(relaxation.gas(), range_m);
+    if !delay_s.is_finite() {
+        return Err(invalid("relaxation receiver delay is unrepresentable"));
     }
-    if pressure_pa.len() < 4 || range_m == 0.0 { return Ok(delay_s); }
-    let n = pressure_pa.len();
-    let n_fft = n.checked_next_power_of_two()
-        .ok_or_else(|| invalid("propagation FFT length is unrepresentable"))?.max(8);
-    let fft = Fft::new(n_fft);
-    let mut buf: Vec<FftC64> = (0..n_fft)
-        .map(|i| FftC64::new(if i < n { pressure_pa[i] } else { 0.0 }, 0.0))
-        .collect();
-    let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
-    fft.forward(&mut buf, &mut scratch);
-    for (k, bin) in buf.iter_mut().enumerate().take(n_fft / 2 + 1) {
-        if k == 0 { continue; }
-        let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let (h_re, h_im) = relaxing_transfer(relaxation, omega, range_m, c_inf)?;
-        let h_im = if k == n_fft / 2 { 0.0 } else { h_im };
-        *bin = FftC64::new(bin.re * h_re - bin.im * h_im, bin.re * h_im + bin.im * h_re);
+    convolve_pressure_history(pressure_pa, &response.taps)?;
+    Ok(delay_s)
+}
+
+// Overlap-add with N >= block_len + taps - 1 realizes a linear convolution.
+// Only the scratch size depends on the FIR length; the separate output keeps
+// refusal atomic. Taps beyond this record cannot affect any retained sample.
+fn convolve_pressure_history(
+    pressure_pa: &mut [f64],
+    taps: &[f64],
+) -> Result<(), AcousticRealizeError> {
+    if pressure_pa.is_empty() { return Ok(()); }
+    let m = taps.len().min(pressure_pa.len());
+    let mut output = vec![0.0; pressure_pa.len()];
+    if m <= 32 {
+        for (i, value) in output.iter_mut().enumerate() {
+            for (j, tap) in taps[..m.min(i + 1)].iter().enumerate() {
+                *value += tap * pressure_pa[i - j];
+            }
+        }
+    } else {
+        let n_fft = m.checked_next_power_of_two()
+            .and_then(|n| n.checked_mul(2))
+            .ok_or_else(|| invalid("propagation FFT length is unrepresentable"))?;
+        let block_len = n_fft - m + 1;
+        let fft = Fft::new(n_fft);
+        let mut kernel = vec![FftC64::new(0.0, 0.0); n_fft];
+        let mut buf = kernel.clone();
+        let mut scratch = kernel.clone();
+        for (bin, &tap) in kernel.iter_mut().zip(&taps[..m]) {
+            bin.re = tap;
+        }
+        fft.forward(&mut kernel, &mut scratch);
+        for start in (0..pressure_pa.len()).step_by(block_len) {
+            let count = block_len.min(pressure_pa.len() - start);
+            buf.fill(FftC64::new(0.0, 0.0));
+            for (bin, &sample) in buf.iter_mut().zip(&pressure_pa[start..start + count]) {
+                bin.re = sample;
+            }
+            fft.forward(&mut buf, &mut scratch);
+            for (bin, h) in buf.iter_mut().zip(&kernel) {
+                *bin = FftC64::new(
+                    bin.re * h.re - bin.im * h.im,
+                    bin.re * h.im + bin.im * h.re,
+                );
+            }
+            fft.inverse(&mut buf, &mut scratch);
+            let kept = (count + m - 1).min(output.len() - start);
+            for (out, value) in output[start..start + kept].iter_mut().zip(&buf) {
+                *out += value.re;
+            }
+        }
     }
-    for k in 1..n_fft / 2 {
-        let c = buf[k];
-        buf[n_fft - k] = FftC64::new(c.re, -c.im);
-    }
-    fft.inverse(&mut buf, &mut scratch);
-    if buf[..n].iter().any(|value| !value.re.is_finite()) {
+    if output.iter().any(|value| !value.is_finite()) {
         return Err(invalid("propagated pressure is unrepresentable"));
     }
-    for (i, sample) in pressure_pa.iter_mut().enumerate() { *sample = buf[i].re; }
-    Ok(delay_s)
+    pressure_pa.copy_from_slice(&output);
+    Ok(())
 }
 
 /// The relaxation law's transfer over `range_m` at `omega`, referenced to the
@@ -684,6 +717,173 @@ pub struct ObserverFilter {
     receipt: ObserverFilterReceipt,
 }
 
+// Response design is independent of the streaming receipt's integer clock.
+// Batch propagation supplies its exact reciprocal dt, without quantizing it.
+struct ObserverResponse {
+    taps: Vec<f64>,
+    truncated_energy: f64,
+    budget_energy: f64,
+    alpha_uncertainty_energy: f64,
+    alignment_samples: f64,
+    padding_samples: usize,
+    low_frequency_delay_s: f64,
+    latency_s: f64,
+}
+
+impl ObserverResponse {
+    fn receiver_delay_s(&self, gas: &GasState, range_m: f64) -> f64 {
+        range_m / gas.sound_speed - self.low_frequency_delay_s
+    }
+}
+
+fn molecular_response(
+    relaxation: &RelaxationState,
+    range_m: f64,
+    rate: f64,
+) -> Result<ObserverResponse, AcousticRealizeError> {
+    let c_inf = relaxation.frozen_sound_speed_m_s();
+    design_observer_response(range_m, rate, |n| {
+        let mut bins = vec![FftC64::new(1.0, 0.0); n / 2 + 1];
+        for (k, bin) in bins.iter_mut().enumerate().skip(1) {
+            let omega = core::f64::consts::TAU * k as f64 * rate / n as f64;
+            let (re, im) = relaxing_transfer(relaxation, omega, range_m, c_inf)?;
+            *bin = FftC64::new(re, im);
+        }
+        Ok(bins)
+    })
+}
+
+// Build the positive-frequency transfer on growing DFT grids, align its
+// Nyquist bin to be real, and keep the shortest FIR (precursor padding D
+// plus causal part) whose left-out energy meets the certificate.
+fn design_observer_response(
+    range_m: f64,
+    rate: f64,
+    mut spectrum: impl FnMut(usize) -> Result<Vec<FftC64>, AcousticRealizeError>,
+) -> Result<ObserverResponse, AcousticRealizeError> {
+    if !(range_m.is_finite() && range_m >= 0.0 && rate.is_finite() && rate > 0.0) {
+        return Err(invalid("an observer filter needs a finite nonnegative range and a positive finite rate"));
+    }
+    if range_m == 0.0 {
+        return Ok(ObserverResponse {
+            taps: vec![1.0],
+            truncated_energy: 0.0,
+            budget_energy: 0.0,
+            alpha_uncertainty_energy: 0.0,
+            alignment_samples: 0.0,
+            padding_samples: 0,
+            low_frequency_delay_s: 0.0,
+            latency_s: 0.0,
+        });
+    }
+    let mut n = 1usize << 14;
+    loop {
+        let half = spectrum(n)?;
+        let (mut magnitude_energy, mut uncertainty) = (0.0, 0.0);
+        for (k, h) in half.iter().enumerate() {
+            let weight = if k == 0 || k == n / 2 { 1.0 } else { 2.0 };
+            let magnitude = h.re.hypot(h.im);
+            let perturbed = det::exp(1.1 * det::ln(magnitude));
+            magnitude_energy += weight * magnitude * magnitude;
+            uncertainty += weight * (magnitude - perturbed) * (magnitude - perturbed);
+        }
+        let alpha_uncertainty_energy = uncertainty / magnitude_energy;
+        let budget = OBSERVER_TRUNCATION_ENERGY.min(OBSERVER_UNCERTAINTY_MARGIN * alpha_uncertainty_energy);
+        // A sub-sample delay in [0, 1) that makes the Nyquist bin real, so
+        // the periodic spectrum has no jump there. A minimum phase already
+        // has a real Nyquist bin.
+        let nyquist = half[n / 2];
+        let align = if nyquist.im.abs() <= 1e-12 * nyquist.re.hypot(nyquist.im) {
+            0.0
+        } else {
+            nyquist.im.atan2(nyquist.re).rem_euclid(core::f64::consts::PI) / core::f64::consts::PI
+        };
+        let mut buf = vec![FftC64::new(0.0, 0.0); n];
+        buf[0] = FftC64::new(1.0, 0.0);
+        for k in 1..=n / 2 {
+            let (sin, cos) = det::sin_cos(-core::f64::consts::TAU * k as f64 * align / n as f64);
+            let h = half[k];
+            let im = if k == n / 2 { 0.0 } else { h.re * sin + h.im * cos };
+            buf[k] = FftC64::new(h.re * cos - h.im * sin, im);
+        }
+        for k in 1..n / 2 {
+            let c = buf[k];
+            buf[n - k] = FftC64::new(c.re, -c.im);
+        }
+        let mut scratch = vec![FftC64::new(0.0, 0.0); n];
+        Fft::new(n).inverse(&mut buf, &mut scratch);
+        let response: Vec<f64> = buf.iter().map(|value| value.re).collect();
+        if response.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("observer impulse response is unrepresentable"));
+        }
+        let energy = |range: core::ops::Range<usize>| -> f64 {
+            response[range].iter().map(|v| v * v).sum()
+        };
+        let total = energy(0..n);
+        if !(total > 0.0) {
+            return Err(invalid("observer impulse response has no energy"));
+        }
+        // The grid is long enough once its middle half is quiet: the causal
+        // tail has decayed and the precursor has not yet risen.
+        if energy(n / 4..3 * n / 4) > budget * total / 4.0 {
+            if n >= MAX_OBSERVER_DESIGN_LEN {
+                return Err(invalid("observer response does not decay within the design grid"));
+            }
+            n *= 2;
+            continue;
+        }
+        // Pad the fewest samples D for the precursor (negative time, the
+        // grid's second half) to meet half the certificate.
+        let mut padding = 0;
+        let mut precursor = energy(n / 2..n);
+        while precursor > budget * total / 2.0 && padding < n / 4 {
+            padding += 1;
+            precursor -= response[n - padding] * response[n - padding];
+        }
+        if precursor > budget * total / 2.0 {
+            if n >= MAX_OBSERVER_DESIGN_LEN {
+                return Err(invalid("observer precursor does not meet the certificate within the design grid"));
+            }
+            n *= 2;
+            continue;
+        }
+        let mut tail = 0.0;
+        let mut causal = n / 2;
+        while causal > 1 {
+            let next = tail + response[causal - 1] * response[causal - 1];
+            if precursor + next > budget * total {
+                break;
+            }
+            tail = next;
+            causal -= 1;
+        }
+        let taps = padding + causal;
+        if taps > MAX_OBSERVER_TAPS {
+            return Err(invalid("observer response needs more taps than MAX_OBSERVER_TAPS"));
+        }
+        let mut fir = response[n - padding..].to_vec();
+        fir.extend_from_slice(&response[..causal]);
+        let latency_s = (align + padding as f64) / rate;
+        let (moment, gain) = fir.iter().enumerate().fold((0.0, 0.0), |(m, g), (j, tap)| {
+            (m + j as f64 * tap, g + tap)
+        });
+        let low_frequency_delay_s = moment / gain / rate;
+        if !latency_s.is_finite() || !low_frequency_delay_s.is_finite() {
+            return Err(invalid("observer response delay is unrepresentable"));
+        }
+        return Ok(ObserverResponse {
+            taps: fir,
+            truncated_energy: (precursor + tail) / total,
+            budget_energy: budget,
+            alpha_uncertainty_energy,
+            alignment_samples: align,
+            padding_samples: padding,
+            low_frequency_delay_s,
+            latency_s,
+        });
+    }
+}
+
 /// The excess transfer of one Debye relaxation with absorption
 /// `strength f_r x^2 / (1 + x^2)` [Np/m], `x = f / f_r`, for the DFT's
 /// `e^{+iwt}` synthesis. Its complex wavenumber is the exact Kramers-Kronig
@@ -748,21 +948,14 @@ impl ObserverFilter {
         range_m: f64,
         sample_rate_hz: u32,
     ) -> Result<Self, AcousticRealizeError> {
-        let c_inf = relaxation.frozen_sound_speed_m_s();
-        let rate = f64::from(sample_rate_hz);
+        let response = molecular_response(relaxation, range_m, f64::from(sample_rate_hz))?;
         let absorption = ObserverAbsorptionReceipt {
             law: GasAbsorptionModel::MolecularRelaxation,
             relaxation_omitted: None,
         };
-        Self::design(absorption, relaxation.gas(), range_m, sample_rate_hz, None, |n| {
-            let mut bins = vec![FftC64::new(1.0, 0.0); n / 2 + 1];
-            for (k, bin) in bins.iter_mut().enumerate().skip(1) {
-                let omega = core::f64::consts::TAU * k as f64 * rate / n as f64;
-                let (re, im) = relaxing_transfer(relaxation, omega, range_m, c_inf)?;
-                *bin = FftC64::new(re, im);
-            }
-            Ok(bins)
-        })
+        Ok(Self::from_response(
+            response, absorption, relaxation.gas(), range_m, sample_rate_hz, None,
+        ))
     }
 
     /// ISO 9613-1 for an admitted terrestrial-air `gas`: each O2 and N2 term
@@ -899,159 +1092,56 @@ impl ObserverFilter {
         }
     }
 
-    // Build the positive-frequency transfer on growing DFT grids, align its
-    // Nyquist bin to be real, and keep the shortest FIR (precursor padding D
-    // plus causal part) whose left-out energy meets the certificate.
     fn design(
         absorption: ObserverAbsorptionReceipt,
         gas: &GasState,
         range_m: f64,
         sample_rate_hz: u32,
         classical_validity_exceeded_from_hz: Option<f64>,
-        mut spectrum: impl FnMut(usize) -> Result<Vec<FftC64>, AcousticRealizeError>,
+        spectrum: impl FnMut(usize) -> Result<Vec<FftC64>, AcousticRealizeError>,
     ) -> Result<Self, AcousticRealizeError> {
-        if !(range_m.is_finite() && range_m >= 0.0) || sample_rate_hz == 0 {
-            return Err(invalid("an observer filter needs a finite nonnegative range and a positive rate"));
-        }
-        let rate = f64::from(sample_rate_hz);
-        if range_m == 0.0 {
-            return Ok(Self {
-                taps: vec![1.0],
-                history: vec![0.0],
-                head: 0,
-                receipt: ObserverFilterReceipt {
-                    absorption,
-                    range_m,
-                    sample_rate_hz,
-                    taps: 1,
-                    truncated_energy: 0.0,
-                    budget_energy: 0.0,
-                    alpha_uncertainty_energy: 0.0,
-                    alignment_samples: 0.0,
-                    padding_samples: 0,
-                    low_frequency_delay_s: 0.0,
-                    latency_s: 0.0,
-                    receiver_delay_s: 0.0,
-                    delay_speed_m_s: Some(gas.sound_speed),
-                    classical_validity_exceeded_from_hz,
-                },
-            });
-        }
-        let mut n = 1usize << 14;
-        loop {
-            let half = spectrum(n)?;
-            let (mut magnitude_energy, mut uncertainty) = (0.0, 0.0);
-            for (k, h) in half.iter().enumerate() {
-                let weight = if k == 0 || k == n / 2 { 1.0 } else { 2.0 };
-                let magnitude = h.re.hypot(h.im);
-                let perturbed = det::exp(1.1 * det::ln(magnitude));
-                magnitude_energy += weight * magnitude * magnitude;
-                uncertainty += weight * (magnitude - perturbed) * (magnitude - perturbed);
-            }
-            let alpha_uncertainty_energy = uncertainty / magnitude_energy;
-            let budget = OBSERVER_TRUNCATION_ENERGY.min(OBSERVER_UNCERTAINTY_MARGIN * alpha_uncertainty_energy);
-            // A sub-sample delay in [0, 1) that makes the Nyquist bin real, so
-            // the periodic spectrum has no jump there. A minimum phase already
-            // has a real Nyquist bin.
-            let nyquist = half[n / 2];
-            let align = if nyquist.im.abs() <= 1e-12 * nyquist.re.hypot(nyquist.im) {
-                0.0
-            } else {
-                nyquist.im.atan2(nyquist.re).rem_euclid(core::f64::consts::PI) / core::f64::consts::PI
-            };
-            let mut buf = vec![FftC64::new(0.0, 0.0); n];
-            buf[0] = FftC64::new(1.0, 0.0);
-            for k in 1..=n / 2 {
-                let (sin, cos) = det::sin_cos(-core::f64::consts::TAU * k as f64 * align / n as f64);
-                let h = half[k];
-                let im = if k == n / 2 { 0.0 } else { h.re * sin + h.im * cos };
-                buf[k] = FftC64::new(h.re * cos - h.im * sin, im);
-            }
-            for k in 1..n / 2 {
-                let c = buf[k];
-                buf[n - k] = FftC64::new(c.re, -c.im);
-            }
-            let mut scratch = vec![FftC64::new(0.0, 0.0); n];
-            Fft::new(n).inverse(&mut buf, &mut scratch);
-            let response: Vec<f64> = buf.iter().map(|value| value.re).collect();
-            if response.iter().any(|value| !value.is_finite()) {
-                return Err(invalid("observer impulse response is unrepresentable"));
-            }
-            let energy = |range: core::ops::Range<usize>| -> f64 {
-                response[range].iter().map(|v| v * v).sum()
-            };
-            let total = energy(0..n);
-            if !(total > 0.0) {
-                return Err(invalid("observer impulse response has no energy"));
-            }
-            // The grid is long enough once its middle half is quiet: the causal
-            // tail has decayed and the precursor has not yet risen.
-            if energy(n / 4..3 * n / 4) > budget * total / 4.0 {
-                if n >= MAX_OBSERVER_DESIGN_LEN {
-                    return Err(invalid("observer response does not decay within the design grid"));
-                }
-                n *= 2;
-                continue;
-            }
-            // Pad the fewest samples D for the precursor (negative time, the
-            // grid's second half) to meet half the certificate.
-            let mut padding = 0;
-            let mut precursor = energy(n / 2..n);
-            while precursor > budget * total / 2.0 && padding < n / 4 {
-                padding += 1;
-                precursor -= response[n - padding] * response[n - padding];
-            }
-            if precursor > budget * total / 2.0 {
-                if n >= MAX_OBSERVER_DESIGN_LEN {
-                    return Err(invalid("observer precursor does not meet the certificate within the design grid"));
-                }
-                n *= 2;
-                continue;
-            }
-            let mut tail = 0.0;
-            let mut causal = n / 2;
-            while causal > 1 {
-                let next = tail + response[causal - 1] * response[causal - 1];
-                if precursor + next > budget * total {
-                    break;
-                }
-                tail = next;
-                causal -= 1;
-            }
-            let taps = padding + causal;
-            if taps > MAX_OBSERVER_TAPS {
-                return Err(invalid("observer response needs more taps than MAX_OBSERVER_TAPS"));
-            }
-            let mut fir = response[n - padding..].to_vec();
-            fir.extend_from_slice(&response[..causal]);
-            let latency_s = (align + padding as f64) / rate;
-            let (moment, gain) = fir.iter().enumerate().fold((0.0, 0.0), |(m, g), (j, tap)| {
-                (m + j as f64 * tap, g + tap)
-            });
-            let low_frequency_delay_s = moment / gain / rate;
-            let receiver_delay_s = range_m / gas.sound_speed - low_frequency_delay_s;
-            let delay_speed_m_s = (receiver_delay_s > 0.0).then(|| range_m / receiver_delay_s);
-            return Ok(Self {
-                taps: fir,
-                history: vec![0.0; taps],
-                head: 0,
-                receipt: ObserverFilterReceipt {
-                    absorption,
-                    range_m,
-                    sample_rate_hz,
-                    taps,
-                    truncated_energy: (precursor + tail) / total,
-                    budget_energy: budget,
-                    alpha_uncertainty_energy,
-                    alignment_samples: align,
-                    padding_samples: padding,
-                    low_frequency_delay_s,
-                    latency_s,
-                    receiver_delay_s,
-                    delay_speed_m_s,
-                    classical_validity_exceeded_from_hz,
-                },
-            });
+        let response = design_observer_response(range_m, f64::from(sample_rate_hz), spectrum)?;
+        Ok(Self::from_response(
+            response, absorption, gas, range_m, sample_rate_hz,
+            classical_validity_exceeded_from_hz,
+        ))
+    }
+
+    fn from_response(
+        response: ObserverResponse,
+        absorption: ObserverAbsorptionReceipt,
+        gas: &GasState,
+        range_m: f64,
+        sample_rate_hz: u32,
+        classical_validity_exceeded_from_hz: Option<f64>,
+    ) -> Self {
+        let taps = response.taps.len();
+        let receiver_delay_s = response.receiver_delay_s(gas, range_m);
+        let delay_speed_m_s = if range_m == 0.0 {
+            Some(gas.sound_speed)
+        } else {
+            (receiver_delay_s > 0.0).then(|| range_m / receiver_delay_s)
+        };
+        Self {
+            taps: response.taps,
+            history: vec![0.0; taps],
+            head: 0,
+            receipt: ObserverFilterReceipt {
+                absorption,
+                range_m,
+                sample_rate_hz,
+                taps,
+                truncated_energy: response.truncated_energy,
+                budget_energy: response.budget_energy,
+                alpha_uncertainty_energy: response.alpha_uncertainty_energy,
+                alignment_samples: response.alignment_samples,
+                padding_samples: response.padding_samples,
+                low_frequency_delay_s: response.low_frequency_delay_s,
+                latency_s: response.latency_s,
+                receiver_delay_s,
+                delay_speed_m_s,
+                classical_validity_exceeded_from_hz,
+            },
         }
     }
 
@@ -1258,24 +1348,23 @@ mod tests {
         law.evaluate(&RelaxingMedium::new(gas, vec![(id, 1.0)]).unwrap()).unwrap()
     }
 
-    /// The transfer is exactly the law's wavenumber in every bin, and the
-    /// propagated impulse of a strongly dispersive reservoir arrives no earlier
-    /// than the bulk delay: pre-arrival energy at most 1e-12 of the total.
+    /// G1: the batch FIR carries the causal law's complex phase, including
+    /// its declared realization latency, within the streaming FIR's 1e-3
+    /// absolute transfer tolerance. Receiver delay restores r/c0 once.
     #[test]
-    fn relaxation_transfer_is_the_law_per_bin_and_causal() {
+    fn relaxation_transfer_is_the_law_and_causal() {
         let state = relaxing_air(true);
         let (n, dt, range, n0) = (1usize << 16, 1.0 / 48_000.0, 10.0, 1usize << 14);
+        let filter = ObserverFilter::molecular_relaxation(&state, range, 48_000).unwrap();
+        let receipt = *filter.receipt();
         let mut x = vec![0.0; n];
         x[n0] = 1.0;
         let delay = propagate_pressure_history_relaxing(&mut x, dt, range, &state).unwrap();
-        assert_eq!(delay.to_bits(), (range / state.frozen_sound_speed_m_s()).to_bits());
+        assert_eq!(delay.to_bits(), receipt.receiver_delay_s.to_bits());
+        assert!((delay + receipt.low_frequency_delay_s - range / state.gas().sound_speed).abs() < 1e-14);
         let total: f64 = x.iter().map(|v| v * v).sum();
         let early: f64 = x[..n0].iter().map(|v| v * v).sum();
-        println!(
-            "{{\"bead\":\"M0.1-W2\",\"test\":\"relaxation_transfer_causal\",\"range_m\":{range},\"pre_arrival_energy_ratio\":{:e},\"tolerance\":1e-12}}",
-            early / total
-        );
-        assert!(early <= 1e-12 * total, "pre-arrival energy ratio {:e}", early / total);
+        assert!(early <= 1e-20 * total, "pre-arrival energy ratio {:e}", early / total);
         let fft = Fft::new(n);
         let mut y: Vec<FftC64> = x.iter().map(|&v| FftC64::new(v, 0.0)).collect();
         let mut scratch = vec![FftC64::new(0.0, 0.0); n];
@@ -1286,15 +1375,73 @@ mod tests {
             let omega = core::f64::consts::TAU * k as f64 / (n as f64 * dt);
             let wave = state.causal_wavenumber(omega).unwrap();
             let magnitude = (-wave.im * range).exp();
-            // Bins attenuated below 1e-6 hold only transform roundoff.
-            if magnitude < 1e-6 {
-                continue;
-            }
-            let phase = -(wave.re - omega / c_inf) * range - core::f64::consts::TAU * (k * n0) as f64 / n as f64;
+            let phase = -(wave.re - omega / c_inf) * range
+                - omega * receipt.latency_s
+                - core::f64::consts::TAU * (k * n0) as f64 / n as f64;
             let (er, ei) = (magnitude * phase.cos(), magnitude * phase.sin());
-            worst = worst.max(((y[k].re - er).hypot(y[k].im - ei)) / magnitude);
+            worst = worst.max((y[k].re - er).hypot(y[k].im - ei));
         }
-        assert!(worst <= 1e-9, "per-bin transfer error {worst:e}");
+        assert!(worst <= 1e-3, "complex transfer error {worst:e}");
+    }
+
+    /// G3: finite records are zero-extended, never treated as periodic.
+    #[test]
+    fn relaxation_late_impulse_cannot_wrap_into_the_record_start() {
+        let state = relaxing_air(true);
+        let filter = ObserverFilter::molecular_relaxation(&state, 10.0, 48_000).unwrap();
+        for n in [1, 2, 3, 17, 257, 2_048, 2_053] {
+            let mut pressure = vec![0.0; n];
+            pressure[n - 1] = 1.0;
+            propagate_pressure_history_relaxing(&mut pressure, 1.0 / 48_000.0, 10.0, &state).unwrap();
+            assert!(pressure[..n - 1].iter().all(|x| x.abs() < 1e-12), "n={n}");
+            assert!((pressure[n - 1] - filter.taps()[0]).abs() < 1e-12, "n={n}");
+        }
+    }
+
+    /// G3: the offline and streaming paths share one FIR, including across
+    /// overlap-add block boundaries and for non-power-of-two record lengths.
+    #[test]
+    fn relaxation_batch_matches_streaming_and_preserves_an_exact_clock() {
+        let state = relaxing_air(true);
+        let filter = ObserverFilter::molecular_relaxation(&state, 10.0, 48_000).unwrap();
+        let block = 2 * filter.taps().len().next_power_of_two() - filter.taps().len() + 1;
+        for n in [0, 1, 3, 17, 2 * block + 3] {
+            let mut streaming = filter.clone();
+            let input: Vec<_> = (0..n).map(|i| (i % 29) as f64 / 14.0 - 1.0).collect();
+            let expected: Vec<_> = input.iter().map(|&x| streaming.process(x)).collect();
+            let mut batch = input;
+            propagate_pressure_history_relaxing(&mut batch, 1.0 / 48_000.0, 10.0, &state).unwrap();
+            assert!(batch.iter().zip(&expected).all(|(a, b)| (a - b).abs() < 1e-12), "n={n}");
+        }
+
+        // A fractional-Hz clock is supported without converting it to u32.
+        let dt = 1.0 / 44_100.25;
+        let response = molecular_response(&state, 10.0, 1.0 / dt).unwrap();
+        let mut impulse = vec![0.0; response.taps.len() + 17];
+        impulse[0] = 1.0;
+        let delay = propagate_pressure_history_relaxing(&mut impulse, dt, 10.0, &state).unwrap();
+        assert!(impulse.iter().zip(&response.taps).all(|(a, b)| (a - b).abs() < 1e-12));
+        assert!(impulse[response.taps.len()..].iter().all(|x| x.abs() < 1e-12));
+        assert!((delay + response.low_frequency_delay_s - 10.0 / state.gas().sound_speed).abs() < 1e-14);
+    }
+
+    /// G0: admission/design and both convolution paths commit only finite
+    /// output; an overflowing intermediate cannot partly replace the input.
+    #[test]
+    fn relaxation_batch_refusal_is_atomic() {
+        let state = relaxing_air(true);
+        let original = [1.0, -2.0, 3.0];
+        let mut pressure = original;
+        assert!(propagate_pressure_history_relaxing(
+            &mut pressure, f64::from_bits(1), 1.0, &state,
+        ).is_err());
+        assert_eq!(pressure, original);
+        for n in [3, 65] {
+            let mut pressure = vec![f64::MAX; n];
+            let original = pressure.clone();
+            assert!(convolve_pressure_history(&mut pressure, &vec![2.0; n]).is_err());
+            assert_eq!(pressure, original);
+        }
     }
 
     fn convention_db(omission: RelaxationOmission) -> f64 {

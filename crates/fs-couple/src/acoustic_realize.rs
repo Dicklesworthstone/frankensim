@@ -1471,8 +1471,9 @@ fn finish_observer(
         )?),
     };
     if law == GasAbsorptionModel::MolecularRelaxation {
-        // The bulk delay r / c_inf is returned, not applied: no observer law
-        // here places the arrival.
+        // The remaining receiver delay is returned, not applied. This source-time
+        // history includes the FIR's declared latency, as the streaming filter
+        // does; no observer law here places the physical arrival.
         crate::air_path::propagate_pressure_history_relaxing(
             &mut pressure_pa,
             dt,
