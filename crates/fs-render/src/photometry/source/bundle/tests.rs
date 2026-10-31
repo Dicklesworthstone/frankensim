@@ -43,6 +43,109 @@ fn close(actual: f64, expected: f64, relative: f64) {
 }
 
 #[test]
+fn g1_calibrated_refractive_meter_preserves_thick_lens_focusing_and_interface_power() {
+    use crate::dielectric::DielectricEvent;
+    use crate::gradient_index::GradientIndexField;
+    use crate::gradient_index::bundle::interface::InterfaceOptions;
+    use crate::polarization::dielectric::transport::bundle::PolarizedRayBundle;
+    use fs_geom::NormalDifferential;
+
+    let source = fixture([0.0, 0.0, -3.0]);
+    let air = glass(CauchyIor::try_constant(1.0).unwrap(), 0.0);
+    let lens = glass(CauchyIor::try_new(1.45, 0.012, 0.0).unwrap(), 0.15);
+    let outside = HomogeneousIndexField::new(&air);
+    let inside = HomogeneousIndexField::new(&lens);
+    let receiver = PlanarIrradianceReceiver::try_new(
+        Point3::new(0.0, 0.0, 2.5),
+        Vec3::new(0.0, 0.0, -1.0),
+        1e-12,
+    )
+    .unwrap();
+    let mut meter = BundleIrradianceMeter::new(&source, receiver, ProjectionOptions::default());
+    let ray = Ray {
+        origin: source.position_m(),
+        dir: Vec3::new(0.0, 0.0, 1.0),
+    };
+    let options = BundleOptions::default();
+    let mut expected_w = 0.0;
+    let mut expected_lux = 0.0;
+    for bin in 0..SPECTRAL_BINS {
+        let wavelength = wavelength_nm(bin);
+        let first = propagate_bundle(
+            &outside,
+            ray,
+            Vec3::new(1.0, 0.0, 0.0),
+            wavelength,
+            2.0,
+            options,
+        )
+        .unwrap();
+        // Exact first derivative of the unit sphere at its two axial poles.
+        let normal = |z| NormalDifferential {
+            normal: Vec3::new(0.0, 0.0, z),
+            derivative_per_m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0; 3]],
+        };
+        let entry = first.propagation().ray.origin;
+        let entered = PolarizedRayBundle::unpolarized(first)
+            .unwrap()
+            .smooth_interface(
+                normal(-1.0),
+                inside.sample(entry, wavelength).unwrap(),
+                DielectricEvent::Transmission,
+                InterfaceOptions::default(),
+            )
+            .unwrap()
+            .continue_in(&inside, 2.0, options)
+            .unwrap();
+        let exit = entered.propagation().propagation().ray.origin;
+        let path = entered
+            .smooth_interface(
+                normal(1.0),
+                outside.sample(exit, wavelength).unwrap(),
+                DielectricEvent::Transmission,
+                InterfaceOptions::default(),
+            )
+            .unwrap()
+            .continue_in(&outside, 1.5, options)
+            .unwrap();
+        // Dropping the path's interface transfer cannot silently publish a
+        // brighter geometric-only irradiance through the old entry point.
+        assert_eq!(
+            meter.record(bin, path.propagation()),
+            Err(BundlePhotometryError::MissingInterfaceTransfer)
+        );
+        assert_eq!(meter.spectral_irradiance_w_m2_nm(bin), None);
+        meter.record_refractive(bin, &path).unwrap();
+        let n = lens.ior().eval(wavelength).unwrap();
+        // Independent reduced-angle ABCD law for the thick unit ball:
+        // two curved surfaces separated by 2m; source at -3, receiver at 2.5.
+        let footprint = 15.0 / n - 9.5;
+        let transmission = 4.0 * n / ((1.0 + n) * (1.0 + n));
+        let expected = source
+            .spectral_intensity_w_sr_nm(ray.dir, wavelength)
+            .unwrap()
+            * transmission
+            * transmission
+            * (-0.3_f64).exp()
+            / (footprint * footprint);
+        close(
+            meter.spectral_irradiance_w_m2_nm(bin).unwrap(),
+            expected,
+            1e-12,
+        );
+        expected_w += expected * BIN_WIDTH_NM;
+        expected_lux += expected * photopic_weight_nm(bin) * LUMINOUS_EFFICACY_LM_W;
+        assert_eq!(
+            meter.record_refractive(bin, &path),
+            Err(BundlePhotometryError::DuplicateBin)
+        );
+    }
+    let reading = meter.reading().unwrap();
+    close(reading.radiant_irradiance_w_m2, expected_w, 1e-12);
+    close(reading.illuminance_lux, expected_lux, 1e-12);
+}
+
+#[test]
 fn g1_calibrated_bundles_recover_oblique_inverse_square_lux_and_absorption() {
     let source = fixture([0.0; 3]);
     let material = glass(CauchyIor::try_constant(1.5).unwrap(), 0.1);

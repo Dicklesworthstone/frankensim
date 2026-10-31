@@ -220,24 +220,48 @@ differentiable lift). Pure Rust throughout.
   check the gradient terms. Normal Jacobians and local integration tolerances
   do not turn a numerical contact collar into a global derivative certificate.
 
-- `photometry::source::bundle` consumes those smooth-field angular bundles in
+- `photometry::source::bundle` consumes angular bundles in
   the native calibrated point-source path. `PlanarIrradianceReceiver` binds a
   finite point, a one-sided normal and an explicit numerical endpoint-position
   tolerance. `PhotometricSource::spectral_irradiance_from_bundle` verifies the
   retained source origin, wavelength, launch direction and receiver endpoint,
   then uses the source's actual spectral/angular intensity and the bundle's
-  receiving-area Jacobian. `BundleIrradianceMeter` borrows one immutable source
+  receiving-area Jacobian. This bare-bundle entry point rejects paths with
+  unaccounted discrete interface events. The refractive entry point and meter's
+  `record_refractive` consume `PolarizedRayBundle`, retaining the true native
+  interface transfer through an explicit specular path. `BundleIrradianceMeter` borrows one immutable source
   and receiver, admits exactly one supplied connecting bundle at each of the
   80 native spectral midpoints, and uses compensated sums for W/m² and native
   CIE-weighted lux. Wrong source/receiver/bin bindings, duplicate wavelengths
   and incomplete spectra refuse without changing an admitted reading. The
   receiver tolerance is not a finite aperture or a global numerical error
   certificate. This evaluates one supplied branch at each wavelength; it does
-  not search for connections, establish visibility, sum all optical branches,
-  differentiate discontinuous interfaces or average a caustic over a pixel.
+  not search for connections, establish visibility, sum all optical branches
+  or average a caustic over a pixel.
   Independent full-spectrum checks recover homogeneous inverse-square
   obliquity/attenuation and dispersive quadratic-field focusing in both radiant
-  and photopic units.
+  and photopic units. A full-spectrum finite-thickness ball-lens check also
+  verifies both curved interfaces, native dispersion, absorption and true
+  Fresnel transmission through the actual calibrated meter.
+
+- `polarization::dielectric::transport::bundle::PolarizedRayBundle` composes
+  those geometric continuations with the existing native Stokes-frame and
+  Fresnel Mueller owner. It retains unit-intensity polarization and logarithmic
+  interface power separately from the integrated bulk optical depth. Subsequent
+  oblique interfaces therefore see the actual partial/circular polarization;
+  deterministic branch contributions contain neither proposal-probability
+  division nor a radiance eta-square multiplier. Native transparent coherent
+  coatings reuse their existing response and collapsed-interface model,
+  including nonzero coated reflection between equal-index bulk media.
+  Physical transfer, Beer absorption and receiving-area conversion are applied
+  once, with log-domain recovery for representable attenuated irradiance.
+  Completely dark polarized branches retain zero power without invalid Stokes
+  normalization. A native geometry contact must match the exact endpoint.
+  The caller supplies each segment and interface; no connecting-ray search,
+  visibility, rough-interface differential, branch completeness or finite-pixel
+  caustic claim is added. Independent thick-lens ABCD, off-axis analytic Snell,
+  slab, total-reflection, critical-angle, quarter-wave-film and Brewster-null
+  references exercise the complete path.
 
 - `polarization::dielectric::scene::curved` connects the field propagator,
   native instance boundaries, spectral interfaces and calibrated receiving

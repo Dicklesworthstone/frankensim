@@ -8,8 +8,10 @@
 //!
 //! Each supplied bundle must actually end at the declared receiving point,
 //! within an explicit numerical position tolerance, and face the receiver.
-//! This owner does not search connecting rays, test visibility, differentiate
-//! discrete interfaces, or enumerate multiple optical paths. An 80-bin reading
+//! Refractive bundles retain native polarized power through every discrete
+//! smooth interface; bare geometric bundles with omitted interface transfer
+//! are refused. This owner does not search connecting rays, test visibility,
+//! or enumerate multiple optical paths. An 80-bin reading
 //! describes one supplied connecting branch per wavelength, not a completeness
 //! certificate for all paths from an extended or multiply imaged source.
 
@@ -18,6 +20,9 @@ use super::{
     photopic_weight_nm, unit, wavelength_nm,
 };
 use crate::gradient_index::bundle::{BundleError, ProjectionOptions, RayBundlePropagation};
+use crate::polarization::dielectric::transport::bundle::{
+    PolarizedBundleError, PolarizedRayBundle,
+};
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
@@ -32,9 +37,11 @@ pub enum BundlePhotometryError {
     WavelengthMismatch,
     DuplicateBin,
     IncompleteSpectrum,
+    MissingInterfaceTransfer,
     NumericalRange,
     Source(SourceError),
     Bundle(BundleError),
+    Refractive(PolarizedBundleError),
 }
 
 impl From<SourceError> for BundlePhotometryError {
@@ -45,6 +52,11 @@ impl From<SourceError> for BundlePhotometryError {
 impl From<BundleError> for BundlePhotometryError {
     fn from(error: BundleError) -> Self {
         Self::Bundle(error)
+    }
+}
+impl From<PolarizedBundleError> for BundlePhotometryError {
+    fn from(error: PolarizedBundleError) -> Self {
+        Self::Refractive(error)
     }
 }
 impl core::fmt::Display for BundlePhotometryError {
@@ -108,6 +120,34 @@ impl PhotometricSource {
         receiver: PlanarIrradianceReceiver,
         projection: ProjectionOptions,
     ) -> Result<f64, BundlePhotometryError> {
+        if bundle.interface_events() != 0 {
+            return Err(BundlePhotometryError::MissingInterfaceTransfer);
+        }
+        let intensity = self.bundle_intensity(bundle, receiver)?;
+        Ok(bundle
+            .project_at_endpoint(receiver.normal, projection)?
+            .point_source_irradiance(intensity)?)
+    }
+
+    /// Physical spectral irradiance after an explicit sequence of smooth
+    /// refractive/reflective interfaces. The path retains the normalized source
+    /// polarization and every native Fresnel transfer; bulk absorption and the
+    /// original launch-angle area Jacobian are each applied once.
+    pub fn spectral_irradiance_from_refractive_bundle(
+        &self,
+        path: &PolarizedRayBundle,
+        receiver: PlanarIrradianceReceiver,
+        projection: ProjectionOptions,
+    ) -> Result<f64, BundlePhotometryError> {
+        let intensity = self.bundle_intensity(path.propagation(), receiver)?;
+        Ok(path.point_source_irradiance(receiver.normal, projection, intensity)?)
+    }
+
+    fn bundle_intensity(
+        &self,
+        bundle: &RayBundlePropagation,
+        receiver: PlanarIrradianceReceiver,
+    ) -> Result<f64, BundlePhotometryError> {
         if bundle.initial_ray().origin != self.position_m() {
             return Err(BundlePhotometryError::SourceOriginMismatch);
         }
@@ -120,11 +160,7 @@ impl PhotometricSource {
         if receiver.normal.dot(endpoint.dir) >= 0.0 {
             return Err(BundlePhotometryError::BackFacingReceiver);
         }
-        let intensity =
-            self.spectral_intensity_w_sr_nm(bundle.initial_ray().dir, bundle.wavelength_nm())?;
-        Ok(bundle
-            .project_at_endpoint(receiver.normal, projection)?
-            .point_source_irradiance(intensity)?)
+        Ok(self.spectral_intensity_w_sr_nm(bundle.initial_ray().dir, bundle.wavelength_nm())?)
     }
 }
 
@@ -161,19 +197,49 @@ impl<'a> BundleIrradianceMeter<'a> {
         bin: usize,
         bundle: &RayBundlePropagation,
     ) -> Result<(), BundlePhotometryError> {
+        let bit = self.admit_bin(bin, bundle.wavelength_nm())?;
+        let value =
+            self.source
+                .spectral_irradiance_from_bundle(bundle, self.receiver, self.projection)?;
+        self.record_value(bin, bit, value)
+    }
+
+    /// Record a fully weighted refractive branch at one native spectral bin.
+    /// A failed source/contact/interface or duplicate-bin admission is atomic.
+    pub fn record_refractive(
+        &mut self,
+        bin: usize,
+        path: &PolarizedRayBundle,
+    ) -> Result<(), BundlePhotometryError> {
+        let bit = self.admit_bin(bin, path.propagation().wavelength_nm())?;
+        let value = self.source.spectral_irradiance_from_refractive_bundle(
+            path,
+            self.receiver,
+            self.projection,
+        )?;
+        self.record_value(bin, bit, value)
+    }
+
+    fn admit_bin(&self, bin: usize, wavelength: f64) -> Result<u128, BundlePhotometryError> {
         if bin >= SPECTRAL_BINS {
             return Err(BundlePhotometryError::InvalidBin);
         }
-        if bundle.wavelength_nm() != wavelength_nm(bin) {
+        if wavelength != wavelength_nm(bin) {
             return Err(BundlePhotometryError::WavelengthMismatch);
         }
         let bit = 1_u128 << bin;
         if self.present & bit != 0 {
             return Err(BundlePhotometryError::DuplicateBin);
         }
-        let value =
-            self.source
-                .spectral_irradiance_from_bundle(bundle, self.receiver, self.projection)?;
+        Ok(bit)
+    }
+
+    fn record_value(
+        &mut self,
+        bin: usize,
+        bit: u128,
+        value: f64,
+    ) -> Result<(), BundlePhotometryError> {
         if !value.is_finite() || value < 0.0 {
             return Err(BundlePhotometryError::NumericalRange);
         }
@@ -188,7 +254,7 @@ impl<'a> BundleIrradianceMeter<'a> {
 
     /// Integrate all 80 admitted bins with the original CIE observer. Missing
     /// wavelengths refuse; successful quadrature adds no visibility or global
-    /// path-completeness claim to the supplied smooth-medium bundles.
+    /// path-completeness claim to the supplied optical branches.
     pub fn reading(&self) -> Result<BundleIrradianceReading, BundlePhotometryError> {
         if self.present != (1_u128 << SPECTRAL_BINS) - 1 {
             return Err(BundlePhotometryError::IncompleteSpectrum);

@@ -38,6 +38,8 @@ use super::{
     attenuate_stokes, fresnel_dielectric_polarized, sample_smooth_dielectric_polarized,
 };
 
+pub mod bundle;
+
 /// Admission or representability refusal. Failed operations leave the beam unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BeamError {
