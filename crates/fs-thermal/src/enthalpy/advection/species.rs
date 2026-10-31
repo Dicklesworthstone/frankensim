@@ -3,14 +3,16 @@
 //! Mass-balanced graphs need explicit inlet compositions. Acyclic sections use
 //! direct mixing; inlet-fed recirculation uses the existing bounded dense solver.
 //! Closed components with no inlet have no uniquely determined composition and
-//! refuse. Species have no reaction, diffusion, condensation or storage rate.
+//! refuse. Explicit selective outlets subtract their supplied component fluxes
+//! before mixing the remaining stream on acyclic graphs. Species have no
+//! reaction, diffusion, internally inferred condensation or storage rate.
 //! The enthalpy observer uses these SAME directions and mass rates. This
 //! stationary extension does not turn fixed thermal cells into a variable-
 //! density transient flow solver.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Advected, MassBoundary, MassFlow, finite, invalid};
+use super::{Advected, MassBoundary, MassFlow, SelectiveOutlet, finite, invalid};
 use crate::enthalpy::{CellId, DepositionError, DepositionSimulation};
 
 #[path = "species/recirculation.rs"]
@@ -54,7 +56,7 @@ pub struct StationarySpecies {
     maximum_residual_kg_s: f64,
 }
 
-fn authored(fractions: &[f64], count: usize) -> Result<(), DepositionError> {
+pub(super) fn authored(fractions: &[f64], count: usize) -> Result<(), DepositionError> {
     if fractions.len() != count
         || fractions.iter().any(|x| !x.is_finite() || *x < 0.0 || *x > 1.0)
         || fractions.iter().sum::<f64>() != 1.0
@@ -130,6 +132,7 @@ impl StationarySpecies {
     fn solve(
         flows: &[MassFlow], boundaries: &[MassBoundary], species: Vec<String>,
         inlet_data: Vec<InletSpecies>, max_cells: usize, max_species: usize,
+        selective_outlets: &BTreeMap<u64, SelectiveOutlet>,
     ) -> Result<Self, DepositionError> {
         if species.is_empty() || species.len() > max_species.min(128)
             || inlet_data.len() > boundaries.len()
@@ -141,6 +144,9 @@ impl StationarySpecies {
             return Err(invalid("stationary species identities must be bounded and unique"));
         }
         let count = species.len();
+        for outlet in selective_outlets.values() {
+            authored(&outlet.mass_fractions, count)?;
+        }
         let mut inlets = BTreeMap::new();
         for inlet in inlet_data {
             authored(&inlet.mass_fractions, count)?;
@@ -159,6 +165,7 @@ impl StationarySpecies {
         let mut edges: BTreeMap<CellId, Vec<(CellId, f64)>> = BTreeMap::new();
         let mut degree: BTreeMap<CellId, usize> = BTreeMap::new();
         let mut incoming_species: BTreeMap<CellId, Vec<f64>> = BTreeMap::new();
+        let mut selective_fluxes: BTreeMap<CellId, (f64, Vec<f64>)> = BTreeMap::new();
         let mut uniform_inputs: BTreeMap<CellId, Option<Vec<f64>>> = BTreeMap::new();
         for flow in flows {
             let Some((up, down, rate)) = flow.directed() else { continue; };
@@ -184,7 +191,17 @@ impl StationarySpecies {
                         *flux = finite(*flux + finite(rate * fraction)?)?;
                     }
                 }
-                MassBoundary::Outlet { .. } => { sums[1] = finite(sums[1] + rate)?; }
+                MassBoundary::Outlet { id, .. } => {
+                    sums[1] = finite(sums[1] + rate)?;
+                    if let Some(outlet) = selective_outlets.get(id) {
+                        let (selected_rate, fluxes) = selective_fluxes.entry(cell)
+                            .or_insert_with(|| (0.0, vec![0.0; count]));
+                        *selected_rate = finite(*selected_rate + rate)?;
+                        for (flux, fraction) in fluxes.iter_mut().zip(&outlet.mass_fractions) {
+                            *flux = finite(*flux + finite(rate * fraction)?)?;
+                        }
+                    }
+                }
             }
         }
         if rates.is_empty() || rates.len() > max_cells.min(4096) {
@@ -202,18 +219,35 @@ impl StationarySpecies {
         let mut cells = BTreeMap::new();
         let mut maximum_residual_kg_s: f64 = 0.0;
         while let Some(cell) = ready.pop_first() {
-            let fluxes = incoming_species.remove(&cell)
+            let mut fluxes = incoming_species.remove(&cell)
                 .ok_or(invalid("stationary species component has no inlet"))?;
             let [incoming, outgoing] = rates[&cell];
+            let mixed_outgoing = if let Some((rate, selected)) = selective_fluxes.get(&cell) {
+                let remaining = finite(outgoing - rate)?;
+                if remaining <= 0.0 {
+                    return Err(invalid("selective outlets require positive remaining mixed flow"));
+                }
+                for (flux, sink) in fluxes.iter_mut().zip(selected) {
+                    *flux = finite(*flux - sink)?;
+                    if *flux < 0.0 {
+                        return Err(invalid("selective outlet exceeds available species flux"));
+                    }
+                }
+                // A selective stream changes the remaining composition even
+                // when every original inlet carried the same exact mixture.
+                uniform_inputs.remove(&cell);
+                remaining
+            } else { outgoing };
             let fractions = if let Some(Some(exact)) = uniform_inputs.remove(&cell) {
                 exact
             } else {
-                let mut fractions: Vec<_> = fluxes.iter().map(|flux| flux / incoming).collect();
+                let denominator = if selective_fluxes.contains_key(&cell) { mixed_outgoing } else { incoming };
+                let mut fractions: Vec<_> = fluxes.iter().map(|flux| flux / denominator).collect();
                 close_generated_simplex(&mut fractions)?;
                 fractions
             };
             for (&flux, &fraction) in fluxes.iter().zip(&fractions) {
-                let residual = finite(flux - finite(outgoing * fraction)?)?.abs();
+                let residual = finite(flux - finite(mixed_outgoing * fraction)?)?.abs();
                 if residual > 128.0 * f64::EPSILON * count as f64 * incoming.max(outgoing) {
                     return Err(invalid("stationary species flux does not close"));
                 }
@@ -234,6 +268,9 @@ impl StationarySpecies {
             cells.insert(cell, fractions);
         }
         if cells.len() != rates.len() {
+            if !selective_outlets.is_empty() {
+                return Err(invalid("selective outlets require an acyclic stationary flow graph"));
+            }
             maximum_residual_kg_s = maximum_residual_kg_s.max(recirculation::complete(
                 &rates, &edges, &incoming_species, uniform_inputs, &mut cells, count,
             )?);
@@ -250,6 +287,7 @@ impl StationarySpecies {
 
     pub(super) fn validate_laws(
         &self, thermal: &DepositionSimulation<'_>, boundaries: &[MassBoundary],
+        selective_outlets: &BTreeMap<u64, SelectiveOutlet>,
     ) -> Result<(), DepositionError> {
         let mut reference: Option<String> = None;
         let mut admit = |law: &dyn crate::enthalpy::ThermalLaw, fractions: &[f64]| {
@@ -280,6 +318,11 @@ impl StationarySpecies {
                 admit(*law, &self.inlets[id])?;
             }
         }
+        for outlet in selective_outlets.values() {
+            if reference.as_deref() != Some(outlet.enthalpy_reference.as_str()) {
+                return Err(invalid("selective outlet enthalpy reference differs from caloric laws"));
+            }
+        }
         Ok(())
     }
 }
@@ -288,7 +331,8 @@ impl<O> Advected<O> {
     /// Solve stationary species on this observer's existing mass-flow graph.
     /// Inlet-fed cycles use at most [`MAX_RECIRCULATION_CELLS`] unresolved cells;
     /// unreachable or ill-conditioned recirculation refuses without regularizing
-    /// the flow or inventing a composition. The acyclic path is unchanged.
+    /// the flow or inventing a composition. Explicit selective outlets require
+    /// an acyclic graph and subtract their component rates before local mixing.
     /// Allows different immutable cell caloric laws only after their exact
     /// compositions and shared energy reference are checked on every advance.
     /// Inlet enthalpy remains the INLET law's enthalpy; it is never interpreted
@@ -299,6 +343,7 @@ impl<O> Advected<O> {
     ) -> Result<Self, DepositionError> {
         self.stationary_species = Some(StationarySpecies::solve(
             &self.flows, &self.boundaries, species, inlets, max_cells, max_species,
+            &self.selective_outlets,
         )?);
         self.pending = None;
         self.boundary_pending = None;

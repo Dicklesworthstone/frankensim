@@ -45,6 +45,142 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn g0_isobaric_condensation_retains_carriers_and_prescribed_pressure() {
+    let inlet = wet(310.0, 0.06, 0.0, 0.0);
+    let carrier = SpeciesId::new("carrier").unwrap();
+    let water = SpeciesId::new("water").unwrap();
+    let context = fs_matdb::QueryPoint::new()
+        .with("specimen-lot", 17.0)
+        .unwrap();
+    let step = inlet
+        .model()
+        .partition_at_pressure_temperature(
+            inlet.species_masses_kg(),
+            0.0,
+            290.0,
+            101325.0,
+            &context,
+            || false,
+        )
+        .unwrap();
+    let saturation = SaturatedWaterState::at_temperature(Temperature::new(290.0)).unwrap();
+    let expected = (inlet.species_masses_kg()[&carrier] / 0.028) * saturation.pressure().value()
+        / (101325.0 - saturation.pressure().value())
+        * 0.01801528;
+    near(
+        step.gas_species_masses_kg[&water],
+        expected,
+        expected * 1e-13,
+    );
+    assert_eq!(
+        step.gas_species_masses_kg[&carrier],
+        inlet.species_masses_kg()[&carrier]
+    );
+    assert_eq!(step.gas.state().pressure, 101325.0);
+    assert!(step.condensed_mass_kg > 0.0);
+    near(step.liquid_mass_kg, step.condensed_mass_kg, 1e-18);
+    near(step.saturation_residual_pa, 0.0, 1e-9);
+    near(step.mass_residual_kg, 0.0, 1e-17);
+    near(
+        step.isothermal_phase_enthalpy_change_j,
+        -step.condensed_mass_kg * step.latent_enthalpy_j_kg,
+        1e-12,
+    );
+    let isochoric = inlet.at_temperature(290.0, || false).unwrap();
+    assert!(
+        step.gas_species_masses_kg[&water] < isochoric.parcel.vapor_mass_kg(),
+        "fixed pressure must use carrier moles, not a frozen gas-volume capacity"
+    );
+    for material in step.gas.components() {
+        assert_eq!(material.query().axes().get("specimen-lot"), Some(&17.0));
+    }
+}
+
+#[test]
+fn g0_isobaric_dry_gas_evaporates_only_available_liquid() {
+    let source = source(0.05, 0.0);
+    let model =
+        WaterCondensationModel::new(source, SpeciesId::new("water").unwrap(), 300.0).unwrap();
+    let carrier = SpeciesId::new("carrier").unwrap();
+    let water = SpeciesId::new("water").unwrap();
+    let masses = BTreeMap::from([(carrier.clone(), 0.001), (water.clone(), 0.0)]);
+    let context = fs_matdb::QueryPoint::new();
+    let step = model
+        .partition_at_pressure_temperature(&masses, 1e-7, 310.0, 101325.0, &context, || false)
+        .unwrap();
+    assert_eq!(step.liquid_mass_kg, 0.0);
+    assert_eq!(step.gas_species_masses_kg[&water], 1e-7);
+    assert_eq!(step.gas_species_masses_kg[&carrier], 0.001);
+    assert_eq!(step.condensed_mass_kg, -1e-7);
+    assert!(step.saturation_residual_pa < 0.0);
+    assert!(step.isothermal_phase_enthalpy_change_j > 0.0);
+    let dry = model
+        .partition_at_pressure_temperature(&masses, 0.0, 310.0, 101325.0, &context, || false)
+        .unwrap();
+    assert_eq!(dry.gas.state().water_mole_fraction, 0.0);
+    assert_eq!(dry.mole_composition.fractions(), &[1.0, 0.0]);
+}
+
+#[test]
+fn g3_isobaric_partition_scales_reference_packets_and_cancels_formation_datum() {
+    let initial = wet(310.0, 0.08, 0.0, 0.0);
+    let context = fs_matdb::QueryPoint::new();
+    let run = |model: &WaterCondensationModel, scale| {
+        let masses = initial
+            .species_masses_kg()
+            .iter()
+            .map(|(id, mass)| (id.clone(), mass * scale))
+            .collect();
+        model
+            .partition_at_pressure_temperature(&masses, 0.0, 295.0, 101325.0, &context, || false)
+            .unwrap()
+    };
+    let normal = run(initial.model(), 1.0);
+    let scaled = run(initial.model(), 128.0);
+    assert_eq!(normal.mole_composition, scaled.mole_composition);
+    assert_eq!(normal.gas, scaled.gas);
+    near(scaled.liquid_mass_kg, 128.0 * normal.liquid_mass_kg, 1e-17);
+    let shifted =
+        WaterCondensationModel::new(source(0.08, 1e12), SpeciesId::new("water").unwrap(), 310.0)
+            .unwrap();
+    let shifted = run(&shifted, 1.0);
+    assert_eq!(normal.gas_species_masses_kg, shifted.gas_species_masses_kg);
+    near(
+        normal.latent_enthalpy_j_kg,
+        shifted.latent_enthalpy_j_kg,
+        1e-7,
+    );
+    near(
+        normal.isothermal_phase_enthalpy_change_j,
+        shifted.isothermal_phase_enthalpy_change_j,
+        1e-11,
+    );
+}
+
+#[test]
+fn g4_isobaric_inventory_domain_and_cancellation_refusals_are_atomic() {
+    let initial = wet(300.0, 0.08, 0.0, 0.0);
+    let saved = initial.clone();
+    let context = fs_matdb::QueryPoint::new();
+    let run = |masses, liquid, t, p, cancelled| {
+        initial
+            .model()
+            .partition_at_pressure_temperature(masses, liquid, t, p, &context, || cancelled)
+    };
+    assert!(run(initial.species_masses_kg(), 1e13, 300.0, 101325.0, false).is_err());
+    assert!(run(initial.species_masses_kg(), 0.0, 270.0, 101325.0, false).is_err());
+    assert!(run(initial.species_masses_kg(), 0.0, 300.0, 500000.0, false).is_err());
+    assert!(matches!(
+        run(initial.species_masses_kg(), 0.0, 300.0, 101325.0, true),
+        Err(WaterCondensationError::Cancelled)
+    ));
+    let mut foreign = initial.species_masses_kg().clone();
+    foreign.insert(SpeciesId::new("unbound").unwrap(), 1e-6);
+    assert!(run(&foreign, 0.0, 300.0, 101325.0, false).is_err());
+    assert_eq!(initial, saved);
+}
+
+#[test]
 fn g0_cooling_condenses_against_partial_pressure_and_retains_every_carrier() {
     let original = wet(310.0, 0.06, 0.0, 0.0);
     let before = original.clone();

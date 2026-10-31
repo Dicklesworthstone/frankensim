@@ -48,6 +48,26 @@ disconnected latent-heat loops, canonical edge orientation, admitted mass
 roundoff, and matching energy/entropy reference invariance. This does not add a
 pressure, velocity, variable-mass or chemical-reaction closure.
 
+`Advected::with_selective_outlets` explicitly binds a carried composition and
+specific enthalpy to existing outlet IDs before stationary species admission.
+The original boundary owns the mass rate. On acyclic graphs the same species
+solver subtracts those component fluxes, checks availability without clamping,
+and propagates the remaining mixed stream. Every selected outlet declares the
+same caloric reference as the registered cell and inlet laws. Its carried phase
+enthalpy is not inverted through the remaining gas law. The existing thermal
+source, continuity, CFL and external-enthalpy accounts include that outlet once;
+no separate latent-heat source is invented. Replacing boundary or selective
+data invalidates the previous stationary species solution.
+
+The constitutive caller owns selection rates, phase equilibrium and source
+alignment. No condensation kinetics or new thermodynamic data are inferred by
+this transport primitive. Negative remaining species flux, absent remaining
+mixed flow, an unknown/duplicate boundary, a mismatched caloric reference,
+selective recirculation and the optional entropy audit refuse. Focused G0/G1
+regressions cover component conservation, downstream propagation, phase
+enthalpy outside the gas inversion domain, the original thermal energy account,
+and these unsupported conditions. This does not add transient species storage.
+
 ## Sublimation and deposition
 
 `sublimation::SublimationLaw` supplies a bounded immutable saturation-pressure,

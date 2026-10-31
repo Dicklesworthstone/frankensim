@@ -51,7 +51,8 @@ impl MassFlow {
 
 /// External mass connection. Rates are positive magnitudes [kg/s]. Inlet
 /// material identity and enthalpy datum must match the receiving cell's law.
-/// Outlets always carry the CURRENT local enthalpy, never a prescribed value.
+/// Outlets carry the CURRENT local enthalpy unless explicitly bound to a
+/// [`SelectiveOutlet`] on the stationary-species path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MassBoundary {
     /// Supplied material entering an active control volume.
@@ -83,6 +84,25 @@ impl MassBoundary {
             Self::Inlet { id, cell, kg_s, .. } | Self::Outlet { id, cell, kg_s } => (id, cell, kg_s),
         }
     }
+}
+
+/// A composition-selective stream leaving an existing outlet connection.
+///
+/// Its mass rate remains owned by [`MassBoundary::Outlet`]. The constitutive
+/// caller supplies the carried enthalpy in the SAME reference as the cell and
+/// inlet laws. A condensed phase need not share their temperature/enthalpy
+/// inversion, so this value is not interpreted through the remaining gas law.
+/// This descriptor supplies no saturation, reaction or phase-change closure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelectiveOutlet {
+    /// Identity of an already-declared outlet, never an inlet or interior edge.
+    pub boundary_id: u64,
+    /// Complete mass fractions in the stationary graph's canonical species order.
+    pub mass_fractions: Vec<f64>,
+    /// Explicit outgoing specific enthalpy [J/kg], including its phase energy.
+    pub specific_h_j_kg: f64,
+    /// Source-aligned caloric reference, checked against every participating law.
+    pub enthalpy_reference: String,
 }
 
 /// Numerical observations for the last successful advance. Boundary energy
@@ -154,6 +174,7 @@ pub struct Advected<O> {
     // Stable component representatives, compiled once for nonzero connections.
     // Boundary-only cells use themselves and need no topology entry.
     reference_cells: BTreeMap<CellId, CellId>,
+    selective_outlets: BTreeMap<u64, SelectiveOutlet>,
     stationary_species: Option<species::StationarySpecies>,
     boundary_pending: Option<BoundaryPending>,
     pending: Option<Pending>,
@@ -207,13 +228,15 @@ impl<O> Advected<O> {
         flows.sort_by_key(|f| f.id);
         let reference_cells = component_references(&flows);
         Ok(Self { inner, flows, boundaries: Vec::new(), reference_cells,
+            selective_outlets: BTreeMap::new(),
             stationary_species: None, boundary_pending: None,
             pending: None, audit: AdvectionAudit::default(), entropy: None })
     }
     /// Replace the complete inlet/outlet data at an accepted endpoint. The
     /// declared ceiling covers interior AND boundary connections. Cell-level
     /// fixed-mass balance and inlet material support are checked on each step.
-    /// This does not infer reservoir pressure, velocity, mixing or momentum.
+    /// This clears previous species and selective-outlet bindings. It does not
+    /// infer reservoir pressure, velocity, mixing or momentum.
     pub fn with_boundaries(mut self, mut boundaries: Vec<MassBoundary>, max_connections: usize)
         -> Result<Self, DepositionError> {
         if self.flows.len().checked_add(boundaries.len()).is_none_or(|n| n > max_connections) {
@@ -231,6 +254,42 @@ impl<O> Advected<O> {
         }
         boundaries.sort_by_key(|boundary| boundary.identity().0);
         self.boundaries = boundaries;
+        self.selective_outlets.clear();
+        self.stationary_species = None;
+        self.boundary_pending = None;
+        self.pending = None;
+        Ok(self)
+    }
+    /// Bind explicit selective streams before solving stationary species.
+    /// Every selected ID must name an existing outlet. Replacing these data
+    /// invalidates the previous species solution; rates and continuity are
+    /// unchanged. Acyclic flow and a positive remaining mixed outflow are
+    /// required. Recirculation and an entropy claim with selective streams
+    /// remain unsupported rather than inheriting the ordinary outlet model.
+    pub fn with_selective_outlets(
+        mut self, outlets: Vec<SelectiveOutlet>, max_species: usize,
+    ) -> Result<Self, DepositionError> {
+        if outlets.len() > self.boundaries.len() {
+            return Err(DepositionError::Budget("selective mass-flow outlets"));
+        }
+        let available: BTreeSet<_> = self.boundaries.iter().filter_map(|boundary| {
+            if let MassBoundary::Outlet { id, .. } = boundary { Some(*id) } else { None }
+        }).collect();
+        let mut selected = BTreeMap::new();
+        for outlet in outlets {
+            let count = outlet.mass_fractions.len();
+            if count == 0 || count > max_species.min(128) {
+                return Err(DepositionError::Budget("selective outlet species"));
+            }
+            species::authored(&outlet.mass_fractions, count)?;
+            finite(outlet.specific_h_j_kg)?;
+            if outlet.enthalpy_reference.is_empty() || !available.contains(&outlet.boundary_id)
+                || selected.insert(outlet.boundary_id, outlet).is_some()
+            {
+                return Err(invalid("invalid or duplicate selective outlet binding"));
+            }
+        }
+        self.selective_outlets = selected;
         self.stationary_species = None;
         self.boundary_pending = None;
         self.pending = None;
@@ -279,6 +338,9 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         check: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
         check()?;
+        if !self.selective_outlets.is_empty() && self.stationary_species.is_none() {
+            return Err(invalid("selective outlets require stationary species admission").into());
+        }
         if self.entropy.is_some() && self.stationary_species.is_some() {
             return Err(invalid("thermal advection entropy does not cover stationary species mixing").into());
         }
@@ -286,13 +348,13 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             entropy.capture(thermal, check)?;
         }
         if let Some(species) = &self.stationary_species {
-            species.validate_laws(thermal, &self.boundaries)?;
+            species.validate_laws(thermal, &self.boundaries, &self.selective_outlets)?;
         }
         let mut sources = self.inner.sources(thermal, check)?;
         let mut pending = BoundaryPending { time_s: thermal.time_s(), ..BoundaryPending::default() };
         for (index, boundary) in self.boundaries.iter().enumerate() {
             if index % 256 == 0 { check()?; }
-            let (_, id, kg_s) = boundary.identity();
+            let (boundary_id, id, kg_s) = boundary.identity();
             let cell = thermal.cells().get(&id).ok_or(invalid("inactive mass-flow boundary cell"))?;
             if thermal.material_storage_basis(cell.material_id)? != ThermalStorageBasis::Enthalpy {
                 return Err(invalid("mass flow requires enthalpy storage, not fixed-volume internal energy").into());
@@ -317,9 +379,11 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                         finite(kg_s * specific_h_j_kg)?, 0)
                 }
                 MassBoundary::Outlet { .. } => {
+                    let outgoing_h = self.selective_outlets.get(&boundary_id)
+                        .map_or(cell.specific_h_j_kg, |outlet| outlet.specific_h_j_kg);
                     pending.outlet_kg_s = finite(pending.outlet_kg_s + kg_s)?;
-                    (-finite(kg_s * finite(cell.specific_h_j_kg - reference_h)?)?,
-                        -finite(kg_s * cell.specific_h_j_kg)?, 1)
+                    (-finite(kg_s * finite(outgoing_h - reference_h)?)?,
+                        -finite(kg_s * outgoing_h)?, 1)
                 }
             };
             let rates = pending.rates.entry(id).or_default();

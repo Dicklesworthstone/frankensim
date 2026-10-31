@@ -32,6 +32,9 @@ use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod isobaric;
+pub use isobaric::WaterIsobaricPartition;
+
 /// Lower temperature admitted without a separate ice owner [K].
 pub const MINIMUM_TEMPERATURE_K: f64 = 273.16;
 /// Upper temperature of this dilute moist-gas approximation [K].

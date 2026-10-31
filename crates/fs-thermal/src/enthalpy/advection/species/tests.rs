@@ -88,6 +88,116 @@ fn mixed(laws: &[MixtureLaw]) -> Advected<()> {
     ], 1, 2).unwrap()
 }
 
+fn selective_stream(selected_rate: f64) -> Advected<()> {
+    Advected::new((), vec![], 0).unwrap().with_boundaries(vec![
+        MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 1.0,
+            material_id: MaterialId(1), specific_h_j_kg: 1900.0 },
+        MassBoundary::Outlet { id: 11, cell: CellId(0), kg_s: 1.0 - selected_rate },
+        MassBoundary::Outlet { id: 12, cell: CellId(0), kg_s: selected_rate },
+    ], 3).unwrap().with_selective_outlets(vec![selected_outlet(12)], 2).unwrap()
+}
+
+fn selected_outlet(boundary_id: u64) -> SelectiveOutlet {
+    SelectiveOutlet { boundary_id, mass_fractions: vec![0.0, 1.0],
+        specific_h_j_kg: -2000.0, enthalpy_reference: "analytic-species-reference".into() }
+}
+
+fn solve_selective(observer: Advected<()>) -> Result<Advected<()>, DepositionError> {
+    observer.with_stationary_species(vec!["A".into(), "B".into()],
+        vec![InletSpecies { boundary_id: 10, mass_fractions: vec![0.5, 0.5] }], 1, 2)
+}
+
+#[test]
+fn selective_species_and_phase_enthalpy_use_the_original_thermal_account() {
+    let observer = solve_selective(selective_stream(0.25)).unwrap();
+    let fractions = observer.stationary_species().unwrap().cells()[&CellId(0)].clone();
+    assert_eq!(fractions, vec![2.0 / 3.0, 1.0 / 3.0]);
+    for (index, incoming) in [0.5, 0.5].into_iter().enumerate() {
+        let selected = if index == 1 { 0.25 } else { 0.0 };
+        assert!((incoming - 0.75 * fractions[index] - selected).abs() < 1e-15);
+    }
+    let laws = [MixtureLaw::new(fractions), MixtureLaw::new(vec![0.5, 0.5])];
+    let initial = prepared(&laws, 280.0);
+    // The carried liquid/selected-phase h is outside the gas inversion's
+    // domain. Its explicit common reference still makes the flux meaningful.
+    assert!(laws[1].temperature_k(-2000.0).is_err());
+    let power = initial.power_balance_observed(&observer, || Ok(())).unwrap();
+    // 1*h_in - 0.75*h_remaining(280 K) - 0.25*h_selected = 1300 W.
+    assert!((power.net_power_w[&CellId(0)] - 1300.0).abs() < 1e-10);
+    let (next, accepted, audit) = initial.advance_observed(&observer, 0.1, cfg(), || Ok(())).unwrap();
+    assert_eq!(audit.substeps, 1);
+    assert!((next.energy_j() - initial.energy_j() - 130.0).abs() < 1e-9);
+    assert!((audit.external_heat_j - 130.0).abs() < 1e-9);
+    assert!((accepted.audit().external_enthalpy_j - 130.0).abs() < 1e-9);
+    assert_eq!(accepted.audit().inlet_mass_kg, 0.1);
+    assert_eq!(accepted.audit().outlet_mass_kg, 0.1);
+    assert!(accepted.audit().maximum_courant <= 0.8);
+    assert!(initial.power_balance_observed(&observer.clone().with_entropy_audit(), || Ok(())).is_err());
+
+    let mut wrong = selected_outlet(12);
+    wrong.enthalpy_reference = "unrelated-liquid-zero".into();
+    let wrong = solve_selective(selective_stream(0.25).with_selective_outlets(vec![wrong], 2).unwrap()).unwrap();
+    assert!(initial.advance_observed(&wrong, 0.1, cfg(), || Ok(())).is_err());
+    assert_eq!(observer.audit().substeps, 0);
+}
+
+#[test]
+fn selective_streams_propagate_the_remaining_composition_downstream() {
+    let observer = Advected::new((), vec![
+        MassFlow { id: 0, a: CellId(0), b: CellId(1), kg_s: 0.75 },
+    ], 1).unwrap().with_boundaries(vec![
+        MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 1.0,
+            material_id: MaterialId(0), specific_h_j_kg: 1.0 },
+        MassBoundary::Outlet { id: 11, cell: CellId(1), kg_s: 0.625 },
+        MassBoundary::Outlet { id: 12, cell: CellId(0), kg_s: 0.25 },
+        MassBoundary::Outlet { id: 13, cell: CellId(1), kg_s: 0.125 },
+    ], 5).unwrap().with_selective_outlets(vec![selected_outlet(13), selected_outlet(12)], 2).unwrap()
+        .with_stationary_species(vec!["A".into(), "B".into()],
+            vec![InletSpecies { boundary_id: 10, mass_fractions: vec![0.5, 0.5] }], 2, 2).unwrap();
+    let solved = observer.stationary_species().unwrap();
+    assert_eq!(solved.cells()[&CellId(0)], vec![2.0 / 3.0, 1.0 / 3.0]);
+    assert_eq!(solved.cells()[&CellId(1)], vec![0.8, 0.2]);
+    assert!(solved.maximum_residual_kg_s() < 1e-14);
+}
+
+#[test]
+fn selective_outlets_refuse_overdraw_unknown_bindings_and_stale_species() {
+    assert!(solve_selective(selective_stream(0.75)).is_err());
+    let valid = solve_selective(selective_stream(0.25)).unwrap();
+    for id in [10, 99] {
+        assert!(valid.clone().with_selective_outlets(vec![selected_outlet(id)], 2).is_err());
+    }
+    assert!(valid.clone().with_selective_outlets(vec![selected_outlet(12), selected_outlet(12)], 2).is_err());
+    let mut bad = selected_outlet(12);
+    bad.mass_fractions = vec![0.0, 0.99];
+    assert!(valid.clone().with_selective_outlets(vec![bad], 2).is_err());
+    let mut bad = selected_outlet(12);
+    bad.specific_h_j_kg = f64::NAN;
+    assert!(valid.clone().with_selective_outlets(vec![bad], 2).is_err());
+    let stale = valid.with_selective_outlets(vec![selected_outlet(12)], 2).unwrap();
+    let laws = [MixtureLaw::new(vec![2.0 / 3.0, 1.0 / 3.0]), MixtureLaw::new(vec![0.5, 0.5])];
+    assert!(prepared(&laws, 280.0).power_balance_observed(&stale, || Ok(())).is_err());
+}
+
+#[test]
+fn selective_outlets_refuse_closed_bulk_flow_and_recirculation() {
+    let no_bulk = Advected::new((), vec![], 0).unwrap().with_boundaries(vec![
+        MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 1.0,
+            material_id: MaterialId(0), specific_h_j_kg: 1.0 },
+        MassBoundary::Outlet { id: 12, cell: CellId(0), kg_s: 1.0 },
+    ], 2).unwrap().with_selective_outlets(vec![SelectiveOutlet {
+        mass_fractions: vec![0.5, 0.5], ..selected_outlet(12)
+    }], 2).unwrap();
+    assert!(solve_selective(no_bulk).is_err());
+    let cycle = recirculating().with_selective_outlets(vec![selected_outlet(4)], 2).unwrap()
+        .with_stationary_species(vec!["A".into(), "B".into()], vec![
+            InletSpecies { boundary_id: 2, mass_fractions: vec![1.0, 0.0] },
+            InletSpecies { boundary_id: 3, mass_fractions: vec![0.0, 1.0] },
+        ], 2, 2);
+    assert!(matches!(cycle, Err(DepositionError::InvalidInput(
+        "selective outlets require an acyclic stationary flow graph"))));
+}
+
 #[test]
 fn species_specific_enthalpies_share_the_original_rate_and_energy_owner() {
     let laws = [MixtureLaw::new(vec![0.25, 0.75]), MixtureLaw::new(vec![1.0, 0.0]),
