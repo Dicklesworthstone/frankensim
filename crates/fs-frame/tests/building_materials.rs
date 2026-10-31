@@ -184,3 +184,83 @@ fn fragility_preserves_the_selected_fine_model_and_its_starting_state() {
     assert_eq!(before, model.clone().run(&motion.values, 0.02).unwrap());
     assert_eq!(model.material_sections().unwrap()[0].area_scale(), 1.0);
 }
+
+#[test]
+fn reference_mass_counts_every_floor_and_full_member_including_supports() {
+    let spec = BuildingSpec {
+        stories: 2,
+        bays: 2,
+        scale: 1.4,
+        ..spec()
+    };
+    let expected = spec.stories as f64
+        * (spec.floor_mass
+            + (spec.bays + 1) as f64
+                * spec.story_height
+                * member_mass(spec.column)
+                * spec.scale
+            + spec.bays as f64 * spec.bay_width * member_mass(spec.beam));
+    for formulation in [
+        FrameMassFormulation::Lumped,
+        FrameMassFormulation::ConsistentReference,
+    ] {
+        let model = BuildingFrame::with_sections(
+            spec,
+            section(spec.column, 1.0, 1.0),
+            section(spec.beam, 1.0, 1.0),
+            formulation,
+        )
+        .unwrap();
+        assert!(
+            (model.reference_mass_kg() - expected).abs() < 2e-12 * expected,
+            "{formulation:?}: {} != {expected}",
+            model.reference_mass_kg(),
+        );
+        if formulation == FrameMassFormulation::Lumped {
+            // Supported first-story column mass belongs in physical inventory
+            // even though no free mode carries its horizontal kinetic energy.
+            let fixed_mass = 0.5
+                * (spec.bays + 1) as f64
+                * spec.story_height
+                * member_mass(spec.column)
+                * spec.scale;
+            let effective_mass: f64 = model
+                .modal_analysis()
+                .modes
+                .iter()
+                .map(|mode| mode.effective_mass_kg[0])
+                .sum();
+            assert!(
+                (model.reference_mass_kg() - effective_mass - fixed_mass).abs()
+                    < 1e-8 * expected
+            );
+        }
+    }
+}
+
+#[test]
+fn reference_mass_uses_actual_authored_line_mass_without_rescaling_it() {
+    let spec = BuildingSpec {
+        scale: 1.7,
+        ..spec()
+    };
+    let column_kg_m = 131.0;
+    let beam_kg_m = 177.0;
+    let model = BuildingFrame::with_member_mass(
+        spec,
+        column_kg_m,
+        beam_kg_m,
+        FrameMassFormulation::ConsistentReference,
+    )
+    .unwrap();
+    let expected = spec.stories as f64
+        * (spec.floor_mass
+            + (spec.bays + 1) as f64 * spec.story_height * column_kg_m
+            + spec.bays as f64 * spec.bay_width * beam_kg_m);
+    assert!((model.reference_mass_kg() - expected).abs() < 2e-12 * expected);
+    let floor_only = BuildingFrame::new(spec).unwrap();
+    assert!(
+        (floor_only.reference_mass_kg() - spec.stories as f64 * spec.floor_mass).abs()
+            < 2e-12 * expected
+    );
+}

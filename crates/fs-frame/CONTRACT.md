@@ -117,6 +117,36 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   the smoke-tier story model, level 1 the building-minus-story correction
   on the same motion (telescoping, so unbiased for the building).
 
+## Material-bearing building catalog CVaR
+
+`cvar::building::building_cvar_mass_min` evaluates an explicit finite catalog
+of admitted `BuildingFrame::with_sections` models against the original motion
+ensemble. Each motion is realized once by the native scenario owner under an
+explicit sample/work budget; independent candidate clones retain their own
+material sources, gravity preload, inertia and constitutive history. Candidate
+and member caps bound the number of complete nonlinear histories.
+
+The shared `fs-robust::empirical_cvar` owner supplies fractional-tail risk and
+order-statistic metadata. Selection minimizes actual full reference mass among
+candidates meeting the declared empirical drift limit. The mass comes from
+`BuildingFrame::reference_mass_kg`, the native full rigid-translation inventory,
+including floors and member mass attached to fixed supports. It is not a scale
+proxy or the sum of free-mode effective masses. Equal feasible masses prefer
+the first catalog entry. Every candidate uses the same building envelope,
+floor masses, damping ratio and section quadrature; materials, section geometry
+and column area scale may vary.
+
+No size-response monotonicity, continuous optimum or population-risk certificate
+is claimed. Candidates are evaluated in their supplied final geometry; a failed
+history refuses the study rather than silently removing a possible minimizer.
+Original candidates remain unchanged on success, failure or cancellation.
+Cancellation checkpoints surround each realization/history and final selection;
+latency may include one complete bounded native history. Native regressions in
+`tests/building_cvar.rs` target direct-history agreement, fractional tails,
+actual material mass selection, tie order, source/state preservation and
+refusal. `tests/building_materials.rs` independently checks the full mass
+inventory for lumped and consistent inertia.
+
 ## Material-driven frame layout and catalog mass
 
 `layout::material::layout_and_size` accepts an existing ground structure,

@@ -317,6 +317,15 @@ impl BuildingFrame {
         let gravity = frame.inertial_forces(&acceleration)?;
         frame.static_load(&gravity, 4)?;
         let modes = frame.modal_analysis()?;
+        if modes
+            .base_influence_mass_kg
+            .iter()
+            .any(|mass| !mass.is_finite() || *mass <= 0.0)
+        {
+            return Err(SolidError::InvalidInput {
+                what: "building reference physical mass must be finite and positive".into(),
+            });
+        }
         if let Some(mode) = modes
             .modes
             .iter()
@@ -379,6 +388,18 @@ impl BuildingFrame {
     #[must_use]
     pub fn periods(&self) -> &[f64] {
         &self.periods
+    }
+
+    /// Total reference physical mass [kg]: floor point masses and all member
+    /// mass, including the portions attached to fixed supports.
+    ///
+    /// This is the native mass owner's full rigid-translation inventory. The
+    /// sum of modal effective masses can be smaller because supported inertia
+    /// also contributes directly to the base reaction. Time histories do not
+    /// change this reference inventory.
+    #[must_use]
+    pub fn reference_mass_kg(&self) -> f64 {
+        self.modes.base_influence_mass_kg[0]
     }
 
     /// Complete signed, mass-normalized initial gravity-loaded modal analysis.

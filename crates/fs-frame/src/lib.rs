@@ -32,6 +32,10 @@ pub use building::{
     BuildingFragility, BuildingFrame, BuildingResponse, BuildingSpec, RcMember, building_fragility,
     building_fragility_from_frame,
 };
+pub use cvar::building::{
+    BuildingCvarControls, BuildingCvarDesign, BuildingCvarError, BuildingCvarEvaluation,
+    building_cvar_mass_min,
+};
 pub use cvar::{
     CvarDesign, FrameCvarError, cvar_mass_min, ensemble_cvar, try_cvar_mass_min, try_ensemble_cvar,
     try_losses,

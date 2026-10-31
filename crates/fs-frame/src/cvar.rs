@@ -12,6 +12,9 @@ use crate::history::{StoryFrame, StoryParams, peak_drift};
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 
+/// Material-bearing distributed-plasticity building catalog design.
+pub mod building;
+
 /// The CVaR design record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CvarDesign {
