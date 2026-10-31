@@ -1333,3 +1333,27 @@ Jacobian actions and allocating/prepared/condensed parity. Prepared inline tests
 also check nonlinear dissipation, unavailable actions and shared-rule forwarding.
 This preserves discrete component work; source interpolation, kink regularity
 and temporal accuracy still require their own physical evidence.
+
+## Constitutive rules through quadratic storage wrappers
+
+Frequency-matched storage and the nonlinear exact-flow remainder retain an
+original complete constitutive discrete-gradient rule. The matched wrapper
+adds the declared quadratic mean effort; the remainder subtracts it, using
+the same row order, represented-midpoint correction and symmetric end-action
+as the original native quadratic owner. Removing an original linear block
+therefore leaves no spurious magnetic effort. Missing original rules preserve
+the default Gonzalez path; an identically zero remainder remains zero.
+
+For an owned rule, frequency-matched Newton uses that rule's actual end-state
+Jacobian when supplied. Its acceptance additionally checks each original state
+equation in its own physical units after the existing global gate passes;
+an unchanged large store cannot hide unresolved nF/pF charge evolution. The
+original finite-difference fallback, iteration cap, source-domain checks and
+independent modified-energy ledger remain. No physical stored energy is
+inferred from port work, and no new integration mode is introduced.
+
+Two wrapper tests use original circuit capacitor curves to check component
+work, end derivatives, domain propagation and exact cancellation of a coupled
+quadratic block, including represented-midpoint offsets. An actual matched-mode
+test drives nF and pF stores through separate source knots beside a large held
+bias and checks each source's work against its original capacitor integral.

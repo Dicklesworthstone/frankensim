@@ -36,6 +36,11 @@ struct Remainder<'a> {
     exact: bool,
 }
 impl Storage for Remainder<'_> {
+    fn discrete_gradient_rule(&self) -> Option<&dyn crate::ConstitutiveDiscreteGradient> {
+        if self.exact { None }
+        else { self.original.discrete_gradient_rule().map(|_| self as &dyn crate::ConstitutiveDiscreteGradient) }
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         if self.exact {
             return 0.0;
@@ -63,6 +68,26 @@ impl Storage for Remainder<'_> {
             self.original.midpoint_energy_remainder(a, b, mid)?
                 - quadratic_midpoint_remainder(self.q, a, b, mid),
         )
+    }
+}
+
+impl crate::ConstitutiveDiscreteGradient for Remainder<'_> {
+    fn evaluate(&self, a: &[f64], b: &[f64], mid: &[f64], out: &mut [f64]) {
+        let Some(rule) = self.original.discrete_gradient_rule() else {
+            out.fill(f64::NAN);
+            return;
+        };
+        rule.evaluate(a, b, mid, out);
+        super::constitutive::add_quadratic_mean(self.q, a, b, mid, -1.0, out);
+    }
+
+    fn end_jacobian_action(
+        &self, a: &[f64], b: &[f64], direction: &[f64], out: &mut [f64],
+    ) -> bool {
+        let Some(rule) = self.original.discrete_gradient_rule() else { return false; };
+        if !rule.end_jacobian_action(a, b, direction, out) { return false; }
+        super::constitutive::add_quadratic_end_action(self.q, direction, -1.0, out);
+        out.iter().all(|value| value.is_finite())
     }
 }
 
@@ -691,4 +716,46 @@ fn solve(
         solver_residual,
         solver_certificate: None,
     })
+}
+
+#[cfg(test)]
+mod constitutive_tests {
+    use super::*;
+
+    #[test]
+    fn remainder_keeps_source_capacitor_work_and_cancels_original_linear_block_exactly() {
+        let (dae, laws) = super::super::constitutive::source_fixture([1.0; 2]);
+        let original = dae.system.storage();
+        let q = original.quadratic_part().unwrap().matrix;
+        let storage = Remainder { original, q: &q, exact: false };
+        let n = dae.system.state_dim();
+        let (mut a, mut b) = (vec![0.0; n], vec![0.0; n]);
+        let bias = 9_007_199_254_740_992.0;
+        a[dae.flux_index[0]] = bias; b[dae.flux_index[0]] = bias + 2.0;
+        a[dae.flux_index[1]] = -bias; b[dae.flux_index[1]] = -bias + 1.0;
+        a[dae.charge_index[0]] = 2.0; b[dae.charge_index[0]] = 0.5;
+        a[dae.charge_index[1]] = 0.25; b[dae.charge_index[1]] = 1.5;
+        a[dae.charge_index[2]] = bias; b[dae.charge_index[2]] = bias + 2.0;
+        let effort = crate::discrete_gradient(&storage, &a, &b);
+        let mut expected = vec![0.0; n];
+        for (slot, law) in dae.charge_index.iter().take(2).zip(&laws) {
+            expected[*slot] = law.discrete_voltage_v(a[*slot], b[*slot]).unwrap();
+            assert!((effort[*slot] * (b[*slot] - a[*slot])
+                - law.energy_change_j(a[*slot], b[*slot]).unwrap()).abs() < 1e-14);
+        }
+        assert_eq!(effort, expected);
+        let direction = vec![0.25; n];
+        let mut action = vec![7.0; n];
+        assert!(storage.discrete_gradient_rule().unwrap().end_jacobian_action(&a, &b, &direction, &mut action));
+        expected.fill(0.0);
+        for (slot, law) in dae.charge_index.iter().take(2).zip(&laws) {
+            expected[*slot] = 0.25 * law.discrete_voltage_end_derivative(a[*slot], b[*slot]).unwrap();
+        }
+        assert_eq!(action, expected);
+        let quadratic = QuadraticStorage::new(vec![2.0], 1).unwrap();
+        let zero = Remainder { original: &quadratic, q: &[2.0], exact: true };
+        assert!(zero.discrete_gradient_rule().is_none());
+        assert_eq!(crate::discrete_gradient(&zero, &[1.0], &[2.0]), vec![0.0]);
+        assert_eq!(zero.hamiltonian(&[2.0]), 0.0);
+    }
 }

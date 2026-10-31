@@ -23,6 +23,7 @@ use fs_la::factor::lu;
 use fs_math::det;
 
 mod gramian;
+mod constitutive;
 use gramian::{accumulate, identity, product};
 /// Cold caching of the same complete quadratic trajectory and its integrals.
 pub mod prepared;
@@ -966,6 +967,10 @@ struct MatchedStorage<'a> {
     correction: &'a [f64],
 }
 impl Storage for MatchedStorage<'_> {
+    fn discrete_gradient_rule(&self) -> Option<&dyn crate::ConstitutiveDiscreteGradient> {
+        self.original.discrete_gradient_rule().map(|_| self as &dyn crate::ConstitutiveDiscreteGradient)
+    }
+
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
         Some(self.original.midpoint_energy_remainder(a, b, mid)?
             + quadratic_midpoint_remainder(self.correction, a, b, mid))
@@ -984,6 +989,26 @@ impl Storage for MatchedStorage<'_> {
     }
 }
 
+impl crate::ConstitutiveDiscreteGradient for MatchedStorage<'_> {
+    fn evaluate(&self, a: &[f64], b: &[f64], mid: &[f64], out: &mut [f64]) {
+        let Some(rule) = self.original.discrete_gradient_rule() else {
+            out.fill(f64::NAN);
+            return;
+        };
+        rule.evaluate(a, b, mid, out);
+        constitutive::add_quadratic_mean(self.correction, a, b, mid, 1.0, out);
+    }
+
+    fn end_jacobian_action(
+        &self, a: &[f64], b: &[f64], direction: &[f64], out: &mut [f64],
+    ) -> bool {
+        let Some(rule) = self.original.discrete_gradient_rule() else { return false; };
+        if !rule.end_jacobian_action(a, b, direction, out) { return false; }
+        constitutive::add_quadratic_end_action(self.correction, direction, 1.0, out);
+        out.iter().all(|value| value.is_finite())
+    }
+}
+
 fn gonzalez(
     sys: &PortHamiltonian,
     storage: &dyn Storage,
@@ -992,6 +1017,7 @@ fn gonzalez(
     dt: f64,
 ) -> Result<StepRecord, PhsError> {
     let n = sys.n;
+    let owned_rule = storage.discrete_gradient_rule();
     let forcing: Vec<f64> = (0..n)
         .map(|i| (0..sys.m).map(|p| sys.g[i * sys.m + p] * u[p]).sum())
         .collect();
@@ -1021,43 +1047,78 @@ fn gonzalez(
             .max(forcing.iter().fold(0.0_f64, |s, v| s.max(dt * v.abs())));
         if norm <= 1e-13 * scale {
             let dg = discrete_gradient(storage, x0, &x);
-            let dissipated = dt * quadratic(&sys.r, &dg);
-            let y = sys.output_from_effort(&dg);
-            let supplied = dt * u.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>();
-            let delta_h = storage_energy_change(storage, x0, &x,
-                &mut vec![0.0; n], &mut vec![0.0; n]);
-            if !finite(&[delta_h, dissipated, supplied])
-                || !storage.hamiltonian(x0).is_finite() || !storage.hamiltonian(&x).is_finite() {
-                return Err(refuse("nonfinite matched ledger"));
+            let mut resolved = true;
+            if owned_rule.is_some() {
+                // A large unchanged store cannot admit an unresolved charge
+                // equation in another unit. Check its own original operands;
+                // no looser tolerance or endpoint-energy allowance is added.
+                for i in 0..n {
+                    let flow_scale: f64 = (0..n)
+                        .map(|k| ((sys.j[i*n+k] - sys.r[i*n+k]) * dg[k]).abs()).sum();
+                    let row_scale = x0[i].abs() + x[i].abs()
+                        + dt * (forcing[i].abs() + flow_scale);
+                    if !row_scale.is_finite() { return Err(refuse("matched constitutive row scale is nonfinite")); }
+                    resolved &= res[i].abs() <= 1e-13 * row_scale;
+                }
             }
-            return Ok(StepRecord {
-                x,
-                y,
-                dissipated,
-                supplied,
-                delta_h,
-                newton_iters: iterations,
-                solver_residual: norm,
-                solver_certificate: None,
-            });
+            if resolved {
+                let dissipated = dt * quadratic(&sys.r, &dg);
+                let y = sys.output_from_effort(&dg);
+                let supplied = dt * u.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>();
+                let delta_h = storage_energy_change(storage, x0, &x,
+                    &mut vec![0.0; n], &mut vec![0.0; n]);
+                if !finite(&[delta_h, dissipated, supplied])
+                    || !storage.hamiltonian(x0).is_finite() || !storage.hamiltonian(&x).is_finite() {
+                    return Err(refuse("nonfinite matched ledger"));
+                }
+                return Ok(StepRecord {
+                    x,
+                    y,
+                    dissipated,
+                    supplied,
+                    delta_h,
+                    newton_iters: iterations,
+                    solver_residual: norm,
+                    solver_certificate: None,
+                });
+            }
         }
         if iterations == 50 {
             return Err(PhsError::NewtonStalled { residual: norm });
         }
         let mut jac = vec![0.0; n * n];
-        for j in 0..n {
-            let h = 1e-5 * x[j].abs().max(scale);
-            if h == 0.0 || !h.is_finite() {
-                return Err(refuse("Gonzalez difference increment"));
+        let mut analytic = owned_rule.is_some();
+        if let Some(rule) = owned_rule {
+            let mut direction = vec![0.0; n];
+            let mut action = vec![0.0; n];
+            for j in 0..n {
+                direction[j] = 1.0;
+                action.fill(0.0);
+                let available = rule.end_jacobian_action(x0, &x, &direction, &mut action);
+                direction[j] = 0.0;
+                if !available { analytic = false; break; }
+                for i in 0..n {
+                    let flow: f64 = (0..n)
+                        .map(|k| (sys.j[i*n+k] - sys.r[i*n+k]) * action[k]).sum();
+                    jac[i*n+j] = (if i == j { 1.0 } else { 0.0 }) - dt * flow;
+                }
             }
-            let mut plus = x.clone();
-            let mut minus = x.clone();
-            plus[j] += h;
-            minus[j] -= h;
-            let rp = residual(&plus);
-            let rm = residual(&minus);
-            for i in 0..n {
-                jac[i * n + j] = (rp[i] - rm[i]) / (2.0 * h);
+        }
+        if !analytic {
+            for j in 0..n {
+                let h = 1e-5 * x[j].abs().max(scale);
+                if h == 0.0 || !h.is_finite() {
+                    return Err(refuse("Gonzalez difference increment"));
+                }
+                let mut plus = x.clone();
+                let mut minus = x.clone();
+                plus[j] += h;
+                minus[j] -= h;
+                let rp = residual(&plus);
+                let rm = residual(&minus);
+                for i in 0..n {
+                    jac[i * n + j] = (rp[i] - rm[i]) / (2.0 * h);
+                }
             }
         }
         if !finite(&jac) {
