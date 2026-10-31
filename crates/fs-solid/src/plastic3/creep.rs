@@ -7,11 +7,11 @@
 //! the next history. Failed equilibrium, material, work or cancellation checks
 //! leave every caller-owned value unchanged.
 //!
-//! Elastic/hardening storage coefficients and the reference mesh are fixed
-//! across an interval. Temperature may change kinetics and yield stress, but
-//! changing stored-energy coefficients requires a parameter-work accounting law.
+//! Elastic/hardening coefficients and the reference mesh remain fixed.
+//! Source-backed thermal expansion additionally supplies mechanical entropy
+//! storage and signed reciprocal caloric heat through the same material account.
 //! Physical creep/plastic dissipation is separate from backward-Euler loss;
-//! only the former is available for thermal coupling. Inertia, finite strain,
+//! only physical loss and reciprocal transfer enter caloric heat. Inertia, finite strain,
 //! primary/tertiary creep and service-life qualification are not implied.
 
 use fs_material::creep::{CreepEnergy, CreepError, CreepLaw, CreepState, CreepTolerances};
@@ -35,9 +35,13 @@ pub struct CreepTetEnergy {
     pub support_work_j: f64,
     pub physical_dissipation_j: f64,
     pub numerical_dissipation_j: f64,
+    /// Change in T times mechanical entropy, separate from free energy.
+    pub thermoelastic_storage_change_j: f64,
+    /// Signed reversible caloric transfer, separate from irreversible heat.
+    pub reversible_heat_j: f64,
     /// Applied plus support work minus independently integrated stress work.
     pub equilibrium_work_residual_j: f64,
-    /// Applied plus support work minus storage change and both loss channels.
+    /// Work minus free/internal storage changes, caloric transfer and numerical loss.
     pub balance_residual_j: f64,
 }
 
@@ -48,8 +52,8 @@ pub struct CreepTetStep<S = CreepState> {
     pub duration_s: f64,
     /// Per-reference-volume accounts [J/m³], in tetrahedron order.
     pub element_energy: Vec<CreepEnergy>,
-    /// The native reference element volumes; multiply physical dissipation
-    /// densities by these volumes when transferring heat to a thermal owner.
+    /// The native reference element volumes; multiply the material's caloric
+    /// heat densities by these volumes when transferring to a thermal owner.
     pub element_volume_m3: Vec<f64>,
     pub energy: CreepTetEnergy,
 }
@@ -156,9 +160,9 @@ impl<L: CreepLaw> SmallStrainTetProblem<'_, L> {
     /// and internal variables. `load_path` must have exactly one absolute
     /// endpoint; every element law must represent the same positive duration.
     ///
-    /// The previous history must have the same elastic coefficients and
-    /// reference geometry. Temperature/rate changes preserve that history;
-    /// callers must account separately for changing elastic storage or geometry.
+    /// The previous history must have the same elastic/hardening coefficients
+    /// and reference geometry. Temperature/rate changes preserve that history;
+    /// a thermally expanding law owns its old temperature and reciprocal account.
     /// All Newton trials see the old state. Returned stresses are the stresses
     /// that balanced the endpoint loads, not a second constitutive advance.
     pub fn solve_creep_from(
@@ -227,6 +231,8 @@ impl<L: CreepLaw> SmallStrainTetProblem<'_, L> {
             support_work_j: 0.0,
             physical_dissipation_j: 0.0,
             numerical_dissipation_j: 0.0,
+            thermoelastic_storage_change_j: 0.0,
+            reversible_heat_j: 0.0,
             equilibrium_work_residual_j: 0.0,
             balance_residual_j: 0.0,
         };
@@ -267,6 +273,12 @@ impl<L: CreepLaw> SmallStrainTetProblem<'_, L> {
             energy.numerical_dissipation_j = finite(
                 energy.numerical_dissipation_j + volume * account.numerical_dissipation_j_m3,
             )?;
+            energy.thermoelastic_storage_change_j = finite(
+                energy.thermoelastic_storage_change_j
+                    + volume * account.thermoelastic_storage_change_j_m3,
+            )?;
+            energy.reversible_heat_j =
+                finite(energy.reversible_heat_j + volume * account.reversible_heat_j_m3)?;
             material_work = finite(material_work + volume * account.mechanical_work_j_m3)?;
             storage_change = finite(
                 storage_change + volume * (account.final_stored_j_m3 - account.initial_stored_j_m3),
@@ -292,7 +304,9 @@ impl<L: CreepLaw> SmallStrainTetProblem<'_, L> {
         energy.equilibrium_work_residual_j = mechanical_work - material_work;
         energy.balance_residual_j = mechanical_work
             - storage_change
+            - energy.thermoelastic_storage_change_j
             - energy.physical_dissipation_j
+            - energy.reversible_heat_j
             - energy.numerical_dissipation_j;
         audit_residual(energy.equilibrium_work_residual_j, tolerances.energy_j)?;
         audit_residual(energy.balance_residual_j, tolerances.energy_j)?;

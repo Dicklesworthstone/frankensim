@@ -3138,3 +3138,21 @@ source chain and both frame integration targets passed pinned-compiler metadata
 checks. The joint material behavior passed its 22 focused executable regressions;
 the subsequent expanded material suite passed 56/56. Native frame tests were
 typechecked, not numerically executed. This is not the full Cargo/DSR gate.
+
+
+### Thermal expansion and reciprocal heat in native creep intervals
+
+The same generic `SmallStrainTetProblem::solve_creep_from` accepts
+`ThermalCreep` with its complete temperature-bearing history. It retains the
+original sparse equilibrium solve, common physical duration, total displacement
+gradient bounds, frozen trial histories and endpoint constitutive consistency
+gates. `CreepTetEnergy` additionally integrates the material's change of T times
+mechanical entropy and signed reversible caloric heat over the original reference
+tetrahedral volumes. The complete applied/support work balance includes these
+terms exactly once. Plain Norton and Norton/J2 laws retain exact zero values for
+both new accounts. Thermal transfer uses the per-element total caloric heat,
+including reciprocal exchange; numerical loss and hardening storage remain separate.
+
+The complete native source chain and the original/joint frame and tetrahedral
+integration targets typechecked successfully. Those four native integration targets
+were not numerically executed in this validation; the material behavior suite was.

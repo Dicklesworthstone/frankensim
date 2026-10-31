@@ -18416,10 +18416,10 @@ finite-gap angular-balance and cancellation refusal. Coefficients are synthetic.
 
 ## Permanent creep on the spatial solid/enthalpy history
 
-`solid_enthalpy::creep::ZeroExpansionCreepSolid` binds one original Norton
+`solid_enthalpy::creep::CreepSolid` binds one original Norton
 material source and actual caloric cell to each native reference tetrahedron.
-The type explicitly selects zero thermal expansion, constant elastic storage
-and fixed reference density/volume. The material owner's shared caloric
+With an unwrapped Norton source, this owner selects zero thermal expansion,
+constant elastic storage and fixed reference density/volume. The material owner's shared caloric
 admission verifies the original card, complete fixed source context, pinned
 Cp/density claims and wholly solid supported interval. No missing coefficient
 is inferred from a material name or a melting point.
@@ -18808,7 +18808,7 @@ uniform resistance fixture with bit-identical scalar controls.
 
 ## Simultaneous creep and plastic heat on spatial enthalpy
 
-`solid_enthalpy::creep::{CreepCell, ZeroExpansionCreepSolid, CreepCandidate}`
+`solid_enthalpy::creep::{CreepCell, CreepSolid, CreepCandidate}`
 accept the material owner's `CreepSourceFamily`, defaulting to their original
 Norton source. Selecting `NortonJ2Source` evolves both native creep and plastic
 history through the existing tetrahedral solve and the same thermal feedback
@@ -18822,9 +18822,10 @@ observer hooks, actual-temperature re-equilibration and atomic publication are
 shared. `tests/solid_creep_plastic_enthalpy.rs` crosses a decreasing sourced
 yield curve under load, checks actual permanent deformation against an
 independent scalar thermal/mechanical reference, and exercises nonconvergence,
-observer failure, cancellation and retry with both memories intact. This adds
-no expansion, variable stored-energy coefficients, finite deformation, phase
-flow, damage or life qualification.
+observer failure, cancellation and retry with both memories intact. The
+unwrapped source selects zero expansion. Variable stored-energy coefficients,
+finite deformation, phase flow, damage and life qualification remain outside
+this reduction.
 
 ## Reversible nonlinear dielectric gap motion
 
@@ -18893,3 +18894,43 @@ curves are authored numerical fixtures, not claims of measured material data.
 The existing deposition heat timeline, spatial Newton solve and accepted J2 histories remain the only evolution owners. Actual endpoint temperature selects the native Voce stress and tangent. The existing mechanical audit includes source-coefficient storage, saturation entropy and signed reversible exchange, while physical yield heat and backward-Euler numerical loss remain separate. Failed or unaccepted candidates do not alter caller-owned thermal or mechanical state.
 
 The heated-member regression uses six connected tetrahedra with held axial grips and three physical heating intervals. An independent scalar axial equilibrium and thermal balance oracle verifies the temperature, all element stresses/history, reaction force, lateral plastic contraction, original source receipts and fixed reference mass. Affine Q(T) softening lowers held-grip tension and increases retained plastic strain relative to the constant-Q control. Separate formulas verify mechanical work, free-energy change, coefficient storage, delta(T s), physical dissipation, reversible caloric heat and numerical loss. Per-element selection and unsupported/late/missing binding refusals are covered. These synthetic fixtures verify the coupled implementation; they do not calibrate a physical material or add thermal Chaboche, finite-strain or hexahedral heat transport.
+
+
+### Source-backed expansion and reciprocal heat in spatial permanent creep
+
+`solid_enthalpy::creep::CreepSolid` is the shared owner for the original
+zero-expansion Norton/J2 sources and their `ExpandingCreepSource` composition.
+This replaces the former `ZeroExpansionCreepSolid` API name; all in-repository
+callers use the common owner. It retains the existing native tetrahedral solve,
+actual caloric-cell mapping, conduction/reservoir/event owner and one atomic
+accepted mechanical/thermal/observer state.
+
+Construction verifies the original source/caloric identities and fixed reference
+mass. For an expanding source, the zero-displacement virgin birth must be at an
+actual stress-free temperature. Every piecewise-linear segment of the actual
+enthalpy chart, with downward-rounded capacity arithmetic, must keep the sum of
+caloric capacity and the source's full-interval mechanical capacity floor positive.
+A valid coefficient set with insufficient combined capacity is refused.
+
+The original feedback loop now transfers physical creep/plastic heat plus signed
+reciprocal thermal exchange. Accepted history retains the old cell temperature;
+all trial solves restart that same state, and final mechanics are resolved at the
+actual returned temperatures. Per-cell absolute heat defects, temperature gates,
+thermal energy and the combined free-energy + T*entropy + caloric balance all
+precede publication. This supports cooling during stress relaxation while creep
+dissipation stays positive. Numerical loss is excluded from heat.
+
+The existing `solid_creep_plastic_enthalpy` target retains its prior joint-law
+cases and adds stress-free heating/expansion and restrained heating that yields
+and creeps before relaxing with negative reciprocal/net caloric transfer. The
+references solve independent scalar force and heat balances and verify rollback
+from nonzero histories after observer failure. The model remains quasistatic,
+small-strain, fully solid and fixed-reference-geometry, with constant E/nu/H and
+reference density. Finite deformation, moving-mesh transport, variable elastic
+storage and service-life qualification are not implied.
+
+The coherent native check refreshed 15 affected production crates and typechecked
+all six frame/tetrahedral/coupling integration targets, including both
+`solid_creep_enthalpy` and `solid_creep_plastic_enthalpy`. Native integration tests
+were not numerically executed. The separate 56-test material behavior suite ran
+successfully with genuine dependencies; neither check is a full Cargo/DSR gate.

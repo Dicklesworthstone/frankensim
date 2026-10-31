@@ -1,9 +1,7 @@
 //! Source-driven yielding, permanent creep and actual finite thermal feedback.
 //! Coefficients are manufactured implementation references, not measured data.
 
-use fs_couple::solid_enthalpy::creep::{
-    CreepCell, CreepConfig, CreepCouplingError, ZeroExpansionCreepSolid,
-};
+use fs_couple::solid_enthalpy::creep::{CreepCell, CreepConfig, CreepCouplingError, CreepSolid};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::{
@@ -12,13 +10,16 @@ use fs_matdb::{
 };
 use fs_material::creep::plastic::source::NortonJ2Source;
 use fs_material::creep::source::*;
+use fs_material::creep::thermal::expansion::ExpandingCreepSource;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::plastic::source::{HardeningPropertyBasis, ISOTROPIC_HARDENING_MODULUS_PROPERTY};
 use fs_material::state_point::{
-    MaterialPropertySelection, POISSON_RATIO_PROPERTY, YIELD_STRESS_PROPERTY,
-    YOUNG_MODULUS_PROPERTY,
+    LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection,
+    POISSON_RATIO_PROPERTY, ScalarAdmissibility, ScalarPropertyRequirement, YIELD_STRESS_PROPERTY,
+    YOUNG_MODULUS_PROPERTY, resolve_material_state_point,
 };
 use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_solid::{IncrementSettings, TetAssemblyBudget};
 use fs_thermal::enthalpy::*;
 use std::collections::BTreeMap;
@@ -48,7 +49,9 @@ const ROLLERS: [(usize, f64); 9] = [
 ];
 fn point(t: f64) -> QueryPoint {
     QueryPoint::new()
-        .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), t)
+        .with_quantity("T", QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature, ValueForm::Static,
+        )), t)
         .unwrap()
 }
 fn yield_stress(t: f64) -> f64 {
@@ -65,7 +68,9 @@ fn claim(name: &str, dims: Dims, lower: f64, upper: f64) -> PropertyClaim {
         },
         validity: ValidityDomain::unconstrained().with_quantity(
             "T",
-            QuantitySpec::dimensional(Temperature::DIMS),
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AbsoluteTemperature, ValueForm::Static,
+            )),
             280.0,
             380.0,
         ),
@@ -85,6 +90,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_expansion(None)
+    }
+    fn with_expansion(alpha: Option<f64>) -> Self {
         let mut claims = ClaimSet::new();
         for (name, dims, value) in [
             (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, E),
@@ -122,6 +130,16 @@ impl Fixture {
                 yield_stress(380.0),
             ))
             .unwrap();
+        if let Some(alpha) = alpha {
+            claims
+                .insert_claim(claim(
+                    LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                    Dims([0, 0, 0, -1, 0, 0]),
+                    alpha,
+                    alpha,
+                ))
+                .unwrap();
+        }
         let card = MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "synthetic combined creep/plastic solid".into(),
@@ -208,8 +226,8 @@ impl Fixture {
         &'a self,
         thermal: &DepositionSimulation<'_>,
         cx: &Cx<'_>,
-    ) -> ZeroExpansionCreepSolid<'a, NortonJ2Source<'a>> {
-        ZeroExpansionCreepSolid::try_new(
+    ) -> CreepSolid<'a, NortonJ2Source<'a>> {
+        CreepSolid::try_new(
             thermal,
             &NODES,
             &TETS,
@@ -217,6 +235,42 @@ impl Fixture {
                 cell: CellId(0),
                 card: &self.card,
                 source: self.source(),
+                caloric: &self.caloric,
+            }],
+            TetAssemblyBudget::standard(),
+            cx,
+        )
+        .unwrap()
+    }
+
+    fn expanding_source(&self) -> ExpandingCreepSource<NortonJ2Source<'_>> {
+        let expansion = resolve_material_state_point(
+            &self.card,
+            &point(300.0),
+            &[ScalarPropertyRequirement::try_new(
+                LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                Dims([0, 0, 0, -1, 0, 0]),
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap()],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        ExpandingCreepSource::new(&self.card, self.source(), &expansion, || false).unwrap()
+    }
+    fn bind_expanding<'a>(
+        &'a self,
+        thermal: &DepositionSimulation<'_>,
+        cx: &Cx<'_>,
+    ) -> CreepSolid<'a, ExpandingCreepSource<NortonJ2Source<'a>>> {
+        CreepSolid::try_new(
+            thermal,
+            &NODES,
+            &TETS,
+            vec![CreepCell {
+                cell: CellId(0),
+                card: &self.card,
+                source: self.expanding_source(),
                 caloric: &self.caloric,
             }],
             TetAssemblyBudget::standard(),
@@ -504,4 +558,284 @@ fn failed_feedback_observation_and_cancellation_do_not_publish_either_memory() {
     assert_eq!(thermal.cells(), &original_cells);
     assert_eq!(thermal.time_s(), 0.0);
     assert_eq!(observer.steps, 0);
+}
+
+const EXPANSION: f64 = 8e-5;
+
+#[test]
+fn free_heated_tetrahedron_follows_the_original_expansion_source_without_stress() {
+    with_gate(&CancelGate::new(), |cx| {
+        let fixture = Fixture::with_expansion(Some(EXPANSION));
+        let thermal = fixture.thermal();
+        let solid = fixture.bind_expanding(&thermal, cx);
+        let old = solid.solution().clone();
+        let selected = solid.materials()[0]
+            .thermoelastic()
+            .expansion
+            .property(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
+            .unwrap()
+            .answer()
+            .receipt
+            .selected;
+        let external_j = RHO * V * CP * 20.0;
+        let observer = Heating {
+            watts: external_j / 0.5,
+            steps: 0,
+            fail: false,
+        };
+        let candidate = solid
+            .advance(
+                &thermal,
+                &observer,
+                0.5,
+                &ROLLERS,
+                &[],
+                IncrementSettings::default(),
+                heat_config(),
+                config(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(solid.solution(), &old);
+        let temperature = candidate.thermal().temperature_k(CellId(0)).unwrap();
+        close(temperature, 320.0, 2e-7);
+        let solution = candidate.solid().solution();
+        let free = EXPANSION * (temperature - 300.0);
+        for i in 0..3 {
+            close(solution.element_strain[0][i], free, 2e-10);
+            close(solution.displacement_m[i + 1][i], L * free, 2e-12);
+        }
+        assert!(solution.element_stress[0].iter().all(|s| s.abs() < 1e-2));
+        let state = &solution.element_states[0];
+        close(state.temperature_k(), temperature, 1e-10);
+        close(state.mechanical.creep.equivalent_creep_strain, 0.0, 1e-12);
+        close(state.mechanical.plastic.alpha, 0.0, 1e-12);
+        let material = &candidate.solid().materials()[0].thermoelastic().expansion;
+        assert_eq!(material.card_identity(), fixture.card.content_hash());
+        assert_eq!(
+            material
+                .property(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
+                .unwrap()
+                .answer()
+                .receipt
+                .selected,
+            selected
+        );
+        close(material.state_coordinate("T").unwrap(), temperature, 1e-10);
+        let report = candidate.report();
+        close(report.mechanical_energy.physical_dissipation_j, 0.0, 1e-10);
+        close(report.mechanical_energy.reversible_heat_j, 0.0, 1e-9);
+        close(
+            report.thermal_audit.stored_energy_change_j,
+            external_j,
+            1e-9,
+        );
+        close(report.combined_residual_j, 0.0, config().energy_tolerance_j);
+
+        // Individually valid sources cannot bypass the combined capacity gate:
+        // rho*Cp=20,000, but 9*K*alpha^2*Tmax=22,800 J/(m3 K).
+        let excessive = Fixture::with_expansion(Some(1e-4));
+        let excessive_thermal = excessive.thermal();
+        let old_inventory = excessive_thermal.cells().clone();
+        let refused = CreepSolid::try_new(
+            &excessive_thermal,
+            &NODES,
+            &TETS,
+            vec![CreepCell {
+                cell: CellId(0),
+                card: &excessive.card,
+                source: excessive.expanding_source(),
+                caloric: &excessive.caloric,
+            }],
+            TetAssemblyBudget::standard(),
+            cx,
+        );
+        assert!(matches!(refused, Err(CreepCouplingError::Invalid(message))
+            if message.contains("heat capacity")));
+        assert_eq!(excessive_thermal.cells(), &old_inventory);
+    });
+}
+
+// Axially restrained, transversely free compression: q/E+c+p=alpha(T-300).
+// The scalar force balance and finite caloric first law are independent of the
+// production tensor return map, finite-element solve and thermoelastic potential.
+fn restrained_reference(
+    old_t: f64,
+    old_q: f64,
+    old_c: f64,
+    old_p: f64,
+    dt: f64,
+    external_j: f64,
+) -> (f64, f64, f64, f64) {
+    let mechanical = |t: f64| {
+        let rate = RATE * (ACTIVATION / 8.314_462_618_153_24 * (1.0 / 300.0 - 1.0 / t)).exp();
+        let free = EXPANSION * (t - 300.0);
+        let increments = |q: f64| {
+            (
+                dt * rate * (q / STRESS).powi(3),
+                ((q - yield_stress(t)) / HARDENING - old_p).max(0.0),
+            )
+        };
+        let (mut lo, mut hi) = (0.0, (E * (free - old_c - old_p)).max(0.0));
+        for _ in 0..80 {
+            let q = 0.5 * (lo + hi);
+            let (dc, dp) = increments(q);
+            if q / E + old_c + dc + old_p + dp > free {
+                hi = q;
+            } else {
+                lo = q;
+            }
+        }
+        let q = 0.5 * (lo + hi);
+        let (dc, dp) = increments(q);
+        (q, dc, dp)
+    };
+    let residual = |t: f64| {
+        let (q, dc, dp) = mechanical(t);
+        RHO * CP * (t - old_t)
+            - external_j / V
+            - q * dc
+            - yield_stress(t) * dp
+            - old_t * EXPANSION * (q - old_q)
+    };
+    let (mut lo, mut hi) = (
+        (300.0 + (old_c + old_p) / EXPANSION).max(old_t - 5.0),
+        old_t + external_j / (RHO * V * CP) + 5.0,
+    );
+    assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+    for _ in 0..80 {
+        let t = 0.5 * (lo + hi);
+        if residual(t) > 0.0 {
+            hi = t;
+        } else {
+            lo = t;
+        }
+    }
+    let t = 0.5 * (lo + hi);
+    let (q, dc, dp) = mechanical(t);
+    (t, q, dc, dp)
+}
+
+#[test]
+fn restrained_heating_yields_and_creeps_then_relaxation_returns_heat_atomically() {
+    with_gate(&CancelGate::new(), |cx| {
+        let fixture = Fixture::with_expansion(Some(EXPANSION));
+        let mut thermal = fixture.thermal();
+        let mut solid = fixture.bind_expanding(&thermal, cx);
+        let mut supports = ROLLERS.to_vec();
+        supports.push((3, 0.0));
+        supports.sort_unstable_by_key(|(dof, _)| *dof);
+        let (mut t0, mut q0, mut creep, mut plastic) = (300.0, 0.0, 0.0, 0.0);
+        for (i, supplied_rise) in [40.0, 0.0].into_iter().enumerate() {
+            let dt = 0.5;
+            let external_j = RHO * V * CP * supplied_rise;
+            let target = (i + 1) as f64 * dt;
+            let observer = Heating {
+                watts: external_j / dt,
+                steps: 0,
+                fail: false,
+            };
+            let (t, q, dc, dp) = restrained_reference(t0, q0, creep, plastic, dt, external_j);
+            let old_solution = solid.solution().clone();
+            let old_cells = thermal.cells().clone();
+            if i == 1 {
+                // The failure starts from nonzero creep AND plastic memory and
+                // the actual accepted temperature, not a virgin fixture.
+                let failing = Heating {
+                    fail: true,
+                    ..observer.clone()
+                };
+                assert!(matches!(
+                    solid.advance(
+                        &thermal,
+                        &failing,
+                        target,
+                        &supports,
+                        &[],
+                        IncrementSettings::default(),
+                        heat_config(),
+                        config(),
+                        cx
+                    ),
+                    Err(CreepCouplingError::Observer(_))
+                ));
+                assert_eq!(solid.solution(), &old_solution);
+                assert_eq!(thermal.cells(), &old_cells);
+                assert_eq!(failing.steps, 0);
+            }
+            let candidate = solid
+                .advance(
+                    &thermal,
+                    &observer,
+                    target,
+                    &supports,
+                    &[],
+                    IncrementSettings::default(),
+                    heat_config(),
+                    config(),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(solid.solution(), &old_solution);
+            creep += dc;
+            plastic += dp;
+            let solution = candidate.solid().solution();
+            let state = &solution.element_states[0];
+            close(
+                candidate.thermal().temperature_k(CellId(0)).unwrap(),
+                t,
+                3e-7,
+            );
+            close(state.temperature_k(), t, 3e-7);
+            close(solution.element_stress[0][0], -q, 2e-2);
+            assert!(
+                solution.element_stress[0][1..]
+                    .iter()
+                    .all(|s| s.abs() < 2e-2)
+            );
+            close(solution.displacement_m[1][0], 0.0, 1e-14);
+            let lateral = EXPANSION * (t - 300.0) + 0.2 * q / E + 0.5 * (creep + plastic);
+            close(solution.displacement_m[2][1], L * lateral, 3e-12);
+            close(state.mechanical.creep.creep_strain[0], -creep, 3e-10);
+            close(state.mechanical.creep.equivalent_creep_strain, creep, 3e-10);
+            close(state.mechanical.plastic.plastic_strain[0], -plastic, 3e-10);
+            close(state.mechanical.plastic.alpha, plastic, 3e-10);
+            assert!(creep > 0.0 && plastic > 0.0);
+            let report = candidate.report();
+            let energy = report.element_energy[0];
+            let physical = q * dc + yield_stress(t) * dp;
+            let reversible = t0 * EXPANSION * (q - q0);
+            close(energy.physical_dissipation_j_m3 * V, physical * V, 1e-9);
+            close(energy.reversible_heat_j_m3 * V, reversible * V, 1e-9);
+            close(
+                energy.thermoelastic_storage_change_j_m3 * V,
+                EXPANSION * (t0 * q0 - t * q) * V,
+                1e-9,
+            );
+            close(
+                report.thermal_audit.stored_energy_change_j,
+                external_j + V * (physical + reversible),
+                1e-9,
+            );
+            close(
+                report.mechanical_energy.applied_work_j + report.mechanical_energy.support_work_j,
+                0.0,
+                1e-12,
+            );
+            close(report.combined_residual_j, 0.0, config().energy_tolerance_j);
+            if i == 1 {
+                assert!(t < t0 && q < q0);
+                assert!(energy.creep_dissipation_j_m3 > 0.0);
+                assert!(energy.reversible_heat_j_m3 < 0.0);
+                assert!(energy.caloric_heat_j_m3() < 0.0);
+                assert!(report.applied_heat_j < 0.0);
+                assert!(report.thermal_audit.stored_energy_change_j < 0.0);
+            }
+            let (next_thermal, next_solid, _, _) = candidate.into_parts();
+            thermal = next_thermal;
+            solid = next_solid;
+            t0 = t;
+            q0 = q;
+        }
+    });
 }

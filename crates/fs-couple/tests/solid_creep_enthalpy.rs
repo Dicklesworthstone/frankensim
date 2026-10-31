@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use fs_couple::solid_enthalpy::creep::{
-    CreepCell, CreepConfig, CreepCouplingError, ZeroExpansionCreepSolid,
+    CreepCell, CreepConfig, CreepCouplingError, CreepSolid,
 };
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -258,8 +258,8 @@ fn bind<'a>(
     nodes: &'a [[f64; 3]],
     tets: &'a [[usize; 4]],
     cx: &Cx<'_>,
-) -> ZeroExpansionCreepSolid<'a> {
-    ZeroExpansionCreepSolid::try_new(
+) -> CreepSolid<'a> {
+    CreepSolid::try_new(
         thermal,
         nodes,
         tets,

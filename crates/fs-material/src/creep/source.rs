@@ -140,6 +140,16 @@ impl From<J2SourceError> for CreepSourceError {
 pub trait CreepSourceFamily<'a>: Clone + core::fmt::Debug {
     type Material: CreepLaw + Clone + core::fmt::Debug;
     fn creep_source(&self) -> &NortonCreepSource<'a>;
+    /// Conservative full-source-span mechanical heat-capacity contribution
+    /// per reference volume. Plain fixed-storage laws contribute zero.
+    fn minimum_thermal_capacity_j_m3_k(&self) -> Result<f64, CreepSourceError> {
+        Ok(0.0)
+    }
+    /// A native zero-displacement birth must actually be stress free. Expansion
+    /// families check their original stress-free reference before initialization.
+    fn admit_stress_free_temperature(&self, _temperature_k: f64) -> Result<(), CreepSourceError> {
+        Ok(())
+    }
     fn at_temperature(
         &self,
         temperature_k: f64,

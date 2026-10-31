@@ -1,19 +1,19 @@
 //! Permanent creep and spatial heat on the original tetrahedral/enthalpy owners.
 //!
 //! Each reference tetrahedron binds one actual caloric cell and one original
-//! Norton or joint Norton/J2 source. The selected zero-expansion reduction
-//! holds E, nu, hardening modulus, density and reference geometry fixed. Local
-//! temperature changes sourced Arrhenius kinetics and, when selected, yield
-//! stress. Conduction, reservoir exchange, thermal events and observer histories
-//! remain in the existing thermal owner.
+//! Norton or joint Norton/J2 source, optionally wrapped in sourced affine thermal
+//! expansion. E, nu, hardening modulus, reference density and geometry remain
+//! fixed. Local temperature changes Arrhenius kinetics, selected yield stress
+//! and sourced free strain. Conduction, reservoir exchange, thermal events and
+//! observer histories remain in the existing thermal owner.
 //!
 //! Every mechanical and thermal proposal starts from the accepted state. The
 //! final mechanics are solved at the actual returned cell temperatures. Only
-//! physical creep/plastic heat enters caloric storage; backward-Euler loss and
-//! energetic hardening storage remain separate.
+//! physical creep/plastic heat and signed reciprocal thermal exchange enter
+//! caloric storage; backward-Euler loss, hardening and T*entropy stay separate.
 //! All local heat, temperature and complete work gates precede publication.
 //! This is small-strain quasistatic secondary creep, not finite deformation,
-//! phase change, variable elastic storage, thermal expansion or a life prediction.
+//! phase change, variable elastic/hardening coefficients or a life prediction.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -100,9 +100,11 @@ struct BoundCell<'a, S> {
     accepted: DepositedCell,
 }
 
-/// Accepted creep/plastic history with an explicit zero-expansion thermal model.
+/// Accepted creep/plastic history with its explicitly selected thermal model.
+/// Plain Norton families select zero expansion; ExpandingCreepSource adds
+/// original free strain, entropy and reciprocal heat to the same native solve.
 #[derive(Clone, Debug)]
-pub struct ZeroExpansionCreepSolid<'a, S: CreepSourceFamily<'a> = NortonCreepSource<'a>> {
+pub struct CreepSolid<'a, S: CreepSourceFamily<'a> = NortonCreepSource<'a>> {
     nodes_m: &'a [[f64; 3]],
     tetrahedra: &'a [[usize; 4]],
     geometry: Arc<TetLoadGeometry3<'a>>,
@@ -114,7 +116,7 @@ pub struct ZeroExpansionCreepSolid<'a, S: CreepSourceFamily<'a> = NortonCreepSou
     time_s: f64,
 }
 
-impl<'a, S: CreepSourceFamily<'a>> ZeroExpansionCreepSolid<'a, S> {
+impl<'a, S: CreepSourceFamily<'a>> CreepSolid<'a, S> {
     /// Bind a virgin, stress-free solid to the actual active thermal inventory.
     /// Original source admission is shared with the uniform creep/heat owner.
     pub fn try_new(
@@ -164,6 +166,27 @@ impl<'a, S: CreepSourceFamily<'a>> ZeroExpansionCreepSolid<'a, S> {
                 &mut || cx.checkpoint().is_err(),
             )
             .map_err(CreepCouplingError::Material)?;
+            let mechanical_capacity = entry
+                .source
+                .minimum_thermal_capacity_j_m3_k()
+                .map_err(CreepCouplingError::Source)?;
+            for pair in entry.caloric.curve().knots().windows(2) {
+                poll(cx)?;
+                // Bound the actual piecewise-linear caloric chart, not a sampled
+                // heat capacity. Round each positive lower-bound operation down.
+                let delta_h =
+                    (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg).next_down();
+                let delta_t = (pair[1].temperature_k - pair[0].temperature_k).next_up();
+                let caloric_capacity = (density * (delta_h / delta_t).next_down()).next_down();
+                if !mechanical_capacity.is_finite()
+                    || !positive(caloric_capacity)
+                    || !positive((caloric_capacity + mechanical_capacity).next_down())
+                {
+                    return Err(CreepCouplingError::Invalid(
+                        "positive combined caloric and mechanical heat capacity required over the full source span",
+                    ));
+                }
+            }
             let volume = geometry.element_volumes_m3()[element];
             if !super::same_measure(cell.geometry.volume_m3, volume)
                 || !super::same_measure(cell.mass_kg, density * volume)
@@ -177,6 +200,10 @@ impl<'a, S: CreepSourceFamily<'a>> ZeroExpansionCreepSolid<'a, S> {
                 .curve()
                 .state_at_specific_enthalpy(cell.specific_h_j_kg)
                 .map_err(CreepCouplingError::Caloric)?;
+            entry
+                .source
+                .admit_stress_free_temperature(state.temperature_k())
+                .map_err(CreepCouplingError::Source)?;
             materials.push(
                 entry
                     .source
@@ -340,7 +367,7 @@ impl<'a, S: CreepSourceFamily<'a>> ZeroExpansionCreepSolid<'a, S> {
             .element_energy
             .iter()
             .zip(&step.element_volume_m3)
-            .map(|(e, v)| finite(e.physical_dissipation_j_m3 * v))
+            .map(|(e, v)| finite(e.caloric_heat_j_m3() * v))
             .collect::<Result<_, _>>()?;
         Ok(MechanicalProposal {
             materials,
@@ -456,17 +483,20 @@ impl<'a, S: CreepSourceFamily<'a>> ZeroExpansionCreepSolid<'a, S> {
                 cx,
             )?;
             let applied_heat_j = finite(trial.heat_j.iter().sum())?;
-            let physical_heat_j = actual.step.energy.physical_dissipation_j;
+            let caloric_heat_j = finite(
+                actual.step.energy.physical_dissipation_j + actual.step.energy.reversible_heat_j,
+            )?;
             let external_heat_j = finite(thermal_audit.external_heat_j - applied_heat_j)?;
             let thermal_residual_j = finite(
                 thermal_audit.stored_energy_change_j
                     - thermal_audit.incoming_energy_j
                     - external_heat_j
-                    - physical_heat_j,
+                    - caloric_heat_j,
             )?;
             let energy = actual.step.energy;
             let combined_residual_j = finite(
                 energy.final_stored_j - energy.initial_stored_j
+                    + energy.thermoelastic_storage_change_j
                     + thermal_audit.stored_energy_change_j
                     + energy.numerical_dissipation_j
                     - energy.applied_work_j
@@ -563,7 +593,7 @@ pub struct CreepReport {
 /// Accept the actual solid, thermal history and observer state together.
 pub struct CreepCandidate<'m, 't, O, S: CreepSourceFamily<'m> = NortonCreepSource<'m>> {
     thermal: DepositionSimulation<'t>,
-    solid: ZeroExpansionCreepSolid<'m, S>,
+    solid: CreepSolid<'m, S>,
     observer: O,
     report: CreepReport,
 }
@@ -571,7 +601,7 @@ impl<'m, 't, O, S: CreepSourceFamily<'m>> CreepCandidate<'m, 't, O, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
-    pub fn solid(&self) -> &ZeroExpansionCreepSolid<'m, S> {
+    pub fn solid(&self) -> &CreepSolid<'m, S> {
         &self.solid
     }
     pub fn observer(&self) -> &O {
@@ -580,21 +610,14 @@ impl<'m, 't, O, S: CreepSourceFamily<'m>> CreepCandidate<'m, 't, O, S> {
     pub fn report(&self) -> &CreepReport {
         &self.report
     }
-    pub fn into_parts(
-        self,
-    ) -> (
-        DepositionSimulation<'t>,
-        ZeroExpansionCreepSolid<'m, S>,
-        O,
-        CreepReport,
-    ) {
+    pub fn into_parts(self) -> (DepositionSimulation<'t>, CreepSolid<'m, S>, O, CreepReport) {
         (self.thermal, self.solid, self.observer, self.report)
     }
 }
 
 #[derive(Clone)]
 struct CreepHeat<'s, 'm, 'cx, O, S: CreepSourceFamily<'m>> {
-    solid: &'s ZeroExpansionCreepSolid<'m, S>,
+    solid: &'s CreepSolid<'m, S>,
     inner: O,
     cx: &'s Cx<'cx>,
     watts: BTreeMap<CellId, f64>,

@@ -12,6 +12,10 @@
 //! The final mechanics are recomputed at the actual returned temperature, and
 //! a failed/cancelled/budget-exhausted step publishes no partially aged state.
 
+/// Sourced thermal expansion, entropy and reciprocal heat around the same
+/// permanent-creep laws, for consumers retaining the full thermal history.
+pub mod expansion;
+
 use super::source::{CreepSourceError, NortonCreepSource};
 use super::{CreepError, CreepIncrement, CreepState, CreepTolerances};
 use crate::phase::{

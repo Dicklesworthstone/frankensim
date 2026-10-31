@@ -8151,3 +8151,49 @@ supported interval. Authored calibrations remain available as explicitly
 authored inputs, with no measured authority inferred from their provenance.
 The shared continuum and native pressure/heat receipts retain this source
 through the exact liquid states used to compile mobility.
+
+
+### Sourced thermal expansion of permanent creep and joint yielding
+
+`creep::thermal::expansion::ExpandingCreepSource` composes an original Norton
+or joint Norton/J2 source with `AffineIsotropicThermoelastic`. It requires an
+explicit expansion claim, stress-free reference, original card and fixed source
+context on the canonical absolute T coordinate. The native thermoelastic owner
+integrates affine instantaneous expansion and supplies entropy and a conservative
+full-interval mechanical heat-capacity bound. E, nu and energetic hardening remain
+constant through the original creep source admission; Arrhenius kinetics and
+sourced yield still follow the actual temperature.
+
+`ThermalCreepState` retains the accepted temperature with every original creep
+and plastic memory. Constitutive trials subtract sourced free strain from total
+strain and call the original return map and tangent. A checked increment resolves
+both actual thermal endpoints and delegates the mechanical energy audit. Explicit
+tensor-Voigt/Mandel conversion preserves shear work. The potential receives total
+strain minus all original irreversible strains, while each component history and
+the total/elastic strain remain independently bounded.
+
+The energy carrier keeps free-energy storage, physical creep/plastic dissipation,
+backward-Euler numerical loss, change of T times mechanical entropy and signed
+reciprocal caloric transfer separate. With f the integrated expansion, reciprocal
+heat is trace(sigma_new)*delta(f)-delta(T*s). Its sum with physical dissipation is
+`caloric_heat_j_m3()`; this sum can be negative during thermoelastic cooling even
+though physical dissipation is nonnegative. Every accepted increment closes total
+stress work against all these independently evaluated terms. Numerical loss is
+never deposited as material heat.
+
+The source exposes a conservative mechanical capacity floor over the complete
+thermal/history envelope and checks a virgin zero-displacement birth against its
+actual stress-free reference. A caloric consumer must add its own original chart
+capacity and admit a positive combined capacity. `creep_expansion` contains five
+manufactured regressions for free and restrained affine expansion, mixed-shear
+tangents/work, simultaneous thermally driven creep/yield, retained temperature
+through cooling and reversal, capacity bounds and original-source refusals.
+This is a bounded small-strain model with fixed storage coefficients, reference
+mass and geometry. Variable elastic/hardening storage, non-affine thermal source
+paths, phase change, finite deformation and measured life qualification remain
+outside this composition.
+
+Validation for this increment: all 56 focused creep/material regressions,
+including the five expansion cases, compiled, linked and executed successfully
+with the pinned compiler and genuine dependency libraries. This was an exact-source
+material-owner assembly, not a Cargo workspace acceptance gate.

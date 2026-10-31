@@ -130,6 +130,10 @@ pub trait CreepLaw: SmallStrainLaw {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CreepError {
     Invalid(&'static str),
+    /// Original source refusal while resolving a thermal history endpoint.
+    Source(crate::state_point::MaterialStatePointError),
+    /// Original elastic-potential coefficient or state refusal.
+    Elastic(crate::MaterialError),
     /// Native energetic J2 coefficient/history/storage refusal.
     Plastic(crate::plastic::energy::EnergyError),
     StressResidual {
@@ -146,6 +150,8 @@ impl fmt::Display for CreepError {
         match self {
             Self::Invalid(what) => write!(f, "Norton creep: {what}"),
             Self::Plastic(error) => error.fmt(f),
+            Self::Source(error) => error.fmt(f),
+            Self::Elastic(error) => error.fmt(f),
             Self::StressResidual {
                 residual_pa,
                 tolerance_pa,
