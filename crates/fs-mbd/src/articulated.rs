@@ -11,6 +11,10 @@
 /// Continuous unconstrained articulated motion in total momentum coordinates.
 pub mod motion;
 
+/// Full free-base mass, inertial bias and shared link motion maps for coupling.
+#[path = "articulated/generalized.rs"]
+pub mod generalized;
+
 use core::fmt;
 use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
 
@@ -781,7 +785,13 @@ impl ArticulatedModel {
         Ok(())
     }
 
-    fn validate_applied_effort(&self, effort: &[f64]) -> Result<(), ArticulatedError> {
+    /// Admit actual internal actuator efforts in compact scalar-joint order.
+    ///
+    /// Coupled consumers include their spring/damper/controller contributions
+    /// here, preserving the same finite and declared-effort limits as ABA.
+    /// External wrenches, gravity, inertia columns and momentum are different
+    /// quantities and must not be compared with actuator effort limits.
+    pub fn validate_applied_effort(&self, effort: &[f64]) -> Result<(), ArticulatedError> {
         self.validate_generalized("generalized_force", effort)?;
         for (link_index, link) in self.links.iter().enumerate() {
             if let Some(dof) = self.dof_index[link_index]

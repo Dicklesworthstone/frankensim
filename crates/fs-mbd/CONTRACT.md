@@ -596,6 +596,37 @@ a dynamic, contact, grasp-stability, or force-closure result.
   curriculum code selects owner coordinates from this layout rather than
   reproducing a second robot-policy representation.
 
+## Generalized articulated coupling
+
+`articulated::generalized::free_floating_terms` exposes the original admitted
+tree's complete free-base mass matrix and velocity bias in
+`[omega_base, v_base, joint_rate]` coordinates. Its equation is
+`M(q) udot + bias(q,u) = applied_force`. The base linear derivative is in body
+coordinates; Cartesian origin acceleration adds `omega cross v` before world
+rotation. Gravity is excluded from bias and explicitly projected at each link
+COM by `project_uniform_gravity`.
+
+The native composite rigid-body pass retains all locked-base, base/joint and
+joint/joint mass terms, including moving COM offsets and rotated full link
+inertias. The original Newton-Euler recursion supplies bias and each link's
+zero-generalized-acceleration term. `GeneralizedKinematics` shares actual link
+poses, twists, analytic Jacobian columns and these acceleration terms with
+additional fluid/structural kinetic operators. It also projects body-held or
+world-axis link-origin wrenches by virtual work. No finite differences, unit-rate
+admission probes, duplicated Newton-Euler engine or additional time integrator
+are introduced.
+
+This explicit coupling seam admits at most 4096 links and 64 scalar joints;
+native unconstrained ABA retains its existing linear-storage path. Projection
+work/storage are bounded by `O(links*(6+joints) + (6+joints)^2)` and cancellation
+is polled around the original indivisible FK/RNEA passes and during projection.
+Native fixed-root, physical-inertia, configuration, rate and finite-output
+admissions remain in force. `articulated_generalized` verifies independent
+serial-rotor and moving-slider mass/recoil formulas, mixed-joint energy,
+CRBA/RNEA/ABA agreement, distributed gravity, load-frame covariance, caps and
+atomic cancellation. Extraction itself makes no time-integration conservation
+claim; its consumer owns that numerical approximation.
+
 ## Rigid dynamics in arbitrary body coordinates
 
 ### Spatial torques and forces on moving material points
