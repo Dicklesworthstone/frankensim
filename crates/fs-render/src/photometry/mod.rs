@@ -40,6 +40,8 @@ use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
 
 /// Version of the calibrated transport model and output interpretation.
+/// Version 8 resolves near-source inverse-square variation with mandatory
+/// distance intervals sharing the existing angular-partition panel budget.
 /// Version 7 resolves optically thick foregrounds with geometric optical-depth
 /// panels and refuses convergence before the camera layer is sampled. Version
 /// 6 resolves represented tabulated phase-law cells in homogeneous
@@ -47,7 +49,7 @@ use transport::{PhotometricMedium, photopic_transmittance};
 /// reflectance. Version 4's
 /// shared tabulated haze phase laws, version 3's fixture
 /// angular partitions and version 2's published CIE observer remain in use.
-pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 7;
+pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 8;
 
 /// Explicit geometric and output budgets for an offline calculation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,10 +91,10 @@ pub enum PhotometryError {
     InvalidCameraRay,
     /// Single-scattering quadrature settings are invalid.
     InvalidScatterSettings,
-    /// The declared fixture/phase angular intervals need more panels than the
-    /// caller permits. No unresolved interval is silently discarded.
+    /// Required source-distance and fixture/phase angular intervals need more
+    /// panels than the caller permits. No interval is silently discarded.
     ScatteringPartitionBudgetExceeded {
-        /// Increase this total panel cap to admit the known angular intervals.
+        /// Increase this total cap to admit the required distance/angular intervals.
         max_panels: u32,
     },
     /// The output count exceeds the explicit job budget.

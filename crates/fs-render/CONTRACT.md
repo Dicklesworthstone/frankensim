@@ -1872,15 +1872,25 @@ remain subject to the existing singularity refusal.
 Beam intersections use the original rigid fixture frames and represented angular
 laws. Opposite
 cone nappes and azimuth half-planes are excluded by their geometric signs,
-retaining ambiguous zeros; distinct roots are never epsilon-merged. Source and
-phase boundaries share one exactly deduplicated partition. Each angular
+retaining ambiguous zeros; distinct roots are never epsilon-merged. Source-distance
+and angular boundaries share one exactly deduplicated partition. Each
 interval then receives its own midpoint refinements, so a narrow represented
 beam or phase lobe cannot evade all sampling merely by lying between the
 original uniform grid's nodes.
 
+Since photometry semantics version 8, scene images also partition near-source
+distance scales: closest approach to the finite camera segment and offsets of
+`d_min`, `2*d_min`, `4*d_min`, and so on, with the actual ray-direction norm
+retained. Collinear sources outside the segment use their distance to its nearest
+endpoint. A segment shorter than one natural source-distance scale needs no added
+distance cuts. These intervals capture inverse-square variation even when a
+fixture's angular law adds no boundaries; they do not validate the near-field
+point-source approximation or fixture calibration.
+
 The intervals share `ScatterSettings::max_panels`, with at least one panel per
 interval and equal shares of the remaining capacity. Exceeding that capacity
-returns `ScatteringPartitionBudgetExceeded`; no angular interval is discarded.
+returns `ScatteringPartitionBudgetExceeded`; no required distance or angular
+interval is discarded.
 Total callback evaluations remain less than four times the total cap. A missing
 refinement comparison in any interval leaves the aggregate discrepancy unknown
 and `tolerance_met` false. Otherwise the discrepancy is the sum of transmitted
@@ -2049,6 +2059,23 @@ progressive replay tests remain in the photometry batteries.
   The reference also checks SI scale covariance and insufficient-budget
   refusal. Pure panel tests cover numerical range and optical resolution;
   generic-callback regressions retain constant-field and distant-support cases.
+- `photometric_image::near_source_reference` checks a 100 cd isotropic fixture
+  0.01 m from a 10 m camera ray in a 0.01 m⁻¹ scattering medium. An independent
+  angle-space reference gives approximately 23.71377356 cd/m²; the former
+  32/64-panel estimates agreed within the requested discrepancy near 11.75 cd/m².
+  Distance partitions recover that contribution under the shared cap. Tests
+  also check SI/rigid transforms, exact interval budgets and typed refusal.
+  Results retain `NumericalKind::NoClaim` and unknown total error: resolving these
+  source scales supplies neither a numerical enclosure nor a calibration claim.
+- `photometric_path::penumbra_reference` defines independent clipped-emitter
+  polygon references across five receiver positions and four direct-light
+  strategies. Its comparisons cover probe lux and reflected camera `rho*E/pi`,
+  with fixed sampling-regression tolerances and unchanged `NoClaim` reporting.
+- `photometric_path::brushed` defines an absolute tilted-normal point-source
+  radiance oracle for the existing law `f_R = f_s * (ns.wi)/(ng.wi)`. It checks
+  weighted local reciprocity after removing that radiance projection, preserving
+  the main shading-normal law and unknown total-error status. These entries
+  describe regression coverage, not completed execution results.
 
 `photometric_path::cie171_analytical` independently reconstructs the diffuse
 point-source subcase of CIE 171:2006 section 5.2 from the factual setup in the

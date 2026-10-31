@@ -199,6 +199,8 @@ fn g4_phase_knots_share_the_global_budget_and_keep_missing_refinement_unknown() 
         // Three distinct phase knots imply four intervals, shared by all
         // four coincident fixtures. One panel per interval cannot supply a
         // refinement discrepancy, even though the positive lobe is resolved.
+        // The closest source distance exceeds the 1 m ray length; distance
+        // partitioning therefore adds no mandatory intervals to this test.
         let result = scene
             .luminance_along_ray(
                 cx,
@@ -212,7 +214,8 @@ fn g4_phase_knots_share_the_global_budget_and_keep_missing_refinement_unknown() 
             )
             .unwrap();
         assert!(result.luminance_cd_m2 > 0.0);
-        assert!(result.single_scatter.panels <= 4);
+        assert_eq!(result.single_scatter.panels, 4);
+        assert_eq!(result.single_scatter.evaluations, 4);
         assert!(
             result
                 .single_scatter

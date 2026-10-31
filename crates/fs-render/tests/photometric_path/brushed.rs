@@ -47,19 +47,67 @@ fn brdf_normal_view(wx: f64, wy: f64, wz: f64, alpha_x: f64, alpha_y: f64) -> f6
     let distribution = 1.0 / (PI * alpha_x * alpha_y * ellipse * ellipse);
     let smith =
         2.0 / (1.0 + (1.0 + ((alpha_x * wx).powi(2) + (alpha_y * wy).powi(2)) / (wz * wz)).sqrt());
+    distribution * smith * fresnel_n2_k3_reference(hz) / (4.0 * wz)
+}
+
+fn fresnel_n2_k3_reference(cosine: f64) -> f64 {
     // Real-valued unpolarized complex-index Fresnel, independently expanded
     // from n=2,k=3. The production path uses complex arithmetic instead.
-    let sine2 = 1.0 - hz * hz;
+    let sine2 = 1.0 - cosine * cosine;
     let t0 = 4.0 - 9.0 - sine2;
     let a2_b2 = (t0 * t0 + 4.0 * 4.0 * 9.0).sqrt();
     let a = (0.5 * (a2_b2 + t0)).sqrt();
-    let t1 = a2_b2 + hz * hz;
-    let t2 = 2.0 * hz * a;
+    let t1 = a2_b2 + cosine * cosine;
+    let t2 = 2.0 * cosine * a;
     let rs = (t1 - t2) / (t1 + t2);
-    let t3 = hz * hz * a2_b2 + sine2 * sine2;
+    let t3 = cosine * cosine * a2_b2 + sine2 * sine2;
     let t4 = t2 * sine2;
     let rp = rs * (t3 - t4) / (t3 + t4);
-    distribution * smith * 0.5 * (rs + rp) / (4.0 * wz)
+    0.5 * (rs + rp)
+}
+
+fn tilted_radiance_bsdf_reference(wo: [f64; 3], wi: [f64; 3], angle: f64) -> f64 {
+    // Radial grain at the +X axis: T=(1,0,0). An explicit rotation about
+    // that fixed axis gives B=(0,cos(theta),-sin(theta)) and
+    // Ns=(0,sin(theta),cos(theta)), without using production frame helpers.
+    let (sine, cosine) = angle.sin_cos();
+    let to_local = |v: [f64; 3]| {
+        [
+            v[0],
+            cosine * v[1] - sine * v[2],
+            sine * v[1] + cosine * v[2],
+        ]
+    };
+    let local_o = to_local(wo);
+    let local_i = to_local(wi);
+    if wo[2] <= 0.0 || wi[2] <= 0.0 || local_o[2] <= 0.0 || local_i[2] <= 0.0 {
+        return 0.0;
+    }
+    let sum = std::array::from_fn::<_, 3, _>(|axis| wo[axis] + wi[axis]);
+    let length = sum.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let half = sum.map(|value| value / length);
+    let local_half = to_local(half);
+    let ellipse =
+        (local_half[0] / 0.12).powi(2) + (local_half[1] / 0.36).powi(2) + local_half[2].powi(2);
+    let distribution = 1.0 / (PI * 0.12 * 0.36 * ellipse * ellipse);
+    let masking = |v: [f64; 3]| {
+        2.0 / (1.0 + (1.0 + ((0.12 * v[0]).powi(2) + (0.36 * v[1]).powi(2)) / v[2].powi(2)).sqrt())
+    };
+    let half_cosine = wo
+        .iter()
+        .zip(half)
+        .map(|(left, right)| left * right)
+        .sum::<f64>();
+    let shading_brdf = distribution
+        * masking(local_o)
+        * masking(local_i)
+        * fresnel_n2_k3_reference(half_cosine.clamp(0.0, 1.0))
+        / (4.0 * local_o[2] * local_i[2]);
+    // The radiance kernel uses geometric incident lux. Convert the shading
+    // projected measure to that measure: f_R = f_s * (Ns.wi)/(Ng.wi).
+    // Only f_s is reciprocal; f_R must not be compared by an unweighted swap.
+    // This decorative normal model does not resolve measured microgeometry.
+    shading_brdf * local_i[2] / wi[2]
 }
 
 #[test]
@@ -144,6 +192,67 @@ fn g1_brushed_point_luminance_retains_anisotropy_and_body_frame() {
             local_values[1] > 10.0 * local_values[0],
             "isotropic fallback must not replace the brushed frame"
         );
+    });
+}
+
+#[test]
+fn g1_tilted_brushed_point_luminance_matches_independent_radiance_reference() {
+    with_cx(|cx, _| {
+        // Flatten photopic weight using the independent published CIE table,
+        // so this constant-n,k test measures geometry/BRDF without wavelength
+        // sampling variation. The source still enters through native lumens.
+        let spectrum = SourceSpectrum::try_from_bins(std::array::from_fn(|bin| {
+            1.0 / super::spectral_reference::cie_reference_xyz(382.5 + 5.0 * bin as f64)[1]
+        }))
+        .unwrap();
+        let target = [0.5, 0.0, 0.0];
+        for view_cosine in [0.1_f64, 0.02] {
+            let view = [0.0, (1.0 - view_cosine * view_cosine).sqrt(), view_cosine];
+            let light = [0.0, -0.6, 0.8];
+            let mut recovered_shading_brdfs = Vec::new();
+            for (wo, wi) in [(view, light), (light, view)] {
+                let mut scene = empty_scene(
+                    std::array::from_fn(|axis| target[axis] + 2.0 * wo[axis]),
+                    wo.map(|component| -component),
+                );
+                // View directions lie in YZ, so +X is the orthogonal camera up.
+                scene.camera.up = Vec3::new(1.0, 0.0, 0.0);
+                let mut receiver = floor(0.0, 10.0, LiftedSpectrum { c: [0.0; 3] });
+                receiver.material = Material::BrushedConductor {
+                    optics: optics(),
+                    detail: SurfaceDetail::try_new(0.12, 3.0, BrushingPattern::Radial, 0.35, None)
+                        .unwrap(),
+                };
+                scene.primitives.push(receiver);
+                let sources = [isotropic(
+                    std::array::from_fn(|axis| target[axis] + 3.0 * wi[axis]),
+                    100.0,
+                    spectrum.clone(),
+                )];
+                let incident_lux = (100.0 / 9.0) * wi[2];
+                let expected_bsdf = tilted_radiance_bsdf_reference(wo, wi, 0.35);
+                let measured =
+                    render_pixel(&scene, &sources, PathMedium::Vacuum, settings(1, 64), cx);
+                close(
+                    measured.luminance_cd_m2,
+                    incident_lux * expected_bsdf,
+                    1.0e-9,
+                    "tilted normal uses geometric incident lux and the shading radiance projection",
+                );
+                assert_eq!(measured.numerical.kind, fs_evidence::NumericalKind::NoClaim);
+                assert!(measured.total_error_bound_cd_m2.is_none());
+                let shading_incident_cosine = 0.35_f64.sin() * wi[1] + 0.35_f64.cos() * wi[2];
+                recovered_shading_brdfs.push(
+                    measured.luminance_cd_m2 / incident_lux * wi[2] / shading_incident_cosine,
+                );
+            }
+            close(
+                recovered_shading_brdfs[0],
+                recovered_shading_brdfs[1],
+                2.0e-9,
+                "removing the radiance projection recovers the reciprocal local GGX law",
+            );
+        }
     });
 }
 

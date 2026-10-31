@@ -18,6 +18,9 @@ mod parallel;
 #[path = "photometric_path/area.rs"]
 mod area;
 
+#[path = "photometric_path/penumbra_reference.rs"]
+mod penumbra_reference;
+
 #[path = "photometric_path/dielectric.rs"]
 mod dielectric;
 

@@ -416,6 +416,8 @@ fn g4_scattering_partition_budget_is_global_and_repeated_knots_are_shared() {
         ));
         // Four coincident fixtures share the same two boundary locations and
         // therefore only three mandatory intervals, not four copies of them.
+        // The closest source distance is the full 1 m ray length, so no
+        // narrower distance scale adds a partition to this angular test.
         let result = scene
             .luminance_along_ray(
                 cx,
@@ -428,7 +430,8 @@ fn g4_scattering_partition_budget_is_global_and_repeated_knots_are_shared() {
                 },
             )
             .unwrap();
-        assert!(result.single_scatter.panels <= 3);
+        assert_eq!(result.single_scatter.panels, 3);
+        assert_eq!(result.single_scatter.evaluations, 3);
         let expected = 4.0 * narrow_reference(&[(-half_angle, half_angle)], |_| 1.0);
         close(result.luminance_cd_m2, expected, 1.0e-3);
         assert!(

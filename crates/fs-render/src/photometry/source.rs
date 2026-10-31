@@ -545,7 +545,8 @@ impl PhotometricSource {
         Ok(self.emitted_flux_lm * self.distribution.intensity_per_steradian(local)?)
     }
 
-    /// Split a camera segment at represented source-profile and phase boundaries.
+    /// Split a camera segment at source-distance scales and represented
+    /// source-profile/phase boundaries.
     /// Knots are sorted, exactly deduplicated fractions in `(0,1)`, shared
     /// across fixtures. They guide quadrature but do not certify geometry,
     /// resolve shadow boundaries, or bound phase/smooth-profile variation.
@@ -560,16 +561,12 @@ impl PhotometricSource {
     ) -> Result<(), super::PhotometryError> {
         use super::{PhotometryError, medium::PhaseFunction};
         use ray_partition::{
-            KnotError, azimuth_crossing, cone_crossings, insert_knot, phase_crossing,
+            KnotError, azimuth_crossing, cone_crossings, distance_breakpoints, insert_knot,
+            phase_crossing,
         };
 
         cx.checkpoint()?;
-        if self.emitted_flux_lm == 0.0
-            || distance_m == 0.0
-            || (!matches!(phase, PhaseFunction::Tabulated(_))
-                && (matches!(&self.distribution.law, AngularLaw::Isotropic)
-                    || matches!(&self.distribution.law, AngularLaw::Cone { cosine_cutoff } if *cosine_cutoff == -1.0)))
-        {
+        if self.emitted_flux_lm == 0.0 || distance_m == 0.0 {
             return Ok(());
         }
         let limit = max_panels
@@ -612,6 +609,19 @@ impl PhotometricSource {
                 KnotError::Allocation => PhotometryError::AllocationRefused,
             })
         };
+        // Even an isotropic source has a potentially narrow inverse-square
+        // peak. Resolve its metric scales independently of fixture rotation.
+        // Off-segment collinear sources use their endpoint distance, not a
+        // zero line impact parameter. Scene admission already excludes every
+        // active source inside the ray's singularity radius.
+        let camera_to_source = [-offset.x / scale, -offset.y / scale, -offset.z / scale];
+        let direction = [ray.dir.x, ray.dir.y, ray.dir.z];
+        let distance_knots = distance_breakpoints(camera_to_source, direction, distance_m / scale)
+            .ok_or(PhotometryError::NonFiniteResult)?;
+        for knot in distance_knots {
+            cx.checkpoint()?;
+            insert(knot)?;
+        }
         match &self.distribution.law {
             AngularLaw::Isotropic => {}
             AngularLaw::Cone { cosine_cutoff } if *cosine_cutoff == -1.0 => {}
@@ -646,8 +656,6 @@ impl PhotometricSource {
         if let PhaseFunction::Tabulated(table) = phase {
             // The phase angle belongs to the source-camera geometry, not the
             // fixture's optical frame. Scale before forming dot/cross products.
-            let camera_to_source = [-offset.x / scale, -offset.y / scale, -offset.z / scale];
-            let direction = [ray.dir.x, ray.dir.y, ray.dir.z];
             let phase_knots = table.knots_per_sr();
             for &(cosine, _) in &phase_knots[1..phase_knots.len() - 1] {
                 cx.checkpoint()?;

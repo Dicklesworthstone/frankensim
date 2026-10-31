@@ -10,6 +10,9 @@ mod scattering_reference;
 #[path = "photometric_image/optical_depth_reference.rs"]
 mod optical_depth_reference;
 
+#[path = "photometric_image/near_source_reference.rs"]
+mod near_source_reference;
+
 #[path = "photometric_image/phase_reference.rs"]
 mod phase_reference;
 
@@ -290,9 +293,10 @@ fn g1_henyey_greenstein_uses_propagation_directions_for_forward_scattering() {
             relative_tolerance: 0.0,
         };
         let mut observed = Vec::new();
-        // The one quadrature point is z=2; both fixtures are exactly 4 m away.
-        // From z=6 the incoming and outgoing propagation vectors are both -Z.
-        for z in [6.0, -2.0] {
+        // The one quadrature point is z=2; both fixtures are exactly 6 m away.
+        // Their nearest segment points are 4 m away, so no distance cuts apply.
+        // From z=8 the incoming and outgoing propagation vectors are both -Z.
+        for z in [8.0, -4.0] {
             let sources = [source([0.0, 0.0, z], 100.0, SourceSpectrum::equal_energy())];
             let scene = PhotometricScene::try_new(
                 &[],
@@ -318,8 +322,8 @@ fn g1_henyey_greenstein_uses_propagation_directions_for_forward_scattering() {
         // HG p(+1)/p(-1) = ((1+g)/(1-g))^3 = 27 for g=0.5.
         close(observed[0] / observed[1], 27.0, 3.0e-13);
         let forward_phase = 1.5 / (4.0 * PI * 0.5 * 0.5);
-        let expected = (100.0 / 16.0)
-            * (-0.15_f64 * 4.0).exp()
+        let expected = (100.0 / 36.0)
+            * (-0.15_f64 * 6.0).exp()
             * forward_phase
             * (0.1 / 0.15)
             * -(-0.15_f64 * 4.0).exp_m1();

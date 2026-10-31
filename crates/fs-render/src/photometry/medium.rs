@@ -663,6 +663,29 @@ mod tests {
             assert!(result.evaluations < 4 * u64::from(settings.max_panels));
             assert!(result.estimated_quadrature_error_cd_m2.unwrap() > 0.0);
             assert_eq!(result.omitted_multiple_scattering_bound_cd_m2, None);
+            // This generic call has one interval, so half the returned count
+            // is exactly the previous grid. Partitioned scenes instead sum
+            // discrepancies from independently refined intervals.
+            let panels = result.panels / 2;
+            let preceding = single_scattered_luminance(
+                &medium,
+                &ray(),
+                100.0,
+                ScatterSettings {
+                    initial_panels: panels,
+                    max_panels: panels,
+                    ..settings
+                },
+                cx,
+                |point, _| Ok::<_, Infallible>(thick_point_incident(point)),
+            )
+            .unwrap();
+            assert_eq!(preceding.estimated_quadrature_error_cd_m2, None);
+            assert!(!preceding.tolerance_met);
+            assert_eq!(
+                result.estimated_quadrature_error_cd_m2,
+                Some((result.luminance_cd_m2 - preceding.luminance_cd_m2).abs())
+            );
         });
     }
 
