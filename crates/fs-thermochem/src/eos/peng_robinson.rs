@@ -18,6 +18,8 @@ use crate::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 pub mod flash;
 /// Bounded tangent-plane searches on the original mixture fugacities.
 pub mod stability;
+/// Pure-fluid coexistence and conservative phase amounts on this same EOS.
+pub mod saturation;
 
 /// Maximum number of components in one bounded mixture.
 pub const MAX_PENG_ROBINSON_COMPONENTS_V1: usize = 64;

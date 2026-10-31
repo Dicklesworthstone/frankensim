@@ -1630,3 +1630,32 @@ and the original pressure/temperature Maxwell derivative, while the pressure
 form retains the Gibbs identity with the existing residual enthalpy. These
 primitives support source-bound entropy inversion in `fs-material` without
 coupling this mechanical owner to transport cards or mutable parcel state.
+
+## Pure-fluid coexistence and conserved phase amount
+
+`eos::peng_robinson::saturation` closes pure-fluid liquid/vapor coexistence by
+equal logarithmic fugacities from the original EOS. Its bounded solve uses
+`d(ln(phi_l)-ln(phi_v))/d(ln p)=Z_l-Z_v` with bisection safeguarding and accepts
+pressure brackets whose endpoints are on distinct single-phase branches. The
+published outer roots must both have negative isothermal pressure-volume
+derivatives, a resolved volume gap, and closed fugacity and pressure-correction
+tests. Numerical critical degeneracy refuses; these tests are not interval
+enclosures or evidence of stability against a solid phase.
+
+The maximum work is a whole-call EOS evaluation cap, including both endpoints.
+Cancellation is checked before every EOS evaluation and result publication.
+PT leaves quality unset. An explicit mean molar volume fixes vapor amount by
+the lever rule; density uses conserved mass over additive phase volume. Latent
+enthalpy/internal energy, Clapeyron slope and amount-weighted residual h/u/s
+come from the original departure functions. Their matching ideal reference is
+added once by the caller; there is no extra latent source or ideal-mixing
+entropy between identical phases. Two-phase transport, acoustics, heat capacity,
+interfaces, metastable kinetics and chemical reactions are separate closures.
+
+Six focused regressions compare independently computed Maxwell-area methane
+and ethane saturation states, differentiated Clapeyron response and latent
+energy, conservative volume/quality closure, single-phase bracket endpoints,
+source-parameter changes, critical-domain refusal, cancellation and work caps.
+The original constitutive law is Peng and Robinson (1976),
+<https://doi.org/10.1021/i160057a011>; these verify that law's implementation,
+not experimental accuracy across all fluids or critical conditions.
