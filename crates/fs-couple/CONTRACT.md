@@ -16398,3 +16398,29 @@ interior/exterior changes and a solid-material valve substitution. These are
 frozen-media numerical integrations, not mean-flow transport, radiating walls or
 experimental instrument validation.
 
+
+## Source material ownership for spatial finite-wall heat
+
+`ThermoviscousInterior::with_tangentially_isotropic_wall_transport` attaches
+complete ordered `MaterialTangentialWallRegion` declarations to already sourced
+finite walls. Each declaration supplies the original prepared normal path and
+a separately selected tangential path. Admission requires the exact original
+normal path/sample, one material-card identity, identical source-state endpoints
+and the same density and specific-heat source lines. This preserves the original
+caloric constraint and refuses silent cross-material mixtures. In-plane isotropy
+and zero normal/tangent coupling are explicit constitutive declarations; they
+are never inferred from a scalar normal measurement.
+
+The normal and tangential source samples remain observable. The existing
+`prepare_time_with_wall_diffusion` consumes the attached material through the
+complete spatial FE wall owner, including all original molecular reservoirs and
+structural fields. Normal-only harmonic source responses refuse an attached
+spatial wall rather than dropping its material response. `ThermoviscousDg::new`
+checks the prepared owner's retained tangential coefficients against those
+source samples, so a same-FE normal-only or invented-material preparation cannot
+enter the source-bound duct connection. Material replacement requires a new
+source assembly; no existing accepted state or prepared coefficients mutate.
+
+This is fixed-equilibrium planar solid heat spreading, with the original common
+temperature and physical thickness. It does not add mean-temperature evolution,
+phase changes, curved extrusions or a measured instrument-realism claim.

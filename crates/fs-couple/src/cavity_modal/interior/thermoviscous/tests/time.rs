@@ -4,7 +4,7 @@ use crate::dg_port::DgPortLoad;
 use fs_duct::dg::{DgBoundary, DgDuct, DgMesh, PortId, MAX_DG_PROPAGATOR_DOFS};
 use fs_exec::CancelGate;
 
-fn time_dg_load(gas: &GasState, duration_s: f64, outlet: DgBoundary) -> DgPortLoad {
+pub(super) fn time_dg_load(gas: &GasState, duration_s: f64, outlet: DgBoundary) -> DgPortLoad {
     let duct = DgDuct::new(
         &fs_duct::Duct {
             segments: vec![Segment::Cylinder {
@@ -156,7 +156,7 @@ use fs_qty::{
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 
-fn wall_transport(rho: f64, cp: f64, k: f64) -> PreparedThermalTransport {
+pub(super) fn wall_transport(rho: f64, cp: f64, k: f64) -> PreparedThermalTransport {
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,

@@ -1505,3 +1505,30 @@ identification of the original physical trace coefficients and original weak
 mass/force equations, check the actual thermal-flux units, permute geometric
 node numbering, retain all molecular fields, test shear and thermal transfer,
 exercise one-sided/shared stationary constraints, and check refusal/retry.
+
+## Spatial conduction in original finite solid-wall fields
+
+`ThermoviscousFe::prepare_time_with_spatial_wall_fields` extends the original
+finite-wall time owner with explicitly declared `TangentialWallConductivity`.
+Each homogeneous patch is a planar extrusion of its actual boundary triangles:
+construction checks coplanarity and the common outward normal. The constitutive
+declaration is transverse isotropy, with independent positive normal and
+in-plane conductivities and zero normal/tangent cross term. The existing normal
+scalar is never assumed to supply the tangential coefficient.
+
+The original hierarchical P2 surface gradient owner and P1 depth mass assemble
+`T0*k_t*K_surface tensor M_depth`; normal conduction remains
+`T0*k_n*M_surface tensor K_depth`. All original surface/depth coefficients,
+consistent front cross mass, molecular fields and structural coordinates are
+retained. This changes no storage coordinate or mass matrix. Both conduction
+forms enter the same original resistance and trajectory-integrated solid heat
+channel, with the same held-input step and energy admission.
+
+Outer slab sides are naturally insulated. Separate regions have no inferred
+tangential bond. Backing and exact front-temperature constraints retain their
+original meanings. Actual finite thickness is required; curvature, multilayers,
+general anisotropic cross terms and evolving mean/material state are outside
+this path. The normal-only path retains its original asymptotic admission;
+spatial conduction uses the planar geometry admission instead. Complete mesh,
+clock, memory/work and cancellation bounds still apply. A stated source band
+alone establishes no spatial or waveform accuracy.

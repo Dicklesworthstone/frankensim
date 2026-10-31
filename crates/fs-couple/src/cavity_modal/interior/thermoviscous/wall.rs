@@ -80,3 +80,74 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
         Ok(self)
     }
 }
+
+
+/// Source paths for one explicitly transversely isotropic planar solid.
+/// `normal` must be the exact prepared path that produced the attached normal
+/// wall sample. `tangential` declares isotropy in the plane and zero coupling to
+/// the normal, using its OWN conductivity source. Both paths must select the
+/// same material card, state path, density and specific-heat law/constraint.
+pub struct MaterialTangentialWallRegion<'a> {
+    pub normal: &'a fs_material::thermal::transport::PreparedThermalTransport,
+    pub tangential: &'a fs_material::thermal::transport::PreparedThermalTransport,
+}
+
+impl<'c, S> ThermoviscousInterior<'c, S> {
+    /// Attach in-plane conductivity in complete original wall-region order.
+    /// This is an explicit material-symmetry declaration, not an inference from
+    /// a scalar normal measurement. Source identities are retained beside the
+    /// original normal samples. Failure leaves no partially attached owner.
+    ///
+    /// `prepare_time_with_wall_diffusion` now includes spatial solid conduction.
+    /// Harmonic normal-only response methods refuse this material attachment.
+    /// Actual coplanarity, outward normals and finite thickness are admitted by
+    /// the original causal field preparation; no curved extrusion is invented.
+    pub fn with_tangentially_isotropic_wall_transport(
+        mut self,
+        regions: &[MaterialTangentialWallRegion<'_>],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousSourceError> {
+        if cancelled() {
+            return Err(ThermoviscousError::Cancelled.into());
+        }
+        if regions.is_empty() || regions.len() != self.wall_sources.len()
+            || !self.wall_tangential_sources.is_empty()
+        {
+            return Err(invalid("complete first tangential wall source set required"));
+        }
+        let mut sources = Vec::with_capacity(regions.len());
+        for (binding, normal_sample) in regions.iter().zip(&self.wall_sources) {
+            if cancelled() {
+                return Err(ThermoviscousError::Cancelled.into());
+            }
+            if binding.normal.identity() != normal_sample.path_identity()
+                || binding.normal.material_card_identity() != binding.tangential.material_card_identity()
+                || binding.normal.query_endpoints() != binding.tangential.query_endpoints()
+                || binding.normal.source_lines()[..2] != binding.tangential.source_lines()[..2]
+            {
+                return Err(invalid(
+                    "normal and tangential transport require the same original card, state and caloric sources",
+                ));
+            }
+            let temperature = normal_sample.temperature_k();
+            let expected = binding.normal.at_temperature(temperature)
+                .map_err(|_| invalid("normal wall temperature outside original material path"))?;
+            let tangent = binding.tangential.at_temperature(temperature)
+                .map_err(|_| invalid("tangential wall temperature outside original material path"))?;
+            if expected != *normal_sample
+                || tangent.density_kg_m3().to_bits() != normal_sample.density_kg_m3().to_bits()
+                || tangent.specific_heat_j_kg_k().to_bits() != normal_sample.specific_heat_j_kg_k().to_bits()
+            {
+                return Err(invalid("spatial wall transport differs from its original thermal state"));
+            }
+            sources.push(tangent);
+        }
+        self.wall_tangential_sources = sources;
+        Ok(self)
+    }
+
+    /// Original in-plane source samples, empty on the original normal-only path.
+    pub fn wall_tangential_sources(&self) -> &[ThermalTransportSample] {
+        &self.wall_tangential_sources
+    }
+}

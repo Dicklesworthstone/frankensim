@@ -1,4 +1,4 @@
-//! Actual normal heat fields in the original finite solid slabs.
+//! Actual heat fields in the original finite solid slabs.
 //!
 //! Each slab has a uniform P1 mesh through its physical thickness, tensorized
 //! with its FULL original hierarchical P2 surface trace. The front coordinate
@@ -10,12 +10,16 @@
 //!
 //! C_vol*T0 integral(theta^2)/2 is stored in the SAME quadratic Hamiltonian.
 //! k*T0 integral((d theta/d normal)^2) is a separate trajectory-integrated loss.
-//! There is no second fluid boundary-layer loss, fitted thermal pole, lateral
-//! solid conduction, multilayer homogenization or changing mean temperature.
+//! Optional explicitly declared in-plane isotropic conduction retains these SAME
+//! fields on a planar extrusion. There is no second fluid boundary-layer loss,
+//! fitted thermal pole, multilayer homogenization or changing mean temperature.
 
 use super::*;
 use crate::acoustics::helmholtz::boundary_layer::thermal_wall::{ThermalBacking, ThermalWallDepth};
 use std::collections::BTreeSet;
+
+mod spatial;
+pub use spatial::TangentialWallConductivity;
 
 /// Explicit spatial resolution for the original finite wall regions.
 /// The declared band includes DC. It is an applicability check, not a promise
@@ -26,8 +30,9 @@ pub struct ThermoviscousWallDiscretization<'a> {
     /// No source region may be omitted. The complete state budget also applies.
     pub normal_elements: &'a [usize],
     /// Upper frequency of the declared normal-profile domain [Hz]. The clock
-    /// must sample it; full slab thickness must admit the normal approximation
-    /// down to DC. No penetration depth is substituted for physical thickness.
+    /// must sample it. On the normal-only path, full slab thickness must admit
+    /// the normal approximation down to DC. Spatial conduction instead admits
+    /// the actual planar extrusion. No penetration depth replaces thickness.
     pub maximum_frequency_hz: f64,
 }
 
@@ -61,6 +66,7 @@ pub(super) struct WallFields {
     pub layouts: Vec<ConductiveWallTimeLayout>,
     offsets: Vec<usize>,
     pub maximum_frequency_hz: Option<f64>,
+    tangential: Option<Vec<TangentialWallConductivity>>,
 }
 
 const MAX_NORMAL_ELEMENTS: usize = 128;
@@ -71,14 +77,19 @@ impl WallFields {
         model: &ThermoviscousFe<'_>,
         duration_s: f64,
         resolution: Option<ThermoviscousWallDiscretization<'_>>,
+        tangential: Option<&[TangentialWallConductivity]>,
         mut mixed: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Self, usize), ThermoviscousTimeError> {
         let regions = model.conductive_walls();
+        if let Some(transport) = tangential {
+            spatial::admit(model, transport, cancelled)?;
+        }
         let mut fields = Self {
             layouts: Vec::with_capacity(regions.len()),
             offsets: Vec::with_capacity(regions.len()),
             maximum_frequency_hz: None,
+            tangential: tangential.map(<[_]>::to_vec),
         };
         let Some(resolution) = resolution else {
             if regions.is_empty() {
@@ -114,6 +125,7 @@ impl WallFields {
                     "bounded positive wall normal-element count required",
                 ));
             }
+            if tangential.is_none() {
             // Reuse original material/geometry validation and the worst
             // high-frequency acoustic-length check. The DC limit additionally
             // penetrates the WHOLE physical thickness, never merely one cell.
@@ -133,6 +145,7 @@ impl WallFields {
                 return Err(invalid(
                     "complete finite wall violates normal-profile geometry at low frequency",
                 ));
+            }
             }
             let mut trace = BTreeSet::new();
             for &face in &region.faces {
@@ -246,6 +259,9 @@ impl WallFields {
                     }
                 }
             }
+        }
+        if let Some(transport) = &self.tangential {
+            spatial::assemble(self, model, transport, &mut conduction, mixed, cancelled)?;
         }
         if mass.iter().chain(&conduction).any(|v| !v.is_finite()) {
             return Err(invalid("nonfinite original solid diffusion assembly"));

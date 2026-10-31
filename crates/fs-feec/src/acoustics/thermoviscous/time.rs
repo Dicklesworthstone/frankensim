@@ -8,7 +8,7 @@
 //! original entry before the admitted fs-phs exact held-input owner is called.
 //!
 //! Fluid viscosity (shear plus bulk), fluid conduction, molecular heat exchange
-//! finite-wall normal conduction and original structural damping are integrated
+//! finite-wall conduction and original structural damping are integrated
 //! along that SAME trajectory.
 //! Pressure and structural-force work use their actual interval-integrated dual flows.
 //! No response curve, fitted decay or endpoint-loss approximation is involved.
@@ -32,7 +32,7 @@ use fs_phs::{PhsError, PortHamiltonian, PreparedStepError, QuadraticStorage};
 mod caloric;
 pub use caloric::ThermoviscousCaloricReservoir;
 mod wall;
-pub use wall::{ConductiveWallTimeLayout, ThermoviscousWallDiscretization};
+pub use wall::{ConductiveWallTimeLayout, TangentialWallConductivity, ThermoviscousWallDiscretization};
 mod interface;
 pub use interface::{
     ConformingThermoviscousInterface, ConformingThermoviscousTimePairStep,
@@ -151,7 +151,8 @@ pub struct ThermoviscousTimeWork {
     /// Heat exchange between the translational and molecular temperatures.
     /// This is independent of viscosity and of spatial thermal conduction.
     pub molecular_relaxation_heat_j: f64,
-    /// Original finite-solid normal Fourier conduction, along the same trajectory.
+    /// Original finite-solid Fourier conduction, along the same trajectory.
+    /// Includes declared in-plane conduction on the spatial wall path.
     pub solid_conductive_heat_j: f64,
 }
 impl ThermoviscousTimeWork {
@@ -245,6 +246,7 @@ impl<'c> ThermoviscousFe<'c> {
             frozen_cp_j_kg_k,
             reservoirs,
             None,
+            None,
             limits,
             cancelled,
         )
@@ -269,6 +271,7 @@ impl<'c> ThermoviscousFe<'c> {
             frozen_cp_j_kg_k,
             reservoirs,
             Some(walls),
+            None,
             limits,
             cancelled,
         )
@@ -282,6 +285,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         frozen_cp_j_kg_k: f64,
         reservoirs: &[ThermoviscousCaloricReservoir],
         wall_resolution: Option<ThermoviscousWallDiscretization<'_>>,
+        tangential: Option<&[TangentialWallConductivity]>,
         limits: ThermoviscousTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ThermoviscousTimeError> {
@@ -289,7 +293,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         let (caloric_end, reservoir_offsets) =
             caloric::layout(model, frozen_cp_j_kg_k, reservoirs)?;
         let (conductive_wall_fields, base) =
-            wall::WallFields::new(model, duration_s, wall_resolution, caloric_end, cancelled)?;
+            wall::WallFields::new(model, duration_s, wall_resolution, tangential, caloric_end, cancelled)?;
         let walls = model.pressure_start - 3 * model.velocity_count;
         let n = base + walls;
         let ports = model.loads.len() + walls;

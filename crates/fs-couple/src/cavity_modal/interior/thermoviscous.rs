@@ -17,7 +17,7 @@
 use fs_duct::{DuctError, compose::TwoPort};
 use fs_feec::acoustics::thermoviscous::time::{
     PreparedThermoviscousTime, ThermoviscousCaloricReservoir, ThermoviscousTimeError,
-    ThermoviscousTimeLimits, ThermoviscousWallDiscretization,
+    ThermoviscousTimeLimits, ThermoviscousWallDiscretization, TangentialWallConductivity,
 };
 use fs_feec::acoustics::thermoviscous::{
     ThermoviscousError, ThermoviscousFe, ThermoviscousField, ThermoviscousMedium,
@@ -163,6 +163,7 @@ pub struct ThermoviscousInterior<'c, S = GasState> {
     relaxation: Option<RelaxationState>,
     band_hz: [f64; 2],
     wall_sources: Vec<ThermalTransportSample>,
+    wall_tangential_sources: Vec<ThermalTransportSample>,
 }
 
 impl<'c> ThermoviscousInterior<'c> {
@@ -216,6 +217,7 @@ impl<'c> ThermoviscousInterior<'c> {
             relaxation: None,
             band_hz,
             wall_sources: Vec::new(),
+            wall_tangential_sources: Vec::new(),
         })
     }
 
@@ -270,6 +272,7 @@ impl<'c, S: ThermoviscousFluid + ThermalFluidTransport> ThermoviscousInterior<'c
             relaxation: None,
             band_hz,
             wall_sources: Vec::new(),
+            wall_tangential_sources: Vec::new(),
         })
     }
 }
@@ -317,7 +320,9 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
     ///
     /// Material conductivity, volumetric heat capacity, physical thickness and
     /// backside condition come from the original immutable source attachment.
-    /// The source band and its DC limit must admit local normal conduction.
+    /// Without an explicit tangential-material attachment, the source band and
+    /// its DC limit must admit local normal conduction. Attached in-plane
+    /// transport instead retains the full planar spatial solid heat equation.
     /// Half-spaces refuse: a finite thickness cannot be silently invented.
     /// Mesh/clock refinement remains necessary; sampling the band does not
     /// establish that a waveform, penetration depth or spatial field is resolved.
@@ -363,17 +368,25 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
                 .collect()
         });
         match normal_elements {
-            Some(elements) => Ok(self.fe.prepare_time_with_thermal_fields(
-                duration_s,
-                frozen_cp,
-                &reservoirs,
-                ThermoviscousWallDiscretization {
+            Some(elements) => {
+                let walls = ThermoviscousWallDiscretization {
                     normal_elements: elements,
                     maximum_frequency_hz: self.band_hz[1],
-                },
-                limits,
-                cancelled,
-            )?),
+                };
+                if self.wall_tangential_sources.is_empty() {
+                    Ok(self.fe.prepare_time_with_thermal_fields(
+                        duration_s, frozen_cp, &reservoirs, walls, limits, cancelled,
+                    )?)
+                } else {
+                    let transport: Vec<_> = self.wall_tangential_sources.iter()
+                        .map(|source| TangentialWallConductivity {
+                            isotropic_w_m_k: source.conductivity_w_m_k(),
+                        }).collect();
+                    Ok(self.fe.prepare_time_with_spatial_wall_fields(
+                        duration_s, frozen_cp, &reservoirs, walls, &transport, limits, cancelled,
+                    )?)
+                }
+            },
             None => Ok(self.fe.prepare_time_with_caloric_reservoirs(
                 duration_s,
                 frozen_cp,
@@ -391,6 +404,11 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
     ) -> Result<C64, ThermoviscousSourceError> {
         if cancelled() {
             return Err(invalid("resolved source-fluid evaluation cancelled"));
+        }
+        if !self.wall_tangential_sources.is_empty() {
+            return Err(invalid(
+                "spatial wall material requires full-field causal preparation; the normal-only harmonic owner cannot consume it",
+            ));
         }
         if !frequency_hz.is_finite()
             || frequency_hz < self.band_hz[0]

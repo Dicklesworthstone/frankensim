@@ -190,8 +190,15 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
             None => prepared.caloric_reservoirs().is_empty()
                 && prepared.frozen_cp_j_kg_k().to_bits() == source.inner().medium().cp_j_kg_k.to_bits(),
         };
+        let tangential_match = prepared.tangential_wall_conductivity().map_or_else(
+            || source.wall_tangential_sources().is_empty(),
+            |transport| transport.len() == source.wall_tangential_sources().len()
+                && transport.iter().zip(source.wall_tangential_sources()).all(|(a, b)|
+                    a.isotropic_w_m_k.to_bits() == b.conductivity_w_m_k().to_bits()),
+        );
         if !core::ptr::eq(source.inner(), prepared.inner())
             || !calorics_match
+            || !tangential_match
             || prepared.duration_s() * source.band_hz()[1] > 0.5
             || prepared.conductive_wall_layouts().len() != source.wall_sources().len()
             || prepared.maximum_wall_frequency_hz().is_some_and(|frequency|
