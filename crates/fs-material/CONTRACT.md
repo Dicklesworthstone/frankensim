@@ -1092,7 +1092,10 @@ source-backed engineering model evaluation, not condensation or a real-gas EOS.
 ### `visco` — viscoelastic damping tiers (bead ybc75)
 
 Four tiers, one runtime path. `RayleighDamping` (tier 0: αM + βK
-coefficients and the two-point fit); `FractionalZener` (fitting
+coefficients and the two-point fit, which must reproduce both finite damping
+pins with nonnegative coefficients or refuse; materially negative coefficients
+are never clipped into a different resonant response, and dimensionless
+frequency ratios preserve the fit under time-unit rescaling); `FractionalZener` (fitting
 canonical, 4 params, `Real`-generic so exact AD parameter tangents share
 the value's code path); `GeneralizedMaxwell` (runtime Prony series with
 the unconditionally stable exact-exponential recursion for

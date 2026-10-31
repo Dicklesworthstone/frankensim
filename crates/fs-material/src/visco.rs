@@ -165,30 +165,70 @@ impl RayleighDamping {
     }
 
     /// Coefficients matching prescribed ratios at two frequencies (the
-    /// classical two-point fit).
+    /// classical two-point fit). A passive fit must match BOTH pins: an
+    /// incompatible pair refuses instead of clipping a negative coefficient
+    /// and silently changing the requested resonance damping.
     ///
     /// # Errors
-    /// [`ViscoError::Parameters`] on non-distinct or non-positive pins.
+    /// [`ViscoError::Parameters`] on invalid pins, an incompatible passive
+    /// fit, or unrepresentable coefficients.
     pub fn from_two_points(
         omega1: f64,
         zeta1: f64,
         omega2: f64,
         zeta2: f64,
     ) -> Result<RayleighDamping, ViscoError> {
-        if !(omega1 > 0.0
+        if !(omega1.is_finite()
+            && omega2.is_finite()
+            && zeta1.is_finite()
+            && zeta2.is_finite()
+            && omega1 > 0.0
             && omega2 > 0.0
             && omega1.to_bits() != omega2.to_bits()
             && zeta1 >= 0.0
             && zeta2 >= 0.0)
         {
             return Err(ViscoError::Parameters {
-                what: "two-point Rayleigh fit needs distinct positive frequencies",
+                what: "two-point Rayleigh fit needs finite distinct positive frequencies and nonnegative damping",
             });
         }
-        // Closed form: β = 2(ζ2ω2 − ζ1ω1)/(ω2² − ω1²), α = 2ζ1ω1 − βω1².
-        let beta = 2.0 * (zeta2 * omega2 - zeta1 * omega1) / (omega2 * omega2 - omega1 * omega1);
-        let alpha = 2.0 * zeta1 * omega1 - beta * omega1 * omega1;
-        RayleighDamping::new(alpha.max(0.0), beta.max(0.0))
+        let (lo, zlo, hi, zhi) = if omega1 < omega2 {
+            (omega1, zeta1, omega2, zeta2)
+        } else {
+            (omega2, zeta2, omega1, zeta1)
+        };
+        // Solve for alpha/lo and beta*hi using r=lo/hi. No squared
+        // dimensional frequency appears, and (hi-lo)/hi retains the gap
+        // even when r rounds close to one.
+        let r = lo / hi;
+        let denominator = ((hi - lo) / hi) * (1.0 + r);
+        let mass_part = zlo - r * zhi;
+        let stiffness_part = zhi - r * zlo;
+        // Only roundoff at a pure-mass/pure-stiffness boundary is allowed.
+        // A materially negative coefficient cannot represent passive damping
+        // at both supplied pins and must not be replaced with zero.
+        let mass_roundoff = 8.0 * f64::EPSILON * zlo.max(r * zhi);
+        let stiffness_roundoff = 8.0 * f64::EPSILON * zhi.max(r * zlo);
+        if mass_part < -mass_roundoff || stiffness_part < -stiffness_roundoff {
+            return Err(ViscoError::Parameters {
+                what: "requested damping ratios have no nonnegative two-point Rayleigh fit",
+            });
+        }
+        let alpha = (2.0 * (mass_part.max(0.0) / denominator)) * lo;
+        let beta = (2.0 * (stiffness_part.max(0.0) / denominator)) / hi;
+        let model = RayleighDamping::new(alpha, beta)?;
+        // Check the original equations, including representability of a very
+        // small coefficient. A clipped roundoff term cannot erase a real pin.
+        for (omega, requested) in [(lo, zlo), (hi, zhi)] {
+            let actual = model.zeta_at(omega);
+            let allowance = 64.0 * f64::EPSILON * requested;
+            if !actual.is_finite() || (actual - requested).abs() > allowance {
+                return Err(ViscoError::Parameters {
+                    what: "two-point Rayleigh coefficients do not reproduce the requested damping",
+                });
+            }
+        }
+        Ok(model)
     }
 }
 
@@ -1635,6 +1675,74 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("FS-MAT-VISCO-PARAMETERS"));
+    }
+
+    #[test]
+    fn rayleigh_fit_preserves_both_resonances_and_pin_order() {
+        let reference = RayleighDamping::new(0.8, 2.0e-5).unwrap();
+        let (w1, w2) = (80.0, 1800.0);
+        let (z1, z2) = (reference.zeta_at(w1), reference.zeta_at(w2));
+        let fit = RayleighDamping::from_two_points(w1, z1, w2, z2).unwrap();
+        let reversed = RayleighDamping::from_two_points(w2, z2, w1, z1).unwrap();
+        assert_eq!(fit.alpha.to_bits(), reversed.alpha.to_bits());
+        assert_eq!(fit.beta.to_bits(), reversed.beta.to_bits());
+        for omega in [50.0, w1, 300.0, w2, 10000.0] {
+            assert!((fit.zeta_at(omega) / reference.zeta_at(omega) - 1.0).abs() < 2.0e-14);
+        }
+        // A mass-normalized oscillator's displacement at its natural
+        // frequency is |F|/(2*zeta*omega^2). Check the actual physical
+        // resonant compliance, not just signs of fitted coefficients.
+        for (omega, zeta) in [(w1, z1), (w2, z2)] {
+            let damping = fit.alpha + fit.beta * omega * omega;
+            let compliance = 1.0 / (omega * damping);
+            let expected = 1.0 / (2.0 * zeta * omega * omega);
+            assert!((compliance / expected - 1.0).abs() < 2.0e-14);
+        }
+    }
+
+    #[test]
+    fn rayleigh_fit_refuses_incompatible_passive_loss() {
+        // Both clipped fits used to succeed while missing one requested
+        // resonant damping by more than a factor of ten.
+        for (z1, z2) in [(0.1, 0.001), (0.001, 0.1), (0.0, 0.01), (0.01, 0.0)] {
+            assert!(RayleighDamping::from_two_points(100.0, z1, 1000.0, z2).is_err());
+            assert!(RayleighDamping::from_two_points(1000.0, z2, 100.0, z1).is_err());
+        }
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            assert!(RayleighDamping::from_two_points(invalid, 0.01, 1000.0, 0.02).is_err());
+            assert!(RayleighDamping::from_two_points(100.0, invalid, 1000.0, 0.02).is_err());
+            assert!(RayleighDamping::from_two_points(100.0, 0.01, invalid, 0.02).is_err());
+            assert!(RayleighDamping::from_two_points(100.0, 0.01, 1000.0, invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn rayleigh_fit_is_covariant_under_frequency_units() {
+        let reference = RayleighDamping::from_two_points(100.0, 0.01, 1000.0, 0.02).unwrap();
+        for scale in [1.0e-200, 1.0, 1.0e200] {
+            let fit = RayleighDamping::from_two_points(
+                100.0 * scale, 0.01, 1000.0 * scale, 0.02,
+            ).unwrap();
+            assert!((fit.alpha / scale / reference.alpha - 1.0).abs() < 2.0e-14);
+            assert!((fit.beta * scale / reference.beta - 1.0).abs() < 2.0e-14);
+            assert!((fit.zeta_at(100.0 * scale) - 0.01).abs() < 2.0e-16);
+            assert!((fit.zeta_at(1000.0 * scale) - 0.02).abs() < 4.0e-16);
+        }
+    }
+
+    #[test]
+    fn rayleigh_fit_retains_pure_mass_stiffness_and_lossless_limits() {
+        for reference in [
+            RayleighDamping::new(8.0, 0.0).unwrap(),
+            RayleighDamping::new(0.0, 0.125).unwrap(),
+            RayleighDamping::new(0.0, 0.0).unwrap(),
+        ] {
+            let fit = RayleighDamping::from_two_points(
+                2.0, reference.zeta_at(2.0), 16.0, reference.zeta_at(16.0),
+            ).unwrap();
+            assert_eq!(fit.alpha, reference.alpha);
+            assert_eq!(fit.beta, reference.beta);
+        }
     }
 
     #[test]
