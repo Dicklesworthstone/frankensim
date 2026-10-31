@@ -27,6 +27,9 @@ use fs_lbm::nsf3::{
 };
 use fs_material::gas::GasState;
 
+/// Original pressure/PCM observation of the complete resolved assembly.
+pub mod performance;
+
 /// Accepted interface and original fluid accounts. Complete accepted FE and
 /// duct states remain available through `load().system().last_frame()` without
 /// cloning every field merely to return a step receipt.

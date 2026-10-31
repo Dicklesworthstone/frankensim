@@ -157,6 +157,80 @@ jet, flute, tone-hole model or listening reference. Its coarse spatial mesh,
 uniform interface projection, time partition and declared source/observer bands
 require refinement. The input pulse is not asserted to be band-limited.
 
+## Resolved nonlinear flow as the source
+
+`dg::load::ThermoviscousDgLoad` exposes an unconnected planar FE opening as a
+flow-driven acoustic load. It eliminates the attached duct pressures through
+the complete FE cross-port matrix and keeps every original field and duct
+history. Its affine `p = H + Z*Q` response is the exact response of the admitted
+mean-port partition. The effective mobility includes every internal return;
+it is not just the external diagonal of the bare FE response. Other unconnected
+pressures and structural forces are held at zero by this load.
+
+`nsf_dg::thermoviscous::NsfThermoviscousDg` couples the original nonlinear
+Navier–Stokes–Fourier volume to that external opening. The flow zone and FE
+region must occupy distinct physical volumes. The existing characteristic
+pressure solve, source material, fluid trial and interface quadrature remain
+the owners of the source. The final original NSF trial, complete FE state and
+all finite duct states publish together after the pressure, projection-work,
+internal-work and cancellation checks. Returning waves from either duct can
+therefore affect the original nonlinear source through the shared field.
+
+Whole characteristic faces and explicit source/downstream aperture patches are
+supported. Drives are original boundary pressure/characteristic controls or
+original transverse reservoir states. This constructor does not silently
+convert an existing finite chamber or finite upstream acoustic attachment into
+prescribed data. Such compositions require their own joint attachment.
+
+This is still an acoustic projection about zero reference flow. The FE region
+does not receive mean mass, species or advected enthalpy. The complete NSF mass
+and total-energy accounts, streamed-mass projection difference and signed
+pressure/flow covariance remain separate observable quantities. Covariance is
+never supplied as invented heat to close the acoustic account.
+
+`nsf_dg::thermoviscous::performance::NsfThermoviscousDgPerformance` implements
+the existing `PressureRenderer`. It observes the actual selected attached
+duct's mean inlet pressure or computed microphone while advancing the entire
+source/field/duct assembly once per physical interval. `new_with_drives` binds
+the matching observer clock; `new_resampled_with_drives` uses the existing
+interval-mean observation clock without retiming the physics. A callback
+failure preserves the accepted physical/output prefix and poisons the stream.
+
+### Native source-to-microphone example
+
+```sh
+cargo run --release -p fs-couple --example nsf_thermoviscous_bore -- output.wav
+```
+
+The new example uses an explicit named near-ambient air mixture in a
+manufactured 8 × 8 × 2-cell nonlinear flow region with one interior constriction.
+The actual NSF material law determines its timestep from the supplied cell
+size. Eight original fluid substeps share each 48 kHz acoustic interval; the
+coupling checks the derived clock instead of changing it. The field keeps the
+same gas reference and original molecular source, and both ducts retain their
+original molecular and 12-pole viscothermal states.
+
+With cell size `dx`, the fluid occupies `[0,8dx] × [-8dx,0] × [0,2dx]` and
+the FE region occupies `[0,8dx] × [0,2dx] × [0,2dx]`. The common opening is
+the fluid's high-y face and FE port 2 at y=0. Left/right FE ports connect the
+20 mm closed cork-side passage and 50 mm radiating bore. No volume is counted
+in both source and acoustic owners. The circular duct interfaces still use
+one equal-area uniform mode and require their own spatial comparison.
+
+An authored pressure offset on the opposite fluid boundary rises to one pascal
+over 2 ms, remains there until 6 ms and releases by 8 ms. The field and duct
+pressures are solved responses to that physical boundary control. The existing
+computed microphone 0.1 m from the main outlet supplies 10 ms of fixed-scale
+PCM output. Console output retains original mass/energy differences and the
+acoustic/projection residuals. The explicit projection allowance is 5% of the
+sum of absolute exchanged works plus 1e-16 J; this exploratory budget is not
+an interface-transparency qualification.
+
+The constriction, wall conditions, bulk-viscosity ratio, geometry and controls
+are declared numerical choices. They are not a measured embouchure, free jet,
+flute, register-transition result or listening reference. The current flute
+and whistle descriptions are not automatically rerouted through this example.
+
 Native regression coverage includes original-owner replay, molecular and
 finite-wall evolution, downstream and finite cork-side feedback, the full
 cross-port solve, aggregate energy and all-owner rollback, binding admission

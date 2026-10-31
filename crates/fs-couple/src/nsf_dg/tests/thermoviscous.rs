@@ -1,6 +1,7 @@
 //! G0/G3 original-owner composition and rejection checks, not jet qualification.
 use super::*;
 use super::super::thermoviscous::NsfThermoviscousDg;
+use super::super::thermoviscous::performance::NsfThermoviscousDgPerformance;
 use crate::cavity_modal::interior::thermoviscous::{ThermoviscousInterior, source_medium};
 use crate::cavity_modal::interior::thermoviscous::dg::{ThermoviscousDg, ThermoviscousDgLimits};
 use crate::cavity_modal::interior::thermoviscous::dg::load::ThermoviscousDgLoad;
@@ -378,4 +379,135 @@ fn selected_resolved_tiles_feed_the_field_while_the_escape_remainder_keeps_its_w
         }
         assert!(escaping_flow > 1e-15, "the surrounding opening must carry separate flow");
     }
+}
+
+fn playback_field<'c>(mesh: &'c TetComplex, unit: &[[f64; 3]]) -> ThermoviscousInterior<'c> {
+    let gas = reference();
+    let dx = (3.0 * gas.specific_gas_constant * gas.temperature).sqrt() / f64::from(RATE);
+    field_source(mesh, unit, dx, gas)
+}
+
+fn playback_system<'a, 'c>(source: &'a ThermoviscousInterior<'c>, gate: &CancelGate)
+    -> NsfThermoviscousDg<'a, 'c, D3q27>
+{
+    let fluid = zone(GasSpec::dry_air_ussa1976(), *source.gas(), true, 1);
+    let area = fluid.law().dx_m.powi(2);
+    let load = ThermoviscousDgLoad::new(acoustic(source, area, 1.0 / f64::from(RATE),
+        DgBoundary::Closed), 2, gate).unwrap();
+    NsfThermoviscousDg::new(fluid, load, true, limits(1), gate).unwrap()
+}
+
+#[test]
+fn selected_duct_playback_matches_original_intervals_and_callback_bits() {
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let (mesh, unit) = kuhn_cube(1);
+    let source = playback_field(&mesh, &unit);
+    let controls: Vec<_> = (0..12).map(|sample| NsfDgDrive::Boundary(
+        NsfBoundaryDrive::PressureOffset(if sample < 6 { 2.0 } else { 0.0 }))).collect();
+    let make = |block| NsfThermoviscousDgPerformance::new_with_drives(
+        playback_system(&source, &gate), 0, ApertureObservation::Inlet, RATE,
+        controls.clone(), block, Arc::clone(&gate)).unwrap();
+    let mut whole = make(12);
+    let mut parts = make(5);
+    let mut direct = playback_system(&source, &gate);
+    let mut expected = [0.0; 12];
+    for (output, &drive) in expected.iter_mut().zip(&controls) {
+        direct.step_with_drive(drive, &gate).unwrap();
+        let frame = direct.load().system().last_frame().unwrap();
+        *output = frame.additional_ducts.iter().find(|duct| duct.port == 0)
+            .unwrap().mean_pressure_pa;
+    }
+    let mut a = [0.0; 12]; let mut b = [0.0; 12];
+    whole.block(&mut a).unwrap();
+    for chunk in b.chunks_mut(5) { parts.block(chunk).unwrap(); }
+    assert_eq!(a.map(f64::to_bits), expected.map(f64::to_bits));
+    assert_eq!(b.map(f64::to_bits), expected.map(f64::to_bits));
+    assert_eq!(snapshot!(whole.system()), snapshot!(parts.system()));
+    assert_eq!(snapshot!(whole.system()), snapshot!(&direct));
+    assert_eq!(whole.observation_port(), 0);
+    assert_eq!(whole.drive_history(), controls.as_slice());
+    assert_eq!(whole.samples_rendered(), 12);
+    assert_eq!(whole.last_frame().unwrap().step, 12);
+    assert_eq!(whole.remaining_samples(), 0);
+    assert!(whole.validate_sample_count(1).is_err());
+}
+
+#[test]
+fn selected_duct_output_clock_averages_original_intervals_without_retiming_physics() {
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let (mesh, unit) = kuhn_cube(1);
+    let source = playback_field(&mesh, &unit);
+    let controls = vec![NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(1.0)); 8];
+    let mut direct = playback_system(&source, &gate);
+    let original: Vec<_> = controls.iter().map(|&drive| {
+        direct.step_with_drive(drive, &gate).unwrap();
+        direct.load().system().last_frame().unwrap().additional_ducts[0].mean_pressure_pa
+    }).collect();
+    let mut renderer = NsfThermoviscousDgPerformance::new_resampled_with_drives(
+        playback_system(&source, &gate), 0, ApertureObservation::Inlet, RATE / 2,
+        controls, 4, 3, Arc::clone(&gate)).unwrap();
+    let mut output = [0.0; 4];
+    renderer.block(&mut output[..1]).unwrap();
+    renderer.block(&mut output[1..]).unwrap();
+    for (&actual, pair) in output.iter().zip(original.chunks_exact(2)) {
+        let expected = 0.5 * pair[0] + 0.5 * pair[1];
+        let scale = pair[0].abs() + pair[1].abs() + actual.abs();
+        assert!((actual - expected).abs() <= 64.0 * f64::EPSILON * scale.max(1e-20));
+    }
+    assert_eq!(snapshot!(renderer.system()), snapshot!(&direct));
+    assert_eq!(renderer.samples_rendered(), 4);
+    assert_eq!(renderer.system().accepted_steps(), 8);
+    assert_eq!(renderer.remaining_samples(), 0);
+}
+
+#[test]
+fn cancellation_refuses_cached_output_and_preserves_the_completed_prefix_and_all_owners() {
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let (mesh, unit) = kuhn_cube(1);
+    let source = playback_field(&mesh, &unit);
+    let mut renderer = NsfThermoviscousDgPerformance::new_resampled_with_drives(
+        playback_system(&source, &gate), 0, ApertureObservation::Inlet, RATE * 3,
+        vec![NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(1.0)); 2],
+        6, 3, Arc::clone(&gate)).unwrap();
+    let mut prefix = [0.0];
+    renderer.block(&mut prefix).unwrap();
+    let prefix_bits = prefix[0].to_bits();
+    let before = snapshot!(renderer.system());
+    assert_eq!(renderer.system().accepted_steps(), 1);
+    gate.request();
+    // Both requested outputs would reuse that already accepted interval.
+    let mut suffix = [123.0, 456.0];
+    assert!(renderer.block(&mut suffix).is_err());
+    assert_eq!(suffix, [123.0, 456.0]);
+    assert_eq!(prefix[0].to_bits(), prefix_bits);
+    assert_eq!(snapshot!(renderer.system()), before);
+    assert_eq!(renderer.samples_rendered(), 1);
+    assert_eq!(renderer.remaining_samples(), 5);
+    assert!(matches!(renderer.block(&mut suffix), Err(crate::render::RenderError::Poisoned)));
+}
+
+#[test]
+fn playback_admission_requires_an_attached_observation_and_complete_physical_controls() {
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let (mesh, unit) = kuhn_cube(1);
+    let source = playback_field(&mesh, &unit);
+    let valid = NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(1.0));
+    for (port, rate, controls) in [
+        (2, RATE, vec![valid]),
+        (0, RATE, Vec::new()),
+        (0, RATE, vec![NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(f64::NAN))]),
+        (0, RATE, vec![NsfDgDrive::UpstreamPressureRise(1.0)]),
+        (0, RATE / 2, vec![valid]),
+    ] {
+        assert!(NsfThermoviscousDgPerformance::new_with_drives(
+            playback_system(&source, &gate), port, ApertureObservation::Inlet, rate,
+            controls, 4, Arc::clone(&gate)).is_err());
+    }
+    assert!(NsfThermoviscousDgPerformance::new_resampled_with_drives(
+        playback_system(&source, &gate), 0, ApertureObservation::Inlet, RATE / 2,
+        vec![valid; 2], 4, 4, Arc::clone(&gate)).is_err());
+    let mut advanced = playback_system(&source, &gate);
+    advanced.step_with_drive(valid, &gate).unwrap();
+    assert!(NsfThermoviscousDgPerformance::new_with_drives(advanced, 0,
+        ApertureObservation::Inlet, RATE, vec![valid], 4, gate).is_err());
 }

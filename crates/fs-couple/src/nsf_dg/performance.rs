@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 /// Generic, source-bound resolved geometry and finite boundary history.
 pub mod file;
-mod clock;
+pub(super) mod clock;
 use clock::IntervalClock;
 mod reservoir;
 pub use reservoir::ReservoirObservation;
