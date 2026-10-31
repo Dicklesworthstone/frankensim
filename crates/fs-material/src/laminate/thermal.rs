@@ -19,6 +19,8 @@ use crate::state_point::{
 use fs_math::det;
 use std::sync::Arc;
 
+/// Thermal loading and recovery with explicitly admitted material history.
+pub mod history;
 /// Source-bound elastic snapshots at one admitted temperature per layer.
 pub mod source;
 

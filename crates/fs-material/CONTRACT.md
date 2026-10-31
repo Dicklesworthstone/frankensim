@@ -94,6 +94,30 @@ history, heat/work feedback, or solved-strain calibration admission.
 formulas, nonlinear CTE integration, fixed mass, heating/cooling, claim pinning,
 directional response and source/domain/cancellation refusals.
 
+### Thermal-strain histories of compatible viscoelastic laminates
+
+`laminate::thermal::history::LaminateThermalHistory` retains original full-3D
+TensorProny histories at two thickness points per layer. It admits one common
+plane-stress strain extension shared by the equilibrium tensor, every Maxwell
+branch and optional Kelvin viscosity. Fixed-Poisson isotropic spectra and
+compatible anisotropic spectra are supported; differing relaxation maps refuse
+explicitly. No independently condensed branch law or frequency-reference
+stiffness is substituted for the original material memory.
+
+Prescribed membrane/curvature and integrated layer free-strain profiles advance
+as exact affine ramps through the native history owner. Mean stress separates
+actual mechanical work from the eigenstrain-work port; equilibrium/branch
+storage and independently integrated nonnegative dissipation remain distinct.
+Layer face stresses are recovered from the exact affine field. Complete-state
+proposal/commit semantics preserve accepted history on cancellation, source
+domain exit or a refused Kelvin jump. Geometry and reference inertia stay fixed.
+
+`tests/laminate_thermal_history.rs` checks restrained ramps and holds, moving
+thermal/mechanical work, compatible expansion, bimetal residual memory, rotated
+anisotropic shear, unsupported spectra and transactional failures. Tensors and
+relaxation times are held fixed; varying-temperature relaxation parameters,
+mechanical equilibrium and reciprocal thermal evolution are separate owners.
+
 ## Ionized-gas DC transport from actual populations
 
 `ionized_gas::IonizedGasConductivity` consumes the exact source-bound

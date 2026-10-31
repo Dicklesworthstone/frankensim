@@ -304,6 +304,10 @@ impl TensorProny {
 pub struct TensorPronyStep {
     /// Endpoint Cauchy stress in tensor-shear Voigt order [Pa].
     pub stress: Voigt,
+    /// Exact interval-mean stress for the prescribed linear strain ramp [Pa].
+    /// For dt=0 this is the jump-path mean; it splits work against independent
+    /// total-strain and eigenstrain increments without an endpoint trapezoid.
+    pub mean_stress: Voigt,
     /// Endpoint total recoverable energy density.
     pub stored_energy: f64,
     /// External stress : strain-increment work on this step (can be negative).
@@ -327,6 +331,10 @@ impl TensorPronyHistory {
     pub fn stress(&self) -> Voigt { tensor(&self.stress) }
     /// Current recoverable energy density [J/m^3].
     pub fn stored_energy(&self) -> f64 { self.stored }
+    /// Recoverable Maxwell-branch energy density, excluding equilibrium storage.
+    pub fn branch_stored_energy(&self) -> f64 {
+        self.q.iter().fold(0.0, |sum,q| sum + 0.5*dot(q,q))
+    }
     /// Total supplied mechanical work density [J/m^3].
     pub fn work(&self) -> f64 { self.work }
     /// Total generated heat density [J/m^3].
@@ -349,6 +357,8 @@ impl TensorPronyHistory {
         let old_eq = apply(eq,&self.strain); let delta_eq = apply(eq,&delta);
         let next_eq = apply(eq,&next_strain);
         let mut stress = [0.0;6]; transpose_add(eq,&next_eq,&mut stress);
+        let mut mean_stress = [0.0;6];
+        transpose_add(eq,&core::array::from_fn(|i|old_eq[i]+0.5*delta_eq[i]),&mut mean_stress);
         let mut stored = 0.5*dot(&next_eq,&next_eq);
         let mut work = (0..6).fold(0.0, |sum,i| sum+(old_eq[i]+0.5*delta_eq[i])*delta_eq[i]);
         let mut heat = 0.0;
@@ -362,11 +372,13 @@ impl TensorPronyHistory {
             let gram_rows = branch.resolved_gram_rows(factor);
             let d = apply(&gram_rows, &delta);
             let ramp = crate::visco::PronyRamp::new(dt_s / branch.tau_s);
+            let mut mean_q = [0.0;6];
             for i in 0..6 {
                 let (next, mean, loss) = ramp.apply(q[i], d[i]);
-                q[i]=next; work += mean*d[i]; heat += loss;
+                q[i]=next; mean_q[i]=mean; work += mean*d[i]; heat += loss;
             }
             stored += 0.5*dot(q,q); transpose_add(&gram_rows,q,&mut stress);
+            transpose_add(&gram_rows,&mean_q,&mut mean_stress);
         }
         if let Some(kv) = self.model.kv_pa_s().filter(|c| c.iter().flatten().any(|v| *v != 0.0)) {
             if dt_s == 0.0 {
@@ -383,6 +395,7 @@ impl TensorPronyHistory {
                 let mut kelvin_heat = 0.0;
                 for i in 0..6 {
                     stress[i] += viscous[i];
+                    mean_stress[i] += viscous[i];
                     let channel = (0..6).fold(0.0,|s,k|s+factor[k][i]*rate[k]);
                     kelvin_heat += (dt_s*channel)*channel;
                 }
@@ -392,12 +405,13 @@ impl TensorPronyHistory {
         }
         let residual = work-(stored-self.stored)-heat;
         let total_work=self.work+work; let total_heat=self.heat+heat;
-        if !finite(&stress) || ![stored,work,heat,residual,total_work,total_heat].iter().all(|v|v.is_finite())
+        if !finite(&stress) || !finite(&mean_stress)
+            || ![stored,work,heat,residual,total_work,total_heat].iter().all(|v|v.is_finite())
             || q.iter().any(|v|!finite(v)) || heat < 0.0 {
             return Err(invalid("nonfinite constitutive response or energy"));
         }
         poll(&mut cancelled)?;
-        let report=TensorPronyStep {stress:tensor(&stress),stored_energy:stored,
+        let report=TensorPronyStep {stress:tensor(&stress),mean_stress:tensor(&mean_stress),stored_energy:stored,
             work,dissipated:heat,balance_residual:residual};
         self.strain=next_strain; self.stress=stress; self.q=q;
         self.stored=stored; self.work=total_work; self.heat=total_heat;
