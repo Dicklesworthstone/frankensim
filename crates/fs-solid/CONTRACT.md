@@ -1,5 +1,35 @@
 # fs-solid CONTRACT
 
+## Conservative gravity on the current finite-strain configuration
+
+`hyper3::gravity` integrates a stationary world-field potential, acceleration
+and analytic spatial gradient at four current P1 tetrahedral quadrature points.
+`PreparedHyperTetProblem::gravity_load` retains the original reference geometry;
+the element-ordered densities are the same fixed reference densities consumed
+by native `reference_mass_matrix`. Current volume never creates or removes mass.
+Force, external-force tangent and potential use the same degree-two quadrature.
+Uniform and affine acceleration reproduce the full consistent reference-mass
+projection, including prescribed coordinates and material interfaces.
+
+`HyperTetProblem::solve_with_gravity` uses that owner at every Newton and trial
+configuration, subtracts its analytic tangent from internal stiffness, includes
+its potential in conservative globalization, and recovers reactions with all
+supported weight. The existing load factor ramps gravity. The combined pressure
+entry preserves current-area pressure and its conservative/nonsymmetric split.
+If a large absolute gravity datum obscures a small potential increment, an
+actual residual decrease is required; equilibrium tolerance is not relaxed.
+
+Callbacks must supply derivatives of one stationary scalar potential. Finite
+values and gradient symmetry are checked; derivative consistency remains the
+field owner's contract. Domain exits refuse or backtrack, never clamp. This is
+an external field, not self-gravity, moving-source dynamics or a new material
+law. Smooth nonlinear fields require spatial refinement; no quadrature error
+certificate, singular-source resolution or mesh-independent result is inferred.
+Focused G0/G1/G3 regressions in `tests/hyper3_gravity.rs` exercise heterogeneous
+native mass, finite-difference derivatives, rotated geometry, analytic finite
+stretch with pressure and support reactions, potential-datum invariance, and a
+three-rung nonlinear quadrature ladder. These are synthetic numerical checks.
+
 ## Fatigue on source-bound inertial J2 motion
 
 `plastic3::dynamics::fatigue::J2DynamicFatigueRun` owns accepted physical time,

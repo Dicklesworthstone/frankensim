@@ -1,5 +1,22 @@
 # CONTRACT: fs-couple
 
+## Shared conservative gravity on deforming solids
+
+`solid_gravity::bind_field` binds the original `fs-mbd::gravity::PointGravityField`
+and an explicit inertial frame directly to the original hyper3 gravity callback.
+The field owns specific potential, acceleration and its analytic spatial
+derivative. The solid evaluates them at current quadrature positions and owns
+reference material mass, consistent loads, external-force tangents, equilibrium
+and support reactions. The adapter allocates nothing and introduces no second
+gravity, material, mass or solver owner. Field-domain failures propagate and
+cancellation retains its native error. World coordinates must agree explicitly;
+moving-source work, rotating-frame forces and self-gravity are not inferred.
+
+`tests/solid_gravity.rs` exercises the shared central field through current solid
+force/potential/tangent differences and the shared uniform field through native
+static reactions and stretch-invariant reference weight. These are authored
+analytic/numerical checks, not measured material validation.
+
 ## Finite water mass, phase inventory and thermal cavitation
 
 `cavitation::water_cell::EquilibriumWaterCell` evolves total water mass and

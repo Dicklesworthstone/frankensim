@@ -111,6 +111,40 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
         Ok(tangent)
     }
 
+    /// Conservative gravity on current quadrature positions, retaining the
+    /// original reference geometry and element mass inventory.
+    ///
+    /// The density field is the same one supplied to the native reference mass
+    /// matrix. No deformed-volume mass update or nodal density average occurs.
+    /// The callback supplies the derivatives of one stationary specific potential.
+    ///
+    /// # Errors
+    /// Invalid density/displacement/field, overflow, or cancellation.
+    pub fn gravity_load(
+        &self,
+        reference_density_kg_m3: &[f64],
+        displacement_m: &[f64],
+        field: &super::gravity::GravityField3<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<super::gravity::TetGravityLoad3, HyperTetError> {
+        let weights =
+            super::gravity::reference_weights(&self.elements, reference_density_kg_m3, cx)?;
+        let result = super::gravity::evaluate(
+            self.problem.nodes_m,
+            &self.elements,
+            &weights,
+            displacement_m,
+            field,
+            true,
+            cx,
+        )?;
+        Ok(super::gravity::TetGravityLoad3 {
+            force_n: result.force_n,
+            force_tangent_n_m: result.tangent.expect("requested gravity tangent"),
+            potential_energy_j: result.potential_energy_j,
+        })
+    }
+
     /// Assemble new held dead loads using the admitted reference volumes.
     ///
     /// Loads are validated on EVERY call and never retained in this object.

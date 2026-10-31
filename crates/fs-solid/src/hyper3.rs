@@ -25,6 +25,10 @@
 //! and their analytic tangent. Uniform pressure has conservative potential
 //! `p (V_current - V_reference)`; face fields use residual globalization without
 //! assigning a potential to their generally path-dependent work.
+//! [`HyperTetProblem::solve_with_gravity`] instead samples an external
+//! conservative body field on current volume quadrature positions while
+//! retaining reference mass. Its analytic force derivative and potential
+//! enter this same Newton and globalization owner, including with pressure.
 //!
 //! # Newton globalization
 //!
@@ -75,6 +79,9 @@ use crate::linear3::TetAssemblyBudget;
 
 /// Current-area follower pressure for the native finite-strain geometry.
 pub mod pressure;
+
+/// Conservative body gravity sampled on the current material configuration.
+pub mod gravity;
 
 /// Immutable reference preparation for repeated finite-deformation evaluation.
 pub mod prepared;
@@ -731,7 +738,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
     /// # Errors
     /// See [`HyperTetError`].
     pub fn solve(&self, cx: &Cx<'_>) -> Result<HyperTetSolution, HyperTetError> {
-        self.solve_loaded(None, cx)
+        self.solve_loaded(None, None, cx)
     }
 
     /// Solve dead loads together with uniform current-area follower pressure.
@@ -764,6 +771,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         }
         self.solve_loaded(
             (pressure_pa != 0.0).then_some((surface, pressure::TetPressure::Uniform(pressure_pa))),
+            None,
             cx,
         )
     }
@@ -798,7 +806,56 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         }
         let pressure = pressure::TetPressure::PerFace(pressures_pa);
         let unloaded = surface.validate_pressure(pressure, cx)?;
-        self.solve_loaded((!unloaded).then_some((surface, pressure)), cx)
+        self.solve_loaded((!unloaded).then_some((surface, pressure)), None, cx)
+    }
+
+    /// Solve dead loads and a stationary conservative gravity field.
+    ///
+    /// Every Newton and line-search trial samples its CURRENT quadrature
+    /// positions. Force, analytic external tangent, potential and reactions use
+    /// the same immutable reference densities as [`Self::reference_mass_matrix`].
+    /// Gravity ramps with the native load factor. Four-point P1 integration is
+    /// exact for affine acceleration; nonlinear fields need mesh refinement.
+    ///
+    /// # Errors
+    /// Invalid densities/field, field-domain exit, or native equilibrium errors.
+    pub fn solve_with_gravity(
+        &self,
+        reference_density_kg_m3: &[f64],
+        field: &gravity::GravityField3<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
+        self.solve_loaded(None, Some((reference_density_kg_m3, field)), cx)
+    }
+
+    /// Combine conservative gravity with the existing current-area pressure.
+    ///
+    /// A face pressure field keeps its nonsymmetric tangent and residual
+    /// globalization. Uniform pressure and gravity share conservative Armijo
+    /// work increments. Neither load is converted into a frozen dead force.
+    ///
+    /// # Errors
+    /// Invalid density/field/pressure binding, domain exit, or native solve errors.
+    pub fn solve_with_gravity_and_pressure(
+        &self,
+        reference_density_kg_m3: &[f64],
+        field: &gravity::GravityField3<'_>,
+        surface: &pressure::ClosedTetPressureSurface,
+        applied_pressure: pressure::TetPressure<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
+        checkpoint(cx)?;
+        if !surface.matches_reference(self.nodes_m, self.tetrahedra) {
+            return Err(HyperTetError::InvalidInput {
+                what: "the exact reference pressure surface is required".into(),
+            });
+        }
+        let unloaded = surface.validate_pressure(applied_pressure, cx)?;
+        self.solve_loaded(
+            (!unloaded).then_some((surface, applied_pressure)),
+            Some((reference_density_kg_m3, field)),
+            cx,
+        )
     }
 
     #[allow(clippy::too_many_lines)] // one load-step / Newton / line-search owner
@@ -808,10 +865,14 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
             &pressure::ClosedTetPressureSurface,
             pressure::TetPressure<'_>,
         )>,
+        gravity: Option<(&[f64], &gravity::GravityField3<'_>)>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
         checkpoint(cx)?;
         let elements = self.validate()?;
+        let gravity_weights = gravity
+            .map(|(density, _)| gravity::reference_weights(&elements, density, cx))
+            .transpose()?;
         let n = self.nodes_m.len();
         let dofs = 3 * n;
         let mut is_prescribed = vec![false; dofs];
@@ -862,9 +923,10 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
             // Accepted and trial states share one current-area load owner.
             // Retain its volume for direct pressure-work increments without
             // rebuilding the same current geometry for a separate volume call.
-            let loaded = |displacement: &[f64]| -> Result<(Vec<f64>, f64), HyperTetError> {
+            let loaded = |displacement: &[f64]| -> Result<(Vec<f64>, f64, f64), HyperTetError> {
                 let mut force = f_dead.clone();
                 let mut volume = 0.0;
+                let mut gravity_potential = 0.0;
                 if let Some((surface, value)) = applied_pressure {
                     let (current_force, current_volume) =
                         surface.force_and_volume(displacement, value, cx)?;
@@ -873,15 +935,33 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                     }
                     volume = current_volume;
                 }
-                if !volume.is_finite() || force.iter().any(|value| !value.is_finite()) {
+                if let Some((_, field)) = gravity {
+                    let sampled = gravity::evaluate(
+                        self.nodes_m,
+                        &elements,
+                        gravity_weights.as_deref().expect("prepared gravity masses"),
+                        displacement,
+                        field,
+                        false,
+                        cx,
+                    )?;
+                    for (total, current) in force.iter_mut().zip(sampled.force_n) {
+                        *total = load.mul_add(current, *total);
+                    }
+                    gravity_potential = sampled.potential_energy_j;
+                }
+                if !volume.is_finite()
+                    || !gravity_potential.is_finite()
+                    || force.iter().any(|value| !value.is_finite())
+                {
                     return Err(HyperTetError::InvalidInput {
-                        what: "combined load or current pressure volume is not representable"
+                        what: "combined load, gravity potential or current pressure volume is not representable"
                             .into(),
                     });
                 }
-                Ok((force, volume))
+                Ok((force, volume, gravity_potential))
             };
-            let (mut f_ext, mut current_volume) = loaded(&u)?;
+            let (mut f_ext, mut current_volume, mut current_gravity_potential) = loaded(&u)?;
             let target: Vec<(usize, f64)> = self
                 .prescribed_m
                 .iter()
@@ -907,14 +987,33 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 // The diagonal times displacement provides a force scale even
                 // at stress-free states where internal force vanishes.
                 let mut full = self.tangent(&elements, &u, cx)?.map_err(refused)?;
-                if let Some((surface, value)) = applied_pressure {
-                    let external_tangent = surface.force_tangent(&u, value, cx)?;
+                let pressure_tangent = applied_pressure
+                    .map(|(surface, value)| surface.force_tangent(&u, value, cx))
+                    .transpose()?;
+                let gravity_tangent = if let Some((_, field)) = gravity {
+                    gravity::evaluate(
+                        self.nodes_m,
+                        &elements,
+                        gravity_weights.as_deref().expect("prepared gravity masses"),
+                        &u,
+                        field,
+                        true,
+                        cx,
+                    )?
+                    .tangent
+                } else {
+                    None
+                };
+                if pressure_tangent.is_some() || gravity_tangent.is_some() {
                     let mut combined = Coo::new(dofs, dofs);
                     for row in 0..dofs {
                         if row % 4096 == 0 {
                             checkpoint(cx)?;
                         }
-                        for (matrix, sign) in [(&full, 1.0), (&external_tangent, -1.0)] {
+                        for (matrix, sign) in std::iter::once((&full, 1.0))
+                            .chain(pressure_tangent.iter().map(|matrix| (matrix, -1.0)))
+                            .chain(gravity_tangent.iter().map(|matrix| (matrix, -load)))
+                        {
                             let (columns, values) = matrix.row(row);
                             for (&column, &coefficient) in columns.iter().zip(values) {
                                 combined.push(row, column, sign * coefficient);
@@ -929,8 +1028,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                     }
                     if full.row(row).1.iter().any(|value| !value.is_finite()) {
                         return Err(HyperTetError::InvalidInput {
-                            what: "solid minus follower-pressure tangent is not representable"
-                                .into(),
+                            what: "solid minus external-load tangent is not representable".into(),
                         });
                     }
                 }
@@ -1002,15 +1100,18 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                         && evaluated.energy.is_finite()
                         && evaluated.internal.iter().all(|value| value.is_finite())
                     {
-                        let (trial_ext, trial_volume) = match loaded(&trial) {
-                            Ok(value) => value,
-                            Err(HyperTetError::Cancelled) => return Err(HyperTetError::Cancelled),
-                            Err(_) => {
-                                alpha *= 0.5;
-                                record.backtracks += 1;
-                                continue;
-                            }
-                        };
+                        let (trial_ext, trial_volume, trial_gravity_potential) =
+                            match loaded(&trial) {
+                                Ok(value) => value,
+                                Err(HyperTetError::Cancelled) => {
+                                    return Err(HyperTetError::Cancelled);
+                                }
+                                Err(_) => {
+                                    alpha *= 0.5;
+                                    record.backtracks += 1;
+                                    continue;
+                                }
+                            };
                         let acceptable = if pending_any {
                             true
                         } else if !nonsymmetric && slope < 0.0 {
@@ -1029,15 +1130,42 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                                 }
                                 _ => 0.0,
                             };
-                            let change = energy_change - dead_work + pressure_change;
+                            let gravity_change =
+                                load * (trial_gravity_potential - current_gravity_potential);
+                            let change =
+                                energy_change - dead_work + pressure_change + gravity_change;
                             let roundoff = 1e-12
                                 * state
                                     .energy
                                     .abs()
                                     .max(evaluated.energy.abs())
                                     .max(dead_work.abs())
-                                    .max(pressure_change.abs());
-                            change.is_finite() && change <= 1e-4 * alpha * slope + roundoff
+                                    .max(pressure_change.abs())
+                                    .max(gravity_change.abs());
+                            // A field may use a large absolute potential datum
+                            // (e.g. zero at infinity). If endpoint subtraction
+                            // loses the step's energy change, require an actual
+                            // residual decrease rather than loosening equilibrium.
+                            let gravity_roundoff = 64.0
+                                * f64::EPSILON
+                                * load
+                                * current_gravity_potential
+                                    .abs()
+                                    .max(trial_gravity_potential.abs());
+                            let armijo_bound = 1e-4 * alpha * slope + roundoff;
+                            // Elastic and gravity work can each be large while
+                            // their NET decrement is tiny. The relevant scale
+                            // is distance to the Armijo decision boundary, not
+                            // the sum of the cancelling component magnitudes.
+                            if gravity_roundoff > (change - armijo_bound).abs() {
+                                let trial_residual: Vec<f64> = free
+                                    .iter()
+                                    .map(|&d| evaluated.internal[d] - trial_ext[d])
+                                    .collect();
+                                norm(&trial_residual) < (1.0 - 1e-4 * alpha) * residual_norm
+                            } else {
+                                change.is_finite() && change <= armijo_bound
+                            }
                         } else {
                             let trial_residual: Vec<f64> = free
                                 .iter()
@@ -1051,14 +1179,22 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                             norm(&trial_residual) < target
                         };
                         if acceptable {
-                            accepted = Some((trial, evaluated, trial_ext, trial_volume));
+                            accepted = Some((
+                                trial,
+                                evaluated,
+                                trial_ext,
+                                trial_volume,
+                                trial_gravity_potential,
+                            ));
                             break;
                         }
                     }
                     alpha *= 0.5;
                     record.backtracks += 1;
                 }
-                let Some((trial, evaluated, trial_ext, trial_volume)) = accepted else {
+                let Some((trial, evaluated, trial_ext, trial_volume, trial_gravity_potential)) =
+                    accepted
+                else {
                     return Err(HyperTetError::NewtonStalled {
                         load_factor: load,
                         history: record.residual_history,
@@ -1068,6 +1204,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 state = evaluated;
                 f_ext = trial_ext;
                 current_volume = trial_volume;
+                current_gravity_potential = trial_gravity_potential;
             }
             if !converged {
                 return Err(HyperTetError::NewtonStalled {
@@ -1080,6 +1217,20 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         let mut f_ext = self.external(&elements, 1.0);
         if let Some((surface, value)) = pressure {
             for (total, current) in f_ext.iter_mut().zip(surface.force_n(&u, value, cx)?) {
+                *total += current;
+            }
+        }
+        if let Some((_, field)) = gravity {
+            let sampled = gravity::evaluate(
+                self.nodes_m,
+                &elements,
+                gravity_weights.as_deref().expect("prepared gravity masses"),
+                &u,
+                field,
+                false,
+                cx,
+            )?;
+            for (total, current) in f_ext.iter_mut().zip(sampled.force_n) {
                 *total += current;
             }
         }

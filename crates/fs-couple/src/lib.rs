@@ -122,6 +122,8 @@ pub mod shock_loading;
 pub mod speaker;
 /// Shared enthalpy and material fields driving native three-dimensional solid equilibrium.
 pub mod solid_enthalpy;
+/// Shared conservative gravity and its analytic derivatives on deforming solids.
+pub mod solid_gravity;
 /// Original stationary operating points on the shared Newton--Krylov owner.
 pub mod stationary_equilibrium;
 pub mod stribeck_friction;
