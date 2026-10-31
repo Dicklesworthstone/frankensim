@@ -214,9 +214,62 @@ pub(super) fn deposit<const N: usize>(
             return Err(VolumeTransportError::BeamPower { lane });
         }
     }
+    let ray = if (!indexed && extinction.iter().all(|k| *k == 0.0))
+        || scattering.map_or(medium.is_vacuum(), ScatteringGrid::is_vacuum)
+    {
+        (ray.0, ray.1, 0.0)
+    } else {
+        ray
+    };
+    deposit_prepared(
+        &mut || checkpoint(cx),
+        medium,
+        ray,
+        wavelengths_nm,
+        incident_power_w,
+        max_deposition_cells,
+        (
+            scattering.map_or(medium.identity, ScatteringGrid::content_identity),
+            medium.wavelength_bounds_nm(),
+        ),
+        |cell| {
+            if indexed {
+                let key = key_at_cell(cell)?;
+                if key != coefficient_key {
+                    (absorption, scatter, extinction) = coefficients_at_cell(cell)?;
+                    coefficient_key = key;
+                }
+            }
+            Ok((absorption, scatter, extinction))
+        },
+    )
+}
+
+/// Native exact spatial beam integration for either uniform or borrowed cell
+/// coefficients. The original DDA and stable optical-depth/power arithmetic
+/// are the sole implementation for both owners.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(super) fn deposit_prepared<const N: usize>(
+    check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    medium: &AbsorbingGrid<'_>,
+    ray: (Point3, Vec3, f64),
+    wavelengths_nm: &[f64; N],
+    incident_power_w: &[f64; N],
+    max_deposition_cells: usize,
+    metadata: (ContentHash, (f64, f64)),
+    mut coefficients: impl FnMut(usize) -> Result<([f64; N], [f64; N], [f64; N]), VolumeTransportError>,
+) -> Result<BeamPowerDeposition<N>, VolumeTransportError> {
+    check()?;
+    validate_ray(ray.0, ray.1, ray.2)?;
+    for (lane, power) in incident_power_w.iter().enumerate() {
+        if !power.is_finite() || *power < 0.0 {
+            return Err(VolumeTransportError::BeamPower { lane });
+        }
+    }
+    let (identity, bounds) = metadata;
     let mut result = BeamPowerDeposition {
-        medium_identity: scattering.map_or(medium.identity, ScatteringGrid::content_identity),
-        wavelength_bounds_nm: medium.wavelength_bounds_nm(),
+        medium_identity: identity,
+        wavelength_bounds_nm: bounds,
         wavelengths_nm: *wavelengths_nm,
         incident_power_w: *incident_power_w,
         transmitted_power_w: *incident_power_w,
@@ -224,10 +277,7 @@ pub(super) fn deposit<const N: usize>(
         scattered_power_w: [0.0; N],
         cells: Vec::new(),
     };
-    if incident_power_w.iter().all(|p| *p == 0.0)
-        || (!indexed && extinction.iter().all(|k| *k == 0.0))
-        || scattering.map_or(medium.is_vacuum(), ScatteringGrid::is_vacuum)
-    {
+    if incident_power_w.iter().all(|p| *p == 0.0) {
         return Ok(result);
     }
     let Some(mut cells) = CellRay::clip(&medium.grid, ray.0, ray.1, ray.2, medium.max_steps)?
@@ -236,18 +286,12 @@ pub(super) fn deposit<const N: usize>(
     };
     let mut absorbed_correction = [0.0; N];
     let mut scattered_correction = [0.0; N];
-    while let Some(cell) = cells.next(cx)? {
+    while let Some(cell) = cells.next_with_checkpoint(check)? {
         let rho = medium.grid.data[cell.cell];
         if rho == 0.0 || cell.length_m == 0.0 {
             continue;
         }
-        if indexed {
-            let key = key_at_cell(cell.cell)?;
-            if key != coefficient_key {
-                (absorption, scatter, extinction) = coefficients_at_cell(cell.cell)?;
-                coefficient_key = key;
-            }
-        }
+        let (absorption, scatter, extinction) = coefficients(cell.cell)?;
         let mut deposit = CellBeamPower {
             cell_index: cell.cell,
             absorbed_power_w: [0.0; N],
@@ -307,7 +351,7 @@ pub(super) fn deposit<const N: usize>(
         }
         result.cells.push(deposit);
     }
-    checkpoint(cx)?;
+    check()?;
     Ok(result)
 }
 

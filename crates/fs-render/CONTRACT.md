@@ -1756,6 +1756,29 @@ tails, source replay and bounded refusal. Native thermal integration tests
 cover actual enthalpy/temperature rise, many-to-one uncertainty admission,
 pure scattering without heat, accepted-time error propagation and rollback.
 
+### Cell-dependent absorption, scattering and phase
+
+`scattering::CellScatteringGrid` borrows the original density/geometry and fixed
+spectral packets of mass absorption and mass scattering for every physical
+cell. A shared phase law or indexed phase palette retains the original angular
+owners without copying large tables into cells. Explicit wavelength support
+and source identities bind the prepared field; no constitutive data or spectral
+extrapolation is inferred. Density stays in kg/m³ and coefficients in m²/kg.
+
+Uniform and cell-dependent media share one monomorphized DDA/free-flight kernel,
+one stable directed-power integrator and one implicit-capture history reducer.
+Each collision uses its actual cell's albedo and phase. Shadow extinction,
+local LTE emission and directed heat use those same coefficients. Absorption-
+only lanes retain exact Beer transport and zero sampling error even when other
+lanes scatter. Solver checkpoint adapters preserve the original refusal; all
+existing traversal, history, segment and output-cell budgets remain effective.
+
+Tests compare bitwise uniform-media reductions, independent layered spectral
+collision laws, infrared support, local LTE absorption/extinction balance and
+an independent analog two-layer calculation with distinct anisotropic phases.
+The prepared packet is fixed for one call; temperature/state evolution belongs
+to the hosting constitutive and thermal owners.
+
 ## No-claim boundaries (volumes)
 
 - FrankenVDB tile-maxima majorants: no fvdb crate exists in-workspace;

@@ -90,7 +90,7 @@ impl PhaseFunction {
         Ok(())
     }
 
-    pub(super) fn hash_into(&self, hash: &mut DomainHasher) {
+    pub(crate) fn hash_into(&self, hash: &mut DomainHasher) {
         match self {
             Self::Isotropic => hash.update(&[0]),
             Self::HenyeyGreenstein { g } => {

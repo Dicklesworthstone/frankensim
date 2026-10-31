@@ -3,7 +3,7 @@
 use super::*;
 use crate::volumes::VolumeGrid;
 use crate::volumes::transport::AbsorbingGridBudget;
-use crate::volumes::transport::scattering::{PhaseFunction, ScatteringGrid};
+use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction, ScatteringGrid};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {

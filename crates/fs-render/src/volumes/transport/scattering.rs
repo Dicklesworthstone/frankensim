@@ -20,7 +20,6 @@ use super::{
     AbsorbingGrid, CellPalette, MassAbsorptionSpectrum, SegmentTransport, VolumeTransportError,
     checkpoint, positive_product,
 };
-use crate::thermal_surface::planck_radiance_w_m2_sr_nm;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
@@ -37,6 +36,9 @@ pub use phase::{
 };
 /// Incident power absorbed after any number of native scattering events.
 pub mod deposition;
+pub mod field;
+mod prepared;
+pub use field::{CellPhaseFunction, CellScatteringGrid};
 /// Physical homogeneous-sphere cross sections and resolved angular scattering.
 pub mod mie;
 
@@ -409,7 +411,8 @@ impl<'a> ScatteringGrid<'a> {
                     positive_product(rho, k, segment.length_m)
                 }
             });
-            self.integrate_source_cell(
+            prepared::integrate_source_cell(
+                &self.absorption,
                 segment.cell,
                 &tau,
                 &absorption,
@@ -462,9 +465,8 @@ impl<'a> ScatteringGrid<'a> {
         )
     }
 
-    // Reuse the exact free-flight kernel for source-power histories. Their
-    // coefficients are prepared once, and incident heating must not include
-    // the medium's independent LTE source or spend work integrating it.
+    // Source-power histories and cell-resolved optics share the exact native
+    // DDA/free-flight kernel; preparation keeps spectra out of photon loops.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn sample_segment_prepared<const N: usize>(
         &self,
@@ -478,26 +480,10 @@ impl<'a> ScatteringGrid<'a> {
         coefficients: (&[f64; N], &[f64; N], &[f64; N]),
         include_emission: bool,
     ) -> Result<FreeFlightSample<N>, VolumeTransportError> {
-        checkpoint(cx)?;
-        let (mut absorption, mut scattering, mut extinction) =
-            (*coefficients.0, *coefficients.1, *coefficients.2);
-        let mut coefficient_key = self.coefficient_key(0)?;
         if !self.has_scattering {
-            let result = if include_emission {
+            let result =
                 self.absorption
-                    .transport(cx, origin, direction, max_distance_m, wavelengths_nm)?
-            } else {
-                SegmentTransport {
-                    transmittance: self.absorption.transmittance(
-                        cx,
-                        origin,
-                        direction,
-                        max_distance_m,
-                        wavelengths_nm,
-                    )?,
-                    emission_w_m2_sr_nm: [0.0; N],
-                }
-            };
+                    .transport(cx, origin, direction, max_distance_m, wavelengths_nm)?;
             return Ok(FreeFlightSample {
                 event: None,
                 weight: result.transmittance,
@@ -505,157 +491,36 @@ impl<'a> ScatteringGrid<'a> {
                 escape_probability: 1.0,
             });
         }
-        let mut result = FreeFlightSample {
-            event: None,
-            weight: [1.0; N],
-            emission_w_m2_sr_nm: [0.0; N],
-            escape_probability: 1.0,
+        if self.absorption.absorption_palette().is_some() || self.scattering_palette().is_some() {
+            let medium = prepared::LiveOptics::new(self, *wavelengths_nm, coefficients);
+            return prepared::sample(
+                &medium,
+                &mut || checkpoint(cx),
+                origin,
+                direction,
+                max_distance_m,
+                u_lane,
+                u_distance,
+                include_emission,
+            );
+        }
+        let medium = prepared::UniformOptics {
+            medium: self,
+            wavelengths: *wavelengths_nm,
+            absorption: *coefficients.0,
+            scattering: *coefficients.1,
+            extinction: *coefficients.2,
         };
-        let Some(mut ray) = CellRay::clip(
-            &self.absorption.grid,
+        prepared::sample(
+            &medium,
+            &mut || checkpoint(cx),
             origin,
             direction,
             max_distance_m,
-            self.absorption.max_steps,
-        )?
-        else {
-            return Ok(result);
-        };
-        let hero = ((u_lane * N as f64) as usize).min(N - 1);
-        let mut remaining_tau = -det::ln(u_distance.max(f64::MIN_POSITIVE));
-        let mut depth = [0.0; N];
-        let mut source_cache = [(f64::NAN, 0.0); N];
-        while let Some(segment) = ray.next(cx)? {
-            let rho = self.absorption.grid.data[segment.cell];
-            if rho == 0.0 || segment.length_m == 0.0 {
-                continue;
-            }
-            let key = self.coefficient_key(segment.cell)?;
-            if key != coefficient_key {
-                (absorption, scattering, extinction) =
-                    self.coefficients_at_cell(segment.cell, wavelengths_nm)?;
-                coefficient_key = key;
-            }
-            let tau = extinction.map(|k| {
-                if k == 0.0 {
-                    0.0
-                } else {
-                    positive_product(rho, k, segment.length_m)
-                }
-            });
-            if result.event.is_none() && extinction[hero] > 0.0 && remaining_tau < tau[hero] {
-                let local_m = divide_product(remaining_tau, rho, extinction[hero]);
-                let parameter = segment.start_m + local_m;
-                if !parameter.is_finite()
-                    || parameter < segment.start_m
-                    || parameter >= segment.start_m + segment.length_m
-                    || (local_m > 0.0 && parameter == segment.start_m)
-                    || (remaining_tau > 0.0 && local_m == 0.0)
-                {
-                    return Err(VolumeTransportError::Unrepresentable);
-                }
-                let event_depth = std::array::from_fn(|lane| {
-                    depth[lane]
-                        + if extinction[lane] == 0.0 || local_m == 0.0 {
-                            0.0
-                        } else {
-                            positive_product(rho, extinction[lane], local_m)
-                        }
-                });
-                result.weight = collision_weights(&event_depth, &extinction, &scattering)?;
-                let position = ray.position(parameter);
-                let distance_m = ray.distance_from_origin(parameter);
-                if !distance_m.is_finite() || (distance_m > 0.0 && position == origin) {
-                    return Err(VolumeTransportError::Unrepresentable);
-                }
-                result.event = Some(ScatteringEvent {
-                    cell_index: segment.cell,
-                    position,
-                    distance_m,
-                });
-                result.escape_probability = 0.0;
-                if !include_emission || !self.has_thermal_emission() {
-                    return Ok(result);
-                }
-            }
-            if result.event.is_none() {
-                remaining_tau -= tau[hero];
-            }
-            if include_emission {
-                self.integrate_source_cell(
-                    segment.cell,
-                    &tau,
-                    &absorption,
-                    &extinction,
-                    wavelengths_nm,
-                    &mut depth,
-                    &mut source_cache,
-                    &mut result.emission_w_m2_sr_nm,
-                )?;
-            } else {
-                for lane in 0..N {
-                    depth[lane] += tau[lane];
-                }
-            }
-        }
-        if result.event.is_none() {
-            let minimum = depth.into_iter().fold(f64::INFINITY, f64::min);
-            if !minimum.is_finite() {
-                return Err(VolumeTransportError::Unrepresentable);
-            }
-            let relative = depth.map(|tau| det::exp(minimum - tau));
-            let sum: f64 = relative.iter().sum();
-            result.weight = relative.map(|t| t * (N as f64 / sum));
-            result.escape_probability =
-                depth.iter().map(|tau| det::exp(-tau)).sum::<f64>() / N as f64;
-        }
-        Ok(result)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn integrate_source_cell<const N: usize>(
-        &self,
-        cell: usize,
-        tau: &[f64; N],
-        absorption: &[f64; N],
-        extinction: &[f64; N],
-        wavelengths_nm: &[f64; N],
-        depth: &mut [f64; N],
-        source_cache: &mut [(f64, f64); N],
-        emission: &mut [f64; N],
-    ) -> Result<(), VolumeTransportError> {
-        for lane in 0..N {
-            if absorption[lane] > 0.0
-                && let Some(temperatures) = self.absorption.temperature_k
-            {
-                let opacity = -det::expm1(-tau[lane]);
-                if opacity > 0.0 && depth[lane].is_finite() {
-                    if source_cache[lane].0 != temperatures[cell] {
-                        source_cache[lane] = (
-                            temperatures[cell],
-                            planck_radiance_w_m2_sr_nm(temperatures[cell], wavelengths_nm[lane])
-                                .map_err(|_| VolumeTransportError::Unrepresentable)?,
-                        );
-                    }
-                    let source = source_cache[lane].1;
-                    let fraction = absorption[lane] / extinction[lane];
-                    let mut contribution = det::exp(-depth[lane]) * opacity * fraction * source;
-                    if contribution == 0.0 && source > 0.0 {
-                        contribution = det::exp(
-                            -depth[lane] + det::ln(opacity) + det::ln(absorption[lane])
-                                - det::ln(extinction[lane])
-                                + det::ln(source),
-                        );
-                    }
-                    emission[lane] += contribution;
-                    if !emission[lane].is_finite() {
-                        return Err(VolumeTransportError::Unrepresentable);
-                    }
-                }
-            }
-            depth[lane] += tau[lane];
-        }
-        Ok(())
+            u_lane,
+            u_distance,
+            include_emission,
+        )
     }
 }
 

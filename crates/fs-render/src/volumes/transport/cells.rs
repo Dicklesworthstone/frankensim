@@ -162,13 +162,20 @@ impl<'g, 'a> CellRay<'g, 'a> {
     }
 
     pub fn next(&mut self, cx: &Cx<'_>) -> Result<Option<CellSegment>, VolumeTransportError> {
+        self.next_with_checkpoint(&mut || checkpoint(cx))
+    }
+
+    pub fn next_with_checkpoint(
+        &mut self,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    ) -> Result<Option<CellSegment>, VolumeTransportError> {
         if self.done {
             return Ok(None);
         }
         if self.steps_left == 0 {
             return Err(VolumeTransportError::Budget);
         }
-        checkpoint(cx)?;
+        check()?;
         self.steps_left -= 1;
         let stop = self
             .next

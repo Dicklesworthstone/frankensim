@@ -214,6 +214,18 @@ pub struct AbsorbingGrid<'a> {
 }
 
 impl<'a> AbsorbingGrid<'a> {
+    /// Number of original X-major physical density cells.
+    #[must_use]
+    pub fn cell_count(&self) -> usize {
+        self.grid.data.len()
+    }
+
+    /// Borrowed physical mass density in kg/m³ at an original cell index.
+    #[must_use]
+    pub fn cell_density_kg_m3(&self, index: usize) -> Option<f64> {
+        self.grid.data.get(index).copied()
+    }
+
     /// Validate, hash and borrow the original simulation buffers; cache bounded
     /// emission proposal weights when a visible thermal source is present.
     pub fn try_new(

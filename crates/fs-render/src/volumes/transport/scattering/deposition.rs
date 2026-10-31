@@ -17,6 +17,7 @@
 //! unobserved rare event can have a zero empirical error estimate.
 
 use super::super::{cells::validate_ray, checkpoint, deposition::removed_power};
+use super::prepared::{self, Monochromatic, PaletteOptics, PreparedOptics, UniformOptics};
 use super::{ScatteringGrid, VolumeTransportError};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -121,209 +122,204 @@ impl ScatteringGrid<'_> {
     ) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
         checkpoint(cx)?;
         validate_ray(origin, unit_direction, f64::INFINITY)?;
+        if self.absorption.absorption_palette().is_some() || self.scattering_palette().is_some() {
+            let medium = PaletteOptics::try_new(self, *wavelengths_nm, &mut || checkpoint(cx))?;
+            return deposit_prepared(
+                &medium,
+                &mut || checkpoint(cx),
+                origin,
+                unit_direction,
+                incident_power_w,
+                config,
+            );
+        }
         let (absorption, scattering, extinction) = self.coefficients(wavelengths_nm)?;
-        let indexed =
-            self.absorption.absorption_palette().is_some() || self.scattering_palette().is_some();
-        if config.histories_per_lane < 2 || config.max_collisions_per_history == 0 {
-            return Err(VolumeTransportError::Budget);
-        }
-        for (lane, &power) in incident_power_w.iter().enumerate() {
-            if !power.is_finite() || power < 0.0 {
-                return Err(VolumeTransportError::BeamPower { lane });
-            }
-            // Validate spectral angular support even if no collision is drawn.
-            self.phase_at_cell(0)?
-                .eval_packet(&[wavelengths_nm[lane]], 0.0)?;
-        }
-        // Only physically occupied cell models determine whether a lane can
-        // scatter. A transparent first cell or an unused palette entry must
-        // not select the wrong deterministic absorption-only transport path.
-        let mut scattering_lanes = scattering.map(|coefficient| coefficient > 0.0);
-        if let Some(palette) = self.scattering_palette()
-            && self.has_scattering
-        {
-            scattering_lanes = [false; N];
-            let mut last_index = None;
-            let mut local_scattering = [0.0; N];
-            for (cell, &density) in self.absorption.grid.data.iter().enumerate() {
-                if cell % 1024 == 0 {
-                    checkpoint(cx)?;
-                }
-                if density == 0.0 {
-                    continue;
-                }
-                let index = palette.cell_indices()[cell];
-                if last_index != Some(index) {
-                    for lane in 0..N {
-                        local_scattering[lane] = palette.values()[index as usize]
-                            .scattering
-                            .at(wavelengths_nm[lane])?;
-                    }
-                    last_index = Some(index);
-                }
-                for lane in 0..N {
-                    scattering_lanes[lane] |= local_scattering[lane] > 0.0;
-                }
-                if scattering_lanes.iter().all(|active| *active) {
-                    break;
-                }
-            }
-        }
-        let mut result = ScatteringPowerDeposition {
-            medium_identity: self.identity,
-            wavelength_bounds_nm: self.wavelength_bounds_nm(),
-            wavelengths_nm: *wavelengths_nm,
-            incident_power_w: *incident_power_w,
-            ballistic_escape: PowerEstimate::zero(),
-            diffuse_escape: PowerEstimate::zero(),
-            absorbed: PowerEstimate::zero(),
-            unresolved: PowerEstimate::zero(),
-            cells: Vec::new(),
-            sampled_histories: [0; N],
-            precision_limited_histories: [0; N],
-            traced_segments: 0,
-            config,
+        let medium = UniformOptics {
+            medium: self,
+            wavelengths: *wavelengths_nm,
+            absorption,
+            scattering,
+            extinction,
         };
-        let mut spatial = SpatialTallies::<N>::new(config.max_deposition_cells);
-        for lane in 0..N {
-            checkpoint(cx)?;
-            let source_w = incident_power_w[lane];
-            if source_w == 0.0 {
-                continue;
-            }
-            let wavelength = [wavelengths_nm[lane]];
-            if !scattering_lanes[lane] || !self.has_scattering {
-                count_segment(&mut result.traced_segments, config.max_total_segments)?;
-                let exact = self.absorption.deposit_beam_power(
-                    cx,
+        deposit_prepared(
+            &medium,
+            &mut || checkpoint(cx),
+            origin,
+            unit_direction,
+            incident_power_w,
+            config,
+        )
+    }
+}
+
+/// One implicit-capture estimator for uniform and genuinely cell-local optics.
+pub(super) fn deposit_prepared<const N: usize>(
+    medium: &impl PreparedOptics<N>,
+    check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    origin: Point3,
+    unit_direction: Vec3,
+    incident_power_w: &[f64; N],
+    config: ScatteringDepositionConfig,
+) -> Result<ScatteringPowerDeposition<N>, VolumeTransportError> {
+    let wavelengths_nm = medium.wavelengths();
+    check()?;
+    validate_ray(origin, unit_direction, f64::INFINITY)?;
+    if config.histories_per_lane < 2 || config.max_collisions_per_history == 0 {
+        return Err(VolumeTransportError::Budget);
+    }
+    for (lane, &power) in incident_power_w.iter().enumerate() {
+        if !power.is_finite() || power < 0.0 {
+            return Err(VolumeTransportError::BeamPower { lane });
+        }
+    }
+    let mut result = ScatteringPowerDeposition {
+        medium_identity: medium.identity(),
+        wavelength_bounds_nm: medium.bounds(),
+        wavelengths_nm: *wavelengths_nm,
+        incident_power_w: *incident_power_w,
+        ballistic_escape: PowerEstimate::zero(),
+        diffuse_escape: PowerEstimate::zero(),
+        absorbed: PowerEstimate::zero(),
+        unresolved: PowerEstimate::zero(),
+        cells: Vec::new(),
+        sampled_histories: [0; N],
+        precision_limited_histories: [0; N],
+        traced_segments: 0,
+        config,
+    };
+    let mut spatial = SpatialTallies::<N>::new(config.max_deposition_cells);
+    for lane in 0..N {
+        check()?;
+        let source_w = incident_power_w[lane];
+        if source_w == 0.0 {
+            continue;
+        }
+        let wavelength = [wavelengths_nm[lane]];
+        let monochromatic = Monochromatic::<_, N> {
+            medium,
+            lane,
+            wavelength,
+        };
+        if !medium.lane_has_scattering(lane) {
+            count_segment(&mut result.traced_segments, config.max_total_segments)?;
+            let exact = super::super::deposition::deposit_prepared(
+                check,
+                medium.geometry(),
+                (
                     origin,
                     unit_direction,
+                    if medium.lane_has_extinction(lane) {
+                        f64::INFINITY
+                    } else {
+                        0.0
+                    },
+                ),
+                &wavelength,
+                &[source_w],
+                config.max_deposition_cells,
+                (medium.identity(), medium.bounds()),
+                |cell| monochromatic.coefficients(cell),
+            )?;
+            result.ballistic_escape.mean_w[lane] = exact.transmitted_power_w[0];
+            result.absorbed.mean_w[lane] = exact.absorbed_power_w[0];
+            for cell in exact.cells {
+                spatial.cell(cell.cell_index)?.lanes[lane]
+                    .moments
+                    .observe(cell.absorbed_power_w[0])?;
+            }
+            continue;
+        }
+        result.sampled_histories[lane] = config.histories_per_lane;
+        let seed = lane_seed(config.seed, config.source_id, lane);
+        let mut totals = [Moments::default(); 4];
+        for history in 0..config.histories_per_lane {
+            check()?;
+            let mut random = StreamKey {
+                seed,
+                kernel: 0x4142_5348, // "ABSH": absorbed source-power histories.
+                tile: history,
+            }
+            .stream();
+            let mut position = origin;
+            let mut direction = unit_direction;
+            let mut power = source_w;
+            let mut survival = PowerSum {
+                sum: source_w,
+                correction: 0.0,
+            };
+            let mut captured = PowerSum::default();
+            let mut outcome = [0.0; 4]; // ballistic, diffuse, heat, unresolved
+            for collision in 0..config.max_collisions_per_history {
+                count_segment(&mut result.traced_segments, config.max_total_segments)?;
+                let flight = prepared::sample(
+                    &monochromatic,
+                    check,
+                    position,
+                    direction,
                     f64::INFINITY,
-                    &wavelength,
-                    &[source_w],
-                    config.max_deposition_cells,
+                    0.0,
+                    random.next_f64(),
+                    false,
                 )?;
-                result.ballistic_escape.mean_w[lane] = exact.transmitted_power_w[0];
-                result.absorbed.mean_w[lane] = exact.absorbed_power_w[0];
-                for cell in exact.cells {
-                    spatial.cell(cell.cell_index)?.lanes[lane]
-                        .moments
-                        .observe(cell.absorbed_power_w[0])?;
-                }
-                continue;
-            }
-            result.sampled_histories[lane] = config.histories_per_lane;
-            let a = [absorption[lane]];
-            let s = [scattering[lane]];
-            let t = [extinction[lane]];
-            let mut collision_key = self.coefficient_key(0)?;
-            let mut local_coefficients = (a, s, t);
-            let seed = lane_seed(config.seed, config.source_id, lane);
-            let mut totals = [Moments::default(); 4];
-            for history in 0..config.histories_per_lane {
-                checkpoint(cx)?;
-                let mut random = StreamKey {
-                    seed,
-                    kernel: 0x4142_5348, // "ABSH": absorbed source-power histories.
-                    tile: history,
-                }
-                .stream();
-                let mut position = origin;
-                let mut direction = unit_direction;
-                let mut power = source_w;
-                let mut survival = PowerSum {
-                    sum: source_w,
-                    correction: 0.0,
+                let Some(event) = flight.event else {
+                    outcome[usize::from(collision != 0)] = power;
+                    break;
                 };
-                let mut captured = PowerSum::default();
-                let mut outcome = [0.0; 4]; // ballistic, diffuse, heat, unresolved
-                for collision in 0..config.max_collisions_per_history {
-                    count_segment(&mut result.traced_segments, config.max_total_segments)?;
-                    let flight = self.sample_segment_prepared(
-                        cx,
-                        position,
-                        direction,
-                        f64::INFINITY,
-                        &wavelength,
-                        0.0,
-                        random.next_f64(),
-                        (&a, &s, &t),
-                        false,
-                    )?;
-                    let Some(event) = flight.event else {
-                        outcome[usize::from(collision != 0)] = power;
-                        break;
-                    };
-                    if indexed {
-                        let key = self.coefficient_key(event.cell_index)?;
-                        if key != collision_key {
-                            local_coefficients =
-                                self.coefficients_at_cell(event.cell_index, &wavelength)?;
-                            collision_key = key;
-                        }
-                    }
-                    let heat =
-                        split_power(power, local_coefficients.0[0], local_coefficients.2[0])?;
-                    let continuation =
-                        split_power(power, local_coefficients.1[0], local_coefficients.2[0])?;
-                    let (Some(heat), Some(continuation)) = (heat, continuation) else {
-                        // Retain the entire representable packet before any
-                        // partial capture, including the below-resolution tail.
-                        outcome[3] = power;
-                        result.precision_limited_histories[lane] += 1;
-                        break;
-                    };
-                    let roundoff = 32.0 * f64::EPSILON * power + 8.0 * f64::from_bits(1);
-                    if ((power - heat) - continuation).abs() > roundoff {
-                        return Err(VolumeTransportError::Unrepresentable);
-                    }
-                    if heat > 0.0 {
-                        captured.add(heat)?;
-                        spatial.cell(event.cell_index)?.lanes[lane].capture(history, heat)?;
-                    }
-                    survival.continue_after_capture(heat, continuation)?;
-                    power = survival.value();
-                    if power == 0.0 {
-                        break;
-                    }
-                    if collision + 1 == config.max_collisions_per_history {
-                        outcome[3] = power;
-                        break;
-                    }
-                    // A monochromatic matched phase sample has physical/PDF
-                    // weight one, including interpolated spectral phase tables.
-                    direction = self
-                        .phase_at_cell(event.cell_index)?
-                        .sample_packet(
-                            &wavelength,
-                            direction,
-                            random.next_f64(),
-                            random.next_f64(),
-                        )?
-                        .direction;
-                    position = event.position;
+                let (a, s, t) = medium.coefficient(event.cell_index, lane)?;
+                let heat = split_power(power, a, t)?;
+                let continuation = split_power(power, s, t)?;
+                let (Some(heat), Some(continuation)) = (heat, continuation) else {
+                    // Retain the entire representable packet before any
+                    // partial capture, including the below-resolution tail.
+                    outcome[3] = power;
+                    result.precision_limited_histories[lane] += 1;
+                    break;
+                };
+                let roundoff = 32.0 * f64::EPSILON * power + 8.0 * f64::from_bits(1);
+                if ((power - heat) - continuation).abs() > roundoff {
+                    return Err(VolumeTransportError::Unrepresentable);
                 }
-                outcome[2] = captured.value();
-                for (moment, value) in totals.iter_mut().zip(outcome) {
-                    moment.observe(value)?;
+                if heat > 0.0 {
+                    captured.add(heat)?;
+                    spatial.cell(event.cell_index)?.lanes[lane].capture(history, heat)?;
                 }
+                survival.continue_after_capture(heat, continuation)?;
+                power = survival.value();
+                if power == 0.0 {
+                    break;
+                }
+                if collision + 1 == config.max_collisions_per_history {
+                    outcome[3] = power;
+                    break;
+                }
+                // A monochromatic matched phase sample has physical/PDF
+                // weight one, including interpolated spectral phase tables.
+                direction = medium
+                    .phase(event.cell_index)
+                    .sample_packet(&wavelength, direction, random.next_f64(), random.next_f64())?
+                    .direction;
+                position = event.position;
             }
-            for (estimate, moment) in [
-                &mut result.ballistic_escape,
-                &mut result.diffuse_escape,
-                &mut result.absorbed,
-                &mut result.unresolved,
-            ]
-            .into_iter()
-            .zip(totals)
-            {
-                (estimate.mean_w[lane], estimate.standard_error_w[lane]) = moment.estimate()?;
+            outcome[2] = captured.value();
+            for (moment, value) in totals.iter_mut().zip(outcome) {
+                moment.observe(value)?;
             }
         }
-        result.cells = spatial.finish(cx, &result.sampled_histories)?;
-        checkpoint(cx)?;
-        Ok(result)
+        for (estimate, moment) in [
+            &mut result.ballistic_escape,
+            &mut result.diffuse_escape,
+            &mut result.absorbed,
+            &mut result.unresolved,
+        ]
+        .into_iter()
+        .zip(totals)
+        {
+            (estimate.mean_w[lane], estimate.standard_error_w[lane]) = moment.estimate()?;
+        }
     }
+    result.cells = spatial.finish(check, &result.sampled_histories)?;
+    check()?;
+    Ok(result)
 }
 
 fn count_segment(count: &mut u64, maximum: u64) -> Result<(), VolumeTransportError> {
@@ -533,17 +529,17 @@ impl<const N: usize> SpatialTallies<N> {
     }
     fn finish(
         mut self,
-        cx: &Cx<'_>,
+        check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
         samples: &[u32; N],
     ) -> Result<Vec<CellAbsorbedPower<N>>, VolumeTransportError> {
-        checkpoint(cx)?;
+        check()?;
         self.cells.sort_unstable_by_key(|cell| cell.index);
         let mut output = Vec::new();
         output
             .try_reserve_exact(self.cells.len())
             .map_err(|_| VolumeTransportError::Budget)?;
         for mut cell in self.cells {
-            checkpoint(cx)?;
+            check()?;
             let mut absorbed = PowerEstimate::zero();
             for lane in 0..N {
                 cell.lanes[lane].flush()?;
