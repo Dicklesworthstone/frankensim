@@ -7578,7 +7578,7 @@ gas mass and solid mass remain separate conserved inventories. The same
 midpoint pressure supplies force and boundary work; the gas retains its actual
 `rho=m/V`, source calorics and acoustic compressibility. Free-wall and
 fixed-support steps preserve the common residual gates and atomic cancellation.
-Reaction, nozzle and double-acting compositions retain their ideal specialization.
+Reaction and double-acting compositions retain their ideal specialization.
 
 Synthetic regression definitions in `piston/tests/real_gas.rs` compare dense
 motion with independent joint PR energy/impulse roots, reversal and continuing
@@ -7601,6 +7601,21 @@ does not silently replace the specimen's conserved mass or geometry.
 Focused real-gas thermal regressions cover signed exchange, source-density
 substitution through continuing motion, independent endpoint energy accounts,
 complete midpoint material views and atomic source/cancellation refusal.
+
+`GasPiston<IsochoricRealGasParcel>::real_gas_nozzle_thermal_candidate` stages
+one original conservative nozzle transfer, then reuses that proposed chamber
+for every reciprocal body-heat/motion trial. Its candidate returns the piston,
+finite reservoir and finite body together. The enclosing mass defect measures
+the accepted gas endpoints; native increment residuals close stream enthalpy,
+reciprocal heat, body enthalpy, gas work and wall kinetics without subtracting
+formation-energy datums. The material wrapper retains original solid inertia
+and the complete accepted port state. A chamber exchanging mass reports its
+wall/heat-only port audit as unavailable; its paired-system report supplies the
+complete balance. Both flow directions, heat signs, continuing source-density
+substitution, reference shifts and atomic refusals have focused regressions.
+This is a first-order flow-then-heat/motion split with identical frozen sources
+and composition, homogeneous gas branches and explicit timestep refinement;
+it does not supply jet thrust, phase change or a simultaneous flow/heat root.
 
 ### Fixed-volume chambers in the shared reacting gas assembly
 

@@ -15,6 +15,8 @@ use super::{ClosedGasParcel, GasPiston, PistonError, PistonGas, PistonInput, Pis
 use fs_mbd_material::ResolvedBody;
 use super::thermal::{ConductanceSample, HeatExchangeSolve, ThermalPistonError, ThermalPistonStep};
 use super::exchange::thermal::NozzleThermalPistonCandidate;
+use super::exchange::real_gas::{RealGasPistonNozzleStep,
+    thermal::RealGasNozzleThermalPistonCandidate};
 use super::exchange::network::NozzleNetworkCandidate;
 use super::thermal::boundary::network::{NetworkGasDrive, NetworkGasError, NetworkGasSolve};
 use super::thermal::boundary::network::material::GasConductionGeometry;
@@ -28,6 +30,8 @@ use super::thermal::double_acting::{DoubleHeatExchangeSolve, DoubleThermalPiston
 use super::thermal::layers::{MaterialConductionLayers, LayerConductionError};
 use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use fs_material::thermochemical_gas::nonideal::{ResolvedThermochemicalRealGasState,
+    energy::parcel::{IsochoricRealGasParcel, transfer::nozzle::RealGasNozzleStepSolve}};
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{GasNozzle, GasNozzleStepSolve};
 use super::double_acting::{
     DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep,
@@ -137,6 +141,40 @@ impl<S, G: PistonGas> MaterialThermalPistonCandidate<S, G> {
     /// Publish the source-bound mechanism and thermal state together.
     pub fn into_parts(self) -> (MaterialGasPiston<G>, UniformEnthalpyStep<S>, ThermalPistonStep<G::State>) {
         (self.piston, self.thermal, self.step)
+    }
+}
+
+impl MaterialGasPiston<IsochoricRealGasParcel> {
+    /// Advance original real-gas nozzle exchange and motion while retaining the
+    /// specimen's canonical solid inertia. Both gas endpoints publish together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_real_gas_nozzle(
+        &mut self, reservoir: &mut IsochoricRealGasParcel, nozzle: GasNozzle,
+        input: PistonInput, flow: RealGasNozzleStepSolve, controls: PistonSolve,
+        total_energy_tolerance_j: f64, cancelled: impl FnMut() -> bool,
+    ) -> Result<RealGasPistonNozzleStep, PistonError> {
+        self.piston.step_with_real_gas_nozzle(reservoir, nozzle, input, flow,
+            controls, total_energy_tolerance_j, cancelled)
+    }
+
+    /// Continue real-gas flow, finite-body heat and motion without discarding
+    /// original material inertia, geometry, source records or port history.
+    /// The original first-order flow split and homogeneous PR domain apply.
+    /// Publish all three returned endpoints together; rejected trials debit none.
+    #[allow(clippy::too_many_arguments)]
+    pub fn real_gas_nozzle_thermal_candidate<S, E>(
+        &self, reservoir: &IsochoricRealGasParcel, nozzle: GasNozzle,
+        input: PistonInput, thermal_body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve, flow: RealGasNozzleStepSolve, exchange: HeatExchangeSolve,
+        resolve: impl FnMut(&ResolvedThermochemicalRealGasState, EquilibriumPhaseState)
+            -> Result<ConductanceSample<S>, E>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RealGasNozzleThermalPistonCandidate<S, Self>, ThermalPistonError<E>> {
+        let candidate = self.piston.real_gas_nozzle_thermal_candidate(reservoir, nozzle,
+            input, thermal_body, controls, flow, exchange, resolve, &mut cancelled)?
+            .map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(ThermalPistonError::Cancelled); }
+        Ok(candidate)
     }
 }
 

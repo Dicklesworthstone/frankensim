@@ -4,10 +4,12 @@ use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
 use fs_material::thermochemical_gas::nonideal::energy::parcel::transfer::RealGasMassTransferSolve;
 use fs_ports::{ModuleWindowAudit, PortedModule};
 
+mod thermal;
+
 fn exchange() -> RealGasNozzleStepSolve {
     RealGasNozzleStepSolve {
         entropy: GasEntropySolve {
-            minimum_temperature_k: 240.0,
+            minimum_temperature_k: 200.0,
             maximum_temperature_k: 450.0,
             entropy_tolerance_j_kg_k: 1e-9,
             maximum_iterations: 128,
@@ -18,7 +20,8 @@ fn exchange() -> RealGasNozzleStepSolve {
             mass_tolerance_kg: 1e-14,
             energy_tolerance_j: 1e-7,
         },
-        minimum_density_fraction: 0.2,
+        // Below the sonic density, while its isentrope stays above the source's 200 K floor.
+        minimum_density_fraction: 0.5,
         pressure_tolerance_pa: 1e-4,
         sonic_tolerance_m2_s2: 1e-4,
         maximum_iterations: 128,

@@ -5,6 +5,9 @@
 //! the existing nonideal midpoint piston mechanics. Stream enthalpy and boundary
 //! work therefore have distinct owners and are each counted exactly once.
 
+/// Reciprocal finite-body heat on the same conservative real-gas flow/motion step.
+pub mod thermal;
+
 use super::super::{
     GasPiston, PistonError, PistonInput, PistonSolve, PistonStep, invalid, poll, positive,
 };
@@ -46,6 +49,13 @@ struct Transfer {
     transfer: RealGasMassTransferStep,
 }
 
+struct Balance {
+    chamber_energy_change_j: f64,
+    reservoir_energy_change_j: f64,
+    total_mass_residual_kg: f64,
+    total_energy_residual_j: f64,
+}
+
 impl GasPiston<IsochoricRealGasParcel> {
     fn real_nozzle_transfer(
         &self,
@@ -78,6 +88,83 @@ impl GasPiston<IsochoricRealGasParcel> {
             if inflow { NozzleDirection::IntoPiston } else { NozzleDirection::OutOfPiston },
         );
         Ok(Transfer { piston, reservoir, direction, flow, transfer })
+    }
+
+    // Shared accounting for the original motion and reciprocal-heat consumers.
+    // Preserve the native increment ledgers: transported formation references
+    // cancel before rounding, even when the extensive stage accounts are large.
+    fn real_nozzle_balance(
+        &self,
+        reservoir: &IsochoricRealGasParcel,
+        next: &Transfer,
+        piston: &PistonStep<ResolvedThermochemicalRealGasState>,
+        exchange: RealGasNozzleStepSolve,
+        tolerance_j: f64,
+    ) -> Result<Balance, PistonError> {
+        let (transfer_chamber, transfer_reservoir) = match next.direction {
+            Some(NozzleDirection::IntoPiston) => (
+                next.transfer.receiver_energy_change_j,
+                next.transfer.donor_energy_change_j,
+            ),
+            Some(NozzleDirection::OutOfPiston) => (
+                next.transfer.donor_energy_change_j,
+                next.transfer.receiver_energy_change_j,
+            ),
+            None => (0.0, 0.0),
+        };
+        let chamber_energy_change_j = transfer_chamber + piston.gas.stored_energy_change_j;
+        let reservoir_energy_change_j = transfer_reservoir;
+        let total_mass_residual_kg = (next.piston.gas.mass_kg() - self.gas.mass_kg())
+            + (next.reservoir.mass_kg() - reservoir.mass_kg());
+        let total_energy_residual_j =
+            next.transfer.energy_residual_j + piston.total_energy_residual_j;
+        if !positive(tolerance_j)
+            || ![chamber_energy_change_j, reservoir_energy_change_j,
+                total_mass_residual_kg, total_energy_residual_j].into_iter().all(f64::is_finite)
+            || total_mass_residual_kg.abs() > exchange.transfer.mass_tolerance_kg
+            || total_energy_residual_j.abs() > tolerance_j
+        {
+            return Err(invalid(
+                "real-gas nozzle/piston endpoints do not close whole-pair mass and energy",
+            ));
+        }
+        Ok(Balance { chamber_energy_change_j, reservoir_energy_change_j,
+            total_mass_residual_kg, total_energy_residual_j })
+    }
+
+    fn record_real_nozzle_account(
+        &self, next: &mut Transfer, input: PistonInput,
+        piston: &PistonStep<ResolvedThermochemicalRealGasState>,
+        balance: &Balance, tolerance_j: f64,
+    ) {
+        // The wall/heat schema has no stream port. Keep actual observations,
+        // but do not present an open chamber as a closed-system certificate.
+        if next.direction.is_some() {
+            next.piston.ports.accept(
+                crate::port_adoption::StepAccount {
+                    tick: self.ports.next_tick(), duration_s: input.duration_s,
+                    storage_change_j: Some(
+                        balance.chamber_energy_change_j + piston.kinetic_energy_change_j,
+                    ),
+                    loss_j: Some(0.0), included_work_j: 0.0,
+                    entropy_change_j_k: piston.gas.entropy_change_j_k,
+                    tolerance_j: Some(tolerance_j),
+                    unavailable: Some(
+                        "real-gas nozzle mass exchange needs a stream port; use the paired nozzle balance",
+                    ),
+                },
+                [
+                    crate::port_adoption::PortTransfer::work(
+                        piston.external_force_work_j - piston.exterior_pressure_work_j
+                            + piston.support_work_j,
+                        true,
+                    ),
+                    crate::port_adoption::PortTransfer::heat(
+                        input.heat_j, piston.midpoint.temperature_k(),
+                    ),
+                ],
+            );
+        }
     }
 
     /// Exchange with a finite real-gas reservoir, then advance the same chamber
@@ -114,80 +201,22 @@ impl GasPiston<IsochoricRealGasParcel> {
             reservoir, nozzle, input.duration_s, exchange, &mut cancelled,
         )?;
         let piston = next.piston.step(input, controls, &mut cancelled)?;
-        let (transfer_chamber, transfer_reservoir) = match next.direction {
-            Some(NozzleDirection::IntoPiston) => (
-                next.transfer.receiver_energy_change_j,
-                next.transfer.donor_energy_change_j,
-            ),
-            Some(NozzleDirection::OutOfPiston) => (
-                next.transfer.donor_energy_change_j,
-                next.transfer.receiver_energy_change_j,
-            ),
-            None => (0.0, 0.0),
-        };
-        let chamber_energy_change_j =
-            transfer_chamber + piston.gas.stored_energy_change_j;
-        let reservoir_energy_change_j = transfer_reservoir;
-        let total_mass_residual_kg = next.transfer.mass_residual_kg;
-        let total_energy_residual_j =
-            next.transfer.energy_residual_j + piston.total_energy_residual_j;
-        if ![
-            chamber_energy_change_j,
-            reservoir_energy_change_j,
-            total_mass_residual_kg,
-            total_energy_residual_j,
-        ].into_iter().all(f64::is_finite)
-            || total_mass_residual_kg.abs() > exchange.transfer.mass_tolerance_kg
-            || total_energy_residual_j.abs() > total_energy_tolerance_j
-        {
-            return Err(invalid(
-                "real-gas nozzle/piston endpoints do not close whole-pair mass and energy",
-            ));
-        }
-
-        // The existing wall/heat schema has no stream port. Preserve its actual
-        // mechanical and heat transfers but explicitly mark the open-mass audit
-        // unavailable rather than presenting a closed-chamber certificate.
-        if next.direction.is_some() {
-            next.piston.ports.accept(
-                crate::port_adoption::StepAccount {
-                    tick: self.ports.next_tick(),
-                    duration_s: input.duration_s,
-                    storage_change_j: Some(
-                        chamber_energy_change_j + piston.kinetic_energy_change_j,
-                    ),
-                    loss_j: Some(0.0),
-                    included_work_j: 0.0,
-                    entropy_change_j_k: piston.gas.entropy_change_j_k,
-                    tolerance_j: Some(total_energy_tolerance_j),
-                    unavailable: Some(
-                        "real-gas nozzle mass exchange needs a stream port; use the paired nozzle balance",
-                    ),
-                },
-                [
-                    crate::port_adoption::PortTransfer::work(
-                        piston.external_force_work_j
-                            - piston.exterior_pressure_work_j
-                            + piston.support_work_j,
-                        true,
-                    ),
-                    crate::port_adoption::PortTransfer::heat(
-                        input.heat_j,
-                        piston.midpoint.temperature_k(),
-                    ),
-                ],
-            );
-        }
+        let balance = self.real_nozzle_balance(
+            reservoir, &next, &piston, exchange, total_energy_tolerance_j,
+        )?;
+        self.record_real_nozzle_account(
+            &mut next, input, &piston, &balance, total_energy_tolerance_j,
+        );
 
         let report = RealGasPistonNozzleStep {
             direction: next.direction,
             flow: next.flow,
             transfer: next.transfer,
             piston,
-            chamber_energy_change_j,
-            reservoir_energy_change_j,
-            total_mass_residual_kg,
-            total_energy_residual_j,
+            chamber_energy_change_j: balance.chamber_energy_change_j,
+            reservoir_energy_change_j: balance.reservoir_energy_change_j,
+            total_mass_residual_kg: balance.total_mass_residual_kg,
+            total_energy_residual_j: balance.total_energy_residual_j,
         };
         poll(&mut cancelled)?;
         *reservoir = next.reservoir;
