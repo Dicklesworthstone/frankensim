@@ -16,6 +16,8 @@
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.039.html>.
 //! Parameters are authored model inputs until separately bound to source data.
 
+/// Simultaneous secondary creep and energetic isotropic J2 plasticity.
+pub mod plastic;
 /// Immutable material-card binding for the same permanent creep law.
 pub mod source;
 /// Source-bound uniform physical-heat feedback with explicit zero expansion.
@@ -68,16 +70,20 @@ pub struct CreepTolerances {
     pub energy_j_m3: f64,
 }
 
-/// Per-reference-volume work account for fixed elastic coefficients [J/m3].
+/// Per-reference-volume work account for fixed elastic/storage coefficients [J/m3].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CreepEnergy {
     pub initial_stored_j_m3: f64,
     pub final_stored_j_m3: f64,
     /// Endpoint stress contracted with the actual total-strain increment.
     pub mechanical_work_j_m3: f64,
-    /// Endpoint `q delta_alpha`; only this account is physical creep heat.
+    /// Sum of the separate creep and plastic physical dissipation accounts.
     pub physical_dissipation_j_m3: f64,
-    /// Backward-Euler loss `delta_e:C:delta_e/2`, never physical heat.
+    /// Endpoint `q delta_alpha_c`, available as physical creep heat.
+    pub creep_dissipation_j_m3: f64,
+    /// Yield-offset work `sigma_y delta_alpha_p`, zero for creep alone.
+    pub plastic_dissipation_j_m3: f64,
+    /// Backward-Euler elastic and, when selected, hardening loss; never heat.
     pub numerical_dissipation_j_m3: f64,
     /// Work minus change of storage minus both separately computed losses.
     pub residual_j_m3: f64,
@@ -85,18 +91,35 @@ pub struct CreepEnergy {
 
 /// Admitted candidate; the caller atomically commits state after its solve.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CreepIncrement {
+pub struct CreepIncrement<S = CreepState> {
     pub strain: Voigt,
     pub stress_pa: Voigt,
     pub tangent_pa: Tangent6,
-    pub state: CreepState,
+    pub state: S,
     pub energy: CreepEnergy,
+}
+
+/// A physical creep interval on the original constitutive history owner.
+/// Consumers freeze this history through all trial evaluations, then audit one
+/// increment before accepting it. A combined law retains its plastic history.
+pub trait CreepLaw: SmallStrainLaw {
+    fn kinetics(&self) -> &NortonCreep;
+    fn validate_creep_history(&self, strain: &Voigt, state: &Self::State) -> Result<()>;
+    fn creep_increment(
+        &self,
+        old_strain: &Voigt,
+        old: &Self::State,
+        strain: &Voigt,
+        tolerances: CreepTolerances,
+    ) -> Result<CreepIncrement<Self::State>>;
 }
 
 /// Parameter/domain, representability or independently measured residual failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CreepError {
     Invalid(&'static str),
+    /// Native energetic J2 coefficient/history/storage refusal.
+    Plastic(crate::plastic::energy::EnergyError),
     StressResidual {
         residual_pa: f64,
         tolerance_pa: f64,
@@ -110,6 +133,7 @@ impl fmt::Display for CreepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(what) => write!(f, "Norton creep: {what}"),
+            Self::Plastic(error) => error.fmt(f),
             Self::StressResidual {
                 residual_pa,
                 tolerance_pa,
@@ -128,6 +152,11 @@ impl fmt::Display for CreepError {
     }
 }
 impl std::error::Error for CreepError {}
+impl From<crate::plastic::energy::EnergyError> for CreepError {
+    fn from(error: crate::plastic::energy::EnergyError) -> Self {
+        Self::Plastic(error)
+    }
+}
 type Result<T> = core::result::Result<T, CreepError>;
 fn require(ok: bool, what: &'static str) -> Result<()> {
     if ok {
@@ -183,6 +212,12 @@ struct Update {
     q_trial: f64,
     q: f64,
     delta_alpha: f64,
+}
+
+struct Trial {
+    pressure: f64,
+    deviator: Voigt,
+    q: f64,
 }
 
 // One scalar kinetic owner for tensor relaxation (3G) and its free-sided axial
@@ -305,11 +340,24 @@ impl NortonCreep {
     /// norms stay within the same small-strain ceiling; accumulated path length
     /// is finite and at least the equivalent norm of the signed creep strain.
     pub fn validate_history(&self, strain: &Voigt, state: &CreepState) -> Result<()> {
+        self.validate_strain(strain)?;
+        self.validate_creep_state(state)?;
+        self.validate_strain(&difference(strain, &state.creep_strain))
+    }
+
+    fn validate_strain(&self, strain: &Voigt) -> Result<()> {
+        let magnitude = norm(strain);
         require(
-            strain
-                .iter()
-                .chain(state.creep_strain.iter())
-                .all(|x| x.is_finite())
+            strain.iter().all(|x| x.is_finite())
+                && magnitude.is_finite()
+                && magnitude <= self.elastic.strain_limit,
+            "total, elastic or inelastic strain exceeds the small-strain domain",
+        )
+    }
+
+    fn validate_creep_state(&self, state: &CreepState) -> Result<()> {
+        require(
+            state.creep_strain.iter().all(|x| x.is_finite())
                 && state.equivalent_creep_strain.is_finite()
                 && state.equivalent_creep_strain >= 0.0,
             "strain and creep history must be finite and accumulated creep nonnegative",
@@ -321,16 +369,7 @@ impl NortonCreep {
                 && det::sqrt(2.0 / 3.0) * creep_norm <= state.equivalent_creep_strain + allowance,
             "creep history must be traceless and consistent with its accumulated path length",
         )?;
-        require(
-            [
-                norm(strain),
-                creep_norm,
-                norm(&difference(strain, &state.creep_strain)),
-            ]
-            .iter()
-            .all(|x| x.is_finite() && *x <= self.elastic.strain_limit),
-            "total, elastic or creep strain exceeds the small-strain domain",
-        )
+        self.validate_strain(&state.creep_strain)
     }
 
     // q/q_trial = exp(y), exp(y)+exp(log_k+n*y)=1. Log-space evaluation avoids
@@ -413,10 +452,8 @@ impl NortonCreep {
         })
     }
 
-    fn update(&self, strain: &Voigt, old: &CreepState) -> Result<Update> {
-        self.validate_history(strain, old)?;
-        let elastic_strain = difference(strain, &old.creep_strain);
-        let pressure = self.bulk_pa * trace(&elastic_strain);
+    fn predictor(&self, elastic_strain: &Voigt) -> Result<Trial> {
+        let pressure = self.bulk_pa * trace(elastic_strain);
         let two_g = 2.0 * self.shear_pa;
         // Form the isotropic split from strain differences. A generic elastic
         // matvec can round equal normal stresses differently; subtracting those
@@ -445,28 +482,18 @@ impl NortonCreep {
             q_trial.is_finite(),
             "equivalent trial stress is not representable",
         )?;
-        let Relaxation {
-            q,
-            delta_alpha,
-            ratio,
-            radial,
-        } = self.relaxation(q_trial, self.log_step_scale)?;
-        let mut state = old.clone();
-        if delta_alpha > 0.0 {
-            for i in 0..6 {
-                state.creep_strain[i] += (s[i] / q_trial) * (1.5 * delta_alpha);
-            }
-            // Keep the dependent deviatoric component through nearly cancelled
-            // load reversals, whose remaining signed history can approach zero.
-            state.creep_strain[2] = -(state.creep_strain[0] + state.creep_strain[1]);
-            state.equivalent_creep_strain += delta_alpha;
-            // Near zero-load equilibrium a positive increment may round away
-            // against accepted history. Retain its analytic heat; the checked
-            // stress/work budgets audit this rounding. Rejecting every such
-            // trial would prevent Newton from completing stress-free unloading.
-        }
-        self.validate_history(strain, &state)?;
-        let stress = core::array::from_fn(|i| ratio * s[i] + if i < 3 { pressure } else { 0.0 });
+        Ok(Trial {
+            pressure,
+            deviator: s,
+            q: q_trial,
+        })
+    }
+
+    fn radial_response(&self, trial: &Trial, ratio: f64, radial: f64) -> Result<(Voigt, Tangent6)> {
+        let s = trial.deviator;
+        let stress =
+            core::array::from_fn(|i| ratio * s[i] + if i < 3 { trial.pressure } else { 0.0 });
+        let s_norm = norm(&s);
         let direction: Voigt = if s_norm > 0.0 {
             core::array::from_fn(|i| s[i] / s_norm)
         } else {
@@ -493,6 +520,35 @@ impl NortonCreep {
                 .all(|x| x.is_finite()),
             "endpoint stress or tangent is not representable",
         )?;
+        Ok((stress, tangent))
+    }
+
+    fn update(&self, strain: &Voigt, old: &CreepState) -> Result<Update> {
+        self.validate_history(strain, old)?;
+        let trial = self.predictor(&difference(strain, &old.creep_strain))?;
+        let q_trial = trial.q;
+        let Relaxation {
+            q,
+            delta_alpha,
+            ratio,
+            radial,
+        } = self.relaxation(q_trial, self.log_step_scale)?;
+        let mut state = old.clone();
+        if delta_alpha > 0.0 {
+            for i in 0..6 {
+                state.creep_strain[i] += (trial.deviator[i] / q_trial) * (1.5 * delta_alpha);
+            }
+            // Keep the dependent deviatoric component through nearly cancelled
+            // load reversals, whose remaining signed history can approach zero.
+            state.creep_strain[2] = -(state.creep_strain[0] + state.creep_strain[1]);
+            state.equivalent_creep_strain += delta_alpha;
+            // Near zero-load equilibrium a positive increment may round away
+            // against accepted history. Retain its analytic heat; the checked
+            // stress/work budgets audit this rounding. Rejecting every such
+            // trial would prevent Newton from completing stress-free unloading.
+        }
+        self.validate_history(strain, &state)?;
+        let (stress, tangent) = self.radial_response(&trial, ratio, radial)?;
         Ok(Update {
             stress,
             tangent,
@@ -545,6 +601,8 @@ impl NortonCreep {
             final_stored_j_m3: self.stored_energy(&new_e)?,
             mechanical_work_j_m3: contract(&next.stress, &difference(strain, old_strain)),
             physical_dissipation_j_m3: next.q * next.delta_alpha,
+            creep_dissipation_j_m3: next.q * next.delta_alpha,
+            plastic_dissipation_j_m3: 0.0,
             numerical_dissipation_j_m3: self.stored_energy(&difference(&new_e, &old_e))?,
             residual_j_m3: 0.0,
         };
@@ -572,6 +630,24 @@ impl NortonCreep {
             state: next.state,
             energy,
         })
+    }
+}
+
+impl CreepLaw for NortonCreep {
+    fn kinetics(&self) -> &NortonCreep {
+        self
+    }
+    fn validate_creep_history(&self, strain: &Voigt, state: &CreepState) -> Result<()> {
+        self.validate_history(strain, state)
+    }
+    fn creep_increment(
+        &self,
+        old_strain: &Voigt,
+        old: &CreepState,
+        strain: &Voigt,
+        tolerances: CreepTolerances,
+    ) -> Result<CreepIncrement> {
+        self.advance_with_energy(old_strain, old, strain, tolerances)
     }
 }
 

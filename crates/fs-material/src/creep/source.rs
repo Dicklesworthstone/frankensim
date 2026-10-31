@@ -7,7 +7,11 @@
 //! work. Temperature-dependent elasticity, primary/tertiary creep, damage and
 //! fitted-data qualification require other explicit models.
 
-use super::{CreepError, CreepState, NortonCreep, NortonCreepParameters};
+use super::{
+    CreepError, CreepIncrement, CreepLaw, CreepState, CreepTolerances, NortonCreep,
+    NortonCreepParameters,
+};
+use crate::plastic::source::J2SourceError;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, POISSON_RATIO_PROPERTY,
     ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
@@ -94,6 +98,7 @@ pub struct NortonSourceQuery<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CreepSourceError {
     Material(MaterialStatePointError),
+    Plastic(J2SourceError),
     Mechanical(CreepError),
     Invalid(&'static str),
     Support { property: String, reason: String },
@@ -103,6 +108,7 @@ impl core::fmt::Display for CreepSourceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Material(e) => write!(f, "creep source: {e}"),
+            Self::Plastic(e) => write!(f, "creep plastic source: {e}"),
             Self::Mechanical(e) => write!(f, "creep law: {e}"),
             Self::Invalid(s) => write!(f, "creep source: {s}"),
             Self::Support { property, reason } => write!(f, "creep source {property}: {reason}"),
@@ -120,6 +126,25 @@ impl From<CreepError> for CreepSourceError {
     fn from(value: CreepError) -> Self {
         Self::Mechanical(value)
     }
+}
+
+impl From<J2SourceError> for CreepSourceError {
+    fn from(value: J2SourceError) -> Self {
+        Self::Plastic(value)
+    }
+}
+
+/// A source-pinned family of physical creep steps. Additional irreversible
+/// memories stay in the original material law; thermal consumers share the
+/// same Norton/caloric source admission and retain the complete resolved law.
+pub trait CreepSourceFamily<'a>: Clone + core::fmt::Debug {
+    type Material: CreepLaw + Clone + core::fmt::Debug;
+    fn creep_source(&self) -> &NortonCreepSource<'a>;
+    fn at_temperature(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<Self::Material, CreepSourceError>;
 }
 
 /// Supported, source-pinned family of physical steps. Preparation checks the
@@ -240,12 +265,7 @@ impl<'a> NortonCreepSource<'a> {
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<ResolvedNortonCreep, CreepSourceError> {
-        let law = NortonCreep::new(
-            self.elastic.clone(),
-            self.parameters.clone(),
-            temperature_k,
-            duration_s,
-        )?;
+        let law = self.prepared_law(temperature_k, duration_s)?;
         let point = self
             .reference
             .query()
@@ -256,6 +276,21 @@ impl<'a> NortonCreepSource<'a> {
             })?;
         let material = self.reference.at_query_point(self.card, &point)?;
         Ok(ResolvedNortonCreep { material, law })
+    }
+
+    // A composed source already refreshes the complete shared property bundle.
+    // Reuse admitted coefficients without resolving the same seven claims twice.
+    pub(crate) fn prepared_law(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<NortonCreep, CreepSourceError> {
+        Ok(NortonCreep::new(
+            self.elastic.clone(),
+            self.parameters.clone(),
+            temperature_k,
+            duration_s,
+        )?)
     }
 }
 
@@ -292,6 +327,39 @@ impl SmallStrainLaw for ResolvedNortonCreep {
     }
     fn card(&self) -> ModelCard {
         self.law.card()
+    }
+}
+
+impl CreepLaw for ResolvedNortonCreep {
+    fn kinetics(&self) -> &NortonCreep {
+        &self.law
+    }
+    fn validate_creep_history(&self, strain: &Voigt, state: &CreepState) -> Result<(), CreepError> {
+        self.law.validate_history(strain, state)
+    }
+    fn creep_increment(
+        &self,
+        old_strain: &Voigt,
+        old: &CreepState,
+        strain: &Voigt,
+        tolerances: CreepTolerances,
+    ) -> Result<CreepIncrement, CreepError> {
+        self.law
+            .advance_with_energy(old_strain, old, strain, tolerances)
+    }
+}
+
+impl<'a> CreepSourceFamily<'a> for NortonCreepSource<'a> {
+    type Material = ResolvedNortonCreep;
+    fn creep_source(&self) -> &NortonCreepSource<'a> {
+        self
+    }
+    fn at_temperature(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<Self::Material, CreepSourceError> {
+        NortonCreepSource::at_temperature(self, temperature_k, duration_s)
     }
 }
 

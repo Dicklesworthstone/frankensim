@@ -7490,3 +7490,44 @@ loss, wrong quantity/curve/domain refusal and specimen/context/direction
 substitution. Three exact original source-domain tests passed in the focused
 native lane; complete material-card integration execution is not implied by
 those narrower domain checks.
+
+## Simultaneous permanent creep and isotropic yielding
+
+`creep::plastic::NortonJ2` combines the original Norton kinetics and native
+energetic linear-isotropic J2 model at one endpoint stress. Separate original
+`CreepState` and `J2State` histories retain permanent creep, plastic strain and
+both accumulated paths. A monotone logarithmic branch test selects creep-only
+or active plastic flow. The active branch reduces to the original bounded
+Norton scalar root with the effective elastic/hardening stiffness; perfect
+plasticity has a closed endpoint. The tensor predictor and consistent tangent
+remain shared with the Norton owner. No sequential full-duration return maps
+or separately added elastic numerical losses are used.
+
+Stored energy includes the native elastic and energetic hardening terms.
+`CreepEnergy` exposes creep and plastic physical dissipation separately and
+retains their total; numerical elastic/hardening loss is never thermal input.
+Scalar balance, yield complementarity, reconstructed stress, separate history
+admission and the complete work identity gate each checked candidate. A changed
+yield offset may induce plasticity at fixed strain without changing storage.
+Nonzero kinematic hardening is refused because its shifted flow need not be
+coaxial with creep. Elastic and hardening storage coefficients stay fixed.
+
+`NortonJ2Source` selects all nine original kinetic/elastic/yield/hardening
+claims together. Continuation pins every selected identity and the original
+source context. Complete temperature lines require constant elastic, kinetic
+and hardening coefficients; yield may vary over its positive supported curve.
+The original J2 owner performs the explicitly selected H or uniaxial-tangent
+conversion. Immutable prepared source tables are shared across clones; the
+composed resolver refreshes the full bundle once per endpoint. Missing data,
+unsupported temperature support, evolving mechanical source axes and changing
+hardening storage refuse. Source binding is not measured material calibration.
+
+`CreepLaw` and the default-generic `CreepIncrement` carry this complete history
+and work account to existing solvers. `CreepSourceFamily` supplies the same
+original Norton/caloric admission to fixed-reference thermal consumers.
+`tests/creep_plastic.rs` checks simultaneous analytical solutions, consistent
+tangents, rotation/reversal, energy, exact activation and refusal;
+`tests/creep_plastic_source.rs` checks heated yielding, source continuation,
+hardening-basis conversion, whole-path admission and cancellation. This remains
+small-strain secondary creep with energetic isotropic hardening; it adds no
+finite-deformation, primary/tertiary creep, damage, rupture or service-life claim.

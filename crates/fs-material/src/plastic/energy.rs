@@ -234,7 +234,7 @@ impl J2Plasticity {
         Ok(EnergyIncrement { strain: *strain, stress_pa, state, energy })
     }
 
-    fn validate_energy_law(&self) -> Result<(), EnergyError> {
+    pub(crate) fn validate_energy_law(&self) -> Result<(), EnergyError> {
         let (lambda, mu) = self.elastic.lame();
         let bulk = lambda + 2.0 * mu / 3.0;
         if !positive(self.elastic.youngs)
@@ -269,7 +269,7 @@ impl J2Plasticity {
         Ok(e)
     }
 
-    pub(super) fn validate_plastic_history(&self, state: &J2State)
+    pub(crate) fn validate_plastic_history(&self, state: &J2State)
         -> Result<(), EnergyError> {
         if !state.alpha.is_finite() || state.alpha < 0.0
             || state.plastic_strain.iter().any(|x| !x.is_finite()) {
@@ -285,7 +285,7 @@ impl J2Plasticity {
         Ok(())
     }
 
-    pub(super) fn energy_of(&self, elastic_strain: &Voigt, alpha: f64, plastic_strain: &Voigt)
+    pub(crate) fn energy_of(&self, elastic_strain: &Voigt, alpha: f64, plastic_strain: &Voigt)
         -> Result<StoredEnergy, EnergyError> {
         let stress = self.elastic.stress(elastic_strain, &());
         let elastic_j_m3 = product(0.5, finite(contract(elastic_strain, &stress))?)?;
