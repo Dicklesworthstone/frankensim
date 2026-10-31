@@ -955,7 +955,7 @@ cantilever against the same monolithic body, including a slave-seam load, full
 tangent and mass. Independent energy/residual differences exercise a
 nonmatching eccentric seam. The scope remains moderate-deformation CST/DKT
 membrane prestress with reference-frame linear bending, beams and glue; it does
-not claim nonlinear MITC bending, unilateral contact, assembled tethers, beam
+not claim nonlinear MITC bending, unilateral contact, beam
 buckling, tension/downbearing/contact force ledgers or closure of M1.4-W1.
 
 ## Complete condensed-film strain coordinates
@@ -980,3 +980,38 @@ The inline strain test checks the complete Gram against original positive
 facet energy, including mixed pairs and budget refusal. A bounded native run
 also exercised the unchanged tangent kernels; it does not constitute a new
 full mesh/modal construction qualification.
+
+## Reciprocal tensile connections in assembled shell equilibrium
+
+`shell::preload::assembly::equilibrate_tethered_shell_assembly` extends the
+preceding dead-load assembly entry point with massless tensile connections
+between physical shell bearings or a bearing and a fixed world anchor. Each
+bearing identifies an existing facet, barycentrics and a reference offset;
+the supplied reference tension and axial stiffness retain their original N
+and N/m meaning. Zero stiffness explicitly prescribes tension. The original
+slack/taut radial potential, cancellation-resistant extension, force, material
+stiffness and geometric stiffness remain the sole constitutive owner.
+
+Both original point maps compose with the existing component ties. Their
+difference is coalesced into deterministic retained columns before force,
+Jacobian action or sparse tangent assembly. This retains offset moments,
+transferred slave forces, cross-body Hessian blocks and cancellation of shared
+coordinates, including endpoints on the same component. Matrix-free actions
+use the three-dimensional radial Hessian without forming dense coupling blocks.
+The unchanged one-part/world-anchor path keeps its original 18-column arithmetic.
+
+The original continuation scales the complete tether potential together with
+dead loads, with the same physical force, deformation and stable-inertia gates.
+The returned tangent already contains the connection stiffness and the original
+mass is unchanged. Original tether responses report tension, length, relative
+potential and equal/opposite endpoint forces, including world-anchor reactions.
+Structural stored energy and tether potential changes are explicitly separate.
+Final cancellation is polled after both displacements and responses are ready.
+
+The reference body must already be supported and tied sufficiently to have a
+stable stiffness; tethers do not silently regularize rigid modes. Work is capped
+at 4,096 connections, 262,144 aggregate retained columns and 8,388,608 scalar
+tangent contributions. Loaded reference geometries still refuse. This is the
+original moderate-deformation shell and linear offset-rotation model with
+massless scalar tensile laws, not a distributed vibrating string, finite-rotation
+attachment, compressive contact, soundpost friction or complete M1.4-W1 closure.

@@ -4,16 +4,22 @@ use crate::shell::junction::{RotationCoupling, TieOffset, TieSide};
 use crate::shell::preload::{equilibrate_shell_materials, tests::reference_newton};
 use fs_material::sheet::SheetMatrix;
 
-struct Part {
-    mesh: ShellMesh,
-    sections: Vec<ShellSection>,
-    fixed: Vec<usize>,
-    loads: Vec<f64>,
-    thickness: Vec<f64>,
+pub(super) struct Part {
+    pub(super) mesh: ShellMesh,
+    pub(super) sections: Vec<ShellSection>,
+    pub(super) fixed: Vec<usize>,
+    pub(super) loads: Vec<f64>,
+    pub(super) thickness: Vec<f64>,
 }
 
 impl Part {
-    fn rectangle(first_column: usize, nx: usize, ny: usize, z: f64, supported: bool) -> Self {
+    pub(super) fn rectangle(
+        first_column: usize,
+        nx: usize,
+        ny: usize,
+        z: f64,
+        supported: bool,
+    ) -> Self {
         let mut nodes = Vec::new();
         let mut tris = Vec::new();
         let mut fixed = Vec::new();
@@ -53,7 +59,7 @@ impl Part {
         }
     }
 
-    fn input(&self) -> ShellPreloadComponent<'_> {
+    pub(super) fn input(&self) -> ShellPreloadComponent<'_> {
         ShellPreloadComponent {
             mesh: &self.mesh,
             sections: &self.sections,
@@ -71,7 +77,7 @@ impl Part {
     }
 }
 
-fn budget() -> TieBudget {
+pub(super) fn budget() -> TieBudget {
     TieBudget {
         max_segments: 1000,
         max_slave_dofs: 1000,
@@ -80,7 +86,7 @@ fn budget() -> TieBudget {
     }
 }
 
-fn seam(slave_ny: usize, offset: TieOffset) -> EdgeTie {
+pub(super) fn seam(slave_ny: usize, offset: TieOffset) -> EdgeTie {
     EdgeTie {
         a: TieSide {
             component: 0,
@@ -96,7 +102,7 @@ fn seam(slave_ny: usize, offset: TieOffset) -> EdgeTie {
     }
 }
 
-fn options() -> PreloadOptions {
+pub(super) fn options() -> PreloadOptions {
     PreloadOptions {
         relative_force_tolerance: 1e-10,
         ..PreloadOptions::default()

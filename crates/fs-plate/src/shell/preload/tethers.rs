@@ -5,8 +5,9 @@
 //! k=0 explicitly selects prescribed tension, not a fixed-rest-length wire.
 //! The force and BOTH material/geometric tangent terms derive from one radial
 //! potential. No compression, follower-force approximation, or added mass.
-use super::{ShellMesh, ShellModel, dot, norm};
+use super::{CoordinateRows, ShellMesh, ShellModel, dot, norm};
 use fs_sparse::Coo;
+use std::collections::BTreeMap;
 
 /// One massless tensile connection to a fixed anchor. The three nodes and
 /// weights identify an existing shell facet; no new mesh or support is inferred.
@@ -40,6 +41,47 @@ pub struct TetherResponse {
     /// Potential relative to the reference [J]; can be negative on unloading.
     pub potential_change_j: f64,
 }
+impl TetherResponse {
+    /// Forces on the bearing and the opposite endpoint, respectively [N].
+    /// For a world anchor the second vector is its transmitted reaction.
+    pub fn endpoint_forces_n(self)->[[f64;3];2] {
+        [self.force_n,self.force_n.map(|v|-v)]
+    }
+}
+
+/// The original barycentric, offset point map, shared by both tether endpoints.
+pub(super) struct PreparedPoint {
+    dofs:[Option<usize>;18],
+    columns:[[f64;3];18],
+    midsurface:[f64;3],
+    arm:[f64;3],
+}
+impl PreparedPoint {
+    pub(super) fn new(nodes:[usize;3],weights:[f64;3],arm:[f64;3],
+        mesh:&ShellMesh,model:&ShellModel)->Result<Self,String> {
+        if nodes.iter().any(|n|*n>=mesh.nodes.len())
+            || nodes[0]==nodes[1] || nodes[0]==nodes[2] || nodes[1]==nodes[2]
+            || weights.iter().any(|w|!w.is_finite() || *w<0. || *w>1.)
+            || (weights.iter().sum::<f64>()-1.).abs()>1e-12
+            || arm.iter().any(|v|!v.is_finite())
+            || !mesh.tris.iter().any(|tri|nodes.iter().all(|n|tri.contains(n))) {
+            return Err("invalid shell tether facet, barycentric port or bearing offset".into());
+        }
+        let columns=std::array::from_fn(|i| {
+            let mut axis=[0.;3];axis[i%3]=1.;
+            let column=if i%6<3 {axis}else{cross(axis,arm)};
+            column.map(|x|x*weights[i/6])
+        });
+        Ok(Self {dofs:std::array::from_fn(|i|model.dof_map[6*nodes[i/6]+i%6]),
+            columns,midsurface:std::array::from_fn(|c|(0..3)
+                .map(|a|weights[a]*mesh.nodes[nodes[a]][c]).sum()),arm})
+    }
+    pub(super) fn position(&self)->Result<[f64;3],String> {
+        let position=std::array::from_fn(|c|self.arm[c]+self.midsurface[c]);
+        if position.iter().any(|v|!v.is_finite()) {return Err("tether bearing position overflow".into());}
+        Ok(position)
+    }
+}
 
 pub(super) struct PreparedTether {
     dofs: [Option<usize>;18],
@@ -48,6 +90,10 @@ pub(super) struct PreparedTether {
     length: f64,
     tension: f64,
     stiffness: f64,
+    // Relative bearing-minus-anchor motion after the original component ties.
+    // Unique retained columns combine shared/slave DOFs before any work or
+    // Hessian is assembled. None preserves the original one-shell arithmetic.
+    mapped_columns: Option<Vec<(usize,[f64;3])>>,
 }
 struct State {
     response: TetherResponse,
@@ -59,29 +105,47 @@ fn cross(a:[f64;3],b:[f64;3])->[f64;3] {
 }
 impl PreparedTether {
     pub(super) fn new(t:&ShellTether,mesh:&ShellMesh,model:&ShellModel)->Result<Self,String> {
-        if t.nodes.iter().any(|n|*n>=mesh.nodes.len())
-            || t.nodes[0]==t.nodes[1] || t.nodes[0]==t.nodes[2] || t.nodes[1]==t.nodes[2]
-            || t.weights.iter().any(|w|!w.is_finite() || *w<0. || *w>1.)
-            || (t.weights.iter().sum::<f64>()-1.).abs()>1e-12
-            || t.arm_m.iter().chain(&t.anchor_m).any(|v|!v.is_finite())
-            || !t.reference_tension_n.is_finite() || t.reference_tension_n<0.
-            || !t.axial_stiffness_n_per_m.is_finite() || t.axial_stiffness_n_per_m<0.
-            || !mesh.tris.iter().any(|tri|t.nodes.iter().all(|n|tri.contains(n))) {
+        let point=PreparedPoint::new(t.nodes,t.weights,t.arm_m,mesh,model)?;
+        Self::at_point(&point,t.anchor_m,t.reference_tension_n,t.axial_stiffness_n_per_m)
+    }
+    pub(super) fn at_point(point:&PreparedPoint,anchor:[f64;3],tension:f64,stiffness:f64)
+        ->Result<Self,String> {
+        if anchor.iter().any(|v|!v.is_finite())
+            || !tension.is_finite() || tension<0. || !stiffness.is_finite() || stiffness<0. {
             return Err("invalid shell tether facet, barycentric port, anchor or tension law".into());
         }
-        let chord=std::array::from_fn(|c|t.arm_m[c]-t.anchor_m[c]
-            +(0..3).map(|a|t.weights[a]*mesh.nodes[t.nodes[a]][c]).sum::<f64>());
+        // Keep the established subtract-then-add ordering for world anchors.
+        let chord=std::array::from_fn(|c|point.arm[c]-anchor[c]+point.midsurface[c]);
         let length=norm(&chord);
         if !length.is_finite() || length<1e-9 {return Err("tether anchor coincides with its bearing".into());}
-        let columns=std::array::from_fn(|i| {
-            let mut axis=[0.;3];axis[i%3]=1.;
-            let column=if i%6<3 {axis}else{cross(axis,t.arm_m)};
-            column.map(|x|x*t.weights[i/6])
-        });
-        Ok(Self {dofs:std::array::from_fn(|i|model.dof_map[6*t.nodes[i/6]+i%6]),
-            columns,chord,length,tension:t.reference_tension_n,stiffness:t.axial_stiffness_n_per_m})
+        Ok(Self {dofs:point.dofs,columns:point.columns,chord,length,tension,stiffness,mapped_columns:None})
+    }
+    pub(super) fn remap(mut self,bearing:&CoordinateRows,
+        anchor:Option<(&PreparedPoint,&CoordinateRows)>)->Result<Self,String> {
+        let mut columns:BTreeMap<usize,[f64;3]>=BTreeMap::new();
+        let mut add=|dofs:&[Option<usize>;18],port:&[[f64;3];18],rows:&CoordinateRows,sign:f64| {
+            for i in 0..18 {if let Some(local)=dofs[i] {
+                for &(global,weight) in &rows[local] {
+                    let column=columns.entry(global).or_insert([0.;3]);
+                    for c in 0..3 {column[c]+=sign*weight*port[i][c];}
+                }
+            }}
+        };
+        add(&self.dofs,&self.columns,bearing,1.);
+        if let Some((point,rows))=anchor {add(&point.dofs,&point.columns,rows,-1.);}
+        if columns.values().flatten().any(|v|!v.is_finite()) {
+            return Err("assembled tether motion map overflows".into());
+        }
+        self.mapped_columns=Some(columns.into_iter().filter(|(_,v)|v.iter().any(|x|*x!=0.)).collect());
+        Ok(self)
+    }
+    pub(super) fn column_count(&self)->usize {
+        self.mapped_columns.as_ref().map_or_else(||self.dofs.iter().flatten().count(),Vec::len)
     }
     fn movement(&self,u:&[f64])->[f64;3] {
+        if let Some(columns)=&self.mapped_columns {
+            return std::array::from_fn(|c|columns.iter().map(|(d,v)|v[c]*u[*d]).sum());
+        }
         std::array::from_fn(|c|(0..18).map(|i|
             self.dofs[i].map_or(0.,|d|self.columns[i][c]*u[d])).sum())
     }
@@ -117,6 +181,10 @@ impl PreparedTether {
     }
     pub(super) fn add_gradient(&self,u:&[f64],out:&mut[f64],factor:f64)->Result<(),String> {
         let state=self.state(self.movement(u))?;
+        if let Some(columns)=&self.mapped_columns {
+            for &(d,column) in columns {out[d]+=factor*dot(column,state.gradient);}
+            return Ok(());
+        }
         for i in 0..18 {if let Some(d)=self.dofs[i] {
             out[d]+=factor*dot(self.columns[i],state.gradient);
         }}
@@ -126,6 +194,10 @@ impl PreparedTether {
         let state=self.state(self.movement(u))?;
         let movement=self.movement(v);
         let hv=super::mul(&state.hessian,movement);
+        if let Some(columns)=&self.mapped_columns {
+            for &(d,column) in columns {out[d]+=factor*dot(column,hv);}
+            return Ok(());
+        }
         for i in 0..18 {if let Some(d)=self.dofs[i] {
             out[d]+=factor*dot(self.columns[i],hv);
         }}
@@ -133,6 +205,15 @@ impl PreparedTether {
     }
     pub(super) fn add_tangent(&self,u:&[f64],out:&mut Coo,factor:f64)->Result<(),String> {
         let state=self.state(self.movement(u))?;
+        if let Some(columns)=&self.mapped_columns {
+            for (i,&(a,column)) in columns.iter().enumerate() {
+                for &(b,other) in &columns[..=i] {
+                    let value=factor*dot(column,super::mul(&state.hessian,other));
+                    out.push(a,b,value);if a!=b {out.push(b,a,value);}
+                }
+            }
+            return Ok(());
+        }
         for i in 0..18 {if let Some(a)=self.dofs[i] {
             for j in 0..=i {if let Some(b)=self.dofs[j] {
                 let value=factor*dot(self.columns[i],super::mul(&state.hessian,self.columns[j]));
@@ -149,7 +230,7 @@ mod tests {
     fn radial(stiffness:f64)->PreparedTether {
         let chord=[0.7,-0.2,0.3];
         PreparedTether {dofs:[None;18],columns:[[0.;3];18],chord,length:norm(&chord),
-            tension:200.,stiffness}
+            tension:200.,stiffness,mapped_columns:None}
     }
     #[test]
     fn energy_force_and_material_geometric_tangent_are_consistent() {
