@@ -38,6 +38,9 @@ use crate::volumes::transport::VolumeTransportError;
 use crate::volumes::transport::enclosure::GridEnclosureBudget;
 use std::io::{self, Write};
 
+/// Propagate declared scalar fixture-flux uncertainty through this same transport.
+pub mod flux;
+
 mod angular;
 pub use angular::MAX_ANGULAR_CELLS_PER_ENCLOSURE;
 mod spectral_medium;
@@ -287,6 +290,15 @@ fn prepare<'field>(scene: &PhotometricScene<'field>, cx: &Cx<'_>) -> Result<Prep
 }
 
 fn evaluate(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe, prepared: &Prepared<'_>) -> Result<EnclosedIlluminance, PhotometryError> {
+    evaluate_with_contributions(scene, cx, probe, prepared, &mut |_, _| {})
+}
+
+// The observer sees each complete source contribution before the original
+// ordered sum. Additional uncertainty accounts reuse transport, not a second ray.
+fn evaluate_with_contributions(
+    scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe,
+    prepared: &Prepared<'_>, observe: &mut impl FnMut(usize, Interval),
+) -> Result<EnclosedIlluminance, PhotometryError> {
     let mut estimate = scene.illuminance(cx, probe)?;
     cx.checkpoint()?;
     let no_claim = |reason| EnclosedIlluminance {
@@ -297,7 +309,7 @@ fn evaluate(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe,
         Prepared::Unavailable(reason) => return Ok(no_claim(*reason)),
         Prepared::Available { identity, visibility, medium } => (identity, visibility, medium),
     };
-    let (enclosure, uncertain) = match direct_bound(scene, cx, probe, visibility, medium)? {
+    let (enclosure, uncertain) = match direct_bound(scene, cx, probe, visibility, medium, observe)? {
         Ok(bound) => bound,
         Err(reason) => return Ok(no_claim(reason)),
     };
@@ -320,10 +332,10 @@ fn evaluate(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe,
     })
 }
 
-fn direct_bound(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe, visibility: &VisibilityIndex, medium: &PreparedMedium<'_>) -> Result<Result<(Interval, usize), EnclosureUnavailable>, PhotometryError> {
+fn direct_bound(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe, visibility: &VisibilityIndex, medium: &PreparedMedium<'_>, observe: &mut impl FnMut(usize, Interval)) -> Result<Result<(Interval, usize), EnclosureUnavailable>, PhotometryError> {
     let mut sum = Interval::point(0.0);
     let mut uncertain = 0;
-    for source in scene.sources {
+    for (source_index, source) in scene.sources.iter().enumerate() {
         cx.checkpoint()?;
         if source.emitted_flux_lm == 0.0 { continue; }
         let origin = source.transform.translation_m();
@@ -356,6 +368,7 @@ fn direct_bound(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminancePr
             contribution = Interval::new(0.0, contribution.hi());
             uncertain += 1;
         }
+        observe(source_index, contribution);
         sum = nonnegative(sum + contribution);
         if !finite(sum) { return Ok(Err(EnclosureUnavailable::ArithmeticRange)); }
     }
