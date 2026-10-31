@@ -2,8 +2,9 @@
 //!
 //! Bulk optics and mechanics must come from one immutable card at one query
 //! point. Surface finish is an independent input, not inferred from chemistry.
-//! Conversion retains the existing visible-band conductor/Cauchy/Beer-Lambert
-//! approximations. The separately declared gray/diffuse thermal binding reuses
+//! Conversion retains the existing visible-band conductor, Cauchy or Sellmeier
+//! dispersion and Beer-Lambert absorption models. The separately declared
+//! gray/diffuse thermal binding reuses
 //! a conduction emissivity sample at the same complete accepted material state.
 //! Neither binding authenticates measurements or supplies experimental validation.
 
@@ -12,6 +13,7 @@ use fs_conduction::radiation::SurfaceEmissivity;
 use fs_material::state_point::{
     ResolvedMaterialStatePoint, VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM, VisibleConductorStatePoint,
     VisibleDielectricAbsorption, VisibleDielectricStatePoint, VisibleOpticalStatePoint,
+    VisibleSellmeierStatePoint,
 };
 
 use crate::conductor::{
@@ -20,7 +22,7 @@ use crate::conductor::{
 };
 use crate::dielectric::{
     BeerLambertAbsorption, CauchyIor, DielectricError, DielectricGlass, DielectricSurface,
-    GlassProvenance,
+    GlassProvenance, SellmeierIor,
 };
 use crate::thermal_surface::{GrayDiffuseThermalSurface, ThermalSurfaceError};
 use crate::tracer::Material;
@@ -150,7 +152,7 @@ pub enum OpticalAppearance {
         /// Explicit surface finish.
         surface: ConductorSurface,
     },
-    /// Homogeneous Cauchy dispersion and Beer-Lambert absorption.
+    /// Homogeneous dielectric dispersion and Beer-Lambert absorption.
     Dielectric {
         /// Admitted bulk optical law.
         glass: DielectricGlass,
@@ -203,6 +205,12 @@ impl MaterialOpticalBinding {
                 Some(roughness_alpha),
                 surface_state_identity,
             ),
+            VisibleOpticalStatePoint::DielectricSellmeier(state) => Self::try_sellmeier(
+                mechanical,
+                state,
+                Some(roughness_alpha),
+                surface_state_identity,
+            ),
         }
     }
 
@@ -246,24 +254,7 @@ impl MaterialOpticalBinding {
     ) -> Result<Self, MaterialOpticalError> {
         Self::validate_state(mechanical, optical.resolved(), surface_state_identity)?;
         let [a, b_m2, c_m4] = optical.cauchy_coefficients_si();
-        let absorption = match optical.absorption() {
-            VisibleDielectricAbsorption::ReferenceRgb {
-                transmittance_linear_rgb,
-                reference_distance_m,
-            } => BeerLambertAbsorption::try_from_rgb_transmittance(
-                transmittance_linear_rgb,
-                reference_distance_m,
-            )?,
-            VisibleDielectricAbsorption::Spectral { absorption_per_m } => {
-                let knots: [(f64, f64); 9] = core::array::from_fn(|index| {
-                    (
-                        VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM[index],
-                        absorption_per_m[index],
-                    )
-                });
-                BeerLambertAbsorption::try_from_spectral_extinction(&knots)?
-            }
-        };
+        let absorption = Self::dielectric_absorption(optical.absorption())?;
         let glass = DielectricGlass::new(
             CauchyIor::try_new(a, b_m2 * 1.0e12, c_m4 * 1.0e24)?,
             absorption,
@@ -279,6 +270,60 @@ impl MaterialOpticalBinding {
             surface_state_identity,
             OpticalAppearance::Dielectric { glass, surface },
         ))
+    }
+
+    /// Bind source-backed Sellmeier optics to the same accepted material state.
+    ///
+    /// The source retains SI squared vacuum resonance wavelengths; conversion
+    /// to micrometres squared occurs exactly once here. The renderer performs
+    /// transparent-band/pole admission before publishing a material. Surface
+    /// finish and absorption keep their existing independent physical roles.
+    pub fn try_sellmeier(
+        mechanical: &ResolvedMaterialStatePoint,
+        optical: &VisibleSellmeierStatePoint,
+        roughness_alpha: Option<f64>,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, MaterialOpticalError> {
+        Self::validate_state(mechanical, optical.resolved(), surface_state_identity)?;
+        let (strengths, resonances_m2) = optical.sellmeier_coefficients_si();
+        let glass = DielectricGlass::new(
+            SellmeierIor::try_new(strengths, resonances_m2.map(|value| value * 1.0e12))?,
+            Self::dielectric_absorption(optical.absorption())?,
+            GlassProvenance::Custom,
+        );
+        let surface = match roughness_alpha {
+            Some(alpha) => DielectricSurface::try_rough(alpha)?,
+            None => DielectricSurface::SMOOTH,
+        };
+        Ok(Self::new(
+            mechanical,
+            optical.resolved(),
+            surface_state_identity,
+            OpticalAppearance::Dielectric { glass, surface },
+        ))
+    }
+
+    fn dielectric_absorption(
+        source: VisibleDielectricAbsorption,
+    ) -> Result<BeerLambertAbsorption, DielectricError> {
+        match source {
+            VisibleDielectricAbsorption::ReferenceRgb {
+                transmittance_linear_rgb,
+                reference_distance_m,
+            } => BeerLambertAbsorption::try_from_rgb_transmittance(
+                transmittance_linear_rgb,
+                reference_distance_m,
+            ),
+            VisibleDielectricAbsorption::Spectral { absorption_per_m } => {
+                let knots: [(f64, f64); 9] = core::array::from_fn(|index| {
+                    (
+                        VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM[index],
+                        absorption_per_m[index],
+                    )
+                });
+                BeerLambertAbsorption::try_from_spectral_extinction(&knots)
+            }
+        }
     }
 
     fn validate_state(

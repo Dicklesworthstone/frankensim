@@ -6219,3 +6219,32 @@ G0/G1 source tests cover geometry and SI scaling, source retention, independent
 single-pole frequency limits, multipole additivity, the zero-memory limit and
 passivity/source-domain refusals. These synthetic fixtures verify the model's
 implementation and do not establish experimental material accuracy.
+
+## Source-backed visible dielectric dispersion
+
+`state_point::VisibleSellmeierStatePoint` retains three nonnegative,
+dimensionless oscillator strengths and three squared vacuum resonance
+wavelengths in SI m², together with the same Beer-Lambert source schemas
+used by Cauchy dielectrics: either four RGB transmittance/reference-distance
+properties or nine typed spectral intensity-absorption knots. Every required
+property resolves atomically from one immutable card at one complete state
+and selected source policy. Spectral absorption retains its power-neper
+quantity kind and wavelength grid; it is not converted through RGB. Partial
+spectral declarations do not fall back to RGB, and ambiguous simultaneous
+absorption schemas require the existing explicit property-selection policy.
+The source index convention is absolute relative to vacuum; no ambient-air
+correction or material-name default is inferred.
+
+The generic visible optical resolver selects exactly one complete conductor,
+Cauchy or Sellmeier schema and refuses ambiguous complete alternatives.
+`fs-render::material_state` converts squared resonance wavelengths to µm²
+once, admits the renderer's transparent band through its existing dielectric
+owner, and checks that optics and mechanics share the original card, query
+and coordinate meanings. Both generic scenes and the Euler scene adapter
+consume this binding. Surface finish remains independent of bulk dispersion.
+
+Focused G0/G1/G3 regressions cover source/temperature retention, SI optical
+evaluation, source-only coefficient changes, both surface finishes, ambiguous
+families, missing or wrongly dimensioned coefficients, gain, extrapolation,
+cross-state substitutions and a resonance inside the render band. These are
+synthetic source and algebra checks, not experimental glass validation.

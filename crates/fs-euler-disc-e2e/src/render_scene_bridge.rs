@@ -216,17 +216,12 @@ impl EulerDiscMaterialStateBinding {
         roughness_alpha: f64,
         surface_state_identity: ContentHash,
     ) -> Result<Self, EulerSceneError> {
-        match optical {
-            VisibleOpticalStatePoint::Conductor(optical) => {
-                Self::try_conductor(mechanical, optical, roughness_alpha, surface_state_identity)
-            }
-            VisibleOpticalStatePoint::Dielectric(optical) => Self::try_dielectric(
-                mechanical,
-                optical,
-                Some(roughness_alpha),
-                surface_state_identity,
-            ),
-        }
+        Self::try_visible_optical_resolved(
+            mechanical.resolved(),
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )
     }
 
     /// Bind the data-selected visible optical family to the minimal elastic
@@ -259,20 +254,42 @@ impl EulerDiscMaterialStateBinding {
         roughness_alpha: f64,
         surface_state_identity: ContentHash,
     ) -> Result<Self, EulerSceneError> {
-        match optical {
-            VisibleOpticalStatePoint::Conductor(optical) => Self::try_conductor_resolved(
-                mechanical,
-                optical,
-                roughness_alpha,
-                surface_state_identity,
-            ),
-            VisibleOpticalStatePoint::Dielectric(optical) => Self::try_dielectric_resolved(
-                mechanical,
-                optical,
-                Some(roughness_alpha),
-                surface_state_identity,
-            ),
+        let binding = MaterialOpticalBinding::try_visible(
+            mechanical,
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )?;
+        let domain = match binding.appearance() {
+            OpticalAppearance::Conductor { .. } => {
+                "org.frankensim.euler-disc.resolved-conductor-material-binding.v1"
+            }
+            OpticalAppearance::Dielectric { .. } => {
+                "org.frankensim.euler-disc.resolved-dielectric-material-binding.v1"
+            }
+        };
+        let appearance = binding.appearance().into();
+        let mechanical_state_identity = mechanical.identity();
+        let optical_state_identity = optical.resolved().identity();
+        let material_card_identity = mechanical.card_identity();
+        let mut hasher = DomainHasher::new(domain);
+        for identity in [
+            mechanical_state_identity,
+            optical_state_identity,
+            material_card_identity,
+            surface_state_identity,
+        ] {
+            hasher.update(identity.as_bytes());
         }
+        hash_material(&mut hasher, appearance);
+        Ok(Self {
+            mechanical_state_identity,
+            optical_state_identity,
+            material_card_identity,
+            surface_state_identity,
+            appearance,
+            identity: hasher.finalize(),
+        })
     }
 
     /// Resolve an opaque-conductor appearance from evidence-bearing material
@@ -3759,6 +3776,157 @@ mod material_binding_tests {
         properties
             .extend(VISIBLE_COMPLEX_IOR_K_PROPERTIES.map(|name| (name, Dims::NONE, extinction)));
         test_card("synthetic-conductor", &properties, 400.0)
+    }
+
+    /// G1/G3: the same source-backed law reaches generic mechanics and the
+    /// Euler scene adapter, with SI resonance conversion performed exactly once.
+    #[test]
+    fn g1_shared_sellmeier_ingress_preserves_dispersion_and_material_state() {
+        use fs_material::state_point::{
+            VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES, VISIBLE_DIELECTRIC_SELLMEIER_C_M2_PROPERTIES,
+        };
+        let strengths = [1.03961212, 0.231792344, 1.01046945];
+        let resonances_m2 = [0.00600069867e-12, 0.0200179144e-12, 103.560653e-12];
+        let mut properties = vec![
+            ("density", Density::DIMS, 2500.0),
+            ("young_modulus", Pressure::DIMS, 70.0e9),
+            ("poisson_ratio", Dims::NONE, 0.23),
+        ];
+        properties.extend(
+            VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES
+                .into_iter()
+                .zip(strengths)
+                .map(|(name, value)| (name, Dims::NONE, value)),
+        );
+        properties.extend(
+            VISIBLE_DIELECTRIC_SELLMEIER_C_M2_PROPERTIES
+                .into_iter()
+                .zip(resonances_m2)
+                .map(|(name, value)| (name, Dims([2, 0, 0, 0, 0, 0]), value)),
+        );
+        properties
+            .extend(VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES.map(|name| (name, Dims::NONE, 1.0)));
+        properties.push((
+            VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+            Dims([1, 0, 0, 0, 0, 0]),
+            0.01,
+        ));
+        // These synthetic source claims use catalog coefficients as an algebra
+        // fixture; they do not authenticate an absolute-index glass measurement.
+        let card = test_card("sellmeier-source", &properties, 400.0);
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let mechanical = string_material(&card, &point);
+        let optical = resolve_visible_optical_state_point(
+            &card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let VisibleOpticalStatePoint::DielectricSellmeier(source) = &optical else {
+            panic!("a complete Sellmeier source must retain its constitutive family")
+        };
+        let surface_id = ContentHash([72; 32]);
+        let binding =
+            MaterialOpticalBinding::try_visible(&mechanical, &optical, 0.08, surface_id).unwrap();
+        let adapter = EulerDiscMaterialStateBinding::try_visible_optical_resolved(
+            &mechanical,
+            &optical,
+            0.08,
+            surface_id,
+        )
+        .unwrap();
+        assert_eq!(adapter.appearance(), binding.appearance().into());
+        let Material::Dielectric { glass, surface } = binding.material() else {
+            panic!("transmitting material expected")
+        };
+        assert_eq!(surface.roughness_alpha(), Some(0.08));
+        for wavelength_nm in [380.0_f64, 486.1, 587.6, 656.3, 780.0] {
+            let wavelength_m2 = (wavelength_nm * 1.0e-9).powi(2);
+            let expected = (1.0
+                + strengths
+                    .into_iter()
+                    .zip(resonances_m2)
+                    .map(|(b, c)| b * wavelength_m2 / (wavelength_m2 - c))
+                    .sum::<f64>())
+            .sqrt();
+            assert!((glass.ior().eval(wavelength_nm).unwrap() - expected).abs() < 2.0e-14);
+        }
+        assert!(glass.ior().eval(380.0).unwrap() > glass.ior().eval(780.0).unwrap());
+        let smooth =
+            MaterialOpticalBinding::try_sellmeier(&mechanical, source, None, surface_id).unwrap();
+        let Material::Dielectric {
+            glass: smooth_glass,
+            surface,
+        } = smooth.material()
+        else {
+            unreachable!()
+        };
+        assert_eq!(smooth_glass, glass);
+        assert!(surface.is_delta());
+        assert_ne!(binding.identity(), smooth.identity());
+
+        let warm = resolve_visible_optical_state_point(
+            &card,
+            &QueryPoint::new().with("T", 350.0).unwrap(),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert_eq!(
+            MaterialOpticalBinding::try_visible(&mechanical, &warm, 0.08, surface_id),
+            Err(MaterialOpticalError::StateMismatch)
+        );
+
+        properties
+            .iter_mut()
+            .find(|entry| entry.0 == VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES[0])
+            .unwrap()
+            .2 *= 1.02;
+        let changed_card = test_card("sellmeier-source", &properties, 400.0);
+        let changed_mechanical = string_material(&changed_card, &point);
+        let changed_optical = resolve_visible_optical_state_point(
+            &changed_card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert_eq!(
+            MaterialOpticalBinding::try_visible(&mechanical, &changed_optical, 0.08, surface_id),
+            Err(MaterialOpticalError::StateMismatch)
+        );
+        let changed = MaterialOpticalBinding::try_visible(
+            &changed_mechanical,
+            &changed_optical,
+            0.08,
+            surface_id,
+        )
+        .unwrap();
+        assert_ne!(changed.material(), binding.material());
+        assert_ne!(changed.identity(), binding.identity());
+
+        properties
+            .iter_mut()
+            .find(|entry| entry.0 == VISIBLE_DIELECTRIC_SELLMEIER_C_M2_PROPERTIES[0])
+            .unwrap()
+            .2 = 500.0e-9_f64.powi(2);
+        let resonant_card = test_card("sellmeier-source", &properties, 400.0);
+        let resonant_mechanical = string_material(&resonant_card, &point);
+        let resonant_optical = resolve_visible_optical_state_point(
+            &resonant_card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(matches!(
+            MaterialOpticalBinding::try_visible(
+                &resonant_mechanical,
+                &resonant_optical,
+                0.08,
+                surface_id
+            ),
+            Err(MaterialOpticalError::Dielectric(
+                DielectricError::InvalidIor
+            ))
+        ));
     }
 
     #[test]

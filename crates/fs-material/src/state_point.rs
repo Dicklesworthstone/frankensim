@@ -36,6 +36,9 @@ pub use linear_interface::*;
 mod shear_layer;
 pub use shear_layer::*;
 
+mod sellmeier;
+pub use sellmeier::*;
+
 mod thermal_expansion;
 pub use thermal_expansion::*;
 mod hygroscopic_expansion;
@@ -2727,7 +2730,7 @@ pub enum VisibleDielectricAbsorption {
 ///
 /// Selection depends only on which complete, admissible property schema the
 /// immutable material card supplies. Material names and chemistry strings are
-/// never inspected. A card that supplies both schemas is ambiguous unless a
+/// never inspected. A card that supplies multiple schemas is ambiguous unless a
 /// pinned per-property selection plan makes exactly one family resolvable.
 #[derive(Clone, Debug, PartialEq)]
 pub enum VisibleOpticalStatePoint {
@@ -2736,6 +2739,9 @@ pub enum VisibleOpticalStatePoint {
     /// Homogeneous transmitting response with Cauchy dispersion and
     /// Beer-Lambert absorption.
     Dielectric(VisibleDielectricStatePoint),
+    /// Homogeneous transmitting response with source-backed Sellmeier dispersion
+    /// and the same Beer-Lambert absorption convention.
+    DielectricSellmeier(VisibleSellmeierStatePoint),
 }
 
 impl VisibleOpticalStatePoint {
@@ -2745,6 +2751,7 @@ impl VisibleOpticalStatePoint {
         match self {
             Self::Conductor(state) => state.resolved(),
             Self::Dielectric(state) => state.resolved(),
+            Self::DielectricSellmeier(state) => state.resolved(),
         }
     }
 }
@@ -2841,7 +2848,48 @@ pub fn resolve_visible_dielectric_state_point(
     point: &QueryPoint,
     selection: MaterialPropertySelection,
 ) -> Result<VisibleDielectricStatePoint, MaterialStatePointError> {
-    let declares = |name: &str| match &selection {
+    let spectral = visible_dielectric_uses_spectral_absorption(card, &selection)?;
+    let mut requirements = Vec::with_capacity(if spectral { 12 } else { 7 });
+    requirements.push(ScalarPropertyRequirement::try_new(
+        VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
+        Dims::NONE,
+        ScalarAdmissibility::StrictlyPositive,
+    )?);
+    requirements.push(ScalarPropertyRequirement::try_new(
+        VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
+        LENGTH_SQUARED_DIMS,
+        ScalarAdmissibility::NonNegative,
+    )?);
+    requirements.push(ScalarPropertyRequirement::try_new(
+        VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
+        LENGTH_FOURTH_DIMS,
+        ScalarAdmissibility::NonNegative,
+    )?);
+    append_visible_dielectric_absorption_requirements(&mut requirements, spectral)?;
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let value = |name: &str| {
+        resolved
+            .property(name)
+            .expect("canonical visible-dielectric requirement was resolved")
+            .value_si()
+    };
+    let absorption = visible_dielectric_absorption(&resolved, spectral)?;
+    Ok(VisibleDielectricStatePoint {
+        cauchy_coefficients_si: [
+            value(VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY),
+            value(VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY),
+            value(VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY),
+        ],
+        absorption,
+        resolved,
+    })
+}
+
+fn visible_dielectric_uses_spectral_absorption(
+    card: &MaterialCard,
+    selection: &MaterialPropertySelection,
+) -> Result<bool, MaterialStatePointError> {
+    let declares = |name: &str| match selection {
         MaterialPropertySelection::PinnedByProperty(plan) => {
             plan.iter().any(|(property, _)| property == name)
         }
@@ -2859,22 +2907,13 @@ pub fn resolve_visible_dielectric_state_point(
             quantity: "ambiguous_visible_dielectric_absorption",
         });
     }
-    let mut requirements = Vec::with_capacity(if spectral { 12 } else { 7 });
-    requirements.push(ScalarPropertyRequirement::try_new(
-        VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
-        Dims::NONE,
-        ScalarAdmissibility::StrictlyPositive,
-    )?);
-    requirements.push(ScalarPropertyRequirement::try_new(
-        VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
-        LENGTH_SQUARED_DIMS,
-        ScalarAdmissibility::NonNegative,
-    )?);
-    requirements.push(ScalarPropertyRequirement::try_new(
-        VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
-        LENGTH_FOURTH_DIMS,
-        ScalarAdmissibility::NonNegative,
-    )?);
+    Ok(spectral)
+}
+
+fn append_visible_dielectric_absorption_requirements(
+    requirements: &mut Vec<ScalarPropertyRequirement>,
+    spectral: bool,
+) -> Result<(), MaterialStatePointError> {
     if spectral {
         for name in VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES {
             requirements.push(ScalarPropertyRequirement::try_with_quantity(
@@ -2897,11 +2936,17 @@ pub fn resolve_visible_dielectric_state_point(
             ScalarAdmissibility::StrictlyPositive,
         )?);
     }
-    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    Ok(())
+}
+
+fn visible_dielectric_absorption(
+    resolved: &ResolvedMaterialStatePoint,
+    spectral: bool,
+) -> Result<VisibleDielectricAbsorption, MaterialStatePointError> {
     let value = |name: &str| {
         resolved
             .property(name)
-            .expect("canonical visible-dielectric requirement was resolved")
+            .expect("canonical visible-dielectric absorption requirement was resolved")
             .value_si()
     };
     let absorption = if spectral {
@@ -2920,15 +2965,7 @@ pub fn resolve_visible_dielectric_state_point(
             reference_distance_m: value(VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY),
         }
     };
-    Ok(VisibleDielectricStatePoint {
-        cauchy_coefficients_si: [
-            value(VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY),
-            value(VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY),
-            value(VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY),
-        ],
-        absorption,
-        resolved,
-    })
+    Ok(absorption)
 }
 
 /// Resolve exactly one visible optical constitutive family from card data.
@@ -2943,15 +2980,20 @@ pub fn resolve_visible_optical_state_point(
     selection: MaterialPropertySelection,
 ) -> Result<VisibleOpticalStatePoint, VisibleOpticalStatePointError> {
     let conductor = resolve_visible_conductor_state_point(card, point, selection.clone());
-    let dielectric = resolve_visible_dielectric_state_point(card, point, selection);
-    match (conductor, dielectric) {
-        (Ok(conductor), Err(_)) => Ok(VisibleOpticalStatePoint::Conductor(conductor)),
-        (Err(_), Ok(dielectric)) => Ok(VisibleOpticalStatePoint::Dielectric(dielectric)),
-        (Ok(_), Ok(_)) => Err(VisibleOpticalStatePointError::AmbiguousFamilies),
-        (Err(conductor), Err(dielectric)) => Err(VisibleOpticalStatePointError::NoCompleteFamily {
-            conductor: Box::new(conductor),
-            dielectric: Box::new(dielectric),
-        }),
+    let dielectric = resolve_visible_dielectric_state_point(card, point, selection.clone());
+    let sellmeier = resolve_visible_sellmeier_state_point(card, point, selection);
+    match (conductor, dielectric, sellmeier) {
+        (Ok(conductor), Err(_), Err(_)) => Ok(VisibleOpticalStatePoint::Conductor(conductor)),
+        (Err(_), Ok(dielectric), Err(_)) => Ok(VisibleOpticalStatePoint::Dielectric(dielectric)),
+        (Err(_), Err(_), Ok(sellmeier)) => Ok(VisibleOpticalStatePoint::DielectricSellmeier(sellmeier)),
+        (Err(conductor), Err(dielectric), Err(sellmeier)) => {
+            Err(VisibleOpticalStatePointError::NoCompleteFamily {
+                conductor: Box::new(conductor),
+                dielectric: Box::new(dielectric),
+                sellmeier: Box::new(sellmeier),
+            })
+        }
+        _ => Err(VisibleOpticalStatePointError::AmbiguousFamilies),
     }
 }
 
@@ -3201,14 +3243,16 @@ impl std::error::Error for MaterialStatePointError {}
 /// Typed refusal from data-driven visible optical-family selection.
 #[derive(Clone, Debug, PartialEq)]
 pub enum VisibleOpticalStatePointError {
-    /// Neither supported optical property schema resolved completely.
+    /// None of the supported optical property schemas resolved completely.
     NoCompleteFamily {
         /// Exact refusal from the complex-index conductor schema.
         conductor: Box<MaterialStatePointError>,
         /// Exact refusal from the Cauchy/Beer-Lambert dielectric schema.
         dielectric: Box<MaterialStatePointError>,
+        /// Exact refusal from the Sellmeier/Beer-Lambert dielectric schema.
+        sellmeier: Box<MaterialStatePointError>,
     },
-    /// Both schemas resolved, so property presence alone cannot select one
+    /// Multiple schemas resolved, so property presence alone cannot select one
     /// constitutive interpretation without inventing caller intent.
     AmbiguousFamilies,
 }
@@ -5099,6 +5143,222 @@ mod tests {
             resolved.absorption(),
             VisibleDielectricAbsorption::Spectral { .. }
         ));
+    }
+
+    fn sellmeier_optical_card(
+        resonance_dims: Dims,
+        red_transmittance: f64,
+        complete: bool,
+    ) -> MaterialCard {
+        let mut claims = ClaimSet::new();
+        for (index, name) in VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES.iter().enumerate() {
+            let cold = [1.0, 0.2, 1.0][index];
+            let hot = [1.1, 0.2, 1.0][index];
+            claims
+                .insert_claim(claim(
+                    name,
+                    Dims::NONE,
+                    vec![(250.0, cold), (600.0, hot)],
+                    600.0,
+                ))
+                .unwrap();
+        }
+        for (index, name) in VISIBLE_DIELECTRIC_SELLMEIER_C_M2_PROPERTIES
+            .iter()
+            .enumerate()
+        {
+            if !complete && index == 2 {
+                continue;
+            }
+            let value = [6.0e-15, 2.0e-14, 1.0e-10][index];
+            claims
+                .insert_claim(claim(
+                    name,
+                    resonance_dims,
+                    vec![(250.0, value), (600.0, value)],
+                    600.0,
+                ))
+                .unwrap();
+        }
+        for (name, value) in VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES
+            .into_iter()
+            .zip([red_transmittance, 0.98, 0.94])
+        {
+            claims
+                .insert_claim(claim(
+                    name,
+                    Dims::NONE,
+                    vec![(250.0, value), (600.0, value)],
+                    600.0,
+                ))
+                .unwrap();
+        }
+        claims
+            .insert_claim(claim(
+                VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+                Dims([1, 0, 0, 0, 0, 0]),
+                vec![(250.0, 0.01), (600.0, 0.01)],
+                600.0,
+            ))
+            .unwrap();
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic-sellmeier-source".into(),
+                phase: "solid".into(),
+                process: "source-ingress-test".into(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    /// G0/G3: a source-only change selects and updates the actual optical law,
+    /// with SI resonance units and the original state/claim identities retained.
+    #[test]
+    fn g0_visible_sellmeier_retains_sources_and_selects_one_complete_schema() {
+        let card = sellmeier_optical_card(LENGTH_SQUARED_DIMS, 0.96, true);
+        let resolve = |temperature| {
+            resolve_visible_optical_state_point(
+                &card,
+                &point(temperature),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap()
+        };
+        let VisibleOpticalStatePoint::DielectricSellmeier(state) = resolve(425.0) else {
+            panic!("six Sellmeier coefficients must select their own law")
+        };
+        let (strengths, resonances) = state.sellmeier_coefficients_si();
+        assert!((strengths[0] - 1.05).abs() < 1.0e-14);
+        assert_eq!(resonances, [6.0e-15, 2.0e-14, 1.0e-10]);
+        assert_eq!(
+            state.absorption(),
+            VisibleDielectricAbsorption::ReferenceRgb {
+                transmittance_linear_rgb: [0.96, 0.98, 0.94],
+                reference_distance_m: 0.01,
+            },
+        );
+        assert_eq!(state.resolved().card_identity(), card.content_hash());
+        assert_ne!(
+            resolve(250.0).resolved().identity(),
+            state.resolved().identity()
+        );
+
+        let mut claims = card.claims().clone();
+        for (name, dims, value) in [
+            (VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY, Dims::NONE, 1.5),
+            (
+                VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
+                LENGTH_SQUARED_DIMS,
+                4.0e-15,
+            ),
+            (
+                VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
+                LENGTH_FOURTH_DIMS,
+                0.0,
+            ),
+        ] {
+            claims
+                .insert_claim(claim(
+                    name,
+                    dims,
+                    vec![(250.0, value), (600.0, value)],
+                    600.0,
+                ))
+                .unwrap();
+        }
+        let ambiguous = MaterialCard::assemble(card.id().clone(), claims, Vec::new()).unwrap();
+        assert!(matches!(
+            resolve_visible_optical_state_point(
+                &ambiguous,
+                &point(425.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            ),
+            Err(VisibleOpticalStatePointError::AmbiguousFamilies),
+        ));
+    }
+
+    #[test]
+    fn g0_visible_sellmeier_refuses_missing_units_gain_and_extrapolation() {
+        for card in [
+            sellmeier_optical_card(Dims::NONE, 0.96, true),
+            sellmeier_optical_card(LENGTH_SQUARED_DIMS, 0.96, false),
+            sellmeier_optical_card(LENGTH_SQUARED_DIMS, 1.01, true),
+        ] {
+            assert!(
+                resolve_visible_sellmeier_state_point(
+                    &card,
+                    &point(425.0),
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .is_err()
+            );
+            assert!(matches!(
+                resolve_visible_optical_state_point(
+                    &card,
+                    &point(425.0),
+                    MaterialPropertySelection::SingleClaimOnly,
+                ),
+                Err(VisibleOpticalStatePointError::NoCompleteFamily { .. }),
+            ));
+        }
+        assert!(
+            resolve_visible_sellmeier_state_point(
+                &sellmeier_optical_card(LENGTH_SQUARED_DIMS, 0.96, true),
+                &point(700.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .is_err()
+        );
+    }
+
+    /// G0/G3: Sellmeier keeps the same typed, state-resolved source spectrum as
+    /// Cauchy without replacing its nine independent knots with an RGB fit.
+    #[test]
+    fn g0_visible_sellmeier_accepts_typed_spectral_absorption() {
+        let optical = sellmeier_optical_card(LENGTH_SQUARED_DIMS, 0.96, true);
+        let spectral = spectral_dielectric_card(
+            9,
+            VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY,
+            false,
+        );
+        let mut claims = ClaimSet::new();
+        for (_, property) in optical.claims().claims_ordered() {
+            if property.key.name().starts_with("optical_sellmeier_") {
+                claims.insert_claim(property.clone()).unwrap();
+            }
+        }
+        for (_, property) in spectral.claims().claims_ordered() {
+            if VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES.contains(&property.key.name()) {
+                claims.insert_claim(property.clone()).unwrap();
+            }
+        }
+        let card = MaterialCard::assemble(optical.id().clone(), claims, Vec::new()).unwrap();
+        let resolve = |temperature| {
+            resolve_visible_optical_state_point(
+                &card,
+                &point(temperature),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap()
+        };
+        let VisibleOpticalStatePoint::DielectricSellmeier(state) = resolve(425.0) else {
+            panic!("Sellmeier coefficients must retain the spectral absorption schema")
+        };
+        assert_eq!(state.resolved().properties().len(), 15);
+        assert_eq!(state.resolved().card_identity(), card.content_hash());
+        assert_eq!(
+            state.absorption(),
+            VisibleDielectricAbsorption::Spectral {
+                absorption_per_m: [10.0, 10.0, 10.0, 110.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+            },
+        );
+        assert_ne!(
+            resolve(250.0).resolved().identity(),
+            state.resolved().identity(),
+        );
     }
 
     #[test]
