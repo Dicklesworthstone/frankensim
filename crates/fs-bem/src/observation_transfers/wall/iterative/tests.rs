@@ -99,6 +99,55 @@ fn relative_field(actual: &[C64], reference: &[C64]) -> f64 {
 }
 
 #[test]
+fn harmonic_statistics_reuse_matrix_free_total_fields_and_retain_solve_reports() {
+    let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let wall = uniform(&surface, mechanical());
+    let owner = IterativeBoundaryObservation::for_scattering(
+        &surface,
+        medium(),
+        &sources(),
+        &receivers(),
+        wall,
+        options(),
+        &gate,
+    )
+    .unwrap();
+    let omega = TAU * 700.0;
+    let (field, reports) = owner.prepare_harmonic(omega, &gate).unwrap();
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0].source, owner.sources()[0]);
+    assert_eq!(reports[1].source, owner.sources()[1]);
+    assert_eq!(field.producer_hash(), owner.operator_hash());
+    assert_eq!(field.angular_frequency_rad_s(), omega);
+    let drive = [C64::new(0.001, 0.002), C64::new(-0.002, 0.001)];
+    let mut coherent = [HarmonicField::default(); 2];
+    field
+        .evaluate_coherent(&drive, &mut coherent, || false)
+        .unwrap();
+    let mut statistics = [HarmonicFieldStatistics::default(); 2];
+    field
+        .evaluate_coherence_modes(
+            &drive,
+            1,
+            HarmonicWorkBudget {
+                maximum_products: 1000,
+            },
+            &mut statistics,
+            || false,
+        )
+        .unwrap();
+    for receiver in 0..2 {
+        let expected = 0.5 * coherent[receiver].pressure_pa.norm_sq();
+        assert!(
+            (statistics[receiver].mean_square_pressure_pa2 - expected).abs()
+                < 1e-12 * expected.max(1e-12)
+        );
+    }
+    assert!(owner.prepare_harmonic(0.0, &gate).is_err());
+}
+
+#[test]
 fn three_fmm_orders_converge_to_dense_total_material_diffraction() {
     let surface = SpherePanels::icosphere(0.025, 2).unwrap();
     let gate = CancelGate::new_clock_free();

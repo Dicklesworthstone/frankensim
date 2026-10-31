@@ -217,6 +217,35 @@ impl<'a> IterativeBoundaryObservation<'a> {
         hash.finalize()
     }
 
+    /// Prepare the complete harmonic p/u source basis through this matrix-free
+    /// owner. The returned original-equation solve reports remain available
+    /// alongside the field bank; algebraic statistics do not certify FMM error.
+    /// All subsequent coherence and microphone-array evaluations reuse these
+    /// transfers, without rerunning GMRES or constructing a dense BEM matrix.
+    pub fn prepare_harmonic(
+        &self,
+        omega: f64,
+        gate: &CancelGate,
+    ) -> Result<(PreparedHarmonicObservation, Vec<IterativeSourceReport>), IterativeObservationError>
+    {
+        poll(gate)?;
+        let medium = match &self.observation.excitation {
+            Excitation::Point(owner) => owner.medium,
+            Excitation::Surface { owner, .. } => owner.medium,
+        };
+        harmonic::admit_frequency(omega, medium)?;
+        let sample = self.physical_frequency_sample(omega, gate)?;
+        let field = PreparedHarmonicObservation::from_samples(
+            omega,
+            medium,
+            self.sources(),
+            self.receivers(),
+            sample.operator_hash,
+            sample.transfer,
+        )?;
+        Ok((field, sample.sources))
+    }
+
     /// Native exp(-i omega t) physical transfer. One prepared Robin FMM and
     /// preconditioner plus one receiver quadrature table serve every source.
     /// No dense fallback, field truncation or unconverged pressure is returned.

@@ -80,6 +80,51 @@ Focused targets: `tests/observation_transfers.rs` (G0/G1/G2/G3/G5),
 `fs-vfit::observation::tests` (G0). Receipts are emitted by these tests; this
 bead has no render-producing default or separate e2e framework.
 
+## Partially coherent harmonic observations and microphone arrays
+
+`BemObservation`, `ReciprocalBemObservation`, `ScatteringObservation`,
+`LocalBoundaryObservation` and `IterativeBoundaryObservation` expose
+`prepare_harmonic` at one positive angular
+frequency. This caches each existing owner's complete source-to-receiver
+pressure and Cartesian particle-velocity transfers. The scattering owner
+combines incident and scattered amplitudes before any quadratic observation;
+the local-wall owner uses its physical, unwindowed constitutive response and
+retains its material-band refusals. These are the same physical operators used
+by the existing observation pipeline, with no new propagation/load model.
+The matrix-free adapter retains all original-equation source solve reports
+alongside the prepared field bank and introduces no dense fallback or extra
+GMRES solve during coherence evaluation.
+
+`PreparedHarmonicObservation` accepts coherent peak source phasors, explicit
+mode-major factors B of the source second moment C = B B*, or diagonal peak
+second moments for independent sources. Source coordinates retain their own
+declared SI units, including mixed structural-mode and aperture-flow bases.
+Output contains pressure mean square, the full Hermitian three-axis velocity
+second moment, and signed complex intensity E[p conj(u)]/2. The negative-time
+phasor convention fixes the reactive sign. Pressure power is never substituted
+for transported intensity in a standing wave or reactive near field.
+
+`microphones` prepares the existing physical first-order pressure/velocity
+projection at each receiver, then forms the complete receiver cross-spectrum
+C_ij = E[m_i conj(m_j)]/2 in Pa². Cross-receiver phase and pressure/velocity
+interference remain available for arrays and beamforming. Independent sources
+can still produce correlated receivers. Factors imply positive-semidefinite
+statistics up to arithmetic roundoff; no eigenvalue repair or coherence guess
+is applied. Zero rank explicitly means silence.
+
+Preparation owns allocation and the original bounded BEM solve. Applications
+reuse transfers, compensated signed reductions and microphone workspaces with
+no allocation. Field factor work is O(sources × receivers × rank), independent
+field work O(sources × receivers), and array factor work
+O(rank × (sources × receivers + receivers²)). Explicit product budgets, a
+4096-factor cap and the existing 64-receiver cap bound work before contraction;
+cancellation and nonfinite statistics refuse. Discard caller output on error.
+These are spectral-line averages, not PSD/Hz, a source-coherence estimator, an
+in-loop load, or a spatial/model accuracy certificate: producer uncertainty
+remains explicitly unresolved. G0/G1/G3/G5 tests cover a standing wave, dense
+covariance and beamformer references, exact cancellation, diagonal factors,
+weak signed residuals, and independently solved finite-source diffraction.
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). Laplace BEM panel methods (plan §8.3 [F], bead

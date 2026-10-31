@@ -23,6 +23,11 @@ mod reciprocal;
 pub use reciprocal::ReciprocalBemObservation;
 mod scattering;
 pub use scattering::{PointSourceSpec, ScatteringObservation};
+mod harmonic;
+pub use harmonic::{
+    HarmonicField, HarmonicFieldStatistics, HarmonicWorkBudget, PreparedHarmonicObservation,
+    PreparedMicrophoneArray,
+};
 mod wall;
 pub use wall::{
     BoundaryObservationBake, IterativeBoundaryObservation, IterativeBoundaryObservationBake,
@@ -969,6 +974,26 @@ impl<'a> BemObservation<'a> {
             }
         }
         Ok(out)
+    }
+    /// Prepare the complete physical p/u source basis once for coherent or
+    /// partially coherent observations at one positive angular frequency.
+    /// Subsequent field, intensity and microphone-array evaluations reuse it.
+    pub fn prepare_harmonic(
+        &self,
+        omega: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedHarmonicObservation, TransferError> {
+        harmonic::admit_frequency(omega, self.medium)?;
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        let samples = self.frequency_sample(omega)?;
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        PreparedHarmonicObservation::from_samples(
+            omega, self.medium, &self.sources, &self.receivers, self.operator_hash(), samples,
+        )
     }
     /// CQ reference samples, with the same full source basis and receiver rows.
     /// A per-receiver advance may extract a known propagation prefix exactly.

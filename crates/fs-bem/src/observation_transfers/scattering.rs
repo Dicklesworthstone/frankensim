@@ -245,6 +245,20 @@ impl<'a> ScatteringObservation<'a> {
         self.frequency_sample_with_admittance(omega, Admittance::Rigid, cancelled)
     }
 
+    /// Cache total incident PLUS scattered p/u amplitudes before taking any
+    /// quadratic statistics. One boundary factorization serves every source.
+    pub fn prepare_harmonic(
+        &self,
+        omega: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedHarmonicObservation, TransferError> {
+        harmonic::admit_frequency(omega, self.medium)?;
+        let samples = self.frequency_sample(omega, cancelled)?;
+        PreparedHarmonicObservation::from_samples(
+            omega, self.medium, &self.sources, &self.receivers, self.operator_hash(), samples,
+        )
+    }
+
     pub(super) fn frequency_sample_with_admittance(
         &self,
         omega: f64,

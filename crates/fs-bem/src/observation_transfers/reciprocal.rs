@@ -85,6 +85,16 @@ impl<'a> ReciprocalBemObservation<'a> {
         }
         Ok(output)
     }
+    /// Prepare p/u statistics from this SAME reciprocal radiation solution.
+    pub fn prepare_harmonic(&self,omega:f64,cancelled:impl FnMut()->bool)
+        ->Result<PreparedHarmonicObservation,TransferError>
+    {
+        let data=&self.declaration;
+        harmonic::admit_frequency(omega,data.medium)?;
+        let samples=self.frequency_sample(omega,cancelled)?;
+        PreparedHarmonicObservation::from_samples(omega,data.medium,&data.sources,
+            &data.receivers,self.operator_hash(),samples)
+    }
     /// Common causal FIR realization, with cancellation propagated into the
     /// original boundary assembly/LU and adaptive receiver integration.
     pub fn bake(&self,decl:&TransferDeclaration,cancelled:impl FnMut()->bool)

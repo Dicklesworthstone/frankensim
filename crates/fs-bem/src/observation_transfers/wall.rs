@@ -338,6 +338,25 @@ impl<'a> LocalBoundaryObservation<'a> {
         Ok(result)
     }
 
+    /// Physical single-frequency observations of the same local material or
+    /// compliant boundary. This uses the unwindowed constitutive response;
+    /// unsupported material frequencies still refuse before the solve.
+    pub fn prepare_harmonic(
+        &self,
+        omega: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedHarmonicObservation, TransferError> {
+        let medium = match &self.excitation {
+            Excitation::Point(owner) => owner.medium,
+            Excitation::Surface { owner, .. } => owner.medium,
+        };
+        harmonic::admit_frequency(omega, medium)?;
+        let samples = self.physical_frequency_sample(omega, cancelled)?;
+        PreparedHarmonicObservation::from_samples(
+            omega, medium, self.sources(), self.receivers(), self.operator_hash(), samples,
+        )
+    }
+
     /// The explicitly lower-windowed transfer used by `bake`. A zero window
     /// skips constitutive queries and solves, never cancellation or band checks.
     pub fn band_limited_frequency_sample(
