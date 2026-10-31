@@ -16,6 +16,12 @@ use super::{
 };
 use core::f64::consts::PI;
 
+mod gravity;
+pub use gravity::{
+    InclinedTwoFluidCircularMeniscusInput, InclinedTwoFluidCircularMeniscusStep,
+    step_newtonian_inclined_two_fluid_circular_meniscus,
+};
+
 /// A translating meniscus with a viscous downstream phase.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TwoFluidCircularMeniscusInput {

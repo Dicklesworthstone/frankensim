@@ -437,3 +437,113 @@ fn g0_displaced_owner_refusal_propagates_without_publishing_a_step() {
     ));
     assert_eq!(displaced.reads.get(), 1);
 }
+
+#[test]
+fn g1_two_fluid_rise_uses_both_sourced_densities_and_closes_open_column_work() {
+    let (liquid, wetting) = fixture(880.0, 0.004, 0.03, PI / 3.0);
+    let tube = MaterialCapillaryTube::new(&liquid, &wetting).unwrap();
+    let input = MaterialMeniscusInput {
+        wet_length_m: 0.02,
+        applied_pressure_pa: 500.0,
+        duration_s: 0.02,
+        ..input()
+    };
+    let gravity = 9.81;
+    for (density, direction) in [(400.0, 1.0), (900.0, -1.0)] {
+        let displaced = DisplacedFixture {
+            label: "original inclined displaced liquid",
+            transport: FluidTransportState::try_new(density, 1000.0, 0.5, 0.002).unwrap(),
+            reads: Cell::new(0),
+            refuse: false,
+        };
+        let step = tube
+            .step_two_fluid_inclined(input, &displaced, gravity)
+            .unwrap();
+        let inclined = step.inclined_discrete();
+        let accepted = &step.discrete().meniscus;
+        let volume = accepted.transferred_volume_m3;
+        assert_eq!(volume.signum(), direction);
+        let midpoint = 0.5 * (input.wet_length_m + accepted.wet_length_m);
+        close(
+            inclined.gravitational_storage_change_j,
+            gravity * (880.0 - density) * midpoint * volume,
+        );
+        close(
+            inclined.outlet_potential_energy_j,
+            gravity * density * input.tube_length_m * volume,
+        );
+        close(
+            accepted.pressure_work_j
+                - accepted.wall_surface_energy_change_j
+                - inclined.gravitational_storage_change_j
+                - inclined.outlet_potential_energy_j,
+            accepted.viscous_dissipation_j,
+        );
+        close(
+            inclined.hydrostatic_pressure_pa,
+            gravity
+                * (880.0 * accepted.wet_length_m
+                    + density * (input.tube_length_m - accepted.wet_length_m)),
+        );
+        close(step.transferred_liquid_mass_kg(), 880.0 * volume);
+        close(step.displaced_mass_kg(), density * volume);
+        assert!(accepted.viscous_dissipation_j > 0.0);
+        assert_eq!(step.opposing_gravity_m_s2(), gravity);
+        assert!(std::ptr::eq(step.tube().liquid(), &liquid));
+        assert!(std::ptr::eq(step.displaced_fluid(), &displaced));
+        assert_eq!(displaced.reads.get(), 1);
+    }
+}
+
+#[test]
+fn g3_equal_density_two_fluid_rise_retains_outlet_potential_transport() {
+    let density = 880.0;
+    let gravity = 9.81;
+    let (liquid, wetting) = fixture(density, 0.004, 0.03, PI / 3.0);
+    let tube = MaterialCapillaryTube::new(&liquid, &wetting).unwrap();
+    let displaced = DisplacedFixture {
+        label: "equal density second phase",
+        transport: FluidTransportState::try_new(density, 1000.0, 0.5, 0.002).unwrap(),
+        reads: Cell::new(0),
+        refuse: false,
+    };
+    let input = MaterialMeniscusInput {
+        wet_length_m: 0.02,
+        applied_pressure_pa: 1200.0,
+        duration_s: 0.02,
+        ..input()
+    };
+    let inclined = tube
+        .step_two_fluid_inclined(input, &displaced, gravity)
+        .unwrap();
+    let horizontal = tube
+        .step_two_fluid_horizontal(
+            MaterialMeniscusInput {
+                applied_pressure_pa: input.applied_pressure_pa
+                    - density * gravity * input.tube_length_m,
+                ..input
+            },
+            &displaced,
+        )
+        .unwrap();
+    close(
+        inclined.discrete().meniscus.wet_length_m,
+        horizontal.discrete().meniscus.wet_length_m,
+    );
+    close(
+        inclined.discrete().meniscus.viscous_dissipation_j,
+        horizontal.discrete().meniscus.viscous_dissipation_j,
+    );
+    assert_eq!(
+        inclined.inclined_discrete().gravitational_storage_change_j,
+        0.0
+    );
+    assert!(inclined.inclined_discrete().outlet_potential_energy_j > 0.0);
+    let zero = tube
+        .step_two_fluid_inclined(input, &displaced, 0.0)
+        .unwrap();
+    let original = tube.step_two_fluid_horizontal(input, &displaced).unwrap();
+    assert_eq!(zero.discrete(), original.discrete());
+    assert_eq!(zero.inclined_discrete().gravitational_storage_change_j, 0.0);
+    assert_eq!(zero.inclined_discrete().outlet_potential_energy_j, 0.0);
+}

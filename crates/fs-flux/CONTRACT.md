@@ -1694,3 +1694,30 @@ rotated Darcy slab without artificial velocity pins, affine tensor-flow and
 dissipation identities, hyperbolic Brinkman-channel refinement, symmetric
 positive drag power, mixed free/porous cells, original-source viscosity versus
 density scaling, free-fluid equivalence and explicit refusal boundaries.
+
+## Inclined two-fluid capillary displacement
+
+The circular meniscus owner now includes both phase columns' hydrostatic head
+and Poiseuille resistance. `step_newtonian_inclined_two_fluid_circular_meniscus`
+integrates the constant-property separated travel-time law, with a bounded
+monotone inverse and actual inlet/outlet event times. Stable equilibria are not
+crossed; a negative density contrast reverses the equilibrium's stability.
+Equal densities retain the full reservoir-to-reservoir head. Zero gravity and
+the massless/inviscid displaced-phase limit preserve their existing operators.
+
+The result separately carries tube gravitational storage, potential energy
+transported through the outlet, and each phase's integrated viscous loss.
+Pressure work minus wall-energy change, storage and outlet transport closes
+against their sum. Positive quadratic resistance weights avoid cancellation
+when viscosities nearly match; no allocated quadrature workspace is used.
+The material adapter's `step_two_fluid_inclined` samples the original displaced
+transport owner once and uses both original densities for hydrostatics and
+signed mass transfer. Its existing horizontal method retains the same result
+view; `inclined_discrete` exposes the expanded gravitational account.
+
+Focused G1/G3 tests cover analytic exponential motion, density-matched head,
+stable/unstable equilibria, repeated equilibrium states, subdivision, end
+events, and independent spatial integration of the two phase losses. This
+remains a rigid, quasisteady, Newtonian, frozen-property two-reservoir model:
+it does not supply trapped-gas storage, inertia, deposited films, thermal
+evolution or a dynamic contact-angle law.

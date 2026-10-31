@@ -49,9 +49,11 @@ pub mod trimesh;
 pub use capillary::{
     CircularCapillaryError, CircularCapillaryInput, CircularCapillaryStep, CircularMeniscusEnd,
     CircularMeniscusInput, CircularMeniscusStep, InclinedCircularMeniscusInput,
-    InclinedCircularMeniscusStep, step_newtonian_circular_capillary,
+    InclinedCircularMeniscusStep, InclinedTwoFluidCircularMeniscusInput,
+    InclinedTwoFluidCircularMeniscusStep, TwoFluidCircularMeniscusInput,
+    TwoFluidCircularMeniscusStep, step_newtonian_circular_capillary,
     step_newtonian_circular_meniscus, step_newtonian_inclined_circular_meniscus,
-    TwoFluidCircularMeniscusInput, TwoFluidCircularMeniscusStep,
+    step_newtonian_inclined_two_fluid_circular_meniscus,
     step_newtonian_two_fluid_circular_meniscus,
 };
 #[cfg(feature = "continuum")]

@@ -13,9 +13,10 @@ use fs_material::state_point::MaterialStatePointError;
 
 use super::{
     CircularCapillaryError, CircularMeniscusInput, CircularMeniscusStep,
-    InclinedCircularMeniscusInput, InclinedCircularMeniscusStep, TwoFluidCircularMeniscusInput,
-    TwoFluidCircularMeniscusStep, step_newtonian_inclined_circular_meniscus,
-    step_newtonian_two_fluid_circular_meniscus,
+    InclinedCircularMeniscusInput, InclinedCircularMeniscusStep,
+    InclinedTwoFluidCircularMeniscusInput, InclinedTwoFluidCircularMeniscusStep,
+    TwoFluidCircularMeniscusInput, TwoFluidCircularMeniscusStep,
+    step_newtonian_inclined_circular_meniscus, step_newtonian_inclined_two_fluid_circular_meniscus,
 };
 
 /// Geometry, current meniscus position and prescribed loading, all in SI.
@@ -191,14 +192,37 @@ impl<'a> MaterialCapillaryTube<'a> {
         input: MaterialMeniscusInput,
         displaced_fluid: &'d F,
     ) -> Result<MaterialTwoFluidMeniscusStep<'a, 'd, F>, MaterialCapillaryError> {
+        self.step_two_fluid_inclined(input, displaced_fluid, 0.0)
+    }
+
+    /// Two-fluid displacement with both columns' hydrostatic and viscous loads.
+    ///
+    /// Both fluids remain homogeneous and incompressible at their retained
+    /// source states. Applied pressure is inlet minus outlet pressure, before
+    /// either hydrostatic column is subtracted. The result separates the tube's
+    /// gravitational storage change from potential energy transported through
+    /// the outlet; equal densities cancel only the storage change.
+    pub fn step_two_fluid_inclined<'d, F: FluidTransport + ?Sized>(
+        &self,
+        input: MaterialMeniscusInput,
+        displaced_fluid: &'d F,
+        opposing_gravity_m_s2: f64,
+    ) -> Result<MaterialTwoFluidMeniscusStep<'a, 'd, F>, MaterialCapillaryError> {
         let displaced_transport = displaced_fluid
             .transport_state()
             .map_err(MaterialCapillaryError::Transport)?;
-        let discrete = step_newtonian_two_fluid_circular_meniscus(TwoFluidCircularMeniscusInput {
-            meniscus: self.primitive_input(input),
-            displaced_dynamic_viscosity_pa_s: displaced_transport.dynamic_viscosity_pa_s(),
-        })?;
-        let volume = discrete.meniscus.transferred_volume_m3;
+        let discrete = step_newtonian_inclined_two_fluid_circular_meniscus(
+            InclinedTwoFluidCircularMeniscusInput {
+                meniscus: TwoFluidCircularMeniscusInput {
+                    meniscus: self.primitive_input(input),
+                    displaced_dynamic_viscosity_pa_s: displaced_transport.dynamic_viscosity_pa_s(),
+                },
+                density_kg_m3: self.liquid.density_kg_m3(),
+                displaced_density_kg_m3: displaced_transport.density_kg_m3(),
+                opposing_gravity_m_s2,
+            },
+        )?;
+        let volume = discrete.meniscus.meniscus.transferred_volume_m3;
         let transferred_liquid_mass_kg = signed_mass(self.liquid.density_kg_m3(), volume)?;
         let displaced_mass_kg = signed_mass(displaced_transport.density_kg_m3(), volume)?;
         Ok(MaterialTwoFluidMeniscusStep {
@@ -206,6 +230,7 @@ impl<'a> MaterialCapillaryTube<'a> {
             input,
             displaced_fluid,
             displaced_transport,
+            opposing_gravity_m_s2,
             discrete,
             transferred_liquid_mass_kg,
             displaced_mass_kg,
@@ -280,7 +305,8 @@ pub struct MaterialTwoFluidMeniscusStep<'a, 'd, F: FluidTransport + ?Sized> {
     input: MaterialMeniscusInput,
     displaced_fluid: &'d F,
     displaced_transport: FluidTransportState,
-    discrete: TwoFluidCircularMeniscusStep,
+    opposing_gravity_m_s2: f64,
+    discrete: InclinedTwoFluidCircularMeniscusStep,
     transferred_liquid_mass_kg: f64,
     displaced_mass_kg: f64,
 }
@@ -313,7 +339,19 @@ impl<'a, 'd, F: FluidTransport + ?Sized> MaterialTwoFluidMeniscusStep<'a, 'd, F>
     /// Endpoint, pressure/surface work and separately integrated fluid losses.
     #[must_use]
     pub const fn discrete(&self) -> &TwoFluidCircularMeniscusStep {
+        &self.discrete.meniscus
+    }
+
+    /// Full inclined result, including stored and advected gravitational energy.
+    #[must_use]
+    pub const fn inclined_discrete(&self) -> &InclinedTwoFluidCircularMeniscusStep {
         &self.discrete
+    }
+
+    /// Signed gravity opposing advance; zero for the horizontal entry point.
+    #[must_use]
+    pub const fn opposing_gravity_m_s2(&self) -> f64 {
+        self.opposing_gravity_m_s2
     }
 
     /// Signed liquid mass entering the tube [kg].
