@@ -6152,3 +6152,29 @@ force-corrected constitutive root, density-bound and cancellation rollback, and
 rejection of rate-dependent storage at equal reference values. The separate
 constitutive/force/heat arithmetic closes to roundoff. Native Rust compilation
 and execution of these added tests remain unavailable in this environment.
+
+### Ordinary immersed dry body with measured interior-fluid feedback
+
+The optional one-body `step_with_dry_partial_saturation_body` uses the original
+positive dry mass and complete tensor for light, neutral and heavy solids. It
+solves the six-component retained-interior momentum correction implicitly through
+the unchanged NT collision, streaming and native rigid split. Endpoint interior
+inventories come from actual streamed populations and sampled occupancy; no
+analytic rigid-fluid tensor subtraction, epsilon mass, or density-matched bypass
+is used. Only reduced-pressure gravity is permitted: source adapters apply
+`(M_s-rho_f V)g` once, with no separately imposed fluid force.
+
+Finite-difference probes, Newton corrections and backtracking have explicit hard
+work limits and condition admission. Probes read population inventories only in
+occupied cells; independent full-grid linear and fixed-origin angular inventories
+run before and after convergence. Body and all-fluid minus interior plus body
+momentum close against authored impulse, stationary-wall exchange and periodic
+angular transport before the single publication. Failure/cancellation preserves
+populations, dry pose/momenta and topology admission; only scratch may change.
+
+Controls bound initial/midpoint/endpoint sampled-volume variation (default 1%,
+at most 10% per step), and refuse zero resolved interior volume. Actual interior
+mass, slip, quadrature volumes, correction work and macroscopic kinetic-energy
+changes remain explicit. These diagnostics do not certify exact no-slip, a GCL,
+complete thermodynamic energy, calibrated drag or unconditional density-ratio
+stability. The isothermal, fully immersed lane has no moving free surface.

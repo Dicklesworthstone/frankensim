@@ -414,6 +414,29 @@ impl BoundaryGrid3 {
             &PartialSaturationBodyExchange3,
         ) -> Result<T>,
     ) -> Result<(PartialSaturationBodyExchange3, T)> {
+        self.partial_saturation_body_transition(
+            solid_fractions, body, external_impulse, moment_origin, gate, true, finish,
+        )
+    }
+
+    // The dry-body owner may stage repeated candidates in the existing next
+    // buffer. False leaves authoritative populations/topology untouched; its
+    // body argument must be a local candidate, never the accepted owner.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn partial_saturation_body_transition<T>(
+        &mut self,
+        solid_fractions: &[f64],
+        body: &mut PartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+        publish: bool,
+        finish: impl FnOnce(
+            &Self,
+            &PartialSaturationBody3,
+            &PartialSaturationBodyExchange3,
+        ) -> Result<T>,
+    ) -> Result<(PartialSaturationBodyExchange3, T)> {
         checkpoint(gate)?;
         let CollisionModel3::Bgk { tau } = self.collision_model else {
             return Err(invalid("finite-inertia immersed coupling requires BGK"));
@@ -749,9 +772,11 @@ impl BoundaryGrid3 {
             self.next = Some(next);
             return Err(error);
         }
-        core::mem::swap(&mut self.f, &mut next);
+        if publish {
+            core::mem::swap(&mut self.f, &mut next);
+            self.topology_locked = true;
+        }
         self.next = Some(next);
-        self.topology_locked = true;
         *body = proposed_body;
         Ok((receipt, final_value))
     }

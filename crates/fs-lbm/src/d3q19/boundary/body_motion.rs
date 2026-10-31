@@ -18,6 +18,8 @@ type Result<T> = core::result::Result<T, PartialSaturationError3>;
 
 mod multiple;
 pub use multiple::{MovingLubricatedPlanesExchange3, MovingPartialSaturationBodiesExchange3};
+mod dry;
+pub use dry::{DryBodyCouplingConfig3, DryBodyExchange3, ImmersedMomentum3};
 
 /// Fixed geometry expressed relative to the body's center in BODY axes.
 ///
@@ -158,7 +160,9 @@ impl BodyFrameSampler3 {
     }
 }
 
-/// One moving rigid body whose inertia is ADDITIONAL to retained interior fluid.
+/// One moving rigid body. Inertia is ADDITIONAL to retained fluid in the original
+/// motion APIs; the explicit dry-body API retains physical dry inertia and
+/// separately solves the actual interior-fluid momentum correction.
 /// All lengths and times are lattice units, `dx = dt = 1`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MovingPartialSaturationBody3 {
@@ -166,7 +170,8 @@ pub struct MovingPartialSaturationBody3 {
     pub center: [f64; 3],
     /// Proper rotation from the fixed geometry/body frame to WORLD axes.
     pub orientation: So3,
-    /// Finite positive additional solid mass, held fixed throughout the step.
+    /// Finite positive mass, held fixed. Additional carrier mass in the original
+    /// APIs, or original physical dry mass in the explicit dry-body API.
     pub mass: f64,
     /// Fixed body-frame inertia, admitted once by the native rotation owner.
     pub inertia: InertiaTensor3,
@@ -248,6 +253,23 @@ impl BoundaryGrid3 {
         moment_origin: [f64; 3],
         gate: &CancelGate,
     ) -> Result<MovingPartialSaturationExchange3> {
+        self.moving_partial_saturation_transition(
+            sampler, shape, body, external_impulse, moment_origin, gate, true,
+        )
+    }
+
+    // Same drift/collision/stream/drift for immediate or candidate publication.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn moving_partial_saturation_transition(
+        &mut self,
+        sampler: &mut BodyFrameSampler3,
+        shape: &impl BodyFrameShape3,
+        body: &mut MovingPartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+        publish: bool,
+    ) -> Result<MovingPartialSaturationExchange3> {
         checkpoint(gate)?;
         if !(sampler.dims == self.dimensions()
             && body.mass.is_finite()
@@ -316,12 +338,13 @@ impl BoundaryGrid3 {
         };
         let dims = sampler.dims;
         let samples = sampler.samples_per_axis;
-        let (_, (accepted, receipt)) = self.step_with_partial_saturation_body_checked(
+        let (_, (accepted, receipt)) = self.partial_saturation_body_transition(
             &sampler.fractions,
             &mut frozen,
             external_impulse,
             moment_origin,
             gate,
+            publish,
             |grid, exchanged, coupling| {
                 let dw = core::array::from_fn(|i| {
                     exchanged.angular_velocity[i] - omega_before_exchange[i]
