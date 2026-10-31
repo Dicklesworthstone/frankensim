@@ -1,9 +1,43 @@
 # fs-solid CONTRACT
 
+## Fatigue on source-bound inertial J2 motion
+
+`plastic3::dynamics::fatigue::J2DynamicFatigueRun` owns accepted physical time,
+displacement, velocity, native plastic history and bounded fatigue observation
+while borrowing the original source-resolved J2 problem. It initializes through
+the real zero-load solve, admits explicit velocity compatible with the original
+supports, and freezes reference density from each original material bundle.
+Every strictly increasing endpoint calls the existing `advance_backward_euler`
+with actual endpoint loads. Native stress, reactions and inertial energy remain
+inspectable; there is no alternate constitutive or dynamic solve.
+
+Single steps and requested endpoint blocks publish only after every mechanical
+increment and every fatigue gauge accepts. A late gauge failure, invalid time,
+nonconvergence, cancellation or original strain-domain refusal leaves all prior
+motion, plastic state, cycles and damage unchanged. Checkpoint clones retain
+native motion and unresolved fatigue cycles together. Only the latest native
+solution/step and bounded gauge residues are retained.
+
+Quasistatic `J2FatiguePath` and inertial motion share the same private observer.
+Uncorrected strain-life uses the scalar counter; named Morrow/SWT policies feed
+actual simultaneous signed stress and total mechanical strain to the paired
+counter, including its coincident-extrema and source-domain checks. A sourced
+CMB curve must match the original material card, named state, external query
+conventions and modulus claim. Caller-declared curves keep their explicit
+identity/chemistry/process/fixed-temperature/modulus admission.
+
+Backward-Euler numerical dissipation remains separately reported in the native
+inertia receipt; it is not material heat or fatigue damage. Physical timestep
+refinement and resolved turning points remain necessary. Miner accumulation
+does not change stiffness, crack topology or thermodynamic state. The six native
+regressions in `tests/plastic_dynamic_fatigue.rs` compare unforced vibration and
+time refinement, cyclic J2/Prager response and inertial support reactions, named
+mean-stress policies, continuation, source admission and atomic rollback.
+
 ## Strain-life from the original cyclic J2 constitutive path
 
 `plastic3::fatigue::J2FatiguePath` owns the latest native solution and one
-shared `StrainLifeMiner` per fixed-plane gauge while borrowing the original
+scalar or paired strain-life counter per fixed-plane gauge while borrowing the original
 `SmallStrainTetProblem<ResolvedJ2Plasticity>`. The real virgin zero-load solve
 is the first observation. Every original absolute load target goes through
 `solve_from`; its plastic strain, accumulated isotropic history and Prager
@@ -28,8 +62,8 @@ state and unresolved cycles, without storing the full response trace. `finish`
 requires completion of the declared observation and includes final half cycles
 once. Processing windows do not create artificial cycles.
 
-The CMB model and named uncorrected mean-stress policy retain their empirical,
-fixed-plane scope. No stiffness, heat, fracture, failure topology, ratcheting
+The CMB model and selected Uncorrected, Morrow or Smith-Watson-Topper policy
+retain their empirical, fixed-plane scope. No stiffness, heat, fracture, failure topology, ratcheting
 model or validated service life is inferred from Miner damage. The five focused
 G0/G1/G3/G4 tests in `tests/plastic_fatigue.rs` compare the actual cyclic J2 coupon
 with independent one-dimensional Prager equations and an analytical strain-life

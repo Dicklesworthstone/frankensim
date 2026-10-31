@@ -13,6 +13,8 @@
 //! existing owners. Refine the physical timestep to control this first-order
 //! approximation; a work identity is not a temporal-accuracy certificate.
 
+pub mod fatigue;
+
 use super::*;
 
 /// Inertia's contribution to the complete mechanical/thermal work balance.
