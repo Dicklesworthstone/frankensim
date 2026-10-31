@@ -417,6 +417,29 @@ impl Atmosphere {
         h_m: f64,
         tick: u64,
     ) -> Result<AirState, Refusal> {
+        let flow = self.sample_flow(x_m, y_m, h_m, tick)?;
+        Ok(AirState {
+            velocity_mps: flow.u,
+            grad: flow.grad,
+            rho_kg_m3: self.air.rho_kg_m3,
+            mu_kg_m_s: self.air.mu_kg_m_s,
+            temperature_k: self.air.temperature_k,
+            pressure_pa: self.air.pressure_pa,
+            provenance: self.air.provenance,
+        })
+    }
+
+    /// Sample mean wind and turbulence without imposing the scenario's constant
+    /// thermodynamic state. Higher-layer material/profile owners can combine
+    /// this exact flow with their own coherent gas at the query position.
+    /// Coordinates, gradients, admission and clock match [`Self::sample_air_state`].
+    pub fn sample_flow(
+        &self,
+        x_m: f64,
+        y_m: f64,
+        h_m: f64,
+        tick: u64,
+    ) -> Result<FlowSample, Refusal> {
         if !(x_m.is_finite() && y_m.is_finite() && h_m.is_finite()) {
             return Err(refuse(
                 "non-finite-input",
@@ -437,14 +460,6 @@ impl Atmosphere {
         velocity[0] += self.mean.speed(h_m);
         let mut grad = turb.grad;
         grad[0][2] += self.mean.dspeed_dh(h_m);
-        Ok(AirState {
-            velocity_mps: velocity,
-            grad,
-            rho_kg_m3: self.air.rho_kg_m3,
-            mu_kg_m_s: self.air.mu_kg_m_s,
-            temperature_k: self.air.temperature_k,
-            pressure_pa: self.air.pressure_pa,
-            provenance: self.air.provenance,
-        })
+        Ok(FlowSample { u: velocity, grad })
     }
 }

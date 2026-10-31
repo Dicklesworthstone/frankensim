@@ -100,7 +100,7 @@ pub(super) fn ground_velocity([u, w]: [f64; 2], theta: f64, wind_mps: [f64; 2]) 
 }
 
 /// Inertial ground velocity to body FRD air velocity at the sampled wind.
-pub(super) fn body_air_velocity(ground_mps: [f64; 2], theta: f64, wind_mps: [f64; 2]) -> [f64; 2] {
+pub(crate) fn body_air_velocity(ground_mps: [f64; 2], theta: f64, wind_mps: [f64; 2]) -> [f64; 2] {
     let vx = ground_mps[0] - wind_mps[0];
     let vh = ground_mps[1] - wind_mps[1];
     let (s, c) = (det::sin(theta), det::cos(theta));

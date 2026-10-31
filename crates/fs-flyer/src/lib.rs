@@ -27,6 +27,7 @@ pub mod addedmasspanel;
 pub mod aerowarp;
 pub mod aircraft;
 pub mod assist;
+pub mod atmosphere;
 pub mod augmented;
 pub mod bemscreen;
 pub mod campaign;

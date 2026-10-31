@@ -50,6 +50,40 @@ the browser boundary remains in `fs-flyer-wasm`.
   checks exponential angular decay, its integrated angle and coupled translation,
   and a constant world-frame torque on an asymmetric rotating body (G0/G1).
 
+## Hydrostatic pressure and material atmosphere loads
+
+`atmosphere::MaterialAirProfile` composes the L2 atmospheric wind with the
+existing L3 material gas owner at L4. It either retains one coherent arbitrary
+gas snapshot or uses `StandardAtmosphere1976` with an explicit geometric ground
+elevation. Wind heights remain above-ground distances; their sum with ground
+elevation is the profile's geometric sea-level altitude. Queries preserve the
+source's 0..80 km domain and retain its complete pressure, temperature, density,
+sound speed and transport state. No duplicate EOS or hydrostatic law is added.
+
+Frozen and evolving samples use the original mean/turbulence flow. They
+transform both vector and gradient into flight-line forward/right/up, without
+advancing an OU clock or consuming randomness. Legacy `AirScenario` constants
+cannot override the material state. Homogeneous gas and the existing SimLoop
+initialization/checkpoint behavior remain unchanged.
+
+`OpenLoopDesign::force_buildup_in_atmosphere` and its evolving counterpart
+subtract the sampled local wind from explicit inertial ground velocity, use
+the shared longitudinal frame transform, and send this sample's density into
+the original wing, drag and propeller load solve. G0/G3 tests compare the full
+native result, verify hydrostatic `dp/dz = -rho*g`, pressure/density scaling of
+dynamic pressure and Reynolds number, real lift/thrust scaling with altitude,
+and exact read-only wind sampling. No extra constant reference density appears.
+
+This is prescribed CG-sampled wind and a gas state frozen across the aircraft
+for one load evaluation. The standard atmosphere is a dry-air reference, not
+local-weather evidence. The original reduced longitudinal loads still omit
+sideslip and Reynolds/Mach-dependent polar corrections; their gravity/frame
+convention is unchanged. The bridge does not model pressure work, buoyancy,
+weather evolution or validate high-altitude aircraft performance, and does not
+make the historical SimLoop stratified. The prescribed solenoidal velocity
+field does not imply divergence-free mass flux in a stratified gas; this is
+not an anelastic or compressible atmospheric-flow solve.
+
 ## Six-DOF rotor momentum and gyroscopic motion
 
 `spine::rotors::{RotorAssembly, RotorState, RotorTorques, step_held}` couples

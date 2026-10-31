@@ -43,7 +43,7 @@ use fs_atmo::ou::{OuMode, STATIONARY_ANCHOR_TICK, StationaryOuPath};
 use fs_blake3::hash_domain;
 use fs_math::det;
 
-mod motion;
+pub(crate) mod motion;
 mod spatial_wind;
 use spatial_wind::SpatialWindState;
 pub use spatial_wind::{MaterialAirSample, SpatialWindSpec};

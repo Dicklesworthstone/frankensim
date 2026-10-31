@@ -301,21 +301,29 @@ impl EvolvingAtmosphere {
     /// # Errors
     /// Mean-law or spatial-query admission errors.
     pub fn sample_air_state(&self, x_m: f64, y_m: f64, h_m: f64) -> Result<AirState, Refusal> {
-        self.mean.admit()?;
-        let turbulent = self.turbulence.sample(x_m, y_m, h_m)?;
-        let mut velocity = turbulent.u;
-        velocity[0] += self.mean.speed(h_m);
-        let mut grad = turbulent.grad;
-        grad[0][2] += self.mean.dspeed_dh(h_m);
+        let flow = self.sample_flow(x_m, y_m, h_m)?;
         Ok(AirState {
-            velocity_mps: velocity,
-            grad,
+            velocity_mps: flow.u,
+            grad: flow.grad,
             rho_kg_m3: self.air.rho_kg_m3,
             mu_kg_m_s: self.air.mu_kg_m_s,
             temperature_k: self.air.temperature_k,
             pressure_pa: self.air.pressure_pa,
             provenance: self.air.provenance,
         })
+    }
+
+    /// Sample the existing mean and current turbulence without imposing constant
+    /// air properties. This is read-only and consumes no random samples; a
+    /// higher-layer material owner may attach a position-dependent gas state.
+    pub fn sample_flow(&self, x_m: f64, y_m: f64, h_m: f64) -> Result<FlowSample, Refusal> {
+        self.mean.admit()?;
+        let turbulent = self.turbulence.sample(x_m, y_m, h_m)?;
+        let mut velocity = turbulent.u;
+        velocity[0] += self.mean.speed(h_m);
+        let mut grad = turbulent.grad;
+        grad[0][2] += self.mean.dspeed_dh(h_m);
+        Ok(FlowSample { u: velocity, grad })
     }
 }
 

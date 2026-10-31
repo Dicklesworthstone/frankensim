@@ -28,6 +28,11 @@ spectral-tensor fit; E3.3c the optional FetchAdjustedMassConsistent mode.
 - `Atmosphere::sample_air_state(x, y, h, tick)` → `AirState` whose
   `dynamic_pressure_pa()` and `reynolds(chord)` derive from the SAME
   provenance-bound state as the velocity.
+- `Atmosphere::sample_flow` and `EvolvingAtmosphere::sample_flow` expose
+  the exact original mean-plus-turbulence velocity and gradient without
+  imposing constant scenario thermodynamics. L3/L4 material compositions
+  attach their own coherent gas/profile; no upward dependency is introduced.
+  Original air-state sampling delegates to this same flow evaluation.
 - `evolving::EvolvingTurbulenceField::at_anchor(basis, seed, times)` —
   opt-in space–time field with one declared OU correlation time per spatial
   mode. Two independent OU quadratures per mode multiply the vector potential
