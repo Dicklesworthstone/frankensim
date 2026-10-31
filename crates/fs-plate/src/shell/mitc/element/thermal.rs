@@ -1,15 +1,20 @@
 //! Thermal force and stress recovery in the original enriched element space.
 
 use super::{PreparedStrainField, stiffness_rule};
-use crate::shell::mitc::thermal::{FacetThermalStrain, ThermalFacetResponse};
+use crate::shell::mitc::thermal::{FacetThermalStrain, LaminateThermalField, ThermalFacetResponse};
 use crate::shell::mitc::{PlateError, ShearShellSection};
 
 type Matrices = ([f64; 9], [f64; 9], [f64; 9], [[f64; 2]; 2]);
 
+pub(in crate::shell::mitc) enum ThermalLoading {
+    Strain(FacetThermalStrain),
+    Laminate(LaminateThermalField),
+}
+
 pub(in crate::shell::mitc) struct PreparedThermalFacet {
     field: PreparedStrainField,
     matrices: Matrices,
-    strain: FacetThermalStrain,
+    loading: ThermalLoading,
     bubble_offset: [f64; 2],
     pub(in crate::shell::mitc) load: [f64; 18],
 }
@@ -38,7 +43,7 @@ impl PreparedThermalFacet {
     pub(in crate::shell::mitc) fn new(
         field: PreparedStrainField,
         section: &ShearShellSection,
-        strain: FacetThermalStrain,
+        loading: ThermalLoading,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, PlateError> {
         let matrices = section.coupled_matrices();
@@ -47,13 +52,21 @@ impl PreparedThermalFacet {
             if cancelled() {
                 return Err(PlateError::Cancelled);
             }
-            let point = strain.at(lambda);
-            let (n, m, _) = resultants(
-                &matrices,
-                point.membrane(),
-                point.gradient_per_m(),
-                [0.0; 2],
-            );
+            let (n, m) = match &loading {
+                ThermalLoading::Strain(strain) => {
+                    let point = strain.at(lambda);
+                    let (n, m, _) = resultants(
+                        &matrices,
+                        point.membrane(),
+                        point.gradient_per_m(),
+                        [0.0; 2],
+                    );
+                    (n, m)
+                }
+                ThermalLoading::Laminate(laminate) => {
+                    (laminate.membrane_force_n_m(), laminate.bending_moment_n())
+                }
+            };
             for (c, force) in full.iter_mut().enumerate() {
                 let (bm, bb, _) = field.kin.basis(&field.g, lambda[1], lambda[2], c);
                 *force += field.g.area_m2
@@ -83,7 +96,7 @@ impl PreparedThermalFacet {
         Ok(Self {
             field,
             matrices,
-            strain,
+            loading,
             bubble_offset,
             load,
         })
@@ -110,12 +123,34 @@ impl PreparedThermalFacet {
                 return Err(PlateError::Cancelled);
             }
             let (mut eps, mut curvature, gamma) = self.field.eval(&q, lambda[1], lambda[2]);
-            let point = self.strain.at(lambda);
-            for i in 0..3 {
-                eps[i] -= point.membrane()[i];
-                curvature[i] -= point.gradient_per_m()[i];
-            }
-            let (n, m, shear) = resultants(&self.matrices, eps, curvature, gamma);
+            let (n, m, shear, energy) = match &self.loading {
+                ThermalLoading::Strain(strain) => {
+                    let point = strain.at(lambda);
+                    for i in 0..3 {
+                        eps[i] -= point.membrane()[i];
+                        curvature[i] -= point.gradient_per_m()[i];
+                    }
+                    let (n, m, shear) = resultants(&self.matrices, eps, curvature, gamma);
+                    let energy = 0.5
+                        * ((0..3)
+                            .map(|i| eps[i] * n[i] + curvature[i] * m[i])
+                            .sum::<f64>()
+                            + (0..2).map(|i| gamma[i] * shear[i]).sum::<f64>());
+                    (n, m, shear, energy)
+                }
+                ThermalLoading::Laminate(laminate) => {
+                    let response = laminate.evaluate(eps, curvature, cancelled)?;
+                    let (_, _, shear) = resultants(&self.matrices, [0.0; 3], [0.0; 3], gamma);
+                    let energy = response.strain_energy_j_m2
+                        + 0.5 * (0..2).map(|i| gamma[i] * shear[i]).sum::<f64>();
+                    (
+                        response.membrane_force_n_m,
+                        response.bending_moment_n,
+                        shear,
+                        energy,
+                    )
+                }
+            };
             for i in 0..3 {
                 out.membrane_force_n_m[i] += weight * n[i];
                 out.bending_moment_n[i] += weight * m[i];
@@ -123,13 +158,7 @@ impl PreparedThermalFacet {
             for i in 0..2 {
                 out.transverse_shear_n_m[i] += weight * shear[i];
             }
-            out.strain_energy_j += 0.5
-                * weight
-                * self.field.g.area_m2
-                * ((0..3)
-                    .map(|i| eps[i] * n[i] + curvature[i] * m[i])
-                    .sum::<f64>()
-                    + (0..2).map(|i| gamma[i] * shear[i]).sum::<f64>());
+            out.strain_energy_j += weight * self.field.g.area_m2 * energy;
             for c in 0..18 {
                 let (bm, bb, _) = self.field.kin.basis(&self.field.g, lambda[1], lambda[2], c);
                 let cov = [

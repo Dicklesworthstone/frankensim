@@ -774,5 +774,30 @@ and oriented orthotropic lowering, discriminating exact path integration from
 an endpoint-coefficient shortcut.
 This is prescribed-temperature small-strain mechanics, with no heat transport,
 thermal feedback, finite-strain geometry update, buckling tangent, interlaminar
-recovery or measured-material validation. Nonlinear/layer-dependent thickness
-profiles require a separate explicit integration rather than a face-only fit.
+recovery or measured-material validation. Nonlinear thickness profiles require
+explicit thickness refinement rather than a face-only fit.
+
+`LaminateThermalField` additionally binds the original
+`fs-material::laminate::thermal::PreparedLaminateThermal` to each facet through
+the same whole-section angle as `ShearShellSection::from_laminate`.
+`prepare_laminate_thermal` checks the original A/B/D and shear operators and all
+three mass moments before preparing a load. Shared `Arc` states retain the
+original layers and source section without copying them per facet. Each layer
+may have its own integrated expansion and affine thickness profile; no averaged
+CTE, replacement homogeneous material, or inferred temperature profile enters.
+
+Both thermal representations use the same native load assembly, affine bubble
+condensation, constrained solve and force recovery. Layered recovery evaluates
+physical elastic strain in each original layer, preserving residual stress
+energy even when net membrane force and bending moment vanish. The engineering
+strain transform and its work-conjugate transpose map section/facet strains and
+stress resultants respectively. Transverse shear remains the original shell
+law. `LaminateThermalField::layer_stress` exposes the two physical in-plane face
+stresses at a supplied compatible strain; it makes no interlaminar claim.
+
+`tests/laminate_thermal_shell.rs` adds independent equal-stiffness bimetal
+curvature and irreducible-energy formulas, restraint loads, native energy/force
+derivatives, rigid rotation, homogeneous reduction, original mass and atomic
+refusal checks. These are authored numerical checks. Thermal histories of Prony
+layers, temperature-dependent section updates, finite rotations, and coupled
+heat/entropy evolution remain outside this shell adapter.

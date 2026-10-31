@@ -17,13 +17,17 @@
 //! Section stiffness stays fixed at the caller's explicitly supplied values.
 //! Callers retain source receipts and integrate coefficients before lowering;
 //! neither endpoint CTE multiplication nor an isotropic material default is
-//! inferred. A nonlinear thickness profile or layer-dependent free strain
-//! needs its own thickness integration and cannot be represented by two face
-//! samples unless it is affine. No heat equation, buckling tangent, physical
+//! inferred. Layer-dependent free strains use the original laminate owner's
+//! thickness integration through [`LaminateThermalField`]. Each layer may have
+//! its own affine profile; a nonlinear profile needs thickness refinement.
+//! No heat equation, buckling tangent, physical
 //! drilling stress, interlaminar stress or thermoelastic heating is implied.
 
+mod laminate;
+pub use laminate::LaminateThermalField;
+
 use super::{MitcShellModel, PlateError, element, solve_static};
-use element::thermal::PreparedThermalFacet;
+use element::thermal::{PreparedThermalFacet, ThermalLoading};
 use fs_material::state_point::{
     IntegratedIsotropicThermalExpansion, IntegratedOrthotropicThermalExpansion,
 };
@@ -203,22 +207,55 @@ impl MitcShellModel {
     pub fn prepare_thermal(
         &self,
         strains: &[FacetThermalStrain],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedThermalShell<'_>, PlateError> {
+        self.prepare_thermal_fields(
+            strains.len(),
+            strains.iter().copied().map(ThermalLoading::Strain),
+            cancelled,
+        )
+    }
+
+    /// Bind independently integrated layer expansion to each original facet.
+    /// The laminate, reference surface, section angle and all physical section
+    /// coefficients must match the section used to assemble this model. A
+    /// shared prepared laminate may be reused across facets without copying its
+    /// layers. Spatial variation is explicit through the per-facet fields.
+    pub fn prepare_laminate_thermal(
+        &self,
+        fields: &[LaminateThermalField],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedThermalShell<'_>, PlateError> {
+        self.prepare_thermal_fields(
+            fields.len(),
+            fields.iter().cloned().map(ThermalLoading::Laminate),
+            cancelled,
+        )
+    }
+
+    fn prepare_thermal_fields(
+        &self,
+        count: usize,
+        fields: impl Iterator<Item = ThermalLoading>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedThermalShell<'_>, PlateError> {
         if cancelled() {
             return Err(PlateError::Cancelled);
         }
-        if strains.len() != self.mesh.tris.len() {
+        if count != self.mesh.tris.len() {
             return Err(PlateError::SectionCount {
                 expected: self.mesh.tris.len(),
-                actual: strains.len(),
+                actual: count,
             });
         }
-        let mut facets = Vec::with_capacity(strains.len());
+        let mut facets = Vec::with_capacity(count);
         let mut load_6n = vec![0.0; 6 * self.mesh.nodes.len()];
-        for (e, (&strain, tri)) in strains.iter().zip(&self.mesh.tris).enumerate() {
+        for (e, (loading, tri)) in fields.zip(&self.mesh.tris).enumerate() {
             if cancelled() {
                 return Err(PlateError::Cancelled);
+            }
+            if let ThermalLoading::Laminate(laminate) = &loading {
+                laminate.admit_section(&self.sections[e])?;
             }
             let field = element::PreparedStrainField::new(
                 &self.mesh,
@@ -229,7 +266,7 @@ impl MitcShellModel {
                 &mut cancelled,
             )?;
             let facet =
-                PreparedThermalFacet::new(field, &self.sections[e], strain, &mut cancelled)?;
+                PreparedThermalFacet::new(field, &self.sections[e], loading, &mut cancelled)?;
             for i in 0..18 {
                 load_6n[6 * tri[i / 6] + i % 6] += facet.load[i];
             }
