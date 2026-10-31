@@ -1,6 +1,10 @@
 //! Synthetic source data through production material, heat and pressure owners.
 use fs_airflow::graph::thermal::medium::{FlowHeatGeometry};
 use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;
+use fs_airflow::graph::thermal::medium::series::hydraulic::pressure::SeriesGravity;
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::recirculation::{
+    GravityReservoirControls, RecirculationError, ReservoirStepControls,
+};
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::{
     LiquidHeatPath, LiquidHeatSection, LiquidPropertyTemperature, LiquidFeedbackBudget,
 };
@@ -65,6 +69,10 @@ fn with_path<R>(variable: bool, viscosity_scale: f64, convention: LiquidProperty
 }
 fn with_card_path<R>(card: &MaterialCard, convention: LiquidPropertyTemperature,
     run: impl FnOnce(&Cx<'_>, &LiquidHeatPath<'_, '_>) -> R) -> R {
+    with_card_path_gate(card,convention,|cx,path,_| run(cx,path))
+}
+fn with_card_path_gate<R>(card: &MaterialCard, convention: LiquidPropertyTemperature,
+    run: impl FnOnce(&Cx<'_>, &LiquidHeatPath<'_, '_>, &CancelGate) -> R) -> R {
     let law = LiquidTemperatureLaw::try_new(&card,&point(300.0),"T",LiquidViscosityBasis::Dynamic,
         MaterialPropertySelection::SingleClaimOnly).unwrap();
     let cp = PropertyKey::with_quantity("specific_heat_capacity",QuantitySpec::dimensional(Dims([2,0,-2,-1,0,0])));
@@ -81,7 +89,7 @@ fn with_card_path<R>(card: &MaterialCard, convention: LiquidPropertyTemperature,
             LiquidHeatSection { region: "last",geometry: geometry(),correlation: CorrelationId::CircularDuctLaminarCwt }];
         let path = LiquidHeatPath::try_new(&cx,&law,&source,MassFlowRate::new(0.001),Temperature::new(300.0),
             &sections,convention).unwrap();
-        run(&cx,&path)
+        run(&cx,&path,&gate)
     })
 }
 fn resistances() -> [LiquidResistanceSection<'static>; 2] {
@@ -131,9 +139,7 @@ fn heating_changes_viscosity_flow_and_the_downstream_heat_trajectory_together() 
     });
 }
 
-#[test]
-fn source_density_closes_zero_pump_buoyant_flow_and_the_original_heat_path() {
-    use fs_airflow::graph::thermal::medium::series::hydraulic::pressure::SeriesGravity;
+fn buoyant_card() -> MaterialCard {
     let base = card(false,1.0);
     let mut claims = ClaimSet::new();
     for (_,claim) in base.claims().claims_ordered() {
@@ -145,7 +151,11 @@ fn source_density_closes_zero_pump_buoyant_flow_and_the_original_heat_path() {
         }
         claims.insert_claim(claim).unwrap();
     }
-    let card = MaterialCard::assemble(base.id().clone(),claims,vec![]).unwrap();
+    MaterialCard::assemble(base.id().clone(),claims,vec![]).unwrap()
+}
+#[test]
+fn source_density_closes_zero_pump_buoyant_flow_and_the_original_heat_path() {
+    let card = buoyant_card();
     with_card_path(&card,LiquidPropertyTemperature::FilmMean,|cx,path| {
         // First leg descends while heating; the warmer second leg ascends.
         // Returning to the 300 K inlet represents a prescribed thermal reservoir.
@@ -416,3 +426,151 @@ fn heated_outlet_prediction_stays_inside_narrow_transport_support() {
 mod porous;
 
 mod dissipative_solid;
+
+fn gravity_reservoir_controls() -> GravityReservoirControls {
+    GravityReservoirControls {
+        local: local(), pressure: pressure_budget(), max_total_flow_evaluations: 4096,
+        reservoir: ReservoirStepControls {
+            temperature_bracket_k: (300.0,315.0), energy_absolute_tolerance_j: 1e-6,
+            max_inlet_evaluations: 64, maximum_neglected_hydraulic_energy_j: 0.1,
+        },
+    }
+}
+fn closed_gravity() -> SeriesGravity {
+    SeriesGravity::try_new([0.0,0.0,-9.81],
+        vec![[0.0,0.0,1.0],[0.0;3],[0.0,0.0,1.0]]).unwrap()
+}
+
+// Independent constant-Cp/constant-HTC equations with the source's linear rho(T).
+// Solves only scalar algebra, never calling the production heat/pressure owners.
+fn thermosiphon_reference(inlet: f64) -> (f64,f64) {
+    let trial = |mass:f64| {
+        let e = (-0.549/(mass*2000.0)).exp();
+        let middle = 400.0+(inlet-400.0)*e;
+        let outlet = 300.0+(middle-300.0)*e;
+        let down = 1000.0-0.5*(0.5*(inlet+middle)-300.0);
+        let up = 1000.0-0.5*(0.5*(middle+outlet)-300.0);
+        let residual = 1e7*mass*(1.0/down+1.0/up)-9.81*(down-up);
+        (residual,mass*2000.0*(outlet-inlet))
+    };
+    let (mut lo,mut hi) = pressure_budget().mass_flow_bracket_kg_per_s;
+    assert!(trial(lo).0<0.0 && trial(hi).0>0.0);
+    for _ in 0..80 {
+        let mid = 0.5*(lo+hi);
+        if trial(mid).0<0.0 { lo=mid; } else { hi=mid; }
+    }
+    let mass = 0.5*(lo+hi);
+    (mass,trial(mass).1)
+}
+
+#[test]
+fn finite_thermosiphon_inventory_closes_energy_and_recomputes_its_circulation() {
+    with_card_path(&buoyant_card(),LiquidPropertyTemperature::FilmMean,|cx,path| {
+        let gravity = closed_gravity();
+        let controls = gravity_reservoir_controls();
+        let mut tank = path.reservoir(cx,0.1,Temperature::new(300.0),0.0).unwrap();
+        let original_source = tank.source();
+        let mut previous_flow = thermosiphon_reference(300.0).0;
+        for (end,external) in [(10.0,0.0),(20.0,-100.0),(30.0,100.0)] {
+            let initial = tank.clone();
+            let duration = end-initial.time_s();
+            let mut lo = controls.reservoir.temperature_bracket_k.0;
+            let mut hi = controls.reservoir.temperature_bracket_k.1;
+            for _ in 0..80 {
+                let mid = 0.5*(lo+hi);
+                let residual = 200.0*(mid-initial.state().temperature_k())
+                    -duration*thermosiphon_reference(mid).1-external;
+                if residual<0.0 { lo=mid; } else { hi=mid; }
+            }
+            let expected = 0.5*(lo+hi);
+            let answer = path.advance_reservoir_with_gravity(cx,&mut tank,end,external,
+                &[400.0,300.0],&resistances(),Pressure::new(0.0),&gravity,controls).unwrap();
+            close(tank.state().temperature_k(),expected);
+            close(answer.circuit.mass_flow_kg_per_s,thermosiphon_reference(expected).0);
+            close(answer.returned_heat_j,duration*thermosiphon_reference(expected).1);
+            assert!(answer.energy_residual_j.abs()<=controls.reservoir.energy_absolute_tolerance_j);
+            close(answer.stored_enthalpy_change_j,answer.returned_heat_j+external);
+            assert_eq!(answer.initial,initial.state());
+            assert_eq!(answer.final_state,tank.state());
+            assert_eq!(answer.start_time_s,initial.time_s());
+            assert_eq!(answer.end_time_s,end);
+            assert_eq!(tank.time_s(),end);
+            assert_eq!(tank.mass_kg(),initial.mass_kg());
+            assert!(core::ptr::eq(tank.source(),original_source));
+            assert!(core::ptr::eq(answer.circuit.thermal.source,original_source));
+            assert_eq!(answer.circuit.thermal.regions[0].inlet,tank.state());
+            assert_eq!(answer.circuit.driving_pressure_pa,0.0);
+            assert_eq!(answer.circuit.hydrostatic.as_ref().unwrap().gravitational_power_w(),0.0);
+            close(answer.circuit.hydraulics.total_pressure_drop_pa,
+                answer.circuit.hydrostatic.as_ref().unwrap().pressure_gain_pa());
+            assert!(answer.circuit.mass_flow_kg_per_s<previous_flow);
+            assert!(answer.total_flow_evaluations>answer.circuit.flow_evaluations);
+            assert!(answer.total_flow_evaluations<=controls.max_total_flow_evaluations);
+            assert_eq!(answer.total_solid_solves,0);
+            assert!(answer.neglected_hydraulic_energy_j<=controls.reservoir.maximum_neglected_hydraulic_energy_j);
+            previous_flow = answer.circuit.mass_flow_kg_per_s;
+            // Repeating from the same committed history reproduces the entire state.
+            let mut replay = initial;
+            let replayed = path.advance_reservoir_with_gravity(cx,&mut replay,end,external,
+                &[400.0,300.0],&resistances(),Pressure::new(0.0),&gravity,controls).unwrap();
+            assert_eq!(tank,replay);
+            assert_eq!(answer.circuit.thermal,replayed.circuit.thermal);
+            assert_eq!(answer.total_flow_evaluations,replayed.total_flow_evaluations);
+        }
+        assert_eq!(path.inlet().temperature_k(),300.0);
+    });
+}
+
+#[test]
+fn thermosiphon_step_shares_actual_pressure_work_and_rolls_back_failures() {
+    with_card_path_gate(&buoyant_card(),LiquidPropertyTemperature::BulkMean,|cx,path,gate| {
+        let gravity = closed_gravity();
+        let controls = gravity_reservoir_controls();
+        let mut tank = path.reservoir(cx,0.1,Temperature::new(300.0),0.0).unwrap();
+        let original = tank.clone();
+        let first = path.solve_pressure_gravity_driven(cx,&[400.0,300.0],&resistances(),
+            Pressure::new(0.0),&gravity,controls.local,controls.pressure).unwrap();
+        let limited = GravityReservoirControls { max_total_flow_evaluations: first.flow_evaluations, ..controls };
+        assert!(matches!(path.advance_reservoir_with_gravity(cx,&mut tank,10.0,0.0,
+            &[400.0,300.0],&resistances(),Pressure::new(0.0),&gravity,limited),
+            Err(RecirculationError::WorkBudget { flow_evaluations, solid_solves: 0 })
+                if flow_evaluations == first.flow_evaluations));
+        assert_eq!(tank,original);
+
+        // Same elevation alone is insufficient: a reservoir closes the full path.
+        let open = SeriesGravity::try_new([0.0,0.0,-9.81],
+            vec![[0.0,0.0,1.0],[0.0;3],[1.0,0.0,1.0]]).unwrap();
+        assert!(matches!(path.advance_reservoir_with_gravity(cx,&mut tank,10.0,0.0,
+            &[400.0,300.0],&resistances(),Pressure::new(0.0),&open,controls),
+            Err(RecirculationError::Invalid(_))));
+        assert_eq!(tank,original);
+        for step in [
+            ReservoirStepControls { temperature_bracket_k: (300.0,301.0), ..controls.reservoir },
+            ReservoirStepControls { temperature_bracket_k: (100.0,315.0), ..controls.reservoir },
+            ReservoirStepControls { maximum_neglected_hydraulic_energy_j: 0.0, ..controls.reservoir },
+            ReservoirStepControls { max_inlet_evaluations: 2, ..controls.reservoir },
+        ] {
+            assert!(path.advance_reservoir_with_gravity(cx,&mut tank,10.0,0.0,
+                &[400.0,300.0],&resistances(),Pressure::new(0.0),&gravity,
+                GravityReservoirControls { reservoir: step, ..controls }).is_err());
+            assert_eq!(tank,original);
+        }
+        gate.request();
+        assert!(path.advance_reservoir_with_gravity(cx,&mut tank,10.0,0.0,
+            &[400.0,300.0],&resistances(),Pressure::new(0.0),&gravity,controls).is_err());
+        assert_eq!(tank,original);
+    });
+}
+
+#[test]
+fn finite_inventory_does_not_invent_circulation_without_density_contrast() {
+    with_path(false,1.0,LiquidPropertyTemperature::BulkMean,|cx,path| {
+        let mut tank = path.reservoir(cx,0.1,Temperature::new(300.0),0.0).unwrap();
+        let original = tank.clone();
+        assert!(matches!(path.advance_reservoir_with_gravity(cx,&mut tank,10.0,0.0,
+            &[400.0,300.0],&resistances(),Pressure::new(0.0),&closed_gravity(),
+            gravity_reservoir_controls()),Err(RecirculationError::Pressure(
+                PressureDrivenError::NotBracketed { .. }))));
+        assert_eq!(tank,original);
+    });
+}

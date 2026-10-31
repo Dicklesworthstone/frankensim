@@ -3,7 +3,7 @@
 //! At fixed thermodynamic source pressure, a well-mixed, constant-mass reservoir
 //! obeys M dh/dt = sum(mdot * (h_return - h_supply)) + P_external. This owner
 //! uses backward Euler on that balance and the EXISTING source enthalpy chart.
-//! Each inlet trial re-solves the actual pump/branch problem at that inlet.
+//! Each inlet trial re-solves the actual pump/branch or gravity-driven problem.
 //! No frozen Cp, temperature averaging, replacement pump or fluid law is used.
 //!
 //! Only the reservoir stores energy here. Pipes/manifolds have zero residence
@@ -11,12 +11,17 @@
 //! vessel, boiling model or full mechanical-energy balance. Branch hydraulic
 //! dissipation remains omitted and is bounded in both watts and step joules.
 
+/// Closed-loop buoyant circulation through the same finite-inventory balance.
+pub mod gravity;
+pub use gravity::GravityReservoirControls;
+
 use fs_exec::Cx;
 use fs_material::phase::{EquilibriumPhaseState, ResolvedHeatCapacityCurve};
 use fs_qty::{MassFlowRate, Temperature};
 
 use super::{LiquidFeedbackBudget, LiquidFeedbackError, LiquidHeatPath, LiquidHeatSection,
     LiquidEnthalpyError, checkpoint, positive, state_at_temperature};
+use super::pressure::PressureDrivenError;
 use super::pressure::porous::LiquidResistanceModel;
 use super::pressure::parallel::{ParallelLiquidBranch, ParallelLiquidNetwork,
     ParallelLiquidSolution, ParallelPressureBudget, ParallelPressureError};
@@ -61,6 +66,8 @@ pub struct ReservoirStepControls {
 pub enum RecirculationError {
     Invalid(&'static str),
     Physics(PumpOperatingError),
+    /// Original gravity/thermal/pressure refusal from a single circulating path.
+    Pressure(PressureDrivenError),
     NotBracketed { lower_residual_j: f64, upper_residual_j: f64 },
     NotConverged { evaluations: usize, last_residual_j: f64 },
     WorkBudget { flow_evaluations: usize, solid_solves: usize },
@@ -72,8 +79,11 @@ impl core::fmt::Display for RecirculationError {
 }
 impl std::error::Error for RecirculationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Physics(e) => Some(e), _ => None }
+        match self { Self::Physics(e) => Some(e), Self::Pressure(e) => Some(e), _ => None }
     }
+}
+impl From<PressureDrivenError> for RecirculationError {
+    fn from(e: PressureDrivenError) -> Self { Self::Pressure(e) }
 }
 impl From<PumpOperatingError> for RecirculationError {
     fn from(e: PumpOperatingError) -> Self { Self::Physics(e) }
@@ -111,10 +121,10 @@ pub struct RecirculatingLiquidStep<T> {
     pub total_solid_solves: usize,
 }
 
-impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
-    /// Bind an initial finite inventory to this network's actual liquid source.
-    /// The reservoir is well mixed, fixed mass and at the same constant source
-    /// pressure. Its initial temperature need not equal the template inlet.
+impl<'a, 'card> LiquidHeatPath<'a, 'card> {
+    /// Bind a finite, well-mixed inventory to this path's original material chart.
+    /// Mass is constant and the thermodynamic source pressure is fixed; reservoir
+    /// volume may change. Its initial state need not equal the template inlet.
     pub fn reservoir(
         &self, cx: &Cx<'_>, mass_kg: f64, temperature: Temperature, time_s: f64,
     ) -> Result<LiquidReservoir<'a>, RecirculationError> {
@@ -122,11 +132,55 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         if !positive(mass_kg) || !time_s.is_finite() {
             return Err(RecirculationError::Invalid("reservoir needs positive finite mass and finite time"));
         }
-        let path = self.branches()[0].path;
-        let state = state_at_temperature(path.source.curve(), temperature.value())?;
-        path.law.at_temperature(temperature).map_err(LiquidFeedbackError::from)?;
+        let state = state_at_temperature(self.source.curve(), temperature.value())?;
+        self.law.at_temperature(temperature).map_err(LiquidFeedbackError::from)?;
         checkpoint(cx)?;
-        Ok(LiquidReservoir { source: path.source, state, mass_kg, time_s })
+        Ok(LiquidReservoir { source: self.source, state, mass_kg, time_s })
+    }
+
+    fn admit_reservoir_step(
+        &self, cx: &Cx<'_>, reservoir: &LiquidReservoir<'a>, end: f64,
+        external: f64, controls: ReservoirStepControls,
+    ) -> Result<f64, RecirculationError> {
+        checkpoint(cx)?;
+        let (lo, hi) = controls.temperature_bracket_k;
+        let duration = end - reservoir.time_s;
+        if self.source.curve().identity() != reservoir.source.curve().identity()
+            || !end.is_finite() || !positive(duration) || !external.is_finite()
+            || !positive(lo) || !positive(hi) || lo >= hi
+            || !positive(controls.energy_absolute_tolerance_j)
+            || !(2..=128).contains(&controls.max_inlet_evaluations)
+            || !controls.maximum_neglected_hydraulic_energy_j.is_finite()
+            || controls.maximum_neglected_hydraulic_energy_j < 0.0
+        { return Err(RecirculationError::Invalid("incompatible reservoir source, time interval or step controls")); }
+        // Complete source preflight precedes the first flow or solid evaluation.
+        for t in [lo, hi] {
+            state_at_temperature(self.source.curve(), t)?;
+            self.law.at_temperature(Temperature::new(t))
+                .map_err(LiquidFeedbackError::from)?;
+        }
+        Ok(duration)
+    }
+
+    fn at_reservoir_inlet(
+        &self, cx: &Cx<'_>, temperature: Temperature,
+    ) -> Result<Self, LiquidFeedbackError> {
+        let sections: Vec<_> = self.sections.iter().map(|s| LiquidHeatSection {
+            region: &s.name, geometry: s.geometry, correlation: s.correlation,
+        }).collect();
+        Self::try_new(cx, self.law, self.source, MassFlowRate::new(self.mass_flow),
+            temperature, &sections, self.property_temperature)
+    }
+}
+
+impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
+    /// Bind an initial finite inventory to this network's actual liquid source.
+    /// The reservoir is well mixed, fixed mass and at the same constant source
+    /// pressure. Its initial temperature need not equal the template inlet.
+    pub fn reservoir(
+        &self, cx: &Cx<'_>, mass_kg: f64, temperature: Temperature, time_s: f64,
+    ) -> Result<LiquidReservoir<'a>, RecirculationError> {
+        self.branches()[0].path.reservoir(cx, mass_kg, temperature, time_s)
     }
 
     /// Advance a recirculating reservoir through the existing pump/fixed-wall
@@ -163,25 +217,7 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         &self, cx: &Cx<'_>, reservoir: &LiquidReservoir<'a>, end: f64,
         external: f64, controls: ReservoirStepControls,
     ) -> Result<f64, RecirculationError> {
-        checkpoint(cx)?;
-        let (lo, hi) = controls.temperature_bracket_k;
-        let duration = end - reservoir.time_s;
-        let source = self.branches()[0].path.source;
-        if source.curve().identity() != reservoir.source.curve().identity()
-            || !end.is_finite() || !positive(duration) || !external.is_finite()
-            || !positive(lo) || !positive(hi) || lo >= hi
-            || !positive(controls.energy_absolute_tolerance_j)
-            || !(2..=128).contains(&controls.max_inlet_evaluations)
-            || !controls.maximum_neglected_hydraulic_energy_j.is_finite()
-            || controls.maximum_neglected_hydraulic_energy_j < 0.0
-        { return Err(RecirculationError::Invalid("incompatible reservoir source, time interval or step controls")); }
-        // Complete source preflight precedes the first flow or solid evaluation.
-        for t in [lo, hi] {
-            state_at_temperature(source.curve(), t)?;
-            self.branches()[0].path.law.at_temperature(Temperature::new(t))
-                .map_err(LiquidFeedbackError::from)?;
-        }
-        Ok(duration)
+        self.branches()[0].path.admit_reservoir_step(cx, reservoir, end, external, controls)
     }
 
     // The original laws, chart, region descriptions, and resistance assignments
@@ -193,12 +229,7 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         let mut paths = Vec::with_capacity(self.branches().len());
         for branch in self.branches() {
             checkpoint(cx)?;
-            let path = branch.path;
-            let sections: Vec<_> = path.sections.iter().map(|s| LiquidHeatSection {
-                region: &s.name, geometry: s.geometry, correlation: s.correlation,
-            }).collect();
-            paths.push(LiquidHeatPath::try_new(cx, path.law, path.source,
-                MassFlowRate::new(path.mass_flow), temperature, &sections, path.property_temperature)?);
+            paths.push(branch.path.at_reservoir_inlet(cx, temperature)?);
         }
         let branches: Vec<_> = self.branches().iter().zip(&paths).map(|(old, path)| ParallelLiquidBranch {
             name: old.name, path, resistances: old.resistances, pressure_budget: old.pressure_budget,
@@ -217,13 +248,26 @@ fn limited_power(watts: f64, controls: ReservoirStepControls, duration: f64) -> 
 
 // Private adapters expose actual retained results, not caller-authored heat or
 // work counters. The common-solid adapter uses the same time/balance algorithm.
+struct ReservoirExchange {
+    net_heat_rate_w: f64,
+    dissipated_power_w: f64,
+    inlet_matches: bool,
+}
 trait ReservoirCircuit {
-    fn fluid(&self) -> &ParallelLiquidSolution<'_>;
+    fn exchange(&self, inlet: EquilibriumPhaseState) -> ReservoirExchange;
     fn flow_evaluations(&self) -> usize;
     fn solid_solves(&self) -> usize;
 }
+fn parallel_exchange(fluid: &ParallelLiquidSolution<'_>, inlet: EquilibriumPhaseState) -> ReservoirExchange {
+    ReservoirExchange {
+        net_heat_rate_w: fluid.total_heat_rate_w,
+        dissipated_power_w: fluid.total_dissipated_power_w,
+        inlet_matches: fluid.branches.iter().all(|b| b.solution.thermal.regions.first()
+            .is_some_and(|r| r.inlet == inlet)),
+    }
+}
 impl ReservoirCircuit for PumpOperatingPoint<'_, ParallelLiquidSolution<'_>> {
-    fn fluid(&self) -> &ParallelLiquidSolution<'_> { &self.state }
+    fn exchange(&self, inlet: EquilibriumPhaseState) -> ReservoirExchange { parallel_exchange(&self.state, inlet) }
     fn flow_evaluations(&self) -> usize { self.total_flow_evaluations }
     fn solid_solves(&self) -> usize { self.total_solid_solves }
 }
@@ -240,17 +284,16 @@ fn integrate<T: ReservoirCircuit>(
         checkpoint(cx)?;
         let final_state = state_at_temperature(reservoir.source.curve(), temperature)?;
         let circuit = evaluate(Temperature::new(temperature), total_flow, total_solid)?;
-        let fluid = circuit.fluid();
+        let exchange = circuit.exchange(final_state);
         // Net circuit uptake already subtracts the supply enthalpy. Counting the
         // full returning mdot*h here would heat the tank merely by circulating it.
         let stored = reservoir.mass_kg * (final_state.specific_enthalpy_j_kg() - reservoir.state.specific_enthalpy_j_kg());
-        let returned = duration * fluid.total_heat_rate_w;
-        let neglected = duration * fluid.total_dissipated_power_w;
+        let returned = duration * exchange.net_heat_rate_w;
+        let neglected = duration * exchange.dissipated_power_w;
         let residual = (stored - returned) - external;
         if [stored, returned, neglected, residual].iter().any(|v| !v.is_finite())
             || neglected > controls.maximum_neglected_hydraulic_energy_j
-            || fluid.branches.iter().any(|b| b.solution.thermal.regions.first()
-                .is_none_or(|r| r.inlet != final_state))
+            || !exchange.inlet_matches
         { return Err(RecirculationError::Invalid("inconsistent inlet or unrepresentable/excessive step energy")); }
         total_flow = total_flow.checked_add(circuit.flow_evaluations())
             .ok_or(RecirculationError::Invalid("step flow-evaluation count overflow"))?;
@@ -309,7 +352,7 @@ use super::pressure::parallel::solid::CoupledParallelLiquidSolution;
 use super::pressure::parallel::pump::solid::PumpCouplingControls;
 
 impl<R> ReservoirCircuit for PumpOperatingPoint<'_, CoupledParallelLiquidSolution<'_, R>> {
-    fn fluid(&self) -> &ParallelLiquidSolution<'_> { &self.state.fluid }
+    fn exchange(&self, inlet: EquilibriumPhaseState) -> ReservoirExchange { parallel_exchange(&self.state.fluid, inlet) }
     fn flow_evaluations(&self) -> usize { self.total_flow_evaluations }
     fn solid_solves(&self) -> usize { self.total_solid_solves }
 }

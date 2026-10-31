@@ -524,13 +524,35 @@ Results retain local heads and signed conservative gravitational work
 `mdot*g.dot(last-first)` separately from hydraulic dissipation. Net gravity
 work on a closed loop is zero even when density contrast drives circulation;
 neither head nor work is silently deposited as heat. Frozen-state paths do not
-evolve an EOS. The thermal path remains a regional bulk-density, single-phase,
+evolve an EOS. The prescribed-inlet solve remains a regional bulk-density, single-phase,
 quasi-steady approximation with a prescribed inlet reservoir and its existing
 explicit hydraulic-heating omission budget. It does not close a finite loop's
 thermal inventory, compressible acceleration, pressure-dependent phase changes,
 or global mechanical/thermal energy. G1/G3 regressions cover analytic flow and
 enthalpy closure, source temperature/pressure changes, reversal, rigid rotation,
 translation and exact uniform-loop equilibrium; G4 checks bounded refusal.
+
+`LiquidHeatPath::reservoir` and `advance_reservoir_with_gravity` close a finite
+well-mixed coolant inventory around that same gravity operating point. The
+existing backward-Euler reservoir owner solves
+`M*(h_new-h_old) = dt*mdot*(h_return-h_supply) + external_heat` on the original
+caloric chart. Each inlet trial recomputes source transport, regional bulk
+density, gravity head, hydraulic losses and the actual positive circulation;
+the final circuit retains exactly the accepted inventory state as its inlet.
+The template inlet remains immutable. Original source identity, mass and time
+admission are shared with the existing pump-reservoir path.
+
+The path must return to its exact initial vertex, not merely the same elevation.
+This makes net conservative gravitational work zero and excludes an unmodelled
+reservoir elevation transfer. `GravityReservoirControls` shares actual flow
+evaluations across every inlet/pressure trial and enforces both the original
+hydraulic watt allowance and the reservoir step-joule allowance. Source failures,
+missing positive roots, exhausted budgets and cancellation leave both inventory
+state and time unchanged. Only the reservoir stores heat; prescribed walls are
+external thermal sources, the loop remains quasi-steady, and no pipe residence
+time, inertia, automatic reversal or zero-flow conduction is supplied. Tests
+compare repeated inventory steps against independent analytic heat/pressure
+balances and exercise work accounting, closed geometry and atomic refusal.
 
 `FrozenFlowMedium::ThermochemicalRealGas` retains the original nonideal source
 and uses its PR density and complete Cp through the same hydraulic losses,
