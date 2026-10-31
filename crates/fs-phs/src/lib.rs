@@ -1271,9 +1271,65 @@ pub fn common_effort_star(
     })
 }
 
+// For exact quadratic storage the effort derivative is Q/2 on differential
+// coordinates and I/2 on algebraic multipliers. With A=J-R the residual
+// Jacobian is I-dt*A*[Q/2, I/2] on differential rows and A*[Q/2, I/2]
+// on constraint rows. In particular, constraints must NOT acquire a dt factor
+// or fictitious storage, and Q must retain all mutual-inductance entries.
+fn descriptor_quadratic_jacobian(sys: &DescriptorPortHamiltonian, dt: f64) -> Option<Vec<f64>> {
+    let n = sys.n;
+    let nd = sys.n_diff;
+    let q = sys.storage.exact_quadratic_matrix()?;
+    if q.len() != n.checked_mul(n)? || q.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    // A tolerated asymmetric Q has a nonzero Gonzalez correction even in exact
+    // arithmetic. Keep that law on the original probing path, as well as any
+    // noncanonical exact declaration that assigns energy to multipliers.
+    for row in 0..n {
+        for col in 0..n {
+            if q[row * n + col] != q[col * n + row]
+                || ((row >= nd || col >= nd) && q[row * n + col] != 0.0)
+            {
+                return None;
+            }
+        }
+    }
+    let mut jac = vec![0.0; n * n];
+    for row in 0..n {
+        let weight = if row < nd { -0.5 * dt } else { 0.5 };
+        for col in 0..n {
+            let mut value = if row == col && row < nd { 1.0 } else { 0.0 };
+            if weight != 0.0 {
+                if col < nd {
+                    for k in 0..nd {
+                        let coefficient = sys.j[row * n + k] - sys.r[row * n + k];
+                        if coefficient != 0.0 && q[k * n + col] != 0.0 {
+                            value += (weight * coefficient) * q[k * n + col];
+                        }
+                    }
+                } else {
+                    value += weight * (sys.j[row * n + col] - sys.r[row * n + col]);
+                }
+            }
+            if !value.is_finite() {
+                return None;
+            }
+            jac[row * n + col] = value;
+        }
+    }
+    Some(jac)
+}
+
 /// Implicit descriptor step: Gonzalez on the differential block,
 /// algebraic residual `0 = ((J−R) e + G u)_alg` at the new state
 /// with effort `e = [∇H(x), λ]` (multipliers are not stored energy).
+///
+/// Exact quadratic storage supplies an analytic, fixed Jacobian. Its LU is
+/// reused for residual corrections within this step, including all mutual
+/// inductance terms and algebraic constraints. The original discrete gradient,
+/// residual admission and work/loss ledger still decide acceptance; nonlinear
+/// storage retains the bounded centered-probe path.
 ///
 /// # Errors
 /// Dimension / `dt` refusals; [`PhsError::NewtonStalled`];
@@ -1346,7 +1402,12 @@ pub fn step_descriptor(
         }
         let mut e = vec![0.0; n];
         discrete_gradient_into_prefix_unchecked(
-            sys.storage.as_ref(), x0, &endpoint, &mut midpoint, &mut e, n_d,
+            sys.storage.as_ref(),
+            x0,
+            &endpoint,
+            &mut midpoint,
+            &mut e,
+            n_d,
         );
         for i in n_d..n {
             e[i] = f64::midpoint(x0[i], x1[i]);
@@ -1398,6 +1459,11 @@ pub fn step_descriptor(
     let mut iters = 0usize;
     let mut stagnant = 0usize;
     let mut best: Option<(Vec<f64>, f64)> = None;
+    // Prepare lazily: a zero update must not fail solely because redundant
+    // algebraic constraints make the Newton matrix singular. The original IC
+    // owner retains its rank-aware consistency solve for those topologies.
+    let mut quadratic_factor = None;
+    let mut quadratic_factor_attempted = false;
     loop {
         let (_, res) = evaluate(&x1).ok_or(PhsError::DescriptorDomain {
             what: "current storage, effort, or flow is nonfinite",
@@ -1420,56 +1486,88 @@ pub fn step_descriptor(
             let (dg, _) = evaluate(&bx).ok_or(PhsError::DescriptorDomain {
                 what: "best Newton iterate is outside finite storage support",
             })?;
-            let floor = newton::residual_rounding_floor(sys.storage.as_ref(), x0, &bx,
-                &dg, &sys.j, &sys.r, &gu, dt, n_d, &[]);
-            admit_default_newton_iterate(SolveBudget::default().certificate(
-                NewtonSite::Descriptor, brnorm, scale, floor, iters, stagnant).with_rounding_allowance())?;
+            let floor = newton::residual_rounding_floor(
+                sys.storage.as_ref(),
+                x0,
+                &bx,
+                &dg,
+                &sys.j,
+                &sys.r,
+                &gu,
+                dt,
+                n_d,
+                &[],
+            );
+            admit_default_newton_iterate(
+                SolveBudget::default()
+                    .certificate(
+                        NewtonSite::Descriptor,
+                        brnorm,
+                        scale,
+                        floor,
+                        iters,
+                        stagnant,
+                    )
+                    .with_rounding_allowance(),
+            )?;
             x1 = bx;
             break;
         }
-        let jac = {
-            let mut jac = vec![0.0; n * n];
-            for col in 0..n {
-                let mut h = 1.0e-6 * (1.0 + scale + x1[col].abs());
-                let mut admitted = false;
-                for _ in 0..=DESCRIPTOR_DOMAIN_HALVINGS {
-                    if !h.is_finite() || h <= 0.0 {
-                        break;
-                    }
-                    let mut xp = x1.clone();
-                    let mut xm = x1.clone();
-                    xp[col] += h;
-                    xm[col] -= h;
-                    if xp[col] == x1[col] || xm[col] == x1[col] {
-                        break;
-                    }
-                    if let (Some((_, rp)), Some((_, rm))) = (evaluate(&xp), evaluate(&xm)) {
-                        let column: Vec<f64> = rp
-                            .iter()
-                            .zip(&rm)
-                            .map(|(p, m)| (p - m) / (2.0 * h))
-                            .collect();
-                        if column.iter().all(|v| v.is_finite()) {
-                            for row in 0..n {
-                                jac[row * n + col] = column[row];
-                            }
-                            admitted = true;
+        if !quadratic_factor_attempted {
+            quadratic_factor =
+                descriptor_quadratic_jacobian(sys, dt).and_then(|jac| lu(&jac, n).ok());
+            quadratic_factor_attempted = true;
+        }
+        let probed_factor;
+        let fact = if let Some(fact) = quadratic_factor.as_ref() {
+            fact
+        } else {
+            let jac = {
+                let mut jac = vec![0.0; n * n];
+                for col in 0..n {
+                    let mut h = 1.0e-6 * (1.0 + scale + x1[col].abs());
+                    let mut admitted = false;
+                    for _ in 0..=DESCRIPTOR_DOMAIN_HALVINGS {
+                        if !h.is_finite() || h <= 0.0 {
                             break;
                         }
+                        let mut xp = x1.clone();
+                        let mut xm = x1.clone();
+                        xp[col] += h;
+                        xm[col] -= h;
+                        if xp[col] == x1[col] || xm[col] == x1[col] {
+                            break;
+                        }
+                        if let (Some((_, rp)), Some((_, rm))) = (evaluate(&xp), evaluate(&xm)) {
+                            let column: Vec<f64> = rp
+                                .iter()
+                                .zip(&rm)
+                                .map(|(p, m)| (p - m) / (2.0 * h))
+                                .collect();
+                            if column.iter().all(|v| v.is_finite()) {
+                                for row in 0..n {
+                                    jac[row * n + col] = column[row];
+                                }
+                                admitted = true;
+                                break;
+                            }
+                        }
+                        h *= 0.5;
                     }
-                    h *= 0.5;
+                    if !admitted {
+                        return Err(PhsError::DescriptorDomain {
+                            what: "no finite centered Jacobian probe within 24 halvings",
+                        });
+                    }
                 }
-                if !admitted {
-                    return Err(PhsError::DescriptorDomain {
-                        what: "no finite centered Jacobian probe within 24 halvings",
-                    });
-                }
-            }
-            jac
-        };
-        let Ok(fact) = lu(&jac, n) else {
-            iters += 1;
-            continue;
+                jac
+            };
+            let Ok(fact) = lu(&jac, n) else {
+                iters += 1;
+                continue;
+            };
+            probed_factor = fact;
+            &probed_factor
         };
         let mut dx = res;
         fact.solve(&mut dx);
@@ -3406,8 +3504,8 @@ pub fn spherical_cone(
     )
 }
 
-#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
-#[allow(clippy::too_many_lines)]// one coherent physics stage
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_lines)] // one coherent physics stage
 fn spherical_cone_wall(
     inlet_radius: f64,
     outlet_radius: f64,
@@ -3857,8 +3955,8 @@ pub enum ChainOutlet {
 ///
 /// # Errors
 /// As [`acoustic_chain`], plus a bad wall pin.
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
-#[allow(clippy::too_many_lines)] // one coherent physics stage
+#[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
+#[allow(clippy::too_many_lines)]// one coherent physics stage
 pub fn acoustic_chain_outlet_wall(
     sections: &[AcousticSection],
     density: f64,

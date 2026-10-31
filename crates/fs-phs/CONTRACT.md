@@ -686,6 +686,19 @@ matches the dissipation ledger within 2%.
   transformers retain the algebraic TransformerLink representation. Authored
   or measured L/M values carry no inferred core saturation, hysteresis,
   eddy-current loss, moving geometry or temperature law.
+  Exact symmetric quadratic storage now supplies the descriptor's analytic
+  Jacobian, including the full inverse-inductance block. Its LU is prepared
+  lazily and reused for residual corrections within one step, avoiding the
+  centered coordinate-probe sweep. Differential residual rows contain the
+  timestep; algebraic Kirchhoff rows do not. The original discrete gradient,
+  represented residual, solve budget, ports and independent heat/work ledger
+  remain authoritative. Nonlinear or tolerably asymmetric storage retains
+  centered probes, and a singular analytic matrix retains the original
+  rank-aware initialization/failure path. `tests/descriptor_storage.rs` checks
+  independently solved coupled RL and RC responses under L/C/time scaling,
+  physical heat and supply, and equivalence to the same quadratic law with its
+  exact declaration withheld. Callback counts verify removal of coordinate
+  sweeps; no wall-clock or real-time speed guarantee is inferred.
   The ledger stays exact
   through constraints, and `step_audited` returns the SUPPLY-DEFECT
   residual |dH + dissipated - supplied| — the independent check

@@ -2,8 +2,175 @@
 
 use fs_phs::circuit::{Branch, CircuitGraph, assemble_circuit};
 use fs_phs::{
-    DescriptorPortHamiltonian, PhsError, QuadraticStorage, Storage, discrete_gradient, step_descriptor,
+    DescriptorPortHamiltonian, PhsError, QuadraticStorage, Storage, discrete_gradient,
+    step_descriptor,
 };
+use std::{cell::Cell, rc::Rc};
+
+struct CountedQuadratic {
+    inner: QuadraticStorage,
+    declare_exact: bool,
+    gradients: Rc<Cell<usize>>,
+}
+
+impl Storage for CountedQuadratic {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        self.inner.hamiltonian(x)
+    }
+
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        self.gradients.set(self.gradients.get() + 1);
+        self.inner.gradient(x, out);
+    }
+
+    fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
+        self.declare_exact.then(|| self.inner.matrix())
+    }
+
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        self.inner.midpoint_energy_remainder(a, b, mid)
+    }
+}
+
+fn coupled_rlc(scale: f64, declare_exact: bool) -> (DescriptorPortHamiltonian, Rc<Cell<usize>>) {
+    use fs_phs::circuit::{MutualInductance, assemble_circuit_with_mutual_inductance};
+    let circuit = assemble_circuit_with_mutual_inductance(
+        &CircuitGraph {
+            node_count: 4,
+            branches: vec![
+                (
+                    1,
+                    0,
+                    Branch::Inductor {
+                        henries: 2.0 * scale,
+                    },
+                ),
+                (1, 0, Branch::Resistor { ohms: 1.0 }),
+                (
+                    2,
+                    0,
+                    Branch::Inductor {
+                        henries: 0.5 * scale,
+                    },
+                ),
+                (2, 0, Branch::Resistor { ohms: 2.0 }),
+                (
+                    3,
+                    0,
+                    Branch::Capacitor {
+                        farads: 4.0 * scale,
+                    },
+                ),
+                (3, 0, Branch::Resistor { ohms: 3.0 }),
+                (1, 0, Branch::CurrentSource { port: 0 }),
+            ],
+            transformers: vec![],
+        },
+        &[MutualInductance {
+            branches: (0, 2),
+            henries: 0.5 * scale,
+        }],
+    )
+    .unwrap();
+    let native = &circuit.system;
+    let n = native.state_dim();
+    let nd = native.differential_dim();
+    let q = native.storage().exact_quadratic_matrix().unwrap();
+    let mut differential = vec![0.0; nd * nd];
+    for row in 0..nd {
+        differential[row * nd..(row + 1) * nd].copy_from_slice(&q[row * n..row * n + nd]);
+    }
+    let gradients = Rc::new(Cell::new(0));
+    let (j, r, g) = native.structure();
+    let system = DescriptorPortHamiltonian::new(
+        n,
+        nd,
+        native.port_dim(),
+        j.to_vec(),
+        r.to_vec(),
+        g.to_vec(),
+        Box::new(CountedQuadratic {
+            inner: QuadraticStorage::new(differential, nd).unwrap(),
+            declare_exact,
+            gradients: Rc::clone(&gradients),
+        }),
+    )
+    .unwrap();
+    (system, gradients)
+}
+
+#[test]
+fn exact_quadratic_coupled_rlc_uses_native_ledger_without_coordinate_probes() {
+    // The same physical trajectory under fifteen orders of magnitude of L/C/time
+    // scaling. An independent two-winding KVL solve includes both M terms.
+    for scale in [1e-9, 1.0, 1e6] {
+        let (system, gradients) = coupled_rlc(scale, true);
+        let initial = [1.8 * scale, 0.3 * scale, 0.8 * scale, 0.0, 0.0, 0.0, 0.0];
+        let record = step_descriptor(&system, &initial, &[0.2], 0.1 * scale).unwrap();
+        let determinant = 2.05 * 0.6 - 0.25;
+        let currents = [
+            (0.6 * 1.77 - 0.5 * 0.34) / determinant,
+            (2.05 * 0.34 - 0.5 * 1.77) / determinant,
+        ];
+        let charge = 0.8 * (1.0 - 0.1 / 24.0) / (1.0 + 0.1 / 24.0);
+        let expected = [
+            2.0 * currents[0] + 0.5 * currents[1],
+            0.5 * currents[0] + 0.5 * currents[1],
+            charge,
+        ];
+        for (actual, value) in record.x[..3].iter().zip(expected) {
+            assert!((actual / scale - value).abs() < 2e-12);
+        }
+        let mid_i = [
+            f64::midpoint(1.0, currents[0]),
+            f64::midpoint(-0.4, currents[1]),
+        ];
+        let voltages = [
+            0.2 - mid_i[0],
+            -2.0 * mid_i[1],
+            f64::midpoint(0.8, charge) / 4.0,
+        ];
+        let heat =
+            0.1 * (voltages[0].powi(2) + voltages[1].powi(2) / 2.0 + voltages[2].powi(2) / 3.0);
+        assert!((record.dissipated / scale - heat).abs() < 2e-12);
+        assert!((record.supplied / scale - 0.1 * 0.2 * voltages[0]).abs() < 2e-12);
+        assert!((record.balance_residual() / scale).abs() < 3e-12);
+        assert!(record.newton_iters <= 3);
+        assert!(
+            gradients.get() < 2 * system.state_dim(),
+            "no centered gradient column sweep"
+        );
+    }
+}
+
+#[test]
+fn exact_quadratic_descriptor_matches_the_undeclared_storage_fallback() {
+    let (exact, exact_calls) = coupled_rlc(1.0, true);
+    let (probed, probed_calls) = coupled_rlc(1.0, false);
+    let mut a = vec![1.8, 0.3, 0.8, 0.0, 0.0, 0.0, 0.0];
+    let mut b = a.clone();
+    for input in [0.2, -0.7, 1.1, 0.0] {
+        let fast = step_descriptor(&exact, &a, &[input], 0.1).unwrap();
+        let reference = step_descriptor(&probed, &b, &[input], 0.1).unwrap();
+        for (x, y) in fast.x.iter().zip(&reference.x) {
+            assert!((x - y).abs() < 2e-11);
+        }
+        for (x, y) in [fast.dissipated, fast.supplied, fast.delta_h, fast.y[0]]
+            .into_iter()
+            .zip([
+                reference.dissipated,
+                reference.supplied,
+                reference.delta_h,
+                reference.y[0],
+            ])
+        {
+            assert!((x - y).abs() < 2e-11);
+        }
+        a = fast.x;
+        b = reference.x;
+    }
+    assert!(probed_calls.get() >= exact_calls.get() + 8 * exact.state_dim());
+}
 
 struct QuarticCapacitor;
 
