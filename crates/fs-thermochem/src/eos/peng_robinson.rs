@@ -3,7 +3,9 @@
 //! Callers supply critical properties, acentric factors, molar masses,
 //! composition and optional binary interactions from their physical source.
 //! The evaluator retains every mechanically admissible cubic root and exposes
-//! fugacity coefficients. It neither fits coefficients nor performs a flash.
+//! fugacity coefficients. The base evaluator neither fits coefficients nor
+//! selects phase amounts; the flash and stability submodules use those same
+//! source-bound fugacities for phase-equilibrium calculations.
 
 use core::fmt;
 
@@ -14,6 +16,8 @@ use crate::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 
 /// Bounded PT vapor-liquid equilibrium on this same cubic EOS.
 pub mod flash;
+/// Bounded tangent-plane searches on the original mixture fugacities.
+pub mod stability;
 
 /// Maximum number of components in one bounded mixture.
 pub const MAX_PENG_ROBINSON_COMPONENTS_V1: usize = 64;

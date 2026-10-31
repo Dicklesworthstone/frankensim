@@ -1441,6 +1441,38 @@ specimen or an effective mixed-phase microstructure.
 
 ## Peng--Robinson real-gas mechanical EOS
 
+### Isothermal phase equilibrium and tangent-plane searches
+
+`eos::peng_robinson::stability` searches the original component fugacities
+from liquid-like and vapor-like Wilson seeds, using damped logarithmic
+successive substitution and the minimum-Gibbs root at each trial composition.
+A negative dimensionless tangent-plane distance is a concrete instability
+witness for the original feed phase. Two nonnegative converged stationary
+searches are not a global stability certificate. Iteration exhaustion refuses;
+neither a failed search nor a missing Wilson bracket declares a stable phase.
+Exact feed absences stay absent, and underflow of present species refuses.
+
+The existing `two_phase_flash_pt` permits incipient single-phase iterates and
+can initialize from a tangent-plane witness if Wilson iteration fails. It
+publishes only a nontrivial split with Rachford--Rice material balance,
+component fugacity equality and no Gibbs increase relative to the best
+homogeneous feed root. The Gibbs change is returned explicitly; it does not
+prove stability against a third phase. Pure-fluid or unresolved azeotropic
+coexistence needs a supplied phase amount or another extensive constraint and
+remains outside this two-phase amount solver. Both APIs have cancellation-aware variants, bounded
+evaluation counts, immutable inputs and no partial publication. Phase trial
+models reuse admitted component/interaction storage instead of cloning and
+revalidating the quadratic interaction matrix every iteration.
+
+G0/G1/G3/G4 regressions cover an independently solved methane/ethane split
+outside Wilson's dew bracket, negative tangent-plane witnesses, a homogeneous
+gas, component permutation and absence, Gibbs/material/fugacity closure,
+iteration limits and cancellation. The physics is the supplied cubic EOS and
+mixing rule; this is not experimental validation of its parameters. Reference:
+Michelsen (1982), <https://doi.org/10.1016/0378-3812(82)85001-2>.
+
+### Fixed-composition mechanical evaluations
+
 `eos::peng_robinson` adds a bounded fixed-composition Peng--Robinson mechanical
 closure. Each component carries caller-supplied critical temperature, critical
 pressure, Pitzer acentric factor and molar mass; an optional explicit symmetric
