@@ -315,6 +315,71 @@ pub fn solve_scattering<'s, 'i>(
     .remove(0))
 }
 
+/// Solve the same finite-source boundary data through the existing FMM/GMRES
+/// Robin owner, avoiding a dense boundary factorization. The caller declares
+/// its FMM accuracy, iteration and storage budgets. Only a converged result
+/// becomes a field; original residual and resource receipts are returned.
+///
+/// Source winding/clearance and adaptive receivers retain their 8192-panel
+/// geometry cap. This route does not claim to extend that admission envelope.
+/// Cancellation is checked around source admission and within the existing
+/// iterative owner; its indivisible FMM-pass limit remains unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_scattering_iterative<'s, 'i>(
+    surface: &'s SpherePanels,
+    k: f64,
+    medium: Medium,
+    law: Admittance<'_>,
+    incident: IncidentField<'i>,
+    minimum_source_clearance_m: f64,
+    formulation: Formulation,
+    options: &IterativeOptions,
+    gate: &CancelGate,
+) -> Result<
+    (
+        ScatteredField<'s, 'i>,
+        fs_solver::krylov::SolveReport,
+        ResourceReceipt,
+    ),
+    IterativeError,
+> {
+    if gate.is_requested() {
+        return Err(IterativeError::Cancelled { matvecs: 0 });
+    }
+    validate_frequency(k, medium)?;
+    admit_resolution(surface, k)?;
+    validate_closed(surface)?;
+    law.validate(surface.areas().len())?;
+    let (pressure, drive) =
+        incident.boundary_drive(surface, k, medium, law, minimum_source_clearance_m)?;
+    if gate.is_requested() {
+        return Err(IterativeError::Cancelled { matvecs: 0 });
+    }
+    let (solution, report, receipt) = solve_radiation_bc_iterative(
+        surface,
+        k,
+        medium,
+        SurfaceBc {
+            drive_velocity: &drive,
+            admittance: law,
+        },
+        formulation,
+        options,
+        gate,
+    )?;
+    let field = ScatteredField {
+        surface,
+        incident,
+        solution: finish_scattering(surface, solution, pressure, law)?,
+    };
+    if gate.is_requested() {
+        return Err(IterativeError::Cancelled {
+            matvecs: receipt.matvecs,
+        });
+    }
+    Ok((field, report, receipt))
+}
+
 /// Independent incident fields through one boundary assembly and LU. Source
 /// admission precedes assembly; all RHS pass the original boundary work checks.
 /// Dense assembly/LU inherit the original owner's cancellation limitation.
@@ -705,5 +770,78 @@ mod tests {
             .pressure[0]
             * expik(-k * radius).scale(radius);
         assert!((measured - expected).abs() / expected.abs() < 1e-3);
+    }
+
+    /// G2/G4: changing the solve route preserves the original finite-source
+    /// Robin field and reports convergence; a pre-cancelled request does no
+    /// source admission or operator work. This small direct-near tree isolates
+    /// the source adapter from the separately tested FMM truncation ladder.
+    #[test]
+    fn iterative_finite_source_matches_dense_and_honors_cancellation() {
+        let surface = SpherePanels::icosphere(1.0, 1).unwrap();
+        let medium = Medium::air();
+        let sources = [source([0.0, 0.0, 3.0])];
+        let incident = IncidentField::Monopoles(&sources);
+        let beta = vec![C64::new(0.3, -0.1); surface.areas().len()];
+        let law = Admittance::Local {
+            beta: &beta,
+            declared_active: false,
+        };
+        let options = IterativeOptions {
+            tol: 1e-10,
+            ..IterativeOptions::default()
+        };
+        let gate = CancelGate::new_clock_free();
+        let dense = solve_scattering(
+            &surface,
+            0.7,
+            medium,
+            law,
+            incident,
+            0.01,
+            Formulation::BurtonMiller,
+        )
+        .unwrap();
+        let (iterative, report, receipt) = solve_scattering_iterative(
+            &surface,
+            0.7,
+            medium,
+            law,
+            incident,
+            0.01,
+            Formulation::BurtonMiller,
+            &options,
+            &gate,
+        )
+        .unwrap();
+        assert!(report.converged);
+        assert!(receipt.matvecs > 0);
+        let exact = &dense.solution.scattered.pressure;
+        let error = iterative
+            .solution
+            .scattered
+            .pressure
+            .iter()
+            .zip(exact)
+            .map(|(&a, &b)| (a - b).norm_sq())
+            .sum::<f64>()
+            .sqrt()
+            / exact.iter().map(|p| p.norm_sq()).sum::<f64>().sqrt();
+        assert!(error < 1e-8, "finite-source dense/iterative error: {error}");
+        gate.request();
+        assert!(matches!(
+            solve_scattering_iterative(
+                &surface,
+                f64::NAN,
+                medium,
+                law,
+                incident,
+                0.01,
+                Formulation::BurtonMiller,
+                &options,
+                &gate,
+            ),
+            Err(IterativeError::Cancelled { matvecs: 0 })
+        ));
     }
 }

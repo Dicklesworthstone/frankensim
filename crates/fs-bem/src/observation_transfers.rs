@@ -21,6 +21,8 @@ use std::collections::BTreeMap;
 
 mod reciprocal;
 pub use reciprocal::ReciprocalBemObservation;
+mod scattering;
+pub use scattering::{PointSourceSpec, ScatteringObservation};
 
 /// Largest admitted DFT/CQ size. Work budgets may be stricter.
 pub const MAX_OBSERVATION_FFT: usize = 65_536;
@@ -30,15 +32,19 @@ pub const MAX_OBSERVATION_RUNGS: usize = 8;
 /// Physical source coordinate. Velocity traces are supplied separately, in
 /// m/s per unit coordinate rate. Aperture traces integrate to exactly one m³/s
 /// per unit flow, checked against the physical panel areas.
+/// Point-volume-flow coordinates instead belong to [`ScatteringObservation`]
+/// and are never admitted as panel traces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceId {
     StructuralMode(String),
     ApertureVolumeFlow(String),
+    /// Prescribed point-source outward volume flow [m³/s], not a panel trace.
+    PointVolumeFlow(String),
 }
 impl SourceId {
     fn name(&self) -> &str {
         match self {
-            Self::StructuralMode(s) | Self::ApertureVolumeFlow(s) => s,
+            Self::StructuralMode(s) | Self::ApertureVolumeFlow(s) | Self::PointVolumeFlow(s) => s,
         }
     }
 }
@@ -284,7 +290,11 @@ impl TransferDeclaration {
             h.update(&(n as u64).to_le_bytes());
         }
         for s in &self.sources {
-            h.update(&[u8::from(matches!(s, SourceId::ApertureVolumeFlow(_)))]);
+            h.update(&[match s {
+                SourceId::StructuralMode(_) => 0,
+                SourceId::ApertureVolumeFlow(_) => 1,
+                SourceId::PointVolumeFlow(_) => 2,
+            }]);
             h.update(&(s.name().len() as u64).to_le_bytes());
             h.update(s.name().as_bytes());
         }
@@ -622,7 +632,8 @@ impl<'a> BemObservation<'a> {
         let points: Vec<_> = receivers.iter().map(|r| r.position_m).collect();
         let geometry = Geometry::new(surface, &points, minimum_clearance_m)?;
         for (source, trace) in sources.iter().zip(traces) {
-            if source.name().is_empty()
+            if matches!(source, SourceId::PointVolumeFlow(_))
+                || source.name().is_empty()
                 || trace.len() != surface.areas().len()
                 || trace.iter().any(|v| !v.is_finite())
                 || (trace.iter().all(|&v| v == 0.0)

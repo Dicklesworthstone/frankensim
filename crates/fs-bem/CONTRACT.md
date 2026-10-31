@@ -1117,6 +1117,16 @@ This is homogeneous, lossless, stationary scalar acoustics, not an interior
 source, transmission, deformable obstacle, atmospheric-refraction or measured
 HRTF model.
 
+`solve_scattering_iterative` sends the identical admitted incident boundary
+data through the existing FMM/GMRES Robin owner and returns its original
+convergence report and resource receipt. It avoids dense factorization while
+retaining the source/receiver geometry's 8192-panel ceiling. Cancellation is
+checked before source admission and around the existing iterative solve;
+source winding and individual FMM passes remain bounded indivisible work.
+The inline dense-versus-iterative Robin-source check uses an 80-panel direct
+near tree and a 1e-8 pressure agreement band, plus immediate cancellation.
+It verifies adapter equivalence, not a new FMM truncation-accuracy claim.
+
 Inline tests in `helmholtz_incident.rs` cover G0 Euler-gradient consistency
 (2e-9 relative) and outward low-frequency volume flux, exterior/singularity
 refusals, G5 bitwise batch/individual and historical plane-wave equivalence,
@@ -1125,6 +1135,42 @@ sphere series (20/80/320 panels, 2% finest complex-field band), and G3 source
 and receiver reciprocity (1e-3 relative). The sphere oracle uses the spherical
 addition theorem (NIST DLMF §10.60.1–2) and the rigid condition
 `a_l=-j_l'(ka)/h_l^(1)'(ka)`; it does not fit BEM output.
+
+### Finite-source diffraction in the audio observation pipeline
+
+`observation_transfers::ScatteringObservation` binds prescribed point-volume-
+flow sources, fixed closed rigid obstacles and physical receivers to the
+existing causal `ObservationTransferBake` / `ObservationFir` pipeline.
+`PointSourceSpec` retains the source position and identity; the distinct
+`SourceId::PointVolumeFlow` coordinate cannot be used as a surface-velocity
+trace by either existing panel observer. Existing source-kind hash tags remain
+unchanged, and point flow receives its own tag.
+
+Each frequency shares one boundary assembly/factorization across sources and
+one adaptive pressure/velocity Green-row preparation across receivers. The
+analytic direct field and the solved scattered field are added coherently.
+The source-major, receiver-major output is `(p, dp/dx, dp/dy, dp/dz)` per m³/s;
+the gradient uses the original Euler relation `grad(p)=i*omega*rho*v`.
+The transfer preserves phase cancellation in acoustic shadows, without a
+binary visibility mask or an empirical shadow gain.
+
+Source/receiver exterior winding, actual triangle clearance, mutual separation,
+unique identities, finite band and existing quadrature/work caps are admitted.
+The straight-line source-to-receiver delay is a conservative earliest arrival,
+even across an obstructed segment. The existing four-or-more-rung DFT, tail,
+wrap-around and DTFT gates then admit the temporal realization, retaining its
+explicit reconstruction delay and unresolved or supplied producer uncertainty.
+An exact-analytic producer claim is refused. Cancellation is checked between
+bounded stages and propagates as `TransferError::Cancelled`; dense LU and
+adaptive receiver preparation retain their existing interruption limits.
+
+Inline G0/G1/G3/G4 tests cover displaced-receiver pressure-gradient agreement
+within 2e-5 relative, distinct source semantics, invalid geometry/band and
+cross-wired declarations, cancellation before and inside a frequency solve,
+and an actual four-rung BEM-to-FIR bake/replay with complex transfer error
+below 2e-4. This qualifies only the declared discrete stationary observer:
+it supplies no source loading, moving geometry, finite-aperture equivalence,
+spatial convergence certificate, or measured instrument/head/room response.
 
 ## Reciprocal complete source loads and matched receiver transfers
 

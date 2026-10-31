@@ -944,7 +944,7 @@ fn characteristic_panel_size(surface: &SpherePanels) -> f64 {
 }
 
 // Also used before a reusable geometry table allocates or integrates anything.
-fn admit_resolution(surface: &SpherePanels, k: f64) -> Result<f64, HelmholtzError> {
+pub(crate) fn admit_resolution(surface: &SpherePanels, k: f64) -> Result<f64, HelmholtzError> {
     if !(k > 0.0 && k.is_finite()) {
         return Err(HelmholtzError::BadParameter {
             what: "wavenumber k must be positive and finite",
