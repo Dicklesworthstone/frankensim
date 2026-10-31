@@ -26,7 +26,7 @@ use fs_material::fluid_transport::FluidTransport;
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 
-use crate::curle2d::{DipoleField, dipole_pressure};
+use crate::curle2d::{DipoleField, PreparedDipoleObserver, dipole_pressure};
 use crate::jetlab::{JetLabiumConfig, JetLabiumDiagnostics, run_jet_labium, validate_config};
 use crate::{AeroacError, SCOPE_STATEMENT};
 
@@ -386,6 +386,38 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabiumRun<'_, F> {
         let wavenumber =
             (2.0 * core::f64::consts::PI * frequency_hz) / self.acoustic.sound_speed_m_s();
         dipole_pressure(force_n_m, wavenumber, observer_m, source_m)
+    }
+
+    /// Prepare interference-aware observation of several compact source forces
+    /// in this run's exact fluid, frequency band and physical coordinate frame.
+    /// Reuse the returned operator for many same-frequency source excitations.
+    /// Unlike collapsing their net force, this retains each propagation path
+    /// and the near-field particle velocity. Force phasors must share one time
+    /// origin; independently started flow records do not imply phase locking.
+    ///
+    /// # Errors
+    /// Refuses frequencies outside the recorded band, invalid geometry, or a
+    /// source count above `max_sources`; see [`PreparedDipoleObserver::new`].
+    pub fn prepare_coherent_observer(
+        &self,
+        frequency_hz: f64,
+        observer_m: [f64; 2],
+        source_positions_m: &[[f64; 2]],
+        max_sources: usize,
+    ) -> Result<PreparedDipoleObserver, AeroacError> {
+        if !frequency_hz.is_finite() || frequency_hz <= 0.0 || frequency_hz * self.timestep_s >= 0.5
+        {
+            return Err(AeroacError::InvalidParameter {
+                what: "frequency must be positive, finite and below the force record's Nyquist limit",
+            });
+        }
+        PreparedDipoleObserver::new(
+            self.acoustic,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            max_sources,
+        )
     }
 }
 

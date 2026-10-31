@@ -25,6 +25,23 @@ scope law, pinned as data and by test).
   span. The 2D-vs-3D Green's-function trap from the bead's polish
   round is structurally excluded (frequency domain, Hankel kernel);
   every output embeds [`SCOPE_STATEMENT`].
+- `curle2d::PreparedDipoleObserver` prepares the actual outgoing Hankel
+  propagation and analytic pressure-gradient transfer for multiple compact line
+  sources in one `FluidAcousticState`. Complex peak forces retain one explicit
+  frequency and common time origin. Pressure and particle velocity are summed
+  before computing `p conj(u)/2`; active intensity includes interference terms
+  and may have signed components, while reactive intensity is kept separately.
+  The source layout need not be compact, but each constituent source still is.
+  Preparation checks the caller's source-count budget; application is O(N),
+  allocation-free, with six complex cached coefficients per source and
+  double-double reductions. `MaterialJetLabiumRun::prepare_coherent_observer`
+  binds the exact source medium and rejects frequencies at/above its Nyquist
+  limit. Independent records must be physically phase-aligned by the caller.
+  No scattering, mutual loading, incoherent-source statistics, absorption, or
+  absolute-SPL validation is inferred. G0/G1/G3 `tests/interference.rs` checks
+  cancellation, quadrature, path phase, near-field momentum, standing-wave
+  intensity, rigid motion, dynamic-range residuals, and bounded admission;
+  `tests/material.rs` exercises the real material-bound flow consumer.
 - `bickley::bickley_rayleigh_mode` — Rayleigh-equation shooting
   solver (RK4 + complex secant, half-line with symmetry boundary
   conditions and the exact `phi' = -alpha phi` far-field decay) for

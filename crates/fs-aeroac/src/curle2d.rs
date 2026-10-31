@@ -19,6 +19,10 @@
 //! ([`crate::SCOPE_STATEMENT`]); absolute SPL additionally needs a
 //! 2D-to-3D span correction.
 
+/// Prepared, phase-preserving radiation from multiple compact line dipoles.
+pub mod array;
+pub use array::{CoherentDipoleField, PreparedDipoleObserver};
+
 use crate::bessel::hankel1_outgoing;
 use crate::{AeroacError, SCOPE_STATEMENT};
 use fs_math::c64::C64;

@@ -134,6 +134,22 @@ fn g0_actual_lattice_force_and_frequency_have_correct_physical_units() {
     assert!((observed.field.pressure - expected.pressure).abs() < 2e-11 * expected.pressure.abs());
     assert!(actual.pressure.abs() > 0.0);
     assert_eq!(actual.scope, SCOPE_STATEMENT);
+    let prepared = run
+        .prepare_coherent_observer(frequency, observer, &[source, source], 2)
+        .unwrap();
+    assert_eq!(prepared.acoustic(), run.acoustic());
+    assert_eq!(prepared.frequency_hz(), frequency);
+    let summed = prepared.evaluate(&[force, force]).unwrap();
+    close(summed.pressure_pa.re, 2.0 * expected.pressure.re);
+    close(summed.pressure_pa.im, 2.0 * expected.pressure.im);
+    assert!(
+        run.prepare_coherent_observer(0.5 / dt, observer, &[source], 1)
+            .is_err()
+    );
+    assert!(
+        run.prepare_coherent_observer(frequency, observer, &[source, source], 1)
+            .is_err()
+    );
     assert!(run.observe_spectral_line(0, observer, source).is_err());
     assert!(run.observe_spectral_line(32, observer, source).is_err());
     assert!(
