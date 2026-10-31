@@ -35,6 +35,8 @@ pub mod polarization;
 pub mod aqueous;
 /// Thermodynamically consistent finite-domain solution interactions.
 pub mod nonideal;
+/// Chemical-potential-driven Maxwell–Stefan transport relative to fixed solvent.
+pub mod diffusion;
 pub use aqueous::AqueousSolution;
 /// Finite-bath ideal ionic partition with fixed charge and explicit trapped particles.
 pub mod donnan;

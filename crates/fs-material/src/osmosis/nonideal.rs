@@ -267,6 +267,89 @@ impl VirialSolutionModel {
         Ok(())
     }
 
+    /// Right-minus-left solute chemical potentials from THIS same free energy.
+    /// The common concentration/standard-state reference cancels analytically,
+    /// before floating-point subtraction. Exact absent species still refuse.
+    /// Output remains unchanged on any domain or arithmetic failure.
+    pub fn chemical_potential_differences_into(
+        &self,
+        left_mol_m3: &[f64],
+        right_mol_m3: &[f64],
+        output: &mut [f64],
+    ) -> Result<()> {
+        let n = self.species_count();
+        shape(n, output.len())?;
+        self.admit_concentrations(left_mol_m3)?;
+        self.admit_concentrations(right_mol_m3)?;
+        let mut candidate = [0.0; MAX_OSMOTIC_SOLUTES];
+        for i in 0..n {
+            if left_mol_m3[i] == 0.0 || right_mol_m3[i] == 0.0 {
+                return Err(NonidealSolutionError::ZeroConcentration { species: i });
+            }
+            let mut force = Sum::default();
+            force.add(log_ratio(right_mol_m3[i], left_mol_m3[i]));
+            for j in 0..n {
+                force.add(finite(
+                    self.interaction_matrix_m3_mol[i * n + j] * (right_mol_m3[j] - left_mol_m3[j]),
+                    "chemical-potential difference is not representable",
+                )?);
+            }
+            candidate[i] = finite(
+                self.rt * sum(force)?,
+                "chemical-potential difference is not representable",
+            )?;
+        }
+        output.copy_from_slice(&candidate[..n]);
+        Ok(())
+    }
+
+    /// Fixed-volume mixing free-energy change, with the common linear
+    /// `-RT ln(c_ref) sum(c_i)` reference term cancelled BEFORE arithmetic.
+    /// This is a closed, species-conserving accounting primitive; individual
+    /// open compartments must retain their chemical reference transfer too.
+    /// It supplies no caloric energy or mechanical pressure/volume work.
+    pub fn reference_cancelled_free_energy_change_j_m3(
+        &self,
+        before_mol_m3: &[f64],
+        after_mol_m3: &[f64],
+    ) -> Result<f64> {
+        self.admit_concentrations(before_mol_m3)?;
+        self.admit_concentrations(after_mol_m3)?;
+        let n = self.species_count();
+        let mut change = Sum::default();
+        for i in 0..n {
+            let (a, b) = (before_mol_m3[i], after_mol_m3[i]);
+            if a == b {
+                continue;
+            }
+            let ideal = if a == 0.0 {
+                b * (det::ln(b) - 1.0)
+            } else if b == 0.0 {
+                -a * (det::ln(a) - 1.0)
+            } else {
+                let delta = b - a;
+                delta * det::ln(a) + b * log_ratio(b, a) - delta
+            };
+            change.add(finite(
+                ideal,
+                "mixing free-energy difference is not representable",
+            )?);
+            // Symmetry makes (b-a)^T B (b+a)/2 exactly the quadratic change.
+            for j in 0..n {
+                change.add(finite(
+                    (b - a)
+                        * self.interaction_matrix_m3_mol[i * n + j]
+                        * (0.5 * before_mol_m3[j] + 0.5 * after_mol_m3[j]),
+                    "excess free-energy difference is not representable",
+                )?);
+            }
+        }
+        finite(
+            self.rt * sum(change)?,
+            "mixing free-energy difference is not representable",
+        )
+    }
+
     /// Row-major `d mu_i/d c_j = RT*(delta_ij/c_i+B_ij)` [J m³/mol²].
     /// Exact zero concentrations refuse the singular derivative without changing
     /// the output. The returned matrix is symmetric on the admitted convex box.
@@ -387,6 +470,30 @@ impl VirialSolutionModel {
                 finite(amount / volume, "molar concentration is not representable")?;
         }
         Ok(concentrations)
+    }
+}
+
+// Relative logarithm avoids cancellation of common concentration references and
+// preserves adjacent positive concentrations. The convergent atanh identity is
+// used only for ratios in [1/2,2]; otherwise the original deterministic logs
+// have no near-equal subtraction. No concentration floor or platform libm.
+fn log_ratio(numerator: f64, denominator: f64) -> f64 {
+    if numerator == denominator {
+        return 0.0;
+    }
+    if numerator >= 0.5 * denominator && denominator >= 0.5 * numerator {
+        let mean = 0.5 * numerator + 0.5 * denominator;
+        let s = 0.5 * ((numerator - denominator) / mean);
+        let square = s * s;
+        let mut term = s;
+        let mut result = s;
+        for k in 1..24 {
+            term *= square;
+            result += term / f64::from(2 * k + 1);
+        }
+        2.0 * result
+    } else {
+        det::ln(numerator) - det::ln(denominator)
     }
 }
 

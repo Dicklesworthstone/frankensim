@@ -7705,6 +7705,40 @@ of sorption: gas-side energy checks are not a whole-membrane energy certificate.
 Mixed-gas competition, adiabatic evolution, swelling and nonlinear sorption need
 their own constitutive and energy closures.
 
+### Nonideal solution diffusion relative to finite stationary solvent
+
+`osmosis::diffusion::SolutionMaxwellStefan` binds one original
+`VirialSolutionModel`, explicit solvent and thermodynamic-order solute identities
+and molar masses, and a complete positive symmetric matrix of constant binary
+Maxwell–Stefan diffusivities [m²/s]. The original virial owner supplies
+reference-cancelled chemical-potential differences. No ideal-gas EOS, inferred
+tracer diffusivity, concentration floor or material authority is introduced.
+Every endpoint must retain the same original model, fixed temperature, solvent
+convention and positive solute concentrations within its declared convex domain.
+
+The admitted model neglects solute partial volumes and holds solvent stationary:
+`c0=1/Vbar0`; arithmetic face concentrations define x and total c. Solute forces
+are `d_i=x_i Delta(mu_i)/(RT L)`, and the solvent reaction
+`d0=-sum_solutes d_i` closes the constrained force system. The existing shared
+molar Maxwell–Stefan owner performs the sole friction solve;
+`N_i=J_i-(x_i/x0)J0` gives the published solvent-frame flux and exactly `N0=0`.
+Every original friction row is checked again after conversion. Original
+pair-friction entropy and `-sum_solutes N_i grad(mu_i)/T` must agree within
+explicit budgets and remain nonnegative. Solute fluxes retain the caller's
+original order even when the shared solver canonicalizes species differently.
+This is neutral fixed-solvent diffusion, not unrestricted liquid mechanics,
+electrochemical migration, Soret/Dufour transport or an absolute caloric balance.
+
+Successful face evaluations reuse the prepared original workspace and allocate
+nothing; failures and cancellation preserve outputs. Source-owned fixed-volume
+free-energy differences cancel the common linear concentration-reference term
+before arithmetic and are limited to closed species-conserving accounting.
+Independent public tests exercise binary solvent-frame reduction, ternary uphill
+diffusion against separate two-unknown elimination, positive dissipation, species
+permutation and concentration-reference invariance, adjacent representable
+concentrations, pair/source/zero-log refusal and atomic cancellation. The dense
+ideal-dilute chemical-potential law is not an exact Fick law.
+
 
 ## Source-bound thermal Voce hardening
 
