@@ -5,6 +5,9 @@
 //! endpoint; the same magnetic laws, geometry and caloric charts remain pinned.
 //! Physical winding/core/graph Joule heat is deposited once. Numerical field
 //! dissipation and private circuit-port work are never mistaken for heat.
+//! Driven solid sections retain the original field's diffusion history: local
+//! conductivity refresh updates their current-constrained source profiles, and
+//! their total E/J heat shares the existing field-cell receipt and caloric owner.
 
 /// Reversible magnetic temperature feedback on this same circuit/field solve.
 pub mod thermal;
@@ -110,9 +113,12 @@ impl WindingThermalNetwork<'_> {
     ///
     /// Conductivity is re-resolved at the actual proposed thermal endpoint.
     /// Every nested field/circuit solve starts from the same accepted histories.
-    /// All conducting triangles need explicit original heat destinations; core
-    /// eddy conductors and stranded windings remain disjoint. Every native graph
-    /// resistor also deposits its authored physical heat.
+    /// All conducting triangles need explicit original heat destinations. Solid
+    /// windings and floating eddy regions use the field's total-current receipt;
+    /// stranded windings retain disjoint source cells. No additional R*I^2 heat
+    /// is added for a solid region. Every native graph resistor also deposits
+    /// its authored physical heat. The outer circuit budget bounds all nested
+    /// field trials, including discarded stencils and the final physical check.
     ///
     /// The complete H(B) law and geometry remain fixed; temperature-dependent
     /// magnetic storage refuses until its entropy/parameter work is represented.
@@ -460,8 +466,17 @@ impl WindingThermalNetwork<'_> {
             target_s,
             controls,
             initial_energy_increments_j,
-            |state, _remaining| {
+            |state, remaining| {
                 check(cancel)?;
+                // One interface trial evaluates both native circuit and field.
+                // Bound that work BEFORE entering the nested solve, including
+                // discarded Newton/Jacobian trials and the final replay.
+                let mut inner = winding_controls;
+                inner.maximum_field_trials = inner.maximum_field_trials.min(remaining);
+                if inner.maximum_field_trials == 0 {
+                    return Err(CircuitEnthalpyError::CircuitBudget);
+                }
+                let outer_limited = remaining < winding_controls.maximum_field_trials;
                 let mut coefficients = resolve(state)?;
                 let (sources, magnetic) = resolve_materials(state, sample(&coefficients.source))?;
                 if let Some(caloric) = &caloric {
@@ -513,10 +528,9 @@ impl WindingThermalNetwork<'_> {
                             winding,
                             external_inputs,
                             assembly,
-                            winding_controls,
+                            inner,
                             &mut || (*cancel.borrow_mut())(),
                         )
-                        .map_err(electrical)?
                 } else {
                     driven
                         .step_to_candidate(
@@ -524,11 +538,16 @@ impl WindingThermalNetwork<'_> {
                             core,
                             winding,
                             external_inputs,
-                            winding_controls,
+                            inner,
                             &mut || (*cancel.borrow_mut())(),
                         )
-                        .map_err(electrical)?
-                };
+                }
+                .map_err(|error| match error {
+                    NonlinearWindingError::TrialBudget if outer_limited => {
+                        CircuitEnthalpyError::CircuitBudget
+                    }
+                    other => electrical(other),
+                })?;
                 let magnetic_caloric = if let Some(caloric) = &caloric {
                     Some(caloric.deposit(
                         state,
@@ -548,6 +567,7 @@ impl WindingThermalNetwork<'_> {
                 } else {
                     None
                 };
+                let circuit_trials = proposal.step().field_trials;
                 Ok(DrivenCoefficients {
                     circuit: proposal,
                     sources_w: coefficients.sources_w,
@@ -558,7 +578,7 @@ impl WindingThermalNetwork<'_> {
                         magnetic_caloric,
                         magnetic_balance: None,
                     },
-                    circuit_trials: 1,
+                    circuit_trials,
                 })
             },
             |proposal: &NonlinearWindingCandidate<'_>, dt, checkpoint| {

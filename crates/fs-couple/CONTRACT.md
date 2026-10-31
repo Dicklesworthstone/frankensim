@@ -1,5 +1,35 @@
 # CONTRACT: fs-couple
 
+## Driven solid windings on the existing finite-enthalpy transaction
+
+`WindingThermalNetwork::step_nonlinear_*` consumes driven solid regions through
+the existing native circuit/field/enthalpy solve. Original conductivity sources
+refresh at each proposed receiving-cell temperature, updating both the current-
+constrained winding functional and DC drive. Every trial retains the same
+accepted spatial potential, native circuit history and thermal state. Induction
+uses the trial functional paired with the retained field increment; changing
+the functional alone cannot create voltage in a stationary biased field.
+
+The original field's total spatial E/J receipt supplies solid and floating-
+conductor heat exactly once, including local drive/eddy cross terms. Distinct
+stranded copper and graph-resistor heat retain their original routes. The
+source-owned `HeatAssembly` and magnetic caloric owners remain authoritative;
+source-supported linear permeability feedback retains its reversible magnetic
+heat and internal-energy account. Numerical field loss is not deposited as heat.
+The outer circuit-work limit now bounds all actual nested field trials, including
+discarded interface/Jacobian evaluations and final replay, rather than counting
+each entire nonlinear solve as one operation.
+
+G0/G1/G3 fixtures in `tests/nonlinear_winding_enthalpy/solid.rs` independently
+reconstruct region currents, P1 E/J/heat and induced voltage across successive
+conductivity-profile refreshes. They check finite receiving temperatures,
+original material conduction, affine permeability caloric exchange, exact
+reported work allowances and deterministic retry after cancellation/refusal.
+The model retains the original fixed geometry, source domains and first-order
+coupling; it does not infer thermal evolution of nonlinear hysteresis fits.
+
+
+
 ## Source-dependent directional histories on sustained mixed trajectories
 
 `finite_solid::contact::step::sustained` now shares ONE force/contact/drift and publication owner across circular, explicit directional, and original-source directional contact. The elliptic wrapper resolves each current original scene row at the actual post-force velocity, preserving pre-force Newton restitution targets. The source wrapper binds each stable feature to an original ordered interface, explicit static/kinetic coefficient role, and one selected material director. Full rigid inertia, consistent solid cross-point response, physical impulses, separate orbital/spin residuals, supports, work, geometry, clocks and noncancelling split-defect gates remain in that shared core.

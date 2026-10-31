@@ -6,6 +6,8 @@ mod field;
 mod graph_material;
 #[path = "nonlinear_winding_enthalpy/thermal.rs"]
 mod magnetic_thermal;
+#[path = "nonlinear_winding_enthalpy/solid.rs"]
+mod solid;
 
 use fs_couple::{
     circuit_enthalpy::{
