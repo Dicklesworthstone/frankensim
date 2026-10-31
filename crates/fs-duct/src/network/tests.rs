@@ -6,6 +6,7 @@ use std::time::Instant;
 mod coherent;
 mod loaded;
 mod porous;
+mod source_bank;
 
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()

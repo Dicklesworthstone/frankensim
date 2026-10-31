@@ -9,10 +9,14 @@
 //! Zc. This selects pressure generators with |p_open| = Zc * 1e-6 Pa, whose
 //! actual flows react to each other; e.g. `-- 180 0.5` cancels receiver pressure
 //! while retaining work dissipated inside the two source resistances.
+//! Optional third/fourth arguments add reciprocal mutual source resistance
+//! and reactance / Zc, e.g. `-- 180 0.5 -0.25 0.1`. The complete internal
+//! matrix is admitted as passive; mutual entries and port work retain signs.
 
 use fs_duct::network::{
-    DuctNetwork, JunctionCorrections, NetworkEdge, NetworkLoad, NetworkNode, NodeBoundary,
-    PortExcitation, PortSource, PortTermination, network_drive_sources,
+    CoupledSourceBank, CoupledTermination, DuctNetwork, JunctionCorrections, NetworkEdge,
+    NetworkLoad, NetworkNode, NodeBoundary, PortExcitation, PortSource, PortTermination,
+    network_drive_source_bank, network_drive_sources,
 };
 use fs_duct::{Duct, LossModel, Segment};
 use fs_material::gas::{GasSpec, GasState};
@@ -20,9 +24,9 @@ use fs_math::{c64::C64, det};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if !(1..=2).contains(&args.len()) {
+    if !(1..=4).contains(&args.len()) {
         return Err(
-            "usage: coherent_network <relative-source-phase-degrees> [source-resistance-over-Zc]"
+            "usage: coherent_network <relative-source-phase-degrees> [source-resistance-over-Zc [mutual-resistance-over-Zc [mutual-reactance-over-Zc]]]"
                 .into(),
         );
     }
@@ -34,6 +38,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if source_resistance.is_some_and(|value| !value.is_finite() || value < 0.0) {
         return Err("source resistance / Zc must be finite and nonnegative".into());
     }
+    let mutual_resistance = args.get(2).map(|value| value.parse::<f64>()).transpose()?;
+    let mutual_reactance = args
+        .get(3)
+        .map(|value| value.parse::<f64>())
+        .transpose()?
+        .unwrap_or(0.0);
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0)?;
     let radius = 0.008;
     let network = DuctNetwork {
@@ -83,15 +93,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         label: "receiver".into(),
         load: NetworkLoad::Impedance(C64::from_re(characteristic)),
     }];
-    let driven = network_drive_sources(
-        &network,
-        &gas,
-        core::f64::consts::TAU * 400.0,
-        LossModel::Lossless,
-        &sources,
-        &loads,
-        None,
-    )?;
+    let omega = core::f64::consts::TAU * 400.0;
+    let driven = if let Some(mutual) = mutual_resistance {
+        let resistance = source_resistance.expect("mutual arguments follow source resistance");
+        let diagonal = C64::from_re(resistance * characteristic);
+        let off_diagonal = C64::new(mutual, mutual_reactance).scale(characteristic);
+        let bank = CoupledSourceBank {
+            impedance: CoupledTermination {
+                omega,
+                labels: vec!["left".into(), "right".into()],
+                z: vec![diagonal, off_diagonal, off_diagonal, diagonal],
+                source_id: "explicit reciprocal two-generator example".into(),
+            },
+            open_circuit_pressures_pa: [C64::ONE, C64::new(cos, sin)]
+                .map(|phase| phase.scale(characteristic * 1.0e-6))
+                .to_vec(),
+        };
+        network_drive_source_bank(
+            &network,
+            &gas,
+            omega,
+            LossModel::Lossless,
+            &[],
+            &bank,
+            &loads,
+            None,
+        )?
+    } else {
+        network_drive_sources(
+            &network,
+            &gas,
+            omega,
+            LossModel::Lossless,
+            &sources,
+            &loads,
+            None,
+        )?
+    };
     if let Some(ratio) = source_resistance {
         println!(
             "frequency_hz=400,phase_degrees={degrees},source_resistance_over_Zc={ratio},peak_open_pressure_pa={:.12e}",
@@ -100,16 +138,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("frequency_hz=400,phase_degrees={degrees},peak_source_flow_m3_s=1e-6");
     }
+    if let Some(mutual) = mutual_resistance {
+        println!(
+            "mutual_source_resistance_over_Zc={mutual},mutual_source_reactance_over_Zc={mutual_reactance}"
+        );
+    }
     let response = &driven.fields;
     println!(
-        "port,pressure_re_pa,pressure_im_pa,flow_re_m3_s,flow_im_m3_s,mean_power_into_graph_w"
+        "port,pressure_re_pa,pressure_im_pa,flow_re_m3_s,flow_im_m3_s,mean_power_into_graph_w,generator_power_w,signed_internal_source_work_w"
     );
     for (index, label) in response.ports.iter().enumerate() {
         let p = response.port_pressures[index];
         let u = response.port_inflows[index];
         println!(
-            "{label},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
-            p.re, p.im, u.re, u.im, response.port_powers_w[index]
+            "{label},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
+            p.re,
+            p.im,
+            u.re,
+            u.im,
+            response.port_powers_w[index],
+            driven.generator_powers_w[index],
+            driven.source_dissipations_w[index]
         );
     }
     println!(

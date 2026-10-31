@@ -16,8 +16,8 @@ pub use media::NetworkMedia;
 mod loaded;
 pub use loaded::{
     network_drive, network_drive_coherent, network_drive_coherent_regional, network_drive_coupled,
-    network_drive_coupled_regional, network_drive_regional, network_drive_sources,
-    network_drive_sources_regional,
+    network_drive_coupled_regional, network_drive_regional, network_drive_source_bank,
+    network_drive_source_bank_regional, network_drive_sources, network_drive_sources_regional,
 };
 
 #[cfg(test)]
@@ -327,6 +327,46 @@ pub struct PortSource {
     pub excitation: PortExcitation,
 }
 
+/// Reciprocal pressure generators with a complete passive internal impedance:
+/// `p_i + sum_j Zs_ij U_j = p_open_i`, with every U directed into the graph.
+/// The diagonal and mutual terms describe the source bank itself, separately
+/// from the network and exterior load. Independent banks can be block diagonal.
+#[derive(Debug, Clone)]
+pub struct CoupledSourceBank {
+    /// Frequency, exact port labels, source identity and full row-major source
+    /// impedance [Pa s/m³]. The shared passive multiport carrier is reused;
+    /// here its operator belongs to the generators, not an exterior load.
+    /// Zs must be reciprocal and its Hermitian part positive semidefinite,
+    /// within a relative 1e-12 numerical admission tolerance. No entry is clipped.
+    pub impedance: CoupledTermination,
+    /// Complex peak open-circuit pressure [Pa], in impedance-label order on
+    /// the common exp(-i omega t) clock. Zero retains that generator's complete
+    /// impedance and mutual interaction with every other bank port.
+    pub open_circuit_pressures_pa: Vec<C64>,
+}
+
+struct ResolvedSources<'a> {
+    conditions: Vec<Option<PortExcitation>>,
+    bank: Option<&'a CoupledSourceBank>,
+    bank_rows: Vec<Option<usize>>,
+}
+
+impl ResolvedSources<'_> {
+    fn impedance(&self, port: usize, other: usize) -> Option<C64> {
+        if let (Some(bank), Some(row), Some(column)) =
+            (self.bank, self.bank_rows[port], self.bank_rows[other])
+        {
+            Some(bank.impedance.z[row * bank.impedance.labels.len() + column])
+        } else if port == other {
+            self.conditions[port]
+                .and_then(PortExcitation::pressure)
+                .map(|(_, impedance)| impedance)
+        } else {
+            None
+        }
+    }
+}
+
 impl PortExcitation {
     fn flow(self) -> Option<C64> {
         match self {
@@ -394,22 +434,38 @@ pub struct NetworkSourceResponse {
     /// Pressure sources use 0.5 Re(p_open conj(U)); ideal flow sources use
     /// their actual interface work. A generator may absorb power.
     pub generator_powers_w: Vec<f64>,
-    /// Mean work dissipated inside each source impedance [W], namely
-    /// 0.5 Re(Zs) |U|². Zero for ideal flow sources and passive-load ports.
+    /// Signed mean internal-source work per port [W]:
+    /// 0.5 Re((Zs U)_i conj(U_i)). With scalar impedances this is the local
+    /// nonnegative loss 0.5 Re(Zs) |U|². With mutual impedances an individual
+    /// entry can be negative: it includes exchange through the source bank,
+    /// including reactive coupling, and is not a local heat attribution.
+    /// Zero for ideal flow sources and passive-load ports.
     pub source_dissipations_w: Vec<f64>,
     /// Signed total generator work [W]. It equals source-interface work plus
     /// source dissipation, up to the admitted linear solve's numerical error.
     pub generator_power_w: f64,
-    /// Total internal source dissipation [W]. This is separate from exterior
-    /// load power and the gas/wall/internal-load work inside the graph.
+    /// Total internal source dissipation [W], nonnegative up to admission and
+    /// solve roundoff for a passive bank. This is separate from exterior load
+    /// power and the gas/wall/internal-load work inside the graph. Signed
+    /// mutual terms are summed before this quantity is reported, never clipped.
     pub source_dissipation_w: f64,
 }
 
-fn source_conditions(
+fn source_conditions<'a>(
     labels: &[&str],
     sources: &[PortSource],
-) -> Result<Vec<Option<PortExcitation>>, DuctError> {
-    if sources.is_empty() || sources.len() > MAX_NETWORK_PORTS {
+    bank: Option<&'a CoupledSourceBank>,
+    omega: f64,
+) -> Result<ResolvedSources<'a>, DuctError> {
+    if labels.is_empty() || labels.len() > MAX_NETWORK_PORTS {
+        return Err(bad("network needs 1..=32 external ports"));
+    }
+    let bank_count = bank.map_or(0, |bank| bank.impedance.labels.len());
+    if sources.len() > MAX_NETWORK_PORTS
+        || bank_count > MAX_NETWORK_PORTS
+        || sources.len() + bank_count == 0
+        || sources.len() + bank_count > MAX_NETWORK_PORTS
+    {
         return Err(bad("network needs 1..=32 coherent sources"));
     }
     let mut conditions = vec![None; labels.len()];
@@ -438,7 +494,52 @@ fn source_conditions(
         }
         conditions[port] = Some(source.excitation);
     }
-    Ok(conditions)
+    let mut bank_rows = vec![None; labels.len()];
+    if let Some(bank) = bank {
+        admit_coupled(&bank.impedance, omega)?;
+        if bank.open_circuit_pressures_pa.len() != bank_count
+            || bank.open_circuit_pressures_pa.iter().any(|&p| !finite(p))
+        {
+            return Err(bad("source bank needs one finite peak pressure per port"));
+        }
+        let scale = bank
+            .impedance
+            .z
+            .iter()
+            .map(|z| z.re.abs().max(z.im.abs()))
+            .fold(0.0, f64::max);
+        for row in 0..bank_count {
+            for column in 0..row {
+                let a = bank.impedance.z[row * bank_count + column];
+                let b = bank.impedance.z[column * bank_count + row];
+                if scale > 0.0
+                    && (C64::new(a.re / scale, a.im / scale) - C64::new(b.re / scale, b.im / scale))
+                        .abs()
+                        > 1.0e-12
+                {
+                    return Err(bad("source bank impedance must be reciprocal"));
+                }
+            }
+            let label = &bank.impedance.labels[row];
+            let port = labels
+                .iter()
+                .position(|&candidate| candidate == label)
+                .ok_or_else(|| bad("unknown source-bank port label"))?;
+            if conditions[port].is_some() {
+                return Err(bad("source-bank ports must be unique and disjoint"));
+            }
+            bank_rows[port] = Some(row);
+            conditions[port] = Some(PortExcitation::Pressure {
+                open_circuit_pressure_pa: bank.open_circuit_pressures_pa[row],
+                impedance_pa_s_m3: bank.impedance.z[row * bank_count + row],
+            });
+        }
+    }
+    Ok(ResolvedSources {
+        conditions,
+        bank,
+        bank_rows,
+    })
 }
 
 // Neumaier accumulation preserves weak residuals of strongly cancelling
@@ -517,33 +618,66 @@ impl NetworkSourceResponse {
     fn from_fields(
         omega: f64,
         labels: &[&str],
-        sources: &[Option<PortExcitation>],
+        sources: &ResolvedSources<'_>,
         pressures: Vec<C64>,
         inflows: Vec<C64>,
     ) -> Result<Self, DuctError> {
-        let fields =
-            NetworkCoherentResponse::from_fields(omega, labels, sources, pressures, inflows)?;
+        let fields = NetworkCoherentResponse::from_fields(
+            omega,
+            labels,
+            &sources.conditions,
+            pressures,
+            inflows,
+        )?;
         let mut generator_powers_w = vec![0.0; labels.len()];
         let mut source_dissipations_w = vec![0.0; labels.len()];
-        for (port, source) in sources.iter().enumerate() {
+        let mut canonical: Vec<usize> = (0..labels.len()).collect();
+        canonical.sort_unstable_by(|&a, &b| labels[a].cmp(labels[b]));
+        for (port, source) in sources.conditions.iter().enumerate() {
             if let Some(source) = source {
                 if let Some((pressure, impedance)) = source.pressure() {
                     let flow = fields.port_inflows[port];
                     generator_powers_w[port] = 0.5 * (pressure * flow.conj()).re;
-                    source_dissipations_w[port] = (0.5 * impedance.re * flow.re) * flow.re
-                        + (0.5 * impedance.re * flow.im) * flow.im;
+                    source_dissipations_w[port] = if sources.bank_rows[port].is_some() {
+                        let internal_pressure =
+                            coherent_sum(canonical.iter().filter_map(|&other| {
+                                sources
+                                    .impedance(port, other)
+                                    .map(|z| z * fields.port_inflows[other])
+                            }));
+                        0.5 * (internal_pressure * flow.conj()).re
+                    } else {
+                        (0.5 * impedance.re * flow.re) * flow.re
+                            + (0.5 * impedance.re * flow.im) * flow.im
+                    };
                 } else {
                     generator_powers_w[port] = fields.port_powers_w[port];
                 }
             }
         }
-        let mut canonical: Vec<usize> = (0..labels.len()).collect();
-        canonical.sort_unstable_by(|&a, &b| labels[a].cmp(labels[b]));
         let total = |powers: &[f64]| {
             coherent_sum(canonical.iter().map(|&port| C64::from_re(powers[port]))).re
         };
         let generator_power_w = total(&generator_powers_w);
-        let source_dissipation_w = total(&source_dissipations_w);
+        // Contract the Hermitian part for the total. Large reactive exchange
+        // can otherwise bury a small real loss when signed port work cancels.
+        // This is the same complete operator; no mutual term is removed from
+        // the solve or the reported signed work at an individual source port.
+        let source_dissipation_w = coherent_sum(canonical.iter().map(|&port| {
+            if sources.bank_rows[port].is_none() {
+                return C64::from_re(source_dissipations_w[port]);
+            }
+            let dissipative_pressure = coherent_sum(canonical.iter().filter_map(|&other| {
+                let forward = sources.impedance(port, other)?;
+                let reverse = sources
+                    .impedance(other, port)
+                    .expect("same complete source bank");
+                let hermitian = forward.scale(0.5) + reverse.conj().scale(0.5);
+                Some(hermitian * fields.port_inflows[other])
+            }));
+            C64::from_re(0.5 * (dissipative_pressure * fields.port_inflows[port].conj()).re)
+        }))
+        .re;
         if generator_powers_w
             .iter()
             .chain(&source_dissipations_w)
@@ -606,11 +740,25 @@ pub(crate) fn admit_coupled(coupled: &CoupledTermination, omega: f64) -> Result<
             "network coupled termination needs the response frequency, a source and a finite square matrix",
         ));
     }
-    let scale = coupled.z.iter().map(|z| z.abs()).fold(0.0, f64::max);
+    // Normalize before forming H: finite near-maximum entries must neither
+    // overflow into NaN and bypass admission nor underflow its passivity gate.
+    let scale = coupled
+        .z
+        .iter()
+        .map(|z| z.re.abs().max(z.im.abs()))
+        .fold(0.0, f64::max);
+    if scale == 0.0 {
+        return Ok(());
+    }
     let mut embedding = vec![0.0; 4 * n * n];
     for a in 0..n {
         for b in 0..n {
-            let h = (coupled.z[a * n + b] + coupled.z[b * n + a].conj()).scale(0.5);
+            let forward = coupled.z[a * n + b];
+            let reverse = coupled.z[b * n + a];
+            let h = C64::new(
+                0.5 * (forward.re / scale + reverse.re / scale),
+                0.5 * (forward.im / scale - reverse.im / scale),
+            );
             embedding[a * 2 * n + b] = h.re;
             embedding[(a + n) * 2 * n + b + n] = h.re;
             embedding[a * 2 * n + b + n] = -h.im;
@@ -618,7 +766,7 @@ pub(crate) fn admit_coupled(coupled: &CoupledTermination, omega: f64) -> Result<
         }
     }
     let (values, _) = fs_la::eigen::jacobi_eigh(&embedding, 2 * n);
-    if values[0] < -1.0e-12 * scale {
+    if values.iter().any(|value| !value.is_finite()) || values[0] < -1.0e-12 {
         return Err(bad(
             "network coupled termination has an active Hermitian part",
         ));
@@ -1447,10 +1595,34 @@ impl NetworkResponse {
         loads: &[PortTermination],
         coupled: Option<&CoupledTermination>,
     ) -> Result<NetworkSourceResponse, DuctError> {
-        let (pressures, inflows) = self.drive_sources_with(sources, loads, coupled, &self.gas)?;
+        self.drive_sources_and_bank(sources, None, loads, coupled)
+    }
+
+    /// Close a complete mutually coupled generator bank, optionally alongside
+    /// independent scalar pressure or prescribed-flow sources. The bank's
+    /// full operator enters the same solve as the graph and exterior matrix;
+    /// every port must belong to exactly one source or passive load.
+    pub fn drive_source_bank(
+        &self,
+        sources: &[PortSource],
+        bank: &CoupledSourceBank,
+        loads: &[PortTermination],
+        coupled: Option<&CoupledTermination>,
+    ) -> Result<NetworkSourceResponse, DuctError> {
+        self.drive_sources_and_bank(sources, Some(bank), loads, coupled)
+    }
+
+    fn drive_sources_and_bank(
+        &self,
+        sources: &[PortSource],
+        bank: Option<&CoupledSourceBank>,
+        loads: &[PortTermination],
+        coupled: Option<&CoupledTermination>,
+    ) -> Result<NetworkSourceResponse, DuctError> {
         let labels: Vec<&str> = self.ports.iter().map(String::as_str).collect();
-        let conditions = source_conditions(&labels, sources)?;
-        NetworkSourceResponse::from_fields(self.omega, &labels, &conditions, pressures, inflows)
+        let sources = source_conditions(&labels, sources, bank, self.omega)?;
+        let (pressures, inflows) = self.drive_sources_with(&sources, loads, coupled, &self.gas)?;
+        NetworkSourceResponse::from_fields(self.omega, &labels, &sources, pressures, inflows)
     }
 
     /// Terminate EVERY other labelled port explicitly, then return the driving
@@ -1499,6 +1671,8 @@ impl NetworkResponse {
             label: active.to_owned(),
             excitation: PortExcitation::VolumeFlow(C64::ONE),
         }];
+        let labels: Vec<&str> = self.ports.iter().map(String::as_str).collect();
+        let sources = source_conditions(&labels, &sources, None, self.omega)?;
         let (port_pressures, port_inflows) =
             self.drive_sources_with(&sources, loads, coupled, gas)?;
         let active = self
@@ -1515,7 +1689,7 @@ impl NetworkResponse {
 
     fn drive_sources_with(
         &self,
-        sources: &[PortSource],
+        sources: &ResolvedSources<'_>,
         loads: &[PortTermination],
         coupled: Option<&CoupledTermination>,
         gas: &GasState,
@@ -1533,14 +1707,14 @@ impl NetworkResponse {
         {
             return Err(bad("invalid network response matrix"));
         }
-        let labels: Vec<&str> = self.ports.iter().map(String::as_str).collect();
-        let conditions = source_conditions(&labels, sources)?;
+        let conditions = &sources.conditions;
         let source_flows: Vec<Option<C64>> = conditions
             .iter()
             .map(|condition| condition.and_then(PortExcitation::flow))
             .collect();
         let coupled_count = coupled.map_or(0, |c| c.labels.len());
-        if loads.len() + coupled_count != n - sources.len() {
+        let source_count = conditions.iter().filter(|source| source.is_some()).count();
+        if loads.len() + coupled_count != n - source_count {
             return Err(bad(
                 "every other network port needs an explicit termination",
             ));
@@ -1599,8 +1773,9 @@ impl NetworkResponse {
         canonical.sort_unstable_by(|&a, &b| self.ports[a].cmp(&self.ports[b]));
         // Keep the original unit-source arithmetic unchanged. Other source
         // vectors retain their phase, with compensation for deep cancellation.
-        let unit_source = (sources.len() == 1 && sources[0].excitation.flow() == Some(C64::ONE))
-            .then(|| source_flows.iter().position(Option::is_some).unwrap());
+        let unit_source = (source_count == 1)
+            .then(|| source_flows.iter().position(|&flow| flow == Some(C64::ONE)))
+            .flatten();
         let incident: Vec<C64> = (0..n)
             .map(|row| {
                 unit_source.map_or_else(
@@ -1618,7 +1793,11 @@ impl NetworkResponse {
         for (i, &p) in live.iter().enumerate() {
             for (j, &q) in live.iter().enumerate() {
                 a[i * m + j] = self.z[p * n + q];
-                if let (Some(c), Some(r), Some(s)) = (coupled, coupled_rows[p], coupled_rows[q]) {
+                if let Some(z) = sources.impedance(p, q) {
+                    a[i * m + j] = a[i * m + j] + z;
+                } else if let (Some(c), Some(r), Some(s)) =
+                    (coupled, coupled_rows[p], coupled_rows[q])
+                {
                     a[i * m + j] = a[i * m + j] + c.z[r * c.labels.len() + s];
                 } else if i == j {
                     a[i * m + j] = a[i * m + j] + resolved[p].expect("finite load");

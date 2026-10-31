@@ -1274,22 +1274,51 @@ exterior interactions. An unexcited pressure generator retains its impedance;
 setting `p_open=0` does not open or remove that port. The source resistance can
 therefore dissipate energy even when coherent interference cancels radiation.
 Source ports and explicit scalar/coupled loads must partition every port once.
-Finite source impedances are diagonal at the source boundary; mutual source
-interaction is through the complete network and exterior operator. A separate
-off-diagonal driver-internal impedance matrix is not modeled by this API.
+Independent `PortSource` impedances remain diagonal at the source boundary.
+`CoupledSourceBank`, `network_drive_source_bank`, its regional counterpart and
+`NetworkResponse::drive_source_bank` additionally close a complete reciprocal
+driver-internal impedance matrix: `p_i + sum_j Zs_ij U_j = p_open_i`. The bank
+reuses the labeled, frequency-bound `CoupledTermination` operator carrier;
+its full diagonal and mutual terms belong to the source itself, independently
+of the full exterior operator. An additional scalar/flow source list may be
+empty or mixed with the bank. Every source bank port is unique and disjoint
+from all other sources and loads. Independent banks can share a block-diagonal
+operator. Zero open-circuit pressure retains every internal mutual term.
 
-The ordinary closure adds source impedances to the same loaded port equations
-and combines pressure and flow excitation in one right-hand side. The retained
-scattering closure adds `p + Zs U = p_open` directly, without dividing by Zs.
+The complete source matrix must be finite, reciprocal and passive: its
+Hermitian part must be positive semidefinite within relative 1e-12 admission
+tolerance. Negative mutual resistance and either sign of reactance are valid;
+entrywise clipping or diagonal-only passivity checks are not used. Reciprocity
+is checked on the full complex matrix with the same relative tolerance. Exact
+query frequency, original source identity and finite peak pressures bind the
+input. Shared source/exterior passivity admission normalizes the matrix before
+forming its Hermitian part, so extreme finite magnitudes cannot bypass the
+gate through overflow or underflow. Admission does not repair the operator.
+
+The ordinary closure adds the complete source impedance to the same loaded
+port equations and combines pressure and flow excitation in one right-hand
+side. The retained scattering closure adds `p + Zs U = p_open` directly,
+without inverting Zs or its diagonal.
 It therefore keeps ideal pressure sources, rank-deficient exterior loads and
 regularized open-circuit poles. All 32 ports may be finite-impedance sources.
-Each representation uses one factorization, with the existing condition cap,
-canonical port ordering and compensated complex reductions. The prescribed-flow and single-unit
-source APIs use the same boundary assembly, retaining unit-source arithmetic.
+Each representation uses one factorization for the complete source vector,
+with the existing condition cap, canonical port ordering and compensated
+complex reductions. A maximum of 32 total source ports is checked before
+allocation; source-bank admission uses at most a 64-by-64 real Hermitian
+embedding. The prescribed-flow and single-unit source APIs use the same
+boundary assembly, retaining unit-source arithmetic.
 
 `NetworkSourceResponse::fields` contains actual pressure, flow and signed
 interface work. Additional per-port and total generator powers use
-`0.5 Re(p_open conj(U))`; internal source dissipation uses `0.5 Re(Zs) |U|²`.
+`0.5 Re(p_open conj(U))`. `source_dissipations_w` retains signed per-port
+internal work `0.5 Re((Zs U)_i conj(U_i))`; an individual mutually coupled port
+can exchange negative work, including through purely reactive coupling, and
+is not a local heat attribution. For scalar impedances this reduces to
+`0.5 Re(Zs) |U|²`. The total `source_dissipation_w` contracts the complete
+Hermitian source operator after solving the combined coherent fields. This
+avoids cancellation of large reactive port exchanges hiding a small real
+loss. The passive total is nonnegative up to numerical admission/solve error;
+individual terms and total roundoff are never clipped.
 Flow generators have no modeled internal impedance, so their generator work
 equals interface work. Passive-load ports have zero generator/internal-source
 entries. Generator work can be negative; internal reactive work is not heat.
@@ -1304,9 +1333,20 @@ unequal-line elimination, destructive interference with nonzero source loss,
 negative generator work, mixed pressure/flow drive with full mutual loads,
 regional gases, source-order invariance and 32 simultaneous pressure sources.
 They reject nonfinite excitation and active/nonfinite source impedance. The
-`coherent_network` example optionally accepts a second argument for source
+`network/tests/source_bank.rs` regressions additionally compare full complex
+mutual source laws to independent two-line elimination, including regional
+media; recover the diagonal limit; preserve bank permutation and common phase;
+retain internal loss at a radiation null; keep signed resistive/reactive port
+exchange; close simultaneous scalar/flow sources and a full exterior load at
+an open-circuit pole; and refuse active/nonreciprocal, mislabeled, wrong-clock,
+oversized or incomplete banks and a true loaded differential pole. These
+new regressions require native execution before claiming numerical validation.
+The `coherent_network` example optionally accepts a second argument for source
 resistance / Zc, holding `|p_open|=Zc*1e-6 Pa` and reporting actual source flows
-and internal source work. The model remains linear and harmonic: it does not
+and internal source work. Optional third/fourth arguments add mutual source
+resistance and reactance / Zc, retaining the complete passive reciprocal bank
+and signed per-port exchange (`-- 180 0.5 -0.25 0.1`). The model remains linear
+and harmonic: it does not
 synthesize a source's impedance from geometry, supply nonlinear excitation,
 cross-frequency phase statistics, or a time-domain feedback dynamics model.
 

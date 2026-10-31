@@ -74,7 +74,7 @@ pub fn network_drive_sources(
     loads: &[PortTermination],
     coupled: Option<&CoupledTermination>,
 ) -> Result<NetworkSourceResponse, DuctError> {
-    drive_sources_bound(net, gas, None, omega, loss, sources, loads, coupled)
+    drive_sources_bound(net, gas, None, omega, loss, sources, None, loads, coupled)
 }
 
 /// [`network_drive_sources`] retaining the original per-edge and exterior gas
@@ -96,6 +96,65 @@ pub fn network_drive_sources_regional(
         omega,
         loss,
         sources,
+        None,
+        loads,
+        coupled,
+    )
+}
+
+/// Solve a reciprocal generator bank with full internal mutual impedance,
+/// optionally mixed with independent scalar pressure or ideal flow sources.
+/// The boundary law is `p_i + sum_j Zs_ij U_j = p_open_i`; the bank, network
+/// and exterior matrices retain every signed mutual term in one closure.
+/// Passivity applies to the complete source operator, not each entry or port's
+/// work. All sources and loads partition the ports at this exact frequency.
+/// The retained scattering path remains available at open-circuit poles.
+#[allow(clippy::too_many_arguments)]
+pub fn network_drive_source_bank(
+    net: &DuctNetwork,
+    gas: &GasState,
+    omega: f64,
+    loss: LossModel,
+    sources: &[PortSource],
+    bank: &CoupledSourceBank,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+) -> Result<NetworkSourceResponse, DuctError> {
+    drive_sources_bound(
+        net,
+        gas,
+        None,
+        omega,
+        loss,
+        sources,
+        Some(bank),
+        loads,
+        coupled,
+    )
+}
+
+/// [`network_drive_source_bank`] with the original per-edge and exterior media.
+/// Source and load phases remain on the one common exp(-i omega t) clock.
+#[allow(clippy::too_many_arguments)]
+pub fn network_drive_source_bank_regional(
+    net: &DuctNetwork,
+    media: &NetworkMedia,
+    omega: f64,
+    loss: LossModel,
+    sources: &[PortSource],
+    bank: &CoupledSourceBank,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+) -> Result<NetworkSourceResponse, DuctError> {
+    media.validate_for(net)?;
+    drive_sources_bound(
+        net,
+        media.exterior_gas(),
+        Some(media),
+        omega,
+        loss,
+        sources,
+        Some(bank),
         loads,
         coupled,
     )
@@ -109,21 +168,23 @@ fn drive_sources_bound(
     omega: f64,
     loss: LossModel,
     sources: &[PortSource],
+    bank: Option<&CoupledSourceBank>,
     loads: &[PortTermination],
     coupled: Option<&CoupledTermination>,
 ) -> Result<NetworkSourceResponse, DuctError> {
     let ordinary = network_port_impedance_bound(net, exterior, media, omega, loss)
-        .and_then(|response| response.drive_sources(sources, loads, coupled));
+        .and_then(|response| response.drive_sources_and_bank(sources, bank, loads, coupled));
     match ordinary {
         Ok(response) => Ok(response),
         Err(DuctError::Singular) => {
-            let fields =
-                drive_retained_sources(net, exterior, media, omega, loss, sources, loads, coupled)?;
+            let fields = drive_retained_sources(
+                net, exterior, media, omega, loss, sources, bank, loads, coupled,
+            )?;
             let labels: Vec<&str> = fields.labels.iter().map(String::as_str).collect();
             NetworkSourceResponse::from_fields(
                 omega,
                 &labels,
-                &fields.conditions,
+                &fields.sources,
                 fields.pressures,
                 fields.inflows,
             )
@@ -248,8 +309,9 @@ fn drive_retained(
         label: active_label.to_owned(),
         excitation: PortExcitation::VolumeFlow(C64::ONE),
     }];
-    let fields =
-        drive_retained_sources(net, exterior, media, omega, loss, &sources, loads, coupled)?;
+    let fields = drive_retained_sources(
+        net, exterior, media, omega, loss, &sources, None, loads, coupled,
+    )?;
     let active = fields
         .labels
         .iter()
@@ -262,24 +324,25 @@ fn drive_retained(
     })
 }
 
-struct LoadedFields {
+struct LoadedFields<'a> {
     labels: Vec<String>,
-    conditions: Vec<Option<PortExcitation>>,
+    sources: ResolvedSources<'a>,
     pressures: Vec<C64>,
     inflows: Vec<C64>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drive_retained_sources(
+fn drive_retained_sources<'a>(
     net: &DuctNetwork,
     exterior: &GasState,
     media: Option<&NetworkMedia>,
     omega: f64,
     loss: LossModel,
     sources: &[PortSource],
+    bank: Option<&'a CoupledSourceBank>,
     loads: &[PortTermination],
     coupled: Option<&CoupledTermination>,
-) -> Result<LoadedFields, DuctError> {
+) -> Result<LoadedFields<'a>, DuctError> {
     net.validate()?;
     validate_medium(exterior, omega)?;
     let port_nodes: Vec<usize> = net
@@ -297,8 +360,10 @@ fn drive_retained_sources(
             _ => unreachable!("port indices were selected above"),
         })
         .collect();
-    let conditions = source_conditions(&labels, sources)?;
-    if loads.len() + coupled.map_or(0, |value| value.labels.len()) != labels.len() - sources.len() {
+    let sources = source_conditions(&labels, sources, bank, omega)?;
+    let conditions = &sources.conditions;
+    let source_count = conditions.iter().filter(|source| source.is_some()).count();
+    if loads.len() + coupled.map_or(0, |value| value.labels.len()) != labels.len() - source_count {
         return Err(bad(
             "every other network port needs an explicit termination",
         ));
@@ -444,14 +509,14 @@ fn drive_retained_sources(
         &wave_edges,
         &labels,
         &port_slots,
-        &conditions,
+        &sources,
         &resolved,
         &coupled_rows,
         coupled,
     )?;
     Ok(LoadedFields {
         labels: labels.iter().map(|label| (*label).to_owned()).collect(),
-        conditions,
+        sources,
         pressures,
         inflows,
     })
@@ -467,11 +532,12 @@ fn loaded_wave_response(
     edges: &[WaveEdge],
     labels: &[&str],
     port_slots: &[usize],
-    conditions: &[Option<PortExcitation>],
+    sources: &ResolvedSources<'_>,
     resolved: &[Option<C64>],
     coupled_rows: &[Option<usize>],
     coupled: Option<&CoupledTermination>,
 ) -> Result<(Vec<C64>, Vec<C64>), DuctError> {
+    let conditions = &sources.conditions;
     let source_flows: Vec<Option<C64>> = conditions
         .iter()
         .map(|condition| condition.and_then(PortExcitation::flow))
@@ -492,7 +558,18 @@ fn loaded_wave_response(
     for &port in &retained_ports {
         let row = current_slots[port].expect("unprescribed port current is retained");
         a[port_slots[port] * n + row] = C64::from_re(-1.0);
-        if let (Some(load), Some(load_row)) = (coupled, coupled_rows[port]) {
+        if conditions[port]
+            .and_then(PortExcitation::pressure)
+            .is_some()
+        {
+            a[row * n + port_slots[port]] = C64::ONE;
+            for &other in &retained_ports {
+                if let Some(z) = sources.impedance(port, other) {
+                    let column = current_slots[other].expect("source current is retained");
+                    a[row * n + column] = C64::new(z.re / reference, z.im / reference);
+                }
+            }
+        } else if let (Some(load), Some(load_row)) = (coupled, coupled_rows[port]) {
             a[row * n + port_slots[port]] = C64::ONE;
             for &other in &retained_ports {
                 if let Some(load_col) = coupled_rows[other] {
