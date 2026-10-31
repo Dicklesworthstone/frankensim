@@ -156,6 +156,87 @@ fn lossy<M: ThermoviscousFluid + ?Sized>(
 }
 
 #[test]
+fn original_regional_liquid_sources_drive_interface_and_diffusion_together() {
+    let (card, cold) = source_liquid();
+    let hot = cold.at_query_point(&card, &point(400.0)).unwrap();
+    let original = cold.clone();
+    let (radius, omega) = (0.004_f64, 800.0_f64);
+    let geometry = Duct {
+        segments: [0.2, 0.5]
+            .map(|length| Segment::Cylinder { radius, length })
+            .to_vec(),
+    };
+    let line = |source: &ResolvedThermoviscousLiquidState, length: f64| {
+        let state = source.thermoviscous_state().unwrap();
+        let acoustic = state.acoustic();
+        let transport = state.transport();
+        let layer = (transport.dynamic_viscosity_pa_s() / (2.0 * acoustic.density_kg_m3() * omega))
+            .sqrt()
+            / radius;
+        let thermal = (state.heat_capacity_ratio() - 1.0) / transport.prandtl().sqrt();
+        let dk = layer * (1.0 + thermal);
+        let dz = layer * (1.0 - thermal);
+        let phase = C64::new(1.0 + dk, dk).scale(omega * length / acoustic.sound_speed_m_s());
+        let z = C64::new(1.0 + dz, dz).scale(
+            acoustic.characteristic_impedance_pa_s_m() / (core::f64::consts::PI * radius * radius),
+        );
+        // Independent complex trig and Kirchhoff first-order constitutive
+        // response; neither native wave nor scattering code supplies this oracle.
+        let cosine = C64::new(
+            phase.re.cos() * phase.im.cosh(),
+            -phase.re.sin() * phase.im.sinh(),
+        );
+        let sine = C64::new(
+            phase.re.sin() * phase.im.cosh(),
+            phase.re.cos() * phase.im.sinh(),
+        );
+        let minus_i_sine = C64::new(sine.im, -sine.re);
+        ([cosine, z * minus_i_sine, minus_i_sine / z, cosine], z)
+    };
+    let (left, _) = line(&cold, 0.2);
+    let (right, load) = line(&hot, 0.5);
+    let a = left[0] * right[0] + left[1] * right[2];
+    let b = left[0] * right[1] + left[1] * right[3];
+    let c = left[2] * right[0] + left[3] * right[2];
+    let d = left[2] * right[1] + left[3] * right[3];
+    let flow = (c * load + d).recip();
+    let expected = (a * load + b) * flow;
+    let actual = fluid::regional::input_impedance_load_with_loss(
+        &geometry,
+        &[&cold, &hot],
+        omega,
+        LossModel::WideTube,
+        Some(load),
+        WallModel::Rigid,
+        ConeSlices::Auto,
+        options(),
+        || false,
+    )
+    .unwrap();
+    near(actual.z_in, expected, expected.abs(), 4e-12);
+    near(actual.u_out_over_u_in, flow, 1.0, 4e-12);
+    near(actual.p_out_over_u_in, load * flow, load.abs(), 4e-12);
+    assert!(actual.z_in.re - load.re * actual.u_out_over_u_in.abs().powi(2) > 0.0);
+    let uniform = lossy(
+        &geometry,
+        &cold,
+        omega,
+        LossModel::WideTube,
+        Some(load),
+        WallModel::Rigid,
+    );
+    assert!((actual.u_out_over_u_in - uniform.u_out_over_u_in).abs() > 1e-3);
+    assert_eq!(cold, original);
+    for source in [&cold, &hot] {
+        for property in source.material().properties() {
+            card.claims()
+                .verify_receipt(&property.answer().receipt)
+                .unwrap();
+        }
+    }
+}
+
+#[test]
 fn original_liquid_temperature_and_transport_change_actual_pipe_transmission() {
     let (card, cold) = source_liquid();
     let hot = cold.at_query_point(&card, &point(400.0)).unwrap();

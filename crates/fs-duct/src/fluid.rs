@@ -22,6 +22,9 @@
 //! inferred for a liquid: those branches need their own pressure/flow boundary.
 //! The caller retains the source material and its original query receipts.
 
+/// Distinct original fluid materials in the same axial pressure/flow chain.
+pub mod regional;
+
 use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain, TwoPort};
 use crate::network::NetworkLoad;
 use crate::{ConeSlices, Duct, DuctError, LossModel, Segment, SegmentWave, WallModel};
@@ -297,9 +300,38 @@ fn chain_from_waves(
     let reference = wave_from_state(state, first.inlet_radius(), omega)?
         .characteristic_impedance
         .re;
+    chain_from_waves_at_reference(
+        &duct.segments,
+        state,
+        omega,
+        wall,
+        cone_slices,
+        options,
+        lossless_bulk,
+        reference,
+        cancelled,
+        wave_at,
+    )
+}
+
+// A common power-wave reference preserves pressure/volume-flow continuity
+// between materials. Local physical impedance still comes from each state.
+#[allow(clippy::too_many_arguments)]
+fn chain_from_waves_at_reference(
+    segments: &[Segment],
+    state: &FluidAcousticState,
+    omega: f64,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    lossless_bulk: bool,
+    reference: f64,
+    cancelled: &mut impl FnMut() -> bool,
+    wave_at: &mut impl FnMut(f64) -> Result<SegmentWave, DuctError>,
+) -> Result<PreparedChain, DuctError> {
     let mut blocks = Vec::new();
     let mut min_shear_number = f64::INFINITY;
-    for (index, segment) in duct.segments.iter().enumerate() {
+    for (index, segment) in segments.iter().enumerate() {
         poll(cancelled, index)?;
         match *segment {
             Segment::Profile { ref profile, steps } => {

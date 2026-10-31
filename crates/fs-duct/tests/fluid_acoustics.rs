@@ -21,6 +21,9 @@ use std::sync::Arc;
 #[path = "fluid_acoustics/thermoviscous.rs"]
 mod thermoviscous;
 
+#[path = "fluid_acoustics/regional.rs"]
+mod regional;
+
 fn options() -> ComposeOptions {
     ComposeOptions {
         preserve_well_conditioned_bits: false,

@@ -97,6 +97,29 @@ independent Poiseuille/inertance/compliance limits. A gas with viscous shear
 above ten but thermal shear below ten must now refuse consistently through
 both public entry points; full Bessel remains available at that same state.
 
+### Regional shared-fluid pressure and flow
+
+`fluid::regional::{duct_chain,input_impedance_load}` and their `_with_loss`
+variants bind one original acoustic/thermoviscous material per authored axial
+segment. Each source is evaluated once; its own density, adiabatic sound speed,
+viscosity, conductivity and Cp/Cv drive every local wave evaluation. Existing
+cylinder/cone/profile, material wall and stable composition owners are reused.
+All blocks share one numerical scattering reference while retaining distinct
+physical impedances, so the original composer enforces pressure/volume-flow
+continuity and interface reflection without averaging materials or synthesizing
+a GasState. A single work cap covers every region, slice and profile step;
+cancellation and original source failures publish no partial chain.
+
+Sources may be heterogeneous trait-object references. Interfaces coincide with
+authored segment ends. These are prescribed frozen backgrounds whose mechanical
+equilibrium the caller establishes, not a phase-equilibrium, heat/species,
+mixing, moving-interface or capillary model. Terminal loads remain explicit and
+must be resolved for the actual outlet medium/geometry. G1/G3 tests in the
+`fluid_acoustics` target retain uniform gas results exactly through mixed
+geometry/walls/loss models, compare IF97 and mixed-source interface pressure,
+flow and work to independent plane-wave formulas, and compare regional
+source-backed liquid diffusion to an independent Kirchhoff two-line solution.
+
 ### Independent exterior gas
 
 `exterior::{input_impedance,input_impedance_and_holes,input_reflection,input_impedance_load,
