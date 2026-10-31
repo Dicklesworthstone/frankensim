@@ -98,9 +98,15 @@ fn triangle_bridge_loads_the_same_material_modes_with_its_offset_moment() {
         let image = source.material_shell_image().unwrap();
         let full = &body.force_ports[0];
         let mut expected = vec![0.0; 150];
-        for (node, weight) in [(6,0.2),(7,0.3),(12,0.5)] {
-            expected[6*node+2] = weight;
-            expected[6*node+4] = -0.02*weight;
+        let triangle = body.specimen.mesh().tris[10];
+        let facet = body.specimen.mesh().facet(10).unwrap();
+        let rows = fs_plate::shell::point::triangle_offset_point_rows([0.2,0.3,0.5],
+            [0.0,0.0,1.0],[0.02,0.0,0.0],facet.frame,facet.gradient,
+            triangle.map(|node|body.directors.vectors()[node])).unwrap();
+        for (node,row) in triangle.into_iter().zip(rows) {
+            expected[6*node..6*node+6].copy_from_slice(&row);
+            let director = body.directors.vectors()[node];
+            assert!((0..3).map(|i|row[3+i]*director[i]).sum::<f64>().abs()<1e-14);
         }
         assert_eq!(full, &expected);
         for (mode, &projected) in image.physical_modes().iter().zip(&image.force_ports()[0]) {
@@ -444,7 +450,6 @@ fn shell_geometry_and_resource_records_refuse_without_borrowing_missing_material
         ("region body @body", "region body ../body.fsmatpk"),
         ("triangle 0 1 6 body", "triangle 0 1 6 unknown"),
         ("support 0 111111", "support 0 11111"),
-        ("bridge 12 0 0 1", "bridge 0 0 0 1"),
         ("bridge 12 0 0 1", "bridge 12 0 0 2"),
     ] {
         assert!(Profile::parse(shell_text().replace(from, to).as_bytes()).is_err(), "accepted {to}");
@@ -454,6 +459,7 @@ fn shell_geometry_and_resource_records_refuse_without_borrowing_missing_material
         // Topology, actual physical directors and bridge membership are checked
         // before the first source pack is requested by the executable.
         for text in [
+            shell_text().replace("bridge 12 0 0 1", "bridge 0 0 0 1"),
             shell_text().replace("triangle 0 1 6 body", "triangle 0 0 6 body"),
             shell_text().replace("triangle 0 1 6 body", "triangle 0 6 1 body"),
             shell_text().replace("bridges 1\nbridge 12 0 0 1", "bridges 2\nbridge 12 0 0 1\nbridge 11 0 0 1"),

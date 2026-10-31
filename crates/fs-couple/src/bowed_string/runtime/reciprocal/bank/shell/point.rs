@@ -12,7 +12,9 @@ pub struct ShellPointGeometry {
     pub node: usize,
     /// Positive displacement/force direction, a finite unit vector.
     pub direction: [f64; 3],
-    /// Vector [m] from the shell node to the physical contact point.
+    /// Vector [m] from the shell node to the physical contact point. Its force
+    /// moment must be orthogonal to the node's actual director: a node alone
+    /// does not select the membrane spin needed for an arbitrary offset arm.
     pub arm_m: [f64; 3],
 }
 
@@ -79,18 +81,24 @@ impl MaterialStringBankSource {
     /// body basis. Reactions use its transpose in the existing coupled owner.
     /// Different incident material states, absent nodes and non-shell receivers
     /// refuse; an assembly seam never borrows another part's material identity.
+    /// An offset moment along this node's actual director also refuses: numerical
+    /// drilling is not physical torsion. Zero/director-aligned offsets remain
+    /// supported, with their exact conjugate force and bending moment.
     pub fn shell_point(
         &self,
         geometry: &ShellPointGeometry,
         gate: &CancelGate,
     ) -> Result<MaterialShellPoint<'_>, ReciprocalStringError> {
         poll(gate)?;
-        let row = geometry.nodal_row()?;
-        let (specimen, _, modes) = self.physical_shell_component(geometry.shell_component)?;
+        geometry.validate()?;
+        let (specimen, directors, modes) = self.physical_shell_component(geometry.shell_component)?;
         let mesh = specimen.mesh();
         if geometry.node >= mesh.nodes.len() {
             return Err(invalid("shell point names an absent physical node"));
         }
+        let row = fs_plate::shell::point::nodal_director_point_row(
+            geometry.direction,geometry.arm_m,directors.vectors()[geometry.node])
+            .map_err(|e|invalid(e.reason()))?;
         let size = mesh
             .nodes
             .len()

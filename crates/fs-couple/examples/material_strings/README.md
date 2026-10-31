@@ -1549,7 +1549,11 @@ Declare each named receiver before its contacts and before the motion blocks.
 shell. `NODE` addresses that part's original physical mesh. The finite unit
 vector `N` and node-to-contact arm `R` are in the body's global XYZ frame.
 The exact map is `N · (U + Theta × R)`, so the reaction includes both force
-and the moment `R × (force N)`. The string-side normal and this body direction
+and the moment `R × (force N)`. That moment must be orthogonal to the node's
+actual material director. Zero offsets and director-aligned arms are supported;
+an arm requiring director-axis spin refuses because a node alone does not
+select a physical facet orientation. Numerical drilling is not material motion.
+The string-side normal and this body direction
 must describe the same physical direction in their respective declared frames;
 the adapter does not infer a string-to-body orientation. `negative` reverses
 both sides together. An authored `stop` can also use `shell:ID` with its existing
@@ -2409,6 +2413,9 @@ bearing point. The body displacement is `t dot (U + Theta cross r)`; the same
 geometry applies the equal-and-opposite force and its `r cross t` moment. Shell
 assembly parts address their original physical nodes while sharing one common
 modal body. This requires a sourced shell or assembled-shell `--body-profile`.
+The moment must be orthogonal to that node's actual director: zero and
+director-aligned arms remain supported, while an arm requiring director-axis
+spin refuses rather than loading numerical drilling.
 
 The interface pack supplies stiffness and viscosity per area through the same
 resolver as ordinary material bridges. Its ordered surfaces must match the

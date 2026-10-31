@@ -193,7 +193,7 @@ impl Spec {
         for _ in 0..n {
             let (record, fields) = Bridge::record(r);
             let v = r.row(record, fields)?;
-            bridges.push(Bridge::read_fields(&v, nodes.len(), &triangles, &supports)?);
+            bridges.push(Bridge::read_fields(&v, nodes.len(), &triangles)?);
         }
         Ok(Self { nodes, triangles, regions, coatings, coating_memory, supports, interfaces, pressure_surfaces, bridges, minimum_facet_dot,
             mass, drilling_alpha, window, projection_work })
@@ -206,8 +206,11 @@ impl Spec {
         if spec.body.modes == 0 || spec.body.modes > MAX_MODES {
             return Err(format!("shell body profile admits 1..={MAX_MODES} retained body modes").into());
         }
-        self.geometry(spec)?;
-        for bridge in &self.bridges { bridge.position(self, spec)?; }
+        let (mesh,directors) = self.geometry(spec)?;
+        for bridge in &self.bridges {
+            bridge.force_port(&mesh,&directors,&self.supports)?;
+            bridge.position(self, spec)?;
+        }
         if let Some(memory) = &self.coating_memory { memory.preflight(spec)?; }
         self.interfaces.preflight(self, spec)?;
         Ok(())
@@ -331,7 +334,8 @@ impl Spec {
         poll(gate)?;
         self.preflight(spec)?;
         let component = self.resolve_component("body", spec, catalog, loader, gate)?;
-        let force_ports = self.bridges.iter().map(|bridge| bridge.force_port(self.nodes.len()))
+        let force_ports = self.bridges.iter().map(|bridge| bridge.force_port(
+            component.specimen.mesh(),&component.directors,&component.constraints))
             .collect::<Result<Vec<_>>>()?;
         let body = SharedMaterialShellBody {
             specimen: component.specimen, directors: component.directors,

@@ -180,7 +180,7 @@ impl Spec {
             let shell = &components[component].shell;
             bridges.push(AssemblyBridge {
                 component,
-                footprint: Bridge::read_fields(&v[1..], shell.nodes.len(), &shell.triangles, &shell.supports)?,
+                footprint: Bridge::read_fields(&v[1..], shell.nodes.len(), &shell.triangles)?,
             });
         }
         if r.lines.next().is_some() {
@@ -208,14 +208,17 @@ impl Spec {
         }
         spec.network_dimensions_with_body_connections(true, self.additional_body_connections())?;
         if let Some(memory) = &self.coating_memory { memory.preflight(spec)?; }
+        let mut geometries = Vec::with_capacity(self.components.len());
         for component in &self.components {
-            component.shell.geometry(spec)?;
+            geometries.push(component.shell.geometry(spec)?);
             component
                 .shell
                 .interfaces
                 .preflight(&component.shell, spec)?;
         }
         for bridge in &self.bridges {
+            let (mesh,directors) = &geometries[bridge.component];
+            bridge.footprint.force_port(mesh,directors,&self.components[bridge.component].shell.supports)?;
             bridge.footprint.position(&self.components[bridge.component].shell, spec)?;
         }
         Ok(())
@@ -405,8 +408,9 @@ impl Spec {
                     .iter()
                     .map(|c| vec![0.0; 6 * c.shell.nodes.len()])
                     .collect();
+                let component = &components[bridge.component];
                 rows[bridge.component] = bridge.footprint.force_port(
-                    self.components[bridge.component].shell.nodes.len())?;
+                    component.specimen.mesh(),&component.directors,&component.constraints)?;
                 Ok(ShellAssemblyForcePort { components: rows })
             })
             .collect::<Result<Vec<_>>>()?;

@@ -3,6 +3,29 @@ use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::shell::ShellRotationGeometry;
 
 #[test]
+fn nodal_force_uses_actual_source_directors_and_refuses_ambiguous_offset_spin() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::shell::ShellPointGeometry;
+    with_cx(|cx,gate| {
+        let bank = build_shell(cx,gate,700.0,0.02,0.17);
+        let source = bank.source();
+        let node = 5;
+        let director = source.material_shell().unwrap().directors.vectors()[node];
+        for arm_m in [[0.0;3],director.map(|v|0.02*v)] {
+            let geometry = ShellPointGeometry { shell_component:0,node,direction:[0.0,1.0,0.0],arm_m };
+            let point = source.shell_point(&geometry,gate).unwrap();
+            let row = fs_plate::shell::point::nodal_point_row(geometry.direction,arm_m).unwrap();
+            for (mode,&shape) in source.material_shell_image().unwrap().physical_modes().iter().zip(&point.body.shapes) {
+                let expected: f64 = (0..6).map(|i|mode[6*node+i]*row[i]).sum();
+                assert!((shape-expected).abs()<1e-12*expected.abs().max(1.0));
+            }
+        }
+        let geometry = ShellPointGeometry { shell_component:0,node,direction:[0.0,1.0,0.0],arm_m:[0.02,0.0,0.0] };
+        geometry.validate().unwrap(); // Pure syntax cannot know this source's director.
+        assert!(source.shell_point(&geometry,gate).unwrap_err().to_string().contains("director-axis drilling"));
+    });
+}
+
+#[test]
 fn physical_rotation_uses_the_original_material_modes_and_refuses_detached_geometry() {
     with_cx(|cx,gate| {
         let geometry = ShellRotationGeometry { shell_component: 0,triangle: 0,

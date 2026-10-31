@@ -664,19 +664,29 @@ with a point on triangle 10 (nodes 6, 7, 12), displaced 20 mm along global x:
 bridge-triangle 10 0.2 0.3 0.5 0 0 1 0.02 0 0
 ```
 
-One unit of force along global z then applies translational weights `0.2, 0.3,
-0.5` and corresponding y moments `-0.004, -0.006, -0.010` N m per newton.
-The same six-DOF rows observe point velocity and return the string's reaction
-force through the original material shell modes, body joints, cavity and
-radiation paths. This is the same P1 interface interpolation used by the shared
-shell point and finite-thickness skin owners. Force, moment and rigid-motion
-virtual work are preserved. It does not reconstruct the element's enriched
-interior field or add an unmodeled bridge's mass, stiffness or compliance.
+One unit of force along global z applies a total y torque of `-0.02` N m about
+the interpolated midsurface point. The physical point velocity is
+`sum(W * Udot) + Omega cross R`, where `Omega` is the same P1 orientation used
+by `shell-rotational-bridge`: director motion supplies tilt and the original
+facet membrane supplies spin. The torque is pulled back through that same map,
+including its membrane forces. Numerical director-axis drilling never becomes
+physical attachment motion. On a flat shell with aligned directors, this
+example reduces to translational weights `0.2, 0.3, 0.5` and y moments
+`-0.004, -0.006, -0.010` N m per newton; the arched fixture uses its actual
+curved directors.
 
-The complete weighted force/moment row must retain an unconstrained DOF;
-zero-weight free vertices cannot rescue a fully fixed attachment. A contact
-offset can act through a free physical rotation even when its translations are
-fixed. Rotational joints built from two bridge ports use these actual attachment
+The same rows observe point velocity and return the string's reaction through
+the original material shell modes, body joints, cavity and radiation paths.
+Force, moment and rigid-motion virtual work are preserved. This does not
+reconstruct the element's enriched interior field or add an unmodeled bridge's
+mass, stiffness or compliance.
+
+The complete physical row must retain an unconstrained DOF. Offset moments
+about the facet normal require membrane motion; leaving numerical drilling
+free cannot rescue a physically fixed attachment. The gradient of membrane
+spin can involve a vertex with zero interpolation weight. Tangential moments
+can act through free director tilt even when translations are fixed.
+Rotational joints built from two bridge ports use these actual attachment
 positions, including their offsets. Prescribed `port bridge` forces and harmonic
 bridge-response queries use these same maps without a separate excitation path.
 

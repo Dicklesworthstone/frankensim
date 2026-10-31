@@ -2,9 +2,11 @@
 //!
 //! These are the P1 interface rows used by the existing shell point and skin
 //! ports, not a reconstruction of an element's enriched interior rotation.
-//! For a reference offset `r`, material motion is `u + theta cross r`.
-//! Its transpose carries both the force and its moment on the SAME nodes.
-//! Offsets are global Cartesian metres; rotations are physical axial radians.
+//! Director-aligned skin offsets use `u + theta cross r`; arbitrary rigid arms
+//! use the physical orientation recovered from directors and membrane spin.
+//! Their transposes carry force and moment on the SAME original nodes, without
+//! treating a numerical drilling coordinate as physical material rotation.
+//! Offsets are global Cartesian metres; physical angles are axial radians.
 //! No contact search, finite-rotation update or mesh-node snapping occurs here.
 
 /// Invalid physical direction, interpolation weights or reference offset.
@@ -26,6 +28,9 @@ impl std::error::Error for ShellPointError {}
 /// Unit-force row `[d, r cross d]` on `(u,v,w,theta_x,theta_y,theta_z)`.
 /// Dot with nodal motion to observe the displacement/velocity at the offset
 /// point; multiply by signed force to return its conjugate force and moment.
+/// This is kinematic algebra, not admission of all three shell rotations as
+/// physical. A shell node with a drilling gauge must use
+/// [`nodal_director_point_row`] or a triangle's physical orientation.
 ///
 /// # Errors
 /// Refuses a nonunit/nonfinite direction, nonfinite offset or moment overflow.
@@ -47,6 +52,26 @@ pub fn nodal_point_row(direction: [f64; 3], offset_m: [f64; 3])
     Ok(row)
 }
 
+/// Nodal offset force that is blind to the actual director-axis drilling gauge.
+/// A zero or director-aligned offset is admitted. Other arms are admitted only
+/// when their moment has no director-axis component, to geometric roundoff.
+/// A node alone does not select a facet's membrane spin; an arbitrary offset
+/// requiring that spin must use [`triangle_offset_point_rows`] instead.
+///
+/// # Errors
+/// Invalid point/director or an offset moment along the numerical drilling axis.
+pub fn nodal_director_point_row(direction: [f64;3], offset_m: [f64;3], director: [f64;3])
+    -> Result<[f64;6], ShellPointError>
+{
+    let row = nodal_point_row(direction,offset_m)?;
+    nodal_point_row(director,[0.0;3])?;
+    let scale = row[3..].iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
+    if scale > 0.0 && (0..3).map(|i|(row[3+i]/scale)*director[i]).sum::<f64>().abs()>1e-12 {
+        return Err(ShellPointError("shell node offset requires a physical triangle orientation, not director-axis drilling"));
+    }
+    Ok(row)
+}
+
 /// Three original-node rows for one explicit triangle material point.
 /// Nonnegative barycentrics sum to one; zero weights are admitted on edges and
 /// vertices. The caller retains the original triangle's node order and admits
@@ -57,6 +82,9 @@ pub fn nodal_point_row(direction: [f64; 3], offset_m: [f64; 3])
 /// The point position is `sum_a weight[a] * (node[a] + offset[a])` and its
 /// velocity is `sum_a weight[a] * (v[a] + omega[a] cross offset[a])`.
 /// These SAME rows preserve total force, moment and rigid-motion virtual work.
+/// For shells with numerical drilling, the offsets must follow the actual
+/// nodal directors (or each moment must otherwise annihilate its nodal gauge).
+/// A common arbitrary rigid arm instead uses [`triangle_offset_point_rows`].
 ///
 /// # Errors
 /// Refuses invalid barycentrics or any invalid nodal point row. It never clamps
@@ -75,6 +103,39 @@ pub fn triangle_point_rows(barycentric: [f64; 3], direction: [f64; 3],
         if rows[a].iter().any(|v| !v.is_finite()) {
             return Err(ShellPointError("shell point weighted row overflows"));
         }
+    }
+    Ok(rows)
+}
+
+/// Force/velocity rows for a rigid reference arm on a physical triangle point.
+/// The point is `sum(w*x) + offset_m`; its velocity is `sum(w*v) + Omega cross
+/// offset_m`, where `Omega` is exactly [`triangle_rotation_rows`]'s gauge-free
+/// P1 orientation. The transpose adds the conjugate torque `offset_m cross F`
+/// through that SAME owner, including its membrane forces. It never loads the
+/// independent director-axis drilling coordinates.
+///
+/// Frame, gradients and directors belong to the original triangle. This does
+/// not add arm inertia/compliance or reconstruct the enriched element interior.
+///
+/// # Errors
+/// Invalid point geometry, invalid physical orientation needed by its torque,
+/// or an unrepresentable force/moment row.
+pub fn triangle_offset_point_rows(barycentric: [f64;3], direction: [f64;3], offset_m: [f64;3],
+    frame: [[f64;3];3], gradient: [[f64;2];3], directors: [[f64;3];3])
+    -> Result<[[f64;6];3], ShellPointError>
+{
+    let mut rows = triangle_point_rows(barycentric,direction,[[0.0;3];3])?;
+    let moment = nodal_point_row(direction,offset_m)?;
+    // Unit Cartesian axes avoid normalizing a zero/tiny/overflowing torque.
+    // Linearity gives the same physical orientation map for every arm.
+    for i in 0..3 {
+        if moment[3+i] == 0.0 { continue; }
+        let mut axis = [0.0;3]; axis[i] = 1.0;
+        let torque = triangle_rotation_rows(barycentric,axis,frame,gradient,directors)?;
+        for a in 0..3 { for dof in 0..6 { rows[a][dof] += moment[3+i]*torque[a][dof]; } }
+    }
+    if rows.iter().flatten().any(|v|!v.is_finite()) {
+        return Err(ShellPointError("shell offset point pullback overflows"));
     }
     Ok(rows)
 }
@@ -290,6 +351,62 @@ mod tests {
         let power: f64 = (0..3).map(|a|(0..3).map(|i|torque*
             (rows[a][i]*velocity[a][i]+rows[a][3+i]*omega[a][i])).sum::<f64>()).sum();
         near(power,torque*dot(axis,physical));
+    }
+
+    #[test]
+    fn arbitrary_offset_force_uses_physical_orientation_work_and_annihilates_drilling() {
+        let frame = [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]];
+        let gradient = [[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];
+        let nodes = [[0.0,0.0,0.0],[1.0,0.0,0.0],[0.0,1.0,0.0]];
+        let weights = [0.2,0.3,0.5];
+        let velocity = [[0.2,-0.1,0.3],[0.7,0.4,-0.2],[-0.3,0.5,0.6]];
+        let omega = [[0.1,-0.3,0.4],[0.7,0.2,-0.5],[-0.4,0.9,0.3]];
+        for directors in [[[0.0,0.0,1.0];3],
+            [[0.2,0.0,0.96_f64.sqrt()],[0.0,0.3,0.91_f64.sqrt()],[-0.1,-0.15,0.9675_f64.sqrt()]]]
+        {
+            for (direction,offset) in [([0.0,1.0,0.0],[0.03,0.0,0.0]),
+                ([0.6,0.0,0.8],[0.02,-0.03,0.005])]
+            {
+                let rows = triangle_offset_point_rows(weights,direction,offset,frame,gradient,directors).unwrap();
+                let point = core::array::from_fn(|i|offset[i]+(0..3).map(|a|weights[a]*nodes[a][i]).sum::<f64>());
+                let mut resultant = [0.0;3]; let mut moment = [0.0;3]; let mut power = 0.0;
+                let mut d = [0.0;3]; let mut delta_d = [0.0;3]; let mut mean_v = [0.0;3];
+                for a in 0..3 {
+                    let f = [rows[a][0],rows[a][1],rows[a][2]];
+                    let m = cross(nodes[a],f); let motion = cross(omega[a],directors[a]);
+                    near((0..3).map(|i|rows[a][3+i]*directors[a][i]).sum(),0.0);
+                    for i in 0..3 {
+                        resultant[i] += f[i]; moment[i] += m[i]+rows[a][3+i];
+                        power += f[i]*velocity[a][i]+rows[a][3+i]
+                            *(omega[a][i]+0.73*(a as f64+1.0)*directors[a][i]);
+                        d[i] += weights[a]*directors[a][i];
+                        delta_d[i] += weights[a]*motion[i]; mean_v[i] += weights[a]*velocity[a][i];
+                    }
+                }
+                let tangent = cross(d,delta_d).map(|v|v/dot(d,d));
+                let spin = 0.5*((velocity[1][1]-velocity[0][1])-(velocity[2][0]-velocity[0][0]));
+                let physical = core::array::from_fn(|i|tangent[i]+d[i]*(spin-tangent[2])/d[2]);
+                let arm_v = cross(physical,offset);
+                let expected_moment = cross(point,direction);
+                for i in 0..3 { near(resultant[i],direction[i]); near(moment[i],expected_moment[i]); }
+                near(power,dot(direction,core::array::from_fn(|i|mean_v[i]+arm_v[i])));
+            }
+        }
+    }
+
+    #[test]
+    fn node_only_offsets_admit_bending_and_refuse_ambiguous_drilling_moments() {
+        for director in [[0.0,0.0,1.0],[0.6,0.0,0.8]] {
+            let direction = [0.0,1.0,0.0];
+            for offset in [[0.0;3],director.map(|v|0.02*v),[0.0,0.03,0.0]] {
+                let row = nodal_director_point_row(direction,offset,director).unwrap();
+                assert_eq!(row,nodal_point_row(direction,offset).unwrap());
+                near((0..3).map(|i|row[3+i]*director[i]).sum(),0.0);
+            }
+            for offset in [[0.03,0.0,0.0],[-0.03,0.0,0.0]] {
+                assert!(nodal_director_point_row(direction,offset,director).is_err());
+            }
+        }
     }
 
     #[test]
