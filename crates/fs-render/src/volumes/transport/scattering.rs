@@ -38,6 +38,8 @@ pub use phase::{
 };
 /// Incident power absorbed after any number of native scattering events.
 pub mod deposition;
+/// Reciprocal thermal volume/bath exchange over the same physical histories.
+pub mod exchange;
 pub mod field;
 mod prepared;
 pub use field::{CellPhaseFunction, CellScatteringGrid};

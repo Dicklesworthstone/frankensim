@@ -240,67 +240,17 @@ pub(super) fn deposit_prepared<const N: usize>(
                 tile: history,
             }
             .stream();
-            let mut position = origin;
-            let mut direction = unit_direction;
-            let mut power = source_w;
-            let mut survival = PowerSum {
-                sum: source_w,
-                correction: 0.0,
-            };
-            let mut captured = PowerSum::default();
-            let mut outcome = [0.0; 4]; // ballistic, diffuse, heat, unresolved
-            for collision in 0..config.max_collisions_per_history {
-                count_segment(&mut result.traced_segments, config.max_total_segments)?;
-                let flight = prepared::sample(
-                    &monochromatic,
-                    check,
-                    position,
-                    direction,
-                    f64::INFINITY,
-                    0.0,
-                    random.next_f64(),
-                    false,
-                )?;
-                let Some(event) = flight.event else {
-                    outcome[usize::from(collision != 0)] = power;
-                    break;
-                };
-                let (a, s, t) = medium.coefficient(event.cell_index, lane)?;
-                let heat = split_power(power, a, t)?;
-                let continuation = split_power(power, s, t)?;
-                let (Some(heat), Some(continuation)) = (heat, continuation) else {
-                    // Retain the entire representable packet before any
-                    // partial capture, including the below-resolution tail.
-                    outcome[3] = power;
-                    result.precision_limited_histories[lane] += 1;
-                    break;
-                };
-                let roundoff = 32.0 * f64::EPSILON * power + 8.0 * f64::from_bits(1);
-                if ((power - heat) - continuation).abs() > roundoff {
-                    return Err(VolumeTransportError::Unrepresentable);
-                }
-                if heat > 0.0 {
-                    captured.add(heat)?;
-                    spatial.cell(event.cell_index)?.lanes[lane].capture(history, heat)?;
-                }
-                survival.continue_after_capture(heat, continuation)?;
-                power = survival.value();
-                if power == 0.0 {
-                    break;
-                }
-                if collision + 1 == config.max_collisions_per_history {
-                    outcome[3] = power;
-                    break;
-                }
-                // A monochromatic matched phase sample has physical/PDF
-                // weight one, including interpolated spectral phase tables.
-                direction = medium
-                    .phase(event.cell_index)
-                    .sample_packet(&wavelength, direction, random.next_f64(), random.next_f64())?
-                    .direction;
-                position = event.position;
-            }
-            outcome[2] = captured.value();
+            let history_result = trace_history(
+                &monochromatic,
+                check,
+                (origin, unit_direction, source_w),
+                (config.max_collisions_per_history, config.max_total_segments),
+                &mut result.traced_segments,
+                &mut || random.next_f64(),
+                &mut |cell, heat| spatial.cell(cell)?.lanes[lane].capture(history, heat),
+            )?;
+            result.precision_limited_histories[lane] += u32::from(history_result.precision_limited);
+            let outcome = history_result.values;
             for (moment, value) in totals.iter_mut().zip(outcome) {
                 moment.observe(value)?;
             }
@@ -320,6 +270,91 @@ pub(super) fn deposit_prepared<const N: usize>(
     result.cells = spatial.finish(check, &result.sampled_histories)?;
     check()?;
     Ok(result)
+}
+
+/// One complete implicit-capture history. Input packet units may be watts for
+/// incident beams or dimensionless for reciprocal emission probabilities.
+/// Source selection happens before this call, so existing beam draws are exact.
+pub(super) struct HistoryOutcome {
+    /// Ballistic escape, diffuse escape, absorption, unresolved continuation.
+    pub values: [f64; 4],
+    pub precision_limited: bool,
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn trace_history(
+    medium: &impl PreparedOptics<1>,
+    check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    source: (Point3, Vec3, f64),
+    limits: (u32, u64),
+    traced_segments: &mut u64,
+    random: &mut impl FnMut() -> f64,
+    capture: &mut impl FnMut(usize, f64) -> Result<(), VolumeTransportError>,
+) -> Result<HistoryOutcome, VolumeTransportError> {
+    let mut precision_limited = false;
+    let (mut position, mut direction, source_w) = source;
+    let mut power = source_w;
+    let mut survival = PowerSum {
+        sum: source_w,
+        correction: 0.0,
+    };
+    let mut captured = PowerSum::default();
+    let mut outcome = [0.0; 4]; // ballistic, diffuse, heat, unresolved
+    for collision in 0..limits.0 {
+        count_segment(traced_segments, limits.1)?;
+        let flight = prepared::sample_extinction(
+            medium,
+            check,
+            position,
+            direction,
+            f64::INFINITY,
+            0.0,
+            random(),
+            false,
+        )?;
+        let Some(event) = flight.event else {
+            outcome[usize::from(collision != 0)] = power;
+            break;
+        };
+        let (a, s, t) = medium.coefficient(event.cell_index, 0)?;
+        let heat = split_power(power, a, t)?;
+        let continuation = split_power(power, s, t)?;
+        let (Some(heat), Some(continuation)) = (heat, continuation) else {
+            // Retain the entire representable packet before any
+            // partial capture, including the below-resolution tail.
+            outcome[3] = power;
+            precision_limited = true;
+            break;
+        };
+        let roundoff = 32.0 * f64::EPSILON * power + 8.0 * f64::from_bits(1);
+        if ((power - heat) - continuation).abs() > roundoff {
+            return Err(VolumeTransportError::Unrepresentable);
+        }
+        if heat > 0.0 {
+            captured.add(heat)?;
+            capture(event.cell_index, heat)?;
+        }
+        survival.continue_after_capture(heat, continuation)?;
+        power = survival.value();
+        if power == 0.0 {
+            break;
+        }
+        if collision + 1 == limits.0 {
+            outcome[3] = power;
+            break;
+        }
+        // A monochromatic matched phase sample has physical/PDF
+        // weight one, including interpolated spectral phase tables.
+        direction = medium
+            .phase(event.cell_index)
+            .sample_packet(medium.wavelengths(), direction, random(), random())?
+            .direction;
+        position = event.position;
+    }
+    outcome[2] = captured.value();
+    Ok(HistoryOutcome {
+        values: outcome,
+        precision_limited,
+    })
 }
 
 fn count_segment(count: &mut u64, maximum: u64) -> Result<(), VolumeTransportError> {
@@ -403,14 +438,14 @@ impl PowerSum {
 /// Welford moments normalized by the largest observed value, so neither large
 /// source watts nor very small deposits overflow/underflow the squared moment.
 #[derive(Clone, Copy, Debug, Default)]
-struct Moments {
+pub(super) struct Moments {
     count: u32,
     scale: f64,
     mean: f64,
     m2: f64,
 }
 impl Moments {
-    fn observe(&mut self, value: f64) -> Result<(), VolumeTransportError> {
+    pub(super) fn observe(&mut self, value: f64) -> Result<(), VolumeTransportError> {
         if !value.is_finite() || value < 0.0 {
             return Err(VolumeTransportError::Unrepresentable);
         }
@@ -441,7 +476,7 @@ impl Moments {
             self.count = total;
         }
     }
-    fn estimate(self) -> Result<(f64, f64), VolumeTransportError> {
+    pub(super) fn estimate(self) -> Result<(f64, f64), VolumeTransportError> {
         let mean = self.mean * self.scale;
         let error = if self.count < 2 {
             0.0
@@ -485,14 +520,23 @@ struct CellTally<const N: usize> {
     index: usize,
     lanes: [CellStatistics; N],
 }
-struct SpatialTallies<const N: usize> {
+pub(super) struct SpatialTallies<const N: usize> {
     cells: Vec<CellTally<N>>,
     // Lookup only: randomized hash iteration never controls reduction order.
     indices: HashMap<usize, usize>,
     limit: usize,
 }
 impl<const N: usize> SpatialTallies<N> {
-    fn new(limit: usize) -> Self {
+    pub(super) fn capture(
+        &mut self,
+        cell: usize,
+        lane: usize,
+        history: u32,
+        value: f64,
+    ) -> Result<(), VolumeTransportError> {
+        self.cell(cell)?.lanes[lane].capture(history, value)
+    }
+    pub(super) fn new(limit: usize) -> Self {
         Self {
             cells: Vec::new(),
             indices: HashMap::new(),
@@ -527,7 +571,7 @@ impl<const N: usize> SpatialTallies<N> {
         self.indices.insert(index, slot);
         Ok(&mut self.cells[slot])
     }
-    fn finish(
+    pub(super) fn finish(
         mut self,
         check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
         samples: &[u32; N],

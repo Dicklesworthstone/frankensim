@@ -142,7 +142,6 @@ pub(super) fn sample<const N: usize>(
     include_emission: bool,
 ) -> Result<FreeFlightSample<N>, VolumeTransportError> {
     check()?;
-    let wavelengths_nm = medium.wavelengths();
     if !medium.has_scattering() {
         let result = transport(
             medium,
@@ -159,6 +158,34 @@ pub(super) fn sample<const N: usize>(
             escape_probability: 1.0,
         });
     }
+    sample_extinction(
+        medium,
+        check,
+        origin,
+        direction,
+        max_distance_m,
+        u_lane,
+        u_distance,
+        include_emission,
+    )
+}
+
+/// The same exact extinction-flight body also serves emitted unit packets in
+/// absorption-only media. Rendering's deterministic absorption shortcut stays
+/// in `sample`; no second tracer or altered physical coefficients are needed.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sample_extinction<const N: usize>(
+    medium: &impl PreparedOptics<N>,
+    check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
+    origin: Point3,
+    direction: Vec3,
+    max_distance_m: f64,
+    u_lane: f64,
+    u_distance: f64,
+    include_emission: bool,
+) -> Result<FreeFlightSample<N>, VolumeTransportError> {
+    check()?;
+    let wavelengths_nm = medium.wavelengths();
     let mut result = FreeFlightSample {
         event: None,
         weight: [1.0; N],

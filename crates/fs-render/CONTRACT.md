@@ -3641,3 +3641,53 @@ unchanged. Bitwise comparisons against the native linear traversal cover direct
 lux, image/probe paths, rigid instances, endpoint/tie cases and progressive
 parallel replay. The paired dense-stage benchmark reports index construction
 separately from repeated connection evaluation, with identical lux outputs.
+
+### Reciprocal volumetric radiative exchange
+
+`volumes::transport::scattering::exchange` estimates a temperature-independent
+`RadiativeExchangeOperator<N>` from the original absorption/scattering geometry,
+coefficient packet, supported wavelength window and scalar reciprocal phase
+laws. Uniform and cell-resolved optical owners share the same implicit-capture
+history primitive as incident beam deposition. Emission histories sample actual
+extinction collisions even in a purely absorbing medium; the renderer's
+no-scattering deterministic attenuation shortcut is not an emission sampler.
+Existing incident-beam draw order and physical deposition remain unchanged.
+
+Every absorbing cell/lane launches independent uniform-volume, isotropic
+histories. With `A_i = 4*pi*rho_i*kappa_a_i*V_i`, a directed captured fraction
+gives `A_i*p_ij`. The retained unordered coefficient is
+`C_ij = (A_i*p_ij + A_j*p_ji)/2`, in m² sr. Its nonnegativity and shared value
+in both directions make a Planck-difference heat transfer reciprocal and
+passive for every retained sample. Self return cancels from net heat. The
+escape coefficient `A_i*p_i,escape` couples to an external isotropic black bath.
+Rows are not renormalized after symmetrization: finite-sample reciprocity and
+directed emissive-capacity closure are different properties.
+
+Reports retain all positive-density material-cell indices separately from sparse
+emitter rows, including pure scatterers and currently transparent cells. Their
+metadata has an independent storage limit so thermal consumers can check every
+fixed optical snapshot's temperature domain, even outside the emitting subset.
+Reports also retain cell volume, source identity, wavelengths,
+per-emitter histories, empirical coefficient standard errors, directed
+reciprocity residuals, self return, escape and unresolved tails. Admission
+reconstructs directed absorption rows and checks their energy balance before
+thermal consumption. Repeated receiver visits within one history are reduced
+before statistical moments. Sparse pair storage, emitter count and total
+segments across every emitter/lane have explicit limits and cancellation.
+An unresolved collision/precision tail remains unresolved, never invented heat.
+Empirical errors do not certify rare-path coverage or provide confidence bounds.
+
+The operator is a volume-launched net-exchange formulation on fixed, index-one
+geometry with elastic scattering. It does not implement boundary-launch
+acceleration, reflecting/refracting interfaces, polarization, fluorescence or
+temperature-varying optical coefficients. Spectral integration requires explicit
+positive wavelength weights over supported source data; visible support never
+implies infrared or bolometric support.
+
+The original `thermal_surface` SI Planck law also supplies stable signed
+temperature differences, analytic tangents, and positive secants. A combined
+evaluation applies exchange coefficient and quadrature weight in logarithmic
+space before conversion to watts and W/K. Nearly equal temperatures, overflowing
+gross radiances, and underflowed intermediate products therefore do not erase
+representable net heat. Equal temperatures produce exactly zero exchange.
+Invalid domains or unrepresentable final physical rates are explicit refusals.

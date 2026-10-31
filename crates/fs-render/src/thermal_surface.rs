@@ -24,6 +24,12 @@
 #[cfg(feature = "material-state")]
 mod entropy;
 
+mod planck;
+pub(crate) use planck::{
+    planck_radiance_difference_w_m2_sr_nm, planck_radiance_temperature_derivative_w_m2_sr_nm_k,
+    planck_radiance_temperature_secant_w_m2_sr_nm_k, planck_radiative_exchange_w_and_w_k,
+};
+
 mod spectral;
 pub use spectral::{DiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity};
 
@@ -140,17 +146,26 @@ pub(crate) fn planck_radiance_w_m2_sr_nm(
         return Err(ThermalSurfaceError::Wavelength);
     }
     let x = (C2_NM_K / wavelength_nm) / temperature_k;
+    checked_planck_exp(planck_log_radiance(temperature_k, wavelength_nm, x))
+}
+
+// Shared algebra of the original SI source law. Retaining the caller's original
+// exponent/order preserves the established surface and volume radiance values.
+fn planck_log_radiance(temperature_k: f64, wavelength_nm: f64, x: f64) -> f64 {
     // Log evaluation avoids lambda^-5 overflowing before the Wien tail
     // vanishes. The small-x branch is the representable Rayleigh--Jeans
     // limit; x>=50 makes log(expm1(x)) indistinguishable from x in f64.
-    let log_b = if x == 0.0 {
+    if x == 0.0 {
         det::ln(2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27) + det::ln(temperature_k)
             - 4.0 * det::ln(wavelength_nm)
     } else {
         let log_denominator = if x >= 50.0 { x } else { det::ln(det::expm1(x)) };
         det::ln(C1_NM) - 5.0 * det::ln(wavelength_nm) - log_denominator
-    };
-    let value = det::exp(log_b);
+    }
+}
+
+fn checked_planck_exp(log_value: f64) -> Result<f64, ThermalSurfaceError> {
+    let value = det::exp(log_value);
     if value.is_finite() && value >= 0.0 {
         Ok(value)
     } else {
@@ -172,6 +187,8 @@ pub enum ThermalSurfaceError {
     SourceIdentity,
     /// Wavelength must be finite and inside the model's declared domain.
     Wavelength,
+    /// A Planck exchange coefficient or quadrature weight was negative or nonfinite.
+    ExchangeCoefficient,
     /// The requested physical radiance or power cannot be represented.
     Unrepresentable,
 }
