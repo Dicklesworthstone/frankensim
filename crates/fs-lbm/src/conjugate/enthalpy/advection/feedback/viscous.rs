@@ -11,6 +11,10 @@ pub struct ViscousHeatingAudit {
     /// Signed work at each Face3::ALL wall [J].
     pub wall_work_j: [f64; 6],
     pub supplied_wall_work_j: f64,
+    /// Signed reservoir normal-traction work at each Face3::ALL mouth [J].
+    pub pressure_work_j: [f64; 6],
+    /// Mechanical supply, never an extra thermal input beside generated_heat_j.
+    pub supplied_pressure_work_j: f64,
     /// Signed prescribed body-force work, separate from wall supply.
     /// This is not an additional thermal input beside generated_heat_j.
     pub supplied_body_work_j: f64,
@@ -27,6 +31,7 @@ pub struct ViscousHeatingAudit {
 #[derive(Clone)]
 pub(super) struct ViscousHeating {
     pub controls: ViscousHeatControls,
+    pub pressure_work: bool,
     pub audit: ViscousHeatingAudit,
     last_end_s: Option<f64>,
 }
@@ -35,6 +40,7 @@ impl ViscousHeating {
     pub fn new(controls: ViscousHeatControls) -> Self {
         Self {
             controls,
+            pressure_work: false,
             audit: ViscousHeatingAudit::default(),
             last_end_s: None,
         }
@@ -84,8 +90,12 @@ impl ViscousHeating {
         for (sum, watts) in next.wall_work_j.iter_mut().zip(power.wall_power_w) {
             add(sum, dt * watts)?;
         }
+        for (sum, watts) in next.pressure_work_j.iter_mut().zip(power.pressure_power_w) {
+            add(sum, dt * watts)?;
+        }
         for (sum, watts) in [
             (&mut next.supplied_wall_work_j, power.supplied_wall_power_w),
+            (&mut next.supplied_pressure_work_j, power.supplied_pressure_power_w),
             (&mut next.supplied_body_work_j, power.supplied_body_power_w),
             (&mut next.generated_heat_j, power.heat_w),
             (&mut next.molecular_heat_j, power.molecular_heat_w),
@@ -103,13 +113,14 @@ impl ViscousHeating {
         if !allowance.is_finite()
             || next.residual_j.abs() > allowance
             || next.pressure_constraint_work_j.abs() > allowance
-            || (next.supplied_wall_work_j + next.supplied_body_work_j - next.generated_heat_j).abs()
+            || (next.supplied_wall_work_j + next.supplied_pressure_work_j
+                + next.supplied_body_work_j - next.generated_heat_j).abs()
                 > allowance
             || (next.generated_heat_j - next.molecular_heat_j - next.darcy_heat_j
                 - next.forchheimer_heat_j).abs() > allowance
         {
             return Err(invalid(
-                "integrated wall/body work and physical heat do not close",
+                "integrated wall/reservoir/body work and physical heat do not close",
             ));
         }
         self.audit = next;

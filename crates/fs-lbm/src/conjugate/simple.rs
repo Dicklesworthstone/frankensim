@@ -605,6 +605,9 @@ pub(super) struct Solver<'a> {
     molecular_viscosity: Vec<f64>,
     /// Explicit Stokes reduction; all ordinary SIMPLE entries keep convection.
     creeping: bool,
+    /// Opt-in reservoir normal traction and zero tangential trace on one
+    /// opposed plane pair. None preserves the legacy opening equations.
+    pressure_work_axis: Option<usize>,
     comps: [Component; 3],
     /// Face velocities per component, m/s.
     vel: [Vec<f64>; 3],
@@ -939,6 +942,7 @@ impl<'a> Solver<'a> {
             mu: fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s,
             molecular_viscosity: Vec::new(),
             creeping: false,
+            pressure_work_axis: None,
             comps,
             vel,
             pressure: vec![0.0; domain.cell_count()],
@@ -1407,7 +1411,7 @@ impl<'a> Solver<'a> {
         let mass = imbalance / (self.rho * largest_flux);
         // Only a prospective convergence result needs the additional frozen
         // coupled residual. Ordinary diagonal paths keep their exact arithmetic.
-        if (!self.porous_cross.is_empty() || self.porous_nonlinear)
+        if (!self.porous_cross.is_empty() || self.porous_nonlinear || self.pressure_work_axis.is_some())
             && mass <= self.config.tolerance && steady <= self.config.tolerance
         {
             steady = self.coupled_darcy_residual(gate)?;
@@ -1669,6 +1673,8 @@ impl<'a> Solver<'a> {
                 poll(gate)?;
             }
             let f = comp.coords(index);
+            let pressure_mouth_row = self.pressure_work_axis == Some(a)
+                && matches!(comp.kind[index], Kind::Outlet(_));
             // The two cells the face separates; an outlet face has one
             // inside, and its outside twin mirrors it (zero normal gradient).
             let minus_cell = (f[a] > 0).then(|| {
@@ -1728,8 +1734,14 @@ impl<'a> Solver<'a> {
                         // The legacy constant-viscosity Laplacian keeps its
                         // arithmetic; div(grad(u)^T)=0 for incompressible flow.
                         let normal = if self.symmetric_stress() { 2.0 } else { 1.0 };
-                        let diff =
+                        let mut diff =
                             normal * self.mu_eff(side_cell) * face_area / width(a, side_cell[a]);
+                        // This mirrored row represents a physical HALF volume.
+                        // Doubling its interior normal stress gives the same
+                        // derivative of mu*(du_n/dn)^2*V as the interior row.
+                        // The unchanged doubled pressure drop then prescribes
+                        // normal traction -p_res*n at the actual mouth.
+                        if pressure_mouth_row { diff *= 2.0; }
                         let coef = diff.mul_add(self.weight(flux / diff), (-flux).max(0.0));
                         match comp.kind[nf] {
                             Kind::Unknown(col) | Kind::Outlet(col) => {
@@ -1765,7 +1777,20 @@ impl<'a> Solver<'a> {
                         let next = if plus { f[d] + 1 } else { f[d] - 1 };
                         0.5 * (row_width + width(d, next))
                     };
-                    let edge_mu = self.edge_mu(minus_cell, plus_cell, d, plus);
+                    let edge_mu = if outside && self.pressure_work_axis == Some(d) {
+                        self.pressure_mouth_mu(a, minus_cell, plus_cell)
+                    } else if pressure_mouth_row && !outside {
+                        let mut next = plus_cell;
+                        if plus { next[d] += 1; } else { next[d] -= 1; }
+                        if self.domain.is_fluid(cell_of(self.n, next)) {
+                            let (m, p) = if plus { (plus_cell, next) } else { (next, plus_cell) };
+                            self.pressure_mouth_mu(d, m, p)
+                        } else {
+                            self.edge_mu(minus_cell, plus_cell, d, plus)
+                        }
+                    } else {
+                        self.edge_mu(minus_cell, plus_cell, d, plus)
+                    };
                     let diff = edge_mu * side_area / distance;
                     // Reciprocal shear mu du_d/dx_a on this SAME staggered
                     // control-volume side. Keeping only mu du_a/dx_d would
@@ -1775,7 +1800,14 @@ impl<'a> Solver<'a> {
                     let cross_shear = if self.symmetric_stress() {
                         let vm = self.vel[d][self.cell_face(d, minus_cell, plus)];
                         let vp = self.vel[d][self.cell_face(d, plus_cell, plus)];
-                        s * edge_mu * w3 * (vp - vm)
+                        // The reservoir fixes the tangential TRACE to zero:
+                        // its odd ghost gives +/-2*u_t across this mirrored
+                        // normal row. Its physical half-row work and the
+                        // complementary tangential row share one shear edge.
+                        let difference = if pressure_mouth_row {
+                            if f[a] == 0 { 2.0 * vp } else { -2.0 * vm }
+                        } else { vp - vm };
+                        s * edge_mu * w3 * difference
                     } else {
                         0.0
                     };
@@ -1797,6 +1829,12 @@ impl<'a> Solver<'a> {
                                 rhs = coef.mul_add(velocity[a], rhs);
                             }
                             FvBoundary::Outlet | FvBoundary::Pressure { .. } => {
+                                if self.pressure_work_axis == Some(d) {
+                                    // Zero tangential velocity half a cell
+                                    // away, retaining reciprocal du_n/dt.
+                                    // The reaction shear has zero trace work.
+                                    a_p += 2.0 * diff;
+                                }
                                 rhs += cross_shear;
                                 net_out += edge_flux;
                                 if edge_flux < 0.0 {

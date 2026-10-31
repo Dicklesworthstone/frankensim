@@ -139,7 +139,7 @@ pub use simple::sgs::FvSgsConfig;
 pub use simple::viscous_heat::{UnsteadyHeatingAudit, UnsteadyMechanicalStep};
 pub use simple::viscous_heat::{
     ViscousHeatControls, ViscousPower, creeping_flow_with_body_force_heat,
-    creeping_flow_with_darcy_heat, creeping_flow_with_viscous_heat,
+    creeping_flow_with_darcy_heat, creeping_flow_with_pressure_work_heat, creeping_flow_with_viscous_heat,
 };
 pub use simple::{
     AMG_REBUILD_SWEEPS, FacePatch, FanCurve, FanInlet, FlowResistance, FvBoundary, FvFlow,

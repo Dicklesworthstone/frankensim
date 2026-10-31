@@ -4,9 +4,10 @@
 //! fixed no-slip solid voxels. Molecular viscosity may vary by fluid cell;
 //! exterior walls may move tangentially. A declared stationary linear Darcy
 //! frame and explicitly calibrated separable Forchheimer resistance may absorb
-//! work as local heat. Inertia, momentum convection, openings, moving solids,
-//! turbulence and fans are excluded from this quasisteady entry.
-//! Exterior walls and explicit body-force actuators supply work; neither
+//! work as local heat. The separate pressure-work opt-in admits one opposed
+//! reservoir normal-traction pair with zero tangential velocity trace. Inertia,
+//! momentum convection, moving solids, turbulence and fans remain excluded.
+//! Exterior walls, reservoirs and explicit body-force actuators supply work; neither
 //! pressure-constraint work nor momentum residual is heat.
 //! It has no kinetic-energy store and makes no Navier--Stokes energy claim.
 //!
@@ -21,6 +22,9 @@
 //! upwind diffusion or pressure-constraint work is converted into heat.
 
 use super::*;
+
+pub(in crate::conjugate) mod pressure;
+pub use pressure::creeping_flow_with_pressure_work_heat;
 
 #[cfg(feature = "enthalpy-coupling")]
 mod unsteady;
@@ -71,9 +75,14 @@ pub struct ViscousPower {
     /// Signed actuator supply at each Face3::ALL boundary [W].
     pub wall_power_w: [f64; 6],
     /// Tangential force exerted by each actuator on the fluid [N]. Normal
-    /// pressure reactions are not included and do no work in this fixed box.
+    /// reactions of impermeable walls are not included and do no work.
     pub wall_tangential_force_n: [[f64; 3]; 6],
     pub supplied_wall_power_w: f64,
+    /// Signed reservoir normal-traction supply at each Face3::ALL mouth [W].
+    /// Uses -(p_res-p_ref)*Q_out; zero outside the explicit pressure-work mode.
+    pub pressure_power_w: [f64; 6],
+    /// Mechanical supply only; physical stress/drag heat is deposited once.
+    pub supplied_pressure_power_w: f64,
     /// Signed total body-force work, partitioned with the original MAC half
     /// cells. This is supply, not an additional heat source. None without forcing.
     /// A material unsteady receipt separately reports its buoyancy subset.
@@ -82,7 +91,7 @@ pub struct ViscousPower {
     pub supplied_body_power_w: f64,
     /// Discrete sum p div(u) V [W]; independently required to be negligible.
     pub pressure_constraint_power_w: f64,
-    /// Wall plus body-force supply plus pressure constraint minus heat [W].
+    /// Wall, reservoir and body supply plus pressure constraint minus heat [W].
     /// Steady flow requires this to vanish. In a transient mechanical receipt
     /// it is inertial power, checked against the native kinetic/time account.
     pub residual_w: f64,
@@ -104,6 +113,8 @@ impl ViscousPower {
             wall_power_w: [0.0; 6],
             wall_tangential_force_n: [[0.0; 3]; 6],
             supplied_wall_power_w: 0.0,
+            pressure_power_w: [0.0; 6],
+            supplied_pressure_power_w: 0.0,
             cell_body_power_w: body.then(|| vec![0.0; domain.cell_count()]),
             supplied_body_power_w: 0.0,
             pressure_constraint_power_w: 0.0,
@@ -282,7 +293,7 @@ fn creeping_material_heat(
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
     creeping_material_heat_with_darcy_tensor(
         domain, fluid, viscosity_pa_s, drag_pa_s_m2, None, None,
-        force_density_n_m3, config, controls, gate,
+        force_density_n_m3, config, controls, false, gate,
     )
 }
 
@@ -298,10 +309,16 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
     force_density_n_m3: Option<&[[f64; 3]]>,
     config: &SimpleConfig,
     controls: ViscousHeatControls,
+    pressure_work: bool,
     gate: &CancelGate,
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
     poll(gate)?;
-    admit_heating(domain, config, controls)?;
+    let pressure_work_axis = if pressure_work {
+        Some(pressure::admit_pressure_work_heating(domain, config, controls)?)
+    } else {
+        admit_heating(domain, config, controls)?;
+        None
+    };
     let mut solver = material_solver_with_darcy_tensor(
         domain,
         fluid,
@@ -314,6 +331,7 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
         gate,
     )?;
     solver.creeping = true;
+    solver.pressure_work_axis = pressure_work_axis;
     let flow = solve_steady(solver, fluid, config, gate)?;
     // Reconstruct only the original coefficient/geometry owner from its public
     // projected field. This is an audit, not another flow solve or projection.
@@ -328,6 +346,7 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
         config,
         gate,
     )?;
+    sampler.pressure_work_axis = pressure_work_axis;
     let arrays = flow.field.face_arrays();
     for (a, fluxes) in arrays.into_iter().enumerate() {
         for (i, flux) in fluxes.iter().enumerate() {
@@ -385,11 +404,12 @@ impl Solver<'_> {
             &flow.field, &flow.pressure_pa, controls, gate,
         )?;
         if power.residual_w.abs() > controls.power_tolerance_w
-            || (power.supplied_wall_power_w + power.supplied_body_power_w - power.heat_w).abs()
+            || (power.supplied_wall_power_w + power.supplied_pressure_power_w
+                + power.supplied_body_power_w - power.heat_w).abs()
                 > controls.power_tolerance_w
         {
             return Err(invalid_power(
-                "independent steady wall/body work and physical heat do not close",
+                "independent steady wall/reservoir/body work and physical heat do not close",
             ));
         }
         Ok(power)
@@ -443,15 +463,13 @@ impl Solver<'_> {
         for a in 0..3 {
             for &index in &self.comps[a].unknowns {
                 poll(gate)?;
-                let plus = self.comps[a].coords(index);
-                let mut minus = plus;
-                minus[a] -= 1;
+                let (minus, plus, weight) = self.power_face_cells(a, index);
                 let fm = force_n_m3[cell_of(self.n, minus)][a];
                 let fp = force_n_m3[cell_of(self.n, plus)][a];
                 let force = self.comp_face_area(a, index)
                     * (0.5 * domain.width(a, minus[a]))
                         .mul_add(fm, 0.5 * domain.width(a, plus[a]) * fp);
-                add(&mut staggered_work, force * self.vel[a][index])?;
+                add(&mut staggered_work, weight * force * self.vel[a][index])?;
             }
         }
         let total = finite_value("viscous_heat.body_supply", body_work.iter().sum())?;
@@ -553,9 +571,8 @@ impl Solver<'_> {
         for a in 0..3 {
             for &index in &self.comps[a].unknowns {
                 poll(gate)?;
-                let plus = self.comps[a].coords(index);
-                let mut minus = plus;
-                minus[a] -= 1;
+                let f = self.comps[a].coords(index);
+                let (minus, plus, weight) = self.power_face_cells(a, index);
                 let wm = domain.width(a, minus[a]);
                 let wp = domain.width(a, plus[a]);
                 for d in 0..3 {
@@ -563,7 +580,7 @@ impl Solver<'_> {
                         continue;
                     }
                     for side in [0, 1] {
-                        let outside = plus[d] == if side == 0 { 0 } else { self.n[d] - 1 };
+                        let outside = f[d] == if side == 0 { 0 } else { self.n[d] - 1 };
                         let (boundary, wall_velocity) = if outside {
                             let face = 2 * d + side;
                             let FvBoundary::Wall { velocity } = self.faces[face] else {
@@ -571,7 +588,7 @@ impl Solver<'_> {
                             };
                             (Some(face), velocity[a])
                         } else {
-                            let mut next = plus;
+                            let mut next = f;
                             if side == 0 {
                                 next[d] -= 1;
                             } else {
@@ -589,7 +606,7 @@ impl Solver<'_> {
                             (None, 0.0)
                         };
                         let wall_mu = self.wall_mu(minus, plus);
-                        let coefficient = 2.0 * self.wall_shear_base_conductance(minus, plus, a, d);
+                        let coefficient = weight * 2.0 * self.wall_shear_base_conductance(minus, plus, a, d);
                         let difference = wall_velocity - self.vel[a][index];
                         let power = coefficient * difference * difference;
                         add(&mut quadrature_w, power)?;
@@ -613,6 +630,7 @@ impl Solver<'_> {
                 }
             }
         }
+        self.pressure_mouth_heat(&mut heat, &mut quadrature_w, gate)?;
         let molecular_heat_w = finite_value("viscous_heat.molecular", heat.iter().sum())?;
         Ok(MolecularPower {
             heat, quadrature_w, wall_power_w, wall_tangential_force_n, molecular_heat_w,
@@ -707,9 +725,7 @@ impl Solver<'_> {
             for a in 0..3 {
                 for &index in &self.comps[a].unknowns {
                     poll(gate)?;
-                    let plus = self.comps[a].coords(index);
-                    let mut minus = plus;
-                    minus[a] -= 1;
+                    let (minus, plus, weight) = self.power_face_cells(a, index);
                     let wm = domain.width(a, minus[a]);
                     let wp = domain.width(a, plus[a]);
                     let bm = self.porous[cell_of(self.n, minus)][a].0;
@@ -717,7 +733,7 @@ impl Solver<'_> {
                     let coefficient =
                         self.comp_face_area(a, index) * (0.5 * wm).mul_add(bm, 0.5 * wp * bp);
                     let u = self.vel[a][index];
-                    add(&mut staggered_drag_w, coefficient * u * u)?;
+                    add(&mut staggered_drag_w, weight * coefficient * u * u)?;
                     if self.porous_nonlinear {
                         let cm = self.porous[cell_of(self.n, minus)][a].1;
                         let cp = self.porous[cell_of(self.n, plus)][a].1;
@@ -725,13 +741,13 @@ impl Solver<'_> {
                         // frozen velocity, after the nonlinear residual gate.
                         let coefficient = self.comp_face_area(a, index)
                             * (0.5 * wm).mul_add(cm * u.abs(), 0.5 * wp * cp * u.abs());
-                        add(&mut staggered_forchheimer_w, coefficient * u * u)?;
+                        add(&mut staggered_forchheimer_w, weight * coefficient * u * u)?;
                         if !self.porous_framed.is_empty() {
-                            add(&mut staggered_forchheimer_w, self.framed_forchheimer_force(a, minus, plus)? * u)?;
+                            add(&mut staggered_forchheimer_w, weight * self.framed_forchheimer_force(a, minus, plus)? * u)?;
                         }
                     }
                     if !self.porous_cross.is_empty() {
-                        add(&mut staggered_drag_w, self.darcy_cross_force(a, minus, plus) * u)?;
+                        add(&mut staggered_drag_w, weight * self.darcy_cross_force(a, minus, plus) * u)?;
                     }
                 }
             }
@@ -752,6 +768,7 @@ impl Solver<'_> {
         add(&mut quadrature_w, staggered_forchheimer_w)?;
         let heat_w = finite_value("viscous_heat.total", heat.iter().sum())?;
         let supplied_wall_power_w = finite_value("viscous_heat.supply", wall_power_w.iter().sum())?;
+        let (pressure_power_w, supplied_pressure_power_w) = self.pressure_work(field, gate)?;
         let (cell_body_power_w, supplied_body_power_w) = if self.force.is_empty() {
             (None, 0.0)
         } else {
@@ -767,12 +784,15 @@ impl Solver<'_> {
             let outward: f64 = (0..6).map(|face| field.outward(domain, c, face)).sum();
             add(
                 &mut pressure_constraint_power_w,
-                pressure_pa[c] * outward,
+                (if self.pressure_work_axis.is_some() {
+                    pressure_pa[c] - self.pressure_reference_pa
+                } else { pressure_pa[c] }) * outward,
             )?;
         }
         let residual_w = finite_value(
             "viscous_heat.residual",
-            supplied_wall_power_w + supplied_body_power_w + pressure_constraint_power_w - heat_w,
+            supplied_wall_power_w + supplied_pressure_power_w + supplied_body_power_w
+                + pressure_constraint_power_w - heat_w,
         )?;
         let reynolds = self.source_reynolds(&self.vel)?;
         if reynolds > controls.maximum_reynolds {
@@ -800,6 +820,8 @@ impl Solver<'_> {
             wall_power_w,
             wall_tangential_force_n,
             supplied_wall_power_w,
+            pressure_power_w,
+            supplied_pressure_power_w,
             cell_body_power_w,
             supplied_body_power_w,
             pressure_constraint_power_w,

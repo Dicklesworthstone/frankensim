@@ -158,7 +158,7 @@ impl Solver<'_> {
 
     /// The final tight pressure projection must not invalidate momentum.
     pub(super) fn admit_projected_darcy(&mut self, gate: &CancelGate) -> Result<f64, ChtError> {
-        if self.porous_cross.is_empty() && !self.porous_nonlinear {
+        if self.porous_cross.is_empty() && !self.porous_nonlinear && self.pressure_work_axis.is_none() {
             return Ok(0.0);
         }
         let residual = self.coupled_darcy_residual(gate)?;

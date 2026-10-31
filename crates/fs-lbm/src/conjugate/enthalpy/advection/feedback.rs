@@ -195,6 +195,8 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
 /// separately closes native kinetic storage, physical dissipation and actuator
 /// work; ordinary retained momentum exposes only diagnostic kinetic energy.
 /// Explicit
+/// `Self::with_pressure_work_heating` adds opposed reservoir traction mouths
+/// whose independent pressure supply balances the same stress/porous heat.
 /// `Self::with_viscous_heating` admits wall-supplied molecular/Darcy heat in a
 /// closed creeping-flow box; `Self::with_body_force_heating` additionally admits
 /// explicit actuator work. The ordinary entry adds no viscous heat.
@@ -520,6 +522,43 @@ where
         Ok(self)
     }
 
+    /// Couple reservoir pressure supply to this same material-flow/enthalpy loop.
+    ///
+    /// Exactly one opposed Pressure/Outlet pair prescribes NORMAL TRACTION
+    /// -p_res*n and a zero TANGENTIAL VELOCITY trace. Reaction shear performs
+    /// no boundary work; this opt-in is distinct from the legacy static-pressure
+    /// opening. Remaining planes are walls/symmetry. The native half-cell
+    /// stresses, source permeability/Forchheimer loss and molecular heat share
+    /// their original quadrature. Optional body forcing composes through
+    /// `Self::with_body_force_heating`.
+    ///
+    /// Signed reservoir supply is independently -(p_res-p_ref)*Q_out on the
+    /// actual flow exported to enthalpy transport. Only physical dissipation
+    /// enters the source map once; incoming/outgoing stream enthalpy remains
+    /// the original advection owner's account. Materials and loss coefficients
+    /// refresh at every accepted thermal substep, under the same Reynolds and
+    /// power gates as closed viscous heating. Buoyancy, retained inertia, fans,
+    /// turbulence and moving solid geometry remain excluded. This fixed-volume,
+    /// incompressible caloric approximation has no open kinetic-energy claim.
+    pub fn with_pressure_work_heating(
+        mut self,
+        controls: ViscousHeatControls,
+    ) -> Result<Self, MaterialFlowError<O::Error>> {
+        check_gate(self.gate, &mut || Ok(()))?;
+        if self.buoyancy.is_some() || self.unsteady.is_some() {
+            return Err(invalid(
+                "pressure-work heating excludes buoyancy and retained kinetic energy",
+            ).into());
+        }
+        crate::conjugate::simple::viscous_heat::pressure::admit_pressure_work_heating(
+            self.domain, self.config, controls,
+        )?;
+        let mut owner = ViscousHeating::new(controls);
+        owner.pressure_work = true;
+        self.viscous_heating = Some(owner);
+        Ok(self)
+    }
+
     /// Drive this same Stokes/material/enthalpy loop by external body forces.
     ///
     /// One finite SI force density [N/m3] per voxel is frozen over the advance.
@@ -529,7 +568,8 @@ where
     /// refresh at every actual thermal substep. Signed actuator supply and heat
     /// are accepted together, including negative work by an opposing actuator.
     ///
-    /// Closed creeping-flow restrictions and exact stationary solids remain.
+    /// Closed creeping-flow restrictions and exact stationary solids remain,
+    /// unless `Self::with_pressure_work_heating` has selected reservoir mouths.
     /// Buoyancy is excluded:
     /// no gravitational potential, finite electrical reservoir or kinetic store
     /// is debited by this prescribed actuator. Change a force only between
@@ -550,7 +590,11 @@ where
                 return Err(invalid("body-force heating requires finite force density").into());
             }
         }
-        let mut coupled = self.with_viscous_heating(controls)?;
+        let mut coupled = if self.viscous_heating.as_ref().is_some_and(|owner| owner.pressure_work) {
+            self.with_pressure_work_heating(controls)?
+        } else {
+            self.with_viscous_heating(controls)?
+        };
         coupled.external_force_n_m3 = Some(force_density_n_m3);
         let domain = coupled.momentum_domain(&coupled.endpoint, &mut || Ok(()))?;
         coupled.check_phase_drives(domain.as_ref().unwrap_or(coupled.domain), &mut || Ok(()))?;
@@ -885,10 +929,13 @@ where
                 .as_ref()
                 .ok_or(invalid("mobile cells lack a transport source"))?;
             if let Some(owner) = &self.viscous_heating {
-                let (flow, power) = if let Some(drag) = &darcy_resistance_pa_s_m2 {
+                let (flow, power) = if owner.pressure_work || darcy_resistance_pa_s_m2.is_some() {
                     crate::conjugate::simple::viscous_heat::creeping_material_heat_with_darcy_tensor(
-                        domain, fluid, &viscosities, None, Some(drag), forchheimer_resistance.as_deref(),
-                        self.external_force_n_m3.as_deref(), self.config, owner.controls, self.gate,
+                        domain, fluid, &viscosities,
+                        if darcy_resistance_pa_s_m2.is_none() { mushy_drag_pa_s_m2.as_deref() } else { None },
+                        darcy_resistance_pa_s_m2.as_deref(), forchheimer_resistance.as_deref(),
+                        self.external_force_n_m3.as_deref(), self.config, owner.controls,
+                        owner.pressure_work, self.gate,
                     )?
                 } else if let Some(force) = &self.external_force_n_m3 {
                     creeping_flow_with_body_force_heat(

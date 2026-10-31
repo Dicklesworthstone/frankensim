@@ -474,3 +474,6 @@ fn unsupported_open_driven_or_high_reynolds_regimes_refuse_and_default_adds_no_h
         })
     ));
 }
+
+#[path = "viscous/pressure_work.rs"]
+mod pressure_work;

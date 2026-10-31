@@ -3611,6 +3611,55 @@ Focused regressions cover wall/body/Darcy balance, absorbing and pressure-balanc
 forces, material substitution, thermal thinning, latent feedback and rollback.
 Their presence does not establish native execution or experimental validation.
 
+### Reservoir pressure work feeds native material flow and enthalpy
+
+`conjugate::creeping_flow_with_pressure_work_heat` and
+`MaterialFlowFeedback::with_pressure_work_heating` add one explicit opposed
+Pressure/Outlet plane pair to the existing quasisteady source-viscosity owner.
+These mouths prescribe normal traction `-p_res*n` and ZERO TANGENTIAL VELOCITY
+trace. Tangential reaction shear performs zero work. This is a distinct opt-in
+from legacy static-pressure/zero-gradient openings; it does not prescribe zero
+tangential traction. Other planes remain walls/symmetry. The original closed
+and inertial heating modes retain their existing boundary admission.
+
+Native mouth momentum rows mirror one interior cell, but their physical work
+volume is HALF that cell. The normal stress coefficient is doubled in that
+mirrored row; physical half-row work therefore matches the original cell
+`2*mu*(du_n/dn)^2*V`. A mouth shear half-edge uses
+`gamma=(u_n_plus-u_n_minus)/l_t + inward*u_t/(h_n/2)` and heat
+`mu_edge*(h_n/2)*l_t*w_other*gamma^2`. Both complementary momentum rows use
+the derivatives of half this nonnegative quadratic: the normal row has an odd
+tangential ghost, and the tangential row has a zero-trace half-cell coefficient
+AND reciprocal normal shear. The same two-cell harmonic source viscosity
+supplies both derivatives and partitions the heat by resistance fractions.
+Original wall, body and grid-aligned porous work likewise use physical mouth
+half volumes. Fully rotated porous cells still require a clear-fluid layer
+before an opening; their existing admission is not relaxed.
+
+`ViscousPower::pressure_power_w` independently sums
+`-(p_res-p_ref)*Q_out` at each mouth using the actual projected face flux that
+enters the existing enthalpy advection owner. `supplied_pressure_power_w` is
+signed mechanical supply, including absorbing reservoirs. It joins wall and
+body supply in the power check, never in the heat source map. The original
+local molecular/Darcy/Forchheimer dissipation is deposited exactly once.
+`ViscousHeatingAudit::pressure_work_j` and `supplied_pressure_work_j` integrate
+that supply over actual accepted substeps, while incoming/outgoing stream
+enthalpy remains the original advection account. Source viscosity,
+permeability and calibrated nonlinear loss refresh on that same timeline.
+`with_body_force_heating` preserves an already selected pressure-work mode.
+
+This remains fixed geometry, fixed density/reference mass and incompressible
+caloric storage, with momentum convection omitted and the existing Reynolds
+ceiling at most 0.1. It has no transient/open kinetic-energy, compressibility,
+buoyancy-work, turbulent or freely turning reservoir-mouth claim. The final
+frozen coupled momentum residual, continuity, independent supply/dissipation
+balance and source domains all gate the original candidate transaction.
+Cancellation or rejection publishes neither motion nor heat. Focused
+regressions cover discrete developed channels, source-only viscosity and
+nonlinear porous swaps, nonuniform/graded mouth shear, gauge/reversal,
+temperature feedback, stream enthalpy and rollback; native execution remains
+separate from source/parser validation.
+
 ### Shared material buoyancy and electromagnetic transport
 
 `MaterialSlab::step_magnetothermal_with_boussinesq_material_transport` and its
