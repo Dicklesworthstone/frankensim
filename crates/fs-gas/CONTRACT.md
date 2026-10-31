@@ -322,7 +322,7 @@ or optional second-order L-stable SDIRK2, both with adaptive step doubling.
 Each candidate uses the last accepted composition plus local reaction extents
 through the exact admitted stoichiometric matrix. The origin is refreshed only
 after acceptance; the original feed and fixed total energy remain untouched for
-whole-call mass, elemental, energy and entropy audits. No species clipping,
+whole-call mass, elemental, charge, energy and entropy audits. No species clipping,
 positive trace seeding or equilibrium projection is introduced. Temperature solves
 the original total internal energy at each candidate composition, with the
 formation contribution present exactly once. No separate reaction heat source
@@ -339,10 +339,10 @@ Euler is first order; SDIRK2 is second order for smooth homogeneous reactor
 ODEs. Both use estimated local errors rather than global accuracy certificates.
 
 Caller controls separately bound absolute energy, absolute amount, relative
-species/temperature error, relative element/mass balance, numerical entropy
+species/temperature error, relative element/charge/mass balance, numerical entropy
 decrease, minimum/initial/maximum time step and all nonlinear/root/attempt work.
 Every accepted step and the complete integration check actual ideal-mixture
-entropy. Final element, molecular-mass and energy balances are checked again
+entropy. Final element, charge, molecular-mass and energy balances are checked again
 before publication. A budget exhaustion, unsupported source state, arithmetic
 failure or cancellation returns no partial integration. Zero duration preserves
 the admitted initial state. No ignition delay or empirical rate accuracy is
@@ -356,6 +356,57 @@ interval admission also rejects negative interior Cv despite positive endpoint
 values. These are numerical/constitutive conformance tests, not experimental
 validation of a real-fuel mechanism.
 
+### Ionized species and numerical charge conservation
+
+The same homogeneous reactor accepts charged mechanisms admitted by the
+original `fs_thermochem::kinetics::IdealGasKineticsV1` owner. Integer stoichiometry must
+conserve both original elemental and charge vectors, and the declared source
+molar masses must agree with every reaction. Ions and electrons contribute to
+the original species pressure and internal energy. Ionization energy belongs
+to those source formation references and is never added as a second heat term.
+For reversible channels, the original source Gibbs energies determine reverse
+rates and the concentration-normalized equilibrium constants.
+
+Exact stoichiometric conservation does not by itself bound floating-point
+charge drift. Before each accepted step is rebased, the reactor compares its
+actual concentrations against the untouched initial concentrations. Final
+publication also compares the actual returned mole amounts against the input
+mole amounts, including the effects of volume conversion. Both checks use
+`IsochoricKineticsSolve::relative_conservation_tolerance` and the residual
+
+`abs(sum_i z_i (n_i - n_i_initial)) / max(sum_i abs(z_i) n_i, sum_i abs(z_i) n_i_initial)`.
+
+An identically zero carrier inventory has zero residual. Charges and carrier
+amounts are scaled before multiplication, and compensated sums preserve the
+canonical species order. Neutral species never enter the denominator. The
+audit takes linear work in species count and allocates no storage.
+`IsochoricKineticsBalance::maximum_relative_charge_residual` retains the largest
+accepted-step or final-publication residual. An excessive or nonfinite residual
+refuses the integration with `IsochoricKineticsError::Balance`; the solver does
+not clip, renormalize, neutralize or publish an inconsistent endpoint.
+
+The conserved target is the authored feed charge, not necessarily zero. This
+is a homogeneous constituent/energy evolution law: admitting a nonzero charge
+does not establish an electrostatic equilibrium or supply its field energy.
+All species share one source temperature and ideal-gas convention. Separate
+electron and heavy-particle temperatures, electric-field acceleration, ambipolar
+diffusion, non-Maxwellian electron distributions, radiation-driven ionization,
+and nonideal plasma corrections require separate owners and are not supplied
+by this reactor.
+
+The ionization regressions use `H + e- <-> H+ + 2 e-`, ideal monatomic
+Sackur--Tetrode thermodynamics and NIST's H I ionization energy. They compare
+detailed balance and the final adiabatic state with independent Saha formulas,
+and finite-time evolution with an independent scalar integration. They check
+electron pressure, ionization cooling, mass/energy/charge balance, preserved
+nonzero feed charge, and refusal of trace-carrier drift over extensive scales.
+Exactly zero initial electrons remain zero for this electron-impact channel;
+no artificial seed is inserted. Its forward rate is explicitly synthetic, so
+these numerical tests do not validate an empirical ionization time or discharge
+mechanism. Source reference: NASA RP-1311, Part I, section 3.7,
+https://ntrs.nasa.gov/citations/19950013764, and NIST H I ionization energy,
+https://physics.nist.gov/cgi-bin/ASD/ie.pl?spectra=H+I.
+
 ## Common material gas integration
 
 Optional feature `material` exposes
@@ -364,6 +415,11 @@ Optional feature `material` exposes
 actual stored internal energy as the one target. The complete product bank
 must match the mechanism's original NASA-9 models and retain every active
 feed transport card, source-pack identity and declared water identity.
+This adapter refuses mechanisms containing charged species before integrating:
+its Wilke viscosity and Wassiljewa--Mason--Saxena thermal-conductivity closure
+belongs to neutral dilute gas. Source identity alone does not make that closure
+an electron/ion transport model. A charged-mechanism refusal leaves the
+original parcel unchanged, including for a zero-duration request.
 
 Generated amounts pass through `ThermochemicalGasModel::with_mole_amounts`,
 which uses the existing exact-simplex closure and refuses unrepresentable
@@ -1503,7 +1559,7 @@ No reduced global methane reaction or added combustion heat source is used.
 Reaction coordinates are rebased only after an accepted complete step.
 Candidates reconstruct from that accepted composition plus local stoichiometric
 extents; the original feed and fixed total internal energy remain untouched for
-whole-call mass, elemental, energy and entropy audits. This prevents a trace
+whole-call mass, elemental, charge, energy and entropy audits. This prevents a trace
 intermediate from becoming the subtraction of large accumulated reaction-cycle
 extents. It introduces no species clipping, positive trace floor, radical seed
 or equilibrium projection, and rejected attempts retain their accepted origin.

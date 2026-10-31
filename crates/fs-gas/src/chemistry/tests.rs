@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 
 #[path = "tests/hydrogen.rs"]
 mod hydrogen;
+#[path = "tests/ionization.rs"]
+mod ionization;
 #[path = "tests/methane.rs"]
 mod methane;
 #[path = "tests/prepared.rs"]

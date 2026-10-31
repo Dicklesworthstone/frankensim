@@ -19,7 +19,7 @@ pub(super) struct Reactor {
     pub controls: IsochoricKineticsSolve,
     volume: f64,
     target_density: f64,
-    /// Untouched whole-call feed for the final elemental inventory audit.
+    /// Untouched whole-call feed for elemental and charge inventory audits.
     pub initial: Vec<f64>,
     /// Accepted composition about which the next local reaction extents act.
     origin: Vec<f64>,

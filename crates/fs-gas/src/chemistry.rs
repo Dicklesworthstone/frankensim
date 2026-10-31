@@ -8,8 +8,8 @@
 //! positivity clipping, trace seeding or equilibrium projection is used.
 //!
 //! Step error is an estimated local error, not a global error certificate.
-//! Accepted endpoints are nonnegative, conserve the original element inventory
-//! and U within the declared tolerances, and pass the actual ideal-mixture
+//! Accepted endpoints are nonnegative, conserve the original element and charge
+//! inventories and U within the declared tolerances, and pass the actual ideal-mixture
 //! entropy check. No ignition, flame, transport or empirical mechanism claim is
 //! implied by a successful zero-dimensional homogeneous reactor integration.
 
@@ -75,7 +75,7 @@ pub struct IsochoricKineticsSolve {
     /// Maximum numerical entropy decrease across any accepted step and the
     /// complete integration, J/K. This is not source-data uncertainty.
     pub entropy_tolerance_j_k: f64,
-    /// Maximum relative element and molecular-mass discrepancy.
+    /// Maximum relative element, charge-carrier and molecular-mass discrepancy.
     pub relative_conservation_tolerance: f64,
     /// Initial proposed step, s; the adaptive controller may reduce it.
     pub initial_step_s: f64,
@@ -151,6 +151,12 @@ pub struct IsochoricKineticsBalance {
     pub mass_residual_kg: f64,
     /// Maximum relative residual of an original elemental inventory row.
     pub maximum_relative_element_residual: f64,
+    /// Largest charge-inventory drift across accepted steps and publication,
+    /// divided by the larger initial/current sum of absolute charged amounts.
+    /// Neutral species never dilute this residual. The original net charge is
+    /// preserved, including a nonzero authored feed; no electrostatic field or
+    /// physical admissibility of a net-charged homogeneous parcel is inferred.
+    pub maximum_relative_charge_residual: f64,
     /// Final actual internal energy minus the one conserved target, J.
     pub energy_residual_j: f64,
     /// Actual final-minus-initial ideal-mixture entropy, J/K.
@@ -485,6 +491,13 @@ fn advance_prepared<'a>(
                 return Err(IsochoricKineticsError::Cancelled);
             }
             Ok((state, error, entropy_change)) if error <= 1.0 => {
+                audit_charge(
+                    &reactor.mechanism,
+                    |i| reactor.initial[i],
+                    |i| reactor.concentrations()[i],
+                    controls.relative_conservation_tolerance,
+                    &mut balance,
+                )?;
                 current_concentrations.copy_from_slice(reactor.concentrations());
                 reactor.rebase(current_concentrations);
                 current.fill(0.0);
@@ -529,7 +542,7 @@ fn advance_prepared<'a>(
     }
     // Resolve the exact accepted composition after the last coordinate rebase.
     // Each local update used stoichiometric extents without clipping; the final
-    // mass/element audit below still compares against the untouched original feed.
+    // mass/element/charge audit compares against the untouched original feed.
     accepted = reactor.resolve(current, accepted.temperature.value(), &mut cancelled)?;
     for (amount, concentration) in amounts.iter_mut().zip(reactor.concentrations()) {
         *amount = Amount::new(*concentration * volume.value());
@@ -548,6 +561,13 @@ fn advance_prepared<'a>(
         &reactor.initial,
         reactor.concentrations(),
     );
+    audit_charge(
+        &reactor.mechanism,
+        |i| feed[i].value(),
+        |i| amounts[i].value(),
+        controls.relative_conservation_tolerance,
+        &mut balance,
+    )?;
     let final_mass = accepted.mass_density_kg_m3 * volume.value();
     let final_energy = accepted.internal_energy_density_j_m3 * volume.value();
     if !positive(final_mass)
@@ -613,6 +633,66 @@ fn feed_amounts(
     }
     Ok(amounts)
 }
+// Fixed-volume concentrations and amounts have the same relative charge
+// residual. Scale both charges and charged concentrations before multiplying:
+// no large neutral inventory, overflowing product, or underflowed absolute
+// carrier total can erase a physically relevant charge discrepancy.
+fn audit_charge(
+    mechanism: &IdealGasKineticsV1,
+    before: impl Fn(usize) -> f64,
+    after: impl Fn(usize) -> f64,
+    tolerance: f64,
+    balance: &mut IsochoricKineticsBalance,
+) -> Result<(), IsochoricKineticsError> {
+    let charges = mechanism.thermodynamics().charge_vector();
+    let mut concentration_scale = 0.0_f64;
+    let mut charge_scale = 0.0_f64;
+    for i in 0..charges.species().len() {
+        let z = charges.get(i).expect("admitted charge shape") as f64;
+        if z == 0.0 {
+            continue;
+        }
+        let (initial, current) = (before(i), after(i));
+        if !initial.is_finite() || initial < 0.0 || !current.is_finite() || current < 0.0 {
+            balance.maximum_relative_charge_residual = f64::INFINITY;
+            return Err(IsochoricKineticsError::Balance(*balance));
+        }
+        if initial > 0.0 || current > 0.0 {
+            concentration_scale = concentration_scale.max(initial).max(current);
+            charge_scale = charge_scale.max(z.abs());
+        }
+    }
+    if concentration_scale == 0.0 {
+        return Ok(());
+    }
+    let mut initial_carriers = Sum::default();
+    let mut final_carriers = Sum::default();
+    let mut change = Sum::default();
+    for i in 0..charges.species().len() {
+        let z = charges.get(i).expect("admitted charge shape") as f64 / charge_scale;
+        if z == 0.0 {
+            continue;
+        }
+        let (initial, current) = (before(i), after(i));
+        initial_carriers.add(z.abs() * (initial / concentration_scale));
+        final_carriers.add(z.abs() * (current / concentration_scale));
+        change.add(z * ((current - initial) / concentration_scale));
+    }
+    let carrier_sum = initial_carriers.value().max(final_carriers.value());
+    let residual = change.value().abs() / carrier_sum;
+    if !residual.is_finite() || residual > tolerance {
+        balance.maximum_relative_charge_residual = if residual.is_finite() {
+            balance.maximum_relative_charge_residual.max(residual)
+        } else {
+            f64::INFINITY
+        };
+        return Err(IsochoricKineticsError::Balance(*balance));
+    }
+    balance.maximum_relative_charge_residual =
+        balance.maximum_relative_charge_residual.max(residual);
+    Ok(())
+}
+
 fn element_residual(mechanism: &IdealGasKineticsV1, before: &[f64], after: &[f64]) -> f64 {
     let matrix = mechanism.thermodynamics().elemental_matrix();
     let mut largest = 0.0_f64;
