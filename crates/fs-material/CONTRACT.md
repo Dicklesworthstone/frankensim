@@ -6932,3 +6932,35 @@ unloading, seals, amount conservation and transactional cancellation. Source
 regressions check original receipts, local domains, ordered identities and
 unsupported coefficient bases without claiming measured membrane accuracy.
 
+## Debye dielectric temperature and thermal potentials
+
+`field_storage::dielectric::thermal::ThermalDebyeCapacitor` binds the original
+complete Debye source and fixed geometry to one typed absolute-temperature
+interval. Instantaneous and polarization permittivities must be positive affine
+source paths over that whole interval, including every interior knot. Relaxation
+times may follow positive continuous piecewise-linear paths; their temperature
+dependence changes friction, not stored energy or entropy. Every refresh retains
+the original card, selected claims, pole roles, quantity conventions and fixed
+nonthermal coordinates, and re-evaluates all other properties in the bundle.
+
+The shared field thermodynamic primitive evaluates each independent charge's
+`psi=q²/(2 C)`, `S=psi C'/C`, `U=psi+T S` and
+`C_q=-2 T psi (C'/C)²`. Bounded evaluations allocate no scratch vectors. The
+analytic charge-envelope bound on the complete negative field heat capacity
+must be combined with the original zero-field caloric chart; the coupled owner
+requires positive total capacity and enforces every charge bound. This layer
+does not advance electrical or thermal history.
+
+`ResolvedDebyeCapacitor::at_query_point` exposes the same complete source refresh
+as an endpoint law. `fixed_charge_free_energy_change_j` admits temperature-only
+parameter changes at fixed original charges and returns signed Helmholtz work
+using relative capacitance differences, retaining small work beneath a large
+unchanged energy reservoir. `thermal_offset_change_j` independently resolves
+the change of `T S` through stable charge and temperature increments and
+compensated pole sums. Both remain separate from native irreversible resistor
+heat. Unsupported storage kinks, changed source/geometry/pole correspondence,
+missing histories and nonthermal refreshes refuse; measured material accuracy,
+moving geometry, switching impulses and general non-affine caloric laws are
+outside this model. `tests/dielectric_thermal.rs` supplies independent analytic
+potential/derivative and capacity checks, source/limit refusals, and large-bias
+parameter-work and entropy-offset regressions with synthetic material data.

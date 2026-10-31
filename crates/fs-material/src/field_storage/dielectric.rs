@@ -21,6 +21,9 @@ use crate::state_point::{
     ScalarPropertyRequirement, resolve_material_state_point,
 };
 
+/// Source-pinned temperature dependence and complete dielectric thermodynamics.
+pub mod thermal;
+
 /// Explicit bound on retained polarization states and per-response work.
 pub const MAX_DIELECTRIC_POLES: usize = 16;
 
@@ -208,6 +211,92 @@ impl ResolvedDebyeCapacitor {
             area_m2,
             gap_m,
         )
+    }
+
+    /// Re-evaluate the entire original material bundle at a new query, retaining
+    /// every selected claim, coordinate convention, pole role and fixed geometry.
+    /// This supplies an endpoint law; it does not change any electric history or
+    /// account for the work/entropy of changing the coefficients.
+    pub fn at_query_point(
+        &self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+    ) -> Result<Self, FieldStorageError> {
+        Self::try_from_material(
+            self.material.at_query_point(card, point)?,
+            &self.high_frequency_property,
+            &self.pole_properties,
+            self.area_m2,
+            self.gap_m,
+        )
+    }
+
+    /// Temperature-parameter change in Helmholtz energy at fixed instantaneous
+    /// and polarization charges. Geometry, the complete source bundle and all
+    /// nonthermal coordinates must remain identical. This signed quantity is
+    /// reversible parameter work, not irreversible polarization heat or total
+    /// internal-energy change; thermal owners also need the entropy correction.
+    ///
+    /// Evaluate each contribution as the larger endpoint energy times the
+    /// relative capacitance change, avoiding subtraction of large energy values
+    /// or nearly equal reciprocals. Opposite pole contributions are compensated.
+    pub fn fixed_charge_free_energy_change_j(
+        &self,
+        refreshed: &Self,
+        instantaneous_charge_c: f64,
+        polarization_charges_c: &[f64],
+    ) -> Result<f64, FieldStorageError> {
+        super::admit_source_temperature_refresh(&self.material, &refreshed.material)?;
+        if self.high_frequency_property != refreshed.high_frequency_property
+            || self.pole_properties != refreshed.pole_properties
+            || self.area_m2.to_bits() != refreshed.area_m2.to_bits()
+            || self.gap_m.to_bits() != refreshed.gap_m.to_bits()
+        {
+            return Err(invalid(
+                "dielectric parameter work requires the same pole roles and fixed geometry",
+            ));
+        }
+        self.stored_energy_j(instantaneous_charge_c, polarization_charges_c)?;
+        refreshed.stored_energy_j(instantaneous_charge_c, polarization_charges_c)?;
+        let mut sum = 0.0_f64;
+        let mut correction = 0.0_f64;
+        let mut add = |charge, before: f64, after: f64| -> Result<(), FieldStorageError> {
+            let term = if before == after || charge == 0.0 {
+                0.0
+            } else {
+                let larger_energy = energy(charge, before.min(after))?;
+                let change = finite(larger_energy * ((before - after) / before.max(after)))?;
+                if change == 0.0 {
+                    return Err(invalid("nonzero dielectric parameter work underflows"));
+                }
+                change
+            };
+            let next = finite(sum + term)?;
+            correction = finite(
+                correction
+                    + if sum.abs() >= term.abs() {
+                        (sum - next) + term
+                    } else {
+                        (term - next) + sum
+                    },
+            )?;
+            sum = next;
+            Ok(())
+        };
+        add(
+            instantaneous_charge_c,
+            self.instantaneous_capacitance_f,
+            refreshed.instantaneous_capacitance_f,
+        )?;
+        for ((before, after), &charge) in self
+            .poles
+            .iter()
+            .zip(&refreshed.poles)
+            .zip(polarization_charges_c)
+        {
+            add(charge, before.capacitance_f, after.capacitance_f)?;
+        }
+        finite(sum + correction)
     }
 
     /// Complete original source bundle and physical query.

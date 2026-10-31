@@ -218,7 +218,7 @@ pub(crate) fn affine_source_path(
     Ok((reference_k, slope, [knots.first().unwrap().1, knots.last().unwrap().1]))
 }
 
-fn thermal_state(
+pub(crate) fn thermal_state(
     free_energy_j: f64,
     temperature_k: f64,
     ratio: f64,
