@@ -122,6 +122,165 @@ fn component_build_up_retains_all_products_in_the_ordinary_flight_body() {
 }
 
 #[test]
+fn oriented_cuboid_inertia_matches_volume_quadrature_and_drives_flight() {
+    // G1/G3: exact two-point-per-axis volume quadrature for a homogeneous
+    // rotated cuboid, including its offset and the original pilot inventory.
+    // The oracle rotates volume points, not a diagonal inertia matrix.
+    use fs_flyer::MassComponent;
+    use fs_flyer::spine::{Loads, SixDofState, step};
+    use fs_ga::{Mat3, So3, So3Tangent, Vec3};
+
+    let mut design = FlyerDesign::reference_1903();
+    let half = [1.2_f64, 0.5, 0.3];
+    let rotation = So3::exp(So3Tangent::new(Vec3::new(0.37, -0.52, 0.29))).unwrap();
+    let component = MassComponent {
+        name: "uniform rotated cuboid",
+        mass_kg: design.empty_mass_kg,
+        position_m: [0.7, -0.6, 0.4],
+        gyration_sq_m2: [
+            (half[1].powi(2) + half[2].powi(2)) / 3.0,
+            (half[0].powi(2) + half[2].powi(2)) / 3.0,
+            (half[0].powi(2) + half[1].powi(2)) / 3.0,
+        ],
+        body_from_component: rotation,
+    };
+    design.pilot_position_m = [-0.2, 0.1, -0.3];
+    design.components = vec![component.clone()];
+    let built = design.mass_build_up().unwrap();
+    let total = component.mass_kg + design.pilot_mass_kg;
+    let center: [f64; 3] = core::array::from_fn(|i| {
+        (component.mass_kg * component.position_m[i]
+            + design.pilot_mass_kg * design.pilot_position_m[i])
+            / total
+    });
+    let mut expected = Mat3::zero();
+    let mut add_point = |mass: f64, point: [f64; 3]| {
+        let r: [f64; 3] = core::array::from_fn(|i| point[i] - center[i]);
+        let radius_squared = r.iter().map(|x| x * x).sum::<f64>();
+        for i in 0..3 {
+            for j in 0..3 {
+                expected.m[3 * i + j] +=
+                    mass * (if i == j { radius_squared } else { 0.0 } - r[i] * r[j]);
+            }
+        }
+    };
+    let gauss = 1.0 / 3.0_f64.sqrt();
+    for x in [-gauss, gauss] {
+        for y in [-gauss, gauss] {
+            for z in [-gauss, gauss] {
+                let point = rotation
+                    .rotate(Vec3::new(x * half[0], y * half[1], z * half[2]))
+                    .unwrap();
+                add_point(
+                    component.mass_kg / 8.0,
+                    [
+                        point.x + component.position_m[0],
+                        point.y + component.position_m[1],
+                        point.z + component.position_m[2],
+                    ],
+                );
+            }
+        }
+    }
+    add_point(design.pilot_mass_kg, design.pilot_position_m);
+    for (i, gyration) in [0.06, 0.35, 0.35].into_iter().enumerate() {
+        expected.m[4 * i] += design.pilot_mass_kg * gyration;
+    }
+    assert_eq!(built.gross_kg, total);
+    for i in 0..3 {
+        assert!((built.cg_m[i] - center[i]).abs() < 1e-15);
+    }
+    for (got, want) in built.inertia_tensor().m.iter().zip(expected.m) {
+        assert!((got - want).abs() < 2e-11, "{got} vs {want}");
+    }
+    // The rotation changes neither mass/CG nor the intrinsic tensor trace.
+    let mut aligned = design.clone();
+    aligned.components[0].body_from_component = So3::identity();
+    let old = aligned.mass_build_up().unwrap();
+    assert_eq!(built.gross_kg, old.gross_kg);
+    assert_eq!(built.cg_m, old.cg_m);
+    assert!(
+        (built.inertia_kgm2.iter().sum::<f64>() - old.inertia_kgm2.iter().sum::<f64>()).abs()
+            < 2e-11
+    );
+    assert!(
+        built
+            .cross_inertia_kgm2
+            .iter()
+            .zip(old.cross_inertia_kgm2)
+            .all(|(a, b)| (a - b).abs() > 0.1)
+    );
+
+    let body = built.rigid_body().unwrap();
+    let initial = SixDofState {
+        pos_m: [0.0; 3],
+        vel_mps: [0.0; 3],
+        quat: [1.0, 0.0, 0.0, 0.0],
+        omega_body: [0.0; 3],
+    };
+    let dt = 1e-4;
+    let end = step(&body, &initial, 0.0, dt, |_, _| Loads {
+        force_n: [0.0; 3],
+        moment_nm: [73.0, 0.0, 0.0],
+    })
+    .unwrap();
+    let impulse = expected.apply(Vec3::new(
+        end.omega_body[0],
+        end.omega_body[1],
+        end.omega_body[2],
+    ));
+    assert!((impulse - Vec3::new(73.0 * dt, 0.0, 0.0)).norm() < 2e-9);
+    assert!(end.omega_body[1].abs() > 1e-9 && end.omega_body[2].abs() > 1e-9);
+}
+
+#[test]
+fn component_frames_bind_identity_and_preserve_degenerate_components() {
+    use fs_ga::{Quat, So3, So3Tangent, Vec3};
+
+    let base = FlyerDesign::reference_1903();
+    let mut oriented = base.clone();
+    let rotation = So3::exp(So3Tangent::new(Vec3::new(0.2, -0.3, 0.5))).unwrap();
+    oriented.components[0].body_from_component = rotation;
+    assert_ne!(oriented.digest(), base.digest());
+    let q = rotation.as_quat();
+    let mut double_cover = oriented.clone();
+    double_cover.components[0].body_from_component = So3::try_from_quat(Quat {
+        w: -q.w,
+        x: -q.x,
+        y: -q.y,
+        z: -q.z,
+    })
+    .unwrap();
+    assert_eq!(double_cover.digest(), oriented.digest());
+    assert_eq!(double_cover.mass_build_up(), oriented.mass_build_up());
+
+    let mut point = base.clone();
+    point.components[0].gyration_sq_m2 = [0.0; 3];
+    let before = point.mass_build_up().unwrap();
+    point.components[0].body_from_component = rotation;
+    assert_eq!(point.mass_build_up().unwrap(), before);
+    // A zero principal moment is also a valid idealized line component.
+    point.components[0].gyration_sq_m2 = [0.0, 0.2, 0.2];
+    assert!(point.mass_build_up().unwrap().rigid_body().is_ok());
+}
+
+#[test]
+fn unrepresentable_component_mass_build_up_refuses() {
+    let mut design = FlyerDesign::reference_1903();
+    design.components[0].gyration_sq_m2[0] = f64::MAX;
+    assert_eq!(
+        design.mass_build_up().unwrap_err().code,
+        "component-mass-invalid"
+    );
+    design.components[0].gyration_sq_m2[0] = 0.2;
+    design.components[0].position_m[0] = f64::MAX;
+    assert_eq!(
+        design.mass_build_up().unwrap_err().code,
+        "component-mass-invalid"
+    );
+}
+
+#[test]
 fn admission_refuses_at_cap_and_cap_plus_one() {
     let base = FlyerDesign::reference_1903;
     // Pilot mass: both edges admitted, one float outside refused.

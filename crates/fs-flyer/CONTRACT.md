@@ -20,17 +20,21 @@ the browser boundary remains in `fs-flyer-wasm`.
   coordinates, +x forward from the wing leading edge, SI units, radians.
 - `LateralControlTopology::{WarpWithSlavedRudder{ratio}, WarpIndependentRudder}`;
   `WarpStructureMode::{FlexibleTrussed, Rigidized}`.
-- `MassComponent { mass, position, gyration_sq }` — six-bucket engine
-  convention included; gyration radii carry each component's own spread.
+- `MassComponent { mass, position, gyration_sq, body_from_component }` —
+  six-bucket engine convention included; squared principal gyration radii
+  and an explicit `So3` frame carry each component's intrinsic tensor.
 - `mass_build_up()` → gross mass, gross CG and full body inertia about the
-  gross CG. `cross_inertia_kgm2` retains the negative parallel-axis products;
+  gross CG. `cross_inertia_kgm2` retains rotated intrinsic products and the
+  negative parallel-axis products;
   `inertia_tensor()` reconstructs the symmetric matrix and `rigid_body()`
   prepares the original six-DOF body directly from it.
 - `derived_panel(hinge_ratio)` → canard volume, naive two-surface neutral
   point, fixed AND free-control static margins, thin-plate hinge-moment
   gradient 2π·(x_h − ¼).
 - `digest()` — canonical content identity under
-  `org.frankensim.fs-flyer.design.v1` (a PhysicalScenarioId ingredient).
+  `org.frankensim.fs-flyer.design.v1` for aligned components; explicitly
+  oriented components select `design.v2` and bind all canonical component
+  quaternions (a PhysicalScenarioId ingredient).
 - `FlyerDesign::reference_1903()` — the dossier-valued reference config.
 - `simloop::SimLoop` / `SimStateOut` — 120 Hz lifecycle state including
   longitudinal state plus Estimated reduced roll/yaw state. Snapshot v2 is a
@@ -62,8 +66,25 @@ Replay and partitioned flight carry that same body; no geometry or load axes
 are relabelled. The diagonal path retains its original arithmetic and digest.
 G1/G3 fixtures independently check component raw moments, the actual
 design-to-flight path, body-coordinate covariance and cross-axis motor recoil.
-Component gyration inputs still describe body-aligned diagonal COM tensors;
-this does not infer unprovided intrinsic cross terms or changing distributions.
+`MassComponent::body_from_component` maps its declared principal axes into
+the unchanged aircraft body coordinates. The existing `So3` and `Mat3` owners
+rotate the component's diagonal intrinsic form before mass-weighting and
+parallel-axis assembly. Positions already live in body axes and are not rotated
+again. This cold assembly introduces no eigensolve or new dynamics owner.
+Aligned components retain their original arithmetic, reference numbers and
+v1 digest. Nonidentity frames use the v2 identity with canonical quaternions,
+so opposite quaternion representatives cannot create different scenarios.
+Idealized point/line components with zero principal moments remain admitted;
+the gross body still goes through the original positive-tensor preparation.
+Nonfinite derived gross moments refuse before publication.
+
+G1/G3 design tests compare all nine tensor entries with independent volume
+quadrature of an oblique homogeneous cuboid, retain the pilot's original mass
+and inertia, and feed the result through an actual flight torque step. G0
+checks cover canonical frame identity, degenerate component moments and
+unrepresentable mass properties. The input principal moments remain declared
+data or the documented reference calibration; a rotation does not validate
+that calibration or supply missing geometry, moving masses or deformation.
 
 ## Finite-strip rotational fluid inertia
 

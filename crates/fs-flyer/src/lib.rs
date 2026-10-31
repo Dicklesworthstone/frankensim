@@ -65,6 +65,8 @@ pub mod webgpu_experiment;
 
 /// Identity domain for design digests.
 pub const DESIGN_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer.design.v1";
+/// Design identity when component principal frames are explicitly rotated.
+pub const ORIENTED_DESIGN_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer.design.v2";
 
 /// Admission caps (refusals at cap AND cap+1 per workspace law).
 pub const MAX_SPAN_M: f64 = 20.0;
@@ -134,7 +136,8 @@ pub enum WarpStructureMode {
 
 /// One mass component: six-bucket engine convention + airframe + crew.
 /// Positions are frd-body-v1 metres from the wing leading edge; gyration
-/// radii squared [m²] carry each component's own mass distribution.
+/// radii squared [m²] carry each component's own mass distribution in its
+/// declared principal frame. That frame is fixed relative to the aircraft.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MassComponent {
     /// Stable component name (unique within a design).
@@ -143,11 +146,35 @@ pub struct MassComponent {
     pub mass_kg: f64,
     /// Position [m], frd (+x forward from wing LE, +y right, +z down).
     pub position_m: [f64; 3],
-    /// Squared gyration radii [m²] about the component's own CG, per body
-    /// axis (rx² adds to Ixx, etc.). CALIBRATION provenance: reference-
+    /// Squared principal gyration radii [m²] about the component's own CG.
+    /// Nonnegative entries admit idealized point/line components as well as
+    /// positive rotational forms. CALIBRATION provenance: reference-
     /// config radii are tuned to reproduce the published single-lineage
     /// inertias and say so; they are not measurements.
     pub gyration_sq_m2: [f64; 3],
+    /// Proper rotation from the component's principal axes to frd body axes.
+    /// It rotates intrinsic inertia only; `position_m` is already in body
+    /// coordinates. Use `So3::identity()` for a body-aligned component.
+    pub body_from_component: fs_ga::So3,
+}
+
+impl MassComponent {
+    /// Intrinsic gyration tensor about the component CG, expressed in body
+    /// axes [m²]. Multiplication by mass supplies its centroidal inertia.
+    /// The existing group/matrix owners evaluate `R diag(r²) Rᵀ`; no
+    /// eigensolve or principal-axis inference is needed.
+    #[must_use]
+    pub fn gyration_tensor_m2(&self) -> fs_ga::Mat3 {
+        let [x, y, z] = self.gyration_sq_m2;
+        let diagonal = fs_ga::Mat3 {
+            m: [x, 0.0, 0.0, 0.0, y, 0.0, 0.0, 0.0, z],
+        };
+        if self.body_from_component == fs_ga::So3::identity() {
+            return diagonal;
+        }
+        let rotation = self.body_from_component.matrix();
+        rotation.compose(diagonal).compose(rotation.transpose())
+    }
 }
 
 /// Wing geometry (both planes; geometry-conventions-v1 symbols).
@@ -232,8 +259,9 @@ pub struct MassBuildUp {
     /// Diagonal body-axis inertia about the GROSS CG [kg·m²]. These are not
     /// principal moments when the products of inertia are nonzero.
     pub inertia_kgm2: [f64; 3],
-    /// Off-diagonal tensor entries `[Ixy, Ixz, Iyz]` [kg·m²], including the
-    /// negative parallel-axis products `-mass * dx * dy` and cyclic entries.
+    /// Off-diagonal tensor entries `[Ixy, Ixz, Iyz]` [kg·m²], including
+    /// rotated intrinsic tensors and the negative parallel-axis products
+    /// `-mass * dx * dy` and cyclic entries.
     pub cross_inertia_kgm2: [f64; 3],
 }
 
@@ -440,7 +468,7 @@ impl FlyerDesign {
         ];
         let mut inertia = [0.0f64; 3];
         let mut cross_inertia = [0.0f64; 3];
-        let mut add = |mass: f64, pos: &[f64; 3], gyr: &[f64; 3]| {
+        let mut add = |mass: f64, pos: &[f64; 3], gyr: &[f64; 3], cross_gyr: [f64; 3]| {
             let d = [pos[0] - cg[0], pos[1] - cg[1], pos[2] - cg[2]];
             inertia[0] += mass * (d[1] * d[1] + d[2] * d[2] + gyr[0]);
             inertia[1] += mass * (d[0] * d[0] + d[2] * d[2] + gyr[1]);
@@ -448,14 +476,42 @@ impl FlyerDesign {
             cross_inertia[0] -= mass * d[0] * d[1];
             cross_inertia[1] -= mass * d[0] * d[2];
             cross_inertia[2] -= mass * d[1] * d[2];
+            // Preserve the aligned reduction bit for bit, including signed
+            // zero behavior. Nonzero intrinsic products have the tensor sign;
+            // unlike parallel-axis products they are not negated here.
+            for (entry, product) in cross_inertia.iter_mut().zip(cross_gyr) {
+                if product != 0.0 {
+                    *entry += mass * product;
+                }
+            }
         };
         add(
             self.pilot_mass_kg,
             &self.pilot_position_m,
             &[0.06, 0.35, 0.35],
+            [0.0; 3],
         );
         for c in &self.components {
-            add(c.mass_kg, &c.position_m, &c.gyration_sq_m2);
+            let gyration = c.gyration_tensor_m2().m;
+            add(
+                c.mass_kg,
+                &c.position_m,
+                &[gyration[0], gyration[4], gyration[8]],
+                [gyration[1], gyration[2], gyration[5]],
+            );
+        }
+        if !m_total.is_finite()
+            || !cg
+                .iter()
+                .chain(&inertia)
+                .chain(&cross_inertia)
+                .all(|v| v.is_finite())
+        {
+            return Err(refuse(
+                "component-mass-invalid",
+                "component mass/position/inertia cannot form a finite gross tensor".into(),
+                "use representable masses, coordinates and principal gyrations",
+            ));
         }
         Ok(MassBuildUp {
             gross_kg: m_total,
@@ -512,11 +568,17 @@ impl FlyerDesign {
         })
     }
 
-    /// Content digest of the design (canonical little-endian field bytes
-    /// under [`DESIGN_DIGEST_DOMAIN`]). Identity ingredient for
+    /// Content digest of the design (canonical little-endian field bytes).
+    /// Aligned designs retain [`DESIGN_DIGEST_DOMAIN`]. A nonidentity
+    /// component frame selects [`ORIENTED_DESIGN_DIGEST_DOMAIN`] and binds
+    /// every component's canonical quaternion. Identity ingredient for
     /// PhysicalScenarioId (replay-identity-schema-v1).
     #[must_use]
     pub fn digest(&self) -> String {
+        let oriented = self
+            .components
+            .iter()
+            .any(|c| c.body_from_component != fs_ga::So3::identity());
         let mut payload = Vec::new();
         payload.extend_from_slice(self.name.as_bytes());
         let mut push = |v: f64| payload.extend_from_slice(&v.to_bits().to_le_bytes());
@@ -563,8 +625,22 @@ impl FlyerDesign {
             for v in c.gyration_sq_m2 {
                 payload.extend_from_slice(&v.to_bits().to_le_bytes());
             }
+            if oriented {
+                let q = c.body_from_component.as_quat();
+                for v in [q.w, q.x, q.y, q.z] {
+                    payload.extend_from_slice(&v.to_bits().to_le_bytes());
+                }
+            }
         }
-        hash_domain(DESIGN_DIGEST_DOMAIN, &payload).to_hex()
+        hash_domain(
+            if oriented {
+                ORIENTED_DESIGN_DIGEST_DOMAIN
+            } else {
+                DESIGN_DIGEST_DOMAIN
+            },
+            &payload,
+        )
+        .to_hex()
     }
 
     /// The reference 1903 configuration, built from the frozen dossiers
@@ -612,60 +688,70 @@ impl FlyerDesign {
                     mass_kg: 122.0,
                     position_m: [-0.696, 0.0, 0.0],
                     gyration_sq_m2: [12.588, 0.60, 12.915],
+                    body_from_component: fs_ga::So3::identity(),
                 },
                 MassComponent {
                     name: "skids-frame",
                     mass_kg: 20.0,
                     position_m: [-0.50, 0.0, 0.55],
                     gyration_sq_m2: [1.0, 2.2, 1.75],
+                    body_from_component: fs_ga::So3::identity(),
                 },
                 MassComponent {
                     name: "canard-structure",
                     mass_kg: 13.0,
                     position_m: [2.30, 0.0, 0.30],
                     gyration_sq_m2: [1.116, 1.2, 1.164],
+                    body_from_component: fs_ga::So3::identity(),
                 },
                 MassComponent {
                     name: "rudder-structure",
                     mass_kg: 7.0,
                     position_m: [-3.35, 0.0, 0.0],
                     gyration_sq_m2: [0.30, 1.0, 0.50],
+                    body_from_component: fs_ga::So3::identity(),
                 },
                 MassComponent {
                     name: "engine-dry",
                     mass_kg: 68.0,
                     position_m: [-0.60, 0.30, 0.0],
                     gyration_sq_m2: [0.04, 0.04, 0.04],
+                    body_from_component: fs_ga::So3::identity(),
                 },
                 MassComponent {
                     name: "engine-installed-accessories",
                     mass_kg: 8.0,
                     position_m: [-0.60, 0.30, 0.0],
                     gyration_sq_m2: [0.02, 0.02, 0.02],
+                    body_from_component: fs_ga::So3::identity(),
                 },
                 MassComponent {
                     name: "cooling-water",
                     mass_kg: 11.0,
                     position_m: [-0.35, 0.25, -0.30],
                     gyration_sq_m2: [0.04, 0.04, 0.04],
+                    body_from_component: fs_ga::So3::identity(),
                 },
                 MassComponent {
                     name: "ignition",
                     mass_kg: 3.0,
                     position_m: [-0.50, 0.30, 0.0],
                     gyration_sq_m2: [0.01, 0.01, 0.01],
+                    body_from_component: fs_ga::So3::identity(),
                 },
                 MassComponent {
                     name: "drivetrain-chains",
                     mass_kg: 16.0,
                     position_m: [-0.85, 0.0, -0.10],
                     gyration_sq_m2: [0.50, 0.80, 0.50],
+                    body_from_component: fs_ga::So3::identity(),
                 },
                 MassComponent {
                     name: "propellers",
                     mass_kg: 6.4,
                     position_m: [-1.30, 0.0, -0.10],
                     gyration_sq_m2: [1.103, 0.05, 1.103],
+                    body_from_component: fs_ga::So3::identity(),
                 },
             ],
         }
