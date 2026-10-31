@@ -408,8 +408,9 @@ retains both the original thermal-load identity and the complete load identity.
 `tests/quadratic_thermal_loads.rs` checks analytic thermal expansion plus end
 traction on all three families, support-load accounting, and malformed loads.
 
-`linear3::visco` (IRP M1.3-W2a, in progress) prepares P1 or TET10 elements
-with caller-supplied, mesh-frame `fs-material::TensorProny` laws and density.
+`linear3::visco` (IRP M1.3-W2a, in progress) prepares P1, TET10, HEX20 or
+HEX27 elements with caller-supplied, mesh-frame `fs-material::TensorProny`
+laws and density.
 It reuses the existing elastic mesh admission, equilibrium stiffness and
 consistent mass, and the shared Mandel B operator. Complex stiffness retains
 the full storage and loss tensors, including off-diagonal couplings. Every
@@ -417,6 +418,15 @@ frequency query must lie in every element's declared law band. Empty branches
 reproduce the canonical elastic stiffness bitwise. Positive quadrature weights
 propagate pointwise relative quadratic-form bounds to the assembled forms;
 this alone is not a frequency-dependent modal-eigenvalue certificate.
+
+`SolidMeshRef::Hex` retains the original hexahedral connectivity and positive
+tensor-product quadrature (at least three points per axis). The original
+`HexElasticProblem` admits topology and sampled Jacobians and assembles the
+reference elastic pencil; the same hex shape gradients feed full-tensor
+spectra, projected operators, constitutive histories and integrated heat.
+This includes curved HEX20/HEX27 geometry without a tetrahedral remesh.
+Jacobian and small-strain checks apply at declared integration points;
+they do not certify unsampled geometry or strain extrema.
 
 The required `ViscoStateBudget` counts six internal strain scalars per branch
 and stiffness quadrature point, before history allocation. A history borrows
@@ -438,6 +448,10 @@ band/state-cap/invalid-history refusals; G1 harmonic endpoint force on three
 time rungs (observed order 2 +/- 0.2); G3 rotation invariance; and a G4
 cancellation-preserves-state check. These fixtures are synthetic software
 checks and require native execution.
+The HEX20/HEX27 fixtures additionally check rotated multiaxial spectra,
+work-conjugate full forces, exact material work/heat integration, canonical
+elastic mass/stiffness parity, quadrature/state-budget refusals, and curved
+HEX27 storage/loss convergence against an analytic spatial integral.
 
 `ViscoElements::modes` solves the storage-dispersive ordered eigenproblem
 `lambda(K'(omega), M) = omega^2` using the existing dense fs-modal eigensolver

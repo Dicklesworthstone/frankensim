@@ -7,6 +7,10 @@ use fs_material::visco::tensor::{
 use fs_material::visco::tensor::{Mandel6, PronyBranch, TensorProny};
 use fs_material::{OrthotropicElastic, visco::FractionalZener};
 use fs_math::det;
+use fs_solid::linear3::hex::{
+    HEX20_REFERENCE_NODES, HEX27_REFERENCE_NODES, HexConnectivity, HexElasticProblem, HexFamily,
+    HexQuadrature,
+};
 use fs_solid::linear3::tet10::{QuadraticTetProblem, TetQuadrature, promote_p1_to_p2};
 use fs_solid::linear3::visco::*;
 use fs_solid::linear3::{TetAssemblyBudget, TetElasticMaterial, TetMaterialField};
@@ -93,6 +97,227 @@ fn system(mesh: SolidMeshRef<'_>, m: &TetViscoMaterial, cx: &Cx<'_>) -> ViscoEle
         cx,
     )
     .unwrap()
+}
+
+#[test]
+fn g0_hex_tensor_spectra_and_history_preserve_material_work() {
+    with_cx(|cx, _| {
+        let physical = |p: [i8; 3]| {
+            [
+                0.1 * f64::from(p[0]),
+                0.05 * f64::from(p[1]),
+                0.025 * f64::from(p[2]),
+            ]
+        };
+        let n20 = HEX20_REFERENCE_NODES.map(physical);
+        let n27 = HEX27_REFERENCE_NODES.map(physical);
+        let h20 = [core::array::from_fn(|i| i)];
+        let h27 = [core::array::from_fn(|i| i)];
+        let mut material = fixture(2);
+        material.law = material
+            .law
+            .rotated(fs_material::tensor::rotation([0.0, 0.0, 1.0], 0.37))
+            .unwrap();
+        let strain = [2e-5, -1e-5, 3e-5, 4e-5, -2e-5, 1e-5];
+        let volume = 0.001;
+        for (nodes, elements) in [
+            (n20.as_slice(), HexConnectivity::Hex20(&h20)),
+            (n27.as_slice(), HexConnectivity::Hex27(&h27)),
+        ] {
+            let solid = system(
+                SolidMeshRef::Hex {
+                    nodes_m: nodes,
+                    elements,
+                    quadrature: HexQuadrature { points_per_dir: 3 },
+                },
+                &material,
+                cx,
+            );
+            assert_eq!(solid.internal_variables(), 27 * 2 * 6);
+            let u = displacement(nodes, strain);
+            for omega in [0.0, 1000.0, 1e8] {
+                let k = solid.complex_stiffness(omega, cx).unwrap();
+                let (storage, loss) = material.law.complex_modulus(omega).unwrap();
+                close(
+                    quadratic(&k.real, &u),
+                    volume * q6(&storage, &strain),
+                    2e-12,
+                );
+                if omega > 0.0 {
+                    close(quadratic(&k.imag, &u), volume * q6(&loss, &strain), 2e-12);
+                } else {
+                    assert_eq!(k.real, solid.equilibrium().stiffness);
+                }
+            }
+            let mut history = solid.state(cx).unwrap();
+            let mut point = material.law.state();
+            for (amplitude, dt) in [(1.0, 0.0002), (-0.6, 0.001), (0.3, 0.02), (0.3, 0.005)] {
+                let epsilon = strain.map(|v| amplitude * v);
+                let stress = material.law.step(&mut point, epsilon, dt).unwrap();
+                let report = history
+                    .step_internal_force(&displacement(nodes, epsilon), dt, cx)
+                    .unwrap();
+                assert!(report.step_dissipated_j >= 0.0);
+                close(report.energy.stored_j, volume * point.stored, 2e-12);
+                close(report.energy.work_j, volume * point.work, 2e-12);
+                close(report.energy.dissipated_j, volume * point.dissipated, 2e-12);
+                close(
+                    report.energy.work_j,
+                    report.energy.stored_j + report.energy.dissipated_j,
+                    2e-12,
+                );
+                // Virtual work of the full assembled force, including all
+                // boundary rows, is the original material stress contraction.
+                let work: f64 = report.full_force_n.iter().zip(&u).map(|(f, v)| f * v).sum();
+                close(
+                    work,
+                    volume * stress.iter().zip(strain).map(|(s, e)| s * e).sum::<f64>(),
+                    2e-12,
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_hex_visco_reuses_elastic_mass_and_admission() {
+    with_cx(|cx, _| {
+        let physical = |p: [i8; 3]| p.map(|v| 0.1 * f64::from(v));
+        let n20 = HEX20_REFERENCE_NODES.map(physical);
+        let n27 = HEX27_REFERENCE_NODES.map(physical);
+        let h20 = [core::array::from_fn(|i| i)];
+        let h27 = [core::array::from_fn(|i| i)];
+        for (nodes, elements, family) in [
+            (
+                n20.as_slice(),
+                HexConnectivity::Hex20(&h20),
+                HexFamily::Serendipity20,
+            ),
+            (
+                n27.as_slice(),
+                HexConnectivity::Hex27(&h27),
+                HexFamily::Lagrange27,
+            ),
+        ] {
+            let material = fixture(0);
+            let elastic = TetElasticMaterial::try_new_mandel(
+                material.density_kg_m3,
+                *material.law.c_eq(),
+                material.material_state_identity,
+            )
+            .unwrap();
+            let fixed = [0, 1, 2];
+            let quadrature = HexQuadrature { points_per_dir: 3 };
+            let expected = HexElasticProblem {
+                nodes_m: nodes,
+                family,
+                elements,
+                materials: TetMaterialField::Uniform(&elastic),
+                fixed_dofs: &fixed,
+                budget: TetAssemblyBudget::standard(),
+                quadrature,
+            }
+            .assemble(cx)
+            .unwrap();
+            let make = |material: &TetViscoMaterial, points_per_dir, cap| {
+                ViscoElements::new(
+                    SolidMeshRef::Hex {
+                        nodes_m: nodes,
+                        elements,
+                        quadrature: HexQuadrature { points_per_dir },
+                    },
+                    TetViscoField::Uniform(material),
+                    &fixed,
+                    TetAssemblyBudget::standard(),
+                    ViscoStateBudget {
+                        max_internal_variables: cap,
+                    },
+                    cx,
+                )
+            };
+            let solid = make(&material, 3, 0).unwrap();
+            assert_eq!(solid.equilibrium().stiffness, expected.stiffness);
+            assert_eq!(solid.equilibrium().mass, expected.mass);
+            assert_eq!(solid.equilibrium().free_dofs, expected.free_dofs);
+            let damped = fixture(1);
+            assert_eq!(make(&damped, 3, 162).unwrap().internal_variables(), 162);
+            assert!(matches!(
+                make(&damped, 3, 161),
+                Err(ViscoElementError::InternalStateBudget {
+                    needed: 162,
+                    cap: 161
+                })
+            ));
+            assert!(matches!(
+                make(&damped, 2, 10000),
+                Err(ViscoElementError::Elastic(
+                    fs_solid::linear3::TetElasticError::UnderIntegrated { .. }
+                ))
+            ));
+        }
+    });
+}
+
+#[test]
+fn g1_curved_hex_loss_quadrature_converges_to_analytic_integral() {
+    with_cx(|cx, _| {
+        // x=L*xi*(1+a*eta^2), y=L*eta, z=L*zeta is an exactly represented
+        // Q2 geometry. u_x=b*xi^2 gives rational physical strain, so refining
+        // quadrature changes the answer even though the interpolation is fixed.
+        let (length, warp, amplitude) = (0.1, 0.2_f64, 1e-5);
+        let nodes = HEX27_REFERENCE_NODES.map(|p| {
+            let [x, y, z] = p.map(f64::from);
+            [length * x * (1.0 + warp * y * y), length * y, length * z]
+        });
+        let cells = [core::array::from_fn(|i| i)];
+        let displacement: Vec<f64> = HEX27_REFERENCE_NODES
+            .iter()
+            .flat_map(|p| [amplitude * f64::from(p[0]).powi(2), 0.0, 0.0])
+            .collect();
+        let material = fixture(1);
+        let (storage, loss) = material.law.complex_modulus(1000.0).unwrap();
+        // Integrate xi and zeta analytically; the two remaining eta integrals
+        // are I0=int 1/(1+a*eta^2), I2=int eta^2/(1+a*eta^2), over [-1,1].
+        let i0 = 2.0 * warp.sqrt().atan() / warp.sqrt();
+        let i2 = (2.0 - i0) / warp;
+        let axial = (16.0 / 3.0) * amplitude * amplitude * length * i0;
+        let shear = (32.0 / 5.0) * amplitude * amplitude * length * warp * warp * i2;
+        let expected = [
+            storage[0][0] * axial + storage[3][3] * shear,
+            loss[0][0] * axial + loss[3][3] * shear,
+        ];
+        let mut previous = [f64::INFINITY; 2];
+        for order in [3, 5, 7] {
+            let solid = system(
+                SolidMeshRef::Hex {
+                    nodes_m: &nodes,
+                    elements: HexConnectivity::Hex27(&cells),
+                    quadrature: HexQuadrature {
+                        points_per_dir: order,
+                    },
+                },
+                &material,
+                cx,
+            );
+            let k = solid.complex_stiffness(1000.0, cx).unwrap();
+            let values = [
+                quadratic(&k.real, &displacement),
+                quadratic(&k.imag, &displacement),
+            ];
+            for channel in 0..2 {
+                let error = (values[channel] / expected[channel] - 1.0).abs();
+                assert!(
+                    error < previous[channel],
+                    "order={order}, channel={channel}, error={error:e}, previous={:e}",
+                    previous[channel]
+                );
+                if order == 7 {
+                    assert!(error < 1e-8, "channel={channel}, error={error:e}");
+                }
+                previous[channel] = error;
+            }
+        }
+    });
 }
 
 /// Freudenthal cells, with x=L, y=R, z=T. This fixed spatial mesh isolates

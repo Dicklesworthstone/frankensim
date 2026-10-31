@@ -14,6 +14,10 @@
 //! including cancellation and nonfinite-result refusals. Prescribed nodal
 //! histories are inputs; this module is not a displacement time integrator.
 
+use super::hex::{
+    HexConnectivity, HexElasticProblem, HexFamily, HexPoint, HexQuadrature, hex20_point,
+    hex27_point,
+};
 use super::tet10::{QuadraticTetProblem, TetQuadrature, tet10_point};
 use super::{
     TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetElasticMaterial, TetGeometry,
@@ -46,6 +50,16 @@ pub enum SolidMeshRef<'a> {
         elements: &'a [[usize; 10]],
         /// Required positive-weight stiffness and consistent-mass rules.
         quadrature: TetQuadrature,
+    },
+    /// Fully integrated isoparametric HEX20 or HEX27, in canonical node order.
+    /// The original elastic owner admits topology and sampled Jacobians.
+    Hex {
+        /// Complete corner, edge and (for HEX27) face/interior positions [m].
+        nodes_m: &'a [[f64; 3]],
+        /// Existing hexahedral family and connectivity, without remeshing.
+        elements: HexConnectivity<'a>,
+        /// Positive tensor-product rule, with at least three points per axis.
+        quadrature: HexQuadrature,
     },
 }
 
@@ -369,8 +383,56 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), ViscoElementError> {
         .map_err(|_| TetElasticError::Cancelled.into())
 }
 
+// The two existing hex geometry kernels differ only in their node count.
+// Keep the Mandel pullback, quadrature order and source copying identical.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn prepare_hex<const N: usize, const D: usize>(
+    prepared: &mut Vec<Element>,
+    nodes: &[[f64; 3]],
+    cells: &[[usize; N]],
+    field: TetViscoField<'_>,
+    rule: &[([f64; 3], f64)],
+    minimum_scaled_jacobian: f64,
+    point: fn([[f64; 3]; N], [f64; 3], f64, usize, usize) -> Result<HexPoint<N>, TetElasticError>,
+    cx: &Cx<'_>,
+) -> Result<(), ViscoElementError> {
+    for (element, conn) in cells.iter().enumerate() {
+        checkpoint(cx)?;
+        let coordinates = conn.map(|node| nodes[node]);
+        let mut points = Vec::with_capacity(rule.len());
+        for (index, &(location, weight)) in rule.iter().enumerate() {
+            checkpoint(cx)?;
+            let geometry = point(
+                coordinates,
+                location,
+                minimum_scaled_jacobian,
+                element,
+                index,
+            )?;
+            let b = super::isoparametric::mandel_b::<N, D>(geometry.gradients);
+            points.push(IntegrationPoint {
+                b: (0..D)
+                    .map(|column| core::array::from_fn(|row| b[row][column]))
+                    .collect(),
+                volume_m3: weight * geometry.determinant_m3,
+            });
+        }
+        prepared.push(Element {
+            dofs: conn
+                .iter()
+                .flat_map(|node| [3 * node, 3 * node + 1, 3 * node + 2])
+                .collect(),
+            law: field.at(element).law.clone(),
+            density_kg_m3: field.at(element).density_kg_m3,
+            material_state_identity: field.at(element).material_state_identity,
+            points,
+        });
+    }
+    Ok(())
+}
+
 impl ViscoElements {
-    /// Prepare P1/TET10 geometry using existing elastic admission/assembly.
+    /// Prepare P1/TET10/HEX20/HEX27 using existing elastic admission/assembly.
     /// Caps are checked before allocating per-element laws or histories.
     pub fn new(
         mesh: SolidMeshRef<'_>,
@@ -394,6 +456,18 @@ impl ViscoElements {
                     elements.len(),
                     quadrature.stiffness_points_per_dir.pow(3),
                 )
+            }
+            SolidMeshRef::Hex {
+                nodes_m,
+                elements,
+                quadrature,
+            } => {
+                quadrature.validate()?;
+                let count = match elements {
+                    HexConnectivity::Hex20(cells) => cells.len(),
+                    HexConnectivity::Hex27(cells) => cells.len(),
+                };
+                (nodes_m, count, quadrature.points_per_dir.pow(3))
             }
         };
         for (what, requested, maximum) in [
@@ -472,6 +546,23 @@ impl ViscoElements {
                 quadrature,
             }
             .assemble(cx)?,
+            SolidMeshRef::Hex {
+                nodes_m,
+                elements,
+                quadrature,
+            } => HexElasticProblem {
+                nodes_m,
+                family: match elements {
+                    HexConnectivity::Hex20(_) => HexFamily::Serendipity20,
+                    HexConnectivity::Hex27(_) => HexFamily::Lagrange27,
+                },
+                elements,
+                materials: TetMaterialField::PerElement(&materials),
+                fixed_dofs: fixed,
+                budget,
+                quadrature,
+            }
+            .assemble(cx)?,
         };
         let mut prepared = Vec::with_capacity(count);
         match mesh {
@@ -533,6 +624,35 @@ impl ViscoElements {
                         material_state_identity: field.at(e).material_state_identity,
                         points: p,
                     });
+                }
+            }
+            SolidMeshRef::Hex {
+                elements,
+                quadrature,
+                ..
+            } => {
+                let rule = quadrature.points()?;
+                match elements {
+                    HexConnectivity::Hex20(cells) => prepare_hex::<20, 60>(
+                        &mut prepared,
+                        nodes,
+                        cells,
+                        field,
+                        &rule,
+                        budget.minimum_scaled_jacobian,
+                        hex20_point,
+                        cx,
+                    )?,
+                    HexConnectivity::Hex27(cells) => prepare_hex::<27, 81>(
+                        &mut prepared,
+                        nodes,
+                        cells,
+                        field,
+                        &rule,
+                        budget.minimum_scaled_jacobian,
+                        hex27_point,
+                        cx,
+                    )?,
                 }
             }
         }
@@ -645,7 +765,7 @@ impl ViscoElements {
     /// Check the complete displacement against every original material point.
     /// This reuses the element's exact Mandel strain map and source domain;
     /// it evolves no history and introduces no alternate stiffness or stress.
-    /// TET10 checks its declared quadrature points, not unsampled extrema.
+    /// High-order elements check declared quadrature points, not unsampled extrema.
     pub fn validate_displacement(
         &self,
         displacement_m: &[f64],
@@ -667,8 +787,12 @@ impl ViscoElements {
                     return Err(TetElasticError::Cancelled.into());
                 }
                 let strain = core::array::from_fn(|i| {
-                    point.b.iter().zip(&element.dofs)
-                        .map(|(b, &dof)| b[i] * displacement_m[dof]).sum()
+                    point
+                        .b
+                        .iter()
+                        .zip(&element.dofs)
+                        .map(|(b, &dof)| b[i] * displacement_m[dof])
+                        .sum()
                 });
                 element.law.validate_mandel_strain(&strain)?;
             }
