@@ -229,9 +229,33 @@ pub struct MassBuildUp {
     pub gross_kg: f64,
     /// Gross CG position [m], frd from wing LE.
     pub cg_m: [f64; 3],
-    /// Body-axis inertia about the GROSS CG [kg·m²] (diagonal; the 1903
-    /// layout is laterally symmetric so products are ~0 by construction).
+    /// Diagonal body-axis inertia about the GROSS CG [kg·m²]. These are not
+    /// principal moments when the products of inertia are nonzero.
     pub inertia_kgm2: [f64; 3],
+    /// Off-diagonal tensor entries `[Ixy, Ixz, Iyz]` [kg·m²], including the
+    /// negative parallel-axis products `-mass * dx * dy` and cyclic entries.
+    pub cross_inertia_kgm2: [f64; 3],
+}
+
+impl MassBuildUp {
+    /// Full symmetric body-frame inertia about the gross centre of mass.
+    #[must_use]
+    pub fn inertia_tensor(&self) -> fs_ga::Mat3 {
+        let [xx, yy, zz] = self.inertia_kgm2;
+        let [xy, xz, yz] = self.cross_inertia_kgm2;
+        fs_ga::Mat3 {
+            m: [xx, xy, xz, xy, yy, yz, xz, yz, zz],
+        }
+    }
+
+    /// Prepare the ordinary flight body without relabelling the geometry or
+    /// dropping products of inertia. Principal-frame preparation occurs once.
+    ///
+    /// # Errors
+    /// Refuses unrepresentable or non-positive-definite mass properties.
+    pub fn rigid_body(&self) -> Result<spine::RigidBody, Refusal> {
+        spine::RigidBody::from_inertia_tensor(self.gross_kg, self.inertia_tensor())
+    }
 }
 
 /// Derived-quantity panel (documented simple models, hand-calc pinned).
@@ -415,11 +439,15 @@ impl FlyerDesign {
             first_moment[2] / m_total,
         ];
         let mut inertia = [0.0f64; 3];
+        let mut cross_inertia = [0.0f64; 3];
         let mut add = |mass: f64, pos: &[f64; 3], gyr: &[f64; 3]| {
             let d = [pos[0] - cg[0], pos[1] - cg[1], pos[2] - cg[2]];
             inertia[0] += mass * (d[1] * d[1] + d[2] * d[2] + gyr[0]);
             inertia[1] += mass * (d[0] * d[0] + d[2] * d[2] + gyr[1]);
             inertia[2] += mass * (d[0] * d[0] + d[1] * d[1] + gyr[2]);
+            cross_inertia[0] -= mass * d[0] * d[1];
+            cross_inertia[1] -= mass * d[0] * d[2];
+            cross_inertia[2] -= mass * d[1] * d[2];
         };
         add(
             self.pilot_mass_kg,
@@ -433,6 +461,7 @@ impl FlyerDesign {
             gross_kg: m_total,
             cg_m: cg,
             inertia_kgm2: inertia,
+            cross_inertia_kgm2: cross_inertia,
         })
     }
 

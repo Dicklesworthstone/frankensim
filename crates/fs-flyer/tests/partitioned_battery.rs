@@ -21,10 +21,7 @@ fn jlog(case: &str, payload: &str) {
 const DT: f64 = 1.0 / 120.0;
 
 fn body() -> RigidBody {
-    RigidBody {
-        mass_kg: 340.17,
-        inertia_kgm2: [1787.0, 367.4, 1820.9],
-    }
+    RigidBody::new(340.17, [1787.0, 367.4, 1820.9]).unwrap()
 }
 
 fn rest() -> SixDofState {

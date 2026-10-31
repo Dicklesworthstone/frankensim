@@ -98,10 +98,7 @@ fn rotation_semantics_agree_between_spine_and_mbd() {
     // Spin the spine 90° about +z (yaw right), then rotate body-x into the
     // world through the ADAPTED quaternion: it must land on world +y
     // (frd/NED: nose right of north = east = +y).
-    let body = RigidBody {
-        mass_kg: 1.0,
-        inertia_kgm2: [1.0, 1.0, 1.0],
-    };
+    let body = RigidBody::new(1.0, [1.0, 1.0, 1.0]).unwrap();
     let start = SixDofState {
         pos_m: [0.0; 3],
         vel_mps: [0.0; 3],
@@ -136,10 +133,7 @@ fn rotation_semantics_agree_between_spine_and_mbd() {
 fn full_state_round_trip_through_the_seam() {
     // Run a coupled trajectory, cross the seam both ways, and require the
     // rebuilt state to be BIT-IDENTICAL (the replay-path guarantee).
-    let body = RigidBody {
-        mass_kg: 340.17,
-        inertia_kgm2: [1787.0, 367.4, 1820.9],
-    };
+    let body = RigidBody::new(340.17, [1787.0, 367.4, 1820.9]).unwrap();
     let start = SixDofState {
         pos_m: [10.0, -3.0, -2.0],
         vel_mps: [13.9, 0.0, 0.0],

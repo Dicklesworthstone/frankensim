@@ -13,8 +13,8 @@
 
 use crate::Refusal;
 use fs_blake3::hash_domain;
-use fs_ga::{Quat, So3, Vec3};
-use fs_time::lie::rigid_body_step;
+use fs_ga::{Mat3, Quat, So3, Vec3};
+use fs_time::lie::{LieStepError, gyrostat::InertiaTensor3, rigid_body_step};
 
 #[path = "spine/rotors.rs"]
 pub mod rotors;
@@ -33,9 +33,9 @@ pub const TICK_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer.spine-tick.v1";
 /// Full 6-DOF rigid state (frd-body-v1 / NED world, SI units).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SixDofState {
-    /// World position [m], NED.
+    /// World centre-of-mass position [m], NED.
     pub pos_m: [f64; 3],
-    /// World velocity [m/s], NED.
+    /// World centre-of-mass velocity [m/s], NED.
     pub vel_mps: [f64; 3],
     /// Unit quaternion (w, x, y, z), body→world.
     pub quat: [f64; 4],
@@ -48,47 +48,137 @@ pub struct SixDofState {
 pub struct Loads {
     /// World-frame force [N].
     pub force_n: [f64; 3],
-    /// Body-frame moment [N·m].
+    /// Body-frame moment about the centre of mass [N·m].
     pub moment_nm: [f64; 3],
 }
 
-/// Rigid-body mass properties (diagonal principal inertia).
+/// Rigid-body mass and full COM inertia in the fixed aircraft body axes.
+///
+/// The shared rotational owner prepares principal axes once at construction.
+/// Geometry, loads and state retain their original body coordinates. The same
+/// cached tensor serves ordinary flight, replay, rotor and added-mass consumers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidBody {
     /// Mass [kg].
     pub mass_kg: f64,
-    /// Principal inertia [kg·m²].
-    pub inertia_kgm2: [f64; 3],
+    inertia: InertiaTensor3,
 }
 
 impl RigidBody {
-    /// Validate mass properties.
+    /// Prepare a body whose declared coordinates are its principal axes.
     ///
     /// # Errors
-    /// `non-finite-input`, `mass-outside-domain`, `inertia-outside-domain`.
-    pub fn admit(&self) -> Result<(), Refusal> {
-        if !self.mass_kg.is_finite() || !self.inertia_kgm2.iter().all(|v| v.is_finite()) {
+    /// Refuses non-finite or non-positive mass and principal inertia.
+    pub fn new(mass_kg: f64, principal_inertia_kgm2: [f64; 3]) -> Result<Self, Refusal> {
+        admit_mass(mass_kg)?;
+        if !principal_inertia_kgm2.iter().all(|value| value.is_finite()) {
             return Err(Refusal {
                 code: "non-finite-input",
-                message: "mass properties must be finite".into(),
+                message: "principal inertia must be finite".into(),
                 ranked_repairs: vec!["check the mass build-up output".into()],
             });
         }
-        if self.mass_kg <= 0.0 {
-            return Err(Refusal {
-                code: "mass-outside-domain",
-                message: format!("mass {} kg must be positive", self.mass_kg),
-                ranked_repairs: vec!["use FlyerDesign::mass_build_up for the gross mass".into()],
-            });
+        let [x, y, z] = principal_inertia_kgm2;
+        let inertia = InertiaTensor3::from_principal(Vec3::new(x, y, z), So3::identity())
+            .map_err(inertia_refusal)?;
+        Ok(Self { mass_kg, inertia })
+    }
+
+    /// Prepare a finite symmetric positive-definite COM inertia [kg·m²].
+    ///
+    /// The tensor may have products of inertia; it is never replaced by its
+    /// diagonal. Reduced carrier inertias for separately owned rotor momentum
+    /// are admitted as positive kinetic forms, without a solid-body triangle
+    /// inequality on that reduced form.
+    ///
+    /// # Errors
+    /// Refuses invalid mass, nonsymmetric/non-positive-definite inertia or a
+    /// failed shared principal-frame reconstruction.
+    pub fn from_inertia_tensor(mass_kg: f64, inertia_kgm2: Mat3) -> Result<Self, Refusal> {
+        admit_mass(mass_kg)?;
+        let inertia = InertiaTensor3::new(inertia_kgm2).map_err(inertia_refusal)?;
+        Ok(Self { mass_kg, inertia })
+    }
+
+    /// Prepared full inertia, with its fixed principal frame and native maps.
+    #[must_use]
+    pub const fn inertia_tensor(&self) -> InertiaTensor3 {
+        self.inertia
+    }
+
+    /// Validate mass properties.
+    ///
+    /// # Errors
+    /// `non-finite-input`, `mass-outside-domain`. The private inertia was
+    /// admitted at construction and cannot drift between steps.
+    pub fn admit(&self) -> Result<(), Refusal> {
+        admit_mass(self.mass_kg)
+    }
+
+    fn angular_acceleration(&self, moment: [f64; 3]) -> Result<[f64; 3], Refusal> {
+        if self.inertia.principal_to_body() == So3::identity() {
+            let diagonal = self.inertia.principal_moments();
+            return Ok([
+                moment[0] / diagonal.x,
+                moment[1] / diagonal.y,
+                moment[2] / diagonal.z,
+            ]);
         }
-        if self.inertia_kgm2.iter().any(|&i| i <= 0.0) {
-            return Err(Refusal {
-                code: "inertia-outside-domain",
-                message: format!("principal inertia {:?} must be positive", self.inertia_kgm2),
-                ranked_repairs: vec!["use the build-up inertias".into()],
-            });
+        let angular = self
+            .inertia
+            .velocity(Vec3::new(moment[0], moment[1], moment[2]))
+            .map_err(lie_refusal)?;
+        Ok([angular.x, angular.y, angular.z])
+    }
+
+    fn free_rotation(&self, rotation: So3, omega: Vec3, dt_s: f64) -> Result<(So3, Vec3), Refusal> {
+        if self.inertia.principal_to_body() == So3::identity() {
+            return rigid_body_step(rotation, omega, self.inertia.principal_moments(), dt_s)
+                .map_err(lie_refusal);
         }
-        Ok(())
+        let momentum = self.inertia.momentum(omega).map_err(lie_refusal)?;
+        let (rotation, momentum) = self
+            .inertia
+            .momentum_step(rotation, momentum, Vec3::default(), dt_s)
+            .map_err(lie_refusal)?;
+        Ok((
+            rotation,
+            self.inertia.velocity(momentum).map_err(lie_refusal)?,
+        ))
+    }
+}
+
+fn admit_mass(mass_kg: f64) -> Result<(), Refusal> {
+    if !mass_kg.is_finite() {
+        return Err(Refusal {
+            code: "non-finite-input",
+            message: "mass must be finite".into(),
+            ranked_repairs: vec!["check the mass build-up output".into()],
+        });
+    }
+    if mass_kg <= 0.0 {
+        return Err(Refusal {
+            code: "mass-outside-domain",
+            message: format!("mass {mass_kg} kg must be positive"),
+            ranked_repairs: vec!["use FlyerDesign::mass_build_up for the gross mass".into()],
+        });
+    }
+    Ok(())
+}
+
+fn inertia_refusal(error: LieStepError) -> Refusal {
+    Refusal {
+        code: "inertia-outside-domain",
+        message: format!("body inertia refused by fs-time: {error}"),
+        ranked_repairs: vec!["use the complete symmetric mass build-up tensor".into()],
+    }
+}
+
+fn lie_refusal(error: LieStepError) -> Refusal {
+    Refusal {
+        code: "lie-step-refused",
+        message: format!("canonical fs-time rigid-body step refused: {error}"),
+        ranked_repairs: vec!["reduce the step or inspect the upstream load model".into()],
     }
 }
 
@@ -251,9 +341,10 @@ where
     }
     // Rotation: half-kick, torque-free Lie step, half-kick.
     let half = 0.5 * dt_s;
+    let angular_acceleration_start = body.angular_acceleration(l0.moment_nm)?;
     let mut w = canonical_state.omega_body;
-    for ((wi, m), inertia) in w.iter_mut().zip(&l0.moment_nm).zip(&body.inertia_kgm2) {
-        *wi += m / inertia * half;
+    for (wi, acceleration) in w.iter_mut().zip(angular_acceleration_start) {
+        *wi += acceleration * half;
     }
     if !pos.pos_m.iter().all(|value| value.is_finite()) || !w.iter().all(|value| value.is_finite())
     {
@@ -263,21 +354,8 @@ where
             ranked_repairs: vec!["reduce the step or inspect the applied loads".into()],
         });
     }
-    let (rotation_new, angular_free) = rigid_body_step(
-        rotation,
-        Vec3::new(w[0], w[1], w[2]),
-        Vec3::new(
-            body.inertia_kgm2[0],
-            body.inertia_kgm2[1],
-            body.inertia_kgm2[2],
-        ),
-        dt_s,
-    )
-    .map_err(|error| Refusal {
-        code: "lie-step-refused",
-        message: format!("canonical fs-time rigid-body step refused: {error}"),
-        ranked_repairs: vec!["reduce the step or inspect the upstream load model".into()],
-    })?;
+    let (rotation_new, angular_free) =
+        body.free_rotation(rotation, Vec3::new(w[0], w[1], w[2]), dt_s)?;
     let w_free = [angular_free.x, angular_free.y, angular_free.z];
     pos.quat = rotation_to_boundary(rotation_new);
     // End-of-tick loads at the predicted state (positions + rotated frame).
@@ -288,10 +366,11 @@ where
         // initial torque impulse for an O(dt²)-accurate endpoint predictor;
         // otherwise angular drag is sampled half a kick early and its
         // integrated momentum is only first-order accurate.
-        predictor.omega_body[i] = w_free[i] + l0.moment_nm[i] / body.inertia_kgm2[i] * half;
+        predictor.omega_body[i] = w_free[i] + angular_acceleration_start[i] * half;
     }
     admit_derived_state(&predictor, "end-of-tick predictor")?;
     let l1 = admit_loads(loads(end_t_s, &predictor), "end-of-tick")?;
+    let angular_acceleration_end = body.angular_acceleration(l1.moment_nm)?;
     let a1 = [
         l1.force_n[0] * inv_m,
         l1.force_n[1] * inv_m,
@@ -306,7 +385,7 @@ where
     }
     for i in 0..3 {
         pos.vel_mps[i] = canonical_state.vel_mps[i] + 0.5 * (a0[i] + a1[i]) * dt_s;
-        pos.omega_body[i] = w_free[i] + l1.moment_nm[i] / body.inertia_kgm2[i] * half;
+        pos.omega_body[i] = w_free[i] + angular_acceleration_end[i] * half;
     }
     admit_derived_state(&pos, "completed tick")?;
     Ok(pos)

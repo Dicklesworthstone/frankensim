@@ -22,8 +22,10 @@ the browser boundary remains in `fs-flyer-wasm`.
   `WarpStructureMode::{FlexibleTrussed, Rigidized}`.
 - `MassComponent { mass, position, gyration_sq }` — six-bucket engine
   convention included; gyration radii carry each component's own spread.
-- `mass_build_up()` → gross mass, gross CG, diagonal body inertia about the
-  gross CG.
+- `mass_build_up()` → gross mass, gross CG and full body inertia about the
+  gross CG. `cross_inertia_kgm2` retains the negative parallel-axis products;
+  `inertia_tensor()` reconstructs the symmetric matrix and `rigid_body()`
+  prepares the original six-DOF body directly from it.
 - `derived_panel(hinge_ratio)` → canard volume, naive two-surface neutral
   point, fixed AND free-control static margins, thin-plate hinge-moment
   gradient 2π·(x_h − ¼).
@@ -49,6 +51,49 @@ the browser boundary remains in `fs-flyer-wasm`.
   balance, not an exact solution for general varying loads. The spine battery
   checks exponential angular decay, its integrated angle and coupled translation,
   and a constant world-frame torque on an asymmetric rotating body (G0/G1).
+
+`spine::RigidBody` owns the shared, immutable `InertiaTensor3`. `new(mass,
+principal_moments)` explicitly declares principal body axes;
+`from_inertia_tensor(mass, tensor)` retains arbitrary products of inertia.
+Principal-frame preparation occurs once, outside all tick loops. Ordinary
+flight torque kicks use the full inverse tensor, and native free rotation
+transports angular momentum through the same fixed body-frame transformation.
+Replay and partitioned flight carry that same body; no geometry or load axes
+are relabelled. The diagonal path retains its original arithmetic and digest.
+G1/G3 fixtures independently check component raw moments, the actual
+design-to-flight path, body-coordinate covariance and cross-axis motor recoil.
+Component gyration inputs still describe body-aligned diagonal COM tensors;
+this does not infer unprovided intrinsic cross terms or changing distributions.
+
+## Finite-strip rotational fluid inertia
+
+`addedmass::assemble_analytic_strip` integrates each finite uniform strip's
+normal translation, pitch about its explicit span axis, and normal-velocity
+variation along its span. With chord `c`, span `b` and normal added mass
+`m_a = rho*pi*c²*b/4`, its centroidal rotary terms are `m_a*c²/32` about the
+span axis and `m_a*b²/12` about `span_axis cross normal`. The pitch coefficient
+is the flat-plate limit of the ellipse coefficient in
+[MIT 13.021, supplemental problem A1, page 3](https://web.mit.edu/13.021/13021_2004/suppnotes/supp04.pdf),
+with ellipse semiaxis `a=c/2`; the span coefficient is the exact uniform second
+moment. These are coefficients of the existing independent-strip potential-flow
+approximation, not a full three-dimensional rectangular-plate solution.
+
+`Strip` supplies orthonormal `normal`/`span_axis` directions plus the existing
+centroid `control_gain` and explicit `control_angular_gain`. All three positive
+kinetic-energy modes contribute to rigid, hinge and cross blocks together;
+their shared added momentum supplies the original workless gyroscopic bias.
+The joint solve also retains the rigid body's complete inertia tensor.
+The actual extraction path uses these terms and records algorithm version
+`config-resolved-strip-v2`; its existing wire schema is unchanged.
+
+G0/G2/G3 tests in `addedmass_battery` cover the thin-ellipse pitch coefficient,
+hinge/rigid recoil, finite-span subdivision, reference shifts, oblique frame
+rotation, length-to-the-fifth rotary scaling, PSD, work closure and invalid
+orientation. The intentionally changed joint and extraction goldens distinguish
+the added physical storage. Geometry/control Jacobians remain frozen during
+each assembly; configuration derivatives for finite hinge motion, cross-strip
+fluid interaction, free-surface effects and finite-aspect-ratio corrections are
+outside this approximation.
 
 ## Hydrostatic pressure and material atmosphere loads
 
@@ -89,7 +134,8 @@ not an anelastic or compressible atmospheric-flow solve.
 `spine::rotors::{RotorAssembly, RotorState, RotorTorques, step_held}` couples
 up to 64 independent axisymmetric rotors to the native six-DOF spine.
 `reduced_body` includes the whole assembly's mass and transverse/offset rotor
-inertia but excludes rotor axial spin inertia. Signed absolute axial momenta
+inertia but excludes rotor axial spin inertia. Its full tensor and all rotor
+axes use the same declared body frame, which need not be principal. Signed absolute axial momenta
 are `p = J (relative_spin + axis dot omega)`; `state_from_relative_spin`
 constructs them from physical relative speeds. This is the reaction-wheel
 reduction documented by Basilisk's `mrpSteering`, equations (2)--(6).

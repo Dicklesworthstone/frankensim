@@ -5,10 +5,11 @@
 //!
 //! Tier honesty (the AddedMassMode ladder doctrine): fs-wing does not
 //! yet expose the surface potential, so this extraction is
-//! `config-resolved-strip-v1` — the rigid↔canard cross column of the
+//! `config-resolved-strip-v2` — the rigid↔canard cross column of the
 //! REAL strip assembly evaluated on the DEFORMED configuration
 //! (canard normal rotated by its deflection, tip strips rotated by
-//! warp, moment arms shifted by height). The artifact DECLARES its
+//! warp, moment arms shifted by height), including finite-chord pitch
+//! and finite-span rotational fluid inertia. The artifact DECLARES its
 //! tier; a potential-integrating panel tier slots into the same
 //! artifact schema when fs-wing grows a Φ surface. The declared
 //! approximation is carried, never hidden.
@@ -24,7 +25,7 @@ use fs_blake3::hash_domain;
 use fs_math::det;
 
 /// Extraction algorithm version (enters the artifact id).
-pub const EXTRACTION_VERSION: &str = "config-resolved-strip-v1";
+pub const EXTRACTION_VERSION: &str = "config-resolved-strip-v2";
 
 /// Grid-axis cap (per axis).
 pub const MAX_AXIS: usize = 16;
@@ -80,8 +81,10 @@ pub fn strips_at(deflection_rad: f64, height_m: f64, warp_rad: f64) -> Vec<Strip
             span_m: 3.66,
             position_m: [2.23, 0.0, -height_m],
             normal: [sd, 0.0, cd],
+            span_axis: [0.0, 1.0, 0.0],
             control_coord: Some(0),
             control_gain: 0.9,
+            control_angular_gain: [0.0, 1.0, 0.0],
         },
         Strip {
             name: "wing-center",
@@ -89,8 +92,10 @@ pub fn strips_at(deflection_rad: f64, height_m: f64, warp_rad: f64) -> Vec<Strip
             span_m: 6.0,
             position_m: [0.0, 0.0, -height_m],
             normal: [0.0, 0.0, 1.0],
+            span_axis: [0.0, 1.0, 0.0],
             control_coord: None,
             control_gain: 0.0,
+            control_angular_gain: [0.0; 3],
         },
         Strip {
             name: "wing-tip-left",
@@ -98,8 +103,10 @@ pub fn strips_at(deflection_rad: f64, height_m: f64, warp_rad: f64) -> Vec<Strip
             span_m: 3.0,
             position_m: [0.0, -4.6, -height_m],
             normal: [0.0, -sw, cw],
+            span_axis: [0.0, cw, sw],
             control_coord: None,
             control_gain: 0.0,
+            control_angular_gain: [0.0; 3],
         },
         Strip {
             name: "wing-tip-right",
@@ -107,8 +114,10 @@ pub fn strips_at(deflection_rad: f64, height_m: f64, warp_rad: f64) -> Vec<Strip
             span_m: 3.0,
             position_m: [0.0, 4.6, -height_m],
             normal: [0.0, sw, cw],
+            span_axis: [0.0, cw, -sw],
             control_coord: None,
             control_gain: 0.0,
+            control_angular_gain: [0.0; 3],
         },
     ]
 }

@@ -64,6 +64,64 @@ fn inertia_reproduces_published_lineage_within_band() {
 }
 
 #[test]
+fn component_build_up_retains_all_products_in_the_ordinary_flight_body() {
+    use fs_flyer::spine::{Loads, SixDofState, step};
+    use fs_ga::Vec3;
+
+    let mut design = FlyerDesign::reference_1903();
+    design.pilot_position_m = [-0.9, -0.6, 0.2];
+    let built = design.mass_build_up().unwrap();
+    // Independent raw-moment/centroid identity, rather than summing shifted
+    // products through the builder's parallel-axis implementation.
+    for (k, (i, j)) in [(0, 1), (0, 2), (1, 2)].into_iter().enumerate() {
+        let raw = design.pilot_mass_kg * design.pilot_position_m[i] * design.pilot_position_m[j]
+            + design
+                .components
+                .iter()
+                .map(|c| c.mass_kg * c.position_m[i] * c.position_m[j])
+                .sum::<f64>();
+        let expected = built.gross_kg * built.cg_m[i] * built.cg_m[j] - raw;
+        assert!((built.cross_inertia_kgm2[k] - expected).abs() < 2e-12);
+        assert!(
+            expected.abs() > 0.1,
+            "fixture must exercise all cross terms"
+        );
+    }
+    let body = built.rigid_body().unwrap();
+    for (got, expected) in body
+        .inertia_tensor()
+        .matrix()
+        .m
+        .iter()
+        .zip(built.inertia_tensor().m)
+    {
+        assert!((got - expected).abs() < 2e-12);
+    }
+    let state = SixDofState {
+        pos_m: [0.0; 3],
+        vel_mps: [0.0; 3],
+        quat: [1.0, 0.0, 0.0, 0.0],
+        omega_body: [0.0; 3],
+    };
+    let moment = Vec3::new(100.0, 0.0, 0.0);
+    let dt = 1e-4;
+    let end = step(&body, &state, 0.0, dt, |_, _| Loads {
+        force_n: [0.0; 3],
+        moment_nm: [moment.x, moment.y, moment.z],
+    })
+    .unwrap();
+    // Initial Euler acceleration is I^-1 tau. The free-rotation contribution
+    // starts quadratically in spin; this small step resolves its O(dt^3) term.
+    let impulse = body.inertia_tensor().matrix().apply(Vec3::new(
+        end.omega_body[0],
+        end.omega_body[1],
+        end.omega_body[2],
+    ));
+    assert!((impulse - moment.scale(dt)).norm() < 2e-10);
+    assert!(end.omega_body[1].abs() > 1e-9 && end.omega_body[2].abs() > 1e-9);
+}
+
+#[test]
 fn admission_refuses_at_cap_and_cap_plus_one() {
     let base = FlyerDesign::reference_1903;
     // Pilot mass: both edges admitted, one float outside refused.

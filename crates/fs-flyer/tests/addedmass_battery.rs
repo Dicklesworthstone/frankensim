@@ -17,10 +17,7 @@ fn jlog(case: &str, payload: &str) {
 const RHO: f64 = 1.294; // the E1.8 cold-day density
 
 fn body() -> RigidBody {
-    RigidBody {
-        mass_kg: 340.17,
-        inertia_kgm2: [1787.0, 367.4, 1820.9],
-    }
+    RigidBody::new(340.17, [1787.0, 367.4, 1820.9]).unwrap()
 }
 
 /// Wing planes (z-normal) + a canard strip driven by the hinge coordinate 0.
@@ -32,8 +29,10 @@ fn flyer_strips() -> Vec<Strip> {
             span_m: 12.29,
             position_m: [-0.5, 0.0, 0.0],
             normal: [0.0, 0.0, 1.0],
+            span_axis: [0.0, 1.0, 0.0],
             control_coord: None,
             control_gain: 0.0,
+            control_angular_gain: [0.0; 3],
         },
         Strip {
             name: "wing-upper",
@@ -41,8 +40,10 @@ fn flyer_strips() -> Vec<Strip> {
             span_m: 12.29,
             position_m: [-0.5, 0.0, -1.89],
             normal: [0.0, 0.0, 1.0],
+            span_axis: [0.0, 1.0, 0.0],
             control_coord: None,
             control_gain: 0.0,
+            control_angular_gain: [0.0; 3],
         },
         Strip {
             name: "canard",
@@ -50,8 +51,10 @@ fn flyer_strips() -> Vec<Strip> {
             span_m: 3.658,
             position_m: [2.6, 0.0, 0.3],
             normal: [0.0, 0.0, 1.0],
+            span_axis: [0.0, 1.0, 0.0],
             control_coord: Some(0),
             control_gain: 0.19, // hinge arm × mode shape at centroid [m]
+            control_angular_gain: [0.0, 1.0, 0.0],
         },
         Strip {
             name: "rudder",
@@ -59,8 +62,10 @@ fn flyer_strips() -> Vec<Strip> {
             span_m: 2.1,
             position_m: [-3.35, 0.0, -0.4],
             normal: [0.0, 1.0, 0.0],
+            span_axis: [0.0, 0.0, 1.0],
             control_coord: None,
             control_gain: 0.0,
+            control_angular_gain: [0.0; 3],
         },
     ]
 }
@@ -72,15 +77,18 @@ fn assemble(nu: [f64; 6], qdot: f64) -> AeroGeneralizedLoads {
 #[test]
 fn single_plate_matches_the_closed_form() {
     // One horizontal plate: M_rr[heave][heave] = ρπc²b/4 EXACTLY; the
-    // heave–pitch coupling is m_a·x; pitch–pitch is m_a·x².
+    // heave–pitch coupling is −m_a·x; pitch includes the plate's own
+    // m_a c²/32 as well as the parallel-axis term m_a·x².
     let plate = [Strip {
         name: "plate",
         chord_m: 2.0,
         span_m: 3.0,
         position_m: [1.5, 0.0, 0.0],
         normal: [0.0, 0.0, 1.0],
+        span_axis: [0.0, 1.0, 0.0],
         control_coord: None,
         control_gain: 0.0,
+        control_angular_gain: [0.0; 3],
     }];
     let l = assemble_analytic_strip(RHO, &plate, 0, &[0.0; 6], &[]).unwrap();
     let m_a = RHO * core::f64::consts::PI * 4.0 / 4.0 * 3.0;
@@ -95,13 +103,196 @@ fn single_plate_matches_the_closed_form() {
         "heave-pitch"
     );
     assert!(
-        (l.m_added_rr[4][4] - m_a * 2.25).abs() < 1e-12,
+        (l.m_added_rr[4][4] - m_a * (2.25 + 4.0 / 32.0)).abs() < 1e-12,
         "pitch-pitch"
+    );
+    assert!(
+        (l.m_added_rr[3][3] - m_a * 9.0 / 12.0).abs() < 1e-12,
+        "finite-span roll inertia"
     );
     // Surge/sway rows are zero (a plate has no added mass along its plane).
     assert_eq!(l.m_added_rr[0][0], 0.0);
     assert_eq!(l.m_added_rr[1][1], 0.0);
     jlog("closed-form", &format!("\"m_a\":{m_a}"));
+}
+
+fn near(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() < 3e-12 * expected.abs().max(1.0),
+        "{actual} != {expected}"
+    );
+}
+
+#[test]
+fn centered_pitching_plate_couples_fluid_spin_to_the_hinge() {
+    // G0/G2: the thin-ellipse limit gives J_a = pi*rho*(c/2)^4*b/8.
+    // A centroid point-mass model would give ZERO for all three entries.
+    let mut plate = flyer_strips()[2].clone();
+    plate.position_m = [0.0; 3];
+    plate.control_gain = 0.0;
+    let added_pitch =
+        core::f64::consts::PI * RHO * (0.5 * plate.chord_m).powi(4) * plate.span_m / 8.0;
+    let mut loads = assemble_analytic_strip(RHO, &[plate], 1, &[0.0; 6], &[0.0]).unwrap();
+    near(loads.m_added_rr[4][4], added_pitch);
+    near(loads.m_added_rc[0][4], added_pitch);
+    near(loads.m_added_cc[0][0], added_pitch);
+    assert!(added_pitch > 0.0);
+
+    // Independent 2x2 solution: (I_r+J) a + J b = 0,
+    // J a + (I_h+J) b = Q. Both coordinates accelerate under hinge load.
+    let rigid = RigidBody::new(5.0, [3.0, 4.0, 5.0]).unwrap();
+    let hinge = 0.2;
+    let torque = 1.3;
+    loads.q_control_nonaccel[0] = torque;
+    let (rigid_acc, hinge_acc) = solve_joint(&rigid, &[hinge], &loads).unwrap();
+    let determinant = 4.0 * hinge + added_pitch * (4.0 + hinge);
+    near(rigid_acc[4], -added_pitch * torque / determinant);
+    near(hinge_acc[0], (4.0 + added_pitch) * torque / determinant);
+    assert!(rigid_acc[4] < 0.0 && hinge_acc[0] > 0.0);
+}
+
+#[test]
+fn finite_strip_subdivision_preserves_mass_momentum_and_control_coupling() {
+    // G3: subdividing the same finite uniform strip must not change its
+    // kinetic energy or apparent forces. This independently exercises the
+    // span integral: centroid offsets plus child intrinsic inertia equal
+    // the parent's finite-span inertia, including a rotating control mode.
+    let mut parent = flyer_strips()[2].clone();
+    parent.control_angular_gain = [0.3, -0.7, 0.2];
+    let nu = [4.0, -0.3, 0.6, 0.5, -0.2, 0.8];
+    let expected = assemble_analytic_strip(RHO, &[parent.clone()], 1, &nu, &[0.4]).unwrap();
+    for count in [2, 5, 16] {
+        let children: Vec<_> = (0..count)
+            .map(|i| {
+                let mut child = parent.clone();
+                let offset = parent.span_m * ((i as f64 + 0.5) / count as f64 - 0.5);
+                child.span_m /= count as f64;
+                for k in 0..3 {
+                    child.position_m[k] += offset * parent.span_axis[k];
+                }
+                // n·(control_angular_gain × offset*t), here n=z and t=y.
+                child.control_gain += offset * parent.control_angular_gain[0];
+                child
+            })
+            .collect();
+        let actual = assemble_analytic_strip(RHO, &children, 1, &nu, &[0.4]).unwrap();
+        for i in 0..6 {
+            for j in 0..6 {
+                near(actual.m_added_rr[i][j], expected.m_added_rr[i][j]);
+            }
+            near(actual.m_added_rc[0][i], expected.m_added_rc[0][i]);
+            near(actual.q_added_bias[i], expected.q_added_bias[i]);
+        }
+        near(actual.m_added_cc[0][0], expected.m_added_cc[0][0]);
+    }
+}
+
+#[test]
+fn rotary_added_inertia_is_frame_covariant_and_scales_with_length_to_the_fifth() {
+    // G3: an oblique rigid rotation must transform the SAME tensor and
+    // generalized bias; span direction is geometry, not an inferred axis.
+    let rotation = [[0.36, 0.48, -0.8], [-0.8, 0.6, 0.0], [0.48, 0.64, 0.6]];
+    let rotate = |v: [f64; 3]| -> [f64; 3] {
+        core::array::from_fn(|i| (0..3).map(|j| rotation[i][j] * v[j]).sum())
+    };
+    let parent = flyer_strips()[2].clone();
+    let nu = [2.0, -0.5, 1.0, 0.6, -0.4, 0.7];
+    let original = assemble_analytic_strip(RHO, &[parent.clone()], 1, &nu, &[0.2]).unwrap();
+    let mut transformed = parent.clone();
+    transformed.position_m = rotate(parent.position_m);
+    transformed.normal = rotate(parent.normal);
+    transformed.span_axis = rotate(parent.span_axis);
+    transformed.control_angular_gain = rotate(parent.control_angular_gain);
+    let v = rotate([nu[0], nu[1], nu[2]]);
+    let w = rotate([nu[3], nu[4], nu[5]]);
+    let rotated = assemble_analytic_strip(
+        RHO,
+        &[transformed],
+        1,
+        &[v[0], v[1], v[2], w[0], w[1], w[2]],
+        &[0.2],
+    )
+    .unwrap();
+    for a in 0..2 {
+        for b in 0..2 {
+            for i in 0..3 {
+                for j in 0..3 {
+                    let mut value = 0.0;
+                    for k in 0..3 {
+                        for l in 0..3 {
+                            value += rotation[i][k]
+                                * original.m_added_rr[3 * a + k][3 * b + l]
+                                * rotation[j][l];
+                        }
+                    }
+                    near(rotated.m_added_rr[3 * a + i][3 * b + j], value);
+                }
+            }
+        }
+        for i in 0..3 {
+            near(
+                rotated.m_added_rc[0][3 * a + i],
+                (0..3)
+                    .map(|j| rotation[i][j] * original.m_added_rc[0][3 * a + j])
+                    .sum(),
+            );
+            near(
+                rotated.q_added_bias[3 * a + i],
+                (0..3)
+                    .map(|j| rotation[i][j] * original.q_added_bias[3 * a + j])
+                    .sum(),
+            );
+        }
+    }
+    near(rotated.m_added_cc[0][0], original.m_added_cc[0][0]);
+    for scale in [0.25_f64, 3.0] {
+        let mut scaled = parent.clone();
+        scaled.chord_m *= scale;
+        scaled.span_m *= scale;
+        scaled.control_gain *= scale;
+        for x in &mut scaled.position_m {
+            *x *= scale;
+        }
+        let loads = assemble_analytic_strip(RHO, &[scaled], 1, &[0.0; 6], &[0.0]).unwrap();
+        for i in 0..6 {
+            for j in 0..6 {
+                let power = 3 + i32::from(i >= 3) + i32::from(j >= 3);
+                near(
+                    loads.m_added_rr[i][j],
+                    original.m_added_rr[i][j] * scale.powi(power),
+                );
+            }
+            near(
+                loads.m_added_rc[0][i],
+                original.m_added_rc[0][i] * scale.powi(4 + i32::from(i >= 3)),
+            );
+        }
+        near(
+            loads.m_added_cc[0][0],
+            original.m_added_cc[0][0] * scale.powi(5),
+        );
+    }
+}
+
+#[test]
+fn joint_solve_retains_the_rigid_bodys_products_of_inertia() {
+    // This checks the algebraic M*a=rhs solve. rhs is the already assembled
+    // inertial RHS, not an external torque for free rigid-body integration.
+    let body = RigidBody::from_inertia_tensor(
+        2.0,
+        fs_ga::Mat3 {
+            m: [3.0, 0.5, -0.2, 0.5, 4.0, 0.3, -0.2, 0.3, 5.0],
+        },
+    )
+    .unwrap();
+    let acceleration = [0.2, -0.4, 0.1, 0.7, -0.3, 0.5];
+    let mut loads = assemble_analytic_strip(RHO, &[], 0, &[0.0; 6], &[]).unwrap();
+    loads.q_rigid_nonaccel = [0.4, -0.8, 0.2, 1.85, -0.7, 2.27];
+    let (actual, control) = solve_joint(&body, &[], &loads).unwrap();
+    assert!(control.is_empty());
+    for i in 0..6 {
+        near(actual[i], acceleration[i]);
+    }
 }
 
 #[test]
@@ -310,9 +501,36 @@ fn refusals_at_cap_and_cap_plus_one() {
             .code,
         "control-coords-outside-domain"
     );
-    // Strip gates: non-unit normal; out-of-range coordinate; bad chord.
+    // Strip gates include the explicit orthonormal orientation and finite
+    // control angular velocity needed by the rotary added-inertia terms.
     let mut bad = flyer_strips();
     bad[0].normal = [0.0, 0.0, 2.0];
+    assert_eq!(
+        assemble_analytic_strip(RHO, &bad, 1, &nu, &[0.0])
+            .unwrap_err()
+            .code,
+        "strip-invalid"
+    );
+    for span_axis in [[0.0, 0.0, 1.0], [0.0, 2.0, 0.0], [f64::NAN, 1.0, 0.0]] {
+        let mut bad = flyer_strips();
+        bad[0].span_axis = span_axis;
+        assert_eq!(
+            assemble_analytic_strip(RHO, &bad, 1, &nu, &[0.0])
+                .unwrap_err()
+                .code,
+            "strip-invalid"
+        );
+    }
+    let mut bad = flyer_strips();
+    bad[2].control_angular_gain[0] = f64::INFINITY;
+    assert_eq!(
+        assemble_analytic_strip(RHO, &bad, 1, &nu, &[0.0])
+            .unwrap_err()
+            .code,
+        "strip-invalid"
+    );
+    let mut bad = flyer_strips();
+    bad[0].chord_m = 1e100;
     assert_eq!(
         assemble_analytic_strip(RHO, &bad, 1, &nu, &[0.0])
             .unwrap_err()
@@ -364,8 +582,9 @@ fn joint_golden_digest() {
     let digest =
         fs_blake3::hash_domain("org.frankensim.fs-flyer.v05d-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
+    // Finite chord/span rotary fluid inertia: measured identically at opt-level 0 and 3.
     assert_eq!(
-        digest, "67462c13531148e9cf47fb4ce3a0913f8a41c12eda53f6cd6a1f4c57f1be6c88",
+        digest, "893e65c751afb001dbdfd13ab16cc3b91002689803cd3bce6a209610291c6af8",
         "V-05d golden moved — determinism regression or an intentional \
          assembly change requiring the golden-bump protocol"
     );

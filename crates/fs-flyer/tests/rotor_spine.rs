@@ -27,10 +27,7 @@ fn rigid() -> SixDofState {
     }
 }
 fn body() -> RigidBody {
-    RigidBody {
-        mass_kg: 3.0,
-        inertia_kgm2: [1.0, 1.5, 2.0],
-    }
+    RigidBody::new(3.0, [1.0, 1.5, 2.0]).unwrap()
 }
 fn rotor(axis_body: [f64; 3]) -> AxialRotor {
     AxialRotor {
@@ -50,9 +47,11 @@ fn total<const N: usize>(
     origin: [f64; 3],
 ) -> (Vec3, Vec3) {
     let p = v(s.rigid.vel_mps).scale(a.reduced_body.mass_kg);
-    let mut l = v(core::array::from_fn(|i| {
-        a.reduced_body.inertia_kgm2[i] * s.rigid.omega_body[i]
-    }));
+    let mut l = a
+        .reduced_body
+        .inertia_tensor()
+        .matrix()
+        .apply(v(s.rigid.omega_body));
     for i in 0..N {
         l = l + v(a.rotors[i].axis_body).scale(s.axial_momentum[i]);
     }
@@ -93,6 +92,47 @@ fn g1_motor_recoil_phase_and_energy_are_analytic() {
     assert!(r.kinetic_work_residual_j.abs() < 1e-15);
     assert!((r.motor_work_j - torque * r.state.relative_phase_rad[0]).abs() < 1e-15);
     assert_eq!(r.external_work_j, 0.0);
+}
+
+#[test]
+fn g1_full_tensor_carrier_has_analytic_cross_axis_motor_recoil() {
+    let a = RotorAssembly {
+        reduced_body: RigidBody::from_inertia_tensor(
+            3.0,
+            fs_ga::Mat3 {
+                m: [2.0, 0.6, 0.0, 0.6, 1.5, 0.0, 0.0, 0.0, 2.5],
+            },
+        )
+        .unwrap(),
+        rotors: [rotor([1.0, 0.0, 0.0])],
+    };
+    let s = a.state_from_relative_spin(rigid(), [0.0], [0.0]).unwrap();
+    let dt = 0.05;
+    let torque = 0.7;
+    let r = step_held(
+        &a,
+        &s,
+        no_loads(),
+        RotorTorques {
+            motor_nm: [torque],
+            aerodynamic_nm: [0.0],
+        },
+        ZERO,
+        dt,
+    )
+    .unwrap();
+    let p = torque * dt;
+    let determinant = 2.0 * 1.5 - 0.6 * 0.6;
+    // Initially zero total angular momentum stays zero: I omega = -p axis.
+    // Independent inverse of the physical xy inertia block supplies recoil.
+    let expected = Vec3::new(-1.5 * p / determinant, 0.6 * p / determinant, 0.0);
+    assert!((v(r.state.rigid.omega_body) - expected).norm() < 2e-14);
+    assert!((r.state.axial_momentum[0] - p).abs() < 1e-15);
+    assert!(v(r.angular_momentum_residual).norm() < 2e-14);
+    assert!(
+        (r.kinetic_energy_after_j - 0.5 * p * p * (1.0 / 0.2 + 1.5 / determinant)).abs() < 2e-14
+    );
+    assert!(r.kinetic_work_residual_j.abs() < 2e-14);
 }
 
 #[test]
@@ -200,7 +240,7 @@ fn g0_balanced_counter_rotors_reduce_to_native_free_carrier() {
     let (exact_r, exact_w) = fs_time::lie::rigid_body_step(
         rotation(&initial),
         v(initial.omega_body),
-        v(body().inertia_kgm2),
+        body().inertia_tensor().principal_moments(),
         0.03,
     )
     .unwrap();
@@ -244,9 +284,12 @@ fn g0_reduced_inertia_and_relative_spin_match_independent_locked_assembly() {
     let j = a.rotors[0].axial_inertia_kgm2;
     assert_eq!(state.axial_momentum[0], j * (relative + projected));
     let carrier_e = 0.5
-        * v(initial.omega_body).dot(v(core::array::from_fn(|i| {
-            body().inertia_kgm2[i] * initial.omega_body[i]
-        })));
+        * v(initial.omega_body).dot(
+            body()
+                .inertia_tensor()
+                .matrix()
+                .apply(v(initial.omega_body)),
+        );
     let locked_e = carrier_e
         + 0.5 * j * projected * projected
         + j * relative * projected

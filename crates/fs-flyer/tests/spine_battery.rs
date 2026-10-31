@@ -14,10 +14,7 @@ fn jlog(case: &str, payload: &str) {
 const DT: f64 = 1.0 / 120.0;
 
 fn body() -> RigidBody {
-    RigidBody {
-        mass_kg: 340.17,
-        inertia_kgm2: [1787.0, 367.4, 1820.9],
-    }
+    RigidBody::new(340.17, [1787.0, 367.4, 1820.9]).unwrap()
 }
 
 fn rest() -> SixDofState {
@@ -65,7 +62,7 @@ fn single_axis_spinup_matches_closed_form() {
         moment_nm: [0.0, m_pitch, 0.0],
     })
     .unwrap();
-    let exact = m_pitch / body().inertia_kgm2[1] * (120.0 * DT);
+    let exact = m_pitch / body().inertia_tensor().matrix().m[4] * (120.0 * DT);
     assert!(
         (end.omega_body[1] - exact).abs() < 1e-12,
         "omega {} vs {exact}",
@@ -84,10 +81,7 @@ fn single_axis_spinup_matches_closed_form() {
 fn richardson_order_is_two_on_time_varying_force() {
     // F(t) = sin(2t) on x: exact velocity v(t) = (1−cos 2t)/2m …with m=1.
     // Measure global order by halving dt twice and fitting the slope.
-    let unit = RigidBody {
-        mass_kg: 1.0,
-        inertia_kgm2: [1.0, 1.0, 1.0],
-    };
+    let unit = RigidBody::new(1.0, [1.0, 1.0, 1.0]).unwrap();
     let t_end = 1.0;
     let err_at = |n: u32| -> f64 {
         let dt = t_end / f64::from(n);
@@ -114,10 +108,7 @@ fn g1_angular_drag_and_cross_coupled_force_converge_at_second_order() {
     // I_y = 2, tau_y = -4 omega_y: omega_y(t) = exp(-2t).
     // F_x = m omega_y independently checks the endpoint angular velocity
     // seen by the same load callback, not only the returned angular state.
-    let body = RigidBody {
-        mass_kg: 3.0,
-        inertia_kgm2: [1.5, 2.0, 2.5],
-    };
+    let body = RigidBody::new(3.0, [1.5, 2.0, 2.5]).unwrap();
     let mut initial = rest();
     initial.omega_body[1] = 1.0;
     let exact_omega = (-2.0_f64).exp();
@@ -153,10 +144,7 @@ fn g1_angular_drag_and_cross_coupled_force_converge_at_second_order() {
 fn g0_spatial_torque_delivers_the_prescribed_world_angular_impulse() {
     use fs_ga::{Quat, So3, So3Tangent, Vec3};
 
-    let body = RigidBody {
-        mass_kg: 2.0,
-        inertia_kgm2: [1.1, 1.7, 2.4],
-    };
+    let body = RigidBody::new(2.0, [1.1, 1.7, 2.4]).unwrap();
     let rotation = So3::exp(So3Tangent::new(Vec3::new(0.3, -0.4, 0.2))).unwrap();
     let q = rotation.as_quat();
     let mut state = rest();
@@ -170,11 +158,11 @@ fn g0_spatial_torque_delivers_the_prescribed_world_angular_impulse() {
             z: s.quat[3],
         })
         .unwrap()
-        .rotate(Vec3::new(
-            body.inertia_kgm2[0] * s.omega_body[0],
-            body.inertia_kgm2[1] * s.omega_body[1],
-            body.inertia_kgm2[2] * s.omega_body[2],
-        ))
+        .rotate(body.inertia_tensor().matrix().apply(Vec3::new(
+            s.omega_body[0],
+            s.omega_body[1],
+            s.omega_body[2],
+        )))
         .unwrap()
     };
     let initial = world_momentum(&state);
@@ -199,6 +187,73 @@ fn g0_spatial_torque_delivers_the_prescribed_world_angular_impulse() {
         residual.norm() < 2e-12,
         "world angular impulse residual {residual:?}"
     );
+}
+
+#[test]
+fn g3_full_tensor_flight_is_covariant_under_body_coordinate_changes() {
+    use fs_ga::{Quat, So3, So3Tangent, Vec3};
+
+    let vector = |a: [f64; 3]| Vec3::new(a[0], a[1], a[2]);
+    let array = |v: Vec3| [v.x, v.y, v.z];
+    let rotation = |s: &SixDofState| {
+        So3::try_from_quat(Quat {
+            w: s.quat[0],
+            x: s.quat[1],
+            y: s.quat[2],
+            z: s.quat[3],
+        })
+        .unwrap()
+    };
+    let basis = So3::exp(So3Tangent::new(Vec3::new(0.3, -0.4, 0.2))).unwrap();
+    let principal = RigidBody::new(2.0, [1.1, 1.7, 2.4]).unwrap();
+    let tensor = basis
+        .matrix()
+        .compose(principal.inertia_tensor().matrix())
+        .compose(basis.matrix().transpose());
+    let full = RigidBody::from_inertia_tensor(2.0, tensor).unwrap();
+    let mut a = rest();
+    let mut b = rest();
+    b.omega_body = [0.8, -0.5, 1.3];
+    a.omega_body = array(basis.rotate(vector(b.omega_body)).unwrap());
+    let q = basis.as_quat();
+    b.quat = [q.w, q.x, q.y, q.z];
+    let torque = Vec3::new(-0.2, 0.3, 0.1);
+    for k in 0..300 {
+        a = step(&full, &a, f64::from(k) * 0.002, 0.002, |_, _| Loads {
+            force_n: [0.4, 0.1, -0.2],
+            moment_nm: array(basis.rotate(torque).unwrap()),
+        })
+        .unwrap();
+        b = step(&principal, &b, f64::from(k) * 0.002, 0.002, |_, _| Loads {
+            force_n: [0.4, 0.1, -0.2],
+            moment_nm: array(torque),
+        })
+        .unwrap();
+    }
+    assert_eq!(a.pos_m, b.pos_m);
+    assert_eq!(a.vel_mps, b.vel_mps);
+    let wa = rotation(&a).rotate(vector(a.omega_body)).unwrap();
+    let wb = rotation(&b).rotate(vector(b.omega_body)).unwrap();
+    assert!((wa - wb).norm() < 3e-11);
+    let probe = Vec3::new(0.2, -0.7, 0.4);
+    let pa = rotation(&a).rotate(basis.rotate(probe).unwrap()).unwrap();
+    let pb = rotation(&b).rotate(probe).unwrap();
+    assert!((pa - pb).norm() < 3e-11);
+    for invalid in [
+        fs_ga::Mat3 {
+            m: [1.0, 0.4, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        },
+        fs_ga::Mat3 {
+            m: [1.0, 2.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        },
+    ] {
+        assert_eq!(
+            RigidBody::from_inertia_tensor(2.0, invalid)
+                .unwrap_err()
+                .code,
+            "inertia-outside-domain"
+        );
+    }
 }
 
 #[test]
@@ -349,10 +404,8 @@ fn refusals_at_cap_and_cap_plus_one() {
         moment_nm: [0.0; 3],
     });
     assert_eq!(bad_dt.unwrap_err().code, "timestep-outside-domain");
-    let bad_body = RigidBody {
-        mass_kg: 0.0,
-        inertia_kgm2: [1.0; 3],
-    };
+    let mut bad_body = RigidBody::new(1.0, [1.0; 3]).unwrap();
+    bad_body.mass_kg = 0.0;
     assert_eq!(
         step(&bad_body, &rest(), 0.0, DT, |_, _| Loads {
             force_n: [0.0; 3],

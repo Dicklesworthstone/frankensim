@@ -15,7 +15,7 @@ use super::{
 };
 use crate::Refusal;
 use fs_ga::Vec3;
-use fs_time::lie::gyrostat::{HeldTorque, driven_step};
+use fs_time::lie::gyrostat::HeldTorque;
 
 #[path = "rotors/geared.rs"]
 pub mod geared;
@@ -28,7 +28,7 @@ pub const MAX_ROTORS: usize = 64;
 /// Axisymmetric rotor mounted at a fixed orientation in the body.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AxialRotor {
-    /// Unit spin axis in the body's principal-axis frame; never normalized here.
+    /// Unit spin axis in the declared body frame; never normalized here.
     pub axis_body: [f64; 3],
     /// Positive axial spin inertia [kg m²].
     pub axial_inertia_kgm2: f64,
@@ -37,9 +37,9 @@ pub struct AxialRotor {
 /// Mass/inertia ownership for a carrier and all attached rotors.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RotorAssembly<const N: usize> {
-    /// Total assembly mass and REDUCED principal inertia: rotor transverse and
+    /// Total assembly mass and REDUCED full inertia: rotor transverse and
     /// offset mass inertia retained, rotor axial spin inertia excluded. Equivalently
-    /// `I_reduced = I_locked - sum(J axis axis^T)`, in its principal frame.
+    /// `I_reduced = I_locked - sum(J axis axis^T)`, in the declared body frame.
     pub reduced_body: RigidBody,
     /// Independent rotor spin coordinates, in deterministic input order.
     pub rotors: [AxialRotor; N],
@@ -178,9 +178,10 @@ impl<const N: usize> RotorAssembly<N> {
     }
 
     fn body_momentum(&self, omega: [f64; 3]) -> Vec3 {
-        vec(core::array::from_fn(|i| {
-            self.reduced_body.inertia_kgm2[i] * omega[i]
-        }))
+        self.reduced_body
+            .inertia_tensor()
+            .matrix()
+            .apply(vec(omega))
     }
 
     fn energy(&self, state: &RotorState<N>) -> f64 {
@@ -261,20 +262,22 @@ pub fn step_held<const N: usize>(
     {
         return Err(reject("rotor momentum or torque overflow"));
     }
-    let (rotation_after, omega_after) = driven_step(
-        rotation,
-        vec(canonical.omega_body),
-        vec(assembly.reduced_body.inertia_kgm2),
-        stored_before,
-        stored_after,
-        HeldTorque::Body(total_torque),
-        dt_s,
-    )
-    .map_err(|error| Refusal {
-        code: "lie-step-refused",
-        message: format!("native rotor/body step refused: {error}"),
-        ranked_repairs: vec!["reduce the step or inspect rotor and carrier loads".into()],
-    })?;
+    let (rotation_after, omega_after) = assembly
+        .reduced_body
+        .inertia_tensor()
+        .driven_step(
+            rotation,
+            vec(canonical.omega_body),
+            stored_before,
+            stored_after,
+            HeldTorque::Body(total_torque),
+            dt_s,
+        )
+        .map_err(|error| Refusal {
+            code: "lie-step-refused",
+            message: format!("native rotor/body step refused: {error}"),
+            ranked_repairs: vec!["reduce the step or inspect rotor and carrier loads".into()],
+        })?;
     next.rigid.quat = rotation_to_boundary(rotation_after);
     next.rigid.omega_body = array(omega_after);
     let force = vec(loads.force_n);

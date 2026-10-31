@@ -154,14 +154,15 @@ fn grid_caps_and_artifact_golden() {
         extract(unordered).unwrap_err().code,
         "extraction-grid-invalid"
     );
-    // Golden: the pinned grid's artifact id (measure-then-pin).
+    // Version 2 includes finite-strip rotary fluid inertia in the cross terms;
+    // this grid's artifact id was measured identically at opt-level 0 and 3.
     let art = extract(pinned_grid()).unwrap();
     jlog(
         "golden",
         &format!("\"artifact_id\":\"{}\"", art.artifact_id),
     );
     assert_eq!(
-        art.artifact_id, "40695911b35f787cb75715c8552949b451d5f2599fffc4e66504d24339ea2c81",
+        art.artifact_id, "2d0f9ff99a8b0e70860a2ba1f8f794416e0b0065d31de67d87b80495c499196f",
         "cross-term artifact moved — determinism regression or an \
          intentional extraction change requiring the golden-bump protocol"
     );

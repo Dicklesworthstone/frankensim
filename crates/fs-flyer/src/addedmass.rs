@@ -12,17 +12,26 @@
 //!
 //! `AnalyticStrip` baseline: each surface strip is a flat plate with 2-D
 //! added mass m_a = ρ·π·c²/4 per unit span acting along its normal. The
-//! strip's normal-velocity Jacobian j = [n; r×n] (plus the control gain g
-//! on its dynamic coordinate) contributes m_a·[j; g·e_k][j; g·e_k]ᵀ — so
-//! the assembled M_added is symmetric PSD BY CONSTRUCTION and the
-//! rigid↔control cross blocks arise from the same outer product (no
-//! separate, forgettable code path).
+//! strip's centroid normal-velocity Jacobian j = [n; r×n] (plus the
+//! control gain g) contributes m_a·[j; g·e_k][j; g·e_k]ᵀ. Finite chord
+//! adds centroidal pitch inertia J_a = m_a c²/32 about the span axis t;
+//! exact integration along a uniform span b adds m_a b²/12 about t×n.
+//! Each contributes a rotational outer product, including the SAME
+//! control-coordinate angular velocity. Thus rigid, control and cross
+//! blocks all contain the fluid's translational AND rotational inertia.
+//!
+//! J_a follows from the 2-D ellipse added inertia πρ(a²−b²)²/8, taking
+//! semichord a=c/2 and the thin-plate limit b=0, then multiplying by span.
+//! Reference: MIT 13.021 Marine Hydrodynamics, supplemental problem A1,
+//! <https://web.mit.edu/13.021/13021_2004/suppnotes/supp04.pdf>, page 3.
 //!
 //! `Q_added_bias` is the Euler–Poincaré gyroscopic term on the added
 //! momentum, −ad*_ν(p): WORKLESS for any p (νᵀ·ad*_ν(p) ≡ 0), which the
 //! battery checks to machine precision — energy consistency without any
 //! runtime finite-differencing. Configuration-independent strips make the
-//! control-block bias identically zero (disclosed below).
+//! control-block bias identically zero (disclosed below). Geometry and
+//! control Jacobians are frozen at the assembled configuration; finite
+//! control rotations require their configuration derivatives as well.
 //!
 //! No-claims: cross-surface fluid-inertia interference is OMITTED
 //! (AnalyticStrip's disclosed boundary; PanelExtracted is the additive
@@ -58,17 +67,28 @@ pub struct Strip {
     pub position_m: [f64; 3],
     /// Unit plate normal (body frame).
     pub normal: [f64; 3],
+    /// Unit span direction in the body frame, perpendicular to `normal`.
+    /// Its sign is arbitrary; it defines the finite strip's pitch axis.
+    pub span_axis: [f64; 3],
     /// Dynamic control coordinate driving this strip, if any.
     pub control_coord: Option<usize>,
-    /// Normal-velocity gain g [m/rad·s⁻¹ per rad/s] of that coordinate
+    /// Normal-velocity gain g [m/rad] of that coordinate
     /// (hinge arm × mode shape at the centroid).
     pub control_gain: f64,
+    /// Relative angular velocity per unit dynamic-coordinate rate [rad/rad],
+    /// in body axes. A rigid hinge about the span axis uses `span_axis`.
+    /// Together with `control_gain`, this defines velocity at every point
+    /// of the finite strip; zero means pure centroid-normal translation.
+    pub control_angular_gain: [f64; 3],
 }
 
 /// The assembled generalized loads (plan §5.1.2 shape).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AeroGeneralizedLoads {
-    /// Non-acceleration rigid loads [6] (force; moment), body frame.
+    /// Rigid inertial right-hand side [6] (force; moment), body frame.
+    /// For body-coordinate acceleration, the caller includes the rigid bias
+    /// `(-omega cross m*v, -omega cross I*omega)` with the external loads.
+    /// Fluid bias is excluded here: `q_added_bias` supplies it separately.
     pub q_rigid_nonaccel: [f64; 6],
     /// Non-acceleration control loads [nc].
     pub q_control_nonaccel: Vec<f64>,
@@ -99,7 +119,7 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 /// # Errors
 /// `control-coords-outside-domain` (nc cap at cap AND cap+1),
 /// `strip-count-exceeded`, `strip-invalid` (non-finite, non-positive
-/// chord/span, non-unit normal, control coordinate out of range),
+/// chord/span, nonorthonormal normal/span axes, control coordinate out of range),
 /// `non-finite-input`.
 pub fn assemble_analytic_strip(
     rho_kg_m3: f64,
@@ -142,13 +162,23 @@ pub fn assemble_analytic_strip(
             && s.span_m.is_finite()
             && s.position_m.iter().all(|v| v.is_finite())
             && s.normal.iter().all(|v| v.is_finite())
-            && s.control_gain.is_finite();
+            && s.span_axis.iter().all(|v| v.is_finite())
+            && s.control_gain.is_finite()
+            && s.control_angular_gain.iter().all(|v| v.is_finite());
         let norm2: f64 = s.normal.iter().map(|v| v * v).sum();
-        if !finite || s.chord_m <= 0.0 || s.span_m <= 0.0 || (norm2 - 1.0).abs() > 1.0e-9 {
+        let span_norm2: f64 = s.span_axis.iter().map(|v| v * v).sum();
+        let perpendicular: f64 = s.normal.iter().zip(s.span_axis).map(|(n, t)| n * t).sum();
+        if !finite
+            || s.chord_m <= 0.0
+            || s.span_m <= 0.0
+            || (norm2 - 1.0).abs() > 1.0e-9
+            || (span_norm2 - 1.0).abs() > 1.0e-9
+            || perpendicular.abs() > 1.0e-9
+        {
             return Err(refuse(
                 "strip-invalid",
-                format!("strip {}: chord/span/normal invalid", s.name),
-                "positive chord/span; unit normal",
+                format!("strip {}: geometry or control velocity invalid", s.name),
+                "positive chord/span; orthonormal normal and span axes; finite control gains",
             ));
         }
         if let Some(k) = s.control_coord {
@@ -162,6 +192,21 @@ pub fn assemble_analytic_strip(
         }
         // 2-D flat-plate added mass per unit span, times strip span.
         let m_a = rho_kg_m3 * core::f64::consts::PI * s.chord_m * s.chord_m / 4.0 * s.span_m;
+        let pitch_inertia = m_a * (s.chord_m * s.chord_m / 32.0);
+        let span_inertia = m_a * (s.span_m * s.span_m / 12.0);
+        if ![m_a, pitch_inertia, span_inertia]
+            .iter()
+            .all(|x| x.is_finite() && *x > 0.0)
+        {
+            return Err(refuse(
+                "strip-invalid",
+                format!(
+                    "strip {}: unrepresentable fluid mass or rotary inertia",
+                    s.name
+                ),
+                "use representable density and strip dimensions",
+            ));
+        }
         let rxn = cross(s.position_m, s.normal);
         let j = [
             s.normal[0],
@@ -181,6 +226,30 @@ pub fn assemble_analytic_strip(
                 m_rc[k][a] += m_a * j[a] * s.control_gain;
             }
             m_cc[k][k] += m_a * s.control_gain * s.control_gain;
+        }
+        // The cross-section's pitch potential is independent of heave. The
+        // spanwise first moment vanishes about the strip centroid. These two
+        // positive modes therefore add without any heave/rotation cross term.
+        for (inertia, axis) in [
+            (pitch_inertia, s.span_axis),
+            (span_inertia, cross(s.span_axis, s.normal)),
+        ] {
+            for a in 0..3 {
+                for b in 0..3 {
+                    m_rr[3 + a][3 + b] += inertia * (axis[a] * axis[b]);
+                }
+            }
+            if let Some(k) = s.control_coord {
+                let gain: f64 = axis
+                    .iter()
+                    .zip(s.control_angular_gain)
+                    .map(|(a, h)| a * h)
+                    .sum();
+                for a in 0..3 {
+                    m_rc[k][3 + a] += inertia * axis[a] * gain;
+                }
+                m_cc[k][k] += inertia * gain * gain;
+            }
         }
     }
     // Euler–Poincaré bias on the ADDED momentum p = M_rr·ν + M_rc·q̇:
@@ -208,6 +277,20 @@ pub fn assemble_analytic_strip(
     }
     // Control-block bias: identically zero for configuration-independent
     // strips (disclosed in the module no-claims).
+    if !m_rr
+        .iter()
+        .flatten()
+        .chain(m_rc.iter().flatten())
+        .chain(m_cc.iter().flatten())
+        .chain(&q_added_bias)
+        .all(|x| x.is_finite())
+    {
+        return Err(refuse(
+            "strip-invalid",
+            "non-finite assembled fluid inertia or momentum bias".into(),
+            "use representable geometry, density, velocities and control gains",
+        ));
+    }
     Ok(AeroGeneralizedLoads {
         q_rigid_nonaccel: [0.0; 6],
         q_control_nonaccel: vec![0.0; nc],
@@ -221,6 +304,12 @@ pub fn assemble_analytic_strip(
 /// Solve the JOINT (6+nc) system with the declared deterministic dense
 /// Cholesky (fixed elimination order; the total effective mass is PD).
 /// Returns (ν̇[6], q̈_ctrl[nc]).
+///
+/// This is an algebraic solve, not a free-body time integrator. It has no
+/// velocity input: `q_rigid_nonaccel` must already contain the rigid-body
+/// inertial right-hand side, including Euler/Coriolis bias when the result
+/// is interpreted as the derivative of body-coordinate velocity. Only the
+/// separately assembled fluid bias is added by this function.
 ///
 /// # Errors
 /// `control-inertia-invalid` (m_control len/values), `joint-mass-not-pd`
@@ -241,20 +330,19 @@ pub fn solve_joint(
     }
     let n = 6 + nc;
     let mut a = vec![0.0f64; n * n];
-    // Rigid block: diag(m, m, m, Ixx, Iyy, Izz) + M_rr.
-    let diag = [
-        body.mass_kg,
-        body.mass_kg,
-        body.mass_kg,
-        body.inertia_kgm2[0],
-        body.inertia_kgm2[1],
-        body.inertia_kgm2[2],
-    ];
+    // Rigid block: mass at the COM and the complete authored-frame inertia.
+    // Off-diagonal entries must survive the same joint solve as fluid inertia.
+    let inertia = body.inertia_tensor().matrix();
     for i in 0..6 {
         for j in 0..6 {
             a[i * n + j] = loads.m_added_rr[i][j];
+            if i >= 3 && j >= 3 {
+                a[i * n + j] += inertia.m[3 * (i - 3) + j - 3];
+            }
         }
-        a[i * n + i] += diag[i];
+        if i < 3 {
+            a[i * n + i] += body.mass_kg;
+        }
     }
     for (k, col) in loads.m_added_rc.iter().enumerate() {
         for i in 0..6 {
