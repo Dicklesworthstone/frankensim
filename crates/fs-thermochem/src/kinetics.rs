@@ -7,7 +7,10 @@
 //! ignition criterion or falloff law is inferred. An explicitly irreversible
 //! source disables its reverse rate and exposes its signed entropy production;
 //! such a source does not acquire a detailed-balance theorem. L3 consumers own
-//! state evolution and numerical step acceptance.
+//! state evolution and numerical step acceptance. Charged elementary reactions
+//! share the same exact elemental/charge conservation and species calorics;
+//! single-temperature rates must be supplied explicitly. An electron-impact
+//! channel with zero electron concentration does not invent an ionization seed.
 //!
 //! Concentrations are mol/m3. The rate scale is mol/(m3 s) at the reference
 //! temperature and at each participating concentration c*=1 mol/m3:
@@ -158,7 +161,8 @@ impl ArrheniusRateV1 {
 /// Separate reactant/product sides retain explicit catalysts appearing on both
 /// sides. An optional authored pressure dependence multiplies both directions.
 /// A source may explicitly disable the reverse direction. Fractional/global
-/// empirical orders and ions are outside this thermodynamic closure.
+/// empirical orders, two-temperature electron kinetics and photon-driven rates
+/// are outside this thermodynamic closure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElementaryReactionV1 {
     reaction: ReactionId,
@@ -258,7 +262,7 @@ struct BoundReaction {
     collider_logs: Vec<f64>,
 }
 
-/// Immutable neutral ideal-gas mechanism sharing one original NASA-9 bank.
+/// Immutable ideal-gas mechanism sharing one original NASA-9 species bank.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IdealGasKineticsV1 {
     thermodynamics: IdealGasEquilibriumV1,

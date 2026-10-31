@@ -9,7 +9,7 @@
 //! b=-dln(V)/dln(p)|T. Then Cv=Cp-N*R*a*a/b and
 //! c_eq^2=(p/rho)/(b-N*R*a*a/Cp). In general Cp-Cv != N*R.
 //! These are the zero-frequency chemical-equilibrium derivatives, not the
-//! frozen or finite-rate acoustic response. The neutral ideal-gas and source
+//! frozen or finite-rate acoustic response. The dilute ideal-gas and source
 //! restrictions of the original composition owner remain in force.
 
 use super::*;
@@ -271,7 +271,12 @@ impl Workspace {
                 poll(cancelled)?;
                 for k in 0..self.rank {
                     self.full_matrix[z * dim + k] = -self.a[k * ns + i];
-                    self.full_matrix[(na + k) * dim + self.rank + 1 + z] = self.a[k * ns + i] * self.n[i];
+                    let amount = if self.charge_constraint == Some(k) {
+                        self.charge_weights[i]
+                    } else {
+                        self.n[i]
+                    };
+                    self.full_matrix[(na + k) * dim + self.rank + 1 + z] = self.a[k * ns + i] * amount;
                 }
                 self.full_matrix[z * dim + self.rank] = -1.0;
                 self.full_matrix[z * dim + self.rank + 1 + z] = 1.0;
@@ -319,7 +324,7 @@ impl Workspace {
             }
         }
         let tolerance = controls.relative_balance_tolerance + 512.0 * f64::EPSILON;
-        for (k, &inventory) in self.inventory.iter().enumerate() {
+        for (k, &inventory) in self.inventory[..owner.elemental.row_count()].iter().enumerate() {
             if inventory == 0.0 { continue; }
             let mut residual = Sum::default();
             let mut scale = Sum::default();
@@ -333,6 +338,17 @@ impl Workspace {
                 || residual.value().abs() > tolerance * scale.value() {
                 return Err(EquilibriumExpansionErrorV1::DerivativeResidual("element response"));
             }
+        }
+        let mut charge_change = Sum::default();
+        let mut charge_scale = Sum::default();
+        for &i in &self.active {
+            let charge = self.charges[i] * self.charge_weights[i];
+            charge_change.add(charge * self.step[i]);
+            charge_scale.add(charge.abs() * (1.0 + self.step[i].abs()));
+        }
+        if !charge_change.value().is_finite() || !charge_scale.value().is_finite()
+            || charge_change.value().abs() > tolerance * charge_scale.value() {
+            return Err(EquilibriumExpansionErrorV1::DerivativeResidual("charge response"));
         }
         let mean = weighted.value() / total.value();
         if !mean.is_finite() || (mean - self.rhs[self.rank]).abs() > tolerance * largest

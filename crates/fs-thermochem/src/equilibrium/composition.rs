@@ -1,16 +1,24 @@
-//! Neutral ideal-gas composition equilibrium from the original NASA-9 models.
+//! Ideal-gas composition equilibrium from the original NASA-9 models.
 //!
-//! Minimize G/(RT)=sum n_i[g_i^0/(RT)+ln(y_i p/p0)] subject to A n=b.
+//! Minimize G/(RT)=sum n_i[g_i^0/(RT)+ln(y_i p/p0)] subject to A n=b
+//! and, for ionized mixtures, sum z_i n_i=0. Electrons have no nuclei and
+//! charge -1; their pressure, entropy and energy use their original source
+//! model, just as ions and neutral species do. Ionization energy belongs in
+//! the source formation enthalpies, never a second heat source.
 //! Damped log-amount Newton iterations eliminate species increments into a
 //! bounded element-space system. A full KKT fallback avoids squaring the
 //! conditioning when trace species make that reduction numerically singular.
 //! HP brackets temperature and uses the differentiated equilibrium equations
 //! for safeguarded Newton steps. Formation enthalpy enters the source h once.
 //!
-//! Reference: Gordon and McBride, NASA RP-1311 Part I (1994), sections 2.3–2.4,
-//! <https://ntrs.nasa.gov/citations/19950013764>. Neutral gas only: no condensed
-//! phases, ionization, finite-rate chemistry, real-gas EOS or phase-stability
-//! verdict. A product list is a caller declaration, not mechanism validation.
+//! Reference: Gordon and McBride, NASA RP-1311 Part I (1994), sections 2.3–2.4
+//! and 3.7, <https://ntrs.nasa.gov/citations/19950013764>. Charged species use
+//! a common-temperature, dilute, nondegenerate local-thermodynamic-equilibrium
+//! model. No space-charge fields, Coulomb corrections, pressure ionization,
+//! condensed phases, finite-rate chemistry or phase-stability verdict. A
+//! product list and its source validity are caller declarations, not mechanism
+//! validation. In particular, neutral-gas transport laws do not become plasma
+//! transport laws merely because the thermodynamic state contains electrons.
 
 use crate::{
     ChargeVector, ElementalMatrix, Nasa9EvaluationReceiptV1, Nasa9StandardStateModelV1, SpeciesId,
@@ -18,16 +26,17 @@ use crate::{
 };
 use core::fmt;
 use fs_qty::{Amount, Energy, Mass, Pressure, Temperature};
+use std::sync::Arc;
 
 mod solve;
-/// Fixed-volume composition and adiabatic internal-energy equilibrium.
-pub use solve::volume;
 /// Reusable source-bound equilibrium isentropes for flow consumers.
 pub use solve::expansion::path as isentrope;
 pub use solve::expansion::{
-    EquilibriumEntropySolveV1, EquilibriumExpansionErrorV1,
-    EquilibriumThermodynamicResponseV1, EquilibriumThermodynamicStateV1,
+    EquilibriumEntropySolveV1, EquilibriumExpansionErrorV1, EquilibriumThermodynamicResponseV1,
+    EquilibriumThermodynamicStateV1,
 };
+/// Fixed-volume composition and adiabatic internal-energy equilibrium.
+pub use solve::volume;
 /// Maximum retained gas species, including reactants and inerts.
 pub const MAX_EQUILIBRIUM_SPECIES_V1: usize = 128;
 /// Maximum elemental rows; dependent rows remain checked at publication.
@@ -123,6 +132,11 @@ impl std::error::Error for CompositionEquilibriumErrorV1 {}
 pub struct EquilibriumResidualsV1 {
     /// Maximum relative element discrepancy, scaled by that element's inventory.
     pub maximum_relative_element_residual: f64,
+    /// Absolute net charge divided by the sum of absolute carrier charges.
+    /// Evaluated with logarithmically scaled amounts, so trace ionization
+    /// cannot pass merely because its charge is small relative to neutral gas.
+    /// Zero when no charged products are eligible.
+    pub relative_charge_residual: f64,
     /// Independently iterated total moles versus the species sum.
     pub relative_total_moles_residual: f64,
     /// Maximum normalized chemical-potential stationarity discrepancy.
@@ -148,6 +162,9 @@ pub struct EquilibriumSpeciesAmountV1 {
 /// Complete equilibrium endpoint. Original source models remain immutable.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IdealGasEquilibriumSolutionV1 {
+    elemental_identity: [u8; 32],
+    charge_identity: [u8; 32],
+    source_models: Arc<[Nasa9StandardStateModelV1]>,
     temperature: Temperature,
     pressure: Pressure,
     species: Vec<EquilibriumSpeciesAmountV1>,
@@ -163,6 +180,16 @@ pub struct IdealGasEquilibriumSolutionV1 {
     target_enthalpy: Option<Energy>,
 }
 impl IdealGasEquilibriumSolutionV1 {
+    /// Whether the endpoint retains this owner's exact species sources and
+    /// canonical elemental/charge constraints. Consumers must check this
+    /// before interpreting species amounts as charge carriers or reaction data.
+    #[must_use]
+    pub fn is_bound_to(&self, owner: &IdealGasEquilibriumV1) -> bool {
+        self.elemental_identity == owner.elemental_identity
+            && self.charge_identity == owner.charge_identity
+            && (Arc::ptr_eq(&self.source_models, &owner.models)
+                || self.source_models == owner.models)
+    }
     /// Product absolute temperature.
     #[must_use]
     pub const fn temperature(&self) -> Temperature {
@@ -178,7 +205,7 @@ impl IdealGasEquilibriumSolutionV1 {
     pub fn species(&self) -> &[EquilibriumSpeciesAmountV1] {
         &self.species
     }
-    /// Total molecular amount, which may change during reaction.
+    /// Total particle amount, including electrons, which may change in reaction.
     #[must_use]
     pub const fn total_amount(&self) -> Amount {
         self.total_amount
@@ -205,7 +232,7 @@ impl IdealGasEquilibriumSolutionV1 {
     pub const fn equilibrium_heat_capacity_p_j_k(&self) -> Option<f64> {
         self.equilibrium_heat_capacity_p_j_k
     }
-    /// Actual element, molecular-total and potential closure.
+    /// Actual element, charge, particle-total and potential closure.
     #[must_use]
     pub const fn residuals(&self) -> EquilibriumResidualsV1 {
         self.residuals
@@ -238,18 +265,24 @@ impl IdealGasEquilibriumSolutionV1 {
     }
 }
 
-/// Neutral product species sharing one exact ideal-gas standard-state convention.
+/// Product species sharing one exact ideal-gas standard-state convention.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IdealGasEquilibriumV1 {
     elemental: ElementalMatrix,
     charges: ChargeVector,
-    models: Vec<Nasa9StandardStateModelV1>,
+    elemental_identity: [u8; 32],
+    charge_identity: [u8; 32],
+    models: Arc<[Nasa9StandardStateModelV1]>,
+    // Elemental rows followed by a signed charge row only when needed.
     coefficients: Vec<f64>,
     convention: StandardStateConventionV1,
 }
 impl IdealGasEquilibriumV1 {
-    /// Bind the original elemental, charge and NASA-9 owners. All charges must
-    /// be zero; omitting a charge-conservation constraint is never implicit.
+    /// Bind the original elemental, charge and NASA-9 owners. A signed charge
+    /// constraint is included whenever any species is charged. A single
+    /// nucleus-free species with charge -1 is admitted as the electron. All
+    /// other species must contain an element. Feed must be electrically neutral;
+    /// this local thermodynamic closure does not solve electrostatic fields.
     pub fn new(
         elemental: ElementalMatrix,
         charges: ChargeVector,
@@ -260,9 +293,9 @@ impl IdealGasEquilibriumV1 {
         if m == 0 || m > MAX_EQUILIBRIUM_ELEMENTS_V1 || n == 0 || n > MAX_EQUILIBRIUM_SPECIES_V1 {
             return Err(E::Invalid("require 1..16 elements and 1..128 species"));
         }
-        if charges.species() != elemental.species() || (0..n).any(|i| charges.get(i) != Some(0)) {
+        if charges.species() != elemental.species() {
             return Err(E::Invalid(
-                "charge species axis must match and every charge must be zero",
+                "charge species axis must match elemental species",
             ));
         }
         if models.len() != n {
@@ -286,8 +319,17 @@ impl IdealGasEquilibriumV1 {
                 return Err(E::ConventionMismatch(model.species().clone()));
             }
         }
-        let mut coefficients = allocated(m * n, 0.0)?;
+        let charged = (0..n).any(|i| charges.get(i) != Some(0));
+        let mut coefficients = allocated((m + usize::from(charged)) * n, 0.0)?;
+        let mut has_electron = false;
         for i in 0..n {
+            let charge = charges.get(i).ok_or(E::Invalid("missing charge entry"))?;
+            if !(-(1_i128 << 53)..=(1_i128 << 53)).contains(&charge) {
+                return Err(E::Invalid("charges must be exactly representable integers"));
+            }
+            if charged {
+                coefficients[m * n + i] = charge as f64;
+            }
             let mut any = false;
             for k in 0..m {
                 let value = elemental
@@ -302,13 +344,22 @@ impl IdealGasEquilibriumV1 {
                 any |= value > 0;
             }
             if !any {
-                return Err(E::Invalid("every neutral species must contain an element"));
+                if charge != -1 || has_electron {
+                    return Err(E::Invalid(
+                        "only one nucleus-free species, the charge -1 electron, is supported",
+                    ));
+                }
+                has_electron = true;
             }
         }
+        let elemental_identity = *elemental.identity().as_bytes();
+        let charge_identity = *charges.identity().as_bytes();
         Ok(Self {
             elemental,
             charges,
-            models,
+            elemental_identity,
+            charge_identity,
+            models: models.into(),
             coefficients,
             convention,
         })
@@ -318,7 +369,7 @@ impl IdealGasEquilibriumV1 {
     pub const fn elemental_matrix(&self) -> &ElementalMatrix {
         &self.elemental
     }
-    /// Original neutral-charge declaration.
+    /// Original signed species-charge declaration.
     #[must_use]
     pub const fn charge_vector(&self) -> &ChargeVector {
         &self.charges
@@ -334,7 +385,7 @@ impl IdealGasEquilibriumV1 {
         &self.convention
     }
 
-    /// Equilibrate at explicit T and p, conserving the supplied feed elements.
+    /// Equilibrate at explicit T and p, conserving feed elements and zero net charge.
     /// Eligible products may appear without positive feed seeds. Interior
     /// iterates are numerical guesses and are never published physical states.
     pub fn equilibrate_tp(

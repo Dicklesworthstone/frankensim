@@ -6,7 +6,8 @@
 > mechanical ideal-gas EOS rung and a bounded Wilke dilute-gas viscosity
 > mixing closure, plus bounded standard-state ideal-gas reaction equilibrium
 > and a caller-declared single-reaction stoichiometric mass-action closure,
-> plus bounded neutral ideal-gas TP/HP composition equilibrium.
+> plus bounded ideal-gas TP/HP/TV/UV composition equilibrium with explicit
+> elemental and electrical-neutrality constraints.
 > Central batch compilation and test execution for the newest slice are
 > pending; the parent thermochemistry bead remains in progress.
 
@@ -725,13 +726,13 @@ This slice does **not** claim:
   in particular, a condensed-species card mislabeled as gas is not detected by
   this schema and must not be treated as authority for `u = h - R T`;
 - an external numerical-oracle match or any evidence-color promotion;
-- reacting/equilibrium composition derivatives beyond the optional neutral
-  ideal-gas fixed-pressure equilibrium heat capacity described below,
+- reacting/equilibrium composition derivatives beyond the dilute ideal-gas
+  thermodynamic response described below,
   activities or chemical potentials beyond the retained ideal-gas `p_i/p0`
   standard-state convention, fugacity, departure functions, cubic/tabular
   real-gas or multiphase EOS behavior;
 - a physical phase-stability verdict from the positive ideal-gas model-domain
-  check, flash calculations, ionized or multiphase equilibrium-composition
+  check, flash calculations, nonideal or multiphase equilibrium-composition
   solves, source-authenticated reaction rates, mechanism evolution or kinetics
   integration, thermal conductivity, diffusion coefficients, or transport
   solves;
@@ -791,27 +792,27 @@ Construction walks outward from the anchor and admits constant h/s offsets only 
 Corrected evaluation derives u = h − RT and g = h − Ts from the same h/s owner. Corrected relative enthalpy and entropy integrate the retained Cp and Cp/T curves over each crossed region, avoiding subtraction of large absolute references or independently rounded seam corrections. Absolute and relative evaluations agree within floating-point rounding. Raw models retain their original region references, source jumps, and evaluator version 1. Explicitly corrected models use evaluator version 2 and bind the anchor, bounds, original card identities, and exact offset bits in immutable policy metadata shared by the model and accepted receipts. Construction and cross-region changes are bounded by the existing 16-region admission limit; successful property-only evaluation adds no allocation.
 
 
-## Neutral ideal-gas composition and adiabatic chamber equilibrium
+## Ideal-gas composition, ionization and adiabatic equilibrium
 
 `equilibrium::composition::IdealGasEquilibriumV1` binds the original typed
-`ElementalMatrix`, neutral `ChargeVector` and canonically ordered NASA-9 models.
+`ElementalMatrix`, signed `ChargeVector` and canonically ordered NASA-9 models.
 It minimizes ideal-gas Gibbs energy at fixed temperature and pressure subject
-to the actual feed elemental inventory. Its HP closure solves the same
-composition problem inside an explicit temperature bracket and closes total
+to the actual feed elemental inventory and zero net electrical charge. Its HP
+closure solves the same composition problem inside an explicit temperature bracket and closes total
 enthalpy. A caller may supply a common inlet temperature or the sum of the
 original enthalpies of separate inlet streams. Source formation enthalpy enters
 once; there is no additional heat-release term.
 
 Damped log-amount Newton steps retain positive species and distinguish a
 structurally absent feed element from a representable logarithmic trace whose
-direct fraction underflows. The ordinary element-space system has at most 17
+direct fraction underflows. The ordinary constraint-space system has at most 18
 unknowns. A bounded full KKT fallback, allocated lazily once, avoids squaring
 trace-species conditioning when the reduced system loses rank. Scratch buffers
 are reused across iterations and warm-started HP temperature trials. Species,
 elements, Newton/backtracking steps and temperature work all have explicit
 bounds; cancellation is polled before result publication.
 
-Results retain accepted original-source receipts, element and chemical-potential
+Results retain accepted original-source receipts, element, charge and chemical-potential
 residuals, independent mass closure, amounts, logarithmic mole fractions,
 enthalpy and iteration counts. The optional equilibrium heat capacity includes
 composition response through a nonnegative Gibbs-Hessian quadratic form; it is
@@ -820,9 +821,38 @@ reacting products. The material freeze boundary must handle its own exact-one
 floating-point composition convention and must not silently erase an
 underflowed positive trace.
 
-This closure is neutral ideal gas only. It does not infer a chemical mechanism,
+Positive and negative ions, multiple ionization stages, and one nucleus-free
+charge -1 electron may share the same source bank. Feed must be neutral to
+floating-point summation precision; net-charged feeds require a field model
+and refuse. Charge coefficients are exact representable signed integers.
+Charge balance and its differentiated constraint use logarithmically scaled
+carrier amounts, independently of the neutral inventory. Thus even a charge
+population whose direct amounts underflow cannot pass with an uncontrolled
+electron/ion ratio. No trace cutoff or electron floor is introduced. A charge
+sign without an eligible countercharge is structurally excluded.
+
+Electrons contribute particle pressure, mixing entropy and energy through
+their original NASA-9 sources. The formation-energy difference supplies
+ionization heat once. Fixed-volume pressure brackets account for the extra
+electrons using the nuclear inventory and positive charge bound. Equilibrium
+Cp, Cv, compressibility and sound speed differentiate these same elemental and
+charge constraints. Accepted endpoints share immutable original source models;
+`is_bound_to` checks the complete model bank and canonical element/charge
+identities before a consumer interprets the species as carriers.
+
+Charged equilibrium assumes a dilute, nondegenerate, common-temperature local
+thermodynamic equilibrium. Source applicability remains explicit; no Coulomb
+correction, continuum lowering, pressure ionization, space-charge field,
+two-temperature kinetics or radiation population balance is inferred.
+Neutral Wilke/WMS transport is not a consequence of charged equilibrium.
+Focused G1/G3 tests use independent Sackur-Tetrode/Saha hydrogen formulas for
+TP/TV populations, electron pressure, ionization energy, HP/UV cooling and
+equilibrium caloric/acoustic response, plus negative/multiply charged species,
+trace charge balance, feed scaling and source-binding refusals.
+
+This closure does not infer a chemical mechanism,
 authenticate a source-to-species declaration, determine phase stability, or
-implement ions, condensed phases, finite-rate combustion or a real-gas EOS.
+implement condensed phases, finite-rate combustion or a real-gas EOS.
 Residual tolerances bound the equations, not relative errors of arbitrarily
 tiny trace species. Manufactured analytic fixtures are not a CEA oracle match.
 
@@ -836,18 +866,18 @@ feed/reference invariance, source and work-budget refusals, and cancellation.
 ### Fixed-volume and adiabatic internal-energy equilibrium
 
 `equilibrium::composition::volume` adds TV and UV endpoints through the same
-original NASA-9 and element-constrained Gibbs owner. `equilibrate_tv` determines
-the pressure satisfying `p V = N(T,p) R T`; it does not hold the feed pressure
+original NASA-9 and element/charge-constrained Gibbs owner. `equilibrate_tv`
+determines the pressure satisfying `p V = N(T,p) R T`; it does not hold the feed pressure
 when reactions change molecular count. Conserved elemental amounts bound the
-pressure search. Safeguarded Newton steps use the existing analytic reacting
-compressibility, with a bounded log-pressure bracket and an explicit relative
+pressure search, including electron production by ionization. Safeguarded
+Newton steps use the existing analytic reacting compressibility, with a bounded log-pressure bracket and an explicit relative
 volume residual. One workspace, including its lazily allocated trace-species
 KKT fallback, is reused through every trial.
 
 `equilibrate_uv` derives total feed internal energy from the original species
 `u = h - R T`. `equilibrate_uv_energy` accepts that target explicitly, including
 separate-temperature feeds or declared heat/work contributions. Both conserve
-volume and elements while solving temperature and pressure; they neither reuse
+volume, elements and charge while solving temperature and pressure; they neither reuse
 constant-pressure enthalpy nor add formation energy a second time. The UV
 Newton slope is the equilibrium constant-volume heat capacity, including
 chemical composition response. Every eligible source must support the complete
@@ -862,14 +892,14 @@ prevents publication, and no supplied chemistry or feed is mutated. G1/G3/G4
 regressions compare dissociation pressure to an independent closed form, rigid
 exothermic energy balance to a separate scalar root, reacting Cv to fixed-volume
 energy differences, and feed/reference scaling, source continuity, work budgets
-and cancellation. These are neutral ideal-gas numerical closures, not a
+and cancellation. These are dilute ideal-gas numerical closures, not a
 finite-rate combustion, ignition, detonation, real-gas or phase-stability model,
 and the manufactured fixtures are not an external CEA validation.
 
 ## Elementary finite-rate kinetics algebra
 
 `kinetics` binds up to 512 caller-authored elementary Arrhenius
-reactions to the original neutral NASA-9 bank and the exact `fs-qty`
+reactions to the original NASA-9 bank and the exact `fs-qty`
 conservation certificate. Separate integer reactant/product orders retain
 explicit catalysts. Molecular-mass consistency is independently checked against
 the caller's bounded tolerance; species inventories are never repaired.

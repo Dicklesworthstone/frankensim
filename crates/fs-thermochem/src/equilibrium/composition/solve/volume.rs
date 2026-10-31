@@ -1,6 +1,6 @@
-//! Neutral ideal-gas equilibrium at fixed volume, with optional fixed energy.
+//! Ideal-gas equilibrium at fixed volume, with optional fixed energy.
 //!
-//! TV closes p V = N(T,p) R T around the original element-constrained Gibbs
+//! TV closes p V = N(T,p) R T around the original element/charge-constrained Gibbs
 //! minimizer. The pressure derivative is the same analytic equilibrium
 //! compressibility used by the sound-speed owner. UV then closes the actual
 //! species internal energy with equilibrium Cv, including composition response.
@@ -434,27 +434,43 @@ impl Workspace {
         }
         let base = (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature.value())
             * (self.scale / volume.value());
-        // Conserved total atoms bound molecular count independently of chemical
-        // equilibrium: B/max(atoms per molecule) <= N <= B/min(atoms per molecule).
+        // Conserved nuclei bound heavy-particle count. Free electrons add at
+        // most the positive ionic charge: N <= sum (1 + max(z_i,0)) n_i.
+        // Electrons have zero nuclei; including them in a minimum atom count
+        // would divide by zero, while ignoring their pressure underbounds N.
         let mut atoms = Sum::default();
-        for &b in &self.inventory {
+        for &b in &self.inventory[..owner.elemental.row_count()] {
             atoms.add(b);
         }
         let mut minimum_atoms = f64::INFINITY;
         let mut maximum_atoms = 0.0_f64;
+        let mut maximum_particles_per_atom = 0.0_f64;
+        let mut has_electron = false;
         let mut previous_total = Sum::default();
         for &i in &self.active {
             let mut count = Sum::default();
-            for k in 0..self.inventory.len() {
+            for k in 0..owner.elemental.row_count() {
                 count.add(owner.coefficients[k * self.n.len() + i]);
             }
-            minimum_atoms = minimum_atoms.min(count.value());
-            maximum_atoms = maximum_atoms.max(count.value());
+            let count = count.value();
+            if count > 0.0 {
+                minimum_atoms = minimum_atoms.min(count);
+                maximum_atoms = maximum_atoms.max(count);
+                maximum_particles_per_atom = maximum_particles_per_atom
+                    .max((1.0 + self.charges[i].max(0.0)) / count);
+            } else {
+                has_electron = true;
+            }
             previous_total.add(self.n[i]);
         }
         let padding = 4.0 * controls.equilibrium.relative_balance_tolerance + 64.0 * f64::EPSILON;
         let lower = base * (atoms.value() / maximum_atoms) * (1.0 - padding);
-        let upper = base * (atoms.value() / minimum_atoms) * (1.0 + padding);
+        let maximum_particles = if has_electron {
+            atoms.value() * maximum_particles_per_atom
+        } else {
+            atoms.value() / minimum_atoms
+        };
+        let upper = base * maximum_particles * (1.0 + padding);
         if !lower.is_finite() || lower <= 0.0 || !upper.is_finite() || upper < lower {
             return Err(E::Arithmetic("fixed-volume pressure bounds").into());
         }

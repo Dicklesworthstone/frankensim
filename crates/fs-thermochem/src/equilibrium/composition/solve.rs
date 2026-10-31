@@ -1,5 +1,5 @@
 //! Reusable log-amount Newton workspace. The ordinary solve uses an element
-//! system of at most 17 unknowns. A bounded full KKT buffer is allocated lazily
+//! system of at most 18 unknowns (including charge and total amount). A bounded full KKT buffer is allocated lazily
 //! once if traces make the reduced Gram system numerically singular.
 //! Source receipts are allocated only at accepted publication.
 
@@ -18,6 +18,10 @@ pub(super) struct Workspace {
     inventory: Vec<f64>,
     active: Vec<usize>,
     a: Vec<f64>,
+    targets: Vec<f64>,
+    charges: Vec<f64>,
+    charge_constraint: Option<usize>,
+    charge_weights: Vec<f64>,
     rank: usize,
     log_n: Vec<f64>,
     n: Vec<f64>,
@@ -50,6 +54,7 @@ impl Workspace {
         }
         let ns = owner.models.len();
         let ne = owner.elemental.row_count();
+        let constraints = owner.coefficients.len() / ns;
         let mut initial = owner.feed_amounts(feed)?;
         let mut sum = Sum::default();
         for &x in &initial {
@@ -69,7 +74,7 @@ impl Workspace {
         if !initial_mass.is_finite() || initial_mass <= 0.0 {
             return Err(E::Arithmetic("initial mass"));
         }
-        let mut inventory = allocated(ne, 0.0)?;
+        let mut inventory = allocated(constraints, 0.0)?;
         for (k, b) in inventory.iter_mut().enumerate() {
             let mut value = Sum::default();
             for (i, &x) in initial.iter().enumerate() {
@@ -77,8 +82,29 @@ impl Workspace {
             }
             *b = value.value();
             if !b.is_finite() {
-                return Err(E::Arithmetic("element inventory"));
+                return Err(E::Arithmetic("element or charge inventory"));
             }
+        }
+        if !inventory[..ne].iter().any(|&b| b > 0.0) {
+            return Err(E::Invalid("feed requires a positive elemental inventory"));
+        }
+        let mut charges = allocated(ns, 0.0)?;
+        if constraints > ne {
+            charges.copy_from_slice(&owner.coefficients[ne * ns..]);
+            let mut absolute_charge = Sum::default();
+            for (i, &x) in initial.iter().enumerate() {
+                absolute_charge.add(charges[i].abs() * x);
+            }
+            if !absolute_charge.value().is_finite()
+                || inventory[ne].abs() > 64.0 * f64::EPSILON * absolute_charge.value()
+            {
+                return Err(E::Invalid(
+                    "ionized equilibrium requires an electrically neutral feed; space charge needs an electrostatic model",
+                ));
+            }
+            // Only floating summation noise is canonicalized. No field energy
+            // or external charge reservoir is silently added to the closure.
+            inventory[ne] = 0.0;
         }
         let mut active = Vec::new();
         active
@@ -92,16 +118,34 @@ impl Workspace {
         if active.is_empty() {
             return Err(E::Invalid("no products represent the feed elements"));
         }
+        // Neutrality structurally excludes a lone charge sign, just as an
+        // absent element excludes a species. No artificial electron floor.
+        if !active.iter().any(|&i| charges[i] > 0.0) || !active.iter().any(|&i| charges[i] < 0.0) {
+            active.retain(|&i| charges[i] == 0.0);
+        }
+        if active.is_empty() {
+            return Err(E::Invalid(
+                "no electrically neutral products represent the feed",
+            ));
+        }
         let rows = independent_rows(owner, &active, &inventory)?;
         let rank = rows.len();
         if rank == 0 {
             return Err(E::SingularSystem);
         }
-        // Every elemental equation uses its own inventory as scale.
+        // Elemental equations use their inventories as scale; the signed
+        // charge equation has zero target and is scaled by current carrier
+        // amounts in the linear system, not divided by its zero inventory.
         let mut a = allocated(rank * ns, 0.0)?;
+        let mut targets = allocated(rank, 1.0)?;
+        let charge_constraint = rows.iter().position(|&row| row == ne);
         for (k, &row) in rows.iter().enumerate() {
+            let denominator = if row == ne { 1.0 } else { inventory[row] };
+            if row == ne {
+                targets[k] = 0.0;
+            }
             for &i in &active {
-                let value = owner.coefficients[row * ns + i] / inventory[row];
+                let value = owner.coefficients[row * ns + i] / denominator;
                 if !value.is_finite() {
                     return Err(E::Arithmetic("scaled element coefficients"));
                 }
@@ -111,13 +155,20 @@ impl Workspace {
         let mut log_n = allocated(ns, f64::NEG_INFINITY)?;
         let mut n = allocated(ns, 0.0)?;
         let mut total = Sum::default();
+        let nuclear_amount: f64 = inventory[..ne].iter().sum();
+        let maximum_positive_charge = charges.iter().copied().fold(0.0_f64, f64::max);
         for &i in &active {
             let mut allowance = f64::INFINITY;
-            for (k, &b) in inventory.iter().enumerate() {
+            for (k, &b) in inventory[..ne].iter().enumerate() {
                 let count = owner.coefficients[k * ns + i];
                 if count > 0.0 {
                     allowance = allowance.min(b / count);
                 }
+            }
+            // Electron count is bounded by the charge carried by nuclei,
+            // although electrons themselves consume no elemental inventory.
+            if allowance.is_infinite() {
+                allowance = nuclear_amount * maximum_positive_charge;
             }
             // Initialization only: all seeds together consume <=10% of each
             // element. No seed amount is retained as a physical concentration.
@@ -138,6 +189,10 @@ impl Workspace {
             inventory,
             active,
             a,
+            targets,
+            charges,
+            charge_constraint,
+            charge_weights: allocated(ns, 0.0)?,
             rank,
             log_n,
             n,
@@ -292,7 +347,10 @@ impl Workspace {
             return Err(E::Arithmetic("total moles"));
         }
         let mut maximum_element = 0.0_f64;
-        for (k, &b) in self.inventory.iter().enumerate() {
+        for (k, &b) in self.inventory[..owner.elemental.row_count()]
+            .iter()
+            .enumerate()
+        {
             let mut error = Sum::default();
             error.add(-b);
             for &i in &self.active {
@@ -330,6 +388,7 @@ impl Workspace {
         }
         Ok(EquilibriumResidualsV1 {
             maximum_relative_element_residual: maximum_element,
+            relative_charge_residual: charge_residual(&self.active, &self.charges, logs)?,
             relative_total_moles_residual: ((sum - total) / total).abs(),
             maximum_dimensionless_potential_residual: maximum_potential,
         })
@@ -344,21 +403,53 @@ impl Workspace {
         }
         let sum = sum.value();
         let total = exp(self.log_total);
-        for k in 0..self.rank {
-            let mut an = Sum::default();
+        // Row scaling, not a change of species potentials. Even when direct
+        // ion/electron amounts underflow, their relative log weights enforce
+        // neutrality. This avoids losing a whole charge equation in the Gram
+        // reduction of a weakly ionized gas (NASA RP-1311, section 3.7).
+        let charge_log_scale = charge_log_scale(&self.active, &self.charges, &self.log_n);
+        self.charge_weights.fill(0.0);
+        if charge_log_scale.is_finite() {
             for &i in &self.active {
-                an.add(self.a[k * ns + i] * self.n[i]);
+                if self.charges[i] != 0.0 {
+                    self.charge_weights[i] = exp(self.log_n[i] - charge_log_scale);
+                }
+            }
+        }
+        for k in 0..self.rank {
+            let is_charge = self.charge_constraint == Some(k);
+            let weights = if is_charge {
+                &self.charge_weights
+            } else {
+                &self.n
+            };
+            let mut an = Sum::default();
+            let mut total_an = Sum::default();
+            for &i in &self.active {
+                an.add(self.a[k * ns + i] * weights[i]);
+                if is_charge {
+                    total_an.add(self.a[k * ns + i] * self.n[i]);
+                }
             }
             let an = an.value();
             self.matrix[k * dim + self.rank] = an;
-            self.matrix[self.rank * dim + k] = an;
-            for l in 0..=k {
+            self.matrix[self.rank * dim + k] = if is_charge { total_an.value() } else { an };
+            // Neutral systems retain the original symmetric half-assembly.
+            // Carrier row scaling makes the charged reduced system asymmetric.
+            let columns = if self.charge_constraint.is_some() {
+                self.rank
+            } else {
+                k + 1
+            };
+            for l in 0..columns {
                 let mut value = Sum::default();
                 for &i in &self.active {
-                    value.add((self.a[k * ns + i] * self.n[i]) * self.a[l * ns + i]);
+                    value.add((self.a[k * ns + i] * weights[i]) * self.a[l * ns + i]);
                 }
                 self.matrix[k * dim + l] = value.value();
-                self.matrix[l * dim + k] = self.matrix[k * dim + l];
+                if self.charge_constraint.is_none() {
+                    self.matrix[l * dim + k] = self.matrix[k * dim + l];
+                }
             }
         }
         self.matrix[self.rank * dim + self.rank] = sum - total;
@@ -383,9 +474,14 @@ impl Workspace {
         }
         for k in 0..self.rank {
             let mut right = Sum::default();
-            right.add(1.0);
+            right.add(self.targets[k]);
+            let weights = if self.charge_constraint == Some(k) {
+                &self.charge_weights
+            } else {
+                &self.n
+            };
             for &i in &self.active {
-                right.add((self.a[k * ns + i] * self.n[i]) * (self.mu[i] - 1.0));
+                right.add((self.a[k * ns + i] * weights[i]) * (self.mu[i] - 1.0));
             }
             self.rhs[k] = right.value();
         }
@@ -429,9 +525,14 @@ impl Workspace {
         }
         for k in 0..self.rank {
             let mut residual = Sum::default();
-            residual.add(1.0);
+            residual.add(self.targets[k]);
+            let weights = if self.charge_constraint == Some(k) {
+                &self.charge_weights
+            } else {
+                &self.n
+            };
             for (z, &i) in self.active.iter().enumerate() {
-                let value = self.a[k * ns + i] * self.n[i];
+                let value = self.a[k * ns + i] * weights[i];
                 self.full_matrix[(na + k) * dim + self.rank + 1 + z] = value;
                 residual.add(-value);
             }
@@ -491,8 +592,13 @@ impl Workspace {
         self.fill_matrix()?;
         for k in 0..self.rank {
             let mut right = Sum::default();
+            let weights = if self.charge_constraint == Some(k) {
+                &self.charge_weights
+            } else {
+                &self.n
+            };
             for &i in &self.active {
-                right.add(-(self.a[k * ns + i] * self.n[i]) * (self.h[i] / rt));
+                right.add(-(self.a[k * ns + i] * weights[i]) * (self.h[i] / rt));
             }
             self.rhs[k] = right.value();
         }
@@ -740,6 +846,9 @@ impl Workspace {
         };
         poll(cancelled)?;
         Ok(IdealGasEquilibriumSolutionV1 {
+            elemental_identity: owner.elemental_identity,
+            charge_identity: owner.charge_identity,
+            source_models: Arc::clone(&owner.models),
             temperature,
             pressure: self.pressure,
             species,
@@ -756,13 +865,47 @@ impl Workspace {
         })
     }
 }
+// Charge is tested in its own numerical scale, independently of the total
+// neutral inventory and of whether direct charged amounts can be represented.
+fn charge_log_scale(active: &[usize], charges: &[f64], logs: &[f64]) -> f64 {
+    active
+        .iter()
+        .filter(|&&i| charges[i] != 0.0)
+        .map(|&i| logs[i])
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
+fn charge_residual(active: &[usize], charges: &[f64], logs: &[f64]) -> Result<f64, E> {
+    let scale = charge_log_scale(active, charges, logs);
+    if scale == f64::NEG_INFINITY {
+        return Ok(0.0);
+    }
+    let mut signed = Sum::default();
+    let mut absolute = Sum::default();
+    for &i in active {
+        if charges[i] != 0.0 {
+            let value = charges[i] * exp(logs[i] - scale);
+            signed.add(value);
+            absolute.add(value.abs());
+        }
+    }
+    let residual = signed.value().abs() / absolute.value();
+    if residual.is_finite() {
+        Ok(residual)
+    } else {
+        Err(E::Arithmetic("relative charge residual"))
+    }
+}
+
 fn converged(r: EquilibriumResidualsV1, c: EquilibriumSolveV1) -> bool {
     r.maximum_relative_element_residual <= c.relative_balance_tolerance
+        && r.relative_charge_residual <= c.relative_balance_tolerance
         && r.relative_total_moles_residual <= c.relative_balance_tolerance
         && r.maximum_dimensionless_potential_residual <= c.dimensionless_potential_tolerance
 }
 fn merit(r: EquilibriumResidualsV1, c: EquilibriumSolveV1) -> f64 {
     (r.maximum_relative_element_residual / c.relative_balance_tolerance)
+        .max(r.relative_charge_residual / c.relative_balance_tolerance)
         .max(r.relative_total_moles_residual / c.relative_balance_tolerance)
         .max(r.maximum_dimensionless_potential_residual / c.dimensionless_potential_tolerance)
 }
@@ -786,14 +929,17 @@ fn independent_rows(
     rows.try_reserve_exact(ne)
         .map_err(|_| E::AllocationRefused)?;
     for (k, &b) in inventory.iter().enumerate() {
-        if b == 0.0 {
+        if b == 0.0 && k < owner.elemental.row_count() {
             continue;
         }
         row.fill(0.0);
         let scale = active
             .iter()
-            .map(|&i| owner.coefficients[k * ns + i])
+            .map(|&i| owner.coefficients[k * ns + i].abs())
             .fold(0.0_f64, f64::max);
+        if scale == 0.0 {
+            continue;
+        }
         for &i in active {
             row[i] = owner.coefficients[k * ns + i] / scale;
         }
@@ -823,7 +969,7 @@ fn independent_rows(
 }
 
 // Row-equilibrated, partial-pivoted dense solve in deterministic tie order.
-// Fast element-space path is <=17; fallback is <=145. No inner allocation.
+// Fast constraint-space path is <=18; fallback is <=146. No inner allocation.
 fn linear_solve(a: &mut [f64], rhs: &mut [f64], n: usize, pivot_floor: f64) -> Result<(), E> {
     for i in 0..n {
         let scale = a[i * n..(i + 1) * n]

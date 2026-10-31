@@ -13,6 +13,8 @@ use fs_qty::MolarMass;
 use fs_qty::Volume;
 use std::collections::BTreeMap;
 
+mod ionization;
+
 const R: f64 = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 const REFERENCE_T: f64 = 1000.0;
 
@@ -938,11 +940,18 @@ fn g0_neutrality_identity_and_invalid_feed_are_admitted_explicitly() {
     let chemistry = dissociation();
     let charges =
         ChargeVector::new(chemistry.elemental_matrix().species().to_vec(), vec![1, 0]).unwrap();
+    let charged = IdealGasEquilibriumV1::new(
+        chemistry.elemental_matrix().clone(),
+        charges,
+        chemistry.models().to_vec(),
+    ).unwrap();
     assert!(matches!(
-        IdealGasEquilibriumV1::new(
-            chemistry.elemental_matrix().clone(),
-            charges,
-            chemistry.models().to_vec()
+        charged.equilibrate_tp(
+            Temperature::new(REFERENCE_T),
+            Pressure::new(100000.0),
+            &[(id("A"), Amount::new(1.0))],
+            EquilibriumSolveV1::default(),
+            || false
         ),
         Err(CompositionEquilibriumErrorV1::Invalid(_))
     ));
