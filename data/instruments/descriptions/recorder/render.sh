@@ -36,13 +36,13 @@
 # keeps the 6.650 mm channel only as a one-sample inlet line (1.20 mm at 288 kHz), the window mass carrying the rest: the channel's full
 # length as a 1-D line rang against the window mass at 18 to 21 kHz, above the channel's first cross mode (13.5 kHz across 12.9 mm).
 # The window radiates; its loss is not authored. Each card's row `mouth_reaction window-cylinder` takes the flux that the same solve puts
-# through the cut's outer face (16.405 mm from the axis, on the head's rigid outer cylinder, the solve's own exterior) and loads the mouth with
+# through the cut's outer face (16.407 mm from the axis, on the head's rigid outer cylinder, the solve's own exterior) and loads the mouth with
 # that face's radiation: resistance from the cylindrical-harmonic series of Junger and Feit (propagating axial wavenumbers only), static mass
 # from it by Kramers-Kronig, realized as a passive chain of parallel R-L-C cells fitted from 20 Hz to 24 kHz (11 cells; error 1.9 % in that
-# band, 2.5 % after the 288 kHz clock's warp, 6.4 % up to its 144 kHz Nyquist; kA 0.006 to 7.2). The radiation's static mass, 34.6 Pa s^2/m^3,
+# band, 2.5 % after the 288 kHz clock's warp, 6.4 % up to its 144 kHz Nyquist; kA 0.006 to 7.2). The radiation's static mass, 34.5 Pa s^2/m^3,
 # comes out of the window mass, so the outer mass is not counted twice. It replaces mouth_loss_rel 0.02: the flue row's last field is 0.
-# The uniform cut-up piston on the same cylinder (`mouth_reaction window-cylinder-piston`, static mass 61.4) is the shape bracket, reported with
-# the landing renders, not rendered here.
+# The uniform cut-up piston on the same cylinder (`mouth_reaction window-cylinder-piston`, static mass 61.4 at the geometry before the
+# Ernoult-Fabre window and the oval head) is the shape bracket, reported with the landing renders, not rendered here.
 # The windway HEIGHT is not published for this alto. The recipe uses 1.8 mm / 1.7 = 1.06 mm (the opening height of the Berlin Bressan alto e
 # divided by the opening-to-exit area ratio of Bouterse's copy), with the bounds 0.5 to 1.8 mm in unknowns.tsv; the flue width is the window width.
 # The viscous windway law uses that exit height over the 61.5 mm windway length (an upper bound on the resistance of a tapering windway). The jet
