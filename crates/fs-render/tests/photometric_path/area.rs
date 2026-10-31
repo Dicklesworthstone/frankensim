@@ -98,7 +98,7 @@ fn axial_rectangle_lux(luminance: f64, a: f64, b: f64, z: f64) -> f64 {
     2.0 * luminance * (a / az * (b / az).atan() + b / bz * (a / bz).atan())
 }
 
-fn projected_polygon_lux(
+pub(super) fn projected_polygon_lux(
     luminance: f64,
     corners: [[f64; 3]; 4],
     receiver: [f64; 3],

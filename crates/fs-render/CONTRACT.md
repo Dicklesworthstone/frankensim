@@ -1754,7 +1754,7 @@ the data and interpolation convention. This removes the observer-fit mismatch
 at represented wavelengths, not spectral-bin/truncation or metrological error.
 
 Input calibration, geometry/material/medium uncertainty and general omitted
-transport are not certified. The restricted diffuse-vacuum depth bound below
+transport are not certified. The restricted diffuse depth bounds below
 concerns only that model's omitted reflection orders. Direct and path estimates
 carry `NumericalKind::NoClaim`,
 not a fictitious zero-width certificate; unknown total error is `None`.
@@ -1845,6 +1845,15 @@ progressive replay tests remain in the photometry batteries.
   native depth convention and lux conversion. It checks global colored
   reflectance maxima, progress-independent metadata, exact black tails and
   refusal of unsupported models while retaining numerical `NoClaim`.
+- `photometric_path::media_remainder` checks the joint surface/volume bound
+  against an independent colored-albedo maximum at an absorption-only knot.
+  It covers nonemitting absorption, varied density layers, retained phase
+  normalization, both headless jobs and refusal of conservative or LTE media.
+- `photometric_path::multiple_emitter_reference` combines finite fixtures with
+  unequal area, flux, dimming and disjoint spectra over a measured colored
+  diffuse receiver. Independent projected polygon solid angles and original
+  CIE rows supply incident lux and reflected XYZ. Different direct-light
+  strategies and reversed emitter order test the multi-source mixture.
 - `photometric_path::uncertainty_reference` measures one unresolved finite
   panel and two disjoint panels with different luminances. Independently
   flattened photopic spectra make each entire path a member of a known
@@ -2067,7 +2076,7 @@ probe. The original Welford accumulator estimates IID sampling standard error
 in lux after two paths. The exact direct term contributes no sampling variance.
 Owen–Sobol results carry no IID standard-error claim. Total error remains
 unknown. Finite-depth model truncation is unbounded except in the restricted
-diffuse-vacuum case below, and physical-model uncertainty remains unknown.
+diffuse cases below, and physical-model uncertainty remains unknown.
 `photometric_stage --total-csv` writes positions, direct/continuous/total lux,
 estimated IID standard error, sample count, explicit unknown total bounds and
 a named sampling-uncertainty state for a stage grid using heterogeneous
@@ -2139,8 +2148,47 @@ errors in geometry or source flux/area normalization, spectral discretization,
 fixture calibration or disagreement with physical materials and fixtures.
 It is not an interval around a sampled result. In particular, a zero model
 tail does not change `NumericalKind::NoClaim`, estimated IID sampling error or
-the `None` total-error fields. General participating-media, point-source,
-projector and non-diffuse truncation bounds remain unavailable.
+the `None` total-error fields. Point-source, projector and non-diffuse
+truncation bounds remain unavailable.
+
+### Nonemitting participating-media depth remainder
+
+Both path jobs also expose `diffuse_transport_remainder()`, returning an
+optional `DiffuseTransportRemainder` for the same finite emitters and diffuse
+surfaces in vacuum or a nonemitting native absorption/scattering grid. This
+broader accessor does not change `diffuse_vacuum_remainder()`: every physical
+grid still returns `None` from the older accessor, even when its density is
+zero. The source and surface envelope is shared by both calculations.
+
+For a nonemitting free flight with transmittance `T`, the continuation operator
+has norm at most `T*r + (1-T)*w`, where `r` bounds surface reflectance and `w`
+bounds spectral single-scattering albedo times the phase integral. Therefore
+`q = max(r,w)` bounds the combined continuation; adding `r+w` would incorrectly
+treat surface and volume events as independent alternatives on one flight.
+The source ceiling and the outward `S*q^D/(1-q)` and `pi*S*q^D/(1-q)` formulas
+remain unchanged. Absorption alone cannot increase this bound. Density may be
+heterogeneous: the native model multiplies absorption and scattering by the
+same density, so density cancels in their ratio.
+
+The albedo maximum is enclosed at the union of absorption and scattering
+spectral knots. Between consecutive combined knots, the ratio is fractional
+linear and monotone wherever extinction is positive; shared zero endpoints
+are covered by their neighboring limits. Coefficient interpolation and the
+ratio use outward intervals. The phase integral accounts for retained native
+analytic coefficients or the trapezoidal integral of retained tabulated
+densities; normalization rounding is not assumed absent. Its gain envelope
+is at least one, so downward normalization roundoff cannot create artificial
+absorption. The final `q` must remain strictly below one without clipping.
+
+Metadata retains the maximum surface reflectance, scattering gain, combined
+contraction, depth, source ceiling and SI bounds. Zero actual scattering has
+zero volume gain. Thermal emission, conservative scattering without a strict
+global contraction, unsupported materials/sources or nonrepresentable bounds
+return `None`; these cases require further source or escape arguments. The
+bound still concerns only omitted ideal-model orders. Sampling deviation,
+floating-point transport and normalization error, geometry, spectral
+discretization and calibration remain outside it, with numerical `NoClaim`
+and unknown total-error fields unchanged.
 
 ### Native CPU execution of calibrated paths
 

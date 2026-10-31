@@ -51,7 +51,7 @@ impl SamplingUncertainty {
 /// Replay also requires the original scene, fixtures, medium, measurement
 /// geometry and remaining options. Calibration, spectral discretization,
 /// geometry/material/medium errors remain unbounded. The separate optional
-/// [`super::DiffuseVacuumRemainder`] addresses only a restricted finite-depth
+/// [`super::DiffuseTransportRemainder`] addresses only a restricted finite-depth
 /// model remainder; these settings alone establish no bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathCalculationContext {

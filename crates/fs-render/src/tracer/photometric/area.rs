@@ -344,17 +344,15 @@ impl<'a> AreaLighting<'a> {
         self.active
     }
 
-    /// Conditional tail of the ideal diffuse transport operator. Call only
-    /// after native scene admission, with explicit vacuum and no active point
-    /// fixtures. Every material and source must satisfy the contraction model.
-    pub(in crate::tracer) fn diffuse_vacuum_remainder(
+    /// Source and surface envelope for the ideal diffuse transport operator.
+    /// Native scene admission and medium/source eligibility remain the caller's
+    /// responsibility. Every material and finite source must fit this envelope.
+    pub(in crate::tracer) fn diffuse_envelope(
         &self,
         scene: &Scene,
-        max_depth: u32,
         cx: &Cx<'_>,
-    ) -> Result<Option<crate::photometry::path::DiffuseVacuumRemainder>, PhotometryError> {
+    ) -> Result<Option<(f64, fs_ivl::Interval)>, PhotometryError> {
         use crate::photometry::observer;
-        use crate::photometry::path::DiffuseVacuumRemainder;
         use crate::photometry::source::BIN_WIDTH_NM;
         use fs_ivl::Interval;
 
@@ -411,11 +409,7 @@ impl<'a> AreaLighting<'a> {
         }
         // Nonnegativity is an exact property of the represented source law.
         let source_ceiling = Interval::new(source_ceiling.lo().max(0.0), source_ceiling.hi());
-        Ok(DiffuseVacuumRemainder::from_envelope(
-            max_depth,
-            max_reflectance,
-            source_ceiling,
-        ))
+        Ok(Some((max_reflectance, source_ceiling)))
     }
 
     /// Spectral emission at the actual hit, with its complementary NEE weight.

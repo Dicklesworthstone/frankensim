@@ -26,6 +26,8 @@ use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
+#[cfg(feature = "photometry")]
+mod contraction;
 mod phase;
 pub use phase::{MAX_PHASE_KNOTS, PhaseFunction, PhaseSample, TabulatedPhase};
 

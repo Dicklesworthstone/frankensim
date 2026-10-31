@@ -1,4 +1,4 @@
-//! A restricted bound on transport omitted by a finite diffuse path depth.
+//! Restricted model bounds on transport omitted by a finite diffuse path depth.
 
 use fs_ivl::Interval;
 
@@ -167,64 +167,174 @@ impl DiffuseVacuumRemainder {
         max_reflectance: f64,
         source_luminance: Interval,
     ) -> Option<Self> {
-        if max_depth == 0
-            || !max_reflectance.is_finite()
-            || !(0.0..1.0).contains(&max_reflectance)
-            || !source_luminance.lo().is_finite()
-            || !source_luminance.hi().is_finite()
-            || source_luminance.lo() < 0.0
-        {
-            return None;
-        }
-
-        // Exact model zeros need no rounded arithmetic. Canonicalize signed
-        // zero as well, so metadata has a deterministic positive-zero result.
-        let max_reflectance = if max_reflectance == 0.0 {
-            0.0
-        } else {
-            max_reflectance
-        };
-        let source_ceiling = if source_luminance.hi() == 0.0 {
-            0.0
-        } else {
-            source_luminance.hi()
-        };
         let (luminance_bound, illuminance_bound) =
-            if max_reflectance == 0.0 || source_ceiling == 0.0 {
-                (0.0, 0.0)
-            } else {
-                let power = reflectance_power(max_reflectance, max_depth);
-                let denominator = Interval::point(1.0) - Interval::point(max_reflectance);
-                if denominator.lo() <= 0.0 {
-                    return None;
-                }
-                let luminance = (source_luminance * power) / denominator;
-                let upper = luminance.hi();
-                // In this branch the envelope's worst-case tail is positive.
-                // A positive underflow must retain an outward subnormal
-                // ceiling, never become an exact-zero model claim.
-                if !upper.is_finite() || upper <= 0.0 {
-                    return None;
-                }
-                let pi = Interval::new(
-                    fs_math::next_down(std::f64::consts::PI),
-                    fs_math::next_up(std::f64::consts::PI),
-                );
-                let lux = (Interval::point(upper) * pi).hi();
-                if !lux.is_finite() || lux <= 0.0 {
-                    return None;
-                }
-                (upper, lux)
-            };
-
+            geometric_tail(max_depth, max_reflectance, source_luminance)?;
         Some(Self {
             max_depth,
-            max_reflectance,
-            source_luminance_ceiling_cd_m2: source_ceiling,
+            max_reflectance: if max_reflectance == 0.0 {
+                0.0
+            } else {
+                max_reflectance
+            },
+            source_luminance_ceiling_cd_m2: if source_luminance.hi() == 0.0 {
+                0.0
+            } else {
+                source_luminance.hi()
+            },
             luminance_bound_cd_m2: luminance_bound,
             illuminance_bound_lux: illuminance_bound,
         })
     }
+}
+
+/// Omitted-order bound for diffuse surfaces and a nonemitting physical medium.
+///
+/// The eligible sources and surfaces are the same as for
+/// [`DiffuseVacuumRemainder`]. Absorption and scattering in native, possibly
+/// heterogeneous grids are also admitted when they have no thermal emission
+/// and the combined surface/volume transport remains a strict contraction.
+///
+/// If surface reflectance is at most `r`, and spectral single-scattering
+/// albedo times the phase integral is at most `w`, a complete free-flight
+/// continuation has norm at most `T*r + (1-T)*w <= max(r,w) = q`. Thus the
+/// same `S*q^D/(1-q)` tail applies across both surface and volume vertices,
+/// independently of density variation. The medium envelope uses outward
+/// arithmetic on the combined spectral knots and retained phase-table values.
+///
+/// This is solely a bound on omitted ideal-model orders. It excludes sampled
+/// deviation, transport arithmetic, source/geometry normalization, spectral
+/// discretization and physical calibration error. It is not a confidence
+/// interval, a bound around a sampled value, or a total-error certificate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DiffuseTransportRemainder {
+    max_depth: u32,
+    max_surface_reflectance: f64,
+    max_scattering_gain: f64,
+    contraction_upper_bound: f64,
+    source_luminance_ceiling_cd_m2: f64,
+    luminance_bound_cd_m2: f64,
+    illuminance_bound_lux: f64,
+}
+
+impl DiffuseTransportRemainder {
+    /// Native maximum surface/volume vertex depth.
+    #[must_use]
+    pub const fn max_depth(self) -> u32 {
+        self.max_depth
+    }
+
+    /// Maximum represented reflectance knot across every surface.
+    #[must_use]
+    pub const fn max_surface_reflectance(self) -> f64 {
+        self.max_surface_reflectance
+    }
+
+    /// Upper bound on spectral albedo times the represented phase integral.
+    /// This is zero for vacuum, absorption-only or zero-density media.
+    #[must_use]
+    pub const fn max_scattering_gain(self) -> f64 {
+        self.max_scattering_gain
+    }
+
+    /// The larger surface/volume continuation bound, strictly below one.
+    #[must_use]
+    pub const fn contraction_upper_bound(self) -> f64 {
+        self.contraction_upper_bound
+    }
+
+    /// Photopic ceiling of the admitted finite-emitter envelope, in cd/m².
+    #[must_use]
+    pub const fn source_luminance_ceiling_cd_m2(self) -> f64 {
+        self.source_luminance_ceiling_cd_m2
+    }
+
+    /// Upper bound on omitted ideal-model luminance, in cd/m².
+    #[must_use]
+    pub const fn luminance_bound_cd_m2(self) -> f64 {
+        self.luminance_bound_cd_m2
+    }
+
+    /// Upper bound on omitted ideal-model hemisphere illuminance, in lux.
+    #[must_use]
+    pub const fn illuminance_bound_lux(self) -> f64 {
+        self.illuminance_bound_lux
+    }
+
+    pub(crate) fn from_envelope(
+        max_depth: u32,
+        max_surface_reflectance: f64,
+        max_scattering_gain: f64,
+        source_luminance: Interval,
+    ) -> Option<Self> {
+        if !max_surface_reflectance.is_finite()
+            || !(0.0..1.0).contains(&max_surface_reflectance)
+            || !max_scattering_gain.is_finite()
+            || !(0.0..1.0).contains(&max_scattering_gain)
+        {
+            return None;
+        }
+        let max_surface_reflectance = if max_surface_reflectance == 0.0 {
+            0.0
+        } else {
+            max_surface_reflectance
+        };
+        let max_scattering_gain = if max_scattering_gain == 0.0 {
+            0.0
+        } else {
+            max_scattering_gain
+        };
+        let q = max_surface_reflectance.max(max_scattering_gain);
+        let (luminance_bound_cd_m2, illuminance_bound_lux) =
+            geometric_tail(max_depth, q, source_luminance)?;
+        Some(Self {
+            max_depth,
+            max_surface_reflectance,
+            max_scattering_gain,
+            contraction_upper_bound: q,
+            source_luminance_ceiling_cd_m2: if source_luminance.hi() == 0.0 {
+                0.0
+            } else {
+                source_luminance.hi()
+            },
+            luminance_bound_cd_m2,
+            illuminance_bound_lux,
+        })
+    }
+}
+
+/// Common outward scalar calculation; scene admission establishes the model.
+fn geometric_tail(max_depth: u32, q: f64, source: Interval) -> Option<(f64, f64)> {
+    if max_depth == 0
+        || !q.is_finite()
+        || !(0.0..1.0).contains(&q)
+        || !source.lo().is_finite()
+        || !source.hi().is_finite()
+        || source.lo() < 0.0
+    {
+        return None;
+    }
+    // Exact model zeros need no widening. All nonzero tails retain an outward
+    // positive subnormal ceiling even when the exact value is unrepresentable.
+    if q == 0.0 || source.hi() == 0.0 {
+        return Some((0.0, 0.0));
+    }
+    let denominator = Interval::point(1.0) - Interval::point(q);
+    if denominator.lo() <= 0.0 {
+        return None;
+    }
+    let upper = ((source * reflectance_power(q, max_depth)) / denominator).hi();
+    if !upper.is_finite() || upper <= 0.0 {
+        return None;
+    }
+    let pi = Interval::new(
+        fs_math::next_down(std::f64::consts::PI),
+        fs_math::next_up(std::f64::consts::PI),
+    );
+    let lux = (Interval::point(upper) * pi).hi();
+    if !lux.is_finite() || lux <= 0.0 {
+        return None;
+    }
+    Some((upper, lux))
 }
 
 /// At most 32 exponent bits even for the largest admitted native path depth.
@@ -255,6 +365,62 @@ fn unit_product(left: Interval, right: Interval) -> Interval {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_and_volume_continuations_use_the_larger_gain_not_the_sum() {
+        for (surface, volume) in [(0.75, 0.5), (0.5, 0.75)] {
+            let bound =
+                DiffuseTransportRemainder::from_envelope(2, surface, volume, Interval::point(4.0))
+                    .unwrap();
+            // Every T in [0,1] gives T*surface+(1-T)*volume <= 3/4.
+            // The exact tail is 4*(3/4)^2/(1-3/4) = 9 cd/m².
+            assert_eq!(bound.max_surface_reflectance(), surface);
+            assert_eq!(bound.max_scattering_gain(), volume);
+            assert_eq!(bound.contraction_upper_bound(), 0.75);
+            assert!(bound.luminance_bound_cd_m2() >= 9.0);
+            assert!(bound.luminance_bound_cd_m2() <= 9.0 * (1.0 + 1e-13));
+            assert!(bound.illuminance_bound_lux() >= 9.0 * std::f64::consts::PI);
+        }
+    }
+
+    #[test]
+    fn black_surfaces_do_not_erase_a_positive_scattering_tail() {
+        let bound =
+            DiffuseTransportRemainder::from_envelope(3, 0.0, 0.5, Interval::point(8.0)).unwrap();
+        assert_eq!(bound.max_depth(), 3);
+        assert_eq!(bound.source_luminance_ceiling_cd_m2(), 8.0);
+        assert!(bound.luminance_bound_cd_m2() >= 2.0);
+        assert!(bound.luminance_bound_cd_m2() <= 2.0 * (1.0 + 1e-13));
+        let underflow =
+            DiffuseTransportRemainder::from_envelope(u32::MAX, 0.0, 0.5, Interval::point(1.0))
+                .unwrap();
+        assert!(underflow.luminance_bound_cd_m2() > 0.0);
+        assert!(underflow.luminance_bound_cd_m2() < f64::MIN_POSITIVE);
+    }
+
+    #[test]
+    fn medium_gain_cannot_hide_invalid_or_noncontracting_component() {
+        for invalid in [-0.1, 1.0, f64::INFINITY, f64::NAN] {
+            for (surface, volume) in [(invalid, 0.5), (0.5, invalid)] {
+                assert!(
+                    DiffuseTransportRemainder::from_envelope(
+                        3,
+                        surface,
+                        volume,
+                        Interval::point(8.0),
+                    )
+                    .is_none()
+                );
+            }
+        }
+        let zero =
+            DiffuseTransportRemainder::from_envelope(3, -0.0, -0.0, Interval::point(8.0)).unwrap();
+        assert_eq!(zero.max_surface_reflectance().to_bits(), 0);
+        assert_eq!(zero.max_scattering_gain().to_bits(), 0);
+        assert_eq!(zero.contraction_upper_bound().to_bits(), 0);
+        assert_eq!(zero.luminance_bound_cd_m2().to_bits(), 0);
+        assert_eq!(zero.illuminance_bound_lux().to_bits(), 0);
+    }
 
     #[test]
     fn dyadic_geometric_tail_uses_the_source_envelope_upper_endpoint() {
@@ -365,7 +531,9 @@ mod tests {
             let tail = 32.0 / f64::from(1_u32 << depth);
             let luminance = envelope.depth_for_luminance_budget(1.5 * tail, 64).unwrap();
             let lux_budget = 1.5 * std::f64::consts::PI * tail;
-            let illuminance = envelope.depth_for_illuminance_budget(lux_budget, 64).unwrap();
+            let illuminance = envelope
+                .depth_for_illuminance_budget(lux_budget, 64)
+                .unwrap();
             assert_eq!(luminance.max_depth(), depth);
             assert_eq!(illuminance.max_depth(), depth);
             assert!(luminance.luminance_bound_cd_m2() >= tail);
@@ -374,11 +542,17 @@ mod tests {
         }
         // The same number in lux is not the same budget as in cd/m².
         assert_eq!(
-            envelope.depth_for_luminance_budget(3.0, 64).unwrap().max_depth(),
+            envelope
+                .depth_for_luminance_budget(3.0, 64)
+                .unwrap()
+                .max_depth(),
             4
         );
         assert_eq!(
-            envelope.depth_for_illuminance_budget(3.0, 64).unwrap().max_depth(),
+            envelope
+                .depth_for_illuminance_budget(3.0, 64)
+                .unwrap()
+                .max_depth(),
             6
         );
     }
@@ -389,7 +563,10 @@ mod tests {
             DiffuseVacuumRemainder::from_envelope(3, 0.5, Interval::point(16.0)).unwrap();
         let limit = envelope.luminance_bound_cd_m2();
         assert_eq!(
-            envelope.depth_for_luminance_budget(limit, 3).unwrap().max_depth(),
+            envelope
+                .depth_for_luminance_budget(limit, 3)
+                .unwrap()
+                .max_depth(),
             3
         );
         assert!(
@@ -398,7 +575,10 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            envelope.depth_for_luminance_budget(4.0, 64).unwrap().max_depth(),
+            envelope
+                .depth_for_luminance_budget(4.0, 64)
+                .unwrap()
+                .max_depth(),
             4
         );
         assert!(envelope.depth_for_illuminance_budget(1.0, 4).is_none());
@@ -406,16 +586,21 @@ mod tests {
 
     #[test]
     fn invalid_budgets_and_positive_underflow_never_meet_zero() {
-        let envelope =
-            DiffuseVacuumRemainder::from_envelope(1, 0.5, Interval::point(1.0)).unwrap();
+        let envelope = DiffuseVacuumRemainder::from_envelope(1, 0.5, Interval::point(1.0)).unwrap();
         for budget in [-1.0, f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
             assert!(envelope.depth_for_luminance_budget(budget, 64).is_none());
             assert!(envelope.depth_for_illuminance_budget(budget, 64).is_none());
         }
         assert!(envelope.depth_for_luminance_budget(1.0, 0).is_none());
-        assert!(envelope.depth_for_illuminance_budget(0.0, u32::MAX).is_none());
+        assert!(
+            envelope
+                .depth_for_illuminance_budget(0.0, u32::MAX)
+                .is_none()
+        );
         assert!(envelope.depth_for_luminance_budget(0.0, u32::MAX).is_none());
-        let tiny = envelope.depth_for_luminance_budget(1e-280, u32::MAX).unwrap();
+        let tiny = envelope
+            .depth_for_luminance_budget(1e-280, u32::MAX)
+            .unwrap();
         assert!(tiny.max_depth() > 900 && tiny.max_depth() < 1024);
         assert!(tiny.luminance_bound_cd_m2() > 0.0);
         assert!(tiny.luminance_bound_cd_m2() <= 1e-280);
@@ -428,7 +613,9 @@ mod tests {
                 DiffuseVacuumRemainder::from_envelope(8, q, Interval::point(source)).unwrap();
             for planned in [
                 envelope.depth_for_luminance_budget(0.0, u32::MAX).unwrap(),
-                envelope.depth_for_illuminance_budget(-0.0, u32::MAX).unwrap(),
+                envelope
+                    .depth_for_illuminance_budget(-0.0, u32::MAX)
+                    .unwrap(),
             ] {
                 assert_eq!(planned.max_depth(), 1);
                 assert_eq!(planned.luminance_bound_cd_m2().to_bits(), 0);
@@ -439,12 +626,9 @@ mod tests {
 
     #[test]
     fn shallow_overflow_does_not_prevent_a_verified_deeper_plan() {
-        let envelope = DiffuseVacuumRemainder::from_envelope(
-            100,
-            0.9,
-            Interval::point(f64::MAX / 4.0),
-        )
-        .unwrap();
+        let envelope =
+            DiffuseVacuumRemainder::from_envelope(100, 0.9, Interval::point(f64::MAX / 4.0))
+                .unwrap();
         assert!(envelope.at_depth(1).is_none());
         let planned = envelope.depth_for_illuminance_budget(1e306, 1000).unwrap();
         assert!(planned.illuminance_bound_lux().is_finite());

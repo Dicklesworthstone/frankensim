@@ -12,8 +12,8 @@ use crate::tracer::{
 use fs_exec::Cx;
 
 use super::{
-    DiffuseVacuumRemainder, PathCalculationContext, PathMedium, PointFixtureSampling,
-    SamplingUncertainty,
+    DiffuseTransportRemainder, DiffuseVacuumRemainder, PathCalculationContext, PathMedium,
+    PointFixtureSampling, SamplingUncertainty,
 };
 
 /// Fixed sampling policy for surface probes, independent of image dimensions.
@@ -24,7 +24,7 @@ pub struct IlluminanceSampling {
     /// Maximum reflecting or scattering vertices after the measurement point.
     /// One includes light reflected once or scattered once. Higher orders are
     /// retained up to this ceiling. The general remainder is unbounded; see
-    /// [`PathIlluminanceJob::diffuse_vacuum_remainder`] for a restricted model bound.
+    /// [`PathIlluminanceJob::diffuse_transport_remainder`] for a restricted model bound.
     pub max_depth: u32,
     /// IID or the existing three-dimensional Owen–Sobol primary sampler.
     /// The latter samples hemisphere direction and wavelength; continuation
@@ -468,6 +468,15 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
     #[must_use]
     pub const fn diffuse_vacuum_remainder(&self) -> Option<DiffuseVacuumRemainder> {
         self.transport.diffuse_vacuum_remainder()
+    }
+
+    /// Bound omitted ideal-model orders for diffuse surfaces in vacuum or
+    /// nonemitting absorbing/scattering grids with a strict contraction.
+    /// The lux ceiling integrates the bounded radiance over a cosine hemisphere;
+    /// sampling, numerical and calibration errors remain separate and unknown.
+    #[must_use]
+    pub const fn diffuse_transport_remainder(&self) -> Option<DiffuseTransportRemainder> {
+        self.transport.diffuse_transport_remainder()
     }
 
     /// Probe-order estimates without another result allocation.

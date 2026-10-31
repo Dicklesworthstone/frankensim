@@ -10,7 +10,9 @@ use super::*;
 use crate::camera::{Aperture, PhysicalCamera};
 use crate::photometry::area::PhotometricEmitters;
 use crate::photometry::medium::HomogeneousMedium;
-use crate::photometry::path::{DiffuseVacuumRemainder, PointFixtureSampling};
+use crate::photometry::path::{
+    DiffuseTransportRemainder, DiffuseVacuumRemainder, PointFixtureSampling,
+};
 use crate::photometry::source::{LUMINOUS_EFFICACY_LM_W, PhotometricSource};
 use crate::photometry::transport::PhotometricMedium;
 use crate::photometry::{
@@ -68,6 +70,7 @@ pub(crate) struct FixtureTransport<'scene, 'field> {
     medium: Option<PathMedium<'scene, 'field>>,
     settings: Settings,
     diffuse_vacuum_remainder: Option<DiffuseVacuumRemainder>,
+    diffuse_transport_remainder: Option<DiffuseTransportRemainder>,
     key: [u32; 2],
     sobol: Option<Sobol>,
     path_sobol: Option<Sobol>,
@@ -175,10 +178,31 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             )?;
         }
         let areas = area::AreaLighting::try_new(scene, emitters.surfaces, cx)?;
-        let diffuse_vacuum_remainder = if matches!(medium, FixtureMedium::Vacuum)
-            && sources.iter().all(|source| source.flux_lm() == 0.0)
-        {
-            areas.diffuse_vacuum_remainder(scene, settings.max_depth, cx)?
+        let envelope = if sources.iter().all(|source| source.flux_lm() == 0.0) {
+            areas.diffuse_envelope(scene, cx)?
+        } else {
+            None
+        };
+        let diffuse_vacuum_remainder = match (medium, envelope) {
+            (FixtureMedium::Vacuum, Some((reflectance, source))) => {
+                DiffuseVacuumRemainder::from_envelope(settings.max_depth, reflectance, source)
+            }
+            _ => None,
+        };
+        let diffuse_transport_remainder = if let Some((reflectance, source)) = envelope {
+            let gain = match medium {
+                FixtureMedium::Vacuum => Some(0.0),
+                FixtureMedium::Absorbing(grid) => (!grid.has_thermal_emission()).then_some(0.0),
+                FixtureMedium::Scattering(grid) => grid.photometric_scattering_gain_upper(cx)?,
+            };
+            gain.and_then(|gain| {
+                DiffuseTransportRemainder::from_envelope(
+                    settings.max_depth,
+                    reflectance,
+                    gain,
+                    source,
+                )
+            })
         } else {
             None
         };
@@ -229,6 +253,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             medium,
             settings,
             diffuse_vacuum_remainder,
+            diffuse_transport_remainder,
             key,
             sobol,
             path_sobol,
@@ -250,6 +275,10 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
 
     pub(crate) const fn diffuse_vacuum_remainder(&self) -> Option<DiffuseVacuumRemainder> {
         self.diffuse_vacuum_remainder
+    }
+
+    pub(crate) const fn diffuse_transport_remainder(&self) -> Option<DiffuseTransportRemainder> {
+        self.diffuse_transport_remainder
     }
 
     #[cfg(test)]

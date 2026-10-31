@@ -33,6 +33,9 @@ mod point_sampling;
 #[path = "photometric_path/spectral_reference.rs"]
 mod spectral_reference;
 
+#[path = "photometric_path/multiple_emitter_reference.rs"]
+mod multiple_emitter_reference;
+
 #[path = "photometric_path/measured_reflectance.rs"]
 mod measured_reflectance;
 
@@ -41,6 +44,8 @@ mod equilibrium;
 
 #[path = "photometric_path/depth_remainder.rs"]
 mod depth_remainder;
+#[path = "photometric_path/media_remainder.rs"]
+mod media_remainder;
 
 #[path = "photometric_path/point_energy.rs"]
 mod point_energy;

@@ -29,7 +29,7 @@ mod illuminance;
 mod remainder;
 mod report;
 pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIlluminanceJob};
-pub use remainder::DiffuseVacuumRemainder;
+pub use remainder::{DiffuseTransportRemainder, DiffuseVacuumRemainder};
 pub use report::{PathCalculationContext, SamplingUncertainty};
 
 /// Borrowed native physical media for spectral fixture paths.
@@ -426,6 +426,15 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
     #[must_use]
     pub const fn diffuse_vacuum_remainder(&self) -> Option<DiffuseVacuumRemainder> {
         self.transport.diffuse_vacuum_remainder()
+    }
+
+    /// Bound omitted ideal-model orders for diffuse surfaces in vacuum or
+    /// nonemitting absorbing/scattering grids with a strict contraction.
+    /// This scene/depth bound excludes sampling, numerical and calibration
+    /// errors. Unsupported models or nonrepresentable bounds return `None`.
+    #[must_use]
+    pub const fn diffuse_transport_remainder(&self) -> Option<DiffuseTransportRemainder> {
+        self.transport.diffuse_transport_remainder()
     }
 
     /// Row-major estimates without an additional image allocation.
