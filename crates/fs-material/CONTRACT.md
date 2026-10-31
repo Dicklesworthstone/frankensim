@@ -5803,3 +5803,45 @@ intervals; sampled endpoints alone do not establish admission. The original
 isotropic arithmetic is retained. This is smooth affine-source, fixed-frame,
 fully solid small-strain thermomechanics, without phase evolution or plasticity.
 
+## Dilute aqueous osmosis and selective membrane transport
+
+`osmosis` owns one shared isothermal constitutive law for independent dissolved
+particle concentrations in mol/m³. `IdealDiluteSolution` retains finite solute
+amounts and solvent volume separately; pure-solvent exchange preserves every
+solute amount and recomputes dilution, osmotic pressure, and water activity.
+Its pressure is `RT sum(c_i)` and its activity obeys
+`ln(a_w) = -Vbar_w sum(c_i)`, with an explicit incompressible solvent partial
+molar volume. This is the declared dilute model, not a non-dilute ideal
+mole-fraction model. The separate activity-to-pressure primitive accepts
+externally supplied nonideal activity through `-RT ln(a_w)/Vbar_w`; it does not
+invent a species decomposition for selective transport.
+
+`MembraneTransport` uses distinct hydraulic permeance [m/(Pa s)],
+concentration-based solute permeance [m/s], and per-species reflection [0,1].
+Left-to-right water flux is `Lp [delta_p - RT sum(sigma_i delta_c_i)]`.
+The constant-coefficient Spiegler–Kedem convection-diffusion equation is
+integrated across each membrane species path with a stable exponential fit.
+Both donor coefficients are nonnegative; zero flow reduces to Fick diffusion,
+zero solute permeance reduces to upwind solvent drag, and full reflection
+excludes drag. A nonselective interface creates no osmotic water pumping.
+Geometry is supplied by consumers and is not counted twice. The explicit
+Darcy-slab crosswalk consumes thickness, intrinsic permeability and the original
+fluid owner's current dynamic viscosity rather than confusing permeability,
+conductivity and permeance.
+
+The prepared 0–64-species kernel and finite-inventory replacement allocate no
+memory; fixed-order compensated sums and the existing deterministic elementary
+functions define repeatability. Invalid shapes, negative inventories and
+unrepresentable outputs refuse atomically without publishing partial results.
+G0/G1/G3 regressions cover independent-particle and SI-unit oracles, activity,
+forward/reverse osmosis, selective mixtures, exact membrane integration,
+orientation, finite dilution, actual viscosity, and positive-concentration
+dissipation. Zero concentration has a finite transport limit but no finite
+ideal chemical-affinity claim. Consumers own integration, conservation,
+cancellation, pressure/storage work and any thermal balance.
+
+There is no ionic chemistry, Donnan potential, solute partial-volume, phase
+stability, external concentration-polarization, or experimental-validation
+claim. Raw coefficients carry no material-card authority; source-backed users
+must retain the original coefficients' full solution and operating support.
+

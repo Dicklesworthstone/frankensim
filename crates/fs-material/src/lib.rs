@@ -48,6 +48,8 @@ pub mod gas_mixture;
 pub mod gas_species;
 mod gas_state;
 pub mod moist_air;
+/// Shared dilute-solution activities, finite inventories and selective membrane transport.
+pub mod osmosis;
 pub mod graph;
 /// Contact-temperature history and explicit strength handoff for polymer welding.
 pub mod healing;
