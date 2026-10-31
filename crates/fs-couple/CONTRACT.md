@@ -17797,3 +17797,28 @@ contact/bulk heat partition, conductivity refresh, mutual-field retention,
 signed parameter work, ideal-source/source-authority refusals and atomic
 cancellation are exercised in `tests/material_circuit_capacitance.rs` with
 synthetic material data.
+
+
+### Source-backed real gas in the original inertial piston
+
+`GasPiston<G = ClosedGasParcel>` accepts the original ideal thermochemical parcel
+or the existing `IsochoricRealGasParcel` through a sealed constitutive interface.
+Both use the same native wall coordinate, free/fixed support, impulse solver,
+acceptance gates and port account. `PistonStep<S>` retains the complete resolved
+midpoint state. Existing ideal defaults and ideal-only nozzle, reaction and
+thermal adapters retain their original applicability.
+
+The gas owner supplies conservative heat/volume candidates, work-conjugate
+midpoint pressure and its discrete endpoint-volume derivative. Actual resolved
+density and sound speed supply before/midpoint/endpoint acoustic clock admission;
+real-fluid mechanics never use ideal-reference density or acoustics. The same
+midpoint pressure supplies force, gas work and fixed-support reaction. Accepted
+gas energy, wall kinetic energy, exterior-pressure work, additional-force work
+and heat must close before final cancellation admission and atomic publication
+of gas, motion and the shared port window.
+
+The PR mode retains the homogeneous frozen-composition source-admitted branch.
+It supplies no phase equilibrium, latent heat, reacting/nozzle exchange,
+friction/contact stops or exact-isentropy/nonnegative-entropy guarantee. Focused
+regression sources cover dense-gas motion and energy accounting, fixed-wall
+heating, real-EOS acoustic admission, and source/cancellation refusal with replay.

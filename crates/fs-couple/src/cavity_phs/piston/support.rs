@@ -3,7 +3,7 @@
 //! This is an ideal stationary constraint. It supplies a reaction impulse,
 //! never removes kinetic energy, invents an inertial mass or credits heat.
 
-use super::{GasPiston, PistonError, PistonInput, PistonSolve, Trial, invalid, poll};
+use super::{GasPiston, PistonError, PistonGas, PistonGasState, PistonInput, PistonSolve, Trial, invalid, poll};
 
 /// Mechanical boundary data retained through gas reaction, flow and heat steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,7 +14,7 @@ pub enum PistonSupport {
     Fixed,
 }
 
-impl GasPiston {
+impl<G: PistonGas> GasPiston<G> {
     /// Attach an ideal fixed support to a wall already at rest.
     ///
     /// The physical wall mass, exposed area, source gas and volume are retained.
@@ -36,7 +36,7 @@ impl GasPiston {
     pub(super) fn fixed_trial(
         &self, input: PistonInput, controls: PistonSolve,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Trial, PistonError> {
+    ) -> Result<Trial<G>, PistonError> {
         poll(cancelled)?;
         if self.velocity_m_s != 0.0 {
             return Err(invalid("fixed support cannot carry nonzero wall velocity"));
@@ -44,7 +44,7 @@ impl GasPiston {
         let gas = self.gas.midpoint_heat_volume(
             self.gas.volume_m3(), input.heat_j, controls.gas, &mut *cancelled,
         )?;
-        let force = self.area_m2*(gas.midpoint().state().pressure-input.exterior_pressure_pa)
+        let force = self.area_m2*(gas.midpoint().pressure_pa()-input.exterior_pressure_pa)
             + input.external_force_n;
         let support_impulse = -input.duration_s*force;
         if !force.is_finite() || !support_impulse.is_finite() {

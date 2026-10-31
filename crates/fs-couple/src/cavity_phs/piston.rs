@@ -10,6 +10,8 @@ pub mod double_acting;
 mod impulse;
 mod support;
 pub use support::PistonSupport;
+mod constitutive;
+pub use constitutive::{PistonGas, PistonGasState};
 /// Conservative nozzle exchange with a finite reservoir and the same wall step.
 pub mod exchange;
 
@@ -32,9 +34,13 @@ use fs_material::thermochemical_gas::energy::parcel::midpoint::{
 /// with a finite reservoir before advancing the same gas and wall equations.
 /// Volume is the single position owner: the effective wall coordinate is V/A.
 /// Other rigid-body coordinates, contact stops and crank linkages are not modeled.
+/// The default is the existing ideal thermochemical parcel. A source-backed
+/// `IsochoricRealGasParcel` uses the SAME mechanics and acceptance with its
+/// nonideal midpoint pressure, calorics and acoustic compressibility. Existing
+/// nozzle, reactive and thermal adapters retain their ideal-parcel domain.
 #[derive(Clone, Debug)]
-pub struct GasPiston {
-    gas: ClosedGasParcel,
+pub struct GasPiston<G: PistonGas = ClosedGasParcel> {
+    gas: G,
     mass_kg: f64,
     area_m2: f64,
     velocity_m_s: f64,
@@ -44,7 +50,7 @@ pub struct GasPiston {
 
 // Equality remains equality of accepted physical state. Observing a stationary
 // step may add an account without changing the gas, geometry or momentum.
-impl PartialEq for GasPiston {
+impl<G: PistonGas> PartialEq for GasPiston<G> {
     fn eq(&self, other: &Self) -> bool {
         self.gas == other.gas
             && self.mass_kg == other.mass_kg
@@ -116,11 +122,11 @@ impl From<GasEnergyError> for PistonError {
 
 /// Actual accepted material and mechanical work, not a topology-only certificate.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PistonStep {
+pub struct PistonStep<S = ResolvedThermochemicalGasState> {
     /// Gas owner's actual heat/work/entropy and stage accounting.
     pub gas: GasHeatVolumeStep,
     /// Source-bearing midpoint used for force, work and acoustic observations.
-    pub midpoint: ResolvedThermochemicalGasState,
+    pub midpoint: S,
     /// Signed wall displacement [m], positive on gas expansion.
     pub displacement_m: f64,
     /// Accepted initial and final wall velocities [m/s].
@@ -150,8 +156,8 @@ pub struct PistonStep {
     pub material_trials: usize,
 }
 
-struct Trial {
-    gas: GasHeatVolumeCandidate,
+struct Trial<G: PistonGas = ClosedGasParcel> {
+    gas: GasHeatVolumeCandidate<G, G::State>,
     displacement: f64,
     velocity: f64,
     residual: f64,
@@ -173,11 +179,11 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PistonError> {
     if cancelled() { Err(PistonError::Cancelled) } else { Ok(()) }
 }
 
-impl GasPiston {
+impl<G: PistonGas> GasPiston<G> {
     /// Couple a resolved gas parcel to explicit inertial mass and constant area.
     /// Positive velocity expands the cavity. No material or atmosphere preset.
     pub fn new(
-        gas: ClosedGasParcel,
+        gas: G,
         mass_kg: f64,
         area_m2: f64,
         velocity_m_s: f64,
@@ -207,7 +213,7 @@ impl GasPiston {
     }
     /// Accepted common gas state, geometry and sources; no independent pressure.
     #[must_use]
-    pub const fn gas(&self) -> &ClosedGasParcel { &self.gas }
+    pub const fn gas(&self) -> &G { &self.gas }
     /// Conserved inertial mass [kg], not the gas mass.
     #[must_use]
     pub const fn mass_kg(&self) -> f64 { self.mass_kg }
@@ -221,25 +227,26 @@ impl GasPiston {
     #[must_use]
     pub fn position_m(&self) -> f64 { self.gas.volume_m3()/self.area_m2 }
 
-    fn admit_linear_clock(&self, state: &ResolvedThermochemicalGasState, volume_m3: f64,
+    fn admit_linear_clock(&self, state: &G::State, volume_m3: f64,
         duration_s: f64) -> Result<(),PistonError>
     {
         // A fixed constraint removes this wall-compressibility oscillator.
         // Gas caloric, reaction and transport owners retain their own controls.
         if self.support == PistonSupport::Fixed { return Ok(()); }
-        let gas=state.state();
-        let omega=(gas.density*gas.sound_speed*gas.sound_speed*self.area_m2*self.area_m2
+        let density=state.density_kg_m3();
+        let sound_speed=state.sound_speed_m_s();
+        let omega=(density*sound_speed*sound_speed*self.area_m2*self.area_m2
             /(self.mass_kg*volume_m3)).sqrt();
         fs_phs::linear_exact::admit_midpoint_band(omega,duration_s)
             .map_err(PistonError::TimeResolution)
     }
 
     fn trial(&self, volume: f64, input: PistonInput, controls: PistonSolve,
-        cancelled: &mut impl FnMut() -> bool) -> Result<Trial, PistonError>
+        cancelled: &mut impl FnMut() -> bool) -> Result<Trial<G>, PistonError>
     {
         poll(cancelled)?;
         let gas = self.gas.midpoint_heat_volume(volume, input.heat_j, controls.gas, &mut *cancelled)?;
-        let motion = self.mechanical_trial(volume, gas.midpoint().state().pressure, input)?;
+        let motion = self.mechanical_trial(volume, gas.midpoint().pressure_pa(), input)?;
         let tangent = (2.0*(self.mass_kg/self.area_m2))/input.duration_s
             - (input.duration_s*self.area_m2)*gas.step().pressure_final_volume_derivative_pa_m3;
         if !positive(tangent) {
@@ -272,13 +279,13 @@ impl GasPiston {
 
     fn finish(
         &mut self,
-        trial: Trial,
+        trial: Trial<G>,
         input: PistonInput,
         controls: PistonSolve,
         iterations: usize,
         material_trials: usize,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<PistonStep, PistonError> {
+    ) -> Result<PistonStep<G::State>, PistonError> {
         self.admit_linear_clock(trial.gas.midpoint(),
             f64::midpoint(self.gas.volume_m3(),trial.gas.endpoint().volume_m3()),input.duration_s)?;
         self.admit_linear_clock(trial.gas.endpoint().state(),trial.gas.endpoint().volume_m3(),input.duration_s)?;
@@ -287,7 +294,7 @@ impl GasPiston {
         let exterior = input.exterior_pressure_pa*(trial.gas.endpoint().volume_m3()-self.gas.volume_m3());
         let external = input.external_force_n*trial.displacement;
         let support_work = trial.support_impulse * f64::midpoint(before, trial.velocity);
-        let force = self.area_m2*(trial.gas.midpoint().state().pressure-input.exterior_pressure_pa)
+        let force = self.area_m2*(trial.gas.midpoint().pressure_pa()-input.exterior_pressure_pa)
             + input.external_force_n;
         let momentum = self.mass_kg*(trial.velocity-before)-input.duration_s*force-trial.support_impulse;
         let gas_step = trial.gas.step();
@@ -323,7 +330,7 @@ impl GasPiston {
                 crate::port_adoption::PortTransfer::work(external - exterior + support_work, true),
                 crate::port_adoption::PortTransfer::heat(
                     input.heat_j,
-                    report.midpoint.state().temperature,
+                    report.midpoint.temperature_k(),
                 ),
             ],
         );
@@ -349,7 +356,7 @@ impl GasPiston {
     /// This is uniform closed-gas dynamics, not piston contact, valves, friction,
     /// combustion, shocks or an exact-isentropy/nonnegative-entropy guarantee.
     pub fn step(&mut self, input: PistonInput, controls: PistonSolve,
-        mut cancelled: impl FnMut() -> bool) -> Result<PistonStep, PistonError>
+        mut cancelled: impl FnMut() -> bool) -> Result<PistonStep<G::State>, PistonError>
     {
         poll(&mut cancelled)?;
         let [lo, hi] = controls.volume_bracket_m3;
@@ -380,5 +387,23 @@ mod tests;
 #[cfg(test)]
 mod warping;
 
-crate::port_adoption::impl_ported_module!(GasPiston, ports);
+// Both source-material families expose the same original accepted port account.
+impl<G: PistonGas> fs_ports::PortedModule for GasPiston<G> {
+    fn port_schemas(&self) -> &[fs_ports::PortSchema] { &self.ports.schemas }
+    fn port_coordinate_charts(&self) -> &[fs_ports::PortCoordinateChart] { &self.ports.charts }
+    fn junction_schemas(&self) -> &[fs_ports::JunctionSchema] { &self.ports.junctions }
+    fn last_window_duration_s(&self) -> Option<f64> { self.ports.duration_s() }
+    fn last_window_transfers(&self) -> Option<&[fs_ports::IntegratedWindowTransfer]> {
+        self.ports.transfers()
+    }
+    fn last_window_transfer_error(&self) -> Option<&fs_ports::CoupleError> {
+        self.ports.transfer_error()
+    }
+    fn audit_last_window(&self) -> Result<fs_ports::ModuleWindowAudit, fs_ports::CoupleError> {
+        self.ports.audit()
+    }
+}
+
+#[cfg(test)]
+mod nonideal_tests;
 
