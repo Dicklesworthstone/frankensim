@@ -23,6 +23,8 @@ fs-uq = { path = "../fs-uq" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-matdb = { path = "../fs-matdb" }
+fs-material = { path = "../fs-material" }
 fs-qty = { path = "../fs-qty" }
 
 [lints]

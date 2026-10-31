@@ -170,6 +170,38 @@ impl MaterialLayout<'_> {
         })
     }
 
+    /// Solve and size the prescribed loads using the same acceptance path as
+    /// consistent body-load design. Material mass is reported, but no body
+    /// acceleration is inferred or added to the original load case.
+    ///
+    /// The returned area vector uses original member order, including zeros
+    /// for pruned members. The body-load record retains those members' masses
+    /// with zero force, and the body-load iteration count is zero.
+    ///
+    /// # Errors
+    /// Invalid inputs, unconverged PDHG, failed sizing or cancellation publish
+    /// no design. Numerical diagnostics do not establish an optimum certificate.
+    pub fn solve_and_size(
+        &self,
+        catalog: &[f64],
+        prune_frac: f64,
+        settings: PdhgSettings,
+        cx: &Cx<'_>,
+    ) -> Result<MaterialBodyLoadDesign, BodyLoadDesignError> {
+        let (solution, design, areas_m2) =
+            self.solve_sized(catalog, prune_frac, settings, 0, cx)?;
+        let body_loads = self.body_loads(&areas_m2, [0.0; 2], cx)?;
+        checkpoint(cx)?;
+        Ok(MaterialBodyLoadDesign {
+            load_case: self.case.clone(),
+            body_loads,
+            areas_m2,
+            design,
+            solution,
+            iterations: 0,
+        })
+    }
+
     /// Close catalog sizing against its own material-derived body loads.
     ///
     /// First solve and size the unchanged external-load case. Then derive body

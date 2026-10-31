@@ -1,5 +1,15 @@
 # fs-truss CONTRACT
 
+## Unified prescribed-load catalog design
+
+`material::MaterialLayout::solve_and_size` returns the same complete
+`MaterialBodyLoadDesign` used by the existing self-weight solve, with the
+original prescribed load case, zero body acceleration and zero body-load
+iterations. Both public paths call the same convergence and sizing acceptance
+owner. Original member ordering, pruned zero areas, material mass and source
+assignments remain consistent. This reports a numerically accepted volume
+layout and catalog design; it does not promote diagnostics to an optimum proof.
+
 ## Purpose and layer
 
 Layer: L4 (ASCENT). Ground-structure truss layout optimization (plan

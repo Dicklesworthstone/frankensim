@@ -6,6 +6,9 @@
 //! Michell-continuum catalogue comparison stays LEDGERED PENDING
 //! exactly as in the fs-truss contract.
 
+/// Per-member source materials, catalog mass and consistent body-load sizing.
+pub mod material;
+
 use fs_evidence::Color;
 use fs_exec::Cx;
 use fs_truss::ground::{GroundLimits, GroundRules, GroundStructure, TrussConstructionError};

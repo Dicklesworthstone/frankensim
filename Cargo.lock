@@ -1757,6 +1757,8 @@ dependencies = [
  "fs-eproc",
  "fs-evidence",
  "fs-exec",
+ "fs-matdb",
+ "fs-material",
  "fs-qty",
  "fs-robust",
  "fs-scenario",

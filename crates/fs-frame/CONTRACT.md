@@ -91,6 +91,34 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   the smoke-tier story model, level 1 the building-minus-story correction
   on the same motion (telescoping, so unbiased for the building).
 
+## Material-driven frame layout and catalog mass
+
+`layout::material::layout_and_size` accepts an existing ground structure,
+explicit load/support case, resolved `TrussMaterial` table and one assignment
+per original member. The native `MaterialLayout` owner supplies heterogeneous
+yield costs, member-specific Euler stiffness, catalog sizing and mass. The
+report borrows the original immutable geometry, source bundles and assignments,
+retains the exact controls, and returns the native design and numerical report.
+
+Body acceleration is explicit. When selected, the existing bounded catalog
+fixed-point owner adds material-derived nodal body loads once to the original
+case and requires the complete section vector to settle. Without body loads,
+the shared `MaterialLayout::solve_and_size` path reports mass without adding
+gravity. Both paths use the same convergence, sizing and member-order checks.
+Unconverged solves, invalid sizing, incomplete assignments and cancellation
+publish no report.
+
+The objective remains volume at the actual applied loads. Returned mass is
+not a mass optimum; numerical LP diagnostics are not certified optimum bounds.
+A settled self-weight design is not a globally optimal self-weight solution.
+The original axial, symmetric-yield, solid-square, pin-jointed model and
+equivalent nodal body-load approximation apply.
+
+`tests/layout_material.rs` covers heterogeneous yield and Euler response,
+source-consistent catalog mass, density-only self-weight changes, preserved
+support loads, numerical/catalog refusal and cancellation. Synthetic cards
+provide numerical references, not measured-material or building qualification.
+
 ## Invariants
 
 1. Layout LP diagnostics: objective separation 3.4e-7, equilibrium residual
