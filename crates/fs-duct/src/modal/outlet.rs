@@ -45,7 +45,8 @@ impl MouthResponse {
 fn bad(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
 fn finite(z: C64) -> bool { z.re.is_finite() && z.im.is_finite() }
 
-/// Analytic plane-mouth load with the original matched higher-mouth modes.
+/// Analytic mouth load: closed/pressure-release conditions act on every mode;
+/// scalar radiation retains the disclosed matched higher-mode approximation.
 /// The existing geometry, mode, frequency and radiation refusals apply.
 pub fn mouth_response(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel,
     termination: Termination, modes: usize, extra_slices: usize)

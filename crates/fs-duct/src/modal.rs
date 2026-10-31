@@ -514,11 +514,11 @@ fn junction_projection(a: f64, b: f64, gammas: &[f64], n: usize) -> Vec<C64> {
 
 /// Multimodal input impedance of a hole-free axisymmetric duct.
 ///
-/// The termination loads the PLANE mode with the scalar image's
-/// radiation impedance (identical refusals, including the `ka` ceiling
-/// for [`Termination::UnflangedOpen`]); higher modes terminate into
-/// their own characteristic impedance — a DISCLOSED matched-mouth
-/// approximation (see the CONTRACT no-claim row), not hidden physics.
+/// Rigid caps and ideal pressure-release ends impose zero normal flow and
+/// zero pressure, respectively, on EVERY retained mode. Radiating terminations
+/// load the plane mode with the scalar image's radiation impedance (identical
+/// refusals, including the `ka` ceiling for [`Termination::UnflangedOpen`]);
+/// their higher modes retain the disclosed matched-mouth approximation.
 ///
 /// `extra_slices` multiplies the cone staircase density (1 = default;
 /// part of the convergence-ladder disclosure).
@@ -548,7 +548,7 @@ pub fn mm_input_impedance(
     )
 }
 
-/// Plane-mode mouth load selector for the modal image.
+/// Terminal load selector for the modal image.
 #[derive(Clone, Copy)]
 enum MmLoad<'a> {
     Analytic(Termination),
@@ -626,8 +626,9 @@ pub fn mm_input_impedance_load(
 /// Every retained radial mode participates in the exterior load. The existing
 /// reflection recursion keeps all cross-mode reflection and propagation.
 /// `state` owns the bore, `exterior` owns radiation, and both must have the
-/// same static pressure. This is opt-in: the scalar-termination APIs retain
-/// their original matched higher-mode mouth closure.
+/// same static pressure. This is opt-in: scalar radiation and tabulated-load
+/// APIs retain their matched higher-mode mouth closure. The exact closed and
+/// pressure-release boundaries already act on every retained mode.
 ///
 /// # Errors
 /// As [`mm_input_impedance`], plus the common-static-pressure admission and
@@ -707,8 +708,9 @@ fn mm_evaluate(
     };
     let mouth_wave = modal_wave(state, mouth, omega, loss, &gammas)?;
     let mut min_shear = mouth_wave.shear_number;
-    // Modal load: plane mode gets Z_L (or a hard wall for Closed);
-    // higher modes get their own Zc (matched; disclosed).
+    // Ideal boundary conditions apply pointwise over the entire mouth:
+    // U = Zc^-1 (a-b) = 0 gives R = +I, and P = a+b = 0 gives R = -I.
+    // A scalar radiation load instead retains the matched higher-mode closure.
     let r_load: Vec<C64> = if let MmLoad::Flanged(exterior) = load {
         let matrix = crate::flanged::flanged_modal_impedance(exterior, mouth, omega, n)?;
         reflection_from_impedance(&matrix, &mouth_wave.zc, n)?
@@ -726,7 +728,16 @@ fn mm_evaluate(
             // Closed mouth: total reflection with p antinode (R = +1).
             None => r[0] = C64::ONE,
         }
-        // Higher-mode diagonal stays ZERO: matched into their own Zc.
+        if matches!(
+            load,
+            MmLoad::Analytic(Termination::Closed | Termination::IdealOpen)
+        ) {
+            let ideal_reflection = r[0];
+            for mode in 1..n {
+                r[mode * n + mode] = ideal_reflection;
+            }
+        }
+        // Only scalar radiation/table loads leave higher modes matched.
         r
     };
     let mut mouth_flow = observe_mouth.then(|| outlet::terminal_flow(&r_load, &mouth_wave.zc, n));

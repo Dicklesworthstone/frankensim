@@ -468,6 +468,11 @@ pipe `Z_in = +i Zc cot(kL)`.
   consumers (the fs-couple MM characteristic-line realizer), keeping
   the `Im k >= 0` branch rule and the `Zc_n = Zc_0 k_0/k_n`
   derivation single-sourced here.
+  `Closed` imposes zero normal volume flow on every retained mode, and
+  `IdealOpen` imposes zero pressure on every mode. Their terminal pressure
+  reflection matrices are respectively `+I` and `-I`, including evanescent
+  modes; propagation retains the original decaying round-trip factors.
+  These conditions feed both input impedance and the complete mouth-flow map.
   `mm_input_impedance_load` supplies an explicit finite plane-mode impedance
   with nonnegative resistance to that same recurrence. It retains every
   interior modal coupling and the matched higher-mode mouth closure. Runtime
@@ -494,10 +499,11 @@ pipe `Z_in = +i Zc cot(kL)`.
   - `ModeCount` is admitted up to `certified_mode_cap()`, which is
     computed as 1 plus the number of `J1` roots below
     `BESSEL_CERTIFIED_X = 64` (21 modes). `RiccatiSteps` uses the W3a caps.
-  - `MouthLoad` selects the plane-mode load: `Analytic` (the scalar
-    termination with its refusals), `Tabulated`, or `Matched` (Pagneux's
-    infinite-pipe end). Higher modes stay matched, the staircase's
-    disclosed closure.
+  - `MouthLoad` selects `Analytic`, `Tabulated`, or `Matched`
+    (Pagneux's infinite-pipe end). Analytic `Closed` and `IdealOpen`
+    impose the exact ideal condition on every retained mode, as in the
+    staircase. Scalar radiation and tabulated loads retain the disclosed
+    matched higher-mode closure; `Matched` matches every mode.
   - Losses follow the staircase rule: `segment_wave` for the plane mode,
     `k_n` from the lossy `k_0`, `Zc_n = Zc_0 k_0/k_n`. A uniform section
     reproduces both exactly.
@@ -927,7 +933,17 @@ staircase).
 - `mm_riccati_n1_equals_plane_riccati` (G2): N = 1 matches the W3a
   plane Riccati to 1e-10.
 - `mm_riccati_cylinder_decouples` (G2): closed-form `i Zc cot kL` and
-  matched `Zc_n` to 1e-12; off-diagonals exactly zero.
+  its long-evanescent-span limit `Zc_n` to 1e-12; off-diagonals zero.
+- `ideal_mouth_reflects_every_mode_in_both_modal_solvers` (G1/G3):
+  a short cylinder retains measurable evanescent returns and exercises
+  higher propagating modes. Both solvers compare every reflection entry
+  with `+/- exp(2 i k_n L)` to 5e-11 absolute.
+- `pressure_release_field_annihilates_every_mouth_pressure_mode` (G1)
+  checks zero terminal pressure and `U_n(L)=U_n(0)/cos(k_n L)`.
+  `rigid_cap_blocks_all_modal_mouth_flow_after_junctions` (G1/G3)
+  checks the complete zero-flow map across expansions and contractions.
+  These are ideal-boundary regressions, not measured radiation validation.
+  Native execution of these new regressions remains unverified.
 - `mm_riccati_matches_extrapolated_staircase` (G1/G3): the staircase is
   O(dx), gated at order 1 +- 0.2 on slice multipliers 4/8/16/32. Its
   first-order Richardson limit agrees with the continuous result to
@@ -1009,9 +1025,10 @@ divergence-theorem closure/orientation pin on the lathe).
   - Mode convergence is algebraic. On the 45-degree cone, 7 vs 17 modes
     differ by 3.1 % in `Z00`, so `tail_bound_estimate` is an indicator,
     not a bound.
-  - Higher modes terminate matched (no radiation matrix), per-mode
-    boundary-layer loss is approximated as in the staircase, and holes
-    and C0 profiles are out of scope.
+  - Scalar radiation and tabulated loads terminate higher modes matched;
+    closed and pressure-release ends impose their exact condition on all
+    modes. Per-mode boundary-layer loss is approximated as in the staircase,
+    and holes and C0 profiles are out of scope.
   - Accuracy above `MAX_EVANESCENT_STEP` is refused, not degraded.
 
 - Wide-tube first order refuses `rv < 10`. `LossModel::Bessel` uses
@@ -1051,12 +1068,13 @@ divergence-theorem closure/orientation pin on the lathe).
   (axisymmetric bores and sources), no tone holes, no mean flow (the
   same quiescent/amplitude boundary as the plane path above; escalation
   per `docs/DECISION_MUSIC_MEAN_FLOW.md`);
-  higher modes terminate into their own characteristic impedance at
-  the mouth (a matched-mouth approximation, disclosed — the plane
-  mode can now play a TABULATED bell load via
+  scalar radiation and tabulated mouth loads terminate higher modes
+  into their own characteristic impedance (a matched-mouth approximation;
+  exact closed/pressure-release ends act on all modes). The plane
+  mode can play a TABULATED bell load via
   `mm_input_impedance_tabulated` (bead zolja), while the analytic
-  plane load keeps its `ka` refusals; the higher-mode mouth coupling
-  remains the disclosed boundary); per-mode viscothermal loss is carried through the
+  plane load keeps its `ka` refusals; the higher-mode radiation coupling
+  remains the disclosed boundary. Per-mode viscothermal loss is carried through the
   LOSSY plane wavenumber (`k_n^2 = k_0^2 - (gamma_n/R)^2`), so the
   wide-tube validity boundary binds per mode through the plane
   mode's shear number, and no independent higher-mode boundary-layer

@@ -302,6 +302,8 @@ fn mm_riccati_cylinder_decouples() {
     let closed = C64::new(0.0, 1.0) * wave.characteristic_impedance * cot;
     let zc = modal_characteristic_impedances(&state, r, omega, loss, 4).unwrap();
     let mut diag = rel(z[0], closed);
+    // These higher modes have kappa*L > 200: their closed-end return has
+    // decayed below roundoff, leaving the characteristic impedance locally.
     for n in 1..4 {
         diag = diag.max(rel(z[n * 4 + n], zc[n]));
     }
@@ -1282,4 +1284,96 @@ fn mm_field_refusals() {
     assert!(call(MouthLoad::Matched, 2, 0, &ok).is_err());
     assert!(call(MouthLoad::Matched, 2, MAX_RICCATI_STEPS + 1, &ok).is_err());
     println!("{{\"suite\":\"fs-duct\",\"case\":\"mm-field-refusals\",\"verdict\":\"pass\"}}");
+}
+
+#[test]
+fn ideal_mouth_reflects_every_mode_in_both_modal_solvers() {
+    // G1/G3: independently separated lossless cylinder modes. In the
+    // exp(-i omega t) convention the round trip is +/- exp(2 i k_n L).
+    // A short cylinder keeps evanescent returns measurable instead of
+    // accidentally testing the semi-infinite (matched) limit.
+    let state = air20();
+    let (radius, length, modes) = (0.05, 0.015, 3);
+    let profile = RadiusProfile::power(radius, 1.0, 0.0, length).unwrap();
+    let duct = Duct {
+        segments: vec![Segment::Cylinder { radius, length }],
+    };
+    let mut gammas = vec![0.0];
+    gammas.extend(j1_roots_unchecked(modes - 1));
+    for frequency in [300.0, 5000.0, 10000.0] {
+        let omega = tau_hz(frequency);
+        let k0 = omega / state.sound_speed;
+        let zc = modal_characteristic_impedances(
+            &state, radius, omega, LossModel::Lossless, modes,
+        ).unwrap();
+        for termination in [Termination::Closed, Termination::IdealOpen] {
+            let sign = if matches!(termination, Termination::Closed) { 1.0 } else { -1.0 };
+            let staircase = mm_input_impedance(
+                &duct, &state, omega, LossModel::Lossless, termination, modes, 1,
+            ).unwrap();
+            let continuous = mm_profile_impedance(
+                &profile, &state, omega, LossModel::Lossless,
+                MouthLoad::Analytic(termination), ModeCount(modes), RiccatiSteps(32),
+            ).unwrap();
+            for (name, response) in [("staircase", staircase), ("continuous", continuous)] {
+                let reflection = crate::modal::modal_reflection_from_impedance(
+                    &response.impedance_matrix, &zc, modes,
+                ).unwrap();
+                for (mode, &gamma) in gammas.iter().enumerate() {
+                    let axial_squared = k0 * k0 - (gamma / radius).powi(2);
+                    let expected = if axial_squared >= 0.0 {
+                        let phase = 2.0 * axial_squared.sqrt() * length;
+                        C64::new(phase.cos(), phase.sin()).scale(sign)
+                    } else {
+                        C64::from_re(sign * (-2.0 * (-axial_squared).sqrt() * length).exp())
+                    };
+                    for column in 0..modes {
+                        let target = if mode == column { expected } else { C64::ZERO };
+                        let actual = reflection[mode * modes + column];
+                        assert!(
+                            (actual - target).abs() < 5e-11,
+                            "{name}, {termination:?}, {frequency} Hz, ({mode},{column}): {actual:?} != {target:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pressure_release_field_annihilates_every_mouth_pressure_mode() {
+    // G1: P_n(L)=0 for each independently driven radial mode; the
+    // corresponding lossless cylinder flow is U_n(L)=U_n(0)/cos(k_n L).
+    let state = air20();
+    let (radius, length, modes) = (0.05, 0.015, 3);
+    let profile = RadiusProfile::power(radius, 1.0, 0.0, length).unwrap();
+    let drive = [C64::ONE, C64::new(0.2, 0.1), C64::new(-0.3, 0.4)];
+    let mut gammas = vec![0.0];
+    gammas.extend(j1_roots_unchecked(modes - 1));
+    for frequency in [300.0, 5000.0, 10000.0] {
+        let omega = tau_hz(frequency);
+        let field = mm_profile_field(
+            &profile, &state, omega, LossModel::Lossless,
+            MouthLoad::Analytic(Termination::IdealOpen), ModeCount(modes),
+            RiccatiSteps(32), &drive,
+        ).unwrap();
+        let pressure = field.pressure.last().unwrap();
+        let flow = field.flow.last().unwrap();
+        for (mode, &gamma) in gammas.iter().enumerate() {
+            assert_eq!(pressure[mode], C64::ZERO, "mouth pressure mode {mode}");
+            let k0 = omega / state.sound_speed;
+            let axial_squared = k0 * k0 - (gamma / radius).powi(2);
+            let cosine = if axial_squared >= 0.0 {
+                (axial_squared.sqrt() * length).cos()
+            } else {
+                ((-axial_squared).sqrt() * length).cosh()
+            };
+            let expected = drive[mode].scale(1.0 / cosine);
+            assert!(
+                (flow[mode] - expected).abs() < 5e-11 * expected.abs(),
+                "{frequency} Hz, mode {mode}: {:?} != {expected:?}", flow[mode]
+            );
+        }
+    }
 }

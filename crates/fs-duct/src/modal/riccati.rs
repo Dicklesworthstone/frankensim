@@ -50,11 +50,12 @@
 //! integrated toward the source the impedance relaxes onto the decaying
 //! branch (local rate `-2 kappa_n`), and only ratios enter the map.
 //!
-//! **Mouth.** The plane mode takes the scalar termination, a tabulated bake,
-//! or its own `Zc` ([`MouthLoad::Matched`], Pagneux's infinite-pipe end).
-//! Those legacy selectors retain matched higher modes. The explicit
-//! `mm_profile_*_flanged` APIs instead impose the complete original Zorumski
-//! radiation matrix, retaining signed mutual loads and the exterior gas.
+//! **Mouth.** Closed and ideal pressure-release boundaries act on every
+//! retained mode. Scalar radiation and tabulated loads act on the plane mode,
+//! with the disclosed matched higher modes. [`MouthLoad::Matched`] is the
+//! infinite-pipe continuation of every mode. The explicit `mm_profile_*_flanged`
+//! APIs impose the complete original Zorumski radiation matrix, retaining
+//! signed mutual loads and the exterior gas.
 //!
 //! **Field.** [`mm_profile_field`] keeps the scaled impedance at every step
 //! station and each step's inverse flow map, then carries a prescribed
@@ -131,10 +132,11 @@ impl ModeCount {
     }
 }
 
-/// Plane-mode load at the mouth; higher modes always terminate matched.
+/// Mouth load: exact closed/pressure-release boundaries act on all modes;
+/// scalar radiation and tabulated loads retain matched higher modes.
 #[derive(Debug, Clone, Copy)]
 pub enum MouthLoad<'a> {
-    /// The scalar termination, with the scalar image's refusals.
+    /// Exact ideal boundaries on all modes, or scalar radiation with its refusals.
     Analytic(Termination),
     /// A tabulated bake; out-of-table frequencies refuse.
     Tabulated(&'a TabulatedLoad),
@@ -391,8 +393,15 @@ fn propagate<'a>(
             }
             for k in 0..n {
                 let (xk, yk) = match (k, plane) {
-                    (0, Some(z)) => (z.scale(1.0 / zref), C64::ONE),
-                    (0, None) => (C64::ONE, C64::ZERO),
+                    // A rigid cap annihilates every modal normal velocity.
+                    (_, None) => (C64::ONE, C64::ZERO),
+                    // Zero pressure is likewise a whole-aperture condition.
+                    (_, Some(z))
+                        if k == 0
+                            || matches!(load, MouthLoad::Analytic(Termination::IdealOpen)) =>
+                    {
+                        (z.scale(1.0 / zref), C64::ONE)
+                    }
                     _ => (mouth.zc[k].scale(1.0 / zref), C64::ONE),
                 };
                 if !finite(xk) {

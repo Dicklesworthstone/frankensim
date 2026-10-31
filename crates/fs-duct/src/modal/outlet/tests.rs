@@ -207,5 +207,26 @@ fn strict_table_scope_and_explicit_dc_remain_distinct() {
         assert!(result.per_incident_plane_pressure(reference).is_err());
     }
     let closed = mouth_response(&duct,&gas,100.0,LossModel::Lossless,Termination::Closed,2,1).unwrap();
-    assert!(closed.flow_map[..2].iter().all(|v|v.abs()==0.0));
+    assert!(closed.flow_map.iter().all(|v|v.abs()==0.0));
+}
+
+#[test]
+fn rigid_cap_blocks_all_modal_mouth_flow_after_junctions() {
+    // G1/G3: no mode may leak through a rigid cap, including propagating
+    // higher modes and evanescent fields coupled by a change of radius.
+    let gas = air();
+    for radii in [&[0.05][..], &[0.035, 0.05][..], &[0.05, 0.035][..]] {
+        let duct = cylinders(radii);
+        for frequency in [300.0, 5000.0, 10000.0] {
+            let closed = mouth_response(
+                &duct, &gas, core::f64::consts::TAU * frequency,
+                LossModel::Lossless, Termination::Closed, 3, 1,
+            ).unwrap();
+            assert!(
+                closed.flow_map.iter().all(|&flow| flow == C64::ZERO),
+                "rigid cap leaked at {frequency} Hz through {radii:?}: {:?}",
+                closed.flow_map,
+            );
+        }
+    }
 }

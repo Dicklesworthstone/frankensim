@@ -25,17 +25,19 @@ its original mouth plane, radius and gas; a separate explicit-load evaluation
 can use declared static impedance without extending the table below its band.
 
 The flanged entry point retains the complete original exterior radiation matrix
-and its interior/exterior-gas admission. The other entry points retain their
-existing matched higher-mode mouth approximation. Cone endpoints are still the
+and its interior/exterior-gas admission. Closed and ideal pressure-release ends
+impose zero flow and zero pressure on every retained mode. Scalar radiation,
+explicit scalar impedance and tabulated loads retain their matched higher-mode
+mouth approximation. Cone endpoints are still the
 original midpoint-radius staircase image: returned endpoint radii identify the
 actual discrete stations, and convergence still requires refining that image.
 This change neither alters that geometry nor certifies arbitrary imported loads
 as causal. Mouth flow is not a microphone signal or an exterior radiation model.
 
-Five Rust regression groups cover analytic resistive cylinders, long evanescent
-spans, scalar-chain degeneration in both junction directions, an independent
-simultaneous all-wave system, flanged input/output power, and strict-table/DC
-separation. Native Rust compilation and test execution remain unverified in the
+Rust regressions cover analytic resistive cylinders, long evanescent spans,
+scalar-chain degeneration in both junction directions, an independent
+simultaneous all-wave system, flanged input/output power, strict-table/DC
+separation, and zero full-mode flow through a rigid cap after radius changes. Native Rust compilation and test execution remain unverified in the
 implementation environment. An independent Python/SciPy derivation check passed
 160 simultaneous-system comparisons (1-4 modes, both radius-step directions,
 complex propagation and above/below-cutoff frequencies), with worst relative
@@ -56,9 +58,9 @@ loads, modal resolution and controls. It does not attach an unrelated output
 model to an already-running voice. The input impedance and output transfer
 therefore share the original modal bore and physical terminal law.
 
-The runtime admits the original voice's analytic plane-mouth terminations and
-strict referenced scalar tables, retaining their matched higher-mouth-mode
-approximation. The frequency-domain full flanged-matrix API above is not yet
+The runtime admits the original voice's analytic terminations and strict
+referenced scalar tables. Closed and ideal pressure-release conditions act on
+every mode; scalar radiation and tables retain matched higher-mouth modes. The frequency-domain full flanged-matrix API above is not yet
 an input-load option for `BrassVoice`. Diagnostic table splices and matched
 continuations are refused by the new runtime. A strict table covers every
 positive output-ladder bin; DC uses its separately declared static impedance
