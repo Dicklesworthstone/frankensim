@@ -6325,3 +6325,29 @@ evaluation, source-only coefficient changes, both surface finishes, ambiguous
 families, missing or wrongly dimensioned coefficients, gain, extrapolation,
 cross-state substitutions and a resonance inside the render band. These are
 synthetic source and algebra checks, not experimental glass validation.
+
+## Native Voce hardening and exact axial reduction
+
+`plastic::voce::VoceJ2` adds an independently selected isotropic saturation
+`Q (1 - exp(-b alpha))` to the existing linear isotropic/Prager J2 law. The
+bounded scalar return shares the original tensor flow and consistent tangent.
+`J2State` retains all plastic strain and accumulated history; `Q = 0` delegates
+exactly to the original law. The energetic interpretation stores the integral
+of hardening, dissipates only the initial-yield offset, and keeps the convex
+backward-Euler remainder out of physical heat.
+
+`plastic::voce::source` requires independent saturation magnitude/rate and
+plastic-strain hardening data, retaining the complete material bundle. A single
+post-yield tangent cannot identify these parameters. Coefficients are fixed over
+the load path; changing source temperature alone does not establish thermal
+history or energy transfer. `plastic::reduction::UniaxialVoce` uses the same
+scalar return with the exact free-sided stress constraint, lateral plastic
+contraction, and native energy account. Borrowed `SmallStrainLaw` forwarding
+lets reductions retain source ownership without copying material tables.
+
+G0/G1/G3 tests in `plastic_voce`, `plastic_voce_source`, and `plastic_reduction`
+check nonlinear reference curves, return consistency, tensor/condensed tangents,
+cyclic energy, source refusals, and the exact zero-saturation limit. These are
+numerical implementation checks, not empirical calibration. Finite strain,
+nonlinear backstress recovery, damage, and temperature-dependent Voce energy
+coupling remain outside this law.

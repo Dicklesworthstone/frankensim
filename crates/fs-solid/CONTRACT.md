@@ -2608,3 +2608,19 @@ Complete unloading in the native frame iteration retains its independent
 compatibility and relative force checks while admitting a local constitutive
 roundoff floor derived from section tangent and strain. This avoids rejecting
 a physically equilibrated permanent bend solely because endpoint load is zero.
+
+## Saturating metal fibers
+
+`FiberLaw::Voce` and its retained axial history use the exact native
+`UniaxialVoce` restriction in existing sections, force-based beam-columns, and
+frame elements. `FiberMaterial::resolve_voce` admits independent saturation
+magnitude/rate, linear isotropic/Prager coefficients and reference density in
+one source bundle. Reinforced sections preserve the same concrete replacement
+and constituent mass calculation. Checked section response admits the full
+tensor strain including lateral contraction before a structural commit.
+
+`fiber_plastic` checks the independent nonlinear moment/curvature relation,
+consistent section tangent, source retention, unloading curvature, and matching
+beam/frame permanent deflection. These fixed-condition, small-strain material
+checks do not establish cyclic calibration, thermal recoupling, damage, or
+finite-strain forming. Existing geometric choices keep their own model limits.

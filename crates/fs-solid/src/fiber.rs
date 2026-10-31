@@ -16,7 +16,7 @@
 use crate::SolidError;
 use fs_la::batched::{BatchMat, BatchVec, batch_cholesky, batch_cholesky_solve};
 use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpState, Uniaxial};
-use fs_material::plastic::reduction::{UniaxialJ2, UniaxialJ2State};
+use fs_material::plastic::reduction::{UniaxialJ2, UniaxialJ2State, UniaxialVoce};
 
 /// Material-bound fiber laws, RC section geometry and coherent member mass.
 pub mod material;
@@ -27,6 +27,8 @@ pub enum FiberLaw {
     /// Free-sided axial restriction of the shared three-dimensional J2 law.
     /// Isotropic and Prager hardening retain separate reversal histories.
     J2(UniaxialJ2),
+    /// Native Voce isotropic saturation with retained linear Prager translation.
+    Voce(UniaxialVoce),
     /// Menegotto–Pinto steel.
     Steel(MenegottoPintoSteel),
     /// Mander concrete (confined or unconfined by parameters).
@@ -38,6 +40,8 @@ pub enum FiberLaw {
 pub enum FiberState {
     /// Signed axial plastic strain and accumulated equivalent plastic strain.
     J2(UniaxialJ2State),
+    /// The same exact axial plastic subspace, with a saturating yield radius.
+    Voce(UniaxialJ2State),
     /// Steel state.
     Steel(MpState),
     /// Concrete state.
@@ -83,6 +87,7 @@ impl Section {
             .iter()
             .map(|f| match &f.law {
                 FiberLaw::J2(l) => FiberState::J2(l.initial_state()),
+                FiberLaw::Voce(l) => FiberState::Voce(l.initial_state()),
                 FiberLaw::Steel(l) => FiberState::Steel(l.initial_state()),
                 FiberLaw::Concrete(l) => FiberState::Concrete(l.initial_state()),
             })
@@ -143,6 +148,20 @@ impl Section {
                     (response.stress_pa, response.tangent_pa)
                 }
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => (l.stress(eps, s), l.tangent(eps, s)),
+                (FiberLaw::Voce(l), FiberState::Voce(s)) => {
+                    let response = l.response(eps, s);
+                    if checked {
+                        let norm_squared =
+                            fs_material::tensor::contract(&response.strain, &response.strain);
+                        let bound = l.backbone().backbone().elastic.strain_limit.min(0.05);
+                        if !norm_squared.is_finite() || norm_squared > bound * bound {
+                            return Err(refused(
+                                "Voce fiber exceeds its full-tensor small-strain domain",
+                            ));
+                        }
+                    }
+                    (response.stress_pa, response.tangent_pa)
+                }
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
                     (-l.stress(-eps, s), l.tangent(-eps, s))
                 }
@@ -173,6 +192,7 @@ impl Section {
             let eps = eps0 - f.y * kappa;
             match (&f.law, st) {
                 (FiberLaw::J2(l), FiberState::J2(s)) => *s = l.update_state(eps, s),
+                (FiberLaw::Voce(l), FiberState::Voce(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
                     *s = l.update_state(-eps, s);

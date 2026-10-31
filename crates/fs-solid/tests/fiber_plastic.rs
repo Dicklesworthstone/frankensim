@@ -9,8 +9,12 @@ use fs_matdb::{
 use fs_material::elastic::IsotropicElastic;
 use fs_material::fiber::ManderConcrete;
 use fs_material::plastic::J2Plasticity;
-use fs_material::plastic::reduction::UniaxialJ2;
+use fs_material::plastic::reduction::{UniaxialJ2, UniaxialVoce};
 use fs_material::plastic::source::HardeningPropertyBasis;
+use fs_material::plastic::voce::VoceJ2;
+use fs_material::plastic::voce::source::{
+    VOCE_SATURATION_INCREMENT_PROPERTY, VOCE_SATURATION_RATE_PROPERTY,
+};
 use fs_material::state_point::MaterialPropertySelection;
 use fs_qty::{Density, Dims, Pressure};
 use fs_solid::fiber::material::{FiberMaterial, RcSection, RcSectionGeometry};
@@ -323,4 +327,154 @@ fn checked_fiber_response_admits_full_tensor_strain_and_preserves_state_on_refus
         };
         assert_eq!(state.tensor_history(), expected);
     }
+}
+
+fn saturation_section() -> Section {
+    let voce =
+        UniaxialVoce::new(VoceJ2::new(law(0.04).backbone().clone(), 80e6, 500.0).unwrap()).unwrap();
+    Section::new(
+        [-ARM, ARM]
+            .map(|y| Fiber {
+                y,
+                area: AREA,
+                law: FiberLaw::Voce(voce.clone()),
+            })
+            .to_vec(),
+    )
+}
+
+#[test]
+fn saturating_section_uses_the_nonlinear_tangent_and_keeps_residual_curvature() {
+    let mut section = saturation_section();
+    let p: f64 = 0.002;
+    let stress = YIELD + (H_ISO + H_KIN) * p + 80e6 * (1.0 - (-500.0 * p).exp());
+    let curvature = (p + stress / E) / ARM;
+    let response = section.try_respond(0.0, curvature).unwrap();
+    let h = H_ISO + H_KIN + 80e6 * 500.0 * (-500.0 * p).exp();
+    close(response.m, 2.0 * AREA * ARM * stress, 2e-12);
+    close(
+        response.tangent[1][1],
+        2.0 * AREA * ARM * ARM * E * (h / (E + h)),
+        2e-12,
+    );
+    section.commit(0.0, curvature);
+    let residual = section.try_respond(0.0, p / ARM).unwrap();
+    close(residual.m, 0.0, 2e-7);
+    for state in &section.states {
+        let FiberState::Voce(state) = state else {
+            panic!("Voce history required")
+        };
+        close(state.equivalent_plastic_strain(), p, 2e-14);
+    }
+    let accepted: Vec<_> = section
+        .states
+        .iter()
+        .map(|s| {
+            let FiberState::Voce(s) = s else {
+                panic!("Voce history required")
+            };
+            s.tensor_history()
+        })
+        .collect();
+    assert!(section.try_respond(0.04, 0.0).is_err());
+    for (state, expected) in section.states.iter().zip(accepted) {
+        let FiberState::Voce(state) = state else {
+            panic!("Voce history required")
+        };
+        assert_eq!(state.tensor_history(), expected);
+    }
+}
+
+#[test]
+fn source_bound_saturation_reaches_metal_fibers_with_all_receipts_and_mass() {
+    let original = source(true, false);
+    let mut claims = original.claims().clone();
+    for (name, value, dims) in [
+        (VOCE_SATURATION_INCREMENT_PROPERTY, 80e6, Pressure::DIMS),
+        (VOCE_SATURATION_RATE_PROPERTY, 500.0, Dims::NONE),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained(),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "authored saturation fixture".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    let card = MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap();
+    let material = FiberMaterial::resolve_voce(
+        &card,
+        &QueryPoint::new(),
+        "density",
+        HardeningPropertyBasis::MixedPlasticStrainModuli,
+        0.04,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    assert_eq!(
+        material.source().unwrap().card_identity(),
+        card.content_hash()
+    );
+    assert_eq!(material.source().unwrap().properties().len(), 8);
+    assert_eq!(material.density_kg_m3(), 7850.0);
+    let section = Section::new(
+        [-ARM, ARM]
+            .map(|y| Fiber {
+                y,
+                area: AREA,
+                law: material.law().clone(),
+            })
+            .to_vec(),
+    );
+    let expected = saturation_section().try_respond(0.0, 0.03).unwrap();
+    let actual = section.try_respond(0.0, 0.03).unwrap();
+    assert_eq!(actual.n, expected.n);
+    assert_eq!(actual.m, expected.m);
+    assert_eq!(actual.tangent, expected.tangent);
+    assert!(
+        FiberMaterial::resolve_voce(
+            &original,
+            &QueryPoint::new(),
+            "density",
+            HardeningPropertyBasis::MixedPlasticStrainModuli,
+            0.04,
+            MaterialPropertySelection::SingleClaimOnly
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn existing_beam_and_frame_share_saturating_history_and_permanent_deflection() {
+    let force = 36_000.0;
+    let mut beam = ForceBasedElement::new(2.0, &saturation_section);
+    let mut frame = Frame2d::new(Geometry::Linear);
+    let base = frame.add_node(0.0, 0.0);
+    let tip = frame.add_node(2.0, 0.0);
+    frame.fix(base, [true; 3]);
+    frame
+        .add_element(base, tip, 5, 0.0, &|| {
+            SectionModel::Fiber(saturation_section())
+        })
+        .unwrap();
+    let mut load = vec![0.0; frame.ndof()];
+    load[3 * tip + 1] = force;
+    frame.static_load(&load, 10).unwrap();
+    let loaded = beam.tip_deflection_under_shear(force).unwrap();
+    close(frame.displacements()[3 * tip + 1], loaded, 2e-8);
+    let elastic = force * 2.0_f64.powi(3) / (6.0 * E * AREA * ARM * ARM);
+    assert!(loaded > elastic);
+    let permanent = beam.tip_deflection_under_shear(0.0).unwrap();
+    frame.static_load(&vec![0.0; frame.ndof()], 10).unwrap();
+    close(permanent, loaded - elastic, 2e-9);
+    close(frame.displacements()[3 * tip + 1], permanent, 2e-8);
+    assert!(permanent > 0.0);
 }

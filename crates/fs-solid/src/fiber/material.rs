@@ -14,10 +14,11 @@ use super::{Fiber, FiberLaw, Section};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
-use fs_material::plastic::reduction::UniaxialJ2;
+use fs_material::plastic::reduction::{UniaxialJ2, UniaxialVoce};
 use fs_material::plastic::source::{
     HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements,
 };
+use fs_material::plastic::voce::source::{ResolvedVoceJ2, voce_requirements};
 use fs_material::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
@@ -134,6 +135,7 @@ impl FiberMaterial {
     pub fn authored(law: FiberLaw, density_kg_m3: f64) -> Result<Self> {
         match law {
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
+            FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
             FiberLaw::Concrete(law) => Self::concrete(law, density_kg_m3),
             FiberLaw::Steel(law) => Self::steel(law, density_kg_m3),
         }
@@ -187,6 +189,54 @@ impl FiberMaterial {
         let density_kg_m3 = density.value_si();
         let resolved = ResolvedJ2Plasticity::try_from_material(source, basis, strain_limit)?;
         let mut material = Self::j2(UniaxialJ2::new(resolved.law().clone())?, density_kg_m3)?;
+        material.source = Some(resolved.material().clone());
+        Ok(material)
+    }
+
+    /// Authored saturating metal law, sharing the native tensor J2 history and
+    /// its exact free-sided axial reduction. No empirical calibration is implied.
+    pub fn voce(law: UniaxialVoce, density_kg_m3: f64) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "Voce fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::Voce(law),
+            density_kg_m3,
+            source: None,
+        })
+    }
+
+    /// Resolve independent saturation magnitude/rate, linear hardening and mass
+    /// density from one fixed-condition material bundle. A post-yield tangent
+    /// alone cannot determine the nonlinear hardening curve and is refused.
+    pub fn resolve_voce(
+        card: &MaterialCard,
+        point: &QueryPoint,
+        density_property: &str,
+        basis: HardeningPropertyBasis,
+        strain_limit: f64,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self> {
+        let mut requirements = voce_requirements(basis)?;
+        requirements.push(ScalarPropertyRequirement::try_new(
+            density_property,
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+        let source = resolve_material_state_point(card, point, &requirements, selection)?;
+        let density = source
+            .property(density_property)
+            .expect("required density was resolved");
+        if !density.is_static_at_fixed_external_conditions() {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: density_property.into(),
+                reason: "Voce fiber density cannot freeze sampled strain, stress, rate or history dependence",
+            }.into());
+        }
+        let density_kg_m3 = density.value_si();
+        let resolved = ResolvedVoceJ2::try_from_material(source, basis, strain_limit)?;
+        let mut material = Self::voce(UniaxialVoce::new(resolved.law().clone())?, density_kg_m3)?;
         material.source = Some(resolved.material().clone());
         Ok(material)
     }
@@ -439,7 +489,10 @@ impl RcSection {
         require(
             matches!(core.law, FiberLaw::Concrete(_))
                 && matches!(cover.law, FiberLaw::Concrete(_))
-                && matches!(steel.law, FiberLaw::Steel(_) | FiberLaw::J2(_)),
+                && matches!(
+                    steel.law,
+                    FiberLaw::Steel(_) | FiberLaw::J2(_) | FiberLaw::Voce(_)
+                ),
             "core and cover require concrete; reinforcement requires a steel or native J2 law",
         )?;
         let core_width = g.width_m - 2.0 * g.cover_m;
