@@ -16,6 +16,8 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState, ThermalFluidTransport};
 use fs_qty::{Length, Temperature};
 
+pub use fs_convection::{HorizontalPlateFacing, NaturalConvectionGeometry};
+
 /// Geometry and heat-flow direction required by the selected forced correlation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ForcedConvectionSettings {
@@ -145,8 +147,36 @@ pub fn evaluate_vertical_plate_from_material<F: FluidTransport + ?Sized>(
     reference_temperature: Temperature,
     characteristic_length: Length,
 ) -> Result<MaterialConvection<'_, F>, MaterialConvectionError> {
+    evaluate_natural_from_material(
+        NaturalConvectionGeometry::VerticalPlate, fluid, gravity_m_s2, expansion_per_k,
+        wall_temperature, reference_temperature, characteristic_length,
+    )
+}
+
+/// Natural convection for an explicitly oriented geometry, from one material
+/// snapshot. The signed `beta * (T_wall - T_reference)` selects the horizontal
+/// face's stability; the conductivity used for h belongs to this same snapshot.
+///
+/// Supply plate height, cylinder diameter, or full horizontal plate area/perimeter
+/// as the characteristic length. Contact-masked exposed area cannot reconstruct
+/// the planform perimeter. Properties must follow the selected card's declared
+/// film convention; use the source-backed cell or film-gas adapter to re-query
+/// them inside a thermal solve. The reference remains the actual bulk temperature.
+///
+/// # Errors
+/// Refuses invalid material, geometry, driving inputs and unsupported correlation
+/// ranges. This does not extrapolate a zero-flow or zero-Rayleigh coefficient.
+pub fn evaluate_natural_from_material<F: FluidTransport + ?Sized>(
+    geometry: NaturalConvectionGeometry,
+    fluid: &F,
+    gravity_m_s2: f64,
+    expansion_per_k: f64,
+    wall_temperature: Temperature,
+    reference_temperature: Temperature,
+    characteristic_length: Length,
+) -> Result<MaterialConvection<'_, F>, MaterialConvectionError> {
     let transport = fluid.transport_state()?;
-    let inputs = vertical_plate_inputs(
+    let rayleigh = natural_rayleigh(
         transport,
         gravity_m_s2,
         expansion_per_k,
@@ -154,13 +184,8 @@ pub fn evaluate_vertical_plate_from_material<F: FluidTransport + ?Sized>(
         reference_temperature,
         characteristic_length,
     )?;
-    finish(
-        CorrelationId::ChurchillChuVerticalPlate,
-        fluid,
-        transport,
-        characteristic_length,
-        inputs,
-    )
+    let nusselt = geometry.evaluate(rayleigh, transport.prandtl())?;
+    finish_evaluation(fluid, transport, characteristic_length, nusselt)
 }
 
 /// Natural convection from the original thermal reservoir's complete material
@@ -224,6 +249,19 @@ fn vertical_plate_inputs(
     reference_temperature: Temperature,
     characteristic_length: Length,
 ) -> Result<CorrelationInputs, MaterialConvectionError> {
+    let rayleigh = natural_rayleigh(transport, gravity_m_s2, expansion_per_k,
+        wall_temperature, reference_temperature, characteristic_length)?;
+    Ok(CorrelationInputs::natural(rayleigh.abs(), transport.prandtl()))
+}
+
+fn natural_rayleigh(
+    transport: FluidTransportState,
+    gravity_m_s2: f64,
+    expansion_per_k: f64,
+    wall_temperature: Temperature,
+    reference_temperature: Temperature,
+    characteristic_length: Length,
+) -> Result<f64, MaterialConvectionError> {
     if [wall_temperature.value(), reference_temperature.value()]
         .into_iter().any(|value| !value.is_finite() || value <= 0.0)
     {
@@ -231,12 +269,11 @@ fn vertical_plate_inputs(
             what: "natural convection needs positive finite absolute temperatures".into(),
         }.into());
     }
-    let rayleigh = transport.rayleigh(
+    Ok(transport.rayleigh(
         gravity_m_s2, expansion_per_k,
         wall_temperature.value() - reference_temperature.value(),
         characteristic_length.value(),
-    )?.abs();
-    Ok(CorrelationInputs::natural(rayleigh, transport.prandtl()))
+    )?)
 }
 
 fn finish<F: FluidTransport + ?Sized>(
@@ -244,6 +281,12 @@ fn finish<F: FluidTransport + ?Sized>(
     length: Length, inputs: CorrelationInputs,
 ) -> Result<MaterialConvection<'_, F>, MaterialConvectionError> {
     let nusselt = fs_convection::evaluate(id, inputs)?;
+    finish_evaluation(fluid, transport, length, nusselt)
+}
+
+fn finish_evaluation<F: FluidTransport + ?Sized>(
+    fluid: &F, transport: FluidTransportState, length: Length, nusselt: NusseltEvaluation,
+) -> Result<MaterialConvection<'_, F>, MaterialConvectionError> {
     let coefficient = nusselt.heat_transfer_coefficient(
         ThermalConductivity::new(transport.thermal_conductivity_w_m_k()), length,
     )?;

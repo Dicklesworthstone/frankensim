@@ -52,6 +52,15 @@ pub enum CellConvectionLaw {
         gravity_m_s2: f64,
         expansion_per_k: f64,
     },
+    /// Isolated natural convection with explicitly authored geometry. For a
+    /// horizontal plate, characteristic length is its full planform area /
+    /// perimeter; for a cylinder it is diameter. Exposed/contact area does not
+    /// replace that length. Signed expansion controls the buoyant orientation.
+    Natural {
+        geometry: NaturalConvectionGeometry,
+        gravity_m_s2: f64,
+        expansion_per_k: f64,
+    },
 }
 
 /// One material source, reservoir and law on the whole currently exposed cell.
@@ -281,6 +290,15 @@ fn evaluate_convection_state(
     transport: &FluidTransportState, wall: f64, reference: Temperature,
     length: Length, law: CellConvectionLaw,
 ) -> Result<Option<CellConvectionEvaluation>, MaterialConvectionError> {
+    let natural = |geometry, gravity_m_s2, expansion_per_k| {
+        if wall == reference.value() {
+            transport.rayleigh(gravity_m_s2, expansion_per_k, 0.0, length.value())
+                .map_err(MaterialConvectionError::from).map(|_| None)
+        } else {
+            evaluate_natural_from_material(geometry, transport, gravity_m_s2,
+                expansion_per_k, Temperature::new(wall), reference, length).map(Some)
+        }
+    };
     let result = match law {
         CellConvectionLaw::Forced { correlation, speed_m_s, mut settings } => {
             if wall > reference.value() {
@@ -292,13 +310,10 @@ fn evaluate_convection_state(
                 speed_m_s, length, settings).map(Some)
         }
         CellConvectionLaw::VerticalPlate { gravity_m_s2, expansion_per_k } => {
-            if wall == reference.value() {
-                transport.rayleigh(gravity_m_s2, expansion_per_k, 0.0, length.value())
-                    .map_err(MaterialConvectionError::from).map(|_| None)
-            } else {
-                evaluate_vertical_plate_from_material(transport, gravity_m_s2,
-                    expansion_per_k, Temperature::new(wall), reference, length).map(Some)
-            }
+            natural(NaturalConvectionGeometry::VerticalPlate, gravity_m_s2, expansion_per_k)
+        }
+        CellConvectionLaw::Natural { geometry, gravity_m_s2, expansion_per_k } => {
+            natural(geometry, gravity_m_s2, expansion_per_k)
         }
     }?;
     Ok(result.map(|value| {

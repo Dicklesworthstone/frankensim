@@ -65,7 +65,9 @@ fn fixture<R>(run: impl FnOnce(&MaterialExchangeNetwork<'_>, DepositionSimulatio
 }
 
 fn patches() -> [ExchangeContact; 3] {
-    let natural = |area_m2| NaturalGasSurface { area_m2, characteristic_length: Length::new(0.1), gravity_m_s2: 9.81 };
+    let natural = |area_m2| NaturalGasSurface {
+        geometry: fs_convection::NaturalConvectionGeometry::VerticalPlate,
+        area_m2, characteristic_length: Length::new(0.1), gravity_m_s2: 9.81 };
     [
         ExchangeContact { contact: Contact { id: 1, chamber: 7, cell: HOT }, law: GasHeatLaw::NaturalConvection(natural(0.01)) },
         ExchangeContact { contact: Contact { id: 2, chamber: 7, cell: HOT }, law: GasHeatLaw::ForcedConvection(
@@ -154,6 +156,7 @@ fn live_flow_path_preserves_patch_ownership_and_publishes_all_histories_together
             maximum_withdrawn_fraction: 0.1, mass_tolerance_kg: 1e-12, energy_tolerance_j: 1e-7 };
         let mut overlap = patches();
         overlap[0].law = GasHeatLaw::NaturalConvection(NaturalGasSurface {
+            geometry: fs_convection::NaturalConvectionGeometry::VerticalPlate,
             area_m2: 0.02, characteristic_length: Length::new(0.1), gravity_m_s2: 9.81,
         });
         assert!(coupled::advance_with_flow(&mut state, &prepared, cx, DT, &[], &drives, &[], &overlap,

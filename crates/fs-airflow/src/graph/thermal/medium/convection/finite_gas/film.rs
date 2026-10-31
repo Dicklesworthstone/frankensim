@@ -1,6 +1,6 @@
 //! Film-temperature properties on the original finite gas/body heat residual.
 //! Film evaluation has no independent energy or mass; bulk gas keeps both.
-use super::super::evaluate_vertical_plate_from_material;
+use super::super::evaluate_natural_from_material;
 use super::*;
 use fs_material::thermochemical_gas::ThermochemicalGasModel;
 use fs_qty::Temperature;
@@ -105,7 +105,8 @@ impl FilmGasSurface<'_> {
                 if wall == bulk {
                     None
                 } else {
-                    Some(evaluate_vertical_plate_from_material(
+                    Some(evaluate_natural_from_material(
+                        surface.geometry,
                         &film,
                         surface.gravity_m_s2,
                         1.0 / film.state().temperature,

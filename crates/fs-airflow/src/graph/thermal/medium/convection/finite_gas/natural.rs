@@ -1,10 +1,10 @@
 //! Natural convection on the original finite gas/body heat residual.
 //!
-//! The shared vertical-plate correlation reads one actual source-resolved gas
+//! The shared geometry-specific correlation reads one actual source-resolved gas
 //! state and both current temperatures. This adapter owns no energy store,
 //! flow field, gas law or timestepper.
 
-use super::super::evaluate_vertical_plate_from_material;
+use super::super::{NaturalConvectionGeometry, evaluate_natural_from_material};
 use super::{
     ConductanceSample, EquilibriumPhaseState, FiniteGasConvectionSample, GasConvectionEvaluation,
     GasPiston, HeatExchangeSolve, Length, MaterialConvectionError, PistonInput, PistonSolve,
@@ -13,19 +13,23 @@ use super::{
 };
 use fs_qty::Temperature;
 
-/// Exposed isothermal vertical plate with explicitly declared gravity.
+/// Exposed isothermal natural-convection surface with declared geometry/gravity.
 ///
 /// The original Churchill-Chu card consumes transport at the supplied BULK gas
 /// state. This uniform-reservoir approximation requires the caller to admit
 /// its temperature contrast; there is no independently resolved film state,
 /// enclosure circulation, neighbouring-wall correction or measured-fidelity
-/// claim. Geometry and temperature contrast must fit the vertical-plate model.
+/// claim. That bulk-property shortcut remains limited to vertical plates;
+/// horizontal plates/cylinders require `FilmGasSurface` and its source bank.
 /// No flow speed, independent beta or material-name switch is introduced.
 #[derive(Clone, Copy, Debug)]
 pub struct NaturalGasSurface {
+    /// Geometry and horizontal face orientation. Select the length below
+    /// according to this geometry; exposed patch area is not a perimeter.
+    pub geometry: NaturalConvectionGeometry,
     /// Actual exposed patch area [m2]; zero explicitly isolates this patch.
     pub area_m2: f64,
-    /// Vertical plate height [m], used by the original correlation.
+    /// Height, cylinder diameter or horizontal plate area/perimeter [m].
     pub characteristic_length: Length,
     /// Positive magnitude of gravitational acceleration [m/s2]. Zero gravity
     /// requires an independently admitted conduction law, not a Ra=0 fallback.
@@ -42,7 +46,7 @@ impl NaturalGasSurface {
             || self.gravity_m_s2 <= 0.0
         {
             return Err(invalid(
-                "finite gas natural convection requires nonnegative area, positive vertical length and positive gravity",
+                "finite gas natural convection requires nonnegative area, positive characteristic length and positive gravity",
             ));
         }
         Ok(())
@@ -88,7 +92,13 @@ impl NaturalGasSurface {
                 },
             });
         }
-        let evaluated = evaluate_vertical_plate_from_material(
+        if self.geometry != NaturalConvectionGeometry::VerticalPlate {
+            return Err(invalid(
+                "horizontal natural convection requires source-resolved FilmGasSurface properties",
+            ));
+        }
+        let evaluated = evaluate_natural_from_material(
+            self.geometry,
             gas,
             self.gravity_m_s2,
             1.0 / gas_temperature_k,

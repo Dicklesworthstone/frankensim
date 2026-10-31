@@ -69,8 +69,9 @@ CHT ladder's correlation-rung transfer.
 ### Material-driven natural and forced finite-cell convection
 
 `medium::convection::deposition::evaluate_material_cell_convection` binds either
-an existing forced-convection card or the Churchill-Chu vertical-plate card to
-the original finite-cell enthalpy owner. Both laws share one source, exposed-area
+an existing forced-convection card or an explicitly oriented natural-convection
+geometry (vertical plate, horizontal cylinder, horizontal plate) to
+the original finite-cell enthalpy owner. These laws share one source, exposed-area
 and contact-coverage accounting path. Natural convection reevaluates Ra and h
 at the proposed wall temperature inside the thermal residual; density, Cp,
 viscosity and conductivity come from one admitted material transport snapshot.
@@ -96,6 +97,14 @@ temperature never replaces the actual reservoir temperature in buoyancy or
 signed heat flow. Density, heat capacity, conductivity, viscosity and known
 signed isobaric expansion share one checked source state. Natural convection
 requires sourced expansion; forced convection does not invent it when absent.
+The `Natural` horizontal-plate and cylinder laws require `FilmMean` and refuse
+bulk-property substitution before querying sources. Signed expansion and the
+full wall/bulk contrast select plate stability; exposed contact-masked area
+does not replace the explicitly authored full-plate `A/P` length. The same law
+resolution applies to reciprocal finite links, so the native thermal owner
+debits and credits one heat transfer. Focused `natural_geometry` tests check
+orientation, negative expansion, retained pressure/composition, independent
+film-property heat calculations and closed-pair energy conservation.
 
 The result retains each concrete material owner and its thermal snapshot beside
 the original correlation, exposed-area and heat-source results. Prepared source
@@ -618,8 +627,11 @@ Rayleigh/heat algebra, actual piston/body energy closure and atomic refusal.
 ### Natural convection in finite gas and coupled surface networks
 
 `medium::convection::finite_gas::NaturalGasSurface` evaluates the shared
-vertical-plate correlation from the coupling owner's actual gas and body query
-states. The retained ideal-gas EOS supplies beta = 1/T; the same resolved
+natural-convection geometry from the coupling owner's actual gas and body query
+states. Its raw bulk-property entry retains vertical-plate behavior; active
+horizontal plate/cylinder exchange requires `FilmGasSurface`, which evaluates
+the original gas at the actual mean film temperature. The retained ideal-gas
+EOS supplies beta = 1/T at that property state; the same resolved
 thermochemical gas supplies density, Cp, viscosity and conductivity. Pressure
 and composition therefore propagate through Ra, Pr, h and the original signed
 gas/body heat residual. The existing piston, phase-enthalpy and gas owners
@@ -632,9 +644,13 @@ disjoint exposed patches, with aggregate area admission and one energy owner.
 Accepted samples retain the exact queried gas and wall states. Candidate solves,
 atomic flow-step publication and cancellation use the existing network path.
 
-This is an unconfined isothermal vertical-plate approximation evaluated at bulk
-gas properties; it does not resolve buoyant velocity or supply enclosure
-corrections. The caller must admit the geometry and temperature contrast.
+These are unconfined isothermal geometry correlations; they do not resolve
+buoyant velocity or supply enclosure corrections. The caller must admit the
+geometry, characteristic length and temperature contrast. Horizontal-plate
+orientation and explicit `A/P` reach the same finite-gas heat residual, while
+film properties leave bulk gas storage, pressure and composition ownership
+unchanged. A focused horizontal-film regression closes the original gas/body
+energy exchange.
 Exact equilibrium and zero patch area have zero transfer without a fabricated
 Ra=0 coefficient; every nonzero contrast retains the original correlation
 domain. Tests in `tests/finite_gas_convection/natural.rs` and

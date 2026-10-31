@@ -3,16 +3,88 @@ use super::*;
 use fs_airflow::graph::thermal::medium::convection::finite_gas::film::{
     FilmGasHeatLaw, FilmGasSurface,
 };
+use fs_convection::{HorizontalPlateFacing, NaturalConvectionGeometry};
 use fs_material::fluid_transport::FluidTransport;
 use fs_qty::Temperature;
 use fs_qty::semantic::{Composition, CompositionBasis};
 
 fn natural_surface() -> NaturalGasSurface {
     NaturalGasSurface {
+        geometry: NaturalConvectionGeometry::VerticalPlate,
         area_m2: 0.02,
         characteristic_length: Length::new(0.1),
         gravity_m_s2: 9.80665,
     }
+}
+
+#[test]
+fn oriented_film_convection_reaches_original_gas_body_and_motion_energy() {
+    let curve = source::body_curve();
+    let old = piston(0.75, 400.0, 100000.0);
+    let saved = old.clone();
+    let thermal = body(&curve, 260000.0); // 500 K
+    let mut conductances = Vec::new();
+    for (geometry, expected) in [
+        (
+            NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Up),
+            CorrelationId::HorizontalPlateUnstableLaminar,
+        ),
+        (
+            NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Down),
+            CorrelationId::HorizontalPlateStable,
+        ),
+        (
+            NaturalConvectionGeometry::HorizontalCylinder,
+            CorrelationId::ChurchillChuHorizontalCylinder,
+        ),
+    ] {
+        let patch = NaturalGasSurface {
+            geometry,
+            ..natural_surface()
+        };
+        // Horizontal source cards cannot silently fall back to bulk properties.
+        assert!(patch.resolve(old.gas().state(), thermal.initial).is_err());
+        let film = FilmGasSurface {
+            model: old.gas().model(),
+            law: FilmGasHeatLaw::Natural(patch),
+        };
+        let fixed = film.resolve(old.gas().state(), thermal.initial).unwrap();
+        let sample = fixed.source.interface.evaluation.as_ref().unwrap();
+        assert_eq!(sample.nusselt.card().id, expected);
+        conductances.push(fixed.conductance_w_k);
+        let next = film
+            .finite_body_candidate(&old, input(), thermal, controls(), exchange(), || false)
+            .unwrap();
+        let report = next.step();
+        let source = &next.thermal().report;
+        let property = source.property_gas.as_ref().unwrap();
+        let gas = &source.interface.gas;
+        near(
+            property.state().temperature,
+            0.5 * (gas.state().temperature + source.interface.body.temperature_k()),
+            1e-12,
+        );
+        assert_eq!(property.state().pressure, gas.state().pressure);
+        assert_eq!(
+            property.thermodynamics().receipt().declared_fraction_bits(),
+            gas.thermodynamics().receipt().declared_fraction_bits()
+        );
+        let du = old.gas().mass_kg()
+            * (next.piston().gas().state().specific_internal_energy_j_kg()
+                - old.gas().state().specific_internal_energy_j_kg());
+        let dh = thermal.mass_kg
+            * (next.thermal().state.specific_enthalpy_j_kg()
+                - thermal.initial.specific_enthalpy_j_kg());
+        let kinetic = 0.5 * old.mass_kg() * next.piston().velocity_m_s().powi(2);
+        let work = input().exterior_pressure_pa
+            * (next.piston().gas().volume_m3() - old.gas().volume_m3());
+        near(du + dh + kinetic + work, 0.0, 1e-7);
+        near(dh + report.exchanged_heat_j, 0.0, 1e-7);
+        assert!(report.exchanged_heat_j > 0.0);
+    }
+    // Same source, temperatures, length and area: stability alone halves h.
+    near(conductances[0], 2.0 * conductances[1], 1e-12);
+    assert_eq!(old, saved);
 }
 
 #[test]

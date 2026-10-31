@@ -7,6 +7,7 @@ use fs_qty::Length;
 
 fn surface() -> NaturalGasSurface {
     NaturalGasSurface {
+        geometry: fs_convection::NaturalConvectionGeometry::VerticalPlate,
         area_m2: 0.02,
         characteristic_length: Length::new(0.1),
         gravity_m_s2: 9.80665,

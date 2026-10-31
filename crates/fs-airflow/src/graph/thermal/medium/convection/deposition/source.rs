@@ -33,6 +33,74 @@ pub enum SourceCellConvectionLaw {
     VerticalPlate {
         gravity_m_s2: f64,
     },
+    /// Geometry selects the shared natural-convection card. Horizontal plate
+    /// and cylinder cards require `FilmMean` properties; Rayleigh and heat use
+    /// the full wall/bulk temperature difference. Expansion comes from the
+    /// same original material source, including its sign.
+    Natural {
+        geometry: NaturalConvectionGeometry,
+        gravity_m_s2: f64,
+    },
+}
+
+impl SourceCellConvectionLaw {
+    fn admit_property_temperature(
+        self,
+        convention: ConvectionPropertyTemperature,
+    ) -> Result<(), ConvectionSourceError> {
+        if matches!(
+            self,
+            Self::Natural {
+                geometry: NaturalConvectionGeometry::HorizontalCylinder
+                    | NaturalConvectionGeometry::HorizontalPlate(_),
+                ..
+            }
+        ) && convention != ConvectionPropertyTemperature::FilmMean
+        {
+            return Err(ConvectionSourceError::Invalid(
+                "horizontal natural convection requires mean wall/bulk film properties",
+            ));
+        }
+        Ok(())
+    }
+
+    // Reservoir boundaries and reciprocal finite links retain one law mapping
+    // and one source-expansion requirement.
+    fn resolve(
+        self,
+        source: &ThermalFluidTransportState,
+    ) -> Result<CellConvectionLaw, ConvectionSourceError> {
+        let expansion = || {
+            source
+                .volumetric_expansion_per_k()
+                .ok_or(ConvectionSourceError::Invalid(
+                    "natural convection requires sourced isobaric volumetric expansion",
+                ))
+        };
+        Ok(match self {
+            Self::Forced {
+                correlation,
+                speed_m_s,
+                settings,
+            } => CellConvectionLaw::Forced {
+                correlation,
+                speed_m_s,
+                settings,
+            },
+            Self::VerticalPlate { gravity_m_s2 } => CellConvectionLaw::VerticalPlate {
+                gravity_m_s2,
+                expansion_per_k: expansion()?,
+            },
+            Self::Natural {
+                geometry,
+                gravity_m_s2,
+            } => CellConvectionLaw::Natural {
+                geometry,
+                gravity_m_s2,
+                expansion_per_k: expansion()?,
+            },
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -133,6 +201,9 @@ pub fn evaluate_source_cell_convection<F: ThermalFluidTransport, E>(
     let mut ordered = Vec::with_capacity(bindings.len());
     for binding in bindings {
         check(&mut cancelled)?;
+        binding
+            .law
+            .admit_property_temperature(binding.property_temperature)?;
         if !ids.insert(binding.cell) {
             return Err(ConvectionSourceError::Invalid("duplicate convective cell").into());
         }
@@ -201,28 +272,7 @@ pub fn evaluate_source_cell_convection<F: ThermalFluidTransport, E>(
     let mut resolved = Vec::with_capacity(ordered.len());
     for (binding, material) in ordered.iter().zip(&materials) {
         check(&mut cancelled)?;
-        let law = match binding.law {
-            SourceCellConvectionLaw::Forced {
-                correlation,
-                speed_m_s,
-                settings,
-            } => CellConvectionLaw::Forced {
-                correlation,
-                speed_m_s,
-                settings,
-            },
-            SourceCellConvectionLaw::VerticalPlate { gravity_m_s2 } => {
-                let expansion_per_k = material.thermal.volumetric_expansion_per_k().ok_or(
-                    ConvectionSourceError::Invalid(
-                        "natural convection requires sourced isobaric volumetric expansion",
-                    ),
-                )?;
-                CellConvectionLaw::VerticalPlate {
-                    gravity_m_s2,
-                    expansion_per_k,
-                }
-            }
-        };
+        let law = binding.law.resolve(&material.thermal)?;
         resolved.push(MaterialConvectiveCell {
             cell: binding.cell,
             fluid: &material.thermal,

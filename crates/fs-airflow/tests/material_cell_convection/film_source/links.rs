@@ -3,6 +3,8 @@ use super::*;
 
 #[path = "links/observer.rs"]
 mod observer;
+#[path = "links/natural_geometry.rs"]
+mod natural_geometry;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::*;
 use fs_matdb::SelectionPolicy;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
@@ -20,7 +22,13 @@ fn context(t: f64) -> QueryPoint {
         .unwrap()
 }
 fn fluid_source(viscosity_scale: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
-    let original = liquid_card(0.0, 0.01, 320.0);
+    fluid_source_with_expansion(viscosity_scale, 0.0)
+}
+fn fluid_source_with_expansion(
+    viscosity_scale: f64,
+    density_slope: f64,
+) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    let original = liquid_card(density_slope, 0.01, 320.0);
     let mut claims = ClaimSet::new();
     for (_, value) in original.claims().claims_ordered() {
         let mut claim = value.clone();

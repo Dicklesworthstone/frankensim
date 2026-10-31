@@ -121,6 +121,9 @@ pub fn evaluate_source_link_convection<F: ThermalFluidTransport, E>(
     let mut ordered = Vec::with_capacity(bindings.len());
     for binding in bindings {
         check(&mut cancelled)?;
+        binding
+            .law
+            .admit_property_temperature(binding.property_temperature)?;
         let link = thermal
             .links()
             .get(&binding.link)
@@ -184,27 +187,7 @@ pub fn evaluate_source_link_convection<F: ThermalFluidTransport, E>(
             )
             .into());
         }
-        let law = match binding.law {
-            SourceCellConvectionLaw::Forced {
-                correlation,
-                speed_m_s,
-                settings,
-            } => CellConvectionLaw::Forced {
-                correlation,
-                speed_m_s,
-                settings,
-            },
-            SourceCellConvectionLaw::VerticalPlate { gravity_m_s2 } => {
-                CellConvectionLaw::VerticalPlate {
-                    gravity_m_s2,
-                    expansion_per_k: snapshot.volumetric_expansion_per_k().ok_or(
-                        ConvectionSourceError::Invalid(
-                            "natural convection requires sourced isobaric volumetric expansion",
-                        ),
-                    )?,
-                }
-            }
-        };
+        let law = binding.law.resolve(&snapshot)?;
         let evaluation = evaluate_convection_state(
             &transport,
             wall_temperature_k,

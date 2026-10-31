@@ -102,6 +102,7 @@ fn heat_law(input: &str) -> Result<GasHeatLaw> {
             return Err("natural-convection gravity must be positive and finite".into());
         }
         Ok(GasHeatLaw::NaturalConvection(NaturalGasSurface {
+            geometry: fs_convection::NaturalConvectionGeometry::VerticalPlate,
             area_m2: geometry.area_m2, characteristic_length: geometry.characteristic_length,
             gravity_m_s2: gravity,
         }))

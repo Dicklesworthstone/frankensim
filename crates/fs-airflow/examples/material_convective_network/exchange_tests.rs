@@ -36,6 +36,7 @@ fn mixed(speed:f64)->[ExchangeContact;3] {
     let base=contacts(speed);
     [ExchangeContact {contact:base[0].contact,law:GasHeatLaw::NaturalConvection(
             NaturalGasSurface {area_m2:base[0].surface.area_m2,
+                geometry:fs_convection::NaturalConvectionGeometry::VerticalPlate,
                 characteristic_length:base[0].surface.characteristic_length,gravity_m_s2:9.81})},
         ExchangeContact {contact:base[1].contact,law:GasHeatLaw::Conduction(GasConductionGeometry {
             area_m2:base[1].surface.area_m2,gas_distance_m:0.01,cell_distance_m:0.02})},
