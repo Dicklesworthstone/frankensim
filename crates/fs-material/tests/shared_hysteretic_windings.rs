@@ -252,3 +252,48 @@ fn source_and_geometry_refusals_leave_all_winding_and_core_history_unchanged() {
 fn model_with_other_geometry() -> SharedHystereticCore {
     model(RATIOS, [0.6, 1.0])
 }
+
+#[test]
+fn biased_small_increments_retain_leakage_work_in_conserved_coordinates() {
+    let reference = UniformHystereticCore::new(
+        ScalarHysteresis::new(0.1, 30.0, vec![]).unwrap(),
+        1.0,
+        1.0,
+        1.0,
+    )
+    .unwrap();
+    let model = SharedHystereticCore::new(
+        reference,
+        vec![
+            SharedHystereticWinding {
+                turns_ratio: 2.0,
+                leakage_h: 0.3,
+            },
+            SharedHystereticWinding {
+                turns_ratio: -1.0,
+                leakage_h: 0.4,
+            },
+        ],
+    )
+    .unwrap();
+    let linkages = [0.5, -0.2];
+    let before = model
+        .candidate_linkages(&model.initial_state(), &linkages)
+        .unwrap()
+        .state;
+    // Independent inverse of L=[[.7,-.2],[-.2,.5]], det=.31.
+    let current = (0.5 * linkages[0] + 0.2 * linkages[1]) / 0.31;
+    for increment in [1e-3, 1e-6, 1e-8, 1e-10] {
+        let target = [linkages[0] + increment, linkages[1]];
+        let delta = target[0] - linkages[0];
+        let next = model.candidate_linkages(&before, &target).unwrap();
+        let expected = (current + 0.25 * delta / 0.31) * delta;
+        // Constitutive endpoint inversion is admitted at the full bias scale;
+        // tiny increments must not acquire a stricter false leakage-work gate.
+        let allowance = 128.0 * f64::EPSILON * before.stored_energy_j();
+        assert!((next.magnetic_work_j - expected).abs() <= allowance);
+        assert_eq!(next.core.core_heat_j, 0.0);
+        assert_eq!(next.magnetic_work_j, next.stored_change_j);
+        assert_eq!(before.flux_linkages_wb(), &linkages);
+    }
+}

@@ -20,16 +20,136 @@ use super::{
 use crate::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
     DrivenCoefficients, DriverAccount, ThermalDriver, cell_driver_candidate,
-    contacts::heat::{HeatAssembly, HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, closed_balance},
+    contacts::heat::{
+        HeatAssembly, HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, closed_balance,
+    },
     material::{
         MaterialCell, MaterialNetwork, MaterialNetworkError, MaterialNetworkSample,
         PreparedMaterialNetwork,
     },
 };
 use fs_exec::Cx;
-use fs_material::conductor::ElectricalPropertyBasis;
+use fs_matdb::QueryPoint;
+use fs_material::{
+    conductor::ElectricalPropertyBasis, field_storage::hysteresis::UniformHystereticCore,
+};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
+
+pub(super) mod sealed {
+    pub trait History {}
+    pub trait Step {}
+}
+
+/// Sealed native magnetic histories using the SAME finite core/coil heat owner.
+/// The source fit, retained memory and original native electrical account stay
+/// with the single-core or shared-core implementation; no thermal trial may
+/// commit or advance that accepted history more than once.
+pub trait HystereticThermalHistory: sealed::History + Clone {
+    type Step: HystereticThermalStep;
+    fn uniform_core(&self) -> &UniformHystereticCore;
+    fn native_circuit(&self) -> &crate::material_circuit::MaterialCircuit;
+    fn time_s(&self) -> f64;
+    fn with_core_source_query(&self, query: &QueryPoint) -> Result<Self, HystereticCircuitError>;
+    fn step_for_heat(
+        &self,
+        target_s: f64,
+        resistors: Vec<crate::material_circuit::MaterialResistor>,
+        external_inputs: &[f64],
+        controls: HystereticCircuitSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, Self::Step), HystereticCircuitError>;
+}
+
+/// Original native electrical, magnetic storage and ONE core-loss receipt.
+/// Sealed implementations prevent arbitrary loss maps entering this account.
+pub trait HystereticThermalStep: sealed::Step {
+    fn electrical(&self) -> &crate::material_circuit::MaterialCircuitStep;
+    fn core_heat_j(&self) -> f64;
+    fn heat_j(&self) -> f64;
+    fn numerical_dissipation_j(&self) -> f64;
+    fn stored_change_j(&self) -> f64;
+    fn supplied_work_j(&self) -> f64;
+    fn circuit_trials(&self) -> usize;
+}
+
+impl sealed::History for HystereticCircuit {}
+impl HystereticThermalHistory for HystereticCircuit {
+    type Step = HystereticCircuitStep;
+    fn uniform_core(&self) -> &UniformHystereticCore {
+        self.core()
+    }
+    fn native_circuit(&self) -> &crate::material_circuit::MaterialCircuit {
+        HystereticCircuit::native_circuit(self)
+    }
+    fn time_s(&self) -> f64 {
+        HystereticCircuit::time_s(self)
+    }
+    fn with_core_source_query(&self, query: &QueryPoint) -> Result<Self, HystereticCircuitError> {
+        Ok(Self {
+            core: self.core.at_source_query(query)?,
+            ..self.clone()
+        })
+    }
+    fn step_for_heat(
+        &self,
+        target_s: f64,
+        resistors: Vec<crate::material_circuit::MaterialResistor>,
+        external_inputs: &[f64],
+        controls: HystereticCircuitSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, Self::Step), HystereticCircuitError> {
+        self.step_candidate(target_s, resistors, external_inputs, controls, cancelled)
+            .map(HystereticCircuitCandidate::into_parts)
+    }
+}
+impl sealed::Step for HystereticCircuitStep {}
+impl HystereticThermalStep for HystereticCircuitStep {
+    fn electrical(&self) -> &crate::material_circuit::MaterialCircuitStep {
+        &self.circuit
+    }
+    fn core_heat_j(&self) -> f64 {
+        self.core.core_heat_j
+    }
+    fn heat_j(&self) -> f64 {
+        self.heat_j
+    }
+    fn numerical_dissipation_j(&self) -> f64 {
+        self.numerical_dissipation_j
+    }
+    fn stored_change_j(&self) -> f64 {
+        self.stored_change_j
+    }
+    fn supplied_work_j(&self) -> f64 {
+        self.supplied_work_j
+    }
+    fn circuit_trials(&self) -> usize {
+        self.circuit_trials
+    }
+}
+
+struct MagneticDriver<H: HystereticThermalHistory> {
+    model: H,
+    step: H::Step,
+}
+impl<H: HystereticThermalHistory> ThermalDriver for MagneticDriver<H> {
+    type Model = H;
+    type Step = H::Step;
+    fn account(&self) -> DriverAccount<'_> {
+        let step = &self.step;
+        DriverAccount {
+            resistors: &step.electrical().resistors,
+            contacts: &step.electrical().contacts,
+            heat_j: step.heat_j(),
+            numerical_dissipation_j: step.numerical_dissipation_j(),
+            stored_change_j: step.stored_change_j(),
+            supplied_j: step.supplied_work_j(),
+        }
+    }
+    fn into_parts(self) -> (Self::Model, Self::Step) {
+        (self.model, self.step)
+    }
+}
 
 #[derive(Debug)]
 pub enum HystereticThermalError<E = HeatNetworkError> {
@@ -88,8 +208,8 @@ impl ThermalDriver for HystereticCircuitCandidate {
 }
 
 /// Accepted circuit/core history retaining ONE prepared source selection.
-pub struct ThermalHystereticCircuit<'n, 'a> {
-    circuit: HystereticCircuit,
+pub struct ThermalHystereticCircuit<'n, 'a, H: HystereticThermalHistory = HystereticCircuit> {
+    circuit: H,
     network: &'n MaterialNetwork<'a>,
     prepared: Arc<PreparedMaterialNetwork<'n, 'a>>,
     destinations: Arc<BTreeMap<usize, CellId>>,
@@ -98,7 +218,7 @@ pub struct ThermalHystereticCircuit<'n, 'a> {
     core_temperature_interval_k: [f64; 2],
     core_binding: Option<&'n MaterialCell<'a>>,
 }
-impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
+impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
     /// Bind the core to a distinct whole fixed-volume solid caloric cell.
     /// Its mass/density must reproduce UniformHystereticCore::volume_m3.
     /// Graph resistor geometry and heat routes stay with MaterialNetwork.
@@ -110,7 +230,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
     /// An authored core keeps its explicit caller interval and authority.
     #[allow(clippy::too_many_arguments)]
     pub fn bind(
-        circuit: HystereticCircuit,
+        circuit: H,
         thermal: &DepositionSimulation<'_>,
         network: &'n MaterialNetwork<'a>,
         electrical_bases: &[(usize, ElectricalPropertyBasis)],
@@ -147,7 +267,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
     /// hysteresis trajectory, but supplies no unmeasured thermal magnetic law.
     #[allow(clippy::too_many_arguments)]
     pub fn bind_with_link_conductances(
-        circuit: HystereticCircuit,
+        circuit: H,
         thermal: &DepositionSimulation<'_>,
         network: &'n MaterialNetwork<'a>,
         electrical_bases: &[(usize, ElectricalPropertyBasis)],
@@ -205,11 +325,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             ));
         }
         let mut initial = prepared
-            .resolve_with_link_conductances(
-                thermal,
-                initial_link_conductances_w_k,
-                &mut cancelled,
-            )
+            .resolve_with_link_conductances(thermal, initial_link_conductances_w_k, &mut cancelled)
             .map_err(material)?;
         initial.resistors.sort_by_key(|r| r.branch);
         if initial.resistors != circuit.native_circuit().resistors() {
@@ -217,7 +333,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                 "accepted circuit resistor sources must match the actual thermal endpoint",
             ));
         }
-        let core_binding = if let Some(source) = circuit.core().source() {
+        let core_binding = if let Some(source) = circuit.uniform_core().source() {
             let cell = thermal
                 .cells()
                 .get(&core_cell)
@@ -265,14 +381,14 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             core_temperature_interval_k,
             core_binding,
         };
-        let _ = result.admit_core(thermal)?;
+        let _ = result.core_query(thermal)?;
         if cancelled() {
             return Err(CircuitEnthalpyError::Cancelled);
         }
         Ok(result)
     }
 
-    pub const fn circuit(&self) -> &HystereticCircuit {
+    pub const fn circuit(&self) -> &H {
         &self.circuit
     }
     pub const fn core_cell(&self) -> CellId {
@@ -282,15 +398,15 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         self.core_temperature_interval_k
     }
 
-    fn admit_core<E>(
+    fn core_query<E>(
         &self,
         thermal: &DepositionSimulation<'_>,
-    ) -> Result<Option<fs_material::field_storage::hysteresis::UniformHystereticCore>, Error<E>> {
+    ) -> Result<Option<QueryPoint>, Error<E>> {
         let cell = thermal
             .cells()
             .get(&self.core_cell)
             .ok_or_else(|| invalid("core heat cell is inactive"))?;
-        let volume = self.circuit.core().volume_m3();
+        let volume = self.circuit.uniform_core().volume_m3();
         let mass_volume = cell.mass_kg / self.core_density_kg_m3;
         let temperature = thermal.temperature_k(self.core_cell)?;
         if !mass_volume.is_finite()
@@ -310,16 +426,11 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                     .state_at_specific_enthalpy(cell.specific_h_j_kg)
                     .map_err(MaterialNetworkError::Phase)
                     .map_err(material)?;
-                let query = binding
+                binding
                     .point
                     .at(phase)
                     .map_err(MaterialNetworkError::Material)
-                    .map_err(material)?;
-                self.circuit
-                    .core()
-                    .at_source_query(&query)
-                    .map_err(HystereticCircuitError::from)
-                    .map_err(magnetic)
+                    .map_err(material)
             })
             .transpose()
     }
@@ -344,7 +455,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         magnetic_controls: HystereticCircuitSolve,
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a>, Error> {
+    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, MaterialNetworkSample, H>, Error> {
         let cancel = RefCell::new(cancelled);
         self.step_resolved_candidate(
             thermal,
@@ -391,7 +502,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         controls: CircuitEnthalpySolve,
         magnetic_controls: HystereticCircuitSolve,
         initial_energy_increments_j: &[f64],
-    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, HeatNetworkSample>, Error> {
+    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, HeatNetworkSample, H>, Error> {
         self.step_candidate_with_heat_assembly(
             cx,
             prepared,
@@ -436,10 +547,13 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         controls: CircuitEnthalpySolve,
         magnetic_controls: HystereticCircuitSolve,
         initial_energy_increments_j: &[f64],
-    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, A::Sample>, Error<A::Error>> {
-        cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
+    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, A::Sample, H>, Error<A::Error>> {
+        cx.checkpoint()
+            .map_err(|_| CircuitEnthalpyError::Cancelled)?;
         let prepared = assembly.prepared_heat_network();
-        let network = prepared.field_material_network().map_err(heat::<A::Error>)?;
+        let network = prepared
+            .field_material_network()
+            .map_err(heat::<A::Error>)?;
         if !std::ptr::eq(network, self.network) {
             return Err(invalid(
                 "hysteretic heat assembly must retain the original bulk material network",
@@ -475,7 +589,8 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             controls.total_energy_tolerance_j,
         )
         .map_err(heat::<A::Error>)?;
-        cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
+        cx.checkpoint()
+            .map_err(|_| CircuitEnthalpyError::Cancelled)?;
         Ok(candidate)
     }
 
@@ -492,7 +607,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         initial_energy_increments_j: &[f64],
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error<E>>,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, S>, Error<E>> {
+    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, S, H>, Error<E>> {
         let cancel = RefCell::new(cancelled);
         let check = || {
             if (*cancel.borrow_mut())() {
@@ -507,13 +622,18 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                 "accepted native circuit and thermal clocks must agree",
             ));
         }
-        if self
-            .admit_core(thermal)?
-            .is_some_and(|core| core != *self.circuit.core())
-        {
-            return Err(invalid(
-                "accepted magnetic source query must match the actual thermal state",
-            ));
+        if let Some(query) = self.core_query(thermal)? {
+            if self
+                .circuit
+                .uniform_core()
+                .source()
+                .map(|source| source.material().query())
+                != Some(query)
+            {
+                return Err(invalid(
+                    "accepted magnetic source query must match the actual thermal state",
+                ));
+            }
         }
         let mut initial = resolve(thermal)?;
         initial.resistors.sort_by_key(|r| r.branch);
@@ -529,7 +649,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             initial_energy_increments_j,
             |state, remaining| {
                 check()?;
-                let core = self.admit_core(state)?;
+                let query = self.core_query(state)?;
                 let coefficients = resolve(state)?;
                 let mut inner = magnetic_controls;
                 inner.circuit = controls.circuit;
@@ -539,12 +659,15 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                 }
                 // Recheck and retain the actual trial source context while all
                 // magnetic memory remains at the one accepted beginning state.
-                let mut beginning = self.circuit.clone();
-                if let Some(core) = core {
-                    beginning.core = core;
-                }
-                let circuit = beginning
-                    .step_candidate(
+                let beginning = match query {
+                    Some(query) => self
+                        .circuit
+                        .with_core_source_query(&query)
+                        .map_err(magnetic)?,
+                    None => self.circuit.clone(),
+                };
+                let (model, step) = beginning
+                    .step_for_heat(
                         target_s,
                         coefficients.resistors,
                         external_inputs,
@@ -552,9 +675,9 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                         || (*cancel.borrow_mut())(),
                     )
                     .map_err(magnetic)?;
-                let circuit_trials = circuit.step().circuit_trials;
+                let circuit_trials = step.circuit_trials();
                 Ok(DrivenCoefficients {
-                    circuit,
+                    circuit: MagneticDriver { model, step },
                     circuit_trials,
                     sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
@@ -563,7 +686,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             },
             |candidate, dt, checkpoint| {
                 let mut powers = BTreeMap::new();
-                for loss in &candidate.step().circuit.resistors {
+                for loss in &candidate.step.electrical().resistors {
                     checkpoint()?;
                     let cell = *self
                         .destinations
@@ -580,7 +703,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
                     powers.insert(cell, power);
                 }
                 checkpoint()?;
-                let core_heat = candidate.step().core.core_heat_j;
+                let core_heat = candidate.step.core_heat_j();
                 let core_power = core_heat / dt;
                 if !core_power.is_finite() || (core_heat != 0.0 && core_power == 0.0) {
                     return Err(invalid(
@@ -613,29 +736,33 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
 /// Both publishable histories. The report's legacy deposited_joule_j field
 /// counts TOTAL physical deposition here, including the separately reported
 /// core pinning heat; numerical dissipation is never part of that deposition.
-pub struct HystereticEnthalpyCandidate<'t, 'n, 'a, S = MaterialNetworkSample> {
+pub struct HystereticEnthalpyCandidate<
+    't,
+    'n,
+    'a,
+    S = MaterialNetworkSample,
+    H: HystereticThermalHistory = HystereticCircuit,
+> {
     thermal: DepositionSimulation<'t>,
-    circuit: ThermalHystereticCircuit<'n, 'a>,
-    report: CircuitEnthalpyReport<S, HystereticCircuitStep>,
+    circuit: ThermalHystereticCircuit<'n, 'a, H>,
+    report: CircuitEnthalpyReport<S, H::Step>,
 }
-impl<'t, 'n, 'a, S> HystereticEnthalpyCandidate<'t, 'n, 'a, S> {
+impl<'t, 'n, 'a, S, H: HystereticThermalHistory> HystereticEnthalpyCandidate<'t, 'n, 'a, S, H> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
-    pub const fn circuit(&self) -> &ThermalHystereticCircuit<'n, 'a> {
+    pub const fn circuit(&self) -> &ThermalHystereticCircuit<'n, 'a, H> {
         &self.circuit
     }
-    pub const fn report(
-        &self,
-    ) -> &CircuitEnthalpyReport<S, HystereticCircuitStep> {
+    pub const fn report(&self) -> &CircuitEnthalpyReport<S, H::Step> {
         &self.report
     }
     pub fn into_parts(
         self,
     ) -> (
         DepositionSimulation<'t>,
-        ThermalHystereticCircuit<'n, 'a>,
-        CircuitEnthalpyReport<S, HystereticCircuitStep>,
+        ThermalHystereticCircuit<'n, 'a, H>,
+        CircuitEnthalpyReport<S, H::Step>,
     ) {
         (self.thermal, self.circuit, self.report)
     }

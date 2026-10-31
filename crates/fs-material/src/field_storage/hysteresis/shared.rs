@@ -273,13 +273,15 @@ impl SharedHystereticCore {
             .windings()
             .iter()
             .zip(&mean_currents_a)
-            .zip(previous.currents_a().iter().zip(state.currents_a()))
+            .zip(previous.flux_linkages_wb().iter().zip(linkages))
         {
             mean_mmf = finite(winding.turns_ratio.mul_add(middle, mean_mmf))?;
-            leakage_change = finite(
-                finite(winding.leakage_h * middle)?
-                    .mul_add(finite(after - before)?, leakage_change),
-            )?;
+            // D*delta(i) = delta(lambda) - r*delta(lambda_ref). Evaluate
+            // directly in the conserved coordinates: subtracting reconstructed
+            // near-equal currents loses resolvable small-step leakage work.
+            let leakage_increment =
+                finite((-winding.turns_ratio).mul_add(delta_core, finite(after - before)?))?;
+            leakage_change = finite(middle.mul_add(leakage_increment, leakage_change))?;
         }
         // Integrate Phi ds by parts: mean(Phi)=Phi_mid+
         // (Iref_mid*dPhi-Wcore)/ds. Applying the corresponding correction

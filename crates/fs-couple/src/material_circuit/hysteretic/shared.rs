@@ -19,6 +19,8 @@
 //! directions. Refinement and caller-supplied waveform/reversal cuts remain
 //! necessary; three samples do not certify an unresolved oscillation.
 
+pub mod thermal;
+
 use super::{HystereticCircuitError, HystereticCircuitSolve, finite, invalid, numerical};
 use crate::material_circuit::{
     MAX_MATERIAL_CIRCUIT_BRANCHES, MAX_MATERIAL_CIRCUIT_NODES, MAX_PORTS, MAX_TRANSFORMERS,

@@ -94,6 +94,35 @@ and remanence, physical polarity reversal, and source-domain/budget/cancellation
 turning-point refusals with unchanged accepted history. Native test execution
 remains a separate requirement where workspace dependencies are available.
 
+### Finite core and winding heat with retained shared magnetic memory
+
+`shared::thermal::ThermalSharedHystereticCircuit` and its
+`SharedHystereticEnthalpyCandidate` reuse the original hysteretic/enthalpy owner
+through sealed native history and step interfaces. The public single-core types
+retain their original default backend. Every thermal trial refreshes the same
+original core source at its actual caloric temperature and restarts the same
+accepted shared winding linkages and polarizations. No discarded thermal or
+electrical trial advances the accepted magnetic memory.
+
+Exactly one pinning-heat receipt enters the whole fixed solid core cell; each
+original resistor's Joule heat enters its distinct source-bound material cell.
+Leakage storage stays reversible. The original `MaterialNetwork` and complete
+`HeatAssembly` cooling, thermal-contact, radiation and finite-coolant paths retain
+their existing source, cancellation, budget and total-energy checks. Winding
+resistance changes with its actual source temperature, feeding back into the
+shared magnetic trajectory. Reports preserve all original winding states and
+the complete shared magnetic work/heat receipt alongside the finite thermal state.
+
+The magnetic fit remains constant over its explicit source-admitted temperature
+interval. Geometry, density and whole-cell core volume stay fixed; common-flux
+reversal cuts and the existing first-order thermal coupling remain authoritative.
+No unmeasured temperature-dependent hysteresis fit or empirical loss map is added.
+Three focused authored-source regressions check per-receiver finite heating,
+original source and resistance feedback, retained memory across intervals,
+native heat-conduction feedback, and unchanged histories with deterministic retry
+after late source-temperature refusal or cancellation.
+
+
 
 ## Shared conservative gravity on deforming solids
 
