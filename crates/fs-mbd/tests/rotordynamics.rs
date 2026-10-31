@@ -332,7 +332,7 @@ fn stability_transition_bracket_matches_exact_cross_coupled_marginal_speed() {
         2,
         &[4.0, 2.0, 2.0, 10.0],
         &[2.0, 1.0, 1.0, 5.0],
-        &[20.0, 14.0, 6.0, 44.0],
+        &[20.0, 16.0, 4.0, 50.0],
         &[0.0, -6.0, 6.0, 0.0],
         || false,
     )
