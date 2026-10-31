@@ -89,6 +89,9 @@ mod bending_quadrature_tests;
 #[cfg(test)]
 mod film_tests;
 
+#[cfg(test)]
+mod flux_tests;
+
 /// Four quarter-cell quadrature points, each with three tensor-root rows.
 /// Shared with consumers of `BodyImage::viscous_root`.
 pub const BENDING_ROOT_ROWS_PER_NODE: usize = 12;
@@ -253,6 +256,15 @@ impl Csr {
             correction += 0.5 * self.val[p] * (mass[j] - mass[i]) * ((w[j] - wp[j]) - xi);
         }
         correction
+    }
+
+    /// Whether row `i` of `mass_flux_correction` adds only signed zeros on a finite state: every
+    /// entry has a finite weight 0.5 val and a mass difference that compares equal to zero. Then
+    /// each term is (finite x +-0) x finite = +-0, and +0.0 plus +-0 is +0.0 under round to
+    /// nearest, so the row's correction is exactly +0.0 whenever every (w_j - wp_j) - xi is finite.
+    fn flux_zero_row(&self, i: usize, mass: &[f64]) -> bool {
+        (self.ptr[i]..self.ptr[i + 1])
+            .all(|p| mass[self.col[p]] - mass[i] == 0.0 && (0.5 * self.val[p]).is_finite())
     }
 }
 
@@ -581,6 +593,9 @@ pub struct Body {
     /// Step size the cached update coefficients `cf` belong to.
     kc: f64,
     cf: Vec<[f64; 4]>,
+    /// Rows of `lap` whose mass-flux correction is a sum of signed zeros (see `flux_correction`),
+    /// built with `cf` from the same mass: empty until then.
+    flux_zero: Vec<bool>,
     /// 3-D placement for microphones: origin and outward normal (+1 up, -1 down).
     pub origin: [f64; 3],
     pub facing: f64,
@@ -967,7 +982,7 @@ impl Body {
         }
         Ok(Body {
             name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, modal: None, tension: s.tension, berger, vk,
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
             film: None, support_springs: s.support.is_some(), surface_t60: s0 > 0.0 || s1 > 0.0,
         })
@@ -988,7 +1003,7 @@ impl Body {
             name: name.into(), h, n, xy, rest_z: vec![0.0; n], grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
             s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]), viscosity: None, modal: None,
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
             film: None, support_springs: false, surface_t60: 6.907755 / t60 > 0.0,
         }
@@ -1064,7 +1079,7 @@ impl Body {
             name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], rest_z: vec![0.0], grid_index: BTreeMap::new(), mass: vec![mass],
             s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]), viscosity: None, modal: None,
             tension: 0.0, berger: 0.0, vk: None,
-            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
+            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
             film: None, support_springs: false, surface_t60: false,
         }
@@ -1452,11 +1467,35 @@ impl Body {
                 [k2 / (m * (1.0 + s0k)), 2.0 * m / k2, (1.0 - s0k) * m / k2, 2.0 * self.s1 * m / k]
             })
             .collect();
+        self.flux_zero = (0..self.n).map(|i| self.lap.flux_zero_row(i, &self.mass)).collect();
+        #[cfg(test)]
+        for z in &mut self.flux_zero {
+            *z = flux_tests::hooked(*z);
+        }
         self.kc = k;
         if let Err(e) = self.prepare_head_radiation(k) {
             // Instrument::validate_head_radiation refuses this at build time
             // for the instrument's own clock; another clock cannot reach here.
             panic!("{e}");
+        }
+    }
+
+    /// Every w and wp is at most f64::MAX/4 in magnitude. That excludes NaN and infinity and keeps
+    /// every (w_j - wp_j) - (w_i - wp_i) finite, so a `flux_zero` row's correction is exactly +0.0.
+    fn flux_state_bounded(&self) -> bool {
+        const BOUND: f64 = f64::MAX / 4.0;
+        let within = |ok: bool, x: &f64| ok & (x.abs() <= BOUND);
+        self.w.iter().fold(true, within) & self.wp.iter().fold(true, within)
+    }
+
+    /// `Csr::mass_flux_correction` on row `i`, or on a `flux_zero` row of a bounded state the +0.0
+    /// that sum returns. An unbounded state sums every row, so NaN and infinity propagate as before.
+    #[inline]
+    fn flux_correction(&self, i: usize, bounded: bool) -> f64 {
+        if bounded && self.flux_zero.get(i) == Some(&true) {
+            0.0
+        } else {
+            self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass)
         }
     }
 
@@ -1494,8 +1533,9 @@ impl Body {
             // div(m grad velocity), not m Lap(velocity): the latter is not
             // symmetric when thickness varies and can create mechanical energy.
             let ih2 = 1.0 / (self.h * self.h);
+            let bounded = self.flux_state_bounded();
             for i in 0..self.n {
-                let correction = self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass);
+                let correction = self.flux_correction(i, bounded);
                 self.tmp[i] = -((self.lw[i] - self.lwp[i]) + correction / self.mass[i]) * ih2;
             }
         }
@@ -1671,10 +1711,11 @@ impl Body {
             let ih2 = 1.0 / (self.h * self.h);
             let mut d0 = 0.0;
             let mut d1 = 0.0;
+            let bounded = self.flux_state_bounded();
             for i in 0..self.n {
                 let dv = self.wn[i] - self.wp[i];
                 d0 += self.mass[i] * self.s0[i] * dv * dv;
-                let correction = self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass);
+                let correction = self.flux_correction(i, bounded);
                 d1 += (self.mass[i] * (self.lw[i] - self.lwp[i]) + correction) * dv;
             }
             // Backward s1 velocity can do negative work against centered
