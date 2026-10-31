@@ -17,7 +17,8 @@ fn piano(strain_limit: f64) -> Instrument {
         ),
         &[course],
     )
-    .unwrap();
+    .unwrap()
+    .with_fixture_axial_rows(&board::demonstration());
     piano.configure_string_stretching(&strings).unwrap();
     let pads = DamperSpecification::read(
         "frankensim-piano-felt-dampers-v1\n\

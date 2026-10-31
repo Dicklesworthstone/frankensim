@@ -58,7 +58,12 @@ fn material_section_and_axial_selection_share_the_render_preparation() {
     let ea = scale[0].bonded_section.unwrap().axial_rigidity_n();
     let admitted = load_string_stretching(&scale, &o).unwrap().unwrap();
     assert_eq!(admitted.courses[&69].unwrap().axial_rigidity_n, ea);
-    let piano = prepare_instrument(scale, &board::demonstration(), &o).unwrap();
+    // A waves row needs the board's axial participation row; the demonstration modes have no rotations, so the
+    // fixture row is supplied, and without any row the same preparation refuses (no default coupling).
+    let refusal = prepare_instrument(scale.clone(), &board::demonstration(), &o).err().expect("waves without a row must refuse");
+    assert!(refusal.contains("axial participation row"), "{refusal}");
+    let admitted = admitted.with_fixture_axial_rows(&board::demonstration());
+    let piano = prepare_instrument_with_string_material(scale, &board::demonstration(), &o, Some(&admitted)).unwrap();
     assert!(piano.bank.has_string_stretching());
     assert_eq!(piano.bank.longitudinal_mode_count(), 2);
 }

@@ -10,6 +10,25 @@ use super::performance::midi;
 mod score;
 pub use score::Score;
 
+/// AUTHORED, and used only by `piano_exterior`: the axial participation row of a `waves` key is this fraction
+/// of the board's vertical bridge row. It is the former single scalar of `longitudinal_string.rs` (its comment
+/// read ~1.8 degrees of downbearing plus a 28 mm lever arm; no source was ever recorded), kept here until the
+/// exterior's crowned shell supplies rotation rows of its own. `grand_piano` has no such number: it derives each
+/// row from its board's retained rotations (`BoardGeometry::bridge_attachments`, bead pexfp.44). The live engine's
+/// matching divergence is bead frankensim-live-piano-axial-row-3eh0l; the exterior's is recorded on pexfp.44.
+const EXTERIOR_AXIAL_RATIO: f64 = 0.06;
+
+fn with_exterior_axial_rows(spec: &linear::string_stretching::Specification, board: &[linear::BoardMode])
+    -> Result<linear::string_stretching::Specification, String> {
+    let mut spec = spec.clone();
+    let rows = spec.waves.keys().map(|&key| {
+        let at = usize::from(key.checked_sub(21).ok_or("waves key below A0")?);
+        Ok((key, board.iter().map(|m| EXTERIOR_AXIAL_RATIO * m.bridge[at]).collect::<Vec<f64>>()))
+    }).collect::<Result<std::collections::BTreeMap<_, _>, &str>>()?;
+    spec.set_bridge_axial_rows(rows)?;
+    Ok(spec)
+}
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub substeps: usize,
@@ -412,7 +431,9 @@ impl Controls {
         if let Some(rates) = &self.source_hammer_rates {
             piano.configure_source_hammer_dissipation(rates)?;
         }
-        if let Some(stretching) = &self.stretching { piano.configure_string_stretching(stretching)?; }
+        if let Some(stretching) = &self.stretching {
+            piano.configure_string_stretching(&with_exterior_axial_rows(stretching, board)?)?;
+        }
         if let Some(cavity) = &cavity { piano.configure_cavity(&cavity.loaded(&piano.bank)?)?; }
         Ok((piano,cavity.as_ref().map(cavity::Projected::report)))
     }

@@ -1307,7 +1307,7 @@ fn run_with(args: &[String]) -> Result<(), String> {
     let scale = selected_scale(scale_text.as_deref(), &options)?;
     // Freeze supplied string material before geometry work or any exports.
     // Playback receives this admitted value, never a later read of the path.
-    let stretching = load_string_stretching(&scale, &options)?;
+    let mut stretching = load_string_stretching(&scale, &options)?;
     let polarization = options.string_polarization.as_deref().map(|path|
         string_polarization::Specification::load(path, &scale)).transpose()?;
     // A `gas,ambient` cavity holds the same selected air as the exterior.
@@ -1346,10 +1346,16 @@ fn run_with(args: &[String]) -> Result<(), String> {
         let start = std::time::Instant::now();
         let source_ports = polarization.as_ref().map(|spec| spec.source_ports(&scale)).transpose()?;
         let want_slopes = options.dump_board.is_some() && options.render.is_none() && !crowned_board::is_crowned(text);
+        // `waves` couples the string's axial termination to the board's motion at the contact: the board must
+        // keep its nodal rotations so the axial participation row can be derived from the board file.
+        let want_axial = stretching.as_ref().is_some_and(|s| !s.waves.is_empty());
+        if want_axial && crowned_board::is_crowned(text) {
+            return Err("waves derive their axial participation row from a flat board's bridge beams; a crowned shell is not supported, and no default coupling is used".into());
+        }
         let prepared = prepare_geometric_board_with_source_ports(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
             options.board_band_hz, options.equilibrate_board_mass, options.consistent_board_mass,
             options.edge_cubic_board_mass, options.acoustic_refinement_levels,
-            polarization.is_some() || cavity.is_some() || want_slopes,
+            polarization.is_some() || cavity.is_some() || want_slopes || want_axial,
             options.board_reduction.as_ref(), source_ports.as_deref())?;
         let projected = polarization.as_ref().map(|spec|
             spec.project(&scale, &prepared.modes, prepared.motion.as_ref())).transpose()?;
@@ -1358,6 +1364,24 @@ fn run_with(args: &[String]) -> Result<(), String> {
             let motion = prepared.motion.as_ref().ok_or("slope columns need the retained board motion")?;
             let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
             board_slopes = Some(board_geometry::BoardGeometry::read(text)?.bridge_slopes(motion, &keys)?);
+        }
+        if want_axial {
+            let spec = stretching.as_mut().ok_or("waves need the string material")?;
+            let motion = prepared.motion.as_ref().ok_or("waves need the retained board motion")?;
+            let keys: Vec<u8> = spec.waves.keys().copied().collect();
+            let attachments = board_geometry::BoardGeometry::read(text)?.bridge_attachments(&keys)?;
+            let mut rows = std::collections::BTreeMap::new();
+            for attachment in &attachments {
+                let row = attachment.axial_row(motion)?;
+                let vertical = &prepared.modes.iter().map(|m| m.bridge[usize::from(attachment.midi - 21)]).collect::<Vec<_>>();
+                let rms = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
+                println!("String axial participation, key {}: bridge-top arm {:.1} mm; axis away from the speaking length ({:.3}, {:.3}, {:.3}), \
+                    perpendicular to the bridge (not on the board file); {} board modes, row rms / vertical rms {:.3}; downbearing 0 (flat plate).",
+                    attachment.midi, 1000.0 * attachment.arm_m[2], attachment.axis_out[0], attachment.axis_out[1],
+                    attachment.axis_out[2], row.len(), rms(&row) / rms(vertical));
+                rows.insert(attachment.midi, row);
+            }
+            spec.set_bridge_axial_rows(rows)?;
         }
         let model_name = if crowned_board::is_crowned(text) { "Crowned shell" } else { "Flat plate" };
         println!("{model_name} {:.6} m^2, {:.6} kg (panel+ribs/bridges), {} free DOFs, {} retained modes; source band (0,{}] Hz; preparation {:.6} s.",

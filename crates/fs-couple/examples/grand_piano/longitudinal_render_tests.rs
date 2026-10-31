@@ -56,8 +56,14 @@ fn finite_axial_waves_change_pressure_and_preserve_midi_csv_and_block_timing() {
         .map(str::to_owned),
     )
     .unwrap();
-    let first = prepare_instrument(vec![course], &modes, &options).unwrap();
-    let second = prepare_instrument(vec![course], &modes, &options).unwrap();
+    // The waves row's axial coupling comes from the board; these demonstration modes carry no rotations, so the
+    // test supplies its fixture row (a fixed fraction of the vertical bridge row) explicitly.
+    let material = load_string_stretching(&[course], &options)
+        .unwrap()
+        .unwrap()
+        .with_fixture_axial_rows(&modes);
+    let first = prepare_instrument_with_string_material(vec![course], &modes, &options, Some(&material)).unwrap();
+    let second = prepare_instrument_with_string_material(vec![course], &modes, &options, Some(&material)).unwrap();
     options.string_stretching = Some(averaged);
     let reference = prepare_instrument(vec![course], &modes, &options).unwrap();
     assert!(first.bank.longitudinal_mode_count() > 0);

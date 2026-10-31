@@ -49,6 +49,31 @@ struct BridgeSite {
     weights: [f64; 3],
 }
 
+/// Where and how one string meets the board, read from the board file (`BoardGeometry::bridge_attachments`).
+/// With a mode's nodal motion it gives the string termination's displacement along its axis:
+/// `axis_out . (U + Theta x arm_m)`, i.e. `MotionSurface::project_at(triangle, weights, arm_m, axis_out)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BridgeAttachment {
+    pub midi: u8,
+    pub triangle: usize,
+    pub weights: [f64; 3],
+    /// From the structural (midplane) site to the string contact: along +z, the outer fibre of the bridge.
+    pub arm_m: [f64; 3],
+    /// Unit string axis at the contact, pointing away from the speaking length (a positive displacement along
+    /// it extends the string). Its vertical component is sin(downbearing angle); a flat plate gives 0.
+    pub axis_out: [f64; 3],
+}
+
+impl BridgeAttachment {
+    /// The axial participation row `a_n = axis_out . (U_n + Theta_n x arm_m)` over the retained modes, in the
+    /// same bare-board coordinates as the bridge coefficient. A rigid translation gives `axis_out.z`
+    /// (sin of the downbearing angle, exactly 0 on a flat plate); a rigid rotation `e` about the site gives
+    /// `axis_out . (e x arm_m)`; zero arm and zero downbearing give an all-zero row.
+    pub fn axial_row(&self, motion: &motion::MotionSurface) -> Result<Vec<f64>, String> {
+        motion.project_at(self.triangle, self.weights, self.arm_m, self.axis_out).map(|(row, _)| row)
+    }
+}
+
 #[derive(Debug)]
 pub struct BoardGeometry {
     provenance: String,
@@ -386,6 +411,71 @@ impl BoardGeometry {
                     out[mode][usize::from(key - 21)][axis] = -value;
                 }
             }
+        }
+        Ok(out)
+    }
+    /// The string attachment of each listed key, from the board file alone.
+    ///
+    /// - **Arm.** The beam that holds the key's bridge station is the stiffener segment on the string side of
+    ///   the midplane (eccentricity > 0) that contains the station. Its section height is
+    ///   `h = sqrt(12 I / A)` (a rectangular section is assumed), and the string rides on the outer fibre, so
+    ///   the arm is `e + h/2` along +z. Several segments at a shared node must agree within 30 degrees (their
+    ///   mean is used); a station on no such beam refuses, as does one on beams that disagree.
+    /// - **String axis: NOT on the board file.** It is taken perpendicular to the bridge in plan, with the
+    ///   speaking length toward decreasing y (the RT-0425 frame's front edge, from which its published
+    ///   contacts run "straight back"), so the axis pointing away from the speaking length has `y >= 0`. This
+    ///   is an assumption (`u-string-direction` in the piano unknowns): the board file carries no string
+    ///   endpoints. Downbearing is absent from a flat plate, so the axis has no vertical component.
+    ///
+    /// Nothing is defaulted: a key without a station or without a string-side beam refuses.
+    pub fn bridge_attachments(&self, keys: &[u8]) -> Result<Vec<BridgeAttachment>, String> {
+        const ON_BEAM_M: f64 = 1e-9; // a station is "on" a beam segment within this distance
+        const MIN_COS: f64 = 0.866_025_403_784_438_6; // 30 degrees between the segments that share a station
+        let (nodes, tris) = (&self.chart.mesh.nodes, &self.chart.mesh.tris);
+        let mut out = Vec::with_capacity(keys.len());
+        for &key in keys {
+            let site = self.bridge_sites.iter().find(|s| s.midi == key)
+                .ok_or_else(|| format!("key {key} has no bridge station, so no string attachment"))?;
+            let tri = tris.get(site.triangle).ok_or_else(|| format!("key {key}: bridge station names a missing facet"))?;
+            let at = |c: usize| (0..3).map(|i| site.weights[i] * if c == 0 { nodes[tri[i]].0 } else { nodes[tri[i]].1 }).sum::<f64>();
+            let p = [at(0), at(1)];
+            let mut found: Vec<([f64; 2], f64)> = Vec::new(); // (unit tangent, arm)
+            for s in self.stiffeners.iter().filter(|s| s.eccentricity > 0.0) {
+                let height = (12.0 * s.inertia / s.area).sqrt();
+                if !height.is_finite() || height <= 0.0 { return Err(format!("key {key}: the beam section has no usable height")); }
+                for pair in s.nodes.windows(2) {
+                    let (a, b) = (nodes[pair[0]], nodes[pair[1]]);
+                    let d = [b.0 - a.0, b.1 - a.1];
+                    let len2 = d[0] * d[0] + d[1] * d[1];
+                    if len2 <= 0.0 { continue; }
+                    let u = (((p[0] - a.0) * d[0] + (p[1] - a.1) * d[1]) / len2).clamp(0.0, 1.0);
+                    if (p[0] - (a.0 + u * d[0])).hypot(p[1] - (a.1 + u * d[1])) <= ON_BEAM_M {
+                        let len = len2.sqrt();
+                        found.push(([d[0] / len, d[1] / len], s.eccentricity + 0.5 * height));
+                    }
+                }
+            }
+            let Some(&(first, _)) = found.first() else {
+                return Err(format!("key {key}: no string-side stiffener (eccentricity > 0) contains the bridge station, so the board file carries no bridge geometry to take the string attachment from"));
+            };
+            let (mut sum, mut arm) = ([0.0, 0.0], 0.0);
+            for &(t, a) in &found {
+                let sign = if t[0] * first[0] + t[1] * first[1] >= 0.0 { 1.0 } else { -1.0 };
+                let t = [sign * t[0], sign * t[1]];
+                if t[0] * first[0] + t[1] * first[1] < MIN_COS {
+                    return Err(format!("key {key}: the bridge beams that hold the station disagree in direction by more than 30 degrees"));
+                }
+                sum = [sum[0] + t[0], sum[1] + t[1]];
+                arm += a;
+            }
+            let norm = sum[0].hypot(sum[1]);
+            let tangent = [sum[0] / norm, sum[1] / norm];
+            let mut normal = [-tangent[1], tangent[0]];
+            // Orient it away from the front edge (y >= 0); a bridge running along y has a normal along x,
+            // whose sign is then fixed by x >= 0 (the tie is judged with a tolerance, not exact equality).
+            if normal[1] < -1e-12 || (normal[1].abs() <= 1e-12 && normal[0] < 0.0) { normal = [-normal[0], -normal[1]]; }
+            out.push(BridgeAttachment { midi: key, triangle: site.triangle, weights: site.weights,
+                arm_m: [0.0, 0.0, arm / found.len() as f64], axis_out: [normal[0], normal[1], 0.0] });
         }
         Ok(out)
     }
@@ -845,13 +935,19 @@ mod tests {
     /// The fixture's 0.7 x 0.45 m, 6 mm plate on an `nx` x `ny` mesh, with one bridge station per entry
     /// of `stations` (key, point [m]) placed at that point's barycentric position in its triangle.
     fn fine_fixture(nx: usize, ny: usize, stations: &[(u8, [f64; 2])]) -> String {
+        plate_fixture(nx, ny, stations, "0.006,450,11000000000,800000000,0.3,600000000,0")
+    }
+
+    /// `fine_fixture` with the panel law given as the triangle row's tail
+    /// `thickness,rho,E_L,E_R,nu_LR,G_LR,grain`.
+    fn plate_fixture(nx: usize, ny: usize, stations: &[(u8, [f64; 2])], panel: &str) -> String {
         let mesh = PlateMesh::rectangle(0.7, 0.45, nx, ny);
         let mut text = format!("{HEADER}\nsource,estimated,analytic rectangular regression NOT Steinway\nsupport,simply_supported\npretension,0\ndamping,0.01\n");
         for (i, (x, y)) in mesh.nodes.iter().enumerate() {
             text.push_str(&format!("node,{i},{x},{y}\n"));
         }
         for (i, t) in mesh.tris.iter().enumerate() {
-            text.push_str(&format!("triangle,{i},{},{},{},0.006,450,11000000000,800000000,0.3,600000000,0\n", t[0], t[1], t[2]));
+            text.push_str(&format!("triangle,{i},{},{},{},{panel}\n", t[0], t[1], t[2]));
         }
         for node in mesh.boundary_nodes() { text.push_str(&format!("fixed,{node}\n")); }
         for &(key, [px, py]) in stations {
@@ -861,7 +957,8 @@ mod tests {
                 let w1 = ((px - a.0) * (c.1 - a.1) - (c.0 - a.0) * (py - a.1)) / det;
                 let w2 = ((b.0 - a.0) * (py - a.1) - (px - a.0) * (b.1 - a.1)) / det;
                 let w0 = 1.0 - w1 - w2;
-                [w0, w1, w2].iter().all(|w| *w >= 0.0).then_some((index, [w0, w1, w2]))
+                // A station exactly on a mesh edge may round to -1e-17 in either neighbour.
+                [w0, w1, w2].iter().all(|w| *w >= -1e-12).then(|| (index, [w0, w1, w2].map(|w| w.max(0.0))))
             }).expect("station inside the plate");
             text.push_str(&format!("bridge,{key},{index},{},{},{}\n", weights[0], weights[1], weights[2]));
         }
@@ -946,6 +1043,201 @@ mod tests {
         let facets = motion.mesh.tris.len();
         assert!(motion.project_at(facets, [0.2, 0.3, 0.5], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).is_err(), "no such facet");
         assert!(motion.project_at(0, [1.5, -0.5, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).is_err(), "weights outside the facet");
+    }
+
+    const SIDE_BEAM: &str = "11000000000,800000000,0.0008,0.0000001,0.0000001";
+
+    /// The 0.7 x 0.45 m fixture on a 14 x 9 mesh with a straight string-side bridge along the mesh row y = 0.2
+    /// (nodes i = 2..=12 of row j = 4), eccentricity `e` [m], section A = 8e-4 m^2, I = 1e-7 m^4, and key 69
+    /// at (0.35, 0.2) on it. Returns the board text and the mesh.
+    fn straight_bridge(e: f64, extra: &str) -> (String, PlateMesh) {
+        let (nx, ny) = (14usize, 9usize);
+        let path: Vec<String> = (2..=12).map(|i| (4 * (nx + 1) + i).to_string()).collect();
+        let text = format!("{}stiffener,{SIDE_BEAM},{e},700,{}\n{extra}",
+            fine_fixture(nx, ny, &[(69, [0.35, 0.2])]), path.join(","));
+        (text, PlateMesh::rectangle(0.7, 0.45, nx, ny))
+    }
+
+    /// A rigid-body mode of the fixture mesh as a retained motion: each node is `[u, theta]` of
+    /// `field(x, y)`.
+    fn rigid_motion(mesh: &PlateMesh, field: impl Fn(f64, f64) -> [f64; 6]) -> motion::MotionSurface {
+        let geometry = fs_plate::ShellMesh::new(mesh.nodes.iter().map(|&(x, y)| [x, y, 0.0]).collect(), mesh.tris.clone()).unwrap();
+        motion::MotionSurface::new(geometry, vec![mesh.nodes.iter().map(|&(x, y)| field(x, y)).collect()]).unwrap()
+    }
+
+    /// Hand calculation. The beam holds key 69's station: h = sqrt(12 I / A) = sqrt(1.5e-3) = 0.0387298335 m,
+    /// arm = e + h/2 = 0.02 + 0.0193649167 = 0.0393649167 m; the bridge runs along x, so the axis pointing
+    /// away from the speaking length (toward +y, the front edge being y = 0) is (0, 1, 0).
+    #[test]
+    fn the_string_attachment_is_read_from_the_beam_that_holds_the_station() {
+        let (text, mesh) = straight_bridge(0.02, "");
+        let g = BoardGeometry::read(&text).unwrap();
+        let list = g.bridge_attachments(&[69]).unwrap();
+        assert_eq!(list.len(), 1, "one attachment per key");
+        let a = list[0];
+        assert_eq!((a.midi, a.arm_m[0], a.arm_m[1], a.axis_out[2]), (69, 0.0, 0.0, 0.0));
+        assert!((a.arm_m[2] - 0.039_364_916_731_037).abs() < 1e-14, "arm {}", a.arm_m[2]);
+        assert!(a.axis_out[0].abs() < 1e-15 && (a.axis_out[1] - 1.0).abs() < 1e-15, "axis {:?}", a.axis_out);
+        // Rows of rigid modes through the same map: a tilt about x (w = s y, theta_x = s) moves the bridge top
+        // along y by -s * arm; a pure translation does not move it along the axis at all.
+        let s = 0.01;
+        let tilt = rigid_motion(&mesh, |_, y| [0.0, 0.0, s * y, s, 0.0, 0.0]);
+        let row = a.axial_row(&tilt).unwrap();
+        assert!((row[0] + s * 0.039_364_916_731_037).abs() < 1e-15, "tilt row {}", row[0]);
+        let lift = rigid_motion(&mesh, |_, _| [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(a.axial_row(&lift).unwrap(), vec![0.0], "alpha = 0: a rigid translation is exactly 0");
+    }
+
+    /// The axis is oriented away from the front edge (y >= 0) and, for a bridge along y, toward +x: the result
+    /// must not depend on the order in which the beam's nodes are listed, nor on rounding of a near-zero component.
+    #[test]
+    fn the_string_axis_does_not_depend_on_beam_node_order() {
+        let column: Vec<usize> = (1..=8).map(|j| j * 15 + 7).collect();
+        let mut seen = Vec::new();
+        for path in [column.clone(), column.iter().rev().copied().collect::<Vec<_>>()] {
+            let text = format!("{}stiffener,{SIDE_BEAM},0.02,700,{}\n", fine_fixture(14, 9, &[(69, [0.35, 0.2])]),
+                path.iter().map(usize::to_string).collect::<Vec<_>>().join(","));
+            let a = BoardGeometry::read(&text).unwrap().bridge_attachments(&[69]).unwrap()[0];
+            assert!((a.axis_out[0] - 1.0).abs() < 1e-12 && a.axis_out[1].abs() < 1e-12 && a.axis_out[2] == 0.0, "{:?}", a.axis_out);
+            seen.push(a);
+        }
+        assert_eq!(seen[0].arm_m, seen[1].arm_m);
+        // A horizontal bridge listed backwards gives the same +y axis as listed forwards.
+        let row: Vec<usize> = (2..=12).map(|i| 4 * 15 + i).collect();
+        for path in [row.clone(), row.iter().rev().copied().collect::<Vec<_>>()] {
+            let text = format!("{}stiffener,{SIDE_BEAM},0.02,700,{}\n", fine_fixture(14, 9, &[(69, [0.35, 0.2])]),
+                path.iter().map(usize::to_string).collect::<Vec<_>>().join(","));
+            let a = BoardGeometry::read(&text).unwrap().bridge_attachments(&[69]).unwrap()[0];
+            assert!(a.axis_out[0].abs() < 1e-12 && (a.axis_out[1] - 1.0).abs() < 1e-12, "{:?}", a.axis_out);
+        }
+    }
+
+    /// G0: the row of a rigid translation is sin(alpha) and of a rigid rotation e about the site is
+    /// t . (e x r), for several downbearing angles; alpha = 0 is exactly 0.
+    #[test]
+    fn rigid_translation_row_is_sine_of_inclination_and_rigid_rotation_row_is_the_lever_arm() {
+        let (text, mesh) = straight_bridge(0.02, "");
+        let g = BoardGeometry::read(&text).unwrap();
+        let base = g.bridge_attachments(&[69]).unwrap()[0];
+        let site = {
+            let tri = mesh.tris[base.triangle];
+            [0, 1].map(|c| (0..3).map(|i| base.weights[i] * if c == 0 { mesh.nodes[tri[i]].0 } else { mesh.nodes[tri[i]].1 }).sum::<f64>())
+        };
+        let e = [0.6, 0.0, 0.8];
+        // Rigid rotation about the unit axis e through the site: u = e x (p - site), theta = e.
+        let turn = rigid_motion(&mesh, |x, y| {
+            let d = [x - site[0], y - site[1], 0.0];
+            [e[1] * d[2] - e[2] * d[1], e[2] * d[0] - e[0] * d[2], e[0] * d[1] - e[1] * d[0], e[0], e[1], e[2]]
+        });
+        let lift = rigid_motion(&mesh, |_, _| [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        for degrees in [0.0f64, 0.5, 1.8, 5.0] {
+            let alpha = degrees.to_radians();
+            let a = BridgeAttachment { axis_out: [0.0, alpha.cos(), alpha.sin()], ..base };
+            let translation = a.axial_row(&lift).unwrap()[0];
+            if degrees == 0.0 { assert_eq!(translation, 0.0); } else { assert!((translation - alpha.sin()).abs() < 1e-14, "{degrees} deg: {translation}"); }
+            // t . (e x r), r = (0, 0, arm): e x r = (e_y arm, -e_x arm, 0).
+            let want = a.axis_out[0] * e[1] * a.arm_m[2] - a.axis_out[1] * e[0] * a.arm_m[2];
+            let rotation = a.axial_row(&turn).unwrap()[0];
+            assert!((rotation - want).abs() < 1e-14, "{degrees} deg: rotation {rotation} want {want}");
+        }
+    }
+
+    /// G3: with no arm and no downbearing there is no axial drive, whatever the board does.
+    #[test]
+    fn zero_geometry_gives_a_zero_axial_row() {
+        let (text, mesh) = straight_bridge(0.02, "");
+        let g = BoardGeometry::read(&text).unwrap();
+        let flat = BridgeAttachment { arm_m: [0.0; 3], ..g.bridge_attachments(&[69]).unwrap()[0] };
+        for mode in [
+            rigid_motion(&mesh, |_, y| [0.0, 0.0, 0.01 * y, 0.01, 0.0, 0.0]),
+            rigid_motion(&mesh, |_, _| [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+        ] {
+            assert_eq!(flat.axial_row(&mode).unwrap(), vec![0.0]);
+        }
+    }
+
+    /// A board with no bridge geometry at the station refuses; it is never given a default arm or axis.
+    #[test]
+    fn the_string_attachment_refuses_missing_or_ambiguous_bridge_geometry() {
+        // No stiffener at all.
+        let bare = BoardGeometry::read(&fine_fixture(14, 9, &[(69, [0.35, 0.2])])).unwrap();
+        assert!(bare.bridge_attachments(&[69]).unwrap_err().contains("no string-side stiffener"));
+        // The beam is on the far side of the midplane (a rib): it does not hold a string.
+        let (rib, _) = straight_bridge(-0.02, "");
+        assert!(BoardGeometry::read(&rib).unwrap().bridge_attachments(&[69]).is_err());
+        // A station away from the beam (y = 0.33, the beam is at y = 0.2).
+        let moved = format!("{}stiffener,{SIDE_BEAM},0.02,700,{}\n", fine_fixture(14, 9, &[(69, [0.35, 0.33])]),
+            (2..=12).map(|i| (4 * 15 + i).to_string()).collect::<Vec<_>>().join(","));
+        assert!(BoardGeometry::read(&moved).unwrap().bridge_attachments(&[69]).unwrap_err().contains("no string-side stiffener"));
+        // Two string-side beams crossing at the station at a right angle: ambiguous, not averaged.
+        let column: Vec<String> = (2..=6).map(|j| (j * 15 + 7).to_string()).collect();
+        let (cross, _) = straight_bridge(0.02, &format!("stiffener,{SIDE_BEAM},0.02,700,{}\n", column.join(",")));
+        assert!(BoardGeometry::read(&cross).unwrap().bridge_attachments(&[69]).unwrap_err().contains("disagree"));
+        // A key with no station.
+        let (text, _) = straight_bridge(0.02, "");
+        assert!(BoardGeometry::read(&text).unwrap().bridge_attachments(&[70]).is_err());
+    }
+
+    /// G1: the rows of a simply supported isotropic plate converge to the closed form. Oracle (mass-normalized
+    /// mode w_mn = A sin(m pi x/a) sin(n pi y/b), A = 2/sqrt(rho h a b)): a_mn = -arm (grad w_mn . t) at the
+    /// station, for the arm and axis of a string-side beam. Three mesh rungs; the error of each mode is
+    /// measured against arm A |k_mn|, the largest value its row can take. The modes are the eight lowest that
+    /// stand at least 5 % in frequency from every other analytic mode: a mode inside a near-degenerate
+    /// cluster has no single FE counterpart on a coarse mesh (the first run lost (4,1) to (3,2), 1.3 % apart,
+    /// with a modal assurance of 0.92), so it is not a test of the row. A priori, with |k| <= 24.9 /m for
+    /// those modes: the error of a P1 rotation readout is (k h)^2/12, so on the rungs of 35, 17.5 and
+    /// 8.75 mm it is about 6 %, 1.4 % and 0.4 %; the checks are 2 % at the finest rung and (see the assertion)
+    /// a fall at every rung with a factor of at least 3 at the last halving (second order gives 4). The bead's
+    /// 1e-3 would need an element of about 4 mm.
+    #[test]
+    fn plate_mode_rows_converge_to_the_closed_form_on_three_meshes() {
+        const PANEL: &str = "0.006,450,11000000000,11000000000,0.3,4230769230.769231,0";
+        let (a_len, b_len, h_panel, rho, young, nu): (f64, f64, f64, f64, f64, f64) = (0.7, 0.45, 0.006, 450.0, 1.1e10, 0.3);
+        let d = young * h_panel.powi(3) / (12.0 * (1.0 - nu * nu));
+        let amp = 2.0 / (rho * h_panel * a_len * b_len).sqrt();
+        let mut analytic: Vec<(f64, usize, usize)> = (1..=6).flat_map(|m| (1..=6).map(move |n| (m, n))).map(|(m, n)| {
+            let (km, kn) = (m as f64 * std::f64::consts::PI / a_len, n as f64 * std::f64::consts::PI / b_len);
+            ((d / (rho * h_panel)).sqrt() * (km * km + kn * kn) / std::f64::consts::TAU, m, n)
+        }).collect();
+        analytic.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let wanted: Vec<(f64, usize, usize)> = analytic.iter().enumerate()
+            .filter(|&(i, a)| analytic.iter().enumerate().all(|(j, b)| i == j || (b.0 / a.0 - 1.0).abs() >= 0.05))
+            .map(|(_, a)| *a).take(8).collect();
+        assert_eq!(wanted.len(), 8);
+        let band = wanted[7].0 * 1.06;
+        let station = [0.2013, 0.1437];
+        let (arm, axis) = (0.04, [0.6, 0.8, 0.0]);
+        let worst = [(20, 13), (40, 26), (80, 52)].map(|(nx, ny)| {
+            let g = BoardGeometry::read(&plate_fixture(nx, ny, &[(69, station)], PANEL)).unwrap();
+            let prepared = g.prepare_with_motion(&[69], band).unwrap();
+            let motion = prepared.motion.as_ref().unwrap();
+            let s = &g.bridge_sites[0];
+            let site = BridgeAttachment { midi: 69, triangle: s.triangle, weights: s.weights, arm_m: [0.0, 0.0, arm], axis_out: axis };
+            let rows = site.axial_row(motion).unwrap();
+            let mut worst = 0.0f64;
+            for &(_, m, n) in &wanted {
+                let (km, kn) = (m as f64 * std::f64::consts::PI / a_len, n as f64 * std::f64::consts::PI / b_len);
+                let shape = |x: f64, y: f64| amp * (km * x).sin() * (kn * y).sin();
+                // The FE mode that matches this analytic mode: the best modal assurance on the nodes.
+                let (best, mac, sign) = motion.shapes.iter().enumerate().map(|(k, nodal)| {
+                    let (mut cross, mut fe, mut an) = (0.0, 0.0, 0.0);
+                    for (&(x, y), q) in g.chart.mesh.nodes.iter().zip(nodal) { let (u, v) = (q[2], shape(x, y)); cross += u * v; fe += u * u; an += v * v; }
+                    (k, cross * cross / (fe * an), cross.signum())
+                }).max_by(|x, y| x.1.total_cmp(&y.1)).unwrap();
+                assert!(mac > 0.95, "{nx}x{ny}: mode ({m},{n}) has no FE counterpart (best MAC {mac:.3})");
+                let (gx, gy) = (amp * km * (km * station[0]).cos() * (kn * station[1]).sin(), amp * kn * (km * station[0]).sin() * (kn * station[1]).cos());
+                let want = -arm * (axis[0] * gx + axis[1] * gy);
+                let got = sign * rows[best];
+                worst = worst.max((got - want).abs() / (arm * amp * km.hypot(kn)));
+            }
+            eprintln!("axial row vs closed form, {nx} x {ny}: worst error {worst:.4} of the largest possible row");
+            worst
+        });
+        assert!(worst[2] < 0.02, "finest mesh: {:.4}", worst[2]);
+        // Pre-registered as "at least 2.5 per halving"; the first run measured 0.0231 -> 0.0101 -> 0.0026 (2.3 then
+        // 3.9): the coarsest rung (k h = 0.87) is still pre-asymptotic. Order is read from the last halving,
+        // where second order gives 4 and first order 2, and the error must fall at every rung.
+        assert!(worst[1] < worst[0] && worst[2] < worst[1] / 3.0, "no second-order convergence: {worst:?}");
     }
 
     #[test]

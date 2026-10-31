@@ -40,7 +40,7 @@ fn specification(courses: &[Course], band: f64, cap: usize, damping: f64) -> Spe
             c.midi
         ));
     }
-    Specification::read(&text, courses).unwrap()
+    Specification::read(&text, courses).unwrap().with_fixture_axial_rows(&board())
 }
 
 fn advance(bank: &mut Bank, contacts: &[f64]) -> Result<(), &'static str> {
@@ -200,6 +200,78 @@ fn longitudinal_force_and_work_remain_reciprocal_for_two_planes_unisons_and_dupl
     }
 }
 
+/// A per-mode row that is NOT proportional to the vertical bridge row (the one thing the former scalar could not
+/// express): the axial reaction on each board coordinate must still be the exact gradient of the stored energy,
+/// and the work over a finite step must still close.
+#[test]
+fn a_per_mode_axial_row_keeps_force_and_work_reciprocal() {
+    let c = Course { unison: 2, duplex_length_m: 0.4, detune_cents: 3.0, ..course() };
+    let mut bank = Bank::new(&[c], &board(), 192_000, 6000.0, 4, false).unwrap();
+    let mut spec = specification(&[c], 6500.0, 4, 0.0);
+    // Vertical rows are 0.8 and -0.45; these are not a multiple of them (opposite sign ratio, different size).
+    spec.set_bridge_axial_rows(BTreeMap::from([(c.midi, vec![0.35, 0.9])])).unwrap();
+    bank.configure_string_stretching(&[c], &spec).unwrap();
+    for (j, q) in bank.q.iter_mut().enumerate() {
+        *q = 1e-6 * (0.31 * j as f64 + 0.2).cos();
+    }
+    let state = bank.stretching.as_mut().unwrap();
+    for (ci, channel) in state.channels.iter_mut().enumerate() {
+        for (j, q) in channel.waves.as_mut().unwrap().q.iter_mut().enumerate() {
+            *q = 1e-8 * (j as f64 + ci as f64 + 0.4).sin();
+        }
+    }
+    state.predict();
+    state.commit();
+    state.evaluate(&bank.q, &bank.q, &bank.strings, &bank.modes).unwrap();
+    let force = state.required.clone();
+    let mut strongest = 0.0f64;
+    for k in 0..bank.q.len() {
+        let h = 1e-9;
+        let (mut a, mut b) = (bank.q.clone(), bank.q.clone());
+        a[k] -= h;
+        b[k] += h;
+        let fd = (state.energy(&b, &bank.strings, &bank.modes) - state.energy(&a, &bank.strings, &bank.modes)) / (2.0 * h);
+        strongest = strongest.max(fd.abs());
+        assert!((force[k] + fd).abs() < 1e-7 * (1.0 + fd.abs()), "coordinate {k}: force={} fd={fd}", force[k]);
+    }
+    assert!(strongest > 0.0, "the check would be vacuous with no stored-energy gradient");
+    let mut end = bank.q.clone();
+    for (j, q) in end.iter_mut().enumerate() {
+        *q += 2e-7 * (j as f64 + 0.1).cos();
+    }
+    state.evaluate(&bank.q, &end, &bank.strings, &bank.modes).unwrap();
+    let work = state.required.iter().zip(bank.q.iter().zip(&end)).map(|(f, (a, b))| f * (b - a)).sum::<f64>();
+    let delta = state.energy(&end, &bank.strings, &bank.modes) - state.energy(&bank.q, &bank.strings, &bank.modes);
+    assert!((delta + work).abs() < 1e-13, "work {work} against stored energy change {delta}");
+}
+
+/// The axial coupling is geometry from the board, never defaulted: a `waves` key without its row, with a row of
+/// the wrong length, or with a row for a key that has no `waves` row refuses, and leaves the bank unconfigured.
+#[test]
+fn waves_without_an_axial_participation_row_refuse() {
+    let c = course();
+    let text = format!("{HEADER}\nwaves,{},100000,0.2,3300,2,0.0,0.05\n", c.midi);
+    let bare = Specification::read(&text, &[c]).unwrap();
+    let mut bank = Bank::new(&[c], &board(), 96_000, 6000.0, 4, false).unwrap();
+    let refusal = bank.configure_string_stretching(&[c], &bare).unwrap_err();
+    assert!(refusal.contains("axial participation row") && refusal.contains("no default"), "{refusal}");
+    assert!(!bank.has_string_stretching());
+    // A row for the wrong number of board modes.
+    let mut short = bare.clone();
+    short.set_bridge_axial_rows(BTreeMap::from([(c.midi, vec![0.1])])).unwrap();
+    assert!(bank.configure_string_stretching(&[c], &short).unwrap_err().contains("entries for 2 board modes"));
+    assert!(!bank.has_string_stretching());
+    // Rows that cannot be admitted at all: no waves key, empty, non-finite.
+    let mut spec = bare.clone();
+    assert!(spec.set_bridge_axial_rows(BTreeMap::from([(c.midi + 1, vec![0.1, 0.2])])).is_err());
+    assert!(spec.set_bridge_axial_rows(BTreeMap::from([(c.midi, vec![])])).is_err());
+    assert!(spec.set_bridge_axial_rows(BTreeMap::from([(c.midi, vec![0.1, f64::NAN])])).is_err());
+    // With its row the same file configures.
+    spec.set_bridge_axial_rows(BTreeMap::from([(c.midi, vec![0.1, -0.2])])).unwrap();
+    bank.configure_string_stretching(&[c], &spec).unwrap();
+    assert!(bank.has_string_stretching());
+}
+
 #[test]
 fn longitudinal_energy_transfer_and_physical_loss_close_the_original_driven_work_ledger() {
     let c = Course {
@@ -291,8 +363,12 @@ fn longitudinal_trajectory_converges_to_independent_continuous_axial_transverse_
             volume: 0.0,
         }];
         let mut bank = Bank::new(&[c], &fixed, rate, 3000.0, 1, false).unwrap();
-        bank.configure_string_stretching(&[c], &specification(&[c], 3300.0, 2, 0.0))
-            .unwrap();
+        // This board has one mode (all-zero vertical row), so the fixture row has one (zero) entry too.
+        bank.configure_string_stretching(
+            &[c],
+            &specification(&[c], 3300.0, 2, 0.0).with_fixture_axial_rows(&fixed),
+        )
+        .unwrap();
         bank.q[0] = amplitude;
         let initial = bank.energy();
         for _ in 0..rate / 100 {

@@ -192,14 +192,45 @@ installed reference strain `T0/EA`. Total tension is checked separately as
 `T0 + EA * epsilon`, including its lower bound over the complete reduced span.
 
 Here `u` is longitudinal displacement coupled at the bridge through the
-speaking termination's axial-to-transverse projection (`BRIDGE_AXIAL_PROJECTION`
-in `longitudinal_string.rs`, representing downbearing inclination plus the
-bridge-cap rocking lever arm), and `y` and `z` are the retained transverse
-directions. A single transverse direction is also supported. Both polarizations
-of one physical string share one axial state and one strain energy; selecting
-two directions does not double the string. The moving bridge supplies both the
-transverse chord and the axial boundary extension `u(L, t) = eta * b(t)` with
-exact reciprocal discrete-gradient force pullback (`F_bridge = -eta * EA * epsilon(L, t)`).
+speaking termination's **axial participation row** `a_n` (below), and `y` and `z`
+are the retained transverse directions. A single transverse direction is also
+supported. Both polarizations of one physical string share one axial state and
+one strain energy; selecting two directions does not double the string. The
+moving bridge supplies both the transverse chord and the axial boundary extension
+`u(L, t) = sum_n a_n x_n(t)` over the board's loaded coordinates `x_n`, with
+exact reciprocal discrete-gradient force pullback (the force on coordinate `n`
+is `-a_n * EA * epsilon(L, t)`, plus the retained axial modes' share).
+
+### The axial participation row
+
+`a_n = t . (U_n + Theta_n x r)`: the termination's motion along the string axis
+`t` (pointing away from the speaking length, so a positive value extends the
+string), for board mode `n` with translation `U_n` and axial rotation `Theta_n`
+at the attachment, and the arm `r` from the board's structural site to the string
+contact. It replaces the former single authored scalar `BRIDGE_AXIAL_PROJECTION =
+0.06`; the row is per mode, changes sign from mode to mode, and is 0 for a
+board with a perfectly flat string and no arm. There is no default: a `waves` key
+without its row refuses when the bank is configured (`axial_rows` of the
+specification), and `grand_piano` derives the rows from the board file when
+`--string-stretching` selects `waves` (`BoardGeometry::bridge_attachments`, then
+`MotionSurface::project_at`, so it is the same map as the bridge coefficient):
+
+- **The arm** is the height of the outer fibre of the stiffener that contains the
+  bridge station and lies on the string side of the panel's midplane
+  (eccentricity > 0), `e + h/2`, with `h = sqrt(12 I / A)` read from that row's
+  area and bending inertia (a rectangular section is assumed).
+- **The string axis** is NOT in the board file. It is taken perpendicular to the
+  bridge in plan, with the speaking length toward decreasing `y` (the RT-0425
+  frame's front edge), so `t` has `t_y >= 0`. This is an assumption; see
+  `u-string-direction` in `data/instruments/descriptions/piano/unknowns.tsv`.
+- **Downbearing** is absent from a flat plate, so the axis has no vertical
+  component: the `sin(alpha) U_n` term is exactly 0.
+- With `--board-reduction` the rotations are those of the reduced basis, built
+  from vertical bridge-force snapshots only.
+
+`piano_exterior` and the live engine still use a labelled authored ratio
+(`EXTERIOR_AXIAL_RATIO`, `LIVE_BRIDGE_AXIAL_RATIO`, both 0.06 times the vertical
+row) until they carry rotation rows of their own.
 
 The retained axial sine modes have inertia, propagate their strain at the
 material wave speed, and exchange energy with transverse and bridge motion
@@ -227,7 +258,7 @@ does not claim to reproduce that full model.
 ## Boundaries
 
 `stretch` selects averaged moderate-slope extension; `waves` adds the explicitly
-retained longitudinal modes and axial bridge port described above. With `--string-polarization`, both
+retained longitudinal modes and the axial participation row described above. With `--string-polarization`, both
 transverse directions share their total strain and one extension energy per
 physical segment; see
 `STRING_POLARIZATION.md` for the required geometric input. It does not resolve

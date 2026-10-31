@@ -15,11 +15,15 @@ use super::{Channel, Observation, StringMode, StringPort, WaveMaterial};
 use fs_math::{c64::C64, det};
 
 const MAX_SLOPES: usize = 2 * (super::super::MAX_STRING_MODES + 1);
-/// Effective axial-to-transverse bridge coupling at the speaking termination
-/// (~1.8 deg downbearing inclination plus 28 mm bridge-cap rocking lever arm).
-pub const BRIDGE_AXIAL_PROJECTION: f64 = 0.06;
 
+/// Axial boundary extension of the speaking termination is `sum_n a_n x_n` over the board's loaded
+/// coordinates `x_n`: `a_n` is the axial participation row of the board's modes at the string's
+/// attachment (`t . (U_n + Theta_n x r)`, from the board's retained nodal motion; see
+/// `BoardGeometry::bridge_attachments`). It is a per-mode vector, not a scalar, and it has no default:
+/// a `waves` key without its row refuses before this type is built.
 pub(super) struct Prepared {
+    /// Axial participation row in the bank's loaded board coordinates (length = board mode count).
+    axial: Vec<f64>,
     model: LongitudinalString,
     string: usize,
     second: Option<usize>,
@@ -50,7 +54,11 @@ impl Prepared {
         density: f64,
         rate: u32,
         material: WaveMaterial,
+        axial: Vec<f64>,
     ) -> Result<Self, String> {
+        if axial.is_empty() || axial.iter().any(|a| !a.is_finite()) {
+            return Err("longitudinal string needs a finite, nonempty axial participation row".into());
+        }
         if material.bandwidth_hz > 0.45 * f64::from(rate) {
             return Err("longitudinal band exceeds the mechanics clock's 0.45*rate guard; supply more substeps or a lower explicit band".into());
         }
@@ -103,6 +111,7 @@ impl Prepared {
             })
             .collect();
         Ok(Self {
+            axial,
             model,
             string: channel.string,
             second: channel.second,
@@ -136,17 +145,11 @@ impl Prepared {
     }
 
     // A channel retaining no axial mode still has the quasi-static boundary
-    // extension eta*b: `evaluate` books its bridge reaction unconditionally,
-    // so the potential must include it too (otherwise that force does work
-    // the energy does not see).
-    fn bridge_axial(&self, q: &[f64], strings: &[StringPort], modes: &[StringMode]) -> f64 {
-        let bridge: f64 = strings[self.string]
-            .bridge
-            .iter()
-            .zip(&q[modes.len()..])
-            .map(|(g, x)| g * x)
-            .sum();
-        BRIDGE_AXIAL_PROJECTION * bridge
+    // extension `sum a_n x_n`: `evaluate` books its bridge reaction
+    // unconditionally, so the potential must include it too (otherwise that
+    // force does work the energy does not see).
+    fn bridge_axial(&self, q: &[f64], modes: &[StringMode]) -> f64 {
+        self.axial.iter().zip(&q[modes.len()..]).map(|(a, x)| a * x).sum()
     }
 
     fn fill_relative_axial(&self, b_axial: f64, u: &[f64], out: &mut [f64]) {
@@ -204,7 +207,7 @@ impl Prepared {
         let mut scratch = [0.; MAX_SLOPES];
         let slopes = &mut scratch[..self.model.slope_count()];
         self.slopes(q, strings, modes, slopes);
-        let b_axial = self.bridge_axial(q, strings, modes);
+        let b_axial = self.bridge_axial(q, modes);
         let eps_bridge = b_axial / self.length;
         let mut u_rel_buf = [0.; MAX_LONGITUDINAL_MODES];
         let u_rel = &mut u_rel_buf[..u.len()];
@@ -304,8 +307,8 @@ impl Prepared {
             modes,
             &mut self.end_slopes,
         );
-        let b_axial_a = self.bridge_axial(a, strings, modes);
-        let b_axial_b = self.bridge_axial(b, strings, modes);
+        let b_axial_a = self.bridge_axial(a, modes);
+        let b_axial_b = self.bridge_axial(b, modes);
         let n = self.q.len();
         let mut u_rel_a_buf = [0.; MAX_LONGITUDINAL_MODES];
         let mut u_rel_b_buf = [0.; MAX_LONGITUDINAL_MODES];
@@ -348,8 +351,8 @@ impl Prepared {
                 out[k] += 0.5 * extra_mean_factor * f64::midpoint(sa[k], sb[k]);
             }
         }
-        let mut axial_bridge_reaction =
-            BRIDGE_AXIAL_PROJECTION * self.ea * (s0_mid + eps_bridge_mid);
+        // Force on the termination along the string axis; it reaches the board through the axial row.
+        let mut axial_bridge_force = self.ea * (s0_mid + eps_bridge_mid);
         for (j, ((value, &omega), &beta)) in self
             .required
             .iter_mut()
@@ -358,7 +361,7 @@ impl Prepared {
             .enumerate()
         {
             let g_axial = *value;
-            axial_bridge_reaction -= BRIDGE_AXIAL_PROJECTION * beta * g_axial;
+            axial_bridge_force -= beta * g_axial;
             let u_mid = f64::midpoint(self.q[j], self.next_q[j]);
             *value = -(g_axial - omega * omega * u_mid);
         }
@@ -366,9 +369,6 @@ impl Prepared {
             let s = &strings[si];
             let row = &self.slope_gradient[plane * width..(plane + 1) * width];
             let mut reaction = row[0] / self.length;
-            if plane == 0 {
-                reaction += axial_bridge_reaction;
-            }
             for ((&gradient, &scale), k) in row[1..]
                 .iter()
                 .zip(&self.transverse_scales)
@@ -380,6 +380,12 @@ impl Prepared {
             }
             for (&shape, value) in s.bridge.iter().zip(&mut mechanical_force[modes.len()..]) {
                 *value -= shape * reaction;
+            }
+            // One physical string, one axial termination: its reaction is booked once, on the first plane.
+            if plane == 0 {
+                for (&a, value) in self.axial.iter().zip(&mut mechanical_force[modes.len()..]) {
+                    *value -= a * axial_bridge_force;
+                }
             }
         }
         Ok(())

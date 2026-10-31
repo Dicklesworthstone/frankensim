@@ -74,7 +74,14 @@ fn a3_waves_follow_the_reference_engine_and_close_the_ledger() {
     if let Some(c) = &desc.damping {
         reference.configure_bare_board_damping(c).unwrap();
     }
-    reference.configure_string_stretching(&Specification::read(&text, &[course]).unwrap()).unwrap();
+    // The reference's waves coupling is a per-mode row; the live engine's is one scalar. To compare the same
+    // equations the reference is given the engine's own labelled scalar times its vertical bridge row.
+    let mut material_spec = Specification::read(&text, &[course]).unwrap();
+    let rows = material_spec.waves.keys().map(|&key| {
+        (key, desc.board.iter().map(|m| fs_live_piano::stretch::LIVE_BRIDGE_AXIAL_RATIO * m.bridge[usize::from(key - 21)]).collect())
+    }).collect();
+    material_spec.set_bridge_axial_rows(rows).unwrap();
+    reference.configure_string_stretching(&material_spec).unwrap();
     reference.note_on(57, 4.5).unwrap();
     let mut live = struck(&desc, Some(text), 57, 4.5);
     let mut linear = struck(&desc, None, 57, 4.5);

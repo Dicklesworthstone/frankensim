@@ -40,8 +40,25 @@ pub struct WaveMaterial {
 pub struct Specification {
     pub courses:BTreeMap<u8,Option<Material>>,
     pub waves:BTreeMap<u8,WaveMaterial>,
+    /// Axial participation row of each `waves` key, in the BARE board's mass-normalized coordinates
+    /// (length = the board's mode count): the string termination's displacement along the string axis,
+    /// positive when it extends the string, per unit modal coordinate. It is not in the file: the board
+    /// supplies it (`BoardGeometry::bridge_attachments` with `MotionSurface::project_at`), and a `waves`
+    /// key without its row refuses when the bank is configured. There is no default coupling.
+    pub axial_rows:BTreeMap<u8,Vec<f64>>,
 }
 impl Specification {
+    /// Attach the axial participation rows of the `waves` keys (see `axial_rows`). Every row must belong to
+    /// a `waves` key, be finite and nonempty; a key may be given once.
+    pub fn set_bridge_axial_rows(&mut self,rows:BTreeMap<u8,Vec<f64>>)->Result<(),String> {
+        for (key,row) in &rows {
+            if !self.waves.contains_key(key) {return Err(format!("key {key}: an axial participation row needs a waves row"));}
+            if row.is_empty()||row.iter().any(|a|!a.is_finite()) {
+                return Err(format!("key {key}: the axial participation row must be finite and nonempty"));
+            }
+        }
+        self.axial_rows=rows;Ok(())
+    }
     pub fn read(text:&str,courses:&[Course])->Result<Self,String> {
         if text.len() as u64>MAX_BYTES {return Err("string stretching file exceeds 64 KiB".into());}
         let mut rows=BTreeMap::new();let mut waves=BTreeMap::new();let mut header=false;
@@ -81,7 +98,7 @@ impl Specification {
             if rows.insert(key,material).is_some(){return Err(format!("duplicate string stretching key {key}"));}
         }
         if !header{return Err("missing string stretching header".into());}
-        let s=Self{courses:rows,waves};s.validate(courses)?;Ok(s)
+        let s=Self{courses:rows,waves,axial_rows:BTreeMap::new()};s.validate(courses)?;Ok(s)
     }
     pub fn load(path:&str,courses:&[Course])->Result<Self,String> {
         let mut text=String::new();std::fs::File::open(path).map_err(|e|format!("{path}: {e}"))?
@@ -221,7 +238,15 @@ impl Prepared {
             let mut channel=Channel {string:si,second,coefficient:ch.coefficient,diagonal,chord,length,
                 rest_tension:tension,material,waves:None};
             if let Some(w)=spec.waves.get(&c.midi) {
-                let prepared=longitudinal::Prepared::new(&channel,c.linear_density_kg_m,bank.rate,*w)?;
+                // The termination's axial motion per board mode is geometry (arm, string axis, the board's
+                // rotations), not a material constant: refuse a key that has no row rather than assume one.
+                let row=spec.axial_rows.get(&c.midi).ok_or_else(||format!(
+                    "key {}: waves needs the board's axial participation row (the string termination's motion along its axis per board mode); none was supplied and there is no default coupling",c.midi))?;
+                if row.len()!=bank.board_count {
+                    return Err(format!("key {}: the axial participation row has {} entries for {} board modes",c.midi,row.len(),bank.board_count));
+                }
+                let axial=bank.project_board_shape(row)?;
+                let prepared=longitudinal::Prepared::new(&channel,c.linear_density_kg_m,bank.rate,*w,axial)?;
                 wave_coordinates+=prepared.mode_count();
                 wave_terms+=prepared.coupling_terms();
                 if wave_coordinates>8192 || wave_terms>4_000_000 {
@@ -379,6 +404,23 @@ impl Bank {
         match &mut self.stretching {
             Some(p)=>p.correct(&self.q,&self.next_q,&self.strings,&self.modes),None=>Ok(true),
         }
+    }
+}
+
+/// TEST FIXTURE ONLY (never compiled into a render): the axial coupling of the longitudinal mechanics tests,
+/// a fixed fraction of the vertical bridge row. Those tests exercise energy closure, rollback and band
+/// admission of the retained axial modes, not the physics of the coupling, so any nonzero row serves; this
+/// one is the value they were written against. A render takes its row from the board
+/// (`BoardGeometry::bridge_attachments`).
+#[cfg(test)]
+pub(crate) const FIXTURE_AXIAL_RATIO:f64=0.06;
+#[cfg(test)]
+impl Specification {
+    /// Give every `waves` key the fixture row `FIXTURE_AXIAL_RATIO` x the board's vertical bridge row.
+    pub(crate) fn with_fixture_axial_rows(mut self,board:&[super::BoardMode])->Self {
+        let rows=self.waves.keys().map(|&key|(key,board.iter()
+            .map(|m|FIXTURE_AXIAL_RATIO*m.bridge[usize::from(key-21)]).collect())).collect();
+        self.set_bridge_axial_rows(rows).unwrap();self
     }
 }
 

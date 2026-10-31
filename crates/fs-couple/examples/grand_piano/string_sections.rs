@@ -245,7 +245,10 @@ mod tests {
         let mut states = Vec::new();
         for (rho, young) in [(8000.0_f64, 80e9_f64), (10000.0, 200e9)] {
             let course = material_course(rho, young);
-            let selection = specification("waves,69,section,0.2,4000,4,0,0.05", course).unwrap();
+            // This bank's board has an all-zero vertical bridge row, so its fixture axial row is zero too.
+            let selection = specification("waves,69,section,0.2,4000,4,0,0.05", course).unwrap()
+                .with_fixture_axial_rows(&[BoardMode { frequency_hz: 100.0, damping_ratio: 0.0,
+                    bridge: [0.0; 88], volume: 0.0 }]);
             let mut mechanics = bank(course);
             mechanics.configure_string_stretching(&[course], &selection).unwrap();
             let f_axial = 0.5 * (young / rho).sqrt() / course.length_m;

@@ -5,8 +5,9 @@
 //! `LongitudinalString` owns the moderate-slope strain `e = u_x + y_x^2/2`, its
 //! storage and its gradient. A `stretch` row retains no axial coordinate (the
 //! averaged Kirchhoff--Carrier tension); a `waves` row retains the axial sine
-//! modes of its band, their damping, and the reference's effective axial bridge
-//! port `u(L) = eta b`. Slopes come from the segment's own coordinates and the
+//! modes of its band, their damping, and an axial bridge port `u(L) = eta b` with
+//! the authored `LIVE_BRIDGE_AXIAL_RATIO` (the reference now derives a per-mode row
+//! instead; see that constant). Slopes come from the segment's own coordinates and the
 //! bridge, `y = sum phi_k (z_k - beta_k b) + x/L b`, with the reference's slope
 //! scales (the Kirchhoff--Carrier channel's diagonal).
 //!
@@ -22,9 +23,18 @@
 //! as the reference differs from itself at 192 kHz. The method's numerical work
 //! is booked in `Ledger::coupling_j`.
 
-use crate::refmods::linear::string_stretching::{longitudinal::BRIDGE_AXIAL_PROJECTION, Material, WaveMaterial};
+use crate::refmods::linear::string_stretching::{Material, WaveMaterial};
 use fs_math::det;
 use fs_nlmodal::{KcStringParams, kirchhoff_carrier_string, longitudinal::LongitudinalString};
+
+/// AUTHORED: the live engine's axial bridge coupling, `u(L) = LIVE_BRIDGE_AXIAL_RATIO * b` with `b` the bridge's
+/// vertical displacement. It is the former single scalar of the offline renderer (`grand_piano`), whose comment
+/// read ~1.8 degrees of downbearing plus a 28 mm bridge-cap lever arm and which never recorded a source. The
+/// offline renderer no longer uses it: `grand_piano` derives a per-mode axial participation row from its board's
+/// retained rotations (`BoardGeometry::bridge_attachments`, bead pexfp.44). This engine keeps the scalar, and
+/// only here, until its board carries slope rows (`gen_board`'s `.bin`; bead frankensim-live-piano-axial-row-3eh0l);
+/// until then the live and offline renders of a `waves` key couple the axial motion to the board differently.
+pub const LIVE_BRIDGE_AXIAL_RATIO: f64 = 0.06;
 
 /// Young's modulus [Pa] and density [kg/m^3] of piano wire (high-carbon steel), as the
 /// reference's graded A3 file (`axial-a3.fspx`) uses them.
@@ -137,7 +147,7 @@ impl Stretch {
                 }
                 indices.push(mode);
             }
-            port = BRIDGE_AXIAL_PROJECTION;
+            port = LIVE_BRIDGE_AXIAL_RATIO;
             damping = w.damping_ratio;
             maximum_strain = w.maximum_strain;
         }

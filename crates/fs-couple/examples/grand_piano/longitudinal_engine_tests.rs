@@ -16,7 +16,8 @@ fn piano(strain: f64, loaded: bool) -> Instrument {
         ),
         &[course],
     )
-    .unwrap();
+    .unwrap()
+    .with_fixture_axial_rows(&board::demonstration());
     let mut p = Instrument::new_with_footprints(
         vec![course],
         &board::demonstration(),
