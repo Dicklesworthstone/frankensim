@@ -14,6 +14,10 @@ pub use incident::{
     sample_incident_sources,
 };
 
+#[path = "helmholtz_bc_prepared_iterative.rs"]
+mod prepared_iterative;
+pub use prepared_iterative::PreparedIterativeBoundary;
+
 /// Hook for a qualified nonlocal BL operator, e.g. a tangential surface
 /// Laplacian. It maps pressure [Pa] to rho*c*v_absorbed [Pa]. Its weighted
 /// quadratic form must be passive unless explicitly declared active. The
@@ -1120,17 +1124,6 @@ pub fn solve_radiation_bc_iterative(
     ),
     IterativeError,
 > {
-    let op = IterativeRadiation::prepare_bc(
-        surface,
-        k,
-        medium,
-        formulation,
-        options,
-        bc.admittance,
-        gate,
-    )?;
-    let mut state = op.start(bc.drive_velocity, gate)?;
-    op.advance(&mut state, options.max_iters.saturating_add(1), gate)?;
-    let (solution, report, receipt) = op.finish(&state)?;
-    Ok((finish_boundary(surface, solution, bc)?, report, receipt))
+    PreparedIterativeBoundary::new(surface, k, medium, bc.admittance, formulation, options, gate)?
+        .solve(bc.drive_velocity, gate)
 }

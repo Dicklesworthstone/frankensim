@@ -612,7 +612,7 @@ impl IterativeState {
 /// Every owner's admission, in this order, before any engine is built:
 /// geometry, frequency and medium, GMRES and preconditioner parameters, then
 /// resolution. Returns the panels per wavelength.
-fn admit(
+pub(crate) fn admit(
     surface: &SpherePanels,
     k: f64,
     medium: Medium,

@@ -25,7 +25,9 @@ mod scattering;
 pub use scattering::{PointSourceSpec, ScatteringObservation};
 mod wall;
 pub use wall::{
-    BoundaryObservationBake, LocalBoundary, LocalBoundaryObservation, LocalWall, LowerBandWindow,
+    BoundaryObservationBake, IterativeBoundaryObservation, IterativeBoundaryObservationBake,
+    IterativeObservationError, IterativeObservationOptions, IterativeObservationSample,
+    IterativeSourceReport, LocalBoundary, LocalBoundaryObservation, LocalWall, LowerBandWindow,
 };
 
 /// Largest admitted DFT/CQ size. Work budgets may be stricter.
@@ -466,12 +468,12 @@ pub fn bake_observation_transfers(
 
 // The same numerical owner, allowing native constitutive refusals to retain
 // their types. The wall adapter admits its explicit nonzero passband first.
-fn bake_observation_transfers_with_errors(
-    mut solve_at: impl FnMut(f64) -> Result<Vec<C64>, TransferError>,
+fn bake_observation_transfers_with_errors<E: From<TransferError>>(
+    mut solve_at: impl FnMut(f64) -> Result<Vec<C64>, E>,
     decl: &TransferDeclaration,
     lower_pass_hz: f64,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<ObservationTransferBake, TransferError> {
+) -> Result<ObservationTransferBake, E> {
     let channels = decl.admit_work()?;
     let finest = *decl
         .fft_lengths
@@ -482,12 +484,12 @@ fn bake_observation_transfers_with_errors(
     let mut ladder = Vec::new();
     for &n in &decl.fft_lengths {
         if cancelled() {
-            return Err(TransferError::Cancelled);
+            return Err(TransferError::Cancelled.into());
         }
         let mut spectra = vec![vec![FftComplex::default(); n]; channels];
         for bin in 0..=n / 2 {
             if cancelled() {
-                return Err(TransferError::Cancelled);
+                return Err(TransferError::Cancelled.into());
             }
             let f = decl.fs_hz * bin as f64 / n as f64;
             let window = observation_taper(f, decl.pass_band_upper_hz, decl.taper_stop_hz);
@@ -504,7 +506,7 @@ fn bake_observation_transfers_with_errors(
                     solve_at(core::f64::consts::TAU * f)?
                 };
                 if row.len() != channels || row.iter().any(|&z| !finite(z)) {
-                    return Err(TransferError::Invalid("producer field shape/nonfinite"));
+                    return Err(TransferError::Invalid("producer field shape/nonfinite").into());
                 }
                 entry.insert(row);
             }
@@ -529,7 +531,7 @@ fn bake_observation_transfers_with_errors(
                 .iter()
                 .any(|v| !v.re.is_finite() || !v.im.is_finite())
             {
-                return Err(TransferError::Invalid("nonfinite IFFT kernel"));
+                return Err(TransferError::Invalid("nonfinite IFFT kernel").into());
             }
             let scale = spectrum
                 .iter()
@@ -548,7 +550,7 @@ fn bake_observation_transfers_with_errors(
                 spectrum.iter().map(|v| (v.im / scale).powi(2)).sum::<f64>()
             };
             if imaginary > 1e-24 * total {
-                return Err(TransferError::Invalid("nonreal observation kernel"));
+                return Err(TransferError::Invalid("nonreal observation kernel").into());
             }
             let pair = c / 4;
             kernels.push(FirKernel {
@@ -605,10 +607,11 @@ fn bake_observation_transfers_with_errors(
             tail: last.tail_energy_fraction,
             wrap: last.wrap_energy_fraction,
             dtft: change,
-        });
+        }
+        .into());
     }
     if cancelled() {
-        return Err(TransferError::Cancelled);
+        return Err(TransferError::Cancelled.into());
     }
     Ok(ObservationTransferBake {
         declaration_hash: decl.declaration_hash(),
@@ -671,6 +674,32 @@ impl<'a> BemObservation<'a> {
         minimum_clearance_m: f64,
         allow_zero_structural_trace: bool,
     ) -> Result<Self, TransferError> {
+        Self::new_admitted_controlled(
+            surface,
+            medium,
+            sources,
+            traces,
+            receivers,
+            minimum_clearance_m,
+            allow_zero_structural_trace,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_admitted_controlled(
+        surface: &'a SpherePanels,
+        medium: Medium,
+        sources: &[SourceId],
+        traces: &[Vec<f64>],
+        receivers: &[ReceiverSpec],
+        minimum_clearance_m: f64,
+        allow_zero_structural_trace: bool,
+        iterative: Option<&fs_exec::CancelGate>,
+    ) -> Result<Self, TransferError> {
+        if iterative.is_some_and(fs_exec::CancelGate::is_requested) {
+            return Err(TransferError::Cancelled);
+        }
         if sources.is_empty()
             || sources.len() != traces.len()
             || sources.len() > MAX_OBSERVATION_INPUTS
@@ -685,8 +714,14 @@ impl<'a> BemObservation<'a> {
             ));
         }
         let points: Vec<_> = receivers.iter().map(|r| r.position_m).collect();
-        let geometry = Geometry::new(surface, &points, minimum_clearance_m)?;
+        let geometry = match iterative {
+            Some(gate) => Geometry::new_iterative(surface, &points, minimum_clearance_m, gate)?,
+            None => Geometry::new(surface, &points, minimum_clearance_m)?,
+        };
         for (source, trace) in sources.iter().zip(traces) {
+            if iterative.is_some_and(fs_exec::CancelGate::is_requested) {
+                return Err(TransferError::Cancelled);
+            }
             if matches!(source, SourceId::PointVolumeFlow(_))
                 || source.name().is_empty()
                 || trace.len() != surface.areas().len()

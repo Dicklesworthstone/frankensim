@@ -1328,6 +1328,56 @@ source-support and cancellation refusals, and porous BEM-to-FIR playback.
 Authored tests require native execution; source review and formatting alone
 establish no passing numerical or experimental qualification.
 
+### Iterative material diffraction and large-surface observation
+
+`helmholtz::bc::PreparedIterativeBoundary` retains one original
+`IterativeRadiation::prepare_bc` FMM/preconditioner for repeated prescribed or
+incident source solves. `solve` and `scatter` use the original Robin drive,
+actual boundary velocity and total-wall work finalizers. Every source must pass
+the original GMRES residual gate. Native nonconvergence, FMM work/accuracy
+refusals and cancellation diagnostics remain intact; a changed nonlocal wall
+fingerprint refuses reuse. Resource receipts include the shared setup time,
+so summing receipts does not measure disjoint preparation costs.
+
+`observation_transfers::IterativeBoundaryObservation` uses that prepared owner
+for point-flow sources and finite prescribed structural/aperture traces. One
+frequency shares both the FMM/preconditioner and adaptive pressure/velocity
+receiver rows across all source columns. Point-source topology/clearance is
+admitted against immutable geometry once; frequency sampling reuses the
+original incident trace sampler and adds the exact direct field coherently.
+Finite traces retain the disjoint-drive/passive-patch rule and SI normalization.
+`IterativeObservationSample` carries complete p/gradient columns, actual
+per-source solver reports, resource receipts and total-wall absorption.
+
+The explicit iterative constructors for the material table and receiver
+geometry admit up to the existing `MAX_SURFACE_PANELS` (81,920), while the old
+dense constructors keep their 8,192-panel limit. Wavelength resolution, closed
+outward topology, componentwise exterior winding, triangle clearance and
+constitutive support are unchanged. Retained finite source coefficients must
+fit `MAX_OBSERVATION_ENTRIES` before copying. Receiver integration keeps its
+existing depth, phase/separation and at-most-20-million kernel-evaluation
+budgets; large geometry admission does not guarantee that a requested receiver
+table fits those budgets. Iterative receiver admission polls cancellation in
+topology, clearance and winding tiles; vector preparation polls at recursive
+triangle tiles. Original FMM setup and individual passes retain their declared
+bounded interruption limitations.
+
+`IterativeObservationOptions` records the explicit FMM/GMRES, receiver and band
+settings. Every solver/preconditioner/directional/rule setting binds the new
+operator identity. The bake retains those settings and the original material
+band metadata; all nonzero source solves must succeed before the existing FIR
+owner can admit temporal convergence. Generic private error propagation does
+not change the public dense FIR API or its arithmetic. GMRES residual does not
+bound FMM approximation, receiver quadrature, spatial discretization or source
+model error; those remain separate from FIR tail/wrap/DTFT convergence.
+
+Focused regressions define a three-order FMM-to-dense complete-field ladder,
+finite-aperture/passive-work agreement, native GMRES failure propagation into
+FIR baking, a 20,480-panel constructor with original geometry/work refusals,
+porous band-limited playback and changed-nonlocal-law refusal. Native execution
+is required before claiming these numerical regressions pass. This extension
+does not qualify measured player/chair geometry or close the full W9 milestone.
+
 ## Reciprocal complete source loads and matched receiver transfers
 
 `modal_loading::modal_radiation_loading_reciprocal` exposes the existing

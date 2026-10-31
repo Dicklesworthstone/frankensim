@@ -68,9 +68,32 @@ impl IncidentTraces {
                 crate::panel3d::MAX_SURFACE_PANELS,
             )?;
         }
+        Self::from_admitted_field(surface, k, medium, field, None)
+    }
+
+    /// The immutable source/surface geometry must already have passed the
+    /// original exterior admission. Reuse that admission over a frequency
+    /// grid; retain the original field sampler and frequency/shape checks.
+    pub(crate) fn from_admitted_field(
+        surface: &SpherePanels,
+        k: f64,
+        medium: Medium,
+        field: IncidentField<'_>,
+        gate: Option<&fs_exec::CancelGate>,
+    ) -> Result<Self, HelmholtzError> {
+        validate_frequency(k, medium)?;
+        field.validate()?;
         let mut pressure_pa = Vec::with_capacity(surface.areas().len());
         let mut normal_velocity_m_s = Vec::with_capacity(surface.areas().len());
-        for (&point, normal) in surface.centroids().iter().zip(surface.normals()) {
+        for (index, (&point, normal)) in surface
+            .centroids()
+            .iter()
+            .zip(surface.normals())
+            .enumerate()
+        {
+            if index % 256 == 0 && gate.is_some_and(fs_exec::CancelGate::is_requested) {
+                return Err(HelmholtzError::Cancelled);
+            }
             let sample = field.sample(k, medium, point)?;
             pressure_pa.push(sample.pressure_pa);
             normal_velocity_m_s.push((0..3).fold(C64::ZERO, |v, a| {

@@ -42,10 +42,30 @@ impl LocalBoundary {
         laws: Vec<LocalWall>,
         panel_laws: Vec<usize>,
     ) -> Result<Self, TransferError> {
+        Self::with_panel_cap(medium, laws, panel_laws, helmholtz::MAX_DENSE_PANELS)
+    }
+
+    /// The same physical material binding for an explicit iterative observer.
+    /// Only the dense allocation ceiling changes; constitutive and geometric
+    /// source support remain the original owners' responsibilities.
+    pub fn try_new_iterative(
+        medium: Medium,
+        laws: Vec<LocalWall>,
+        panel_laws: Vec<usize>,
+    ) -> Result<Self, TransferError> {
+        Self::with_panel_cap(medium, laws, panel_laws, crate::panel3d::MAX_SURFACE_PANELS)
+    }
+
+    fn with_panel_cap(
+        medium: Medium,
+        laws: Vec<LocalWall>,
+        panel_laws: Vec<usize>,
+        maximum_panels: usize,
+    ) -> Result<Self, TransferError> {
         if laws.is_empty()
             || laws.len() > 256
             || panel_laws.is_empty()
-            || panel_laws.len() > helmholtz::MAX_DENSE_PANELS
+            || panel_laws.len() > maximum_panels
             || !medium.density.is_finite()
             || medium.density <= 0.0
             || !medium.sound_speed.is_finite()

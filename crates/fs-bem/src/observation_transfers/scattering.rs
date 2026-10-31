@@ -33,14 +33,14 @@ pub struct PointSourceSpec {
 /// around fixed, closed rigid bodies. No in-loop impedance is inferred.
 pub struct ScatteringObservation<'a> {
     pub(super) surface: &'a SpherePanels,
-    receiver_geometry: Geometry<'a>,
+    pub(super) receiver_geometry: Geometry<'a>,
     pub(super) medium: Medium,
-    point_sources: Vec<PointSourceSpec>,
+    pub(super) point_sources: Vec<PointSourceSpec>,
     sources: Vec<SourceId>,
     pub(super) receivers: Vec<ReceiverSpec>,
     pub(super) highest_omega: f64,
-    minimum_clearance_m: f64,
-    quadrature: Options,
+    pub(super) minimum_clearance_m: f64,
+    pub(super) quadrature: Options,
     delays_s: Vec<f64>,
 }
 
@@ -61,6 +61,31 @@ impl<'a> ScatteringObservation<'a> {
         highest_omega: f64,
         minimum_clearance_m: f64,
         quadrature: Options,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, TransferError> {
+        Self::new_admitted(
+            surface,
+            medium,
+            sources,
+            receivers,
+            highest_omega,
+            minimum_clearance_m,
+            quadrature,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_admitted(
+        surface: &'a SpherePanels,
+        medium: Medium,
+        sources: &[PointSourceSpec],
+        receivers: &[ReceiverSpec],
+        highest_omega: f64,
+        minimum_clearance_m: f64,
+        quadrature: Options,
+        iterative: Option<&fs_exec::CancelGate>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, TransferError> {
         if cancelled() {
@@ -100,14 +125,22 @@ impl<'a> ScatteringObservation<'a> {
         }
         // Refuse an unresolved upper band before geometry preparation or
         // lower-frequency solves; the same monotone gate owns every sample.
-        helmholtz::admit_resolution(surface, highest_omega / medium.sound_speed)?;
+        if iterative.is_some() {
+            helmholtz::admit_iterative_resolution(surface, highest_omega / medium.sound_speed)?;
+        } else {
+            helmholtz::admit_resolution(surface, highest_omega / medium.sound_speed)?;
+        }
         let source_points: Vec<_> = sources.iter().map(|s| s.position_m).collect();
-        Geometry::new(surface, &source_points, minimum_clearance_m)?;
+        let admit_geometry = |points: &[[f64; 3]]| match iterative {
+            Some(gate) => Geometry::new_iterative(surface, points, minimum_clearance_m, gate),
+            None => Geometry::new(surface, points, minimum_clearance_m),
+        };
+        admit_geometry(&source_points)?;
         if cancelled() {
             return Err(TransferError::Cancelled);
         }
         let points: Vec<_> = receivers.iter().map(|r| r.position_m).collect();
-        let receiver_geometry = Geometry::new(surface, &points, minimum_clearance_m)?;
+        let receiver_geometry = admit_geometry(&points)?;
         let mut delays_s = Vec::with_capacity(sources.len() * receivers.len());
         for source in sources {
             for receiver in receivers {

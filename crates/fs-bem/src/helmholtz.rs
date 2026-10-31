@@ -966,13 +966,23 @@ fn characteristic_panel_size(surface: &SpherePanels) -> f64 {
 
 // Also used before a reusable geometry table allocates or integrates anything.
 pub(crate) fn admit_resolution(surface: &SpherePanels, k: f64) -> Result<f64, HelmholtzError> {
+    admit_resolution_with_cap(surface, k, MAX_DENSE_PANELS)
+}
+
+// Shared wavelength admission for an explicitly matrix-free consumer. This
+// changes only the allocation ceiling, never the mesh resolution requirement.
+pub(crate) fn admit_iterative_resolution(surface: &SpherePanels, k: f64) -> Result<f64, HelmholtzError> {
+    admit_resolution_with_cap(surface, k, crate::panel3d::MAX_SURFACE_PANELS)
+}
+
+fn admit_resolution_with_cap(surface: &SpherePanels, k: f64, maximum_panels: usize) -> Result<f64, HelmholtzError> {
     if !(k > 0.0 && k.is_finite()) {
         return Err(HelmholtzError::BadParameter {
             what: "wavenumber k must be positive and finite",
         });
     }
     let n = surface.centroids().len();
-    if n > MAX_DENSE_PANELS {
+    if n > maximum_panels {
         return Err(HelmholtzError::WorkCap { panels: n });
     }
     let wavelength = 2.0 * core::f64::consts::PI / k;

@@ -103,6 +103,18 @@ impl<'a> Geometry<'a> {
         let clearances=admit_exterior_points(surface,points,minimum_clearance_m,MAX_PANELS)?;
         Ok(Self {surface,points:points.to_vec(),clearances})
     }
+    /// Explicit matrix-free surface range, with the same exterior winding,
+    /// exact triangle clearance and receiver cardinality admission. Integration
+    /// still has its original kernel-evaluation/depth budget; this is not a
+    /// promise that every admitted geometry can be integrated within that budget.
+    pub fn new_iterative(
+        surface: &'a SpherePanels, points: &[Point], minimum_clearance_m: f64,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<Self,HelmholtzError> {
+        let clearances=admit_exterior_points_controlled(surface,points,minimum_clearance_m,
+            crate::panel3d::MAX_SURFACE_PANELS,Some(gate))?;
+        Ok(Self {surface,points:points.to_vec(),clearances})
+    }
     /// Minimum Euclidean point-to-triangle distance [m], in receiver order.
     pub fn clearances_m(&self) -> &[f64] { &self.clearances }
     /// Original, unshifted physical receiver coordinates [m].
@@ -115,6 +127,19 @@ impl<'a> Geometry<'a> {
         self.prepare_fields(k,medium,options,false)
     }
     fn prepare_fields(&self,k:f64,medium:Medium,options:Options,with_velocity:bool) -> Result<Prepared<'a>,HelmholtzError> {
+        self.prepare_fields_controlled(k,medium,options,with_velocity,None)
+    }
+    /// The same adaptive vector receiver with cancellation between panels and
+    /// recursive triangle tiles. Every tile retains the original phase,
+    /// separation and componentwise discrepancy gates.
+    pub fn prepare_velocity_cancellable(
+        &self,k:f64,medium:Medium,options:Options,gate:&fs_exec::CancelGate,
+    ) -> Result<Prepared<'a>,HelmholtzError> {
+        self.prepare_fields_controlled(k,medium,options,true,Some(gate))
+    }
+    fn prepare_fields_controlled(&self,k:f64,medium:Medium,options:Options,with_velocity:bool,
+        gate:Option<&fs_exec::CancelGate>) -> Result<Prepared<'a>,HelmholtzError> {
+        poll_receiver(gate)?;
         options.validate()?;
         let omega_rho=k*medium.sound_speed*medium.density;
         if !k.is_finite() || k<=0. || !medium.density.is_finite() || medium.density<=0.
@@ -127,7 +152,8 @@ impl<'a> Geometry<'a> {
         for &x in &self.points {
             let mut row=Vec::with_capacity(triangles.len());
             for (i,&t) in triangles.iter().enumerate() {
-                row.push(integrate_fields(k,x,t,self.surface.normals()[i],0,&mut work,with_velocity)?);
+                poll_receiver(gate)?;
+                row.push(integrate_fields_controlled(k,x,t,self.surface.normals()[i],0,&mut work,with_velocity,gate)?);
             }
             rows.push(row);
         }
@@ -140,23 +166,41 @@ impl<'a> Geometry<'a> {
 // it must not inherit the dense observer's smaller integration/storage cap.
 pub(crate) fn admit_exterior_points(surface:&SpherePanels, points:&[Point], minimum_clearance_m:f64, maximum_panels:usize)
     -> Result<Vec<f64>,HelmholtzError> {
+        admit_exterior_points_controlled(surface,points,minimum_clearance_m,maximum_panels,None)
+}
+
+fn poll_receiver(gate:Option<&fs_exec::CancelGate>) -> Result<(),HelmholtzError> {
+    if gate.is_some_and(fs_exec::CancelGate::is_requested) { Err(HelmholtzError::Cancelled) } else { Ok(()) }
+}
+
+fn admit_exterior_points_controlled(surface:&SpherePanels, points:&[Point], minimum_clearance_m:f64,
+    maximum_panels:usize,gate:Option<&fs_exec::CancelGate>) -> Result<Vec<f64>,HelmholtzError> {
+        poll_receiver(gate)?;
         let triangles=surface.triangles().ok_or_else(||bad("near-field receivers require retained triangles"))?;
         if triangles.is_empty() || triangles.len()>maximum_panels || points.is_empty() || points.len()>MAX_RECEIVERS
             || !minimum_clearance_m.is_finite() || minimum_clearance_m<=0.
             || triangles.iter().flatten().flatten().chain(points.iter().flatten()).any(|v|!v.is_finite()||v.abs()>1e9) {
             return Err(bad("invalid bounded near-field surface, receiver or clearance"));
         }
-        let components=components(triangles)?;
+        let components=components_controlled(triangles,gate)?;
         let scale=triangles.iter().flatten().flatten().chain(points.iter().flatten())
             .fold(0.0_f64,|s,v|s.max(v.abs()));
         let guard=minimum_clearance_m.max(128.*f64::EPSILON*scale);
         let mut clearances=Vec::with_capacity(points.len());
         for &point in points {
-            let clearance=triangles.iter().map(|&t|distance(point,t)).fold(f64::INFINITY,f64::min);
+            poll_receiver(gate)?;
+            let mut clearance=f64::INFINITY;
+            for (index,&triangle) in triangles.iter().enumerate() {
+                if index%256==0 {poll_receiver(gate)?;}
+                clearance=clearance.min(distance(point,triangle));
+            }
             if !clearance.is_finite() || clearance<guard { return Err(bad("receiver touches or is too close to a source triangle")); }
             for component in &components {
                 let(mut sum,mut correction)=(0.,0.);
-                for &i in component { compensated(&mut sum,&mut correction,angle(point,triangles[i])); }
+                for (index,&i) in component.iter().enumerate() {
+                    if index%256==0 {poll_receiver(gate)?;}
+                    compensated(&mut sum,&mut correction,angle(point,triangles[i]));
+                }
                 // Refuse ambiguous values instead of guessing from a half-space
                 // or approximate centroid solid-angle sign. No cancellation
                 // between different components can hide an interior receiver.
@@ -172,9 +216,13 @@ pub(crate) fn admit_exterior_points(surface:&SpherePanels, points:&[Point], mini
 // Exact-coordinate seam welding; no tolerance repair. Component-wise winding
 // needs oriented closed components, not the approximate centroid flux test.
 pub(crate) fn components(triangles:&[Triangle]) -> Result<Vec<Vec<usize>>,HelmholtzError> {
+    components_controlled(triangles,None)
+}
+fn components_controlled(triangles:&[Triangle],gate:Option<&fs_exec::CancelGate>) -> Result<Vec<Vec<usize>>,HelmholtzError> {
     let mut vertices=BTreeMap::<[u64;3],usize>::new();
     let mut edges=BTreeMap::<(usize,usize),Vec<(usize,usize,usize)>>::new(); let mut faces=BTreeSet::new();
     for (face,t) in triangles.iter().enumerate() {
+        if face%256==0 {poll_receiver(gate)?;}
         let mut ids=[0;3];
         for (i,p) in t.iter().enumerate() {
             let key=p.map(|v|if v==0. {0}else{v.to_bits()}); let next=vertices.len();
@@ -188,7 +236,8 @@ pub(crate) fn components(triangles:&[Triangle]) -> Result<Vec<Vec<usize>>,Helmho
         for i in 0..3 {let(a,b)=(ids[i],ids[(i+1)%3]); edges.entry((a.min(b),a.max(b))).or_default().push((face,a,b));}
     }
     let mut adjacency=vec![Vec::new();triangles.len()];
-    for uses in edges.values() {
+    for (index,uses) in edges.values().enumerate() {
+        if index%256==0 {poll_receiver(gate)?;}
         if uses.len()!=2 || uses[0].1!=uses[1].2 || uses[0].2!=uses[1].1 {
             return Err(bad("near-field surface must have two opposite uses of each edge"));
         }
@@ -200,6 +249,7 @@ pub(crate) fn components(triangles:&[Triangle]) -> Result<Vec<Vec<usize>>,Helmho
         let origin=triangles[start][0]; let(mut volume,mut correction)=(0.,0.);
         let mut pending=vec![start]; let mut component=Vec::new(); visited[start]=true;
         while let Some(i)=pending.pop() {
+            if component.len()%256==0 {poll_receiver(gate)?;}
             component.push(i); let [a,b,c]=triangles[i].map(|p|sub(p,origin));
             compensated(&mut volume,&mut correction,dot(a,cross(b,c)));
             for &j in &adjacency[i] {if !visited[j] {visited[j]=true;pending.push(j);}}
@@ -269,6 +319,11 @@ fn integrate(k:f64,x:Point,t:Triangle,normal:Point,depth:usize,work:&mut Work) -
     integrate_fields(k,x,t,normal,depth,work,false)
 }
 fn integrate_fields(k:f64,x:Point,t:Triangle,normal:Point,depth:usize,work:&mut Work,with_velocity:bool) -> Result<Integral,HelmholtzError> {
+    integrate_fields_controlled(k,x,t,normal,depth,work,with_velocity,None)
+}
+fn integrate_fields_controlled(k:f64,x:Point,t:Triangle,normal:Point,depth:usize,work:&mut Work,with_velocity:bool,
+    gate:Option<&fs_exec::CancelGate>) -> Result<Integral,HelmholtzError> {
+    poll_receiver(gate)?;
     let coarse=rule(k,x,t,normal,&X4,&W4,work,with_velocity)?;let mut fine=rule(k,x,t,normal,&X8,&W8,work,with_velocity)?;
     fine.error_s=(fine.s-coarse.s).abs();fine.error_d=(fine.d-coarse.d).abs();
     let size=[norm(sub(t[1],t[0])),norm(sub(t[2],t[1])),norm(sub(t[0],t[2]))].into_iter().fold(0.0_f64,f64::max);
@@ -280,7 +335,7 @@ fn integrate_fields(k:f64,x:Point,t:Triangle,normal:Point,depth:usize,work:&mut 
     if separated && fine.error_s<=tol*fine.abs_s && fine.error_d<=tol*fine.abs_d && gradient_ok {return Ok(fine);}
     if depth==work.options.maximum_depth {return Err(bad("near-field triangle refinement depth exhausted"));}
     let mut sum=Integral::default();
-    for child in children(t) {sum.add(integrate_fields(k,x,child,normal,depth+1,work,with_velocity)?);}
+    for child in children(t) {sum.add(integrate_fields_controlled(k,x,child,normal,depth+1,work,with_velocity,gate)?);}
     Ok(sum)
 }
 

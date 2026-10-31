@@ -10,6 +10,11 @@ use std::cell::RefCell;
 
 mod boundary;
 pub use boundary::{LocalBoundary, LocalWall};
+mod iterative;
+pub use iterative::{
+    IterativeBoundaryObservation, IterativeBoundaryObservationBake, IterativeObservationError,
+    IterativeObservationOptions, IterativeObservationSample, IterativeSourceReport,
+};
 
 /// Declared C4 lower reconstruction window: zero at/below `stop_hz`, one at/
 /// above `pass_hz`. It is a band-limited observation, not an extrapolated wall
@@ -364,11 +369,31 @@ impl<'a> LocalBoundaryObservation<'a> {
         declaration: &TransferDeclaration,
         cancelled: impl FnMut() -> bool,
     ) -> Result<BoundaryObservationBake, TransferError> {
+        self.admit_declaration(declaration, self.operator_hash())?;
+        let cancel = RefCell::new(cancelled);
+        let transfer = bake_observation_transfers_with_errors(
+            |omega| self.band_limited_frequency_sample(omega, || (*cancel.borrow_mut())()),
+            declaration,
+            self.lower_window.map_or(0.0, |window| window.pass_hz),
+            || (*cancel.borrow_mut())(),
+        )?;
+        Ok(BoundaryObservationBake {
+            transfer,
+            lower_window: self.lower_window,
+            boundary_hash: self.boundary.content_hash(),
+        })
+    }
+
+    fn admit_declaration(
+        &self,
+        declaration: &TransferDeclaration,
+        producer_hash: ContentHash,
+    ) -> Result<(), TransferError> {
         declaration.admit_work()?;
         if declaration.sources != self.sources()
             || declaration.receivers != self.receivers()
             || declaration.geometric_delays_s != self.geometric_delays_s()
-            || declaration.producer_hash != self.operator_hash()
+            || declaration.producer_hash != producer_hash
             || core::f64::consts::TAU * declaration.taper_stop_hz > self.highest_omega
             || matches!(
                 declaration.producer_uncertainty,
@@ -382,18 +407,7 @@ impl<'a> LocalBoundaryObservation<'a> {
         if let Some(window) = self.lower_window {
             window.admit_ladder(declaration)?;
         }
-        let cancel = RefCell::new(cancelled);
-        let transfer = bake_observation_transfers_with_errors(
-            |omega| self.band_limited_frequency_sample(omega, || (*cancel.borrow_mut())()),
-            declaration,
-            self.lower_window.map_or(0.0, |window| window.pass_hz),
-            || (*cancel.borrow_mut())(),
-        )?;
-        Ok(BoundaryObservationBake {
-            transfer,
-            lower_window: self.lower_window,
-            boundary_hash: self.boundary.content_hash(),
-        })
+        Ok(())
     }
 
     fn channel_count(&self) -> usize {
@@ -416,6 +430,17 @@ fn admit_binding(
     boundary: &LocalBoundary,
     lower: Option<LowerBandWindow>,
 ) -> Result<(), TransferError> {
+    admit_binding_for_route(surface, medium, highest_omega, boundary, lower, false)
+}
+
+fn admit_binding_for_route(
+    surface: &SpherePanels,
+    medium: Medium,
+    highest_omega: f64,
+    boundary: &LocalBoundary,
+    lower: Option<LowerBandWindow>,
+    iterative: bool,
+) -> Result<(), TransferError> {
     if boundary.panel_count() != surface.areas().len()
         || boundary.medium() != medium
         || !highest_omega.is_finite()
@@ -427,7 +452,11 @@ fn admit_binding(
         ));
     }
     boundary.admit_band(highest_omega, lower)?;
-    helmholtz::admit_resolution(surface, highest_omega / medium.sound_speed)?;
+    if iterative {
+        helmholtz::admit_iterative_resolution(surface, highest_omega / medium.sound_speed)?;
+    } else {
+        helmholtz::admit_resolution(surface, highest_omega / medium.sound_speed)?;
+    }
     Ok(())
 }
 
