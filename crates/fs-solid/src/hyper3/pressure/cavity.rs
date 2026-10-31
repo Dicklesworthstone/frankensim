@@ -25,6 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use fs_exec::Cx;
+use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
+use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
+use fs_sparse::{Coo, Csr};
 
 use super::{
     ClosedTetPressureSurface, HyperTetError, area_vector, checkpoint, cross, difference, dot,
@@ -59,6 +62,25 @@ pub struct TetCavityVolume<'a> {
     positions_m: Vec<[f64; 3]>,
     volume_m3: f64,
     gradient_m2: Vec<f64>,
+}
+
+/// One source-resolved adiabatic gas load pulled back to the full solid chart.
+/// The endpoint gas is reconstructed from the original parcel at the actual
+/// cavity volume. The tangent includes both geometry and acoustic dp/dV terms.
+#[derive(Debug)]
+pub struct TetCavityGasLoad {
+    /// Gas endpoint at exactly `volume_m3`, retaining the original source model.
+    pub gas: ClosedGasParcel,
+    /// Actual enclosed gas volume [m^3].
+    pub volume_m3: f64,
+    /// Gas pressure minus the fixed exterior pressure [Pa].
+    pub net_pressure_pa: f64,
+    /// Full node-major force on the surrounding solid [N].
+    pub force_n: Vec<f64>,
+    /// Derivative of `force_n` with respect to full solid displacement.
+    pub force_tangent: Csr,
+    /// Delta U_gas + p_exterior Delta V [J] from the reference cavity state.
+    pub potential_change_j: f64,
 }
 
 impl ClosedTetCavity {
@@ -235,6 +257,100 @@ impl ClosedTetCavity {
         })
     }
 
+    /// Pull the original closed gas through this cavity's exact nonlinear volume.
+    ///
+    /// The supplied parcel must be at the undeformed cavity volume. Every call
+    /// starts from that immutable thermodynamic state, follows its source-owned
+    /// reversible adiabatic path to the CURRENT cavity volume, and then uses the
+    /// common acoustic mechanical-load owner for pressure and dp/dV. This avoids
+    /// a fixed-gamma or frozen-pressure surrogate and keeps source, force,
+    /// acoustic stiffness and solid geometry on one state.
+    pub fn adiabatic_gas_load(
+        &self,
+        displacement_m: &[f64],
+        gas: &ClosedGasParcel,
+        exterior_pressure_pa: f64,
+        controls: GasEntropySolve,
+        cx: &Cx<'_>,
+    ) -> Result<TetCavityGasLoad, HyperTetError> {
+        checkpoint(cx)?;
+        if gas.volume_m3().to_bits() != self.reference_volume_m3.to_bits()
+            || !exterior_pressure_pa.is_finite()
+            || exterior_pressure_pa < 0.0
+        {
+            return Err(invalid(
+                "adiabatic cavity gas must start at the reference volume with finite nonnegative exterior pressure",
+            ));
+        }
+        let geometry = self.evaluate(displacement_m, cx)?;
+        let mut endpoint = gas.clone();
+        let mut was_cancelled = false;
+        let volume_step = endpoint.set_volume_isentropic(
+            geometry.volume_m3,
+            controls,
+            || {
+                if cx.checkpoint().is_err() {
+                    was_cancelled = true;
+                    true
+                } else {
+                    false
+                }
+            },
+        );
+        let volume_step = match volume_step {
+            Ok(step) => step,
+            Err(_) if was_cancelled => return Err(HyperTetError::Cancelled),
+            Err(error) => return Err(invalid(&format!("adiabatic cavity gas refused state: {error}"))),
+        };
+        let load = endpoint
+            .mechanical_load(
+                geometry.volume_m3,
+                geometry.gradient_m2(),
+                exterior_pressure_pa,
+            )
+            .map_err(|error| invalid(&format!("cavity gas mechanical load refused: {error}")))?;
+        let compact_force = load
+            .generalized_forces()
+            .map_err(|error| invalid(&format!("cavity gas force refused: {error}")))?;
+        let mut force_n = vec![0.0; displacement_m.len()];
+        for (local, &value) in compact_force.iter().enumerate() {
+            let node = self.nodes[local / 3];
+            force_n[3 * node + local % 3] = value;
+        }
+        let compact = geometry.gradient_m2().len();
+        let mut tangent = Coo::new(displacement_m.len(), displacement_m.len());
+        let mut direction = vec![0.0; compact];
+        for column in 0..compact {
+            checkpoint(cx)?;
+            direction[column] = 1.0;
+            let volume_hessian = geometry.hessian_action(&direction, cx)?;
+            let action = load
+                .tangent_action(&direction, &volume_hessian)
+                .map_err(|error| invalid(&format!("cavity gas tangent refused: {error}")))?;
+            direction[column] = 0.0;
+            let column_node = self.nodes[column / 3];
+            let column_dof = 3 * column_node + column % 3;
+            for (row, value) in action.into_iter().enumerate() {
+                if value != 0.0 {
+                    let row_node = self.nodes[row / 3];
+                    tangent.push(3 * row_node + row % 3, column_dof, value);
+                }
+            }
+        }
+        let potential_change_j = finite(
+            volume_step.stored_energy_change_j
+                + exterior_pressure_pa * finite(geometry.volume_m3 - self.reference_volume_m3)?,
+        )?;
+        checkpoint(cx)?;
+        Ok(TetCavityGasLoad {
+            gas: endpoint,
+            volume_m3: geometry.volume_m3,
+            net_pressure_pa: load.net_pressure_pa(),
+            force_n,
+            force_tangent: tangent.assemble(),
+            potential_change_j,
+        })
+    }
     /// Uniform differential gas pressure in canonical SOLID face order.
     ///
     /// Positive p expands the cavity: it acts opposite the solid-outward normal
