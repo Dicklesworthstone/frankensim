@@ -469,7 +469,10 @@ def speaks_ms(x, a, d, period):
     return round(d * 1000), False
 
 
-def note_measures(x, fr, n, family):
+def note_measures(x, fr, n, family, whole_cycles=False):
+    """The note's measures on one track. whole_cycles: x is a vibrato note and n carries phrasekit's reading of it over
+    whole cycles, which stands for the frames' median as its pitch. A swing has no one period, so it gets no time to speak
+    either: speaks_ms never finds a repeat at the 2 % it searches and would report the note as never settling."""
     a, d = n["at"], n["dur"]
     i0, i1 = int(a * SR), int(min(len(x), (a + d) * SR))
     k0, k1 = int(a * SR / HOP), int((a + d) * SR / HOP)
@@ -508,7 +511,9 @@ def note_measures(x, fr, n, family):
             out["wobble_cents"] = round(float(np.std(resid)), 1)
     f0s = [v for v in fr["f0"][steady] if v is not None]
     f0 = float(np.median(f0s)) if f0s else (n.get("target_hz") or None)
-    if family not in ("piano", "kit") and not n.get("decays"):
+    if whole_cycles:
+        out["cents"], f0 = n["cents"], n["f0_hz"]
+    if family not in ("piano", "kit") and not n.get("decays") and not whole_cycles:
         names = (n.get("note") or "").split("+")
         period = (common_period([hz_of(midi_of(p)) for p in names]) if len(names) > 1 and all(midi_of(p) is not None for p in names)
                   else 1 / f0 if f0 else None)
@@ -673,9 +678,7 @@ def main():
             if k in refused:  # the solver refused this note and its slot is silent: nothing to measure
                 out_notes.append(dict(i=k, refused=n["refused"], sim={}))
                 continue
-            row = dict(i=k, sim=note_measures(x, fs, n, p["family"]))
-            if n.get("whole_cycles"):  # a median of frames across a vibrato swing is not its centre; the map's reading is
-                row["sim"]["cents"] = n["cents"]
+            row = dict(i=k, sim=note_measures(x, fs, n, p["family"], bool(n.get("whole_cycles"))))
             if fr_ref is not None and k not in missing and n["at"] + 0.05 < len(ref_x) / SR:
                 row["ref"] = note_measures(ref_x, fr_ref, n, p["family"])
                 row["timbre_distance_db"] = timbre_distance(row["sim"].get("bands_db"), row["ref"].get("bands_db"))

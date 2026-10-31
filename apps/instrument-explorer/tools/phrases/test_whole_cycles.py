@@ -58,6 +58,24 @@ def test_a_span_under_one_cycle_keeps_the_first_reading():
     assert whole_cycles(tone("C4", -20, 83, PLAIN), 0.26, 0.40, RATE, m, "C4") == m
 
 
+def test_a_vibrato_note_keeps_its_reading_through_the_analyzer():
+    argv, sys.argv = sys.argv, ["analyze.py", ".", ".", ".", "."]  # analyze.py reads its directories on import
+    import analyze
+    sys.argv = argv
+    x = tone("C4", -20, 83, PLAIN, 6.0)
+    frames = len(x) // analyze.HOP + 1
+    right = hz("C4") * 2 ** (-19 / 1200)
+    fr = dict(level=[0.0] * frames, centroid=[1000.0] * frames, hnr=[20.0] * frames, flat=[-30.0] * frames,
+              rough=[0.1] * frames, f0=[hz("C4") * 2 ** (61 / 1200)] * frames, cents=[61.0] * frames)
+    n = dict(at=0.0, dur=1.0, note="C4", target_hz=hz("C4"), f0_hz=right, cents=-19.0)
+    got = analyze.note_measures(x, fr, n, "voice", True)
+    assert got["cents"] == -19.0 and "speaks_ms" not in got, got
+    plain = analyze.note_measures(x, fr, n, "voice")
+    assert plain["cents"] == 61.0 and "speaks_ms" in plain, plain  # the planted failure: the mistracked frames win
+    tracked = analyze.note_measures(x, dict(fr, f0=[right] * frames), n, "voice")
+    assert got["partials_db"] == tracked["partials_db"], (got, tracked)
+
+
 for name, fn in sorted(globals().copy().items()):
     if name.startswith("test_") and callable(fn):
         fn()
