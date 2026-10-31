@@ -86,6 +86,12 @@ pub struct GeneralizedKinematics {
 }
 
 impl GeneralizedKinematics {
+    /// Borrow the original FK poses/twists for shared native contact geometry.
+    #[must_use]
+    pub fn native_kinematics(&self) -> &Kinematics {
+        &self.kinematics
+    }
+
     /// Number of scalar joints, excluding the six base coordinates.
     #[must_use]
     pub const fn dof_count(&self) -> usize {

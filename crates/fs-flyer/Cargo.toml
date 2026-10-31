@@ -27,11 +27,12 @@ fs-atmo = { path = "../fs-atmo" }
 fs-bem = { path = "../fs-bem" }
 fs-evidence = { path = "../fs-evidence" }
 fs-robust = { path = "../fs-robust" }
+fs-contact = { path = "../fs-contact" }
+fs-solver = { path = "../fs-solver" }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
-fs-contact = { path = "../fs-contact" }
 fs-exec = { path = "../fs-exec" }
 fs-ivl = { path = "../fs-ivl" }
 fs-motion = { path = "../fs-motion" }

@@ -47,7 +47,7 @@ pub mod hinged;
 
 #[path = "addedmass/joint.rs"]
 pub(crate) mod joint;
-pub use joint::solve_articulated_joint;
+pub use joint::{PreparedArticulatedMass, solve_articulated_joint};
 
 #[path = "addedmass/articulated.rs"]
 pub mod articulated;

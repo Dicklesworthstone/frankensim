@@ -15,6 +15,10 @@ pub mod motion;
 #[path = "articulated/generalized.rs"]
 pub mod generalized;
 
+/// Inertia-independent material-point rows for simultaneous articulated contact.
+#[path = "articulated/contact_geometry.rs"]
+pub mod contact_geometry;
+
 use core::fmt;
 use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
 

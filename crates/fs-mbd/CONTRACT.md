@@ -1166,6 +1166,22 @@ inelastic counterpart succeeds. Redundant directions remain a typed numerical
 refusal. No friction, collision-time search, position repair, continuous contact
 force or nonsmooth timestep claim is made.
 
+### Shared material-point contact geometry
+
+`articulated::contact_geometry` owns link-fixed witnesses, positive separating
+world normals, point impulse directions, signed gap/support speed and the
+common-line check for dynamic witness pairs. It consumes original admitted
+`Kinematics`; `GeneralizedKinematics::native_kinematics` exposes that same
+snapshot to bounded generalized-inertia consumers. Native
+`articulated_contacts` reexports the existing public contact types and calls
+this owner for its normal preparation and shared point/normal helpers. Thus
+the dry ABA adapter and a fluid-augmented generalized adapter use the same
+material points and sign conventions without duplicating contact geometry.
+Strict negative gaps and invalid or noncollinear witnesses retain their native
+refusals. The existing seven normal-contact regressions continue to cover
+coupled body/self contacts, moving support, frame transformations, global
+energy admission and atomic refusal through this shared geometry path.
+
 ### Coupled articulated Coulomb contact
 
 `articulated_contacts::friction::resolve_articulated_frictional_contacts`

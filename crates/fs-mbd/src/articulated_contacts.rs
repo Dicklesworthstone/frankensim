@@ -27,6 +27,10 @@ use fs_contact::multicontact::{
 use fs_ga::{GaError, Twist, Vec3, Wrench};
 use fs_tribo::TriboError;
 
+use crate::articulated::contact_geometry::{self, ContactGeometryError, PointDirection as Term};
+pub use crate::articulated::contact_geometry::{
+    ArticulatedNormalContact, ContactCounterpart, LinkContactPoint,
+};
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, BaseState, FreeFloatingBaseState,
     FreeFloatingImpulseResponse, Kinematics, apply_free_floating_impulses, forward_kinematics,
@@ -44,46 +48,6 @@ pub struct ArticulatedContactSystem<'a> {
     pub joint_position: &'a [f64],
     /// Joint velocities before impact.
     pub joint_velocity: &'a [f64],
-}
-
-/// A material point on one link of one supplied system.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LinkContactPoint {
-    /// Index in the supplied system slice.
-    pub system_index: usize,
-    /// Link index within that system.
-    pub link_index: usize,
-    /// Link-coordinate point relative to its origin, in metres.
-    pub point_body: Vec3,
-}
-
-/// Opposite side of a point contact.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ContactCounterpart {
-    /// Dynamic point receiving the opposite impulse, including within a tree.
-    Body(LinkContactPoint),
-    /// Prescribed plane; its actuator can supply or absorb impact work.
-    PrescribedPlane {
-        /// Any world-coordinate point on the plane, in metres.
-        point_world: Vec3,
-        /// Prescribed plane material velocity at contact, in m/s.
-        velocity_world: Vec3,
-    },
-}
-
-/// One normal row in the simultaneous impact problem.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ArticulatedNormalContact {
-    /// Point receiving the positive normal impulse.
-    pub point: LinkContactPoint,
-    /// Opposite dynamic point or prescribed plane.
-    pub other: ContactCounterpart,
-    /// Nonzero outward normal from `other` to `point`, normalized here.
-    pub normal_world: Vec3,
-    /// Maximum nonnegative gap admitted as active, in metres.
-    pub activation_tolerance: f64,
-    /// Requested restitution in [0, 1]; never silently changed on refusal.
-    pub restitution: f64,
 }
 
 /// Complete candidate states are published only after global admission.
@@ -265,10 +229,16 @@ impl From<fs_tribo::tangential::transport::TangentialTransportError> for Articul
     }
 }
 
-#[derive(Clone, Copy)]
-struct Term {
-    point: LinkContactPoint,
-    direction: Wrench,
+impl From<ContactGeometryError> for ArticulatedContactError {
+    fn from(error: ContactGeometryError) -> Self {
+        match error {
+            ContactGeometryError::Invalid(reason) => Self::Invalid(reason),
+            ContactGeometryError::NonCollinearContact { index } => {
+                Self::NonCollinearContact { index }
+            }
+            ContactGeometryError::Geometry(error) => Self::Geometry(error),
+        }
+    }
 }
 struct Prepared {
     first: Term,
@@ -322,45 +292,19 @@ pub fn resolve_articulated_contacts(
     let mut laws = Vec::with_capacity(contacts.len());
     for (index, contact) in contacts.iter().enumerate() {
         poll(&mut cancelled)?;
-        let normal = unit_normal(contact.normal_world)?;
-        let (first, world_point) = prepare_point(contact.point, normal, &workspace.before)?;
-        let (second, other_point, plane_speed) = match contact.other {
-            ContactCounterpart::Body(point) => {
-                let (term, position) = prepare_point(point, normal.scale(-1.0), &workspace.before)?;
-                (Some(term), position, 0.0)
-            }
-            ContactCounterpart::PrescribedPlane {
-                point_world,
-                velocity_world,
-            } => {
-                vector(point_world)?;
-                vector(velocity_world)?;
-                (None, point_world, finite(normal.dot(velocity_world))?)
-            }
-        };
-        let separation = world_point - other_point;
-        let gap = finite(normal.dot(separation))?;
-        if second.is_some() {
-            let tangent = separation - normal.scale(gap);
-            let scale = magnitude(world_point)
-                .max(magnitude(other_point))
-                .max(magnitude(separation));
-            if magnitude(tangent) > 256.0 * f64::EPSILON * scale {
-                return Err(ArticulatedContactError::NonCollinearContact { index });
-            }
-        }
+        let geometry = contact_geometry::prepare_normal_contact(contact, index, &workspace.before)?;
         let item = Prepared {
-            first,
-            second,
-            axis_world: normal,
-            world_point,
-            plane_speed,
-            minimum_speed: (gap <= contact.activation_tolerance).then_some(0.0),
+            first: geometry.first,
+            second: geometry.second,
+            axis_world: geometry.axis_world,
+            world_point: geometry.world_point,
+            plane_speed: geometry.plane_speed,
+            minimum_speed: (geometry.gap <= contact.activation_tolerance).then_some(0.0),
         };
         laws.push(NormalContactImpact {
-            gap,
+            gap: geometry.gap,
             activation_tolerance: contact.activation_tolerance,
-            relative_normal_speed: finite(item.velocity(&workspace.before))?,
+            relative_normal_speed: geometry.relative_normal_speed,
             restitution: contact.restitution,
         });
         prepared.push(item);
@@ -707,27 +651,7 @@ fn prepare_point(
     normal: Vec3,
     kinematics: &[Kinematics],
 ) -> Result<(Term, Vec3), ArticulatedContactError> {
-    let system = kinematics
-        .get(point.system_index)
-        .ok_or(ArticulatedContactError::Invalid(
-            "contact system index is out of range",
-        ))?;
-    let pose =
-        system
-            .world_from_link
-            .get(point.link_index)
-            .ok_or(ArticulatedContactError::Invalid(
-                "contact link index is out of range",
-            ))?;
-    vector(point.point_body)?;
-    let direction = pose.rotation().inverse().rotate(normal)?;
-    Ok((
-        Term {
-            point,
-            direction: Wrench::new(point.point_body.cross(direction), direction),
-        },
-        pose.transform_point(point.point_body)?,
-    ))
+    contact_geometry::prepare_point(point, normal, kinematics).map_err(Into::into)
 }
 fn add_load(
     load: &mut Wrench,
@@ -740,15 +664,7 @@ fn add_load(
     vector(load.force)
 }
 fn unit_normal(normal: Vec3) -> Result<Vec3, ArticulatedContactError> {
-    vector(normal)?;
-    let scale = magnitude(normal);
-    if scale == 0.0 {
-        return Err(ArticulatedContactError::Invalid(
-            "contact normal must be nonzero",
-        ));
-    }
-    let scaled = Vec3::new(normal.x / scale, normal.y / scale, normal.z / scale);
-    Ok(scaled.scale(1.0 / scaled.norm()))
+    contact_geometry::unit_normal(normal).map_err(Into::into)
 }
 fn magnitude(value: Vec3) -> f64 {
     value.x.abs().max(value.y.abs()).max(value.z.abs())

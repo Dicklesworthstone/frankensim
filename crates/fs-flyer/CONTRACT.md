@@ -230,6 +230,43 @@ momentum and angular momentum errors all converge at second order in that free
 trajectory. No exact finite-step nonlinear conservation, impact, joint-stop or
 closed-loop constraint claim is made by this smooth coupled lane.
 
+### Simultaneous contacts with complete articulated fluid inertia
+
+`partitioned::articulated::impact::resolve` resets a caller-located event on one
+native free articulated tree with up to eight joints, 256 links and 64 normal
+contacts. Link-point/self-contact and prescribed moving-plane geometry come
+from `fs-mbd::articulated::contact_geometry`, also used by the original dry
+contact adapter. The same admitted link motion map projects every impulse row
+and the complete linked-strip inertia. No scalar effective mass replaces the
+coupled dry/fluid body and joint blocks.
+
+`addedmass::PreparedArticulatedMass` owns one immutable, diagonally equilibrated
+snapshot of the dry plus fluid matrix. Its original Cholesky factor is reused
+for every column of `J M_total^-1 J^T` and the final accumulated generalized
+impulse. Momentum uses the assembled matrix; positive kinetic energy uses its
+factor. Configuration, fluid density or attached geometry changes require a new
+snapshot. Force/bias fields do not act during an instantaneous reset, and
+duplicated fluid applied-load fields refuse at this boundary.
+
+The original `fs-contact` simultaneous normal law chooses all impulses together
+and retains its global restitution/passivity admission. Equal/opposite internal
+point impulses conserve combined spatial momentum. Prescribed planes supply
+explicit external impulse and signed work. Actual returned native point speeds,
+total dry/fluid linear and world-origin angular momentum, and complete kinetic
+work are checked before publication. The energy change uses quadratic
+polarization to avoid subtracting two large kinetic energies. Native joint-rate
+limits still apply; an impulse is not an actuator force and does not consume the
+continuous-effort limit. Cancellation, invalid geometry, penetrating witnesses,
+singular active rows and unresolved endpoint balances publish no candidate.
+Pose, joint positions and aerodynamic memory remain unchanged.
+
+`articulated_impact` verifies simultaneous self/plane coupling with independently
+computed dry and strip-local fluid momentum/energy, signed moving-support work,
+the zero-fluid original ABA response, and a rebound law that must refuse global
+energy creation. Atomic ownership/cancellation, exact gap admission and row
+caps are also covered. This entry point does not locate collision times or
+provide friction, persistent contact, penetration repair or multi-tree impacts.
+
 ## Hydrostatic pressure and material atmosphere loads
 
 `atmosphere::MaterialAirProfile` composes the L2 atmospheric wind with the

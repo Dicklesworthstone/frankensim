@@ -1714,6 +1714,7 @@ dependencies = [
  "fs-motion",
  "fs-rand",
  "fs-robust",
+ "fs-solver",
  "fs-time",
  "fs-wakeref",
  "fs-wing",

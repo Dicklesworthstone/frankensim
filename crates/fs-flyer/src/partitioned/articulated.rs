@@ -5,8 +5,13 @@
 //! moving dry COMs, link orientation, serial-joint coupling and base recoil are
 //! retained. This is a bounded Lie midpoint lane, not the dry owner's separate
 //! momentum-coordinate integrator. General nonlinear energy and momentum
-//! balance converge with timestep refinement; exact finite-step preservation,
-//! impacts, joint stops and closed-loop constraints are not claimed.
+//! balance converge with timestep refinement. This smooth `step` does not
+//! preserve general invariants exactly or resolve events; the `impact` child
+//! handles caller-located instantaneous normal contacts.
+
+/// Instantaneous simultaneous normal impacts with full dry and fluid inertia.
+#[path = "articulated/impact.rs"]
+pub mod impact;
 
 use super::{MAX_CERT_STATES, MemoryState, refuse};
 use crate::Refusal;
@@ -376,3 +381,4 @@ where
         "reduce the timestep or increase the bounded midpoint iteration budget",
     ))
 }
+

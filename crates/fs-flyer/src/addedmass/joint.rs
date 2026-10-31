@@ -94,94 +94,224 @@ pub fn solve_articulated_joint(
     solve_articulated_with_diagonal(dry, loads, &[])
 }
 
+/// One admitted physical dry-plus-fluid mass, factored once at a configuration.
+///
+/// All vectors use Flyer `[linear_body, angular_body, joint]` ordering. The
+/// same factor serves force solves, every contact-space response column and
+/// the final accumulated impulse. Its immutable snapshot must be rebuilt when
+/// configuration, dry mass properties, fluid density or strip geometry changes.
+/// No applied force, inertial bias, restitution or contact law is stored here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedArticulatedMass {
+    n: usize,
+    mass: Vec<f64>,
+    scale: Vec<f64>,
+    lower: Vec<f64>,
+}
+
+impl PreparedArticulatedMass {
+    /// Prepare the complete physical inertia at one common dry/fluid state.
+    /// The load and bias fields are admitted for shape/finite consistency but
+    /// do not enter this mass operator. Impulses never integrate those forces.
+    ///
+    /// # Errors
+    /// Mismatched, nonfinite, nonsymmetric or unresolved positive inertia.
+    pub fn new(dry: &FreeFloatingTerms, fluid: &AeroGeneralizedLoads) -> Result<Self, Refusal> {
+        Self::with_control_diagonal(dry, fluid, &[])
+    }
+
+    /// Effective midpoint operator only: the extra diagonal is eliminated
+    /// linear impedance, not physical storage and never used for an impact.
+    pub(crate) fn with_control_diagonal(
+        dry: &FreeFloatingTerms,
+        loads: &AeroGeneralizedLoads,
+        control_diagonal: &[f64],
+    ) -> Result<Self, Refusal> {
+        admit_fluid(loads)?;
+        let nc = loads.q_control_nonaccel.len();
+        let n = 6 + nc;
+        if dry.kinematics.dof_count() != nc
+            || dry.mass.len() != n
+            || dry.mass.iter().any(|row| row.len() != n)
+            || dry.bias.len() != n
+            || (!control_diagonal.is_empty() && control_diagonal.len() != nc)
+            || !control_diagonal.iter().all(|x| x.is_finite() && *x >= 0.0)
+            || !dry
+                .mass
+                .iter()
+                .flatten()
+                .chain(&dry.bias)
+                .all(|x| x.is_finite())
+        {
+            return Err(refuse(
+                "articulated-mass-invalid",
+                "dry generalized terms or implicit diagonal do not match the active controls"
+                    .into(),
+                "prepare native dry terms and fluid blocks at the same admitted state",
+            ));
+        }
+        let mut mass = vec![0.0; n * n];
+        for i in 0..n {
+            let ni = native_index(i);
+            for j in 0..n {
+                let nj = native_index(j);
+                admit_symmetric(dry.mass[ni][nj], dry.mass[nj][ni])?;
+                let fluid = match (i < 6, j < 6) {
+                    (true, true) => loads.m_added_rr[i][j],
+                    (true, false) => loads.m_added_rc[j - 6][i],
+                    (false, true) => loads.m_added_rc[i - 6][j],
+                    (false, false) => loads.m_added_cc[i - 6][j - 6],
+                };
+                mass[i * n + j] = dry.mass[ni][nj] + fluid;
+            }
+            if i >= 6 && !control_diagonal.is_empty() {
+                mass[i * n + i] += control_diagonal[i - 6];
+            }
+        }
+        let scale: Vec<_> = (0..n).map(|i| mass[i * n + i].sqrt()).collect();
+        if !mass.iter().all(|x| x.is_finite()) || !scale.iter().all(|s| s.is_finite() && *s > 0.0) {
+            return Err(refuse(
+                "joint-mass-not-pd",
+                "invalid effective mass diagonal or unrepresentable mass".into(),
+                "use representable positive dry and fluid inertia",
+            ));
+        }
+        let mut normalized = mass.clone();
+        for i in 0..n {
+            for j in 0..n {
+                normalized[i * n + j] = (normalized[i * n + j] / scale[i]) / scale[j];
+            }
+        }
+        let lower = factor_positive(normalized, n, 128.0 * f64::EPSILON)?;
+        Ok(Self {
+            n,
+            mass,
+            scale,
+            lower,
+        })
+    }
+
+    /// Number of body and joint coordinates.
+    #[must_use]
+    pub const fn coordinate_count(&self) -> usize {
+        self.n
+    }
+
+    /// Number of active scalar joints, excluding the six body coordinates.
+    #[must_use]
+    pub const fn dof_count(&self) -> usize {
+        self.n - 6
+    }
+
+    fn admit_vector(&self, vector: &[f64]) -> Result<(), Refusal> {
+        if vector.len() != self.n || !vector.iter().all(|x| x.is_finite()) {
+            Err(refuse(
+                "joint-vector-invalid",
+                "generalized vector has the wrong shape or a nonfinite coordinate".into(),
+                "supply one finite entry per prepared body/joint coordinate",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Apply `M^-1` to a force or impulse, reusing the immutable factor.
+    /// Force input gives a body-coordinate acceleration; impulse gives a
+    /// velocity increment. Neither operation adds inertial bias or changes state.
+    ///
+    /// # Errors
+    /// Invalid vector shape, nonfinite input or unrepresentable response.
+    pub fn solve(&self, right_hand_side: &[f64]) -> Result<Vec<f64>, Refusal> {
+        self.admit_vector(right_hand_side)?;
+        let normalized = right_hand_side
+            .iter()
+            .zip(&self.scale)
+            .map(|(x, s)| x / s)
+            .collect();
+        let mut result = solve_factored(&self.lower, normalized, self.n)?;
+        for (value, scale) in result.iter_mut().zip(&self.scale) {
+            *value /= scale;
+        }
+        self.admit_vector(&result)?;
+        Ok(result)
+    }
+
+    /// Apply the assembled physical mass to a generalized velocity.
+    /// The first six entries are body-axis linear momentum and angular
+    /// momentum about the declared base origin, including attached fluid.
+    ///
+    /// # Errors
+    /// Invalid vector shape, nonfinite input or unrepresentable momentum.
+    pub fn momentum(&self, velocity: &[f64]) -> Result<Vec<f64>, Refusal> {
+        self.admit_vector(velocity)?;
+        let mut momentum = vec![0.0; self.n];
+        for i in 0..self.n {
+            for j in 0..self.n {
+                momentum[i] += self.mass[i * self.n + j] * velocity[j];
+            }
+        }
+        self.admit_vector(&momentum)?;
+        Ok(momentum)
+    }
+
+    /// Evaluate `u^T M u/2` through the positive factored kinetic form.
+    /// Computing `|L^T D u|^2/2` avoids subtracting large orbital cross terms.
+    ///
+    /// # Errors
+    /// Invalid vector shape, nonfinite input or unrepresentable kinetic energy.
+    pub fn kinetic_energy(&self, velocity: &[f64]) -> Result<f64, Refusal> {
+        self.admit_vector(velocity)?;
+        let mut energy = 0.0;
+        for j in 0..self.n {
+            let mut mode = 0.0;
+            for i in j..self.n {
+                mode += self.lower[i * self.n + j] * (self.scale[i] * velocity[i]);
+            }
+            energy += 0.5 * mode * mode;
+        }
+        if !energy.is_finite() {
+            return Err(refuse(
+                "joint-energy-invalid",
+                "unrepresentable generalized kinetic energy".into(),
+                "inspect mass, geometry and velocity scales",
+            ));
+        }
+        Ok(energy)
+    }
+}
+
 /// Extra diagonal terms arise only from eliminating implicit linear impedance.
 pub(crate) fn solve_articulated_with_diagonal(
     dry: &FreeFloatingTerms,
     loads: &AeroGeneralizedLoads,
     control_diagonal: &[f64],
 ) -> Result<(Vec<f64>, Vec<f64>), Refusal> {
-    admit_fluid(loads)?;
-    let nc = loads.q_control_nonaccel.len();
-    let n = 6 + nc;
-    if dry.kinematics.dof_count() != nc
-        || dry.mass.len() != n
-        || dry.mass.iter().any(|row| row.len() != n)
-        || dry.bias.len() != n
-        || (!control_diagonal.is_empty() && control_diagonal.len() != nc)
-        || !control_diagonal.iter().all(|x| x.is_finite() && *x >= 0.0)
-        || !dry
-            .mass
-            .iter()
-            .flatten()
-            .chain(&dry.bias)
-            .all(|x| x.is_finite())
-    {
-        return Err(refuse(
-            "articulated-mass-invalid",
-            "dry generalized terms or implicit diagonal do not match the active controls".into(),
-            "prepare native dry terms and fluid blocks at the same admitted state",
-        ));
-    }
-    let mut a = vec![0.0; n * n];
-    let mut rhs = vec![0.0; n];
-    for i in 0..n {
-        let ni = native_index(i);
-        rhs[i] = if i < 6 {
+    let mass = PreparedArticulatedMass::with_control_diagonal(dry, loads, control_diagonal)?;
+    let mut rhs = vec![0.0; mass.coordinate_count()];
+    for (i, entry) in rhs.iter_mut().enumerate() {
+        *entry = if i < 6 {
             loads.q_rigid_nonaccel[i]
         } else {
             loads.q_control_nonaccel[i - 6]
         } + loads.q_added_bias[i]
-            - dry.bias[ni];
-        for j in 0..n {
-            let nj = native_index(j);
-            admit_symmetric(dry.mass[ni][nj], dry.mass[nj][ni])?;
-            let fluid = match (i < 6, j < 6) {
-                (true, true) => loads.m_added_rr[i][j],
-                (true, false) => loads.m_added_rc[j - 6][i],
-                (false, true) => loads.m_added_rc[i - 6][j],
-                (false, false) => loads.m_added_cc[i - 6][j - 6],
-            };
-            a[i * n + j] = dry.mass[ni][nj] + fluid;
-        }
-        if i >= 6 && !control_diagonal.is_empty() {
-            a[i * n + i] += control_diagonal[i - 6];
-        }
+            - dry.bias[native_index(i)];
     }
-    let scale: Vec<_> = (0..n).map(|i| a[i * n + i].sqrt()).collect();
-    if !scale.iter().all(|s| s.is_finite() && *s > 0.0) {
-        return Err(refuse(
-            "joint-mass-not-pd",
-            "invalid effective mass diagonal".into(),
-            "use representable positive dry and fluid inertia",
-        ));
-    }
-    for i in 0..n {
-        rhs[i] /= scale[i];
-        for j in 0..n {
-            a[i * n + j] = (a[i * n + j] / scale[i]) / scale[j];
-        }
-    }
-    let mut acceleration = solve_positive(a, rhs, n, 128.0 * f64::EPSILON)?;
-    for (value, scale) in acceleration.iter_mut().zip(scale) {
-        *value /= scale;
-    }
-    if !acceleration.iter().all(|v| v.is_finite()) {
-        return Err(refuse(
-            "joint-mass-not-pd",
-            "unrepresentable generalized acceleration".into(),
-            "inspect inertia and applied load scales",
-        ));
-    }
+    let acceleration = mass.solve(&rhs)?;
     Ok((acceleration[..6].to_vec(), acceleration[6..].to_vec()))
 }
 
 pub(crate) fn solve_positive(
-    mut a: Vec<f64>,
-    mut rhs: Vec<f64>,
+    a: Vec<f64>,
+    rhs: Vec<f64>,
     n: usize,
     pivot_floor: f64,
 ) -> Result<Vec<f64>, Refusal> {
-    // The original fixed-order factorization and substitution arithmetic.
+    let lower = factor_positive(a, n, pivot_floor)?;
+    solve_factored(&lower, rhs, n)
+}
+
+fn factor_positive(mut a: Vec<f64>, n: usize, pivot_floor: f64) -> Result<Vec<f64>, Refusal> {
+    // The original fixed-order factorization arithmetic.
     for i in 0..n {
         for j in 0..=i {
             let mut sum = a[i * n + j];
@@ -202,6 +332,10 @@ pub(crate) fn solve_positive(
             }
         }
     }
+    Ok(a)
+}
+
+fn solve_factored(a: &[f64], mut rhs: Vec<f64>, n: usize) -> Result<Vec<f64>, Refusal> {
     for i in 0..n {
         let mut sum = rhs[i];
         for k in 0..i {
