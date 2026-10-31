@@ -8,6 +8,10 @@
 //! a conduction emissivity sample at the same complete accepted material state.
 //! Neither binding authenticates measurements or supplies experimental validation.
 
+/// Molecular optics on the original shared gas density and composition.
+#[cfg(feature = "volumes")]
+pub mod gas_scattering;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_conduction::radiation::SurfaceEmissivity;
 use fs_material::state_point::{

@@ -5944,6 +5944,34 @@ intervals; sampled endpoints alone do not establish admission. The original
 isotropic arithmetic is retained. This is smooth affine-source, fixed-frame,
 fully solid small-strain thermomechanics, without phase evolution or plasticity.
 
+## Molecular Rayleigh scattering on shared gas states
+
+`gas_scattering::MolecularRayleigh` admits an explicitly sourced reference
+refractivity (`n - 1`), molecular number density, visible wavelength and
+unpolarized 90-degree depolarization ratio. The Lorentz–Lorenz cross section
+uses the matching King correction. No species name supplies missing optics.
+`MolecularRayleighMixture` retains the original `GasSpec` rows, shared mass/mole
+composition and explicit water label, then delegates thermodynamics and
+transport to the original `GasState`/Wilke/WMS owners. Molecular cross sections
+add by number fraction; normalized phases add by scattering weight. The
+prepared coefficient is `N_A * sum(x_i sigma_i) / M_mix` in m²/kg, so the actual
+gas density supplies m^-1 attenuation and responds to pressure and temperature.
+
+Preparation is bounded by the original 128-component gas limit; spectral and
+phase evaluation are allocation-free constant work. The exact lambda^-4 law
+assumes constant molecular polarizability on 380–780 nm. No dispersion,
+resonance, Raman shift, dense-gas correction, Stokes transport, absorption or
+thermal-emission claim is made. The original gas owner still owns phase and
+thermodynamic validity. Source hashes retain caller input identity, not
+measurement authority. `bind_gas_state` checks complete numerical coherence;
+the caller must retain composition identity because a bare `GasState` has none.
+
+G0/G1/G3 regressions cover the independent dipole cross-section reference,
+King correction, exact wavelength law, molecular addition, phase normalization,
+mass/mole conversion, pressure/temperature scaling, original-state binding and
+invalid-source/domain refusal. `fs-render::material_state::gas_scattering`
+consumes the same coefficients and phase without a sampled spectral fit.
+
 ### Finite mixed-gas condensation and re-evaporation
 
 `phase::condensation::{WaterCondensationModel, WetGasParcel}` retains one

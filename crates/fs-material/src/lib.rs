@@ -49,6 +49,8 @@ pub mod gas;
 /// Prescribed axial temperature/composition fields on the shared gas laws.
 pub mod gas_field;
 pub mod gas_mixture;
+/// Molecular Rayleigh scattering from explicit refractivity and the shared gas state.
+pub mod gas_scattering;
 pub mod gas_species;
 mod gas_state;
 pub mod moist_air;
