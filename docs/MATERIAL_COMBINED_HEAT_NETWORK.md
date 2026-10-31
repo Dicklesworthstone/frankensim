@@ -385,6 +385,45 @@ source domains and first-order thermal coupling remain. Arbitrary graph
 outputs still need their own complete work/storage account; this adapter
 does not certify arbitrary material laws or add a chemistry model.
 
+## Hysteretic cores and windings with finite material coolant
+
+`ThermalHystereticCircuit::step_candidate_with_heat_assembly` uses the same
+complete heat provider as other material circuit owners. Each trial starts
+from the original accepted magnetic memory and resolves winding transport and
+coolant at its proposed thermal endpoint. The native magnetic solve still owns
+current, flux linkage, play history, stored magnetic energy and pinning loss.
+Winding Joule heat and core pinning heat enter their original distinct caloric
+cells once; finite coolant exchange remains internal.
+
+A finite coolant link must already have a physical owner when the driver is
+bound. Use `bind_with_link_conductances` with the initially resolved additional
+link map. The original material network and that map must partition native
+links completely and without overlap. These initial conductances admit and
+resolve the initial state only: they are not cached as future cooling. Every
+heat-assembly trial resolves the finite links again. The ordinary constructor
+and bare step continue to refuse links without an owner.
+
+The assembly must retain the exact bulk material network used at binding.
+Full accepted fluid and heat samples remain in `report().source`, and
+`HystereticThermalError<E>` preserves typed provider errors. Cancellation,
+work budgets, immutable rejected candidates and the original closed-radiation
+energy correction keep their existing semantics. The concrete
+`step_candidate_with_heat_network` entry delegates to the same driver.
+
+The finite-coolant regression checks two continued intervals against an
+independent play-integral, winding/coolant balance and convection calculation.
+Changing only coolant viscosity, coolant heat capacity or the source card's
+pinning field changes the resulting current, magnetic memory and heating.
+It also checks complete initial link ownership, fresh source identities and
+queries, and transactional refusal after an accepted prefix.
+
+The fitted magnetic coefficients remain constant over their explicitly
+admitted temperature interval. Cooling changes winding R(T) and therefore the
+magnetic trajectory; source queries refresh at the actual core temperature,
+but no temperature-dependent magnetic free energy is inferred. Existing
+fixed solid geometry, source coverage, monotone-linkage cuts and first-order
+thermal coupling still apply.
+
 ## Energy and scope
 
 The standard circuit/enthalpy report preserves the actual source arithmetic,

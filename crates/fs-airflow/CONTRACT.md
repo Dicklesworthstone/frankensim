@@ -273,6 +273,29 @@ cancellation and retry preserve accepted state. Original graph work/storage
 obligations, source ranges, fixed geometry and first-order time accuracy
 remain authoritative.
 
+### Hysteretic core and winding feedback with finite coolant
+
+`ThermalHystereticCircuit::step_candidate_with_heat_assembly` consumes this
+same complete source-resolved heat provider. Its original current, magnetic
+memory and finite-enthalpy solve resolves winding R(T) and coolant at each
+trial endpoint. Winding Joule heat and core pinning heat enter their original
+distinct cells once; reciprocal finite coolant exchange remains internal.
+
+`bind_with_link_conductances` admits the initial finite-link conductances
+through the original complete/disjoint material-link checks. It does not
+cache those values as a cooling law: continued assembly trials resolve them
+again, and a bare step still refuses links without their physical owner.
+The exact bulk material network, full accepted fluid samples, source identity,
+typed provider errors and original energy gates remain authoritative.
+
+The focused finite-coolant fixture independently checks current, play memory,
+core pinning heat and the combined energy balance over two intervals. Source
+substitutions change coolant viscosity, coolant heat capacity and magnetic
+pinning field. Missing link ownership, a later typed source refusal, work
+exhaustion and cancellation preserve the accepted states. Magnetic fit
+coefficients remain constant within their admitted thermal interval; the
+integration adds no unmeasured thermal magnetic law.
+
 ### Complete material heat on the native explicit timeline
 
 `SourceConvectionHeatNetwork::observe_with_links` composes the complete prepared
