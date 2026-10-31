@@ -629,6 +629,11 @@ impl ObstacleSet {
     pub(super) fn slip_shift(&self, port: usize) -> Result<f64, ModalCouplingError> {
         let q = self.points.len(); dot(&self.tn[port*q..(port+1)*q], &self.reactions)
     }
+    // True only when every friction/stop map entry is exactly zero, with no
+    // tolerance: the stops then neither feel the friction nor shift its slip.
+    pub(super) fn friction_decoupled(&self) -> bool {
+        self.nt.iter().chain(&self.tn).all(|&coupling| coupling == 0.0)
+    }
     pub(super) fn check_prediction(&self, friction: &[f64], dt: f64, gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>
     {

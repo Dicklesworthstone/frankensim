@@ -368,9 +368,9 @@ fn a_stop_that_misses_at_its_actual_endpoint_is_solved_again_and_accepted() {
 #[test]
 fn a_declined_rescue_names_the_sweep_failure_it_could_not_converge() {
     // One joint sweep cannot settle a static bow against a preloaded stop: the
-    // bow's traction moves the stop's closure after its reaction was solved. An
-    // obstacle is present, so the active-set rescue declines; the refusal must
-    // carry that unconverged contact solve, not only the decline.
+    // bow's traction moves the stop's closure after its reaction was solved. The
+    // stop is coupled to the bow, so the active-set rescue declines; the refusal
+    // must carry that unconverged contact solve, not only the decline.
     let gate = CancelGate::new_clock_free();
     let mut joint = friction(network(1000.0))
         .with_additional_ports(vec![], MultiFrictionConfig { max_ports: 8, max_sweeps: 1, max_setup_terms: 100000 }, &gate)
@@ -387,4 +387,104 @@ fn a_declined_rescue_names_the_sweep_failure_it_could_not_converge() {
     }
     assert!(error.to_string().contains("; the joint sweep's last failure: friction network: "), "{error}");
     assert_eq!(states(&joint), before, "a refused step publishes no motion");
+}
+
+// Two ports share two body modes and the stops press modes of their own, so every
+// friction/stop map entry is exactly zero. One sweep can't settle two stuck ports
+// against each other, which sends the step to the rescue. With `stops_share_a_mode`
+// the stops load each other too, and one sweep can't settle them either.
+fn decoupled_stop_bank(stops_share_a_mode: bool) -> MultiFrictionModalSystem {
+    let gate = CancelGate::new_clock_free();
+    let modes = vec![100.0, 150.0, 200.0, 250.0].into_iter().map(|omega| ModalAcousticMode {
+        angular_frequency_rad_s: omega, damping_ratio: 0.02, pressure_per_modal_velocity: C64::ZERO,
+    }).collect();
+    let model = ModalAcousticTimeModel::try_new(48000, modes, ModalAcousticTimeBudget::audible_reference()).unwrap();
+    let network = CoupledModalSystem::new(vec![model], vec![], config(1000.0), &gate).unwrap();
+    let row = |shapes: [f64; 4]| ModalAttachment { component: 0, shapes: shapes.to_vec() };
+    let port = |shapes: [f64; 4]| ModalFrictionPort { left: row(shapes), right: None,
+        law: FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.4 } };
+    let port_config = ModalFrictionConfig { max_iterations: 96, maximum_force_n: 50.0, maximum_slip_speed_m_s: 10.0,
+        force_absolute_tolerance_n: 1e-12, force_relative_tolerance: 1e-10, sticking_tolerance_m: 1e-12 };
+    let stop = |shapes: [f64; 4]| {
+        let mut contact = obstacle(1.0, -1e-4);
+        contact.left = row(shapes);
+        contact.right = row([0.0; 4]);
+        (contact, normal_limits())
+    };
+    let second = if stops_share_a_mode { [0.0, 0.0, 0.5, 1.0] } else { [0.0, 0.0, 0.0, 1.0] };
+    FrictionModalSystem::new(network, port([1.0, 0.5, 0.0, 0.0]), port_config, &gate).unwrap()
+        .with_additional_ports(vec![(port([0.5, 1.0, 0.0, 0.0]), port_config)],
+            MultiFrictionConfig { max_ports: 8, max_sweeps: 1, max_setup_terms: 100000 }, &gate).unwrap()
+        .with_obstacles(vec![stop([0.0, 0.0, 1.0, 0.0]), stop(second)], limits(), &gate).unwrap()
+}
+// Slow enough that both ports stick inside their cones.
+const CREEPING: [FrictionDrive; 2] = [FrictionDrive { speed_m_s: 5e-6, normal_force_n: 1.0 }; 2];
+
+#[test]
+fn a_stop_with_no_friction_coupling_leaves_the_step_to_the_rescue() {
+    let mut bank = decoupled_stop_bank(false);
+    assert!(bank.obstacles.as_ref().unwrap().friction_decoupled());
+    let frame = bank.step(&[0.0; 4], &CREEPING).unwrap();
+    assert_eq!(frame.active_set_rescues, 1);
+    for port in &frame.ports { assert_eq!(port.regime, ModalFrictionRegime::Sticking); }
+}
+
+#[test]
+fn any_non_zero_stop_coupling_still_declines_the_rescue() {
+    // The smallest positive double: any tolerance on the zero would admit it.
+    let planted = f64::from_bits(1);
+    let plants: [fn(&mut ObstacleSet, f64); 2] = [|stops, c| stops.nt[0] = c, |stops, c| stops.tn[0] = c];
+    for plant in plants {
+        let mut bank = decoupled_stop_bank(false);
+        plant(bank.obstacles.as_mut().unwrap(), planted);
+        let before = states(&bank);
+        let error = match bank.step(&[0.0; 4], &CREEPING) {
+            Ok(_) => panic!("a coupled stop reached the rescue"),
+            Err(error) => error,
+        };
+        match &error {
+            ModalFrictionError::ActiveSetDeclined { cause } => assert!(
+                matches!(**cause, ModalFrictionError::Sticking { .. }), "cause: {cause}"),
+            other => panic!("expected a declined rescue, got {other}"),
+        }
+        assert_eq!(states(&bank), before, "a refused step publishes no motion");
+    }
+}
+
+#[test]
+fn the_stops_own_check_refuses_a_rescued_state() {
+    let mut bank = decoupled_stop_bank(true);
+    assert!(bank.obstacles.as_ref().unwrap().friction_decoupled());
+    let before = states(&bank);
+    let error = match bank.step(&[0.0; 4], &CREEPING) {
+        Ok(_) => panic!("one sweep settled two stops that load each other"),
+        Err(error) => error,
+    };
+    match &error {
+        ModalFrictionError::ActiveSetRefusedByStops { cause } => assert!(
+            matches!(**cause, ModalFrictionError::Network(ModalCouplingError::ContactSolve { .. })), "cause: {cause}"),
+        other => panic!("expected the stops to refuse the rescued state, got {other}"),
+    }
+    assert!(error.to_string().starts_with("active-set rescue refused: the stops refused the rescued state: "), "{error}");
+    assert_eq!(states(&bank), before, "a refused step publishes no motion");
+}
+
+#[test]
+fn a_contact_loaded_port_on_a_decoupled_stop_bank_is_rescued_with_its_stops_reaction() {
+    // `nt` is zero, so the stop's reaction can't move with the friction: the
+    // rescue reads the same constant normal load the sweep read.
+    use crate::render::schedule::force::coupled::contact::friction::multiple::normal_load::ContactNormalLoad;
+    let gate = CancelGate::new_clock_free();
+    let mut bank = decoupled_stop_bank(false)
+        .with_contact_normal_loads(vec![ContactNormalLoad { friction_port: 0, obstacle: 0 }], &gate).unwrap();
+    assert!(bank.obstacles.as_ref().unwrap().friction_decoupled());
+    // A tenth of CREEPING, so the port on the stop's 0.2 N holds inside its
+    // smaller cone. A contact-loaded port prescribes no normal load of its own.
+    let creep = FrictionDrive { speed_m_s: 5e-7, normal_force_n: 1.0 };
+    let drives = [FrictionDrive { normal_force_n: 0.0, ..creep }, creep];
+    let frame = bank.step(&[0.0; 4], &drives).unwrap().clone();
+    assert_eq!(frame.active_set_rescues, 1);
+    let reaction = bank.last_obstacle_frames().unwrap()[0].normal_force_n;
+    assert!(reaction > 0.0);
+    assert_eq!(frame.ports[0].normal_force_n.to_bits(), reaction.to_bits());
 }

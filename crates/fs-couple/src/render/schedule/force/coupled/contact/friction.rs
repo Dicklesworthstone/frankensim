@@ -128,10 +128,18 @@ pub enum ModalFrictionError {
         /// Magnitude of that violation.
         worst_size: f64,
     },
-    /// The active-set rescue was not attempted because an obstacle or shear layer
-    /// is present on a port; the joint solve refused on its original terms.
+    /// The active-set rescue did not apply: a shear layer, a Mindlin contact or a
+    /// stop coupled to the friction ports (a non-zero `nt` or `tn` entry) is
+    /// present. The joint solve refused on its original terms.
     ActiveSetDeclined {
         /// The joint sweep's own failure at its last sweep: what did not converge.
+        cause: Box<ModalFrictionError>,
+    },
+    /// The active-set rescue reached a consistent partition on a stop bank with
+    /// no friction coupling, and the stops' own check refused that state.
+    /// Nothing was adopted.
+    ActiveSetRefusedByStops {
+        /// The stops' refusal of the rescued state.
         cause: Box<ModalFrictionError>,
     },
 }
@@ -162,8 +170,10 @@ impl core::fmt::Display for ModalFrictionError {
                 "active-set rescue exhausted: {pivots}/{budget} pivots, last active set {last_active_set}, \
                  worst KKT violation at port {worst_port} ({worst_condition}) size {worst_size:e}"),
             Self::ActiveSetDeclined { cause } => write!(f,
-                "active-set rescue not attempted: an obstacle or shear layer is present on a port; \
-                 the joint sweep's last failure: {cause}"),
+                "active-set rescue declined: a shear layer, a Mindlin contact or a stop coupled to \
+                 the friction ports is present; the joint sweep's last failure: {cause}"),
+            Self::ActiveSetRefusedByStops { cause } => write!(f,
+                "active-set rescue refused: the stops refused the rescued state: {cause}"),
         }
     }
 }

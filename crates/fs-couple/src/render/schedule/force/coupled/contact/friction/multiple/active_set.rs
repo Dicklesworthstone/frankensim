@@ -3,14 +3,19 @@
 //! The simultaneous friction owner normally advances with a Gauss-Seidel sweep:
 //! each port re-chooses its stick/slide branch against the other ports' current
 //! held tractions, and the step commits when one full sweep is jointly
-//! consistent. For a well-posed step the consistent stick/slide partition is
-//! unique, but the sweep can OSCILLATE between candidate partitions near a
+//! consistent. The sweep can OSCILLATE between candidate partitions near a
 //! stick<->slip transition and never land a clean sweep, so it exhausts
 //! `max_sweeps` and refuses a step that does have a solution (o7qbp: the 5-cell
 //! compliant bow ribbon at the first Helmholtz transition; enumerating all 3^p
 //! partitions at that step found exactly ONE consistent joint solution).
 //!
-//! This module solves that unique partition directly. It runs ONLY after the
+//! More than one consistent partition can exist. Sample 451 of the 160 N stop
+//! bank in `normal_support_press` has three. The walk below never consults the
+//! ports' history: it starts at all-stuck and flips the worst violator, so the
+//! partition it keeps is a function of the step alone. At that step it keeps
+//! SS+, which continues the previous motion; nothing here makes that general.
+//!
+//! This module solves a consistent partition directly. It runs ONLY after the
 //! Gauss-Seidel sweep has failed, so every step the sweep already converges is
 //! bit-identical. It fixes a partition, joint-Newtons the effective load line
 //! for it, checks the Karush-Kuhn-Tucker friction conditions, flips the one
@@ -283,11 +288,11 @@ fn is_consistent(
     Ok(true)
 }
 
-/// Active-set rescue. Returns `(tractions, regimes)` for the unique consistent
-/// partition, or None when the pivot budget is spent without consistency.
+/// Active-set rescue. Returns `(tractions, regimes)` for the first consistent
+/// partition it reaches, or None when the pivot budget is spent without consistency.
 ///
-/// `seed` is the sweep's last (oscillating) regimes, used only to bias the first
-/// partition; correctness does not depend on it.
+/// `seed` is the sweep's last (oscillating) regimes. It is unused: the walk
+/// always starts at all-stuck.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn solve_active_set(
     a: &[f64],
@@ -480,6 +485,81 @@ mod tests {
             *cells,
             [Branch::Stuck, Branch::SlidePos, Branch::Stuck, Branch::Stuck, Branch::Stuck]
         );
+    }
+
+    // Sample 451 of the 160 N stop bank in normal_support_press, dumped where the
+    // sweep refused. The stops have no coupling to these ports, so these rows are
+    // the whole friction step. The sweep alternates SSS and SS+ here.
+    const STOP_DT: f64 = 1.0 / 48_000.0;
+    const STOP_LINE: [f64; 9] = [
+        6.5438179355632094e-6, 1.9929157425147624e-6, 1.9363011049747153e-6,
+        1.9929157425147624e-6, 6.598357687970561e-6, 1.957313263922187e-6,
+        1.9363011049747153e-6, 1.957313263922187e-6, 6.485641401497002e-6,
+    ];
+    const STOP_FREE_SLIP: [f64; 3] = [-1.6153907305051958e-8, -3.306641346093483e-8, 1.3310924282490778e-8];
+    const STOP_NORMAL: [f64; 3] = [0.007177012064098477, 0.008213326310517676, 0.005221382740318865];
+    const STOP_SS_PLUS: [f64; 3] = [-0.00151066, -0.00517458, 0.00208855];
+
+    #[test]
+    fn a_stop_bank_step_has_three_consistent_partitions_and_the_walk_lands_on_ss_plus() {
+        use Branch::{SlideNeg, SlidePos, Stuck};
+        let law = FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.4 };
+        let laws = [&law, &law, &law];
+        let (a, f, n) = (&STOP_LINE, &STOP_FREE_SLIP, &STOP_NORMAL);
+        let cap = |i: usize| 0.8 * n[i];
+        // The force a port needs to stick with the others held: the sweep's own test.
+        let required = |t: &[f64], i: usize| t[i] + slips(a, f, t)[i] / a[i * 3 + i];
+        let assert_near = |got: &[f64], want: &[f64]| {
+            for (g, w) in got.iter().zip(want) {
+                assert!((g - w).abs() < 1e-8, "force {g} against {w}");
+            }
+        };
+
+        // Port forces [N], whether the partition is consistent, and the ports the
+        // sweep can't leave on their branch.
+        let rows: [([Branch; 3], [f64; 3], bool, &[usize]); 4] = [
+            ([Stuck, Stuck, Stuck], [-0.00202881, -0.00569704, 0.00437739], false, &[2]),
+            ([Stuck, Stuck, SlidePos], STOP_SS_PLUS, true, &[2]),
+            ([Stuck, SlideNeg, Stuck], [-0.00259823, -0.00328533, 0.00381956], true, &[1]),
+            ([Stuck, SlideNeg, SlidePos], [-0.00208603, -0.00328533, 0.00208855], true, &[1, 2]),
+        ];
+        for (cells, forces, consistent, moved) in &rows {
+            let t = solve_partition(a, f, n, &laws, STOP_DT, cells, 100).expect("every row solves");
+            assert_near(&t, forces);
+            assert_eq!(is_consistent(a, f, n, &laws, STOP_DT, cells, &t).unwrap(), *consistent, "{cells:?}");
+            // A stuck port past its cone slides; a sliding port inside it re-sticks.
+            // No partition keeps every port where the sweep's rule puts it.
+            for &i in *moved {
+                assert_eq!(required(&t, i).abs() <= cap(i), cells[i] != Stuck, "{cells:?} port {i}");
+            }
+        }
+        let all_stuck = solve_partition(a, f, n, &laws, STOP_DT, &[Stuck; 3], 100).unwrap();
+        assert!((all_stuck[2] / cap(2) - 1.048).abs() < 5e-4, "SSS is 4.8 % over its cap");
+
+        let bs = all_branches();
+        let mut consistent = Vec::new();
+        for code in 0..27usize {
+            let cells: Vec<Branch> = (0..3u32).map(|i| bs[code / 3usize.pow(i) % 3]).collect();
+            if let Some(t) = solve_partition(a, f, n, &laws, STOP_DT, &cells, 100) {
+                if is_consistent(a, f, n, &laws, STOP_DT, &cells, &t).unwrap() {
+                    consistent.push(cells);
+                }
+            }
+        }
+        assert_eq!(consistent.len(), 3, "{consistent:?}");
+        for (cells, _, is_one, _) in &rows {
+            assert_eq!(consistent.iter().any(|c| c == cells), *is_one, "{cells:?}");
+        }
+
+        let seed = [ModalFrictionRegime::Sticking; 3];
+        match solve_active_set(a, f, n, &laws, STOP_DT, &seed, 4 * 3 + 16).unwrap() {
+            Resolution::Solved(t, regimes) => {
+                assert_near(&t, &STOP_SS_PLUS);
+                assert_eq!(regimes, [ModalFrictionRegime::Sticking, ModalFrictionRegime::Sticking,
+                    ModalFrictionRegime::Sliding]);
+            }
+            Resolution::Exhausted { last_set, .. } => panic!("the walk stopped at {last_set}"),
+        }
     }
 
     #[test]

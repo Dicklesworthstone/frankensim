@@ -692,13 +692,18 @@ impl MultiFrictionModalSystem {
     /// Active-set rescue for a step the Gauss-Seidel sweep cannot converge
     /// (frankensim-o7qbp). Builds the effective load line (bare compliance plus
     /// each port's series/hair compliance on the diagonal; free slip plus each
-    /// port's stored-stretch shift), solves the unique consistent stick/slip
-    /// partition directly, and on success overwrites the held tractions and
-    /// regimes with it. Returns whether a consistent partition was adopted.
+    /// port's stored-stretch shift), solves a consistent stick/slip partition
+    /// directly, and on success overwrites the held tractions and regimes with
+    /// it. Returns whether a consistent partition was adopted.
     ///
-    /// Restricted to the plain friction case: when any port carries a unilateral
-    /// obstacle or a material shear layer the rescue declines and the caller
-    /// refuses with the sweep's own last failure as the decline's cause.
+    /// Restricted to the plain friction case: a material shear layer, a Mindlin
+    /// contact, or a stop with any non-zero coupling to the friction ports, makes
+    /// the rescue decline and the caller refuse with the sweep's own last failure
+    /// as the decline's cause. Coupling here means a non-zero `nt` or `tn` entry.
+    /// The rescue doesn't solve a stop with exactly none, so the stops' own check
+    /// runs on the rescued state before it is adopted, and a refusal there is
+    /// named as the stops'. A contact-loaded port on such a bank is rescued with
+    /// its stop's reaction as the normal load, a constant the friction can't move.
     /// Override the active-set pivot budget (frankensim-o7qbp). For tests that
     /// plant a budget-exhaustion negative; production uses the construction default.
     pub fn force_active_set_budget(&mut self, budget: usize) { self.active_set_budget = budget; }
@@ -707,7 +712,8 @@ impl MultiFrictionModalSystem {
         cause: ModalFrictionError) -> Result<(), ModalFrictionError>
     {
         let p = self.points.len();
-        if self.obstacles.is_some() || self.shear_layers.iter().any(Option::is_some)
+        let coupled_stop = self.obstacles.as_ref().is_some_and(|stops| !stops.friction_decoupled());
+        if coupled_stop || self.shear_layers.iter().any(Option::is_some)
             || self.mindlin_contacts.iter().any(Option::is_some) {
             // Not attempted: the active-set model covers only the plain friction
             // ports. Name it a decline that carries the Gauss-Seidel failure.
@@ -735,6 +741,12 @@ impl MultiFrictionModalSystem {
         match active_set::solve_active_set(&a, &f, &normal, &lawrefs, dt, &seed, self.active_set_budget)? {
             active_set::Resolution::Solved(tractions, regimes) => {
                 poll(gate)?;
+                if let Some(stops) = &self.obstacles {
+                    // Checked on the rescued tractions, not assumed from the sweep.
+                    if let Err(error) = stops.check_prediction(&tractions, dt, None) {
+                        return Err(ModalFrictionError::ActiveSetRefusedByStops { cause: Box::new(error.into()) });
+                    }
+                }
                 self.tractions.copy_from_slice(&tractions);
                 self.regimes.copy_from_slice(&regimes);
                 for b in &mut self.staged_branches { *b = ContactBranch::Fresh; }
@@ -859,13 +871,13 @@ impl MultiFrictionModalSystem {
                 None => { sweeps = sweep; break; },
                 Some(cause) if sweep == self.config.max_sweeps => {
                     // The Gauss-Seidel sweep could not converge this step
-                    // (frankensim-o7qbp). For a well-posed step the consistent
-                    // stick/slip partition is unique; solve it directly with the
-                    // active-set rescue. If it finds and verifies that partition,
-                    // adopt it and accept; otherwise refuse on budget as before.
-                    // Adopts the unique partition and continues, or returns a
-                    // NAMED active-set error (exhausted with payload, or declined
-                    // with the Gauss-Seidel error as its cause).
+                    // (frankensim-o7qbp). Solve a consistent stick/slip partition
+                    // directly with the active-set rescue. If it finds and verifies
+                    // one, adopt it and accept; otherwise refuse on budget as before.
+                    // Adopts that partition and continues, or returns a
+                    // NAMED active-set error (exhausted with payload, declined
+                    // with the Gauss-Seidel error as its cause, or refused by the
+                    // stops with their refusal as its cause).
                     self.active_set_rescue(drives, gate, cause)?;
                     rescues = 1;
                     sweeps = sweep;
