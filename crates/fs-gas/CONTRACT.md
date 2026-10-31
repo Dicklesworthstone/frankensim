@@ -1774,15 +1774,30 @@ residual. Because the closed species inventories are unchanged, formation
 references cancel from work exactly in the continuum. Boundary work is not
 reclassified as heat and no \`p*Delta V\` endpoint approximation is used.
 
-This operation is deliberately clock-free and quasistatic. It is a conservative
-thermodynamic endpoint for a future piston/cylinder or moving-network driver,
-not a finite-speed moving-wall Riemann solver. Piston inertia, prescribed motion,
-shock generation, branch-flow splitting, heat leakage and moving geometry/GCL
-remain explicit separate owners. Three focused tests cover an independent
+`MixtureNetwork1d::quasistatic_adiabatic_plenum_to` accepts that same endpoint
+directly into a running connected chamber between transport steps. Every branch
+field, other plenum, connection and clock stays unchanged. The next transport
+step reads the accepted chamber volume and source state for both port fluxes
+and its acoustic CFL restriction. A single branch-field pass admits old/new
+combined inventories before publication, including refusal if total network
+storage would overflow. The returned `NetworkVolumeReport` separates mechanical
+work from transport/heat and reports the combined species and energy balance.
+An actual accepted volume change invalidates the obsolete flow/port reports;
+an exact no-op, refusal or cancellation retains them. No network reconstruction
+or source-gauge conversion is required.
+
+These operations are deliberately clock-free and quasistatic. Network use
+holds ports closed during the volume change and leaves the schedule and
+accuracy of composing that change with transport to its caller. They do not
+implement a finite-speed moving-wall Riemann solver. Piston inertia, prescribed
+motion, shock generation during boundary motion, heat leakage and moving
+geometry/GCL remain explicit separate owners. Three focused endpoint tests cover an independent
 constant-Cp isentrope and reversible round trip, variable calorics with +/-1e18
-formation-energy gauges, and source-domain/cancellation atomicity. Native
-Rust/Cargo execution is unavailable in the current executor, so these tests are
-committed as source evidence rather than claimed runtime evidence.
+formation-energy gauges, and source-domain/cancellation atomicity. Three
+additional network regressions cover compression-driven branch flow with an
+independently integrated physical work balance, reversible volume cycles, and
+state/clock/report preservation under early or late cancellation, source
+refusal and exact no-op.
 
 ## Original material calorics in finite gas walls
 
