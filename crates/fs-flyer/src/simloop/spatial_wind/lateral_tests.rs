@@ -116,7 +116,7 @@ fn missing_distributed_force_velocities_cannot_silently_disable_gust_torque() {
     let mut loads = sim.force_buildup_current_wind(speed, alpha, dc).unwrap();
     loads.coupled.strip_velocity_mps = None;
     let before = sim.save_checkpoint().unwrap();
-    let error = sim.step_lateral_current_wind(0.0, speed, dc, &loads, 1.0 / 120.0)
+    let error = sim.step_lateral_current_wind(0.0, speed, sim.spec.rho_kg_m3, dc, &loads, 1.0 / 120.0)
         .unwrap_err();
     assert_eq!(error.code, "distributed-loads-invalid");
     assert_eq!(sim.save_checkpoint().unwrap(), before);

@@ -12,7 +12,7 @@ use fs_blake3::hash_domain;
 use fs_material::gas::GasState;
 use fs_math::det;
 
-/// The accepted wind and its complete, homogeneous material gas at one tick.
+/// The accepted wind and its complete local material gas at one tick.
 /// Components and gradient coordinates are flight-line forward/right/up.
 /// Numerical gas identity is retained; source receipts stay with the caller's
 /// material model, and this view grants no composition or calibration authority.
@@ -140,8 +140,9 @@ impl SimLoop {
         Ok(sim)
     }
 
-    /// Original complete gas, if this lifecycle explicitly bound a material.
+    /// Original complete gas from a homogeneous material-wind constructor.
     /// Historical scalar-density scenarios have no inferred gas composition.
+    /// Profile runs use `sample_material_air` at the requested physical height.
     #[must_use]
     pub fn material_gas(&self) -> Option<&GasState> {
         self.spatial_wind.as_ref()?.material_gas.as_ref()
@@ -150,9 +151,13 @@ impl SimLoop {
     /// Read wind, thermodynamics and transport from the same accepted state.
     /// This observation neither advances physics nor consumes randomness.
     pub fn sample_material_air(&self, position_m: [f64; 3]) -> Result<MaterialAirSample, Refusal> {
-        let gas = *self.material_gas().ok_or_else(|| {
-            invalid("this run has no material-bound gas; initialize with material spatial wind")
-        })?;
+        let gas = if let Some(profile) = self.material_air_profile() {
+            profile.gas_at_height(position_m[2])?
+        } else {
+            *self.material_gas().ok_or_else(|| {
+                invalid("this run has no material gas or profile; bind one during initialization")
+            })?
+        };
         Ok(MaterialAirSample {
             wind: self.sample_spatial_wind(position_m)?,
             gas,
@@ -224,3 +229,5 @@ pub(crate) fn decode_gas(bytes: &[u8]) -> Result<GasState, Refusal> {
 
 #[cfg(test)]
 mod tests;
+
+pub(in crate::simloop) mod profile;

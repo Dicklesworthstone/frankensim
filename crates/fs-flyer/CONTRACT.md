@@ -867,3 +867,40 @@ This source-selected build uses the original aircraft/wing/propeller and
 Newton/FGMRES numerics, excluding only unrelated module surfaces and the two
 unused solver `Cx` convenience wrappers. It does not establish a full Cargo or
 DSR gate; full-runtime builds were interrupted while compiling asupersync.
+
+
+## Prescribed material atmosphere in the evolving flight lifecycle
+
+`SimLoop::init_with_profile_spatial_wind` and its distributed counterpart bind
+an immutable `MaterialAirProfile` to the original native trajectory. Initial
+trim and prelaunch state use the source gas at the 2.4 m rail height. Each
+beginning/midpoint load stage samples its own CG height, and the same density
+drives native wing/canard forces, propeller thrust and torque, aeroelastic
+dynamic pressure, and reduced/distributed lateral response. The value in
+`scenario().rho_kg_m3` remains the initial rail density. `sample_material_air`
+returns the complete original gas at the requested height without advancing
+wind or trajectory. Predicted endpoints are profile-admitted before publishing
+motion and its corresponding warm start.
+
+V6 checkpoints retain the profile definition, geometric ground datum, sampling
+mode and complete existing wind/flight state. Uniform profiles retain all twelve
+gas fields; the standard atmosphere retains its model discriminator and ground
+altitude. Profile identity binds into tick-zero and run identities. Restore
+admits the initial density and saved height before publishing state. Matching
+replay recorders retain the initial V6 checkpoint; existing V2–V5 modes keep
+their layouts and homogeneous paths retain their existing arithmetic.
+
+The original material owner supplies hydrostatic pressure and coherent gas
+thermodynamics/transport. Density is frozen across the aircraft within each
+load stage; distributed mode resolves incident velocities across strips and
+disks. Existing reduced flight dynamics, constant flight gravity, engine torque
+law and Reynolds-independent polar remain in force. This adds no weather
+evolution, compressible/anelastic atmospheric dynamics, buoyancy, pressure work
+or high-altitude aircraft validation claim. A prescribed solenoidal velocity
+field with stratified density does not imply divergence-free mass flux.
+
+Six focused regressions cover native trajectory/rotor changes with altitude,
+stage-density coherence through midpoint/warp/lateral loads, homogeneous
+equivalence, profile-domain refusal before motion publication, complete source
+encoding, and checkpoint/replay continuation. Source/parser review is distinct
+from native execution, which remains unverified for this addition.

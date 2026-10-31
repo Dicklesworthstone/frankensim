@@ -4,6 +4,7 @@
 
 use super::{SimLoop, map_atmo, motion};
 use crate::Refusal;
+use crate::atmosphere::MaterialAirProfile;
 use fs_atmo::evolving::{EvolvingTurbulenceCheckpoint, EvolvingTurbulenceField};
 use fs_atmo::ou::OuCheckpoint;
 use fs_atmo::{FlatSiteLogLaw, FlowSample, MAX_MODES, TurbulenceField};
@@ -40,6 +41,7 @@ pub(super) struct SpatialWindState {
     pub field: EvolvingTurbulenceField,
     pub distributed: bool,
     pub material_gas: Option<GasState>,
+    pub material_profile: Option<MaterialAirProfile>,
     /// Ground velocity in flight-line-forward / vertical-up coordinates.
     pub ground_mps: [f64; 2],
 }
@@ -48,6 +50,8 @@ pub(super) struct SampledFlightLoads {
     pub forces: crate::aircraft::ForceBuildup,
     pub airspeed_mps: f64,
     pub alpha_rad: f64,
+    /// The same CG density used by wing, propeller and lateral stage loads.
+    pub rho_kg_m3: f64,
 }
 
 impl SpatialWindState {
@@ -69,6 +73,7 @@ impl SpatialWindState {
             field,
             distributed: false,
             material_gas: None,
+            material_profile: None,
             ground_mps: [0.0; 2],
         })
     }
@@ -363,13 +368,24 @@ impl SimLoop {
         Ok([c * vx + s * vh, -sample.u[1], s * vx - c * vh])
     }
 
-    pub(super) fn force_buildup_current_wind(
+    #[cfg(test)]
+    fn force_buildup_current_wind(
         &self,
         v_air: f64,
         alpha: f64,
         dc: f64,
     ) -> Result<crate::aircraft::ForceBuildup, Refusal> {
-        self.force_buildup_at_motion(
+        self.sampled_loads_current_wind(v_air, alpha, dc)
+            .map(|sample| sample.forces)
+    }
+
+    pub(super) fn sampled_loads_current_wind(
+        &self,
+        v_air: f64,
+        alpha: f64,
+        dc: f64,
+    ) -> Result<SampledFlightLoads, Refusal> {
+        self.sampled_loads_at_motion(
             self.current_flight_motion(),
             v_air,
             alpha,
@@ -378,6 +394,7 @@ impl SimLoop {
         )
     }
 
+    #[cfg(test)]
     fn force_buildup_at_motion(
         &self,
         state: motion::FlightMotion,
@@ -386,7 +403,20 @@ impl SimLoop {
         dc: f64,
         warm_slip: Option<[f64; 2]>,
     ) -> Result<crate::aircraft::ForceBuildup, Refusal> {
-        if self
+        self.sampled_loads_at_motion(state, v_air, alpha, dc, warm_slip)
+            .map(|sample| sample.forces)
+    }
+
+    fn sampled_loads_at_motion(
+        &self,
+        state: motion::FlightMotion,
+        v_air: f64,
+        alpha: f64,
+        dc: f64,
+        warm_slip: Option<[f64; 2]>,
+    ) -> Result<SampledFlightLoads, Refusal> {
+        let rho_kg_m3 = self.air_density_at_height(state.longitudinal.position_m[1])?;
+        let forces = if self
             .spatial_wind
             .as_ref()
             .is_some_and(|wind| wind.distributed)
@@ -397,7 +427,7 @@ impl SimLoop {
                 dc.clamp(-0.55, 0.55),
                 state.rotor_rad_s.clamp(10.5, 119.5),
                 state.longitudinal.q_rad_s.clamp(-2.9, 2.9),
-                self.spec.rho_kg_m3,
+                rho_kg_m3,
                 warm_slip,
                 &|point| self.incident_at_motion(state, point),
             )
@@ -408,10 +438,16 @@ impl SimLoop {
                 dc.clamp(-0.55, 0.55),
                 state.rotor_rad_s.clamp(10.5, 119.5),
                 state.longitudinal.q_rad_s.clamp(-2.9, 2.9),
-                self.spec.rho_kg_m3,
+                rho_kg_m3,
                 warm_slip,
             )
-        }
+        }?;
+        Ok(SampledFlightLoads {
+            forces,
+            airspeed_mps: v_air,
+            alpha_rad: alpha,
+            rho_kg_m3,
+        })
     }
 
     fn current_flight_motion(&self) -> motion::FlightMotion {
@@ -548,7 +584,7 @@ impl SimLoop {
                 gust_w / airspeed_mps
             })
         .clamp(-0.55, 0.55);
-        let forces = self.force_buildup_at_motion(
+        let sample = self.sampled_loads_at_motion(
             stage,
             airspeed_mps,
             alpha_rad,
@@ -558,23 +594,25 @@ impl SimLoop {
         let mut next = motion::finish_midpoint(
             start,
             stage,
-            self.flight_acceleration(stage, &forces, alpha_rad),
+            self.flight_acceleration(stage, &sample.forces, alpha_rad),
             dt,
         );
         if !next.is_finite() {
             return Err(invalid_flight_stage());
         }
-        if next.longitudinal.position_m[1] <= 0.0 {
+        let ground_contact = next.longitudinal.position_m[1] <= 0.0;
+        if ground_contact {
             next.longitudinal.position_m[1] = 0.0;
+        }
+        // Admit the profile at the accepted endpoint before publishing motion.
+        // A valid midpoint must not commit an out-of-domain atmospheric state.
+        self.air_density_at_height(next.longitudinal.position_m[1])?;
+        if ground_contact {
             self.phase = super::Phase::Ended(super::TerminalEvent::GroundContact);
         }
         self.publish_flight_motion(next);
-        self.warm_slip = Some(forces.coupled.w_slip);
-        Ok(Some(SampledFlightLoads {
-            forces,
-            airspeed_mps,
-            alpha_rad,
-        }))
+        self.warm_slip = Some(sample.forces.coupled.w_slip);
+        Ok(Some(sample))
     }
 
     /// Use the already accepted force solve, not a second wind sample after
@@ -586,22 +624,23 @@ impl SimLoop {
         &mut self,
         loaded_twist_rad: f64,
         v_air: f64,
+        rho_kg_m3: f64,
         dc_eff: f64,
         loads: &crate::aircraft::ForceBuildup,
         dt: f64,
     ) -> Result<crate::lateral::LateralTick, Refusal> {
         if self.spatial_wind.as_ref().is_some_and(|wind| wind.distributed) {
             let incident = self.design.distributed_lateral_loads(
-                loads, dc_eff.clamp(-0.55, 0.55), self.spec.rho_kg_m3,
+                loads, dc_eff.clamp(-0.55, 0.55), rho_kg_m3,
             )?.net();
             self.lateral_model.step_with_moments(
                 &mut self.lateral_state, loaded_twist_rad, v_air,
-                self.spec.rho_kg_m3, dt, incident,
+                rho_kg_m3, dt, incident,
             ).map(|step| step.reduced)
         } else {
             self.lateral_model.step(
                 &mut self.lateral_state, loaded_twist_rad, v_air,
-                self.spec.rho_kg_m3, dt,
+                rho_kg_m3, dt,
             )
         }
     }

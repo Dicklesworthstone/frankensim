@@ -28,6 +28,9 @@
 //! checkpoints. Resolved panel/profile/thrust moments drive the existing
 //! reduced roll/yaw response; crosswind/sideslip and banked translational
 //! dynamics remain outside that tier.
+//! `init_with_profile_spatial_wind` and its distributed twin prescribe a
+//! material atmosphere at each native load stage, including hydrostatic
+//! pressure/density, with the immutable profile retained in V6 checkpoints.
 
 use crate::Refusal;
 use crate::aerowarp::ReducedAeroelasticWarp;
@@ -69,6 +72,9 @@ pub const MIN_HEADWIND_MPS: f64 = 1.5;
 
 /// Rail rolling-friction coefficient (declared Estimated).
 pub const RAIL_MU: f64 = 0.05;
+
+/// Initial CG height above the sand [m], shared by trim and material sampling.
+const RAIL_HEIGHT_M: f64 = 2.4;
 
 /// Catapult pull-force cap [N] (absurd-input guard).
 pub const MAX_CATAPULT_FORCE_N: f64 = 5_000.0;
@@ -417,7 +423,7 @@ impl SimLoop {
             tick: 0,
             phase: Phase::OnRail,
             x_m: 0.0,
-            h_m: 2.4, // rail height class above the sand (visual datum)
+            h_m: RAIL_HEIGHT_M,
             u: u0,
             w: w0,
             q: 0.0,
@@ -458,6 +464,8 @@ impl SimLoop {
 
     /// Accepted scenario, including density resolved from the material gas
     /// when initialized through a material-bound spatial-wind constructor.
+    /// With a profile, this is the initial rail density; later loads sample
+    /// the immutable profile at their own CG height.
     #[must_use]
     pub fn scenario(&self) -> &ScenarioSpec {
         &self.spec
@@ -475,6 +483,8 @@ impl SimLoop {
     /// including its explicit model, both sequential OU quadratures, and
     /// inertial ground velocity. Distributed strip/disk sampling emits V4.
     /// Material-bound wind emits V5 with its sampling mode and complete gas.
+    /// Prescribed material profiles emit V6 with the immutable source definition
+    /// and geometric ground datum, so altitude changes survive restoration.
     /// Legacy V2 reconstructs its OU state by
     /// replaying the canonical prehistory through the saved tick.
     ///
@@ -491,6 +501,7 @@ impl SimLoop {
         }
         let mut b = Vec::new();
         let version = match &self.spatial_wind {
+            Some(wind) if wind.material_profile.is_some() => 6u32,
             Some(wind) if wind.material_gas.is_some() => 5u32,
             Some(wind) if wind.distributed => 4u32,
             Some(_) => 3,
@@ -547,13 +558,17 @@ impl SimLoop {
             None => b.push(0),
         }
         if let Some(wind) = &self.spatial_wind {
-            if let Some(gas) = &wind.material_gas {
+            if let Some(profile) = &wind.material_profile {
+                b.push(u8::from(wind.distributed));
+                spatial_wind::material::profile::encode_profile(profile, &mut b);
+            } else if let Some(gas) = &wind.material_gas {
                 b.push(u8::from(wind.distributed));
                 spatial_wind::material::encode_gas(gas, &mut b);
             }
             wind.encode(&self.run_intent_id, &mut b);
         }
         let domain = match version {
+            6 => "org.frankensim.wf.checkpoint-state.v6",
             5 => "org.frankensim.wf.checkpoint-state.v5",
             4 => "org.frankensim.wf.checkpoint-state.v4",
             3 => "org.frankensim.wf.checkpoint-state.v3",
@@ -597,12 +612,14 @@ impl SimLoop {
         let digest_v3 = hash_domain("org.frankensim.wf.checkpoint-state.v3", body);
         let digest_v4 = hash_domain("org.frankensim.wf.checkpoint-state.v4", body);
         let digest_v5 = hash_domain("org.frankensim.wf.checkpoint-state.v5", body);
+        let digest_v6 = hash_domain("org.frankensim.wf.checkpoint-state.v6", body);
         let matches_v1 = digest_v1.as_bytes() == tail;
         let matches_v2 = digest_v2.as_bytes() == tail;
         let matches_v3 = digest_v3.as_bytes() == tail;
         let matches_v4 = digest_v4.as_bytes() == tail;
         let matches_v5 = digest_v5.as_bytes() == tail;
-        if !matches_v1 && !matches_v2 && !matches_v3 && !matches_v4 && !matches_v5 {
+        let matches_v6 = digest_v6.as_bytes() == tail;
+        if !matches_v1 && !matches_v2 && !matches_v3 && !matches_v4 && !matches_v5 && !matches_v6 {
             return Err(Refusal {
                 code: "checkpoint-tampered",
                 message: "embedded digest mismatch".into(),
@@ -615,13 +632,14 @@ impl SimLoop {
             .map(u32::from_le_bytes)
             .ok_or_else(|| bad("missing version"))?;
         match (
-            version, matches_v1, matches_v2, matches_v3, matches_v4, matches_v5,
+            version, matches_v1, matches_v2, matches_v3, matches_v4, matches_v5, matches_v6,
         ) {
-            (2, _, true, _, _, _)
-            | (3, _, _, true, _, _)
-            | (4, _, _, _, true, _)
-            | (5, _, _, _, _, true) => {}
-            (1, true, _, _, _, _) => {
+            (2, _, true, _, _, _, _)
+            | (3, _, _, true, _, _, _)
+            | (4, _, _, _, true, _, _)
+            | (5, _, _, _, _, true, _)
+            | (6, _, _, _, _, _, true) => {}
+            (1, true, _, _, _, _, _) => {
                 return Err(Refusal {
                     code: "checkpoint-version-unsupported",
                     message: "CheckpointStateV1 lacks lateral state and cannot exact-resume v2"
@@ -680,7 +698,23 @@ impl SimLoop {
             if tick > spec.max_ticks || !f.iter().all(|v| v.is_finite()) || f[1] < 0.0 {
                 return Err(bad("invalid spatial lifecycle state"));
             }
-            let (distributed, material_gas) = if version == 5 {
+            let (distributed, material_gas, material_profile) = if version == 6 {
+                let mode = take(&mut pos, 1)?[0];
+                if mode > 1 {
+                    return Err(bad("unknown profile wind sampling mode"));
+                }
+                let (profile, used) = spatial_wind::material::profile::decode_profile(&body[pos..])?;
+                pos += used;
+                let rail_gas = profile.gas_at_height(RAIL_HEIGHT_M)?;
+                if rail_gas.density.to_bits() != spec.rho_kg_m3.to_bits() {
+                    return Err(bad(
+                        "scenario density disagrees with the profile at rail height",
+                    ));
+                }
+                // Reject an invalid restored location before publishing state.
+                profile.gas_at_height(f[1])?;
+                (mode == 1, None, Some(profile))
+            } else if version == 5 {
                 let mode = take(&mut pos, 1)?[0];
                 if mode > 1 {
                     return Err(bad("unknown material wind sampling mode"));
@@ -691,31 +725,44 @@ impl SimLoop {
                         "scenario density disagrees with the retained material gas",
                     ));
                 }
-                (mode == 1, Some(gas))
+                (mode == 1, Some(gas), None)
             } else {
-                (version == 4, None)
+                (version == 4, None, None)
             };
             let (mut wind, intent) = SpatialWindState::decode(&body[pos..], spec.seed, tick)?;
             wind.distributed = distributed;
             wind.material_gas = material_gas;
+            wind.material_profile = material_profile;
             Some((wind, intent))
         } else {
             None
         };
         let mut sim = if let Some((wind, intent)) = &restored_wind {
-            let sim = match (wind.distributed, wind.material_gas) {
-                (true, Some(gas)) => SimLoop::init_with_material_distributed_spatial_wind(
-                    spec,
-                    wind.spec.clone(),
-                    gas,
-                )?,
-                (false, Some(gas)) => {
-                    SimLoop::init_with_material_spatial_wind(spec, wind.spec.clone(), gas)?
+            let sim = if let Some(profile) = wind.material_profile {
+                if wind.distributed {
+                    SimLoop::init_with_profile_distributed_spatial_wind(
+                        spec,
+                        wind.spec.clone(),
+                        profile,
+                    )?
+                } else {
+                    SimLoop::init_with_profile_spatial_wind(spec, wind.spec.clone(), profile)?
                 }
-                (true, None) => {
-                    SimLoop::init_with_distributed_spatial_wind(spec, wind.spec.clone())?
+            } else {
+                match (wind.distributed, wind.material_gas) {
+                    (true, Some(gas)) => SimLoop::init_with_material_distributed_spatial_wind(
+                        spec,
+                        wind.spec.clone(),
+                        gas,
+                    )?,
+                    (false, Some(gas)) => {
+                        SimLoop::init_with_material_spatial_wind(spec, wind.spec.clone(), gas)?
+                    }
+                    (true, None) => {
+                        SimLoop::init_with_distributed_spatial_wind(spec, wind.spec.clone())?
+                    }
+                    (false, None) => SimLoop::init_with_spatial_wind(spec, wind.spec.clone())?,
                 }
-                (false, None) => SimLoop::init_with_spatial_wind(spec, wind.spec.clone())?,
             };
             if &sim.run_intent_id != intent {
                 return Err(bad("spatial checkpoint belongs to a different scenario"));
@@ -905,7 +952,7 @@ impl SimLoop {
                 gust_w / v_air
             };
         let alpha_clamped = alpha.clamp(-0.55, 0.55);
-        let b = match self.force_buildup_current_wind(v_air, alpha_clamped, dc_eff) {
+        let initial_loads = match self.sampled_loads_current_wind(v_air, alpha_clamped, dc_eff) {
             Ok(b) => b,
             Err(refusal) => {
                 // The flight left the certified aero envelope (a wild
@@ -928,6 +975,8 @@ impl SimLoop {
                 return Ok(out);
             }
         };
+        let initial_density = initial_loads.rho_kg_m3;
+        let b = initial_loads.forces;
         // A rail already unloaded at tick start cannot supply a constraint,
         // friction or tow impulse during this free-flight interval. Classify
         // support before any rail mutation, then use the same airborne owner.
@@ -959,12 +1008,15 @@ impl SimLoop {
                         let alpha = midpoint
                             .as_ref()
                             .map_or(alpha_clamped, |sample| sample.alpha_rad);
+                        let rho_kg_m3 = midpoint
+                            .as_ref()
+                            .map_or(initial_density, |sample| sample.rho_kg_m3);
                         let loads = midpoint.as_ref().map_or(&b, |sample| &sample.forces);
                         // Reuse the accepted load stage for lateral forcing;
                         // common trim washout supplies no antisymmetric command.
                         let lateral_result = self
                             .warp_model
-                            .evaluate(self.warp, 0.5 * self.spec.rho_kg_m3 * v_air * v_air, alpha)
+                            .evaluate(self.warp, 0.5 * rho_kg_m3 * v_air * v_air, alpha)
                             .and_then(|loaded| {
                                 let (projection, norm) = loaded
                                     .strips
@@ -979,6 +1031,7 @@ impl SimLoop {
                                 self.step_lateral_current_wind(
                                     projection / norm,
                                     v_air,
+                                    rho_kg_m3,
                                     dc_eff,
                                     loads,
                                     dt,

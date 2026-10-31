@@ -22,6 +22,7 @@
 
 use crate::Refusal;
 use crate::assist::ASSIST_V1;
+use crate::atmosphere::MaterialAirProfile;
 use crate::simloop::{
     CATAPULT_1904_V1, CatapultSpec, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut,
     SpatialWindSpec, TerminalEvent,
@@ -157,6 +158,38 @@ pub fn record_replay_with_material_distributed_spatial_wind(
         spec,
         interval,
         |scenario| SimLoop::init_with_material_distributed_spatial_wind(scenario, wind, gas),
+        true,
+    )
+}
+
+/// Record an altitude-dependent material atmosphere on the CG wind lifecycle.
+/// V6 checkpoints retain the profile definition and ground datum, so resumed
+/// forces continue sampling hydrostatic pressure/density at evolving heights.
+pub fn record_replay_with_profile_spatial_wind(
+    spec: ScenarioSpec,
+    wind: SpatialWindSpec,
+    profile: MaterialAirProfile,
+    interval: u64,
+) -> Result<ReplayEnvelope, Refusal> {
+    record_initialized(
+        spec,
+        interval,
+        |scenario| SimLoop::init_with_profile_spatial_wind(scenario, wind, profile),
+        true,
+    )
+}
+
+/// Record the same material profile with distributed strip/disk wind sampling.
+pub fn record_replay_with_profile_distributed_spatial_wind(
+    spec: ScenarioSpec,
+    wind: SpatialWindSpec,
+    profile: MaterialAirProfile,
+    interval: u64,
+) -> Result<ReplayEnvelope, Refusal> {
+    record_initialized(
+        spec,
+        interval,
+        |scenario| SimLoop::init_with_profile_distributed_spatial_wind(scenario, wind, profile),
         true,
     )
 }

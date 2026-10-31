@@ -4,7 +4,8 @@
 //! The standard profile remains the existing material owner's USSA-1976 model;
 //! no pressure, density, viscosity or sound-speed formula is duplicated here.
 //! The optional force path samples this same state before the native aircraft
-//! and propeller solve. It does not alter the historical homogeneous SimLoop.
+//! and propeller solve. SimLoop's opt-in profile constructors use it at each
+//! native load stage; historical homogeneous scenarios remain unchanged.
 
 use crate::Refusal;
 use crate::aircraft::{ForceBuildup, OpenLoopDesign};
@@ -16,7 +17,7 @@ use fs_material::gas::atmosphere::StandardAtmosphere1976;
 use fs_math::det;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Profile {
+pub(crate) enum Profile {
     Uniform(GasState),
     Standard1976 {
         model: StandardAtmosphere1976,
@@ -29,7 +30,7 @@ enum Profile {
 /// distance above the aerodynamic ground plane. Their offset is explicit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialAirProfile {
-    profile: Profile,
+    pub(crate) profile: Profile,
 }
 
 fn invalid(message: impl Into<String>) -> Refusal {
