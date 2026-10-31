@@ -2,7 +2,7 @@
 //!
 //! The optical model is an ideal thin lens. Focus distance is the positive
 //! axial distance from the lens plane, not distance along each raster ray.
-//! Opt-in circular and bladed pupil diffraction covers incoherent, paraxial,
+//! Opt-in circular, annular and bladed pupil diffraction covers incoherent, paraxial,
 //! focused and declared-plane defocused imaging. Lens distortion, chromatic
 //! aberration, rolling shutter, and autofocus heuristics are outside this contract.
 
@@ -57,7 +57,7 @@ pub enum CameraError {
     InvalidExposureMetadata,
     /// A lens coordinate was outside the half-open unit square.
     InvalidLensSample,
-    /// Diffraction needs a circular or bladed pupil, a valid phase budget, and a
+    /// Diffraction needs a circular, annular or bladed pupil, a valid phase budget, and a
     /// supported opaque diffuse primary surface or distant environment.
     InvalidDiffraction,
     /// A diffraction camera requires wavelength-aware ray generation.
@@ -172,7 +172,7 @@ impl CameraError {
         const DIFFRACTION: &[CameraFix] = &[CameraFix {
             rank: 1,
             code: "pupil_diffraction",
-            message: "use spectral rays and a clear nonzero circular or regular bladed pupil with opaque diffuse sources in the declared depth model",
+            message: "use spectral rays and a nonzero circular, annular or regular bladed pupil with opaque diffuse sources and no additional pupil occlusion in the declared depth model",
         }];
         const EXPOSURE_METADATA: &[CameraFix] = &[
             CameraFix {
@@ -416,7 +416,8 @@ pub struct LensSample {
 }
 
 impl LensSample {
-    /// The aperture centre under both supported sampling maps.
+    /// Conventional midpoint of the lens-sample square. It maps to the centre
+    /// of a clear circular pupil, but remains on the opening of an annulus.
     pub const CENTER: Self = Self { u: 0.5, v: 0.5 };
 
     /// Admit two finite coordinates in `[0,1)`.
@@ -455,6 +456,10 @@ enum ApertureKind {
     Circular {
         radius_m: f64,
     },
+    Annular {
+        radius_m: f64,
+        inner_radius_m: f64,
+    },
     RegularPolygon {
         radius_m: f64,
         blades: u8,
@@ -464,6 +469,10 @@ enum ApertureKind {
 }
 
 impl Aperture {
+    /// Numerical/sampling admission for a centrally obscured circular pupil.
+    /// Narrower rings need a separately conditioned propagation model.
+    pub const MAX_ANNULAR_OBSCURATION_RATIO: f64 = 0.95;
+
     /// Admit a circular aperture. A radius of exactly zero is canonical pinhole.
     pub fn try_circular(radius_m: f64) -> Result<Self, CameraError> {
         if !radius_m.is_finite() || radius_m < 0.0 {
@@ -477,6 +486,32 @@ impl Aperture {
             Self {
                 kind: ApertureKind::Circular { radius_m },
             }
+        })
+    }
+
+    /// Admit a concentric annulus with declared outer and inner radii [m].
+    /// The inner/outer ratio may not exceed 0.95. An exactly zero inner radius
+    /// canonicalizes to the existing circular pupil (or pinhole if both zero).
+    pub fn try_annular(radius_m: f64, inner_radius_m: f64) -> Result<Self, CameraError> {
+        if !radius_m.is_finite()
+            || !inner_radius_m.is_finite()
+            || radius_m < 0.0
+            || inner_radius_m < 0.0
+        {
+            return Err(CameraError::InvalidAperture);
+        }
+        if inner_radius_m == 0.0 {
+            return Self::try_circular(radius_m);
+        }
+        let ratio = inner_radius_m / radius_m;
+        if !ratio.is_finite() || ratio <= 0.0 || ratio > Self::MAX_ANNULAR_OBSCURATION_RATIO {
+            return Err(CameraError::InvalidAperture);
+        }
+        Ok(Self {
+            kind: ApertureKind::Annular {
+                radius_m,
+                inner_radius_m,
+            },
         })
     }
 
@@ -538,15 +573,73 @@ impl Aperture {
         matches!(&self.kind, ApertureKind::Pinhole)
     }
 
-    /// Aperture radius (m).
+    /// Outer aperture radius (m), or circumradius for a regular polygon.
     #[must_use]
     pub const fn radius_m(&self) -> f64 {
         match &self.kind {
             ApertureKind::Pinhole => 0.0,
-            ApertureKind::Circular { radius_m } | ApertureKind::RegularPolygon { radius_m, .. } => {
-                *radius_m
-            }
+            ApertureKind::Circular { radius_m }
+            | ApertureKind::Annular { radius_m, .. }
+            | ApertureKind::RegularPolygon { radius_m, .. } => *radius_m,
         }
+    }
+
+    /// Whether the pupil has an explicitly declared central circular obstruction.
+    #[must_use]
+    pub const fn is_annular(&self) -> bool {
+        matches!(&self.kind, ApertureKind::Annular { .. })
+    }
+
+    /// Central obstruction radius [m], zero for every unobscured shape.
+    #[must_use]
+    pub const fn inner_radius_m(&self) -> f64 {
+        match &self.kind {
+            ApertureKind::Annular { inner_radius_m, .. } => *inner_radius_m,
+            _ => 0.0,
+        }
+    }
+
+    /// Inner/outer radius ratio, zero for every unobscured shape.
+    #[must_use]
+    pub fn obscuration_ratio(&self) -> f64 {
+        match &self.kind {
+            ApertureKind::Annular {
+                radius_m,
+                inner_radius_m,
+            } => inner_radius_m / radius_m,
+            _ => 0.0,
+        }
+    }
+
+    /// Physical transmitting area [m²], including a central obstruction or
+    /// actual blade vertices. The ideal pinhole has zero physical area.
+    /// This is a collection-area query: the current camera averages radiance
+    /// over its admitted opening and does not multiply exposure by this area.
+    /// Refuses when a nonzero physical area cannot be represented finitely.
+    pub fn transmitting_area_m2(&self) -> Result<f64, CameraError> {
+        let area = match &self.kind {
+            ApertureKind::Pinhole => return Ok(0.0),
+            ApertureKind::Circular { radius_m } => (PI * radius_m) * radius_m,
+            ApertureKind::Annular {
+                radius_m,
+                inner_radius_m,
+            } => (PI * (radius_m - inner_radius_m)) * (radius_m + inner_radius_m),
+            ApertureKind::RegularPolygon {
+                radius_m, vertices, ..
+            } => {
+                let mut twice_area = 0.0;
+                for index in 0..vertices.len() {
+                    let a = vertices[index].map(|v| v / radius_m);
+                    let b = vertices[(index + 1) % vertices.len()].map(|v| v / radius_m);
+                    twice_area += a[0] * b[1] - a[1] * b[0];
+                }
+                (0.5 * twice_area * radius_m) * radius_m
+            }
+        };
+        if !area.is_finite() || area <= 0.0 {
+            return Err(CameraError::InvalidAperture);
+        }
+        Ok(area)
     }
 
     /// Blade count for a regular polygon aperture.
@@ -554,7 +647,9 @@ impl Aperture {
     pub const fn blades(&self) -> Option<u8> {
         match &self.kind {
             ApertureKind::RegularPolygon { blades, .. } => Some(*blades),
-            ApertureKind::Pinhole | ApertureKind::Circular { .. } => None,
+            ApertureKind::Pinhole
+            | ApertureKind::Circular { .. }
+            | ApertureKind::Annular { .. } => None,
         }
     }
 
@@ -563,7 +658,9 @@ impl Aperture {
     pub const fn rotation_rad(&self) -> Option<f64> {
         match &self.kind {
             ApertureKind::RegularPolygon { rotation_rad, .. } => Some(*rotation_rad),
-            ApertureKind::Pinhole | ApertureKind::Circular { .. } => None,
+            ApertureKind::Pinhole
+            | ApertureKind::Circular { .. }
+            | ApertureKind::Annular { .. } => None,
         }
     }
 
@@ -585,6 +682,18 @@ impl Aperture {
                     radius_m * radius * det::cos(theta),
                     radius_m * radius * det::sin(theta),
                 ]
+            }
+            ApertureKind::Annular {
+                radius_m,
+                inner_radius_m,
+            } => {
+                let ratio = inner_radius_m / radius_m;
+                let fraction = (1.0 - ratio) * (1.0 + ratio);
+                // Uniform in r², with hypot preserving the inner endpoint
+                // even when squaring its ratio would underflow.
+                let radius = det::hypot(*inner_radius_m, radius_m * det::sqrt(fraction * sample.u));
+                let (sin, cos) = det::sin_cos(2.0 * PI * sample.v);
+                [radius * cos, radius * sin]
             }
             ApertureKind::RegularPolygon {
                 blades, vertices, ..

@@ -354,6 +354,7 @@ fn g1_camera_pupil_and_exposure_do_not_scale_uniform_luminance() {
             Aperture::try_circular(0.0).unwrap(),
             Aperture::try_circular(0.03).unwrap(),
             Aperture::try_circular(0.5).unwrap(),
+            Aperture::try_annular(0.5, 0.3).unwrap(),
             Aperture::try_regular_polygon(0.5, 5, 0.37).unwrap(),
         ] {
             let camera = camera(&scene, 3.0, aperture);

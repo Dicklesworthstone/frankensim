@@ -16,7 +16,7 @@
 //! <https://nijboerzernike.nl/_PDF/BraatProgOpt2008_20140413.pdf>;
 //! NIST DLMF 10.17, 10.54.1, 10.60.7 and 10.74(iv).
 
-use fs_math::{det, special::bessel_j1};
+use fs_math::{c64::C64, det, special::bessel_j1};
 
 const PI: f64 = core::f64::consts::PI;
 pub(super) const MAX_PHASE_RAD: f64 = 16.0;
@@ -58,6 +58,30 @@ impl CircularDefocus {
         if radius == 0.0 {
             return self.coefficients[0] * self.coefficients[0] / (4.0 * PI);
         }
+        let (re, im) = self.reduced_amplitude(radius);
+        (re * re + im * im) / (4.0 * PI)
+    }
+
+    /// Full disk amplitude, including its common pupil phase. Coherent pupil
+    /// composition must use this before squaring: the removed phase differs
+    /// for an annulus's inner disk. Existing disk intensity arithmetic is kept.
+    pub(super) fn amplitude(&self, radius: f64) -> C64 {
+        if self.phase_rad == 0.0 {
+            return C64::from_re(jinc(radius));
+        }
+        let (re, mut im) = if radius == 0.0 {
+            (self.coefficients[0], 0.0)
+        } else {
+            self.reduced_amplitude(radius)
+        };
+        if self.phase_rad < 0.0 {
+            im = -im;
+        }
+        let (sin, cos) = det::sin_cos(0.5 * self.phase_rad);
+        C64::new(re, im) * C64::new(cos, sin)
+    }
+
+    fn reduced_amplitude(&self, radius: f64) -> (f64, f64) {
         let radial = odd_bessel_over_radius(radius);
         let (mut re, mut im, mut cr, mut ci) = (0.0, 0.0, 0.0, 0.0);
         for (n, (&coefficient, bessel)) in self.coefficients.iter().zip(radial).enumerate() {
@@ -69,7 +93,7 @@ impl CircularDefocus {
                 _ => compensated(&mut im, &mut ci, term),
             }
         }
-        (re * re + im * im) / (4.0 * PI)
+        (re, im)
     }
 }
 

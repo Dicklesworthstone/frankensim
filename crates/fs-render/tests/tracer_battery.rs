@@ -1804,7 +1804,7 @@ fn full_path_owen_vs_pixel_owen_equal_spp_logged() {
 }
 
 /// G2/G3: a focused emitter outside the geometrical centre ray contributes
-/// through circular and bladed pupil diffraction; absolute sample chunks
+/// through circular, obscured and bladed pupil diffraction; absolute sample chunks
 /// still replay bitwise for each physical aperture.
 #[test]
 fn diffraction_render_resolves_light_outside_geometric_image_and_replays() {
@@ -1828,6 +1828,7 @@ fn diffraction_render_resolves_light_outside_geometric_image_and_replays() {
         assert_eq!(ray_image.xyz[0], [0.0; 3]);
         for (name, aperture) in [
             ("circular", Aperture::try_circular(1.0e-3).unwrap()),
+            ("annular", Aperture::try_annular(1.0e-3, 6.0e-4).unwrap()),
             (
                 "triangular",
                 Aperture::try_regular_polygon(1.0e-3, 3, 0.37).unwrap(),
@@ -2012,6 +2013,7 @@ fn defocused_plane_render_transports_light_and_replays() {
     with_cx(|cx| {
         for (name, aperture) in [
             ("circular", Aperture::try_circular(1.0e-3).unwrap()),
+            ("annular", Aperture::try_annular(1.0e-3, 6.0e-4).unwrap()),
             (
                 "triangular",
                 Aperture::try_regular_polygon(1.0e-3, 3, 0.37).unwrap(),
@@ -2251,6 +2253,7 @@ fn defocused_infinite_plane_preserves_uniform_radiance() {
             render_cinematic(&scene, &geometric, CutSide::After, cx, &settings, shutter).unwrap();
         for (name, aperture) in [
             ("circular", Aperture::try_circular(1.0e-3).unwrap()),
+            ("annular", Aperture::try_annular(1.0e-3, 6.0e-4).unwrap()),
             (
                 "pentagonal",
                 Aperture::try_regular_polygon(1.0e-3, 5, 0.21).unwrap(),

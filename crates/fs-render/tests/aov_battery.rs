@@ -1734,6 +1734,77 @@ fn g3_progressive_ranges_equal_straight_through_and_mismatch_rolls_back() {
 }
 
 #[test]
+fn annular_obscuration_changes_progressive_camera_binding() {
+    let scene = scene(false);
+    let settings = settings(4);
+    let camera = |inner| {
+        let physical = PhysicalCamera::try_legacy_compatible(
+            scene.camera.eye,
+            scene.camera.forward,
+            scene.camera.up,
+            scene.camera.half_tan,
+            2.0,
+            Aperture::try_annular(0.01, inner).unwrap(),
+        )
+        .unwrap();
+        AnimatedCamera::try_static(701, 0.0, 1.0, physical).unwrap()
+    };
+    let original = camera(0.002);
+    let mut film = fs_render::aov::CinematicAovFilm::try_new(
+        1,
+        1,
+        config(CinematicAovProfile::FinalDiagnostic),
+    )
+    .unwrap();
+    with_cx(|cx| {
+        render_cinematic_range_with_aovs(
+            &scene,
+            &original,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut film,
+            0,
+            2,
+            shutter(),
+        )
+        .unwrap();
+        let before = film.to_exr().unwrap();
+        // Same outer radius, view, focus and shot. Only the physical pupil's
+        // inner edge changes; this must not reuse prior image/AOV samples.
+        for changed in [camera(0.004), camera(0.0)] {
+            assert_eq!(
+                render_cinematic_range_with_aovs(
+                    &scene,
+                    &changed,
+                    CutSide::After,
+                    cx,
+                    &settings,
+                    &mut film,
+                    2,
+                    4,
+                    shutter(),
+                ),
+                Err(CinematicAovError::ProgressiveBindingMismatch),
+            );
+            assert_eq!(film.to_exr().unwrap(), before);
+        }
+        render_cinematic_range_with_aovs(
+            &scene,
+            &original,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut film,
+            2,
+            4,
+            shutter(),
+        )
+        .unwrap();
+    });
+}
+
+#[test]
 fn g4_reference_time_refusal_precedes_any_aov_publication() {
     let scene = scene(true);
     let camera = camera(&scene);

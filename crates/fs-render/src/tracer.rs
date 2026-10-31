@@ -9835,6 +9835,8 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
     let aperture = camera.aperture();
     let aperture_tag = if aperture.is_pinhole() {
         0
+    } else if aperture.is_annular() {
+        3
     } else if aperture.blades().is_some() {
         2
     } else {
@@ -9844,6 +9846,11 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
     update_continuity_f64(hasher, aperture.radius_m());
     hasher.update(&[aperture.blades().unwrap_or(0)]);
     update_continuity_f64(hasher, aperture.rotation_rad().unwrap_or(0.0));
+    if aperture.is_annular() {
+        // The obscuration changes both geometric bokeh and the coherent
+        // pupil transform. Keep existing clear-pupil continuity bytes intact.
+        update_continuity_f64(hasher, aperture.inner_radius_m());
+    }
     let exposure = camera.exposure_metadata();
     update_continuity_f64(hasher, exposure.sensitivity_iso());
     update_continuity_f64(hasher, exposure.compensation_ev());

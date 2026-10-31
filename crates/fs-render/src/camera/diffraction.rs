@@ -14,7 +14,7 @@
 //! <https://qiweb.tudelft.nl/aoi/incoherentimaging/incoherentimaging/>
 //!
 //! The focused policy bounds omitted quadratic phase. The finite-defocus
-//! policy propagates the circular pupil at an explicit object plane, with
+//! policy propagates the declared pupil at an explicit object plane, with
 //! phase `pi*a^2/lambda * (1/z - 1/s)`, and gates residual depth error.
 //! Geometric pupil blur is not added to either wave PSF. Coherence between
 //! scene points, polarization, aberrations and pupil-dependent occlusion are
@@ -26,15 +26,17 @@ use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
+mod annular;
 mod circular;
 mod polygon;
+use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
 use polygon::PolygonPupil;
 
 const PI: f64 = core::f64::consts::PI;
 const PROPOSAL_RADIUS: f64 = 2.0;
 
-/// Explicit in-focus scalar diffraction for circular and regular bladed pupils.
+/// Explicit in-focus scalar diffraction for circular, annular and bladed pupils.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FocusedDiffraction {
     maximum_defocus_phase_rad: f64,
@@ -133,7 +135,7 @@ pub struct SpectralCameraRay<const N: usize> {
 }
 
 impl PhysicalCamera {
-    /// Select in-focus diffraction for a nonzero circular or bladed pupil. The rendered
+    /// Select in-focus diffraction for a nonzero circular, annular or bladed pupil. The rendered
     /// raster retains the camera's declared angular field of view. The pupil
     /// sets optical resolution; it is not also sampled for geometric defocus.
     /// A declared physical focal length requires focus beyond that length,
@@ -158,7 +160,7 @@ impl PhysicalCamera {
         self.diffraction
     }
 
-    /// Select finite-defocus propagation through a circular or regular bladed pupil.
+    /// Select finite-defocus propagation through a circular, annular or bladed pupil.
     /// The sensor remains at the conjugate of the camera's focus distance;
     /// the declared object plane may lie in front of or behind that focus.
     /// The wavelength-dependent rim phase must remain within 16 radians.
@@ -199,13 +201,16 @@ impl PhysicalCamera {
     /// directional spikes without a pupil raster or an image convolution.
     /// The finite-defocus policy evaluates the propagated pupil
     /// itself and widens the proposal to cover its geometric blur radius.
+    /// Annuli coherently subtract the inner disk before squaring and use a
+    /// narrow/broad Cauchy mixture that also covers their wider diffraction rings.
     /// The lens and diffraction draws must be independent
     /// of pixel, wavelength, BSDF and shutter draws. Geometric cameras ignore
     /// diffraction samples and wavelengths and return unit weights.
     ///
     /// Wavelengths are in nanometres. Scalar admission requires `lambda/D <=
     /// 0.01` for every wavelength, using the inscribed pupil diameter for a
-    /// regular polygon. Call [`Self::admit_diffraction_depth`] on the
+    /// regular polygon and the radial opening width for an annulus.
+    /// Call [`Self::admit_diffraction_depth`] on the
     /// primary visible surface (or infinite environment) before accepting the
     /// path. Primary surfaces must be opaque diffuse: a mirror/refractor's
     /// virtual-image depth is not its first-hit depth. Volumetric primary
@@ -233,7 +238,33 @@ impl PhysicalCamera {
         let (minimum, maximum) = self.diffraction_wavelength_range(wavelengths_nm)?;
         let reference_nm = 0.5 * minimum + 0.5 * maximum;
         let scale = (reference_nm * 1.0e-9 / self.aperture.radius_m()) / (2.0 * PI);
-        let (x, y, weights) = if let Some(policy) = self.defocused_diffraction {
+        let (x, y, weights) = if self.aperture.is_annular() {
+            let obscuration = self.aperture.obscuration_ratio();
+            let reference_phase = self
+                .defocused_diffraction
+                .map_or(Ok(0.0), |policy| self.defocus_phase(policy, reference_nm))?;
+            let (radius, proposal) =
+                annular::sample_radius(obscuration, reference_phase, diffraction_sample.u());
+            let (sin_phi, cos_phi) = det::sin_cos(2.0 * PI * diffraction_sample.v());
+            let mut weights = [0.0; N];
+            for (weight, &wavelength_nm) in weights.iter_mut().zip(wavelengths_nm) {
+                cx.checkpoint()?;
+                let ratio = reference_nm / wavelength_nm;
+                let phase = self
+                    .defocused_diffraction
+                    .map_or(Ok(0.0), |policy| self.defocus_phase(policy, wavelength_nm))?;
+                let pupil = AnnularPupil::new(obscuration, phase);
+                *weight = ratio * ratio * pupil.density(ratio * radius) / proposal;
+                if !weight.is_finite() || *weight < 0.0 {
+                    return Err(CameraError::InvalidDiffraction);
+                }
+            }
+            (
+                x_tan + scale * radius * cos_phi,
+                y_tan + scale * radius * sin_phi,
+                weights,
+            )
+        } else if let Some(policy) = self.defocused_diffraction {
             let reference_phase = self.defocus_phase(policy, reference_nm)?;
             if let ApertureKind::RegularPolygon { vertices, .. } = &self.aperture.kind {
                 let pupil = PolygonPupil::new(self.aperture.radius_m(), vertices);
@@ -362,6 +393,10 @@ impl PhysicalCamera {
                 let amplitude = jinc(det::sqrt(radius_squared));
                 amplitude * amplitude / (4.0 * PI)
             }
+            ApertureKind::Annular { .. } => {
+                AnnularPupil::new(self.aperture.obscuration_ratio(), 0.0)
+                    .density(det::sqrt(radius_squared))
+            }
             ApertureKind::RegularPolygon { vertices, .. } => {
                 PolygonPupil::new(self.aperture.radius_m(), vertices).density(q)
             }
@@ -377,6 +412,7 @@ impl PhysicalCamera {
     /// Evaluate the selected finite-defocus PSF per angular-raster area.
     /// The integral is one; the on-axis value is physical pupil area divided
     /// by wavelength squared, times `sinc(phase/2)^2` for a circular pupil;
+    /// for an annulus the sinc argument includes its clear area fraction;
     /// bladed pupils propagate their actual polygon. No finite image radius
     /// truncates the rings or tails. This stack-only query uses the same
     /// bounded kernel and wavelength admission as the spectral ray path.
@@ -406,6 +442,9 @@ impl PhysicalCamera {
                     .ok_or(CameraError::InvalidDiffraction)?
             }
             ApertureKind::Circular { .. } => CircularDefocus::new(phase).density(radius),
+            ApertureKind::Annular { .. } => {
+                AnnularPupil::new(self.aperture.obscuration_ratio(), phase).density(radius)
+            }
             ApertureKind::Pinhole => return Err(CameraError::InvalidDiffraction),
         } / scale
             / scale;
@@ -469,6 +508,10 @@ impl PhysicalCamera {
     ) -> Result<(f64, f64), CameraError> {
         self.admit_diffraction_projection()?;
         let radius_m = match &self.aperture.kind {
+            ApertureKind::Annular {
+                radius_m,
+                inner_radius_m,
+            } => 0.5 * (radius_m - inner_radius_m),
             ApertureKind::RegularPolygon {
                 radius_m, blades, ..
             } => radius_m * det::cos(PI / f64::from(*blades)),

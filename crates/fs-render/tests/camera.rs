@@ -335,6 +335,7 @@ fn every_sampled_nonzero_lens_ray_converges_on_the_axial_focus_plane() {
     let focus_distance_m = 4.5;
     let apertures = [
         Aperture::try_circular(0.18).unwrap(),
+        Aperture::try_annular(0.18, 0.12).unwrap(),
         Aperture::try_regular_polygon(0.18, 7, 0.37).unwrap(),
     ];
     let lens_samples = [
@@ -368,6 +369,268 @@ fn every_sampled_nonzero_lens_ray_converges_on_the_axial_focus_plane() {
             }
         }
     });
+}
+
+#[test]
+fn annular_aperture_admission_and_physical_collection_area() {
+    let annulus = Aperture::try_annular(0.01, 0.006).unwrap();
+    assert!(annulus.is_annular());
+    assert!(!annulus.is_pinhole());
+    assert_eq!(annulus.radius_m(), 0.01);
+    assert_eq!(annulus.inner_radius_m(), 0.006);
+    assert_eq!(annulus.obscuration_ratio(), 0.6);
+    assert_eq!(annulus.blades(), None);
+    assert_eq!(annulus.rotation_rad(), None);
+    assert_close(
+        annulus.transmitting_area_m2().unwrap(),
+        core::f64::consts::PI * (0.01_f64.powi(2) - 0.006_f64.powi(2)),
+        1.0e-19,
+        "annular physical collection area",
+    );
+    for radius in [0.0, 0.01] {
+        let circular = Aperture::try_circular(radius).unwrap();
+        assert_eq!(Aperture::try_annular(radius, 0.0).unwrap(), circular);
+        assert!(!circular.is_annular());
+        assert_eq!(circular.inner_radius_m(), 0.0);
+        assert_eq!(circular.obscuration_ratio(), 0.0);
+        assert_eq!(
+            circular.transmitting_area_m2().unwrap(),
+            (core::f64::consts::PI * radius) * radius
+        );
+    }
+    for blades in [3, 4, 7, 64] {
+        let radius = 0.01;
+        let polygon = Aperture::try_regular_polygon(radius, blades, 0.31).unwrap();
+        let expected = 0.5
+            * f64::from(blades)
+            * radius
+            * radius
+            * (2.0 * core::f64::consts::PI / f64::from(blades)).sin();
+        assert_close(
+            polygon.transmitting_area_m2().unwrap(),
+            expected,
+            1.0e-18,
+            "actual polygon area",
+        );
+    }
+    assert!(Aperture::try_annular(1.0, Aperture::MAX_ANNULAR_OBSCURATION_RATIO).is_ok());
+    for (outer, inner) in [
+        (0.0, 0.1),
+        (1.0, 0.9500001),
+        (1.0, 1.0),
+        (1.0, -0.1),
+        (-1.0, 0.0),
+        (f64::NAN, 0.0),
+        (1.0, f64::INFINITY),
+    ] {
+        assert_eq!(
+            Aperture::try_annular(outer, inner),
+            Err(CameraError::InvalidAperture)
+        );
+    }
+    for radius in [1.0e-200, 1.0e200] {
+        assert_eq!(
+            Aperture::try_annular(radius, 0.6 * radius)
+                .unwrap()
+                .transmitting_area_m2(),
+            Err(CameraError::InvalidAperture)
+        );
+    }
+}
+
+#[test]
+fn annular_geometric_pupil_samples_only_the_opening_with_uniform_area() {
+    let outer = 0.7;
+    let inner = 0.42;
+    let camera = axial_camera(Aperture::try_annular(outer, inner).unwrap(), 3.0);
+    let grid = 64_u32;
+    let mut mean = [0.0; 2];
+    let mut mean_square = 0.0;
+    with_cx(|_, cx| {
+        for row in 0..grid {
+            for column in 0..grid {
+                let sample = LensSample::try_new(
+                    (f64::from(column) + 0.5) / f64::from(grid),
+                    (f64::from(row) + 0.5) / f64::from(grid),
+                )
+                .unwrap();
+                let ray = camera
+                    .generate_ray_from_tangent_offsets(cx, 0.13, -0.07, sample)
+                    .unwrap();
+                let [x, y] = lens_coordinates(&camera, ray.origin);
+                let square = x * x + y * y;
+                assert!(square >= inner * inner && square <= outer * outer);
+                assert_close(
+                    ray.origin.delta_from(camera.eye()).dot(camera.forward()),
+                    0.0,
+                    2.0e-15,
+                    "annular pupil plane",
+                );
+                mean[0] += x;
+                mean[1] += y;
+                mean_square += square;
+            }
+        }
+        // Exact sampler endpoints and the conventional centre draw also stay
+        // outside the obstruction; no disk rejection or centre-ray fallback.
+        for u in [0.0, 0.5, 1.0 - 0.5 * f64::EPSILON] {
+            let sample = LensSample::try_new(u, 0.23).unwrap();
+            let ray = camera
+                .generate_spectral_ray_from_tangent_offsets(
+                    cx,
+                    0.0,
+                    0.0,
+                    sample,
+                    LensSample::CENTER,
+                    &[400.0, 550.0, 700.0],
+                )
+                .unwrap();
+            let radius = ray.ray.origin.delta_from(camera.eye()).norm();
+            assert!(
+                radius >= inner * (1.0 - 8.0 * f64::EPSILON)
+                    && radius <= outer * (1.0 + 8.0 * f64::EPSILON)
+            );
+            assert_eq!(
+                ray.weights, [1.0; 3],
+                "radiance averages are not exposure-calibrated irradiance"
+            );
+        }
+    });
+    let count = f64::from(grid * grid);
+    assert_close(mean[0] / count, 0.0, 1.0e-14, "annular mean x");
+    assert_close(mean[1] / count, 0.0, 1.0e-14, "annular mean y");
+    assert_close(
+        mean_square / count,
+        0.5 * (outer * outer + inner * inner),
+        1.0e-13,
+        "uniform annular E[r²]",
+    );
+}
+
+#[test]
+fn annular_spectral_camera_retains_coherent_defocus_and_opening_admission() {
+    let radius = 1.0e-3;
+    let obscuration = 0.6;
+    let aperture = Aperture::try_annular(radius, obscuration * radius).unwrap();
+    let focus = 0.25;
+    let wavelength = 550.0;
+    let lambda = wavelength * 1.0e-9;
+    let clear_fraction = (1.0 - obscuration) * (1.0 + obscuration);
+    let phase = 2.0 * core::f64::consts::PI / clear_fraction;
+    let inverse_shift = phase * lambda / (core::f64::consts::PI * radius * radius);
+    let object_depth = 1.0 / (1.0 / focus + inverse_shift);
+    let focused = axial_camera(aperture.clone(), focus)
+        .with_in_focus_diffraction(FocusedDiffraction::try_new(0.01).unwrap())
+        .unwrap();
+    let peak = aperture.transmitting_area_m2().unwrap() / (lambda * lambda);
+    assert_close(
+        focused
+            .in_focus_diffraction_density([0.0; 2], wavelength)
+            .unwrap(),
+        peak,
+        1.0e-12 * peak,
+        "annular focused peak uses clear area",
+    );
+    let offset = [0.0002, -0.0001];
+    let focused_density = focused
+        .in_focus_diffraction_density(offset, wavelength)
+        .unwrap();
+    assert_close(
+        focused
+            .in_focus_diffraction_density(offset.map(|v| 2.0 * v), 2.0 * wavelength)
+            .unwrap(),
+        0.25 * focused_density,
+        1.0e-12 * peak,
+        "annular diffraction wavelength scaling",
+    );
+    let camera = axial_camera(aperture.clone(), focus)
+        .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(object_depth), 0.0).unwrap())
+        .unwrap();
+    assert!(
+        camera
+            .defocused_diffraction_density([0.0; 2], wavelength)
+            .unwrap()
+            < 1.0e-25 * peak
+    );
+    for wavelength_nm in [400.0, 700.0] {
+        let argument = 0.5 * phase * clear_fraction * wavelength / wavelength_nm;
+        let expected = aperture.transmitting_area_m2().unwrap() / (wavelength_nm * 1.0e-9).powi(2)
+            * (argument.sin() / argument).powi(2);
+        assert_close(
+            camera
+                .defocused_diffraction_density([0.0; 2], wavelength_nm)
+                .unwrap(),
+            expected,
+            1.0e-12 * peak,
+            "annular chromatic phase interference",
+        );
+    }
+    let opposite = axial_camera(aperture, focus)
+        .with_defocused_diffraction(
+            DefocusedDiffraction::try_new(Some(1.0 / (1.0 / focus - inverse_shift)), 0.0).unwrap(),
+        )
+        .unwrap();
+    assert_close(
+        camera
+            .defocused_diffraction_density(offset, wavelength)
+            .unwrap(),
+        opposite
+            .defocused_diffraction_density(offset, wavelength)
+            .unwrap(),
+        1.0e-12 * peak,
+        "signed circularly symmetric annular defocus",
+    );
+    assert!(
+        camera
+            .admit_diffraction_depth(Some(Point3::new(0.1, 0.0, -object_depth)), &[400.0, 700.0])
+            .is_ok()
+    );
+    assert_eq!(
+        camera.admit_diffraction_depth(Some(Point3::new(0.0, 0.0, -focus)), &[550.0]),
+        Err(CameraError::DefocusOutsideDiffractionModel)
+    );
+    with_cx(|_, cx| {
+        let draw = |model: &PhysicalCamera, u, lens| {
+            model
+                .generate_spectral_ray_from_tangent_offsets(
+                    cx,
+                    0.0,
+                    0.0,
+                    lens,
+                    LensSample::try_new(u, 0.23).unwrap(),
+                    &[400.0, 550.0, 700.0],
+                )
+                .unwrap()
+        };
+        let axis = draw(&camera, 0.0, LensSample::CENTER);
+        assert!(axis.weights[1] < 1.0e-24);
+        assert!(axis.weights[0] > 0.01 && axis.weights[2] > 0.01);
+        for model in [&focused, &camera] {
+            for u in [0.37, 0.5, 0.83, 1.0 - 0.5 * f64::EPSILON] {
+                let a = draw(model, u, LensSample::CENTER);
+                let b = draw(model, u, LensSample::try_new(0.1, 0.9).unwrap());
+                assert_eq!(a.ray.origin, model.eye());
+                assert_eq!(a.ray.dir, b.ray.dir);
+                assert_eq!(a.weights, b.weights, "pupil is propagated exactly once");
+                assert!(a.weights.iter().all(|v| v.is_finite() && *v >= 0.0));
+            }
+        }
+    });
+    let narrow = axial_camera(Aperture::try_annular(5.0e-5, 4.0e-5).unwrap(), focus)
+        .with_in_focus_diffraction(FocusedDiffraction::try_new(0.0).unwrap())
+        .unwrap();
+    assert_eq!(
+        narrow.in_focus_diffraction_density([0.0; 2], 550.0),
+        Err(CameraError::InvalidDiffraction),
+        "scalar admission uses the radial opening width"
+    );
+    assert!(
+        axial_camera(Aperture::try_circular(5.0e-5).unwrap(), focus)
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.0).unwrap())
+            .unwrap()
+            .in_focus_diffraction_density([0.0; 2], 550.0)
+            .is_ok()
+    );
 }
 
 #[test]

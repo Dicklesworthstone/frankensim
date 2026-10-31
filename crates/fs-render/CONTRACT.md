@@ -2005,6 +2005,25 @@ triangle reuses vertex zero bit-exactly. Radius zero canonicalizes to a true
 pinhole. `Aperture::try_from_f_number` uses
 `radius = focal_length / (2*f_number)`.
 
+`Aperture::try_annular(a,b)` declares a concentric circular obstruction with
+outer radius `a` and inner radius `b`. Its inner/outer ratio must be representable
+and at most 0.95; zero inner radius canonicalizes to the existing circle or
+pinhole. The 0.95 ceiling is a numerical and sampling admission, not a physical
+claim that narrower rings cannot exist. Geometric lens samples are uniform in
+`r²=b²+u*(a²-b²)` with an independent uniform azimuth. A scaled `hypot` form
+avoids squaring physical radii and preserves the inner endpoint. No rejection
+loop or sampled origin inside the obstruction is substituted. The conventional
+`LensSample::CENTER` is a unit-square midpoint, not a ray through this blocked
+centre. `inner_radius_m`, `obscuration_ratio` and `is_annular` expose the shape.
+
+`transmitting_area_m2` returns the actual collection area for each pupil:
+zero for an ideal pinhole, `pi*a²` for a circle, `pi*(a-b)*(a+b)` for an annulus,
+and the represented vertex area for a polygon. Nonzero areas that cannot be
+represented as finite positive `f64` refuse. This is separate from the camera's
+unit-power radiance average: no hidden aperture-area exposure multiplier is
+introduced. Annular geometric rays also use the existing photometric path's
+pupil-averaged radiance convention.
+
 `CameraShot` linearly interpolates eye position, uses deterministic
 shortest-arc quaternion SLERP for orientation, and linearly interpolates either
 axial focus distance or an explicitly moving world focus point. It returns
@@ -2040,8 +2059,9 @@ broader provenance closure.
 
 `PhysicalCamera::with_in_focus_diffraction(FocusedDiffraction)` opts the
 cinematic spectral tracer into scalar, paraxial, incoherent pupil imaging.
-It requires a nonzero circular or regular 3–64-blade aperture,
-`lambda/(2*inradius) <= 0.01` (the usual radius for a circle), and an explicit
+It requires a nonzero circular, annular or regular 3–64-blade aperture,
+`lambda/(2*inradius) <= 0.01` for circles/polygons or
+`lambda/(a-b) <= 0.01` for an annulus, and an explicit
 maximum pupil-rim defocus phase between zero and 0.1 radians. A physical
 focal-length declaration requires focus beyond that focal length, admitting
 only a positive conjugate image distance. First-hit surfaces must have an
@@ -2066,6 +2086,20 @@ two-variate Cauchy proposal has the same inverse-cubic radial-density tail,
 with no rejection loop, image-space convolution buffer, or ring cutoff.
 Each wavelength receives its own PSF/proposal weight before spectral XYZ
 integration; no wavelength is treated as a representative achromatic blur.
+
+A concentric annulus retains coherent interference between its two curved
+edges. With `e=b/a`, its focused amplitude is
+`B(q)=2*(J1(q)-e*J1(e*q))/q` and its unit-integral dimensionless density is
+`abs(B)²/(4*pi*(1-e²))`. Its focused peak is the actual transmitting area
+divided by wavelength squared. Removing the centre changes the rings and the
+central peak; it does not merely darken an otherwise unchanged Airy function.
+Small image radii use a factored series. The finite-defocus composition below
+uses the same pupil and normalization. Its complete-support proposal is an
+equal mixture of isotropic Cauchy densities with scales 2 and
+`max(2,2*abs(phi_reference),1/(1-e))`. This keeps the narrow central lobe while
+covering the wider ring groups of an obscured pupil. Every draw evaluates the
+full mixture PDF for each wavelength; both components retain inverse-cubic
+area-density tails without an angular cutoff or rejection loop.
 
 Regular bladed pupils use the analytic Fourier transform of their actual
 polygon edges. With unit-circumradius pupil area `A`, transform `F(q)` and
@@ -2117,7 +2151,7 @@ that kernel. These are numerical model checks, not measured lens validation.
 ### Finite-defocus pupil imaging
 
 `PhysicalCamera::with_defocused_diffraction(DefocusedDiffraction)` selects
-scalar propagation of a circular or regular 3–64-blade pupil at a declared object plane. The
+scalar propagation of a circular, annular or regular 3–64-blade pupil at a declared object plane. The
 policy takes a positive axial object distance in metres (`Some(z0)`) or
 infinity (`None`), plus a residual depth-phase budget in `[0,0.1]` radians.
 It replaces the focused policy rather than combining the two. The camera's
@@ -2144,6 +2178,8 @@ refuse. The mesh scan occurs once at render admission, and actual sampled
 hits retain the depth check. Camera-only consumers must establish equivalent
 clear-pupil and pupil-independent-radiance conditions themselves: a first-hit
 depth check cannot detect an obstacle that clips only part of a pupil.
+For an annular aperture, the declared concentric obstruction is part of the
+propagated pupil; these conditions forbid additional scene-dependent clipping.
 
 For dimensionless image radius `q=2*pi*a*abs(theta)/lambda`, the propagated
 amplitude is `A(q,phi)=2*integral_0^1 r*J0(q*r)*exp(i*phi*r²) dr`; the
@@ -2173,6 +2209,23 @@ PSF/proposal weights. Cancellation is polled between spectral lanes.
 The expansion follows Braat et al., *Progress in Optics* 51 (2008), equations
 2.45 and 2.61, <https://nijboerzernike.nl/_PDF/BraatProgOpt2008_20140413.pdf>,
 with the coefficient bound from NIST DLMF 10.54.1 and 10.60.7.
+
+Annular finite defocus splits that same complex pupil integral at the inner
+radius. With `e=b/a` and `delta=(1-e)*(1+e)`, its propagated amplitude is
+`B(q,phi)=A(q,phi)-e²*A(e*q,e²*phi)`, and its normalized density is
+`abs(B)²/(4*pi*delta)`. Both disk amplitudes restore their different common
+`exp(i*phi/2)` factors before subtraction. The signed phase is retained;
+negative phase conjugates the complete amplitude. Subtracting disk intensities
+or their phase-stripped complex series would give a different optical model.
+The on-axis limit is evaluated directly as
+`delta*sinc(phi*delta/2)²/(4*pi)`, including its nulls. The existing outer-rim
+phase cap of 16 applies to both constituent disk evaluations; a small annular
+phase spread does not relax that cap. The clear-area fraction is at least
+0.0975 at the admitted maximum ratio, bounding the cancellation associated
+with subtracting nearly coincident disks. This uses two bounded circular
+expansions, with no additional quadrature, pupil raster or radius-dependent
+work. A zero-width ring is refused: it has no transmitting area and its
+formal `J0²` limit is not a normalizable two-dimensional PSF.
 
 Bladed defocus instead propagates the actual polygon by exact Fresnel boundary
 identities. Its normalized density is `abs(F(q,phi))²/(4*pi²*area)`, where
@@ -2204,7 +2257,7 @@ The existing blade-aligned product-Cauchy mixture widens with defocus to cover
 the geometric pupil footprint and its directional diffraction ridges. Each
 packet lane evaluates the actual signed phase and its own PSF/proposal weight.
 For odd blade counts, changing defocus sign mirrors the intensity pattern:
-`I(q,-phi)=I(-q,phi)`; using `abs(phi)` would be physically wrong. Circular
+`I(q,-phi)=I(-q,phi)`; using `abs(phi)` would be physically wrong. Circular, annular
 and even-blade pupils also have central symmetry. The boundary identities
 follow Barnett, *arXiv:2010.05978*, Appendix A, equations 19 and 22,
 <https://arxiv.org/pdf/2010.05978>, and Huang, Christian and McDonald,
@@ -2223,8 +2276,14 @@ area-integral landmarks through stationary edge/vertex points, branch
 transitions and far tails; signed odd-blade patterns; rotation; focused-bit
 preservation; extreme full-support draws; and three-wavelength unit power with
 16,384 Hammersley samples for triangular and heptagonal pupils (1% integration
-band). Camera tests bind these kernels to physical aperture area, wavelength
-scaling, rotated rays and separate packet weights. The
+band). Annular tests compare direct adaptive integrals over the opening
+against coherent disk composition, including recurrence transitions, both
+phase signs, 0.95 obscuration and image radius 1000. They check axial nulls,
+exact clear-disk limits, finite extreme draws and unit power at three
+wavelengths using 65,536 radial mixture draws (0.6% integration band).
+Camera tests bind these kernels to physical aperture area, wavelength
+scaling, geometric annulus support and area moments, radial-width admission,
+rotated rays and separate packet weights. The
 phase cap bounds numerical work; it does not certify the paraxial, high-NA,
 wide-angle, lens-aberration or measured-lens error. General multi-depth
 occlusion, virtual images, coherent scene transport
@@ -3069,7 +3128,7 @@ the legacy display-white normalization. Y therefore reports cd/m². The old
 entry points pass no fixture context and retain their previous arithmetic.
 
 The explicit physical camera supports focal length plus active vertical sensor
-height, axial focus distance, and circular or regular bladed pupils through the
+height, axial focus distance, and circular, annular or regular bladed pupils through the
 original thin-lens ray generator. Image dimensions declare aspect ratio. Lens
 draws use the native independent Philox camera-lens domain at the same absolute
 pixel/sample address; they do not consume wavelength, fixture, phase or BSDF
