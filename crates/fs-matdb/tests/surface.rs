@@ -237,6 +237,53 @@ fn g1_constant_shared_edge_does_not_flatten_either_nonconstant_cell() {
 }
 
 #[test]
+fn g1_near_edge_pressure_composition_keeps_nonzero_source_weight() {
+    let pressure = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Pressure, ValueForm::Static,
+    ));
+    let fraction = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Composition(fs_qty::semantic::CompositionBasis::MoleFraction),
+        ValueForm::Static,
+    ));
+    let query = |p, x| QueryPoint::new().with_quantity("p", pressure, p).unwrap()
+        .with_quantity("x", fraction, x).unwrap();
+    for triangle in [[0, 1, 2], [2, 1, 0]] {
+        let mut claims = ClaimSet::new();
+        let id = claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new("coefficient", Dims::NONE),
+            value: PropertyValue::Surface2D {
+                axes: ["p".into(), "x".into()],
+                axis_dims: [fs_qty::Pressure::DIMS, Dims::NONE],
+                samples: vec![([200000.0, 0.0], 0.0), ([200000.0, 1.0], 1e16), ([50000.0, 1.0], 0.0)],
+                triangles: vec![triangle], dims: Dims::NONE,
+            },
+            validity: ValidityDomain::unconstrained()
+                .with_quantity("p", pressure, 50000.0, 200000.0)
+                .with_quantity("x", fraction, 0.0, 1.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::LinearInside,
+            observations: vec![],
+            provenance: Provenance { source: "manufactured pressure/composition near-edge interpolation".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+        // Binary64 0.4 lies 1/(5*2^53) above exact 2/5. At p=140000,
+        // this is the true opposite-vertex barycentric weight, although the
+        // ordinary determinant subtracts equal rounded products to zero.
+        // Amplification makes ignoring that weight visibly incorrect.
+        let answer = claims.query_pinned("coefficient", &query(140000.0, 0.4), id).unwrap();
+        assert_close(answer.evidence.value.value, 1e16 / (5.0 * (1_u64 << 53) as f64));
+        assert!(answer.evidence.value.value > 0.2);
+        claims.verify_receipt(&answer.receipt).unwrap();
+        // Exact edges retain their exact source value; a one-ulp outside
+        // point stays outside. No tolerance or simplex clipping is introduced.
+        let edge = claims.query_pinned("coefficient", &query(125000.0, 0.5), id).unwrap();
+        assert_eq!(edge.evidence.value.value, 0.0);
+        assert!(matches!(claims.query_pinned("coefficient", &query(140000.0, 0.4_f64.next_down()), id),
+            Err(MatDbError::OutsideSurfaceSupport { .. })));
+    }
+}
+
+#[test]
 fn g1_axis_independent_slices_agree_across_cells_and_interior_queries() {
     for (values, axis, lower, upper, queries, expected) in [
         (

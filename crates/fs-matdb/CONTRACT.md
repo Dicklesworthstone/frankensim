@@ -286,6 +286,11 @@ Membership and topology use `fs_ivl::orient2d`. Source and query coordinates
 must be zero or have magnitude in `[2^-200, 2^200]`, within that owner's
 finite, no-underflow predicate domain. One response admits at most 4096
 samples and 1024 triangles; admission checks are explicitly bounded.
+If exact orientation gives a nonzero barycentric area but ordinary arithmetic
+rounds it to zero, the original `fs_ivl` expansion arithmetic evaluates that
+same determinant before rounding its weight. This bounded fallback preserves
+source/query coordinates, exact membership and the final representability
+refusal; it introduces no edge snapping or tolerance enlargement.
 When every vertex with a nonzero barycentric weight has a bit-identical
 ordinate, interpolation preserves that source value exactly, including its
 zero sign. This covers constant cells and constant edges without flattening

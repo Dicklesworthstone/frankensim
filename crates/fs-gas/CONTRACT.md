@@ -1023,6 +1023,25 @@ is inferred from species names, molecular masses, heat capacities or collision
 diameters. State-dependent or composition-restricted laws implement that same
 source query directly. Existing molecular laws omit the extra closure by default.
 
+With `material`, `MaterialSoretDufourTransport<L>` supplies this closure from
+original material-card scalar, curve or two-coordinate surface claims. Each
+canonical species is explicitly assigned a signed J/kg kinetic coefficient
+key, card and selection policy, and an explicit typed mole-fraction query axis.
+The caller declares the wrapped law's conductivity at zero diffusive species
+flux; partial enthalpies cannot substitute for these kinetic coefficients.
+Construction resolves a reference state, then pins the exact selected claims.
+Every face refreshes the original sources at actual T,p and composition,
+preserving fixed external conditions and full usage receipts. Original static
+source admission rejects unowned frequency, field or rate response and
+unsupported scalar constancy. Missing/ambiguous claims, type/domain/source
+refusal and cancellation publish no partial coefficients or new retained cross
+receipts. A successful face's coefficient and heat requests reuse one resolved
+cross query; source resolution allocates and is not an allocation-free kernel
+claim. Existing material transport omits cross coupling by default.
+Manufactured surface fixtures independently verify the resulting Soret/Dufour
+flux and entropy across changing T,p,x, plus source pinning, absent species,
+typed admission and atomic refusal; they are not measured-material qualification.
+
 The shared axial/network/planar/spatial face adds the balanced Soret force
 `d_i^T = x_i M_i (H_i-Hbar)/(R T) grad(T)/T`, with `Hbar=sum_i Y_i H_i`,
 to the original ideal chemical/pressure forces before calling the same

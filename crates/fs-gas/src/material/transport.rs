@@ -6,6 +6,12 @@
 //! viscosity/conductivity outputs are explicitly unused. Bulk viscosity is an
 //! explicit nonnegative declaration, never inferred from either source.
 
+mod thermal_cross;
+pub use thermal_cross::{
+    MaterialSoretDufourTransport, ResolvedMaterialHeatsOfTransport, SpeciesHeatOfTransportMaterial,
+    ThermalConductivityConvention,
+};
+
 use crate::multicomponent::dissipation::{
     DissipationError, TransportCoefficients, TransportLaw, validate_binary,
 };

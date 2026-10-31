@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fs_ivl::expansion::{diff_expansion, estimate, expansion_diff, expansion_product};
 use fs_ivl::{Sign, orient2d};
 
 use crate::{EvaluationDecision, InterpolationPolicy, MatDbError};
@@ -161,6 +162,24 @@ fn vertices(samples: &[([f64; 2], f64)], triangle: [u32; 3]) -> [[f64; 2]; 3] {
 
 fn determinant(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
     (a[0] - c[0]) * (b[1] - c[1]) - (a[1] - c[1]) * (b[0] - c[0])
+}
+
+// A genuine near-edge area can disappear in the rounded product difference
+// even though the exact membership predicate resolves its nonzero sign. The
+// original expansion owner retains BOTH coordinate-subtraction and product
+// tails; rounding that exact determinant recovers the weight without moving
+// the query, clipping it to an edge, or changing source-cell membership.
+// Source/query coordinate admission already bounds this degree-two arithmetic
+// inside the finite, no-underflow expansion domain. This is a cold fallback.
+fn expanded_determinant(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    let acx = diff_expansion(a[0], c[0]);
+    let acy = diff_expansion(a[1], c[1]);
+    let bcx = diff_expansion(b[0], c[0]);
+    let bcy = diff_expansion(b[1], c[1]);
+    estimate(&expansion_diff(
+        &expansion_product(&acx, &bcy),
+        &expansion_product(&acy, &bcx),
+    ))
 }
 
 fn opposite(a: Sign, b: Sign) -> bool {
@@ -416,6 +435,9 @@ pub(crate) fn evaluate(
                 let b = positions[(vertex + 2) % 3];
                 if orient2d(a, b, point) != Sign::Zero {
                     weights[vertex] = determinant(a, b, point).abs();
+                    if weights[vertex] == 0.0 {
+                        weights[vertex] = expanded_determinant(a, b, point).abs();
+                    }
                     if weights[vertex] == 0.0 {
                         return Err(MatDbError::UnsupportedEvaluation {
                             reason: "surface interpolation weights are numerically unresolved",

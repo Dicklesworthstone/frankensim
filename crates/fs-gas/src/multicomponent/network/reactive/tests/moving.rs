@@ -55,7 +55,7 @@ fn fixture(hot: bool) -> (ReactingNetwork1d, Molecular, NetworkWallOperator<'sta
     (flow, molecular, wall)
 }
 
-fn sources(wall: &mut NetworkWallOperator<'static>) -> NetworkSources<'_, 'static> {
+fn sources<'a>(wall: &'a mut NetworkWallOperator<'static>) -> NetworkSources<'a, 'static> {
     NetworkSources {
         wall: Some((wall, WallControl::default())),
         valves: None,

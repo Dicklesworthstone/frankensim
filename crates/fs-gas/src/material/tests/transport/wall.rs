@@ -180,7 +180,11 @@ fn borrowed_original_solid_chart_and_current_gas_materials_share_reacting_wall_s
         };
         // Deliberately authored verification chart, with retained original
         // material owner; no experimentally calibrated solid is claimed.
-        let curve = EquilibriumEnthalpyPhaseCurve::try_new(ClaimSet::new().content_hash(),
+        let chart_card = MaterialCard::assemble(MaterialStateId {
+            chemistry: "manufactured-wall".into(), phase: "solid-liquid".into(),
+            process: "authored-verification-chart".into(), revision: 0,
+        }, ClaimSet::new(), vec![]).unwrap();
+        let curve = EquilibriumEnthalpyPhaseCurve::try_new(chart_card.content_hash(),
             vec![knot(0.0, 350.0, 0.0), knot(100.0*capacity, 450.0, 0.0),
                 knot(200.0*capacity, 500.0, 0.0), knot(300.0*capacity, 500.0, 1.0)]).unwrap();
         let original = curve.pure_solid_thermal_law().unwrap();

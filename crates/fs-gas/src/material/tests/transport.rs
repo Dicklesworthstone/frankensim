@@ -12,6 +12,7 @@ use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 use std::cell::Cell;
 use std::rc::Rc;
 
+mod thermal_cross;
 mod wall;
 
 fn card(name: &str, mu: f64, k: f64, maximum_temperature: f64) -> SpeciesTransportMaterial {
@@ -51,7 +52,7 @@ fn card(name: &str, mu: f64, k: f64, maximum_temperature: f64) -> SpeciesTranspo
                 chemistry: name.into(),
                 phase: "gas".into(),
                 process: "manufactured-transport".into(),
-                revision: 1,
+                revision: 0,
             },
             claims,
             vec![],
