@@ -1356,6 +1356,29 @@ Positive pressure, obtuse angles, pinning, evaporation, cavitation, dynamic
 pinch-off and bridge topology changes are outside its scope. A solver or
 stability refusal does not manufacture rupture, surface release or heat.
 
+## Closed-mass capillary material continuation
+
+`BridgeVolumeConstraint` supplies the same explicit closed-liquid choice to the
+planar and axisymmetric original-source refresh paths. `FixedVolume` retains the
+existing density-equality admission. `FixedMass` derives the new volume from the
+original retained mass and refreshed density, to floating-point roundoff. The
+same original liquid and ordered wetting claims remain selected; volume change
+does not substitute a density, phase, equilibrium angle or topology. Planar
+attached/detached history, invariant width and all physical limits remain active.
+
+`SourceAxisymmetricCapillaryBridge::refresh_at_query_point` resolves the actual
+Young--Laplace shape on the existing suction/stability branch at the predecessor's
+requested gap. The original equilibrium budget and a parameter-work error estimate
+including both quadrature and root-gap terms must admit the result. The immutable
+candidate carries its exact predecessor, successor and signed surface free-energy
+parameter work. Branch exit, unsupported source, unresolved work or cancellation
+refuses without mutation. This is endpoint material continuation, not a transient
+thermal solver: surface parameter work is distinct from deposited heat, bulk
+pressure work, latent heat and a complete thermodynamic energy balance. No flow,
+evaporation, phase change or branch jump is inferred. Focused tests cover mass and
+volume response, both planar topologies, original 3-D sources, reverse parameter
+work, branch/accuracy refusal and cancellation.
+
 ## Axisymmetric capillary work against actual mechanical compliance
 
 `capillary_bridge::axisymmetric::load_line::AxisymmetricBridgeLoadLine`

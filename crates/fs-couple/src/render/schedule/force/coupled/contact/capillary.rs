@@ -34,7 +34,8 @@ use fs_contact::capillary_bridge::axisymmetric::load_line::{
     AxisymmetricBridgeLoadLine, AxisymmetricLoadLineConfig, AxisymmetricLoadLineError,
 };
 use fs_contact::capillary_bridge::axisymmetric::{
-    AxisymmetricError, AxisymmetricState, AxisymmetricStep, SourceAxisymmetricCapillaryBridge,
+    AxisymmetricBridgeSourceRefresh, AxisymmetricError, AxisymmetricState, AxisymmetricStep,
+    SourceAxisymmetricCapillaryBridge,
 };
 use fs_contact::capillary_bridge::contact_line::load_line::{
     ContactLineBridgeLoadLine, ContactLineLoadLineConfig, ContactLineLoadLineError,
@@ -339,6 +340,72 @@ impl<'a> CapillaryModalSystem<'a> {
 }
 
 impl<'a> CapillaryModalSystem<'a, AxisymmetricBridgeLoadLine<'a>> {
+    /// Adopt an original-source 3-D material endpoint without advancing mechanics.
+    ///
+    /// The true mechanical gap remains unchanged; a newly converged profile
+    /// never replaces it. Original gap and energy-accuracy budgets admit the
+    /// numerical endpoint. Clock, coordinates, connections and prior observation
+    /// remain intact. Returned surface parameter work is separate from heat and
+    /// subsequent mechanical work. Any refusal leaves the complete owner intact.
+    pub fn apply_source_refresh(
+        &mut self,
+        refresh: &'a AxisymmetricBridgeSourceRefresh,
+        gate: &CancelGate,
+    ) -> Result<f64, CapillaryModalError> {
+        poll(Some(gate))?;
+        if refresh.previous_state() != self.state {
+            return Err(AxisymmetricError::StateMismatch.into());
+        }
+        self.source.evaluate(refresh.previous_state())?;
+        let source = refresh.source();
+        let state = refresh.state();
+        let profile = source.evaluate(state)?;
+        let config = self.load_line.config();
+        let gap_tolerance = finite(
+            config.mechanical.gap_absolute_tolerance_m
+                + config.mechanical.gap_relative_tolerance * self.gap_m.abs(),
+        )?;
+        for gap in [refresh.gap_m(), profile.gap_m] {
+            let residual = finite(gap - self.gap_m)?;
+            if residual.abs() > gap_tolerance {
+                return Err(CapillaryModalError::GapMismatch {
+                    residual_m: residual,
+                    tolerance_m: gap_tolerance,
+                });
+            }
+        }
+        let load_line =
+            AxisymmetricBridgeLoadLine::new(source, self.load_line.compliance_m_per_n(), config)?;
+        let before = self.total_energy_j()?;
+        let after = finite(self.network.total_energy_j()? + profile.surface_free_energy_j)?;
+        limit(
+            "native/capillary energy magnitude after source refresh",
+            after.abs(),
+            self.network.config.maximum_total_energy_j,
+        )?;
+        let energy_tolerance = finite(
+            self.network.config.energy_absolute_tolerance_j
+                + self.network.config.energy_relative_tolerance
+                    * before
+                        .abs()
+                        .max(after.abs())
+                        .max(refresh.parameter_work_j().abs()),
+        )?;
+        let error = refresh.estimated_parameter_work_error_j();
+        if error > energy_tolerance {
+            return Err(CapillaryModalError::EnergyAccuracy {
+                residual_j: 0.0,
+                estimated_error_j: error,
+                tolerance_j: energy_tolerance,
+            });
+        }
+        poll(Some(gate))?;
+        self.source = source;
+        self.state = state;
+        self.load_line = load_line;
+        Ok(refresh.parameter_work_j())
+    }
+
     /// Couple the original fixed-volume 3-D bridge to actual native body motion.
     /// Its admitted branch, source accuracy and substrate identities remain in
     /// force. The caller must establish quasistatic liquid applicability.

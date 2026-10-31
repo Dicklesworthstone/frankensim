@@ -1,7 +1,9 @@
 //! Actual three-dimensional, axisymmetric capillary adhesion between plates.
 //!
-//! The liquid has fixed volume and its two mobile contact lines obey the original
-//! (possibly different) acute Young angles. Gravity-free Young--Laplace profiles
+//! Each mechanical continuation has fixed liquid volume; an explicit source
+//! endpoint can change it under a closed-mass constraint. The two mobile contact
+//! lines obey the original (possibly different) acute Young angles.
+//! Gravity-free Young--Laplace profiles
 //! have one neck and nonpositive liquid-minus-gas pressure. With neck radius a,
 //! q=-Delta_p*a/gamma >= 0, and tangent angle beta measured from the axis,
 //! r cos(beta)+q r²/(2a)=a(1+q/2). This first integral reduces the shape/volume
@@ -35,11 +37,12 @@
 //! https://doi.org/10.1093/imamat/hxv016; the explicit conservative bound above
 //! is derived here for radial graphs with the stated boundary/volume constraints.
 
-use super::{BridgeError, finite, limit, poll, positive};
+use super::{BridgeError, BridgeVolumeConstraint, finite, limit, poll, positive, refresh_sources};
 use crate::normal_patch::PointNormalPort;
 use core::f64::consts::{FRAC_PI_2, PI};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
+use fs_matdb::{InterfaceSystemCard, MaterialCard, QueryPoint};
 use fs_material::liquid::surface::adhesion::YoungDupreLaw;
 use fs_material::liquid::surface::{ResolvedLiquidSurfaceState, ResolvedLiquidWettingState};
 use fs_math::det;
@@ -264,6 +267,47 @@ pub struct SourceAxisymmetricCapillaryBridge {
     limits: AxisymmetricLimits,
     identity: ContentHash,
 }
+
+/// Original-source material endpoint on the same admitted Young--Laplace branch.
+/// Publish this candidate only with the receiving mechanics' acceptance.
+#[derive(Clone, Debug)]
+pub struct AxisymmetricBridgeSourceRefresh {
+    source: SourceAxisymmetricCapillaryBridge,
+    previous: AxisymmetricState,
+    state: AxisymmetricState,
+    gap_m: f64,
+    parameter_work_j: f64,
+    estimated_parameter_work_error_j: f64,
+}
+impl AxisymmetricBridgeSourceRefresh {
+    #[must_use]
+    pub const fn source(&self) -> &SourceAxisymmetricCapillaryBridge {
+        &self.source
+    }
+    #[must_use]
+    pub const fn previous_state(&self) -> AxisymmetricState {
+        self.previous
+    }
+    #[must_use]
+    pub const fn state(&self) -> AxisymmetricState {
+        self.state
+    }
+    /// The predecessor's requested gap, recovered from its explicit root residual.
+    #[must_use]
+    pub const fn gap_m(&self) -> f64 {
+        self.gap_m
+    }
+    /// Signed change of surface free energy, separate from plate work and heat.
+    #[must_use]
+    pub const fn parameter_work_j(&self) -> f64 {
+        self.parameter_work_j
+    }
+    /// Original quadrature and gap-root work error estimates, not an enclosure.
+    #[must_use]
+    pub const fn estimated_parameter_work_error_j(&self) -> f64 {
+        self.estimated_parameter_work_error_j
+    }
+}
 impl SourceAxisymmetricCapillaryBridge {
     pub fn new(
         liquid: ResolvedLiquidSurfaceState,
@@ -392,6 +436,93 @@ impl SourceAxisymmetricCapillaryBridge {
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
+    }
+
+    /// Continue the same original liquid and ordered surfaces at a new endpoint.
+    ///
+    /// `FixedMass` resolves thermal expansion from the refreshed density; no
+    /// material, source claim, phase, branch, plate gap or physical limit is
+    /// substituted. The existing shape solver must establish the same selected
+    /// suction/stability branch at the predecessor's requested physical gap.
+    /// Quadrature and root-gap contributions must fit the supplied work budget.
+    ///
+    /// The signed surface parameter work is not deposited heat, bulk pressure
+    /// work, latent heat or a complete thermodynamic balance. This operation
+    /// establishes endpoint support only, not a transient thermal/meniscus path.
+    pub fn refresh_at_query_point(
+        &self,
+        previous: AxisymmetricState,
+        material: &MaterialCard,
+        interfaces: [&InterfaceSystemCard; 2],
+        point: &QueryPoint,
+        constraint: BridgeVolumeConstraint,
+        budget: AxisymmetricWorkBudget,
+        gate: &CancelGate,
+    ) -> Result<AxisymmetricBridgeSourceRefresh, AxisymmetricError> {
+        poll(gate)?;
+        let before = self.evaluate(previous)?;
+        budget.equilibrium.validate()?;
+        positive(
+            budget.absolute_tolerance_j,
+            "source parameter-work absolute tolerance",
+        )?;
+        if !budget.relative_tolerance.is_finite()
+            || budget.relative_tolerance < 0.0
+            || budget.relative_tolerance >= 1.0
+        {
+            return Err(invalid("source parameter-work relative tolerance"));
+        }
+        let (liquid, wetting, volume) = refresh_sources(
+            &self.liquid,
+            &self.wetting,
+            self.volume,
+            material,
+            interfaces,
+            point,
+            constraint,
+        )?;
+        let source = Self::new(liquid, wetting, volume, self.branch, self.limits)?;
+        let gap_m = positive(
+            before.gap_m - previous.report.gap_residual_m,
+            "retained physical source-refresh gap",
+        )?;
+        let state = source.solve_gap(gap_m, Some(previous.q), budget.equilibrium, gate)?;
+        let after = state.profile;
+        let parameter_work_j = finite(
+            after.surface_free_energy_j - before.surface_free_energy_j,
+            "axisymmetric surface parameter work",
+        )?;
+        let error = finite(
+            previous.report.surface_energy_error_estimate_j
+                + state.report.surface_energy_error_estimate_j
+                + before.normal_force_n.abs() * previous.report.gap_residual_m.abs()
+                + after.normal_force_n.abs() * state.report.gap_residual_m.abs(),
+            "axisymmetric source parameter-work error estimate",
+        )?;
+        let tolerance = finite(
+            budget.absolute_tolerance_j + budget.relative_tolerance * parameter_work_j.abs(),
+            "axisymmetric source parameter-work tolerance",
+        )?;
+        if error > tolerance {
+            return Err(AxisymmetricError::WorkUnresolved {
+                estimated_error_j: error,
+                tolerance_j: tolerance,
+            });
+        }
+        limit(
+            parameter_work_j.abs(),
+            self.limits.maximum_abs_step_work_j,
+            "axisymmetric source parameter work",
+        )?;
+        poll(gate)?;
+        Ok(AxisymmetricBridgeSourceRefresh {
+            source,
+            previous,
+            state,
+            gap_m,
+            parameter_work_j,
+            estimated_parameter_work_error_j: error,
+        })
     }
 
     /// Authenticate and read an accepted equilibrium without solving it again.

@@ -2,7 +2,8 @@
 //!
 //! This is the exact two-dimensional, gravity-free circular-meniscus model:
 //! an invariant out-of-plane direction (reported over a supplied width), fixed
-//! liquid volume, equal acute Young angles, and quasistatic mobile contact lines.
+//! liquid volume between explicit source endpoints, equal acute Young angles,
+//! and quasistatic mobile contact lines.
 //! The actual source owners remain immutable. With A=V/width, c=cos(theta),
 //! s=sin(theta), alpha=pi/2-theta, the wetted span is A/h+k h, where
 //! k=(alpha-sc)/(2c²). The same surface free energy gives
@@ -233,6 +234,68 @@ pub struct SourcePlanarCapillaryBridge {
     identity: ContentHash,
 }
 
+/// Closed-liquid constraint during an externally prescribed source update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BridgeVolumeConstraint {
+    /// Retain volume; a density change would change mass and therefore refuses.
+    FixedVolume,
+    /// Retain mass to floating-point roundoff by resolving V_new = rho_old V_old/rho_new.
+    /// This admits thermal expansion within the same liquid phase and source.
+    /// It does not model inflow, evaporation, latent heat or bulk pressure work.
+    FixedMass,
+}
+
+// Both geometries refresh the same original source selections and ordered wetting
+// systems. A volume update never substitutes a density or an equilibrium angle.
+fn refresh_sources(
+    liquid: &ResolvedLiquidSurfaceState,
+    wetting: &[ResolvedLiquidWettingState; 2],
+    volume_m3: f64,
+    material: &MaterialCard,
+    interfaces: [&InterfaceSystemCard; 2],
+    point: &QueryPoint,
+    constraint: BridgeVolumeConstraint,
+) -> Result<
+    (
+        ResolvedLiquidSurfaceState,
+        [ResolvedLiquidWettingState; 2],
+        f64,
+    ),
+    BridgeError,
+> {
+    let updated = ResolvedLiquidSurfaceState::try_from_material(
+        liquid.material().at_query_point(material, point)?,
+        liquid.viscosity_basis(),
+        liquid.capillarity(),
+    )?;
+    let volume = match constraint {
+        BridgeVolumeConstraint::FixedVolume => {
+            if updated.density_kg_m3().to_bits() != liquid.density_kg_m3().to_bits() {
+                return Err(BridgeError::Invalid {
+                    field: "fixed-volume source refresh must preserve liquid density and mass",
+                });
+            }
+            volume_m3
+        }
+        BridgeVolumeConstraint::FixedMass => {
+            if updated.density_kg_m3().to_bits() == liquid.density_kg_m3().to_bits() {
+                volume_m3
+            } else {
+                let mass = positive(liquid.density_kg_m3() * volume_m3, "retained liquid mass")?;
+                positive(
+                    mass / updated.density_kg_m3(),
+                    "mass-preserving liquid volume",
+                )?
+            }
+        }
+    };
+    let surfaces = [
+        wetting[0].at_query_point_with_liquid(interfaces[0], point, &updated)?,
+        wetting[1].at_query_point_with_liquid(interfaces[1], point, &updated)?,
+    ];
+    Ok((updated, surfaces, volume))
+}
+
 /// Source-preserving parameter change at one accepted gap and topology.
 /// The old bridge remains untouched until its consumer accepts this candidate.
 #[derive(Clone, Debug)]
@@ -418,29 +481,45 @@ impl SourcePlanarCapillaryBridge {
         point: &QueryPoint,
         gate: &CancelGate,
     ) -> Result<PlanarBridgeSourceRefresh, BridgeError> {
+        self.refresh_at_query_point_with_volume(
+            previous,
+            material,
+            interfaces,
+            point,
+            BridgeVolumeConstraint::FixedVolume,
+            gate,
+        )
+    }
+
+    /// Refresh the original sources under an explicit closed-liquid constraint.
+    ///
+    /// `FixedMass` allows density-driven volume change while preserving width,
+    /// mechanical gap and the attached/detached history. Both geometries and
+    /// their free energies are evaluated at that same plate gap. The resulting
+    /// parameter work includes the surface response to volume and wetting; it
+    /// is not a complete thermal/bulk energy balance or deposited heat.
+    /// A new volume that exits the selected topology or physical limits refuses.
+    pub fn refresh_at_query_point_with_volume(
+        &self,
+        previous: BridgeState,
+        material: &MaterialCard,
+        interfaces: [&InterfaceSystemCard; 2],
+        point: &QueryPoint,
+        constraint: BridgeVolumeConstraint,
+        gate: &CancelGate,
+    ) -> Result<PlanarBridgeSourceRefresh, BridgeError> {
         poll(gate)?;
         let before = self.evaluate(previous)?;
-        let liquid = ResolvedLiquidSurfaceState::try_from_material(
-            self.liquid.material().at_query_point(material, point)?,
-            self.liquid.viscosity_basis(),
-            self.liquid.capillarity(),
-        )?;
-        if liquid.density_kg_m3().to_bits() != self.liquid.density_kg_m3().to_bits() {
-            return Err(BridgeError::Invalid {
-                field: "fixed-volume source refresh must preserve liquid density and mass",
-            });
-        }
-        let wetting = [
-            self.wetting[0].at_query_point_with_liquid(interfaces[0], point, &liquid)?,
-            self.wetting[1].at_query_point_with_liquid(interfaces[1], point, &liquid)?,
-        ];
-        let source = Self::new(
-            liquid,
-            wetting,
+        let (liquid, wetting, volume) = refresh_sources(
+            &self.liquid,
+            &self.wetting,
             self.geometry.volume,
-            self.geometry.width,
-            self.limits,
+            material,
+            interfaces,
+            point,
+            constraint,
         )?;
+        let source = Self::new(liquid, wetting, volume, self.geometry.width, self.limits)?;
         if previous.attached && previous.gap_m >= source.rupture_gap_m()
             || !previous.attached && previous.gap_m <= source.formation_gap_m()
         {

@@ -21,9 +21,15 @@ fn numerical() -> AxisymmetricNumerics {
 fn model3d(sigma: f64) -> SourceAxisymmetricCapillaryBridge {
     let (liquid, lower) = sources(1.1, sigma, 300.0, true);
     let (_, upper) = sources(1.3, sigma, 300.0, true);
+    bridge3d(liquid, [lower[0].clone(), upper[1].clone()])
+}
+fn bridge3d(
+    liquid: ResolvedLiquidSurfaceState,
+    wetting: [ResolvedLiquidWettingState; 2],
+) -> SourceAxisymmetricCapillaryBridge {
     SourceAxisymmetricCapillaryBridge::new(
         liquid,
-        [lower[0].clone(), upper[1].clone()],
+        wetting,
         VOLUME,
         AxisymmetricBranch {
             minimum_suction_parameter: 0.0,
@@ -145,6 +151,137 @@ fn owner(
         &gate,
     )
     .unwrap()
+}
+
+#[test]
+fn g3_g4_thermal_expansion_refresh_keeps_native_motion_clock_and_observation() {
+    let (original, lower) = source_cards(1.1, 0.05, true);
+    let (_, upper) = source_cards(1.3, 0.05, true);
+    let curves = |original: &ClaimSet| {
+        let mut claims = ClaimSet::new();
+        for (_, original) in original.claims_ordered() {
+            let factor = match original.key.name() {
+                "density" => 0.95,
+                SURFACE_TENSION_PROPERTY | EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY => 0.8,
+                _ => 1.0,
+            };
+            let mut changed = original.clone();
+            let PropertyValue::Scalar { value, dims } = original.value else {
+                unreachable!()
+            };
+            changed.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: fs_qty::Temperature::DIMS,
+                knots: vec![(300.0, value), (320.0, factor * value)],
+                dims,
+            };
+            changed.interpolation = InterpolationPolicy::LinearInside;
+            claims.insert_claim(changed).unwrap();
+        }
+        claims
+    };
+    let material =
+        MaterialCard::assemble(original.id().clone(), curves(original.claims()), vec![]).unwrap();
+    let surfaces = [lower[0].clone(), upper[1].clone()].map(|card| {
+        InterfaceSystemCard::assemble(
+            card.surface_a().clone(),
+            card.surface_b().clone(),
+            card.context().clone(),
+            curves(card.claims()),
+            vec![],
+        )
+        .unwrap()
+    });
+    let (liquid, wetting) = resolved_sources(&material, &surfaces, 300.0, true);
+    let source = bridge3d(liquid, wetting);
+    let gate = CancelGate::new_clock_free();
+    let mut system = owner(&source, true);
+    let initial_state = system.state();
+    let mut control = owner(&source, true);
+    for _ in 0..3 {
+        system.step(&[0.0; 2], 0.0).unwrap();
+        control.step(&[0.0; 2], 0.0).unwrap();
+    }
+    let state = system.state();
+    let gap = system.gap_m();
+    let energy = system.total_energy_j().unwrap();
+    let frame = *system.last_frame().unwrap();
+    let bodies: Vec<_> = system
+        .components()
+        .iter()
+        .map(|m| m.states().to_vec())
+        .collect();
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    let stale = source
+        .refresh_at_query_point(
+            initial_state,
+            &material,
+            surfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedMass,
+            controls().contact.work,
+            &gate,
+        )
+        .unwrap();
+    let refresh = source
+        .refresh_at_query_point(
+            state,
+            &material,
+            surfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedMass,
+            controls().contact.work,
+            &gate,
+        )
+        .unwrap();
+    assert!(system.apply_source_refresh(&stale, &gate).is_err());
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(system.apply_source_refresh(&refresh, &cancelled).is_err());
+    assert_eq!(system.state(), state);
+    assert_eq!(system.total_energy_j().unwrap(), energy);
+    assert_eq!(system.samples_rendered(), 3);
+    assert_eq!(system.last_frame(), Some(&frame));
+    assert_eq!(
+        system
+            .components()
+            .iter()
+            .map(|m| m.states().to_vec())
+            .collect::<Vec<_>>(),
+        bodies
+    );
+
+    let work = system.apply_source_refresh(&refresh, &gate).unwrap();
+    close(system.total_energy_j().unwrap() - energy, work, 1e-21);
+    close(
+        system.source().liquid().density_kg_m3() * system.state().profile().liquid_volume_m3,
+        source.liquid().density_kg_m3() * VOLUME,
+        1e-21,
+    );
+    assert_eq!(system.gap_m(), gap);
+    assert_eq!(system.samples_rendered(), 3);
+    assert_eq!(system.last_frame(), Some(&frame));
+    assert_eq!(
+        system
+            .components()
+            .iter()
+            .map(|m| m.states().to_vec())
+            .collect::<Vec<_>>(),
+        bodies
+    );
+    assert!(system.apply_source_refresh(&refresh, &gate).is_err());
+    let next = *system.step(&[0.0; 2], 0.0).unwrap();
+    let unchanged = *control.step(&[0.0; 2], 0.0).unwrap();
+    assert_ne!(next.applied_mean_force_n, unchanged.applied_mean_force_n);
+    let mut loss = next.network_dissipation_j;
+    for _ in 0..10 {
+        loss += system.step(&[0.0; 2], 0.0).unwrap().network_dissipation_j;
+    }
+    close(
+        system.total_energy_j().unwrap() + loss,
+        energy + work,
+        1e-15,
+    );
 }
 
 #[test]

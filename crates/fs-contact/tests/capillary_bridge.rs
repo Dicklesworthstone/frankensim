@@ -204,6 +204,143 @@ fn near(a: f64, b: f64, rel: f64, scale: f64) {
         "{a:e} != {b:e}"
     );
 }
+#[test]
+fn g3_fixed_mass_refresh_expands_both_branches_without_creating_liquid() {
+    let gate = CancelGate::new_clock_free();
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    let cold = QueryPoint::new().with("T", 300.0).unwrap();
+    for young in [false, true] {
+        let (card, surfaces) = temperature_cards(young, 0.9, 1.04);
+        let (liquid, wetting) = resolved_sources(&card, &surfaces, 300.0, young);
+        let source =
+            SourcePlanarCapillaryBridge::new(liquid, wetting, VOLUME, WIDTH, limits()).unwrap();
+        for attached in [true, false] {
+            let gap = if attached {
+                0.5 * source.formation_gap_m()
+            } else {
+                2.0 * source.rupture_gap_m()
+            };
+            let state = source.initialize(gap, attached).unwrap();
+            let before = source.evaluate(state).unwrap();
+            let unchanged = source
+                .refresh_at_query_point_with_volume(
+                    state,
+                    &card,
+                    surfaces.each_ref(),
+                    &cold,
+                    BridgeVolumeConstraint::FixedMass,
+                    &gate,
+                )
+                .unwrap();
+            assert_eq!(unchanged.state(), state);
+            assert_eq!(unchanged.parameter_work_j(), 0.0);
+            assert!(
+                source
+                    .refresh_at_query_point(state, &card, surfaces.each_ref(), &hot, &gate,)
+                    .is_err()
+            );
+            let refresh = source
+                .refresh_at_query_point_with_volume(
+                    state,
+                    &card,
+                    surfaces.each_ref(),
+                    &hot,
+                    BridgeVolumeConstraint::FixedMass,
+                    &gate,
+                )
+                .unwrap();
+            let after = refresh.source().evaluate(refresh.state()).unwrap();
+            near(after.liquid_volume_m3, VOLUME / 0.9, 2e-15, 0.0);
+            near(
+                refresh.source().liquid().density_kg_m3() * after.liquid_volume_m3,
+                source.liquid().density_kg_m3() * VOLUME,
+                2e-15,
+                0.0,
+            );
+            assert_eq!(refresh.state().gap_m(), gap);
+            assert_eq!(refresh.state().attached(), attached);
+            assert_eq!(
+                refresh.parameter_work_j(),
+                after.surface_free_energy_j - before.surface_free_energy_j
+            );
+            if !attached {
+                assert_eq!(
+                    after.detached_cap_volumes_m3,
+                    Some([0.5 * after.liquid_volume_m3; 2])
+                );
+            } else {
+                assert_ne!(after.normal_force_n, before.normal_force_n);
+            }
+            let reverse = refresh
+                .source()
+                .refresh_at_query_point_with_volume(
+                    refresh.state(),
+                    &card,
+                    surfaces.each_ref(),
+                    &cold,
+                    BridgeVolumeConstraint::FixedMass,
+                    &gate,
+                )
+                .unwrap();
+            let restored = reverse.source().evaluate(reverse.state()).unwrap();
+            near(restored.liquid_volume_m3, VOLUME, 3e-15, 0.0);
+            near(
+                restored.surface_free_energy_j,
+                before.surface_free_energy_j,
+                3e-14,
+                1e-12,
+            );
+            near(
+                reverse.parameter_work_j(),
+                -refresh.parameter_work_j(),
+                3e-13,
+                1e-12,
+            );
+            assert_eq!(source.evaluate(state).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn g0_g4_mass_refresh_refuses_topology_change_and_cancel_without_mutation() {
+    let (card, surfaces) = temperature_cards(false, 100.0, 1.0);
+    let (liquid, wetting) = resolved_sources(&card, &surfaces, 300.0, false);
+    let source =
+        SourcePlanarCapillaryBridge::new(liquid, wetting, VOLUME, WIDTH, limits()).unwrap();
+    let state = source
+        .initialize(0.9 * source.rupture_gap_m(), true)
+        .unwrap();
+    let before = source.evaluate(state).unwrap();
+    let point = QueryPoint::new().with("T", 320.0).unwrap();
+    let gate = CancelGate::new_clock_free();
+    assert!(matches!(
+        source.refresh_at_query_point_with_volume(
+            state,
+            &card,
+            surfaces.each_ref(),
+            &point,
+            BridgeVolumeConstraint::FixedMass,
+            &gate,
+        ),
+        Err(BridgeError::Invalid {
+            field: "source refresh requires a separate liquid topology event"
+        })
+    ));
+    gate.request();
+    assert!(matches!(
+        source.refresh_at_query_point_with_volume(
+            state,
+            &card,
+            surfaces.each_ref(),
+            &point,
+            BridgeVolumeConstraint::FixedMass,
+            &gate,
+        ),
+        Err(BridgeError::Cancelled)
+    ));
+    assert_eq!(source.evaluate(state).unwrap(), before);
+}
+
 fn simpson(f: impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
     let n = 4096;
     let h = (b - a) / f64::from(n);

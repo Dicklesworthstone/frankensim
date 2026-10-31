@@ -13328,6 +13328,20 @@ checks source-force feedback without reset, complete energy accounting with
 that parameter term, stale-candidate and cancellation refusal, and unchanged
 body/observation history on both refusal and successful source adoption.
 
+The axisymmetric owner's `apply_source_refresh` now accepts the original 3-D
+Young--Laplace material endpoint through that same continuing network. Its
+source can conserve closed-liquid mass while density and volume change. Exact
+predecessor matching, the existing mechanical gap tolerance, native energy limit
+and the original source's quadrature/root-work error estimate precede publication.
+The true mechanical gap is retained independently of the newly converged profile;
+neither numerical root residuals nor a material update move or reset the bodies.
+Clock, coordinates, connections, work column and prior observation remain intact.
+Returned surface parameter work stays separate from mechanical work and heat;
+bulk thermal energy, evaporation and phase transitions require their own owners.
+A native regression couples temperature-driven density/tension changes to actual
+subsequent force and motion while checking mass, energy, stale-candidate refusal,
+cancellation and preservation of all accepted mechanical/observation history.
+
 ## Objective cohesive transport and finite-rotation work
 
 `cohesive_contact::objective::ObjectiveCohesivePoint` retains the original

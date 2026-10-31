@@ -55,6 +55,198 @@ fn make(
     .unwrap()
 }
 
+fn temperature_cards3d(
+    young: bool,
+    density_factor: f64,
+) -> (MaterialCard, [InterfaceSystemCard; 2]) {
+    let (material, lower) = source_cards(1.1, 0.05, young);
+    let (_, upper) = source_cards(1.3, 0.05, young);
+    let curves = |original: &ClaimSet| {
+        let mut claims = ClaimSet::new();
+        for (_, original) in original.claims_ordered() {
+            let factor = match original.key.name() {
+                "density" => density_factor,
+                SURFACE_TENSION_PROPERTY | EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY => 0.8,
+                _ => 1.0,
+            };
+            let mut changed = original.clone();
+            let PropertyValue::Scalar { value, dims } = original.value else {
+                unreachable!()
+            };
+            changed.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: fs_qty::Temperature::DIMS,
+                knots: vec![(300.0, value), (320.0, factor * value)],
+                dims,
+            };
+            changed.interpolation = InterpolationPolicy::LinearInside;
+            claims.insert_claim(changed).unwrap();
+        }
+        claims
+    };
+    let material =
+        MaterialCard::assemble(material.id().clone(), curves(material.claims()), vec![]).unwrap();
+    let surfaces = [lower[0].clone(), upper[1].clone()].map(|card| {
+        InterfaceSystemCard::assemble(
+            card.surface_a().clone(),
+            card.surface_b().clone(),
+            card.context().clone(),
+            curves(card.claims()),
+            vec![],
+        )
+        .unwrap()
+    });
+    (material, surfaces)
+}
+
+#[test]
+fn g3_axisymmetric_source_refresh_preserves_mass_gap_and_original_surface_claims() {
+    let gate = CancelGate::new_clock_free();
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    let cold = QueryPoint::new().with("T", 300.0).unwrap();
+    for young in [false, true] {
+        let (card, surfaces) = temperature_cards3d(young, 0.95);
+        let (liquid, wetting) = resolved_sources(&card, &surfaces, 300.0, young);
+        let source =
+            SourceAxisymmetricCapillaryBridge::new(liquid, wetting, VOLUME, branch(), envelope())
+                .unwrap();
+        let state = source.solve_at_suction(2.0, numerical(), &gate).unwrap();
+        let before = *state.profile();
+        assert!(
+            source
+                .refresh_at_query_point(
+                    state,
+                    &card,
+                    surfaces.each_ref(),
+                    &hot,
+                    BridgeVolumeConstraint::FixedVolume,
+                    work_budget(),
+                    &gate
+                )
+                .is_err()
+        );
+        let refresh = source
+            .refresh_at_query_point(
+                state,
+                &card,
+                surfaces.each_ref(),
+                &hot,
+                BridgeVolumeConstraint::FixedMass,
+                work_budget(),
+                &gate,
+            )
+            .unwrap();
+        let after = *refresh.state().profile();
+        near(after.liquid_volume_m3, VOLUME / 0.95, 2e-15, 0.0);
+        near(
+            refresh.source().liquid().density_kg_m3() * after.liquid_volume_m3,
+            source.liquid().density_kg_m3() * VOLUME,
+            2e-15,
+            0.0,
+        );
+        near(after.gap_m, before.gap_m, 3e-12, 0.0);
+        assert_ne!(after.normal_force_n, before.normal_force_n);
+        assert_eq!(
+            refresh.parameter_work_j(),
+            after.surface_free_energy_j - before.surface_free_energy_j
+        );
+        assert!(
+            refresh.estimated_parameter_work_error_j()
+                <= work_budget().absolute_tolerance_j
+                    + work_budget().relative_tolerance * refresh.parameter_work_j().abs()
+        );
+        for i in 0..2 {
+            assert_eq!(
+                refresh.source().wetting()[i].resolved().query_point(),
+                &[(String::from("T"), 320.0)]
+            );
+            assert_eq!(
+                refresh.source().wetting()[i].angle_origin(),
+                source.wetting()[i].angle_origin()
+            );
+        }
+        let reverse = refresh
+            .source()
+            .refresh_at_query_point(
+                refresh.state(),
+                &card,
+                surfaces.each_ref(),
+                &cold,
+                BridgeVolumeConstraint::FixedMass,
+                work_budget(),
+                &gate,
+            )
+            .unwrap();
+        near(
+            reverse.state().profile().liquid_volume_m3,
+            VOLUME,
+            3e-15,
+            0.0,
+        );
+        near(
+            reverse.parameter_work_j(),
+            -refresh.parameter_work_j(),
+            3e-10,
+            1e-12,
+        );
+        assert_eq!(source.evaluate(state).unwrap(), before);
+    }
+}
+
+#[test]
+fn g0_g4_axisymmetric_refresh_refuses_unresolved_work_branch_exit_and_cancel() {
+    let gate = CancelGate::new_clock_free();
+    let hot = QueryPoint::new().with("T", 320.0).unwrap();
+    for density_factor in [0.95, 1e6] {
+        let (card, surfaces) = temperature_cards3d(true, density_factor);
+        let (liquid, wetting) = resolved_sources(&card, &surfaces, 300.0, true);
+        let source =
+            SourceAxisymmetricCapillaryBridge::new(liquid, wetting, VOLUME, branch(), envelope())
+                .unwrap();
+        let state = source.solve_at_suction(2.0, numerical(), &gate).unwrap();
+        let mut budget = work_budget();
+        if density_factor < 1.0 {
+            budget.absolute_tolerance_j = 1e-40;
+            budget.relative_tolerance = 0.0;
+        }
+        let result = source.refresh_at_query_point(
+            state,
+            &card,
+            surfaces.each_ref(),
+            &hot,
+            BridgeVolumeConstraint::FixedMass,
+            budget,
+            &gate,
+        );
+        if density_factor < 1.0 {
+            assert!(matches!(
+                result,
+                Err(AxisymmetricError::WorkUnresolved { .. })
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(AxisymmetricError::GapOutsideBranch { .. })
+            ));
+        }
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(matches!(
+            source.refresh_at_query_point(
+                state,
+                &card,
+                surfaces.each_ref(),
+                &hot,
+                BridgeVolumeConstraint::FixedMass,
+                work_budget(),
+                &cancelled
+            ),
+            Err(AxisymmetricError::Physical(BridgeError::Cancelled))
+        ));
+        assert_eq!(source.evaluate(state).unwrap(), *state.profile());
+    }
+}
+
 #[test]
 fn g1_axisymmetric_catenoid_matches_closed_form_and_actual_shape() {
     let gate = CancelGate::new_clock_free();
