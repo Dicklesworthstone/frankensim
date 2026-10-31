@@ -92,6 +92,13 @@ pub trait Storage {
     /// `grad H(x)` into `out` (efforts).
     fn gradient(&self, x: &[f64], out: &mut [f64]);
 
+    /// Optional numerical magnitude of a stored coordinate in its OWN units,
+    /// used only to size finite-difference probes. A bounded constitutive owner
+    /// can supply its actual charge/flux support instead of a dimensionless
+    /// unit-sized probe. Values must be finite and positive. This neither
+    /// rescales physical state nor relaxes tolerances or source-domain checks.
+    fn coordinate_scale(&self, _coordinate: usize) -> Option<f64> { None }
+
     /// Explicit quadratic part in the original state order. `None` refuses
     /// automatic splitting; numerical gradient probes never establish linearity.
     fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
@@ -289,6 +296,11 @@ pub struct SumStorage {
 }
 
 impl Storage for SumStorage {
+    fn coordinate_scale(&self, coordinate: usize) -> Option<f64> {
+        if coordinate < self.a.1 { self.a.0.coordinate_scale(coordinate) }
+        else { self.b.0.coordinate_scale(coordinate - self.a.1) }
+    }
+
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
         let na = self.a.1;
         let left = self.a.0.midpoint_energy_remainder(&a[..na], &b[..na], &mid[..na])?;
@@ -918,6 +930,10 @@ fn pad_differential_matrix(matrix: &[f64], n_diff: usize, n: usize) -> Option<Ve
 }
 
 impl Storage for DifferentialStorage {
+    fn coordinate_scale(&self, coordinate: usize) -> Option<f64> {
+        if coordinate < self.n_diff { self.inner.coordinate_scale(coordinate) } else { None }
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         self.inner.hamiltonian(&x[..self.n_diff])
     }
@@ -1441,6 +1457,37 @@ pub fn step_descriptor(
         let res = residual(x, &dg)?;
         Some((dg, res))
     };
+    // Circuit charges/fluxes are driven by multiplier currents/voltages, and
+    // capacitive KCL rows balance multiplier currents and source currents.
+    // These equations have their OWN physical units: pC or pA defects cannot
+    // be admitted against a volt-sized node scale. No uncertain constitutive
+    // gradient enters these rows, so their original evaluated operands give
+    // a componentwise roundoff floor.
+    let direct_rows: Vec<usize> = (0..n).filter(|&row| {
+        (0..n_d).all(|col| sys.j[row * n + col] == 0.0 && sys.r[row * n + col] == 0.0)
+    }).collect();
+    let continuity = |x: &[f64], dg: &[f64], res: &[f64]| -> Option<(f64, f64)> {
+        let mut relative = 0.0_f64;
+        let mut floor = 0.0_f64;
+        for &row in &direct_rows {
+            let factor = if row < n_d { dt } else { 1.0 };
+            let mut magnitude = factor * gu[row].abs()
+                + if row < n_d { x0[row].abs() + x[row].abs() } else { 0.0 };
+            for col in n_d..n {
+                magnitude += factor * (sys.j[row * n + col].abs() + sys.r[row * n + col].abs())
+                    * dg[col].abs();
+            }
+            if !magnitude.is_finite() { return None; }
+            if magnitude > 0.0 {
+                relative = relative.max(res[row].abs() / magnitude);
+                floor = floor.max(arithmetic_rounding_floor(n.saturating_mul(4).saturating_add(8), magnitude)
+                    / magnitude);
+            } else if res[row] != 0.0 {
+                return None;
+            }
+        }
+        Some((relative, floor))
+    };
     let scale = x0
         .iter()
         .map(|v| v.abs())
@@ -1465,15 +1512,19 @@ pub fn step_descriptor(
     let mut quadratic_factor = None;
     let mut quadratic_factor_attempted = false;
     loop {
-        let (_, res) = evaluate(&x1).ok_or(PhsError::DescriptorDomain {
+        let (dg, res) = evaluate(&x1).ok_or(PhsError::DescriptorDomain {
             what: "current storage, effort, or flow is nonfinite",
         })?;
         let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-        let improved = best.as_ref().is_none_or(|(_, b)| rnorm < *b);
+        let (coordinate_residual, _) = continuity(&x1, &dg, &res).ok_or(PhsError::DescriptorDomain {
+            what: "direct descriptor row residual scale is nonfinite",
+        })?;
+        let score = (rnorm / scale).max(coordinate_residual);
+        let improved = best.as_ref().is_none_or(|(_, b)| score < *b);
         if improved {
-            best = Some((x1.clone(), rnorm));
+            best = Some((x1.clone(), score));
         }
-        if rnorm <= NEWTON_TOL * scale {
+        if rnorm <= NEWTON_TOL * scale && coordinate_residual <= NEWTON_TOL {
             break;
         }
         if improved {
@@ -1482,34 +1533,22 @@ pub fn step_descriptor(
             stagnant += 1;
         }
         if stagnant >= 3 || iters >= NEWTON_MAX {
-            let (bx, brnorm) = best.expect("at least one iterate");
-            let (dg, _) = evaluate(&bx).ok_or(PhsError::DescriptorDomain {
+            let (bx, _) = best.expect("at least one iterate");
+            let (dg, res) = evaluate(&bx).ok_or(PhsError::DescriptorDomain {
                 what: "best Newton iterate is outside finite storage support",
             })?;
-            let floor = newton::residual_rounding_floor(
-                sys.storage.as_ref(),
-                x0,
-                &bx,
-                &dg,
-                &sys.j,
-                &sys.r,
-                &gu,
-                dt,
-                n_d,
-                &[],
-            );
-            admit_default_newton_iterate(
-                SolveBudget::default()
-                    .certificate(
-                        NewtonSite::Descriptor,
-                        brnorm,
-                        scale,
-                        floor,
-                        iters,
-                        stagnant,
-                    )
-                    .with_rounding_allowance(),
-            )?;
+            let brnorm = res.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let floor = newton::residual_rounding_floor(sys.storage.as_ref(), x0, &bx,
+                &dg, &sys.j, &sys.r, &gu, dt, n_d, &[]);
+            admit_default_newton_iterate(SolveBudget::default().certificate(
+                NewtonSite::Descriptor, brnorm, scale, floor, iters, stagnant).with_rounding_allowance())?;
+            let (relative, floor) = continuity(&bx, &dg, &res).ok_or(PhsError::DescriptorDomain {
+                what: "direct descriptor row residual scale is nonfinite",
+            })?;
+            // This supplementary certificate is explicitly dimensionless:
+            // each original multiplier-driven row uses its own operands.
+            admit_default_newton_iterate(SolveBudget::default().certificate(
+                NewtonSite::Descriptor, relative, 1.0, floor, iters, stagnant).with_rounding_allowance())?;
             x1 = bx;
             break;
         }
@@ -1525,7 +1564,14 @@ pub fn step_descriptor(
             let jac = {
                 let mut jac = vec![0.0; n * n];
                 for col in 0..n {
-                    let mut h = 1.0e-6 * (1.0 + scale + x1[col].abs());
+                    let probe_scale = sys.storage.coordinate_scale(col)
+                        .unwrap_or(1.0 + scale + x1[col].abs());
+                    if !probe_scale.is_finite() || probe_scale <= 0.0 {
+                        return Err(PhsError::DescriptorDomain {
+                            what: "stored-coordinate probe scale must be finite and positive",
+                        });
+                    }
+                    let mut h = 1.0e-6 * probe_scale;
                     let mut admitted = false;
                     for _ in 0..=DESCRIPTOR_DOMAIN_HALVINGS {
                         if !h.is_finite() || h <= 0.0 {
@@ -1660,6 +1706,11 @@ pub fn step_descriptor(
             )
             .with_rounding_allowance(),
     )?;
+    let (relative, floor) = continuity(&x1, &dg, &res).ok_or(PhsError::DescriptorDomain {
+        what: "accepted direct descriptor row residual scale is nonfinite",
+    })?;
+    admit_default_newton_iterate(SolveBudget::default().certificate(
+        NewtonSite::Descriptor, relative, 1.0, floor, iters, stagnant).with_rounding_allowance())?;
     Ok(StepRecord {
         x: x1,
         y,

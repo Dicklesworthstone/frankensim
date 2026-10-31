@@ -1158,3 +1158,20 @@ nonorthogonal constraint-coordinate invariance and atomic refusal. Complete
 production and unit-test code type-checks with genuine dependencies; three new
 tests also execute in the documented original-source algebra seam, which is
 not full native crate or consumer-runtime qualification.
+
+## SI-scale charge and current continuity
+
+Descriptor charge/flux continuity and algebraic rows driven solely by multiplier
+efforts or held ports also satisfy a componentwise relative residual criterion
+in their own units. Arithmetic floors use the original row operands; volt-sized
+node potentials cannot admit an unchanged picocoulomb charge or discard a
+femtoampere source in capacitive KCL. This gate applies at convergence,
+stagnation fallback and publication, alongside the original global certificate.
+It changes neither physical coordinates nor the native energy/work equations.
+
+Optional `Storage::coordinate_scale` supplies only a numerical probe magnitude
+for bounded constitutive coordinates. The default preserves existing probing;
+a supplied scale never extends source support or changes state units/tolerances.
+Original block and differential storage wrappers preserve the declaration.
+`tests/circuit_charge_scale.rs` checks independent midpoint RC updates from 1 F
+through 1 fF, mixed-size branches and weak-source charging at a biased node.
