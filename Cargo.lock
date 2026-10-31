@@ -1545,6 +1545,7 @@ dependencies = [
  "fs-mbd",
  "fs-mesh",
  "fs-modal",
+ "fs-phs",
  "fs-plate",
  "fs-qty",
  "fs-rand",

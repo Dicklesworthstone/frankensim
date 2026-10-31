@@ -73,6 +73,12 @@ use crate::{
     reconstruct_generalized_force_measures,
 };
 
+mod prony;
+pub use prony::{
+    StructuralPronyAudioBudget, StructuralPronyAudioError, StructuralPronyAudioModel,
+    StructuralPronyAudioRequest, StructuralPronyPressureFrame,
+};
+
 /// Schema version of the integrated structural modal artifact.
 pub const STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION: u32 = 1;
 /// Schema version of the count-certified residual-flexibility estimate.
@@ -3158,6 +3164,10 @@ fn baffled_plate_decimated_pressure_signal_identity(
 /// This adapter intentionally accepts an explicit model identity. The
 /// parameter/evidence author, not the material's display name, owns that
 /// identity and the certified frequency band.
+///
+/// This is a damping-only approximation on fixed elastic frequencies. It does
+/// not propagate Prony storage dispersion or material history. Use
+/// [`StructuralPronyAudioModel`] when those effects belong to the model.
 ///
 /// # Errors
 /// Refuses a foreign specimen/material binding, a zero model identity, or any
@@ -7926,6 +7936,551 @@ mod tests {
         );
     }
 
+    #[test]
+    fn g1_source_bound_prony_audio_drives_contact_controls_with_relaxed_initialization() {
+        let equilibrium = resolve_isotropic_elastic_state_point(
+            &material_card(193.0e6, 8_000.0),
+            &QueryPoint::new().with("T", 293.15).unwrap(),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        // A manufactured compliant solid keeps this complete retained basis
+        // below the production 48 kHz reconstruction clock's Nyquist guard.
+        let specimen = with_cx(|cx| {
+            DiscProfileSpec::SolidCylinder {
+                outer_radius_m: 0.038,
+                thickness_m: 0.006,
+                edge_treatment: SquatDiscEdgeTreatment::CircularFillet { radius: 0.001 },
+            }
+            .resolve_with_isotropic_elastic_state(&equilibrium, cx)
+        })
+        .unwrap();
+        let basis = with_cx(|cx| {
+            build_structural_modal_basis(
+                &StructuralModeRequest {
+                    minimum_frequency_hz: 10.0,
+                    maximum_frequency_hz: 1_200.0,
+                    ..coarse_modal_request(&specimen)
+                },
+                cx,
+            )
+        })
+        .unwrap();
+        let law = LoweredModel {
+            model: fs_material::visco::GeneralizedMaxwell::new(
+                equilibrium.young_modulus_pa(),
+                vec![(0.5 * equilibrium.young_modulus_pa(), 2.0e-4)],
+            )
+            .unwrap(),
+            band: (1.0, 2.0e6),
+            sup_rel_err: 0.0,
+            sup_rel_storage_err: 0.0,
+            sup_rel_loss_err: 0.0,
+            verification_points: 2,
+        };
+        // Manufactured receiver transfers isolate native source/basis/memory
+        // composition. They are not measured or broadband radiation evidence.
+        let radiation = ModalAcousticRadiation {
+            structural_basis_identity: basis.identity,
+            gas_model_identity: ContentHash([0x63; 32]),
+            temperature_k: 293.15,
+            ambient_pressure_pa: 101_325.0,
+            density_kg_m3: 1.204,
+            sound_speed_m_s: 343.0,
+            observer: AcousticObserver {
+                position_m: [1.0, 0.0, 0.0],
+            },
+            modes: basis
+                .modes
+                .iter()
+                .enumerate()
+                .map(|(index, mode)| AcousticModeRadiation {
+                    structural_mode: index,
+                    angular_frequency_rad_s: mode.angular_frequency_rad_s,
+                    formulation: HelmholtzFormulation::PlainCbie,
+                    observer_pressure_per_modal_velocity: if index == 0 {
+                        C64::new(1.0, 0.4)
+                    } else {
+                        C64::ZERO
+                    },
+                    radiated_power_per_modal_velocity_squared: 0.0,
+                    panels_per_wavelength: 10.0,
+                    condition_lower_bound: 1.0,
+                    minimum_far_field_distance_m: 0.1,
+                })
+                .collect(),
+            identity: ContentHash([0x64; 32]),
+        };
+        let request = StructuralPronyAudioRequest {
+            basis: &basis,
+            specimen: &specimen,
+            equilibrium: &equilibrium,
+            material: &law,
+            material_model_identity: ContentHash([0x65; 32]),
+            radiation: &radiation,
+            sample_rate_hz: 48_000,
+            budget: StructuralPronyAudioBudget {
+                modal: ModalAcousticTimeBudget::audible_reference(),
+                coupling: fs_couple::render::schedule::force::coupled::ModalCouplingConfig {
+                    max_modes: 64,
+                    max_connections: 0,
+                    max_setup_terms: 1_000_000,
+                    nyquist_guard_fraction: 0.9,
+                    maximum_total_energy_j: 100.0,
+                    maximum_abs_pressure_pa: 1.0e6,
+                    maximum_abs_connection_force_n: 1.0e6,
+                    solve_relative_tolerance: 1.0e-11,
+                    energy_absolute_tolerance_j: 1.0e-12,
+                    energy_relative_tolerance: 1.0e-9,
+                },
+                prepared: fs_couple::render::schedule::force::coupled::PreparedModalBudget {
+                    max_modes: 64,
+                    max_dense_bytes: 536_870_912,
+                    max_multiply_terms: 100_000_000_000,
+                },
+                maximum_material_branches: 64,
+            },
+        };
+        let gate = CancelGate::new_clock_free();
+        let mut wrong = law.clone();
+        wrong.model.e_inf *= 1.01;
+        assert!(
+            StructuralPronyAudioModel::try_new(
+                StructuralPronyAudioRequest {
+                    material: &wrong,
+                    ..request
+                },
+                &gate,
+            )
+            .is_err(),
+            "a storage-at-reference-frequency modulus must not become equilibrium E"
+        );
+        let mut runtime = StructuralPronyAudioModel::try_new(request, &gate).unwrap();
+        assert_eq!(runtime.material_memory().len(), basis.modes.len());
+        let mode = &basis.modes[0];
+        let node = basis
+            .mesh
+            .boundary
+            .triangles
+            .iter()
+            .flatten()
+            .copied()
+            .max_by(|&a, &b| {
+                norm_squared(mode.nodal_shape_per_sqrt_kg[a])
+                    .total_cmp(&norm_squared(mode.nodal_shape_per_sqrt_kg[b]))
+            })
+            .unwrap();
+        let point = basis.mesh.nodes_m[node];
+        let shape = mode.nodal_shape_per_sqrt_kg[node];
+        let scale = norm_squared(shape).sqrt();
+        let force = shape.map(|component| 0.01 * component / scale);
+        let expected_projection = basis.project_point_force(point, force, 1.0e-12).unwrap();
+        let first = runtime
+            .step_point_force(point, force, 1.0e-12, &gate)
+            .unwrap();
+        assert_eq!(
+            first.force_projection.modal_force_n_per_sqrt_kg,
+            expected_projection.modal_force_n_per_sqrt_kg
+        );
+        assert_ne!(first.acoustic.observer_pressure_pa, 0.0);
+        assert!(first.acoustic.material_energy_j > 0.0);
+        assert!(first.acoustic.material_dissipation_j > 0.0);
+        assert_eq!(first.acoustic.component_dissipation_j, 0.0);
+        assert!(first.acoustic.energy_residual_j.abs() <= first.acoustic.energy_tolerance_j);
+        let before = runtime.states().to_vec();
+        let history = runtime.material_memory().to_vec();
+        let stopped = CancelGate::new_clock_free();
+        stopped.request();
+        assert!(runtime.reset(&stopped).is_err());
+        assert_eq!(runtime.states(), before);
+        assert_eq!(runtime.material_memory(), history);
+        assert_eq!(runtime.samples_rendered(), 1);
+        runtime.reset(&gate).unwrap();
+        assert_eq!(runtime.samples_rendered(), 0);
+        assert!(
+            runtime
+                .material_memory()
+                .iter()
+                .all(|memory| *memory == 0.0)
+        );
+        let replay = runtime
+            .step_point_force(point, force, 1.0e-12, &gate)
+            .unwrap();
+        assert_eq!(first.acoustic, replay.acoustic);
+
+        use crate::coupled_runner::{ChannelOwnership, ChannelWrench};
+        use crate::{
+            AudioReconstructionFilterSpec, AudioResamplingBoundaryPolicy, AudioResamplingBudget,
+            DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, RenderBaseFrame,
+            RenderBaseModeState, RenderChannelAvailability, RenderContactBranch,
+            RenderContactGeometry, RenderMassProperties, RenderSampleDisposition,
+            RenderSupportFeature, RenderTrajectoryAuthority, RenderTrajectoryMetadata,
+            RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
+        };
+        use fs_mbd::{MassProperties, RigidBodyState};
+
+        let profile_ids = specimen.profile.content_identities();
+        let mass = specimen.profile.mass_properties;
+        let mass = MassProperties::new(
+            mass.mass,
+            Vec3::ZERO,
+            Vec3::new(
+                mass.principal_inertia.transverse,
+                mass.principal_inertia.transverse,
+                mass.principal_inertia.axial,
+            ),
+        )
+        .unwrap();
+        let orientation = UnitQuaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), 0.2).unwrap();
+        let center = Vec3::new(0.2, -0.1, 0.3);
+        let state = RigidBodyState::new(
+            Pose::new(center, orientation).unwrap(),
+            Vec3::ZERO,
+            Vec3::ZERO,
+        )
+        .unwrap();
+        let base_state = RenderBaseModeState {
+            displacement_m: 0.0,
+            velocity_m_per_s: 0.0,
+        };
+        let force_world = orientation.rotate_body_to_world(Vec3::new(force[0], force[1], force[2]));
+        let force_world = if force_world.z < 0.0 {
+            force_world.scale(-1.0)
+        } else {
+            force_world
+        };
+        let contact_world =
+            center.add(orientation.rotate_body_to_world(Vec3::new(point[0], point[1], point[2])));
+        let source_start = 0.5;
+        let interval_count = 64;
+        let source_dt = 1.0 / 16_000.0;
+        let trajectory = |vary_force: bool, profile_identity: ContentHash| {
+            let inputs = (0..interval_count)
+                .map(|index| {
+                    let multiplier = if vary_force && index < interval_count / 2 {
+                        0.25
+                    } else {
+                        1.0
+                    };
+                    let applied = force_world.scale(multiplier);
+                    RenderTrajectorySampleInput {
+                        interval_start_time_s: source_start + index as f64 * source_dt,
+                        time_s: source_start + (index + 1) as f64 * source_dt,
+                        world_frame: RenderWorldFrame::RightHandedZUp,
+                        units: RenderUnitSystem::SiRadians,
+                        center_of_mass_world_m: center,
+                        orientation_body_to_world: orientation.components(),
+                        linear_momentum_world_kg_m_per_s: Vec3::ZERO,
+                        angular_momentum_body_kg_m2_per_s: Vec3::ZERO,
+                        symmetry_axis_world: orientation
+                            .rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0)),
+                        contact_branch: RenderContactBranch::Closed,
+                        contact_geometry: Some(RenderContactGeometry {
+                            point_world_m: contact_world,
+                            normal_world: Vec3::new(0.0, 0.0, 1.0),
+                            support_feature: RenderSupportFeature::ProfileFeature(0),
+                        }),
+                        signed_gap_m: 0.0,
+                        interval_contact_active: true,
+                        interval_normal_force_n: applied.z,
+                        contact_transitions: Vec::new(),
+                        base_mode: Some(base_state),
+                        channels: ChannelOwnership {
+                            contact: ChannelWrench {
+                                force_world_n: applied,
+                                torque_world_nm: Vec3::ZERO,
+                                work_j: 0.0,
+                            },
+                            ..ChannelOwnership::default()
+                        },
+                        mechanical_energy_j: 0.0,
+                        energy_defect_j: 0.0,
+                        qois: DerivedEulerQois::from_state(state, mass, 0.0).unwrap(),
+                        disposition: if index + 1 == interval_count {
+                            RenderSampleDisposition::HorizonCensored
+                        } else {
+                            RenderSampleDisposition::Continue
+                        },
+                        terminal_event: None,
+                    }
+                })
+                .collect();
+            RenderTrajectory::try_new(
+                RenderTrajectoryMetadata {
+                    schema_version: EULER_RENDER_TRAJECTORY_SCHEMA_VERSION,
+                    world_frame: RenderWorldFrame::RightHandedZUp,
+                    units: RenderUnitSystem::SiRadians,
+                    specimen_profile_identity: profile_identity,
+                    specimen_chart_identity: profile_ids.chart,
+                    mass_properties: RenderMassProperties {
+                        identity: profile_ids.mass_properties,
+                        properties: mass,
+                    },
+                    initial_state: state,
+                    initial_base_mode: base_state,
+                    base_model_identity: ContentHash([0x66; 32]),
+                    base_frame: RenderBaseFrame {
+                        origin_world_m: Vec3::ZERO,
+                        orientation_base_to_world: UnitQuaternion::IDENTITY,
+                    },
+                    model_identity: ContentHash([0x67; 32]),
+                    channel_availability: RenderChannelAvailability::ALL_AVAILABLE,
+                    configuration_identity: ContentHash([if vary_force { 0x68 } else { 0x69 }; 32]),
+                    configuration_fingerprint: 0x5052_4f4e_5943_5452,
+                    timestep_s: source_dt,
+                    producer_version: "manufactured-prony-controls-v1".to_owned(),
+                    applicability:
+                        "manufactured interval forces test the source/control/audio handoff"
+                            .to_owned(),
+                    no_claims: vec![
+                        "no full mechanics trajectory or measured radiation validation".to_owned(),
+                    ],
+                    authority: RenderTrajectoryAuthority::SimulationEvidence,
+                },
+                inputs,
+            )
+            .unwrap()
+        };
+        let reconstruction = GeneralizedForceReconstructionInput {
+            declared_source_bandwidth_hz: 256.0,
+            filter: AudioReconstructionFilterSpec {
+                passband_edge_hz: 2_000.0,
+                stopband_edge_hz: 4_800.0,
+                half_length: 128,
+                maximum_passband_ripple_db: 0.1,
+                minimum_stopband_attenuation_db: 80.0,
+                response_grid_intervals: 8_192,
+            },
+            boundary_policy: AudioResamplingBoundaryPolicy::HalfSampleEvenReflectionV1,
+            clock_roundoff_operation_count: interval_count,
+            budget: AudioResamplingBudget::reference_film(),
+        };
+        let variable = trajectory(true, basis.profile_identity);
+        let constant = trajectory(false, basis.profile_identity);
+        let foreign = trajectory(true, ContentHash([0x70; 32]));
+        with_cx(|cx| {
+            let controls = EulerControlStream::try_derive(&variable, cx).unwrap();
+            let interval_forces: Vec<_> = controls
+                .audio()
+                .iter()
+                .map(|interval| {
+                    modal_force_for_control_interval(
+                        &basis.mesh,
+                        &basis.modes,
+                        &controls,
+                        interval,
+                        1.0e-12,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let forces = reconstruct_projected_modal_forces(
+                controls.audio(),
+                &interval_forces,
+                reconstruction,
+                cx,
+            )
+            .unwrap();
+            let mut manual = StructuralPronyAudioModel::try_new(request, &gate).unwrap();
+            let expected_pressure: Vec<_> = (0..forces.frame_count())
+                .map(|index| {
+                    manual
+                        .step_modal_force(forces.frame(index).unwrap(), &gate)
+                        .unwrap()
+                        .observer_pressure_pa
+                })
+                .collect();
+
+            runtime.reset(&gate).unwrap();
+            let signal = runtime
+                .synthesize_control_stream(
+                    &controls,
+                    PhysicalModalInitialState::Zero,
+                    reconstruction,
+                    1.0e-12,
+                    &gate,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(signal.start_time_s.to_bits(), source_start.to_bits());
+            assert_eq!(signal.sample_rate_hz, 48_000);
+            assert_eq!(signal.pressure_pa.len(), 3 * interval_count);
+            assert_eq!(signal.pressure_pa, expected_pressure);
+            assert!(signal.peak_abs_pressure_pa > 0.0);
+            assert_eq!(signal.structural_basis_identity, basis.identity);
+            assert_eq!(signal.contact_force_sampling,
+                PhysicalContactForceSampling::IntervalMeasureAtClosingElseOpeningEndpointBandLimitedV1);
+            assert_eq!(runtime.states(), manual.states());
+            assert_eq!(runtime.material_memory(), manual.material_memory());
+            assert!(runtime.last_frame().unwrap().material_dissipation_j > 0.0);
+            let accepted = runtime.states().to_vec();
+            assert!(
+                runtime
+                    .synthesize_control_stream(
+                        &controls,
+                        PhysicalModalInitialState::Zero,
+                        reconstruction,
+                        1.0e-12,
+                        &gate,
+                        cx,
+                    )
+                    .is_err(),
+                "a second horizon must not silently reuse accepted state"
+            );
+            assert_eq!(runtime.states(), accepted);
+            runtime.reset(&gate).unwrap();
+            let replay = runtime
+                .synthesize_control_stream(
+                    &controls,
+                    PhysicalModalInitialState::Zero,
+                    reconstruction,
+                    1.0e-12,
+                    &gate,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(signal.identity, replay.identity);
+            assert_eq!(signal.pressure_pa, replay.pressure_pa);
+
+            let lossless = LoweredModel {
+                model: fs_material::visco::GeneralizedMaxwell::new(law.model.e_inf, Vec::new())
+                    .unwrap(),
+                ..law.clone()
+            };
+            let loss = ModalLossSpectrum {
+                structural_basis_identity: basis.identity,
+                material_state_identity: basis.material_state_identity,
+                damping_model_identity: request.material_model_identity,
+                loss_factors: vec![0.0; basis.modes.len()],
+            };
+            let mut plain = PhysicalModalAudioModel::try_new(
+                &basis,
+                &loss,
+                &radiation,
+                48_000,
+                request.budget.modal,
+            )
+            .unwrap();
+            let plain_signal = plain
+                .synthesize_control_stream(
+                    &controls,
+                    PhysicalModalInitialState::Zero,
+                    reconstruction,
+                    1.0e-12,
+                    cx,
+                )
+                .unwrap();
+            let mut no_arms = StructuralPronyAudioModel::try_new(
+                StructuralPronyAudioRequest {
+                    material: &lossless,
+                    ..request
+                },
+                &gate,
+            )
+            .unwrap();
+            let no_arms_signal = no_arms
+                .synthesize_control_stream(
+                    &controls,
+                    PhysicalModalInitialState::Zero,
+                    reconstruction,
+                    1.0e-12,
+                    &gate,
+                    cx,
+                )
+                .unwrap();
+            for (actual, expected) in no_arms_signal
+                .pressure_pa
+                .iter()
+                .zip(&plain_signal.pressure_pa)
+            {
+                assert!(
+                    (actual - expected).abs()
+                        < 1.0e-12 + 1.0e-9 * plain_signal.peak_abs_pressure_pa
+                );
+            }
+            let material_change = signal
+                .pressure_pa
+                .iter()
+                .zip(&no_arms_signal.pressure_pa)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(material_change > 1.0e-4 * signal.peak_abs_pressure_pa);
+
+            // Constant contact preload must initialize both coordinates AND
+            // Maxwell histories. Complex transfers expose fictitious DC pressure.
+            let constant_controls = EulerControlStream::try_derive(&constant, cx).unwrap();
+            let mut preloaded = StructuralPronyAudioModel::try_new(request, &gate).unwrap();
+            let preload = preloaded
+                .synthesize_control_stream(
+                    &constant_controls,
+                    PhysicalModalInitialState::StaticEquilibriumAtFirstHeldForce,
+                    reconstruction,
+                    1.0e-12,
+                    &gate,
+                    cx,
+                )
+                .unwrap();
+            assert!(
+                preloaded
+                    .material_memory()
+                    .iter()
+                    .any(|memory| *memory != 0.0)
+            );
+            assert!(
+                preload.peak_abs_pressure_pa < 1.0e-10,
+                "{}",
+                preload.peak_abs_pressure_pa
+            );
+            let frame = preloaded.last_frame().unwrap();
+            assert!(frame.material_energy_j < 1.0e-18);
+            assert!(frame.material_dissipation_j < 1.0e-18);
+
+            let foreign_controls = EulerControlStream::try_derive(&foreign, cx).unwrap();
+            let mut refused = StructuralPronyAudioModel::try_new(request, &gate).unwrap();
+            assert!(matches!(
+                refused.synthesize_control_stream(
+                    &foreign_controls,
+                    PhysicalModalInitialState::Zero,
+                    reconstruction,
+                    1.0e-12,
+                    &gate,
+                    cx,
+                ),
+                Err(StructuralPronyAudioError::Structural(
+                    StructuralModalBasisError::IdentityMismatch { .. }
+                ))
+            ));
+            assert_eq!(refused.samples_rendered(), 0);
+            assert!(
+                refused
+                    .material_memory()
+                    .iter()
+                    .all(|memory| *memory == 0.0)
+            );
+            let mut wrong_clock = StructuralPronyAudioModel::try_new(
+                StructuralPronyAudioRequest {
+                    sample_rate_hz: 96_000,
+                    ..request
+                },
+                &gate,
+            )
+            .unwrap();
+            assert!(matches!(
+                wrong_clock.synthesize_control_stream(
+                    &controls,
+                    PhysicalModalInitialState::Zero,
+                    reconstruction,
+                    1.0e-12,
+                    &gate,
+                    cx,
+                ),
+                Err(StructuralPronyAudioError::Structural(
+                    StructuralModalBasisError::ControlTimeline { .. }
+                ))
+            ));
+            assert_eq!(wrong_clock.samples_rendered(), 0);
+        });
+    }
     #[test]
     fn g0_world_observer_uses_current_body_pose_and_spherical_spreading() {
         // A pure Y_10 table has a body-axis null in the equatorial plane. A
