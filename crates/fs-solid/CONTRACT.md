@@ -1,5 +1,42 @@
 # fs-solid CONTRACT
 
+## Strain-life from the original cyclic J2 constitutive path
+
+`plastic3::fatigue::J2FatiguePath` owns the latest native solution and one
+shared `StrainLifeMiner` per fixed-plane gauge while borrowing the original
+`SmallStrainTetProblem<ResolvedJ2Plasticity>`. The real virgin zero-load solve
+is the first observation. Every original absolute load target goes through
+`solve_from`; its plastic strain, accumulated isotropic history and Prager
+backstress continue from the preceding accepted state. The observer projects
+the returned tensor-Voigt total mechanical strain and signed normal stress.
+It does not substitute nondecreasing equivalent plastic strain, unsigned von
+Mises stress or a second constitutive approximation.
+
+Each calibration must match its original resolved material-state identity,
+chemistry, process, fixed temperature and Young's modulus. Original material
+receipts remain inspectable through the path. The adapter accepts only the
+source-resolved J2 owner, which has no thermal eigenstrain; thermal-wrapped
+laws and changing-temperature histories require a separately admitted transfer.
+Every accepted element, including ungauged ones, must remain within the native
+law's finite-state and componentwise small-strain envelope.
+
+`advance(count)` observes every intermediate target and commits the whole
+requested block only after mechanics and all gauges accept. Cancellation,
+nonconvergence, a later gauge refusal or an unsupported strain leaves the prior
+mechanical and fatigue histories intact. Clones retain the complete current
+state and unresolved cycles, without storing the full response trace. `finish`
+requires completion of the declared observation and includes final half cycles
+once. Processing windows do not create artificial cycles.
+
+The CMB model and named uncorrected mean-stress policy retain their empirical,
+fixed-plane scope. No stiffness, heat, fracture, failure topology, ratcheting
+model or validated service life is inferred from Miner damage. The five focused
+G0/G1/G3/G4 tests in `tests/plastic_fatigue.rs` compare the actual cyclic J2 coupon
+with independent one-dimensional Prager equations and an analytical strain-life
+damage sum, and check continuation, source admission, budgets and rollback.
+Their data are synthetic numerical references, not held-out material evidence.
+
+
 ## Fatigue from accepted inertial stress histories
 
 `loads3::transient::fatigue::TetTransientFatigueRun3` owns the original sparse

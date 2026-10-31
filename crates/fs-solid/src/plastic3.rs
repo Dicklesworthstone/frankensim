@@ -56,6 +56,9 @@ use crate::linear3::TetAssemblyBudget;
 /// Inertial increments using the same constitutive assembly and Newton owner.
 pub mod dynamics;
 
+/// Fixed-plane strain-life observation of the native cyclic J2 load path.
+pub mod fatigue;
+
 /// Newton controls for each increment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IncrementSettings {
