@@ -329,7 +329,10 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
                 previous_bsdf: None,
                 prev_origin: ray.origin,
                 segment_origin: ray.origin,
-                medium_stack: MediumStack::new(),
+                medium_stack: self
+                    .lighting
+                    .initial_media
+                    .stack(self.scene, &render_cx, ray.origin, None)?,
                 rng: PathRng {
                     pixel,
                     sample,
@@ -379,7 +382,28 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         cx: &Cx<'_>,
         probe: &IlluminanceProbe,
     ) -> Result<IlluminanceEstimate, PhotometryError> {
+        let stack = self
+            .lighting
+            .initial_media
+            .stack(self.scene, cx, probe.position_m(), None)?;
+        self.admit_probe_medium(&stack)?;
         self.direct_scene.illuminance(cx, probe)
+    }
+
+    fn admit_probe_medium(&self, stack: &MediumStack<'_>) -> Result<(), TracerError> {
+        if let Some(active) = stack.last()
+            && self
+                .fixtures
+                .sources
+                .iter()
+                .any(|source| source.flux_lm() > 0.0)
+        {
+            return Err(TracerError::InitialMedium {
+                boundary_primitive: active.boundary_primitive,
+                reason: "embedded point-fixture probes require a calibrated refractive direct connector; area-only probes are supported",
+            });
+        }
+        Ok(())
     }
 
     /// One cosine-weighted sample of continuous incoming irradiance. Y is lux;
@@ -407,6 +431,11 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         )?;
         let position = probe.position_m();
         let normal = probe.normal();
+        let initial_stack = self
+            .lighting
+            .initial_media
+            .stack(self.scene, cx, position, None)?;
+        self.admit_probe_medium(&initial_stack)?;
         let radius = u1.sqrt();
         let phi = 2.0 * PI * u2;
         let direction = to_world_all_sphere(
@@ -456,7 +485,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             // Only geometry uses the offset. Medium transport starts at the
             // exact receiver, retaining even cells thinner than ray epsilon.
             segment_origin: position,
-            medium_stack: MediumStack::new(),
+            medium_stack: initial_stack,
             rng: PathRng {
                 pixel: probe_index,
                 sample,
@@ -483,7 +512,10 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
                 0,
                 self.medium,
                 position,
-                area::Receiver::Probe { normal },
+                area::Receiver::Probe {
+                    normal,
+                    incident_medium: initial_stack.last().map(|entry| *entry.glass),
+                },
                 &wavelengths,
                 &state.rng,
             )?;

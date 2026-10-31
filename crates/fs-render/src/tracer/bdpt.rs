@@ -28,7 +28,9 @@ use super::*;
 /// more general manifold-path MIS remains outside this estimator's claim.
 /// Version 7 retains the direct-source technique in environment-only scenes,
 /// where there is no finite emitter from which to launch a light subpath.
-pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 7;
+/// Version 8 retains admitted launch media at camera and light endpoints,
+/// including endpoint connection absorption for paths wholly inside glass.
+pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 8;
 
 /// Admitted finite-light BDPT technique set.
 ///
@@ -290,7 +292,7 @@ impl<'scene> Vertex<'scene> {
 
     fn medium_toward(self, direction: Vec3) -> Option<MediumEntry<'scene>> {
         let Some(normal) = self.geometric_normal else {
-            return None;
+            return self.positive_medium;
         };
         if normal.dot(direction) >= 0.0 {
             self.positive_medium
@@ -799,9 +801,9 @@ fn random_walk<'scene>(
     vertices: &mut Vec<Vertex<'scene>>,
     rng: &mut SubpathRng<'_>,
     forced_first_smooth_event: Option<DielectricEvent>,
+    mut stack: MediumStack<'scene>,
+    mut segment_origin: Point3,
 ) -> Result<WalkOutcome, TracerError> {
-    let mut stack = MediumStack::new();
-    let mut segment_origin = ray.origin;
     let mut forced_smooth_event_encountered = false;
     while vertices.len() < max_vertices {
         cx.checkpoint()?;
@@ -944,6 +946,7 @@ fn generate_camera_subpaths<'scene>(
     pixel: u32,
     sample: u32,
     path_sobol: Option<&Sobol>,
+    initial_stack: MediumStack<'scene>,
 ) -> Result<Vec<CameraSubpath<'scene>>, TracerError> {
     let raster = physical_camera
         .pinhole_raster_sample(ray.origin.offset(ray.dir), settings.width, settings.height)?
@@ -953,7 +956,11 @@ fn generate_camera_subpaths<'scene>(
     }
     let walk = |event| {
         let mut vertices = Vec::with_capacity(settings.max_depth as usize + 2);
-        vertices.push(Vertex::camera(ray.origin));
+        vertices.push(Vertex {
+            positive_medium: initial_stack.last().copied(),
+            negative_medium: initial_stack.last().copied(),
+            ..Vertex::camera(ray.origin)
+        });
         let mut rng = SubpathRng::new(settings, pixel, sample, CAMERA_WALK_DOMAIN, path_sobol);
         let outcome = random_walk(
             scene,
@@ -968,6 +975,8 @@ fn generate_camera_subpaths<'scene>(
             &mut vertices,
             &mut rng,
             Some(event),
+            initial_stack,
+            ray.origin,
         )?;
         Ok::<_, TracerError>((vertices, outcome))
     };
@@ -1003,7 +1012,7 @@ fn generate_camera_subpaths<'scene>(
 
 fn generate_light_subpath<'scene>(
     scene: &'scene Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     cx: &Cx<'_>,
     settings: &Settings,
     ray_time: Option<&PathTime>,
@@ -1029,6 +1038,11 @@ fn generate_light_subpath<'scene>(
         origin: dielectric_spawn_origin(emission.point, emission.normal, emission.direction),
         dir: emission.direction,
     };
+    let initial_stack = lighting
+        .initial_media
+        .stack(scene, cx, ray.origin, ray_time)?;
+    vertices[0].positive_medium = initial_stack.last().copied();
+    vertices[0].negative_medium = initial_stack.last().copied();
     let _ = random_walk(
         scene,
         cx,
@@ -1042,6 +1056,8 @@ fn generate_light_subpath<'scene>(
         &mut vertices,
         &mut rng,
         None,
+        initial_stack,
+        emission.point,
     )?;
     Ok(vertices)
 }
@@ -1188,12 +1204,25 @@ fn segment_transmittance(
         dir: direction,
     };
     let target_primitive = endpoint_primitive(to);
-    let visible = match intersect(scene, cx, &ray, ray_time)? {
-        None => target_primitive.is_none(),
-        Some(hit) => {
-            let distance = distance_squared.sqrt();
-            target_primitive == Some(hit.primitive_index)
-                && hit.hit.point.delta_from(to.point).norm() <= 8.0 * RAY_EPS + 2.0e-8 * distance
+    let visible = if target_primitive.is_none() {
+        // A camera is a finite endpoint. Its enclosing glass, or any other
+        // geometry beyond it, cannot occlude this segment. Project from the
+        // offset geometric origin while retaining the full physical length
+        // below for Beer--Lambert attenuation.
+        let camera_distance = to.point.delta_from(origin).dot(direction);
+        camera_distance.is_finite()
+            && camera_distance > 0.0
+            && intersect_primitives(&scene.primitives, cx, &ray, ray_time, Some(camera_distance))?
+                .is_none()
+    } else {
+        match intersect(scene, cx, &ray, ray_time)? {
+            None => false,
+            Some(hit) => {
+                let distance = distance_squared.sqrt();
+                target_primitive == Some(hit.primitive_index)
+                    && hit.hit.point.delta_from(to.point).norm()
+                        <= 8.0 * RAY_EPS + 2.0e-8 * distance
+            }
         }
     };
     if !visible {
@@ -1643,7 +1672,7 @@ fn primary_slab_emitter_hit_mis_weight(
 #[allow(clippy::too_many_arguments)]
 fn connect_s1(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     camera: &PhysicalCamera,
     cx: &Cx<'_>,
     ray_time: Option<&PathTime>,
@@ -1727,6 +1756,16 @@ fn connect_s1(
             let position_pdf = lighting
                 .rectangle_emission_pdfs(sample.light_index, direction.scale(-1.0))
                 .map_or(0.0, |(pdf, _)| pdf);
+            let source_medium = lighting
+                .initial_media
+                .stack(
+                    scene,
+                    cx,
+                    dielectric_spawn_origin(sample.point, sample.normal, direction.scale(-1.0)),
+                    ray_time,
+                )?
+                .last()
+                .copied();
             let sampled = Vertex {
                 kind: VertexKind::Light {
                     light_index: sample.light_index,
@@ -1740,8 +1779,8 @@ fn connect_s1(
                 pdf_fwd: position_pdf,
                 pdf_rev: 0.0,
                 delta: false,
-                positive_medium: None,
-                negative_medium: None,
+                positive_medium: source_medium,
+                negative_medium: source_medium,
             };
             let transmittance =
                 segment_transmittance(scene, cx, ray_time, pt, &sampled, wavelength_nm)?;
@@ -1856,7 +1895,7 @@ fn connect_t1(
     };
     let camera_vertex = Vertex {
         pdf_fwd: 0.0,
-        ..Vertex::camera(camera.eye())
+        ..*camera_vertices.first().ok_or(TracerError::InvalidInput)?
     };
     let predecessor = &light_vertices[s - 2];
     let predecessor_direction = vector_between(qs.point, predecessor.point)
@@ -1986,7 +2025,7 @@ fn connect_general(
 #[allow(clippy::too_many_arguments)]
 fn evaluate_strategies(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     camera: &PhysicalCamera,
     cx: &Cx<'_>,
     ray_time: Option<&PathTime>,
@@ -2167,7 +2206,7 @@ fn evaluate_strategies(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn render_admitted_sample_range(
     scene: &Scene,
-    lighting: &AdmittedLighting<'_>,
+    lighting: &SceneLighting<'_>,
     camera: &AnimatedCamera,
     exposure: CameraExposure<'_>,
     cx: &Cx<'_>,
@@ -2229,6 +2268,10 @@ fn render_admitted_sample_range(
                 camera_lens_sample(key, pixel, sample)?,
             )?;
             let spectral_normalization = 1.0 / PACKET as f64;
+            let initial_stack =
+                lighting
+                    .initial_media
+                    .stack(scene, &render_cx, ray.origin, Some(&ray_time))?;
             for (wavelength_lane, &wavelength_nm) in wavelengths.iter().enumerate() {
                 let camera_subpaths = generate_camera_subpaths(
                     scene,
@@ -2241,6 +2284,7 @@ fn render_admitted_sample_range(
                     pixel,
                     sample,
                     path_sobol,
+                    initial_stack,
                 )?;
                 let light_subpath = generate_light_subpath(
                     scene,
@@ -2406,7 +2450,7 @@ pub fn render_cinematic_bidirectional_with_strategy_set(
 
 struct BidirectionalSampleKernel<'run, 'assets> {
     scene: &'assets Scene,
-    lighting: &'run AdmittedLighting<'assets>,
+    lighting: &'run SceneLighting<'assets>,
     camera: &'assets AnimatedCamera,
     exposure: CameraExposure<'assets>,
     settings: &'run Settings,
@@ -2850,6 +2894,108 @@ mod tests {
         )
     }
 
+    #[test]
+    fn g1_embedded_camera_and_light_endpoints_retain_host_absorption() {
+        with_test_cx(|cx| {
+            let (mut scene, _, _) = direct_emitter_scene(true);
+            scene.primitives.push(Primitive {
+                shape: Shape::Mesh(closed_smooth_slab(-3.0, 3.0)),
+                material: Material::Dielectric {
+                    glass: DielectricGlass::new(
+                        CauchyIor::try_constant(1.5).unwrap(),
+                        BeerLambertAbsorption::try_constant(0.4).unwrap(),
+                        GlassProvenance::Custom,
+                    ),
+                    surface: DielectricSurface::SMOOTH,
+                },
+                emission: None,
+            });
+            let lighting = validate_scene(&scene, cx, None).unwrap();
+            let initial = lighting
+                .initial_media
+                .stack(&scene, cx, scene.camera.eye, None)
+                .unwrap();
+            let physical = PhysicalCamera::try_legacy_compatible(
+                scene.camera.eye,
+                scene.camera.forward,
+                scene.camera.up,
+                scene.camera.half_tan,
+                2.0,
+                Aperture::try_circular(0.0).unwrap(),
+            )
+            .unwrap();
+            let settings = Settings {
+                width: 1,
+                height: 1,
+                spp: 1,
+                max_depth: 1,
+                sampler: Sampler::Iid,
+                strategy: DirectStrategy::Mis,
+                seed: 0x484f_5354,
+            };
+            let paths = generate_camera_subpaths(
+                &scene,
+                cx,
+                &settings,
+                &physical,
+                Ray {
+                    origin: scene.camera.eye,
+                    dir: scene.camera.forward,
+                },
+                None,
+                550.0,
+                0,
+                0,
+                None,
+                initial,
+            )
+            .unwrap();
+            assert_eq!(paths.len(), 1);
+            let vertices = &paths[0].vertices;
+            assert_eq!(vertices.len(), 2);
+            assert_eq!(
+                vertices[0]
+                    .medium_toward(scene.camera.forward)
+                    .unwrap()
+                    .boundary_primitive,
+                1
+            );
+            assert!((vertices[1].beta - det::exp(-0.8)).abs() < 2.0e-14);
+            let connection =
+                segment_transmittance(&scene, cx, None, &vertices[1], &vertices[0], 550.0).unwrap();
+            assert!(
+                (connection - det::exp(-0.8)).abs() < 2.0e-14,
+                "enclosing wall beyond the camera is not an occluder"
+            );
+            let light =
+                generate_light_subpath(&scene, &lighting, cx, &settings, None, 550.0, 0, 0, None)
+                    .unwrap();
+            assert_eq!(light[0].positive_medium.unwrap().boundary_primitive, 1);
+            assert_eq!(light[0].negative_medium.unwrap().boundary_primitive, 1);
+        });
+    }
+
+    #[test]
+    fn g0_camera_connection_visibility_stops_at_its_finite_endpoint() {
+        with_test_cx(|cx| {
+            for (occluder_z, expected_visible) in [(2.5, true), (1.0, false)] {
+                let (mut scene, _, _) = direct_emitter_scene(true);
+                scene.primitives.push(Primitive {
+                    shape: Shape::Mesh(emitter_quad(occluder_z)),
+                    material: Material::Lambertian {
+                        reflectance: lift_rgb([0.0; 3]),
+                    },
+                    emission: None,
+                });
+                let from = Vertex::camera(Point3::new(0.0, 0.0, 0.2));
+                let to = Vertex::camera(scene.camera.eye);
+                let transmission =
+                    segment_transmittance(&scene, cx, None, &from, &to, 550.0).unwrap();
+                assert_eq!(transmission, if expected_visible { 1.0 } else { 0.0 });
+            }
+        });
+    }
+
     fn instanced_smooth_slab(z_bottom: f64, z_top: f64) -> Shape {
         let identity = hash_domain(
             "org.frankensim.fs-render.bdpt-test.parallel-slab",
@@ -2921,6 +3067,7 @@ mod tests {
                 0,
                 0,
                 None,
+                MediumStack::new(),
             )
             .unwrap();
             assert_eq!(paths.len(), 2);
@@ -3441,7 +3588,8 @@ mod tests {
                     half_tan: 0.2,
                 },
             };
-            let lighting = AdmittedLighting::try_new(&scene.lights, None).unwrap();
+            let lighting =
+                SceneLighting::from(AdmittedLighting::try_new(&scene.lights, None).unwrap());
             let camera = PhysicalCamera::try_legacy_compatible(
                 scene.camera.eye,
                 scene.camera.forward,
@@ -3713,7 +3861,9 @@ mod tests {
                 crate::lighting::EnvironmentMap::try_from_linear_srgb(2, 2, vec![[1.0; 3]; 4], 0.0)
                     .unwrap(),
             );
-            let lighting = AdmittedLighting::try_new(&[], scene.environment.as_ref()).unwrap();
+            let lighting = SceneLighting::from(
+                AdmittedLighting::try_new(&[], scene.environment.as_ref()).unwrap(),
+            );
             let physical = PhysicalCamera::try_legacy_compatible(
                 scene.camera.eye,
                 scene.camera.forward,

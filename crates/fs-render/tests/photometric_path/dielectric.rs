@@ -329,6 +329,78 @@ fn g1_calibrated_glass_probe_matches_refracted_square_source_integral() {
 }
 
 #[test]
+fn g1_embedded_calibrated_camera_attenuates_from_the_actual_pupil() {
+    with_cx(|cx, _| {
+        let mut scene = slab_scene(glass(1.5, 0.7), DielectricSurface::SMOOTH, -0.3);
+        scene.camera.eye.z = -0.1;
+        let sources = [emitter(SourceSpectrum::equal_energy())];
+        let estimate = pixel(&scene, &sources, settings(1, 64), cx);
+        close(
+            estimate.luminance_cd_m2,
+            LUMINANCE * fs_math::det::exp(-0.7 * 0.2),
+            2.0e-12,
+            "embedded camera's first physical segment",
+        );
+    });
+}
+
+#[test]
+fn g1_embedded_area_probe_matches_its_absorbing_hemisphere_integral() {
+    with_cx(|cx, _| {
+        let scene = slab_scene(glass(1.5, 0.7), DielectricSurface::SMOOTH, -0.3);
+        let sources = [emitter(SourceSpectrum::equal_energy())];
+        let probes =
+            [
+                IlluminanceProbe::try_new(Point3::new(0.0, 0.0, -0.1), Vec3::new(0.0, 0.0, -1.0))
+                    .unwrap(),
+            ];
+        let mut job = PathIlluminanceJob::new_with_emitters(
+            &scene,
+            PhotometricEmitters {
+                points: &[],
+                surfaces: &sources,
+            },
+            PathMedium::Vacuum,
+            &probes,
+            TransportOptions::default(),
+            IlluminanceSampling {
+                samples_per_probe: 16_384,
+                max_depth: 1,
+                sampler: Sampler::OwenSobol,
+                seed: 0x494e_5349,
+            },
+            cx,
+        )
+        .unwrap();
+        job.advance(cx, usize::MAX).unwrap();
+        let estimate = job.probe_estimate(0).unwrap();
+        // Deterministic midpoint integral over the actual square emitter.
+        // No interface is crossed: n is a host property, not an extra gain.
+        let panels = 512;
+        let step = 2.0 * SOURCE_HALF_M / f64::from(panels);
+        let mut reference = 0.0;
+        for y in 0..panels {
+            for x in 0..panels {
+                let px = -SOURCE_HALF_M + (f64::from(x) + 0.5) * step;
+                let py = -SOURCE_HALF_M + (f64::from(y) + 0.5) * step;
+                let r2 = px * px + py * py + 0.2 * 0.2;
+                reference += LUMINANCE * fs_math::det::exp(-0.7 * r2.sqrt()) * 0.2 * 0.2
+                    / (r2 * r2)
+                    * step
+                    * step;
+            }
+        }
+        close(
+            estimate.illuminance_lux,
+            reference,
+            0.02,
+            "embedded area probe NEE and continuation share host absorption",
+        );
+        assert_eq!(estimate.direct_lux, 0.0);
+    });
+}
+
+#[test]
 fn g3_calibrated_rough_glass_nee_mis_and_bsdf_agree_and_absorb() {
     with_cx(|cx, _| {
         let surface = DielectricSurface::try_rough(0.25).unwrap();

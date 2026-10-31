@@ -66,6 +66,25 @@ differentiable lift). Pure Rust throughout.
   linear-alpha approximation and weakly absorbing dielectric interface model.
   No RGB fit, opacity floor, or extrapolation is introduced. Thin-path absorbed
   fractions use `expm1`, and material identities retain every admitted knot.
+- **Dielectric launch media:** camera pupils, cinematic/moving origins, area-only
+  photometric probes, and both BDPT endpoints initialize the physical host
+  before their first segment. Mesh edge closure/orientation is prepared once;
+  local support bounds prune queries, and compensated oriented solid-angle
+  winding determines mesh membership. Charts supply a finite certified strict
+  sign. Static legacy eyes cache their admitted boundary IDs; aperture and
+  moving origins use the same immutable prepared topology in their own frame.
+  Multiple containing bodies require a conservative nesting witness: the inner
+  transformed support lies in all outer mesh inward half-spaces, or in a
+  certified negative chart step ball. Unproven concave nesting, overlaps,
+  reversed/open/unresolved winding and origins on a boundary refuse rather than
+  choosing the host from a first back-facing hit. These checks are not a global
+  self-intersection/topology certificate. Pure emitter materials do not invent
+  enclosing volumes. The original LIFO stack then supplies absorption, nested
+  restoration, incident index, total internal reflection, participating-field
+  selection and endpoint connection attenuation. Exterior origins retain their
+  existing random streams and radiance arithmetic. Calibrated point-fixture
+  probes still require their separate refractive direct connector; area-only
+  embedded probes use host absorption in both NEE and continuation paths.
 - `gradient_index` module (feature `tracer`): allocation-free adaptive
   Dormand--Prince 5(4) propagation of the geometric-optics ray equation
   `d(n t)/ds = grad(n)`. An immutable field supplies local phase index,
@@ -725,8 +744,8 @@ differentiable lift). Pure Rust throughout.
   absorption, explicit vacuum, heterogeneous and nested paths, refractive LTE,
   phase transport, direct-source laws, execution replay and refusal rollback.
   This is static geometry with held world-space fields and spatially constant
-  host index. It does not certify boundary closure, initialize cameras inside
-  bodies, admit arbitrary overlaps, implement gradient-index rays, or debit
+  host index. Camera launches use the dielectric admission above. It does not
+  certify boundary closure, admit arbitrary overlaps, implement gradient-index rays, or debit
   thermal energy. Surface thermal-emission laws inside glass remain refused,
   including phase-to-surface connections; the implemented interior thermal
   source is the participating field. The `n^2` source convention follows
@@ -1436,7 +1455,7 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   production tracer entry points use its cancellation-aware counterpart.
 - Dielectric support is homogeneous, non-polarizing geometric optics. It does
   not claim polarization, coherence, fluorescence, birefringence, measured
-  preset fidelity, camera-start-inside-medium support, arbitrary overlapping
+  preset fidelity, arbitrary overlapping
   media, or a topology certificate. GGX transmission is single-scattering and
   does not claim multiple-scattering furnace closure at appreciable roughness.
   Outside the explicitly checked smooth homogeneous local parallel-face-pair
@@ -2353,8 +2372,9 @@ pixel/sample address; they do not consume wavelength, fixture, phase or BSDF
 draws. An equivalent legacy-compatible pinhole preserves the original image
 bits. The complete sampled ray starts at its actual pupil point, including its
 medium attenuation, geometry visibility and subsequent spectral transport.
-Every pupil origin must be in the ambient dielectric medium, as for the
-existing pinhole entry; an enclosing glass interior is not initialized.
+Every pupil origin uses the shared admitted dielectric membership and nesting
+rules above, including a camera placed inside glass. An unresolved boundary
+point or unsupported containing topology refuses before publication.
 
 These values are pixel- and pupil-averaged luminance in cd/m², without an
 aperture-area or f-number brightness multiplier. Focal length, sensor size,

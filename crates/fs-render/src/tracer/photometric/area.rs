@@ -69,6 +69,7 @@ pub(in crate::tracer) enum Receiver<'a> {
     },
     Probe {
         normal: Vec3,
+        incident_medium: Option<DielectricGlass>,
     },
 }
 
@@ -545,7 +546,7 @@ impl<'a> AreaLighting<'a> {
                 },
                 ..
             }
-            | Receiver::Probe { normal } => {
+            | Receiver::Probe { normal, .. } => {
                 let shifted = point.offset(direction.scale(fixtures.options.ray_epsilon_m));
                 let displacement = shifted.delta_from(point);
                 if [shifted.x, shifted.y, shifted.z]
@@ -793,7 +794,7 @@ impl Receiver<'_> {
                 ..
             } => !surface.is_delta() && frame.oriented.dot(direction) != 0.0,
             Self::Surface { frame, .. } => frame.oriented.dot(direction) > 0.0,
-            Self::Probe { normal } => normal.dot(direction) > 0.0,
+            Self::Probe { normal, .. } => normal.dot(direction) > 0.0,
             Self::Phase { .. } => true,
         }
     }
@@ -812,7 +813,10 @@ impl Receiver<'_> {
                     boundary.transmitted
                 }
             }),
-            Self::Phase { .. } | Self::Probe { .. } => None,
+            Self::Probe {
+                incident_medium, ..
+            } => incident_medium,
+            Self::Phase { .. } => None,
         }
     }
 
@@ -837,7 +841,7 @@ impl Receiver<'_> {
             } => Ok(phase
                 .eval_packet(wavelengths, incoming_travel.dot(direction))?
                 .pdf),
-            Self::Probe { normal } => Ok(normal.dot(direction).max(0.0) / PI),
+            Self::Probe { normal, .. } => Ok(normal.dot(direction).max(0.0) / PI),
         }
     }
 
@@ -898,7 +902,7 @@ impl Receiver<'_> {
                 phase.eval_at(wavelength, incoming_travel.dot(direction))?,
                 opaque_pdf,
             )),
-            Self::Probe { normal } => Ok((normal.dot(direction).max(0.0), opaque_pdf)),
+            Self::Probe { normal, .. } => Ok((normal.dot(direction).max(0.0), opaque_pdf)),
         }
     }
 }

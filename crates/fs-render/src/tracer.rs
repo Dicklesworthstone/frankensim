@@ -114,6 +114,7 @@ pub use sharding::{
     render_motion_shard, render_static_shard,
 };
 mod bdpt;
+mod initial_medium;
 mod manifold;
 pub use bdpt::{
     BIDIRECTIONAL_TRACER_SEMANTICS_VERSION, BidirectionalExecutionReport,
@@ -190,9 +191,9 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
 /// opaque materials retain tracer-v1 stream order and image bits.
-// v15 gives terminal rough-dielectric NEE its complete contribution: no
-// continuation is evaluated there, so there is no competing BSDF technique.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 15;
+// v16 initializes rays launched inside admitted dielectric regions. Exterior
+// origins retain the same empty stack, random streams and radiance arithmetic.
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 16;
 
 /// Radiance-mode shading-normal projection for brushed GGX conductors.
 /// Version 2 removes spurious gain at geometric grazing incidence.
@@ -259,6 +260,7 @@ struct SceneLighting<'scene> {
     // Prepared once at admission, including glass that a camera path has
     // already exited when it reaches its terminal opaque receiver.
     has_dielectric_materials: bool,
+    initial_media: initial_medium::InitialMedia<'scene>,
 }
 
 impl<'scene> core::ops::Deref for SceneLighting<'scene> {
@@ -275,6 +277,7 @@ impl<'scene> From<AdmittedLighting<'scene>> for SceneLighting<'scene> {
             stationary,
             moving: None,
             has_dielectric_materials: false,
+            initial_media: initial_medium::InitialMedia::default(),
         }
     }
 }
@@ -3088,6 +3091,14 @@ pub enum TracerError {
     },
     /// The defensive nested-medium ceiling was exceeded.
     MediumStackOverflow,
+    /// Launch-point membership or nesting could not be established without
+    /// guessing a dielectric medium.
+    InitialMedium {
+        /// Boundary requiring repair or a supported containment witness.
+        boundary_primitive: usize,
+        /// Stable refusal class.
+        reason: &'static str,
+    },
     /// A direct-light sample first encountered a dielectric, but the geometry
     /// or material was outside both exact smooth homogeneous connector classes:
     /// the analytic parallel slab and the finite convex planar manifold.
@@ -3205,6 +3216,13 @@ impl core::fmt::Display for TracerError {
                 "dielectric boundary {boundary_primitive} violated LIFO nesting; active boundary {active_boundary:?}"
             ),
             Self::MediumStackOverflow => formatter.write_str("dielectric medium stack overflow"),
+            Self::InitialMedium {
+                boundary_primitive,
+                reason,
+            } => write!(
+                formatter,
+                "initial dielectric medium for boundary {boundary_primitive} refused: {reason}"
+            ),
             Self::UnsupportedSlabNee {
                 boundary_primitive,
                 reason,
@@ -13505,7 +13523,9 @@ fn trace_path_with_regions<'scene>(
             previous_bsdf: None,
             prev_origin: ray.origin,
             segment_origin: ray.origin,
-            medium_stack: MediumStack::new(),
+            medium_stack: lighting
+                .initial_media
+                .stack(scene, cx, ray.origin, ray_time)?,
             rng,
             next_depth: 0,
             active_lane: None,
@@ -16201,6 +16221,9 @@ fn validate_scene_with_medium_emission<'scene>(
     }
     let mut lighting = SceneLighting::from(lighting);
     lighting.has_dielectric_materials = has_dielectric_materials;
+    if has_dielectric_materials {
+        lighting.initial_media = initial_medium::InitialMedia::try_new(scene, cx)?;
+    }
     if thermal_emission {
         let moving = thermal_lighting::MovingThermalLights::try_new(scene, cx)?;
         if !moving.is_empty() {
