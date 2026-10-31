@@ -438,3 +438,19 @@ fn individually_finite_compartments_with_overflowing_network_water_total_refuse(
         ))
     ));
 }
+
+#[test]
+fn empty_edge_network_observes_temporal_cancellation_before_step_budget_exhaustion() {
+    let mut system = network(vec![cell(1.0, &[], 0.0, 0.0)], vec![]);
+    let before = snapshot(&system);
+    let mut config = controls(1.0);
+    config.maximum_steps = 1;
+    let mut polls = 0;
+    let result = system.advance(2.0, config, || {
+        polls += 1;
+        polls == 2
+    });
+    assert!(matches!(result, Err(OsmoticNetworkError::Cancelled)));
+    assert_eq!(polls, 2);
+    assert_eq!(snapshot(&system), before);
+}

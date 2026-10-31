@@ -16617,3 +16617,48 @@ source assembly; no existing accepted state or prepared coefficients mutate.
 This is fixed-equilibrium planar solid heat spreading, with the original common
 temperature and physical thickness. It does not add mean-temperature evolution,
 phase changes, curved extrusions or a measured instrument-realism claim.
+## Finite solution activity, bound-water transport and native swelling
+
+`moisture::solution::FiniteMoistureSolution` retains the shared
+`fs-material::osmosis::IdealDiluteSolution` inventory. Its independent solute
+amounts remain unchanged while water uptake concentrates the solution and
+desorption dilutes it. Explicit solvent molar mass and partial molar volume
+define the incompressible water mass scale; no material name supplies a density.
+
+The equal-pressure, isothermal equilibrium-vapor bridge maps aqueous water
+activity to the original `DryBasisSorption` relative-humidity coordinate, under
+the same pure-water reference pressure and ideal-vapor approximation.
+Every scalar trial advances the original `MoistureSlab` from its accepted field
+using the same endpoint activity at all exposed faces. Original diffusivity,
+surface-exchange, source-domain and solver controls remain active. A bounded
+safeguarded secant solve closes solution solvent change plus bound-water change
+over an explicitly supplied source-supported volume bracket. Only bracket
+residuals are retained between trials, avoiding two additional full slab and
+material candidates. No inventory is clipped, and dissolved solute is not lost
+or diluted by changing concentration independently of its amount.
+
+The returned reservoir, native moisture field and original source receipts
+publish together after both incremental and direct water-inventory checks.
+`MoistureSolid::advance_finite_solution` resolves original source-integrated
+hygroscopic strain, compatible deformation, stress, wet inertia and current
+density at that same endpoint. A late mechanical/source refusal preserves both
+accepted water inventories. Existing native plate resolution consumes the same
+field and refreshes its actual elastic sources and wet mass.
+
+G1 manufactured one-cell uptake/desorption endpoints independently check water
+balance and equilibrium activity; G3 tests cover finite dilution, unchanged
+solute amounts, continuation, sealed boundaries, equilibrium and salinity's
+effect on native plate/solid responses. G4 tests cover inadequate volume and
+iteration bounds, temperature mismatch, cancellation and a late native elastic
+source refusal. These authored cases do not establish material calibration.
+
+This bridge assumes nonvolatile solutes, solute exclusion from the bound-water
+solid, and negligible vapor-path storage. Its original vapor surface resistance
+does not become a liquid-immersion permeability. It does not add a resolved vapor
+space, ion transport, sorption heat, stress-driven transport or pressure-driven
+liquid filtration. Reported osmotic pressure remains a thermodynamic diagnostic
+and is not silently substituted for a mechanical surface traction. The dilute
+thermodynamic and original fixed-reference moisture limits remain explicit.
+Mechanical response is one way: elastic work does not feed solvent chemical
+potential, and the route does not claim closed chemo-mechanical energy balance.
+

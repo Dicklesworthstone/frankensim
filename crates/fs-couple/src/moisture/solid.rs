@@ -465,4 +465,33 @@ impl MoistureSolid {
         poll(cx)?;
         Ok((candidate, solid))
     }
+
+    /// Couple finite solution activity, original bound-water transport and
+    /// compatible native swelling as one unpublished endpoint. Nonvolatile
+    /// solutes remain in the equal-pressure solution; the original sorption
+    /// law is consumed through its equilibrium vapor-activity convention.
+    /// A late mechanical/source refusal leaves both water inventories accepted
+    /// at their originals. Osmotic pressure is not a substituted surface load.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_finite_solution(
+        &self,
+        reservoir: &super::solution::FiniteMoistureSolution,
+        slab: &MoistureSlab,
+        dt_s: f64,
+        faces: &[Option<super::atmosphere::DryBasisSorption>; 2],
+        transport: MoistureStepConfig,
+        controls: super::solution::SolutionMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            super::solution::SolutionMoistureCandidate,
+            MoistureSolidState,
+        ),
+        super::solution::SolutionMoistureError,
+    > {
+        let candidate = reservoir.advance(slab, dt_s, faces, transport, controls, cx)?;
+        let solid = self.resolve(candidate.moisture(), cx)?;
+        poll(cx)?;
+        Ok((candidate, solid))
+    }
 }

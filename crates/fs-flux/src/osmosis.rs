@@ -379,6 +379,7 @@ impl OsmoticNetwork {
         let mut elapsed = 0.0;
         let mut step = duration_s.min(controls.maximum_step_s);
         while elapsed < duration_s {
+            poll(&mut cancelled)?;
             if report.accepted_steps >= controls.maximum_steps {
                 return Err(OsmoticNetworkError::WorkBudget);
             }

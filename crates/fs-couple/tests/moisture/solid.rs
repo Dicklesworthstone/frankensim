@@ -54,6 +54,132 @@ fn free_supports() -> Vec<usize> {
 }
 
 #[test]
+fn finite_solution_activity_drives_native_swelling_and_late_refusal_is_atomic() {
+    with_cx(|cx| {
+        let volume = 1e-4;
+        let original = slab(card([0.01; 2], 0.3), 0.1, vec![0.1], cx);
+        let binding = bind(
+            &original,
+            SolidStiffnessModel::Isotropic,
+            axes(),
+            free_supports(),
+            cx,
+        );
+        let faces = [
+            Some(atmosphere::sorption(0.2)),
+            Some(atmosphere::sorption(0.2)),
+        ];
+        let pure = solution::reservoir(volume, vec![0.0]);
+        let saline = solution::reservoir(volume, vec![0.03]);
+        let (pure_water, pure_solid) = binding
+            .advance_finite_solution(
+                &pure,
+                &original,
+                0.25,
+                &faces,
+                config(),
+                solution::controls(volume),
+                cx,
+            )
+            .unwrap();
+        let (salt_water, salt_solid) = binding
+            .advance_finite_solution(
+                &saline,
+                &original,
+                0.25,
+                &faces,
+                config(),
+                solution::controls(volume),
+                cx,
+            )
+            .unwrap();
+        let activity = salt_water.reservoir().solution().water_activity().unwrap();
+        // Two half-cell faces give alpha = 4*dt*D/L² = 1. Source-integrated
+        // beta is constant, so compatible free strain is beta*(M_end-M_start).
+        let expected_moisture = (0.1 + 0.2 * activity) / 2.0;
+        near(
+            salt_water.moisture().moisture()[0],
+            expected_moisture,
+            2e-13,
+        );
+        let strain = [0.01, 0.04, 0.02].map(|beta| beta * (expected_moisture - 0.1));
+        for (x, u) in binding
+            .reference_nodes_m()
+            .iter()
+            .zip(salt_solid.solution().displacement_m())
+        {
+            for k in 0..3 {
+                near(u[k], strain[k] * x[k], 1e-10);
+            }
+        }
+        for element in salt_solid.stress().elements() {
+            for stress in element.stress_mandel_pa() {
+                near(*stress, 0.0, 0.1);
+            }
+        }
+        assert!(salt_water.step().water_to_solid_kg < pure_water.step().water_to_solid_kg);
+        assert!(salt_solid.wet_mass_kg() < pure_solid.wet_mass_kg());
+        assert!(
+            salt_solid
+                .geometry()
+                .element_volumes_m3()
+                .iter()
+                .sum::<f64>()
+                < pure_solid
+                    .geometry()
+                    .element_volumes_m3()
+                    .iter()
+                    .sum::<f64>()
+        );
+        near(
+            salt_solid.wet_mass_kg(),
+            salt_water.moisture().wet_mass_kg(),
+            1e-13,
+        );
+        assert_eq!(salt_solid.time_s(), salt_water.moisture().time_s());
+
+        let limited = slab(card([0.01; 2], 0.12), 0.1, vec![0.1], cx);
+        let limited_solid = bind(
+            &limited,
+            SolidStiffnessModel::Isotropic,
+            axes(),
+            free_supports(),
+            cx,
+        );
+        // Native diffusion accepts the proposed water exchange, but the actual
+        // endpoint elastic source is outside its admitted moisture range.
+        let water_only = saline
+            .advance(
+                &limited,
+                0.25,
+                &faces,
+                config(),
+                solution::controls(volume),
+                cx,
+            )
+            .unwrap();
+        assert!(water_only.moisture().moisture()[0] > 0.12);
+        assert!(
+            limited_solid
+                .advance_finite_solution(
+                    &saline,
+                    &limited,
+                    0.25,
+                    &faces,
+                    config(),
+                    solution::controls(volume),
+                    cx,
+                )
+                .is_err()
+        );
+        assert_eq!(saline.solution().solvent_volume_m3(), volume);
+        assert_eq!(saline.solution().solute_moles(), &[0.03]);
+        assert_eq!(limited.time_s(), 0.0);
+        assert_eq!(limited.moisture(), &[0.1]);
+    });
+}
+
+#[test]
 fn transported_moisture_drives_free_shape_wet_mass_and_current_density() {
     with_cx(|cx| {
         let original = slab(card([0.01; 2], 0.3), 0.1, vec![0.1], cx);

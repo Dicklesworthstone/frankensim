@@ -24,6 +24,8 @@ mod solid;
 mod atmosphere;
 #[path = "moisture/surface.rs"]
 mod surface;
+#[path = "moisture/solution.rs"]
+mod solution;
 #[path = "moisture/implicit.rs"]
 mod implicit;
 

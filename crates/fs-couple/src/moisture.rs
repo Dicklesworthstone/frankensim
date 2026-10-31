@@ -23,6 +23,8 @@ mod implicit;
 pub mod plate;
 /// Directional swelling, compatible shape, stress and native vibration tangent.
 pub mod solid;
+/// Finite aqueous solvent inventory and activity-controlled bound-water exchange.
+pub mod solution;
 /// Source-backed finite surface exchange in the dry-basis flux convention.
 pub mod surface;
 pub use implicit::{MoistureNonlinearConfig, MoistureNonlinearReport};
