@@ -188,8 +188,9 @@ buoyancy; no independent expansion coefficient is used. An authored
 that differs from the fluid's original reference. Omitting gravity gives the
 same temperature feedback under the declared forced-flow boundaries.
 
-Inertia, continuity and heat advection retain the fluid's reference density and
-heat capacity under the existing Boussinesq approximation. Every trial and
+Inertia and continuity retain the fluid's reference density under the existing
+Boussinesq approximation. Heat advection uses reference heat capacity unless
+the source-enthalpy option below is selected. Every trial and
 endpoint must keep each of those two source values within **5%** of its reference.
 Viscosity and conductivity use their actual local values. Solid conductivity is
 reevaluated at each solid cell; the complete original source bundle, including
@@ -232,6 +233,102 @@ identify reference inputs; evolving endpoint evidence is reported separately in
 `material_feedback`. Neither promotes estimated numerical results to
 experimental validation.
 
+## Source-law fluid enthalpy
+
+An evolving fluid can use its original caloric law for transported heat by
+adding a top-level `fluid_enthalpy` object. This also selects source-law fluid
+storage in a native unsteady scene. For a liquid material pack, declare the
+supported temperature span, the caloric interpolation accuracy and a local
+heat-flux convergence tolerance explicitly:
+
+```json
+{
+  "fluid_enthalpy": {
+    "minimum_temperature_k": 290,
+    "maximum_temperature_k": 315,
+    "maximum_interpolation_error_j_kg": 0.001,
+    "maximum_flux_defect_w": 1e-7
+  }
+}
+```
+
+The span must contain the fluid's original reference temperature, every inlet
+and potential backflow temperature, and every thermal trial. Bounds must fit
+the original source support. Liquid `Cp(T)` is integrated into the existing
+bounded caloric chart from the same material pack, fixed pressure/composition
+coordinates and pinned source claims. The declared interpolation tolerance
+controls its specific-enthalpy approximation in J/kg; an accuracy request that
+exceeds the chart's finite knot budget refuses. Density and transport still
+come from the original liquid law at their native material time level.
+
+For a gas, supply the same temperature and flux fields but **omit
+`maximum_interpolation_error_j_kg`**. The original gas model supplies its
+analytic enthalpy increment: the engineering gas models retain their constant
+mixture Cp, while thermochemical gases use the original NASA-9 caloric source.
+No formation-energy subtraction, species substitution or source reconciliation
+is introduced. Original temperature domains and humid-air saturation checks
+remain active.
+
+The native heat operator transports donor `h(T)` with conservative first-order
+upwind fluxes on the projected flow faces. Nonlinear acceptance checks the
+source-law heat defect on every face and in every fluid cell; global
+cancellation cannot conceal a local error. This option retains the existing
+fixed-density Boussinesq model and its **5% source density and Cp departure
+limits**, and does not admit latent phase change. The original source reference
+temperature supplies a common numerical enthalpy datum.
+
+`material_feedback.fluid_enthalpy` identifies the selected advection law,
+reference temperature, declared span and tolerances, liquid chart identity
+(or `null` for the original analytic gas law), and final face/cell flux defects.
+Existing material input and endpoint receipts remain available.
+
+For an unsteady scene, add explicit nonlinear and total-work controls inside
+the same object:
+
+```json
+{
+  "fluid_enthalpy": {
+    "minimum_temperature_k": 290,
+    "maximum_temperature_k": 315,
+    "maximum_interpolation_error_j_kg": 0.001,
+    "maximum_flux_defect_w": 1e-7,
+    "transient_controls": {
+      "maximum_passes_per_step": 40,
+      "maximum_energy_solves": 4000,
+      "temperature_tolerance_k": 1e-7,
+      "maximum_storage_defect_w": 1e-6,
+      "maximum_energy_closure_j": 1e-6,
+      "temperature_relaxation": 1
+    }
+  }
+}
+```
+
+These controls are required for transient source enthalpy and refuse on a
+steady scene. Transient `fluid_enthalpy` requires authored or frozen solid
+storage; combining it with temperature-dependent solid calorics is currently
+refused. Counts must be positive integers, with at most 1,000,000 passes
+per step and 10,000,000 energy solves for the whole march. All tolerances must
+be finite and nonnegative, and relaxation must be in `(0, 1]`. Choose them for
+the scene's temperature, heat and energy scales; the examples are explicit
+settings, not automatic error estimates.
+
+Every accepted thermal step stores `rho_reference * V * [h(T_new)-h(T_old)]`
+using the original source increment. Backward-Euler storage linearizations
+all retain the same accepted old state and the same native momentum step.
+Acceptance checks the unrelaxed temperature defect, each cell's storage-rate
+defect, local advective defects and actual energy closure independently.
+`maximum_energy_solves` counts every linear heat solve across all steps,
+including inner endpoint-radiation trials. Exhaustion or nonconvergence
+publishes no partial march.
+
+The transient caloric report includes actual `energy_solves`, the largest
+accepted per-step work and defects, and all declared limits. Each emitted
+transient history record includes `stored_energy_change_j`, `source_energy_j`,
+`boundary_outflow_j` and `closure_j`, with positive boundary energy directed
+outward. These are the native physical heat records, including thermostat and
+radiation heat. The existing history sampling limit still applies.
+
 
 ## Unsteady flow with temperature-dependent fluid properties
 
@@ -265,7 +362,8 @@ At each accepted temperature, the original fluid source resolves local density,
 viscosity, heat capacity and conductivity together. The next native momentum
 step uses `(rho(T) - rho_reference) * gravity` and local viscosity; the heat
 step uses the same projected volume fluxes, local conductivity and reference
-`rho * Cp` storage/advection. Both source density and Cp must remain within
+`rho * Cp` storage/advection unless `fluid_enthalpy` selects the source-law
+storage and transport above. Both source density and Cp must remain within
 5% of their original reference at the initial state and every endpoint.
 Pressure, composition, source choices and source domains retain the same rules
 as in the steady path.

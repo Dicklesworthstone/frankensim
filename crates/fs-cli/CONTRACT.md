@@ -1,5 +1,37 @@
 # CONTRACT: fs-cli
 
+## Source-caloric cooling scenes
+
+`cooling-cht` accepts an explicit top-level `fluid_enthalpy` object on an
+evolving gas or liquid source. It binds calorics to the same immutable fluid
+law/card, thermodynamic pressure, composition and source selection used for
+transport. The caller declares minimum/maximum temperatures and a finite
+nonnegative local heat-flux tolerance. Liquids also require a positive
+specific-enthalpy interpolation tolerance for the existing bounded Cp chart;
+analytic gas calorics reject that inapplicable field. The source reference,
+inlets, potential backflow and every queried trial must remain in the declared
+and original supported domains. Unknown caloric fields refuse.
+
+Steady scenes use the native source-enthalpy material CHT solver with
+first-order upwind donor heat transport. Unsteady scenes additionally require
+`fluid_enthalpy.transient_controls`: explicit positive per-step nonlinear and
+whole-march energy-solve budgets, unrelaxed temperature/storage/energy-closure
+tolerances, and relaxation in `(0,1]`. The same native momentum history, clock,
+conductivity, radiation and thermostat owners advance; fluid storage is
+`rho0 V delta(h)`. Every actual linear heat solve, including endpoint-radiation
+trials, consumes the whole-march budget. Exhaustion reports
+`cooling-cht-budget`; caloric nonconvergence or source refusal exposes no
+partial march. Steady scenes reject transient-only controls.
+
+`material_feedback.fluid_enthalpy` reports source span/datum, chart identity
+where applicable, local caloric defects, declared controls and actual transient
+work. Unsteady history rows expose stored, source, boundary and closure energy
+from the original physical ledger. Existing source receipts and transport
+epochs remain available. Reference density, the 5% source rho/Cp bounds,
+laminar/fixed-geometry admission and first-order coupled time accuracy remain;
+omitting the opt-in preserves reference-Cp thermal behavior.
+`docs/COOLING_CHT_MATERIALS.md` specifies the input and reporting fields.
+
 The stable command-line membrane for the Cooling 0.1 product workflow (bead
 `frankensim-extreal-program-f85xj.6.2`). The binary is named `frankensim`;
 the package is `fs-cli` so the workspace retains its flat `fs-*` crate

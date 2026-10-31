@@ -679,6 +679,7 @@ struct Scene {
     grid: Grid,
     fluid: FluidProperties,
     fluid_source: Option<material::FluidSource>,
+    fluid_enthalpy: Option<material::enthalpy::Input>,
     materials: Vec<SolidMaterial>,
     solid_sources: Vec<material::SolidSource>,
     contacts: Vec<ContactResistance>,
@@ -1486,11 +1487,23 @@ impl Scene {
             transient.as_ref(),
             evolving,
         )?;
+        let fluid_enthalpy = material::enthalpy::parse(
+            root.get("fluid_enthalpy"), fluid_source.as_ref(), transient.is_some(),
+        )?;
+        if transient.is_some()
+            && fluid_enthalpy.is_some()
+            && solid_sources.iter().any(material::SolidSource::temperature_dependent)
+        {
+            return Err(bad(
+                "transient fluid_enthalpy requires authored or frozen solid storage; simultaneous source-caloric fluid and temperature-dependent solid storage is unsupported",
+            ));
+        }
         Ok(Self {
             dx,
             grid,
             fluid,
             fluid_source,
+            fluid_enthalpy,
             materials,
             solid_sources,
             contacts,
@@ -1919,12 +1932,16 @@ fn execute_unsteady(
             first = false;
             let _ = write!(
                 out,
-                "{{\"time_s\":{},\"max_solid_temperature_k\":{},\"kinetic_energy_j\":{},\"radiated_w\":{},\"sweeps\":{}}}",
+                "{{\"time_s\":{},\"max_solid_temperature_k\":{},\"kinetic_energy_j\":{},\"radiated_w\":{},\"sweeps\":{},\"stored_energy_change_j\":{},\"source_energy_j\":{},\"boundary_outflow_j\":{},\"closure_j\":{}}}",
                 num(record.time_s)?,
                 num_or_null(record.max_solid_temperature_k),
                 num(step.kinetic_energy_j)?,
                 num(record.radiated_w)?,
-                step.inner_iterations
+                step.inner_iterations,
+                num(record.stored_energy_change_j)?,
+                num(record.source_j)?,
+                num(record.boundary_outflow_j)?,
+                num(record.closure_j)?
             );
         }
         out.push_str("]},\"sources\":[");

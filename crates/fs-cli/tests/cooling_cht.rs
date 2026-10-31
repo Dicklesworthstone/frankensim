@@ -427,15 +427,43 @@ mod evolving_materials {
         pack_with_caloric(liquid, slope, upper, 1.0, 0.0)
     }
 
+    fn pack_with_cp_slope(liquid: bool, slope: f64, upper: f64, cp_slope: f64) -> Vec<u8> {
+        let capacity = if cp_slope == 0.0 {
+            [2.0; 3]
+        } else {
+            [2.0 - 10.0 * cp_slope, 2.0, 2.0 + cp_slope * (upper - 300.0)]
+        };
+        pack_with_caloric_knots(liquid, slope, upper, 1.0, capacity)
+    }
+
     fn pack_with_caloric(
-        liquid: bool, slope: f64, upper: f64, reference_conductivity: f64, capacity_slope: f64,
+        liquid: bool,
+        slope: f64,
+        upper: f64,
+        reference_conductivity: f64,
+        capacity_slope: f64,
+    ) -> Vec<u8> {
+        pack_with_caloric_knots(
+            liquid,
+            slope,
+            upper,
+            reference_conductivity,
+            [2.0, 2.0, 2.0 + capacity_slope * (upper - 300.0)],
+        )
+    }
+
+    fn pack_with_caloric_knots(
+        liquid: bool,
+        slope: f64,
+        upper: f64,
+        reference_conductivity: f64,
+        capacity: [f64; 3],
     ) -> Vec<u8> {
         let mut properties = vec![
             (DENSITY_PROPERTY, Density::DIMS, if liquid {
                 [1.01, 1.0, 1.0-0.001*(upper-300.0)]
             } else { [2.0; 3] }),
-            (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS,
-                [2.0, 2.0, 2.0 + capacity_slope * (upper - 300.0)]),
+            (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS, capacity),
             (THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS,
                 [reference_conductivity, reference_conductivity,
                     reference_conductivity+slope*(upper-300.0)]),
@@ -492,6 +520,382 @@ mod evolving_materials {
         std::fs::write(base.join(liquid), pack(true, 0.0, 350.0)).unwrap();
         std::fs::write(base.join(solid), pack(false, slope, solid_upper)).unwrap();
         (path, scene)
+    }
+
+    const CALORIC_LIQUID: &str = r#"{"mode":"temperature-dependent","temperature_axis":"T",
+      "pack":"PACK","viscosity":"dynamic","state":[
+        {"name":"T","value":"300 K","kind":"absolute-temperature"},
+        {"name":"pressure","value":"100 kPa","kind":"pressure"}]}"#;
+    const CALORIC_GAS: &str = r#"{"mode":"temperature-dependent",
+      "gas":"mixture 300 100000 mole 2 He 0.4 N2 0.6"}"#;
+    const CALORIC_POLICY: &str = r#"{"minimum_temperature_k":300,"maximum_temperature_k":310,
+      "maximum_flux_defect_w":1e-10,"maximum_interpolation_error_j_kg":1e-8}"#;
+
+    fn caloric_channel(fluid: &str, policy: &str, reverse: bool) -> String {
+        let (inlet, outlet, speed) = if reverse {
+            ("x+", "x-", -0.1)
+        } else {
+            ("x-", "x+", 0.1)
+        };
+        format!(
+            r#"{{
+          "schema":"frankensim.cooling-cht.v1", "size_m":[1,1,1],"voxel_m":1,
+          "fluid":{fluid},"fluid_enthalpy":{policy},
+          "faces":{{
+            "{inlet}":{{"type":"inlet","velocity_m_s":[{speed},0,0],"temperature_k":300}},
+            "{outlet}":{{"type":"opening","ambient_k":300}},
+            "y-":{{"type":"symmetry"}},"y+":{{"type":"wall","heat_flux_w_m2":11}},
+            "z-":{{"type":"symmetry"}},"z+":{{"type":"symmetry"}}
+          }},
+          "probes":[{{"name":"fluid","at_m":[0.5,0.5,0.5]}}],
+          "solver":{{"tolerance":1e-12}}
+        }}"#
+        )
+    }
+
+    #[test]
+    fn source_enthalpy_liquid_changes_actual_heated_channel_in_both_directions() {
+        let mut temperatures = Vec::new();
+        let mut identities = Vec::new();
+        for (index, cp_slope) in [0.0_f64, 0.01].into_iter().enumerate() {
+            let bytes = pack_with_cp_slope(true, 0.0, 310.0, cp_slope);
+            let source = NormalizedMaterialCardPack::from_bytes(&bytes).unwrap();
+            let point = fs_matdb::QueryPoint::new()
+                .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 300.0)
+                .unwrap()
+                .with_quantity("pressure", quantity(QuantityKind::Pressure), 100000.0)
+                .unwrap();
+            let reference = fs_material::liquid::resolve_liquid_state(
+                source.card(),
+                &point,
+                fs_material::state_point::MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            let mut directions = Vec::new();
+            for reverse in [false, true] {
+                let name = format!("source-enthalpy-liquid-{index}-{reverse}");
+                let pack_name = format!("{name}.fsmcdpk");
+                let input = caloric_channel(
+                    &CALORIC_LIQUID.replace("PACK", &pack_name),
+                    CALORIC_POLICY,
+                    reverse,
+                );
+                let path = scratch(&format!("{name}.json"), &input);
+                let pack_path = path.with_file_name(&pack_name);
+                std::fs::write(&pack_path, &bytes).unwrap();
+                let (code, result, error) = run(&path);
+                assert_eq!(code, 0, "{error}");
+                assert_eq!(result.str_field("solver"), Some("fv-simplec-material"));
+                assert_eq!(f(&result, &["fluid_cells"]), 1.0);
+                let probe = &result.get("probes").unwrap().as_array().unwrap()[0];
+                let temperature = f(probe, &["temperature_k"]);
+                let velocity = probe.get("velocity_m_s").unwrap().as_array().unwrap()[0]
+                    .as_f64()
+                    .unwrap();
+                assert!((velocity - if reverse { -0.1 } else { 0.1 }).abs() < 1e-10);
+                assert!((f(&result, &["flow", "outflow_m3_s"]) - 0.1).abs() < 1e-12);
+                // Native Inflow also conducts through the half-cell: G=2*k*A/dx=2.
+                // Independent source integral: 11 = 2*dT + .1*(2*dT + s*dT^2/2).
+                let a = 0.05 * cp_slope;
+                let expected = 300.0 + 22.0 / (2.2 + (2.2_f64.powi(2) + 44.0 * a).sqrt());
+                assert!(
+                    (temperature - expected).abs() < 1e-7,
+                    "{temperature} vs {expected}"
+                );
+                let delta = temperature - 300.0;
+                let advected = 0.1 * (2.0 * delta + 0.5 * cp_slope * delta * delta);
+                assert!((advected + 2.0 * delta - 11.0).abs() < 2e-7);
+                assert!((f(&result, &["energy", "advective_outflow_w"]) - advected).abs() < 2e-8);
+                assert!(f(&result, &["energy", "boundary_outflow_w"]).abs() < 2e-7);
+                assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-8);
+                let fluid = result.path(&["material_inputs", "fluid"]).unwrap();
+                assert_eq!(f(fluid, &["density_kg_m3"]), 1.0);
+                assert_eq!(f(fluid, &["specific_heat_j_kg_k"]), 2.0);
+                assert_eq!(
+                    fluid
+                        .path(&["source", "pack_identity"])
+                        .unwrap()
+                        .as_str()
+                        .unwrap(),
+                    source.content_hash().to_hex()
+                );
+                assert_eq!(
+                    fluid
+                        .path(&["source", "material_state"])
+                        .unwrap()
+                        .as_str()
+                        .unwrap(),
+                    reference.material().identity().to_hex()
+                );
+                let caloric = result
+                    .path(&["material_feedback", "fluid_enthalpy"])
+                    .unwrap();
+                assert_eq!(
+                    caloric.str_field("advection"),
+                    Some("source-enthalpy-first-order-upwind")
+                );
+                assert_eq!(f(caloric, &["reference_temperature_k"]), 300.0);
+                assert_eq!(f(caloric, &["maximum_interpolation_error_j_kg"]), 1e-8);
+                for defect in ["maximum_face_flux_defect_w", "maximum_cell_flux_defect_w"] {
+                    assert!(f(caloric, &[defect]) <= f(caloric, &["flux_tolerance_w"]));
+                }
+                let identity = caloric.str_field("chart_identity").unwrap().to_owned();
+                assert_eq!(identity.len(), 64);
+                if !reverse {
+                    identities.push(identity);
+                }
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), input);
+                assert_eq!(std::fs::read(&pack_path).unwrap(), bytes);
+                directions.push(temperature);
+            }
+            assert!((directions[0] - directions[1]).abs() < 1e-9);
+            temperatures.push(directions[0]);
+        }
+        assert!(temperatures[0] - temperatures[1] > 0.005);
+        assert_ne!(identities[0], identities[1]);
+    }
+
+    #[test]
+    fn source_enthalpy_named_gas_keeps_its_pressure_composition_and_native_heat_balance() {
+        let policy = CALORIC_POLICY.replace(",\"maximum_interpolation_error_j_kg\":1e-8", "");
+        let input = caloric_channel(CALORIC_GAS, &policy, false);
+        let path = scratch("source-enthalpy-named-gas.json", &input);
+        let (code, result, error) = run(&path);
+        assert_eq!(code, 0, "{error}");
+        let fluid = result.path(&["material_inputs", "fluid"]).unwrap();
+        let source = fluid.get("source").unwrap();
+        assert_eq!(
+            source.str_field("declaration"),
+            Some("mixture 300 100000 mole 2 He 0.4 N2 0.6")
+        );
+        assert_eq!(f(source, &["pressure_pa"]), 100000.0);
+        let endpoint = result
+            .path(&["material_feedback", "fluid_endpoint"])
+            .unwrap();
+        let delta = f(endpoint, &["maximum_temperature_k"]) - 300.0;
+        assert!(delta > 0.0 && delta < 5.0);
+        let advected =
+            f(fluid, &["density_kg_m3"]) * 0.1 * f(fluid, &["specific_heat_j_kg_k"]) * delta;
+        let conduction = 2.0 * f(endpoint, &["maximum_conductivity_w_m_k"]) * delta;
+        assert!((advected + conduction - 11.0).abs() < 2e-6);
+        assert!((f(&result, &["energy", "advective_outflow_w"]) - advected).abs() < 2e-6);
+        assert!(f(&result, &["energy", "boundary_outflow_w"]).abs() < 2e-6);
+        let caloric = result
+            .path(&["material_feedback", "fluid_enthalpy"])
+            .unwrap();
+        assert_eq!(
+            caloric.get("maximum_interpolation_error_j_kg"),
+            Some(&J::Null)
+        );
+        assert_eq!(caloric.get("chart_identity"), Some(&J::Null));
+        for defect in ["maximum_face_flux_defect_w", "maximum_cell_flux_defect_w"] {
+            assert!(f(caloric, &[defect]) <= f(caloric, &["flux_tolerance_w"]));
+        }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), input);
+    }
+
+    #[test]
+    fn source_enthalpy_requires_explicit_supported_sources_and_keeps_original_cp_bound() {
+        let bytes = pack_with_cp_slope(true, 0.0, 310.0, 0.01);
+        let path = scratch("source-enthalpy-refusal-base.json", "{}");
+        let pack_path = path.with_file_name("source-enthalpy-refusal.fsmcdpk");
+        std::fs::write(&pack_path, &bytes).unwrap();
+        let liquid = CALORIC_LIQUID.replace("PACK", "source-enthalpy-refusal.fsmcdpk");
+        let base = caloric_channel(&liquid, CALORIC_POLICY, false);
+        let unsupported_cp = pack_with_cp_slope(true, 0.0, 310.0, 0.04);
+        std::fs::write(
+            path.with_file_name("source-enthalpy-excessive-cp.fsmcdpk"),
+            &unsupported_cp,
+        )
+        .unwrap();
+        let (paired_path, paired_scene) = prepare("source-enthalpy-paired", 0.02, 350.0);
+        let paired_solid = pack_with_caloric(false, 0.02, 350.0, 1.0, 0.4);
+        let paired_solid_path = paired_path.with_file_name("source-enthalpy-paired-solid.fsmcdpk");
+        std::fs::write(&paired_solid_path, &paired_solid).unwrap();
+        let policy = CALORIC_POLICY.replacen(
+            '{',
+            r#"{"transient_controls":{
+          "maximum_passes_per_step":80,"maximum_energy_solves":200,
+          "temperature_tolerance_k":1e-9,"maximum_storage_defect_w":1e-9,
+          "maximum_energy_closure_j":1e-8,"temperature_relaxation":1},"#,
+            1,
+        );
+        let paired = paired_scene.replace(
+            "\"source\":{\"mode\":\"temperature-dependent\",",
+            "\"source\":{\"mode\":\"temperature-dependent\",\"storage_temperature_range_k\":[290,350],",
+        ).replacen('{', &format!(r#"{{"fluid_enthalpy":{policy},
+          "transient":{{"flow":"unsteady","scheme":"backward-euler",
+            "time_step_s":0.02,"steps":2,"initial_temperature_k":300,
+            "inner_iterations":2000,"inner_tolerance":1e-9}},"#), 1);
+        for (index, (input, reason)) in [
+            (
+                base.replace(
+                    "\"minimum_temperature_k\":300",
+                    "\"minimum_temperature_k\":301",
+                ),
+                "temperature span containing the fluid reference",
+            ),
+            (
+                base.replace(",\"maximum_interpolation_error_j_kg\":1e-8", ""),
+                "maximum_interpolation_error_j_kg is required",
+            ),
+            (
+                base.replace(
+                    "\"maximum_flux_defect_w\":1e-10",
+                    "\"guessed_cp\":2,\"maximum_flux_defect_w\":1e-10",
+                ),
+                "unsupported material-source field",
+            ),
+            (
+                caloric_channel("\"dry-air-300k\"", CALORIC_POLICY, false),
+                "requires a temperature-dependent fluid source",
+            ),
+            (
+                caloric_channel(CALORIC_GAS, CALORIC_POLICY, false),
+                "no interpolation-error field applies",
+            ),
+            (
+                base.replace(
+                    "\"maximum_temperature_k\":310",
+                    "\"maximum_temperature_k\":300.1",
+                ),
+                "outside the declared fluid_enthalpy span",
+            ),
+            (
+                base.replace(
+                    "source-enthalpy-refusal.fsmcdpk",
+                    "source-enthalpy-excessive-cp.fsmcdpk",
+                )
+                .replace(
+                    "\"maximum_interpolation_error_j_kg\":1e-8",
+                    "\"maximum_interpolation_error_j_kg\":1e-7",
+                ),
+                "Boussinesq specific heat relative departure",
+            ),
+            (
+                paired,
+                "transient fluid_enthalpy requires authored or frozen solid storage",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = scratch(&format!("source-enthalpy-refusal-{index}.json"), &input);
+            let (code, result, error) = run(&path);
+            assert_ne!(code, 0, "unexpected acceptance: {input}");
+            assert_eq!(result.str_field("code"), Some("cooling-cht-input"));
+            assert!(error.contains(reason), "{error}");
+            assert!(result.get("material_feedback").is_none());
+            assert_eq!(std::fs::read_to_string(path).unwrap(), input);
+        }
+        assert_eq!(std::fs::read(pack_path).unwrap(), bytes);
+        assert_eq!(std::fs::read_to_string(paired_path).unwrap(), paired_scene);
+        assert_eq!(std::fs::read(paired_solid_path).unwrap(), paired_solid);
+    }
+
+    #[test]
+    fn source_enthalpy_unsteady_storage_closes_each_native_step() {
+        let bytes = pack_with_cp_slope(true, 0.0, 310.0, 0.01);
+        let fluid = CALORIC_LIQUID.replace("PACK", "source-enthalpy-unsteady.fsmcdpk");
+        let policy = CALORIC_POLICY.replacen(
+            '{',
+            r#"{"transient_controls":{
+          "maximum_passes_per_step":80,"maximum_energy_solves":200,
+          "temperature_tolerance_k":1e-9,"maximum_storage_defect_w":1e-9,
+          "maximum_energy_closure_j":1e-8,"temperature_relaxation":1},"#,
+            1,
+        );
+        let input = format!(
+            r#"{{
+          "schema":"frankensim.cooling-cht.v1","size_m":[1,1,1],"voxel_m":1,
+          "fluid":{fluid},"fluid_enthalpy":{policy},
+          "faces":{{"y+":{{"type":"wall","heat_flux_w_m2":11}}}},
+          "probes":[{{"name":"fluid","at_m":[0.5,0.5,0.5]}}],
+          "transient":{{"flow":"unsteady","scheme":"backward-euler",
+            "time_step_s":0.1,"steps":3,"initial_temperature_k":300,
+            "inner_iterations":100,"inner_tolerance":1e-10}},
+          "solver":{{"tolerance":1e-12}}
+        }}"#
+        );
+        let path = scratch("source-enthalpy-unsteady.json", &input);
+        let pack_path = path.with_file_name("source-enthalpy-unsteady.fsmcdpk");
+        std::fs::write(&pack_path, &bytes).unwrap();
+        let (code, result, error) = run(&path);
+        assert_eq!(code, 0, "{error}");
+        assert_eq!(
+            result.str_field("solver"),
+            Some("fv-simplec-unsteady-material")
+        );
+        assert_eq!(f(&result, &["fluid_cells"]), 1.0);
+        assert_eq!(f(&result, &["flow", "steps"]), 3.0);
+        assert_eq!(f(&result, &["flow", "inflow_m3_s"]), 0.0);
+        assert_eq!(f(&result, &["flow", "outflow_m3_s"]), 0.0);
+        assert_eq!(f(&result, &["flow", "final_kinetic_energy_j"]), 0.0);
+        let transient = result.get("transient").unwrap();
+        assert_eq!(transient.str_field("scheme"), Some("backward-euler"));
+        assert_eq!(f(transient, &["steps"]), 3.0);
+        assert!(f(transient, &["worst_step_closure_j"]) <= 1e-8);
+        let records = transient.get("records").unwrap().as_array().unwrap();
+        assert_eq!(records.len(), 3);
+        let mut stored = 0.0;
+        for (index, record) in records.iter().enumerate() {
+            assert!((f(record, &["time_s"]) - 0.1 * (index + 1) as f64).abs() < 1e-14);
+            // The unit-area wall supplies 11 W: this is boundary heat, not a
+            // volumetric source. Every actual BE step must store exactly 1.1 J.
+            assert_eq!(f(record, &["source_energy_j"]), 0.0);
+            assert!((f(record, &["boundary_outflow_j"]) + 1.1).abs() < 1e-10);
+            assert!((f(record, &["stored_energy_change_j"]) - 1.1).abs() < 1e-8);
+            assert!(f(record, &["closure_j"]).abs() <= 1e-8);
+            stored += f(record, &["stored_energy_change_j"]);
+        }
+        let probe = &result.get("probes").unwrap().as_array().unwrap()[0];
+        let temperature = f(probe, &["temperature_k"]);
+        let delta = temperature - 300.0;
+        // Independently integrate source Cp=2+.01*(T-300), with rho0*V=1 kg.
+        let physical_storage = 2.0 * delta + 0.005 * delta * delta;
+        let expected = 300.0 + 6.6 / (2.0 + (4.0_f64 + 0.02 * 3.3).sqrt());
+        assert!(
+            (temperature - expected).abs() < 1e-7,
+            "{temperature} vs {expected}"
+        );
+        assert!((physical_storage - 3.3).abs() < 1e-7);
+        assert!((stored - physical_storage).abs() < 1e-7);
+        assert!(
+            physical_storage - 2.0 * delta > 0.01,
+            "frozen Cp cannot store the supplied heat"
+        );
+        let caloric = result
+            .path(&["material_feedback", "fluid_enthalpy"])
+            .unwrap();
+        assert_eq!(
+            caloric.str_field("storage"),
+            Some("source-enthalpy-backward-euler")
+        );
+        assert_eq!(f(caloric, &["maximum_energy_solves"]), 200.0);
+        let energy_solves = f(caloric, &["energy_solves"]);
+        assert!(energy_solves > 3.0 && energy_solves <= f(caloric, &["maximum_energy_solves"]));
+        assert!(f(caloric, &["maximum_storage_defect_w"]) <= f(caloric, &["storage_tolerance_w"]));
+        for defect in ["maximum_face_flux_defect_w", "maximum_cell_flux_defect_w"] {
+            assert!(f(caloric, &[defect]) <= f(caloric, &["flux_tolerance_w"]));
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), input);
+        assert_eq!(std::fs::read(&pack_path).unwrap(), bytes);
+
+        let exhausted = input.replace(
+            "\"maximum_energy_solves\":200",
+            "\"maximum_energy_solves\":2",
+        );
+        let path = scratch("source-enthalpy-unsteady-budget.json", &exhausted);
+        let (code, result, error) = run(&path);
+        assert_ne!(code, 0);
+        assert_eq!(result.str_field("code"), Some("cooling-cht-budget"));
+        assert!(
+            error.contains("whole-march budget must cover at least one energy solve per time step"),
+            "{error}"
+        );
+        assert!(result.get("material_feedback").is_none());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), exhausted);
+        assert_eq!(std::fs::read(pack_path).unwrap(), bytes);
     }
 
     #[test]
