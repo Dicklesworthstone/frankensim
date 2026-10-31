@@ -1,4 +1,4 @@
-//! Affine stored tensor thermodynamics on the shared tensor/enthalpy driver.
+//! Source tensor thermodynamics on the shared tensor/enthalpy driver.
 use super::*;
 use crate::tensor_material::TensorMaterialError;
 use fs_material::visco_tensor::{TensorThermalState, source::thermal::TensorTemperatureDerivative};
@@ -28,6 +28,77 @@ pub struct TensorThermalExchange {
     /// -coefficient_work - delta(T*S), supplied to the same caloric receiver.
     /// Signed reversible heat is distinct from positive dashpot dissipation.
     pub reversible_heat_j: Vec<f64>,
+}
+
+/// Admit the complete caloric/stored-energy interval before any endpoint trial.
+/// The source bound covers every original strain and retained-memory envelope,
+/// including curvature with zero thermal expansion.
+pub(super) fn admit_capacity<E>(
+    history: &TensorSolidHistory<'_, '_>,
+    thermal: &DepositionSimulation<'_>,
+    cells: &[RelaxationThermalCell<'_>],
+    derivatives: &[TensorTemperatureDerivative],
+    temperatures_k: &[f64],
+    expansion_per_k: Option<&[[f64; 6]]>,
+    gate: &CancelGate,
+) -> Result<(), Error<E>> {
+    if derivatives.len() != cells.len()
+        || temperatures_k.len() != cells.len()
+        || expansion_per_k.is_some_and(|a| a.len() != cells.len())
+    {
+        return Err(invalid(
+            "complete thermal derivatives per original caloric receiver required",
+        ));
+    }
+    let mut coefficients = vec![0.0; cells.len()];
+    for (point, &element) in history
+        .solid
+        .projection
+        .material_points()
+        .iter()
+        .zip(history.solid.projection.point_elements())
+    {
+        check(gate)?;
+        coefficients[element] = finite(
+            coefficients[element]
+                + point
+                    .thermal_capacity_bound_j_k2(
+                        &derivatives[element],
+                        temperatures_k[element],
+                        expansion_per_k.map_or([0.0; 6], |a| a[element]),
+                    )
+                    .map_err(|e| solid(SolidError::Dynamics(TensorMaterialError::Material(e))))?,
+        )?;
+    }
+    // The original caloric owner is piecewise linear in h(T). Bound
+    // C_eff = mass*dh/dT - T*psi_TT on every intersecting segment, including
+    // its hottest endpoint. Mechanical capacity stays in reversible exchange;
+    // inserting it into the caloric curve would count the same energy twice.
+    for (cell, coefficient) in cells.iter().zip(coefficients) {
+        check(gate)?;
+        let [low, high] = cell.temperature_interval_k;
+        let mass = thermal
+            .cells()
+            .get(&cell.cell)
+            .ok_or_else(|| invalid("tensor caloric receiver disappeared"))?
+            .mass_kg;
+        for segment in cell.caloric.curve().knots().windows(2) {
+            let a = segment[0];
+            let b = segment[1];
+            if b.temperature_k < low || a.temperature_k > high {
+                continue;
+            }
+            let capacity = mass * (b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg)
+                / (b.temperature_k - a.temperature_k)
+                - high.min(b.temperature_k) * coefficient;
+            if !capacity.is_finite() || capacity <= 0.0 {
+                return Err(invalid(
+                    "tensor thermodynamics cannot establish positive total fixed-strain heat capacity over its admitted domain",
+                ));
+            }
+        }
+    }
+    check(gate)
 }
 
 pub(super) fn states<E>(

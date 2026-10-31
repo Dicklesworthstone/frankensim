@@ -16653,6 +16653,20 @@ thermal histories unchanged. Five focused regressions cover continuing
 memory and physical U balance, lossless cooling, full anisotropic rotated
 entropy, orthotropic common-scale admission and non-affine/late refusal.
 
+`TensorSolidHistory::advance_material_thermal_candidate` extends the same
+driver through `TensorThermalLaw`, including independently affine Young/shear
+sources with rational bulk stiffness. One oriented source derivative template
+per element supplies exact snapshots at the accepted and trial temperatures;
+frozen and evolved states use the same trial snapshot. The shared material
+potential supplies mechanical heat capacity as well as psi, S and U. A
+whole-source-interval bound must establish positive total caloric plus
+mechanical capacity over the original strain domain, even without expansion.
+The caloric curve is unchanged, and coefficient work and delta(T*S) still
+enter its reversible exchange once. The strict affine entry point retains its
+original admission. Focused regressions cover continuing nonlinear material
+memory and heat, a held volumetric finite-heat endpoint, and whole-domain
+capacity refusal with unchanged accepted inputs.
+
 ## Complete material heat on inertial plastic solids
 
 `ThermoplasticDynamics::advance_heat_network_candidate` binds the existing
@@ -16900,22 +16914,24 @@ zero expansion keeps the original state extent and trajectory. A stationary
 coordinate may drift only within the declared floating-point roundoff budget;
 its endpoint is never renormalized or its work/loss recomputed to hide error.
 
-Entropy includes both source-affine stiffness derivatives and equilibrium/
+Entropy includes both source-derived stiffness derivatives and equilibrium/
 Maxwell expansion terms; the shared finite heat driver receives native dashpot
 loss plus signed reversible exchange and checks physical K+U, with U=psi+T*S.
-Constant source alpha may now accompany affine stored tensors over the complete
+Constant source alpha may accompany admitted stored tensors over the complete
 admitted interval. The existing source-law owner admits every selected stiffness
 knot; source-dependent relaxation times remain active.
 
 Actual caloric receiver mass must keep a conservative lower bound on
 C_eff=m*dh/dT-T*psi_TT positive on every chart segment. The mechanical curvature
-includes alpha:C_inst:alpha, -2 alpha:C_eq':e and -2 sum alpha:C_j':q_j.
+includes .5 e:C_eq'':e, alpha:C_inst:alpha, -2 alpha:C_eq':e and
+-2 sum alpha:C_j':q_j. Independent affine Young/shear sources retain their
+nonlinear bulk curvature through the same thermal driver.
 The complete interval bound uses the original Mandel elastic-strain limit and
 a separately enforced 2L envelope for varying Maxwell spring strain. Accepted,
 rebound and final thermal states use that same memory admission. A failed
 sufficient bound refuses without claiming that every individual state is
 unstable. Constant tensors and zero alpha retain their original paths.
-Varying alpha, non-affine stored tensors, Kelvin thermal strain rates, finite
+Varying alpha, unsupported stored-tensor paths, Kelvin thermal strain rates, finite
 deformation and phase mechanics remain outside this bounded reciprocal model.
 
 Five native regressions cover two continuing heated Maxwell intervals, rotated

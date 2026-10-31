@@ -3,7 +3,6 @@ use super::*;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{ClaimSelection, PropertyKey, QueryPoint};
 use fs_material::state_point::MaterialPropertySelection;
-use fs_material::visco_tensor::source::thermal::TensorTemperatureDerivative;
 use fs_solid::linear3::source::{ThermalExpansionModel, ThermalExpansionSource};
 use fs_solid::linear3::{TetElasticMaterial, TetThermalStrainState};
 
@@ -58,15 +57,11 @@ fn resolve<E>(
 
 pub(super) fn prepare<E>(
     history: &TensorSolidHistory<'_, '_>,
-    thermal: &DepositionSimulation<'_>,
     cells: &[RelaxationThermalCell<'_>],
     bindings: &[ThermalExpansionCell<'_>],
-    derivatives: &[TensorTemperatureDerivative],
-    temperatures_k: &[f64],
     gate: &CancelGate,
 ) -> Result<PreparedExpansion, Error<E>> {
-    if bindings.len() != cells.len() || derivatives.len() != cells.len()
-        || temperatures_k.len() != cells.len() {
+    if bindings.len() != cells.len() {
         return Err(invalid(
             "complete expansion sources per original element required",
         ));
@@ -82,7 +77,7 @@ pub(super) fn prepare<E>(
     let mut expected = Vec::with_capacity(cells.len());
     for ((source, cell), binding) in sources.iter().zip(cells).zip(bindings) {
         check(gate)?;
-        // The common caller already admitted the original affine stored
+        // The common caller already admitted the original stored
         // tensors over every selected source knot and retained their derivatives.
         // Expansion still requires its own complete constant-alpha source proof.
         if cell.point.temperature_axis != "T" || binding.mesh_frame.0 == [0; 32] {
@@ -172,7 +167,6 @@ pub(super) fn prepare<E>(
             "continuing thermal memory must preserve expansion sources, stress-free reference and frames",
         ));
     }
-    let mut coefficients = vec![0.0; cells.len()];
     for (point, &element) in history
         .solid
         .projection
@@ -185,44 +179,6 @@ pub(super) fn prepare<E>(
             return Err(invalid(
                 "accepted tensor eigenstrain and integrated thermal source must agree",
             ));
-        }
-        coefficients[element] = finite(
-            coefficients[element]
-                + point
-                    .affine_expansion_capacity_bound_j_k2(
-                        &derivatives[element], temperatures_k[element], prepared.alpha_mandel[element],
-                    )
-                    .map_err(|e| {
-                        solid(SolidError::Dynamics(
-                            crate::tensor_material::TensorMaterialError::Material(e),
-                        ))
-                    })?,
-        )?;
-    }
-    // The actual caloric owner is piecewise linear in h(T). Check its positive
-    // fixed-strain total capacity on every segment, including the hottest end.
-    // C_eff = mass*dh/dT - T*psi_TT. The coefficient bounds the COMPLETE
-    // affine tensor/free-strain curvature over all admitted temperatures and
-    // strains, including each varying Maxwell spring's enforced 2L envelope.
-    for (cell, coefficient) in cells.iter().zip(coefficients) {
-        check(gate)?;
-        let [low, high] = cell.temperature_interval_k;
-        let mass = thermal.cells().get(&cell.cell)
-            .ok_or_else(|| invalid("expansion caloric receiver disappeared"))?.mass_kg;
-        for segment in cell.caloric.curve().knots().windows(2) {
-            let a = segment[0];
-            let b = segment[1];
-            if b.temperature_k < low || a.temperature_k > high {
-                continue;
-            }
-            let capacity = mass * (b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg)
-                / (b.temperature_k - a.temperature_k)
-                - high.min(b.temperature_k) * coefficient;
-            if !capacity.is_finite() || capacity <= 0.0 {
-                return Err(invalid(
-                    "affine stiffness/expansion cannot establish positive total fixed-strain heat capacity over its admitted domain",
-                ));
-            }
         }
     }
     check(gate)?;

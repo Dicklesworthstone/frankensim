@@ -1,7 +1,7 @@
 //! Independent Helmholtz/entropy/internal-energy checks, including real cooling.
 use super::*;
 use fs_couple::tensor_material::solid::thermal::relaxation::AffineThermalBudget;
-use fs_material::visco_tensor::source::thermal::AffineTensorThermal;
+use fs_material::visco_tensor::source::thermal::{AffineTensorThermal, TensorThermalLaw};
 
 fn branch_slope() -> [[f64; 6]; 6] {
     let mut m = [[0.0; 6]; 6];
@@ -61,13 +61,16 @@ fn budget() -> AffineThermalBudget {
 
 // Physical strain coordinates: x, xdot, Maxwell spring strain, accumulated
 // dashpot heat and force work. The reference owns no matrix factor or FE code.
-fn trajectory(mut y: [f64; 5], t: f64, dt: f64, branch: bool) -> [f64; 5] {
+fn trajectory(y: [f64; 5], t: f64, dt: f64, branch: bool) -> [f64; 5] {
     let e = 1000.0 - 2.0 * (t - 300.0);
     let b = if branch {
         280.0 + 0.4 * (t - 300.0)
     } else {
         0.0
     };
+    trajectory_with_stiffness(y, dt, e, b)
+}
+fn trajectory_with_stiffness(mut y: [f64; 5], dt: f64, e: f64, b: f64) -> [f64; 5] {
     let rhs = |z: [f64; 5]| {
         [
             z[1],
@@ -541,5 +544,378 @@ fn nonaffine_sources_and_late_failed_trials_leave_every_accepted_account_unchang
             retry.model().history().material_history().state()
         );
         assert_eq!(first.thermal().energy_j(), retry.thermal().energy_j());
+    });
+}
+
+const RATIONAL_CP: f64 = 0.001;
+const RATIONAL_HEATER_W: f64 = 2.0;
+
+fn rational_claims(cp: f64, with_branch: bool) -> (Vec<PropertyClaim>, TensorPronyProperties) {
+    let (mut claims, mut properties) = claims(with_branch);
+    properties.elasticity = TensorElasticity::IsotropicYoungShear;
+    for claim in &mut claims {
+        if let PropertyValue::Scalar { value, .. } = &mut claim.value {
+            match claim.key.name() {
+                "specific_heat_capacity" => *value = cp,
+                "strain_limit" => *value = 0.01,
+                _ => {}
+            }
+        }
+    }
+    let mut shear = scalar("shear_modulus", Pressure::DIMS, 500.0);
+    shear.value = PropertyValue::Curve {
+        abscissa: "T".into(),
+        abscissa_dims: fs_qty::Temperature::DIMS,
+        knots: [280.0, 300.0, 310.0, 330.0]
+            .map(|t| (t, 500.0 + 0.5 * (t - 300.0)))
+            .to_vec(),
+        dims: Pressure::DIMS,
+    };
+    shear.interpolation = InterpolationPolicy::LinearInside;
+    claims.push(shear);
+    (claims, properties)
+}
+
+// Independent scalar Young/shear constitutive algebra. No source derivatives,
+// projected factors or finite differences enter the reference thermodynamics.
+fn rational_bulk(t: f64) -> [f64; 3] {
+    let young = 1000.0 - 2.0 * (t - 300.0);
+    let shear = 500.0 + 0.5 * (t - 300.0);
+    let gap = 3.0 * shear - young;
+    let cross = -2.0 * shear - 0.5 * young;
+    [
+        young * shear / (3.0 * gap),
+        ((-2.0 * shear + 0.5 * young) * gap - 3.5 * young * shear) / (3.0 * gap * gap),
+        2.0 * cross * cross / (gap * gap * gap),
+    ]
+}
+fn rational_axial(t: f64) -> [f64; 3] {
+    let [bulk, slope, curvature] = rational_bulk(t);
+    [
+        bulk + (4.0 / 3.0) * (500.0 + 0.5 * (t - 300.0)),
+        slope + 2.0 / 3.0,
+        curvature,
+    ]
+}
+fn rational_state(y: [f64; 5], t: f64) -> [f64; 3] {
+    let [modulus, slope, curvature] = rational_axial(t);
+    let branch = 280.0 + 0.4 * (t - 300.0);
+    [
+        (modulus * y[0].powi(2) + branch * y[2].powi(2)) / 12.0,
+        -(slope * y[0].powi(2) + 0.4 * y[2].powi(2)) / 12.0,
+        -t * curvature * y[0].powi(2) / 12.0,
+    ]
+}
+fn rational_endpoint(y: [f64; 5], t0: f64, dt: f64) -> ([f64; 5], f64, f64, f64) {
+    let old = rational_state(y, t0);
+    let at = |t: f64| {
+        let next =
+            trajectory_with_stiffness(y, dt, rational_axial(t)[0], 280.0 + 0.4 * (t - 300.0));
+        let coefficient = rational_state(y, t)[0] - old[0];
+        let reversible = -coefficient - t * rational_state(next, t)[1] + t0 * old[1];
+        (next, coefficient, reversible)
+    };
+    let (mut low, mut high) = (280.0, 330.0);
+    for _ in 0..48 {
+        let t = 0.5 * (low + high);
+        let (next, _, reversible) = at(t);
+        let residual = (10.0 / 6.0) * RATIONAL_CP * (t - t0)
+            - (next[3] - y[3] + reversible + RATIONAL_HEATER_W * dt);
+        if residual > 0.0 {
+            high = t;
+        } else {
+            low = t;
+        }
+    }
+    let t = 0.5 * (low + high);
+    let (next, coefficient, reversible) = at(t);
+    (next, t, coefficient, reversible)
+}
+
+#[test]
+fn rational_young_shear_finite_heat_refreshes_entropy_and_capacity_while_retaining_memory() {
+    with_cx(|cx, gate| {
+        let (claims, properties) = rational_claims(RATIONAL_CP, true);
+        let card = card(claims);
+        let curve = caloric(&card);
+        let source = bind(&card, properties);
+        let elements = elements(&source, cx);
+        let body = body(&elements, source, cx, gate);
+        let initial = body
+            .history(&[0.006], &[0.08], InitialMemory::Instantaneous, gate)
+            .unwrap();
+        let accepted_state = initial.material_history().state().to_vec();
+        let context = query();
+        let cells = [cell(0, &card, &curve, &context)];
+        let mut thermal = heat(&[&curve], &[RATIONAL_CP], 0.0);
+        // The compatibility entry point must keep its narrower promise.
+        assert!(
+            initial
+                .advance_affine_thermal_candidate(
+                    &thermal,
+                    0.005,
+                    &FORCE,
+                    &cells,
+                    controls(),
+                    budget(),
+                    &[0.01],
+                    no_extra,
+                    gate,
+                )
+                .is_err()
+        );
+        let mut model: Option<RelaxingSolid<'_>> = None;
+        let mut y = [0.006, 0.08, 0.006, 0.0, 0.0];
+        let mut temperature = 300.0;
+        let mut total_coefficient = 0.0;
+        for target in [0.005, 0.01] {
+            let history = model
+                .as_ref()
+                .map(RelaxingSolid::history)
+                .unwrap_or_else(|| initial.clone());
+            let (next, t, coefficient, reversible) = rational_endpoint(y, temperature, 0.005);
+            let result = history
+                .advance_material_thermal_candidate(
+                    &thermal,
+                    target,
+                    &FORCE,
+                    &cells,
+                    controls(),
+                    budget(),
+                    &[0.01],
+                    |_| {
+                        Ok::<_, Infallible>(StepCoefficients {
+                            sources_w: BTreeMap::from([(CellId(0), RATIONAL_HEATER_W)]),
+                            conductances_w_k: BTreeMap::new(),
+                            payload: (),
+                        })
+                    },
+                    gate,
+                )
+                .unwrap();
+            let actual = result.model().history();
+            let native = actual.material_history();
+            let report = result.report();
+            let exchange = report.thermodynamics.as_ref().unwrap();
+            let expected = rational_state(next, t);
+            near(result.thermal().temperature_k(CellId(0)).unwrap(), t, 2e-7);
+            near(native.displacement_m()[0], next[0], 2e-9);
+            near(native.velocity_m_s()[0], next[1], 2e-8);
+            near(native.dissipated_heat_j(), next[3], 2e-11);
+            near(native.supplied_work_j(), next[4], 2e-11);
+            near(
+                exchange.before[0].entropy_j_k,
+                rational_state(y, temperature)[1],
+                2e-13,
+            );
+            near(exchange.after[0].free_energy_j, expected[0], 2e-11);
+            near(exchange.after[0].entropy_j_k, expected[1], 2e-13);
+            near(exchange.after[0].heat_capacity_j_k, expected[2], 2e-13);
+            assert!(exchange.after[0].heat_capacity_j_k < 0.0);
+            near(
+                exchange.after[0].internal_energy_j,
+                expected[0] + t * expected[1],
+                2e-11,
+            );
+            near(exchange.coefficient_work_j[0], coefficient, 2e-11);
+            near(exchange.reversible_heat_j[0], reversible, 3e-11);
+            total_coefficient += coefficient;
+            near(
+                native.thermal_coefficient_work_j(),
+                total_coefficient,
+                3e-11,
+            );
+            assert_eq!(native.parameter_work_j(), 0.0);
+            let physical = 0.5 * (10.0 / 60.0) * (next[1].powi(2) - y[1].powi(2))
+                + exchange.after[0].internal_energy_j
+                - exchange.before[0].internal_energy_j
+                + result.thermal().energy_j()
+                - thermal.energy_j()
+                - (next[4] - y[4])
+                - RATIONAL_HEATER_W * 0.005;
+            near(physical, 0.0, 3e-10);
+            near(report.total_energy_residual_j, 0.0, 2e-10);
+            assert_eq!(
+                result.model().thermodynamics().unwrap(),
+                exchange.after.as_slice()
+            );
+            let (next_model, next_thermal, _) = result.into_parts();
+            model = Some(next_model);
+            thermal = next_thermal;
+            temperature = t;
+            y = next;
+        }
+        assert_eq!(
+            model.as_ref().unwrap().history().material_history().steps(),
+            2
+        );
+        assert_eq!(initial.material_history().state(), accepted_state);
+        assert_eq!(initial.material_history().thermal_coefficient_work_j(), 0.0);
+    });
+}
+
+#[test]
+fn rational_held_volumetric_strain_closes_finite_heat_against_exact_internal_energy() {
+    with_cx(|cx, gate| {
+        let (claims, properties) = rational_claims(RATIONAL_CP, false);
+        let card = card(claims);
+        let curve = caloric(&card);
+        let source = bind(&card, properties);
+        let elements = ViscoElements::new(
+            SolidMeshRef::Tet4 {
+                nodes_m: &NODES,
+                elements: &[[0, 1, 2, 3]],
+            },
+            TetViscoField::Uniform(&TetViscoMaterial::from_source(&source, IDENTITY).unwrap()),
+            &[0, 1, 2, 4, 5, 6, 8, 9, 10],
+            TetAssemblyBudget::standard(),
+            ViscoStateBudget {
+                max_internal_variables: 128,
+            },
+            cx,
+        )
+        .unwrap();
+        let body = TensorSolidBody::from_material_sources(
+            elements
+                .project_basis(&[vec![1.0, 1.0, 1.0]], controls().projection, cx)
+                .unwrap(),
+            vec![SolidMaterialSource {
+                material: source,
+                material_to_mesh: IDENTITY,
+            }],
+            dynamics(),
+            gate,
+        )
+        .unwrap();
+        let dilation: f64 = 0.004;
+        let target_temperature = 310.0;
+        let target_s = 0.005;
+        let [bulk, slope, curvature] = rational_bulk(target_temperature);
+        let old = rational_bulk(300.0);
+        // Uniform epsilon_ii=x has psi=(9/2)*V*K*x^2. At the desired
+        // temperature the fixed load balances every free nodal direction,
+        // yielding a manufactured held-strain endpoint of the dynamic solve.
+        let scale = 0.75 * dilation.powi(2);
+        let initial_u = scale * (old[0] - 300.0 * old[1]);
+        let final_u = scale * (bulk - target_temperature * slope);
+        let supplied =
+            (10.0 / 6.0) * RATIONAL_CP * (target_temperature - 300.0) + final_u - initial_u;
+        let force = 0.5 * bulk * dilation;
+        let forces = [
+            [0.0; 3],
+            [force, 0.0, 0.0],
+            [0.0, force, 0.0],
+            [0.0, 0.0, force],
+        ];
+        let history = body
+            .history(&[dilation], &[0.0], InitialMemory::Relaxed, gate)
+            .unwrap();
+        let thermal = heat(&[&curve], &[RATIONAL_CP], 0.0);
+        let context = query();
+        let result = history
+            .advance_material_thermal_candidate(
+                &thermal,
+                target_s,
+                &forces,
+                &[cell(0, &card, &curve, &context)],
+                controls(),
+                budget(),
+                &[0.012],
+                |_| {
+                    Ok::<_, Infallible>(StepCoefficients {
+                        sources_w: BTreeMap::from([(CellId(0), supplied / target_s)]),
+                        conductances_w_k: BTreeMap::new(),
+                        payload: (),
+                    })
+                },
+                gate,
+            )
+            .unwrap();
+        let accepted = result.model().history();
+        let exchange = result.report().thermodynamics.as_ref().unwrap();
+        near(
+            result.thermal().temperature_k(CellId(0)).unwrap(),
+            target_temperature,
+            2e-7,
+        );
+        near(
+            accepted.material_history().displacement_m()[0],
+            dilation,
+            2e-10,
+        );
+        near(accepted.material_history().velocity_m_s()[0], 0.0, 2e-9);
+        near(exchange.after[0].free_energy_j, scale * bulk, 2e-11);
+        near(exchange.after[0].entropy_j_k, -scale * slope, 2e-13);
+        near(
+            exchange.after[0].heat_capacity_j_k,
+            -target_temperature * scale * curvature,
+            2e-13,
+        );
+        near(exchange.after[0].internal_energy_j, final_u, 2e-11);
+        near(
+            result.thermal().energy_j() - thermal.energy_j() + final_u - initial_u,
+            supplied,
+            3e-10,
+        );
+        assert_eq!(accepted.material_history().dissipated_heat_j(), 0.0);
+        near(accepted.material_history().supplied_work_j(), 0.0, 2e-11);
+        near(result.report().total_energy_residual_j, 0.0, 2e-10);
+    });
+}
+
+#[test]
+fn rational_capacity_refusal_covers_the_whole_strain_domain_and_preserves_inputs() {
+    with_cx(|cx, gate| {
+        let (claims, properties) = rational_claims(CP, false);
+        let card = card(claims);
+        let curve = caloric(&card);
+        let source = bind(&card, properties);
+        let derivative = TensorThermalLaw::try_new(&source, &card, "T", [280.0, 330.0])
+            .unwrap()
+            .in_frame(IDENTITY)
+            .unwrap()
+            .at_temperature(300.0)
+            .unwrap();
+        let elements = elements(&source, cx);
+        let body = body(&elements, source, cx, gate);
+        let bound = body.projection().material_points()[0]
+            .thermal_capacity_bound_j_k2(&derivative, 300.0, [0.0; 6])
+            .unwrap();
+        let caloric_capacity = (10.0 / 6.0) * CP;
+        assert!(
+            caloric_capacity - 300.0 * rational_axial(300.0)[2] * 0.006_f64.powi(2) / 12.0 > 0.0
+        );
+        assert!(caloric_capacity < 330.0 * bound);
+        let history = body
+            .history(&[0.006], &[0.08], InitialMemory::Relaxed, gate)
+            .unwrap();
+        let before = history.material_history().state().to_vec();
+        let thermal = heat(&[&curve], &[CP], 0.0);
+        let energy = thermal.energy_j();
+        let context = query();
+        let calls = std::cell::Cell::new(0);
+        let failed = history.advance_material_thermal_candidate(
+            &thermal,
+            0.005,
+            &FORCE,
+            &[cell(0, &card, &curve, &context)],
+            controls(),
+            budget(),
+            &[0.00005],
+            |t| {
+                calls.set(calls.get() + 1);
+                no_extra(t)
+            },
+            gate,
+        );
+        assert!(matches!(failed,
+            Err(fs_couple::circuit_enthalpy::CircuitEnthalpyError::Invalid(message))
+                if message.contains("positive total fixed-strain heat capacity")));
+        assert_eq!(calls.get(), 0);
+        assert_eq!(history.material_history().state(), before);
+        assert_eq!(history.material_history().steps(), 0);
+        assert_eq!(history.material_history().thermal_coefficient_work_j(), 0.0);
+        assert_eq!(history.material_history().parameter_work_j(), 0.0);
+        assert_eq!(thermal.energy_j(), energy);
     });
 }
