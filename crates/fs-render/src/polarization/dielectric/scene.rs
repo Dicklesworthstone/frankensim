@@ -52,6 +52,10 @@ pub enum Interaction {
     /// Native rejected microfacet samples terminate without resampling. This
     /// does not model anisotropic brushing or a tilted shading normal.
     RoughConductor { optics: usize, medium: usize, surface: ConductorSurface },
+    /// Native body-locked radial/circular brushing, including its shading
+    /// normal and radial roughness mark. Forward power uses the adjoint
+    /// shading-normal law; no resolved groove geometry or heat law is inferred.
+    BrushedConductor { optics: usize, medium: usize, detail: crate::surface_detail::SurfaceDetail },
     /// A two-sided ideal receiver. Positive Q uses the world reference axis
     /// projected transverse to each arriving ray. A parallel axis is refused.
     /// No lens/pupil transformation or grazing-angle polarizer model is inferred.
@@ -224,8 +228,9 @@ impl<'a> PolarizedScene<'a> {
 
     /// Trace with externally supplied `[microfacet_u, microfacet_v, event]`
     /// samples. The callback receives the zero-based surface-event index and
-    /// is called only for dielectric or rough-conductor hits, after geometry
-    /// and medium admission. Rough metals use the first two samples only.
+    /// is called only for dielectric, rough or brushed conductor hits, after
+    /// geometry and medium admission. Rough/brushed metals use two samples;
+    /// smooth metals consume none.
     /// This scene uses piecewise-homogeneous straight segments. A sampled
     /// gradient-index medium refuses at launch, before any traversal or sample;
     /// its curved boundary intersections are not implemented by this owner.
@@ -325,6 +330,25 @@ impl<'a> PolarizedScene<'a> {
                     result.beam = next.beam;
                     offset = settings.query_offset_m;
                 }
+                Interaction::BrushedConductor { optics, medium, detail } => {
+                    if result.medium != medium {
+                        return Err(SceneError::MediumMismatch {
+                            object_id: hit.object_id, expected: medium, actual: result.medium,
+                        });
+                    }
+                    let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
+                    let instance = &self.geometry.instances()[index];
+                    let draw = samples(event);
+                    let Some(next) = result.beam.sample_instanced_brushed_conductor(
+                        &self.conductors[optics], &detail, instance.transform(),
+                        hit.local_hit.point, normal, [draw[0], draw[1]],
+                    )? else {
+                        result.termination = PathTermination::RejectedMicrofacet;
+                        return finish(cx, result);
+                    };
+                    result.beam = next.beam;
+                    offset = settings.query_offset_m;
+                }
                 interaction @ (Interaction::Dielectric { outside, inside, .. }
                 | Interaction::CoatedDielectric { outside, inside, .. }) => {
                     let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
@@ -391,6 +415,14 @@ fn admit_bindings(
                     return Err(SceneError::InvalidBindings);
                 }
             }
+            Interaction::BrushedConductor { optics, medium, detail } => {
+                let (alpha_x, alpha_y) = detail.alpha_pair();
+                if optics >= conductor_count || medium >= media_count
+                    || ConductorSurface::try_rough(alpha_x).is_err()
+                    || ConductorSurface::try_rough(alpha_y).is_err() {
+                    return Err(SceneError::InvalidBindings);
+                }
+            }
             Interaction::SmoothConductor { optics, medium }
             | Interaction::RoughConductor { optics, medium, .. } => {
                 if optics >= conductor_count || medium >= media_count {
@@ -447,6 +479,9 @@ pub mod measurement;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod brushed_tests;
 
 #[cfg(test)]
 mod conductor_tests {

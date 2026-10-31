@@ -12,7 +12,7 @@
 //! Internally localized events carry their explicit departure witness.
 //!
 //! Reflection/transmission use the local phase indices, native polarized
-//! smooth/GGX sampler and smooth/rough conductor responses. Boundary departure is
+//! smooth/GGX sampler and smooth/rough/brushed conductor responses. Boundary departure is
 //! propagated and counted in distance, optical lengths and absorption. Geometry and field
 //! snapshots stay fixed for an entire trace. This forward ray-power estimator
 //! supplies detector samples; it does not supply scalar camera/BDPT MIS
@@ -300,8 +300,8 @@ impl<'a> CurvedPolarizedScene<'a> {
     }
 
     /// Trace through the native clearance/event owner. The sampler is called
-    /// only after an admitted dielectric or rough-conductor event and medium
-    /// check. Rough conductors use the first two samples; smooth metals use none.
+    /// only after an admitted dielectric, rough or brushed conductor event and
+    /// medium check. Rough/brushed metals use two samples; smooth metals use none.
     /// Boundary departure is physical propagation, not a discarded ray offset.
     pub fn trace_with_samples(
         &self,
@@ -478,6 +478,27 @@ impl<'a> CurvedPolarizedScene<'a> {
                     let draw = samples(event);
                     let Some(next) = result.beam.sample_rough_conductor(
                         witness.normal, &self.conductors[optics], surface, [draw[0], draw[1]],
+                    ).map_err(SceneError::from)? else {
+                        result.termination = PathTermination::RejectedMicrofacet;
+                        break;
+                    };
+                    result.beam = next.beam;
+                }
+                Interaction::BrushedConductor { optics, medium, detail } => {
+                    if result.medium != medium {
+                        return Err(SceneError::MediumMismatch {
+                            object_id: instance.object_id(), expected: medium, actual: result.medium,
+                        }.into());
+                    }
+                    let transform = instance.transform();
+                    let local_point = transform.inverse().map_err(SceneError::from)?
+                        .transform_point(witness.surface_point);
+                    let draw = samples(event);
+                    // The surface representative defines the procedural finish.
+                    // The physical beam stays at its integrated endpoint.
+                    let Some(next) = result.beam.sample_instanced_brushed_conductor(
+                        &self.conductors[optics], &detail, transform, local_point,
+                        witness.normal, [draw[0], draw[1]],
                     ).map_err(SceneError::from)? else {
                         result.termination = PathTermination::RejectedMicrofacet;
                         break;
