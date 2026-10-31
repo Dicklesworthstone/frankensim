@@ -16,6 +16,7 @@
 use crate::SolidError;
 use fs_la::batched::{BatchMat, BatchVec, batch_cholesky, batch_cholesky_solve};
 use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpState, Uniaxial};
+use fs_material::plastic::chaboche::axial::{UniaxialChaboche, UniaxialChabocheState};
 use fs_material::plastic::reduction::{UniaxialJ2, UniaxialJ2State, UniaxialVoce};
 
 /// Material-bound fiber laws, RC section geometry and coherent member mass.
@@ -29,6 +30,8 @@ pub enum FiberLaw {
     J2(UniaxialJ2),
     /// Native Voce isotropic saturation with retained linear Prager translation.
     Voce(UniaxialVoce),
+    /// Independent nonlinear backstress recovery with native Voce isotropic hardening.
+    Chaboche(UniaxialChaboche),
     /// Menegotto–Pinto steel.
     Steel(MenegottoPintoSteel),
     /// Mander concrete (confined or unconfined by parameters).
@@ -42,6 +45,8 @@ pub enum FiberState {
     J2(UniaxialJ2State),
     /// The same exact axial plastic subspace, with a saturating yield radius.
     Voce(UniaxialJ2State),
+    /// Signed axial plastic history and independently retained backstress.
+    Chaboche(UniaxialChabocheState),
     /// Steel state.
     Steel(MpState),
     /// Concrete state.
@@ -88,6 +93,7 @@ impl Section {
             .map(|f| match &f.law {
                 FiberLaw::J2(l) => FiberState::J2(l.initial_state()),
                 FiberLaw::Voce(l) => FiberState::Voce(l.initial_state()),
+                FiberLaw::Chaboche(l) => FiberState::Chaboche(l.initial_state()),
                 FiberLaw::Steel(l) => FiberState::Steel(l.initial_state()),
                 FiberLaw::Concrete(l) => FiberState::Concrete(l.initial_state()),
             })
@@ -162,6 +168,15 @@ impl Section {
                     }
                     (response.stress_pa, response.tangent_pa)
                 }
+                (FiberLaw::Chaboche(l), FiberState::Chaboche(s)) => match l.response(eps, s) {
+                    Ok(response) => (response.stress_pa, response.tangent_pa),
+                    Err(error) if checked => {
+                        return Err(SolidError::MaterialRefused {
+                            what: error.to_string(),
+                        });
+                    }
+                    Err(_) => (f64::NAN, f64::NAN),
+                },
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
                     (-l.stress(-eps, s), l.tangent(-eps, s))
                 }
@@ -193,6 +208,7 @@ impl Section {
             match (&f.law, st) {
                 (FiberLaw::J2(l), FiberState::J2(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Voce(l), FiberState::Voce(s)) => *s = l.update_state(eps, s),
+                (FiberLaw::Chaboche(l), FiberState::Chaboche(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
                     *s = l.update_state(-eps, s);

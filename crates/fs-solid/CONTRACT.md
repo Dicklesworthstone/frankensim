@@ -2757,3 +2757,26 @@ relaxation, atomic continuation/refusal, geometry and rotation admission, and
 Voce saturation. Standard displacement elements can lock in confined nearly
 incompressible plastic flow. This does not implement mixed/B-bar plasticity,
 shell bending, finite-strain forming, or limit-load continuation.
+
+## Nonlinear backstress recovery in metal fibers and members
+
+`FiberLaw::Chaboche` and its matching state use the exact free-sided axial
+restriction of the native tensor law. Signed plastic strain, accumulated
+equivalent plastic strain and independent recovering backstress remain separate
+through section curvature reversals and member unloading. Section forces and
+their tangent come from the same checked candidate; rejected domain exits leave
+accepted fiber histories unchanged. Existing force-based beams and frame fiber
+sections consume this law through their original section interface.
+
+`FiberMaterial::resolve_chaboche` resolves density, Voce/Prager coefficients and
+one independently sourced C/gamma branch from the same fixed-condition bundle.
+All original property receipts remain available and density retains its original
+mass meaning. The adapter does not infer nonlinear recovery from a monotonic
+total-strain tangent or silently freeze evolving material coordinates.
+
+The native fiber battery compares beam deflection and permanent set against an
+independently stress-parametrized implicit-recovery curve, checks a reversed
+section tangent and retained history, and exercises complete sourced properties
+and mass. These are numerical constitutive/member checks, not calibration of
+real cyclic behavior, finite-strain forming or a fatigue-life prediction.
+

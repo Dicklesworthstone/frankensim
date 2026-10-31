@@ -9,6 +9,11 @@ use fs_matdb::{
 use fs_material::elastic::IsotropicElastic;
 use fs_material::fiber::ManderConcrete;
 use fs_material::plastic::J2Plasticity;
+use fs_material::plastic::chaboche::axial::UniaxialChaboche;
+use fs_material::plastic::chaboche::source::{
+    CHABOCHE_BACKSTRESS_MODULUS_PROPERTY, CHABOCHE_DYNAMIC_RECOVERY_PROPERTY,
+};
+use fs_material::plastic::chaboche::{BackstressBranch, ChabocheJ2};
 use fs_material::plastic::reduction::{UniaxialJ2, UniaxialVoce};
 use fs_material::plastic::source::HardeningPropertyBasis;
 use fs_material::plastic::voce::VoceJ2;
@@ -300,6 +305,184 @@ fn existing_frame_uses_the_same_metal_section_history() {
         frame.displacements()[3 * tip + 1],
         reference_deflection(&beam, 30_000.0, true),
         1e-8,
+    );
+}
+
+const C_RECOVERY: f64 = 8e9;
+const GAMMA_RECOVERY: f64 = 500.0;
+
+fn recovery_section() -> Section {
+    let axial = UniaxialChaboche::new(
+        ChabocheJ2::new(
+            VoceJ2::new(law(0.04).backbone().clone(), 80e6, 500.0).unwrap(),
+            [BackstressBranch::new(C_RECOVERY, GAMMA_RECOVERY).unwrap()],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    Section::new(
+        [-ARM, ARM]
+            .map(|y| Fiber {
+                y,
+                area: AREA,
+                law: FiberLaw::Chaboche(axial.clone()),
+            })
+            .to_vec(),
+    )
+}
+
+#[test]
+fn recovering_backstress_drives_beam_deflection_permanent_set_and_reversed_section_tangent() {
+    let mut beam = ForceBasedElement::new(2.0, &recovery_section);
+    let force = 30_000.0;
+    // Independent stress-parametrized monotonic backward-Euler law. Inverting
+    // this scalar reference does not use the tensor or fiber return map.
+    let plastic_at_stress = |stress: f64| {
+        if stress <= YIELD {
+            return 0.0;
+        }
+        let (mut lo, mut hi) = (0.0_f64, 0.03_f64);
+        for _ in 0..70 {
+            let p = 0.5 * (lo + hi);
+            let s = YIELD
+                + (H_ISO + H_KIN) * p
+                + 80e6 * (1.0 - (-500.0 * p).exp())
+                + C_RECOVERY * p / (1.0 + GAMMA_RECOVERY * p);
+            if s < stress {
+                lo = p;
+            } else {
+                hi = p;
+            }
+        }
+        0.5 * (lo + hi)
+    };
+    let mut loaded_reference = 0.0;
+    let mut permanent_reference = 0.0;
+    for (&xi, &weight) in beam.xi.iter().zip(&beam.wi) {
+        let arm = beam.length * (1.0 - xi);
+        let stress = force * arm / (2.0 * AREA * ARM);
+        let plastic = plastic_at_stress(stress);
+        let scale = weight * beam.length * arm / ARM;
+        loaded_reference += scale * (plastic + stress / E);
+        permanent_reference += scale * plastic;
+    }
+    let loaded = beam.tip_deflection_under_shear(force).unwrap();
+    close(loaded, loaded_reference, 3e-9);
+    let permanent = beam.tip_deflection_under_shear(0.0).unwrap();
+    close(permanent, permanent_reference, 3e-9);
+    assert!(permanent > 0.0);
+    let mut section = recovery_section();
+    section.try_respond(0.0, 0.04).unwrap();
+    section.commit(0.0, 0.04);
+    let accepted: Vec<_> = section
+        .states
+        .iter()
+        .map(|s| {
+            let FiberState::Chaboche(s) = s else {
+                panic!("recovery history required")
+            };
+            s.tensor_history().clone()
+        })
+        .collect();
+    let curvature = -0.03;
+    let h = 1e-7;
+    let response = section.try_respond(0.0, curvature).unwrap();
+    let fd = (section.try_respond(0.0, curvature + h).unwrap().m
+        - section.try_respond(0.0, curvature - h).unwrap().m)
+        / (2.0 * h);
+    close(response.tangent[1][1], fd, 2e-8);
+    assert!(section.try_respond(0.04, 0.0).is_err());
+    assert!(section.respond(0.04, 0.0).n.is_nan());
+    for (state, old) in section.states.iter().zip(&accepted) {
+        let FiberState::Chaboche(state) = state else {
+            panic!("recovery history required")
+        };
+        assert_eq!(state.tensor_history(), old);
+    }
+    section.commit(0.0, curvature);
+    for (state, old) in section.states.iter().zip(&accepted) {
+        let FiberState::Chaboche(state) = state else {
+            panic!("recovery history required")
+        };
+        assert!(state.equivalent_plastic_strain() > old.plastic.alpha);
+        assert!(state.tensor_history().backstress_pa[0][0] * old.backstress_pa[0][0] < 0.0);
+    }
+}
+
+#[test]
+fn sourced_recovery_keeps_complete_receipts_mass_and_reaches_native_fibers() {
+    let original = source(true, false);
+    let mut claims = original.claims().clone();
+    for (name, value, dims) in [
+        (VOCE_SATURATION_INCREMENT_PROPERTY, 80e6, Pressure::DIMS),
+        (VOCE_SATURATION_RATE_PROPERTY, 500.0, Dims::NONE),
+        (
+            CHABOCHE_BACKSTRESS_MODULUS_PROPERTY,
+            C_RECOVERY,
+            Pressure::DIMS,
+        ),
+        (
+            CHABOCHE_DYNAMIC_RECOVERY_PROPERTY,
+            GAMMA_RECOVERY,
+            Dims::NONE,
+        ),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained(),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "authored nonlinear-recovery fixture".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    let card = MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap();
+    let material = FiberMaterial::resolve_chaboche(
+        &card,
+        &QueryPoint::new(),
+        "density",
+        HardeningPropertyBasis::MixedPlasticStrainModuli,
+        0.04,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    assert_eq!(
+        material.source().unwrap().card_identity(),
+        card.content_hash()
+    );
+    assert_eq!(material.source().unwrap().properties().len(), 10);
+    assert_eq!(material.density_kg_m3(), 7850.0);
+    assert!(matches!(material.law(), FiberLaw::Chaboche(_)));
+    let sourced = Section::new(
+        [-ARM, ARM]
+            .map(|y| Fiber {
+                y,
+                area: AREA,
+                law: material.law().clone(),
+            })
+            .to_vec(),
+    );
+    let expected = recovery_section().try_respond(0.0, 0.03).unwrap();
+    let actual = sourced.try_respond(0.0, 0.03).unwrap();
+    assert_eq!(actual.m, expected.m);
+    assert_eq!(actual.tangent, expected.tangent);
+    assert!(
+        FiberMaterial::resolve_chaboche(
+            &original,
+            &QueryPoint::new(),
+            "density",
+            HardeningPropertyBasis::MixedPlasticStrainModuli,
+            0.04,
+            MaterialPropertySelection::SingleClaimOnly
+        )
+        .is_err()
     );
 }
 

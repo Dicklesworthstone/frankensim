@@ -14,6 +14,8 @@ use super::{Fiber, FiberLaw, Section};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
+use fs_material::plastic::chaboche::axial::UniaxialChaboche;
+use fs_material::plastic::chaboche::source::{ResolvedChabocheJ2, chaboche_requirements};
 use fs_material::plastic::reduction::{UniaxialJ2, UniaxialVoce};
 use fs_material::plastic::source::{
     HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements,
@@ -136,6 +138,7 @@ impl FiberMaterial {
         match law {
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
+            FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
             FiberLaw::Concrete(law) => Self::concrete(law, density_kg_m3),
             FiberLaw::Steel(law) => Self::steel(law, density_kg_m3),
         }
@@ -237,6 +240,57 @@ impl FiberMaterial {
         let density_kg_m3 = density.value_si();
         let resolved = ResolvedVoceJ2::try_from_material(source, basis, strain_limit)?;
         let mut material = Self::voce(UniaxialVoce::new(resolved.law().clone())?, density_kg_m3)?;
+        material.source = Some(resolved.material().clone());
+        Ok(material)
+    }
+
+    /// Authored Armstrong-Frederick/Voce metal with independent backstress
+    /// recovery. Density remains an explicit physical input.
+    pub fn chaboche(law: UniaxialChaboche, density_kg_m3: f64) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "Chaboche fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::Chaboche(law),
+            density_kg_m3,
+            source: None,
+        })
+    }
+
+    /// Resolve one nonlinear backstress branch, Voce/Prager data and density
+    /// from one immutable fixed-condition material bundle. C and gamma need
+    /// independent source properties; monotonic tangent data cannot supply them.
+    pub fn resolve_chaboche(
+        card: &MaterialCard,
+        point: &QueryPoint,
+        density_property: &str,
+        basis: HardeningPropertyBasis,
+        strain_limit: f64,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self> {
+        let mut requirements = chaboche_requirements(basis)?;
+        requirements.push(ScalarPropertyRequirement::try_new(
+            density_property,
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+        let source = resolve_material_state_point(card, point, &requirements, selection)?;
+        let density = source
+            .property(density_property)
+            .expect("required density was resolved");
+        if !density.is_static_at_fixed_external_conditions() {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: density_property.into(),
+                reason: "Chaboche fiber density cannot freeze sampled strain, stress, rate or history dependence",
+            }.into());
+        }
+        let density_kg_m3 = density.value_si();
+        let resolved = ResolvedChabocheJ2::try_from_material(source, basis, strain_limit)?;
+        let mut material = Self::chaboche(
+            UniaxialChaboche::new(resolved.law().clone())?,
+            density_kg_m3,
+        )?;
         material.source = Some(resolved.material().clone());
         Ok(material)
     }
@@ -491,7 +545,10 @@ impl RcSection {
                 && matches!(cover.law, FiberLaw::Concrete(_))
                 && matches!(
                     steel.law,
-                    FiberLaw::Steel(_) | FiberLaw::J2(_) | FiberLaw::Voce(_)
+                    FiberLaw::Steel(_)
+                        | FiberLaw::J2(_)
+                        | FiberLaw::Voce(_)
+                        | FiberLaw::Chaboche(_)
                 ),
             "core and cover require concrete; reinforcement requires a steel or native J2 law",
         )?;
