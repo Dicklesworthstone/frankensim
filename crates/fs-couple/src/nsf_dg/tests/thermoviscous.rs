@@ -14,6 +14,7 @@ use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
 use fs_rep_mesh::TetComplex;
 
 mod radiation;
+mod upstream;
 mod radiation_observation;
 
 const BAND: [f64; 2] = [20.0, 2000.0];

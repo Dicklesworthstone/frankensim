@@ -97,7 +97,9 @@ pub(in crate::nsf_dg) fn solve_joint_interval<L: Lattice3<27>, T>(
         -> Result<T, NsfDgError>,
 ) -> Result<(T, Vec<f64>), NsfDgError> {
     let width = inputs.len() + 1;
-    if inputs.is_empty() || inputs.len() > MAX_NSF_RESERVOIR_APERTURES
+    // With no mouth coordinates, the original upstream characteristic still
+    // closes a joint two-face problem against the one-coordinate main load.
+    if (inputs.is_empty() && upstream.is_none()) || inputs.len() > MAX_NSF_RESERVOIR_APERTURES
         || temperatures.len() != inputs.len()
         || relation.history_pressure_pa.len() != width
         || relation.impedance_pa_s_m3.len() != width * width
