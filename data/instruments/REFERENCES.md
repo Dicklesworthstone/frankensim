@@ -1,10 +1,10 @@
 # Real instrument reference recordings
 
 `references-supplemental.json`, together with its `baseline_ids` from
-`references.json`, supplies actual recordings for all 22 instrument family
-cards, including separate alto and tenor saxophones, plus piano, organ,
-steel-string guitar, timpani, splash cymbal and the nine
-drum-kit comparison states. Originals remain outside Git. The existing Iowa manifest has
+`references.json`, supplies actual recordings for all 27 families in
+`apps/instrument-explorer/tools/build.py`, plus a separate tenor saxophone,
+splash cymbal and all nine drum-kit comparison states. Originals remain
+outside Git. The existing Iowa manifest has
 1,176 files (about 12.3 GB); its selected baseline requires 21 files
 (110,212,120 bytes), including an ambient-noise control.
 
@@ -41,9 +41,11 @@ bash data/instruments/fetch-references.sh \
 
 `--instrument` is case-insensitive and exact; both selectors are repeatable.
 Combining `--instrument` and `--id` intersects them. Unknown selectors and empty
-intersections fail before downloading. No selector means the entire chosen
-manifest: about 2.2 GB for the supplement, including the 1.61 GB TU-Note ZIP
-and the 388 MB drum-kit archive.
+intersections fail before downloading. No selector chooses every entry.
+The supplement's complete listening archives include the 1.61 GB TU-Note ZIP
+and the 388 MB drum-kit archive. The separate 22 GB force experiment is
+range-only: it refuses a complete download and requires `--members --zip-ranges`
+as described below.
 
 Fetch the smaller Iowa selection without copying its IDs:
 
@@ -102,6 +104,8 @@ bash data/instruments/fetch-references.sh \
 Its source license is CC BY-SA 4.0. This is a different performance and remains
 a family-level listening reference: it is not the Freesound specimen, a
 matched note, or a characterized excitation/recording-chain measurement.
+Both the original Freesound preview and this Commons recording were available
+and matched their existing pins in the later 2026-10-30 acquisition below.
 
 ## Coverage
 
@@ -245,19 +249,23 @@ specimen geometry, and no material or excitation parameter was fitted to it.
 
 ## Rechecked family coverage (2026-10-30)
 
-The existing baseline and supplement were reacquired as **69 original audio
-files, 280,543,511 bytes and 1,872.17214 seconds**. Every file matched its
+The baseline, listening supplement and independent Commons duduk were reacquired
+as **71 original audio files, 283,804,824 bytes and 1,962.947266 seconds**.
+Every file matched its
 SHA-256 and byte-length pins and passed a complete FFmpeg decode. This selection
-covers all 22 documented families, plus piano, organ, steel-string guitar,
-timpani, splash cymbal and all nine drum-kit comparison states. It includes
+covers all 27 explorer families, separate alto and tenor saxophones,
+splash cymbal and all nine drum-kit comparison states. It includes
 the three synchronized mdw cello performances; their three motion CSVs, original
 README and score were also retained and verified. The full source tar archives
-were checked before their selected members were published.
+were checked before their selected members were published. Three truncated Iowa
+transfers were preserved and recovered or retried against the original pins;
+no checksum was changed to accept an incomplete recording.
 
 This acquisition omitted the 20 TU-Note violin WAVs and their large ZIP;
 the three Iowa violin sequences already supply arco and pizzicato coverage.
-The larger 89-file selection above remains separately reproducible. To fetch
-the 69-file selection with the existing fetcher and an existing
+The larger TU-Note selection above remains separately reproducible. Sensor WAVs
+are counted separately from these listening recordings. To fetch the 71-file
+listening selection with the existing fetcher and an existing
 `FRANKENSIM_REFERENCE_DIR`:
 
 ```sh
@@ -269,7 +277,10 @@ cohort = json.loads(Path(supplement).read_text())
 selections = [
     ("data/instruments/references.json", cohort["baseline_ids"]),
     (supplement, [f["id"] for f in cohort["files"]
-                  if f["id"] != "tu-note-violin-2018"]),
+                  if f["id"] not in {"tu-note-violin-2018",
+                                      "lampis-2024-bowed-string-transient"}]),
+    ("data/instruments/references-screened.json",
+     ["commons-sound-of-armenian-duduk"]),
 ]
 for manifest, ids in selections:
     command = ["bash", "data/instruments/fetch-references.sh",
@@ -279,6 +290,54 @@ for manifest, ids in selections:
     subprocess.run(command, check=True)
 PY
 ```
+
+## Measured bow/string transient
+
+The [Lampis, Mayer and Chatziioannou experiment](https://zenodo.org/records/10946413)
+provides an independent component measurement for testing bow/string dynamics.
+The selected original recording is the first sweep point in the 2023-10-18
+session: **4.84 seconds, 242,000 frames, 50 kHz, 11 channels, PCM32**. The authors'
+`main.m` identifies a Dominant G2 string on a rigid monochord, with a 0.7 m
+playing length and 0.055 m bow-bridge distance. It is a component experiment;
+there is no cello body or microphone-pressure channel in this WAV.
+
+The original README specifies the channels as follows:
+
+| One-based channels | Measurement | Stored units |
+|---|---|---|
+| 1–2 | Left and right bridge-force sensors | V |
+| 3–4 | Left and right nut-force sensors | V |
+| 5–6 | Two bow-force sensors | V |
+| 7 | Unused by the source analysis | — |
+| 8 | String-tension sensor | V |
+| 9–11 | Robot X, Y and Z coordinates | m |
+
+The six selected members comprise this WAV, the README and four original
+analysis files documenting calibration and offsets. These total 10,715,565
+uncompressed bytes. The fetcher can obtain them with about 3.84 MB of HTTP
+ranges, without acquiring the 21,950,506,374-byte ZIP:
+
+```sh
+bash data/instruments/fetch-references.sh --members --zip-ranges \
+  --manifest data/instruments/references-supplemental.json \
+  --id lampis-2024-bowed-string-transient
+```
+
+Range mode requires exact HTTP 206 responses, matching source size and byte
+ranges, then checks every member's SHA-256 and length before publishing any
+new member. Its `archive-ranges-read` event reports transferred bytes and no
+archive digest. The manifest retains Zenodo's published MD5 as a source fact;
+the whole archive has **not** been independently hashed. The normal whole-file
+path refuses this source because it has no verified complete SHA-256 pin.
+
+Raw sensor voltage must not be treated as newtons, and robot position must not
+be treated as measured velocity. The retained source code specifies calibration,
+offset removal, filtering and trajectory processing; its force-correction helper
+still uses earlier directory names, so that mapping needs review before a
+calibrated force comparison. The unchanged trace can support independently
+specified excitation and response checks once those controls are resolved.
+One transient does not validate the complete playability map, friction law,
+instrument sound, or material-substitution behavior.
 
 ## Recording limits and attribution
 

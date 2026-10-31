@@ -5,7 +5,7 @@
     "frankensim-irp-v5-instrument-realism-pexfp.219"
   ],
   "retrieved_utc": "2026-10-24T05:10:07.574401+00:00",
-  "storage": "Use fetch-references.sh --manifest references-supplemental.json with an existing FRANKENSIM_REFERENCE_DIR. Audio is not committed. --members streams tar sources and extracts pinned members; ZIP sources are cached for random access and only selected members are extracted.",
+  "storage": "Use fetch-references.sh --manifest references-supplemental.json with an existing FRANKENSIM_REFERENCE_DIR. Audio is not committed. --members streams tar sources and extracts pinned members; ZIP sources are cached for random access by default. Opt-in --members --zip-ranges verifies selected ZIP member pins without downloading or claiming to hash the complete archive. A source with sha256=null requires this bounded member path.",
   "purpose": "Real recordings for independent listening and validation of physics predictions; never synthesis inputs or parameter-fitting targets. All supplemental entries remain gradable=false pending appropriate specimen, pitch, articulation and recording-chain controls.",
   "baseline_manifest": "data/instruments/references.json",
   "baseline_ids": [
@@ -32,6 +32,13 @@
     "uiowa-marimba-marimba-yarn-mf-c4b4"
   ],
   "licences": [
+    {
+      "id": "lampis-transients-cc-by-4",
+      "name": "CC BY 4.0",
+      "url": "https://zenodo.org/records/10946413",
+      "credit": "Alessio Lampis, with Alexander Mayer and Vasileios Chatziioannou; mdw University of Music and Performing Arts Vienna, 2024",
+      "notes": "License verified from the Zenodo API. One unchanged multichannel sensor recording and its original channel/calibration documentation; no source bytes redistributed in Git."
+    },
     {
       "id": "mdw-cello-cc-by-4",
       "name": "CC BY 4.0",
@@ -1464,6 +1471,85 @@
       "range": "open A3, D3, G2",
       "dynamic": null,
       "gradable": false
+    },
+    {
+      "id": "lampis-2024-bowed-string-transient",
+      "instrument": "Bowed-string monochord",
+      "kind": "archive",
+      "archive_format": "zip",
+      "path": "BowedStringTransient2024/zenodo.zip",
+      "url": "https://zenodo.org/api/records/10946413/files/zenodo.zip/content",
+      "sha256": null,
+      "bytes": 21950506374,
+      "source_checksum": "md5:3be9b34c15f022fea41f58c392bd1cc0",
+      "source_checksum_status": "Published MD5, not independently verified. The complete 22 GB archive was not downloaded. Each selected original member has its own SHA-256 and byte-length pin.",
+      "retrieved_utc": "2026-10-31T00:51:43Z",
+      "acquisition_check": "Two separate ranged acquisitions produced identical member hashes. The production fetcher transferred 3835925 bytes and verified all six members; the sensor WAV passed complete FFmpeg decoding. No full-archive digest or acoustic-realism claim.",
+      "source_page": "https://zenodo.org/records/10946413",
+      "paper": "https://doi.org/10.1051/aacus/2024034",
+      "licence": "lampis-transients-cc-by-4",
+      "articulation": "one robot-driven transient, first recorded sweep point of the 2023-10-18 session",
+      "range": "nominal G2 on a rigid 0.7 m monochord; bow-bridge distance 0.055 m in the authors' main.m",
+      "dynamic": null,
+      "gradable": false,
+      "notes": "Physical sensor reference, not microphone sound. The README specifies raw force-sensor voltages and robot coordinates, not calibrated force or velocity channels. main.m and preprocessing.m retain the authors' calibration, offset, filtering and trajectory-processing choices; the session-specific force-correction helper still uses earlier directory names. No unreviewed force conversion, fitted friction coefficient or instrument-fidelity claim is made here.",
+      "measurement_channels": [
+        {"indices_1_based": [1, 2], "quantity": "bridge force sensor voltages", "unit": "V"},
+        {"indices_1_based": [3, 4], "quantity": "nut force sensor voltages", "unit": "V"},
+        {"indices_1_based": [5, 6], "quantity": "bow force sensor voltages", "unit": "V"},
+        {"indices_1_based": [7], "quantity": "unused by source analysis", "unit": null},
+        {"indices_1_based": [8], "quantity": "string tension sensor voltage", "unit": "V"},
+        {"indices_1_based": [9, 10, 11], "quantity": "robot X, Y, Z coordinates", "unit": "m"}
+      ],
+      "members": [
+        {
+          "archive_member": "zenodo/README.pdf",
+          "path": "BowedStringTransient2024/README.pdf",
+          "sha256": "bc2a9410830480e95e7270049af2aa37e9fcbc9cdb77cdcded85e13a8786f66a",
+          "bytes": 33457,
+          "kind": "original-channel-documentation"
+        },
+        {
+          "archive_member": "zenodo/raw_data/first_repetitions/2023-10-18/guettler181023_120351_1.wav",
+          "path": "BowedStringTransient2024/raw_data/first_repetitions/2023-10-18/guettler181023_120351_1.wav",
+          "sha256": "7c39ce8d52fdbac4674b048b5b5c393611c11c2786fcd6819252825556a5a052",
+          "bytes": 10648080,
+          "kind": "sensor-recording",
+          "sample_rate_hz": 50000,
+          "channels": 11,
+          "frames": 242000,
+          "duration_s": 4.84,
+          "format": "PCM signed 32-bit little-endian WAV; sensor channels, not loudspeaker channels"
+        },
+        {
+          "archive_member": "zenodo/functions/preprocessing.m",
+          "path": "BowedStringTransient2024/functions/preprocessing.m",
+          "sha256": "48b985d6e8343250c36cda7ae45ca199df28b9acd73a9f12089ab89f1d8df519",
+          "bytes": 6388,
+          "kind": "original-analysis-source"
+        },
+        {
+          "archive_member": "zenodo/main.m",
+          "path": "BowedStringTransient2024/main.m",
+          "sha256": "9ae105873e21b3c25392de96e9c3f997cffe856a7f2919eee3b0e7ef531e8fc3",
+          "bytes": 22038,
+          "kind": "original-analysis-source"
+        },
+        {
+          "archive_member": "zenodo/utilities/force_correction_factors.m",
+          "path": "BowedStringTransient2024/utilities/force_correction_factors.m",
+          "sha256": "3f1ccaba38359f49a0b0f58a74e0180bd0c2c8939dd563c7c74cd41a67b8ac9a",
+          "bytes": 4871,
+          "kind": "original-analysis-source"
+        },
+        {
+          "archive_member": "zenodo/utilities/zero_tension_correction.m",
+          "path": "BowedStringTransient2024/utilities/zero_tension_correction.m",
+          "sha256": "22220f548a06d8a14b6d42026782bb9c8682317efd130e889b43bf038d02d708",
+          "bytes": 731,
+          "kind": "original-analysis-source"
+        }
+      ]
     }
   ],
   "acquisition_check": {
@@ -1476,6 +1562,15 @@
     "qualification": "Acquisition and decoding establish availability and integrity, not simulation fidelity or complete specimen/material measurements."
   },
   "additional_acquisition_checks": [
+    {
+      "date": "2026-10-30",
+      "decoded_audio_files": 71,
+      "decoded_audio_bytes": 283804824,
+      "decoded_audio_duration_s": 1962.947266,
+      "selection": "baseline_ids plus every supplemental entry except tu-note-violin-2018 and lampis-2024-bowed-string-transient, plus commons-sound-of-armenian-duduk from references-screened.json",
+      "verification": "All selected originals, including 27 Salamander kit members, matched their existing SHA-256 and byte lengths and passed full FFmpeg decode. Three truncated Iowa downloads were preserved and recovered or retried against the unchanged pins. Both the Freesound and Commons duduk sources were accessible in this session.",
+      "qualification": "Covers all 27 explorer families, separate tenor saxophone and splash cymbal, and all nine drum-kit comparison states; includes the ambient-noise control. Sensor WAVs are excluded from this listening-audio count. Available recordings do not establish instrument fidelity or matched specimen geometry."
+    },
     {
       "date": "2026-10-28",
       "new_recordings": 3,

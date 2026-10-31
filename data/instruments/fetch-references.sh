@@ -9,6 +9,8 @@
 #   --manifest PATH     use another reference manifest with the same file fields.
 #   --members           acquire checksum-pinned archive members. Tar sources stream without being
 #                       retained; ZIP sources are cached for random access, without a full unzip.
+#   --zip-ranges        with --members, read ZIP members by HTTP ranges instead of fetching the
+#                       archive. Verifies each member; does NOT verify the complete archive hash.
 # Never overwrites and never deletes. Audio is never committed: FRANKENSIM_REFERENCE_DIR must be an
 # existing directory, and a directory on the Mac Data volume (/System/Volumes/Data) is refused.
 # One JSONL line per file on stdout: utc, event, id, url, sha256_expected, sha256_observed, bytes,
@@ -27,6 +29,7 @@ exec python3 -I - "$manifest" "$dest" "$mount" "$@" <<'PY'
 import argparse
 import datetime
 import hashlib
+import io
 import json
 import os
 import socket
@@ -47,7 +50,10 @@ parser.add_argument("--id", action="append", default=[], help="exact recording I
 parser.add_argument("--list", action="store_true", help="list selected manifest entries without downloading")
 parser.add_argument("--manifest", default=manifest, help="reference manifest JSON")
 parser.add_argument("--members", action="store_true", help="extract only pinned archive members; tar streams, ZIP caches the source for random access")
+parser.add_argument("--zip-ranges", action="store_true", help="with --members, fetch ZIP ranges and verify member pins only, not the complete archive hash")
 args = parser.parse_args(sys.argv[4:])
+if args.zip_ranges and (not args.members or args.pin):
+    parser.error("--zip-ranges requires --members and existing member pins (not --pin)")
 mode = "--pin" if args.pin else "--verify"
 USER_AGENT = "frankensim-agent (+https://github.com/Dicklesworthstone/frankensim)"
 host = socket.gethostname()
@@ -105,6 +111,55 @@ class HashedReader:
         return data
 
 
+class RangedZip(io.RawIOBase):
+    """Seek within a public ZIP, refusing servers that ignore or alter a range.
+
+    A successful read binds only the requested bytes. Member SHA-256 checks,
+    not ZIP metadata or the source's published MD5, authorize publication.
+    """
+    def __init__(self, entry, member_bytes):
+        self.url, self.size = entry["url"], entry["bytes"]
+        self.position, self.transferred = 0, 0
+        self.budget = 32 * (1 << 20) + 2 * member_bytes
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.position
+
+    def seek(self, offset, whence=0):
+        if whence not in (0, 1, 2):
+            raise ValueError("invalid ZIP seek origin")
+        position = (0, self.position, self.size)[whence] + offset
+        if position < 0 or position > self.size:
+            raise ValueError("ZIP seek outside declared source length")
+        self.position = position
+        return position
+
+    def read(self, count=-1):
+        count = min(self.size - self.position, self.size if count < 0 else count)
+        if count == 0:
+            return b""
+        if count > 16 * (1 << 20) or self.transferred + count > self.budget:
+            raise ValueError("ZIP range acquisition exceeds its bounded transfer budget")
+        end = self.position + count - 1
+        requested = f"bytes {self.position}-{end}/{self.size}"
+        request = urllib.request.Request(self.url, headers={
+            "User-Agent": USER_AGENT, "Accept-Encoding": "identity",
+            "Range": f"bytes={self.position}-{end}",
+        })
+        with urllib.request.urlopen(request, timeout=120) as response:
+            if response.status != 206 or response.headers.get("Content-Range") != requested:
+                raise ValueError("source did not honor the exact ZIP byte range")
+            data = response.read(count + 1)
+        if len(data) != count:
+            raise ValueError("ZIP byte range was truncated or oversized")
+        self.position += count
+        self.transferred += count
+        return data
+
+
 def fetch_members(entry, start):
     members = entry.get("members", [])
     if not members:
@@ -157,7 +212,19 @@ def fetch_members(entry, start):
         staged.append((member, path, part, observed, size))
 
     archive_format = entry.get("archive_format", "tar")
-    if archive_format == "zip":
+    ranged = args.zip_ranges and archive_format == "zip"
+    if ranged:
+        reader = RangedZip(entry, sum(member["bytes"] for member in pending.values()))
+        with zipfile.ZipFile(reader) as archive:
+            for item in archive.infolist():
+                if item.filename in pending:
+                    file_type = stat.S_IFMT(item.external_attr >> 16)
+                    regular = not item.is_dir() and file_type in (0, stat.S_IFREG)
+                    stage(item.filename, item.file_size, regular, lambda: archive.open(item))
+        observed, source_size = None, reader.transferred
+    elif not entry.get("sha256"):
+        raise ValueError("source has no complete SHA-256 pin; use --members --zip-ranges for pinned ZIP members")
+    elif archive_format == "zip":
         # ZIP's directory lives at the end. Keep the verified compressed source on the
         # reference volume; never unpack its unselected files or buffer it all in RAM.
         if os.path.exists(archive_path):
@@ -196,10 +263,10 @@ def fetch_members(entry, start):
         raise ValueError(f"unsupported archive format: {archive_format}")
     if seen != set(pending):
         raise ValueError("archive is missing members: " + ", ".join(sorted(set(pending) - seen)))
-    if mode != "--pin" and (observed != entry["sha256"] or source_size != entry["bytes"]):
+    if not ranged and mode != "--pin" and (observed != entry["sha256"] or source_size != entry["bytes"]):
         raise ValueError("source archive does not match its pin; unverified members remain at .part")
-    emit("pinned" if mode == "--pin" else "archive-verified", entry, observed, source_size, start)
-    # Nothing is published until BOTH the complete source and every selected member verify.
+    emit("archive-ranges-read" if ranged else "pinned" if mode == "--pin" else "archive-verified", entry, observed, source_size, start)
+    # Range mode verifies every member; other modes also verify the complete source.
     for member, path, part, observed, size in staged:
         if mode != "--pin":
             os.link(part, path)
@@ -239,6 +306,11 @@ for entry in files:
             print(f"REFUSED archive {entry['id']}: {error}", file=sys.stderr)
             emit("refused", entry, None, None, start)
             refused += 1
+        continue
+    if not entry.get("sha256"):
+        print(f"REFUSED {entry['id']}: source has no complete SHA-256 pin; use --members --zip-ranges", file=sys.stderr)
+        emit("refused", entry, None, None, start)
+        refused += 1
         continue
     parts = entry["path"].split("/")
     if os.path.isabs(entry["path"]) or any(p in ("", ".", "..") for p in parts):

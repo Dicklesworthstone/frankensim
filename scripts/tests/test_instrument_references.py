@@ -4,6 +4,7 @@ Run: python3 -I scripts/tests/test_instrument_references.py -v
 Every test prints one IRPDATA line for scripts/e2e/instrument_data.sh. Artifact digests are sha256
 (the stdlib has no BLAKE3). Tolerance everywhere: an exact sha256 match and an exact byte count.
 """
+import contextlib
 import functools
 import hashlib
 import http.server
@@ -106,11 +107,76 @@ class Quiet(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+@contextlib.contextmanager
+def range_server(payload, fault=None):
+    class Ranges(Quiet):
+        def do_GET(self):
+            first, last = map(int, self.headers["Range"].removeprefix("bytes=").split("-"))
+            body = payload[first:last + 1]
+            self.send_response(200 if fault == "ignored" else 206)
+            self.send_header("Content-Range", f"bytes {first + (fault == 'shifted')}-{last}/{len(payload)}")
+            if fault == "truncated":
+                body = body[:-1]
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Ranges)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/source.zip"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def tree(directory):
     return sorted((str(p.relative_to(directory)), p.read_bytes()) for p in Path(directory).rglob("*") if p.is_file())
 
 
 class ReferenceTests(unittest.TestCase):
+    def test_zip_ranges_verify_members_without_claiming_full_archive_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, payload = zip_entry(directory)
+            archive["sha256"] = None  # Source publishes MD5; no complete SHA-256 was measured.
+            with range_server((Path(directory) / "source.zip").read_bytes()) as url:
+                archive["url"] = url
+                result, events = fetch(directory, [archive], selectors=("--members", "--zip-ranges"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([e["event"] for e in events], ["archive-ranges-read", "fetched"])
+            self.assertIsNone(events[0]["sha256_observed"])
+            self.assertEqual(events[1]["sha256_observed"], archive["members"][0]["sha256"])
+            self.assertEqual(tree(Path(directory) / "refs"), [("selected/A4.wav", payload)])
+            archive["url"] = "http://127.0.0.1:9/unreachable"
+            result, events = fetch(directory, [archive], selectors=("--members", "--zip-ranges"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([e["event"] for e in events], ["verified"])
+
+    def test_zip_ranges_refuse_bad_ranges_and_member_pins(self):
+        for fault in ("ignored", "shifted", "truncated", "member-hash"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                archive, _ = zip_entry(directory)
+                if fault == "member-hash":
+                    archive["members"][0]["sha256"] = "0" * 64
+                with range_server((Path(directory) / "source.zip").read_bytes(), fault) as url:
+                    archive["url"] = url
+                    result, events = fetch(directory, [archive], selectors=("--members", "--zip-ranges"))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual([e["event"] for e in events], ["refused"])
+                self.assertFalse((Path(directory) / "refs/selected/A4.wav").exists())
+
+    def test_unpinned_source_cannot_trigger_a_complete_archive_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, _ = zip_entry(directory)
+            archive["sha256"] = None
+            archive["url"] = "http://127.0.0.1:9/unreachable"
+            for selectors in ((), ("--members",)):
+                result, events = fetch(directory, [archive], selectors=selectors)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("source has no complete SHA-256 pin", result.stderr)
+                self.assertEqual([e["event"] for e in events], ["refused"])
+                self.assertEqual(tree(Path(directory) / "refs"), [])
+
     def test_zip_caches_verified_source_and_extracts_only_selected_members(self):
         with tempfile.TemporaryDirectory() as directory:
             archive, payload = zip_entry(directory)
