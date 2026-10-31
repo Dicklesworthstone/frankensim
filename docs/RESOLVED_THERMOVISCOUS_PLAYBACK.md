@@ -210,6 +210,41 @@ and total-energy accounts, streamed-mass projection difference and signed
 pressure/flow covariance remain separate observable quantities. Covariance is
 never supplied as invented heat to close the acoustic account.
 
+### Reciprocal escape mouths and their original exterior
+
+`NsfThermoviscousDg::with_reservoir_radiation_at(aperture, input, solve, gate)`
+attaches one passive transverse opening to the primary duct's existing
+computed exterior. `with_reservoir_radiations` attaches several explicit
+aperture identities to that same owner. Each supplied
+`NsfDgReservoirRadiation` declares a common-baffle placement, rectangular
+quadrature, circular-terminal quadrature and admissible ghost-pressure
+bracket. The actual aperture tiles determine the physical rectangle and its
+area. Every passive aperture must be distinct from the finite or prescribed
+breath supply. Attachments are cold; a complete-field load with preattached,
+unbound mouth coordinates is refused by the NSF constructor.
+
+The resulting affine response has one coordinate for flow into the external
+FE opening and one independent outward flow per passive mouth. The field's
+complete cross-port matrix, all finite passages, and every original exterior
+self/mutual term remain in this response. The shared Newton–Krylov pressure
+solver evaluates the original private NSF interval with all those controls
+together. It retains the declared characteristic/pressure brackets, charges
+all source evaluations to the original work budget, and checks final
+pressure and conservative pressure-work agreement separately at every mouth.
+The solved controls warm-start the next interval only after the common
+acceptance of fluid, field, ducts, exterior memory and finite supply.
+
+This reaction has one uniform acoustic-pressure mode per rectangle. It does
+not make the original prescribed-ghost boundary transparent, replace the
+original source material law, or transfer mean material into the acoustic
+field. `frame.reservoir_radiations` retains each mouth's original conservative
+NSF exchange, solved ghost-pressure offset, actual outward flow, exterior
+pressure/work and projection defects. The complete FE/DG storage account
+retains its original signed circular-terminal work. Direct mouth work enters
+the shared exterior separately and is not debited again as field or duct
+storage. The finite supply still receives only its own aperture's original
+streamed mass and total-energy exchange.
+
 `nsf_dg::thermoviscous::performance::NsfThermoviscousDgPerformance` implements
 the existing `PressureRenderer`. It observes the actual selected attached
 duct's mean inlet pressure or computed microphone while advancing the entire
@@ -217,6 +252,18 @@ source/field/duct assembly once per physical interval. `new_with_drives` binds
 the matching observer clock; `new_resampled_with_drives` uses the existing
 interval-mean observation clock without retiming the physics. A callback
 failure preserves the accepted physical/output prefix and poisons the stream.
+
+`with_reservoir_observation_at(aperture, placement)` adds that selected
+opening's actual signed tile flows to the existing microphone through the
+original finite-tile propagation owner. A reciprocally loaded mouth requires
+the primary duct's shared exterior, the same baffle origin, zero additional
+rotation and the declared circular-terminal observer quadrature. A supplied
+breath aperture is not implicitly selected. The observer retains each tile's
+flow and path rather than substituting bore flow or streamed mass divided by
+reference density. With several selected openings their signed pressures are
+summed at the same output clock. Observer gas preparation, when selected,
+applies its existing shared path budget after all surfaces are attached and
+aligns numerical padding without changing physical delays.
 
 ### Native source-to-microphone example
 
@@ -230,6 +277,8 @@ opening feeds an internal plenum, a two-cell-high windway, a seven-cell free
 gap and a stationary staircase labium. All flow from the source plenum toward
 the edge must pass through the windway. The velocity field comes from the
 original nonlinear NSF solver; no prescribed jet velocity or jet card is used.
+A separate manufactured escape in the free gap shares reciprocal radiation
+with the bore. This extended example has not been compiled or executed here.
 
 The actual NSF material law determines its timestep from the supplied cell
 size. Eight original fluid substeps share each 48 kHz acoustic interval; the
@@ -244,17 +293,20 @@ in the following table start at the low corner of the fluid volume:
 
 | Part | Declared local geometry |
 | --- | --- |
-| Source opening | Low-x face, y indices 4–6 and z indices 1–3: nine original reservoir tiles |
+| Source opening, aperture 0 | Low-x face, y indices 4–6 and z indices 1–3: nine original reservoir tiles |
 | Internal plenum | Fluid y layers 3–7, before the windway |
 | Windway | Fluid x indices 5–6 through y layers 8–12, across all five z cells |
 | Free gap | Fluid y layers 13–19 |
+| Passive escape, aperture 1 | Low-x face, y indices 16–18 and z indices 1–3: nine distinct reservoir tiles |
 | Labium | Solid y layers 20–29, with `6 <= x < 7 + floor((y-20)/3)` |
 | Field opening | Lower half of the high-y face, x indices 0–5, adjoining FE port 2 |
-| Escape opening | Upper half of the high-y face, retaining zero incoming characteristic |
+| Ambient remainder | Upper half of the high-y face, retaining zero incoming characteristic |
 
-The original source aperture's three-by-three tangential and two-layer inward
-fluid collar is explicit. Both characteristic faces retain their required two
-all-fluid layers. A solid wall at y index 2 isolates the unused low-y ambient
+Both transverse apertures retain their original three-by-three tangential and
+two-layer inward fluid collars. The passive escape is downstream of the
+windway and upstream of the labium; it cannot bypass the windway from the
+source plenum. Both characteristic faces retain their required two all-fluid
+layers. A solid wall at y index 2 isolates the unused low-y ambient
 pocket, preventing source flow from escaping behind the windway. The two fluid
 layers after the labium remain part of the original characteristic interface;
 the staircase does not invent a solid edge inside that mandatory collar.
@@ -262,10 +314,29 @@ the staircase does not invent a solid edge inside that mandatory collar.
 Left/right FE ports connect the 20 mm closed cork-side passage and 50 mm
 radiating bore. No volume is counted in both source and acoustic owners.
 The circular duct interfaces use one equal-area uniform mode and require
-their own spatial comparison. The microphone observes the main bore's original
-computed finite-aperture exterior 0.1 m from its outlet. The escape opening's
-mass and energy remain in the NSF account; that opening is not silently assigned
-a radiation impedance or added to this microphone as a point monopole.
+their own spatial comparison. Aperture 1 joins the primary bore's original
+computed self/mutual exterior in an explicitly manufactured common rigid
+baffle. Its grid tangential edge zero maps to `[-0.08, 0]` m, with the original
+low-face reversal of the second coordinate. This placement does not claim a
+free-field instrument body. The declared rectangular reaction quadrature is
+16 × 16; circular outlets use eight radial rings and 32 angular points.
+
+The microphone at `[0, 0, 0.1]` m uses those same circular quadrature counts,
+the same escape origin and zero extra rotation. It receives the signed sum
+of original bore-outlet pressure and all nine escape-tile pressures through
+their respective original propagation paths. The finite supply aperture is
+not observed as an escape. The high-y ambient remainder keeps its explicit
+zero incoming characteristic and its original NSF mass/energy account; it
+has no silently assigned radiation load or added microphone source.
+
+The simultaneous two-coordinate pressure solve uses an incoming-characteristic
+bracket of ±0.5 m/s and a passive-mouth ghost-pressure bracket of ±20 Pa about
+the source reference. It uses a normalized finite-difference step of 1e-5,
+a 1e-8 Pa nonlinear absolute tolerance and at most 12 Newton iterations.
+The existing allowance of 64 original NSF interval evaluations also bounds
+numerical Jacobian and line-search work. These are explicit unqualified
+numerical settings; a trial outside a bracket or allowance refuses and does
+not clip the physical solution or advance only part of the assembly.
 
 The chamber starts at the common reference pressure and temperature. Its
 volume rate ramps from zero to -1e-6 m³/s over 4 ms, remains there until 12 ms,
@@ -280,7 +351,9 @@ It refuses to replace an existing file.
 Console output reports the accepted finite inventory, last original source
 mass/total-energy exchange, midpoint heat/work receipt, source conservation
 residuals, actual final windway axial velocity and prior acoustic/projection
-accounts. The finite source admits at most 1% relative mass and energy movement
+accounts. It also reports aperture 1's actual outward flow, shared-exterior
+pressure/work, conservative streamed mass/total energy, pressure residual
+and pressure-work covariance. The finite source admits at most 1% relative mass and energy movement
 per interval, bounds volume movement independently at 1%, and checks original
 mass and energy balances. The explicit acoustic projection allowance remains
 5% of the sum of absolute exchanged works plus 1e-16 J. These declared limits
@@ -297,8 +370,11 @@ not automatically rerouted through this example.
 
 Native regression coverage includes original-owner replay, molecular and
 finite-wall evolution, downstream and finite cork-side feedback, the full
-cross-port solve, aggregate energy and all-owner rollback, binding admission
-and callback-independent playback at selected ports. Rust syntax was parsed
+cross-port solve including independent mouth cross terms, aggregate energy
+and all-owner rollback, exclusive binding admission, signed tile/bore
+microphone composition and callback-independent playback at selected ports.
+These are algebraic/replay and rollback regression cases (G0/G3/G4); they do
+not establish spatial or temporal convergence. Rust syntax was parsed
 with the pinned formatter during implementation. Compilation, native numerical
 tests and example execution were not run because this executor lacks the full
 pinned dependency checkout and remote build runners. No audible improvement or

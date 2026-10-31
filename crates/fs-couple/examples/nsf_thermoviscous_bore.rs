@@ -5,7 +5,9 @@
 //! A finite material-owned chamber feeds a manufactured windway, free gap and
 //! labium through an original transverse NSF opening. Only chamber volume and
 //! heat are authored; its pressure, temperature and emitted flow are solved.
-//! This coarse stationary geometry is not measured anatomy or a qualified jet.
+//! A separate escape shares reciprocal radiation with the original bore; its
+//! signed tile flows and the bore outlets reach the same microphone.
+//! This unexecuted coarse composition is not measured anatomy or a qualified jet.
 
 use fs_couple::bernoulli_aperture::performance::ApertureObservation;
 use fs_couple::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
@@ -15,7 +17,8 @@ use fs_couple::cavity_modal::interior::thermoviscous::{
 };
 use fs_couple::dg_port::DgPortLoad;
 use fs_couple::nsf_dg::{
-    NsfDgDrive, NsfDgLimits, NsfFiniteReservoirLimits, performance::source_intervals_for,
+    NsfDgDrive, NsfDgLimits, NsfDgRadiationSolve, NsfDgReservoirRadiation,
+    NsfFiniteReservoirLimits, performance::{ReservoirObservation, source_intervals_for},
     thermoviscous::{NsfThermoviscousDg, performance::NsfThermoviscousDgPerformance},
 };
 use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
@@ -121,14 +124,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?.with_characteristic_patch(true, NsfCharacteristicPatch {
         start: [0, 0], end: [6, DIMS[2]],
     }, NsfBoundaryDrive::IncomingCharacteristic(0.0))?
-        .with_reservoir_aperture(NsfReservoirAperture {
+        .with_reservoir_apertures(vec![NsfReservoirAperture {
             axis: 0, high: false,
+            // Aperture 0 is the exclusive finite supply owner.
             // The original ghost boundary requires a 3x3 tangential and
             // two-layer inward fluid collar. All nine tiles satisfy it.
             cells: (4..7).flat_map(|y| (1..4).map(move |z| [0, y, z])).collect(),
             state: NsfOpenState { density_kg_m3: gas.density,
                 velocity_m_s: [0.0; 3], temperature_k: gas.temperature },
-        })?;
+        }, NsfReservoirAperture {
+            axis: 0, high: false,
+            // Aperture 1 is a manufactured passive escape in the free gap.
+            // Its own complete fluid collar is downstream of the windway;
+            // the high-y remainder still has its explicit ambient condition.
+            cells: (16..19).flat_map(|y| (1..4).map(move |z| [0, y, z])).collect(),
+            state: NsfOpenState { density_kg_m3: gas.density,
+                velocity_m_s: [0.0; 3], temperature_k: gas.temperature },
+        }])?;
     let physical_dt = zone.law().dt_s * SUBSTEPS as f64;
     let intervals = source_intervals_for(physical_dt, RATE, SAMPLES)?;
     // The actual derived NSF clock is checked against the original acoustic
@@ -198,6 +210,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mass_absolute_tolerance_kg: 1e-18, energy_absolute_tolerance_j: 1e-10,
         relative_tolerance: 1e-9,
     }, &gate)?;
+    // One declared common rigid baffle holds the original bore outlets and
+    // this distinct rectangular escape. This manufactured placement is not
+    // inferred from the three-dimensional source/bore body or a point source.
+    let mouth_radiation = NsfDgReservoirRadiation {
+        origin_m: [-0.08, 0.0], cells: [16, 16],
+        terminal_radial_rings: 8, terminal_angular_points: 32,
+        pressure_bracket_pa: [-20.0, 20.0],
+    };
+    let system = system.with_reservoir_radiation_at(1, mouth_radiation,
+        NsfDgRadiationSolve {
+            difference_step: 1e-5, maximum_iterations: 12,
+            newton: fs_solver::NewtonKrylovConfig {
+                absolute_tolerance: 1e-8, relative_tolerance: 0.0,
+                linear_restart: 2, max_linear_cycles: 8,
+                forcing_minimum: 1e-5, forcing_maximum: 0.5,
+                forcing_gamma: 0.9, forcing_exponent: 1.5,
+                globalization: fs_solver::Globalization::LineSearch(fs_solver::LineSearchConfig {
+                    armijo: 1e-4, contraction: 0.5, minimum_step: 1e-6,
+                }),
+            },
+        }, &gate)?;
     // One gentle squeeze and explicit heating of the SAME finite gas owner.
     // Its held p/T comes from its accepted inventory, then actual NSF flux
     // and original midpoint heat/volume work update that inventory together.
@@ -215,9 +248,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }).collect();
     let mut renderer = NsfThermoviscousDgPerformance::new_with_drives(system, 1,
         ApertureObservation::TubeBaffled(CircularOutletReceiver {
-            position_m: [0.0, 0.0, 0.1], radial_rings: 4, angular_points: 16,
+            position_m: [0.0, 0.0, 0.1],
+            radial_rings: mouth_radiation.terminal_radial_rings,
+            angular_points: mouth_radiation.terminal_angular_points,
             maximum_frequency_hz: BAND_HZ[1],
-        }), RATE, controls, BLOCK, Arc::clone(&gate))?;
+        }), RATE, controls, BLOCK, Arc::clone(&gate))?
+        .with_reservoir_observation_at(1, ReservoirObservation {
+            origin_m: mouth_radiation.origin_m, angle_rad: 0.0,
+        })?;
     let file = OpenOptions::new().write(true).create_new(true).open(output)?;
     let mut stream = Pcm16WavStream::new(file, RATE, 1.0, BLOCK)?;
     let progress = render_pressure_pcm16(&mut renderer, &mut stream, &gate,
@@ -233,6 +271,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frame.projection_covariance_j, frame.acoustic_work_residual_j);
     println!("NSF mass change={} kg, total-energy change={} J, mass projection difference={} kg",
         frame.flow_mass_change_kg, frame.flow_energy_change_j, frame.mass_projection_difference_kg);
+    let escape = frame.reservoir_radiations.first()
+        .filter(|mouth| mouth.resolved_exchange.aperture == 1)
+        .ok_or("the accepted passive escape receipt is missing")?;
+    println!("passive escape 1: outward flow={} m^3/s, radiation pressure={} Pa, radiation work={} J",
+        escape.outward_flow_m3_s, escape.radiation_pressure_pa, escape.radiation_work_j);
+    println!("passive escape 1: pressure residual={} Pa, projection covariance={} J, work residual={} J",
+        escape.pressure_residual_pa, escape.projection_covariance_j, escape.acoustic_work_residual_j);
+    println!("passive escape 1: streamed mass={} kg, streamed total energy={} J, mass projection difference={} kg",
+        escape.resolved_exchange.mass_out_kg, escape.resolved_exchange.total_energy_out_j,
+        escape.mass_projection_difference_kg);
     let chamber = renderer.system().finite_reservoir_inventory()
         .ok_or("the finite source inventory is missing")?;
     let source_frame = frame.finite_reservoir.as_ref()
