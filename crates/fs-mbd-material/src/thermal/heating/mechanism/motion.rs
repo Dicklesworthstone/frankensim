@@ -9,6 +9,8 @@
 //! Optional source-backed journal films apply resisting torques in the SAME
 //! mechanical stages and deposit their integrated work on this thermal clock.
 //! Ordered material dry brakes use that same work/heat path for both bodies.
+//! Source-backed squeeze films share those stages through their full native
+//! generalized pressure-force map, rather than an independent damping fit.
 use super::*;
 use fs_ga::{Se3, Vec3, Wrench};
 use fs_mbd::articulated::{
@@ -28,6 +30,10 @@ use viscous::{BoundBearing, ExpandingJournalBearing, JournalBearing, JournalBear
 pub mod dry;
 use dry::{BoundBrake, DryBrakeState, DryJointBrake};
 use fs_tribo::DissipationStep;
+
+/// Material Reynolds pressure, generalized resistance and finite-wall heating.
+pub mod squeeze;
+use squeeze::{BoundSqueeze, SqueezeFilm, SqueezeFilmState};
 
 /// Component tolerances follow the actual generalized-coordinate ordering.
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +61,7 @@ pub enum Error {
     ThermalMaterial(fs_material::thermal::source::ThermalMaterialError),
     Interface(fs_contact::interface_binding::InterfaceBindingError),
     Tribo(fs_tribo::TriboError),
+    Film(fs_tribo::resistive_film::FilmError),
     Dynamics(ArticulatedError),
     Integration(AdaptiveError),
     Invalid(&'static str),
@@ -96,6 +103,11 @@ impl From<fs_tribo::TriboError> for Error {
         Self::Tribo(e)
     }
 }
+impl From<fs_tribo::resistive_film::FilmError> for Error {
+    fn from(e: fs_tribo::resistive_film::FilmError) -> Self {
+        Self::Film(e)
+    }
+}
 impl From<ArticulatedError> for Error {
     fn from(e: ArticulatedError) -> Self {
         Self::Dynamics(e)
@@ -125,7 +137,7 @@ pub struct Audit {
     pub mechanical_before: MechanicalEnergy,
     pub mechanical_after: MechanicalEnergy,
     pub applied_joint_work_j: f64,
-    /// Mechanical loss deposited once in `thermal.external_heat_j` [J].
+    /// Journal and squeeze-film loss deposited once in `thermal.external_heat_j` [J].
     /// Subtract this internal transfer when identifying externally supplied heat.
     pub viscous_heat_j: f64,
     /// Dry sliding loss deposited once into the two ordered finite bodies [J].
@@ -189,6 +201,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
             work: Work::default(),
             bearings: Vec::new(),
             brakes: Vec::new(),
+            squeeze: Vec::new(),
             pending: None,
         };
         forward_dynamics(
@@ -246,7 +259,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
         checkpoint()?;
         if !self.motion.bearings.is_empty()
             || bearings.is_empty()
-            || bearings.len() + self.motion.brakes.len() > 64
+            || bearings.len() + self.motion.brakes.len() + self.motion.squeeze.len() > 64
         {
             return Err(Error::Invalid("attach 1..=64 journal films exactly once"));
         }
@@ -285,7 +298,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
         checkpoint()?;
         if !self.motion.bearings.is_empty()
             || bearings.is_empty()
-            || bearings.len() + self.motion.brakes.len() > 64
+            || bearings.len() + self.motion.brakes.len() + self.motion.squeeze.len() > 64
         {
             return Err(Error::Invalid("attach 1..=64 journal films exactly once"));
         }
@@ -321,7 +334,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
         checkpoint()?;
         if !self.motion.brakes.is_empty()
             || brakes.is_empty()
-            || brakes.len() + self.motion.bearings.len() > 64
+            || brakes.len() + self.motion.bearings.len() + self.motion.squeeze.len() > 64
         {
             return Err(Error::Invalid(
                 "attach dry brakes once within the 64-interface total budget",
@@ -346,6 +359,45 @@ impl<'a> HeatedArticulatedMotion<'a> {
     /// Accepted source temperatures, friction response and cumulative heat split.
     pub fn dry_joint_brakes(&self) -> impl ExactSizeIterator<Item = &DryBrakeState> {
         self.motion.brakes.iter().map(|b| &b.state)
+    }
+
+    /// Attach native Reynolds graphs in this mechanism's complete joint order.
+    /// Each graph contributes its full generalized pressure resistance and
+    /// integrates the conjugate power through the SAME adaptive mechanical
+    /// stages. Its named finite wall receives the heat and supplies the next
+    /// source temperature. Native geometry, low absolute-pressure liquid
+    /// support, source and energy limits all participate in atomic acceptance.
+    ///
+    /// This is the controlled nonstiff ODE image, not the pressure core's usual
+    /// implicit stiff-film embedding. At most 64 total journal/brake/squeeze
+    /// interfaces are admitted. No film inertia, thermal store, pressure clamp,
+    /// cavitation content or thermal change to the authored gap map is inferred.
+    pub fn with_squeeze_films(
+        &self,
+        films: Vec<SqueezeFilm<'a>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        checkpoint()?;
+        if !self.motion.squeeze.is_empty()
+            || films.is_empty()
+            || films.len() + self.motion.bearings.len() + self.motion.brakes.len() > 64
+        {
+            return Err(Error::Invalid("attach squeeze films once within the 64-interface total budget"));
+        }
+        let mut candidate = self.clone();
+        for film in films {
+            checkpoint()?;
+            candidate.motion.squeeze.push(BoundSqueeze::new(
+                film, &self.thermal, &self.motion.position, &self.motion.velocity, &mut checkpoint,
+            )?);
+        }
+        checkpoint()?;
+        Ok(candidate)
+    }
+
+    /// Actual source, pressure, generalized resistance and accepted heat history.
+    pub fn squeeze_films(&self) -> impl ExactSizeIterator<Item = &SqueezeFilmState> {
+        self.motion.squeeze.iter().map(|film| &film.state)
     }
 
     /// Use the existing heat scheduler. Late cancellation, material-domain,
@@ -459,6 +511,7 @@ struct Motion<'a> {
     work: Work,
     bearings: Vec<BoundBearing<'a>>,
     brakes: Vec<BoundBrake<'a>>,
+    squeeze: Vec<BoundSqueeze<'a>>,
     pending: Option<IntegratedMotion>,
 }
 #[derive(Clone)]
@@ -471,6 +524,7 @@ struct IntegratedMotion {
     viscous: f64,
     friction: f64,
     dry_steps: Vec<DissipationStep>,
+    squeeze_losses: Vec<f64>,
     heat_w: BTreeMap<CellId, f64>,
     numerical: f64,
     attempts: usize,
@@ -516,6 +570,9 @@ impl Motion<'_> {
                 .iter()
                 .map(|b| b.definition.limits.absolute_loss_tolerance_j),
         );
+        scales.extend(
+            self.squeeze.iter().map(|film| film.definition.limits.absolute_loss_tolerance_j),
+        );
         let mut normalized: Vec<_> = self
             .position
             .iter()
@@ -541,6 +598,14 @@ impl Motion<'_> {
                     effort[brake.dof] = finite(effort[brake.dof] + force)?;
                     let index = 2 * n + self.bearings.len() + j;
                     out[index] = power / scales[index];
+                }
+                for (j, film) in self.squeeze.iter().enumerate() {
+                    let (resistance, _, response) = film.response(&physical[..n], &physical[n..2 * n])?;
+                    for (effort, force) in effort.iter_mut().zip(resistance) {
+                        *effort = finite(*effort - force)?;
+                    }
+                    let index = 2 * n + self.bearings.len() + self.brakes.len() + j;
+                    out[index] = response.dissipated_power_w / scales[index];
                 }
                 let response = forward_dynamics(
                     model,
@@ -636,6 +701,19 @@ impl Motion<'_> {
             }
             dry_steps.push(step);
         }
+        let mut squeeze_losses = Vec::with_capacity(self.squeeze.len());
+        for (film, &loss) in self.squeeze.iter().zip(
+            &physical[2 * n + self.bearings.len() + self.brakes.len()..],
+        ) {
+            if !nonnegative(loss) {
+                return Err(Error::Budget("squeeze integrated loss must be nonnegative; refine RK tolerances"));
+            }
+            film.response(&position, &velocity)?;
+            viscous = finite(viscous + loss)?;
+            let watts = heat_w.entry(film.definition.heat_cell).or_insert(0.0);
+            *watts = finite(*watts + loss / dt_s)?;
+            squeeze_losses.push(loss);
+        }
         let numerical = finite(after_motion.change_from(before)? - applied + viscous + friction)?;
         checkpoint()?;
         Ok(IntegratedMotion {
@@ -647,6 +725,7 @@ impl Motion<'_> {
             viscous,
             friction,
             dry_steps,
+            squeeze_losses,
             heat_w,
             numerical,
             attempts: report.attempts,
@@ -673,7 +752,7 @@ impl DepositionObserver for Motion<'_> {
         Ok(proposed_s.min(self.controls.maximum_step_s))
     }
     fn requires_step_interval(&self) -> bool {
-        !self.bearings.is_empty() || !self.brakes.is_empty()
+        !self.bearings.is_empty() || !self.brakes.is_empty() || !self.squeeze.is_empty()
     }
     fn step_sources(
         &mut self,
@@ -723,6 +802,7 @@ impl DepositionObserver for Motion<'_> {
             viscous,
             friction,
             dry_steps,
+            squeeze_losses,
             numerical,
             attempts,
             ..
@@ -760,6 +840,9 @@ impl DepositionObserver for Motion<'_> {
         }
         for (brake, loss) in self.brakes.iter_mut().zip(dry_steps) {
             brake.accept(loss, thermal, &next_velocity, checkpoint)?;
+        }
+        for (film, loss) in self.squeeze.iter_mut().zip(squeeze_losses) {
+            film.accept(loss, thermal, &position, &next_velocity, checkpoint)?;
         }
         self.work.applied = finite(self.work.applied + applied)?;
         self.work.viscous = finite(self.work.viscous + viscous)?;

@@ -284,6 +284,48 @@ gravitational work and transactional source/cancellation/work-budget refusal.
 These synthetic analytical cases establish implementation behavior, not measured
 material validity or an accuracy claim for rapid thermal actuation.
 
+## Source-bound squeeze pressure on articulated motion (MR20)
+
+`HeatedArticulatedMotion::with_squeeze_films` binds original
+`fs-tribo::resistive_film::ResistiveFilm` pressure graphs to the mechanism's full
+scalar joint ordering. Each native mechanical stage evaluates the graph at its
+actual joint position and velocity, subtracts its complete generalized
+resistance from the ABA efforts, and integrates that SAME pressure owner's
+viscous power. Cross-coordinate pressure coupling is retained. Accepted work
+enters the named finite caloric cell once and is included in `Audit.viscous_heat_j`;
+it is an internal mechanical-to-thermal transfer, not additional external heat.
+Each film retains cumulative accepted heat and endpoint pressure/force observations.
+
+The same `LiquidTemperatureLaw` bundle supplies viscosity and the explicitly
+named saturation-vapor-pressure claim. It retains every original claim and full
+context. The reservoir pressure must be an explicit absolute Pressure/Static
+coordinate. Only constant or single-temperature Newtonian source responses are
+admitted, and original source-line queries check the complete declared pressure
+envelope plus every crossed thermal breakpoint. Every stage and refreshed
+endpoint checks actual absolute pressure strictly above the sourced saturation
+pressure and gauge pressure within the declared small-pressure limit. No pressure
+floor, clipped suction or substitute liquid is used. This conservative
+full-liquid admission is not a cavitation-inception prediction; rupture,
+starvation and reformation require the separate original cavitating-film owner.
+
+The pressure core's usual consumer is an implicit mechanical equation. This
+adapter explicitly admits its nonstiff ODE image through the existing capped
+adaptive RK45 stages, independent integrated-loss tolerance and mechanical-energy
+gate. It claims no stiff-film robustness. The authored linearized gap map remains
+fixed; continuous surface expansion, compressibility, fluid inertia/storage,
+entrainment, cavitation content and non-Newtonian effects are not inferred. The
+film is massless and isothermal at its designated finite wall, with all its heat
+assigned there. Source viscosity refresh and its fractional-change gate share
+the original accepted thermal intervals, including composed observer heat.
+Source, geometry, pressure, energy, work-budget and cancellation refusals preserve
+motion, thermal state, source receipts and cumulative loss together.
+
+`tests/heated_articulated_squeeze_motion.rs` uses independent one-chamber
+Poiseuille resistance and exponential native translation, coupled sibling-joint
+momentum, material substitution, temperature feedback and rollback oracles.
+These are synthetic constitutive fixtures; syntax/source review alone does not
+establish native runtime validation.
+
 ## Material-driven journal loss in continuing articulated motion (MR20)
 
 `HeatedArticulatedMotion::with_journal_bearings` binds explicit revolute links,
