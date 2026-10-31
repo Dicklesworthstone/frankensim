@@ -527,9 +527,16 @@ re-derives it. Assembly stages triplets into `fs_sparse::Coo`.
 | `∫_e ∇λ_a·K∇λ_b dV` | `V · gᵀ_a K g_b` | any constant `K` on the element — the P₁ gradients are constant, so this is not a quadrature at all |
 | `∫_e λ_a f dV` | `Σ_b V(1+δ_ab)/20 · f_b` | `f` linear on the element (second-order otherwise) |
 | `∫_F λ_a q_n dA` | `Σ_b A(1+δ_ab)/12 · q_b` | `q_n` linear on the face |
-| `∫_F h λ_a λ_b dA` | `h̄_F · A(1+δ_ab)/12` | `h` constant on the face (second-order otherwise); `h̄_F` is the face mean |
-| `∫_F h λ_a T_ref dA` | `h̄_F · Σ_b A(1+δ_ab)/12 · T_ref,b` | `h` face-constant AND `T_ref` linear on the face |
+| `∫_F h λ_a λ_b dA` | `Σ_c h_c ∫_F λ_a λ_b λ_c dA` | `h` linear on the face; cubic simplex moments are integrated exactly |
+| `∫_F h λ_a T_ref dA` | `Σ_b R_ab T_ref,b` with the same exact Robin block `R` | independently linear `h` and `T_ref` on the face |
 | `∫_F (1/R'') λ_a λ_b dA` | `(1/R'') · A(1+δ_ab)/12`, staged as signed A/A, B/B, A/B, and B/A blocks | face-constant `R''` on exactly matching P1 traces |
+
+The spatial Robin block is shared by steady, temperature-transient and
+enthalpy residuals/tangents. `tests/robin_flux.rs` checks its matrix and load
+against independent Duffy/Gauss integration, then verifies steady generation,
+transient cooling and latent-plateau heat removal against that same independent
+surface integral. This removes coefficient-averaging error for P₁ trace data;
+it does not certify the supplied convection law or the spatial solution error.
 
 `K` is evaluated once per element at `T̄_e`, the element mean of the P₁
 iterate. For P₁ that mean is the EXACT element average of `T_h`, so for `k`
@@ -825,9 +832,12 @@ On the 43,840-tet heatsink ladder rung this proves `||A^-1||_inf <= 9.1e6` over
     redefining it.** `report.robin_fluxes` carries one row per declared Robin
     region owning at least one boundary face, in declaration order, each
     integrating `∫ h (T_h − T_ref) dA` over that region's faces with the SAME
-    per-face rule the balance uses. `EnergyBalance::robin_out_w` keeps its
-    historical running-accumulator value bit-for-bit — it is NOT re-derived as
-    a sum of these parts — so the whole and the sum of parts agree only up to
+    per-face rule the balance uses. The P₁ product is integrated exactly,
+    including spatial correlation between the transfer coefficient and the
+    temperature difference. The reported area means remain separate diagnostics;
+    their product need not equal the heat rate. `EnergyBalance::robin_out_w`
+    uses its own running accumulator, not a sum of region totals, so the whole
+    and the sum of parts agree only up to
     floating-point summation order, and the test pins that gap rather than
     asserting it away. A Robin region matching no face emits no row: it moves
     no heat and has no area to average over, so inventing zero-valued means

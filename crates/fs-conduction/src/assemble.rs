@@ -9,17 +9,17 @@
 //!   element conduction   K^e_ab = V · gᵀ_a K(T̄_e) g_b
 //!   element source       b^e_a  = Σ_b  V (1 + δ_ab)/20 · f_b
 //!   face Neumann         b^F_a −= Σ_b  A (1 + δ_ab)/12 · q_b
-//!   face Robin (matrix)  R^F_ab = h̄_F · A (1 + δ_ab)/12
-//!   face Robin (load)    b^F_a += h̄_F · Σ_b A (1 + δ_ab)/12 · T_ref,b
+//!   face Robin (matrix)  R^F_ab = Σ_c h_c ∫_F λ_a λ_b λ_c dA
+//!   face Robin (load)    b^F_a += Σ_b R^F_ab · T_ref,b
 //! ```
 //!
 //! `∫ λ_a λ_b dV = V(1+δ_ab)/20` on a tet and `∫ λ_a λ_b dA =
 //! A(1+δ_ab)/12` on a triangle are exact, so the source and boundary
 //! rules are EXACT for data that is linear on the element/face and
-//! second-order accurate otherwise. `h̄_F` is the face mean of `h`: the
-//! Robin operator block is exact for a face-constant transfer
-//! coefficient and second-order otherwise. All four rules are stated in
-//! `CONTRACT.md` as the quadrature claim.
+//! second-order accurate otherwise. The Robin rule integrates the cubic
+//! barycentric moments exactly, retaining spatial correlation between `h`,
+//! wall temperature and reference temperature. It is exact for independently
+//! P₁ `h` and `T_ref`. All four rules are stated in `CONTRACT.md`.
 //!
 //! `K` is evaluated ONCE per element at `T̄_e`, the element mean of the
 //! P₁ iterate — which for P₁ is the EXACT element average of `T_h`, not
@@ -430,6 +430,35 @@ pub(crate) fn assemble_operator_scaled_with_interfaces(
     })
 }
 
+/// Exact P₁ Robin matrix for a triangle with nodal transfer coefficients.
+///
+/// The simplex moments are `∫ λ_i³ = A/10`, `∫ λ_i² λ_j = A/30`,
+/// and `∫ λ_0 λ_1 λ_2 = A/60`. Nonnegative nodal `h` therefore retains
+/// a symmetric positive-semidefinite boundary operator without sampling or
+/// replacing the field by its mean. Only a stack-local 3×3 block is needed.
+pub(crate) fn robin_face_matrix(area: f64, h: [f64; 3]) -> [[f64; 3]; 3] {
+    let mut block = [[0.0; 3]; 3];
+    if h[0] == h[1] && h[1] == h[2] {
+        // The common uniform case keeps the original consistent face mass.
+        for (a, row) in block.iter_mut().enumerate() {
+            for (b, entry) in row.iter_mut().enumerate() {
+                *entry = h[0] * if a == b { area / 6.0 } else { area / 12.0 };
+            }
+        }
+        return block;
+    }
+    for a in 0..3 {
+        block[a][a] = area * (h[a] / 10.0 + h[(a + 1) % 3] / 30.0 + h[(a + 2) % 3] / 30.0);
+        for b in (a + 1)..3 {
+            let c = 3 - a - b;
+            let entry = area * (h[a] / 30.0 + h[b] / 30.0 + h[c] / 60.0);
+            block[a][b] = entry;
+            block[b][a] = entry;
+        }
+    }
+    block
+}
+
 fn assemble_boundary(
     cx: &Cx<'_>,
     mesh: &ConductionMesh,
@@ -466,15 +495,14 @@ fn assemble_boundary(
                     }
                 }
                 ThermalBc::Robin { htc, t_ref } => {
-                    let h_bar = (htc.at(verts[0]) + htc.at(verts[1]) + htc.at(verts[2])) / 3.0;
+                    let block = robin_face_matrix(area, verts.map(|v| htc.at(v)));
                     for a in 0..3 {
                         let mut acc = 0.0f64;
                         for (b, &vb) in verts.iter().enumerate() {
-                            let w = if a == b { area / 6.0 } else { area / 12.0 };
-                            coo.push(verts[a], vb, h_bar * w);
-                            acc = w.mul_add(t_ref.at(vb), acc);
+                            coo.push(verts[a], vb, block[a][b]);
+                            acc = block[a][b].mul_add(t_ref.at(vb), acc);
                         }
-                        load[verts[a]] += h_bar * acc;
+                        load[verts[a]] += acc;
                     }
                 }
             }

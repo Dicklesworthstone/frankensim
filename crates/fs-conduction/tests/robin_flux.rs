@@ -422,3 +422,327 @@ fn solution_boundary_condition(mesh: &ConductionMesh, slot: usize) -> Option<Bou
     let centroid_x = mesh.boundary()[slot].centroid[0];
     (on_box_face(centroid_x, 0.0) || on_box_face(centroid_x, LENGTH)).then_some(BoundaryKind::Robin)
 }
+
+// Independent tensor-product Gauss rule under the triangle Duffy map.
+// Three points in each coordinate integrate every cubic trace product exactly;
+// this oracle does not use the production barycentric moment formula.
+fn triangle_integral(area: f64, f: impl Fn([f64; 3]) -> f64) -> f64 {
+    let offset = (3.0f64 / 5.0).sqrt() / 2.0;
+    let rule = [
+        (0.5 - offset, 5.0 / 18.0),
+        (0.5, 4.0 / 9.0),
+        (0.5 + offset, 5.0 / 18.0),
+    ];
+    let mut integral = 0.0;
+    for (u, wu) in rule {
+        for (v, wv) in rule {
+            integral +=
+                2.0 * area * wu * wv * (1.0 - u) * f([(1.0 - u) * (1.0 - v), u, (1.0 - u) * v]);
+        }
+    }
+    integral
+}
+
+fn interpolate(values: [f64; 3], lambda: [f64; 3]) -> f64 {
+    values.iter().zip(lambda).map(|(&v, l)| v * l).sum()
+}
+
+fn integrated_robin_heat(
+    mesh: &ConductionMesh,
+    boundary: &fs_conduction::ThermalBoundary,
+    temperature: &[f64],
+) -> f64 {
+    mesh.boundary()
+        .iter()
+        .enumerate()
+        .map(|(slot, face)| {
+            let Some(ThermalBc::Robin { htc, t_ref }) = boundary.condition_for(slot) else {
+                return 0.0;
+            };
+            let h = face.vertices.map(|v| htc.at(v as usize));
+            let delta = face
+                .vertices
+                .map(|v| temperature[v as usize] - t_ref.at(v as usize));
+            triangle_integral(face.area, |lambda| {
+                interpolate(h, lambda) * interpolate(delta, lambda)
+            })
+        })
+        .sum()
+}
+
+#[test]
+fn spatial_robin_operator_and_load_match_independent_cubic_quadrature() {
+    use fs_conduction::assemble::{assemble_jacobian, assemble_operator};
+    use fs_rep_mesh::TetComplex;
+
+    let mesh = ConductionMesh::new(
+        TetComplex::from_tets(4, vec![[0, 1, 2, 3]]),
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+    .unwrap();
+    let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let temperature = [400.0, 325.0, 450.0, 370.0];
+    let insulated = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let face = mesh
+        .boundary()
+        .iter()
+        .find(|f| on_box_face(f.centroid[2], 0.0))
+        .unwrap();
+    let vertices = face.vertices.map(|v| v as usize);
+    let references = [280.0, 310.0, 350.0, 270.0];
+    for coefficients in [[2.0, 11.0, 41.0, 3.0], [7.0; 4]] {
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "spatial-cooling",
+                |f| on_box_face(f.centroid[2], 0.0),
+                ThermalBc::Robin {
+                    htc: ScalarField::Nodal(coefficients.to_vec()),
+                    t_ref: ScalarField::Nodal(references.to_vec()),
+                },
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        with_cx(|cx| {
+            let base =
+                assemble_operator(cx, &mesh, &insulated, &material, &source, &temperature).unwrap();
+            let system =
+                assemble_operator(cx, &mesh, &boundary, &material, &source, &temperature).unwrap();
+            let tangent = assemble_jacobian(cx, &mesh, &boundary, &material, &temperature).unwrap();
+            let h = vertices.map(|v| coefficients[v]);
+            let reference = vertices.map(|v| references[v]);
+            for a in 0..4 {
+                let basis = |lambda: [f64; 3], vertex: usize| {
+                    vertices
+                        .iter()
+                        .position(|&v| v == vertex)
+                        .map_or(0.0, |i| lambda[i])
+                };
+                let expected_load = triangle_integral(face.area, |lambda| {
+                    basis(lambda, a) * interpolate(h, lambda) * interpolate(reference, lambda)
+                });
+                assert!(
+                    (system.load[a] - expected_load).abs() < 2e-12,
+                    "node {a}: load {} != {expected_load}",
+                    system.load[a]
+                );
+                for b in 0..4 {
+                    let mut unit = [0.0; 4];
+                    unit[b] = 1.0;
+                    let mut primal_column = [0.0; 4];
+                    let mut base_column = [0.0; 4];
+                    let mut tangent_column = [0.0; 4];
+                    system.operator.spmv(&unit, &mut primal_column);
+                    base.operator.spmv(&unit, &mut base_column);
+                    tangent.spmv(&unit, &mut tangent_column);
+                    let expected = triangle_integral(face.area, |lambda| {
+                        basis(lambda, a) * basis(lambda, b) * interpolate(h, lambda)
+                    });
+                    assert!(
+                        (primal_column[a] - base_column[a] - expected).abs() < 2e-14,
+                        "Robin entry ({a},{b}) differs from cubic quadrature"
+                    );
+                    assert!(
+                        (tangent_column[a] - primal_column[a]).abs() < 2e-14,
+                        "temperature tangent must retain the same spatial Robin block"
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn nonuniform_cooling_heat_closes_steady_and_transient_energy() {
+    use fs_conduction::transient::VolumetricHeatCapacity;
+    use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig};
+
+    let (complex, positions) = box_grid([2, 1, 1], [0.1, 0.1, 0.1]);
+    let mesh = ConductionMesh::new(complex, positions).unwrap();
+    let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .remainder(
+            "spatial-cooling",
+            ThermalBc::Robin {
+                htc: ScalarField::Nodal(
+                    mesh.positions()
+                        .iter()
+                        .map(|p| 10.0 + 1900.0 * p[1])
+                        .collect(),
+                ),
+                t_ref: ScalarField::Nodal(
+                    mesh.positions()
+                        .iter()
+                        .map(|p| 290.0 + 300.0 * p[1])
+                        .collect(),
+                ),
+            },
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    let source = ScalarField::Uniform(10_000.0);
+    with_cx(|cx| {
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source,
+            element_materials: None,
+        };
+        let steady = solve(cx, problem, config()).unwrap();
+        let oracle = integrated_robin_heat(&mesh, &boundary, &steady.temperature);
+        assert!(
+            (oracle - 10.0).abs() < 1e-8,
+            "cooling must remove the generated 10 W: {oracle}"
+        );
+        assert!((steady.report.energy.robin_out_w - oracle).abs() < 1e-10);
+        assert!((steady.report.robin_fluxes[0].heat_rate_w - oracle).abs() < 1e-10);
+
+        let old = vec![360.0; mesh.vertex_count()];
+        let stepper =
+            BackwardEuler::uniform(cx, &mesh, VolumetricHeatCapacity::declared(1e4).unwrap())
+                .unwrap();
+        let dt = 2.0;
+        let step = stepper
+            .advance(
+                cx,
+                problem,
+                None,
+                &old,
+                dt,
+                StepConfig {
+                    linear: config().linear,
+                    energy_tolerance_j: 1e-8,
+                },
+            )
+            .unwrap();
+        let oracle = integrated_robin_heat(&mesh, &boundary, &step.temperature);
+        assert!((step.robin_out_w - oracle).abs() < 1e-10);
+        assert!((step.robin_fluxes[0].heat_rate_w - oracle).abs() < 1e-10);
+        assert!((step.stored_energy_change_j - dt * (10.0 - oracle)).abs() < 1e-8);
+        assert!(
+            step.stored_energy_change_j < 0.0,
+            "the initially hot solid must cool"
+        );
+        assert!(
+            old.iter().all(|&t| t == 360.0),
+            "the trial cannot change its history"
+        );
+    });
+}
+
+#[test]
+fn spatial_robin_exchange_removes_latent_heat_without_inventing_temperature_change() {
+    use fs_blake3::ContentHash;
+    use fs_conduction::transient::enthalpy::{
+        EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyStepConfig,
+    };
+    use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+    use fs_solver::NewtonKrylovConfig;
+
+    let (complex, positions) = box_grid([1, 1, 1], [0.1; 3]);
+    let mesh = ConductionMesh::new(complex, positions).unwrap();
+    let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+        ContentHash([0x29; 32]),
+        [
+            (0.0, 250.0, 0.0),
+            (1000.0, 350.0, 0.0),
+            (3000.0, 350.0, 1.0),
+            (4500.0, 500.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(h, t, liquid)| EnthalpyPhaseKnot {
+            specific_enthalpy_j_kg: h,
+            temperature_k: t,
+            liquid_mass_fraction: liquid,
+            bulk_density_kg_m3: 10.0,
+        })
+        .collect(),
+    )
+    .unwrap();
+    let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .remainder(
+            "spatial-cooling",
+            ThermalBc::Robin {
+                htc: ScalarField::Nodal(
+                    mesh.positions()
+                        .iter()
+                        .map(|p| 10.0 + 1900.0 * p[1])
+                        .collect(),
+                ),
+                t_ref: ScalarField::Nodal(
+                    mesh.positions()
+                        .iter()
+                        .map(|p| 290.0 + 300.0 * p[1])
+                        .collect(),
+                ),
+            },
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    let old_h = vec![2000.0; mesh.vertex_count()];
+    let expected_heat = integrated_robin_heat(&mesh, &boundary, &vec![350.0; mesh.vertex_count()]);
+    let dt = 0.001;
+    with_cx(|cx| {
+        let stepper = EnthalpyBackwardEuler::uniform(
+            cx,
+            &mesh,
+            &curve,
+            10.0,
+            EnthalpyBudget {
+                max_vertices: mesh.vertex_count(),
+                max_elements: mesh.element_count(),
+            },
+        )
+        .unwrap();
+        let result = stepper
+            .advance(
+                cx,
+                ConductionProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material,
+                    source: &source,
+                    element_materials: None,
+                },
+                None,
+                &old_h,
+                dt,
+                EnthalpyStepConfig {
+                    newton: NewtonKrylovConfig {
+                        absolute_tolerance: 1e-12,
+                        relative_tolerance: 1e-12,
+                        ..NewtonKrylovConfig::default()
+                    },
+                    max_newton_iterations: 16,
+                    energy_tolerance_j: 1e-10,
+                },
+            )
+            .unwrap();
+        assert!(result.temperature.iter().all(|&t| t == 350.0));
+        assert!(
+            result
+                .liquid_mass_fraction
+                .iter()
+                .all(|&f| f > 0.0 && f < 0.5)
+        );
+        assert!((result.robin_out_w - expected_heat).abs() < 1e-10);
+        assert!((result.stored_energy_change_j + dt * expected_heat).abs() < 1e-10);
+        assert!(result.energy_residual_j.abs() < 1e-10);
+        assert!(old_h.iter().all(|&h| h == 2000.0));
+    });
+}

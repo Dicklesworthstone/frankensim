@@ -358,9 +358,9 @@ impl EnergyBalance {
 /// solid.
 ///
 /// The means are AREA-WEIGHTED over the region's faces, each face
-/// contributing its own vertex mean — the same per-face reduction the
-/// balance uses, so `heat_rate_w` and the means describe one quadrature
-/// rather than two.
+/// contributing its own vertex mean. The heat rate integrates the PRODUCT
+/// of the P₁ fields exactly: spatially varying `h` and temperature cannot
+/// generally be replaced by the product of their separate means.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RobinFlux {
     /// The declared region name.
@@ -1203,13 +1203,17 @@ pub(crate) fn energy_balance(
                 neumann_out_w = face.area.mul_add(mean, neumann_out_w);
             }
             ThermalBc::Robin { htc, t_ref } => {
-                let h_bar = verts.iter().map(|&v| htc.at(v)).sum::<f64>() / 3.0;
-                let delta = verts
-                    .iter()
-                    .map(|&v| temperature[v] - t_ref.at(v))
-                    .sum::<f64>()
-                    / 3.0;
-                robin_out_w = (h_bar * face.area).mul_add(delta, robin_out_w);
+                let h = verts.map(|v| htc.at(v));
+                let h_bar = h.iter().sum::<f64>() / 3.0;
+                let block = crate::assemble::robin_face_matrix(face.area, h);
+                let delta = verts.map(|v| temperature[v] - t_ref.at(v));
+                let mut heat = 0.0f64;
+                for row in block {
+                    for b in 0..3 {
+                        heat = row[b].mul_add(delta[b], heat);
+                    }
+                }
+                robin_out_w += heat;
                 if let Some(region) = boundary.region_for(slot) {
                     let wall_bar = verts.iter().map(|&v| temperature[v]).sum::<f64>() / 3.0;
                     let ref_bar = verts.iter().map(|&v| t_ref.at(v)).sum::<f64>() / 3.0;
@@ -1219,7 +1223,7 @@ pub(crate) fn energy_balance(
                     acc.h_area = face.area.mul_add(h_bar, acc.h_area);
                     acc.wall_area = face.area.mul_add(wall_bar, acc.wall_area);
                     acc.ref_area = face.area.mul_add(ref_bar, acc.ref_area);
-                    acc.heat = (h_bar * face.area).mul_add(delta, acc.heat);
+                    acc.heat += heat;
                 }
             }
         }
