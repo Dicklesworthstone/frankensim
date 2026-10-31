@@ -1929,6 +1929,24 @@ synthetic integration fixture, not measured instrument or bridge
 qualification. Full three-dimensional unilateral bridge contact, moving
 geometry and measured violin/cello/bass fidelity remain separate requirements.
 
+### Omitted bending flexibility at fixed material bow contacts
+
+Fixed dry bows may select `bow-residual-flexibility exact-static-green` after
+the matching bridge `residual-flexibility` record. The material string bank
+derives omitted bending compliance from each admitted string's tension,
+bending stiffness, span and retained spectrum, reusing the bridge/point-force
+Schur complement. Reciprocal string/body maps and all cross-bow terms enter
+the existing simultaneous friction solve. Tail storage is `F^T G F / 2`;
+`delta_F^T G delta_F / 2` is separately reported backward-Euler numerical loss,
+not material or friction dissipation. Traction history publishes only with
+the complete accepted step. This quasi-static approximation requires modal/time
+refinement and does not restore omitted resonances or torsional modes. Fixed
+point or uniform-ribbon bows on linear banks with one simple bridge per string
+are supported; normal contacts, moving maps, material compliant ribbons,
+receiving fibers, extra bridge maps, nonlinear storage and source-bound friction
+histories refuse. The optional Cannone experiment preserves physical data and
+existing acoustic acceptance gates.
+
 ### `string_specimen`
 
 `acoustic_realize::LinearMaterialStringRuntime` incrementally advances an explicitly

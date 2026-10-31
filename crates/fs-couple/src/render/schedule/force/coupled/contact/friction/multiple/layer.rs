@@ -257,6 +257,9 @@ impl MultiFrictionModalSystem {
         if bindings.is_empty() {
             return Ok(self);
         }
+        if self.friction_residual.is_some() {
+            return Err(invalid("friction residual compliance does not include source-bound interface histories").into());
+        }
         if self.samples_rendered() != 0
             || self.shear_layers.iter().any(Option::is_some)
         {

@@ -376,7 +376,8 @@ impl ReciprocalStringBank {
     /// later fluid, torsion and cavity rebuilds keep the condensation. Stops
     /// bound later carry the cross terms. Directed bridges (polarization.rs)
     /// condense along their own axes, admitted only orthogonal to every other
-    /// connection on their string. The bow port has no residual yet.
+    /// connection on their string. Fixed bows opt into the same correction with
+    /// `MultiBowStringBank::with_bow_residual_flexibility` after their assembly.
     ///
     /// # Errors
     /// After motion, playback or bound nonlinear storage; repeated; beside

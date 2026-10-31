@@ -213,6 +213,8 @@ pub struct Spec {
     /// `residual-flexibility exact-static-green`: the omitted bending modes' static compliance in series with
     /// every bridge and fixed stop (pexfp.299). Absent means the retained modes alone.
     pub residual_flexibility: bool,
+    /// Extend the same omitted bending spectrum to fixed bow contacts.
+    pub bow_residual_flexibility: bool,
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub longitudinal_loss: LongitudinalMaterialLoss,
@@ -517,6 +519,15 @@ impl Spec {
             let mut row = r.row("residual-flexibility")?;
             if row.word()? != "exact-static-green" {
                 return Err("residual-flexibility names its one source: exact-static-green".into());
+            }
+            row.end()?;
+        }
+        let bow_residual_flexibility = r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow-residual-flexibility");
+        if bow_residual_flexibility {
+            let mut row = r.row("bow-residual-flexibility")?;
+            if !residual_flexibility || row.word()? != "exact-static-green" {
+                return Err("bow-residual-flexibility exact-static-green requires the matching bridge residual-flexibility record".into());
             }
             row.end()?;
         }
@@ -1106,7 +1117,7 @@ impl Spec {
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, material_states, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
-            rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
+            rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, bow_residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
             plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, dry_contact_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
             bow_station_motion, forces, schedule };

@@ -1891,7 +1891,40 @@ pitch changes.
   stops, moving or migrating stops, bound nonlinear storage, material bridge
   interfaces, additional directed translational bridges, rotational and constant-loss bridges, and a string with other than
   one bridge connection.
-- The bow port carries no residual yet. That is the next step.
+- Bow ports retain their original maps unless the separate record below is supplied.
+
+### Omitted bending modes at fixed bows
+
+Immediately after the support record, add:
+
+```text
+bow-residual-flexibility exact-static-green
+```
+
+Every fixed bow then sees the same string's omitted bending spectrum. Its
+retained force/displacement map includes the bridge cross term, and all bow
+contacts share the condensed matrix, including off-diagonal terms between
+ribbon cells. The correction is derived from material tension, EI, length and
+retained modes; it neither retunes those modes nor adds a friction coefficient.
+The original body, cavity, air loading and sympathetic strings stay coupled.
+
+The omitted tail responds quasi-statically to each step's held traction. The
+joint friction ledger retains its elastic storage `friction_residual_energy_j`
+(`F G F / 2`) and separately reports `friction_residual_loss_j`
+(`delta_F G delta_F / 2`). This is backward-Euler **numerical loss**, not rosin
+or material dissipation. Increasing the retained string basis drives the
+tail and its numerical loss to zero. The correction does not recover omitted
+resonances; modal and time refinement remain necessary, especially for sharp
+slips and attacks. It does not correct omitted torsional modes or external
+point-load response, and the bridge dashpot retains the first-order support
+approximation stated above.
+
+This lane admits fixed point bows and a fixed uniform ribbon on the linear
+material bank. It refuses normal stops (their bow/stop cross-compliance is not
+yet carried), moving bows, material compliant ribbons, receiving fibers,
+nonlinear stretching and source-bound friction histories (their omitted endpoint velocities are not
+resolved). Existing performances without this record are unchanged. These
+limits do not establish recording-level accuracy or a complete physical bow.
 
 ## Nonlinear stretching with the same bow, body and gas memory
 

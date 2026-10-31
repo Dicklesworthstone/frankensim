@@ -1298,4 +1298,12 @@ fn quasistatic_fibers_refuse_implicit_loss_or_conflicting_material_query() {
     conflict.material_states.insert(conflict.bow_compliance.as_ref().unwrap().pack.clone(),
         vec![("relative_humidity_known".into(), 1.0)]);
     assert!(conflict.network_dimensions(false).is_err());
+    scoped(|cx, gate| {
+        let residual = text.replace("cavity neck", "residual-flexibility exact-static-green\nbow-residual-flexibility exact-static-green\ncavity neck");
+        let error = input::Spec::parse(residual.as_bytes()).unwrap().compile(cx, gate, |name| {
+            Ok(if name.starts_with("bow-hair-") { quasistatic_pack(7e9, Some(1e6)) }
+            else { pack(name, 7800.0, 200_000.0, None) })
+        }).err().unwrap().to_string();
+        assert!(error.contains("does not yet bind material compliant ribbons"), "{error}");
+    });
 }

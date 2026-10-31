@@ -13,7 +13,8 @@
 //!   bridge link's own column, and the stops' compliance among themselves
 //!   becomes G_ss' - k_eff G_sb G_s'b. The obstacle owner books that storage
 //!   and the declared numerical loss of its step-held quasi-static response.
-//! - The bow port carries no residual yet. That is the declared next step.
+//! - `MultiBowStringBank::with_bow_residual_flexibility` uses this same Schur
+//!   complement for fixed bow maps and their joint omitted-mode compliance.
 
 use super::*;
 use fs_math::det;
@@ -158,8 +159,9 @@ pub fn residual_bridges<'a>(strings: &[MaterialStringMember], cards: &'a [BowedS
     }).collect()
 }
 
-/// The omitted modes' coupling of `stops` with one another and with their own
+/// The omitted modes' coupling of point forces with one another and with their own
 /// strings' bridges (`bridges`, one per string), condensed through the bridges.
+/// Fixed bows reuse this force-law-independent projection with their tangents.
 ///
 /// Returns, per stop, the bridge cross factor k_eff G_sb: the stop's closure
 /// column gains minus this times its bridge link's column (string and body

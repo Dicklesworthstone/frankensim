@@ -90,3 +90,57 @@ fn what_the_residual_does_not_own_refuses_by_name() {
         assert!(input::Spec::parse(text.as_bytes()).is_err(), "accepted {record:?}");
     }
 }
+
+fn bowed() -> String {
+    include_str!("../pluck-and-bow.material-strings")
+        .replace("48000 4096 0.01 128","48000 256 0.01 128")
+        .replace("forces preload 1 1\nport 0 0.2 surface 0.002\nforce 0 0 0","forces retain 0 0")
+        .replace("event\t1e-2\t5e-3","event\t1e-3\t5e-4")
+        .replace("event\t2e-2\t1e-2","event\t2e-3\t1e-3")
+        .replace("event\t4e-2","event\t4e-3")
+}
+fn bowed_residual(text:&str)->input::Spec {
+    let text=text.replace("cavity neck","residual-flexibility exact-static-green\nbow-residual-flexibility exact-static-green\ncavity neck");
+    input::Spec::parse(text.as_bytes()).unwrap()
+}
+
+#[test]
+fn bow_residual_uses_material_geometry_and_reaches_the_original_pcm_writer() {
+    scoped(|cx,gate| {
+        let mut plain=compile(cx,gate,flexible(&bowed()),7800.0);
+        let mut corrected=compile(cx,gate,bowed_residual(&bowed()),7800.0);
+        let bank=corrected.performance.bank();
+        let bridges=residual::residual_bridges(bank.source().bank().strings(),bank.cards()).unwrap();
+        let (cross,g)=residual::stop_residual(&bridges,&[residual::ResidualStop {
+            string:0,station_fraction:0.2,direction:[1.0,0.0],
+        }]).unwrap();
+        assert_eq!(bank.system().friction_residual_compliance(),Some(g.as_slice()));
+        assert!(g[0]>0.0 && cross[0]!=0.0);
+        let receiver=bank.system().port(0).unwrap().right.as_ref().unwrap();
+        let bridge=&bank.source().bank().strings()[0].connections[0].body;
+        assert_eq!(receiver.shapes,bridge.shapes.iter().map(|b|-cross[0]*b).collect::<Vec<_>>());
+        assert_eq!(bank.system().components()[0].modes(),plain.performance.bank().system().components()[0].modes());
+        let a=pressure(&mut plain,37);
+        let b=pressure(&mut corrected,1);
+        assert!(b.iter().any(|p|p.abs()>1e-12));
+        assert!(a.iter().zip(&b).any(|(a,b)|(a-b).abs()>1e-12));
+        let mut encoded=compile(cx,gate,bowed_residual(&bowed()),7800.0);
+        let (wav,_)=encoded.write(Cursor::new(Vec::<u8>::new()),gate).unwrap();
+        assert_eq!(wav.into_inner(),fs_couple::pcm_wav::encode_pcm16_wav(&b,48000,0.01).unwrap().0);
+        let mut fine=bowed_residual(&bowed());fine.strings[0].bending_modes=8;
+        let fine=compile(cx,gate,fine,7800.0);
+        assert!(fine.performance.bank().system().friction_residual_compliance().unwrap()[0]<g[0]);
+    });
+}
+
+#[test]
+fn bow_residual_requires_the_matching_support_tail_and_refuses_unwired_stops() {
+    scoped(|cx,gate| {
+        let error=stopped(cx,gate,bowed_residual(&bowed())).err().unwrap().to_string();
+        assert!(error.contains("normal contacts"),"{error}");
+    });
+    for record in ["bow-residual-flexibility exact-static-green","residual-flexibility exact-static-green\nbow-residual-flexibility guessed",
+        "residual-flexibility exact-static-green\nbow-residual-flexibility exact-static-green extra"] {
+        assert!(input::Spec::parse(bowed().replace("cavity neck",&format!("{record}\ncavity neck")).as_bytes()).is_err());
+    }
+}

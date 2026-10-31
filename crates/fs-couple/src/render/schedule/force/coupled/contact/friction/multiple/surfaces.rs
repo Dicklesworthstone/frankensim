@@ -75,9 +75,12 @@ impl MultiFrictionModalSystem {
 
     // Shared by cold surface binding and live held-map changes. No mechanical,
     // interface or constitutive history is rebuilt by geometric preparation.
-    fn prepare_surface_maps(&self, ports: Vec<ModalFrictionPort>, gate: &CancelGate)
+    pub(super) fn prepare_surface_maps(&self, ports: Vec<ModalFrictionPort>, gate: &CancelGate)
         -> Result<(Vec<Point>, Vec<f64>), ModalFrictionError>
     {
+        if self.friction_residual.is_some() {
+            return Err(invalid("friction residual compliance requires its original fixed attachment maps").into());
+        }
         let p = self.points.len();
         if ports.len() != p {
             return Err(invalid("surface maps must retain every original friction port").into());

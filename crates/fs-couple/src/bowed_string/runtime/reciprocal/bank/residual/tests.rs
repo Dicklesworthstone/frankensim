@@ -162,3 +162,41 @@ fn residual_flexibility_restores_the_exact_point_supported_string() {
         }
     }
 }
+
+#[test]
+fn bow_residual_enrichment_converges_to_the_exact_driven_string() {
+    // Independent dynamic Green function of a taut pinned string, below its
+    // first resonance, with the same spring bridge to ground. This exercises
+    // the bow/bridge cross-map as well as the bow's own omitted compliance.
+    let bow = 0.73;
+    let omega = 0.4*core::f64::consts::PI*(A_TENSION_N/DENSITY_KG_M).sqrt()/SPAN_M;
+    let wave = omega*(DENSITY_KG_M/A_TENSION_N).sqrt();
+    let exact = |x:f64,y:f64| {
+        let (a,b)=(x.min(y)*SPAN_M,x.max(y)*SPAN_M);
+        (wave*a).sin()*(wave*(SPAN_M-b)).sin()/(A_TENSION_N*wave*(wave*SPAN_M).sin())
+    };
+    let truth = exact(bow,bow)-BRIDGE_N_M*exact(bow,BRIDGE).powi(2)
+        /(1.0+BRIDGE_N_M*exact(BRIDGE,BRIDGE));
+    let mut previous = f64::INFINITY;
+    let mut previous_tail = f64::INFINITY;
+    for count in [4,8,16] {
+        let card = card(0.0,count);
+        let bridge = ResidualBridge { card:&card,station_fraction:BRIDGE,axis:[1.0,0.0],
+            condensed:condense(residual_compliance_m_n(&card,BRIDGE,BRIDGE).unwrap(),BRIDGE_N_M,0.0).unwrap() };
+        let (cross,g)=stop_residual(&[bridge],&[ResidualStop {string:0,station_fraction:bow,direction:[1.0,0.0]}]).unwrap();
+        let response=|x:f64,y:f64| (1..=count).map(|n| {
+            let order=n as f64*core::f64::consts::PI;
+            2.0*(order*x).sin()*(order*y).sin()
+                /(SPAN_M*(A_TENSION_N*(order/SPAN_M).powi(2)-DENSITY_KG_M*omega*omega))
+        }).sum::<f64>();
+        let (aa,ab,bb)=(response(bow,bow),response(bow,BRIDGE),response(BRIDGE,BRIDGE));
+        let k=bridge.condensed.stiffness_n_m;
+        let corrected=aa-2.0*cross[0]*ab+cross[0]*cross[0]*bb
+            -k*(ab-cross[0]*bb).powi(2)/(1.0+k*bb)+g[0];
+        let plain=aa-BRIDGE_N_M*ab*ab/(1.0+BRIDGE_N_M*bb);
+        let error=(corrected-truth).abs();
+        assert!(error<0.01*(plain-truth).abs(),"N={count}: corrected {error:e}, plain {:e}",(plain-truth).abs());
+        assert!(error<previous && g[0]>0.0 && g[0]<previous_tail);
+        previous=error;previous_tail=g[0];
+    }
+}

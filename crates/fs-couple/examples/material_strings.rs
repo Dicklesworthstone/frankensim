@@ -271,6 +271,9 @@ impl input::Spec {
         }
         self.validate_shell_observer()?;
         let bow_station_program = self.bow_station_program(gate)?;
+        if self.bow_residual_flexibility && (bow_station_program.is_some() || harmonic_only) {
+            return Err("bow residual flexibility requires fixed bows on the time-domain performer".into());
+        }
         if let Some(layers)=self.friction.shear_layers() { layers.preflight(&self)?; }
         if let Some(body)=&profile { body.preflight(&self)?; }
         if self.one_way_observer.is_some() && profile.is_none() {
@@ -523,6 +526,9 @@ impl input::Spec {
             Some(stops)=>stops.bind(bank,&self,&mut catalog,&mut loader,gate)?, None=>bank };
         let bank=if let Some(layers)=self.friction.shear_layers() {
             layers.bind(&self,bank,&mut catalog,&mut loader,gate)?
+        } else { bank };
+        let bank = if self.bow_residual_flexibility {
+            bank.with_bow_residual_flexibility(gate)?
         } else { bank };
         poll(gate)?;
         if self.material_states.keys().any(|name| !catalog.contains_key(name)
@@ -999,6 +1005,10 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         }
         eprintln!("residual_stop_compliance_m_N={:?}; opposed_stop_pairs={:?}",
             bank.system().obstacle_residual_compliance(),bank.system().obstacle_pairs());
+        if ready.spec.bow_residual_flexibility {
+            eprintln!("residual_bow_compliance_m_N={:?}; tail_response=quasi-static; tail_step=backward-euler; tail_loss=numerical",
+                bank.system().friction_residual_compliance());
+        }
     }
     eprintln!("linear_frequency_upper_bound_rad_s={:e}",ready.performance.bank().system().linear_frequency_upper_bound_rad_s());
     if let Some(loading)=ready.performance.bank().source().bank().cylinder_gas_loading() {

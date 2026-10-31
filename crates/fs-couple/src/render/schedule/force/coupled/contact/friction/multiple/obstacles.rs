@@ -92,6 +92,9 @@ impl MultiFrictionModalSystem {
     {
         poll(Some(gate))?;
         if contacts.is_empty() { return Ok(self); }
+        if self.friction_residual.is_some() {
+            return Err(invalid("normal contacts need joint normal/tangential omitted-mode cross-compliance").into());
+        }
         if self.samples_rendered() != 0 || self.obstacles.is_some() {
             return Err(invalid("friction obstacles bind once before the first physical sample").into());
         }

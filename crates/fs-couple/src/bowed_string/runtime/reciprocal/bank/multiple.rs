@@ -123,6 +123,69 @@ impl ReciprocalStringBank {
     }
 }
 impl MultiBowStringBank {
+    /// Let every fixed bow see the bending modes omitted from its material
+    /// string. Requires the matching bridge condensation selected earlier by
+    /// `ReciprocalStringBank::with_residual_flexibility`.
+    ///
+    /// Uses that string's tension, EI, span, retained count and transverse
+    /// directions. The same static Schur complement as fixed stops supplies
+    /// every bow/bridge cross-map and all bow/bow compliance terms, including
+    /// several ribbon cells on one string. String/body force and displacement
+    /// maps remain reciprocal; retained modes are unchanged. Torsional modes
+    /// remain resolved explicitly, with no invented omitted torsional response.
+    ///
+    /// The omitted bending tail is quasi-static. Its separately reported
+    /// backward-Euler loss is numerical and vanishes with modal enrichment;
+    /// no claim is made near omitted resonances. Normal contacts, migrating
+    /// bows, nonlinear stretching, material compliant ribbons, receiving fibers
+    /// and source-bound interface histories refuse in this lane.
+    pub fn with_bow_residual_flexibility(mut self, gate: &CancelGate)
+        -> Result<Self, ReciprocalStringError>
+    {
+        poll(gate)?;
+        if self.source.compliant_ribbon.is_some() {
+            return Err(invalid("bow residual flexibility does not yet bind material compliant ribbons"));
+        }
+        if !self.source.bank.residual_flexibility() || self.bow_stations.is_some()
+            || self.source.fiber_ribbon.is_some()
+            || !self.source.bank.translational_body_connections().is_empty() {
+            return Err(invalid("bow residual flexibility requires condensed single bridges and fixed bow maps"));
+        }
+        let strings = self.source.bank.strings();
+        let bridges = residual::residual_bridges(strings, &self.cards)?;
+        let points: Vec<_> = self.source.bows.iter().map(|bow| residual::ResidualStop {
+            string: bow.location.string, station_fraction: bow.location.station_fraction,
+            direction: residual::directions(&strings[bow.location.string].source).0,
+        }).collect();
+        // The omitted-mode algebra is independent of the force law: stop and
+        // bow point forces use the SAME Green function and Schur complement.
+        let (cross, compliance) = residual::stop_residual(&bridges, &points)?;
+        let mut geometry = Vec::with_capacity(points.len());
+        for (i, (point, factor)) in points.iter().zip(cross).enumerate() {
+            poll(gate)?;
+            let original = self.system.port(i).ok_or_else(|| invalid("missing material bow port"))?;
+            if original.right.is_some() {
+                return Err(invalid("bow residual flexibility does not include a receiving surface's omitted modes"));
+            }
+            let member = &strings[point.string];
+            let connection = &member.connections[0];
+            let bridge = member.source.bridge_shape(&self.cards[point.string], connection.station_fraction)?;
+            let mut left = original.left.clone();
+            if left.shapes.len() != bridge.len() {
+                return Err(invalid("bow and bridge maps must use the same material string basis"));
+            }
+            for (shape, b) in left.shapes.iter_mut().zip(&bridge) { *shape -= factor*b; }
+            geometry.push(crate::render::schedule::force::coupled::contact::friction::multiple::surfaces::geometry::FrictionGeometry {
+                left,
+                right: Some(ModalAttachment { component: self.cards.len()+connection.body.component,
+                    shapes: connection.body.shapes.iter().map(|b| -factor*b).collect() }),
+            });
+        }
+        self.system = self.system.with_friction_residual_ports(geometry, compliance, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        Ok(self)
+    }
+
     /// Bind complete material strain histories after optional static preload.
     /// The relaxed initial history uses that actual solved displacement; all
     /// bow, stop, surface and original mechanical state remain in their owner.

@@ -102,6 +102,40 @@ Galluzzo, Woodhouse and Mansour 2017, measured a plain steel monofilament E. The
 Dominant E here is wound steel (Pickering 1985, the table's note 1), and eta_F is
 the loss of a construction, so that row is not applied.
 
+## Include the omitted bending modes' static bow response
+
+`cannone-bow-residual.material-strings` is a **modal-enrichment experiment**
+on the same four strings, shell and cavity. Its only additions to the original
+Cannone performance are these native records after `prepared-linear`:
+
+```text
+residual-flexibility exact-static-green
+bow-residual-flexibility exact-static-green
+```
+
+```bash
+NOTES=G3 \
+MATERIAL_STRINGS_PERFORMANCE="$PWD/data/instruments/descriptions/violin/cannone-bow-residual.material-strings" \
+data/instruments/descriptions/violin/render.sh \
+  target/release/material_strings /path/to/new-bow-residual-violin-run
+```
+
+The omitted bending modes' static compliance comes from each string's own
+length, tension, bending stiffness and retained mode count. The same Green
+function condenses the bridge supports and corrects the bow's string/body
+force and displacement maps. Their cross-coupling reaches the existing shell,
+cavity and pressure observer. Material packs, physical coefficients, retained
+modes, clock, bow gesture and PCM scale are unchanged; no tension is retuned.
+
+This is a quasi-static tail, not a replacement for the omitted resonances.
+Its stored energy is `F^T G F / 2`; the step-held response also has the
+separately reported **numerical** loss `delta_F^T G delta_F / 2`. Compare with
+the original point-bow card and enrich the bending mode counts at the same
+clock and physical inputs before drawing acoustic conclusions. The inherited
+bridge dashpot condensation remains a first-order approximation. This variant
+still uses the authored Stribeck law and prescribed normal force, and does not
+establish converged violin sound or change the default recipe or its grades.
+
 ## Resolve the finite bow contact width
 
 `cannone-ribbon-10mm.material-strings` selects a **rigid, uniformly loaded

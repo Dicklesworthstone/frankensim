@@ -256,6 +256,90 @@ fn g0_coulomb_multi_port_discloses_nothing() {
     assert!(frame.ports.iter().all(|p| p.roots.is_none()));
 }
 
+fn residual_system(g: Vec<f64>) -> MultiFrictionModalSystem {
+    let joint = system(FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.4 });
+    let maps = joint.points.iter().map(|p| surfaces::geometry::FrictionGeometry {
+        left: p.port.left.clone(), right: p.port.right.clone(),
+    }).collect();
+    joint.with_friction_residual_ports(maps, g, &CancelGate::new_clock_free()).unwrap()
+}
+
+#[test]
+fn friction_residual_cross_terms_match_the_analytic_first_sticking_step() {
+    // Independent retained modes; the omitted spectrum supplies the only cross-term.
+    let g = vec![2e-5, 5e-6, 5e-6, 4e-5];
+    let mut joint = residual_system(g.clone());
+    let a: Vec<f64> = joint.compliance.iter().zip(&g).map(|(s,g)| s+g).collect();
+    let drive = [FrictionDrive { speed_m_s: 0.0, normal_force_n: 1.0 },
+        FrictionDrive { speed_m_s: 0.02, normal_force_n: 1.0 }];
+    let distance = drive[1].speed_m_s*joint.sample_period_s();
+    let determinant = a[0]*a[3]-a[1]*a[2];
+    let expected = [-a[1]*distance/determinant, a[0]*distance/determinant];
+    let f = joint.step(&[0.0,0.0], &drive).unwrap();
+    for (port, force) in f.ports.iter().zip(expected) {
+        assert_eq!(port.regime, ModalFrictionRegime::Sticking);
+        assert!((port.traction_n-force).abs() < 1e-10);
+    }
+    let storage = 0.5*(g[0]*expected[0]*expected[0]
+        +2.0*g[1]*expected[0]*expected[1]+g[3]*expected[1]*expected[1]);
+    assert!((f.friction_residual_energy_j-storage).abs() < 1e-14);
+    assert_eq!(f.friction_residual_energy_j, f.friction_residual_loss_j);
+    assert!(f.energy_residual_j.abs() <= f.energy_tolerance_j);
+}
+
+#[test]
+fn friction_residual_history_closes_work_through_drive_reversal_and_release() {
+    let g = vec![2e-5, -5e-6, -5e-6, 4e-5];
+    let mut joint = residual_system(g.clone());
+    let mut old = [0.0;2];
+    let mut numerical = 0.0;
+    for step in 0..600 {
+        let speed = if step < 200 {0.02} else {-0.03};
+        let normal = if step < 400 {0.1} else {0.0};
+        let drives = [FrictionDrive {speed_m_s:speed,normal_force_n:normal},
+            FrictionDrive {speed_m_s:0.5*speed,normal_force_n:normal}];
+        let before: Vec<f64> = joint.components().iter().map(|m|m.states()[0].displacement_m_sqrt_kg).collect();
+        let f = joint.step(&[0.0,0.0], &drives).unwrap().clone();
+        let force = [f.ports[0].traction_n,f.ports[1].traction_n];
+        let delta = [force[0]-old[0],force[1]-old[1]];
+        let energy = |x:[f64;2]|0.5*(g[0]*x[0]*x[0]+2.0*g[1]*x[0]*x[1]+g[3]*x[1]*x[1]);
+        assert!((f.friction_residual_energy_j-energy(force)).abs()<1e-14);
+        assert!((f.friction_residual_loss_j-energy(delta)).abs()<1e-14);
+        assert!(f.energy_residual_j.abs()<=f.energy_tolerance_j);
+        for i in 0..2 {
+            let displacement = 100.0*(joint.components()[i].states()[0].displacement_m_sqrt_kg-before[i]);
+            let slip = drives[i].speed_m_s*joint.sample_period_s()-displacement-g[2*i]*delta[0]-g[2*i+1]*delta[1];
+            assert!((f.ports[i].slip_distance_m-slip).abs()<1e-13);
+        }
+        numerical += f.friction_residual_loss_j;
+        old = force;
+    }
+    assert!(numerical>0.0 && joint.last_frame().unwrap().friction_residual_energy_j==0.0);
+    let accepted=joint.last_frame().unwrap().clone();
+    let energy=joint.total_energy_j().unwrap();
+    let cancelled=CancelGate::new_clock_free();cancelled.request();
+    assert!(joint.step_under_gate(&[0.0,0.0], &[FrictionDrive {speed_m_s:0.1,normal_force_n:1.0};2], &cancelled).is_err());
+    assert_eq!(joint.last_frame(),Some(&accepted));
+    assert_eq!(joint.total_energy_j().unwrap(),energy);
+}
+
+#[test]
+fn friction_residual_refuses_nonpassive_matrices_and_moving_maps() {
+    let gate=CancelGate::new_clock_free();
+    for g in [vec![1e-5],vec![-1e-5,0.0,0.0,1e-5],vec![1e-5,2e-5,2e-5,1e-5],
+        vec![1e-5,0.0,1e-6,1e-5],vec![f64::NAN,0.0,0.0,1e-5]] {
+        let joint=system(FrictionLaw::Coulomb {static_mu:0.8,kinetic_mu:0.4});
+        let maps=joint.points.iter().map(|p|surfaces::geometry::FrictionGeometry {
+            left:p.port.left.clone(),right:p.port.right.clone(),
+        }).collect();
+        assert!(joint.with_friction_residual_ports(maps,g,&gate).is_err());
+    }
+    let joint=residual_system(vec![1e-5,0.0,0.0,1e-5]);
+    assert!(joint.validate_friction_geometry_config(surfaces::geometry::FrictionGeometryConfig {
+        max_update_terms:1_000_000,
+    }).is_err());
+}
+
 // ----- Series compliant drive (bow-hair compliance, M4.4-W2) -----
 
 fn stribeck() -> FrictionLaw {

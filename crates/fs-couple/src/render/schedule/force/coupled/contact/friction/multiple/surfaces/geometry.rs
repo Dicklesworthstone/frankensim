@@ -48,6 +48,9 @@ impl MultiFrictionModalSystem {
     pub fn validate_friction_geometry_config(&self, config: FrictionGeometryConfig)
         -> Result<(), ModalFrictionError>
     {
+        if self.friction_residual.is_some() {
+            return Err(invalid("friction residual compliance requires fixed attachment maps").into());
+        }
         let n = self.mode_count();
         let k = self.core.network.columns.len();
         let s = self.port_count().checked_add(self.obstacle_count())
