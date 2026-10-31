@@ -96,6 +96,15 @@ pub enum GasEvaporationError {
         iterations: usize,
         residual_temperature_k: f64,
     },
+    /// The admitted source domains do not bracket the joint heat-energy root.
+    HeatEnergyOutsideBracket {
+        residual_energy_j: [f64; 2],
+    },
+    /// Bounded scalar gas-temperature work was exhausted without a heat endpoint.
+    HeatEnergyNotConverged {
+        iterations: usize,
+        residual_energy_j: f64,
+    },
     Cancelled,
 }
 impl core::fmt::Display for GasEvaporationError {

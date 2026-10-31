@@ -373,3 +373,102 @@ fn original_water_films_condense_and_evaporate_against_one_nasa_gas_endpoint() {
     assert!(candidate.step().sum_absolute_energy_residual_j <= phase.gas.energy_tolerance_j);
     assert!(std::ptr::eq(candidate.catalog(), &source));
 }
+
+#[test]
+fn original_water_films_share_reciprocal_heat_before_joint_condensation_and_evaporation() {
+    use crate::evaporation::gas::chamber::heat::{
+        GasLiquidChamberHeatSolve, GasLiquidChamberHeatSurface, advance_chamber_with_gas_and_heat,
+    };
+    use crate::evaporation::gas::chamber::{GasLiquidChamberSolve, GasLiquidChamberSurface};
+    let source = original_gas();
+    let water = original_water();
+    let vapor = SpeciesId::new("H2O").unwrap();
+    let initial = ClosedGasParcel::new(
+        source
+            .with_composition(
+                Composition::new(CompositionBasis::MoleFraction, vec![0.04, 0.96]).unwrap(),
+            )
+            .unwrap(),
+        point(300.0, 100_000.0),
+        0.01,
+    )
+    .unwrap();
+    let binding = GasLiquidBinding {
+        species: vapor.clone(),
+        liquid_enthalpy_offset_j_kg: source
+            .species_specific_enthalpy_j_kg(&vapor, 300.0)
+            .unwrap()
+            - water.vapor_specific_enthalpy_j_kg(300.0).unwrap(),
+    };
+    let inverse = |h| water.temperature_at_specific_enthalpy_k(h);
+    let surfaces: Vec<_> = [295.0, 305.0]
+        .into_iter()
+        .enumerate()
+        .map(|(index, t)| GasLiquidChamberHeatSurface {
+            surface: GasLiquidChamberSurface {
+                id: index as u64,
+                law: &water,
+                binding: &binding,
+                liquid: LiquidSurfaceState {
+                    mass_kg: 0.02,
+                    area_m2: 0.01,
+                    specific_enthalpy_j_kg: water.liquid_state(t).unwrap().specific_enthalpy_j_kg(),
+                },
+                temperature_from_enthalpy: &inverse,
+                mass_transfer_coefficient_m_s: 0.005,
+            },
+            heat_transfer_coefficient_w_m2_k: 60.0 + 30.0 * index as f64,
+            heat_controls: GasFilmHeatSolve {
+                pure_liquid_enthalpy_range_j_kg: water.enthalpy_range_j_kg(),
+                temperature_tolerance_k: 1e-7,
+                maximum_iterations: 128,
+            },
+        })
+        .collect();
+    let mut phase = controls();
+    phase.gas.gas.minimum_temperature_k = 280.0;
+    phase.gas.gas.maximum_temperature_k = 340.0;
+    phase.gas.gas.energy_tolerance_j_kg = 1e-6;
+    phase.gas.energy_tolerance_j = 1e-7;
+    phase.maximum_temperature_increment_k = 1.0;
+    phase.latent_compatibility_tolerance_j_kg = 1000.0;
+    let candidate = advance_chamber_with_gas_and_heat(
+        &surfaces,
+        &initial,
+        &source,
+        0.1,
+        GasLiquidChamberSolve {
+            surface: phase,
+            maximum_surfaces: 2,
+        },
+        GasLiquidChamberHeatSolve {
+            maximum_iterations: 128,
+        },
+        || false,
+    )
+    .unwrap();
+    assert!(candidate.heat_surfaces()[0].heat_into_liquid_j > 0.0);
+    assert!(candidate.heat_surfaces()[1].heat_into_liquid_j < 0.0);
+    assert!(candidate.phase().surfaces()[0].transferred_mass_kg < 0.0);
+    assert!(candidate.phase().surfaces()[1].transferred_mass_kg > 0.0);
+    for (heat, phase) in candidate
+        .heat_surfaces()
+        .iter()
+        .zip(candidate.phase().surfaces())
+    {
+        assert_eq!(heat.temperature_k[1], phase.surface_temperature_k[0]);
+        assert_eq!(heat.phase_initial_liquid.mass_kg, 0.02);
+        assert!(heat.temperature_equation_residual_k.abs() <= 1e-7);
+    }
+    near(
+        candidate.step().liquid_enthalpy_change_j + candidate.step().gas_internal_energy_change_j,
+        0.0,
+        phase.gas.energy_tolerance_j,
+    );
+    near(
+        candidate.step().mass_residual_kg,
+        0.0,
+        phase.gas.mass_tolerance_kg,
+    );
+    assert!(candidate.step().sum_absolute_energy_residual_j <= phase.gas.energy_tolerance_j);
+}

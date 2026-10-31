@@ -6936,10 +6936,33 @@ of absolute local caloric defects and the sole gas defect bounds acceptance,
 so increasing surface count does not renew tolerance or hide opposing errors.
 An empty active roster admits and preserves the original gas. This remains a
 first-order phase-only frozen-film step with retained positive liquid mass and
-fixed gas volume; it adds no joint sensible-film heat, dry-wall nucleation,
-film extinction or volume-displacement work. Regression sources exercise shared
+fixed gas volume. Dry-wall nucleation, film extinction and volume-displacement
+work remain outside this owner. Regression sources exercise shared
 inventory, opposite-signed exchange, input-order invariance and source-relative
 energy accounting; native execution remains a separate required validation.
+
+The opt-in `evaporation::gas::chamber::heat` path solves simultaneous reciprocal
+sensible heat before the same joint phase interval. Each film retains its own
+explicit coefficient and original increasing liquid enthalpy branch. The common
+gas temperature is a scalar energy root; independent bounded liquid responses
+use their original caloric inverses. Safeguarded secants, retained brackets and
+compensated heat sums require no frozen heat capacities, numerical derivatives,
+dense matrix or per-trial gas-source reconstruction. Local response uncertainty
+is bounded in joules before choosing an outer-root sign, including stiff films.
+The original gas caloric branch is prepared once, and the actual represented
+liquid increments determine the one heat-stage gas debit and reconstruction.
+Every heat equation is rechecked at that reconstructed endpoint.
+
+Films initially at the gas temperature remain active when other films move it;
+intermediate films may reverse their original heat-flow direction. Original
+source domains and global initial temperature extrema remain binding. All-zero
+coefficients delegate to the existing phase path, and a single active film
+reuses the original implicit heat solver. Exact heated liquid states are retained
+for native mass-carry accounting. Combined storage and absolute energy defects
+include sensible heat once; vapor-carried sensible and latent energy remain in
+the phase stream. This heat/phase split is first order and requires full-step
+refinement. Separate per-film and outer iteration bounds cap work, with
+cancellation and transactional refusal throughout.
 
 `evaporation::gas::timeline::multiple::advance_deposition_with_gas` connects
 that same chamber to several original thermal cells. Heat/contact/source

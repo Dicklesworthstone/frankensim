@@ -15,7 +15,11 @@
 //! This is the existing first-order frozen-rate, positive wet-film reduction,
 //! with fixed gas volume and caller-owned liquid geometry. Original thermal
 //! transport may cool/warm each retained film before an interval. This module
-//! adds no sensible gas-film heat, nucleation, film exhaustion or hydrodynamics.
+//! adds no nucleation, film exhaustion or hydrodynamics. The opt-in [`heat`]
+//! path solves reciprocal sensible exchange before this joint phase interval.
+
+/// Reciprocal sensible heat for all retained films, then one joint phase step.
+pub mod heat;
 
 use std::collections::BTreeMap;
 

@@ -134,7 +134,7 @@ struct Sample {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sensible_heat(
+pub(super) fn sensible_heat(
     liquid: LiquidSurfaceState,
     gas: &ClosedGasParcel,
     liquid_t: f64,
