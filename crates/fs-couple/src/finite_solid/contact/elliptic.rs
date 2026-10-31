@@ -37,20 +37,20 @@ pub type FiniteSolidRigidEllipticContactError =
 
 /// Actual incoming geometry and complete original coefficient/state receipts.
 #[derive(Clone, Debug)]
-pub struct SourceFiniteSolidRigidContactReceipt {
-    pub kinematics: FiniteSolidRigidContactKinematics,
+pub struct SourceFiniteSolidRigidContactReceipt<K = FiniteSolidRigidContactKinematics> {
+    pub kinematics: K,
     /// `state` is a candidate in the contact frame, ready only with this event.
     pub sample: SourceImpulseSample,
 }
 
 /// One admitted mechanical event and the source candidates that produced it.
 #[derive(Clone, Debug)]
-pub struct SourceFiniteSolidRigidContactReport {
+pub struct SourceFiniteSolidRigidContactReport<K = FiniteSolidRigidContactKinematics> {
     pub mechanical: FiniteSolidRigidEllipticContactReport,
     /// Geometrically active contacts, in canonical ID order. Each original
     /// history is replaced by `sample.state` at `kinematics.original_index` when
     /// the caller adopts both body candidates. Inactive histories stay unchanged.
-    pub sources: Vec<SourceFiniteSolidRigidContactReceipt>,
+    pub sources: Vec<SourceFiniteSolidRigidContactReceipt<K>>,
 }
 
 /// Original source or condition refusal with the caller's contact identity.
@@ -189,89 +189,53 @@ impl<'a> FiniteSolidBody<'a> {
         ),
         SourceFiniteSolidRigidContactError<E>,
     > {
-        use SourceFiniteSolidRigidContactFailure as Failure;
-        if bindings.len() != contacts.len() || histories.len() != contacts.len() {
+        if contacts.len() > controls.contact.maximum_contacts
+            || controls.contact.maximum_contacts > 21
+        {
             return Err(FiniteSolidRigidContactError::Invalid(
-                "one original interface binding and accepted history per contact required",
+                "bounded contact count required",
             ));
         }
-        let mut sources = Vec::new();
-        let (solid, rigid, mechanical) = self.rigid_contact_candidate_with(
+        let mixed: Vec<_> = contacts
+            .iter()
+            .copied()
+            .map(super::mixed::FiniteSolidMixedContact::from)
+            .collect();
+        let convert = |q: super::mixed::FiniteSolidMixedContactKinematics| {
+            FiniteSolidRigidContactKinematics {
+                original_index: q.original_index,
+                contact_id: q.contact_id,
+                axes_world: q.axes_world,
+                rigid_point_world: q.first_point_world,
+                solid_point_world: q.second_point_world,
+                gap_m: q.gap_m,
+                relative_velocity_m_s: q.relative_velocity_m_s,
+            }
+        };
+        let (solid, rigid, report) = self.mixed_source_elliptic_contact_candidate(
             rigid_bodies,
             rigid_properties,
-            contacts,
+            &mixed,
+            histories,
+            bindings,
             origin_m,
             controls,
+            |history, query| conditions(history, &convert(*query)),
             cx,
-            |kinematics, matrix| {
-                let mut laws = Vec::with_capacity(kinematics.len());
-                for query in kinematics {
-                    if cx.checkpoint().is_err() {
-                        return Err(Failure::Cancelled);
-                    }
-                    let c = contacts[query.original_index];
-                    let friction = if query.gap_m > c.activation_tolerance_m {
-                        EllipticFriction {
-                            coefficients_mu: [0.0; 2],
-                            principal_axis: [1.0, 0.0],
-                        }
-                    } else {
-                        let accepted = &histories[query.original_index];
-                        let binding = bindings[query.original_index];
-                        let boundary =
-                            conditions(accepted, query).map_err(|error| Failure::Conditions {
-                                contact_id: query.contact_id,
-                                original_index: query.original_index,
-                                error,
-                            })?;
-                        let sample = binding
-                            .law
-                            .sample_preimpact_coefficients(
-                                accepted,
-                                [
-                                    query.relative_velocity_m_s[1],
-                                    query.relative_velocity_m_s[2],
-                                ],
-                                &boundary,
-                                binding.coefficient_role,
-                                &mut || cx.checkpoint().is_err(),
-                            )
-                            .map_err(|error| Failure::Coefficients {
-                                contact_id: query.contact_id,
-                                original_index: query.original_index,
-                                error,
-                            })?;
-                        let friction = EllipticFriction {
-                            coefficients_mu: sample.coefficients_mu,
-                            principal_axis: sample.state.constitutive_state().principal_axis(),
-                        };
-                        sources.push(SourceFiniteSolidRigidContactReceipt {
-                            kinematics: *query,
-                            sample,
-                        });
-                        friction
-                    };
-                    laws.push(EllipticFrictionalContact {
-                        id: c.id,
-                        gap: query.gap_m,
-                        activation_tolerance: c.activation_tolerance_m,
-                        relative_velocity: query.relative_velocity_m_s,
-                        friction,
-                        normal_law: c.normal_law,
-                    });
-                }
-                solve_elliptic_frictional_contacts(&laws, matrix, controls.contact, || {
-                    cx.checkpoint().is_err()
-                })
-                .map_err(Failure::Contact)
-            },
         )?;
         Ok((
             solid,
             rigid,
             SourceFiniteSolidRigidContactReport {
-                mechanical,
-                sources,
+                mechanical: report.mechanical,
+                sources: report
+                    .sources
+                    .into_iter()
+                    .map(|receipt| SourceFiniteSolidRigidContactReceipt {
+                        kinematics: convert(receipt.kinematics),
+                        sample: receipt.sample,
+                    })
+                    .collect(),
             },
         ))
     }

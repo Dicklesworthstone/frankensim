@@ -1,9 +1,9 @@
-//! Simultaneous frictional impacts between one deforming solid and rigid bodies.
+//! Simultaneous frictional impacts among one deforming solid and rigid bodies.
 //!
 //! The complete contact mobility is B_s M_s,ff^-1 B_s^T plus the original
-//! rigid-body mass/full-inertia response. Cross-point blocks are retained: two
-//! rigid bodies striking one solid are coupled even when they do not touch each
-//! other. The existing fs-contact owner determines all normal and tangential
+//! signed rigid-body mass/full-inertia response. Rigid/rigid and rigid/solid
+//! contacts share one matrix, including every cross-point and shared-body block.
+//! The existing fs-contact owner determines all normal and tangential
 //! impulses together. Its determinacy and passivity refusals remain operative.
 //!
 //! Actual native velocities, spin/orbital momentum, stationary-support reaction
@@ -17,6 +17,9 @@
 
 /// Directional interface sources through the same coupled mechanical event.
 pub mod elliptic;
+
+/// Mixed rigid/rigid and rigid/finite-solid events through one mechanical core.
+pub mod mixed;
 
 /// Current finite-solid surface witnesses for native rigid contact.
 pub mod surface;
@@ -32,6 +35,10 @@ use fs_contact::frictional_multicontact::{
 };
 use fs_mbd::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_solver::SolveReport;
+use mixed::{
+    FiniteSolidContactCounterpart, FiniteSolidMixedContact, FiniteSolidMixedContactKinematics,
+    RigidImpactPoint,
+};
 
 /// A rigid witness and a P1 material witness on the same contact normal line.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -131,6 +138,12 @@ pub struct FiniteSolidRigidContactReport<R = FrictionalContactResult> {
     pub linear_momentum_residual_kg_m_s: Vec3,
     pub angular_momentum_residual_kg_m2_s: Vec3,
     pub endpoint_velocity_residual_m_s: f64,
+    /// Sum of native endpoint impulse errors; opposing body errors cannot cancel.
+    pub absolute_linear_residual_kg_m_s: f64,
+    /// Sum of native spin/orbital impulse errors, about the declared origin.
+    pub absolute_angular_residual_kg_m2_s: f64,
+    /// Sum of native actual-change minus commanded-impulse work magnitudes.
+    pub absolute_work_residual_j: f64,
 }
 
 #[derive(Debug)]
@@ -196,8 +209,42 @@ impl ImpactResponse for FrictionalContactResult {
 struct Prepared {
     original: usize,
     axes: [Vec3; 3],
+    rigid: [Option<RigidIncidence>; 2],
+    solid_row: Option<usize>,
+}
+
+struct RigidIncidence {
+    point: RigidImpactPoint,
+    sign: f64,
     torque_body: [Vec3; 3],
     angular_response_body: [Vec3; 3],
+}
+
+impl RigidIncidence {
+    fn new(
+        point: RigidImpactPoint,
+        sign: f64,
+        axes: [Vec3; 3],
+        body: RigidBodyState,
+        property: MassProperties,
+    ) -> Result<Self, DynamicsError> {
+        let torque_body = axes.map(|axis| {
+            point
+                .arm_body
+                .cross(body.pose().orientation().rotate_world_to_body(axis))
+        });
+        let mut angular_response_body = [Vec3::ZERO; 3];
+        for axis in 0..3 {
+            angular_response_body[axis] =
+                property.angular_velocity_body_checked(torque_body[axis])?;
+        }
+        Ok(Self {
+            point,
+            sign,
+            torque_body,
+            angular_response_body,
+        })
+    }
 }
 
 impl<'a> FiniteSolidBody<'a> {
@@ -250,7 +297,8 @@ impl<'a> FiniteSolidBody<'a> {
         )
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    /// Compatibility adapter; all mechanical assembly and admission lives below.
+    #[allow(clippy::too_many_arguments)]
     fn rigid_contact_candidate_with<F: Copy, R: ImpactResponse, CE>(
         &self,
         rigid_bodies: &[RigidBodyState],
@@ -260,6 +308,58 @@ impl<'a> FiniteSolidBody<'a> {
         controls: FiniteSolidRigidContactControls,
         cx: &Cx<'_>,
         solve: impl FnOnce(&[FiniteSolidRigidContactKinematics], &[f64]) -> Result<R, CE>,
+    ) -> Result<
+        (Self, Vec<RigidBodyState>, FiniteSolidRigidContactReport<R>),
+        FiniteSolidRigidContactError<R, CE>,
+    > {
+        poll::<R, CE>(cx)?;
+        if contacts.len() > controls.contact.maximum_contacts
+            || controls.contact.maximum_contacts > 21
+        {
+            return Err(FiniteSolidRigidContactError::Invalid(
+                "bounded contact count required",
+            ));
+        }
+        let mixed: Vec<_> = contacts
+            .iter()
+            .copied()
+            .map(FiniteSolidMixedContact::from)
+            .collect();
+        self.mixed_contact_candidate_with(
+            rigid_bodies,
+            rigid_properties,
+            &mixed,
+            origin_m,
+            controls,
+            cx,
+            |queries, matrix| {
+                let original: Vec<_> = queries
+                    .iter()
+                    .map(|q| FiniteSolidRigidContactKinematics {
+                        original_index: q.original_index,
+                        contact_id: q.contact_id,
+                        axes_world: q.axes_world,
+                        rigid_point_world: q.first_point_world,
+                        solid_point_world: q.second_point_world,
+                        gap_m: q.gap_m,
+                        relative_velocity_m_s: q.relative_velocity_m_s,
+                    })
+                    .collect();
+                solve(&original, matrix)
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn mixed_contact_candidate_with<F: Copy, R: ImpactResponse, CE>(
+        &self,
+        rigid_bodies: &[RigidBodyState],
+        rigid_properties: &[MassProperties],
+        contacts: &[FiniteSolidMixedContact<F>],
+        origin_m: [f64; 3],
+        controls: FiniteSolidRigidContactControls,
+        cx: &Cx<'_>,
+        solve: impl FnOnce(&[FiniteSolidMixedContactKinematics], &[f64]) -> Result<R, CE>,
     ) -> Result<
         (Self, Vec<RigidBodyState>, FiniteSolidRigidContactReport<R>),
         FiniteSolidRigidContactError<R, CE>,
@@ -297,7 +397,7 @@ impl<'a> FiniteSolidBody<'a> {
         for (slot, &index) in order.iter().enumerate() {
             poll::<R, CE>(cx)?;
             let c = contacts[index];
-            if c.rigid_body >= rigid_bodies.len()
+            if c.point.body >= rigid_bodies.len()
                 || (slot > 0 && contacts[order[slot - 1]].id == c.id)
             {
                 return Err(E::Invalid(
@@ -306,41 +406,58 @@ impl<'a> FiniteSolidBody<'a> {
             }
             let axes = contact_frame(c.normal_world, c.tangent_world).map_err(E::Invalid)?;
             let n = axes[0];
-            let rigid = rigid_bodies[c.rigid_body];
-            let property = rigid_properties[c.rigid_body];
-            let kinematics = rigid.point_kinematics(property, c.arm_body_m)?;
-            let point_s = vector(self.point_position_m(c.solid_point, cx)?);
-            let velocity_s = vector(self.point_velocity_m_s(c.solid_point, cx)?);
-            let separation = kinematics.point_world.sub(point_s);
+            let rigid = rigid_bodies[c.point.body];
+            let property = rigid_properties[c.point.body];
+            let kinematics = rigid.point_kinematics(property, c.point.arm_body)?;
+            let first = RigidIncidence::new(c.point, 1.0, axes, rigid, property)?;
+            let (second_point, second_velocity, second, solid_row) = match c.counterpart {
+                FiniteSolidContactCounterpart::Solid(point) => {
+                    let offset = rows.len();
+                    rows.extend(axes.map(|axis| (point, array(axis))));
+                    (
+                        vector(self.point_position_m(point, cx)?),
+                        vector(self.point_velocity_m_s(point, cx)?),
+                        None,
+                        Some(offset),
+                    )
+                }
+                FiniteSolidContactCounterpart::Rigid(point) => {
+                    if point.body >= rigid_bodies.len() || point.body == c.point.body {
+                        return Err(E::Invalid(
+                            "distinct valid rigid contact endpoints required",
+                        ));
+                    }
+                    let body = rigid_bodies[point.body];
+                    let property = rigid_properties[point.body];
+                    let kinematics = body.point_kinematics(property, point.arm_body)?;
+                    (
+                        kinematics.point_world,
+                        kinematics.point_velocity_world,
+                        Some(RigidIncidence::new(point, -1.0, axes, body, property)?),
+                        None,
+                    )
+                }
+            };
+            let separation = kinematics.point_world.sub(second_point);
             let gap = n.dot(separation);
             if magnitude(separation.sub(n.scale(gap))) > controls.geometry_tolerance_m {
                 return Err(E::Invalid("contact witnesses do not share a normal line"));
             }
-            let relative = kinematics.point_velocity_world.sub(velocity_s);
-            let torque_body = axes.map(|axis| {
-                c.arm_body_m
-                    .cross(rigid.pose().orientation().rotate_world_to_body(axis))
-            });
-            let mut angular_response_body = [Vec3::ZERO; 3];
-            for axis in 0..3 {
-                angular_response_body[axis] =
-                    property.angular_velocity_body_checked(torque_body[axis])?;
-                rows.push((c.solid_point, array(axes[axis])));
-            }
-            queries.push(FiniteSolidRigidContactKinematics {
+            let relative = kinematics.point_velocity_world.sub(second_velocity);
+            queries.push(FiniteSolidMixedContactKinematics {
                 original_index: index,
                 contact_id: c.id,
                 axes_world: axes,
-                rigid_point_world: kinematics.point_world,
-                solid_point_world: point_s,
+                first_point_world: kinematics.point_world,
+                second_point_world: second_point,
                 gap_m: gap,
                 relative_velocity_m_s: axes.map(|axis| relative.dot(axis)),
             });
             prepared.push(Prepared {
                 original: index,
                 axes,
-                torque_body,
-                angular_response_body,
+                rigid: [Some(first), second],
+                solid_row,
             });
         }
         let mobility = self.point_mobility_matrix_per_kg(
@@ -349,35 +466,73 @@ impl<'a> FiniteSolidBody<'a> {
             controls.solid_impulse.mass_solve,
             cx,
         )?;
-        let mut matrix = mobility.matrix_per_kg;
+        // The original consistent solid inverse is evaluated only for the
+        // material-point rows. Rigid-only rows never cause extra mass solves.
+        let solid_dimension = rows.len();
+        let mut matrix = vec![0.0; dimension * dimension];
+        for (i, a) in prepared.iter().enumerate() {
+            if let Some(ar) = a.solid_row {
+                for (j, b) in prepared.iter().enumerate() {
+                    if let Some(br) = b.solid_row {
+                        for ai in 0..3 {
+                            for bj in 0..3 {
+                                // Retain both native entries: this composition
+                                // never repairs an asymmetric solid mass solve.
+                                matrix[(3 * i + ai) * dimension + 3 * j + bj] =
+                                    mobility.matrix_per_kg[(ar + ai) * solid_dimension + br + bj];
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for i in 0..dimension {
             poll::<R, CE>(cx)?;
             let a = &prepared[i / 3];
-            let body_a = contacts[a.original].rigid_body;
             for j in i..dimension {
                 let b = &prepared[j / 3];
-                if body_a == contacts[b.original].rigid_body {
-                    let value = a.axes[i % 3].dot(b.axes[j % 3]) / rigid_properties[body_a].mass()
-                        + a.torque_body[i % 3].dot(b.angular_response_body[j % 3]);
-                    matrix[i * dimension + j] += value;
-                    if i != j {
-                        matrix[j * dimension + i] += value;
+                let mut value = 0.0;
+                for ia in a.rigid.iter().flatten() {
+                    for ib in b.rigid.iter().flatten() {
+                        if ia.point.body == ib.point.body {
+                            value += ia.sign
+                                * ib.sign
+                                * (a.axes[i % 3].dot(b.axes[j % 3])
+                                    / rigid_properties[ia.point.body].mass()
+                                    + ia.torque_body[i % 3].dot(ib.angular_response_body[j % 3]));
+                        }
                     }
+                }
+                matrix[i * dimension + j] += value;
+                if i != j {
+                    matrix[j * dimension + i] += value;
                 }
             }
         }
         let contact = solve(&queries, &matrix).map_err(E::Contact)?;
         let physical = contact.physical();
-        let mut rigid_next = rigid_bodies.to_vec();
+        let mut rigid_next = Vec::with_capacity(rigid_bodies.len());
+        let mut linear_impulses = vec![Vec3::ZERO; rigid_bodies.len()];
+        let mut angular_impulses = vec![Vec3::ZERO; rigid_bodies.len()];
         let mut solid_impulses = Vec::with_capacity(contacts.len());
         for (slot, p) in prepared.iter().enumerate() {
             poll::<R, CE>(cx)?;
             let c = contacts[p.original];
             let j = world(p.axes, physical.impulses[slot]);
-            rigid_next[c.rigid_body] = rigid_next[c.rigid_body]
-                .apply_impulse_at_body_point(rigid_properties[c.rigid_body], c.arm_body_m, j)?
-                .state_after;
-            solid_impulses.push((c.solid_point, array(j.scale(-1.0))));
+            for incidence in p.rigid.iter().flatten() {
+                let point = incidence.point;
+                let impulse = j.scale(incidence.sign);
+                let impulse_body = rigid_bodies[point.body]
+                    .pose()
+                    .orientation()
+                    .rotate_world_to_body(impulse);
+                linear_impulses[point.body] = linear_impulses[point.body].add(impulse);
+                angular_impulses[point.body] =
+                    angular_impulses[point.body].add(point.arm_body.cross(impulse_body));
+            }
+            if let FiniteSolidContactCounterpart::Solid(point) = c.counterpart {
+                solid_impulses.push((point, array(j.scale(-1.0))));
+            }
         }
         // One combined solve retains all cross-contact work and support reactions.
         let (solid_next, solid_impulse) =
@@ -392,41 +547,57 @@ impl<'a> FiniteSolidBody<'a> {
             .add(vector(solid_impulse.linear_residual_kg_m_s));
         let mut angular_residual = vector(solid_impulse.applied.angular_kg_m2_s)
             .add(vector(solid_impulse.angular_residual_kg_m2_s));
-        for ((&old, &new), &property) in rigid_bodies.iter().zip(&rigid_next).zip(rigid_properties)
-        {
+        let mut absolute_linear = magnitude(vector(solid_impulse.linear_residual_kg_m_s));
+        let mut absolute_angular = magnitude(vector(solid_impulse.angular_residual_kg_m2_s));
+        let mut absolute_work = solid_impulse.work_residual_j.abs();
+        for (index, (&old, &property)) in rigid_bodies.iter().zip(rigid_properties).enumerate() {
             poll::<R, CE>(cx)?;
-            before += old.kinetic_energy(property)?;
-            after += new.kinetic_energy(property)?;
-            let dp = new.linear_momentum_world().sub(old.linear_momentum_world());
-            let dl = new.angular_momentum_body().sub(old.angular_momentum_body());
-            let v_average = old
-                .center_of_mass_velocity_world(property)?
-                .scale(0.5)
-                .add(new.center_of_mass_velocity_world(property)?.scale(0.5));
-            let w_average = property
-                .angular_velocity_body_checked(old.angular_momentum_body())?
-                .scale(0.5)
-                .add(
-                    property
-                        .angular_velocity_body_checked(new.angular_momentum_body())?
-                        .scale(0.5),
-                );
-            change += v_average.dot(dp) + w_average.dot(dl);
+            // One native momentum update per body retains all point moments
+            // without repeatedly rounding its accepted momentum between rows.
+            let receipt = old.apply_momentum_impulse(
+                property,
+                linear_impulses[index],
+                angular_impulses[index],
+            )?;
+            rigid_next.push(receipt.state_after);
+            before += receipt.work.kinetic_energy_before_j;
+            after += receipt.work.kinetic_energy_after_j;
+            change += receipt.work.kinetic_energy_change_j;
+            let dp = receipt.linear_increment_world;
+            let dl = receipt.angular_increment_body;
+            let arm = old.pose().position_world().sub(origin);
             linear_residual = linear_residual.add(dp);
             angular_residual = angular_residual
-                .add(old.pose().position_world().sub(origin).cross(dp))
+                .add(arm.cross(dp))
                 .add(old.pose().orientation().rotate_body_to_world(dl));
+            absolute_linear += magnitude(receipt.linear_residual_world);
+            absolute_angular += magnitude(arm.cross(receipt.linear_residual_world))
+                + magnitude(
+                    old.pose()
+                        .orientation()
+                        .rotate_body_to_world(receipt.angular_residual_body),
+                );
+            absolute_work += receipt.work.work_energy_residual_j.abs();
         }
         let mut relative_work = 0.0;
         let mut endpoint_error = 0.0_f64;
         for (slot, p) in prepared.iter().enumerate() {
             poll::<R, CE>(cx)?;
             let c = contacts[p.original];
-            let rigid_v = rigid_next[c.rigid_body]
-                .point_kinematics(rigid_properties[c.rigid_body], c.arm_body_m)?
+            let first_velocity = rigid_next[c.point.body]
+                .point_kinematics(rigid_properties[c.point.body], c.point.arm_body)?
                 .point_velocity_world;
-            let solid_v = vector(solid_next.point_velocity_m_s(c.solid_point, cx)?);
-            let relative = rigid_v.sub(solid_v);
+            let second_velocity = match c.counterpart {
+                FiniteSolidContactCounterpart::Solid(point) => {
+                    vector(solid_next.point_velocity_m_s(point, cx)?)
+                }
+                FiniteSolidContactCounterpart::Rigid(point) => {
+                    rigid_next[point.body]
+                        .point_kinematics(rigid_properties[point.body], point.arm_body)?
+                        .point_velocity_world
+                }
+            };
+            let relative = first_velocity.sub(second_velocity);
             for axis in 0..3 {
                 let velocity = relative.dot(p.axes[axis]);
                 endpoint_error = endpoint_error
@@ -449,6 +620,9 @@ impl<'a> FiniteSolidBody<'a> {
             linear_momentum_residual_kg_m_s: linear_residual,
             angular_momentum_residual_kg_m2_s: angular_residual,
             endpoint_velocity_residual_m_s: endpoint_error,
+            absolute_linear_residual_kg_m_s: absolute_linear,
+            absolute_angular_residual_kg_m2_s: absolute_angular,
+            absolute_work_residual_j: absolute_work,
             contact,
             solid_impulse,
         };
@@ -462,12 +636,18 @@ impl<'a> FiniteSolidBody<'a> {
             report.dissipation_residual_j,
             magnitude(linear_residual),
             magnitude(angular_residual),
+            absolute_linear,
+            absolute_angular,
+            absolute_work,
         ]
         .iter()
         .any(|v| !v.is_finite())
             || endpoint_error > controls.velocity_tolerance_m_s
             || magnitude(linear_residual) > controls.linear_tolerance_kg_m_s
             || magnitude(angular_residual) > controls.angular_tolerance_kg_m2_s
+            || absolute_linear > controls.linear_tolerance_kg_m_s
+            || absolute_angular > controls.angular_tolerance_kg_m2_s
+            || absolute_work > controls.energy_tolerance_j
             || report.work_energy_residual_j.abs() > controls.energy_tolerance_j
             || report.dissipation_residual_j.abs() > controls.energy_tolerance_j
             || (relative_work - contact_work).abs() > controls.energy_tolerance_j

@@ -1,5 +1,28 @@
 # CONTRACT: fs-couple
 
+## Simultaneous mixed rigid and finite-solid impacts
+
+`finite_solid::contact::mixed` assembles rigid/rigid and rigid/solid rows in one
+bounded original Coulomb or directional-ellipse solve. Signed full-inertia rigid
+incidences retain every shared-body interaction; original supported consistent
+solid mobility retains every cross-point block. Rigid-only rows introduce no
+solid mobility columns. Existing rigid/solid entry points adapt to this owner.
+
+Each rigid body receives one native resultant linear and COM angular impulse.
+Actual paired material points remain distinct: a finite-gap tangential couple
+must pass the world angular-momentum gate, never be hidden by moving witnesses.
+Original endpoint velocities, stable kinetic/relative impulse work, passivity,
+solid support reactions, and noncancelling sums of per-body residuals gate the
+entire candidate. Both spin and orbital angular momentum use their actual frames.
+
+Mixed source-backed directional events preserve original input indices, sample
+actual preimpact slip in the solved frame, and return history only with admitted
+mechanics. No impact duration, pressure law, heat partition, penetration repair,
+continuous geometry, or transported material texture is inferred. Independent
+fixtures cover coupled free/supported chains, rigid-only chains, directional spin,
+input-order invariance and atomic refusal. Native execution remains required;
+format/source review is not a test-suite pass.
+
 ## Spatial layer heating and native laminate deformation
 
 `laminate_thermal::LayeredThermalShell` binds the original sourced thermal stack

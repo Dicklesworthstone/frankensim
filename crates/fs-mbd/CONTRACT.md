@@ -1,5 +1,20 @@
 # CONTRACT: fs-mbd
 
+## Simultaneous resultant momentum impulses
+
+`RigidBodyState::apply_momentum_impulse` accepts one world linear impulse and
+one body-frame central angular impulse at fixed native pose. Original mass and
+full inertia remain authoritative. Assemblers can sum all incident contact
+impulses before this single update, avoiding contact-order-dependent sequential
+rounding. `apply_impulse_at_body_point` delegates its native momentum update to
+this primitive while retaining its actual point-work receipt.
+
+The resultant receipt distinguishes commanded impulses from representable
+momentum increments and computes kinetic change by polarization of those actual
+increments. It reports linear, angular and work residuals without accepting or
+repairing them; the composing contact owner supplies physical gates. This is
+neither a contact law nor an angular-velocity state replacement.
+
 ## Linear rotor-bearing operating points
 
 `rotordynamics::RotorBearingModel` admits 1–32 original generalized coordinates

@@ -39,15 +39,13 @@ pub mod planar_drive;
 pub mod robot_models;
 pub mod rocket;
 pub mod roomba;
-/// Full-matrix gyroscopic rotor-bearing poles and forced harmonic response.
-pub mod rotordynamics;
 pub mod salisbury;
+/// World-held torques and forces at rotating material points.
+pub mod spatial_loads;
 /// Complete finite-mass sphere-pair flight, frictional impact, and recoil.
 pub mod sphere_pair;
 /// Ballistic sphere/plane impacts, sustained support, sliding, and rolling.
 pub mod sphere_plane;
-/// World-held torques and forces at rotating material points.
-pub mod spatial_loads;
 /// Coupled finite-patch friction on native rigid-body momenta.
 pub mod tangential_friction;
 pub mod tri_wheel_cluster;
@@ -968,19 +966,14 @@ impl RigidBodyState {
         if !angular_impulse_body.is_finite() {
             return Err(DynamicsError::NonFinite("angular_impulse_body"));
         }
-        let state_after = Self::new(
-            self.pose,
-            self.linear_momentum_world.add(impulse_world),
-            self.angular_momentum_body.add(angular_impulse_body),
-        )?;
+        let momentum =
+            self.apply_momentum_impulse(properties, impulse_world, angular_impulse_body)?;
+        let state_after = momentum.state_after;
         let point_kinematics_before = self.point_kinematics(properties, arm_body)?;
         let point_kinematics_after = state_after.point_kinematics(properties, arm_body)?;
-        let kinetic_energy_before = self.kinetic_energy(properties)?;
-        let kinetic_energy_after = state_after.kinetic_energy(properties)?;
-        let kinetic_energy_change_j = finite_derived(
-            kinetic_energy_after - kinetic_energy_before,
-            "impulse.kinetic_energy_change_j",
-        )?;
+        let kinetic_energy_before = momentum.work.kinetic_energy_before_j;
+        let kinetic_energy_after = momentum.work.kinetic_energy_after_j;
+        let kinetic_energy_change_j = momentum.work.kinetic_energy_change_j;
         let midpoint_point_velocity_world = point_kinematics_before
             .point_velocity_world
             .add(point_kinematics_after.point_velocity_world)
@@ -1008,6 +1001,90 @@ impl RigidBodyState {
                 kinetic_energy_change_j,
                 impulse_work_j,
                 work_energy_residual_j,
+            },
+        })
+    }
+
+    /// Apply a simultaneous resultant linear and central angular impulse.
+    ///
+    /// Contact assemblers sum all point impulses and their ORIGINAL body-frame
+    /// moments before calling this operation once per body. The pose is fixed;
+    /// no fictitious application point or force couple is introduced. The
+    /// supplied angular impulse is about the COM, in this body's coordinates.
+    /// This is a native momentum update, not a contact law or an acceptance gate.
+    /// Receipts distinguish commanded impulses from representable increments.
+    /// Kinetic change uses actual momentum increments and midpoint velocities,
+    /// avoiding subtraction of two large total kinetic energies.
+    pub fn apply_momentum_impulse(
+        self,
+        properties: MassProperties,
+        linear_impulse_world: Vec3,
+        angular_impulse_body: Vec3,
+    ) -> Result<MomentumImpulseReceipt, DynamicsError> {
+        self.validate()?;
+        properties.validate()?;
+        if !linear_impulse_world.is_finite() || !angular_impulse_body.is_finite() {
+            return Err(DynamicsError::NonFinite("momentum_impulse"));
+        }
+        let state_after = Self::new(
+            self.pose,
+            self.linear_momentum_world.add(linear_impulse_world),
+            self.angular_momentum_body.add(angular_impulse_body),
+        )?;
+        let delta_linear = state_after
+            .linear_momentum_world
+            .sub(self.linear_momentum_world);
+        let delta_angular = state_after
+            .angular_momentum_body
+            .sub(self.angular_momentum_body);
+        let average_velocity = self
+            .center_of_mass_velocity_world(properties)?
+            .scale(0.5)
+            .add(
+                state_after
+                    .center_of_mass_velocity_world(properties)?
+                    .scale(0.5),
+            );
+        let average_angular_velocity = properties
+            .angular_velocity_body_checked(self.angular_momentum_body)?
+            .scale(0.5)
+            .add(
+                properties
+                    .angular_velocity_body_checked(state_after.angular_momentum_body)?
+                    .scale(0.5),
+            );
+        let change = finite_derived(
+            average_velocity.dot(delta_linear) + average_angular_velocity.dot(delta_angular),
+            "momentum_impulse.kinetic_change",
+        )?;
+        let work = finite_derived(
+            average_velocity.dot(linear_impulse_world)
+                + average_angular_velocity.dot(angular_impulse_body),
+            "momentum_impulse.work",
+        )?;
+        let linear_residual = delta_linear.sub(linear_impulse_world);
+        let angular_residual = delta_angular.sub(angular_impulse_body);
+        if !linear_residual.is_finite() || !angular_residual.is_finite() {
+            return Err(DynamicsError::NonFinite("momentum_impulse.residual"));
+        }
+        Ok(MomentumImpulseReceipt {
+            state_before: self,
+            state_after,
+            linear_impulse_world,
+            angular_impulse_body,
+            linear_increment_world: delta_linear,
+            angular_increment_body: delta_angular,
+            linear_residual_world: linear_residual,
+            angular_residual_body: angular_residual,
+            work: ImpulseWorkDiagnostics {
+                kinetic_energy_before_j: self.kinetic_energy(properties)?,
+                kinetic_energy_after_j: state_after.kinetic_energy(properties)?,
+                kinetic_energy_change_j: change,
+                impulse_work_j: work,
+                work_energy_residual_j: finite_derived(
+                    change - work,
+                    "momentum_impulse.work_residual",
+                )?,
             },
         })
     }
@@ -1128,6 +1205,23 @@ pub struct ImpulseReceipt {
     /// Kinematics immediately after the event.
     pub point_kinematics_after: PointKinematics,
     /// Fallible kinetic/work accounting for this event.
+    pub work: ImpulseWorkDiagnostics,
+}
+
+/// One fixed-pose resultant impulse and its actual representable native update.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MomentumImpulseReceipt {
+    pub state_before: RigidBodyState,
+    pub state_after: RigidBodyState,
+    /// Requested linear impulse [kg m/s], world coordinates.
+    pub linear_impulse_world: Vec3,
+    /// Requested COM angular impulse [kg m2/s], body coordinates.
+    pub angular_impulse_body: Vec3,
+    pub linear_increment_world: Vec3,
+    pub angular_increment_body: Vec3,
+    /// Actual increment minus requested impulse, retaining lost small kicks.
+    pub linear_residual_world: Vec3,
+    pub angular_residual_body: Vec3,
     pub work: ImpulseWorkDiagnostics,
 }
 
