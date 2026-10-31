@@ -112,6 +112,43 @@ fn native_material_dg_observer_gas_preserves_source_and_pcm() {
         assert!(metadata.contains(token), "{token}");
     }
 }
+
+#[test]
+fn native_dg_supply_reaches_actual_microphone_pcm_and_provenance() {
+    use fs_couple::bernoulli_aperture::performance::file::material_modal::dg::MaterialModalDgValvePerformance;
+    use fs_couple::pcm_wav::observation::DecimatedRenderer;
+    let text = include_str!("../../examples/material_modal_valve/paired-dg-chimney.performance")
+        .replace("audio 96000 96000 4800 20", "audio 96000 96000 512 0.02")
+        .replace("ambient 293.15 101325 0", "ambient mixture 293.15 101325 mole 2 He 0.79 O2 0.21")
+        .replace("slit_length", "supply circular 0.004 0.0002 16\nslit_length");
+    let material = pack();
+    let source = MaterialModalDgValvePerformance::from_bytes_with_sources(
+        text.as_bytes(), 37, &CancelGate::new_clock_free(), None, |_| Ok(material.clone()),
+    ).unwrap();
+    let channel = source.renderer().system().supply_channel().unwrap();
+    assert_eq!(channel.gas(), source.renderer().system().load().duct().inlet_gas());
+    let mut renderer = DecimatedRenderer::new(source.into_renderer(), 96000, 48000, 37).unwrap();
+    let mut pressure = vec![0.0; 256];
+    for block in pressure.chunks_mut(37) { renderer.block(block).unwrap(); }
+    assert!(pressure.iter().any(|p| p.abs() > 1e-15));
+    let expected = encode_pcm16_wav(&pressure, 48000, 0.02).unwrap().0;
+    let dir = directory();
+    let input = dir.join("material-dg-supply.performance");
+    std::fs::write(&input, text).unwrap();
+    std::fs::write(dir.join("blade.matpack"), material.to_bytes()).unwrap();
+    for block in [1, 37] {
+        let output = dir.join(format!("material-dg-supply-{block}.wav"));
+        success(run(&input, &output, block, true));
+        assert_eq!(std::fs::read(&output).unwrap(), expected);
+        let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        for token in ["\"supply_channel\":{\"kind\":\"circular\"",
+            "\"length_m\":4e-3", "\"radius_m\":2e-4", "\"radial_cells\":16",
+            "\"retained_modes\":6", "\"observer_gas\":{\"law\":\"stokes-kirchhoff\""] {
+            assert!(metadata.contains(token), "missing {token}: {metadata}");
+        }
+    }
+}
+
 fn pack_with_density(density: f64) -> NormalizedMaterialCardPack {
     pack_with_relaxation(density, 1e8, 0.001)
 }

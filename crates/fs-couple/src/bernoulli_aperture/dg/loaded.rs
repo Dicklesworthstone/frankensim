@@ -44,15 +44,17 @@ impl ApertureDg<LoadedAperture> {
                 "loaded DG coupling requires cold ExactZoh mechanics bound to its inlet gas, mean inlet-pressure impedance and clock; driven exterior mouth effort is unsupported",
             ));
         }
-        Ok(Self { aperture, load, upstream: None })
+        Ok(Self { aperture, load, upstream: None, supply_channel: None })
     }
 
-    /// Mechanical, contact, material and DG storage [J]. The original rational
-    /// terminal's signed exchange stays separate from its unmodeled storage.
+    /// Mechanical, contact, material, DG and optional supply kinetic storage
+    /// [J]. The original rational terminal's signed exchange stays separate
+    /// from its unmodeled storage.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
         let energy = self.aperture.energy() + self.load.stored_energy_j();
-        self.upstream.as_ref().map_or(energy, |tract| energy + tract.stored_energy_j())
+        let energy = self.upstream.as_ref().map_or(energy, |tract| energy + tract.stored_energy_j());
+        self.supply_channel.as_ref().map_or(energy, |channel| energy + channel.stored_energy_j())
     }
 
     /// Continue all original mechanical, acoustic and material histories.
@@ -85,6 +87,15 @@ impl ApertureDg<LoadedAperture> {
         forces_n: [f64; 2],
         pressures_pa: [f64; 2],
     ) -> Result<DgApertureFrame, AcousticRealizeError> {
+        if self.supply_channel.is_some() {
+            let (mechanical, frame, channel) = super::tract::prepare_series_step(
+                &self.aperture, self.upstream.as_mut(), &mut self.load,
+                self.supply_channel.as_ref(), drive, forces_n, pressures_pa,
+            )?;
+            self.aperture.accept(mechanical);
+            self.supply_channel = channel;
+            return Ok(frame);
+        }
         if self.upstream.is_some() {
             return self.step_with_upstream(drive, forces_n, pressures_pa);
         }

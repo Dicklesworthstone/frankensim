@@ -8,7 +8,8 @@
 //! Record order: schema; audio RATE RATE SAMPLES FULL_SCALE_PA;
 //! propagator exact-zoh; ambient GAS_RECORD; shared dg_tube/dg_bore and its
 //! geometry/gas/radiation records and optional material walls; optional
-//! upstream_tract followed by the same DG source/wall records; slit_length
+//! upstream_tract followed by the same DG source/wall records; optional supply
+//! none|slit LENGTH WIDTH HEIGHT CELLS|circular LENGTH RADIUS CELLS; slit_length
 //! none|LENGTH; observation
 //! inlet-pressure|baffled-outlet X Y Z RINGS ANGLES FMAX_HZ; optional observer_gas
 //! stokes-kirchhoff|lossless MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS;
@@ -22,6 +23,10 @@
 //! actual computed DG terminal and its independently declared exterior gas.
 //! Its optional gas law acts on every original terminal-to-receiver surface
 //! path; omission keeps the original lossless receiver.
+//! The optional fixed supply passage uses the same local material gas and
+//! transverse momentum owner as network valves. Its pressure, inertia and
+//! viscous heat are coupled to both blade and duct states in the same sample.
+//! It is distinct geometry from the moving slit and from either acoustic duct.
 //!
 //! Alternatively, `solid tet4 SOURCE_TOKEN` replaces `loss`/`blades` and
 //! selects an original source-bound volume mesh. Complete source histories or
@@ -35,7 +40,7 @@ use super::{
     NormalizedMaterialCardPack, Obstacle, PairedApertureLimits,
     PlateValveInputError, Reader, MAX_CONTROLS, MAX_PLATE_VALVE_PERFORMANCE_BYTES,
     bad, checkpoint, closure, forces, gas, optional_positive, plate, pressure,
-    read_propagator, read_receiver, solid, wetted,
+    read_propagator, read_receiver, solid, wetted, SupplyInput,
 };
 use crate::bernoulli_aperture::dg::LoadedApertureDg;
 use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
@@ -199,6 +204,11 @@ impl MaterialModalDgValvePerformance {
             } else { DgMaterialWallLayout::default() };
             Some((source, walls))
         } else { None };
+        let supply = if rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("supply")
+        {
+            SupplyInput::read(&mut rows)?
+        } else { SupplyInput::None };
         let mut row = rows.row("slit_length")?;
         let slit = optional_positive(&mut row)?;
         row.finish()?;
@@ -307,11 +317,17 @@ impl MaterialModalDgValvePerformance {
                 let load = source.prepare_with_material_wall_layout(&ambient, dt, gate, &walls)?;
                 Ok((load, walls))
             }).transpose()?;
-        let (inlet, impedance) = match &upstream {
+        let (inlet, mut impedance) = match &upstream {
             Some((tract, _)) => crate::bernoulli_aperture::dg::series_inlet_state(tract, &load)
                 .map_err(PlateValveInputError::Physics)?,
             None => (*load.duct().inlet_gas(), load.impedance_pa_s_m3()),
         };
+        let supply = supply.resolve(&inlet, dt)?;
+        if let Some(channel) = &supply {
+            impedance = crate::bernoulli_aperture::dg::supply::inlet_state_with_supply(
+                upstream.as_ref().map(|(load, _)| load), &load, channel,
+            ).map_err(PlateValveInputError::Physics)?.1;
+        }
         let mut prepared_plates = Vec::with_capacity(plates.len());
         for (source, options) in plates {
             let tensor = if let LossSelection::Tensor { properties, limits: projection } = &loss {
@@ -346,7 +362,14 @@ impl MaterialModalDgValvePerformance {
         if let Some(length) = slit {
             valve.set_material_viscous_slit(length).map_err(PlateValveInputError::Physics)?;
         }
-        let (system, upstream_wall) = match upstream {
+        let (system, upstream_wall) = if let Some(channel) = supply {
+            let (tract, walls) = match upstream {
+                Some((tract, walls)) => (Some(tract), Some(walls)),
+                None => (None, None),
+            };
+            (LoadedApertureDg::new_loaded_with_supply(valve, tract, load, channel)
+                .map_err(PlateValveInputError::Physics)?, walls)
+        } else { match upstream {
             Some((tract, walls)) => (
                 LoadedApertureDg::new_loaded_with_upstream(valve, tract, load)
                     .map_err(PlateValveInputError::Physics)?,
@@ -354,7 +377,7 @@ impl MaterialModalDgValvePerformance {
             ),
             None => (LoadedApertureDg::new_loaded(valve, load)
                 .map_err(PlateValveInputError::Physics)?, None),
-        };
+        }};
         let mut renderer = LoadedDgPerformance::new(system, observation, schedule,
             AperturePerformanceConfig {
                 sample_rate_hz: mechanics, samples, max_block, max_compile_work, max_controls,

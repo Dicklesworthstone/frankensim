@@ -97,6 +97,11 @@ impl ApertureDg<LoadedAperture> {
         cancelled: &mut C,
     ) -> Result<FiniteGasSeriesApertureDgStep<S>, FiniteGasDgError<E>> {
         check(cancelled)?;
+        if self.supply_channel.is_some() {
+            return Err(FiniteGasDgError::Invalid(
+                "shared finite gas requires the fixed supply passage's explicit inventory and parameter work",
+            ));
+        }
         admit_finite_gas_controls(controls)?;
         let upstream = self.upstream.as_ref().ok_or(FiniteGasDgError::Invalid(
             "shared finite gas requires the original upstream and downstream tracts",

@@ -29,6 +29,8 @@ pub mod finite_gas;
 /// Finite-body wall heat and signed material work on the original moving load.
 pub mod thermal_wall;
 mod tract;
+/// Fixed material-gas passages in the same valve and acoustic transaction.
+pub mod supply;
 mod gas;
 /// Actual upstream tract exchange and cold preparation of the series load.
 pub use tract::{DgTractFrame, series_inlet_state};
@@ -55,7 +57,11 @@ pub struct DgApertureFrame {
     /// Optional original upstream tract. Its inlet points away from the valve;
     /// its work and terminal exchange are included once in the total accounts.
     pub upstream: Option<DgTractFrame>,
-    /// Mechanical, contact, material, acoustic, and wall-memory storage [J].
+    /// Original fixed no-slip passage, when explicitly included upstream of
+    /// the valve. Its storage and losses are already in the total accounts.
+    pub supply: Option<super::two_sided::supply::SupplyChannelFrame>,
+    /// Mechanical, contact, material, acoustic, wall-memory and optional supply
+    /// fluid kinetic storage [J].
     pub stored_energy_j: f64,
     /// Actual axial outlet exchange, when loaded. This convenience is also in
     /// terminals and must not be credited a second time.
@@ -63,22 +69,24 @@ pub struct DgApertureFrame {
     /// Every signed terminal exchange in the original load's channel order.
     /// This is neither heat nor a certificate of rational internal storage.
     pub terminals: Vec<DgTerminalFrame>,
-    /// Change in the aperture and DG storage [J].
+    /// Change in the complete aperture, DG and optional supply storage [J].
     pub storage_change_j: f64,
     /// Signed material-intervention work INTO the represented load [J]. Zero
     /// for an ordinary frozen-material step. A finite background reports the
     /// matching thermodynamic debit separately; it is not mechanical loss.
     pub parameter_work_j: f64,
-    /// Aperture loss plus inferred duct loss [J]. This is NOT an independent
-    /// wall/terminal heat integral when `duct.ledger.balance_checked` is false.
+    /// Aperture loss, inferred duct loss and optional passage losses [J]. The
+    /// passage's viscous and numerical contributions stay separate in `supply`.
+    /// This is NOT an independent wall/terminal heat integral when
+    /// `duct.ledger.balance_checked` is false.
     pub inferred_total_dissipation_j: f64,
     /// Prescribed source pressure work on aperture flow, excluding body flow [J].
     /// With a tract this is SERIES-source work; tract feedback is not a source.
     pub upstream_work_j: f64,
     /// Inlet pressure work on independently supplied body flow [J].
     pub body_work_j: f64,
-    /// DG integrated INLET work minus aperture mean pressure times bore volume
-    /// [J]. The internal port cancels before either candidate is published.
+    /// Summed original DG inlet and optional supply pressure/flow work defects
+    /// [J]. Every internal exchange is checked before any candidate publishes.
     pub port_work_residual_j: f64,
 }
 
@@ -106,6 +114,7 @@ pub struct ApertureDg<A = DynamicAperture> {
     aperture: A,
     load: ApertureDgLoad,
     upstream: Option<ApertureDgLoad>,
+    supply_channel: Option<super::slit_channel::FixedChannel>,
 }
 
 impl<A> ApertureDg<A> {
@@ -120,6 +129,13 @@ impl<A> ApertureDg<A> {
     /// Optional retained upstream tract; its inlet points AWAY from the valve.
     #[must_use]
     pub const fn upstream_load(&self) -> Option<&ApertureDgLoad> { self.upstream.as_ref() }
+
+    /// Original fixed passage, complete material gas and accepted transverse
+    /// momentum field. This is separate geometry from the moving reed gap.
+    #[must_use]
+    pub const fn supply_channel(&self) -> Option<&super::slit_channel::FixedChannel> {
+        self.supply_channel.as_ref()
+    }
 
     /// Accepted acoustic and memory state; its physical nodal arrays are current.
     #[must_use]
@@ -149,7 +165,7 @@ impl ApertureDg {
                 "DG coupling requires a new ExactZoh aperture bound to its mean inlet-pressure impedance, gas density and clock; driven exterior mouth effort is unsupported",
             ));
         }
-        Ok(Self { aperture, load, upstream: None })
+        Ok(Self { aperture, load, upstream: None, supply_channel: None })
     }
 
     /// Accepted aperture and DG stored energy [J]. Rational terminal exchange
@@ -264,7 +280,7 @@ fn accept_acoustic_candidate_observed<T>(
     let observed = observe(&acoustic)?;
     let duct = acoustic.accept();
     Ok((DgApertureFrame {
-        aperture, spatial_pressure, duct, upstream: None, terminal, terminals, stored_energy_j, storage_change_j, parameter_work_j: 0.0, inferred_total_dissipation_j,
+        aperture, spatial_pressure, duct, upstream: None, supply: None, terminal, terminals, stored_energy_j, storage_change_j, parameter_work_j: 0.0, inferred_total_dissipation_j,
         upstream_work_j, body_work_j, port_work_residual_j,
     }, observed))
 }

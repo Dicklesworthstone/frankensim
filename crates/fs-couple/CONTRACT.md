@@ -11158,6 +11158,25 @@ The original public `SlitChannel` constructors and methods remain available;
 coupled consumers select `.slit()` or `.circular()` for geometry-specific data.
 
 Material-modal reed files accept `supply circular LENGTH_M RADIUS_M CELLS`.
+The material-modal DG grammar also accepts this same record, or
+`supply slit LENGTH_M WIDTH_M HEIGHT_M CELLS`, immediately before
+`slit_length`; omission or `supply none` retains its original behavior.
+`dg::supply::inlet_state_with_supply` and
+`LoadedApertureDg::new_loaded_with_supply` bind the passage to the original
+single, independent-pair or full material-modal source, with an optional
+upstream DG tract. The existing series elimination combines each exact DG mean
+port with the channel's affine pressure law before the sole nonlinear valve
+solve. Downstream body flow remains separate: only the actual valve through-flow
+crosses the upstream tract and channel. Pressure, volume flow and work are
+checked before all original candidates publish; a refusal retains every blade,
+solid history, transverse velocity, acoustic state and terminal memory.
+`DgApertureFrame::supply` retains the original channel account. Its kinetic
+storage, wall heat and separately identified numerical dissipation enter total
+accounts once. Source gas changes at construction reach both channel inertia
+and no-slip diffusion. Live gas/finite-heat APIs refuse an attached supply
+passage until its additional inventory and parameter work join those specific
+transactions; they never silently drop its flow or energy.
+
 The shared DG grammar accepts
 `dg_terminal_circular PORT_ID RADIUS_M LENGTH_M CELLS MAX_MACH`. Each uses
 the actual retained local gas and mechanical clock. Circular and slit terminal

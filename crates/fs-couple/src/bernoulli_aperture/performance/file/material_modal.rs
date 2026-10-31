@@ -93,6 +93,48 @@ pub use wall::ModalValveWallRecord;
 /// Exact grammar selector. Filenames and instrument names never select physics.
 pub const MATERIAL_MODAL_VALVE_SCHEMA: &str = "frankensim-material-modal-valve-v1";
 
+// Both acoustic hosts consume this one physical passage declaration. Resolve
+// it only after the host has supplied its actual local inlet gas and clock.
+enum SupplyInput {
+    None,
+    Slit { length: f64, width: f64, height: f64, cells: usize },
+    Circular { length: f64, radius: f64, cells: usize },
+}
+
+impl SupplyInput {
+    fn read(rows: &mut Reader<'_>) -> Result<Self, PlateValveInputError> {
+        let mut row = rows.row("supply")?;
+        let input = match row.word()? {
+            "none" => Self::None,
+            "slit" => Self::Slit {
+                length: row.scalar()?, width: row.scalar()?, height: row.scalar()?,
+                cells: row.count(4096)?,
+            },
+            "circular" => Self::Circular {
+                length: row.scalar()?, radius: row.scalar()?, cells: row.count(4096)?,
+            },
+            _ => return Err(bad(row.line,
+                "supply must be none, slit LENGTH WIDTH HEIGHT CELLS or circular LENGTH RADIUS CELLS")),
+        };
+        row.finish()?;
+        Ok(input)
+    }
+
+    fn resolve(self, inlet: &GasState, dt: f64) -> Result<Option<FixedChannel>, PlateValveInputError> {
+        Ok(match self {
+            Self::None => None,
+            Self::Slit { length, width, height, cells } => Some(SlitChannel::from_gas(inlet, SlitChannelSpec {
+                length_m: length, width_m: width, height_m: height,
+                transverse_cells: cells, sample_period_s: dt, exit: SlitExit::StaticPressure,
+            }).map_err(PlateValveInputError::Physics)?.into()),
+            Self::Circular { length, radius, cells } => Some(CircularChannel::from_gas(inlet, CircularChannelSpec {
+                length_m: length, radius_m: radius, radial_cells: cells,
+                sample_period_s: dt, exit: SlitExit::StaticPressure,
+            }).map_err(PlateValveInputError::Physics)?.into()),
+        })
+    }
+}
+
 /// Physical source facts, independent of callback partition and PCM scaling.
 #[derive(Clone, Copy, Debug)]
 pub struct MaterialModalValveInfo {
@@ -237,20 +279,7 @@ impl MaterialModalValvePerformance {
             _ => return Err(bad(row.line, "propagation must be integer or fractional BAND_HZ PHASE_ERROR_RAD")),
         };
         row.finish()?;
-        let mut row = rows.row("supply")?;
-        let channel = match row.word()? {
-            "none" => None,
-            "slit" => Some(SlitChannel::from_gas(&inlet, SlitChannelSpec {
-                length_m: row.scalar()?, width_m: row.scalar()?, height_m: row.scalar()?,
-                transverse_cells: row.count(4096)?, sample_period_s: dt, exit: SlitExit::StaticPressure,
-            }).map_err(PlateValveInputError::Physics)?.into()),
-            "circular" => Some(CircularChannel::from_gas(&inlet, CircularChannelSpec {
-                length_m: row.scalar()?, radius_m: row.scalar()?, radial_cells: row.count(4096)?,
-                sample_period_s: dt, exit: SlitExit::StaticPressure,
-            }).map_err(PlateValveInputError::Physics)?.into()),
-            _ => return Err(bad(row.line, "supply must be none, slit LENGTH WIDTH HEIGHT CELLS or circular LENGTH RADIUS CELLS")),
-        };
-        row.finish()?;
+        let channel = SupplyInput::read(&mut rows)?.resolve(&inlet, dt)?;
         if let Some(channel) = &channel {
             impedance = combined_inlet_state_with_supply(&sides, channel)
                 .map_err(PlateValveInputError::Physics)?.1;

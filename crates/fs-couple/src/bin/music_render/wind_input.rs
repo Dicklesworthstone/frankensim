@@ -755,11 +755,31 @@ pub(super) fn material_modal_dg_provenance(
             }),
         _ => String::new(),
     };
-    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"{model_scope}\"{structure}{surface_closure}{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}}}",
+    let supply = fixed_channel_provenance(source.system().supply_channel());
+    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"supply_channel\":{supply},\"model_scope\":\"{model_scope}\"{structure}{surface_closure}{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}}}",
         i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
         i.mechanics_rate_hz, load.duct().operator_identity().to_hex(),
         load.duct().total_length());
     source_json
+}
+
+fn fixed_channel_provenance(
+    channel: Option<&fs_couple::bernoulli_aperture::slit_channel::FixedChannel>,
+) -> String {
+    channel.map_or_else(|| "null".into(), |channel| match channel {
+        fs_couple::bernoulli_aperture::slit_channel::FixedChannel::Slit(channel) => {
+            let spec = channel.spec();
+            format!("{{\"length_m\":{:e},\"width_m\":{:e},\"height_m\":{:e},\"transverse_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
+                spec.length_m, spec.width_m, spec.height_m, spec.transverse_cells,
+                channel.gas().density, channel.gas().dynamic_viscosity)
+        }
+        fs_couple::bernoulli_aperture::slit_channel::FixedChannel::Circular(channel) => {
+            let spec = channel.spec();
+            format!("{{\"kind\":\"circular\",\"length_m\":{:e},\"radius_m\":{:e},\"radial_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
+                spec.length_m, spec.radius_m, spec.radial_cells,
+                channel.gas().density, channel.gas().dynamic_viscosity)
+        }
+    })
 }
 
 fn modal_relaxation_provenance(
@@ -855,22 +875,7 @@ pub(super) fn material_modal_provenance(
                 !matches!(&wall.source().model, fs_couple::bernoulli_aperture::wall::material::WallMaterialModel::Isotropic)));
     let wall_model = if directional_walls { "isotropic or principal-aligned orthotropic" } else { "isotropic" };
     let wall_json = format!(",\"material_duct_walls\":[{walls}],\"duct_wall_scope\":\"fixed-state local {wall_model} membrane; original regional duct gas; no full shell or exterior wall radiation\"");
-    let supply = system.supply_channel().map_or_else(|| "null".into(), |channel| {
-        match channel {
-            fs_couple::bernoulli_aperture::slit_channel::FixedChannel::Slit(channel) => {
-                let spec = channel.spec();
-                format!("{{\"length_m\":{:e},\"width_m\":{:e},\"height_m\":{:e},\"transverse_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
-                    spec.length_m, spec.width_m, spec.height_m, spec.transverse_cells,
-                    channel.gas().density, channel.gas().dynamic_viscosity)
-            }
-            fs_couple::bernoulli_aperture::slit_channel::FixedChannel::Circular(channel) => {
-                let spec = channel.spec();
-                format!("{{\"kind\":\"circular\",\"length_m\":{:e},\"radius_m\":{:e},\"radial_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
-                    spec.length_m, spec.radius_m, spec.radial_cells,
-                    channel.gas().density, channel.gas().dynamic_viscosity)
-            }
-        }
-    });
+    let supply = fixed_channel_provenance(system.supply_channel());
     let (propagator, linear_scope) = match i.propagator {
         fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint =>
             ("midpoint", "original material structure with loaded one-cent midpoint admission"),

@@ -847,9 +847,49 @@ name; the existing programmatic molecular law requires its sourced state.
 `valve`, `limits`, `contact`, `loss`, `blades`, the complete plate blocks,
 optional wetted surfaces, pressure shapes, spatial closure, source forces,
 source pressures, and the canonical schedule keep the same record meanings
-shown above. This DG route has one explicit upstream pressure supply; it
-does not declare the separate upstream tract or moving graph boundaries of
-the two-sided schema. Every force/pressure event uses the mechanical clock.
+shown above. An optional `upstream_tract` followed by the shared DG bore and
+material-wall records places a second original duct at the source. Its inlet
+points away from the valve, and its complete inlet gas and clock must match
+the bore's. Every force/pressure event uses the mechanical clock.
+
+### Fixed supply passages on the same material clock
+
+Immediately before `slit_length`, after any upstream tract records, add one
+explicit fixed passage:
+
+```text
+supply slit 0.004 0.002 0.0002 16
+```
+
+The slit fields are length, width, height in metres and transverse cell count.
+For an axisymmetric passage, use `supply circular 0.004 0.0002 16`: length,
+radius and radial cell count. Omission or `supply none` preserves the source's
+existing response. This passage describes additional fixed geometry between
+the source pressure/tract and moving valve. Its length must not also appear
+in a duct or in the moving reed's `slit_length`.
+
+Both declarations use the original no-slip fluid momentum solver, shared with
+network valves and DG terminal passages. The actual inlet `GasState` supplies
+density and viscosity; no channel-specific air coefficients are introduced.
+Changing `ambient` to, for example, `mixture 293.15 101325 mole 2 He 0.79 O2 0.21`
+changes the channel, moving slit, material-reed pressure feedback and bore
+together. Source-bound thermochemical records are accepted through the same
+gas grammar. Geometry, material modes and gestures remain the caller's data.
+
+The current transverse velocity field supplies its inertial pressure history
+to the nonlinear valve solve. The bore, optional tract, fixed passage and every
+reed mode accept the same flow in the same step. Channel kinetic storage,
+viscous heat and numerical dissipation enter the combined work balance once;
+viscous heat is distinct from numerical loss. Native sidecars identify the
+actual channel geometry, resolution, density and viscosity.
+
+This is fixed-geometry, fully developed laminar incompressible flow with
+parallel walls or a circular cross-section. Transverse refinement resolves
+the unsteady viscous profile; it does not add entrance flow, turbulence,
+moving-wall squeeze flow or channel heat transport. The prescribed gas state
+is fixed during this performance. Programmatic live-gas and finite-heat
+transactions reject an attached supply passage until they can include its
+separate fluid inventory, momentum transfer and parameter work.
 
 ### Finite DG terminal passages and closures
 

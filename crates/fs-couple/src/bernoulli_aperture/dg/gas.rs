@@ -18,6 +18,9 @@ fn prepare_single<A, R, C: FnMut() -> bool>(
     update: impl FnOnce(&mut ApertureDgLoad, &mut C) -> Result<R, AcousticRealizeError>,
     cancelled: &mut C,
 ) -> Result<(ApertureDgLoad, R), AcousticRealizeError> {
+    if model.supply_channel.is_some() {
+        return Err(invalid("live DG gas refresh must include the fixed supply passage's momentum and parameter work"));
+    }
     if model.upstream.is_some() {
         return Err(invalid(
             "live two-sided DG gas refresh requires one series transaction for both loads",
@@ -47,6 +50,9 @@ fn prepare_series<R, C: FnMut() -> bool>(
     maximum_absolute_parameter_work_j: f64,
     cancelled: &mut C,
 ) -> Result<SeriesCandidate<R>, AcousticRealizeError> {
+    if model.supply_channel.is_some() {
+        return Err(invalid("live DG series gas refresh must include the fixed supply passage's momentum and parameter work"));
+    }
     let upstream = model
         .upstream
         .as_ref()

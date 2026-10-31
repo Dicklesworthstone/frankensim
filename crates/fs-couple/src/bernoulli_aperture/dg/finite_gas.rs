@@ -54,6 +54,11 @@ fn admit<A, E, C: FnMut() -> bool>(
     controls: FiniteGasDgSolve,
     cancelled: &mut C,
 ) -> Result<(), FiniteGasDgError<E>> {
+    if model.supply_channel.is_some() {
+        return Err(FiniteGasDgError::Invalid(
+            "finite aperture feedback requires the fixed supply passage's explicit gas inventory and parameter work",
+        ));
+    }
     if model.upstream.is_some() {
         return Err(FiniteGasDgError::Invalid(
             "finite aperture feedback needs an explicit inventory for each tract; one parcel cannot replace two independent gas owners",

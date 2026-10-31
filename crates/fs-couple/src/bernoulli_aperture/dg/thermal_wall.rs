@@ -153,6 +153,9 @@ fn admit<A>(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AcousticRealizeError> {
     poll(cancelled)?;
+    if system.supply_channel.is_some() {
+        return Err(invalid("finite wall feedback must retain the fixed supply passage in its complete acoustic transaction"));
+    }
     if system.upstream.is_some() {
         return Err(invalid(
             "finite wall feedback needs an explicit joint inventory for an upstream tract",
