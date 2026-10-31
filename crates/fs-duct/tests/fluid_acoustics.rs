@@ -323,7 +323,8 @@ fn source_failure_unsupported_geometry_work_caps_and_cancellation_are_explicit()
             options(),
             || false
         )
-        .unwrap_err(),
+        .err()
+        .expect("unsupported fluid source must be rejected"),
         FluidDuctError::Material(MaterialError::State {
             what: "source phase no longer supported".into()
         }),
