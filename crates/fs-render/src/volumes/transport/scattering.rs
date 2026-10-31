@@ -45,6 +45,9 @@ mod prepared;
 pub use field::{CellPhaseFunction, CellScatteringGrid};
 /// Physical homogeneous-sphere cross sections and resolved angular scattering.
 pub mod mie;
+/// Full-Stokes molecular scattering over the original physical free-flight owner.
+#[cfg(feature = "tracer")]
+pub mod polarized;
 
 /// Mass scattering coefficient in m²/kg, independently specified
 /// from absorption. The interpolation and admitted wavelength band are the
