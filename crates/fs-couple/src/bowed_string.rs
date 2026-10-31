@@ -1,4 +1,4 @@
-//! Bowed-string e2e fixture: a modal exact-ZOH string driven by a Stribeck
+//! Bowed-string e2e fixture: a modal exact-ZOH string driven by a shared dry
 //! friction island at a bow station (bead frankensim-music-v8-root-3ez8g.7.5).
 //!
 //! The Helmholtz corner must EMERGE from the friction island acting on the
@@ -10,9 +10,9 @@
 //!   `omega_k² = (T kappa² + EI kappa⁴)/mu`, `kappa = k pi/L`.
 //!   Unit-mass shapes `phi_k(x) = sin(k pi x / L) / sqrt(mu L / 2)`
 //!   are stepped by the exact-ZOH [`ModalAcousticTimeModel`].
-//! - Bow: constant-velocity driver with a SET-VALUED Stribeck contact.
+//! - Bow: constant-velocity driver with a SET-VALUED dry contact.
 //!   Each substep solves the shared exact-ZOH endpoint load line against the
-//!   unregularized kinetic curve `mu_k + (mu_s - mu_k) exp(-(v/v0)^2)` and the
+//!   declared unregularized Stribeck or hyperbolic kinetic curve and the
 //!   static cone `mu_s F_n` ([`crate::stribeck_friction::StribeckLoadLine`]).
 //!   Sticking is endpoint no-slip, not a continuous-time constraint. Where
 //!   the load line meets both the cone and a sliding root, the contact keeps
@@ -25,8 +25,7 @@
 //!   the listener hears it at the gas's time of flight.
 //!
 //! Determinism class: ONE-HOST for this composed fixture. The kinetic curve
-//! uses the shared fs-tribo owner's deterministic exponential through
-//! [`StribeckFriction`]; that alone does not certify every other operand
+//! uses the shared fs-tribo owner; that alone does not certify every other operand
 //! in this fixture across hosts.
 
 /// Stateful performance of the same bowed-string physics, with retained contact
@@ -223,18 +222,23 @@ impl BowedStringCard {
     }
 }
 
-/// Friction island variants. Under the event-stiction coupling the
+/// Friction island variants. Under the set-valued coupling the
 /// [`StribeckFriction`] fields mean: `mu_static` caps the pinning force,
 /// `mu_dynamic` is the sliding floor, and `stiction_m_s` is the KINETIC
-/// decay width of the drop — it must span cm/s so a sliding operating point
-/// samples the negative-slope region and pumps the oscillation.
+/// decay width of the drop. The legacy ODE regularization field is admitted
+/// for compatibility but never enters this endpoint contact solve. Direct
+/// shared laws carry no numerical velocity ramp.
 ///
 /// `ViscousOnly` is the FALSIFIER law: purely viscous opposition has no
 /// stiction window and no Stribeck drop, so stick-slip gates must fail.
 #[derive(Clone, Debug)]
 pub enum FrictionIsland {
-    /// The regularized Stribeck rung used across the music stack.
+    /// Legacy Stribeck declaration; the shared unregularized law owns contact.
     Stribeck(StribeckFriction),
+    /// A direct shared Stribeck or hyperbolic dry law. The original load-line
+    /// owner retains the declared functional form and static branch. Other
+    /// laws refuse because that owner's root continuation does not admit them.
+    Constitutive(fs_tribo::FrictionLaw),
     /// Ordered dry-interface law with a fixed temperature and nominal area.
     /// The card retains caller authority, not measured-data admission. This
     /// embedding uses the complete Stribeck law, including velocity strengthening.
@@ -246,6 +250,17 @@ pub enum FrictionIsland {
         /// Declared nominal contact area [m²], used to compute N/area.
         nominal_contact_area_m2: f64,
     },
+    /// Ordered source-bound Stribeck or hyperbolic law. Identity, physical
+    /// coefficients and state-domain checks stay with the original card;
+    /// no conversion to a Gaussian or regularized sliding law takes place.
+    Interface {
+        /// Original ordered surfaces, history, law and applicability domain.
+        card: Box<fs_tribo::DryInterfaceSystemCard>,
+        /// Declared fixed contact temperature [K].
+        temperature_kelvin: f64,
+        /// Declared nominal contact area [m²].
+        nominal_contact_area_m2: f64,
+    },
     /// Pure viscous opposition `c * v_rel`; falsifier only.
     ViscousOnly {
         /// Viscous coefficient [N s/m].
@@ -254,60 +269,47 @@ pub enum FrictionIsland {
 }
 
 impl FrictionIsland {
-    fn stribeck(&self) -> Result<Option<StribeckFriction>, BowedRunError> {
-        match self {
-            Self::Stribeck(law) => Ok(Some(*law)),
-            Self::InterfaceStribeck { card, .. } => match *card.friction_law() {
-                fs_tribo::FrictionLaw::Stribeck {
-                    static_mu,
-                    kinetic_mu,
-                    characteristic_speed,
-                    ..
-                } => StribeckFriction::try_new(static_mu, kinetic_mu, characteristic_speed, characteristic_speed)
-                    .map(Some)
-                    .map_err(BowedRunError::Friction),
-                _ => Err(BowedRunError::Friction(
-                    "bow interface requires a Stribeck law",
-                )),
-            },
-            Self::ViscousOnly { .. } => Ok(None),
-        }
-    }
-
     /// The unregularized fs-tribo law that owns set-valued bow contact.
-    fn kinetic_law(&self) -> Option<fs_tribo::FrictionLaw> {
-        match self {
-            Self::Stribeck(law) => Some(fs_tribo::FrictionLaw::Stribeck {
-                static_mu: law.mu_static,
-                kinetic_mu: law.mu_dynamic,
-                characteristic_speed: law.stiction_m_s,
-                viscous_per_speed: 0.0,
-            }),
-            Self::InterfaceStribeck { card, .. } => Some(card.friction_law().clone()),
-            Self::ViscousOnly { .. } => None,
+    fn kinetic_law(&self) -> Result<Option<fs_tribo::FrictionLaw>, BowedRunError> {
+        let law = match self {
+            Self::Stribeck(law) => {
+                // Keep admission of the legacy input, but its ODE ramp is not
+                // part of this set-valued model and is never evaluated here.
+                StribeckFriction::try_new(law.mu_static, law.mu_dynamic,
+                    law.stiction_m_s, law.regularization_m_s).map_err(BowedRunError::Friction)?;
+                fs_tribo::FrictionLaw::Stribeck {
+                    static_mu: law.mu_static, kinetic_mu: law.mu_dynamic,
+                    characteristic_speed: law.stiction_m_s, viscous_per_speed: 0.0,
+                }
+            }
+            Self::Constitutive(law) => law.clone(),
+            Self::Interface { card, .. } => card.friction_law().clone(),
+            Self::InterfaceStribeck { card, .. } => {
+                if !matches!(card.friction_law(), fs_tribo::FrictionLaw::Stribeck { .. }) {
+                    return Err(BowedRunError::Friction("legacy bow interface requires a Stribeck law"));
+                }
+                card.friction_law().clone()
+            }
+            Self::ViscousOnly { viscous_n_s_per_m } => {
+                if !viscous_n_s_per_m.is_finite() || *viscous_n_s_per_m < 0.0 {
+                    return Err(BowedRunError::Friction("viscous friction must be finite and nonnegative"));
+                }
+                return Ok(None);
+            }
+        };
+        if !matches!(law, fs_tribo::FrictionLaw::Stribeck { .. } | fs_tribo::FrictionLaw::Hyperbolic { .. }) {
+            return Err(BowedRunError::Friction("set-valued bow contact requires a Stribeck or hyperbolic law"));
         }
-    }
-
-    fn sliding_traction(
-        &self,
-        law: StribeckFriction,
-        relative_velocity: f64,
-        normal_n: f64,
-    ) -> Result<f64, BowedRunError> {
-        if let Self::InterfaceStribeck { card, .. } = self {
-            // Do not reconstruct the kinetic law from the static/capture
-            // parameters: that would discard its velocity-strengthening term.
-            card.friction_law()
-                .regularized_traction_1d(-relative_velocity, normal_n, law.regularization_m_s)
-                .map_err(BowedRunError::Interface)
-        } else {
-            law.traction(relative_velocity, normal_n)
-                .map_err(BowedRunError::Friction)
-        }
+        law.validate().map_err(BowedRunError::Interface)?;
+        Ok(Some(law))
     }
 
     fn check_state(&self, relative_velocity: f64, normal_n: f64) -> Result<(), BowedRunError> {
         if let Self::InterfaceStribeck {
+            card,
+            temperature_kelvin,
+            nominal_contact_area_m2,
+        } | Self::Interface {
             card,
             temperature_kelvin,
             nominal_contact_area_m2,

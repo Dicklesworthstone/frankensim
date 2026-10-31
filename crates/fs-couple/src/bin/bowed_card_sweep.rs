@@ -34,7 +34,7 @@ use fs_couple::bowed_string::{
     BowGesture, BowedRunConfig, BowedRunLog, BowedStringCard, FrictionIsland, Termination,
     classify, gate_metrics, run_bowed,
 };
-use fs_couple::stribeck_friction::StribeckFriction;
+use fs_couple::bowed_string::runtime::schedule::file::parse_friction_record;
 
 const SCHEMA: &str = "frankensim.bowed-card-sweep.v1";
 const MAX_CARD_BYTES: usize = 1024 * 1024;
@@ -59,7 +59,7 @@ struct Args {
 
 struct Card {
     string: BowedStringCard,
-    friction: StribeckFriction,
+    friction: fs_tribo::FrictionLaw,
     mu_static: f64,
     mu_dynamic: f64,
     subsamples: usize,
@@ -95,9 +95,9 @@ fn read_card(text: &str) -> Result<Card, String> {
     let audio = words(lines[1], "audio")?;
     let string = words(lines[2], "string")?;
     let damping = words(lines[3], "damping")?;
-    let stribeck = words(lines[4], "stribeck")?;
+    let friction = parse_friction_record(lines[4]).map_err(str::to_string)?;
     let sub = words(lines[5], "subsamples")?;
-    if audio.len() != 3 || string.len() != 6 || stribeck.len() != 3 || sub.len() != 1 {
+    if audio.len() != 3 || string.len() != 6 || sub.len() != 1 {
         return Err("a record has the wrong number of fields".to_string());
     }
     let sample_rate_hz: u32 = audio[0]
@@ -126,11 +126,11 @@ fn read_card(text: &str) -> Result<Card, String> {
     string_card
         .validate()
         .map_err(|error| format!("the string card is refused: {error}"))?;
-    let mu_static = real(stribeck[0], "mu_static")?;
-    let mu_dynamic = real(stribeck[1], "mu_dynamic")?;
-    let speed = real(stribeck[2], "stribeck speed")?;
-    let friction = StribeckFriction::try_new(mu_static, mu_dynamic, speed, speed)
-        .map_err(|what| what.to_string())?;
+    let (mu_static, mu_dynamic) = match friction {
+        fs_tribo::FrictionLaw::Stribeck { static_mu, kinetic_mu, .. }
+        | fs_tribo::FrictionLaw::Hyperbolic { static_mu, kinetic_mu, .. } => (static_mu, kinetic_mu),
+        _ => return Err("unsupported shared bow friction law".to_string()),
+    };
     let subsamples: usize = sub[0]
         .parse()
         .map_err(|_| "subsamples is not an integer".to_string())?;
@@ -320,7 +320,7 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("gesture refused at {force_n} N: {error:?}"))?;
         let config = BowedRunConfig {
             card: card.string.clone(),
-            island: FrictionIsland::Stribeck(card.friction),
+            island: FrictionIsland::Constitutive(card.friction.clone()),
             gesture,
             steps,
             subsamples: card.subsamples,
@@ -394,6 +394,16 @@ mod tests {
         assert!((card.string.length_m - 0.65).abs() < 1.0e-15);
         assert!((card.mu_static - 0.8).abs() < 1.0e-15);
         assert!((card.mu_dynamic - 0.4).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn sweep_retains_the_performers_shared_hyperbolic_law() {
+        let text = CARD.replace("stribeck 0.8 0.4 0.04", "friction hyperbolic 0.8 0.4 0.2");
+        let card = read_card(&text).unwrap();
+        assert_eq!(card.friction, fs_tribo::FrictionLaw::Hyperbolic {
+            static_mu: 0.8, kinetic_mu: 0.4, characteristic_speed: 0.2,
+        });
+        assert_eq!((card.mu_static, card.mu_dynamic), (0.8, 0.4));
     }
 
     #[test]

@@ -11,7 +11,6 @@ use fs_material::gas_species::input::{
 use fs_scenario::{RadiatingPlate, gesture::{GestureSchedule, GestureValue}};
 use crate::bowed_string::{BowGesture, BowedRunConfig, BowedRunError, BowedStringCard, FrictionIsland, Termination};
 use crate::render::{RenderContext, RenderError, RenderVoice, schedule::ScheduledRenderer};
-use crate::stribeck_friction::StribeckFriction;
 use crate::thin_plate::CompactBody;
 use super::{BowedScheduleError, ScheduledBowedRenderer};
 use super::super::BowedStringState;
@@ -24,6 +23,44 @@ const MAX_MODES: usize = 512;
 const MAX_EVENTS: usize = 16_384;
 const MAX_CONTROLS: usize = 262_144;
 const MAX_WORK: u64 = 16_777_216;
+
+/// Decode one declared law for both the native performer and card sweeps.
+///
+/// Accepted records are `stribeck mu_s mu_k v0` (legacy, zero viscous term),
+/// `friction stribeck mu_s mu_k v0 viscous_per_speed`, and
+/// `friction hyperbolic mu_s mu_k v0`. All speeds are physical constitutive
+/// scales. This set-valued owner takes no numerical regularization speed.
+/// Coefficients retain their input authority; decoding is not validation of
+/// a measured rosin interface or a temperature-dependent third-body model.
+pub fn parse_friction_record(record: &str) -> Result<fs_tribo::FrictionLaw, &'static str> {
+    let mut words = record.split_ascii_whitespace();
+    let (kind, legacy) = match words.next() {
+        Some("stribeck") => ("stribeck", true),
+        Some("friction") => (words.next().ok_or("friction requires a law name")?, false),
+        _ => return Err("expected a stribeck or friction record"),
+    };
+    let mut scalar = || {
+        let value = words.next().ok_or("missing friction coefficient")?
+            .parse::<f64>().map_err(|_| "friction coefficient must be numeric")?;
+        if value.is_finite() { Ok(value) } else { Err("friction coefficient must be finite") }
+    };
+    let static_mu = scalar()?;
+    let kinetic_mu = scalar()?;
+    let characteristic_speed = scalar()?;
+    let law = match kind {
+        "stribeck" => fs_tribo::FrictionLaw::Stribeck {
+            static_mu, kinetic_mu, characteristic_speed,
+            viscous_per_speed: if legacy { 0.0 } else { scalar()? },
+        },
+        "hyperbolic" => fs_tribo::FrictionLaw::Hyperbolic {
+            static_mu, kinetic_mu, characteristic_speed,
+        },
+        _ => return Err("set-valued bow contact requires stribeck or hyperbolic friction"),
+    };
+    if words.next().is_some() { return Err("extra friction coefficient"); }
+    law.validate().map_err(|_| "invalid shared friction coefficients")?;
+    Ok(law)
+}
 
 /// Syntax and existing physical/scheduling owner refusals remain distinguishable.
 #[derive(Debug)]
@@ -151,15 +188,9 @@ impl BowedPerformance {
         let mut row = r.row("damping")?;
         for _ in 0..card.mode_count { card.zetas.push(row.scalar()?); }
         row.finish()?;
-        let mut row = r.row("stribeck")?;
-        let mu_static = row.scalar()?;
-        let mu_dynamic = row.scalar()?;
-        // This v1 fixture grammar declares one shared speed; the constitutive
-        // adapter keeps the two controls separate for independently authored data.
-        let speed = row.scalar()?;
-        let friction = StribeckFriction::try_new(mu_static, mu_dynamic, speed, speed)
-            .map_err(|what| bad(r.line, what))?;
-        row.finish()?;
+        r.line += 1;
+        let record = r.lines.next().ok_or_else(|| bad(r.line, "missing friction record"))?;
+        let friction = parse_friction_record(record).map_err(|what| bad(r.line, what))?;
         let mut row = r.row("subsamples")?;
         let subsamples = row.count(256)?; row.finish()?;
         if subsamples == 0 { return Err(bad(r.line, "subsamples must be explicit and positive")); }
@@ -222,7 +253,7 @@ impl BowedPerformance {
             .map_err(|e| BowedPerformanceError::Model(BowedRunError::Gesture(e)))?;
         let body = CompactBody::from_radiator(radiator)
             .map_err(|_| bad(0, "the existing compact body rejected its area/mass/frequency/damping"))?;
-        let config = BowedRunConfig { card, island: FrictionIsland::Stribeck(friction), gesture,
+        let config = BowedRunConfig { card, island: FrictionIsland::Constitutive(friction), gesture,
             steps: samples as usize, subsamples,
             termination: Termination::PlateOnePort { body: Box::new(body), ambient }, listener_m };
         let state = BowedStringState::new(&config, max_block).map_err(BowedPerformanceError::Model)?;
@@ -284,5 +315,34 @@ impl Row<'_> {
     fn finish(mut self) -> Result<(), BowedPerformanceError> {
         if self.words.next().is_some() { return Err(bad(self.line, "unexpected extra field")); }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod friction_record_tests {
+    use super::parse_friction_record;
+    use fs_tribo::FrictionLaw;
+
+    #[test]
+    fn declared_friction_records_preserve_physical_law_and_legacy_meaning() {
+        assert_eq!(parse_friction_record("stribeck 0.8 0.4 0.04").unwrap(),
+            parse_friction_record("friction stribeck 0.8 0.4 0.04 0").unwrap());
+        assert_eq!(parse_friction_record("friction stribeck 0.8 0.4 0.04 1.5").unwrap(),
+            FrictionLaw::Stribeck { static_mu: 0.8, kinetic_mu: 0.4,
+                characteristic_speed: 0.04, viscous_per_speed: 1.5 });
+        let hyperbolic = parse_friction_record("friction hyperbolic 0.8 0.4 0.2").unwrap();
+        for speed in [0.001, 0.2, 0.6, 2.0] {
+            assert!((hyperbolic.kinetic_coefficient(speed).unwrap()
+                - (0.4 + 0.08 / (speed + 0.2))).abs() < 1.0e-15);
+        }
+        // No discarded ramp, optional unnamed field, unsupported family or
+        // invalid coefficient may silently change the declared contact model.
+        for record in ["friction hyperbolic 0.8 0.4 0.2 0.2",
+            "stribeck 0.8 0.4 0.04 0.04", "friction stribeck 0.8 0.4 0.04",
+            "friction coulomb 0.8 0.4 0.2", "friction hyperbolic 0.4 0.8 0.2",
+            "friction hyperbolic 0.8 0.4 0", "friction hyperbolic NaN 0.4 0.2",
+            "friction stribeck 0.8 0.4 0.2 -1"] {
+            assert!(parse_friction_record(record).is_err(), "accepted {record}");
+        }
     }
 }

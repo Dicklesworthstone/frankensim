@@ -23,11 +23,15 @@ fn schedule() -> GestureSchedule {
         ] }]).unwrap()
 }
 fn reference(rate: u32, samples: usize, tension: f64) -> (Vec<f64>, f64) {
+    reference_with_island(rate, samples, tension,
+        FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.4, 0.04, 0.04).unwrap()))
+}
+fn reference_with_island(rate: u32, samples: usize, tension: f64, island: FrictionIsland) -> (Vec<f64>, f64) {
     let config = BowedRunConfig {
         card: BowedStringCard { length_m: 0.65, tension_n: tension, linear_density_kg_m: 0.0006,
             bending_stiffness_n_m2: 0.0, viscous_bending_n_m2_s: 0.0, mode_count: 16,
             zetas: vec![0.001; 16], sample_rate_hz: rate },
-        island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.4, 0.04, 0.04).unwrap()),
+        island,
         gesture: BowGesture::admit(0.45, 3.9, 0.11).unwrap(), steps: samples, subsamples: 16,
         termination: Termination::PlateOnePort {
             body: Box::new(CompactBody::from_radiator(RadiatingPlate {
@@ -70,6 +74,25 @@ fn canonical_file_matches_physical_solver_and_retains_release_ringdown_across_ca
         assert!(bow.applied_controls().iter().any(|event| event.velocity_m_s < 0.0));
         assert_eq!(bow.applied_controls().last().unwrap().normal_force_n, 0.0);
         assert!(renderer.validate_sample_count(1).is_err());
+    }
+}
+
+#[test]
+fn hyperbolic_file_drives_the_declared_physics_through_gestures_and_pressure_callbacks() {
+    let text = INPUT.replace("stribeck 0.8 0.4 0.04", "friction hyperbolic 0.8 0.4 0.2");
+    let (expected, energy) = reference_with_island(48_000, 4801, 60.0,
+        FrictionIsland::Constitutive(fs_tribo::FrictionLaw::Hyperbolic {
+            static_mu: 0.8, kinetic_mu: 0.4, characteristic_speed: 0.2,
+        }));
+    assert!(expected[3000..].iter().any(|p| p.abs() > 1.0e-12));
+    assert_ne!(bits(&expected), bits(&reference(48_000, 4801, 60.0).0));
+    for partition in [37, 128] {
+        let mut renderer = BowedPerformance::from_bytes(text.as_bytes(), partition).unwrap().into_renderer();
+        let mut actual = vec![0.0; 4801];
+        for block in actual.chunks_mut(partition) { renderer.block(block).unwrap(); }
+        assert_eq!(bits(&actual), bits(&expected));
+        assert_eq!(renderer.context().bowed_performance(0).unwrap().state()
+            .total_modal_energy_j().to_bits(), energy.to_bits());
     }
 }
 

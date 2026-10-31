@@ -3,20 +3,20 @@
  "family": "double-bass",
  "title": "Double bass",
  "reference_instrument": "Double bass (University of Iowa MIS)",
- "summary": "A reduced engine, not a double bass. Each string drives a single body mode (a 0.15 kg mass on a spring at 280 Hz, damping ratio 0.02) that radiates as a baffled piston of 0.003 m², in place of the double bass's bridge, arched plates, ribs, bass bar, soundpost and enclosed air. On the four graded open strings this leaves 11 to 17 dB too much of each note's energy above 8 kHz, and too much in every band above 0.5 kHz, up to 24 dB at 2-3 kHz. No open, measured double bass geometry was found on 2026-10-30, so the physical body waits on a scanned or measured double bass. The open-string arco cards for the E, A, D and G (orchestra tuning) strings are written from published string properties, a Schelleng-range bow and a published rosin friction curve, each number with a source row, and run through the one-string point-bow reader.",
+ "summary": "A reduced engine, not a double bass. Each string drives a single body mode (a 0.15 kg mass on a spring at 280 Hz, damping ratio 0.02) that radiates as a baffled piston of 0.003 m², in place of the double bass's bridge, arched plates, ribs, bass bar, soundpost and enclosed air. The prior Gaussian-law baseline on four graded open strings left 11 to 17 dB too much of each note's energy above 8 kHz, and too much in every band above 0.5 kHz, up to 24 dB at 2-3 kHz. No open, measured double bass geometry was found on 2026-10-30, so the physical body waits on a scanned or measured double bass. The open-string arco cards for the E, A, D and G (orchestra tuning) strings now select the shared hyperbolic friction law with published assumed coefficients; they have not been regraded. Published string properties, assumed interface properties and retained bow gestures each have source rows and run through the one-string point-bow reader.",
  "physics_present": [
   "fs-couple bowed_string: pinned Euler-Bernoulli string modes from vibrating length, tension and mass per length; tension is set from the table so the open-string pitch is a result of the card",
-  "fs-couple stribeck_friction on the shared fs-tribo law with event stiction: static cap, then a Gaussian drop to the kinetic coefficient",
+  "fs-couple set-valued contact on the shared fs-tribo Hyperbolic law: static cap and mu(v) = 0.4 + 0.08/(abs(v) + 0.2), with the declared law solved at the string endpoint; no Gaussian conversion or numerical velocity ramp",
   "a reduced body: one mode (0.15 kg, 280 Hz, damping ratio 0.02) radiating one way as a baffled piston of 0.003 m² to a 1 m observer; the same placeholder serves viola, cello and double bass. Modal damping from the fundamental's measured Q where one was retrieved",
-  "a point bow driven by a canonical gesture schedule (on the string at rest, constant acceleration to the bow speed, constant force, lift); the bow force is chosen from the card's own bow-force sweep, in the middle of its longest run of Helmholtz motion, with no recording involved",
-  "bow-force sweeps of every card with a rigid bridge (bowed_card_sweep): one flyback per period with slip fraction near the bow-to-bridge ratio over a band of forces, interleaved with doubled-slip and raucous forces, so the playable map is multistable; receipts are in data/instruments/grades"
+  "a point bow driven by a canonical gesture schedule (on the string at rest, constant acceleration to the bow speed, constant force, lift); forces retain the prior Gaussian baseline's model-sweep choices as authored gestures, with no recording involved",
+  "bowed_card_sweep and the native performer now read the same declared law; existing rigid-bridge sweeps in data/instruments/grades describe the prior Gaussian baseline and do not validate the hyperbolic cards' playable region"
  ],
  "physics_missing": [
   "the whole body (a reduced stand-in is rendered): bridge, arched top and back with graduated thickness, ribs, bass bar, soundpost, f-holes, enclosed air and radiation back-loading; the physical route is the material_strings shell body with published plate geometry and wood data, finite-width bow ribbon",
   "measured string Q and body admittance for this instrument (placeholders are labelled UNKNOWN in sources.tsv)",
   "string torsion and the second polarisation, and a ribbon bow with hair compliance",
   "bending stiffness and mode-dependent loss of the real wound strings; the card carries zero stiffness and one damping ratio for every mode",
-  "a hyperbolic or thermal rosin law: the solver's Stribeck law is Gaussian and its regularisation speed is tied to the same file field",
+  "the actual rosin's measured temperature-dependent law, transfer layer and contact history; the selected hyperbolic curve is a published velocity-only assumption",
   "stopped notes and finger damping; only open strings are described",
   "mode-count, friction-substep and time-step convergence ladders",
   "the C extension and the bow type",
