@@ -27,6 +27,9 @@ use fs_solver::{CheckedCgConfig, SolveReport};
 use fs_sparse::Csr;
 use std::sync::Arc;
 
+mod rebind;
+pub use rebind::{DielectricMaterialRebind, DielectricMaterialRebindControls};
+
 #[derive(Clone, Copy, Debug)]
 pub struct DielectricRelaxationControls {
     pub linear: CheckedCgConfig,
@@ -429,7 +432,13 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
         let dielectric = dielectric(&conduction, laws, thermal_laws.as_deref(), limits, cancelled)?;
         let cells = dielectric.cell_response(&voltage_v, cancelled)?;
         let nodal_charge_c = apply(&dielectric.stiffness, &voltage_v, cancelled)?;
-        check_storage(&voltage_v, &nodal_charge_c, cells.energy_j, controls)?;
+        check_storage(
+            &voltage_v,
+            &nodal_charge_c,
+            cells.energy_j,
+            controls.charge_tolerance_c,
+            controls.energy_tolerance_j,
+        )?;
         let mut voltage_vertices = voltage_vertices.to_vec();
         voltage_vertices.sort_unstable();
         poll(cancelled)?;
@@ -564,33 +573,21 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
         let losses = conduction.cell_response(&midpoint_voltage_v, cancelled)?;
         let previous = self.dielectric.cell_response(&self.voltage_v, cancelled)?;
         let endpoint = dielectric.cell_response(&voltage_v, cancelled)?;
-        let mut electric_cells = Vec::with_capacity(previous.cell_energy_j.len());
-        let mut parameter_work_j = 0.0;
-        for triangle in 0..previous.cell_energy_j.len() {
-            poll(cancelled)?;
-            let before = self.dielectric.permittivity_coefficients()[triangle].matrix_f_m();
-            let after = dielectric.permittivity_coefficients()[triangle].matrix_f_m();
-            let e0 = previous.electric_field_v_m[triangle];
-            let e1 = endpoint.electric_field_v_m[triangle];
-            let mut delta_d = [0.0; 2];
-            for i in 0..2 {
-                for j in 0..2 {
-                    delta_d[i] = finite(finite(after[i][j] - before[i][j])?.mul_add(e1[j], delta_d[i]))?;
-                }
-            }
-            let volume = conduction.mesh().face_measure(triangle)
-                .ok_or(Error::Invalid("dielectric cell lacks its original volume"))?;
-            let work = finite(-0.5 * volume * finite(e0[0].mul_add(delta_d[0], e0[1] * delta_d[1]))?)?;
-            parameter_work_j = finite(parameter_work_j + work)?;
-            electric_cells.push(DielectricEnergyCell {
-                triangle,
-                displacement_c_m2: [previous.displacement_c_m2[triangle], endpoint.displacement_c_m2[triangle]],
-                free_energy_j: [previous.cell_energy_j[triangle], endpoint.cell_energy_j[triangle]],
-                parameter_work_j: work,
-            });
-        }
+        let (electric_cells, parameter_work_j) = parameter_work_cells(
+            &self.dielectric,
+            &dielectric,
+            &previous,
+            &endpoint,
+            cancelled,
+        )?;
         let nodal_charge_c = apply(&dielectric.stiffness, &voltage_v, cancelled)?;
-        check_storage(&voltage_v, &nodal_charge_c, endpoint.energy_j, controls)?;
+        check_storage(
+            &voltage_v,
+            &nodal_charge_c,
+            endpoint.energy_j,
+            controls.charge_tolerance_c,
+            controls.energy_tolerance_j,
+        )?;
         let current = apply(
             conduction.stiffness_operator(),
             &midpoint_voltage_v,
@@ -670,11 +667,59 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
     }
 }
 
+// Exact two-endpoint coefficient work, shared by finite-time thermal refresh
+// and zero-duration material replacement. It is independent of the storage
+// residual and includes every tensor cross term in the actual mesh frame.
+fn parameter_work_cells(
+    before: &PlanarElectrostatics,
+    after: &PlanarElectrostatics,
+    previous: &super::ElectricCellResponse,
+    endpoint: &super::ElectricCellResponse,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<DielectricEnergyCell>, f64), Error> {
+    let mut cells = Vec::with_capacity(previous.cell_energy_j.len());
+    let mut parameter_work_j = 0.0;
+    for triangle in 0..previous.cell_energy_j.len() {
+        poll(cancelled)?;
+        let epsilon0 = before.permittivity_coefficients()[triangle].matrix_f_m();
+        let epsilon1 = after.permittivity_coefficients()[triangle].matrix_f_m();
+        let e0 = previous.electric_field_v_m[triangle];
+        let e1 = endpoint.electric_field_v_m[triangle];
+        let mut delta_d = [0.0; 2];
+        for i in 0..2 {
+            for j in 0..2 {
+                delta_d[i] =
+                    finite(finite(epsilon1[i][j] - epsilon0[i][j])?.mul_add(e1[j], delta_d[i]))?;
+            }
+        }
+        let volume = before
+            .mesh()
+            .face_measure(triangle)
+            .ok_or(Error::Invalid("dielectric cell lacks its original volume"))?;
+        let work = finite(-0.5 * volume * finite(e0[0].mul_add(delta_d[0], e0[1] * delta_d[1]))?)?;
+        parameter_work_j = finite(parameter_work_j + work)?;
+        cells.push(DielectricEnergyCell {
+            triangle,
+            displacement_c_m2: [
+                previous.displacement_c_m2[triangle],
+                endpoint.displacement_c_m2[triangle],
+            ],
+            free_energy_j: [
+                previous.cell_energy_j[triangle],
+                endpoint.cell_energy_j[triangle],
+            ],
+            parameter_work_j: work,
+        });
+    }
+    Ok((cells, parameter_work_j))
+}
+
 fn check_storage(
     voltage: &[f64],
     charge: &[f64],
     energy: f64,
-    controls: DielectricRelaxationControls,
+    charge_tolerance_c: f64,
+    energy_tolerance_j: f64,
 ) -> Result<(), Error> {
     let reference = voltage[0];
     let mut pairing = 0.0;
@@ -683,8 +728,8 @@ fn check_storage(
         pairing = finite((v - reference).mul_add(q, pairing))?;
         total_charge = finite(total_charge + q)?;
     }
-    if finite(energy - 0.5 * pairing)?.abs() > controls.energy_tolerance_j
-        || total_charge.abs() > controls.charge_tolerance_c
+    if finite(energy - 0.5 * pairing)?.abs() > energy_tolerance_j
+        || total_charge.abs() > charge_tolerance_c
     {
         return Err(Error::Balance(
             "original dielectric charge and cell energy disagree",

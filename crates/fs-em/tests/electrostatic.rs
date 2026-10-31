@@ -6,6 +6,8 @@ mod force;
 mod network;
 #[path = "electrostatic/anisotropic.rs"]
 mod anisotropic;
+#[path = "electrostatic/rebind.rs"]
+mod rebind;
 use common::{config, layered, limits};
 use fs_em::electrostatic::{ElectrostaticControls, ElectrostaticError, PlanarElectrostatics};
 use fs_evidence::ValidityDomain;

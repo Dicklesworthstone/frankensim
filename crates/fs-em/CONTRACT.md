@@ -811,6 +811,34 @@ resistance or automatic electrical mixture law is inferred here.
 
 ## Native spatial leaky-dielectric charge and energy history
 
+### Material replacement at retained native charge
+
+`PlanarLeakyDielectric::rebind_material_candidate` substitutes new complete
+dielectric/conductor source bundles on the original mesh at the accepted clock.
+The native scalar-potential solver recomputes voltage at conserved free-node
+charge; those charge coordinates are retained bit-for-bit. Original electrode
+voltages remain held. Their charge transfer and signed electrical work are
+explicit, separately from signed material-parameter work. The shared native
+coefficient-work calculation includes all tensor cross terms and independently
+closes `delta_U = W_electrodes + W_material`. Neither work account is Joule heat.
+
+New material cards, electrical basis and material orientations are data; declared
+mesh frames must agree. New dielectric laws are validity-wide constant and
+subsequent ordinary temperature/phase updates remain pinned to the replacement
+sources. Conductivity-only changes retain voltage and charge exactly and alter
+subsequent native current/heat. Work bounds, assembly budgets, field/charge
+gates and cancellation refuse transactionally. This explicit instantaneous
+constitutive replacement does not predict an insertion trajectory, material
+formation energy, thermal entropy, mass transport or radiative transients.
+
+G1/G3/G4 tests in `electrostatic/rebind.rs` cover conserved-charge and held-voltage
+capacitor limits, heterogeneous redistribution and reversal, rotated dielectric
+data, electrical-basis substitution through continued relaxation, gauge
+invariance, work refusal and late-cancellation retry. These are synthetic
+analytical model checks, not measured material validation.
+
+### Charge relaxation
+
 `electrostatic::relaxation::PlanarLeakyDielectric<C>` retains physical P1
 potentials, weak nodal charges, cell dielectric storage and time on the original
 planar mesh. It uses the existing dielectric and scalar/oriented Ohmic Hodge
