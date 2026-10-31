@@ -14,7 +14,23 @@ pub struct TensorProjectionBudget {
     pub max_coordinates: usize,
     /// Bound on (branches+1+kv)*36*n + (1+kv)*6*n^2 scalar products,
     /// where kv=1 when the material supplies a Kelvin viscosity, otherwise 0.
+    /// Thermal derivative projection separately bounds (branches+1)*42*n^2.
     pub max_scalar_terms: usize,
+}
+
+/// Derivatives of the original stored tensors through the SAME strain columns
+/// and volume as a mechanical projection. Matrices are symmetric row-major;
+/// signed and indefinite derivatives are valid and are never Gram-factored.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectedTensorTemperatureDerivative {
+    equilibrium: Vec<f64>,
+    branches: Vec<Vec<f64>>,
+}
+impl ProjectedTensorTemperatureDerivative {
+    /// Complete equilibrium derivative, in N/(m K) for displacement columns.
+    pub fn equilibrium(&self) -> &[f64] { &self.equilibrium }
+    /// Complete Maxwell derivatives, in the original source branch order.
+    pub fn branches(&self) -> &[Vec<f64>] { &self.branches }
 }
 
 /// One volume-scaled Maxwell factor A = sqrt(volume) B S in caller coordinates.
@@ -137,6 +153,51 @@ impl ProjectedTensorProny {
     pub fn viscosity_gram_rows(&self) -> Option<&[Vec<f64>]> { self.viscosity_rows.as_deref() }
     /// All volume-scaled memory factors in original material branch order.
     pub fn branches(&self) -> &[ProjectedPronyBranch] { &self.branches }
+
+    /// Project dC/dT by V S^T (dC/dT) S using the original tensor-shear columns.
+    /// The source owner establishes that the derivative belongs to this law
+    /// and material frame. No strain recovery is needed: consumers retaining
+    /// physical spring strains can use varying rank-deficient Maxwell tensors
+    /// without losing their otherwise hidden strain history.
+    ///
+    /// This is a derivative of stored free energy only. Kelvin viscosity and
+    /// relaxation-time derivatives contribute no mechanical entropy.
+    pub fn thermal_stiffness_derivatives(&self,
+        derivative: &source::thermal::TensorTemperatureDerivative,
+        budget: TensorProjectionBudget, mut cancelled: impl FnMut() -> bool)
+        -> Result<ProjectedTensorTemperatureDerivative>
+    {
+        poll(&mut cancelled)?;
+        let n = self.coordinates();
+        let count = 1 + self.branches.len();
+        let work = n.checked_mul(n).and_then(|v| v.checked_mul(42))
+            .and_then(|v| v.checked_mul(count))
+            .ok_or_else(|| invalid("thermal projection work overflow"))?;
+        if !(1..=256).contains(&budget.max_coordinates) || n > budget.max_coordinates
+            || work > budget.max_scalar_terms
+            || derivative.branches_pa_k.len() != self.branches.len() {
+            return Err(invalid("thermal projection needs complete branches within its original work budget"));
+        }
+        let mut project = |matrix: &Tangent6| -> Result<Vec<f64>> {
+            let mut result = vec![0.0; n*n];
+            for i in 0..n {
+                poll(&mut cancelled)?;
+                let left = mandel(&self.columns[i]);
+                for j in i..n {
+                    let right = mandel(&self.columns[j]);
+                    let value = self.volume_m3 * dot(&left, &apply(matrix, &right));
+                    if !value.is_finite() { return Err(invalid("projected thermal derivative overflow")); }
+                    result[i*n+j] = value; result[j*n+i] = value;
+                }
+            }
+            Ok(result)
+        };
+        let equilibrium = project(&derivative.equilibrium_pa_k)?;
+        let branches = derivative.branches_pa_k.iter().map(project)
+            .collect::<Result<Vec<_>>>()?;
+        poll(&mut cancelled)?;
+        Ok(ProjectedTensorTemperatureDerivative { equilibrium, branches })
+    }
 
     /// Reconstruct physical strain and enforce the original material domain.
     /// This checks a supplied state, not every point along a time interval.

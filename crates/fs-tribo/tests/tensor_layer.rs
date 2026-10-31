@@ -1,5 +1,6 @@
 //! Manufactured tensor materials verify operators, not measured rosin or wood.
-use fs_tribo::layer_contact::tensor::{ShearStiffness, ShearViscosity, TensorLayerRelaxationArm};
+use fs_tribo::layer_contact::tensor::{ShearStiffness, ShearViscosity, TensorLayerRelaxationArm,
+    TensorLayerThermalSlopes};
 use fs_tribo::layer_contact::{ThirdBodyLayerContact, ThirdBodyLayerRelaxationArm};
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::tangential::transport::{
@@ -58,6 +59,125 @@ fn model(yield_force: f64) -> ThirdBodyLayerContact {
         1.0,
     )
     .unwrap()
+}
+
+fn thermal_slopes() -> TensorLayerThermalSlopes {
+    TensorLayerThermalSlopes {
+        equilibrium_n_m_k: [[-1.2, 0.3], [0.3, -0.4]],
+        relaxation_n_m_k: vec![
+            [[-0.2, 0.8], [0.8, 0.5]],
+            [[-0.128, 0.176], [0.176, -0.242]],
+        ],
+    }
+}
+fn thermal_model(t: f64) -> ThirdBodyLayerContact {
+    let slopes = thermal_slopes();
+    let dt = t - 300.0;
+    let affine = |base: [[f64; 2]; 2], slope: [[f64; 2]; 2]| {
+        std::array::from_fn(|i| std::array::from_fn(|j| base[i][j] + dt*slope[i][j]))
+    };
+    ThirdBodyLayerContact::new_tensor(
+        ShearStiffness::positive_definite(affine([[800.0,70.0],[70.0,500.0]],
+            slopes.equilibrium_n_m_k)).unwrap(),
+        vec![
+            TensorLayerRelaxationArm {
+                stiffness: ShearStiffness::positive_definite(affine([[400.0,80.0],[80.0,65.0]],
+                    slopes.relaxation_n_m_k[0])).unwrap(),
+                relaxation_time_s: 0.02*(1.0+0.003*dt),
+            },
+            TensorLayerRelaxationArm {
+                stiffness: ShearStiffness::from_gram_rows(vec![[8.0,-11.0]
+                    .map(|v| v*(1.0-0.002*dt).sqrt())]).unwrap(),
+                relaxation_time_s: 0.07,
+            },
+        ], 0.1, 0.7, t, 1.0).unwrap()
+        .with_kelvin_viscosity(ShearViscosity::from_gram_rows(vec![
+            [0.18,-0.07].map(|v| v*(1.0+0.01*dt).sqrt())]).unwrap()).unwrap()
+}
+fn quadratic(k: [[f64; 2]; 2], x: [f64; 2]) -> f64 {
+    k[0][0]*x[0]*x[0] + 2.0*k[0][1]*x[0]*x[1] + k[1][1]*x[1]*x[1]
+}
+
+#[test]
+fn g1_tensor_thermal_entropy_keeps_cross_terms_rank_deficient_strain_and_all_loss_channels() {
+    let law = thermal_model(300.0);
+    let slopes = thermal_slopes();
+    let state = law.advance(&law.initial_state(), &input([0.003,-0.001],0.001,0.0))
+        .unwrap().state;
+    let before = law.tensor_thermodynamics(&state, &slopes).unwrap();
+    let expected_s = -0.5*quadratic(slopes.equilibrium_n_m_k,state.elastic_slip_m())
+        -0.5*slopes.relaxation_n_m_k.iter().zip(state.relaxation_slip_m())
+            .map(|(k,r)| quadratic(*k,*r)).sum::<f64>();
+    close(before.entropy_j_k, expected_s, 3e-21);
+    close(before.internal_energy_j,before.free_energy_j+300.0*expected_s,1e-18);
+    let held_energy = |t| {
+        let next = thermal_model(t);
+        let continued = next.continue_state_with_work(&state).unwrap();
+        next.stored_energy_j(&continued.state)
+    };
+    close(before.entropy_j_k,-(held_energy(300.01)-held_energy(299.99))/0.02,1e-16);
+    let hot = thermal_model(320.0);
+    assert!(hot.continue_state(&state).is_err());
+    let continued = hot.continue_state_with_work(&state).unwrap();
+    assert_eq!(continued.state.elastic_slip_m(),state.elastic_slip_m());
+    assert_eq!(continued.state.plastic_slip_m(),state.plastic_slip_m());
+    assert_eq!(continued.state.relaxation_slip_m(),state.relaxation_slip_m());
+    let held = hot.tensor_thermodynamics(&continued.state,&slopes).unwrap();
+    close(held.internal_energy_j,before.internal_energy_j,2e-18);
+    close(continued.coefficient_free_energy_change_j,
+        -20.0*before.entropy_j_k,2e-18);
+    let mut drive = input([-0.001,0.002],0.001,0.0);
+    drive.contact_temperature_k = Some(320.0);
+    let step = hot.advance(&continued.state,&drive).unwrap();
+    let after = hot.tensor_thermodynamics(&step.state,&slopes).unwrap();
+    let channels = hot.step_dissipation(&continued.state,&step.state,drive.dt_s).unwrap();
+    assert!(channels.plastic_j > 0.0 && channels.relaxation_j > 0.0 && channels.kelvin_j > 0.0);
+    let heat = channels.plastic_j + channels.relaxation_j + channels.kelvin_j
+        -continued.coefficient_free_energy_change_j
+        -(320.0*after.entropy_j_k-300.0*before.entropy_j_k);
+    let work = step.traction_n[0]*step.slip_increment_m[0]
+        + step.traction_n[1]*step.slip_increment_m[1];
+    close(work,after.internal_energy_j-before.internal_energy_j+heat,2e-14);
+}
+
+#[test]
+fn g3_tensor_thermal_entropy_rotates_with_full_material_and_history() {
+    let law = thermal_model(300.0);
+    let state = law.advance(&law.initial_state(), &input([0.002,-0.001],0.001,0.0))
+        .unwrap().state;
+    let slopes = thermal_slopes();
+    let frame = TangentFrame::new([0.0,0.0,1.0],[1.0,0.0,0.0]).unwrap();
+    for angle in [0.31_f64, -0.77] {
+        let next = TangentFrame::new([0.0,0.0,1.0],[angle.cos(),angle.sin(),0.0]).unwrap();
+        let rotation = TangentialHistoryRotation::between(frame,next,0.0).unwrap();
+        let transfer = law.transport_tensor_state(&state,rotation,TangentialTransportConfig {
+            absolute_energy_tolerance_j: 1e-16, relative_energy_tolerance: 1e-13,
+        }).unwrap();
+        let columns = [rotation.apply([1.0,0.0]).unwrap(),rotation.apply([0.0,1.0]).unwrap()];
+        let rotate = |k: [[f64;2];2]| {
+            let entry = |i: usize,j: usize| (0..2).map(|a| (0..2)
+                .map(|b| columns[a][i]*k[a][b]*columns[b][j]).sum::<f64>()).sum::<f64>();
+            let cross = entry(0,1);
+            [[entry(0,0),cross],[cross,entry(1,1)]]
+        };
+        let rotated = TensorLayerThermalSlopes {
+            equilibrium_n_m_k: rotate(slopes.equilibrium_n_m_k),
+            relaxation_n_m_k: slopes.relaxation_n_m_k.iter().map(|k| rotate(*k)).collect(),
+        };
+        let a = law.tensor_thermodynamics(&state,&slopes).unwrap();
+        let b = transfer.law.tensor_thermodynamics(&transfer.state,&rotated).unwrap();
+        close(a.entropy_j_k,b.entropy_j_k,2e-20);
+        close(a.internal_energy_j,b.internal_energy_j,2e-17);
+    }
+    let saved = state.clone();
+    let mut bad = slopes.clone(); bad.relaxation_n_m_k.pop();
+    assert!(law.tensor_thermodynamics(&state,&bad).is_err());
+    bad = slopes.clone(); bad.equilibrium_n_m_k[0][1] = f64::NAN;
+    assert!(law.tensor_thermodynamics(&state,&bad).is_err());
+    bad = slopes; bad.equilibrium_n_m_k[1][0] += 0.01;
+    assert!(law.tensor_thermodynamics(&state,&bad).is_err());
+    assert!(thermal_model(301.0).tensor_thermodynamics(&state,&thermal_slopes()).is_err());
+    assert_eq!(state,saved);
 }
 
 #[test]

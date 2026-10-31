@@ -4,9 +4,11 @@
 //! Every original 3-D equilibrium/Maxwell cross term is projected in its declared
 //! orientation. This is constrained shear kinematics, not plane-stress/normal
 //! contact elimination. Only the already-existing shear wrenches do work here.
-//! Stored tensors are constant throughout the admitted caloric interval;
-//! temperature may change relaxation times, Kelvin viscosity and plastic kinetics. The
-//! original joint rigid/enthalpy residual accepts all bodies/history/cells once.
+//! Affine stored tensors contribute their complete mechanical entropy and
+//! internal energy. Temperature may also change relaxation times, Kelvin
+//! viscosity and plastic kinetics. The original joint rigid/enthalpy residual
+//! evaluates each law at its endpoint trial temperature and accepts all
+//! bodies/history/cells once; dissipative heat excludes reversible storage work.
 
 use super::thermal::RigidLayerThermalTransport;
 use super::*;
@@ -18,8 +20,9 @@ use fs_material::state_point::{
     ScalarPropertyRequirement, resolve_material_state_point,
 };
 use fs_material::visco_tensor::{
-    TensorProjectionBudget,
+    ProjectedTensorProny, TensorProjectionBudget,
     source::{ResolvedTensorMaterial, TensorSourceError},
+    source::thermal::AffineTensorThermal,
 };
 use fs_qty::{DynViscosity, Pressure, Temperature};
 use fs_thermal::enthalpy::ThermalLaw;
@@ -59,11 +62,15 @@ pub struct TensorLayerMaterial<'a> {
     geometry: RigidLayerGeometry,
     maximum_angular_frequency_rad_s: f64,
     projection_budget: TensorProjectionBudget,
+    thermal_slopes: TensorLayerThermalSlopes,
 }
 impl<'a> TensorLayerMaterial<'a> {
-    /// Source-bound fully solid, constant-density tensor potential. Stored
-    /// tensor softening and changing strain maps refuse here;
-    /// they require their complete thermoelastic/work-conjugate extensions.
+    /// Source-bound fully solid, constant-density affine tensor potential.
+    /// Equilibrium moduli share the original admitted affine scale; every
+    /// Maxwell coefficient may have its own affine slope. Retained physical
+    /// spring strains preserve even rank-deficient branch history. Non-affine
+    /// potentials, changing geometry and thermal expansion remain outside this
+    /// fixed-kinematics law and refuse instead of silently dropping their work.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         material: ResolvedTensorMaterial,
@@ -97,9 +104,19 @@ impl<'a> TensorLayerMaterial<'a> {
             ));
         }
         let interval = [knots[0].temperature_k, knots[knots.len() - 1].temperature_k];
-        material
-            .admit_thermal_relaxation(card, temperature_axis, interval)
+        let thermal = AffineTensorThermal::try_new(&material, card, temperature_axis, interval)
             .map_err(TensorLayerSourceError::Tensor)?;
+        let derivative = thermal.in_frame(material_to_world)
+            .map_err(TensorLayerSourceError::Tensor)?;
+        let projected = project_layer(&material, material_to_world, geometry, projection_budget)?;
+        let derivative = projected.thermal_stiffness_derivatives(&derivative,
+            projection_budget, || false)
+            .map_err(|_| TensorLayerSourceError::Invalid("tensor shear thermal projection refused"))?;
+        let matrix = |values: &[f64]| [[values[0], values[1]], [values[2], values[3]]];
+        let thermal_slopes = TensorLayerThermalSlopes {
+            equilibrium_n_m_k: matrix(derivative.equilibrium()),
+            relaxation_n_m_k: derivative.branches().iter().map(|values| matrix(values)).collect(),
+        };
         let requirements = [
             ScalarPropertyRequirement::try_new(
                 SHEAR_LAYER_YIELD_PROPERTY,
@@ -134,6 +151,7 @@ impl<'a> TensorLayerMaterial<'a> {
             geometry,
             maximum_angular_frequency_rad_s,
             projection_budget,
+            thermal_slopes,
         };
         value.at_temperature(temperature)?;
         Ok(value)
@@ -143,6 +161,11 @@ impl<'a> TensorLayerMaterial<'a> {
     }
     pub const fn geometry(&self) -> RigidLayerGeometry {
         self.geometry
+    }
+    /// Original source derivatives after the SAME material-frame and physical
+    /// shear projection as the stored tensors, in N/(m K).
+    pub const fn thermal_slopes(&self) -> &TensorLayerThermalSlopes {
+        &self.thermal_slopes
     }
 
     /// Requery original claims, rotate the full 3-D law, and project every arm.
@@ -203,34 +226,9 @@ impl<'a> TensorLayerMaterial<'a> {
                 ));
             }
         }
-        let rotated = material
-            .rotated_law(self.material_to_world)
-            .map_err(TensorLayerSourceError::Tensor)?;
-        let normal = self.geometry.frame.normal();
-        let tangent = [
-            self.geometry.frame.longitudinal(),
-            self.geometry.frame.lateral(),
-        ];
         let h = self.geometry.thickness_m;
-        let columns = tangent.map(|t| {
-            let strain = |i: usize, j: usize| (t[i] * normal[j] + normal[i] * t[j]) / (2.0 * h);
-            [
-                strain(0, 0),
-                strain(1, 1),
-                strain(2, 2),
-                strain(0, 1),
-                strain(1, 2),
-                strain(2, 0),
-            ]
-        });
-        let projected = rotated
-            .project_strain(
-                &columns,
-                self.geometry.area_m2 * h,
-                self.projection_budget,
-                || false,
-            )
-            .map_err(|_| TensorLayerSourceError::Invalid("tensor shear projection refused"))?;
+        let projected = project_layer(&material, self.material_to_world,
+            self.geometry, self.projection_budget)?;
         let k = projected.equilibrium_stiffness();
         let equilibrium = ShearStiffness::positive_definite([[k[0], k[1]], [k[2], k[3]]])
             .map_err(TensorLayerSourceError::Constitutive)?;
@@ -319,6 +317,22 @@ impl<'a> TensorLayerMaterial<'a> {
     }
 }
 
+fn project_layer<E>(material: &ResolvedTensorMaterial, material_to_world: [[f64; 3]; 3],
+    geometry: RigidLayerGeometry, budget: TensorProjectionBudget)
+    -> Result<ProjectedTensorProny, TensorLayerSourceError<E>> {
+    let rotated = material.rotated_law(material_to_world)
+        .map_err(TensorLayerSourceError::Tensor)?;
+    let normal = geometry.frame.normal();
+    let tangent = [geometry.frame.longitudinal(), geometry.frame.lateral()];
+    let h = geometry.thickness_m;
+    let columns = tangent.map(|t| {
+        let strain = |i: usize, j: usize| (t[i]*normal[j] + normal[i]*t[j])/(2.0*h);
+        [strain(0,0), strain(1,1), strain(2,2), strain(0,1), strain(1,2), strain(2,0)]
+    });
+    rotated.project_strain(&columns, geometry.area_m2*h, budget, || false)
+        .map_err(|_| TensorLayerSourceError::Invalid("tensor shear projection refused"))
+}
+
 fn admit_plastic(
     state: &ResolvedMaterialStatePoint,
     card: &MaterialCard,
@@ -390,8 +404,9 @@ fn admit_plastic(
 
 /// Actual tensor material drives the same finite-face force/couple, inertia,
 /// retained strain, and heat solve. All source trials retain original receipts.
-/// Changing tensor stiffness is refused by admission and unchanged-potential
-/// continuation, so its reversible work cannot be mislabeled as friction heat.
+/// The original retained strains survive affine tensor softening. Caloric heat
+/// is plastic + Maxwell + Kelvin loss minus coefficient free-energy change
+/// minus delta(T*S); only the actual dissipative channels produce friction entropy.
 #[allow(clippy::too_many_arguments)]
 pub fn step_tensor_heated_rigid_layer_candidate<'t, P, E>(
     bodies: &[RigidBodyState; 2],
@@ -415,7 +430,10 @@ pub fn step_tensor_heated_rigid_layer_candidate<'t, P, E>(
     material
         .admit(history, thermal, route)
         .map_err(HeatedRigidLayerError::Source)?;
-    step_heated_rigid_layer_candidate(
+    let has_thermal_storage = material.thermal_slopes.equilibrium_n_m_k.iter().flatten()
+        .chain(material.thermal_slopes.relaxation_n_m_k.iter().flatten().flatten())
+        .any(|slope| *slope != 0.0);
+    step_heated_impl(
         bodies,
         properties,
         history,
@@ -427,6 +445,7 @@ pub fn step_tensor_heated_rigid_layer_candidate<'t, P, E>(
         controls,
         force_guess_n,
         energy_guess_j,
+        has_thermal_storage.then_some(LayerThermalSlopes::Tensor(&material.thermal_slopes)),
         |endpoint, temperature| {
             let (source, law) = material.resolve(temperature)?;
             let transport =

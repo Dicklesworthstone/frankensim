@@ -30,6 +30,7 @@ use fs_solver::{
 use fs_thermal::enthalpy::backward_euler::StepCoefficients;
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 use fs_tribo::layer_contact::{ThirdBodyLayerContact, ThirdBodyLayerState};
+use fs_tribo::layer_contact::tensor::TensorLayerThermalSlopes;
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::{
     TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput, TriboError,
@@ -41,6 +42,24 @@ pub mod thermal;
 
 /// Full source tensor shear with original rigid momenta and finite caloric cells.
 pub mod tensor;
+
+// Both source adapters use the original mechanical/thermal transaction. Only
+// their retained free-energy derivatives differ; there is no second heat solve.
+#[derive(Clone, Copy)]
+enum LayerThermalSlopes<'a> {
+    Scalar(&'a ShearLayerThermalSlopes),
+    Tensor(&'a TensorLayerThermalSlopes),
+}
+impl LayerThermalSlopes<'_> {
+    fn thermodynamics(self, law: &ThirdBodyLayerContact, state: &ThirdBodyLayerState)
+        -> Result<fs_tribo::layer_contact::ThirdBodyLayerThermodynamics, TriboError> {
+        match self {
+            Self::Scalar(slopes) => law.thermodynamics_with_relaxation(state,
+                slopes.equilibrium_n_m_k, &slopes.relaxation_n_m_k),
+            Self::Tensor(slopes) => law.tensor_thermodynamics(state, slopes),
+        }
+    }
+}
 
 /// The actual opposing face centres and unchanged material tangent frame.
 /// The normal points from face A to face B. Arms are COM-relative in each
@@ -486,7 +505,7 @@ fn step_heated_impl<'t, P, E>(
     history: &RigidLayerHistory, thermal: &DepositionSimulation<'t>,
     route: &ThirdBodyHeatRoute, target_s: f64, normal_n: f64,
     law_solve: TangentialSolveConfig, controls: HeatedRigidLayerSolve,
-    force_guess_n: [f64; 2], energy_guess_j: &[f64], thermal_slopes: Option<&ShearLayerThermalSlopes>,
+    force_guess_n: [f64; 2], energy_guess_j: &[f64], thermal_slopes: Option<LayerThermalSlopes<'_>>,
     resolve: impl Fn(&DepositionSimulation<'t>, f64) -> Result<RigidLayerHeatSource<P>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<HeatedRigidLayerCandidate<'t, P>, HeatedRigidLayerError<E>> {
@@ -529,8 +548,7 @@ fn step_heated_impl<'t, P, E>(
     prepared.admit_thermal_route(route, controls.mechanical.geometry_tolerance_m)?;
     let heat_step = ThirdBodyHeatStep::new(thermal, target_s, route, &poll)?;
     let old_thermodynamics = thermal_slopes.map(|slopes|
-        history.law.thermodynamics_with_relaxation(&history.deformation,
-            slopes.equilibrium_n_m_k, &slopes.relaxation_n_m_k)
+        slopes.thermodynamics(&history.law, &history.deformation)
             .map_err(RigidLayerError::from)).transpose()?;
     let count = heat_step.cell_ids().len();
     let scale = controls.energy_coordinate_j_per_n;
@@ -575,9 +593,8 @@ fn step_heated_impl<'t, P, E>(
                 )?;
                 let thermoelastic = if let (Some(slopes), Some(old), Some(continuation)) =
                     (thermal_slopes, old_thermodynamics, continuation) {
-                    let new = source.law.thermodynamics_with_relaxation(
-                        &mechanical.report.constitutive.state, slopes.equilibrium_n_m_k,
-                        &slopes.relaxation_n_m_k)
+                    let new = slopes.thermodynamics(&source.law,
+                        &mechanical.report.constitutive.state)
                         .map_err(RigidLayerError::from)?;
                     let coefficient = continuation.coefficient_free_energy_change_j;
                     let entropy_energy_change_j = temperature * new.entropy_j_k

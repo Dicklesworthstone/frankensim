@@ -1140,10 +1140,21 @@ material orientation, source receipts, Maxwell order and Gram rows. Existing
 separated face forces/couples drive actual rigid momenta, and independently
 computed plastic/Maxwell/Kelvin loss enters the existing finite layer caloric cell in
 the original joint nonlinear solve. Geometry, material mass, caloric identity,
-temperature and clock must agree. This fixed-geometry rung admits constant
-stored tensors with source-defined temperature-dependent relaxation, Kelvin
-viscosity and plastic kinetics. It refuses tensor thermal softening, phase changes,
-normal/bending/torsional response and unowned geometric changes.
+temperature and clock must agree. This fixed-geometry rung also admits
+source-affine stored tensors through the original thermal potential. Equilibrium
+moduli share its admitted common affine scale; each Maxwell cross term may have
+its own affine derivative. Source-defined relaxation, Kelvin viscosity and
+plastic kinetics may vary with temperature. Non-affine storage, thermal expansion,
+phase change, normal/bending/torsional response and unowned geometry remain refused.
+
+`TensorLayerThermalSlopes` retains complete symmetric equilibrium and Maxwell
+derivatives in the same tangent frame. `tensor_thermodynamics` uses the original
+physical spring strains to evaluate `S=-e^T K' e/2-sum(r_j^T K'_j r_j/2)` and
+`U=Psi+T*S`, including signed cross terms and changing rank-deficient branches.
+The shared rigid/finite-heat Newton owner deposits plastic, Maxwell and Kelvin
+loss minus coefficient free-energy change and `Delta(T*S)`. Reversible exchange
+may cool a cell and is never relabeled as frictional dissipation. Force/history,
+temperature, rigid momenta and finite caloric cells are accepted together.
 
 `with_kelvin_viscosity` retains the original positive-semidefinite shear-rate
 Gram rows, including zero and rank-deficient tensors. Viscosity acts on the

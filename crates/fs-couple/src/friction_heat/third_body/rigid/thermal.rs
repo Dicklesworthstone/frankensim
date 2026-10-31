@@ -152,7 +152,8 @@ pub fn step_thermoelastic_heated_rigid_layer_candidate<'t, P, E>(
 ) -> Result<HeatedRigidLayerCandidate<'t, P>, HeatedRigidLayerError<ThermoelasticLayerError<E>>> {
     material.admit(history, thermal, route).map_err(HeatedRigidLayerError::Source)?;
     step_heated_impl(bodies, properties, history, thermal, route, target_s, normal_n,
-        law_solve, controls, force_guess_n, energy_guess_j, Some(&material.thermal_slopes),
+        law_solve, controls, force_guess_n, energy_guess_j,
+        Some(LayerThermalSlopes::Scalar(&material.thermal_slopes)),
         |endpoint, temperature| {
             let (source, law) = material.resolve(temperature)?;
             let resolved = resolve_transport(endpoint, &source).map_err(ThermoelasticLayerError::Transport)?;

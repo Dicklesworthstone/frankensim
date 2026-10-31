@@ -114,6 +114,16 @@ pub struct TensorLayerRelaxationArm {
     pub stiffness: ShearStiffness,
     pub relaxation_time_s: f64,
 }
+
+/// Complete affine derivatives of the retained equilibrium and Maxwell
+/// stiffness tensors [N/(m K)]. Signed cross terms and indefinite derivatives
+/// are physical possibilities; only the actual stored tensors must be PSD.
+/// These numerical inputs do not themselves establish material-source authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorLayerThermalSlopes {
+    pub equilibrium_n_m_k: [[f64; 2]; 2],
+    pub relaxation_n_m_k: Vec<[[f64; 2]; 2]>,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TensorLayerPotential {
     equilibrium: ShearStiffness,
@@ -195,6 +205,48 @@ impl ThirdBodyLayerContact {
     /// Tensor arms, absent for the separately preserved isotropic constructor.
     pub fn tensor_relaxation(&self) -> Option<&[TensorLayerRelaxationArm]> {
         self.tensor.as_ref().map(|value| value.arms.as_slice())
+    }
+
+    /// S=-e^T K' e/2-sum(r_j^T K'_j r_j/2), U=Psi+T*S, using the
+    /// SAME retained physical spring strains as the tensor force law. Every
+    /// branch derivative is required in source order, including a zero slope.
+    /// The coupled owner admits the full affine interval and accounts for both
+    /// coefficient work and delta(T*S). Neither Kelvin viscosity nor plastic
+    /// kinetics has stored free energy, even when either varies with temperature.
+    pub fn tensor_thermodynamics(&self, state: &ThirdBodyLayerState,
+        slopes: &TensorLayerThermalSlopes)
+        -> Result<ThirdBodyLayerThermodynamics, TriboError>
+    {
+        let potential = self.tensor_state(state)?;
+        if slopes.relaxation_n_m_k.len() != potential.arms.len() {
+            return Err(invalid("layer_thermal_memory_derivative_count"));
+        }
+        let contribution = |matrix: [[f64; 2]; 2], slip: [f64; 2]| {
+            if matrix[0][1] != matrix[1][0]
+                || matrix.iter().flatten().any(|v| !v.is_finite()) {
+                return Err(invalid("layer_tensor_temperature_derivative"));
+            }
+            let mut entropy = 0.0;
+            for i in 0..2 {
+                for j in 0..2 {
+                    let term = checked_mul(checked_mul(-0.5*matrix[i][j], slip[i],
+                        "layer_mechanical_entropy_j_k")?, slip[j], "layer_mechanical_entropy_j_k")?;
+                    entropy = checked_add(entropy, term, "layer_mechanical_entropy_j_k")?;
+                }
+            }
+            Ok(entropy)
+        };
+        let mut entropy_j_k = contribution(slopes.equilibrium_n_m_k, state.elastic_slip_m)?;
+        for (matrix, &slip) in slopes.relaxation_n_m_k.iter().zip(&state.relaxation_slip_m) {
+            entropy_j_k = checked_add(entropy_j_k, contribution(*matrix, slip)?,
+                "layer_mechanical_entropy_j_k")?;
+        }
+        let free_energy_j = self.tensor_energy(state);
+        nonnegative_finite(free_energy_j, "layer_free_energy_j")?;
+        let internal_energy_j = checked_add(free_energy_j,
+            checked_mul(self.temperature_kelvin, entropy_j_k, "layer_entropy_energy_j")?,
+            "layer_internal_energy_j")?;
+        Ok(ThirdBodyLayerThermodynamics { free_energy_j, entropy_j_k, internal_energy_j })
     }
     fn tensor_state<'a>(
         &'a self,

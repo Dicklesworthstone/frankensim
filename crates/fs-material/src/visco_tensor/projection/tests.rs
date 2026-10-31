@@ -99,3 +99,51 @@ fn projection_refuses_domain_work_and_cancellation_without_mutating_the_law() {
     assert!(baseline.strain(&[0.0]).is_err());
     assert!(baseline.conjugate_force(&[f64::NAN;6]).is_err());
 }
+
+#[test]
+fn thermal_projection_retains_signed_full_tensor_derivatives_and_original_strain_work() {
+    let m = model();
+    let columns = columns();
+    let volume = 0.25;
+    let p = m.project_strain(&columns,volume,budget(),||false).unwrap();
+    let mut equilibrium = diagonal(-0.7);
+    equilibrium[0][3] = 1.3; equilibrium[3][0] = 1.3;
+    let mut first = diagonal(0.2);
+    first[0][0] = -1.1; first[1][4] = -0.8; first[4][1] = -0.8;
+    let mut second = diagonal(-0.3);
+    second[2][5] = 0.9; second[5][2] = 0.9;
+    let derivative = source::thermal::TensorTemperatureDerivative {
+        equilibrium_pa_k: equilibrium, branches_pa_k: vec![first,second],
+        interval_k: [280.0,320.0],
+    };
+    let projected = p.thermal_stiffness_derivatives(&derivative,budget(),||false).unwrap();
+    let pairs = [(equilibrium,projected.equilibrium()),
+        (first,projected.branches()[0].as_slice()),
+        (second,projected.branches()[1].as_slice())];
+    // Independent physical Voigt contraction: both shear factors sqrt(2)
+    // remain, including every normal/shear cross term and both tangent axes.
+    let weights = [1.0,1.0,1.0,2.0_f64.sqrt(),2.0_f64.sqrt(),2.0_f64.sqrt()];
+    for (matrix, reduced) in pairs {
+        for x in [[0.004,-0.003],[-0.002,0.005]] {
+            let strain: [f64;6] = std::array::from_fn(|i|
+                weights[i]*(columns[0][i]*x[0]+columns[1][i]*x[1]));
+            let direct = volume*(0..6).map(|i| (0..6)
+                .map(|j| strain[i]*matrix[i][j]*strain[j]).sum::<f64>()).sum::<f64>();
+            let reduced_work = reduced[0]*x[0]*x[0] + 2.0*reduced[1]*x[0]*x[1]
+                + reduced[3]*x[1]*x[1];
+            close(direct,reduced_work);
+            assert_eq!(reduced[1],reduced[2]);
+        }
+    }
+    let viscous = m.with_kelvin_viscosity_mandel(diagonal(0.2)).unwrap()
+        .project_strain(&columns,volume,budget(),||false).unwrap();
+    assert_eq!(projected,viscous.thermal_stiffness_derivatives(&derivative,budget(),||false).unwrap());
+    assert!(p.thermal_stiffness_derivatives(&derivative,
+        TensorProjectionBudget {max_scalar_terms:503,..budget()},||false).is_err());
+    assert_eq!(projected,p.thermal_stiffness_derivatives(&derivative,
+        TensorProjectionBudget {max_scalar_terms:504,..budget()},||false).unwrap());
+    assert!(matches!(p.thermal_stiffness_derivatives(&derivative,budget(),||true),
+        Err(TensorPronyError::Cancelled)));
+    let mut incomplete = derivative; incomplete.branches_pa_k.pop();
+    assert!(p.thermal_stiffness_derivatives(&incomplete,budget(),||false).is_err());
+}

@@ -5615,6 +5615,21 @@ at zero actual memory; unchanged singular factors retain their original
 free energy with zero thermal entropy. Non-affine stored tensors, thermal
 expansion and finite-strain thermodynamics are outside this admission.
 
+`ProjectedTensorProny::thermal_stiffness_derivatives` contracts the same admitted
+source derivatives through the original strain columns and physical volume:
+`V S^T (dC/dT) S`. It returns every equilibrium and Maxwell cross term in
+original branch order under explicit coordinate/work budgets and cancellation.
+Signed or indefinite derivatives are not positive-semidefinite storage and are
+never Gram-factored. Kelvin viscosity and relaxation-time derivatives carry no
+stored free energy.
+
+A consumer retaining physical equilibrium/Maxwell spring strains can evaluate
+entropy directly from these complete derivatives, including a changing
+rank-deficient Maxwell tensor. This does not relax the existing
+`thermal_state` refusal when a consumer retains only factor memory and cannot
+recover the required physical strain. Source identity, frame, affine interval
+admission and thermodynamic accounting remain the consumer's responsibility.
+
 ## Source density retained through bounded phase transport
 
 `phase::transport::resolve_phase_transport_state_with_density_departure` keeps

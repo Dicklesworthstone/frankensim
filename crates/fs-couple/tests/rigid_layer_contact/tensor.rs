@@ -40,6 +40,9 @@ fn fixture(softening: bool) -> Fixture {
     fixture_with_kelvin(softening, false)
 }
 fn fixture_with_kelvin(softening: bool, kelvin: bool) -> Fixture {
+    fixture_with_thermal(softening, kelvin, false)
+}
+fn fixture_with_thermal(softening: bool, kelvin: bool, affine: bool) -> Fixture {
     let mut claims = ClaimSet::new();
     let mut add = |name: &str, dims: Dims, value: f64, curve: Option<Vec<(f64, f64)>>| {
         let interpolation = if curve.is_some() {
@@ -77,7 +80,8 @@ fn fixture_with_kelvin(softening: bool, kelvin: bool) -> Fixture {
         .into_iter()
         .zip([30.0, 24.0, 18.0])
     {
-        add(name, Pressure::DIMS, value, None);
+        add(name, Pressure::DIMS, value, affine.then(||
+            vec![(280.0,1.05*value),(300.0,value),(320.0,0.95*value)]));
     }
     for (name, value) in ORTHOTROPIC_POISSON_RATIO_PROPERTIES
         .into_iter()
@@ -94,7 +98,9 @@ fn fixture_with_kelvin(softening: bool, kelvin: bool) -> Fixture {
             name,
             Pressure::DIMS,
             value,
-            if softening && i == 0 {
+            if affine {
+                Some(vec![(280.0,1.05*value),(300.0,value),(320.0,0.95*value)])
+            } else if softening && i == 0 {
                 Some(vec![(280.0, 9.2), (300.0, 9.0), (320.0, 8.8)])
             } else {
                 None
@@ -122,7 +128,12 @@ fn fixture_with_kelvin(softening: bool, kelvin: bool) -> Fixture {
     for i in 0..6 {
         for j in i..6 {
             let name = format!("branch_{i}_{j}");
-            add(&name, Pressure::DIMS, factor[i] * factor[j], None);
+            let value = factor[i]*factor[j] + if affine && i==5 && j==5 {2.0} else {0.0};
+            let slope = if affine { match (i,j) {
+                (3,3) => -0.01, (3,5) => 0.006, (5,5) => 0.02, _ => 0.0,
+            }} else {0.0};
+            add(&name, Pressure::DIMS, value, affine.then(||
+                vec![(280.0,value-20.0*slope),(300.0,value),(320.0,value+20.0*slope)]));
             names.push(name);
         }
     }
@@ -453,7 +464,110 @@ fn assert_tensor_source_run(kelvin: bool) {
 }
 
 #[test]
-fn g4_tensor_softening_and_foreign_orientation_refuse_before_native_state_changes() {
+fn g1_affine_source_tensors_drive_original_momenta_entropy_memory_and_finite_heat() {
+    let f = fixture_with_thermal(false,true,true);
+    for angle in [0.4, -0.55] {
+        let material = bind(&f,angle).unwrap();
+        let mut heat = inventory(&f);
+        let route = ThirdBodyHeatRoute::from_links(&heat,LAYER,[7,8],K,[0.0;2]).unwrap();
+        let (_,law) = material.at_temperature(300.0).unwrap();
+        let mut history = RigidLayerHistory::new(&law,geometry(),0.0).unwrap();
+        let mut moving = bodies(false,Vec3::new(0.0,0.08,0.0));
+        let k0 = rotated([[9.0,0.0],[0.0,4.0]],angle);
+        let b0 = rotated([[2.0,1.0],[1.0,1.5]],angle);
+        let dk = k0.map(|row| row.map(|v| -0.0025*v));
+        let db = rotated([[-0.005,0.003],[0.003,0.01]],angle);
+        let c0 = rotated([[0.02,-0.01],[-0.01,0.005]],angle);
+        for i in 0..2 { for j in 0..2 {
+            close(material.thermal_slopes().equilibrium_n_m_k[i][j],dk[i][j],2e-15);
+            close(material.thermal_slopes().relaxation_n_m_k[0][i][j],db[i][j],2e-15);
+        }}
+        let at = |base: [[f64;2];2], slope: [[f64;2];2], t: f64| {
+            std::array::from_fn(|i| std::array::from_fn(|j| base[i][j]+(t-300.0)*slope[i][j]))
+        };
+        let quadratic = |k: [[f64;2];2], x: [f64;2]| {
+            k[0][0]*x[0]*x[0]+2.0*k[0][1]*x[0]*x[1]+k[1][1]*x[1]*x[1]
+        };
+        let energy = |state: &fs_tribo::layer_contact::ThirdBodyLayerState,t: f64| {
+            0.5*quadratic(at(k0,dk,t),state.elastic_slip_m())
+                +0.5*quadratic(at(b0,db,t),state.relaxation_slip_m()[0])
+        };
+        let entropy = |state: &fs_tribo::layer_contact::ThirdBodyLayerState| {
+            -0.5*quadratic(dk,state.elastic_slip_m())
+                -0.5*quadratic(db,state.relaxation_slip_m()[0])
+        };
+        let dt = 0.05;
+        let power = 4.0;
+        for step in 1..=3 {
+            let old_temperature = history.law().temperature_kelvin();
+            let old_state = history.deformation().clone();
+            let candidate = step_tensor_heated_rigid_layer_candidate(&moving,properties(false),
+                &history,&heat,&route,&material,step as f64*dt,10.0,law_solve(),heat_controls(),
+                [0.0;2],&[0.0;3],|_,source| Ok::<_,&str>(RigidLayerThermalTransport {
+                    conductivity_w_m_k: K, area_resistance_m2_k_w: [0.0;2],
+                    transport: StepCoefficients { sources_w: BTreeMap::from([(LAYER,power)]),
+                        conductances_w_k: BTreeMap::new(), payload: source.clone() },
+                }),||false).unwrap();
+            let report = candidate.report();
+            let account = report.thermoelastic.unwrap();
+            let temperature = report.heat.layer_temperature_k;
+            let new_state = candidate.history().deformation();
+            let k = at(k0,dk,temperature);
+            let b = at(b0,db,temperature);
+            let c = c0.map(|row| row.map(|v| v*(1.0+0.025*(temperature-300.0))));
+            let tau = 0.2+0.005*(temperature-300.0);
+            for i in 0..2 { for j in 0..2 {
+                close(candidate.history().law().stiffness_tensor_n_m()[i][j],k[i][j],3e-13);
+                close(candidate.history().law().tensor_relaxation().unwrap()[0]
+                    .stiffness.matrix_n_m()[i][j],b[i][j],3e-13);
+            }}
+            // The first held-force solution is independently inverted at the
+            // ORIGINAL endpoint trial temperature, including full cross terms.
+            if step == 1 {
+                let w = 1.0/(1.0+dt/(2.0*tau));
+                let effective = std::array::from_fn(|i| std::array::from_fn(|j|
+                    k[i][j]+w*b[i][j]+2.0*c[i][j]/dt));
+                let a = std::array::from_fn(|i| std::array::from_fn(|j|
+                    if i==j {1.0+dt*dt*(17.0/6.0)*effective[i][j]/4.0}
+                    else {dt*dt*(17.0/6.0)*effective[i][j]/4.0}));
+                let force = solve(a,product(effective,[0.08,0.0]).map(|v| 0.5*dt*v));
+                for i in 0..2 {close(report.mechanical.constitutive.traction_n[i],force[i],3e-9);}
+                assert!(force[1].abs()>0.001);
+            } else {
+                assert_ne!(account.coefficient_free_energy_change_j,0.0);
+            }
+            let old_s = entropy(&old_state);
+            let new_s = entropy(new_state);
+            let coefficient = energy(&old_state,temperature)-energy(&old_state,old_temperature);
+            let delta_ts = temperature*new_s-old_temperature*old_s;
+            close(account.coefficient_free_energy_change_j,coefficient,2e-14);
+            close(account.mechanical_entropy_change_j_k,new_s-old_s,2e-16);
+            close(account.entropy_energy_change_j,delta_ts,2e-14);
+            close(account.internal_energy_change_j,
+                energy(new_state,temperature)+temperature*new_s
+                    -energy(&old_state,old_temperature)-old_temperature*old_s,2e-14);
+            close(account.reversible_heat_j,-coefficient-delta_ts,2e-14);
+            assert_eq!(new_state.plastic_slip_m(),old_state.plastic_slip_m());
+            let mid = std::array::from_fn(|i| 0.5*(new_state.relaxation_slip_m()[0][i]
+                +old_state.relaxation_slip_m()[0][i]));
+            let delta_e = std::array::from_fn(|i| new_state.elastic_slip_m()[i]-old_state.elastic_slip_m()[i]);
+            let dissipation = dt/tau*quadratic(b,mid)+quadratic(c,delta_e)/dt;
+            close(report.heat.dissipated_j,dissipation,2e-13);
+            close(report.heat.thermal.stored_energy_change_j,
+                dt*power+dissipation-coefficient-delta_ts,5e-10);
+            close(report.combined_energy_residual_j,0.0,5e-10);
+            close(report.source.material.state().state_coordinate("T").unwrap(),temperature,1e-14);
+            close(report.source.material.kelvin_source().unwrap().state()
+                .state_coordinate("T").unwrap(),temperature,1e-14);
+            assert_eq!(history.deformation(),&old_state);
+            let (next_bodies,next_history,next_heat,_) = candidate.into_parts();
+            moving = next_bodies; history = next_history; heat = next_heat;
+        }
+    }
+}
+
+#[test]
+fn g4_unsupported_equilibrium_path_and_foreign_orientation_refuse_before_native_state_changes() {
     let soft = fixture(true);
     assert!(bind(&soft, 0.4).is_err());
     let f = fixture(false);
