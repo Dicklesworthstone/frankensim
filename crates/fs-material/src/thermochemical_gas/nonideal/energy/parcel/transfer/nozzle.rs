@@ -14,7 +14,7 @@
 use super::{
     IsochoricRealGasParcel, RealGasMassTransferCandidate, RealGasMassTransferSolve,
 };
-use crate::thermochemical_gas::ResolvedThermochemicalRealGasState;
+use crate::thermochemical_gas::nonideal::ResolvedThermochemicalRealGasState;
 use crate::thermochemical_gas::energy::{
     GasEnergyError, poll,
     entropy::{GasEntropyError, GasEntropySolve},
