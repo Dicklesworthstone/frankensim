@@ -5011,6 +5011,40 @@ solutions, contact heating, full inverse-matrix parameter work and repeated
 finite-temperature feedback against independent algebraic energy balances.
 Indefinite multiwinding matrices and cancellation refuse without publication.
 
+## Reciprocal shared-gap winding motion
+
+`material_circuit::motion::coupled_gap` binds multiple physical windings to one
+source-resolved uniform magnetic gap. `CommonMagneticGap` retains the one-turn
+gap-medium permeability receipt, constant area and open gap domain. Each
+`GapWinding` supplies an original inductor branch, signed integer turns and
+strictly positive, fixed physical leakage. The complete matrix is
+L(g)=diag(L_leak)+(mu*A/g)*n*n^T. Native full-matrix admission checks assembly
+and both geometric bounds; unresolved ideal coupling is refused without
+inventing regularizing energy.
+
+`CoupledGapMotion` replaces the entire common winding storage block in the
+original descriptor. A linear-cost rank-one constitutive evaluation supplies
+common flux, all terminal currents, positive leakage-plus-gap energy and
+fixed-linkage force F=-Phi^2/(2*mu*A). An analytic two-endpoint energy identity
+supplies the discrete-gradient remainder without subtracting large energies.
+One solve advances all linkages, gap, source-derived body momentum and optional
+frozen axial support. Unrelated independent RLC stores, native transformer and
+source constraints, bulk/contact losses and `FieldMotionStep` work accounting
+remain attached. Endpoint geometry regenerates self and mutual coefficients
+and rechecks native constraints without projecting conserved linkage.
+
+Scope is one uniform constant-area gap with negligible return-path reluctance,
+validity-wide constant nondispersive permeability, constant explicit leakage
+and guided translation. Thermally live coefficients/supports, changing leakage,
+saturation, hysteresis, fringing and pole contact require their own physical
+owners. No input path for an additional external mutual group is supplied.
+
+G1/G3 regressions cover independent matrix current/force, driven refinement
+against RK4, electrical/mechanical/heat closure, winding reversal, noncontiguous
+windings with unrelated RLC and series-contact losses, source substitutions
+and atomic refusal/replay. Exact-nightly parsing and independent arithmetic
+checks passed. Native execution remains unverified on the saturated shared host.
+
 ## Reciprocal material electric and magnetic gap motion
 
 `material_circuit::motion::MaterialFieldMotion` composes the existing source-bound

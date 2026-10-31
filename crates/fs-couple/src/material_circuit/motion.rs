@@ -14,6 +14,8 @@
 pub mod support;
 /// Material conduction at the operating fields solved with actual gap motion.
 pub mod conductivity;
+/// Multiple physical windings sharing one moving magnetic gap and explicit leakage.
+pub mod coupled_gap;
 use support::AxialSupport;
 
 use fs_matdb::EvaluationDecision;
