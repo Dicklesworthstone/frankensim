@@ -20,7 +20,7 @@ fn sources(layer:usize)->(MaterialCard,ResolvedHeatCapacityCurve) {
     // Explicit insulating thermal law, independently of finite electrical contact.
     claims.insert_claim(PropertyClaim {key:PropertyKey::new("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS),
         value:PropertyValue::Scalar {value:0.0,dims:THERMAL_CONDUCTIVITY_DIMS},
-        validity:ValidityDomain::unconstrained().with("T",290.0,340.0),
+        validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),290.0,340.0),
         interpolation:InterpolationPolicy::ConstantWithinValidity,uncertainty:UncertaintyModel::Unstated,
         observations:vec![],provenance:Provenance {source:"authored insulation fixture".into(),license:"test-only".into(),artifact:None}}).unwrap();
     let card=MaterialCard::assemble(card.id().clone(),claims,vec![]).unwrap();

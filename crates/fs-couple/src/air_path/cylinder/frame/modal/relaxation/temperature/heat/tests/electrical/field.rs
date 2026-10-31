@@ -31,7 +31,7 @@ fn source(layer: usize, s: Spec) -> (MaterialCard, ResolvedHeatCapacityCurve) {
         value:if s.slope==0.0 {PropertyValue::Scalar {value,dims}} else {
             PropertyValue::Curve {abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
                 knots:vec![(290.0,value*(1.0-10.0*s.slope)),(340.0,value*(1.0+40.0*s.slope))],dims}},
-        validity:ValidityDomain::unconstrained().with("T",290.0,340.0),
+        validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),290.0,340.0),
         interpolation:if s.slope==0.0 {InterpolationPolicy::ConstantWithinValidity} else {InterpolationPolicy::LinearInside},
         uncertainty:UncertaintyModel::Unstated,observations:vec![],provenance:Provenance {
             source:"manufactured field/relaxation specimen".into(),license:"test-only".into(),artifact:None},

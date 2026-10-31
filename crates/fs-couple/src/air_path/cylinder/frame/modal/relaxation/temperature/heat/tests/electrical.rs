@@ -26,7 +26,7 @@ fn powered_source(layer: usize, scale: f64, conductivity: bool) -> (MaterialCard
                 let resistivity = rho * (1.0 + 0.02 * (t-300.0));
                 (t, if conductivity { 1.0/resistivity } else { resistivity })
             }).collect(), dims },
-        validity: ValidityDomain::unconstrained().with("T",290.0,340.0),
+        validity: ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),290.0,340.0),
         interpolation: InterpolationPolicy::LinearInside, uncertainty: UncertaintyModel::Unstated,
         observations: vec![], provenance: Provenance { source: "manufactured electrical/relaxation fixture".into(),
             license: "test-only".into(), artifact: None },

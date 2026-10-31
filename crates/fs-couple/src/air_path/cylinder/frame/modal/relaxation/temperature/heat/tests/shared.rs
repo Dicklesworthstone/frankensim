@@ -9,7 +9,7 @@ fn conducting_source(layer:usize,varying:bool,k:f64)->(MaterialCard,ResolvedHeat
     for (_,claim) in original.claims().claims_ordered() {claims.insert_claim(claim.clone()).unwrap();}
     claims.insert_claim(PropertyClaim {key:PropertyKey::new("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS),
         value:PropertyValue::Scalar {value:k,dims:THERMAL_CONDUCTIVITY_DIMS},
-        validity:ValidityDomain::unconstrained().with("T",290.0,340.0),
+        validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),290.0,340.0),
         uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
         observations:vec![],provenance:Provenance {source:"synthetic cross-body heat path".into(),license:"test-only".into(),artifact:None}}).unwrap();
     let card=MaterialCard::assemble(original.id().clone(),claims,vec![]).unwrap();

@@ -43,7 +43,7 @@ fn source(layer: usize, s: Spec) -> (MaterialCard, ResolvedHeatCapacityCurve) {
             value: if slope == 0.0 { PropertyValue::Scalar { value,dims } } else {
                 PropertyValue::Curve { abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
                     knots:vec![(290.0,value*(1.0-10.0*slope)),(340.0,value*(1.0+40.0*slope))],dims } },
-            validity:ValidityDomain::unconstrained().with("T",290.0,upper),
+            validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),290.0,upper),
             interpolation:if slope == 0.0 {InterpolationPolicy::ConstantWithinValidity} else {InterpolationPolicy::LinearInside},
             uncertainty:UncertaintyModel::Unstated,observations:vec![],provenance:Provenance {
                 source:"manufactured coupled transport".into(),license:"test-only".into(),artifact:None},
