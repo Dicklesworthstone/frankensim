@@ -22,6 +22,9 @@ use fs_exec::CancelGate;
 use fs_lbm::lattice3::Lattice3;
 use std::sync::Arc;
 
+/// Native composition of a cold resolved source with a complete 3-D acoustic field.
+pub mod file;
+
 fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }
 fn physical(error: NsfDgError) -> RenderError {
     RenderError::Voice(match error {

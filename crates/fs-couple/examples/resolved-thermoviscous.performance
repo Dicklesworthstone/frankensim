@@ -1,0 +1,65 @@
+frankensim-resolved-thermoviscous-dg-performance-v1
+field_band 20 2000
+field_bulk_viscosity 0.73 authored-manufactured-air-fixture
+field_vertices 8
+field_vertex 0.006 0 0
+field_vertex 0.006 0 0.0015
+field_vertex 0.006 0.0015 0
+field_vertex 0.006 0.0015 0.0015
+field_vertex 0.009 0 0
+field_vertex 0.009 0 0.0015
+field_vertex 0.009 0.0015 0
+field_vertex 0.009 0.0015 0.0015
+field_tets 6
+field_tet 0 4 6 7
+field_tet 0 5 4 7
+field_tet 0 6 2 7
+field_tet 0 2 3 7
+field_tet 0 1 5 7
+field_tet 0 3 1 7
+field_walls 8
+field_wall isothermal 0 4 6
+field_wall isothermal 0 4 5
+field_wall isothermal 0 2 6
+field_wall isothermal 0 1 5
+field_wall isothermal 2 6 7
+field_wall isothermal 2 3 7
+field_wall isothermal 1 5 7
+field_wall isothermal 1 3 7
+field_ports 2
+field_port 0 2
+field_face 0 2 3
+field_face 0 1 3
+field_port 1 2
+field_face 4 6 7
+field_face 4 5 7
+field_connect 0 1
+resolved_source
+frankensim-resolved-dg-performance-v1
+clock 96000 10
+output 1920 1
+gas dry-air 293.15 101325
+grid 12 3 3 0.0005 0 0 0
+fluid_limits 108 273.15 323.15 0.2 0.1 17 1
+bulk_viscosity 0.73 authored-manufactured-air-fixture
+wall adiabatic
+characteristic 0 high 0.05
+characteristic_thermal enthalpy-flux enthalpy-flux
+initial rest
+solids 4
+solid 7 0 0
+solid 7 0 2
+solid 7 2 0
+solid 7 2 2
+states 0
+coupling 64 69120 -0.5 0.5 1e-7 1e-9 1e-16 0.05
+dg_tube 0.05 0.0008462843753216344 baffled 2 2 12 20 2000 0.01 1e-11 512
+dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257
+dg_exterior 293.15 101325 0
+observation baffled 0 0 0.1 4 16 2000
+boundary pressure-temperature 4
+ramp 384 0 293.15 20 295
+hold 768 20 295
+ramp 1152 20 295 0 293.15
+hold 1920 0 293.15
+end

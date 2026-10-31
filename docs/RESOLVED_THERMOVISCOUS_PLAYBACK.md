@@ -455,3 +455,39 @@ with the pinned formatter during implementation. Compilation, native numerical
 tests and example execution were not run because this executor lacks the full
 pinned dependency checkout and remote build runners. No audible improvement or
 instrument milestone is claimed by these changes.
+
+
+## Native two-port resolved-field source
+
+The schema `frankensim-resolved-thermoviscous-dg-performance-v1` now provides a
+first native composition rung for the existing nonlinear NSF source and complete
+three-dimensional thermoviscous field. It embeds one ordinary
+`frankensim-resolved-dg-performance-v1` source after a literal
+`resolved_source` separator. The ordinary source is admitted by its existing
+reader first; only then can its cold NSF grid and primary DG load move into the
+field composition.
+
+The field prefix declares an SI tetrahedral mesh, an explicit wall/port
+partition, a positive frequency band, an independently sourced bulk/shear
+viscosity ratio, and two distinct port identities: the NSF source port and the
+port receiving the original primary DG load. Every exterior triangle must be
+owned by a wall or port. The source port must lie exactly on the selected NSF
+face or patch, remain inside its tangential bounds, and the entire FE volume
+must lie outside the nonlinear-fluid volume. The existing field/DG and NSF/field
+constructors independently recheck area, gas, clock and work-conjugate matching.
+
+This first file rung intentionally accepts only a cold direct source without
+finite-reservoir, upstream-DG, reciprocal-mouth, reservoir-observer or prepared
+gas-observer state. Those owners refuse the cold handoff rather than being
+discarded. The embedded source can still use the existing pressure,
+pressure-temperature, SGS, SI geometry, gas-mixture and aperture declarations
+that do not attach one of those extra histories. Additional field ducts,
+molecular field reservoirs and finite wall sources remain explicit follow-on
+schema extensions.
+
+`crates/fs-couple/examples/resolved-thermoviscous.performance` is a manufactured
+integration fixture: a 3 mm long 3-D field sits immediately outside a 6 mm
+resolved source volume and feeds the original 50 mm radiating DG duct. The warm
+pressure history reaches the existing conservative enthalpy contact, resolved
+flow, complete thermoviscous field, duct and microphone in that order. It is not
+measured flute geometry, a converged jet or a listening-quality claim.
