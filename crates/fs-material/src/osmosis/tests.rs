@@ -119,6 +119,11 @@ fn g1_selective_mixture_uses_each_reflection_coefficient() {
         )
         .unwrap();
     close(flow.volume_flux_m_s, 2e-12 * R * 300.0 * 50.0);
+    assert_eq!(
+        flow,
+        law.water_flux(300.0, 0.0, 0.0, &[0.0, 400.0, 0.0], &[20.0, 0.0, 60.0])
+            .unwrap()
+    );
     assert_eq!(out[0], 0.0);
     assert!(out[1] > 0.0);
 }

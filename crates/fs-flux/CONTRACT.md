@@ -1551,3 +1551,58 @@ signed mass/energy and end-event accounting, refusal of source mismatches and
 unevolved rheology, and finite displaced-fluid resistance with original-owner
 retention. They establish numerical/source integration, not measured wetting
 accuracy or arbitrary two-phase applicability.
+
+## Finite-compartment osmosis and selective membrane networks
+
+`osmosis` (the existing `continuum` feature) evolves the original
+`fs-material::osmosis::IdealDiluteSolution` inventories across prepared
+`MembraneTransport` links. Solvent volume and every independent solute amount
+are extensive state; concentrations and osmotic pressure are recalculated at
+each trial. Species share one explicit ordering, temperature and incompressible
+solvent molar volume. Mechanical pressure has an independent linear volume
+response, admitting prescribed pressure, hydrostatic columns and compliant
+chambers without counting osmotic pressure twice.
+
+At a proposed water transfer, the original exponentially fitted membrane
+coefficients reduce all backward-Euler solute equations analytically to
+positive, conservative endpoint inventories. A bounded scalar solve closes
+the water transfer. Near-complete donor depletion preserves the small donor
+remainder using positive implicit weights. The bracket grows from zero along
+the initial driving direction; a distant inadmissible volume-floor state does
+not veto an admissible interior root. General leaking-solute residuals do not
+carry a uniqueness claim.
+
+Membrane sweeps follow their declared fixed order. The first-order Lie split
+compares one full sweep with two half sweeps, retains the latter, and controls
+both water and every species with separate SI absolute tolerances plus a
+relative tolerance. Maximum substep, accepted steps, rejected trials and scalar
+iterations bound work. This is a local temporal error estimate, not a certified
+global error bound. A volume floor is an explicit model boundary; depletion is
+refused rather than clipped. Each face exchange is applied conservatively to
+both compartments, and reports reconstruct closed water and species balances.
+
+Four complete state buffers are prepared under the caller's byte budget;
+successful advances allocate no memory. Cancellation polls each membrane and
+scalar evaluation and once before publication. A refused or cancelled full
+interval leaves public compartments and clock unchanged; retries reconstruct
+all scratch state from the original accepted endpoint. Determinism follows
+fixed cell/species/link traversal and the original material's deterministic
+elementary functions. Workspace accounting includes retained input capacities
+and original boxed coefficient/inventory arrays; bounded scalar stack scratch
+is additional.
+
+Focused G1/G3/G4 checks cover analytic unequal-volume diffusion, compliant
+pressure transients and hydrostatic equilibrium, retained-solute equilibrium,
+nonselective convection, leaking-species free-energy decrease, nonlinear branch
+selection, graph refinement, stiff donor remainders and atomic failure/replay.
+`cargo run -p fs-flux --example osmotic_columns` exercises two finite columns:
+water transfer changes dilution and hydrostatic pressure until these balance.
+Its explicit numerical coefficients are illustrative, not a calibrated source.
+
+This owner assumes well-mixed, isothermal dilute compartments with negligible
+solute volume and fixed membrane area/coefficients. It supplies no electrolyte
+activity law, Donnan potential, resolved boundary-layer concentration
+polarization, nonisothermal heat/entropy balance, mechanical inertia, ionic
+reaction chemistry or experimentally validated membrane selectivity. Ordinary
+nonselective fluid links use zero reflection; gas solution-diffusion retains
+its separate existing physical law and permeability units.

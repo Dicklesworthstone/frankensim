@@ -32,6 +32,9 @@ pub mod lc;
 pub mod material;
 #[cfg(feature = "continuum")]
 pub mod ns;
+/// Conservative isothermal solution transport through selective membranes.
+#[cfg(feature = "continuum")]
+pub mod osmosis;
 #[cfg(feature = "continuum")]
 pub mod reduced_aero;
 /// Reciprocal quasistatic Reynolds pressure for deforming thin-gap interfaces.

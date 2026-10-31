@@ -488,26 +488,26 @@ impl MembraneTransport {
         }
     }
 
-    /// Evaluate isothermal solvent and solute fluxes without allocation.
+    /// Evaluate the solvent driving law without evaluating solute transport.
     ///
     /// Pressures may share any consistent gauge. The temperature and species
     /// layout must be common; fluxes are per membrane area, so geometry is
-    /// applied exactly once by the caller. Failure leaves `solute_flux_mol_m2_s`
-    /// unchanged. Pure water moves toward higher reflected solute concentration
-    /// at equal pressure; sufficient applied pressure reverses that flow.
-    pub fn flux_into(
+    /// applied exactly once by the caller. Pure water moves toward higher
+    /// reflected solute concentration at equal pressure; sufficient applied
+    /// pressure reverses that flow. Finite-volume solvers that already obtained
+    /// the solute donor coefficients can evaluate their scalar water residual
+    /// here without repeating the membrane exponential fits or staging solute fluxes.
+    pub fn water_flux(
         &self,
         temperature_k: f64,
         pressure_left_pa: f64,
         pressure_right_pa: f64,
         concentration_left_mol_m3: &[f64],
         concentration_right_mol_m3: &[f64],
-        solute_flux_mol_m2_s: &mut [f64],
     ) -> Result<MembraneFlux> {
         let count = self.solutes.len();
         shape(count, concentration_left_mol_m3.len())?;
         shape(count, concentration_right_mol_m3.len())?;
-        shape(count, solute_flux_mol_m2_s.len())?;
         let rt = thermal_scale(temperature_k)?;
         if !pressure_left_pa.is_finite() || !pressure_right_pa.is_finite() {
             return Err(OsmosisError::Invalid(
@@ -540,12 +540,42 @@ impl MembraneTransport {
             self.hydraulic.0 * driving_pressure_pa,
             "solvent flux is not representable",
         )?;
+        Ok(MembraneFlux {
+            volume_flux_m_s,
+            effective_osmotic_pressure_drop_pa,
+            driving_pressure_pa,
+        })
+    }
+
+    /// Evaluate isothermal solvent and solute fluxes without allocation.
+    ///
+    /// Uses the same [`Self::water_flux`] solvent law and the fitted solute
+    /// transport. All fluxes are left to right per membrane area. Failure leaves
+    /// the complete caller-owned `solute_flux_mol_m2_s` output unchanged.
+    pub fn flux_into(
+        &self,
+        temperature_k: f64,
+        pressure_left_pa: f64,
+        pressure_right_pa: f64,
+        concentration_left_mol_m3: &[f64],
+        concentration_right_mol_m3: &[f64],
+        solute_flux_mol_m2_s: &mut [f64],
+    ) -> Result<MembraneFlux> {
+        let count = self.solutes.len();
+        shape(count, solute_flux_mol_m2_s.len())?;
+        let water = self.water_flux(
+            temperature_k,
+            pressure_left_pa,
+            pressure_right_pa,
+            concentration_left_mol_m3,
+            concentration_right_mol_m3,
+        )?;
         let mut output = [0.0; MAX_OSMOTIC_SOLUTES];
         for (index, &(reflection, permeability)) in self.solutes.iter().enumerate() {
             let left = concentration_left_mol_m3[index];
             let right = concentration_right_mol_m3[index];
             let advective = finite(
-                (1.0 - reflection.0) * volume_flux_m_s,
+                (1.0 - reflection.0) * water.volume_flux_m_s,
                 "solute convective velocity is not representable",
             )?;
             let exchange = diffusive_exchange(permeability.0, advective)?;
@@ -557,11 +587,7 @@ impl MembraneTransport {
             )?;
         }
         solute_flux_mol_m2_s.copy_from_slice(&output[..count]);
-        Ok(MembraneFlux {
-            volume_flux_m_s,
-            effective_osmotic_pressure_drop_pa,
-            driving_pressure_pa,
-        })
+        Ok(water)
     }
 }
 
