@@ -194,8 +194,8 @@ fn restrict_band(source: &ResolvedMaterialStatePoint, key: &str,
     band: &mut (f64,f64), require_frequency: bool) -> Result<(), AcousticRealizeError>
 {
     let property = source.property(key).ok_or_else(|| invalid("missing shell material coefficient"))?;
-    if !property.is_constant_at_fixed_temperature() {
-        return Err(invalid("shell coefficients must be constants at the original frozen temperature"));
+    if !property.is_constant_at_fixed_environment() {
+        return Err(invalid("shell coefficients require the original held material environment"));
     }
     match property.angular_frequency_band_rad_s().map_err(owner)? {
         Some((lo,hi)) => { band.0=band.0.max(lo); band.1=band.1.min(hi); },
@@ -211,9 +211,11 @@ fn restrict_band(source: &ResolvedMaterialStatePoint, key: &str,
 /// transverse shear viscosities are independently sourced, including zeros.
 /// Neither elastic anisotropy nor loss is inferred from a material's name.
 ///
-/// Every selected coefficient is constant at its source temperature and every
-/// viscosity has frequency applicability. Actual retained frequencies are
-/// checked by reduction. This is unloaded linear geometry, not a prestress solve.
+/// Every selected coefficient is constant at its complete held source state;
+/// typed temperature, pressure, composition, moisture and concentration curves
+/// are resolved before assembly. Every viscosity has frequency applicability,
+/// and reduction checks actual retained frequencies. This does not evolve the
+/// environment, supply a sorption law or solve prestress.
 /// # Errors
 /// Incomplete coverage, invalid material/units/geometry, excessive dimensions,
 /// nonpositive mass/stiffness/viscosity, nonintersecting bands or cancellation.

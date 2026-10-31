@@ -246,6 +246,87 @@ fn curved_material_body_keeps_layers_planes_torsion_cavity_and_gas_in_actual_pre
     });
 }
 
+fn held_shell_pack(band: (f64, f64)) -> NormalizedPack {
+    use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+    // Manufactured conditioning response, not a wood measurement or sorption law.
+    let original = pack_with_shear("body.fsmatpk", 1.0, 1.0, None);
+    let mut claims = ClaimSet::new();
+    for id in original.claims().observation_ids() {
+        assert_eq!(claims.register_observation(original.claims().observation(id).unwrap().clone()).unwrap(), id);
+    }
+    let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    for (_, original) in original.claims().claims_ordered() {
+        let mut claim = original.clone();
+        let PropertyValue::Scalar { value, dims } = claim.value else { unreachable!() };
+        let scale = if dims == Density::DIMS { 1.2 }
+            else if dims == Pressure::DIMS { 0.7 }
+            else if dims == DynViscosity::DIMS { 2.0 }
+            else { 1.0 };
+        claim.value = PropertyValue::Curve { abscissa: "moisture_content".into(),
+            abscissa_dims: Dims::NONE, knots: vec![(0.0, value), (0.2, scale*value)], dims };
+        claim.validity = ValidityDomain::unconstrained()
+            .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 280.0, 320.0)
+            .with_quantity("omega", quantity(QuantityKind::Frequency(FrequencyConvention::Angular)), band.0, band.1)
+            .with_quantity("moisture_content", quantity(QuantityKind::Moisture(MoistureBasis::DryMass)), 0.0, 0.2);
+        claim.interpolation = InterpolationPolicy::LinearInside;
+        claims.insert_claim(claim).unwrap();
+    }
+    NormalizedPack::new("synthetic-shell-environment", "synthetic-tensor-v1",
+        original.source_artifact(), "CC0-1.0", claims, vec![], vec![]).unwrap()
+}
+
+#[test]
+fn held_body_material_state_reaches_mass_stiffness_full_loss_and_pressure() {
+    scoped(|cx, gate| {
+        let source = held_shell_pack((0.0, 200_000.0));
+        let prepare = |source: &NormalizedPack, moisture: Option<f64>| -> Result<Ready> {
+            let mut spec = shell_spec();
+            if let Some(value) = moisture {
+                spec.material_states.insert("body.fsmatpk".into(),
+                    vec![("moisture_content".into(), value)]);
+            }
+            spec.compile_with_body(cx, gate, Some(shell_profile()), |name|
+                Ok(if name == "body.fsmatpk" { source.clone() } else { pack(name, 1.0, None) }))
+        };
+        let mut low = prepare(&source, Some(0.0)).unwrap();
+        let mut high = prepare(&source, Some(0.2)).unwrap();
+        let a = low.performance.bank().source().bank().material_shell().unwrap().specimen.regions()[0].clone();
+        let b = high.performance.bank().source().bank().material_shell().unwrap().specimen.regions()[0].clone();
+        assert_eq!(a.area_m2(), b.area_m2());
+        assert_eq!(a.thickness_m(), b.thickness_m());
+        assert!((b.mass_kg()/a.mass_kg() - 1.2).abs() < 1e-12);
+        assert_eq!(a.input().region.material.card_identity(), b.input().region.material.card_identity());
+        assert_eq!(b.input().region.material.state_coordinate("moisture_content"), Some(0.2));
+        for (key, scale) in [("density", 1.2), ("young_modulus_1", 0.7),
+            ("shear_modulus_23", 0.7), (VISCOSITY[0], 2.0),
+            (fs_couple::shear_shell::TRANSVERSE_SHEAR_VISCOSITY_PROPERTIES[1], 2.0)] {
+            let scalar = |region: &fs_couple::shear_shell::ResolvedShellRegion|
+                region.input().region.material.property(key).unwrap().value_si();
+            assert!((scalar(&b)/scalar(&a) - scale).abs() < 1e-12);
+        }
+        let modes = |r: &Ready| r.performance.bank().system().components()[1].modes().to_vec();
+        assert_ne!(modes(&low), modes(&high));
+        assert_ne!(low.performance.bank().source().bank().material_shell_image().unwrap().damping().matrix_per_s(),
+            high.performance.bank().source().bank().material_shell_image().unwrap().damping().matrix_per_s());
+        for name in ["wire.fsmatpk", "sleeve.fsmatpk", "body.fsmatpk"] {
+            assert_eq!(low.catalog[name].pack.content_hash(), high.catalog[name].pack.content_hash());
+        }
+        assert_eq!(low.performance.bank().cards()[0].fundamental_hz(), high.performance.bank().cards()[0].fundamental_hz());
+        let low_pressure = pressure(&mut low, 7);
+        let high_pressure = pressure(&mut high, 31);
+        assert_ne!(low_pressure, high_pressure);
+        assert_eq!(high_pressure, pressure(&mut prepare(&source, Some(0.2)).unwrap(), 1));
+        for ready in [&low, &high] {
+            let frame = ready.performance.bank().system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        assert!(prepare(&source, None).is_err(), "no default moisture state");
+        assert!(prepare(&source, Some(0.3)).is_err(), "no source extrapolation");
+        // The reference query is in-band; actual shell modes still need support.
+        assert!(prepare(&held_shell_pack((999.999, 1000.001)), Some(0.1)).is_err());
+    });
+}
+
 #[test]
 fn shell_geometry_and_resource_records_refuse_without_borrowing_missing_material_data() {
     let over_nodes = format!("nodes {}", MAX_NODES + 1);
@@ -686,6 +767,85 @@ fn shell_assembly_options_refuse_missing_repeated_unknown_and_malformed_records(
     assert!(refused(&format!("{text}tie-budget 4\n")).contains("unknown"));
     assert!(refused(&text.replace("window-hz 15 2000", "window-hz 2000 15")).contains("0 < LO < HI"));
     assert!(refused(&text.replacen("options-v1", "options-v2", 1)).contains("not a frankensim-shell-assembly-options-v1"));
+}
+
+fn held_coating_pack() -> NormalizedPack {
+    use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+    // Manufactured passive films: the endpoints are not measured varnish data.
+    let mut claims = ClaimSet::new();
+    let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    for (key, dims, low, high) in [
+        ("density", Density::DIMS, 1000.0, 1200.0),
+        ("varnish_e0", Pressure::DIMS, 2e8, 1.4e8),
+        ("varnish_einf", Pressure::DIMS, 3e8, 2.1e8),
+        ("varnish_alpha", Dims::NONE, 0.5, 0.5),
+        ("varnish_beta", Dims::NONE, 0.5, 0.5),
+        ("varnish_tau", Dims([0, 0, 1, 0, 0, 0]), 0.01, 0.02),
+    ] {
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(key, dims),
+            value: PropertyValue::Curve { abscissa: "moisture_content".into(),
+                abscissa_dims: Dims::NONE, knots: vec![(0.0, low), (0.2, high)], dims },
+            validity: ValidityDomain::unconstrained()
+                .with_quantity("temperature", quantity(QuantityKind::AbsoluteTemperature), 280.0, 320.0)
+                .with_quantity("frequency", quantity(QuantityKind::Frequency(FrequencyConvention::Cyclic)), 0.01, 20_000.0)
+                .with_quantity("moisture_content", quantity(QuantityKind::Moisture(MoistureBasis::DryMass)), 0.0, 0.2),
+            uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
+            provenance: Provenance { source: "manufactured held-state coating fixture".into(),
+                license: "CC0-1.0".into(), artifact: None }, observations: vec![],
+        }).unwrap();
+    }
+    NormalizedPack::new("synthetic-coating-environment", "synthetic-film-v1",
+        fs_blake3::ContentHash([8; 32]), "CC0-1.0", claims, vec![], vec![]).unwrap()
+}
+
+#[test]
+fn held_film_state_changes_original_laminate_and_coupled_pressure() {
+    scoped(|cx, gate| {
+        let source = held_coating_pack();
+        let row = "coatings 1\ncoating body film.fsmatpk positive 0.00002 1000 0.3 0.001 0.35 0.9\n";
+        let profile = Profile::parse(shell_text().replace("nodes 25\n",
+            &format!("{row}nodes 25\n")).as_bytes()).unwrap();
+        let prepare = |environment: Vec<(String, f64)>| -> Result<Ready> {
+            let mut spec = shell_spec();
+            if !environment.is_empty() { spec.material_states.insert("film.fsmatpk".into(), environment); }
+            spec.compile_with_body(cx, gate, Some(profile.clone()), |name|
+                Ok(if name == "film.fsmatpk" { source.clone() } else { pack(name, 1.0, None) }))
+        };
+        let environment = |value| vec![("moisture_content".into(), value)];
+        let mut low = prepare(environment(0.0)).unwrap();
+        let mut high = prepare(environment(0.2)).unwrap();
+        let coating = |ready: &Ready| ready.performance.bank().source().bank()
+            .material_shell().unwrap().specimen.coatings()[0].clone();
+        let a = coating(&low);
+        let b = coating(&high);
+        assert_eq!(a.faces_m(), b.faces_m());
+        assert_eq!(a.input().material.source().card_identity(), b.input().material.source().card_identity());
+        assert!((b.mass_kg()/a.mass_kg() - 1.2).abs() < 1e-12);
+        assert_ne!(a.reference_storage_pa(), b.reference_storage_pa());
+        assert_eq!(b.input().material.law().relaxation_time_s(), 0.02);
+        assert_eq!(b.input().material.source().state_coordinate("moisture_content"), Some(0.2));
+        assert_eq!(b.input().material.source().state_coordinate("conditioning_relative_humidity"), Some(0.35));
+        let modes = |r: &Ready| r.performance.bank().system().components()[1].modes().to_vec();
+        assert_ne!(modes(&low), modes(&high));
+        assert_ne!(low.performance.bank().source().bank().material_shell_image().unwrap().damping().matrix_per_s(),
+            high.performance.bank().source().bank().material_shell_image().unwrap().damping().matrix_per_s());
+        for name in ["wire.fsmatpk", "sleeve.fsmatpk", "body.fsmatpk", "film.fsmatpk"] {
+            assert_eq!(low.catalog[name].pack.content_hash(), high.catalog[name].pack.content_hash());
+        }
+        let low_pressure = pressure(&mut low, 7);
+        let high_pressure = pressure(&mut high, 31);
+        assert_ne!(low_pressure, high_pressure);
+        assert_eq!(high_pressure, pressure(&mut prepare(environment(0.2)).unwrap(), 1));
+        for ready in [&low, &high] {
+            let frame = ready.performance.bank().system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        assert!(prepare(vec![]).is_err());
+        assert!(prepare(environment(0.3)).is_err());
+        assert!(prepare(vec![("conditioning_relative_humidity".into(), 0.2)]).is_err(),
+            "held environment must not overwrite the coating's authored conditioning");
+    });
 }
 
 /// A finish is an explicit layer on the selected side of an existing region.

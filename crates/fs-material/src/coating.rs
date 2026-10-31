@@ -67,8 +67,11 @@ impl ResolvedCoating {
 
     /// Bind an existing resolved source. The fitted coefficient claims must
     /// declare one intersecting frequency band; density need not depend on
-    /// frequency. The source's original query includes its actual conditioning
-    /// coordinates, which are retained unchanged.
+    /// frequency. Typed fixed-environment curves may supply the fit parameters;
+    /// frequency-dependent coefficient samples cannot replace the fitted law.
+    /// The source's original query includes its actual conditioning coordinates,
+    /// which are retained unchanged. Existing fixed-temperature film sources
+    /// keep their original applicability-only conditioning and provenance flags.
     pub fn from_material(source: ResolvedMaterialStatePoint, poisson_ratio: f64,
         strain_limit: f64) -> Result<Self, MaterialError>
     {
@@ -80,8 +83,11 @@ impl ResolvedCoating {
         let mut band = (0.0_f64, f64::INFINITY);
         for (i, &(name, dims)) in COATING_PROPERTIES.iter().enumerate() {
             let p = source.property(name).ok_or_else(|| invalid(format!("missing coating property {name}")))?;
+            // Legacy measured films retain applicability-only source flags;
+            // additional response axes need the shared typed environment policy.
+            let held = p.is_constant_at_fixed_temperature() || p.is_constant_at_fixed_environment();
             if p.requirement().quantity() != QuantitySpec::dimensional(dims)
-                || !p.is_constant_at_fixed_temperature() || !p.value_si().is_finite() || p.value_si() <= 0.0 {
+                || !held || !p.value_si().is_finite() || p.value_si() <= 0.0 {
                 return Err(invalid("coating coefficients must be positive fixed-state source scalars with original units"));
             }
             let frequency = p.angular_frequency_band_rad_s().map_err(|e| invalid(e.to_string()))?;

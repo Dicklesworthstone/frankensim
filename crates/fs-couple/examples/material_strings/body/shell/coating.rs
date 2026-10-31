@@ -164,7 +164,7 @@ impl FilmInput {
     fn resolve(
         &self,
         region: &str,
-        temperature: f64,
+        spec: &input::Spec,
         catalog: &mut Catalog,
         loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
     ) -> Result<ShellCoating> {
@@ -176,7 +176,7 @@ impl FilmInput {
             .with_quantity(
                 "temperature",
                 semantic(QuantityKind::AbsoluteTemperature),
-                temperature,
+                spec.temperature,
             )?
             .with_quantity(
                 "frequency",
@@ -198,6 +198,10 @@ impl FilmInput {
                 QuantitySpec::dimensional(Dims::NONE),
                 0.0,
             )?;
+        let query = fs_material::state_point::append_held_environment(
+            catalog[&self.pack].card.claims(), query,
+            spec.material_states.get(&self.pack).map_or(&[], Vec::as_slice),
+        )?;
         let material = resolve_material_state_point(
             &catalog[&self.pack].card,
             &query,
@@ -263,7 +267,7 @@ impl Inputs {
         let mut coatings = Vec::with_capacity(self.0.len());
         for (region, film) in &self.0 {
             poll(gate)?;
-            coatings.push(film.resolve(region, spec.temperature, catalog, loader)?);
+            coatings.push(film.resolve(region, spec, catalog, loader)?);
         }
         Ok(specimen.with_coatings(coatings, gate)?)
     }
