@@ -9,6 +9,8 @@ use super::{ConductanceSample, EquilibriumPhaseState, HeatExchangeSolve,
     UniformEnthalpyStepInput, feedback, poll, positive};
 use super::super::double_acting::{DoubleActingGasPiston, DoublePistonInput,
     DoublePistonSolve, DoublePistonStep};
+use super::super::{ClosedGasParcel, PistonGas, PistonGasState};
+use fs_material::fluid_transport::FluidTransport;
 
 /// Separate material/interface brackets plus a total bound on nested proposals.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,9 +25,9 @@ pub struct DoubleHeatExchangeSolve {
 
 /// One accepted two-gas, one-body and one-kinetic thermal/mechanical update.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DoubleThermalPistonStep {
+pub struct DoubleThermalPistonStep<T = ResolvedThermochemicalGasState> {
     /// Original two-gas/one-momentum result; contains both material midpoints.
-    pub piston: DoublePistonStep,
+    pub piston: DoublePistonStep<T>,
     /// Body phase state at midpoint ENTHALPY, not averaged temperature.
     pub thermal_midpoint: EquilibriumPhaseState,
     /// Actual material/interface conductances [W/K], [primary, opposing].
@@ -49,25 +51,25 @@ pub struct DoubleThermalPistonStep {
 
 /// Publish both gases, their common momentum and the thermal body together.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DoubleThermalPistonCandidate<S> {
-    piston: DoubleActingGasPiston,
+pub struct DoubleThermalPistonCandidate<S, G: PistonGas = ClosedGasParcel> {
+    piston: DoubleActingGasPiston<G>,
     thermal: UniformEnthalpyStep<[S; 2]>,
-    step: DoubleThermalPistonStep,
+    step: DoubleThermalPistonStep<G::State>,
 }
-impl<S> DoubleThermalPistonCandidate<S> {
+impl<S, G: PistonGas> DoubleThermalPistonCandidate<S, G> {
     /// Tentative shared mechanics, geometry and both source-resolved gases.
-    pub const fn piston(&self) -> &DoubleActingGasPiston { &self.piston }
+    pub const fn piston(&self) -> &DoubleActingGasPiston<G> { &self.piston }
     /// Shared thermal carrier; its report retains BOTH original interface sources.
     pub const fn thermal(&self) -> &UniformEnthalpyStep<[S; 2]> { &self.thermal }
     /// Independent source and energy accounting on the accepted proposal.
-    pub const fn step(&self) -> &DoubleThermalPistonStep { &self.step }
+    pub const fn step(&self) -> &DoubleThermalPistonStep<G::State> { &self.step }
     /// Return all endpoints together; do not apply the boundary heat a second time.
-    pub fn into_parts(self) -> (DoubleActingGasPiston, UniformEnthalpyStep<[S; 2]>, DoubleThermalPistonStep) {
+    pub fn into_parts(self) -> (DoubleActingGasPiston<G>, UniformEnthalpyStep<[S; 2]>, DoubleThermalPistonStep<G::State>) {
         (self.piston, self.thermal, self.step)
     }
 }
 
-impl DoubleActingGasPiston {
+impl<G: PistonGas> DoubleActingGasPiston<G> {
     /// Couple a single finite thermal store to BOTH faces during one physical step.
     ///
     /// The body supplies h->(T,phase), each gas supplies u/EOS/transport/acoustics,
@@ -75,6 +77,9 @@ impl DoubleActingGasPiston {
     /// each trial [Qa,Qb], body enthalpy changes by (H-Qa-Qb)/mass and both gas
     /// heats include their own Q. Both conductances are resolved only after the
     /// SAME coupled proposal, from its actual gas and body energy midpoints.
+    /// Ideal and real-gas parcels reuse these equations. Each chamber keeps its
+    /// own composition, sources, density and caloric/EOS law; an ideal reference
+    /// state is never substituted for a real-gas temperature or mechanical state.
     ///
     /// `resolve` must be repeatable and must not debit live external state. It
     /// may reuse the existing layered-conductance/material interface providers.
@@ -93,10 +98,10 @@ impl DoubleActingGasPiston {
     pub fn thermal_candidate<S, E>(
         &self, input: DoublePistonInput, body: UniformEnthalpyStepInput<'_>,
         controls: DoublePistonSolve, exchange: DoubleHeatExchangeSolve,
-        resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2], EquilibriumPhaseState)
+        resolve: impl FnMut(&[G::State; 2], EquilibriumPhaseState)
             -> Result<[ConductanceSample<S>; 2], E>,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<DoubleThermalPistonCandidate<S>, ThermalPistonError<E>> {
+    ) -> Result<DoubleThermalPistonCandidate<S, G>, ThermalPistonError<E>> {
         self.thermal_candidate_with_midpoint_resistance(
             input, body, controls, exchange, 0.0, resolve, cancelled,
         )
@@ -110,10 +115,10 @@ impl DoubleActingGasPiston {
         &self, input: DoublePistonInput, body: UniformEnthalpyStepInput<'_>,
         controls: DoublePistonSolve, exchange: DoubleHeatExchangeSolve,
         resistance_n_s_m: f64,
-        mut resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2], EquilibriumPhaseState)
+        mut resolve: impl FnMut(&[G::State; 2], EquilibriumPhaseState)
             -> Result<[ConductanceSample<S>; 2], E>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DoubleThermalPistonCandidate<S>, ThermalPistonError<E>> {
+    ) -> Result<DoubleThermalPistonCandidate<S, G>, ThermalPistonError<E>> {
         poll(&mut cancelled)?;
         if !resistance_n_s_m.is_finite() || resistance_n_s_m < 0.0 {
             return Err(ThermalPistonError::Invalid("invalid shared midpoint force resistance"));
@@ -164,7 +169,7 @@ impl DoubleActingGasPiston {
                 let mut residual = [0.0; 2];
                 for i in 0..2 {
                     let g = samples[i].conductance_w_k;
-                    let delta = midpoint.temperature_k() - piston.midpoint[i].state().temperature;
+                    let delta = midpoint.temperature_k() - piston.midpoint[i].temperature_k();
                     let power = g * delta;
                     let heat = input.duration_s * power;
                     residual[i] = q[i] - heat;
@@ -200,7 +205,7 @@ impl DoubleActingGasPiston {
     }
 }
 
-impl DoubleActingGasPiston {
+impl<G: PistonGas> DoubleActingGasPiston<G> {
     /// Source-bound series conduction on both faces, with no copied gas or body
     /// coefficients. Each descriptor must bind the same card as the thermal
     /// chart; geometry may differ between the faces. This reuses the existing
@@ -211,8 +216,9 @@ impl DoubleActingGasPiston {
         controls: DoublePistonSolve, exchange: DoubleHeatExchangeSolve,
         layers: [super::layers::MaterialConductionLayers<'_>; 2],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<DoubleThermalPistonCandidate<fs_material::state_point::ResolvedMaterialStatePoint>,
+    ) -> Result<DoubleThermalPistonCandidate<fs_material::state_point::ResolvedMaterialStatePoint, G>,
         ThermalPistonError<super::layers::LayerConductionError>>
+    where G::State: FluidTransport,
     {
         self.thermal_candidate(input, body, controls, exchange,
             |gases, thermal| Ok([

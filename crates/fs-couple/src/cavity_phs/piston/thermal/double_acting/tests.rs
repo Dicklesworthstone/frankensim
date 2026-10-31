@@ -333,6 +333,7 @@ fn trial_budget_source_failure_and_final_cancellation_return_no_partial_system()
 
 mod source_layers {
     use super::*;
+    mod real_gas;
     use crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
     use fs_evidence::ValidityDomain;
     use fs_matdb::{

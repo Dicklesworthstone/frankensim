@@ -164,3 +164,144 @@ fn adding_a_real_opposing_volume_retains_history_and_refused_steps_publish_neith
         saved.piston().audit_last_window().unwrap()
     );
 }
+
+#[test]
+fn one_sourced_solid_mass_controls_both_inertia_and_finite_heat_capacity() {
+    use crate::cavity_phs::piston::thermal::double_acting::DoubleHeatExchangeSolve;
+    use crate::cavity_phs::piston::thermal::{
+        ConductanceSample, HeatExchangeSolve, ThermalPistonError,
+    };
+    use fs_material::phase::{
+        EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, SolidLiquidPhase,
+        UniformEnthalpyStepInput,
+    };
+    use fs_material::thermochemical_gas::nonideal::ResolvedThermochemicalRealGasState;
+    use std::convert::Infallible;
+
+    let primary = real_parcel(300.0, 5e6);
+    let opposing = real_parcel(330.0, 5e6);
+    let heat = DoubleHeatExchangeSolve {
+        faces: [HeatExchangeSolve {
+            heat_bracket_j: [-0.001, 0.001],
+            source_tolerance_j: 1e-9,
+            energy_tolerance_j: 2e-6,
+            maximum_iterations: 128,
+        }; 2],
+        maximum_joint_trials: 256,
+    };
+    let resolve = |gases: &[ResolvedThermochemicalRealGasState; 2], _: EquilibriumPhaseState| {
+        Ok::<_, Infallible>([
+            ConductanceSample {
+                conductance_w_k: 1.0,
+                source: gases[0].clone(),
+            },
+            ConductanceSample {
+                conductance_w_k: 0.8,
+                source: gases[1].clone(),
+            },
+        ])
+    };
+    let run = |density| {
+        let specimen = body(density);
+        let bound = MaterialDoubleActingGasPiston::new(
+            primary.clone(),
+            opposing.clone(),
+            specimen.clone(),
+            [0.01; 2],
+            0.0,
+        )
+        .unwrap();
+        let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            super::card(density).content_hash(),
+            SolidLiquidPhase::Solid,
+            [200.0, 400.0]
+                .map(|temperature_k| EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg: 500.0 * (temperature_k - 200.0),
+                    temperature_k,
+                    liquid_mass_fraction: 0.0,
+                    bulk_density_kg_m3: density,
+                })
+                .to_vec(),
+        )
+        .unwrap();
+        let thermal = UniformEnthalpyStepInput {
+            curve: &curve,
+            initial: curve
+                .state_at_specific_enthalpy(500.0 * (325.0 - 200.0))
+                .unwrap(),
+            mass_kg: specimen.inertia().mass(),
+            volume_m3: 0.0001,
+            surface_area_m2: 0.02,
+            duration_s: input().duration_s,
+            internal_heat_j: 0.0,
+        };
+        let saved = bound.clone();
+        let mut polls = 0;
+        let candidate = bound
+            .thermal_candidate(input(), thermal, controls(), heat, resolve, || {
+                polls += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(bound, saved);
+        assert_eq!(candidate.piston().body(), &specimen);
+        assert_eq!(candidate.thermal().report, candidate.step().piston.midpoint);
+        assert!(candidate.step().exchanged_heat_j[0] > 0.0);
+        assert!(candidate.step().exchanged_heat_j[1] < 0.0);
+        let body_energy = thermal.mass_kg
+            * (candidate.thermal().state.specific_enthalpy_j_kg()
+                - thermal.initial.specific_enthalpy_j_kg());
+        let mut stored = body_energy
+            + 0.5
+                * specimen.inertia().mass()
+                * candidate.piston().piston().primary().velocity_m_s().powi(2);
+        for (gas, initial) in candidate
+            .piston()
+            .gases()
+            .into_iter()
+            .zip([&primary, &opposing])
+        {
+            assert_eq!(gas.mass_kg(), initial.mass_kg());
+            assert_eq!(gas.model(), initial.model());
+            stored += gas.mass_kg()
+                * gas
+                    .model()
+                    .specific_internal_energy_change_between_densities(
+                        initial.density_kg_m3(),
+                        initial.state().temperature_k(),
+                        gas.density_kg_m3(),
+                        gas.state().temperature_k(),
+                    )
+                    .unwrap();
+        }
+        assert!(
+            (stored - input().heat_j.into_iter().sum::<f64>()).abs()
+                <= heat.faces[0].energy_tolerance_j
+        );
+        assert!(
+            (body_energy + candidate.step().exchanged_heat_j.into_iter().sum::<f64>()).abs()
+                <= heat.faces[0].energy_tolerance_j
+        );
+        let mut seen = 0;
+        assert!(matches!(
+            bound.thermal_candidate(input(), thermal, controls(), heat, resolve, || {
+                seen += 1;
+                seen == polls
+            }),
+            Err(ThermalPistonError::Cancelled)
+        ));
+        assert_eq!(bound, saved);
+        assert_eq!(
+            bound.piston().last_window_transfers(),
+            saved.piston().last_window_transfers()
+        );
+        (
+            candidate.piston().piston().primary().velocity_m_s(),
+            candidate.thermal().state.temperature_k(),
+        )
+    };
+    let (light_speed, light_temperature) = run(1000.0);
+    let (dense_speed, dense_temperature) = run(8000.0);
+    assert!(light_speed > dense_speed && dense_speed > 0.0);
+    assert!(light_temperature < dense_temperature && dense_temperature < 325.0);
+}

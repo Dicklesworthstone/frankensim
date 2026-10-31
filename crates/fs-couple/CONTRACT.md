@@ -7908,6 +7908,33 @@ reversal, continuing energy and source-density-driven material inertia.
 This remains homogeneous closed-gas motion with rigid prescribed face geometry;
 it supplies no two-phase closure, species transport or moving-chamber wave field.
 
+### Reciprocal heat between two real gases and one finite solid
+
+`DoubleThermalPistonCandidate<S, G>` and its source-bound
+`MaterialDoubleThermalPistonCandidate<S, G>` retain the same native two-face
+heat/impulse solve for ideal and PR parcels. Each callback receives both actual
+source-bearing gas midpoints and the solid state at midpoint enthalpy. The
+existing material conduction layers consume each gas's own `FluidTransport`
+snapshot; they never use ideal-reference density or substitute one chamber's
+composition for the other. Separate signed face heats can have opposite signs.
+
+Both gas inventories, the single momentum and the finite body publish as one
+candidate. Heat added to either gas is removed from that same body exactly
+once; combined gas internal energy, solid enthalpy and kinetic energy close
+against prescribed heat and external mechanical work. Existing per-face root
+limits, a shared proposal ceiling, source admission and final cancellation
+remain active. The material wrapper retains the original rigid body's density
+and geometry records and complete accepted port histories. Its thermal store
+may be the moving specimen or a separate declared body; the wrapper does not
+silently equate their masses or change rigid geometry during heating.
+
+Focused dense-gas regressions exercise opposite heat flow, source-layer replay,
+continuing independent storage balances, insulation reduction and late source
+or cancellation refusal. A source-density substitution also uses the same
+solid mass for inertia and finite heat capacity, changing both motion and the
+thermal response while retaining both gas masses. This remains a lumped thermal
+body with explicit interface geometry and source-supported single-phase gases.
+
 ### Fixed-volume chambers in the shared reacting gas assembly
 
 `GasPiston::with_fixed_support` and `MaterialGasPiston::with_fixed_support`

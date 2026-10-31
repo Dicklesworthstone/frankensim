@@ -564,25 +564,25 @@ impl<G: PistonGas> MaterialDoubleActingGasPiston<G> {
 /// Material-bound shared mechanics and its jointly accepted finite thermal store.
 /// The mechanical body's original density and geometry records remain attached.
 #[derive(Clone, Debug, PartialEq)]
-pub struct MaterialDoubleThermalPistonCandidate<S> {
-    piston: MaterialDoubleActingGasPiston,
+pub struct MaterialDoubleThermalPistonCandidate<S, G: PistonGas = ClosedGasParcel> {
+    piston: MaterialDoubleActingGasPiston<G>,
     thermal: UniformEnthalpyStep<[S; 2]>,
-    step: DoubleThermalPistonStep,
+    step: DoubleThermalPistonStep<G::State>,
 }
-impl<S> MaterialDoubleThermalPistonCandidate<S> {
+impl<S, G: PistonGas> MaterialDoubleThermalPistonCandidate<S, G> {
     /// Accepted candidate with the original source-resolved inertial specimen.
-    pub const fn piston(&self) -> &MaterialDoubleActingGasPiston { &self.piston }
+    pub const fn piston(&self) -> &MaterialDoubleActingGasPiston<G> { &self.piston }
     /// One finite thermal endpoint retaining both interface source evaluations.
     pub const fn thermal(&self) -> &UniformEnthalpyStep<[S; 2]> { &self.thermal }
     /// Original joint material, heat, momentum and energy accounting.
-    pub const fn step(&self) -> &DoubleThermalPistonStep { &self.step }
+    pub const fn step(&self) -> &DoubleThermalPistonStep<G::State> { &self.step }
     /// Publish the material-bound mechanism and thermal state together.
-    pub fn into_parts(self) -> (MaterialDoubleActingGasPiston, UniformEnthalpyStep<[S; 2]>, DoubleThermalPistonStep) {
+    pub fn into_parts(self) -> (MaterialDoubleActingGasPiston<G>, UniformEnthalpyStep<[S; 2]>, DoubleThermalPistonStep<G::State>) {
         (self.piston, self.thermal, self.step)
     }
 }
 
-impl MaterialDoubleActingGasPiston {
+impl<G: PistonGas> MaterialDoubleActingGasPiston<G> {
     /// Exchange heat with one finite material store without shedding the body's
     /// source records or replacing its canonical inertia with a numeric mass.
     /// The thermal store may be separate from the rigid moving specimen; its
@@ -593,10 +593,10 @@ impl MaterialDoubleActingGasPiston {
     pub fn thermal_candidate<S, E>(
         &self, input: DoublePistonInput, thermal_body: UniformEnthalpyStepInput<'_>,
         controls: DoublePistonSolve, exchange: DoubleHeatExchangeSolve,
-        resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2], EquilibriumPhaseState)
+        resolve: impl FnMut(&[G::State; 2], EquilibriumPhaseState)
             -> Result<[ConductanceSample<S>; 2], E>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<MaterialDoubleThermalPistonCandidate<S>, ThermalPistonError<E>> {
+    ) -> Result<MaterialDoubleThermalPistonCandidate<S, G>, ThermalPistonError<E>> {
         let candidate = self.piston.thermal_candidate(input, thermal_body, controls,
             exchange, resolve, &mut cancelled)?;
         let (piston, thermal, step) = candidate.into_parts();
@@ -615,8 +615,9 @@ impl MaterialDoubleActingGasPiston {
         &self, input: DoublePistonInput, thermal_body: UniformEnthalpyStepInput<'_>,
         controls: DoublePistonSolve, exchange: DoubleHeatExchangeSolve,
         layers: [MaterialConductionLayers<'_>; 2], cancelled: impl FnMut() -> bool,
-    ) -> Result<MaterialDoubleThermalPistonCandidate<fs_material::state_point::ResolvedMaterialStatePoint>,
+    ) -> Result<MaterialDoubleThermalPistonCandidate<fs_material::state_point::ResolvedMaterialStatePoint, G>,
         ThermalPistonError<LayerConductionError>>
+    where G::State: fs_material::fluid_transport::FluidTransport,
     {
         self.thermal_candidate(input, thermal_body, controls, exchange,
             |gases, thermal| Ok([

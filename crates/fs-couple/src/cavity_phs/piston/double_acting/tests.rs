@@ -339,12 +339,13 @@ fn source_geometry_and_numerical_refusals_leave_both_owners_unchanged() {
         assert_eq!(piston, before);
     }
     // At the common 50 us tick the 20 J trial converges in one Newton
-    // correction. Resolve the same piston at 200 us (omega*dt < 0.04) and
-    // supply enough heat to require another correction, still inside both
-    // material temperature domains. Prove that this is work exhaustion,
-    // rather than a source, geometry or time-resolution refusal.
+    // correction. At 180 us, the summed gas stiffness remains resolved even
+    // after heating the primary parcel to about 842 K; 200 us resolves only
+    // the initial pair. Keep enough heat for another Newton correction and
+    // prove that refusal is work exhaustion with both gases admitted at every
+    // accepted stage, not a source, geometry or time-resolution failure.
     let nonlinear = DoublePistonInput {
-        duration_s: 0.0002,
+        duration_s: 0.00018,
         ..drive_pair([300.0, 0.0])
     };
     let omega2: f64 = [piston.primary().gas(), piston.opposing()]
@@ -360,6 +361,22 @@ fn source_geometry_and_numerical_refusals_leave_both_owners_unchanged() {
     let accepted = resolved.step(nonlinear, controls(), || false).unwrap();
     assert!(accepted.iterations > 1);
     check(&accepted);
+    for (states, volumes) in [
+        ([&accepted.midpoint[0], &accepted.midpoint[1]], [
+            f64::midpoint(before.primary().gas().volume_m3(), resolved.primary().gas().volume_m3()),
+            f64::midpoint(before.opposing().volume_m3(), resolved.opposing().volume_m3()),
+        ]),
+        ([resolved.primary().gas().state(), resolved.opposing().state()], [
+            resolved.primary().gas().volume_m3(), resolved.opposing().volume_m3(),
+        ]),
+    ] {
+        let omega2: f64 = states.into_iter().zip(volumes).map(|(state, volume)| {
+            let medium = state.state();
+            medium.density * medium.sound_speed.powi(2) * 0.01_f64.powi(2)
+                / (volume * before.primary().mass_kg())
+        }).sum();
+        assert!(omega2.sqrt() * nonlinear.duration_s < 0.04);
+    }
     let exhausted = DoublePistonSolve {
         piston: PistonSolve {
             maximum_iterations: 1,
