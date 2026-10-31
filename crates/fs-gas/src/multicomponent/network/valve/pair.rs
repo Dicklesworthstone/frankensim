@@ -67,6 +67,14 @@ pub(super) fn solve(
         let endpoint = flow::admitted(gas,
             [cell(&update.states[0][..n + 2], n), cell(&update.states[1][..n + 2], n)],
             update.primitives, orifice, cancelled)?;
+        // A pressure-actuated aperture can close before the tanks equilibrate.
+        // Such a trial is an upper transfer bound, never an accepted tiny leak
+        // justified only by the absolute mass tolerance.
+        if endpoint.donor.is_none() {
+            hi = x;
+            x = lo.midpoint(hi);
+            continue;
+        }
         let actual_mass = sign * update.exchange.mass_to_second_kg();
         let expected_mass = dt * sign * endpoint.mass_kg_s;
         let residual = actual_mass - expected_mass;

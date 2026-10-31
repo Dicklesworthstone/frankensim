@@ -26,7 +26,7 @@ pub(super) fn admitted(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ValveFlow, ValveError> {
     let n = gas.species_count();
-    let area = orifice.effective_area().value();
+    let mut area = orifice.effective_area().value();
     if area == 0.0 || p[0].pressure == p[1].pressure {
         poll(cancelled)?;
         return Ok(ValveFlow::zero(n));
@@ -37,6 +37,17 @@ pub(super) fn admitted(
     {
         poll(cancelled)?;
         return Ok(ValveFlow::zero(n));
+    }
+    if let Some(opening) = orifice.pressure_opening {
+        let fraction = opening.fraction(Pressure::new(p[donor].pressure - p[1 - donor].pressure))?;
+        if fraction == 0.0 {
+            poll(cancelled)?;
+            return Ok(ValveFlow::zero(n));
+        }
+        area *= fraction;
+        if area == 0.0 {
+            return Err(ValveError::Invalid("nonzero pressure-actuated orifice area underflowed"));
+        }
     }
     let law = LocalCaloric::new(gas, states[donor].partial_densities)?;
     let (exit, choked) = nozzle::state(&law, p[donor], p[1 - donor].pressure, cancelled)

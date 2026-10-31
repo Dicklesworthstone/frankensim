@@ -5,6 +5,8 @@ use crate::multicomponent::{Boundaries, Boundary, Conserved};
 use super::super::{BranchEnd, PlenumConnection};
 use fs_qty::Length;
 
+mod pressure;
+
 fn close(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "actual={a:.16e}, expected={b:.16e}, tolerance={tolerance:e}");
 }

@@ -1867,3 +1867,29 @@ and replay, continuing molecular/wave energy conservation, and the original
 borrowed solid material chart in a reacting network with current gas-card losses.
 Native execution remains unverified in the authoring worker: the unchanged
 asupersync dependency was SIGKILLed during code generation under its memory cap.
+
+
+## Pressure-actuated network valves
+
+`Orifice::with_pressure_opening(PressureOpening)` adds a reversible quasi-static
+differential-pressure aperture to the existing finite-plenum valve owner.
+Finite typed thresholds satisfy `0 <= cracking < full_open`: aperture is zero
+through cracking, linear between thresholds, and capped at one. It multiplies
+the declared maximum `Cd * opening * area` exactly once. Existing
+`ValveDirection` enforces exact reverse closure.
+
+Initial and implicit endpoint evaluations use current source-decoded pressures.
+The actual nozzle pressure ratio, source-owned variable calorics and choking,
+adiabatic donor blowdown, and equal-and-opposite species and energy transfers
+remain authoritative. Cracking pressure is never subtracted from nozzle
+backpressure. Closed endpoint trials bracket the transfer instead of accepting
+threshold overshoot under a loose absolute mass tolerance. Invalid thresholds,
+nonfinite differences, and unresolved nonzero aperture or area refuse.
+
+This is an Estimated algebraic aperture law without hysteresis, poppet inertia,
+spring-energy storage, leakage, calibration, or a certified safety-relief claim.
+Fixed-opening construction retains its previous behavior. Focused
+`pressure_actuated` regressions exercise analytical choking/un-choking,
+thresholds and directions, finite-tank blowdown and energy/species balance,
+source rollback, and pressure-wave propagation in the original gas network.
+Their presence is not an executed validation claim.

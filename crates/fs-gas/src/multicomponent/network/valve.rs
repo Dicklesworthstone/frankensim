@@ -4,6 +4,10 @@
 //! calorics, species and stagnation enthalpy. An explicit discharge coefficient
 //! and opening multiply geometric area once. The throat can choke; no constant
 //! gamma, incompressible square-root surrogate or hidden leakage is introduced.
+//! Optional [`PressureOpening`] supplies a reversible, memoryless aperture law
+//! from the actual pressure difference, including finite cracking pressure.
+//! The same nozzle still uses the actual donor and receiver pressures; opening
+//! the valve introduces no extra pressure subtraction or energy source.
 //!
 //! Finite transfers follow the donor's adiabatic blowdown path and deposit the
 //! identical species and energy into the receiver. A backward endpoint mass-rate
@@ -22,7 +26,7 @@ use crate::multicomponent::{
     Cell, Error as FlowError, MAX_COMPONENTS, MAX_SPECIES, MixtureEuler1d, MixtureGas,
     Primitive, StepControl, StepReport, allocated, cell, positive, sum,
 };
-use fs_qty::{Area, Time};
+use fs_qty::{Area, Pressure, Time};
 
 mod flow;
 mod pair;
@@ -46,6 +50,50 @@ pub enum ValveDirection {
     SecondToFirst,
 }
 
+/// Quasi-static pressure-actuated aperture, with no hysteresis or stored energy.
+///
+/// Fractional area is zero at/below the cracking differential, rises linearly
+/// to one at the full-open differential, and remains one above it. This is an
+/// explicit estimated engineering law, not resolved poppet/spring dynamics or
+/// an empirically calibrated safety-relief model. Both thresholds are pressure
+/// differences; downstream backpressure participates in the opening decision.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PressureOpening {
+    cracking_pressure: Pressure,
+    full_open_pressure: Pressure,
+}
+impl PressureOpening {
+    /// Require finite 0 <= cracking < full-open pressures, in Pa.
+    pub fn new(cracking_pressure: Pressure, full_open_pressure: Pressure) -> Result<Self, ValveError> {
+        if !cracking_pressure.value().is_finite() || cracking_pressure.value() < 0.0
+            || !full_open_pressure.value().is_finite()
+            || full_open_pressure.value() <= cracking_pressure.value()
+        { return Err(ValveError::Invalid("pressure opening requires finite 0 <= cracking < full-open differentials")); }
+        Ok(Self { cracking_pressure, full_open_pressure })
+    }
+    /// Differential pressure at which the aperture first opens.
+    pub const fn cracking_pressure(self) -> Pressure { self.cracking_pressure }
+    /// Differential pressure at which the aperture reaches its declared maximum.
+    pub const fn full_open_pressure(self) -> Pressure { self.full_open_pressure }
+    /// Fraction of the maximum aperture at a signed forward pressure difference.
+    /// Negative differences are closed. An orifice first selects the allowed
+    /// donor, then evaluates this law on donor pressure minus receiver pressure.
+    pub fn fraction(self, pressure_difference: Pressure) -> Result<f64, ValveError> {
+        let difference = pressure_difference.value();
+        if !difference.is_finite() {
+            return Err(ValveError::Invalid("pressure opening differential must be finite"));
+        }
+        if difference <= self.cracking_pressure.value() { return Ok(0.0); }
+        if difference >= self.full_open_pressure.value() { return Ok(1.0); }
+        let fraction = (difference - self.cracking_pressure.value())
+            / (self.full_open_pressure.value() - self.cracking_pressure.value());
+        if fraction == 0.0 {
+            return Err(ValveError::Invalid("nonzero pressure opening underflowed"));
+        }
+        Ok(fraction)
+    }
+}
+
 /// Caller-authored effective opening of a stationary converging orifice.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Orifice {
@@ -53,6 +101,7 @@ pub struct Orifice {
     discharge_coefficient: f64,
     opening: f64,
     direction: ValveDirection,
+    pressure_opening: Option<PressureOpening>,
 }
 impl Orifice {
     /// Area is nonnegative; Cd and fractional opening are in [0,1]. Zero is an
@@ -70,7 +119,7 @@ impl Orifice {
         {
             return Err(ValveError::Invalid("orifice area, discharge coefficient or opening"));
         }
-        let out = Self { area, discharge_coefficient, opening, direction };
+        let out = Self { area, discharge_coefficient, opening, direction, pressure_opening: None };
         let effective = out.effective_area().value();
         if area.value() > 0.0 && discharge_coefficient > 0.0 && opening > 0.0 && effective == 0.0 {
             return Err(ValveError::Invalid("nonzero effective orifice area underflowed"));
@@ -81,11 +130,21 @@ impl Orifice {
     pub const fn area(self) -> Area { self.area }
     /// Explicit discharge coefficient, with no hidden loss or area multiplier.
     pub const fn discharge_coefficient(self) -> f64 { self.discharge_coefficient }
-    /// Retained fractional opening.
+    /// Retained fractional opening, an upper bound when pressure-actuated.
     pub const fn opening(self) -> f64 { self.opening }
     /// Retained ideal check-valve direction.
     pub const fn direction(self) -> ValveDirection { self.direction }
-    /// Cd times opening times geometric area, applied once.
+    /// Add a reversible differential-pressure aperture law. The caller's opening
+    /// remains an independent maximum fraction, and the retained direction still
+    /// forbids reverse leakage. Evaluated at every implicit transfer endpoint.
+    pub const fn with_pressure_opening(mut self, law: PressureOpening) -> Self {
+        self.pressure_opening = Some(law);
+        self
+    }
+    /// Optional pressure aperture law; None retains the fixed original opening.
+    pub const fn pressure_opening(self) -> Option<PressureOpening> { self.pressure_opening }
+    /// Maximum effective area: Cd times opening times geometric area, once.
+    /// A pressure-actuated valve multiplies this by its current aperture fraction.
     pub fn effective_area(self) -> Area {
         Area::new((self.area.value() * self.opening) * self.discharge_coefficient)
     }
