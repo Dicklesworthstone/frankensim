@@ -11,6 +11,8 @@ pub mod thermal;
 pub mod network;
 /// Shared-state multiport flow driving independent moving gas chambers.
 pub mod graph;
+/// Source-backed Peng--Robinson reservoir flow driving the same piston mechanics.
+pub mod real_gas;
 
 use super::{ClosedGasParcel, GasEnergyError, GasPiston, PistonError, PistonInput,
     PistonSolve, PistonStep, invalid, poll, positive};
