@@ -9,6 +9,7 @@
 use super::{NsfThermoviscousDg, NsfThermoviscousDgFrame};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::performance::ApertureObservation;
+use crate::cavity_modal::interior::thermoviscous::dg::ThermoviscousDg;
 use crate::nsf_dg::{NsfDgDrive, NsfDgError, same_clock};
 use crate::nsf_dg::performance::{ReservoirObservation, clock::IntervalClock, source_intervals_for};
 use crate::nsf_dg::performance::reservoir::{self, ReservoirPressure};
@@ -29,6 +30,31 @@ fn physical(error: NsfDgError) -> RenderError {
     })
 }
 
+/// One original FE-to-duct connection inside an explicitly selected acoustic
+/// assembly. The port is its FE identity, not an attachment-list position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NsfThermoviscousDgObservationPort {
+    Downstream(usize),
+    Upstream(usize),
+}
+
+impl NsfThermoviscousDgObservationPort {
+    pub const fn port(self) -> usize {
+        match self { Self::Downstream(port) | Self::Upstream(port) => port }
+    }
+
+    fn assembly<'s, 'a, 'c, L: Lattice3<27>>(self,
+        system: &'s NsfThermoviscousDg<'a, 'c, L>)
+        -> Result<&'s ThermoviscousDg<'a, 'c>, RenderError>
+    {
+        match self {
+            Self::Downstream(_) => Ok(system.load().system()),
+            Self::Upstream(_) => system.upstream_load().map(|load| load.system())
+                .ok_or_else(|| sizing("upstream observation requires its original complete acoustic assembly")),
+        }
+    }
+}
+
 /// A finite stream observing one attached duct while all participants continue.
 /// A failed step leaves every physical owner unchanged. Observation failure
 /// retains the accepted physical step; either failure poisons playback and
@@ -36,7 +62,7 @@ fn physical(error: NsfDgError) -> RenderError {
 /// by the original solvers; no allocation-free or real-time claim is implied.
 pub struct NsfThermoviscousDgPerformance<'a, 'c, L: Lattice3<27>> {
     system: NsfThermoviscousDg<'a, 'c, L>,
-    observation_port: usize,
+    observation_target: NsfThermoviscousDgObservationPort,
     observation: ApertureObservation,
     controls: Vec<NsfDgDrive>,
     receiver: Option<BaffledPressure>,
@@ -62,11 +88,24 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
         observation: ApertureObservation, sample_rate_hz: u32, controls: Vec<NsfDgDrive>,
         maximum_block: usize, gate: Arc<CancelGate>) -> Result<Self, RenderError>
     {
+        Self::new_with_drives_at(system, NsfThermoviscousDgObservationPort::Downstream(observation_port),
+            observation, sample_rate_hz, controls, maximum_block, gate)
+    }
+
+    /// Observe either original complete assembly on the common physical clock.
+    /// Both fields and every attached finite duct advance together regardless
+    /// of which original pressure or computed microphone is selected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_drives_at(system: NsfThermoviscousDg<'a, 'c, L>,
+        target: NsfThermoviscousDgObservationPort, observation: ApertureObservation,
+        sample_rate_hz: u32, controls: Vec<NsfDgDrive>, maximum_block: usize,
+        gate: Arc<CancelGate>) -> Result<Self, RenderError>
+    {
         if !same_clock(system.load().duration_s(), 1.0 / f64::from(sample_rate_hz)) {
             return Err(sizing("resolved complete-field playback requires its original matching clock"));
         }
         let output_samples = controls.len() as u64;
-        Self::build(system, observation_port, observation, sample_rate_hz, controls,
+        Self::build(system, target, observation, sample_rate_hz, controls,
             output_samples, maximum_block, gate, None, false)
     }
 
@@ -80,25 +119,41 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
         observation: ApertureObservation, output_rate_hz: u32, controls: Vec<NsfDgDrive>,
         output_samples: u64, maximum_block: usize, gate: Arc<CancelGate>) -> Result<Self, RenderError>
     {
+        Self::new_resampled_with_drives_at(system,
+            NsfThermoviscousDgObservationPort::Downstream(observation_port), observation,
+            output_rate_hz, controls, output_samples, maximum_block, gate)
+    }
+
+    /// Select an original acoustic assembly while projecting its accepted
+    /// interval means through the shared independent observation clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_resampled_with_drives_at(system: NsfThermoviscousDg<'a, 'c, L>,
+        target: NsfThermoviscousDgObservationPort, observation: ApertureObservation,
+        output_rate_hz: u32, controls: Vec<NsfDgDrive>, output_samples: u64,
+        maximum_block: usize, gate: Arc<CancelGate>) -> Result<Self, RenderError>
+    {
         let dt = system.load().duration_s();
         if controls.len() != source_intervals_for(dt, output_rate_hz, output_samples)? {
             return Err(sizing("resolved field controls must cover the original physical output window"));
         }
         if same_clock(dt, 1.0 / f64::from(output_rate_hz)) {
-            if dt.to_bits() == (1.0 / f64::from(output_rate_hz)).to_bits() {
-                return Self::new_with_drives(system, observation_port, observation,
+            let observer_dt = target.assembly(&system)?.prepared().duration_s();
+            if dt.to_bits() == (1.0 / f64::from(output_rate_hz)).to_bits()
+                && observer_dt.to_bits() == dt.to_bits()
+            {
+                return Self::new_with_drives_at(system, target, observation,
                     output_rate_hz, controls, maximum_block, gate);
             }
-            return Self::build(system, observation_port, observation, output_rate_hz,
+            return Self::build(system, target, observation, output_rate_hz,
                 controls, output_samples, maximum_block, gate, None, true);
         }
         let clock = IntervalClock::new(dt, output_rate_hz, output_samples).map_err(sizing)?;
-        Self::build(system, observation_port, observation, output_rate_hz, controls,
+        Self::build(system, target, observation, output_rate_hz, controls,
             output_samples, maximum_block, gate, Some(clock), true)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build(system: NsfThermoviscousDg<'a, 'c, L>, observation_port: usize,
+    fn build(system: NsfThermoviscousDg<'a, 'c, L>, target: NsfThermoviscousDgObservationPort,
         observation: ApertureObservation, sample_rate_hz: u32, controls: Vec<NsfDgDrive>,
         output_samples: u64, maximum_block: usize, gate: Arc<CancelGate>,
         clock: Option<IntervalClock>, projected_observer: bool) -> Result<Self, RenderError>
@@ -108,6 +163,8 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
             || !(1..=65_536).contains(&maximum_block) || controls.is_empty()
             || controls.len() as u64 > system.limits().maximum_steps
             || controls.len() as u64 > system.load().system().limits().maximum_steps
+            || system.upstream_load().is_some_and(|load|
+                controls.len() as u64 > load.system().limits().maximum_steps)
             || controls.len() != source_intervals_for(system.load().duration_s(), sample_rate_hz, output_samples)?
         {
             return Err(sizing("resolved field playback requires cold owners and a bounded complete control history"));
@@ -116,7 +173,7 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
             if gate.is_requested() { return Err(RenderError::Voice(AcousticRealizeError::Cancelled)); }
             system.validate_drive(drive).map_err(physical)?;
         }
-        let load = system.load().system().load_at_port(observation_port)
+        let load = target.assembly(&system)?.load_at_port(target.port())
             .ok_or_else(|| sizing("resolved field observation must name an attached original duct"))?;
         let receiver = match observation {
             ApertureObservation::Inlet => None,
@@ -128,7 +185,7 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
         let terminal_flows = if receiver.is_some() { vec![0.0; load.terminal_ports().len()] }
             else { Vec::new() };
         if gate.is_requested() { return Err(RenderError::Voice(AcousticRealizeError::Cancelled)); }
-        Ok(Self { system, observation_port, observation, controls, receiver,
+        Ok(Self { system, observation_target: target, observation, controls, receiver,
             observer_gas: None, reservoirs: Vec::new(), terminal_flows, sample_rate_hz, maximum_block, gate,
             last: None, clock, projected_observer, output_samples, output_cursor: 0, poisoned: false })
     }
@@ -137,6 +194,9 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
     /// Multiple original apertures require `with_reservoir_observation_at` so
     /// independently prescribed supply tiles cannot be selected implicitly.
     pub fn with_reservoir_observation(self, input: ReservoirObservation) -> Result<Self, RenderError> {
+        if matches!(self.observation_target, NsfThermoviscousDgObservationPort::Upstream(_)) {
+            return Err(sizing("resolved escape observation requires the downstream exterior"));
+        }
         if self.system.zone().reservoir_aperture_count() != 1 {
             return Err(sizing("select the observed reservoir explicitly when multiple apertures exist"));
         }
@@ -152,6 +212,9 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
     pub fn with_reservoir_observation_at(mut self, aperture: usize,
         input: ReservoirObservation) -> Result<Self, RenderError>
     {
+        if matches!(self.observation_target, NsfThermoviscousDgObservationPort::Upstream(_)) {
+            return Err(sizing("resolved escape observation requires the downstream exterior"));
+        }
         if self.poisoned || self.system.accepted_steps() != 0 || self.observer_gas.is_some()
             || self.reservoirs.iter().any(|observer| observer.aperture == aperture)
             || self.gate.is_requested()
@@ -160,10 +223,10 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
             return Err(sizing("reservoir observation needs a unique cold finite placement before gas preparation"));
         }
         let reaction = self.system.reservoir_radiation_at(aperture);
-        if reaction.is_some() && self.observation_port != self.system.load().system().port() {
+        if reaction.is_some() && self.observation_port() != self.system.load().system().port() {
             return Err(sizing("joint reservoir observation requires its primary duct's original shared exterior"));
         }
-        let load = self.system.load().system().load_at_port(self.observation_port)
+        let load = self.system.load().system().load_at_port(self.observation_port())
             .ok_or_else(|| sizing("resolved field microphone lost its original duct"))?;
         let observer = ReservoirPressure::prepare(
             self.system.zone(), self.system.reference_gas(), load, self.observation,
@@ -184,7 +247,7 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
         let ApertureObservation::TubeBaffled(location) = self.observation else {
             return Err(sizing("resolved field atmosphere requires an exterior microphone"));
         };
-        let load = self.system.load().system().load_at_port(self.observation_port)
+        let load = self.observation_target.assembly(&self.system)?.load_at_port(self.observation_port())
             .ok_or_else(|| sizing("resolved field microphone lost its original duct"))?;
         let (receiver, report) = if self.projected_observer {
             load.baffled_receiver_projected_with_gas(self.sample_rate_hz, location, propagation, &self.gate)
@@ -206,7 +269,8 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
     pub const fn system(&self) -> &NsfThermoviscousDg<'a, 'c, L> { &self.system }
     pub fn drive_history(&self) -> &[NsfDgDrive] { &self.controls }
     pub const fn last_frame(&self) -> Option<&NsfThermoviscousDgFrame> { self.last.as_ref() }
-    pub const fn observation_port(&self) -> usize { self.observation_port }
+    pub const fn observation_port(&self) -> usize { self.observation_target.port() }
+    pub const fn observation_target(&self) -> NsfThermoviscousDgObservationPort { self.observation_target }
     pub const fn observation(&self) -> ApertureObservation { self.observation }
     pub fn baffled_receiver(&self) -> Option<&BaffledPressure> { self.receiver.as_ref() }
     pub fn observer_gas(&self) -> Option<&GasPropagationReport> { self.observer_gas.as_ref() }
@@ -253,13 +317,14 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
     }
 
     fn accumulate(&mut self, weight: f64) -> Result<f64, RenderError> {
-        let system = self.system.load().system();
+        let system = self.observation_target.assembly(&self.system)?;
         let frame = system.last_frame().ok_or_else(|| sizing("resolved acoustic field has no accepted interval"))?;
-        let pressure = if self.observation_port == system.port() { frame.mean_pressure_pa }
-            else { frame.additional_ducts.iter().find(|duct| duct.port == self.observation_port)
+        let port = self.observation_port();
+        let pressure = if port == system.port() { frame.mean_pressure_pa }
+            else { frame.additional_ducts.iter().find(|duct| duct.port == port)
                 .ok_or_else(|| sizing("resolved acoustic field omitted its observed duct"))?.mean_pressure_pa };
         if self.receiver.is_some() {
-            let terminals = system.load_at_port(self.observation_port)
+            let terminals = system.load_at_port(port)
                 .ok_or_else(|| sizing("resolved field microphone lost its original duct"))?.last_terminal_frames();
             if terminals.is_empty() || terminals.len() != self.terminal_flows.len() {
                 return Err(sizing("resolved field microphone requires every original terminal flow"));

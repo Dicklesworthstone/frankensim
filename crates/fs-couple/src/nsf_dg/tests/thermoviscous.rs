@@ -15,6 +15,7 @@ use fs_rep_mesh::TetComplex;
 
 mod radiation;
 mod upstream;
+mod upstream_observation;
 mod radiation_observation;
 
 const BAND: [f64; 2] = [20.0, 2000.0];
