@@ -28,8 +28,8 @@ pub struct GasPressureResponse {
 /// moved while this view is used, preventing stale thermodynamic coefficients.
 /// Geometry derivatives and coordinate/frame correctness remain caller authority.
 #[derive(Debug)]
-pub struct GasMechanicalLoad<'a> {
-    state: &'a ResolvedThermochemicalGasState,
+pub struct GasMechanicalLoad<'a, S = ResolvedThermochemicalGasState> {
+    state: &'a S,
     gradient: &'a [f64],
     response: GasPressureResponse,
     net_pressure_pa: f64,
@@ -80,25 +80,54 @@ impl ClosedGasParcel {
     /// and Hessian actions must use that same chart, units, frame and ordering.
     /// No coordinate registry, derivative estimator or volume law is invented.
     pub fn mechanical_load<'a>(
-        &'a self, volume_m3: f64, gradient: &'a [f64], exterior_pressure_pa: f64,
+        &'a self,
+        volume_m3: f64,
+        gradient: &'a [f64],
+        exterior_pressure_pa: f64,
     ) -> Result<GasMechanicalLoad<'a>, GasEntropyError> {
-        if volume_m3 != self.volume_m3() || !exterior_pressure_pa.is_finite()
+        GasMechanicalLoad::new(
+            self.state(),
+            self.volume_m3(),
+            volume_m3,
+            gradient,
+            exterior_pressure_pa,
+            self.pressure_response()?,
+        )
+    }
+}
+
+impl<'a, S> GasMechanicalLoad<'a, S> {
+    // Shared pullback for ideal and nonideal material states. The borrowed state
+    // fixes the physical epoch; each EOS supplies its own pressure/bulk response.
+    pub(in crate::thermochemical_gas) fn new(
+        state: &'a S,
+        current_volume_m3: f64,
+        volume_m3: f64,
+        gradient: &'a [f64],
+        exterior_pressure_pa: f64,
+        response: GasPressureResponse,
+    ) -> Result<Self, GasEntropyError> {
+        if volume_m3 != current_volume_m3 || !exterior_pressure_pa.is_finite()
             || exterior_pressure_pa < 0.0 || gradient.is_empty()
             || gradient.len() > MAX_VOLUME_COORDINATES
         {
             return Err(invalid("mechanical load needs current volume, nonnegative exterior pressure and 1..=256 coordinates"));
         }
         finite_vector(gradient, gradient.len())?;
-        let response = self.pressure_response()?;
         let net_pressure_pa = finite(response.pressure_pa - exterior_pressure_pa)?;
-        Ok(GasMechanicalLoad { state: self.state(), gradient, response, net_pressure_pa })
+        Ok(Self {
+            state,
+            gradient,
+            response,
+            net_pressure_pa,
+        })
     }
-}
 
-impl GasMechanicalLoad<'_> {
     /// Original source-bearing medium, also consumed by thermal/acoustic paths.
     #[must_use]
-    pub const fn state(&self) -> &ResolvedThermochemicalGasState { self.state }
+    pub const fn state(&self) -> &S {
+        self.state
+    }
     /// Absolute gas pressure and its adiabatic derivative, not net pressure.
     #[must_use]
     pub const fn pressure_response(&self) -> GasPressureResponse { self.response }

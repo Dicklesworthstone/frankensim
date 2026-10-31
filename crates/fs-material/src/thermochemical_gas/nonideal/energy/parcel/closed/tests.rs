@@ -282,3 +282,5 @@ fn g0_unchanged_volume_is_exact_but_still_checks_controls_and_cancellation() {
     assert_eq!(same.state().temperature_k(), gas.state().temperature_k());
     assert_eq!(energy, 0.0);
 }
+
+mod mechanics;

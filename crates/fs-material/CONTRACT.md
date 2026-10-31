@@ -6449,6 +6449,26 @@ inception or collapse. G0/G3 regressions cover source retention/refresh, quantit
 refusal, original water coefficients, pure limits, phase exchange, mass/volume
 conversion and independent compression of the separate phase volumes.
 
+## Real-gas pressure forces and mechanical tangents
+
+Closed ideal and Peng--Robinson parcels share the typed, borrowed
+`GasMechanicalLoad` for work-conjugate generalized forces, mechanical power and
+matrix-free tangent actions. The existing real-gas compression/heat owner supplies
+the accepted material state. Its adiabatic bulk modulus is rho*c^2 from that
+state's acoustic law, not the ideal-gas substitution (Cp/Cv)*p.
+
+For caller-supplied V(q), gradient and Hessian actions, F=(p-pe)*grad(V) and
+DF[dq]=(p-pe)*Hess(V)[dq]-(rho*c^2/V)*grad(V)*(grad(V).dq).
+Exterior pressure is explicitly constant during the local linearization.
+Borrowing the parcel preserves the state epoch across force and tangent use.
+The adapter owns no geometry, piston integrator or phase-equilibrium closure;
+the existing homogeneous-branch restrictions continue to apply.
+
+Focused regressions compare dense-gas stiffness with adiabatic pressure
+differences, the full geometric tangent with displaced-state force differences,
+and refined generalized-force quadrature with caloric compression work plus
+the declared exterior-pressure work.
+
 ## Conservative real-gas heating at fixed mass and volume
 
 `thermochemical_gas::nonideal::energy` reconstructs a complete source-bound

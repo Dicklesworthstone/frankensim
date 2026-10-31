@@ -5,6 +5,9 @@
 //! mechanical integrator that owns its actual heat and boundary-work balance.
 
 use super::IsochoricRealGasParcel;
+use crate::thermochemical_gas::energy::parcel::mechanics::{
+    GasMechanicalLoad, GasPressureResponse,
+};
 use crate::thermochemical_gas::energy::{
     GasEnergyError, GasEnergySolve, GasHeatStep,
     entropy::{GasEntropyError, GasEntropySolve, map_context},
@@ -87,6 +90,45 @@ impl ClosedRealGasParcel {
         cancelled: impl FnMut() -> bool,
     ) -> Result<GasHeatStep, GasEnergyError> {
         self.parcel.add_heat(heat_j, controls, cancelled)
+    }
+
+    /// Adiabatic mechanical stiffness from the SAME accepted real-gas sound
+    /// speed: K_s = rho*c^2 and (dp/dV)_s = -K_s/V. In a dense fluid Cp/Cv
+    /// cannot be substituted into the ideal-gas expression gamma*p.
+    pub fn pressure_response(&self) -> Result<GasPressureResponse, GasEntropyError> {
+        let state = self.state();
+        let bulk = state.density_kg_m3() * state.sound_speed_m_s() * state.sound_speed_m_s();
+        let derivative = -bulk / self.volume_m3();
+        if !positive(bulk) || !derivative.is_finite() || derivative >= 0.0 {
+            return Err(GasEntropyError::Invalid(
+                "real-gas adiabatic stiffness is unrepresentable",
+            ));
+        }
+        Ok(GasPressureResponse {
+            pressure_pa: state.pressure_pa(),
+            bulk_modulus_pa: bulk,
+            pressure_volume_derivative_pa_m3: derivative,
+        })
+    }
+
+    /// Pull the real-gas pressure and acoustic compressibility through the
+    /// existing work-conjugate geometry owner. The caller supplies V(q), its
+    /// gradient and later its Hessian actions in one consistent coordinate
+    /// chart. No separate force law or ideal-gas stiffness is introduced.
+    pub fn mechanical_load<'a>(
+        &'a self,
+        volume_m3: f64,
+        gradient: &'a [f64],
+        exterior_pressure_pa: f64,
+    ) -> Result<GasMechanicalLoad<'a, ResolvedThermochemicalRealGasState>, GasEntropyError> {
+        GasMechanicalLoad::new(
+            self.state(),
+            self.volume_m3(),
+            volume_m3,
+            gradient,
+            exterior_pressure_pa,
+            self.pressure_response()?,
+        )
     }
 
     /// Propose an endpoint from volume and total internal-energy change [J].
