@@ -33,6 +33,8 @@ use fs_qty::{Pressure, Temperature};
 
 mod caloric;
 pub use caloric::admit_caloric_interval;
+/// Ground-state atomic ionization and recombination at separate Te and Th.
+pub mod atomic_ionization;
 mod electron_impact;
 pub use electron_impact::{ElectronImpactRateV1, ForwardRateV1};
 /// Complete pinned GRI-Mech 3.0 source using these same kinetic owners.
