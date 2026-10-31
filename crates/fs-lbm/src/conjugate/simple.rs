@@ -90,6 +90,8 @@ use crate::d3q19::Face3;
 
 pub mod sgs;
 pub mod viscous_heat;
+mod darcy;
+use darcy::DarcyCross;
 #[cfg(feature = "enthalpy-coupling")]
 pub(in crate::conjugate) mod phase_capture;
 
@@ -580,6 +582,11 @@ impl Component {
     }
 }
 
+struct MomentumResidual {
+    relative: f64,
+    rms: f64,
+}
+
 pub(super) struct Solver<'a> {
     domain: &'a VoxelDomain,
     config: &'a SimpleConfig,
@@ -626,6 +633,9 @@ pub(super) struct Solver<'a> {
     planar_loss: [Vec<f64>; 3],
     /// Porous `(mu / kappa, rho C / 2)` per cell and axis (empty: none).
     porous: Vec<[(f64, f64); 3]>,
+    /// Symmetric cross-coordinate Darcy resistance. Empty for every original
+    /// scalar/grid-diagonal path; compiled once with the source epoch.
+    porous_cross: Vec<DarcyCross>,
     /// Internal fan index per face and component (`usize::MAX`: none;
     /// empty: no internal fans).
     fan_face: [Vec<usize>; 3],
@@ -958,6 +968,7 @@ impl<'a> Solver<'a> {
             },
             planar_loss,
             porous,
+            porous_cross: Vec::new(),
             fan_face,
             internal_fans,
             momentum_rms: [0.0; 3],
@@ -1322,6 +1333,9 @@ impl<'a> Solver<'a> {
                     *viscous = (*viscous / previous) * dynamic_viscosity_pa_s[c];
                     finite("simple.material_darcy_resistance", *viscous)?;
                 }
+                if let Some(cross) = self.porous_cross.get_mut(c) {
+                    cross.rescale_viscosity(previous, dynamic_viscosity_pa_s[c])?;
+                }
             }
             self.molecular_viscosity.clear();
             self.molecular_viscosity
@@ -1361,7 +1375,7 @@ impl<'a> Solver<'a> {
         }
         let mut steady = 0.0f64;
         for a in 0..3 {
-            steady = steady.max(self.momentum(a, gate)?);
+            steady = steady.max(self.momentum(a, true, gate)?.relative);
             self.guard_finite()?;
         }
         let imbalance = self.correct(self.config.pressure_tolerance, gate)?;
@@ -1375,6 +1389,13 @@ impl<'a> Solver<'a> {
             })
             .max(f64::MIN_POSITIVE);
         let mass = imbalance / (self.rho * largest_flux);
+        // Only a prospective convergence result needs the additional frozen
+        // coupled residual. Ordinary diagonal paths keep their exact arithmetic.
+        if !self.porous_cross.is_empty()
+            && mass <= self.config.tolerance && steady <= self.config.tolerance
+        {
+            steady = self.coupled_darcy_residual(gate)?;
+        }
         self.update_fan(mass, steady);
         let fan = self.fan.as_ref().map_or(0.0, |fan| fan.residual);
         Ok((mass, steady.max(fan)))
@@ -1462,7 +1483,9 @@ impl<'a> Solver<'a> {
     /// pressure correction (1e-8 of its imbalance).
     pub(super) fn project(&mut self, gate: &CancelGate) -> Result<(), ChtError> {
         self.correct(1e-8, gate)?;
-        self.guard_finite()
+        self.guard_finite()?;
+        self.admit_projected_darcy(gate)?;
+        Ok(())
     }
 
     /// Cell-centred velocity of `cell` (zero in solids).
@@ -1548,11 +1571,12 @@ impl<'a> Solver<'a> {
     /// flow's momentum scale (under-relaxation cancels at `u = u_old`, so
     /// this is the residual of the unrelaxed steady equations).
     #[allow(clippy::too_many_lines)] // one staggered control-volume assembly
-    fn momentum(&mut self, a: usize, gate: &CancelGate) -> Result<f64, ChtError> {
+    fn momentum(&mut self, a: usize, solve: bool, gate: &CancelGate) -> Result<MomentumResidual, ChtError> {
         let comp = &self.comps[a];
         let rows = comp.unknowns.len();
         if rows == 0 {
-            return Ok(0.0);
+            self.momentum_rms[a] = 0.0;
+            return Ok(MomentumResidual { relative: 0.0, rms: 0.0 });
         }
         let alpha = self.config.velocity_relaxation;
         let advective_density = if self.creeping { 0.0 } else { self.rho };
@@ -1750,6 +1774,9 @@ impl<'a> Solver<'a> {
                 let coef = |c: (f64, f64)| c.1.mul_add(u_old.abs(), c.0);
                 a_p += face_area * (0.5 * w_minus).mul_add(coef(m), 0.5 * w_plus * coef(p));
             }
+            if !self.porous_cross.is_empty() {
+                rhs -= self.darcy_cross_force(a, minus_cell, plus_cell);
+            }
             if let Some(time) = &self.time {
                 // rho V du/dt over the staggered volume.
                 let c = self.rho * face_area * length / time.dt;
@@ -1852,6 +1879,8 @@ impl<'a> Solver<'a> {
         if !steady.is_finite() {
             return Err(ChtError::FlowDiverged { step: self.sweeps });
         }
+        let residual = MomentumResidual { relative: steady, rms: residual / rows_root };
+        if !solve { return Ok(residual); }
         if steady > 1e-15 {
             let outcome = bicgstab_ilu0("momentum", &matrix, &b, &mut x, inner, 20_000, gate)
                 .map_err(|error| match error {
@@ -1867,7 +1896,7 @@ impl<'a> Solver<'a> {
             self.d[a][index] =
                 areas[row] / (a_p_relaxed[row] - neighbour_sum[row]).max(f64::MIN_POSITIVE);
         }
-        Ok(steady)
+        Ok(residual)
     }
 
     /// Outward mass flux of cell `c` through local face `side` (Face3 order).
@@ -2212,7 +2241,8 @@ impl Solver<'_> {
         self.correct(1e-8, gate)?;
         self.update_sgs(gate)?;
         self.guard_finite()?;
-        Ok(self.finish_projected(fluid, iterations, (mass_residual, momentum_residual)))
+        let coupled = self.admit_projected_darcy(gate)?;
+        Ok(self.finish_projected(fluid, iterations, (mass_residual, momentum_residual.max(coupled))))
     }
 
     /// Report an already projected field, keeping a checkpoint and its receipt
@@ -2452,25 +2482,25 @@ pub(super) fn material_solver<'a>(
     config: &'a SimpleConfig,
     gate: &CancelGate,
 ) -> Result<Solver<'a>, ChtError> {
-    material_solver_with_directional(
+    material_solver_with_darcy_tensor(
         domain, fluid, dynamic_viscosity_pa_s, force_density_n_m3,
         drag_pa_s_m2, None, config, gate,
     )
 }
 
-/// Same native momentum owner with explicitly grid-aligned Darcy coefficients.
+/// Same native momentum owner with symmetric world-frame Darcy resistance.
 #[cfg(feature = "enthalpy-coupling")]
 #[allow(clippy::too_many_arguments)]
-pub(in crate::conjugate) fn simple_flow_with_directional_resistance(
+pub(in crate::conjugate) fn simple_flow_with_darcy_tensor(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
     dynamic_viscosity_pa_s: &[f64],
-    drag_pa_s_m2: &[[f64; 3]],
+    drag_pa_s_m2: &[[[f64; 3]; 3]],
     force_density_n_m3: Option<&[[f64; 3]]>,
     config: &SimpleConfig,
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
-    let solver = material_solver_with_directional(
+    let solver = material_solver_with_darcy_tensor(
         domain, fluid, dynamic_viscosity_pa_s, force_density_n_m3,
         None, Some(drag_pa_s_m2), config, gate,
     )?;
@@ -2478,13 +2508,13 @@ pub(in crate::conjugate) fn simple_flow_with_directional_resistance(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn material_solver_with_directional<'a>(
+pub(super) fn material_solver_with_darcy_tensor<'a>(
     domain: &'a VoxelDomain,
     fluid: &FluidProperties,
     dynamic_viscosity_pa_s: &[f64],
     force_density_n_m3: Option<&[[f64; 3]]>,
     drag_pa_s_m2: Option<&[f64]>,
-    directional_drag_pa_s_m2: Option<&[[f64; 3]]>,
+    darcy_resistance_pa_s_m2: Option<&[[[f64; 3]; 3]]>,
     config: &'a SimpleConfig,
     gate: &CancelGate,
 ) -> Result<Solver<'a>, ChtError> {
@@ -2519,27 +2549,34 @@ pub(super) fn material_solver_with_directional<'a>(
             }
         }
     }
-    if let Some(drag) = directional_drag_pa_s_m2 {
+    if let Some(drag) = darcy_resistance_pa_s_m2 {
         if drag.len() != domain.cell_count() {
             return Err(ChtError::InvalidInput {
-                field: "simple.directional_drag_pa_s_m2",
-                reason: "one grid-axis drag vector per voxel is required".into(),
+                field: "simple.darcy_resistance_pa_s_m2",
+                reason: "one world-frame Darcy resistance tensor per voxel is required".into(),
             });
         }
         if solver.porous.is_empty() {
             solver.porous = vec![[(0.0, 0.0); 3]; domain.cell_count()];
         }
-        for (c, coefficients) in drag.iter().enumerate() {
+        for (c, matrix) in drag.iter().enumerate() {
             if c % 256 == 0 { poll(gate)?; }
-            for (axis, &coefficient) in coefficients.iter().enumerate() {
-                finite("simple.directional_drag_pa_s_m2", coefficient)?;
-                if coefficient < 0.0 || (!domain.is_fluid(c) && coefficient != 0.0) {
-                    return Err(ChtError::InvalidInput {
-                        field: "simple.directional_drag_pa_s_m2",
-                        reason: "grid-axis drag must be nonnegative and zero in solid voxels".into(),
-                    });
+            let cross = DarcyCross::from_tensor(matrix)?;
+            if !domain.is_fluid(c) && matrix != &[[0.0; 3]; 3] {
+                return Err(ChtError::InvalidInput {
+                    field: "simple.darcy_resistance_pa_s_m2",
+                    reason: "Darcy resistance must be zero in solid voxels".into(),
+                });
+            }
+            solver.admit_darcy_opening(c, cross)?;
+            if !cross.is_zero() {
+                if solver.porous_cross.is_empty() {
+                    solver.porous_cross = vec![DarcyCross::default(); domain.cell_count()];
                 }
-                solver.porous[c][axis].0 += coefficient;
+                solver.porous_cross[c] = cross;
+            }
+            for axis in 0..3 {
+                solver.porous[c][axis].0 += matrix[axis][axis];
                 finite("simple.material_darcy_resistance", solver.porous[c][axis].0)?;
             }
         }

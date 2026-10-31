@@ -352,7 +352,7 @@ where
                 start_s,
                 dt_s,
                 end_s,
-                applied.mushy_drag_pa_s_m2.is_some() || applied.directional_drag_pa_s_m2.is_some(),
+                applied.mushy_drag_pa_s_m2.is_some() || applied.darcy_resistance_pa_s_m2.is_some(),
                 applied.external_force_n_m3.is_some(),
                 applied.buoyancy_force_n_m3.is_some(),
                 self.gate,
@@ -401,9 +401,9 @@ where
                 &viscosity,
                 force_n_m3.as_deref(),
                 applied.buoyancy_force_n_m3.as_deref(),
-                if applied.directional_drag_pa_s_m2.is_some() { None }
+                if applied.darcy_resistance_pa_s_m2.is_some() { None }
                     else { applied.mushy_drag_pa_s_m2.as_deref() },
-                applied.directional_drag_pa_s_m2.as_deref(),
+                applied.darcy_resistance_pa_s_m2.as_deref(),
                 start_s,
                 dt_s,
                 end_s,

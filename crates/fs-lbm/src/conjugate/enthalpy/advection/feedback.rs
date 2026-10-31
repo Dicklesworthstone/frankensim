@@ -148,9 +148,11 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     pub mushy_drag_pa_s_m2: Option<Vec<f64>>,
     /// Original skeleton sources sampled at the SAME local caloric temperature.
     pub porous_samples: Vec<PorousFlowSample>,
-    /// Total grid-axis drag, including any scalar mushy contribution, when a
-    /// sourced skeleton is bound. Do not add mushy_drag_pa_s_m2 a second time.
-    pub directional_drag_pa_s_m2: Option<Vec<[f64; 3]>>,
+    /// Full symmetric world/grid-frame Darcy resistance [Pa s/m2], including
+    /// any scalar mushy diagonal, when a sourced skeleton is bound. These
+    /// coefficients drive both native force and local heat; do not add the
+    /// mushy_drag_pa_s_m2 account a second time.
+    pub darcy_resistance_pa_s_m2: Option<Vec<[[f64; 3]; 3]>>,
     /// Molecular heat and independent actuator work at this same source epoch.
     /// Present only after explicit quasisteady closed creeping-flow admission.
     /// Transient heat has a separate endpoint unsteady_mechanical_step receipt.
@@ -850,7 +852,7 @@ where
             None
         };
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
-        let (porous_samples, directional_drag_pa_s_m2) =
+        let (porous_samples, darcy_resistance_pa_s_m2) =
             self.porous_drag(&samples, mushy_drag_pa_s_m2.as_deref(), check)?;
         let (flow, viscous_power) = if let Some(owner) = &self.unsteady {
             // Thermal CFL and advection use the accepted old momentum. Its
@@ -867,7 +869,7 @@ where
                 self.viscous_heating.as_ref().map(|_| {
                     immobile_power(
                         domain,
-                        mushy_drag_pa_s_m2.is_some() || directional_drag_pa_s_m2.is_some(),
+                        mushy_drag_pa_s_m2.is_some() || darcy_resistance_pa_s_m2.is_some(),
                         self.external_force_n_m3.is_some(),
                     )
                 }),
@@ -877,8 +879,8 @@ where
                 .as_ref()
                 .ok_or(invalid("mobile cells lack a transport source"))?;
             if let Some(owner) = &self.viscous_heating {
-                let (flow, power) = if let Some(drag) = &directional_drag_pa_s_m2 {
-                    crate::conjugate::simple::viscous_heat::creeping_material_heat_with_directional(
+                let (flow, power) = if let Some(drag) = &darcy_resistance_pa_s_m2 {
+                    crate::conjugate::simple::viscous_heat::creeping_material_heat_with_darcy_tensor(
                         domain, fluid, &viscosities, None, Some(drag),
                         self.external_force_n_m3.as_deref(), self.config, owner.controls, self.gate,
                     )?
@@ -914,9 +916,9 @@ where
                     )?
                 };
                 (flow, Some(power))
-            } else if let Some(drag) = &directional_drag_pa_s_m2 {
+            } else if let Some(drag) = &darcy_resistance_pa_s_m2 {
                 (
-                    crate::conjugate::simple::simple_flow_with_directional_resistance(
+                    crate::conjugate::simple::simple_flow_with_darcy_tensor(
                         domain, fluid, &viscosities, drag,
                         buoyancy_force_n_m3.as_deref(), self.config, self.gate,
                     )?,
@@ -999,7 +1001,7 @@ where
             external_force_n_m3: self.external_force_n_m3.clone(),
             mushy_drag_pa_s_m2,
             porous_samples,
-            directional_drag_pa_s_m2,
+            darcy_resistance_pa_s_m2,
             viscous_power,
         });
         self.solves += usize::from(native_solve);

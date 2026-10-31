@@ -3249,20 +3249,42 @@ are explicit `None` entries. Each source epoch samples the skeleton's intrinsic
 principal permeability in m2 at the same local caloric temperature used by the
 fluid transport source; all other original material conditions, keys and claim
 receipts stay pinned. The existing `IntrinsicPermeability` owns the material
-frame. Exact signed grid axes and axis permutations are admitted; oblique
-tensors refuse because the native momentum stencil has no cross-axis drag.
-Positive finite permeability is required. Zero permeability needs an exact
-velocity constraint and is not replaced by a large finite resistance.
+frame. The complete `B = mu R diag(1/K_i) R^T` enters the native world/grid
+coordinates, including oblique frames and signed cross-coordinate resistance.
+An isotropic material is independent of its arbitrary frame. Positive finite
+principal permeability is required. Zero permeability needs an exact velocity
+constraint and is not replaced by a large finite resistance.
 
-The actual resolved `mu(T)/K_i(T)` coefficients enter the original MAC momentum
-rows and pressure correction. Any declared scalar mushy resistance adds once
-to each grid axis; its existing API is retained. With an admitted quasisteady
-or unsteady heating mode, the same coefficients feed the existing staggered
-Darcy work quadrature and original thermal storage once. Native transient
-kinetic energy and backward-Euler numerical loss retain their separate
-accounts. Without a heating attachment this binding changes momentum only.
-`MaterialFlowEpoch` exposes source-start skeleton receipts and total sourced
-directional drag; `endpoint_porous_samples` retains accepted endpoint sources.
+The actual source coefficients enter the original MAC momentum rows and
+pressure correction. Grid-diagonal inputs retain the exact original half-cell
+arithmetic. If P averages each cell's two faces per component, cross terms use
+the symmetric native action `P^T V (B-diag(B)) P`. Its local power plus the
+original diagonal half-face power is
+`V [ubar^T B ubar + sum_a B_aa (u_a+ - u_a-)^2/4]`, nonnegative for SPD B.
+This retains face coercivity instead of introducing a checkerboard null mode
+through cell-centred drag alone. The symmetric coefficients are compiled with
+the source epoch; no material query or tensor rotation occurs in an iteration.
+Scalar mushy resistance adds once to the diagonal; its existing API is retained.
+
+The existing bounded component iteration resolves the cross coupling. Before
+accepting convergence, all three coupled momentum residuals are reassembled on
+one frozen velocity/pressure iterate. The final tight pressure projection must
+also preserve that residual bound. Failure refuses instead of reporting a
+converged solve with stale cross-coordinate forces. This is not an unconditional
+iteration-convergence claim for arbitrarily ill-conditioned anisotropy.
+Cells with nonzero cross terms may touch closed normal walls/symmetry, but
+cannot touch pressure/inlet openings: the existing opening rows mirror an
+exterior staggered volume, which requires a separate open-port work reduction.
+A clear-fluid layer between a porous insert and those openings is admitted.
+
+With quasisteady or unsteady heating, the SAME native action supplies the
+original cell's Darcy heat once; a cross term alone may be negative and is not
+a separate dissipation channel. Independent face-work and cell-heat traversals
+must agree. Native kinetic energy and backward-Euler numerical loss retain
+their separate accounts. Without a heating attachment this changes momentum
+only. `MaterialFlowEpoch::darcy_resistance_pa_s_m2` exposes the full total matrix
+and source-start skeleton receipts; `endpoint_porous_samples` retains accepted
+endpoint sources.
 
 This closure has a fixed, zero-velocity rigid skeleton and fixed geometry,
 linear Darcy drag and the existing density/caloric limits. Fluid and skeleton
@@ -3277,6 +3299,10 @@ Focused tests in `liquid_flow_enthalpy/viscous/porous.rs` independently reduce
 the four-face MAC equations to check directional drag and heat, signed axis
 permutations, exact compatibility with the scalar native APIs, real
 two-interval `mu(T)/K(T)` feedback, and source-domain refusal with retry.
+The `porous/rotated.rs` cases independently reduce an alternating-frame 2x2
+MAC circulation in all three coordinate planes. They check signed off-diagonal
+motion, local and total heat, source feedback, native backward-Euler kinetic
+and numerical losses, and transactional source/cancellation failure.
 The supported-freezing regression also requires the original porous receipts
 to match the final temperature after kinetic capture heat. These numerical
 fixtures are authored regressions, not experimental material validation; native

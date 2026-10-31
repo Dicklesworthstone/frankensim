@@ -1,4 +1,4 @@
-//! Source-bound, stationary, grid-aligned porous drag and its original heat.
+//! Source-bound, stationary, oriented porous drag and its original heat.
 
 use super::*;
 use fs_material::porous::permeability::temperature::ResolvedPermeability;
@@ -20,13 +20,19 @@ where
 {
     /// Bind one original permeability law to each declared porous fluid voxel.
     /// None is an explicitly clear-fluid voxel; missing material data must not
-    /// be converted to None. Principal axes must be exact signed grid axes or
-    /// their permutation. Oblique tensors require a different momentum stencil
-    /// and refuse, even if their sampled eigenvalues happen to coincide.
+    /// be converted to None. The original orthonormal material frame rotates
+    /// the complete resistance tensor `mu R diag(1/K_i) R^T` into grid axes.
+    /// Cross-coordinate resistance enters the existing native MAC/SIMPLE owner
+    /// through adjoint half-cell averaging; diagonal cases keep their original
+    /// exact force and heat arithmetic. Tensor-bearing cells may touch closed
+    /// walls/symmetry, but need a clear-fluid layer before an inlet or pressure
+    /// opening because those native rows mirror an exterior staggered volume.
     ///
-    /// Actual local mu(T) divided by K_i(T) enters the SAME implicit native
-    /// momentum coefficient and optional Darcy heating quadrature. Scalar mushy
-    /// resistance remains additive. Both source-start and accepted endpoint T
+    /// Actual local mu(T) divided by K_i(T) enters the SAME native momentum
+    /// system and optional Darcy heating quadrature. The existing bounded
+    /// component iteration resolves off-diagonal coupling and checks the full
+    /// coupled residual before acceptance. Scalar mushy resistance remains
+    /// additive. Both source-start and accepted endpoint T
     /// must fit the original claims; no clipping or replacement source is used.
     ///
     /// The rigid skeleton has zero velocity, so drag work is physical loss.
@@ -90,17 +96,17 @@ where
         samples: &[FlowMaterialSample<F, T>],
         mushy: Option<&[f64]>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(Vec<PorousFlowSample>, Option<Vec<[f64; 3]>>), MaterialFlowError<O::Error>> {
+    ) -> Result<(Vec<PorousFlowSample>, Option<Vec<[[f64; 3]; 3]>>), MaterialFlowError<O::Error>> {
         let Some(bindings) = &self.porous else {
             return Ok((Vec::new(), None));
         };
-        let mut drag = vec![[0.0; 3]; self.domain.cell_count()];
+        let mut drag = vec![[[0.0; 3]; 3]; self.domain.cell_count()];
         if let Some(mushy) = mushy {
             for (voxel, (row, value)) in drag.iter_mut().zip(mushy).enumerate() {
                 if voxel % 256 == 0 {
                     check_gate(self.gate, check)?;
                 }
-                *row = [*value; 3];
+                for axis in 0..3 { row[axis][axis] = *value; }
             }
         }
         let mut sources = Vec::new();
@@ -116,33 +122,34 @@ where
                     source,
                 })?;
             let permeability = material.permeability();
-            let mut grid_k = [0.0; 3];
-            for (axis, &k) in permeability
-                .material_axes_in_world()
-                .iter()
-                .zip(permeability.principal_m2())
-            {
-                let direction = axis
-                    .iter()
-                    .position(|x| x.abs() == 1.0)
-                    .filter(|&a| (0..3).all(|i| i == a || axis[i] == 0.0))
-                    .ok_or(invalid(
-                        "native porous momentum requires exact signed grid principal axes",
-                    ))?;
+            let principal = permeability.principal_m2();
+            for &k in principal {
                 if !k.is_finite() || k <= 0.0 {
                     return Err(invalid("native Darcy drag requires positive intrinsic permeability; sealed axes need explicit constraints").into());
                 }
-                grid_k[direction] = k;
             }
             if let Some(transport) = sample.transport.mobile_transport() {
-                for (coefficient, k) in drag[sample.voxel].iter_mut().zip(grid_k) {
-                    let value = transport.dynamic_viscosity_pa_s() / k;
-                    *coefficient += value;
-                    if !value.is_finite() || value <= 0.0 || !coefficient.is_finite() {
-                        return Err(invalid(
-                            "source-bound directional Darcy drag is not representable",
-                        )
-                        .into());
+                let resistance = principal.map(|k| transport.dynamic_viscosity_pa_s() / k);
+                if resistance.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+                    return Err(invalid("source-bound principal Darcy resistance is not representable").into());
+                }
+                let axes = permeability.material_axes_in_world();
+                let isotropic = principal[0] == principal[1] && principal[1] == principal[2];
+                for a in 0..3 {
+                    for b in a..3 {
+                        // A truly isotropic material is independent of the
+                        // floating representation of its arbitrary frame.
+                        let value = if isotropic {
+                            if a == b { resistance[0] } else { 0.0 }
+                        } else {
+                            (0..3).map(|i| resistance[i] * axes[i][a] * axes[i][b]).sum()
+                        };
+                        let coefficient = drag[sample.voxel][a][b] + value;
+                        if !value.is_finite() || (a == b && value <= 0.0) || !coefficient.is_finite() {
+                            return Err(invalid("source-bound rotated Darcy resistance is not representable").into());
+                        }
+                        drag[sample.voxel][a][b] = coefficient;
+                        drag[sample.voxel][b][a] = coefficient;
                     }
                 }
             }

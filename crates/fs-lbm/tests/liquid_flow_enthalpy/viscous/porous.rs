@@ -9,6 +9,9 @@ use fs_material::state_point::{
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
 
+#[path = "porous/rotated.rs"]
+mod rotated;
+
 const K_NAMES: [&str; 3] = ["intrinsic_k_1", "intrinsic_k_2", "intrinsic_k_3"];
 const GRID_ALIGNED_AXES: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
@@ -124,8 +127,8 @@ fn original_axis_permutation_changes_native_drag_and_darcy_heat_once() {
         );
         assert!(epoch.mushy_drag_pa_s_m2.is_none());
         assert_eq!(
-            epoch.directional_drag_pa_s_m2.as_ref().unwrap(),
-            &vec![beta; 4]
+            epoch.darcy_resistance_pa_s_m2.as_ref().unwrap(),
+            &vec![[[beta[0], 0.0, 0.0], [0.0, beta[1], 0.0], [0.0, 0.0, beta[2]]]; 4]
         );
         for c in 0..4 {
             near(
@@ -291,13 +294,13 @@ fn actual_temperature_changes_both_fluid_viscosity_and_pinned_skeleton_permeabil
         for row in second
             .applied()
             .unwrap()
-            .directional_drag_pa_s_m2
+            .darcy_resistance_pa_s_m2
             .as_ref()
             .unwrap()
         {
-            near(row[0], 2.0 * mu1 / k_factor);
-            near(row[1], mu1 / k_factor);
-            near(row[2], 0.5 * mu1 / k_factor);
+            near(row[0][0], 2.0 * mu1 / k_factor);
+            near(row[1][1], mu1 / k_factor);
+            near(row[2][2], 0.5 * mu1 / k_factor);
         }
         assert_eq!(
             observer.unsteady_heating_audit(),
@@ -311,7 +314,7 @@ fn actual_temperature_changes_both_fluid_viscosity_and_pinned_skeleton_permeabil
 }
 
 #[test]
-fn unsupported_frames_sealed_axes_and_endpoint_source_exits_publish_no_candidate() {
+fn sealed_axes_and_endpoint_source_exits_publish_no_candidate() {
     let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
     let mut config = driven_box();
     config.faces[3] = FvBoundary::wall();
@@ -321,25 +324,14 @@ fn unsupported_frames_sealed_axes_and_endpoint_source_exits_publish_no_candidate
     let caloric = liquid_caloric(&card);
     let old = initial(&domain, 1.0, &caloric);
     let ids: Vec<_> = (0..4).map(|c| Some(CellId(c))).collect();
-    let oblique = std::f64::consts::FRAC_1_SQRT_2;
-    for (k, axes) in [
-        ([0.0, 1.0, 2.0], GRID_ALIGNED_AXES),
-        (
-            [1.0; 3],
-            [
-                [oblique, oblique, 0.0],
-                [-oblique, oblique, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
-        ),
-    ] {
-        let skeleton = skeleton(k, false, 810.0);
+    {
+        let skeleton = skeleton([0.0, 1.0, 2.0], false, 810.0);
         let observer = input(&ids, &liquid, &caloric)
             .feedback(&old, &domain, &config, (), &gate, 10)
             .unwrap();
         assert!(
             observer
-                .with_porous_materials(vec![Some(permeability(&skeleton, axes)); 4])
+                .with_porous_materials(vec![Some(permeability(&skeleton, GRID_ALIGNED_AXES)); 4])
                 .is_err()
         );
     }

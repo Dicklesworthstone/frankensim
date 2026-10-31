@@ -272,20 +272,20 @@ fn creeping_material_heat(
     controls: ViscousHeatControls,
     gate: &CancelGate,
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
-    creeping_material_heat_with_directional(
+    creeping_material_heat_with_darcy_tensor(
         domain, fluid, viscosity_pa_s, drag_pa_s_m2, None,
         force_density_n_m3, config, controls, gate,
     )
 }
 
-/// Grid-axis material drag shares the native force and heat quadrature.
+/// Symmetric material drag shares the native force and heat quadrature.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::conjugate) fn creeping_material_heat_with_directional(
+pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
     viscosity_pa_s: &[f64],
     drag_pa_s_m2: Option<&[f64]>,
-    directional_drag_pa_s_m2: Option<&[[f64; 3]]>,
+    darcy_resistance_pa_s_m2: Option<&[[[f64; 3]; 3]]>,
     force_density_n_m3: Option<&[[f64; 3]]>,
     config: &SimpleConfig,
     controls: ViscousHeatControls,
@@ -293,13 +293,13 @@ pub(in crate::conjugate) fn creeping_material_heat_with_directional(
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
     poll(gate)?;
     admit_heating(domain, config, controls)?;
-    let mut solver = material_solver_with_directional(
+    let mut solver = material_solver_with_darcy_tensor(
         domain,
         fluid,
         viscosity_pa_s,
         force_density_n_m3,
         drag_pa_s_m2,
-        directional_drag_pa_s_m2,
+        darcy_resistance_pa_s_m2,
         config,
         gate,
     )?;
@@ -307,13 +307,13 @@ pub(in crate::conjugate) fn creeping_material_heat_with_directional(
     let flow = solve_steady(solver, fluid, config, gate)?;
     // Reconstruct only the original coefficient/geometry owner from its public
     // projected field. This is an audit, not another flow solve or projection.
-    let mut sampler = material_solver_with_directional(
+    let mut sampler = material_solver_with_darcy_tensor(
         domain,
         fluid,
         viscosity_pa_s,
         force_density_n_m3,
         drag_pa_s_m2,
-        directional_drag_pa_s_m2,
+        darcy_resistance_pa_s_m2,
         config,
         gate,
     )?;
@@ -673,6 +673,12 @@ impl Solver<'_> {
                         add(cell_heat, (0.5 * domain.volume(c)) * beta * u * u)?;
                     }
                 }
+                if !self.porous_cross.is_empty() {
+                    add(cell_heat, self.darcy_cross_power(c))?;
+                    if *cell_heat < 0.0 {
+                        return Err(invalid_power("the full symmetric Darcy loss is not representably nonnegative"));
+                    }
+                }
                 if *cell_heat != 0.0 {
                     add(&mut heat[c], *cell_heat)?;
                 }
@@ -694,6 +700,9 @@ impl Solver<'_> {
                         self.comp_face_area(a, index) * (0.5 * wm).mul_add(bm, 0.5 * wp * bp);
                     let u = self.vel[a][index];
                     add(&mut staggered_drag_w, coefficient * u * u)?;
+                    if !self.porous_cross.is_empty() {
+                        add(&mut staggered_drag_w, self.darcy_cross_force(a, minus, plus) * u)?;
+                    }
                 }
             }
             let total = finite_value("viscous_heat.darcy", drag_heat.iter().sum())?;

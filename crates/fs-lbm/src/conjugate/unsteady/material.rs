@@ -3,7 +3,7 @@
 //! a checkpoint adapter around SIMPLEC, not another momentum discretization.
 
 use super::{FlowStepRecord, UnsteadyConfig, admit_unsteady, converge_step};
-use crate::conjugate::simple::{MomentumState, Solver, material_solver, material_solver_with_directional};
+use crate::conjugate::simple::{MomentumState, Solver, material_solver, material_solver_with_darcy_tensor};
 use crate::conjugate::simple::phase_capture::NativePhaseCapture;
 use crate::conjugate::{
     ChtError, FluidProperties, FvBoundary, FvFlow, SimpleConfig, TimeScheme, Turbulence,
@@ -378,7 +378,7 @@ impl MaterialMomentum {
         force_n_m3: Option<&[[f64; 3]]>,
         buoyancy_force_n_m3: Option<&[[f64; 3]]>,
         drag_pa_s_m2: Option<&[f64]>,
-        directional_drag_pa_s_m2: Option<&[[f64; 3]]>,
+        darcy_resistance_pa_s_m2: Option<&[[[f64; 3]; 3]]>,
         start_s: f64,
         dt_s: f64,
         end_s: f64,
@@ -387,13 +387,13 @@ impl MaterialMomentum {
         self.admit_interval(start_s, dt_s, end_s)?;
         let unsteady = controls(dt_s, config);
         admit_unsteady(domain, config, &unsteady)?;
-        let mut solver = material_solver_with_directional(
+        let mut solver = material_solver_with_darcy_tensor(
             domain,
             fluid,
             viscosity_pa_s,
             force_n_m3,
             drag_pa_s_m2,
-            directional_drag_pa_s_m2,
+            darcy_resistance_pa_s_m2,
             config,
             gate,
         )?;
