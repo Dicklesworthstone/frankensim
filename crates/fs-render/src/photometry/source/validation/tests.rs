@@ -190,7 +190,7 @@ fn csv_keeps_numerical_and_unknown_physical_errors_separate() {
         assert_eq!(columns[5],"enclosure");
         assert_eq!(columns[6].len(),64);
         assert_eq!(&columns[7..11],&["unknown";4]);
-        assert_eq!(columns[11],"3");
+        assert_eq!(columns[11],"4");
         assert_eq!(columns[12],"0");
         assert_eq!(columns[1].parse::<f64>().unwrap().to_bits(),report.estimate.lux.to_bits());
         struct Refuse;

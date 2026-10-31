@@ -19,9 +19,11 @@
 //! retained observer weights, not an assumed exact spectral normalization.
 //! Cell-boundary uncertainty widens the interval; grid discretization and
 //! measured-medium accuracy remain unknown. Supported source laws are
-//! isotropic, uniform cone, integer cosine powers 0..=64 and two-column
-//! axisymmetric tables with at most 64 polar knots. Cutoff uncertainty encloses
-//! both branches. The original native nominal calculation is unchanged.
+//! isotropic, uniform cone, integer cosine powers 0..=64 and the full native
+//! polar/azimuth tables, including asymmetric distributions. Angle and cutoff
+//! uncertainty encloses all branches. Table-query work is bounded; a broad
+//! angular box can fall back to the declared global intensity envelope. The
+//! original native nominal calculation is unchanged.
 
 use super::{AngularLaw, PhotometricSource};
 use crate::photometry::{
@@ -36,6 +38,8 @@ use crate::volumes::transport::VolumeTransportError;
 use crate::volumes::transport::enclosure::GridEnclosureBudget;
 use std::io::{self, Write};
 
+mod angular;
+pub use angular::MAX_ANGULAR_CELLS_PER_ENCLOSURE;
 mod spectral_medium;
 use spectral_medium::PreparedMedium;
 mod visibility;
@@ -43,8 +47,9 @@ use visibility::{Visibility, VisibilityIndex};
 pub use visibility::MAX_VISIBILITY_TRIANGLES;
 
 /// Version of the represented-function and numerical-enclosure interpretation.
-/// Version 3 adds retained spectral-grid extinction and its source/observer binding.
-pub const DIRECT_ENCLOSURE_SEMANTICS_VERSION: u32 = 3;
+/// Version 4 adds full polar/azimuth tables with series-bounded angular evaluation.
+/// Version 3's spectral-grid extinction and original scene owners are retained.
+pub const DIRECT_ENCLOSURE_SEMANTICS_VERSION: u32 = 4;
 
 /// Why the unchanged nominal result has no numerical enclosure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +62,7 @@ pub enum EnclosureUnavailable {
     MediumBudgetExceeded,
     /// The physical grid could not supply the requested spectral coefficients.
     PhysicalGridTransport,
-    /// This source needs an unsupported angular law or a larger table.
+    /// This source needs an unsupported angular law (for example fractional powers).
     SourceLaw {
         /// Source index in the original caller order.
         source: usize,
@@ -222,9 +227,10 @@ impl<'a, 'scene> EnclosedIlluminanceJob<'a, 'scene> {
 
 fn prepare<'field>(scene: &PhotometricScene<'field>, cx: &Cx<'_>) -> Result<Prepared<'field>, PhotometryError> {
     cx.checkpoint()?;
-    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.model.v3");
+    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.model.v4");
     hash.update(&DIRECT_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&fs_ivl::INTERVAL_SEMANTICS_VERSION.to_le_bytes());
+    hash.update(&fs_ivl::angle::ANGLE_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&fs_ivl::decay::DECAY_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&crate::photometry::PHOTOMETRY_SEMANTICS_VERSION.to_le_bytes());
     let medium = match PreparedMedium::prepare(&scene.medium, &mut hash, cx) {
@@ -256,11 +262,16 @@ fn prepare<'field>(scene: &PhotometricScene<'field>, cx: &Cx<'_>) -> Result<Prep
             AngularLaw::CosinePower { exponent, cosine_cutoff, .. } if *exponent <= 64.0 && exponent.fract() == 0.0 => {
                 hash.update(&[2]); hash_float(&mut hash, *exponent); hash_float(&mut hash, *cosine_cutoff);
             }
-            AngularLaw::Table(table) if table.phi.len() == 2 && table.cosine.len() <= 64 => {
+            AngularLaw::Table(table) => {
                 hash.update(&[3]);
-                hash.update(&(table.cosine.len() as u64).to_le_bytes());
-                for (row, mu) in table.cosine.iter().enumerate() {
-                    hash_float(&mut hash, *mu); hash_float(&mut hash, table.values[2 * row]);
+                // Hash original table content once, with bounded cancellation
+                // latency. No second profile or per-probe table copy is made.
+                for values in [&table.cosine, &table.phi, &table.values] {
+                    hash.update(&(values.len() as u64).to_le_bytes());
+                    for chunk in values.chunks(256) {
+                        cx.checkpoint()?;
+                        for &value in chunk { hash_float(&mut hash, value); }
+                    }
                 }
             }
             _ => return Ok(Prepared::Unavailable(EnclosureUnavailable::SourceLaw { source: index })),
@@ -298,7 +309,7 @@ fn evaluate(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe,
     };
     if !error.is_finite() { return Ok(no_claim(EnclosureUnavailable::ArithmeticRange)); }
     estimate.numerical = NumericalCertificate::enclosure(enclosure.lo(), enclosure.hi());
-    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.probe.v3");
+    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.probe.v4");
     hash.update(&model.0);
     for value in [probe.position_m.x, probe.position_m.y, probe.position_m.z, probe.normal.x, probe.normal.y, probe.normal.z] { hash_float(&mut hash, value); }
     cx.checkpoint()?;
@@ -323,7 +334,7 @@ fn direct_bound(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminancePr
         let normal = [probe.normal.x, probe.normal.y, probe.normal.z].map(Interval::point);
         let cosine = nonnegative(dot(normal, direction));
         if cosine.hi() == 0.0 { continue; }
-        let Some(intensity) = intensity_bound(source, direction.map(|v| -v)) else { return Ok(Err(EnclosureUnavailable::ArithmeticRange)); };
+        let Some(intensity) = intensity_bound(source, direction.map(|v| -v), cx)? else { return Ok(Err(EnclosureUnavailable::ArithmeticRange)); };
         if intensity.hi() == 0.0 { continue; }
         // Parameterize from source to receiver, exactly as native visibility.
         // The receiver exclusion changes only this segment, not distance² or
@@ -351,20 +362,20 @@ fn direct_bound(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminancePr
     Ok(Ok((sum, uncertain)))
 }
 
-fn intensity_bound(source: &PhotometricSource, outgoing: [Interval; 3]) -> Option<Interval> {
+fn intensity_bound(source: &PhotometricSource, outgoing: [Interval; 3], cx: &Cx<'_>) -> Result<Option<Interval>, PhotometryError> {
     let peak = Interval::point(source.distribution.peak_per_sr);
     if matches!(&source.distribution.law, AngularLaw::Isotropic) {
-        return Some(nonnegative(Interval::point(source.emitted_flux_lm) * peak));
+        return Ok(Some(nonnegative(Interval::point(source.emitted_flux_lm) * peak)));
     }
     let [x, y, z, w] = source.world_to_local_rotation.rotation_xyzw().map(Interval::point);
     let q = [x, y, z];
     let twice = cross(q, outgoing).map(|v| Interval::point(2.0) * v);
     let double = cross(q, twice);
     let local = std::array::from_fn(|i| outgoing[i] + w * twice[i] + double[i]);
-    let length = norm(local)?;
-    if length.lo() <= 0.0 { return None; }
+    let Some(length) = norm(local) else { return Ok(None); };
+    if length.lo() <= 0.0 { return Ok(None); }
     let cosine = local[2] / length;
-    if !finite(cosine) { return None; }
+    if !finite(cosine) { return Ok(None); }
     let mu = Interval::new(cosine.lo().clamp(-1.0, 1.0), cosine.hi().clamp(-1.0, 1.0));
     let angular = match &source.distribution.law {
         AngularLaw::Isotropic => peak,
@@ -375,26 +386,12 @@ fn intensity_bound(source: &PhotometricSource, outgoing: [Interval; 3]) -> Optio
             for _ in 0..(*exponent as u32) { power = nonnegative(power * positive_mu); }
             cutoff(nonnegative(peak * power), mu, *cosine_cutoff)
         }
-        AngularLaw::Table(table) => {
-            let mut result: Option<Interval> = None;
-            for (row, cell) in table.cosine.windows(2).enumerate() {
-                let lo = mu.lo().max(cell[1]);
-                let hi = mu.hi().min(cell[0]);
-                if lo > hi { continue; }
-                let denominator = Interval::point(cell[0]) - Interval::point(cell[1]);
-                if denominator.lo() <= 0.0 { return None; }
-                let t = (Interval::point(cell[0]) - Interval::new(lo, hi)) / denominator;
-                let t = Interval::new(t.lo().max(0.0), t.hi().min(1.0));
-                let a = Interval::point(table.values[2 * row]);
-                let b = Interval::point(table.values[2 * row + 2]);
-                let value = nonnegative((Interval::point(1.0) - t) * a + t * b);
-                result = Some(result.map_or(value, |old| old.hull(value)));
-            }
-            result?
-        }
+        AngularLaw::Table(table) => angular::table_enclosure(
+            table, source.distribution.peak_per_sr, local, mu, cx,
+        )?,
     };
     let result = nonnegative(Interval::point(source.emitted_flux_lm) * angular);
-    finite(result).then_some(result)
+    Ok(finite(result).then_some(result))
 }
 
 fn cutoff(value: Interval, mu: Interval, boundary: f64) -> Interval {

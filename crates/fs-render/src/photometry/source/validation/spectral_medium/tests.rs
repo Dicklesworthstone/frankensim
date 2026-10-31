@@ -62,7 +62,7 @@ fn layered_colored_attenuation_matches_an_independent_discrete_spectral_integral
             values.push(report.estimate.lux); identities.push(report.numerical_model_identity);
             let mut csv = Vec::new(); report.write_csv_row(0,&mut csv).unwrap();
             let csv = String::from_utf8(csv).unwrap();
-            assert!(csv.contains(",unknown,unknown,unknown,unknown,3,0"));
+            assert!(csv.contains(",unknown,unknown,unknown,unknown,4,0"));
         }
         assert!(values[0] > 900.0 * values[1], "colored attenuation was incorrectly collapsed to gray");
         assert_ne!(identities[0],identities[1]);
