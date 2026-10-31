@@ -2395,6 +2395,54 @@ wall conductances, diffusion, reaction and condensation. Source, phase, work,
 convergence and publication failures return no partial solution. This does not
 close the complete M0.1-W3 qualification.
 
+`SteadyAxialGas::solve_condensing` adds an explicit equilibrium-water route for
+the same positive axial flow and supplied wall data. Each bounded temperature
+proposal uses `WaterCondensationModel::partition_at_pressure_temperature` on a
+one-second reference flux packet, followed by the original `Advected` observer's
+stationary species and enthalpy balance. Its selective pure-water liquid outlet
+carries the aligned IAPWS liquid enthalpy; its mixed gas outlet carries the
+remaining source-derived composition and reduced mass rate. The original
+thermal timeline supplies wall power. The per-cell scalar root does not march
+a second transport model or approximate the original NASA caloric law.
+
+The reusable constant-pressure partition retains every noncondensing species
+and finite total water, with saturation capacity
+`n_water = n_carrier * p_sat(T) / (p - p_sat(T))`. This is distinct from the
+fixed-gas-volume capacity of `WetGasParcel`. It reuses the original gas owner's
+mole-amount construction and EOS/transport resolution, plus the same IAPWS
+saturation/liquid properties and caller-selected constant NASA/IAPWS caloric
+alignment. Its explicit liquid enthalpy and `-dm * L_h` phase contribution do
+not close a stream's sensible-enthalpy balance by themselves. The constant-p
+partition neither infers a volume nor defines a physical duration or wall film.
+
+Liquid output is a **drained** film-reservoir flux at the local equilibrium
+temperature, with explicit kg/s and enthalpy W. It is not accumulating steady
+storage, and downstream warm/dry gas cannot re-evaporate liquid already drained
+from upstream cells. Side injections retain their own species and enthalpies.
+The independent energy audit uses original NASA sensible increments plus the
+shared latent gap, cancelling formation datums before arithmetic; source/audit
+disagreement, loose caloric reconstruction, work exhaustion and failed total or
+per-species flow budgets refuse the complete field. Latent W is diagnostic and
+is never applied again beside carried liquid enthalpy.
+
+This route publishes the SAME `AxialGasField` using explicit
+`AxialGasSampling::CellwiseConstant`: station zero is the authored inlet and
+state i fills (station i-1, station i]. Cached states retain their original
+source evaluations and phase admission. No primitive chord between different
+saturated states is manufactured, so arbitrary acoustic samples remain within
+their admitted cell phases. Existing linear primitive fields and dry/network
+solves are unchanged. Temperature trials, wall heat, liquid and gas flows,
+source-relative power and species residuals remain inspectable per cell.
+
+The shared 273.16--323.15 K / 20--200 kPa ideal-mixture approximation applies.
+The model does not infer condensation kinetics, film motion, retained-film
+storage, wall thermal evolution, pressure loss or an acoustic validity bound
+from a steady residual. Authored G0/G1/G4 tests cover saturated cooling with
+mass/energy closure, dry upwind limits, hot/dry side injection, live cell
+refinement, arbitrary field sampling and bounded transactional refusal. These
+are manufactured-source checks, not experimental breath/film validation or
+completion of all M0.1-W3 requirements.
+
 ### Equilibrium substrate wetting on the liquid surface owner
 
 `liquid::surface::resolve_liquid_wetting_state` resolves only

@@ -5,6 +5,60 @@ use crate::thermochemical_gas::tests::{point, species_with_energy_reference, tra
 use fs_qty::Temperature;
 use fs_thermochem::{SpeciesId, mixture::FrozenIdealGasMixtureModelV1, water::SaturatedWaterState};
 
+#[test]
+fn g0_cellwise_sampling_keeps_saturated_source_states_without_an_invalid_chord() {
+    let pressure = 101325.0;
+    let states = [310.0, 300.0, 290.0].map(|temperature_k| {
+        let water = SaturatedWaterState::at_temperature(Temperature::new(temperature_k))
+            .unwrap()
+            .pressure()
+            .value()
+            / pressure;
+        PrimitiveGasState {
+            temperature_k,
+            composition: Composition::new(CompositionBasis::MoleFraction, vec![1.0 - water, water])
+                .unwrap(),
+        }
+    });
+    let field = AxialGasField::new_piecewise_constant(
+        vec![0.0, 0.25, 0.5],
+        pressure,
+        states.to_vec(),
+        source(),
+        QueryPoint::new(),
+        ThermochemicalPhase::LiquidWaterIapwsLimit,
+    )
+    .unwrap();
+    assert_eq!(field.sampling(), AxialGasSampling::CellwiseConstant);
+    assert_eq!(field.state_at(0.0).unwrap().state().temperature, 310.0);
+    for (x, endpoint) in [
+        (f64::EPSILON, 0.25),
+        (0.125, 0.25),
+        (0.25, 0.25),
+        (0.25001, 0.5),
+        (0.375, 0.5),
+        (0.5, 0.5),
+    ] {
+        assert_eq!(
+            field.state_at(x).unwrap(),
+            field.state_at(endpoint).unwrap()
+        );
+    }
+    assert!(field.state_at(-1.0).is_err());
+    assert!(field.state_at(0.50001).is_err());
+    let linear = AxialGasField::new(
+        vec![0.0, 0.25, 0.5],
+        pressure,
+        states.to_vec(),
+        source(),
+        QueryPoint::new(),
+        ThermochemicalPhase::LiquidWaterIapwsLimit,
+    )
+    .unwrap();
+    assert_eq!(linear.sampling(), AxialGasSampling::LinearPrimitives);
+    assert!(linear.state_at(0.125).is_err());
+}
+
 fn source() -> ThermochemicalGasModel {
     ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(

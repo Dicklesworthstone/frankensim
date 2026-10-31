@@ -1,4 +1,4 @@
-//! A prescribed, continuous primitive gas field at common static pressure.
+//! A prescribed primitive gas field at common static pressure.
 //!
 //! Temperature and canonical mole fractions are linearly interpolated between
 //! supplied stations. Density, sound speed, heat capacities and transport are
@@ -7,6 +7,9 @@
 //! This is a frozen field, not an advection, heat-transfer or condensation
 //! solver. The caller retains the measurements and uncertainty of the supplied
 //! stations. Material and thermochemistry source receipts survive every sample.
+//! An explicit cellwise route retains the same type and cached source-resolved
+//! finite-volume states. It does not interpolate saturated states through a
+//! supersaturated chord or infer phase transfer between discrete cells.
 
 /// Shared explicit species-column admission for authored primitive fields.
 pub mod input;
@@ -26,6 +29,16 @@ use crate::thermochemical_gas::{ResolvedThermochemicalGasState, ThermochemicalGa
 
 /// Bounds construction and a single sampling request; no silent decimation.
 pub const MAX_FIELD_STATIONS: usize = 4096;
+
+/// Spatial reconstruction of the supplied primitive states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxialGasSampling {
+    /// Continuous linear interpolation, reevaluated through the original sources.
+    LinearPrimitives,
+    /// State i holds on (station i-1, station i]; station zero is the inlet.
+    /// This is the first-order, well-mixed finite-volume reconstruction.
+    CellwiseConstant,
+}
 
 /// Primitive coordinates in the field model's canonical species order.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +60,7 @@ pub struct AxialGasField {
     source_conditions: QueryPoint,
     phase: ThermochemicalPhase,
     uniform: Option<ResolvedThermochemicalGasState>,
+    cell_states: Option<Vec<ResolvedThermochemicalGasState>>,
 }
 
 fn invalid(what: impl Into<String>) -> MaterialError {
@@ -105,6 +119,34 @@ impl AxialGasField {
         source_conditions: QueryPoint,
         phase: ThermochemicalPhase,
     ) -> Result<Self, MaterialError> {
+        Self::new_with_sampling(stations_m, static_pressure_pa, states, model,
+            source_conditions, phase, AxialGasSampling::LinearPrimitives)
+    }
+
+    /// Retain source-resolved finite-volume states in this SAME field owner.
+    /// State zero is the supplied inlet at x=0; state i fills (x[i-1], x[i]].
+    /// Every positive-width interval therefore samples an admitted cell state,
+    /// including saturated states whose linear primitive chord would be invalid.
+    /// Cached properties are evaluated once from each primitive/source pair;
+    /// no derived property is independently interpolated or humidity clamped.
+    /// Spatial convergence still requires refinement of the producing cell grid.
+    pub fn new_piecewise_constant(
+        stations_m: Vec<f64>,
+        static_pressure_pa: f64,
+        states: Vec<PrimitiveGasState>,
+        model: ThermochemicalGasModel,
+        source_conditions: QueryPoint,
+        phase: ThermochemicalPhase,
+    ) -> Result<Self, MaterialError> {
+        Self::new_with_sampling(stations_m, static_pressure_pa, states, model,
+            source_conditions, phase, AxialGasSampling::CellwiseConstant)
+    }
+
+    fn new_with_sampling(
+        stations_m: Vec<f64>, static_pressure_pa: f64, states: Vec<PrimitiveGasState>,
+        model: ThermochemicalGasModel, source_conditions: QueryPoint,
+        phase: ThermochemicalPhase, sampling: AxialGasSampling,
+    ) -> Result<Self, MaterialError> {
         if !(2..=MAX_FIELD_STATIONS).contains(&stations_m.len())
             || stations_m.len() != states.len()
             || stations_m[0] != 0.0
@@ -136,19 +178,32 @@ impl AxialGasField {
             source_conditions,
             phase,
             uniform: None,
+            cell_states: None,
         };
         let first = field.evaluate_primitive(&field.states[0])?;
         let mut uniform = true;
+        let mut previous = first.clone();
+        let mut cell_states = (sampling == AxialGasSampling::CellwiseConstant)
+            .then(|| vec![first.clone()]);
         for pair in field.states.windows(2) {
             if pair[0] != pair[1] {
-                field.evaluate_primitive(&pair[1])?;
+                previous = field.evaluate_primitive(&pair[1])?;
                 uniform = false;
             }
+            if let Some(states) = &mut cell_states { states.push(previous.clone()); }
         }
         if uniform {
             field.uniform = Some(first);
         }
+        field.cell_states = cell_states;
         Ok(field)
+    }
+
+    /// Explicit reconstruction; consumers rebuilding a field must retain it.
+    #[must_use]
+    pub const fn sampling(&self) -> AxialGasSampling {
+        if self.cell_states.is_some() { AxialGasSampling::CellwiseConstant }
+        else { AxialGasSampling::LinearPrimitives }
     }
 
     /// Original supplied station positions [m], retained without resampling.
@@ -202,8 +257,9 @@ impl AxialGasField {
         resolve_primitive(&self.model, &self.source_conditions, self.phase, state)
     }
 
-    /// Reevaluate the physical medium at one position, preserving exact supplied
-    /// knots and uniform spans. Only primitive T and mole fractions interpolate.
+    /// Resolve the physical medium at one position, preserving exact supplied
+    /// knots and uniform spans. Cellwise fields return their cached source state;
+    /// linear fields interpolate only primitive T and mole fractions.
     /// A bounded roundoff residual is added to the largest interpolated fraction
     /// so the existing thermochemistry owner receives a unit simplex. Authored
     /// station fractions are never normalized or repaired.
@@ -217,6 +273,9 @@ impl AxialGasField {
             return Ok(state.clone());
         }
         let right = self.stations_m.partition_point(|x| *x < x_m);
+        if let Some(states) = &self.cell_states {
+            return Ok(states[right].clone());
+        }
         if self.stations_m[right] == x_m {
             return self.evaluate_primitive(&self.states[right]);
         }

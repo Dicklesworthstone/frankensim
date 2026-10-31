@@ -14,7 +14,7 @@ use crate::compose::{
 use crate::{Duct, DuctError, DuctResponse, LossModel, OpenHoleFlow, Segment, Termination};
 use fs_material::MaterialError;
 use fs_material::gas::GasState;
-use fs_material::gas_field::AxialGasField;
+use fs_material::gas_field::{AxialGasField, AxialGasSampling};
 use fs_math::{c64::C64, det};
 use fs_phs::WallPin;
 use crate::WallModel;
@@ -202,17 +202,24 @@ impl GasFieldDuct {
         }
         if let (Some(first), Some(last)) = (open_sites.first(), open_sites.last()) {
             // Equal endpoint coefficients alone are insufficient: temperature
-            // or composition could change between them. Inspect every primitive
-            // interpolation span that intersects the near-field coupling span.
+            // or composition could change between them. Inspect the actual
+            // reconstruction on every intersecting span. A cellwise interval
+            // holds its RIGHT station; its left neighbor need not be identical.
+            let first_index = field.stations_m().partition_point(|x| *x < first.0);
+            let first_state = &field.primitive_states()[first_index];
             for (positions, states) in field
                 .stations_m()
                 .windows(2)
                 .zip(field.primitive_states().windows(2))
             {
+                let varies = match field.sampling() {
+                    AxialGasSampling::LinearPrimitives => states[0] != states[1],
+                    AxialGasSampling::CellwiseConstant => &states[1] != first_state,
+                };
                 if first.0 < last.0
                     && positions[1] > first.0
                     && positions[0] < last.0
-                    && states[0] != states[1]
+                    && varies
                 {
                     return Err(bad("open tone holes across a varying gas field need an unavailable mutual-hole law").into());
                 }

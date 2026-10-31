@@ -15,6 +15,9 @@
 /// Shared source-bound steady transport on branched and recirculating graphs.
 pub mod network;
 
+/// Equilibrium liquid-water removal through the same species/enthalpy observer.
+pub mod condensation;
+
 use super::{AxialGasField, PrimitiveGasState, resolve_primitive, typed};
 use crate::{MaterialError, gas_species::input::ThermochemicalPhase};
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::{GasEnergyError, GasEnergySolve}};
