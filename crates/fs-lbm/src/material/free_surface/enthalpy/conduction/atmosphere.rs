@@ -3,7 +3,8 @@
 //! existing source owner; film geometry remains an explicit physical input.
 
 use super::*;
-use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel};
+use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve, IsochoricGasParcel};
+use fs_qty::Temperature;
 
 mod body;
 pub(super) use body::BodyAtmosphere;
@@ -34,7 +35,7 @@ pub(super) struct FiniteAtmosphere {
     pub(super) parcel: IsochoricGasParcel,
     pub(super) temperature_slope: f64,
     controls: GasEnergySolve,
-    initial_specific_energy_j_kg: f64,
+    initial_temperature_k: f64,
     substeps: usize,
 }
 
@@ -58,7 +59,7 @@ impl FiniteAtmosphere {
             parcel: parcel.clone(),
             temperature_slope,
             controls,
-            initial_specific_energy_j_kg: parcel.state().specific_internal_energy_j_kg(),
+            initial_temperature_k: temperature,
             substeps: 0,
         })
     }
@@ -100,11 +101,18 @@ impl FiniteAtmosphere {
         thermal: &EnergyAudit,
         thermal_tolerance_j: f64,
     ) -> Result<FreeSurfaceFiniteGasExchange, Error> {
-        let stored = environment::finite(
-            self.parcel.mass_kg()
-                * (self.parcel.state().specific_internal_energy_j_kg()
-                    - self.initial_specific_energy_j_kg),
-        )?;
+        // Audit the actual endpoint with the SAME temperature-anchored caloric
+        // law used by the parcel. Subtracting absolute NASA9 energies here can
+        // reject valid coupled heat steps merely because their common formation
+        // reference is large. This is still an independent endpoint calculation,
+        // not the sum of the supplied heat or of per-substep solver receipts.
+        let change = self.parcel.model().thermodynamics().specific_internal_energy_change(
+            Temperature::new(self.initial_temperature_k),
+            Temperature::new(self.parcel.state().state().temperature),
+        ).map_err(|error| GasEnergyError::Material(fs_material::MaterialError::Parameters {
+            what: format!("finite atmosphere caloric increment: {error}"),
+        }))?.value();
+        let stored = environment::finite(self.parcel.mass_kg() * change)?;
         let defect = environment::finite(stored + heat_to_condensed_j)?;
         let allowance = environment::finite(
             self.substeps as f64 * self.parcel.mass_kg() * self.controls.energy_tolerance_j_kg,

@@ -362,6 +362,11 @@ account. Environmental heat appears once as a supply to the liquid subsystem
 and cancels against gas storage in their union. Authored heat and the existing
 physical molecular-heating account remain distinct; no full VOF kinetic-energy
 or pressure-work closure is inferred.
+The gas storage audit integrates the original frozen-composition Cv law between
+the actual initial and final temperatures, independently of the accumulated heat
+receipts. It does not subtract large absolute NASA9 energies. Changing a common
+formation-energy reference therefore cannot reject an otherwise admitted liquid,
+wall and atmosphere step or alter its heat, pressure or native liquid motion.
 
 This retains the existing pure-liquid, neglected-capillarity and first-order
 thermal/flow approximation. The caller supplies currently exposed geometry at
@@ -1680,9 +1685,21 @@ single retained offset u_offset = u_NASA9(T_ref) - cv(T_ref)*T_ref. It matches
 cv*T at the reference state and removes arbitrary formation-energy offsets
 from the separate lattice mass / finite-volume energy fluxes. NASA9 absolute
 energy may be negative. Lattice specific energy converts through (dx/dt)^2.
-The original material owner reconstructs density/energy with its stable
-(u_NASA9 - u_offset) - u_s residual; no new polynomial evaluator or caloric
-integrator participates. `energy_reference_j_kg()` exposes the offset.
+Cell and face energies evaluate this chart as cv(T_ref)*T_ref plus the original
+NASA9 integral of Cv from T_ref to T. Density/energy reconstruction inverts that
+same temperature-anchored increment. Common formation references therefore cancel
+before floating-point evaluation, including when they dwarf the thermal change;
+no subtraction of large absolute NASA9 energies participates in evolution.
+The existing material caloric branch is prepared once per native timestep and
+reused across every cell and corrector, while endpoint transport is still resolved
+at the actual state. No new polynomial evaluator or caloric integrator participates.
+Construction admits this same source branch over the entire inversion bracket,
+including positive Cv. A raw NASA9 bracket must stay within one region per species;
+crossing a region boundary requires the source owner's explicit
+`with_caloric_continuity` policy. The NSF owner neither reconciles source offsets
+implicitly nor waits until the first timestep to refuse an unsupported bracket.
+`NSF3_BIT_SEMANTICS_VERSION=6` records this source-path arithmetic change;
+the legacy GasSpec branch is unchanged. `energy_reference_j_kg()` exposes the offset.
 Reported energies and manufactured `SourceFn` energy supplies use this chart;
 an absolute-energy source carrying mass must subtract u_offset times its mass
 supply. Composition-changing/reaction sources are unsupported.
@@ -1702,8 +1719,8 @@ legacy perfect-gas convergence and stability evidence does not establish
 nonlinear NASA9 qualification. No reactions, species transport, molecular
 relaxation, phase change or variable bulk/shear ratio are supplied. Synthetic
 regressions in `tests/nsf3_thermochemical.rs` exercise caloric heating and local
-EOS/transport feedback, formation-energy-offset invariance during density
-changes, data-only conductivity substitution, worker invariance, local-source
+EOS/transport feedback, exact formation-energy-offset invariance during density
+changes and signed small-heat evolution, data-only conductivity substitution, worker invariance, local-source
 rollback, temperature-dependent Mach admission and legacy ingress equivalence.
 Their presence does not claim native execution or empirical gas validation.
 

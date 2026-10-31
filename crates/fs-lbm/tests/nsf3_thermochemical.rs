@@ -60,6 +60,24 @@ fn varying(x: [usize; 3]) -> (f64, [f64; 3], f64) {
 }
 
 #[test]
+fn g0_constructor_refuses_a_caloric_bracket_beyond_source_support() {
+    let model = source::model(-4000.0, 250000.0, 1.0);
+    let point = source::point(300.0, 100000.0);
+    let admitted = GasEnergySolve { maximum_temperature_k: 700.0, ..controls() };
+    // The reference is supported in both cases, but only the first complete
+    // run window is supported. Refuse the other before constructing a grid.
+    assert!(ThermochemicalNsfGas::new(model.clone(), point.clone(), admitted).is_ok());
+    let unsupported = GasEnergySolve {
+        maximum_temperature_k: 700.0_f64.next_up(),
+        ..admitted
+    };
+    assert!(matches!(
+        ThermochemicalNsfGas::new(model, point, unsupported),
+        Err(NsfError::Gas(_))
+    ));
+}
+
+#[test]
 fn g0_open_faces_use_source_caloric_energy_and_pressure_support() {
     // Uniform flow at a temperature away from the reference detects a ghost
     // energy reconstructed with frozen cv instead of the source's integral.
@@ -232,6 +250,61 @@ fn formation_energy_offset_cannot_drive_flow_or_heat_when_density_changes() {
     assert!((a.total_energy_j() - energy_a).abs() < 1e-12 * energy_a.abs());
     assert!((b.total_energy_j() - energy_b).abs() < 1e-12 * energy_b.abs());
     assert!((energy_a - energy_b).abs() < 1e-9 * energy_a.abs());
+}
+
+#[test]
+fn g3_large_formation_offsets_leave_the_native_thermal_flow_trajectory_unchanged() {
+    let mut reference =
+        NsfGrid3::<D3q27>::new(spec(gas(0.0, 250000.0, 1.0)), |_| false, varying).unwrap();
+    let mut shifted: Vec<_> = [-1.0e12, 1.0e12]
+        .into_iter()
+        .map(|offset| {
+            NsfGrid3::<D3q27>::new(spec(gas(offset, 250000.0, 1.0)), |_| false, varying)
+                .unwrap()
+        })
+        .collect();
+    // NASA9 a7 changes the absolute energy convention only. Even the initial
+    // sensible energy must agree before density, pressure and heat flux evolve.
+    for grid in &shifted {
+        assert_eq!(grid.state_hash(), reference.state_hash());
+    }
+    for _ in 0..5 {
+        reference.step().unwrap();
+        for grid in &mut shifted {
+            grid.step().unwrap();
+            assert_eq!(grid.state_hash(), reference.state_hash());
+            for x in 0..8 {
+                assert_eq!(grid.cell([x, 0, 0]), reference.cell([x, 0, 0]));
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_small_heat_survives_a_large_material_formation_reference() {
+    for heat_per_mass in [-1.0e-3, 1.0e-3] {
+        let mut reference_hash = None;
+        for offset in [0.0, -1.0e12, 1.0e12] {
+            let material = gas(offset, 250000.0, 1.0);
+            let r = material.model().evaluate(material.context()).unwrap()
+                .state().specific_gas_constant;
+            let source_e = heat_per_mass / (3.0 * r * 300.0);
+            let mut grid = NsfGrid3::<D3q27>::new_with_sources(
+                spec(material), |_| false, |_| (1.0, [0.0; 3], 300.0),
+                Some(Box::new(move |_, _| (0.0, [0.0; 3], source_e))),
+            ).unwrap();
+            for _ in 0..8 { grid.step().unwrap(); }
+            let temperature = grid.cell([0, 0, 0]).2;
+            // Independent integral of the authored cv/R = 2 + .001 T.
+            // Factoring the difference avoids recreating absolute-energy
+            // subtraction in the reference calculation itself.
+            let heat = r * (temperature - 300.0)
+                * (2.0 + 0.0005 * (temperature + 300.0));
+            assert!((heat - 8.0 * heat_per_mass).abs() < 1.0e-6, "{offset}: {heat}");
+            let expected = reference_hash.get_or_insert(grid.state_hash());
+            assert_eq!(grid.state_hash(), *expected);
+        }
+    }
 }
 
 #[test]

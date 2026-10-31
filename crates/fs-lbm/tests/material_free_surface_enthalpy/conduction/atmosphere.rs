@@ -111,6 +111,46 @@ fn g1_finite_gas_and_moving_liquid_match_independent_nasa_energy_and_pressure() 
 }
 
 #[test]
+fn g3_gas_formation_reference_cannot_reject_or_change_liquid_heat_and_motion() {
+    let run = |offset, temperature| {
+        let liquid = conducting_card(1.0);
+        with_exposed_liquid(&liquid, true, |thermal, gate| {
+            let mut gas = IsochoricGasParcel::new(
+                gas_source::model(offset, 250000.0, 100.0),
+                gas_source::point(temperature, 100000.0), 1e-8,
+            ).unwrap();
+            let exposed = gas_contact(gas.model(), gas.point()).face;
+            let report = thermal.step_with_finite_gas_environment(
+                &[], &[], controls(), &mut [], &[], &[], &mut gas,
+                &[exposed], gas_controls(), false, gate,
+            ).unwrap().conduction;
+            let finite = report.finite_gas.unwrap();
+            let endpoint = gas.state().state().temperature;
+            // Independent integral of the fixture's cv/R, with no absolute
+            // formation reference in the expected transferred thermal energy.
+            let expected = gas.mass_kg() * (8.314_462_618_153_24 / 0.028)
+                * (endpoint - temperature) * (2.0 + 0.0005 * (endpoint + temperature));
+            near(finite.internal_energy_change_j, expected, 2e-12);
+            assert!(finite.gas_balance_defect_j.abs() <= finite.gas_energy_tolerance_j);
+            (
+                thermal.flow().lattice().grid().state_bits(),
+                thermal.total_enthalpy_j().unwrap(),
+                endpoint,
+                gas.state().state().pressure,
+                finite,
+            )
+        })
+    };
+    for temperature in [350.0, 450.0] {
+        let reference = run(0.0, temperature);
+        assert_ne!(reference.2, temperature, "the finite gas must actually exchange heat");
+        for offset in [-1.0e12, 1.0e12] {
+            assert_eq!(run(offset, temperature), reference);
+        }
+    }
+}
+
+#[test]
 fn g3_finite_atmosphere_storage_and_source_data_change_actual_liquid_motion() {
     let run = |volume, conductivity| {
         let liquid = conducting_card(1.0);

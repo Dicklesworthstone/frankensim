@@ -9,7 +9,9 @@ use fs_matdb::QueryPoint;
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
+use fs_material::thermochemical_gas::energy::increment::GasCaloricBranch;
 use fs_material::thermochemical_gas::{ResolvedThermochemicalGasState, ThermochemicalGasModel};
+use fs_qty::Temperature;
 use fs_qty::semantic::Composition;
 
 /// Original named species and composition of a frozen near-ambient mixture.
@@ -126,31 +128,39 @@ pub struct ThermochemicalNsfGas {
     energy_solve: GasEnergySolve,
     reference: GasState,
     energy_reference_j_kg: f64,
+    sensible_reference_j_kg: f64,
 }
 
 impl ThermochemicalNsfGas {
     /// Bind the source owner and its bounded existing energy inversion.
     ///
-    /// The conserved chart is u_s(T) = u_NASA9(T) - u_offset, with
-    /// u_offset = u_NASA9(T_ref) - cv(T_ref) T_ref. Its value at the reference
-    /// state equals the legacy cv*T energy, and arbitrary formation-energy
-    /// offsets cannot enter the separate lattice mass / finite-volume energy
-    /// fluxes. Negative NASA9 absolute energies are admitted.
+    /// The conserved chart is u_s(T) = cv(T_ref) T_ref + integral Cv dT from
+    /// T_ref to T, using the original NASA9 increment owner. This equals
+    /// u_NASA9(T) - u_offset, where u_offset = u_NASA9(T_ref) - cv(T_ref) T_ref,
+    /// without subtracting large absolute formation energies during evolution.
+    /// Its value at the reference state equals the legacy cv*T energy.
+    /// Negative NASA9 absolute energies are admitted and remain in source states.
+    /// The complete inversion bracket must have source-supported positive Cv.
+    /// Raw NASA9 data must stay within one region per species; crossing a region
+    /// boundary requires the source owner's explicit `with_caloric_continuity`
+    /// policy. Construction checks this before a grid can reach its first step.
     ///
     /// # Errors
-    /// Original material support/quantity failures or invalid inversion controls.
+    /// Original material support/quantity failures, invalid inversion controls,
+    /// or refusal of the source's continuous caloric branch over the whole bracket.
     pub fn new(
         model: ThermochemicalGasModel,
         context: QueryPoint,
         energy_solve: GasEnergySolve,
     ) -> Result<Self, NsfError> {
-        energy_solve.validate().map_err(gas_error)?;
+        model.prepare_caloric_branch(energy_solve, || false).map_err(gas_error)?;
         let resolved = model.evaluate(&context).map_err(gas_error)?;
         let reference = *resolved.state();
         let cv = reference.specific_heat_cp - reference.specific_gas_constant;
+        let sensible_reference_j_kg = cv * reference.temperature;
         let energy_reference_j_kg =
-            resolved.specific_internal_energy_j_kg() - cv * reference.temperature;
-        if !energy_reference_j_kg.is_finite() {
+            resolved.specific_internal_energy_j_kg() - sensible_reference_j_kg;
+        if !energy_reference_j_kg.is_finite() || !sensible_reference_j_kg.is_finite() {
             return Err(NsfError::Input("unrepresentable gas energy reference"));
         }
         Ok(Self {
@@ -159,6 +169,7 @@ impl ThermochemicalNsfGas {
             energy_solve,
             reference,
             energy_reference_j_kg,
+            sensible_reference_j_kg,
         })
     }
 
@@ -221,9 +232,15 @@ impl ThermochemicalNsfGas {
                 maximum: MAX_VERIFIED_LATTICE_VISCOSITY,
             });
         }
-        let sensible_energy_lattice = (resolved.specific_internal_energy_j_kg()
-            - self.energy_reference_j_kg)
-            / law.specific_energy_unit_j_kg();
+        // Cancel the formation reference in the original caloric law BEFORE
+        // floating-point evaluation. Subtracting absolute u values here would
+        // let an arbitrary energy zero quantize thermal/acoustic perturbations.
+        let change = self.model.thermodynamics().specific_internal_energy_change(
+            Temperature::new(self.reference.temperature),
+            Temperature::new(state.temperature),
+        ).map_err(gas_error)?.value();
+        let unit = law.specific_energy_unit_j_kg();
+        let sensible_energy_lattice = self.sensible_reference_j_kg / unit + change / unit;
         if !sensible_energy_lattice.is_finite() {
             return Err(NsfError::Input("unrepresentable sensible gas energy"));
         }
@@ -236,23 +253,33 @@ impl ThermochemicalNsfGas {
 
     pub(super) fn reconstruct(
         &self,
+        branch: &GasCaloricBranch<'_>,
         law: &NsfLaw,
         density_lattice: f64,
         sensible_energy_lattice: f64,
     ) -> Result<(f64, NsfCellMaterial), NsfError> {
-        let solved = self
-            .model
-            .reconstruct_density_energy_change(
+        let unit = law.specific_energy_unit_j_kg();
+        // Invert the SAME reference-plus-increment chart used by cell/face
+        // energies. Taking the difference in lattice units preserves an exact
+        // zero increment at the reference instead of a multiply/divide residue.
+        let change = (sensible_energy_lattice - self.sensible_reference_j_kg / unit) * unit;
+        let solved = branch
+            .reconstruct_density_internal_energy_increment(
                 &self.context,
                 density_lattice * law.rho_ref_kg_m3,
-                self.energy_reference_j_kg,
-                sensible_energy_lattice * law.specific_energy_unit_j_kg(),
-                self.energy_solve,
+                change,
                 || false,
             )
             .map_err(gas_error)?;
         let material = self.cell(law, density_lattice, solved.state())?;
         Ok((law.theta_of_kelvin(material.state.temperature), material))
+    }
+
+    // One borrow per native timestep shares source-interval admission across
+    // every fluid cell and corrector. No per-cell source cloning or separate
+    // caloric solver is introduced; all endpoint transport queries remain live.
+    pub(super) fn prepare_caloric_branch(&self) -> Result<GasCaloricBranch<'_>, NsfError> {
+        self.model.prepare_caloric_branch(self.energy_solve, || false).map_err(gas_error)
     }
 }
 

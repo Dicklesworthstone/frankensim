@@ -104,9 +104,10 @@ pub const MAX_VERIFIED_LATTICE_VISCOSITY: f64 = 0.03;
 /// of a decay rate below 5e-3 of the quiescent rate up to this value, and nothing was measured above it. A larger declared
 /// `maximum_mach` is refused ([`NsfError::MachBound`]), not extrapolated.
 pub const MAX_QUALIFIED_MACH: f64 = 0.2;
-/// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits). 5: initialization
-/// and reservoir updates preserve the full Guo half-source chart, including its physical stress.
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 5;
+/// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits).
+/// 6: source-driven gas energy uses the original temperature-anchored Cv integral,
+/// keeping formation-energy offsets out of thermal-flow arithmetic.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 6;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -1393,6 +1394,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// [`NsfError`] when the new state leaves the declared Mach, temperature-ratio, window or finite domain; the
     /// published state is unchanged.
     pub fn step(&mut self) -> Result<EnergyLedger, NsfError> {
+        let caloric_branch = match &self.spec.gas {
+            NsfGasMedium::Thermochemical(source) => Some(source.prepare_caloric_branch()?),
+            _ => None,
+        };
         let n = self.n;
         let cv = 1.0 / (self.law.gamma - 1.0);
         let (rho0, mom0) = self.macro_fields(&self.f);
@@ -1535,8 +1540,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         material_new[i] = Some(local);
                     }
                     NsfGasMedium::Thermochemical(source) => {
-                        let (theta, local) =
-                            source.reconstruct(&self.law, rho1[i], (e1[i] - ke) / rho1[i])?;
+                        let (theta, local) = source.reconstruct(
+                            caloric_branch.as_ref().expect("source caloric branch prepared"),
+                            &self.law, rho1[i], (e1[i] - ke) / rho1[i],
+                        )?;
                         th_new[i] = theta;
                         material_new[i] = Some(local);
                     }
