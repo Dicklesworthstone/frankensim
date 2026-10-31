@@ -24,7 +24,7 @@ pub struct BowDryContactHeat<'a> {
     pub receiver: DryReceiverHeatPosition,
 }
 impl<'a> BowDryContactHeat<'a> {
-    fn at<E>(
+    pub(super) fn at<E>(
         &self,
         string_centres_m: &[f64],
         fiber_centre_m: Option<f64>,

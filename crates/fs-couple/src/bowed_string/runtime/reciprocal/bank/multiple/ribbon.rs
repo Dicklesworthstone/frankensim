@@ -42,6 +42,7 @@ pub struct MaterialFiberRibbon {
     string_count: usize,
     station_fraction: f64,
     normal_shapes: Vec<f64>,
+    material_branch_start: usize,
 }
 impl MaterialFiberRibbon {
     /// Original geometry, material sources and two independent resolutions.
@@ -204,6 +205,7 @@ impl ReciprocalStringBank {
         let string_count = self.cards.len();
         self.system = self.system.with_internal_components(ribbon.cell_models(), gate)
             .map_err(ReciprocalStringError::Friction)?;
+        let material_branch_start = self.system.material_relaxation_branches().len();
         if let Some(memory) = ribbon.material_relaxation() {
             let branches = memory.branches(first_fiber_mode, self.system.mode_count(), gate)
                 .map_err(fiber_memory_error)?;
@@ -248,7 +250,7 @@ impl ReciprocalStringBank {
         bank.system = bank.system.with_surface_attachments(attachments, gate)
             .map_err(ReciprocalStringError::Friction)?;
         bank.source.fiber_ribbon = Some(MaterialFiberRibbon {
-            model: ribbon, component_start, string_count, station_fraction, normal_shapes,
+            model: ribbon, component_start, string_count, station_fraction, normal_shapes, material_branch_start,
         });
         Ok(bank)
     }
@@ -286,5 +288,56 @@ impl ReciprocalStringBank {
         let mut bank = self.with_additional_bows(additional, joint, gate)?;
         bank.source.ribbon = Some(ribbon);
         Ok(bank)
+    }
+}
+
+impl MultiBowStringBank {
+    /// Route ONE width strip's original material layer into its actual finite
+    /// receiving body. The independently integrated channels include every
+    /// axial/bending mode and every Maxwell arm of that layer. Volume is the
+    /// original annular area times supported length times fibers per strip;
+    /// neither modal mass nor an authored heat fraction defines it.
+    ///
+    /// One uniform temperature is assumed along this complete supported strip.
+    /// Cell mass, caloric card, source domain and fixed coefficients are checked
+    /// on every thermal trial. Source-dependent stored coefficients, nonlinear
+    /// hereditary strain and phase change require their own continuation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fiber_material_heat_destination<'a>(
+        &self, strip: usize, layer: usize, cell: fs_thermal::enthalpy::CellId,
+        material: &'a fs_matdb::MaterialCard,
+        caloric: &'a fs_material::phase::EquilibriumEnthalpyPhaseCurve,
+        temperature_axis: &'a str,
+        budget: crate::render::schedule::force::coupled::coefficients::heat::MaterialHeatBudget, gate: &CancelGate,
+    ) -> Result<crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::material::MaterialRelaxationHeatDestination<'a>, ReciprocalStringError> {
+        use crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::material::MaterialRelaxationHeatDestination;
+        poll(gate)?;
+        let fiber = self.source.fiber_ribbon().ok_or_else(|| invalid("material heat needs the original physical fiber ribbon"))?;
+        let model = fiber.model();
+        let memory = model.material_relaxation().ok_or_else(|| invalid("fiber heat requires its original hereditary material source"))?;
+        if memory.has_finite_strain() {
+            return Err(invalid("full-strain fiber heat needs its nonlinear material-history integral as well as bending"));
+        }
+        let section = memory.source().elastic();
+        if strip >= model.resolution().cells || layer >= section.layers().len() {
+            return Err(invalid("fiber heat must name one original physical strip and material layer"));
+        }
+        let channels = memory.channels();
+        let first = channels.iter().position(|channel| channel.layer == layer)
+            .ok_or_else(|| invalid("fiber material layer has no dissipative memory channels"))?;
+        let count = channels.iter().filter(|channel| channel.layer == layer).count();
+        if channels[first..first + count].iter().any(|channel| channel.layer != layer) {
+            return Err(invalid("fiber heat lost its original contiguous material projection"));
+        }
+        let start = fiber.material_branch_start + strip * channels.len() + first;
+        let channel = self.system.prepare_material_heat(&[start..start + count], budget, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        let volume_m3 = section.layer_integrals()[layer].area_m2() * model.geometry().length_m
+            * model.geometry().fiber_count as f64 / model.resolution().cells as f64;
+        if !volume_m3.is_finite() || volume_m3 <= 0.0 {
+            return Err(invalid("fiber receiving material volume is unrepresentable"));
+        }
+        Ok(MaterialRelaxationHeatDestination { cell, material, caloric, temperature_axis,
+            density_property: "density", volume_m3, source: section.layers()[layer].material.clone(), channel })
     }
 }

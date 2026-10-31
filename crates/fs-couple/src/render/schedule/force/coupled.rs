@@ -264,6 +264,9 @@ pub struct CoupledModalSystem {
     reactions: Vec<f64>,
     frame: CoupledModalFrame,
     staged_frame: CoupledModalFrame,
+    /// Original held-input trajectory of the current candidate, not an endpoint
+    /// power approximation. Unavailable for externally integrated trajectories.
+    staged_material_trajectory: Option<(Vec<f64>, Vec<f64>)>,
     ports: crate::port_adoption::ModulePorts,
     staged_ports: crate::port_adoption::ModulePorts,
 }
@@ -483,6 +486,7 @@ impl CoupledModalSystem {
             forces: vec![0.0; count],
             reactions: vec![0.0; links],
             staged_frame: frame.clone(),
+            staged_material_trajectory: None,
             frame,
             staged_ports: ports.clone(), ports,
         };
@@ -667,6 +671,7 @@ impl CoupledModalSystem {
     fn stage_inner(&mut self, external: &[f64], gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>
     {
+        self.staged_material_trajectory = None;
         self.require_time_domain()?;
         exact::stage(self,external,gate)
     }
@@ -677,6 +682,7 @@ impl CoupledModalSystem {
         std::mem::swap(&mut self.radiation_state, &mut self.candidate_radiation_state);
         std::mem::swap(&mut self.frame, &mut self.staged_frame);
         std::mem::swap(&mut self.ports, &mut self.staged_ports);
+        self.staged_material_trajectory = None;
     }
 
     // Unrestrained full-network prediction is scratch. Contact/friction may
@@ -686,6 +692,7 @@ impl CoupledModalSystem {
         external: &[f64],
         gate: Option<&CancelGate>,
     ) -> Result<(), ModalCouplingError> {
+        self.staged_material_trajectory = None;
         poll(gate)?;
         self.require_time_domain()?;
         if external.len() != self.mode_count() || external.iter().any(|x| !x.is_finite()) {

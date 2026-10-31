@@ -10,12 +10,62 @@ use crate::render::RenderError;
 use fs_exec::CancelGate;
 use fs_material::state_point::ResolvedShearLayer;
 use fs_thermal::enthalpy::{DepositionSimulation, backward_euler::StepCoefficients};
+use crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::material::MaterialRelaxationHeatDestination;
 use crate::render::schedule::force::coupled::contact::friction::{FrictionDrive,
     multiple::FrictionPortFrame,
     multiple::layer::thermal::{LayerThermalCell, LayerThermalSolve, LayerThermalFrame, LayerThermalError,
         SeriesDriveHeatDestination}};
 
 impl MultiBowStringBank {
+    /// Original distributed material heat and contact heat on one physical
+    /// clock. Support inertia, moving material footprints, stop work, retained
+    /// fiber/string histories and pressure all use the same candidate. No
+    /// thermal or station cursor advances after a rejected mechanical trial.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_contact_thermal_motion<'t, S, E: core::fmt::Display>(
+        &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination], dry: &[dry::BowDryContactHeat<'_>],
+        material_heat: &[MaterialRelaxationHeatDestination<'_>], controls: LayerThermalSolve,
+        energy_guess_j: &[f64], external: &[f64], drives: &[FrictionDrive],
+        bow_stations: Option<&[f64]>, stop_stations: Option<&[f64]>, offsets_m: Option<&[f64]>,
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, RenderError> {
+        let normal = stop_stations.map(|stations|
+            self.prepare_stop_station_geometry_with_bows(stations, bow_stations, gate)).transpose()?;
+        let failure = |error: LayerThermalError<E>|
+            RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string()));
+        let accepted = if self.bow_station_motion_limits().is_some() {
+            self.with_bow_geometry(external, drives, bow_stations, normal.as_deref(), offsets_m, gate,
+                |system, step| {
+                    let routes = dry.iter().map(|route|
+                        route.at(step.string_centres_m, step.fiber_centre_m))
+                        .collect::<Result<Vec<_>, LayerThermalError<E>>>()?;
+                    system.step_with_material_contact_thermal_geometry(thermal, bindings,
+                        series_heat, &routes, material_heat, controls, energy_guess_j,
+                        step.external, step.drives, step.geometry, step.endpoints,
+                        step.normal_geometry, step.stop_offsets_m, step.config, gate, resolve)
+                }).map_err(failure)?
+        } else {
+            if bow_stations.is_some() {
+                return Err(RenderError::Control { what: "bow migration needs admitted station motion" });
+            }
+            let centres = self.source.bows.iter().map(|bow|
+                bow.location.station_fraction * self.cards[bow.location.string].length_m).collect::<Vec<_>>();
+            let fiber = self.source.fiber_ribbon().map(|f|
+                f.station_fraction() * f.model().geometry().length_m);
+            let routes = dry.iter().map(|route| route.at(&centres, fiber))
+                .collect::<Result<Vec<_>, LayerThermalError<E>>>().map_err(failure)?;
+            self.system.step_with_material_contact_thermal_feedback(thermal, bindings,
+                series_heat, &routes, material_heat, controls, energy_guess_j, external, drives,
+                normal.as_deref(), offsets_m, gate, resolve).map_err(failure)?
+        };
+        if let Some(stations) = stop_stations {
+            self.stop_stations.as_mut().expect("admitted stop geometry").accepted.copy_from_slice(stations);
+        }
+        Ok(accepted)
+    }
+
     /// Bind isothermal thin shear layers to selected original bow/contact ports.
     ///
     /// Each source retains its actual G, shear yield stress, plastic viscosity,

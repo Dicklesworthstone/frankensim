@@ -14,6 +14,7 @@ use crate::render::schedule::force::coupled::contact::friction::multiple::layer:
 };
 use fs_exec::CancelGate;
 use fs_thermal::enthalpy::{DepositionSimulation, backward_euler::StepCoefficients};
+use crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::material::MaterialRelaxationHeatDestination;
 use std::marker::PhantomData;
 
 type TrialHeatSource<'p, 't, S, E> = dyn Fn(&DepositionSimulation<'t>, &[FrictionPortFrame])
@@ -38,6 +39,7 @@ pub struct ContactThermalPerformance<'p, 't, 'm, 'g, F, S, E> {
     bindings: Vec<LayerThermalCell<'m>>,
     series_heat: Vec<SeriesDriveHeatDestination>,
     dry: Vec<BowDryContactHeat<'m>>,
+    material_heat: Vec<MaterialRelaxationHeatDestination<'m>>,
     controls: LayerThermalSolve,
     gate: &'g CancelGate,
     resolve: F,
@@ -67,6 +69,21 @@ impl MultiBowPerformance {
         F: Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
         E: core::fmt::Display,
     {
+        self.with_material_contact_thermal_network(thermal, bindings, series_heat, Vec::new(),
+            controls, gate, resolve)
+    }
+
+    /// Finite contact heating plus independently integrated distributed body
+    /// losses. Receiving geometry/card and the fixed body coefficient domains
+    /// are checked by the shared owner at every trial temperature. Contact
+    /// friction still updates from its own actual source-temperature law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_material_contact_thermal_network<'p, 't, 'm, 'g, F, S, E>(
+        &'p mut self, thermal: DepositionSimulation<'t>, bindings: Vec<LayerThermalCell<'m>>,
+        series_heat: Vec<SeriesDriveHeatDestination>, material_heat: Vec<MaterialRelaxationHeatDestination<'m>>,
+        controls: LayerThermalSolve, gate: &'g CancelGate, resolve: F,
+    ) -> Result<ContactThermalPerformance<'p, 't, 'm, 'g, F, S, E>, RenderError>
+    where F: Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>, E: core::fmt::Display {
         self.validate_sample_count(0)?;
         if gate.is_requested() {
             return Err(RenderError::Coupled(ModalCouplingError::Cancelled));
@@ -76,7 +93,7 @@ impl MultiBowPerformance {
             || thermal.time_s() != system.samples_rendered() as f64 * system.sample_period_s()
             || thermal.cells().is_empty()
             || thermal.cells().len() > controls.maximum_cells
-            || (bindings.is_empty() && series_heat.is_empty())
+            || (bindings.is_empty() && series_heat.is_empty() && material_heat.is_empty())
         {
             return Err(render_invalid(
                 "contact heat needs matching clocks, finite cells, explicit routes and retained string-film stations",
@@ -92,6 +109,7 @@ impl MultiBowPerformance {
             bindings,
             series_heat,
             dry: Vec::new(),
+            material_heat,
             controls,
             gate,
             resolve,
@@ -124,7 +142,7 @@ impl MultiBowPerformance {
         }
         let energy_guess_j = vec![0.0; thermal.cells().len()];
         Ok(ContactThermalPerformance { performance: self, thermal, bindings: Vec::new(),
-            series_heat, dry, controls, gate, resolve, trial_resolve: None,
+            series_heat, dry, material_heat: Vec::new(), controls, gate, resolve, trial_resolve: None,
             energy_guess_j, last_frame: None, error: PhantomData })
     }
 }
@@ -143,6 +161,21 @@ impl<'p, 't, F, S, E> ContactThermalPerformance<'p, 't, '_, '_, F, S, E> {
             return Err(render_invalid("trial film heat requires the original retained-film thermal owner"));
         }
         self.trial_resolve = Some(Box::new(resolve));
+        Ok(self)
+    }
+}
+
+impl<'m, F, S, E> ContactThermalPerformance<'_, '_, 'm, '_, F, S, E> {
+    /// Add original distributed-body heat to an already declared film or dry
+    /// thermal performance. Every source route remains distinct from contact
+    /// plasticity and from any explicitly routed lumped series-drive loss.
+    pub fn with_material_relaxation_heat(
+        mut self, routes: Vec<MaterialRelaxationHeatDestination<'m>>,
+    ) -> Result<Self, RenderError> {
+        if !self.material_heat.is_empty() || routes.is_empty() || routes.len() > self.controls.maximum_cells {
+            return Err(render_invalid("material heat needs one bounded nonempty original binding"));
+        }
+        self.material_heat = routes;
         Ok(self)
     }
 }
@@ -195,6 +228,7 @@ where
             bindings,
             series_heat,
             dry,
+            material_heat,
             controls,
             gate,
             resolve,
@@ -212,7 +246,15 @@ where
             for (guess, cell) in energy_guess_j.iter_mut().zip(thermal.cells().values()) {
                 *guess = cell.mass_kg * cell.specific_h_j_kg;
             }
-            let accepted = if let Some(source) = trial_resolve.as_ref() {
+            let accepted = if !material_heat.is_empty() {
+                bank.step_with_material_contact_thermal_motion(thermal, bindings, series_heat,
+                    dry, material_heat, *controls, energy_guess_j, forces, drives,
+                    motion.bow_stations, motion.stop_stations, motion.stop_offsets_m, gate,
+                    |endpoint, ports| match trial_resolve.as_ref() {
+                        Some(source) => source(endpoint, ports),
+                        None => resolve(endpoint),
+                    })?
+            } else if let Some(source) = trial_resolve.as_ref() {
                 bank.step_with_contact_thermal_feedback_and_stops(thermal, bindings, series_heat,
                     *controls, energy_guess_j, forces, drives, motion.stop_stations,
                     motion.stop_offsets_m, gate, &**source)?

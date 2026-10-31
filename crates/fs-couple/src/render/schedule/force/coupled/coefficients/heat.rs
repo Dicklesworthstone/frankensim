@@ -3,8 +3,9 @@
 //! Each source row is (sqrt(k) b.q-z)/sqrt(tau), not a share of total loss.
 //! The original modal/connection/Maxwell coefficients define the observation
 //! generator; `PreparedSourceLoss` owns its positive integral. No physical state
-//! or second mechanical time stepper is stored here. External acoustic owners
-//! and nonlinear/contact trajectories need their own complete source integral.
+//! or second mechanical time stepper is stored here. Held-effort contact trials
+//! supply their actual original staged input. External acoustic owners and
+//! varying-force trajectories require their own complete source integral.
 use super::super::*;
 use core::ops::Range;
 use fs_phs::{PreparedStepError, RelaxationBranch};
@@ -233,10 +234,31 @@ impl MaterialHeatIntegral {
         state.extend_from_slice(&network.material_memory);
         let input = external.iter().zip(&self.rest_force).map(|(f,r)| finite(f+r))
             .collect::<Result<Vec<_>,_>>()?;
+        self.evaluate_trajectory(&state, &input, gate)
+    }
+
+    /// Read the SAME unpublished contact candidate's original start and held
+    /// input, including its converged contact, nonlinear and support efforts.
+    /// Rest preload is already in this input and must not be added twice.
+    /// Every thermal retry still starts from accepted mechanical/material state.
+    pub(crate) fn evaluate_staged(&self, network: &CoupledModalSystem, gate: &CancelGate)
+        -> Result<Vec<f64>, ModalCouplingError> {
+        poll(Some(gate))?;
+        if !self.signature.matches(network, gate)?
+            || network.frame.sample.checked_add(1) != Some(network.staged_frame.sample) {
+            return Err(invalid("material heat requires its current original mechanical candidate"));
+        }
+        let (state, input) = network.staged_material_trajectory.as_ref()
+            .ok_or_else(|| invalid("material heat requires the original held-force contact trajectory"))?;
+        self.evaluate_trajectory(state, input, gate)
+    }
+
+    fn evaluate_trajectory(&self, state: &[f64], input: &[f64], gate: &CancelGate)
+        -> Result<Vec<f64>, ModalCouplingError> {
         let mut heat = Vec::with_capacity(self.integrals.len());
         for integral in &self.integrals {
             poll(Some(gate))?;
-            heat.push(integral.evaluate_controlled(&state,&input,||gate.is_requested()).map_err(prepared_error)?);
+            heat.push(integral.evaluate_controlled(state,input,||gate.is_requested()).map_err(prepared_error)?);
         }
         poll(Some(gate))?;
         Ok(heat)

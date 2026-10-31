@@ -815,6 +815,7 @@ pub(super) fn stage(
     external: &[f64],
     gate: Option<&CancelGate>,
 ) -> Result<(), ModalCouplingError> {
+    network.staged_material_trajectory = None;
     poll(gate)?;
     network.require_time_domain()?;
     let before = network.total_energy_j()?;
@@ -875,6 +876,7 @@ struct PropagatedCandidate {
 fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate: PropagatedCandidate,
     gate: Option<&CancelGate>) -> Result<(), ModalCouplingError>
 {
+    network.staged_material_trajectory = None;
     poll(gate)?;
     let sample=network.frame.sample.checked_add(1).ok_or_else(||invalid("coupled sample clock overflow"))?;
     let before=network.total_energy_j()?;
@@ -1031,8 +1033,7 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
     };
     if let Some(transfers)=connection_transfers {
         network.staged_ports.accept(account, transfers);
-        return Ok(());
-    }
+    } else
     // The prepared owner's per-port ledger is a sweep over every dense link Gramian: it is kept as this step's inputs and
     // evaluated only if an observer asks for the window's transfers (`PreparedNetwork::pending_ledger`). Its refusal, if any,
     // is the same independent observation refusal as below.
@@ -1042,8 +1043,7 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
         .and_then(|exact| exact.deferred_connection_work(&x, &u, &rec_x, connection_loss))
     {
         network.staged_ports.accept_deferred(account, pending);
-        return Ok(());
-    }
+    } else {
     // Independent port observations cannot turn an accepted physical step into
     // a refusal. Preserve their original diagnostic instead of a zero account.
     let transfers = match &network.exact {
@@ -1069,6 +1069,13 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
         reason: error.to_string(),
     });
     network.staged_ports.accept_result(account, transfers);
+    }
+    // Move the SAME original state/held input after the ledger has observed it;
+    // no extra vector allocation or cloning is added to a contact trial.
+    // Varying-force trajectories need their own independent heat integrals.
+    if !network.relaxation_branches.is_empty() && external_work.is_none() {
+        network.staged_material_trajectory = Some((x, u));
+    }
     Ok(())
 }
 

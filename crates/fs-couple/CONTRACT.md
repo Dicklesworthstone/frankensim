@@ -16283,3 +16283,41 @@ fixed-kinematics law refuses non-affine stored tensors, thermal expansion,
 changing geometry, phase change and unsupported source intervals. This extends
 the retained contact material law; it does not assert measured rosin parameters
 or instrument sound validation.
+
+
+## Distributed material heat in the original bowed contact transaction
+
+The existing `coefficients::heat::MaterialHeatIntegral` now observes the
+current unpublished contact trajectory through `evaluate_staged`. It reuses
+`PreparedSourceLoss` and its original complete source rows, coefficient
+signature and resource limits. Accepted-start displacement, velocity and
+Maxwell memory are paired with the actual converged held modal input, including
+contact/support effort and preload exactly once. The mechanical owner clears
+stale trajectory scratch before preparation, and publishing invalidates the
+candidate clock. No second mechanical integrator or loss partition is introduced.
+
+`MaterialRelaxationHeatDestination` binds one complete original material group
+to a distinct finite receiving body. The fiber adapter derives its volume from
+the original annular layer area, supported length and fibers per width strip;
+every original axial/bending mode and Maxwell arm of that layer belongs to the
+group. The receiving cell must retain the source card, exact caloric owner,
+physical volume and mass, fixed reference density and a valid original
+absolute-temperature coordinate. Distinct bodies cannot share one body's heat
+capacity, repeat a branch loss, or reuse a separate contact film's cell.
+
+The existing contact/enthalpy Newton candidate deposits independently integrated
+body heat once. Original conduction carries it to contact films in that same
+trial, where the original temperature-dependent friction law supplies the
+mechanical response. The combined account removes that same routed quantity
+once from external mechanical loss. Finite heat, contact/source histories,
+mechanical state and moving material-coordinate cursors are accepted together.
+The existing performance wrapper and moving contact path expose these routes.
+
+This rung admits one uniform temperature per supported strip/layer and fixed
+body constitutive coefficients throughout the source-supported caloric interval.
+It refuses temperature-dependent body storage/relaxation, nonlinear hereditary
+fiber strain and the original heat owner's unsupported external-radiation or
+varying-force trajectories. Thermal expansion, phase change and finer spatial
+body-temperature projection require their corresponding physical owners.
+The new source/fiber/finite-heat fixtures are manufactured verification cases;
+they supply no measured rosin parameters or instrument-sound validation.

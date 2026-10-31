@@ -38,6 +38,40 @@ fn network(prepared: bool) -> CoupledModalSystem {
 fn near(a:f64,b:f64) { assert!((a-b).abs()<=1e-11+1e-8*a.abs().max(b.abs()),"{a:e} != {b:e}"); }
 
 #[test]
+fn staged_contact_input_uses_original_group_integrals_without_replaying_or_double_preload() {
+    let gate = CancelGate::new_clock_free();
+    for prepared in [false, true] {
+        let mut system = network(prepared);
+        let groups = system.prepare_material_heat(&[0..1, 1..3], budget(), &gate).unwrap();
+        let memory = system.material_memory().to_vec();
+        let states = system.components().iter().flat_map(|m| m.states().iter().copied()).collect::<Vec<_>>();
+        assert!(groups.evaluate_staged(&system, &gate).is_err());
+        // The converged held contact/support effort differs from the requested
+        // free-body force. Nonzero spring preload must enter exactly once.
+        let held = [-0.3, 0.6];
+        let expected = groups.evaluate(&system, &held, &gate).unwrap();
+        let free = groups.evaluate(&system, &[0.0; 2], &gate).unwrap();
+        system.stage_inner(&held, Some(&gate)).unwrap();
+        let staged = groups.evaluate_staged(&system, &gate).unwrap();
+        for (&actual, &expected) in staged.iter().zip(&expected) { near(actual, expected); }
+        near(staged.iter().sum(), system.staged_frame.material_dissipation_j);
+        assert!(staged.iter().zip(&free).any(|(a,b)| (a-b).abs() > 1e-12));
+        assert_eq!(system.material_memory(), memory);
+        assert_eq!(system.components().iter().flat_map(|m| m.states().iter().copied()).collect::<Vec<_>>(), states);
+        assert_eq!(system.samples_rendered(), 0);
+        system.stage_inner(&held, Some(&gate)).unwrap();
+        assert_eq!(groups.evaluate_staged(&system, &gate).unwrap(), staged);
+        // A refused trial cannot leave a previous candidate's heat observable.
+        assert!(system.stage_inner(&[f64::NAN, 0.0], Some(&gate)).is_err());
+        assert!(groups.evaluate_staged(&system, &gate).is_err());
+        system.stage_inner(&held, Some(&gate)).unwrap();
+        system.publish_staged();
+        assert_eq!(system.samples_rendered(), 1);
+        assert!(groups.evaluate_staged(&system, &gate).is_err());
+    }
+}
+
+#[test]
 fn original_group_heat_matches_complete_native_loss_and_analytic_constrained_history() {
     let gate=CancelGate::new_clock_free();
     for prepared in [false,true] {

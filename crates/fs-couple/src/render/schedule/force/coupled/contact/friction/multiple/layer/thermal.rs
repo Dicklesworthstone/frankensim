@@ -31,11 +31,14 @@
 pub mod dry;
 /// Moving counterface heat around an original material-attached shear film.
 pub mod film_surface;
+/// Original distributed material losses received by their finite bodies.
+pub mod material;
 mod source;
 
 use super::*;
 use dry::{DryContactHeat, DryContactHeatFrame};
 use source::DryTemperatureUnknown;
+use material::MaterialRelaxationHeatDestination;
 use fs_material::thermal::source::ThermalMaterialError;
 use fs_matdb::MaterialCard;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, PhaseStateError};
@@ -115,6 +118,10 @@ pub struct LayerThermalFrame<S> {
     /// Already included in the mechanical report, so removed once from the
     /// combined external loss account. Never includes stored spring energy.
     pub routed_series_drive_heat_j: f64,
+    /// Independently integrated original bulk Maxwell resistance channels.
+    /// These are already in network_dissipation_j and are removed exactly once
+    /// from the combined external loss account after entering their cells.
+    pub routed_material_heat_j: f64,
     /// Original dry friction loss delivered to the same finite thermal cells.
     pub routed_dry_heat_j: f64,
     /// Physical contact temperatures and signed body fluxes, including zero-slip conduction.
@@ -494,7 +501,7 @@ impl MultiFrictionModalSystem {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
-        self.step_with_contact_thermal_inner(thermal, bindings, series_heat, &[], controls,
+        self.step_with_contact_thermal_inner(thermal, bindings, series_heat, &[], &[], controls,
             energy_guess_j, external, drives, obstacle_geometry, obstacle_offsets, false, gate, resolve)
     }
 
@@ -516,8 +523,46 @@ impl MultiFrictionModalSystem {
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
         self.with_friction_geometry_and_endpoints(geometry, endpoints, normal_geometry,
             config, gate, |system| system.step_with_contact_thermal_inner(
-                thermal, bindings, series_heat, &[], controls, energy_guess_j, external,
+                thermal, bindings, series_heat, &[], &[], controls, energy_guess_j, external,
                 drives, normal_geometry, normal_offsets_m, normal_geometry.is_some(), gate, resolve))
+    }
+
+    /// Receive original distributed-body heat and contact heat in the same
+    /// finite enthalpy trial. Each material group uses the staged contact
+    /// trajectory through the existing source heat-integral owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_contact_thermal_feedback<'t, S, E>(
+        &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination], dry: &[DryContactHeat<'_>],
+        material_heat: &[MaterialRelaxationHeatDestination<'_>], controls: LayerThermalSolve,
+        energy_guess_j: &[f64], external: &[f64], drives: &[FrictionDrive],
+        obstacle_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>, obstacle_offsets: Option<&[f64]>,
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        self.step_with_contact_thermal_inner(thermal, bindings, series_heat, dry, material_heat,
+            controls, energy_guess_j, external, drives, obstacle_geometry, obstacle_offsets, false, gate, resolve)
+    }
+
+    /// All original material/contact heat under the same moving contact maps.
+    /// Body histories and their finite receiving volumes stay in material
+    /// coordinates; only the original contact geometry owner moves the maps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_contact_thermal_geometry<'t, S, E>(
+        &mut self, thermal: &mut DepositionSimulation<'t>, bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination], dry: &[DryContactHeat<'_>],
+        material_heat: &[MaterialRelaxationHeatDestination<'_>], controls: LayerThermalSolve,
+        energy_guess_j: &[f64], external: &[f64], drives: &[FrictionDrive],
+        geometry: &[surfaces::geometry::FrictionGeometry],
+        endpoints: Option<&[surfaces::geometry::FrictionEndpointGeometry]>,
+        normal_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>, normal_offsets_m: Option<&[f64]>,
+        config: surfaces::geometry::FrictionGeometryConfig, gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>, &[FrictionPortFrame]) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        self.with_friction_geometry_and_endpoints(geometry, endpoints, normal_geometry,
+            config, gate, |system| system.step_with_contact_thermal_inner(thermal, bindings,
+                series_heat, dry, material_heat, controls, energy_guess_j, external, drives,
+                normal_geometry, normal_offsets_m, normal_geometry.is_some(), gate, resolve))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -527,6 +572,7 @@ impl MultiFrictionModalSystem {
         bindings: &[LayerThermalCell<'_>],
         series_heat: &[SeriesDriveHeatDestination],
         dry: &[DryContactHeat<'_>],
+        material_heat: &[MaterialRelaxationHeatDestination<'_>],
         controls: LayerThermalSolve,
         energy_guess_j: &[f64],
         external: &[f64],
@@ -573,13 +619,29 @@ impl MultiFrictionModalSystem {
             ));
         }
         let original_layers = self.shear_layers.clone();
-        if bindings.is_empty() && series_heat.is_empty() && dry.is_empty()
+        if bindings.is_empty() && series_heat.is_empty() && dry.is_empty() && material_heat.is_empty()
             || bindings.len() != original_layers.iter().flatten().count() {
             return Err(LayerThermalError::Invalid(
                 "bind every retained layer to one original finite thermal cell",
             ));
         }
         let mut heated_dry = BTreeSet::new();
+        if material_heat.len() > controls.maximum_cells {
+            return Err(LayerThermalError::Invalid("material heat channels exceed the declared finite-body budget"));
+        }
+        let mut heated_branches = BTreeSet::new();
+        let mut heated_material_cells = BTreeSet::new();
+        for route in material_heat {
+            checkpoint()?;
+            if !heated_material_cells.insert(route.cell) {
+                return Err(LayerThermalError::Invalid("distinct material volumes need distinct finite receiving cells"));
+            }
+            if route.channel.groups().iter().flat_map(|r| r.clone())
+                .any(|branch| !heated_branches.insert(branch)) {
+                return Err(LayerThermalError::Invalid("an original material resistance may heat its body only once"));
+            }
+            route.admit(thermal)?;
+        }
         for route in dry {
             checkpoint()?;
             if !heated_dry.insert(route.port) {
@@ -609,7 +671,8 @@ impl MultiFrictionModalSystem {
         let mut thermodynamics = Vec::with_capacity(bindings.len());
         for binding in bindings {
             checkpoint()?;
-            if !ports.insert(binding.port) || !cells.insert(binding.cell) {
+            if !ports.insert(binding.port) || !cells.insert(binding.cell)
+                || heated_material_cells.contains(&binding.cell) {
                 return Err(LayerThermalError::Invalid(
                     "layer thermal ports and receiving cells must be distinct",
                 ));
@@ -726,6 +789,24 @@ impl MultiFrictionModalSystem {
                         series_heat_j = number(series_heat_j + heat_j)?;
                         series_loss.push((route.cell, heat_j));
                     }
+                    let mut material_loss = Vec::with_capacity(material_heat.len());
+                    let mut material_heat_j = 0.0;
+                    for route in material_heat {
+                        checkpoint()?;
+                        route.admit(endpoint)?;
+                        let heat = route.channel.evaluate_staged(&system.core.network, gate)
+                            .map_err(ModalFrictionError::from)?;
+                        let heat_j = number(heat[0])?; // Exactly one admitted original body group.
+                        if heat_j < 0.0 {
+                            return Err(LayerThermalError::Invalid("material resistance heat must be nonnegative"));
+                        }
+                        material_heat_j = number(material_heat_j + heat_j)?;
+                        material_loss.push((route.cell, heat_j));
+                    }
+                    if material_heat_j - system.core.network.staged_frame.material_dissipation_j
+                        > controls.total_energy_tolerance_j {
+                        return Err(LayerThermalError::Invalid("routed material heat exceeds original integrated material loss"));
+                    }
                     let mut dry_frames = Vec::with_capacity(dry.len());
                     let mut dry_sources = Vec::with_capacity(dry.len());
                     let mut dry_heat_j = 0.0;
@@ -783,6 +864,12 @@ impl MultiFrictionModalSystem {
                             heat_j, dt, controls.total_energy_tolerance_j)?;
                         deposited_heat_j = number(deposited_heat_j + delivered)?;
                     }
+                    for (cell, heat_j) in material_loss {
+                        checkpoint()?;
+                        let delivered = deposit_heat(&mut sources_w, cell,
+                            heat_j, dt, controls.total_energy_tolerance_j)?;
+                        deposited_heat_j = number(deposited_heat_j + delivered)?;
+                    }
                     for report in &dry_frames {
                         for &(cell, heat_j) in &report.cell_heat_j {
                             checkpoint()?;
@@ -792,7 +879,7 @@ impl MultiFrictionModalSystem {
                         }
                     }
                     if number(deposited_heat_j - plastic_heat_j - relaxation_heat_j - reversible_heat_j - series_heat_j
-                        - dry_heat_j - interface_residual_j)?.abs()
+                        - material_heat_j - dry_heat_j - interface_residual_j)?.abs()
                         > controls.total_energy_tolerance_j
                     {
                         return Err(LayerThermalError::Invalid(
@@ -815,6 +902,7 @@ impl MultiFrictionModalSystem {
                             entropy_energy_j,
                             internal_change_j,
                             series_heat_j,
+                            material_heat_j,
                             dry_heat_j, dry_frames, dry_sources,
                         ),
                     })
@@ -828,7 +916,7 @@ impl MultiFrictionModalSystem {
             |x: &[f64]| evaluate(x).map(|t| {
                 let mut residual = t.residual_j().to_vec();
                 for (index, source) in temperatures.iter().enumerate() {
-                    let frame = t.payload().13.iter().find(|frame| frame.port == source.port)
+                    let frame = t.payload().14.iter().find(|frame| frame.port == source.port)
                         .expect("one report per admitted dry source");
                     residual.push(if frame.interface_temperature_k.is_some() {
                         frame.interface_energy_residual_j
@@ -868,7 +956,7 @@ impl MultiFrictionModalSystem {
         // this thermal endpoint. Nothing evaluates another trial after it.
         let trial = evaluate(&solver.x)?;
         let maximum_cell_residual_j = trial.maximum_cell_residual_j();
-        if trial.payload().13.iter().any(|contact|
+        if trial.payload().14.iter().any(|contact|
             contact.interface_energy_residual_j.abs() > controls.total_energy_tolerance_j) {
             return Err(LayerThermalError::Invalid(
                 "dry interface fluxes do not close the same temperature-dependent friction work",
@@ -877,7 +965,7 @@ impl MultiFrictionModalSystem {
         let (
             next,
             (frame, layers, source, deposited_heat_j, plastic_heat_j, relaxation_heat_j, external_heat_j,
-                reversible_heat_j, coefficient_work_j, entropy_energy_j, internal_change_j, series_heat_j,
+                reversible_heat_j, coefficient_work_j, entropy_energy_j, internal_change_j, series_heat_j, material_heat_j,
                 dry_heat_j, dry_contacts, dry_sources),
             thermal_audit,
         ) = trial.accept(
@@ -888,7 +976,7 @@ impl MultiFrictionModalSystem {
         let total = number(
             frame.energy_residual_j + thermal_audit.stored_energy_change_j
                 - plastic_heat_j - relaxation_heat_j
-                - series_heat_j - dry_heat_j - external_heat_j + coefficient_work_j + entropy_energy_j,
+                - series_heat_j - material_heat_j - dry_heat_j - external_heat_j + coefficient_work_j + entropy_energy_j,
         )?;
         if total.abs() > controls.total_energy_tolerance_j {
             return Err(LayerThermalError::Invalid(
@@ -919,6 +1007,7 @@ impl MultiFrictionModalSystem {
             routed_plastic_heat_j: plastic_heat_j,
             routed_relaxation_heat_j: relaxation_heat_j,
             routed_series_drive_heat_j: series_heat_j,
+            routed_material_heat_j: material_heat_j,
             routed_dry_heat_j: dry_heat_j,
             dry_contacts,
             routed_reversible_heat_j: reversible_heat_j,
