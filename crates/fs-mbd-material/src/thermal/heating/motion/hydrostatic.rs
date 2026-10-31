@@ -8,10 +8,9 @@
 
 use super::*;
 use crate::hydrostatic::{
-    DisplacementMesh, HydrostaticLoad, HydrostaticMedium, HydrostaticStepControls,
+    DisplacementMesh, HydrostaticLoad, HydrostaticReservoir, HydrostaticStepControls,
     MAX_DISPLACEMENT_CELLS,
 };
-use fs_material::fluid_transport::FluidTransport;
 use std::collections::BTreeSet;
 
 /// A non-overlapping part of the original fluid-excluding envelope, attached
@@ -52,10 +51,13 @@ impl<'a> HeatedRigidBody<'a> {
     /// Each original envelope vertex follows its own source region's accepted
     /// free strain and fixed point. Geometry is rebuilt FROM THE REFERENCE,
     /// never compounded, and the body's mass remains unchanged. The medium's
-    /// source density, prescribed free surface and gravity are frozen during
+    /// source density profile, prescribed free surface and gravity are frozen during
     /// this advance; its gravity must match the original mechanical integrator.
     /// Continue with the same medium and reference envelope. Replacing those
     /// inputs is a model change whose reservoir/exchange work is not inferred.
+    /// Pressure configuration work uses that reservoir's fixed pressure datum.
+    /// For a volume-changing envelope, a datum shift adds a constant times the
+    /// volume change; absolute ambient-pressure compression work is not inferred.
     ///
     /// Native kick-drift motion precedes each thermal configuration update.
     /// This first-order split requires timestep refinement. No waves, fluid
@@ -64,9 +66,9 @@ impl<'a> HeatedRigidBody<'a> {
     /// The existing absolute work/error budgets include pressure-potential
     /// contributions. Any late source, budget or cancellation failure discards
     /// the entire proposed thermal and mechanical history.
-    pub fn advance_hydrostatic<F: FluidTransport + ?Sized>(
+    pub fn advance_hydrostatic<M: HydrostaticReservoir + ?Sized>(
         &self,
-        medium: &HydrostaticMedium<'_, F>,
+        medium: &M,
         envelope: &[ThermalDisplacementRegion],
         target_s: f64,
         config: StepConfig,
@@ -151,13 +153,13 @@ impl<'a> HeatedRigidBody<'a> {
     }
 }
 
-struct HydrostaticExpansion<'a, 'm, 'f, F: FluidTransport + ?Sized> {
+struct HydrostaticExpansion<'a, 'm, M: HydrostaticReservoir + ?Sized> {
     motion: RigidExpansion<'a>,
-    medium: &'m HydrostaticMedium<'f, F>,
+    medium: &'m M,
     parts: Vec<(usize, &'m DisplacementMesh)>,
     displacement_work_j: f64,
 }
-impl<F: FluidTransport + ?Sized> Clone for HydrostaticExpansion<'_, '_, '_, F> {
+impl<M: HydrostaticReservoir + ?Sized> Clone for HydrostaticExpansion<'_, '_, M> {
     fn clone(&self) -> Self {
         Self {
             motion: self.motion.clone(),
@@ -167,7 +169,7 @@ impl<F: FluidTransport + ?Sized> Clone for HydrostaticExpansion<'_, '_, '_, F> {
         }
     }
 }
-impl<F: FluidTransport + ?Sized> HydrostaticExpansion<'_, '_, '_, F> {
+impl<M: HydrostaticReservoir + ?Sized> HydrostaticExpansion<'_, '_, M> {
     fn mesh(
         &self,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -204,7 +206,7 @@ impl<F: FluidTransport + ?Sized> HydrostaticExpansion<'_, '_, '_, F> {
         })
     }
 }
-impl<F: FluidTransport + ?Sized> DepositionObserver for HydrostaticExpansion<'_, '_, '_, F> {
+impl<M: HydrostaticReservoir + ?Sized> DepositionObserver for HydrostaticExpansion<'_, '_, M> {
     type Error = HeatedMotionError;
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.displacement_work_j = 0.0;

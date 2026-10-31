@@ -231,6 +231,22 @@ impl<'a> LayeredHydrostaticMedium<'a> {
     }
 }
 
+impl super::HydrostaticReservoir for LayeredHydrostaticMedium<'_> {
+    fn gravity(&self) -> Gravity {
+        LayeredHydrostaticMedium::gravity(self)
+    }
+
+    fn load_frame(
+        &self,
+        mesh: &DisplacementMesh,
+        body: &PrincipalFrame,
+        state: RigidBodyState,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<HydrostaticLoad, HydrostaticError> {
+        LayeredHydrostaticMedium::load_frame(self, mesh, body, state, &mut cancelled)
+    }
+}
+
 fn add_moments(
     displaced: DisplacedVolume,
     density: f64,

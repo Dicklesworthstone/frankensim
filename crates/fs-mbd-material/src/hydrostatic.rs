@@ -60,6 +60,35 @@ impl From<DynamicsError> for HydrostaticError { fn from(e: DynamicsError) -> Sel
 impl From<PrincipalFrameError> for HydrostaticError { fn from(e: PrincipalFrameError) -> Self { Self::Principal(e) } }
 impl From<GaError> for HydrostaticError { fn from(e: GaError) -> Self { Self::Principal(PrincipalFrameError::Frame(e)) } }
 
+/// Conservative hydrostatic loading on an admitted material body frame.
+///
+/// Uniform and layered reservoirs share this boundary so thermal expansion
+/// changes the same displacement geometry, fluid mass, force and pressure
+/// potential consumed by ordinary rigid motion. A load excludes body weight;
+/// its pressure-potential pose derivative must agree with its wrench.
+/// Reservoir sources and interfaces stay frozen during an accounting window.
+/// Cancellation remains generic, preserving the native per-cell callback path.
+pub trait HydrostaticReservoir {
+    /// Gravity supplied exactly once to the native rigid-body integrator.
+    fn gravity(&self) -> Gravity;
+
+    /// Evaluate on the original or thermally expanded principal frame.
+    /// No failed source, geometry or cancellation may publish a partial load.
+    fn load_frame(&self, mesh: &DisplacementMesh, body: &PrincipalFrame,
+        state: RigidBodyState, cancelled: impl FnMut() -> bool)
+        -> Result<HydrostaticLoad, HydrostaticError>;
+
+    /// Reuse the native kick-drift step and its absolute energy-defect gate.
+    /// Both endpoint loads use the supplied frame and actual displacement mesh.
+    fn step_frame(&self, mesh: &DisplacementMesh, body: &PrincipalFrame,
+        state: RigidBodyState, controls: HydrostaticStepControls,
+        mut cancelled: impl FnMut() -> bool)
+        -> Result<HydrostaticStep, HydrostaticStepError> {
+        step::step_with_load(self.gravity(), body, state, controls, &mut cancelled,
+            |state, cancel| self.load_frame(mesh, body, state, cancel))
+    }
+}
+
 /// One frozen fluid evaluation, retaining its source owner. Temperature or
 /// composition changes require evaluating that source and making a new medium;
 /// no coefficient changes during a mechanics step or hidden water default.
@@ -130,6 +159,16 @@ impl<'a, F: FluidTransport + ?Sized> HydrostaticMedium<'a, F> {
             displaced.centroid_body_m(), pressure_potential_j, self.gravity, body, state)?;
         poll(&mut cancelled)?;
         Ok(load)
+    }
+}
+
+impl<F: FluidTransport + ?Sized> HydrostaticReservoir for HydrostaticMedium<'_, F> {
+    fn gravity(&self) -> Gravity { HydrostaticMedium::gravity(self) }
+
+    fn load_frame(&self, mesh: &DisplacementMesh, body: &PrincipalFrame,
+        state: RigidBodyState, cancelled: impl FnMut() -> bool)
+        -> Result<HydrostaticLoad, HydrostaticError> {
+        HydrostaticMedium::load_frame(self, mesh, body, state, cancelled)
     }
 }
 

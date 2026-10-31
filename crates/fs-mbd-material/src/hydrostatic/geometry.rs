@@ -4,7 +4,8 @@ use fs_ga::{Se3, Vec3};
 use super::{HydrostaticError, finite, finite_vec, poll};
 use crate::VolumeMoments;
 
-/// Maximum tetrahedra traversed by one hydrostatic load evaluation.
+/// Maximum tetrahedra in a displacement mesh and one interface-clipping pass.
+/// Layered loading can traverse the mesh once per nonzero density jump.
 pub const MAX_DISPLACEMENT_CELLS: usize = 65_536;
 
 /// Caller-supplied, non-overlapping tetrahedral partition of the volume which

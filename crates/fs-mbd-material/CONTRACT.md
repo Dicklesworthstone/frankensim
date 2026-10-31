@@ -602,6 +602,18 @@ starts from reference vertices; closed-body mass remains unchanged. Fluid
 density is the exact `FluidTransport` snapshot, and reservoir gravity must
 match the original mechanical integrator.
 
+The shared `HydrostaticReservoir` loading boundary admits both the original
+uniform medium and `LayeredHydrostaticMedium`, including its optional overlying
+fluid. Heating therefore changes displaced fluid mass, density-weighted buoyancy
+and native motion when the expanding envelope crosses a density interface.
+Both reservoirs supply their original pressure potential to the same thermal
+configuration-work accounting and native endpoint energy gate. The generic
+cancellation callback retains the existing per-cell execution path.
+Pressure configuration work remains in the declared reservoir pressure datum.
+A constant datum shift changes expansion work by that constant times the volume
+change; this does not supply absolute ambient-pressure compression work or
+reciprocal heat. The datum must stay fixed throughout an accounting window.
+
 `HeatedHydrostaticAudit` includes pressure-potential storage and separately
 reports its change caused by expansion as external configuration work, never
 caloric heat. Absolute parameter-work sums count inertia and displacement
@@ -609,7 +621,7 @@ contributions before cancellation. The numerical budget bounds the native
 kinetic-plus-gravity-plus-pressure-potential defect. Failed bindings, sources,
 work limits and late cancellation publish neither proposed trajectory.
 
-The fluid reservoir has frozen homogeneous density and a prescribed surface;
+The fluid reservoir has a frozen density profile and prescribed interfaces;
 the coupling uses a first-order split. It adds no waves, drag, added mass,
 flooding, expansion-induced fluid kinetic energy, constrained deformation or
 reciprocal thermoelastic heat. The caller owns envelope coverage, nonoverlap
@@ -621,6 +633,18 @@ changes reaching flotation, independent regional center of buoyancy and torque,
 source-density acceleration, reference rebuilding and restart, and late
 cancellation/work-budget rollback. Synthetic coefficients test the implementation;
 they do not establish measured material or hydrodynamic validity.
+
+The layered thermal regression starts with a neutrally floating cold body whose
+bottom touches a denser layer. Source-driven expansion crosses that interface;
+the next native kick uses the changed displaced-fluid mass while specimen mass
+is retained. Independent slab integrals check force, pressure potential and each
+thermal configuration-work increment. The layered path also exercises restart
+and late cancellation/work-budget rollback through the same thermal owner.
+
+The existing `floating_materials` example resolves both fluid cards and accepts
+optional lower density and interface depth:
+`cargo run -p fs-mbd-material --example floating_materials -- 375 500 1000 0.25`.
+Its CSV distinguishes displaced fluid mass from submerged geometric volume.
 
 ## Continuing creeping flow during material-resolved thermal expansion
 
