@@ -212,6 +212,8 @@ impl FreeSurface3 {
             contact,
             planar_contact: None,
             planar_contact_field: None,
+            planar_piston: None,
+            geometry_epoch: 0,
             carry: 0.0,
             conversions: ConversionStats3::default(),
             worst_step_violation: 0.0,

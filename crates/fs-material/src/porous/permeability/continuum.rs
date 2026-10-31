@@ -112,7 +112,7 @@ impl<'a> ContinuumDarcyGeometry<'a> {
                 resistance += part;
             }
         }
-        Ok(Self {
+        Ok(ContinuumDarcyGeometry {
             barrier: self.barrier,
             liquid_states: Some(states),
             geometric_resistance_per_m: if sealed { None } else { Some(resistance) },

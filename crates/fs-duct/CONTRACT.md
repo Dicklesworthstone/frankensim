@@ -1350,6 +1350,75 @@ and harmonic: it does not
 synthesize a source's impedance from geometry, supply nonlinear excitation,
 cross-frequency phase statistics, or a time-domain feedback dynamics model.
 
+### Prepared source response and partial coherence
+
+`network_prepare_sources`, its regional counterpart and
+`NetworkResponse::prepare_sources` freeze the admitted source/network/exterior
+boundary at one angular frequency. Preparation supports the same independent
+flow/pressure sources, full reciprocal source bank and full exterior load as
+the deterministic drive APIs. Those APIs now share reusable ordinary and
+retained-wave boundary assembly with preparation. One loaded boundary inverse
+serves every source right-hand side; preparation never repeatedly solves an
+isolated generator or discards the unexcited generators' impedances. The
+retained-wave route remains available at regularized open-circuit poles, with
+the existing dimension, equilibration and condition-number refusal policies.
+
+`PreparedNetworkSources` stores complete row-major pressure/flow transfers and
+the corresponding internal-source effort and Hermitian-loss effort transfers.
+Output rows follow the graph's port order. Input columns are sorted by exact
+source labels and carry `NetworkSourceQuantity`: peak prescribed flow [m3/s]
+or peak open-circuit pressure [Pa]. Cross moments between different input
+quantities therefore carry the product of those SI units. The original
+amplitudes remain available as the default vector in this canonical order.
+Changing medium, geometry, frequency, source impedance or loading requires a
+new preparation; amplitude/phase and source-statistics sweeps reuse it.
+
+`response_buffer` and `drive_into` reuse the existing coherent field/work
+response without heap allocation during application. Every actual source
+vector is combined before power evaluation. Finite-input/field/work failure
+preserves the previous coherent output. `statistics_buffer` similarly owns
+reusable matrices and compensated sums. `coherence_into` accepts factor-major
+vectors B with `E[x x^H]=B B^H`: each factor's sources remain fully coherent;
+different factors have mutually uncorrelated unit latent coefficients. Rank
+one is the deterministic coherent limit. This is an explicit uncentered source
+second moment, not inferred covariance, unknown random phase, or a bandwidth
+model. `independent_into` accepts declared `E[|x_i|²]` and zero cross-source
+moments. Its direct-column contraction avoids dense one-hot factors while
+retaining the complete coupled boundary in every column.
+
+The output contains full `0.5 E[p_i conj(p_j)]` [Pa2],
+`0.5 E[U_i conj(U_j)]` [m6/s2] and `0.5 E[p_i conj(U_j)]` [W] matrices, not
+diagonal powers alone. The real pressure/flow diagonal is signed mean work
+into each graph port. Per-port generator and internal-source work retain
+negative exchange. Total internal dissipation contracts the complete
+Hermitian source operator; source/interface, exterior and graph work remain
+separate. A radiation null does not erase internal source loss. The harmonic
+peak-phasor average 1/2 is included exactly once; these are spectral-line
+second moments, not per-Hz power spectral densities. No clipping, normalization,
+cross-frequency interference or spatial coherence is inferred.
+
+Source/port counts remain at most 32. Statistical rank is explicitly bounded
+by 32 and by `NetworkCoherenceBudget::maximum_rank`. The declared complex
+product budget admits at most 262144 products: rank times
+`4*ports*sources + 3*ports² + 6*ports` for full factors, or source count times
+`4*ports + 3*ports² + 6*ports` for independent sources. Prepared storage has
+four bounded transfer matrices; statistics use bounded output and compensation
+matrices. All application paths allocate nothing and contain no factorization
+or passivity eigenanalysis. Refusal invalidates every statistical getter, so
+partial contractions cannot be published as a valid statistic.
+
+`network/tests/prepared.rs` contains G1/G3 regressions for independent regional
+two-line response columns and repeated coherent application; analytical complex
+covariance contractions of every port-pressure/flow matrix entry and source
+work; common/differential-mode statistics at an exact half-wave pole;
+independent-source/direct-factor parity; mixed Pa and m3/s generators with full
+internal/exterior matrices; negative reactive port exchange and small real loss;
+canonical ordering; bounded-work and invalid-output behavior. The native tests
+require execution before claiming numerical validation. The `coherent_network`
+example uses preparation and accepts a fifth coherence-magnitude argument,
+e.g. `-- 180 0.5 -0.25 0.1 0.6`, to compare the declared partial-coherence
+statistics with its coherent reference using the same physical boundary.
+
 ### Regional material and exterior binding
 
 `NetworkMedia` binds a complete original `GasRecord` to every exact edge id,

@@ -177,7 +177,7 @@ impl LiquidSaturationColumn {
         for (i, ((cell, state), pressure)) in self
             .cells
             .iter()
-            .zip(&before_states)
+            .zip(before_states)
             .zip(&before_pressures)
             .enumerate()
         {

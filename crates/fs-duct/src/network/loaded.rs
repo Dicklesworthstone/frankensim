@@ -331,6 +331,12 @@ struct LoadedFields<'a> {
     inflows: Vec<C64>,
 }
 
+struct RetainedSourceSystem<'a> {
+    labels: Vec<String>,
+    sources: ResolvedSources<'a>,
+    wave: LoadedWaveSystem,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drive_retained_sources<'a>(
     net: &DuctNetwork,
@@ -343,6 +349,30 @@ fn drive_retained_sources<'a>(
     loads: &[PortTermination],
     coupled: Option<&CoupledTermination>,
 ) -> Result<LoadedFields<'a>, DuctError> {
+    let system = retained_source_system(
+        net, exterior, media, omega, loss, sources, bank, loads, coupled,
+    )?;
+    let (pressures, inflows) = system.wave.drive(&system.sources.conditions)?;
+    Ok(LoadedFields {
+        labels: system.labels,
+        sources: system.sources,
+        pressures,
+        inflows,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retained_source_system<'a>(
+    net: &DuctNetwork,
+    exterior: &GasState,
+    media: Option<&NetworkMedia>,
+    omega: f64,
+    loss: LossModel,
+    sources: &[PortSource],
+    bank: Option<&'a CoupledSourceBank>,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+) -> Result<RetainedSourceSystem<'a>, DuctError> {
     net.validate()?;
     validate_medium(exterior, omega)?;
     let port_nodes: Vec<usize> = net
@@ -503,7 +533,7 @@ fn drive_retained_sources<'a>(
         .iter()
         .map(|&node| slots[node].expect("external port pressure is retained"))
         .collect();
-    let (pressures, inflows) = loaded_wave_response(
+    let wave = loaded_wave_system(
         &boundary_y,
         pressures,
         &wave_edges,
@@ -514,11 +544,10 @@ fn drive_retained_sources<'a>(
         &coupled_rows,
         coupled,
     )?;
-    Ok(LoadedFields {
+    Ok(RetainedSourceSystem {
         labels: labels.iter().map(|label| (*label).to_owned()).collect(),
         sources,
-        pressures,
-        inflows,
+        wave,
     })
 }
 
@@ -526,7 +555,7 @@ fn drive_retained_sources<'a>(
 // Keeping their external currents permits a pressure release or a rank-deficient
 // passive Z without an inverse, and closes the source/load problem at its pole.
 #[allow(clippy::too_many_arguments)]
-fn loaded_wave_response(
+fn loaded_wave_system(
     boundary_y: &[C64],
     pressures: usize,
     edges: &[WaveEdge],
@@ -536,7 +565,7 @@ fn loaded_wave_response(
     resolved: &[Option<C64>],
     coupled_rows: &[Option<usize>],
     coupled: Option<&CoupledTermination>,
-) -> Result<(Vec<C64>, Vec<C64>), DuctError> {
+) -> Result<LoadedWaveSystem, DuctError> {
     let conditions = &sources.conditions;
     let source_flows: Vec<Option<C64>> = conditions
         .iter()
@@ -604,49 +633,205 @@ fn loaded_wave_response(
         .filter(|&port| conditions[port].is_some())
         .collect();
     driven.sort_unstable_by(|&a, &b| labels[a].cmp(labels[b]));
-    let unit_source =
-        (driven.len() == 1 && source_flows[driven[0]] == Some(C64::ONE)).then_some(driven[0]);
-    let solution = |row: usize| {
-        unit_source.map_or_else(
-            || {
-                coherent_sum(driven.iter().map(|&port| {
-                    if let Some(flow) = source_flows[port] {
-                        let slot = port_slots[port];
-                        inv[row * n + slot] * flow.scale(row_scales[slot])
-                    } else {
-                        let slot =
-                            current_slots[port].expect("pressure-source current is retained");
-                        let (pressure, _) = conditions[port]
-                            .and_then(PortExcitation::pressure)
-                            .expect("driven pressure boundary");
-                        inv[row * n + slot] * pressure.scale(pressure_scales[slot])
-                    }
-                }))
-            },
-            |active| {
-                let slot = port_slots[active];
-                inv[row * n + slot].scale(row_scales[slot])
-            },
-        )
-    };
-    let mut port_pressures = vec![C64::ZERO; labels.len()];
-    let mut port_inflows: Vec<C64> = source_flows
-        .iter()
-        .map(|value| value.unwrap_or(C64::ZERO))
-        .collect();
-    for port in 0..labels.len() {
-        port_pressures[port] = solution(port_slots[port]);
-        if let Some(row) = current_slots[port] {
-            let current = solution(row);
-            port_inflows[port] = C64::new(current.re / reference, current.im / reference);
+    Ok(LoadedWaveSystem {
+        inv,
+        n,
+        reference,
+        port_slots: port_slots.to_vec(),
+        current_slots,
+        row_scales,
+        pressure_scales,
+        driven,
+    })
+}
+
+struct LoadedWaveSystem {
+    inv: Vec<C64>,
+    n: usize,
+    reference: f64,
+    port_slots: Vec<usize>,
+    current_slots: Vec<Option<usize>>,
+    row_scales: Vec<f64>,
+    pressure_scales: Vec<f64>,
+    driven: Vec<usize>,
+}
+
+impl LoadedWaveSystem {
+    fn drive(
+        &self,
+        conditions: &[Option<PortExcitation>],
+    ) -> Result<(Vec<C64>, Vec<C64>), DuctError> {
+        let Self {
+            inv,
+            n,
+            reference,
+            port_slots,
+            current_slots,
+            row_scales,
+            pressure_scales,
+            driven,
+        } = self;
+        let (n, reference) = (*n, *reference);
+        let source_flows: Vec<Option<C64>> = conditions
+            .iter()
+            .map(|condition| condition.and_then(PortExcitation::flow))
+            .collect();
+        let unit_source =
+            (driven.len() == 1 && source_flows[driven[0]] == Some(C64::ONE)).then_some(driven[0]);
+        let solution = |row: usize| {
+            unit_source.map_or_else(
+                || {
+                    coherent_sum(driven.iter().map(|&port| {
+                        if let Some(flow) = source_flows[port] {
+                            let slot = port_slots[port];
+                            inv[row * n + slot] * flow.scale(row_scales[slot])
+                        } else {
+                            let slot =
+                                current_slots[port].expect("pressure-source current is retained");
+                            let (pressure, _) = conditions[port]
+                                .and_then(PortExcitation::pressure)
+                                .expect("driven pressure boundary");
+                            inv[row * n + slot] * pressure.scale(pressure_scales[slot])
+                        }
+                    }))
+                },
+                |active| {
+                    let slot = port_slots[active];
+                    inv[row * n + slot].scale(row_scales[slot])
+                },
+            )
+        };
+        let mut port_pressures = vec![C64::ZERO; port_slots.len()];
+        let mut port_inflows: Vec<C64> = source_flows
+            .iter()
+            .map(|value| value.unwrap_or(C64::ZERO))
+            .collect();
+        for port in 0..port_slots.len() {
+            port_pressures[port] = solution(port_slots[port]);
+            if let Some(row) = current_slots[port] {
+                let current = solution(row);
+                port_inflows[port] = C64::new(current.re / reference, current.im / reference);
+            }
         }
+        if port_pressures
+            .iter()
+            .chain(&port_inflows)
+            .any(|&z| !finite(z))
+        {
+            return Err(DuctError::Singular);
+        }
+        Ok((port_pressures, port_inflows))
     }
-    if port_pressures
-        .iter()
-        .chain(&port_inflows)
-        .any(|&z| !finite(z))
-    {
-        return Err(DuctError::Singular);
+}
+
+/// Prepare a fixed source/network/exterior boundary once for coherent sweeps
+/// and explicitly declared partial-coherence statistics. Source amplitudes
+/// supplied here become the prepared default vector; their boundary kinds,
+/// impedances, labels and common frequency stay fixed during application.
+#[allow(clippy::too_many_arguments)]
+pub fn network_prepare_sources(
+    net: &DuctNetwork,
+    gas: &GasState,
+    omega: f64,
+    loss: LossModel,
+    sources: &[PortSource],
+    bank: Option<&CoupledSourceBank>,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+) -> Result<PreparedNetworkSources, DuctError> {
+    prepare_sources_bound(net, gas, None, omega, loss, sources, bank, loads, coupled)
+}
+
+/// [`network_prepare_sources`] retaining the original regional material laws.
+#[allow(clippy::too_many_arguments)]
+pub fn network_prepare_sources_regional(
+    net: &DuctNetwork,
+    media: &NetworkMedia,
+    omega: f64,
+    loss: LossModel,
+    sources: &[PortSource],
+    bank: Option<&CoupledSourceBank>,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+) -> Result<PreparedNetworkSources, DuctError> {
+    media.validate_for(net)?;
+    prepare_sources_bound(
+        net,
+        media.exterior_gas(),
+        Some(media),
+        omega,
+        loss,
+        sources,
+        bank,
+        loads,
+        coupled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_sources_bound(
+    net: &DuctNetwork,
+    exterior: &GasState,
+    media: Option<&NetworkMedia>,
+    omega: f64,
+    loss: LossModel,
+    sources: &[PortSource],
+    bank: Option<&CoupledSourceBank>,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+) -> Result<PreparedNetworkSources, DuctError> {
+    let ordinary = network_port_impedance_bound(net, exterior, media, omega, loss)
+        .and_then(|response| response.prepare_sources(sources, bank, loads, coupled));
+    match ordinary {
+        Ok(prepared) => Ok(prepared),
+        Err(DuctError::Singular) => {
+            let system = retained_source_system(
+                net, exterior, media, omega, loss, sources, bank, loads, coupled,
+            )?;
+            let wave = &system.wave;
+            let count = wave.driven.len();
+            let mut pressure = vec![C64::ZERO; system.labels.len() * count];
+            let mut flow = pressure.clone();
+            // Every column is read from this ONE equilibrated boundary inverse.
+            // No source or bank is isolated, removed or independently solved.
+            for (column, &source) in wave.driven.iter().enumerate() {
+                let (slot, scale) = if system.sources.conditions[source]
+                    .and_then(PortExcitation::flow)
+                    .is_some()
+                {
+                    (
+                        wave.port_slots[source],
+                        wave.row_scales[wave.port_slots[source]],
+                    )
+                } else {
+                    let slot =
+                        wave.current_slots[source].expect("pressure source current retained");
+                    (slot, wave.pressure_scales[slot])
+                };
+                for port in 0..system.labels.len() {
+                    pressure[port * count + column] =
+                        wave.inv[wave.port_slots[port] * wave.n + slot].scale(scale);
+                    flow[port * count + column] = match wave.current_slots[port] {
+                        Some(row) => {
+                            let normalized = wave.inv[row * wave.n + slot].scale(scale);
+                            C64::new(
+                                normalized.re / wave.reference,
+                                normalized.im / wave.reference,
+                            )
+                        }
+                        None if port == source => C64::ONE,
+                        None => C64::ZERO,
+                    };
+                }
+            }
+            PreparedNetworkSources::from_transfers(
+                omega,
+                &system.labels,
+                &system.sources,
+                pressure,
+                flow,
+            )
+        }
+        Err(error) => Err(error),
     }
-    Ok((port_pressures, port_inflows))
 }

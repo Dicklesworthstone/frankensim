@@ -1,10 +1,10 @@
 use super::*;
 
-fn zc(gas: &GasState) -> f64 {
+pub(super) fn zc(gas: &GasState) -> f64 {
     gas.density * gas.sound_speed / (core::f64::consts::PI * 0.008 * 0.008)
 }
 
-fn star(lengths: [f64; 2]) -> DuctNetwork {
+pub(super) fn star(lengths: [f64; 2]) -> DuctNetwork {
     DuctNetwork {
         nodes: vec![port("left"), port("right"), port("receiver")],
         edges: vec![
@@ -14,7 +14,7 @@ fn star(lengths: [f64; 2]) -> DuctNetwork {
     }
 }
 
-fn bank(omega: f64, z: [C64; 4], pressures: [C64; 2]) -> CoupledSourceBank {
+pub(super) fn bank(omega: f64, z: [C64; 4], pressures: [C64; 2]) -> CoupledSourceBank {
     CoupledSourceBank {
         impedance: CoupledTermination {
             omega,
@@ -26,14 +26,14 @@ fn bank(omega: f64, z: [C64; 4], pressures: [C64; 2]) -> CoupledSourceBank {
     }
 }
 
-fn close(actual: C64, expected: C64, scale: f64) {
+pub(super) fn close(actual: C64, expected: C64, scale: f64) {
     assert!(
         (actual - expected).abs() < 1.0e-10 * scale,
         "actual={actual:?}, expected={expected:?}"
     );
 }
 
-fn solve_pair(a: [C64; 4], b: [C64; 2]) -> [C64; 2] {
+pub(super) fn solve_pair(a: [C64; 4], b: [C64; 2]) -> [C64; 2] {
     let determinant = a[0] * a[3] - a[1] * a[2];
     [
         (a[3] * b[0] - a[1] * b[1]) / determinant,
@@ -69,7 +69,7 @@ fn line_fields(
     )
 }
 
-fn analytic_bank(
+pub(super) fn analytic_bank(
     gases: [&GasState; 2],
     lengths: [f64; 2],
     omega: f64,
@@ -95,7 +95,7 @@ fn analytic_bank(
     line_fields(gases, lengths, omega, solve_pair(a, pressure), load)
 }
 
-fn balance(response: &NetworkSourceResponse, scale: f64) {
+pub(super) fn balance(response: &NetworkSourceResponse, scale: f64) {
     assert!(response.source_dissipation_w >= -1.0e-11 * scale);
     assert!(
         (response.generator_power_w

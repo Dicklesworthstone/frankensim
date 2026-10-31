@@ -18,6 +18,12 @@ pub use loaded::{
     network_drive, network_drive_coherent, network_drive_coherent_regional, network_drive_coupled,
     network_drive_coupled_regional, network_drive_regional, network_drive_source_bank,
     network_drive_source_bank_regional, network_drive_sources, network_drive_sources_regional,
+    network_prepare_sources, network_prepare_sources_regional,
+};
+mod prepared;
+pub use prepared::{
+    NetworkCoherenceBudget, NetworkSourceCoordinate, NetworkSourceQuantity,
+    NetworkSourceStatistics, NetworkSourceWork, PreparedNetworkSources,
 };
 
 #[cfg(test)]
@@ -349,6 +355,12 @@ struct ResolvedSources<'a> {
     conditions: Vec<Option<PortExcitation>>,
     bank: Option<&'a CoupledSourceBank>,
     bank_rows: Vec<Option<usize>>,
+}
+
+struct ImpedanceSourceSystem {
+    live: Vec<usize>,
+    canonical: Vec<usize>,
+    inverse: Vec<C64>,
 }
 
 impl ResolvedSources<'_> {
@@ -1694,6 +1706,77 @@ impl NetworkResponse {
         coupled: Option<&CoupledTermination>,
         gas: &GasState,
     ) -> Result<(Vec<C64>, Vec<C64>), DuctError> {
+        let system = self.source_system(sources, loads, coupled, gas)?;
+        let n = self.ports.len();
+        let conditions = &sources.conditions;
+        let source_flows: Vec<Option<C64>> = conditions
+            .iter()
+            .map(|condition| condition.and_then(PortExcitation::flow))
+            .collect();
+        let source_count = conditions.iter().filter(|source| source.is_some()).count();
+        let live = &system.live;
+        let canonical = &system.canonical;
+        let inv = &system.inverse;
+        let mut currents: Vec<C64> = source_flows
+            .iter()
+            .map(|value| value.unwrap_or(C64::ZERO))
+            .collect();
+        // Keep the original unit-source arithmetic unchanged. Other source
+        // vectors retain their phase, with compensation for deep cancellation.
+        let unit_source = (source_count == 1)
+            .then(|| source_flows.iter().position(|&flow| flow == Some(C64::ONE)))
+            .flatten();
+        let incident: Vec<C64> = (0..n)
+            .map(|row| {
+                unit_source.map_or_else(
+                    || {
+                        coherent_sum(canonical.iter().filter_map(|&port| {
+                            source_flows[port].map(|u| self.z[row * n + port] * u)
+                        }))
+                    },
+                    |active| self.z[row * n + active],
+                )
+            })
+            .collect();
+        let m = live.len();
+        for (i, &p) in live.iter().enumerate() {
+            if unit_source.is_some() {
+                for (j, &q) in live.iter().enumerate() {
+                    currents[p] = currents[p] - inv[i * m + j] * incident[q];
+                }
+            } else {
+                currents[p] = coherent_sum(live.iter().enumerate().map(|(j, &q)| {
+                    let pressure = conditions[q]
+                        .and_then(PortExcitation::pressure)
+                        .map_or(C64::ZERO, |(pressure, _)| pressure);
+                    inv[i * m + j] * (pressure - incident[q])
+                }));
+            }
+        }
+        let mut pressures = vec![C64::ZERO; n];
+        for i in 0..n {
+            if unit_source.is_some() {
+                for &j in canonical {
+                    pressures[i] = pressures[i] + self.z[i * n + j] * currents[j];
+                }
+            } else {
+                pressures[i] =
+                    coherent_sum(canonical.iter().map(|&j| self.z[i * n + j] * currents[j]));
+            }
+        }
+        if pressures.iter().chain(&currents).any(|&v| !finite(v)) {
+            return Err(DuctError::Singular);
+        }
+        Ok((pressures, currents))
+    }
+
+    fn source_system(
+        &self,
+        sources: &ResolvedSources<'_>,
+        loads: &[PortTermination],
+        coupled: Option<&CoupledTermination>,
+        gas: &GasState,
+    ) -> Result<ImpedanceSourceSystem, DuctError> {
         validate_medium(gas, self.omega)?;
         if *gas != self.gas {
             return Err(bad("network response and termination gas states differ"));
@@ -1765,29 +1848,8 @@ impl NetworkResponse {
             })
             .collect();
         live.sort_unstable_by(|&a, &b| self.ports[a].cmp(&self.ports[b]));
-        let mut currents: Vec<C64> = source_flows
-            .iter()
-            .map(|value| value.unwrap_or(C64::ZERO))
-            .collect();
         let mut canonical: Vec<usize> = (0..n).collect();
         canonical.sort_unstable_by(|&a, &b| self.ports[a].cmp(&self.ports[b]));
-        // Keep the original unit-source arithmetic unchanged. Other source
-        // vectors retain their phase, with compensation for deep cancellation.
-        let unit_source = (source_count == 1)
-            .then(|| source_flows.iter().position(|&flow| flow == Some(C64::ONE)))
-            .flatten();
-        let incident: Vec<C64> = (0..n)
-            .map(|row| {
-                unit_source.map_or_else(
-                    || {
-                        coherent_sum(canonical.iter().filter_map(|&port| {
-                            source_flows[port].map(|u| self.z[row * n + port] * u)
-                        }))
-                    },
-                    |active| self.z[row * n + active],
-                )
-            })
-            .collect();
         let m = live.len();
         let mut a = vec![C64::ZERO; m * m];
         for (i, &p) in live.iter().enumerate() {
@@ -1804,37 +1866,15 @@ impl NetworkResponse {
                 }
             }
         }
-        if m > 0 {
-            let (inv, _) = inverse(&a, m)?;
-            for (i, &p) in live.iter().enumerate() {
-                if unit_source.is_some() {
-                    for (j, &q) in live.iter().enumerate() {
-                        currents[p] = currents[p] - inv[i * m + j] * incident[q];
-                    }
-                } else {
-                    currents[p] = coherent_sum(live.iter().enumerate().map(|(j, &q)| {
-                        let pressure = conditions[q]
-                            .and_then(PortExcitation::pressure)
-                            .map_or(C64::ZERO, |(pressure, _)| pressure);
-                        inv[i * m + j] * (pressure - incident[q])
-                    }));
-                }
-            }
-        }
-        let mut pressures = vec![C64::ZERO; n];
-        for i in 0..n {
-            if unit_source.is_some() {
-                for &j in &canonical {
-                    pressures[i] = pressures[i] + self.z[i * n + j] * currents[j];
-                }
-            } else {
-                pressures[i] =
-                    coherent_sum(canonical.iter().map(|&j| self.z[i * n + j] * currents[j]));
-            }
-        }
-        if pressures.iter().chain(&currents).any(|&v| !finite(v)) {
-            return Err(DuctError::Singular);
-        }
-        Ok((pressures, currents))
+        let inverse = if m == 0 {
+            Vec::new()
+        } else {
+            inverse(&a, m)?.0
+        };
+        Ok(ImpedanceSourceSystem {
+            live,
+            canonical,
+            inverse,
+        })
     }
 }

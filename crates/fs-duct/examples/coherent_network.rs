@@ -12,11 +12,14 @@
 //! Optional third/fourth arguments add reciprocal mutual source resistance
 //! and reactance / Zc, e.g. `-- 180 0.5 -0.25 0.1`. The complete internal
 //! matrix is admitted as passive; mutual entries and port work retain signs.
+//! An optional fifth argument supplies coherence magnitude in [0,1], retaining
+//! the declared phase: `-- 180 0.5 -0.25 0.1 0.6`. The prepared boundary serves
+//! both the deterministic vector and its explicitly declared source statistics.
 
 use fs_duct::network::{
-    CoupledSourceBank, CoupledTermination, DuctNetwork, JunctionCorrections, NetworkEdge,
-    NetworkLoad, NetworkNode, NodeBoundary, PortExcitation, PortSource, PortTermination,
-    network_drive_source_bank, network_drive_sources,
+    CoupledSourceBank, CoupledTermination, DuctNetwork, JunctionCorrections,
+    NetworkCoherenceBudget, NetworkEdge, NetworkLoad, NetworkNode, NodeBoundary, PortExcitation,
+    PortSource, PortTermination, network_prepare_sources,
 };
 use fs_duct::{Duct, LossModel, Segment};
 use fs_material::gas::{GasSpec, GasState};
@@ -24,9 +27,9 @@ use fs_math::{c64::C64, det};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if !(1..=4).contains(&args.len()) {
+    if !(1..=5).contains(&args.len()) {
         return Err(
-            "usage: coherent_network <relative-source-phase-degrees> [source-resistance-over-Zc [mutual-resistance-over-Zc [mutual-reactance-over-Zc]]]"
+            "usage: coherent_network <relative-source-phase-degrees> [source-resistance-over-Zc [mutual-resistance-over-Zc [mutual-reactance-over-Zc [coherence-magnitude]]]]"
                 .into(),
         );
     }
@@ -44,6 +47,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| value.parse::<f64>())
         .transpose()?
         .unwrap_or(0.0);
+    let coherence = args.get(4).map(|value| value.parse::<f64>()).transpose()?;
+    if coherence.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+        return Err("coherence magnitude must be finite and in [0,1]".into());
+    }
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0)?;
     let radius = 0.008;
     let network = DuctNetwork {
@@ -94,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         load: NetworkLoad::Impedance(C64::from_re(characteristic)),
     }];
     let omega = core::f64::consts::TAU * 400.0;
-    let driven = if let Some(mutual) = mutual_resistance {
+    let prepared = if let Some(mutual) = mutual_resistance {
         let resistance = source_resistance.expect("mutual arguments follow source resistance");
         let diagonal = C64::from_re(resistance * characteristic);
         let off_diagonal = C64::new(mutual, mutual_reactance).scale(characteristic);
@@ -109,27 +116,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|phase| phase.scale(characteristic * 1.0e-6))
                 .to_vec(),
         };
-        network_drive_source_bank(
+        network_prepare_sources(
             &network,
             &gas,
             omega,
             LossModel::Lossless,
             &[],
-            &bank,
+            Some(&bank),
             &loads,
             None,
         )?
     } else {
-        network_drive_sources(
+        network_prepare_sources(
             &network,
             &gas,
             omega,
             LossModel::Lossless,
             &sources,
+            None,
             &loads,
             None,
         )?
     };
+    let mut driven = prepared.response_buffer();
+    prepared.drive_into(prepared.default_excitations(), &mut driven)?;
     if let Some(ratio) = source_resistance {
         println!(
             "frequency_hz=400,phase_degrees={degrees},source_resistance_over_Zc={ratio},peak_open_pressure_pa={:.12e}",
@@ -169,5 +179,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "generator_power_w={:.12e},source_internal_dissipation_w={:.12e}",
         driven.generator_power_w, driven.source_dissipation_w
     );
+    if let Some(magnitude) = coherence {
+        let defaults = prepared.default_excitations();
+        let factors = [
+            defaults[0],
+            defaults[1].scale(magnitude),
+            C64::ZERO,
+            defaults[1].scale((1.0 - magnitude * magnitude).sqrt()),
+        ];
+        let mut statistics = prepared.statistics_buffer();
+        prepared.coherence_into(
+            &factors,
+            2,
+            NetworkCoherenceBudget::default(),
+            &mut statistics,
+        )?;
+        let work = statistics
+            .work()
+            .expect("completed statistical contraction");
+        let receiver_pressure_ms = statistics
+            .pressure_second_moments()
+            .expect("completed pressure moments")[8]
+            .re;
+        println!(
+            "coherence_magnitude={magnitude},receiver_mean_square_pressure_pa2={receiver_pressure_ms:.12e},statistical_generator_power_w={:.12e},statistical_source_loss_w={:.12e},statistical_external_power_w={:.12e},statistical_graph_power_w={:.12e}",
+            work.generator_power_w,
+            work.source_dissipation_w,
+            work.external_load_power_w,
+            work.network_power_w
+        );
+    }
     Ok(())
 }
