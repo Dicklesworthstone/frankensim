@@ -211,6 +211,19 @@ fn input_elasticity(
         CorrelationId::ManningQureshiAidingVerticalPlate => {
             AidingVerticalPlate::new(group("Re"), group("Ra"), group("Pr")).elasticity(axis)
         }
+        CorrelationId::ChurchillSphere => {
+            let b = det::pow(0.469 / group("Pr"), 9.0 / 16.0);
+            // Keep the buoyant term before adding the conduction floor: Nu-2
+            // loses its derivative when the small excess rounds away.
+            let term = 0.589 * det::pow(group("Ra"), 0.25)
+                / det::pow(1.0 + b, 4.0 / 9.0);
+            let ra_elasticity = term / (4.0 * nu);
+            match axis {
+                "Ra" => ra_elasticity,
+                "Pr" => ra_elasticity * b / (1.0 + b),
+                _ => 0.0,
+            }
+        }
     };
     finite_derivative(value, "Nusselt input elasticity").map(Some)
 }

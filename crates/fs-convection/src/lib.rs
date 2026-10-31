@@ -77,12 +77,14 @@ pub enum CorrelationId {
     HorizontalPlateStable,
     /// Laminar aiding mixed convection over an isothermal vertical plate.
     ManningQureshiAidingVerticalPlate,
+    /// Isolated isothermal sphere in natural convection; length is diameter.
+    ChurchillSphere,
 }
 
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 17] = [
+    pub const ALL: [CorrelationId; 18] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -100,6 +102,7 @@ impl CorrelationId {
         Self::HorizontalPlateUnstableTurbulent,
         Self::HorizontalPlateStable,
         Self::ManningQureshiAidingVerticalPlate,
+        Self::ChurchillSphere,
     ];
 
     /// Stable model-card identifier.
@@ -129,6 +132,7 @@ impl CorrelationId {
             Self::ManningQureshiAidingVerticalPlate => {
                 "convection.manning-qureshi-aiding-vertical-plate"
             }
+            Self::ChurchillSphere => "convection.churchill-sphere",
         }
     }
 
@@ -170,6 +174,9 @@ impl CorrelationId {
             Self::HorizontalPlateStable => "Nu_L = 0.27 Ra_L^(1/4); L = A/P",
             Self::ManningQureshiAidingVerticalPlate => {
                 "Nu_L = [(2 Ff sqrt(Re))^n + ((4/3) Fn (Ra/Pr)^(1/4))^n]^(1/n); Ff=0.339 Pr^(1/3)(1+0.100 Pr^(-3/4))^(-2/9); Fn=0.503 Pr^(1/4)(1+0.670 Pr^(-9/16))^(-4/9); n=3.5 Pr^0.075"
+            }
+            Self::ChurchillSphere => {
+                "Nu_D = 2 + 0.589 Ra_D^(1/4)/(1+(0.469/Pr)^(9/16))^(4/9)"
             }
         }
     }
@@ -333,7 +340,12 @@ impl CorrelationInputs {
             insert_group(&mut groups, "aspect_ratio", value, false)?;
         }
         if let Some(value) = self.rayleigh {
-            insert_group(&mut groups, "Ra", value, mixed)?;
+            insert_group(
+                &mut groups,
+                "Ra",
+                value,
+                mixed || id == CorrelationId::ChurchillSphere,
+            )?;
         }
         if let (Some(re), Some(pr)) = (self.reynolds, self.prandtl) {
             insert_group(&mut groups, "Pe", re * pr, mixed)?;
@@ -382,8 +394,9 @@ pub struct DomainViolation {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CorrelationError {
     /// A supplied group is non-finite or violates its sign requirement.
-    /// Only the mixed card admits zero Re/Ra and their derived groups;
-    /// `max(Re,Ra)` must still be positive.
+    /// The mixed card admits zero Re/Ra and their derived groups, but
+    /// `max(Re,Ra)` must be positive. The sphere admits Ra=0 as its conductive
+    /// limit. Other supplied groups must be strictly positive.
     InvalidGroup {
         /// Axis name.
         axis: &'static str,
@@ -420,7 +433,7 @@ impl fmt::Display for CorrelationError {
         match self {
             Self::InvalidGroup { axis, value_bits } => write!(
                 f,
-                "dimensionless group {axis} must be finite and positive (zero is allowed only for the mixed card's individual flow drivers); got bits 0x{value_bits:016x}"
+                "dimensionless group {axis} must be finite and positive (zero is allowed for the mixed card's individual flow drivers or the sphere's Rayleigh number); got bits 0x{value_bits:016x}"
             ),
             Self::OutOfDomain {
                 correlation,
@@ -805,6 +818,10 @@ fn evaluate_formula(
         CorrelationId::ManningQureshiAidingVerticalPlate => {
             mixed::AidingVerticalPlate::new(group("Re"), group("Ra"), group("Pr")).nusselt()
         }
+        CorrelationId::ChurchillSphere => {
+            let denominator = det::pow(1.0 + det::pow(0.469 / group("Pr"), 9.0 / 16.0), 4.0 / 9.0);
+            2.0 + 0.589 * det::pow(group("Ra"), 0.25) / denominator
+        }
     }
 }
 
@@ -908,6 +925,10 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
     const MANNING_QURESHI: SourceProvenance = SourceProvenance {
         citation: "K. S. Manning and Z. H. Qureshi, Transport Correlations for Laminar Aiding Mixed Convection Over a Vertical Isothermal Surface, Journal of Heat Transfer 116(3), 1994, 777-780, Eqs. (4), (8), (10), (11)",
         identifier: "doi:10.1115/1.2910940",
+    };
+    const CHURCHILL_SPHERE: SourceProvenance = SourceProvenance {
+        citation: "Churchill isolated-sphere relation; COMSOL 6.4 Heat Transfer Theory, External Natural Convection, Sphere, Eq. (4-194), citing Incropera et al., Fundamentals of Heat and Mass Transfer, 6th ed., Eq. (9.35); also ASHRAE Fundamentals 2025, Ch. 4, Table 9 (T9.11), citing Churchill (1990)",
+        identifier: "https://doc.comsol.com/6.4/doc/com.comsol.help.heat/heat_ug_theory.07.100.html",
     };
 
     let fully_developed = || {
@@ -1190,6 +1211,26 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
                 "enclosure confinement, finite-width edge effects or non-isothermal walls",
                 "strong property variation or non-Boussinesq density response",
                 "creeping-flow or diffusion-dominated regimes outside boundary-layer theory",
+            ],
+            0.20,
+            DiscrepancyBasis::EngineeringAllowance,
+        ),
+        CorrelationId::ChurchillSphere => (
+            CHURCHILL_SPHERE,
+            ValidityDomain::unconstrained()
+                .with("Pr", 0.7, f64::MAX)
+                .with("Ra", 0.0, 1.0e11),
+            vec![
+                "average coefficient over an isolated isothermal sphere; characteristic length is diameter",
+                "quiescent unbounded single-phase Newtonian fluid; transport properties at mean wall/ambient temperature",
+                "source bounds Ra <= 1e11 and Pr >= 0.7; no finite upper Pr is published, so its numeric upper bound is the largest finite f64",
+                "a beta-based Rayleigh number uses the dimensional adapter's declared Boussinesq property approximation",
+                "Nu=2 at Ra=0 is the steady conductive limit to an unbounded fluid and is already included in the coefficient",
+            ],
+            vec![
+                "forced or mixed convection, confinement or particle arrays",
+                "non-isothermal sphere or use as a local angular heat-transfer coefficient",
+                "strong property variation, transient fluid diffusion or non-Boussinesq density response",
             ],
             0.20,
             DiscrepancyBasis::EngineeringAllowance,

@@ -25,6 +25,9 @@ pub enum NaturalConvectionGeometry {
     /// The face and signed buoyancy determine whether the boundary layer is
     /// stable or unstable. Heat still flows from the hotter body to the colder.
     HorizontalPlate(HorizontalPlateFacing),
+    /// Churchill isolated isothermal sphere; characteristic length is diameter.
+    /// Includes the steady unbounded-fluid conductive limit Nu=2 at Ra=0.
+    Sphere,
 }
 
 impl NaturalConvectionGeometry {
@@ -41,9 +44,10 @@ impl NaturalConvectionGeometry {
     /// natural convection are not supplied by this selector.
     ///
     /// # Errors
-    /// Refuses nonfinite groups, zero driving and out-of-card ranges through
-    /// the ordinary evaluator. Exact thermal equilibrium can be represented
-    /// by zero heat at the coupling owner without inventing a Ra=0 coefficient.
+    /// Refuses nonfinite groups and out-of-card ranges through the ordinary
+    /// evaluator. Zero driving is admitted only for the sphere's physical
+    /// steady conduction limit Nu=2. Other geometries leave exact thermal
+    /// equilibrium to the coupling owner's zero-heat treatment.
     pub fn evaluate(
         self,
         signed_rayleigh: f64,
@@ -53,6 +57,7 @@ impl NaturalConvectionGeometry {
         let id = match self {
             Self::VerticalPlate => CorrelationId::ChurchillChuVerticalPlate,
             Self::HorizontalCylinder => CorrelationId::ChurchillChuHorizontalCylinder,
+            Self::Sphere => CorrelationId::ChurchillSphere,
             Self::HorizontalPlate(facing) => {
                 let unstable = match facing {
                     HorizontalPlateFacing::Up => signed_rayleigh > 0.0,

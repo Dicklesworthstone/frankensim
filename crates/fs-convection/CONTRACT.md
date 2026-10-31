@@ -21,7 +21,7 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names seventeen implemented relations: circular-duct 3.66 and
+- `CorrelationId` names eighteen implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
@@ -32,7 +32,8 @@ correlation.
   and the stable, unstable-laminar and unstable-turbulent horizontal-plate
   rows of ASHRAE 2025 Fundamentals, Chapter 4, Table 9 (T9.7--T9.9); and
   Manning--Qureshi aiding laminar mixed convection over an isothermal vertical
-  plate, including its pure forced and natural boundary-layer limits.
+  plate, including its pure forced and natural boundary-layer limits; and
+  Churchill isolated-sphere natural convection, including its conductive limit.
 - `CorrelationCard` combines an `fs-evidence::ModelCard`, bibliographic
   provenance, and `DiscrepancyBasis`.
 - `CorrelationInputs` makes Re, Pr, L/Dh, aspect ratio, Ra, and the
@@ -64,9 +65,10 @@ correlation.
    `ThermalBc` raw coherent-SI row, which has no standalone `fs-convection`
    authority if cloned or detached from `CorrelationRobinBoundary`.
 2. Missing, non-finite, incorrectly signed, or out-of-domain dimensionless
-   inputs refuse; there is no silent extrapolation. Only the aiding mixed card
+   inputs refuse; there is no silent extrapolation. The aiding mixed card
    admits zero Re or Ra (and corresponding derived Pe/Gz); at least one flow
-   driver must be positive. All other cards retain positive-group admission.
+   driver must be positive. The isolated sphere admits Ra=0 as the physical
+   steady conduction limit Nu=2. All other supplied groups remain positive.
 3. Every successful value carries exactly the selected model card, its
    validity domain, assumptions, discrepancy, and deterministic evaluation
    provenance.
@@ -201,9 +203,10 @@ None.
   Formula tests establish arithmetic and limit behavior, not external validation.
 
 - `NaturalConvectionGeometry` selects vertical plates, horizontal cylinders,
-  or the stable/unstable horizontal face from signed `g beta (Tw-Ta)`.
-  Characteristic lengths are height, diameter, and full planform area/perimeter,
-  respectively. The horizontal plate uses film properties and retains the
+  isolated spheres, or the stable/unstable horizontal face from signed
+  `g beta (Tw-Ta)`. Characteristic lengths are height for the vertical plate,
+  diameter for the cylinder and sphere, and full planform area/perimeter for
+  the horizontal plate. The horizontal plate uses film properties and retains the
   handbook's Rayleigh ranges. Its source does not specify a universal Prandtl
   interval; omission of that axis is not all-fluid experimental validation.
   The cylinder's Prandtl box is explicitly an implementation policy. Numeric
@@ -217,6 +220,30 @@ None.
   values, orientation/sign metamorphisms, source domains and derivatives, and
   the cylinder against the handbook's approximate 733 W heater calculation
   within a declared 3% calculation tolerance; this is not measured validation.
+
+- `ChurchillSphere` supplies the **average** coefficient for an isolated,
+  isothermal sphere in an unbounded quiescent single-phase fluid, using its
+  diameter in both Ra and `h=Nu k/D`. The formula and domain follow
+  [COMSOL 6.4 Heat Transfer Theory, External Natural Convection, Sphere,
+  Eq. (4-194)](https://doc.comsol.com/6.4/doc/com.comsol.help.heat/heat_ug_theory.07.100.html):
+  `Nu=2+0.589 Ra^(1/4)/(1+(0.469/Pr)^(9/16))^(4/9)`, `Ra<=1e11`, `Pr>=0.7`.
+  The same relation is attributed to Churchill (1990) by ASHRAE 2025
+  Fundamentals, Chapter 4, Table 9 (T9.11). No upper Prandtl bound is published;
+  the finite-number domain uses `f64::MAX`, without claiming validation in
+  every fluid. Transport properties are sampled at the mean wall/ambient
+  temperature; an adapter's beta-based Rayleigh number is its declared
+  Boussinesq approximation, not COMSOL's finite-density-difference definition.
+  Unlike the plate and cylinder cards, the sphere admits Ra=0: Nu=2 gives the
+  exact steady spherical conduction limit `G=4 pi k r` to an unbounded fluid.
+  This conductive component is already included and must not be added again
+  as a separate parallel path. The model supplies no transient fluid diffusion,
+  local angular coefficient, confinement, particle-array correction, or mixed
+  forced/natural blend. The 20% discrepancy is an engineering allowance, not
+  source-published statistical validation. `tests/natural_sphere.rs` checks
+  independent high-precision arithmetic, diameter-based conductive scaling,
+  signed-buoyancy symmetry, range admission and analytic input partials. At
+  Ra=0 the singular Ra partial is absent; at positive tiny Ra its derivative
+  is retained even when the buoyant increment rounds away in Nu.
 
 - Source citations identify formula authority; the repository does not retain
   a licensed copy of Shah-London or a cross-code validation dataset. The
