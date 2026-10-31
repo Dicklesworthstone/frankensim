@@ -2,7 +2,7 @@
 //!
 //! The enclosed real function uses the retained binary64 flux, normalized
 //! angular coefficients/cutoffs, inverse-rotation quaternion, source/probe
-//! positions, receiver normal and gray absorption/scattering coefficients.
+//! positions, receiver normal and the original homogeneous or physical-grid medium.
 //! Native opaque triangles and their retained forward rigid placements determine
 //! visibility on the source-to-receiver segment, excluding the source endpoint
 //! and the final `ray_epsilon_m` at the receiver, as in the nominal calculation.
@@ -14,7 +14,11 @@
 //! effect of the excluded receiver segment, spectral/model discrepancy, or
 //! omitted reflected/scattered light. The total error therefore stays unknown.
 //!
-//! Physical-grid transport has no enclosure here. Supported source laws are
+//! Physical grids retain their density, absorption and scattering laws. The
+//! enclosed grid response includes the actual 80-bin source spectrum and
+//! retained observer weights, not an assumed exact spectral normalization.
+//! Cell-boundary uncertainty widens the interval; grid discretization and
+//! measured-medium accuracy remain unknown. Supported source laws are
 //! isotropic, uniform cone, integer cosine powers 0..=64 and two-column
 //! axisymmetric tables with at most 64 polar knots. Cutoff uncertainty encloses
 //! both branches. The original native nominal calculation is unchanged.
@@ -27,16 +31,20 @@ use crate::photometry::{
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
-use fs_ivl::{Interval, decay::exp_neg};
+use fs_ivl::Interval;
+use crate::volumes::transport::VolumeTransportError;
+use crate::volumes::transport::enclosure::GridEnclosureBudget;
 use std::io::{self, Write};
 
+mod spectral_medium;
+use spectral_medium::PreparedMedium;
 mod visibility;
 use visibility::{Visibility, VisibilityIndex};
 pub use visibility::MAX_VISIBILITY_TRIANGLES;
 
 /// Version of the represented-function and numerical-enclosure interpretation.
-/// Version 2 adds bounded opaque-mesh visibility and geometry-bound identities.
-pub const DIRECT_ENCLOSURE_SEMANTICS_VERSION: u32 = 2;
+/// Version 3 adds retained spectral-grid extinction and its source/observer binding.
+pub const DIRECT_ENCLOSURE_SEMANTICS_VERSION: u32 = 3;
 
 /// Why the unchanged nominal result has no numerical enclosure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +53,9 @@ pub enum EnclosureUnavailable {
     GeometryVisibility,
     /// Optional visibility metadata exceeds the documented admission ceiling.
     GeometryBudgetExceeded,
-    /// Heterogeneous spectral attenuation/cell crossings are not enclosed.
+    /// The optional medium enclosure exceeded its cell or node work budget.
+    MediumBudgetExceeded,
+    /// The physical grid could not supply the requested spectral coefficients.
     PhysicalGridTransport,
     /// This source needs an unsupported angular law or a larger table.
     SourceLaw {
@@ -66,9 +76,10 @@ pub struct EnclosedIlluminance {
     /// This includes any unresolved visibility branches, not just small rounding.
     pub numerical_error_bound_lux: Option<f64>,
     /// Content identity of retained source, referenced geometry and probe inputs.
-    /// Spectra/phase are irrelevant to gray unscattered lux and are excluded,
-    /// as are inactive source details and constructor history. This is not a
-    /// complete scene hash or authenticated calibration provenance.
+    /// Grid media additionally bind their native snapshot identity, source bins
+    /// and observer weights. Homogeneous gray media do not need spectra.
+    /// Constructor history and physical calibration are not authenticated; the
+    /// native grid identity may retain phase/thermal data irrelevant to direct lux.
     pub numerical_model_identity: Option<ContentHash>,
     /// Sources with nonzero possible contribution and unresolved visibility.
     /// `Some(0)` means all relevant visibility predicates were decided; `None`
@@ -97,6 +108,7 @@ impl EnclosedIlluminance {
                     Some(EnclosureUnavailable::GeometryVisibility) => "geometry-visibility",
                     Some(EnclosureUnavailable::GeometryBudgetExceeded) => "geometry-budget",
                     Some(EnclosureUnavailable::PhysicalGridTransport) => "physical-grid-transport",
+                    Some(EnclosureUnavailable::MediumBudgetExceeded) => "medium-budget",
                     Some(EnclosureUnavailable::SourceLaw { .. }) => "source-law",
                     _ => "arithmetic-range",
                 };
@@ -115,8 +127,8 @@ impl EnclosedIlluminance {
     }
 }
 
-enum Prepared {
-    Available { identity: ContentHash, visibility: VisibilityIndex },
+enum Prepared<'field> {
+    Available { identity: ContentHash, visibility: VisibilityIndex, medium: PreparedMedium<'field> },
     Unavailable(EnclosureUnavailable),
 }
 
@@ -136,12 +148,13 @@ impl PhotometricScene<'_> {
 
 /// Progressive direct calculation with enclosure and provenance on each value.
 /// The original scene/probes stay borrowed. The numerical-model identity and
-/// bounded, stackless visibility hierarchy are prepared once, not per probe.
+/// bounded, stackless visibility hierarchy and spectral extinction coefficients
+/// are prepared once, not per probe.
 /// Each receiver publishes atomically; failed/cancelled receivers are absent.
 pub struct EnclosedIlluminanceJob<'a, 'scene> {
     scene: &'a PhotometricScene<'scene>,
     receivers: Receivers<'a>,
-    prepared: Prepared,
+    prepared: Prepared<'scene>,
     count: usize,
     values: Vec<EnclosedIlluminance>,
 }
@@ -165,6 +178,20 @@ impl<'a, 'scene> EnclosedIlluminanceJob<'a, 'scene> {
         values.try_reserve_exact(count).map_err(|_| PhotometryError::AllocationRefused)?;
         cx.checkpoint()?;
         Ok(Self { scene, receivers, prepared, count, values })
+    }
+
+    /// Adjust optional medium-enclosure work before any receiver is published.
+    /// The original grid's cell budget remains binding. Exhaustion does not
+    /// invalidate a successful native nominal value: it reports an unavailable
+    /// enclosure with `MediumBudgetExceeded`. Homogeneous gray jobs are unaffected.
+    pub fn set_grid_enclosure_budget(&mut self, budget: GridEnclosureBudget) -> Result<(), PhotometryError> {
+        if !self.values.is_empty() || budget.max_nodes_per_segment == 0 {
+            return Err(PhotometryError::InvalidOptions);
+        }
+        if let Prepared::Available { medium, .. } = &mut self.prepared {
+            medium.set_grid_budget(budget);
+        }
+        Ok(())
     }
 
     /// Append only complete receivers. Chunk sizes do not enter the arithmetic.
@@ -193,17 +220,20 @@ impl<'a, 'scene> EnclosedIlluminanceJob<'a, 'scene> {
     pub fn is_complete(&self) -> bool { self.values.len() == self.count }
 }
 
-fn prepare(scene: &PhotometricScene<'_>, cx: &Cx<'_>) -> Result<Prepared, PhotometryError> {
+fn prepare<'field>(scene: &PhotometricScene<'field>, cx: &Cx<'_>) -> Result<Prepared<'field>, PhotometryError> {
     cx.checkpoint()?;
-    let Some(medium) = scene.medium.homogeneous() else {
-        return Ok(Prepared::Unavailable(EnclosureUnavailable::PhysicalGridTransport));
-    };
-    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.model.v2");
+    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.model.v3");
     hash.update(&DIRECT_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&fs_ivl::INTERVAL_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&fs_ivl::decay::DECAY_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&crate::photometry::PHOTOMETRY_SEMANTICS_VERSION.to_le_bytes());
-    for value in [medium.absorption_per_m(), medium.scattering_per_m(), scene.options.ray_epsilon_m, scene.options.max_distance_m] {
+    let medium = match PreparedMedium::prepare(&scene.medium, &mut hash, cx) {
+        Ok(medium) => medium,
+        Err(VolumeTransportError::Cancelled) => return Err(PhotometryError::Cancelled),
+        Err(VolumeTransportError::Budget) => return Ok(Prepared::Unavailable(EnclosureUnavailable::MediumBudgetExceeded)),
+        Err(_) => return Ok(Prepared::Unavailable(EnclosureUnavailable::PhysicalGridTransport)),
+    };
+    for value in [scene.options.ray_epsilon_m, scene.options.max_distance_m] {
         hash_float(&mut hash, value);
     }
     hash.update(&(scene.sources.len() as u64).to_le_bytes());
@@ -215,6 +245,9 @@ fn prepare(scene: &PhotometricScene<'_>, cx: &Cx<'_>) -> Result<Prepared, Photom
             hash_float(&mut hash, value);
         }
         hash_float(&mut hash, source.distribution.peak_per_sr);
+        if medium.needs_spectrum() {
+            for &power in source.spectrum().bins_w_per_lumen_nm() { hash_float(&mut hash, power); }
+        }
         match &source.distribution.law {
             AngularLaw::Isotropic => { hash.update(&[0]); },
             AngularLaw::Cone { cosine_cutoff } => {
@@ -238,22 +271,23 @@ fn prepare(scene: &PhotometricScene<'_>, cx: &Cx<'_>) -> Result<Prepared, Photom
         Err(reason) => return Ok(Prepared::Unavailable(reason)),
     };
     cx.checkpoint()?;
-    Ok(Prepared::Available { identity: hash.finalize(), visibility })
+    Ok(Prepared::Available { identity: hash.finalize(), visibility, medium })
 }
 
-fn evaluate(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe, prepared: &Prepared) -> Result<EnclosedIlluminance, PhotometryError> {
+fn evaluate(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe, prepared: &Prepared<'_>) -> Result<EnclosedIlluminance, PhotometryError> {
     let mut estimate = scene.illuminance(cx, probe)?;
     cx.checkpoint()?;
     let no_claim = |reason| EnclosedIlluminance {
         estimate, numerical_error_bound_lux: None, numerical_model_identity: None,
         uncertain_visibility_sources: None, unavailable: Some(reason),
     };
-    let (model, visibility) = match prepared {
+    let (model, visibility, medium) = match prepared {
         Prepared::Unavailable(reason) => return Ok(no_claim(*reason)),
-        Prepared::Available { identity, visibility } => (identity, visibility),
+        Prepared::Available { identity, visibility, medium } => (identity, visibility, medium),
     };
-    let Some((enclosure, uncertain)) = direct_bound(scene, cx, probe, visibility)? else {
-        return Ok(no_claim(EnclosureUnavailable::ArithmeticRange));
+    let (enclosure, uncertain) = match direct_bound(scene, cx, probe, visibility, medium)? {
+        Ok(bound) => bound,
+        Err(reason) => return Ok(no_claim(reason)),
     };
     // Include the native nominal value without using it to establish the real
     // model enclosure. A nominal visibility disagreement widens, never narrows.
@@ -264,7 +298,7 @@ fn evaluate(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe,
     };
     if !error.is_finite() { return Ok(no_claim(EnclosureUnavailable::ArithmeticRange)); }
     estimate.numerical = NumericalCertificate::enclosure(enclosure.lo(), enclosure.hi());
-    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.probe.v2");
+    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.probe.v3");
     hash.update(&model.0);
     for value in [probe.position_m.x, probe.position_m.y, probe.position_m.z, probe.normal.x, probe.normal.y, probe.normal.z] { hash_float(&mut hash, value); }
     cx.checkpoint()?;
@@ -274,10 +308,7 @@ fn evaluate(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe,
     })
 }
 
-fn direct_bound(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe, visibility: &VisibilityIndex) -> Result<Option<(Interval, usize)>, PhotometryError> {
-    let Some(medium) = scene.medium.homogeneous() else { return Ok(None); };
-    let extinction = nonnegative(Interval::point(medium.absorption_per_m()) + Interval::point(medium.scattering_per_m()));
-    let vacuum = medium.extinction_per_m() == 0.0;
+fn direct_bound(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe, visibility: &VisibilityIndex, medium: &PreparedMedium<'_>) -> Result<Result<(Interval, usize), EnclosureUnavailable>, PhotometryError> {
     let mut sum = Interval::point(0.0);
     let mut uncertain = 0;
     for source in scene.sources {
@@ -286,13 +317,13 @@ fn direct_bound(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminancePr
         let origin = source.transform.translation_m();
         let receiver = [probe.position_m.x, probe.position_m.y, probe.position_m.z];
         let delta = std::array::from_fn(|i| Interval::point(origin[i]) - Interval::point(receiver[i]));
-        let Some(distance) = norm(delta) else { return Ok(None); };
-        if distance.lo() <= 0.0 { return Ok(None); }
+        let Some(distance) = norm(delta) else { return Ok(Err(EnclosureUnavailable::ArithmeticRange)); };
+        if distance.lo() <= 0.0 { return Ok(Err(EnclosureUnavailable::ArithmeticRange)); }
         let direction = delta.map(|v| v / distance);
         let normal = [probe.normal.x, probe.normal.y, probe.normal.z].map(Interval::point);
         let cosine = nonnegative(dot(normal, direction));
         if cosine.hi() == 0.0 { continue; }
-        let Some(intensity) = intensity_bound(source, direction.map(|v| -v)) else { return Ok(None); };
+        let Some(intensity) = intensity_bound(source, direction.map(|v| -v)) else { return Ok(Err(EnclosureUnavailable::ArithmeticRange)); };
         if intensity.hi() == 0.0 { continue; }
         // Parameterize from source to receiver, exactly as native visibility.
         // The receiver exclusion changes only this segment, not distance² or
@@ -301,21 +332,23 @@ fn direct_bound(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminancePr
         let end = Interval::new(end.lo().clamp(0.0, 1.0), end.hi().clamp(0.0, 1.0));
         let state = visibility.visibility(scene.primitives, origin.map(Interval::point), delta.map(|v| -v), end, cx)?;
         if state == Visibility::Blocked { continue; }
-        let transmission = if vacuum { Interval::point(1.0) } else {
-            let Some(value) = exp_neg(nonnegative(extinction * distance)) else { return Ok(None); };
-            value
+        let transmission = match medium.photopic_transfer(cx, source, probe.position_m, distance) {
+            Ok(value) => value,
+            Err(VolumeTransportError::Cancelled) => return Err(PhotometryError::Cancelled),
+            Err(VolumeTransportError::Budget) => return Ok(Err(EnclosureUnavailable::MediumBudgetExceeded)),
+            Err(_) => return Ok(Err(EnclosureUnavailable::ArithmeticRange)),
         };
         let mut contribution = nonnegative(intensity / distance / distance * cosine * transmission);
-        if !finite(contribution) { return Ok(None); }
+        if !finite(contribution) { return Ok(Err(EnclosureUnavailable::ArithmeticRange)); }
         if state == Visibility::Uncertain {
             contribution = Interval::new(0.0, contribution.hi());
             uncertain += 1;
         }
         sum = nonnegative(sum + contribution);
-        if !finite(sum) { return Ok(None); }
+        if !finite(sum) { return Ok(Err(EnclosureUnavailable::ArithmeticRange)); }
     }
     cx.checkpoint()?;
-    Ok(Some((sum, uncertain)))
+    Ok(Ok((sum, uncertain)))
 }
 
 fn intensity_bound(source: &PhotometricSource, outgoing: [Interval; 3]) -> Option<Interval> {
