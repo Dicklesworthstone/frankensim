@@ -161,6 +161,135 @@ fn accepted_charge(solution: &IdealGasEquilibriumSolutionV1) {
 }
 
 #[test]
+fn g1_frozen_ionization_state_uses_actual_two_temperature_populations() {
+    let chemistry = hydrogen(false);
+    let x = 1e-4;
+    let amounts = [Amount::new(1.0 - x), Amount::new(x), Amount::new(x)];
+    let (th, te, volume) = (1200.0, 18000.0, 2.0);
+    let state = FrozenIonizedGasStateV1::new(
+        &chemistry,
+        &amounts,
+        Volume::new(volume),
+        Temperature::new(th),
+        Temperature::new(te),
+        1e-12,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(state.amounts(), &amounts);
+    assert_eq!(state.electron_index(), Some(2));
+    assert_eq!(state.species_temperature(0), Some(Temperature::new(th)));
+    assert_eq!(state.species_temperature(2), Some(Temperature::new(te)));
+    assert_eq!(state.species_temperature(3), None);
+    relative_close(state.pressure().value(), R * (th + x * te) / volume, 2e-15);
+    relative_close(
+        state.heavy_internal_energy().value(),
+        1.5 * R * th + x * IONIZATION_J_MOL,
+        2e-15,
+    );
+    relative_close(
+        state.electron_internal_energy().value(),
+        1.5 * R * x * te,
+        2e-15,
+    );
+    relative_close(
+        state.internal_energy().value(),
+        1.5 * R * (th + x * te) + x * IONIZATION_J_MOL,
+        2e-15,
+    );
+    relative_close(state.mass().value(), ATOM_MOLAR_MASS, 2e-15);
+    relative_close(
+        state.number_density_per_m3(2).unwrap(),
+        x * AVOGADRO / volume,
+        2e-15,
+    );
+    relative_close(state.heavy_heat_capacity_j_k(), 1.5 * R, 2e-15);
+    relative_close(state.electron_heat_capacity_j_k(), 1.5 * R * x, 2e-15);
+    assert_eq!(state.relative_charge_residual(), 0.0);
+    // Immutable inventories and original source models are shared, not copied
+    // every time an accepted reactor endpoint becomes a material snapshot.
+    assert!(core::ptr::eq(
+        state.thermodynamics().models().as_ptr(),
+        chemistry.models().as_ptr()
+    ));
+    assert!(core::ptr::eq(
+        state.thermodynamics().elemental_matrix(),
+        chemistry.elemental_matrix()
+    ));
+    assert!(core::ptr::eq(
+        state.clone().amounts().as_ptr(),
+        state.amounts().as_ptr()
+    ));
+}
+
+#[test]
+fn g0_frozen_ionization_state_scales_charge_by_actual_trace_carriers() {
+    let chemistry = hydrogen(false);
+    for x in [1e-25, 1e-280, f64::from_bits(10)] {
+        let amounts = [Amount::new(1.0), Amount::new(x), Amount::new(x)];
+        let state = FrozenIonizedGasStateV1::new(
+            &chemistry,
+            &amounts,
+            Volume::new(1.0),
+            Temperature::new(1000.0),
+            Temperature::new(1000.0),
+            1e-12,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(state.relative_charge_residual(), 0.0);
+        let unequal = [amounts[0], amounts[1], Amount::new(2.0 * x)];
+        assert!(matches!(
+            FrozenIonizedGasStateV1::new(
+                &chemistry,
+                &unequal,
+                Volume::new(1.0),
+                Temperature::new(1000.0),
+                Temperature::new(1000.0),
+                1e-12,
+                || false,
+            ),
+            Err(FrozenIonizedGasStateErrorV1::ChargeImbalance { .. })
+        ));
+    }
+}
+
+#[test]
+fn g0_frozen_ionization_state_admits_actual_source_temperatures_and_no_seeds() {
+    let chemistry = hydrogen(false);
+    let amounts = [Amount::new(1.0), Amount::new(0.0), Amount::new(0.0)];
+    let state = FrozenIonizedGasStateV1::new(
+        &chemistry,
+        &amounts,
+        Volume::new(1.0),
+        Temperature::new(1000.0),
+        Temperature::new(200000.0),
+        1e-12,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(state.amounts()[2].value(), 0.0);
+    assert_eq!(state.electron_heat_capacity_j_k(), 0.0);
+    let seeded = [Amount::new(0.9), Amount::new(0.1), Amount::new(0.1)];
+    assert!(matches!(FrozenIonizedGasStateV1::new(
+        &chemistry, &seeded, Volume::new(1.0), Temperature::new(1000.0),
+        Temperature::new(200000.0), 1e-12, || false,
+    ), Err(FrozenIonizedGasStateErrorV1::SpeciesEvaluation { species, .. }) if species == id("e-")));
+    assert_eq!(
+        FrozenIonizedGasStateV1::new(
+            &chemistry,
+            &seeded,
+            Volume::new(1.0),
+            Temperature::new(1000.0),
+            Temperature::new(1000.0),
+            1e-12,
+            || true,
+        ),
+        Err(FrozenIonizedGasStateErrorV1::Cancelled)
+    );
+}
+
+#[test]
 fn g1_ionization_tp_matches_saha_from_a_neutral_unseeded_feed() {
     let chemistry = hydrogen(false);
     let feed = [(id("H"), Amount::new(1.0))];

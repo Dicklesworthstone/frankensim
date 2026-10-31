@@ -29,6 +29,8 @@ use fs_qty::{Amount, Energy, Mass, Pressure, Temperature};
 use std::sync::Arc;
 
 mod solve;
+/// Source-bound frozen populations with explicit heavy and electron temperatures.
+pub mod state;
 /// Reusable source-bound equilibrium isentropes for flow consumers.
 pub use solve::expansion::path as isentrope;
 pub use solve::expansion::{
@@ -37,6 +39,7 @@ pub use solve::expansion::{
 };
 /// Fixed-volume composition and adiabatic internal-energy equilibrium.
 pub use solve::volume;
+pub use state::{FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1};
 /// Maximum retained gas species, including reactants and inerts.
 pub const MAX_EQUILIBRIUM_SPECIES_V1: usize = 128;
 /// Maximum elemental rows; dependent rows remain checked at publication.
@@ -268,13 +271,13 @@ impl IdealGasEquilibriumSolutionV1 {
 /// Product species sharing one exact ideal-gas standard-state convention.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IdealGasEquilibriumV1 {
-    elemental: ElementalMatrix,
-    charges: ChargeVector,
+    elemental: Arc<ElementalMatrix>,
+    charges: Arc<ChargeVector>,
     elemental_identity: [u8; 32],
     charge_identity: [u8; 32],
     models: Arc<[Nasa9StandardStateModelV1]>,
     // Elemental rows followed by a signed charge row only when needed.
-    coefficients: Vec<f64>,
+    coefficients: Arc<[f64]>,
     convention: StandardStateConventionV1,
 }
 impl IdealGasEquilibriumV1 {
@@ -355,23 +358,23 @@ impl IdealGasEquilibriumV1 {
         let elemental_identity = *elemental.identity().as_bytes();
         let charge_identity = *charges.identity().as_bytes();
         Ok(Self {
-            elemental,
-            charges,
+            elemental: Arc::new(elemental),
+            charges: Arc::new(charges),
             elemental_identity,
             charge_identity,
             models: models.into(),
-            coefficients,
+            coefficients: coefficients.into(),
             convention,
         })
     }
     /// Original complete elemental source, including dependent rows.
     #[must_use]
-    pub const fn elemental_matrix(&self) -> &ElementalMatrix {
+    pub fn elemental_matrix(&self) -> &ElementalMatrix {
         &self.elemental
     }
     /// Original signed species-charge declaration.
     #[must_use]
-    pub const fn charge_vector(&self) -> &ChargeVector {
+    pub fn charge_vector(&self) -> &ChargeVector {
         &self.charges
     }
     /// Canonical unmodified source models.

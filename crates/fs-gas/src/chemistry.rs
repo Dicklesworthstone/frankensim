@@ -14,6 +14,9 @@
 //! implied by a successful zero-dimensional homogeneous reactor integration.
 
 use fs_qty::{Amount, Energy, Mass, Pressure, Temperature, Time, Volume};
+use fs_thermochem::equilibrium::composition::{
+    FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1,
+};
 use fs_thermochem::kinetics::{
     IdealGasKineticsV1, KineticThermodynamicsV1, KineticWorkspaceV1, KineticsErrorV1,
 };
@@ -238,6 +241,24 @@ impl IsochoricKineticsResult {
     /// Accepted original NASA-9 evaluation receipts, including possible products.
     pub fn sources(&self) -> &[Nasa9EvaluationReceiptV1] {
         &self.sources
+    }
+    /// Freeze the actual accepted populations for charged transport. This does
+    /// not project a finite-rate endpoint to LTE or manufacture electron seeds.
+    /// A net-charged reactor endpoint refuses this quasineutral material lane.
+    pub fn frozen_state(
+        &self,
+        relative_charge_tolerance: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<FrozenIonizedGasStateV1, FrozenIonizedGasStateErrorV1> {
+        FrozenIonizedGasStateV1::new(
+            self.mechanism.thermodynamics(),
+            &self.amounts,
+            self.volume,
+            self.temperature,
+            self.temperature,
+            relative_charge_tolerance,
+            cancelled,
+        )
     }
 }
 

@@ -175,6 +175,40 @@ fn g0_ionization_collisions_do_not_invent_an_electron_seed() {
 }
 
 #[test]
+fn g1_ionization_reactor_freezes_actual_endpoint_without_equilibrium_projection() {
+    let mechanism = hydrogen_ionization();
+    let initial = [Amount::new(0.99), Amount::new(0.01), Amount::new(0.01)];
+    let mut reactor = IsochoricReactor::new(mechanism, controls(), || false).unwrap();
+    let endpoint = reactor
+        .advance_adiabatic(
+            &initial,
+            Volume::new(1.0),
+            Temperature::new(12000.0),
+            Time::new(1e-4),
+            || false,
+        )
+        .unwrap();
+    let frozen = endpoint.frozen_state(1e-10, || false).unwrap();
+    let owned = endpoint.to_owned(|| false).unwrap();
+    let owned_frozen = owned.frozen_state(1e-10, || false).unwrap();
+    assert_eq!(frozen, owned_frozen);
+    assert_eq!(frozen.amounts(), owned.amounts());
+    assert_eq!(frozen.heavy_temperature(), owned.temperature());
+    assert_eq!(frozen.electron_temperature(), owned.temperature());
+    relative(frozen.pressure().value(), owned.pressure().value(), 3e-15);
+    relative(
+        frozen.internal_energy().value(),
+        owned.internal_energy().value(),
+        3e-15,
+    );
+    relative(frozen.mass().value(), owned.mass().value(), 3e-15);
+    // A deliberately short finite-rate interval stays far from Saha. Freezing
+    // must retain its small electron density rather than replacing it by LTE.
+    assert!(frozen.amounts()[2].value() < 0.02);
+    assert!(equilibrium_fraction(owned.temperature().value()) > 5.0 * frozen.amounts()[2].value());
+}
+
+#[test]
 fn g1_ionization_finite_rate_reactor_conserves_energy_mass_and_charge() {
     let mechanism = hydrogen_ionization();
     let initial_x = 0.01;

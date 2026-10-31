@@ -200,6 +200,24 @@ impl IsochoricKineticsView<'_> {
         self.balance
     }
 
+    /// Retain actual accepted populations for quasineutral charged transport.
+    /// This explicit owning conversion allocates only its bounded state data.
+    pub fn frozen_state(
+        &self,
+        relative_charge_tolerance: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<FrozenIonizedGasStateV1, FrozenIonizedGasStateErrorV1> {
+        FrozenIonizedGasStateV1::new(
+            self.mechanism.thermodynamics(),
+            self.amounts,
+            self.volume,
+            self.temperature,
+            self.temperature,
+            relative_charge_tolerance,
+            cancelled,
+        )
+    }
+
     /// Materialize an independent endpoint and the original source receipts.
     /// This explicit conversion allocates; the prepared advance itself does not.
     pub fn to_owned(
