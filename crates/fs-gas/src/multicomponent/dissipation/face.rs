@@ -3,7 +3,7 @@ use super::evolve::{close_simplex, fractions, heat_capacity_density};
 use super::law::validate_binary;
 use super::*;
 use crate::multicomponent::{MAX_NORMAL_COMPONENTS, MAX_SPECIES, NormalCell, NormalPrimitive, sum};
-use fs_qty::{Pressure, Temperature};
+use fs_qty::{AmountConcentration, Pressure, Temperature};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod spatial;
@@ -44,7 +44,8 @@ pub enum WallThermalCondition {
 /// Face scratch is reserved once; successful kernels allocate no new scratch.
 /// The supplied law keeps its own allocation/validity contract: in particular,
 /// a material-card provider may perform allocating source queries. Soret/Dufour
-/// effects, no-slip walls and nonideal gas transport require other closures.
+/// coupling is applied only when the source law explicitly supplies heats of
+/// transport. Nonideal gas transport requires an additional thermodynamic owner.
 pub struct PlanarTransport<L: TransportLaw> {
     gas: MixtureGas,
     law: L,
@@ -576,17 +577,74 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     )?;
     coefficients.validate()?;
     let maximum_diffusion = validate_binary(binary, n)?;
-    let evaluated = diffusion.evaluate(
-        &x[..n],
-        &gradient[..n],
+    let mut heats = [0.0; MAX_SPECIES];
+    let coupled = law.heats_of_transport(
         Temperature::new(t),
         Pressure::new(p),
-        log_pressure / distance,
-        binary,
-        controls,
-        workspace,
-        &mut *cancelled,
+        &x[..n],
+        &mut heats[..n],
+        &mut || cancelled(),
     )?;
+    let mut forces = [0.0; MAX_SPECIES];
+    let mut thermal_force_scale = 0.0_f64;
+    let mut maximum_heat = 0.0_f64;
+    if coupled {
+        if !heats[..n].iter().all(|h| h.is_finite()) {
+            return Err(DissipationError::Invalid(
+                "non-finite source heat of transport",
+            ));
+        }
+        let masses = diffusion.molar_masses();
+        let mean_mass = sum((0..n).map(|k| x[k] * masses[k].value()));
+        // Subtract a reference before the weighted mean. A common authored
+        // offset must not create cancellation or a false Dufour heat flux.
+        let reference = heats[pivot];
+        let mean_heat =
+            sum((0..n).map(|k| (x[k] * masses[k].value() / mean_mass) * (heats[k] - reference)));
+        for k in 0..n {
+            heats[k] = (heats[k] - reference) - mean_heat;
+            let y = x[k] * masses[k].value() / mean_mass;
+            let thermal = masses[k].value() * ((heats[k] / R) / t);
+            forces[k] = gradient[k]
+                + (x[k] - y) * (log_pressure / distance)
+                + x[k] * thermal * (grad_t / t);
+            if x[k] > 0.0 {
+                thermal_force_scale = thermal_force_scale.max(thermal.abs());
+                maximum_heat = maximum_heat.max(heats[k].abs());
+            }
+        }
+        if !positive(mean_mass)
+            || !mean_heat.is_finite()
+            || !heats[..n].iter().all(|h| h.is_finite())
+        {
+            return Err(DissipationError::Invalid(
+                "heat-of-transport scaling overflow",
+            ));
+        }
+    }
+    let evaluated = if coupled {
+        diffusion.evaluate_driving_forces(
+            &x[..n],
+            &forces[..n],
+            AmountConcentration::new((p / R) / t),
+            binary,
+            controls,
+            workspace,
+            &mut *cancelled,
+        )?
+    } else {
+        diffusion.evaluate(
+            &x[..n],
+            &gradient[..n],
+            Temperature::new(t),
+            Pressure::new(p),
+            log_pressure / distance,
+            binary,
+            controls,
+            workspace,
+            &mut *cancelled,
+        )?
+    };
     let mut report = TransportFaceReport {
         diffusivity_m2_s: 0.0,
         maximum_gradient_residual_per_m: evaluated.maximum_gradient_residual_per_m(),
@@ -634,6 +692,19 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     let energy = sum(enthalpy_flux[..n].iter().copied())
         - coefficients.thermal_conductivity.value() * grad_t
         - velocity * stress;
+    // H_i is a kinetic heat of transport, not the caloric partial enthalpy
+    // already included above. The reciprocal term must use the actual species
+    // flux once. With theta=grad(T)/T², the added force is x_i M_i H_i theta/R;
+    // hence -R sum(z_i d_chem_i/x_i) - q_reduced*theta equals the shared
+    // nonnegative pair-friction entropy plus lambda*(grad(T)/T)².
+    // This is the Onsager Schur-complement construction, not an assumption
+    // that the finite-volume discretization inherits a full entropy theorem.
+    // Van-Brunt et al., https://arxiv.org/pdf/2109.05082, equations 3.5–3.9.
+    let energy = if coupled {
+        energy + sum((0..n).map(|k| heats[k] * out[k]))
+    } else {
+        energy
+    };
     out[n + 1 + TRANSVERSE] = if TRANSVERSE > 0 {
         energy - shear_work
     } else {
@@ -649,6 +720,21 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     report.diffusivity_m2_s = (maximum_diffusion * mass_ratio * gamma)
         .max(viscosity_scale / pl.density.min(pr.density))
         .max(coefficients.thermal_conductivity.value() / left.cv_density.min(right.cv_density));
+    if thermal_force_scale > 0.0 {
+        // Include both off-diagonal couplings and their product in the existing
+        // engineering step-size estimate. H/(Cv*T) bounds transport heat versus
+        // storage; M*H/(R*T) bounds the thermal diffusion force. This is a
+        // conservative scale estimate, not a variable-coefficient spectral bound.
+        let thermal_storage_scale = (maximum_heat / t)
+            * (pl.density.max(pr.density) / left.cv_density.min(right.cv_density));
+        let coupled_scale = maximum_diffusion
+            * mass_ratio
+            * gamma
+            * (1.0 + thermal_force_scale)
+            * (1.0 + thermal_storage_scale)
+            + coefficients.thermal_conductivity.value() / left.cv_density.min(right.cv_density);
+        report.diffusivity_m2_s = report.diffusivity_m2_s.max(coupled_scale);
+    }
     if !report.diffusivity_m2_s.is_finite() || report.diffusivity_m2_s < 0.0 {
         return Err(DissipationError::Invalid("molecular face scale overflow"));
     }
@@ -746,7 +832,6 @@ fn wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     })
 }
 
-
 #[allow(clippy::too_many_arguments)]
 fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     gas: &MixtureGas,
@@ -794,8 +879,9 @@ fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     let face_temperature = 0.5 * p.temperature + 0.5 * wall_temperature;
     let temperature_gradient = match thermal {
         WallThermalCondition::Adiabatic => 0.0,
-        WallThermalCondition::Isothermal(_) =>
-            normal_sign * (wall_temperature - p.temperature) / wall_distance,
+        WallThermalCondition::Isothermal(_) => {
+            normal_sign * (wall_temperature - p.temperature) / wall_distance
+        }
     };
     let mut x = [0.0; MAX_SPECIES];
     fractions(gas, trace.densities, &mut x[..n])?;
@@ -819,18 +905,16 @@ fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     out[n] = -normal_stress;
     let mut wall_work = 0.0;
     for axis in 0..TRANSVERSE {
-        let shear = mu
-            * normal_sign
-            * (wall_tangential_velocity[axis] - trace.transverse_velocity[axis])
-            / wall_distance;
+        let shear =
+            mu * normal_sign * (wall_tangential_velocity[axis] - trace.transverse_velocity[axis])
+                / wall_distance;
         out[n + 1 + axis] = -shear;
         wall_work += wall_tangential_velocity[axis] * out[n + 1 + axis];
     }
-    out[n + 1 + TRANSVERSE] =
-        wall_work - c.thermal_conductivity.value() * temperature_gradient;
+    out[n + 1 + TRANSVERSE] = wall_work - c.thermal_conductivity.value() * temperature_gradient;
     let viscosity_scale = viscosity_scale::<TRANSVERSE>(longitudinal, cross, mu);
-    let diffusivity_m2_s = (viscosity_scale / p.density)
-        .max(c.thermal_conductivity.value() / trace.cv_density);
+    let diffusivity_m2_s =
+        (viscosity_scale / p.density).max(c.thermal_conductivity.value() / trace.cv_density);
     if !out.iter().all(|v| v.is_finite()) || !diffusivity_m2_s.is_finite() {
         return Err(DissipationError::Invalid(
             "no-slip molecular wall flux overflow",

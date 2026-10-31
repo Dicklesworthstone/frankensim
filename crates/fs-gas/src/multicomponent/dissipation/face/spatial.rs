@@ -10,7 +10,8 @@ use crate::multicomponent::{MAX_SPATIAL_COMPONENTS, SpatialCell, SpatialPrimitiv
 /// velocity derivatives enter the three-dimensional Newtonian stress. Species
 /// enthalpy, Fourier heat and all three components of stress work accompany the
 /// same conservative species/momentum/energy flux; no extra heating source is
-/// needed. Soret/Dufour effects and nonideal transport remain separate closures.
+/// needed. Explicit source-owned Soret/Dufour coefficients use that same shared
+/// face kernel; nonideal transport requires a separate thermodynamic closure.
 pub struct SpatialTransport<L: TransportLaw> {
     prepared: PlanarTransport<L>,
 }
@@ -183,7 +184,6 @@ impl<L: TransportLaw> SpatialTransport<L> {
         )
     }
 
-
     /// Impermeable flat no-slip wall with prescribed two-component tangential
     /// wall velocity and optional fixed temperature.
     #[allow(clippy::too_many_arguments)]
@@ -272,7 +272,6 @@ impl<L: TransportLaw> SpatialTransport<L> {
             cancelled,
         )
     }
-
 
     #[allow(clippy::too_many_arguments)]
     fn no_slip_wall_trace(

@@ -4,7 +4,8 @@
 //! partial enthalpies accompany diffusion; Fourier heat conduction and Newtonian
 //! longitudinal stress share the same total-energy face flux. No independent
 //! heat-release or viscous-heating source is added to conservative total energy.
-//! Soret/Dufour cross effects and viscous stresses in variable-area geometry
+//! Explicitly supplied heats of transport add Soret separation and its reciprocal
+//! Dufour energy flux together. Viscous stresses in variable-area geometry
 //! require additional closures and are not represented by this operator.
 
 pub(super) mod evolve;
@@ -15,7 +16,8 @@ pub use face::{PlanarTransport, SpatialTransport, TransportFaceReport, WallTherm
 #[cfg(feature = "material")]
 pub(crate) use law::validate_binary;
 pub use law::{
-    ConstantTransport, KineticTransport, TransportCoefficients, TransportDomain, TransportLaw,
+    ConstantTransport, KineticTransport, SoretDufourTransport, TransportCoefficients,
+    TransportDomain, TransportLaw,
 };
 
 use super::{

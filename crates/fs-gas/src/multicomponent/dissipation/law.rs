@@ -3,6 +3,7 @@ use fs_qty::{DynViscosity, Pressure, Temperature};
 use fs_thermochem::equilibrium::composition::IdealGasEquilibriumV1;
 pub use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 use fs_thermochem::transport::kinetic::{KineticGasTransportV1, KineticTransportWorkspaceV1};
+use fs_thermochem::{MassSpecificEnergyQuantityV1, SpeciesId};
 
 /// Common-state transport coefficients in coherent SI.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -11,7 +12,8 @@ pub struct TransportCoefficients {
     pub dynamic_viscosity: DynViscosity,
     /// Authored bulk viscosity [Pa s]; zero explicitly selects Stokes' hypothesis.
     pub bulk_viscosity: DynViscosity,
-    /// Fourier thermal conductivity [W/(m K)].
+    /// Thermal conductivity at zero diffusive species flux [W/(m K)].
+    /// With Soret/Dufour coupling, this excludes the reciprocal heat flux.
     pub thermal_conductivity: ThermalConductivityQuantityV1,
 }
 impl TransportCoefficients {
@@ -89,6 +91,145 @@ pub trait TransportLaw {
         binary_diffusivities: &mut [f64],
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<TransportCoefficients, DissipationError>;
+
+    /// Optional source-owned heats of transport `H_i` [J/kg] at the actual
+    /// common face state, in canonical species order. Return `true` only after
+    /// writing every finite coefficient. These are kinetic cross coefficients,
+    /// distinct from the original thermodynamic partial enthalpies.
+    ///
+    /// The barycentric closure uses the balanced thermal force
+    /// `x_i M_i (H_i-sum_j Y_j H_j)/(RT) grad(ln T)` and reciprocal reduced
+    /// heat flux `sum_i H_i j_i`. A common shift of every H has no effect.
+    /// The accompanying conductivity must use the zero-diffusive-flux
+    /// convention. The default explicitly omits this additional closure;
+    /// neither gas names nor collision/thermodynamic data infer these values.
+    fn heats_of_transport(
+        &mut self,
+        _temperature: Temperature,
+        _pressure: Pressure,
+        _mole_fractions: &[f64],
+        output_j_kg: &mut [f64],
+        _cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, DissipationError> {
+        output_j_kg.fill(0.0);
+        Ok(false)
+    }
+}
+
+/// Explicit constant Soret/Dufour cross coefficients on a declared source domain.
+///
+/// Wraps an original molecular law without estimating missing transport data.
+/// The author declares that its conductivity is measured/modelled at zero
+/// diffusive species flux and supplies independent heats of transport in J/kg,
+/// not partial enthalpies or heat capacities. The shared face owner applies
+/// both cross effects together. A state-dependent provider can instead implement
+/// [`TransportLaw::heats_of_transport`] directly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoretDufourTransport<L: TransportLaw> {
+    law: L,
+    model_id: String,
+    model_version: u32,
+    domain: TransportDomain,
+    heats: Vec<(SpeciesId, MassSpecificEnergyQuantityV1)>,
+}
+impl<L: TransportLaw> SoretDufourTransport<L> {
+    /// Bind authored coefficients to the exact underlying canonical species.
+    /// Positive, negative and zero heats are admitted; no universal sign of
+    /// thermal separation is assumed. The complete coupled Onsager law remains
+    /// positive semidefinite for positive pair D and nonnegative conductivity.
+    pub fn new(
+        law: L,
+        model_id: impl Into<String>,
+        model_version: u32,
+        domain: TransportDomain,
+        mut heats: Vec<(SpeciesId, MassSpecificEnergyQuantityV1)>,
+    ) -> Result<Self, DissipationError> {
+        let model_id = model_id.into();
+        heats.sort_by(|a, b| a.0.cmp(&b.0));
+        if model_id.is_empty()
+            || model_id.len() > 128
+            || model_version == 0
+            || !domain.valid()
+            || heats.len() != law.source().models().len()
+            || heats
+                .iter()
+                .zip(law.source().models())
+                .any(|((id, h), model)| id != model.species() || !h.value().is_finite())
+        {
+            return Err(DissipationError::Invalid(
+                "Soret/Dufour identity, species, heats or domain",
+            ));
+        }
+        Ok(Self {
+            law,
+            model_id,
+            model_version,
+            domain,
+            heats,
+        })
+    }
+    /// Underlying original-source molecular law.
+    pub const fn law(&self) -> &L {
+        &self.law
+    }
+    /// Authored thermal cross-coefficient source identity.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+    /// Authored thermal cross-coefficient version.
+    pub const fn model_version(&self) -> u32 {
+        self.model_version
+    }
+    /// Validity of this constant thermal cross-coefficient approximation.
+    pub const fn domain(&self) -> TransportDomain {
+        self.domain
+    }
+    /// Original coefficients, with typed J/kg values and canonical species IDs.
+    pub fn heats(&self) -> &[(SpeciesId, MassSpecificEnergyQuantityV1)] {
+        &self.heats
+    }
+}
+impl<L: TransportLaw> TransportLaw for SoretDufourTransport<L> {
+    fn source(&self) -> &IdealGasEquilibriumV1 {
+        self.law.source()
+    }
+    fn evaluate(
+        &mut self,
+        t: Temperature,
+        p: Pressure,
+        x: &[f64],
+        binary: &mut [f64],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<TransportCoefficients, DissipationError> {
+        if !self.domain.admits(t, p) {
+            return Err(DissipationError::Invalid(
+                "Soret/Dufour state outside source domain",
+            ));
+        }
+        self.law.evaluate(t, p, x, binary, cancelled)
+    }
+    fn heats_of_transport(
+        &mut self,
+        t: Temperature,
+        p: Pressure,
+        x: &[f64],
+        out: &mut [f64],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, DissipationError> {
+        if cancelled() {
+            return Err(DissipationError::Cancelled);
+        }
+        if !self.domain.admits(t, p) || x.len() != self.heats.len() || out.len() != self.heats.len()
+        {
+            return Err(DissipationError::Invalid(
+                "Soret/Dufour state or output axis",
+            ));
+        }
+        for (output, (_, heat)) in out.iter_mut().zip(&self.heats) {
+            *output = heat.value();
+        }
+        Ok(true)
+    }
 }
 
 /// Caller-authored constant coefficients on an explicit physical domain.

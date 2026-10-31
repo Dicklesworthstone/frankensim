@@ -974,7 +974,7 @@ with the actual distances and physical cell volumes; variable-area viscous
 geometry requires additional stress terms and is refused.
 
 Every shared face carries barycentric Maxwell-Stefan mass fluxes Ji, momentum
-flux `-tau`, and gauged-energy flux
+flux `-tau`, and, without thermal cross coupling, gauged-energy flux
 `sum_i (h_i/M_i - e_ref_i) Ji - lambda grad(T) - u*tau`.
 The longitudinal stress is `tau=(4mu/3+mu_bulk) grad(u)`; bulk viscosity is an
 explicit authored value, with zero selecting Stokes' hypothesis. The source
@@ -1007,9 +1007,48 @@ unequal-mass partial-enthalpy transport and bit-identical evolution after a
 energy work; and cancellation, work limits, zero duration and reuse. Fourier
 L1 errors at 40/80 cells are 1.91446548e-5 / 4.77807730e-6. This remains an
 Estimated continuum operator: the parabolic estimate is not a spectral or
-fully discrete entropy/invariant-domain proof. Soret/Dufour effects, nonideal
-phases, Knudsen transport and variable-area viscous stresses remain separate
-closures.
+fully discrete entropy/invariant-domain proof. Explicit source-owned Soret/Dufour
+coupling is described below; nonideal phases, Knudsen transport and variable-area
+viscous stresses remain separate closures.
+
+### Explicit reciprocal thermal diffusion
+
+`TransportLaw::heats_of_transport` optionally supplies canonical finite kinetic
+heats of transport `H_i [J/kg]` at the actual common face T,p,composition.
+`SoretDufourTransport<L>` supplies a constant authored approximation on an
+explicit T/p domain and the full composition simplex, with source identity,
+version and typed species coefficients matched to the underlying caloric bank.
+The wrapped molecular law retains its own source/domain checks. No coefficient
+is inferred from species names, molecular masses, heat capacities or collision
+diameters. State-dependent or composition-restricted laws implement that same
+source query directly. Existing molecular laws omit the extra closure by default.
+
+The shared axial/network/planar/spatial face adds the balanced Soret force
+`d_i^T = x_i M_i (H_i-Hbar)/(R T) grad(T)/T`, with `Hbar=sum_i Y_i H_i`,
+to the original ideal chemical/pressure forces before calling the same
+Maxwell--Stefan owner. Its reciprocal reduced heat flux is
+`q_reduced = -lambda grad(T) + sum_i (H_i-Hbar) Ji`.
+Here lambda means conductivity at zero diffusive species flux. These kinetic
+cross coefficients are distinct from original partial enthalpies: total energy
+contains partial-enthalpy diffusion, this reduced heat flux and stress work
+exactly once each. A common shift of every H is removed before arithmetic;
+zero coupling recovers the original molecular law. Exact absent species are
+neither seeded nor assigned spurious flux. At impermeable walls, zero species
+flux makes the reciprocal heat contribution zero.
+
+For positive fractions, the local conjugate entropy balance is
+`-R sum_i (Ji/M_i) d_chem_i/x_i - q_reduced grad(T)/T²
+ = sigma_pair + lambda [grad(T)/T]² >= 0`.
+This is the Onsager Schur-complement construction (Van-Brunt et al.,
+<https://arxiv.org/pdf/2109.05082>, equations 3.5–3.9). The existing parabolic
+engineering scale includes both thermal/composition coupling scales and their
+product; no variable-coefficient spectral or fully discrete entropy theorem is
+claimed. Bounded scratch remains allocation-free on successful numerical faces.
+Focused fixtures independently reconstruct unequal-mass Soret-only, Dufour-only
+and combined fluxes and entropy; common-heat gauge/zero-coupling/spatial reduction;
+source-axis/domain/cancellation refusal; and periodic composition evolution with
+closed original species and total-energy balances. Authored fixture coefficients
+are not empirical transport validation.
 
 
 ## Reacting Navier-Stokes composition with original-source molecular transport
@@ -1303,8 +1342,9 @@ passed in the integrated production-source native build.
 
 The compact gradient-length closure is an Estimated continuum model. It does
 not resolve multidimensional mixing, radial wall layers, variable-area viscous
-stresses or rarefied gas. Soret/Dufour effects and a fully discrete entropy or
-invariant-domain theorem remain outside this operator. Native source-linked
+stresses or rarefied gas. Thermal cross coupling requires the explicit source
+law above; a fully discrete entropy or invariant-domain theorem remains outside
+this operator. Native source-linked
 checks are supplementary: `dsr quality --tool frankensim` is unavailable here
 (`dsr: command not found`), so no workspace DSR verdict is claimed.
 
@@ -1774,8 +1814,9 @@ Fourier/full-tensor/enthalpy flux, primitive/conservative agreement, tangential
 frame and formation-gauge covariance, exact axial reduction, slip-wall loads,
 exact-zero species, source/axis refusal and final cancellation/replay. Original
 axial/network regressions remain authoritative for their geometry and balances.
-This face owner supplies no Soret/Dufour closure, independent no-slip wall,
-nonideal transport, spatial accuracy or combustion validation. Explicit held
+Soret/Dufour coupling uses the explicit source-law extension above. These face
+fixtures establish no nonideal transport, spatial accuracy or combustion
+validation. Explicit held
 reservoir faces use the source-owned boundary energy convention below.
 
 ### Shared original-mixture molecular faces in three dimensions
