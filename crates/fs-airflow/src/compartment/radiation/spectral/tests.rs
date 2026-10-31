@@ -476,7 +476,11 @@ fn g1_fixed_optical_bands_recover_original_gray_operator_and_reuse_factors() {
         close(*a, *b, 1e-7);
     }
     assert_eq!(report.factorizations, 1);
-    assert!(report.wavelength_evaluations > report.factorizations);
+    assert_eq!(report.wavelength_evaluations, 0);
+    assert_eq!(report.accepted_panels, 0);
+    assert!(report.surface_heat_error_estimate_w.iter().all(|&e| e == 0.0));
+    assert_eq!(report.gas_heat_error_estimate_w, [0.0; 2]);
+    assert!(report.radiosity_error_estimate_w_m2.iter().all(|&e| e == 0.0));
     conserved(&report);
 
     let split = SpectralOptics::new(
@@ -497,6 +501,8 @@ fn g1_fixed_optical_bands_recover_original_gray_operator_and_reuse_factors() {
         )
         .unwrap();
     assert_eq!(split_report.factorizations, 2);
+    assert_eq!(split_report.wavelength_evaluations, 0);
+    assert_eq!(split_report.accepted_panels, 0);
     for (a, b) in heat(&report).into_iter().zip(heat(&split_report)) {
         close(a, b, 1e-7);
     }
@@ -538,6 +544,8 @@ fn g1_absorbing_molecular_band_preserves_spectral_windows_and_kirchhoff_emission
     close(report.gas_heat_power[1].value(), expected, 1e-7);
     assert_eq!(report.gas_heat_power[0].value(), 0.0);
     assert_eq!(report.factorizations, 3);
+    assert_eq!(report.wavelength_evaluations, 0);
+    assert_eq!(report.accepted_panels, 0);
     conserved(&report);
 }
 
@@ -731,12 +739,45 @@ fn g4_spectral_domain_work_cancellation_and_scratch_replay_are_explicit() {
         ),
         Err(RadiationError::SpectralTruncation { .. })
     ));
+    // Fixed band optics need no point-wavelength budget at all: their Planck
+    // sources are integrated exactly before one linear solve per band.
+    let exact_under_tiny_budget = enclosure
+        .evaluate_spectral(
+            &temperatures,
+            &e,
+            gas,
+            &optics,
+            SpectralSolve {
+                maximum_evaluations: 24,
+                ..controls()
+            },
+            &mut work,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(exact_under_tiny_budget.wavelength_evaluations, 0);
+    assert_eq!(exact_under_tiny_budget.accepted_panels, 0);
+
+    // Wavelength-varying soot still owns the adaptive point-sampling budget.
+    let soot_model = soot();
+    let varying = SpectralOptics::new(
+        vec![band(1e-7, 1e-3, [0.0; 2])],
+        [
+            Some(SootPopulation {
+                model: &soot_model,
+                volume_fraction: 1e-6,
+            }),
+            None,
+        ],
+        "varying soot fixture",
+    )
+    .unwrap();
     assert!(matches!(
         enclosure.evaluate_spectral(
             &temperatures,
             &e,
             gas,
-            &optics,
+            &varying,
             SpectralSolve {
                 maximum_evaluations: 24,
                 ..controls()
@@ -749,14 +790,14 @@ fn g4_spectral_domain_work_cancellation_and_scratch_replay_are_explicit() {
             ..
         })
     ));
-    for stop in [1, 10, 100, 500] {
+    for stop in [1, 10, 50] {
         let mut polls = 0;
         assert!(matches!(
             enclosure.evaluate_spectral(
                 &temperatures,
                 &e,
                 gas,
-                &optics,
+                &varying,
                 controls(),
                 &mut work,
                 || {

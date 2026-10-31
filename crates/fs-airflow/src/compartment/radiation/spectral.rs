@@ -11,7 +11,10 @@
 //! not a certified error bound. Initial panels span at most one logarithmic
 //! wavelength unit, so a broad window cannot skip the smooth Planck peak.
 //! Both the work limit and absolute per-output tolerances are explicit.
-//! Constant band optics reuse one factorization for all their spectra.
+//! Constant band optics commute with wavelength integration: their Planck
+//! sources are integrated analytically and one prepared solve is performed per
+//! band. Adaptive wavelength quadrature is reserved for genuinely varying soot
+//! opacity, where the transfer operator itself changes with wavelength.
 //!
 //! The Planck shape follows NIST SP 250-1, section 2:
 //! <https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nbsspecialpublication250-1.pdf>.
@@ -340,11 +343,12 @@ pub struct SpectralRadiationReport<'a> {
     pub surface_residual_integral_w_m2: f64,
     /// Actual signed sum of all integrated powers [W], never redistributed.
     pub energy_residual_w: f64,
-    /// Actual wavelength evaluations, including all rejected panels.
+    /// Actual point-wavelength evaluations, including rejected panels. Fixed
+    /// band optics integrate Planck sources analytically and contribute zero.
     pub wavelength_evaluations: usize,
-    /// Original LU factorizations performed; fixed band optics reuse a factor.
+    /// Original LU factorizations performed; fixed band optics use one per band.
     pub factorizations: usize,
-    /// Accepted 16-point quadrature panels; each has an 8-point comparison.
+    /// Accepted adaptive 16-point panels. Fixed bands contribute zero panels.
     pub accepted_panels: usize,
 }
 impl SpectralRadiationReport<'_> {
@@ -554,6 +558,72 @@ impl ParticipatingEnclosure {
                     *value = source.value();
                 }
             }
+            let begin = source.wavelengths[0].value().ln();
+            let end = source.wavelengths[1].value().ln();
+            if !optics.varying {
+                self.prepare_optics(
+                    &values[..n],
+                    optics.coefficients(band, source.wavelengths[0])?,
+                    &mut work.radiation,
+                    &mut cancelled,
+                )?;
+                factorizations += 1;
+
+                // With wavelength-independent opacity and emissivity, the
+                // complete diffuse/reflection operator is linear and constant
+                // across this band. Integrate each Planck source first, then
+                // solve the identical radiosity system once. This is both more
+                // accurate and substantially cheaper than sampling wavelength.
+                let blackbody = BlackbodyBand::new(
+                    source.wavelengths[0].value(),
+                    source.wavelengths[1].value(),
+                )
+                .map_err(|_| RadiationError::Invalid("shared blackbody spectral window refused"))?;
+                let reference_emission = blackbody
+                    .evaluate(reference)
+                    .map_err(|_| RadiationError::Invalid("shared blackbody band evaluation refused"))?
+                    .power_w_m2;
+                for (i, (value, &temperature)) in work
+                    .radiation
+                    .emission
+                    .iter_mut()
+                    .zip(&temperatures[..m])
+                    .enumerate()
+                {
+                    *value = if i < n && values[i] == 0.0 {
+                        0.0
+                    } else {
+                        blackbody
+                            .difference(temperature, reference)
+                            .map_err(|_| RadiationError::Invalid("shared blackbody band evaluation refused"))?
+                    };
+                }
+                let (residual, _) = self.solve_emission(
+                    &values[..n],
+                    controls.algebraic,
+                    &mut work.radiation,
+                    &mut cancelled,
+                )?;
+                for i in 0..m {
+                    let y = finite(work.radiation.powers[i] - work.corrections[i])?;
+                    let next = finite(work.totals[i] + y)?;
+                    work.corrections[i] = (next - work.totals[i]) - y;
+                    work.totals[i] = next;
+                }
+                for i in 0..n {
+                    let radiosity = finite(reference_emission + work.radiation.radiosity[i])?;
+                    if radiosity < 0.0 {
+                        return Err(RadiationError::Invalid("negative spectral radiosity"));
+                    }
+                    let channel = m + i;
+                    let y = finite(radiosity - work.corrections[channel])?;
+                    let next = finite(work.totals[channel] + y)?;
+                    work.corrections[channel] = (next - work.totals[channel]) - y;
+                    work.totals[channel] = next;
+                }
+                work.totals[m + n] = finite(work.totals[m + n] + residual)?;
+                continue;
+            }
             let mut sample = SpectralSample {
                 enclosure: self,
                 emissivities: &values[..n],
@@ -565,17 +635,6 @@ impl ParticipatingEnclosure {
                     energy_residual_w: controls.algebraic.energy_residual_w / log_range,
                 },
             };
-            let begin = source.wavelengths[0].value().ln();
-            let end = source.wavelengths[1].value().ln();
-            if !optics.varying {
-                self.prepare_optics(
-                    &values[..n],
-                    optics.coefficients(band, source.wavelengths[0])?,
-                    &mut work.radiation,
-                    &mut cancelled,
-                )?;
-                factorizations += 1;
-            }
             let mut left = begin;
             while left < end {
                 let right = (left + 1.0).min(end);
