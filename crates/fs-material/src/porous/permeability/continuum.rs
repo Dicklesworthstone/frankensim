@@ -13,9 +13,9 @@ use super::{DarcyGasBarrier, MaterialError, PorousGasSupport, invalid, positive}
 /// The original gas barrier also owns the fluid-independent intrinsic tensors
 /// and series geometry. This view reuses those exact data without constructing
 /// a gas state or treating the gas EOS as an incompressible-liquid law.
-/// Normal permeability keeps the original planar-gradient, unconstrained
-/// transverse-flow convention; a laterally confined anisotropic plug needs a
-/// separately qualified geometry law.
+/// Permeability keeps the original barrier's explicit transverse constraint:
+/// planar normal pressure gradient or fully developed confined normal flow.
+/// This view never changes that geometry to suit a different fluid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContinuumDarcyGeometry<'a> {
     barrier: &'a DarcyGasBarrier,
@@ -45,10 +45,10 @@ impl<'a> ContinuumDarcyGeometry<'a> {
         self.barrier
     }
 
-    /// Original sum(L/k_normal), in 1/m. None means an exactly sealed layer.
+    /// Original sum(L/k_effective), in 1/m. None means an exactly sealed layer.
     ///
     /// Divide by the actual superficial flow area for the viscous geometric
-    /// coefficient in dp = mu * sum(L/k_normal) * Q/area. The existing fluid
+    /// coefficient in dp = mu * sum(L/k_effective) * Q/area. The existing fluid
     /// transport and hydraulic owners supply mu and Q; no coefficient is frozen
     /// at the permeability source's original query temperature.
     pub const fn geometric_resistance_per_m(&self) -> Option<f64> {

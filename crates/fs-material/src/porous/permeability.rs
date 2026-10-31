@@ -17,6 +17,13 @@
 //! <https://doc.comsol.com/6.3/doc/com.comsol.help.echem/echem_ug_fluidflow.08.111.html>
 //! <https://documentation.pflotran.org/user_guide/cards/subsurface/klinkenberg_effect_card.html>
 //!
+//! Anisotropic scalar reductions declare their transverse constraint explicitly:
+//! a prescribed normal pressure gradient gives n.K.n, while a constrained normal
+//! flow gives 1/(n.K^-1.n). These are different boundary-value problems, not
+//! interchangeable estimates of the same material coefficient. The latter is a
+//! fully developed one-dimensional reduction; it does not resolve entrance or
+//! inter-layer transverse pressure fields in a finite three-dimensional plug.
+//!
 //! Intrinsic permeability [m2], hydraulic conductivity, membrane permeability
 //! and permeance are distinct quantities. This is a rigid, dry, gas-filled
 //! skeleton, not a selective membrane, Darcy-Forchheimer inertia, pore-storage
@@ -90,6 +97,71 @@ impl IntrinsicPermeability {
             return Err(invalid("normal permeability is unrepresentable"));
         }
         Ok(value)
+    }
+
+    /// Effective axial permeability when transverse superficial flow is zero.
+    ///
+    /// For q = q_n n, Darcy's law gives grad(p) = -mu q_n K^-1 n, hence
+    /// k_axial = 1/(n.K^-1.n). The transverse pressure gradient is generally
+    /// nonzero. This is a local fully developed closure, not an entrance-flow
+    /// solution for a finite specimen between uniform-pressure reservoirs.
+    ///
+    /// A direction with any component along an exactly sealed material axis
+    /// cannot carry confined flow. A direction wholly within the conducting
+    /// subspace uses the inverse restricted to that subspace. No epsilon opens
+    /// a seal. The inverse square-root norm avoids overflowing 1/k for small
+    /// but representable positive intrinsic permeability.
+    pub fn confined_permeability(&self, normal: [f64; 3]) -> Result<f64, MaterialError> {
+        if !unit(normal) {
+            return Err(invalid("confined permeability normal must be a finite unit vector"));
+        }
+        let mut inverse_root = [0.0_f64; 3];
+        for (i, (&k, &axis)) in self.principal_m2.iter().zip(&self.axes).enumerate() {
+            let projection = dot(normal, axis);
+            if k == 0.0 {
+                if projection != 0.0 {
+                    return Ok(0.0);
+                }
+            } else {
+                inverse_root[i] = projection / fs_math::det::sqrt(k);
+            }
+        }
+        let scale = inverse_root.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        if !positive(scale) {
+            return Err(invalid("confined permeability inverse norm is unrepresentable"));
+        }
+        let sum = inverse_root.iter().map(|x| (x / scale).powi(2)).sum::<f64>();
+        let root = (1.0 / scale) / fs_math::det::sqrt(sum);
+        let value = root * root;
+        if !positive(value) {
+            return Err(invalid("confined permeability is unrepresentable"));
+        }
+        Ok(value)
+    }
+}
+
+/// The transverse boundary constraint of a one-dimensional Darcy reduction.
+/// Material principal values and axes remain unchanged by this choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DarcyFlowConstraint {
+    /// A normal pressure gradient; transverse flow is unconstrained (n.K.n).
+    NormalPressureGradient,
+    /// A normal flow; transverse pressure gradients enforce confinement
+    /// (1/(n.K^-1.n), or an exact seal outside the conducting subspace).
+    ConfinedNormalFlow,
+}
+
+impl DarcyFlowConstraint {
+    /// Project the original intrinsic tensor using this physical constraint.
+    pub fn permeability(
+        self,
+        tensor: &IntrinsicPermeability,
+        normal: [f64; 3],
+    ) -> Result<f64, MaterialError> {
+        match self {
+            Self::NormalPressureGradient => tensor.normal_permeability(normal),
+            Self::ConfinedNormalFlow => tensor.confined_permeability(normal),
+        }
     }
 }
 
@@ -246,6 +318,7 @@ fn source_axis(axis: &str, quantity: Option<QuantitySpec>) -> Result<Option<Sour
 pub struct DarcyGasBarrier {
     layers: Vec<PorousGasLayer>,
     normal: [f64; 3],
+    flow_constraint: DarcyFlowConstraint,
     support: PorousGasSupport,
     /// None is exactly sealed, not an artificially enormous finite resistance.
     geometric_resistance_per_m: Option<f64>,
@@ -327,16 +400,16 @@ impl DarcyGasBarrier {
     /// no chemical identity and cannot qualify gas-specific slip on its own.
     pub fn try_new(layers: Vec<PorousGasLayer>, normal: [f64; 3], support: PorousGasSupport)
         -> Result<Self, MaterialError> {
-        Self::compile(layers, normal, support, None)
+        Self::compile(layers, normal, support, None, DarcyFlowConstraint::NormalPressureGradient)
     }
     /// Bind slip to the complete immutable gas model, including its canonical
     /// composition and source laws. No molecular-mass or name inference.
     pub fn try_new_for_gas_model(layers: Vec<PorousGasLayer>, normal: [f64; 3],
         support: PorousGasSupport, model: &ThermochemicalGasModel) -> Result<Self, MaterialError> {
-        Self::compile(layers, normal, support, Some(model.clone()))
+        Self::compile(layers, normal, support, Some(model.clone()), DarcyFlowConstraint::NormalPressureGradient)
     }
     fn compile(layers: Vec<PorousGasLayer>, normal: [f64; 3], mut support: PorousGasSupport,
-        model: Option<ThermochemicalGasModel>) -> Result<Self, MaterialError> {
+        model: Option<ThermochemicalGasModel>, flow_constraint: DarcyFlowConstraint) -> Result<Self, MaterialError> {
         support.validate()?;
         if layers.is_empty() || layers.len() > MAX_POROUS_LAYERS || !unit(normal) {
             return Err(invalid("Darcy barrier needs 1..64 layers and an explicit unit normal"));
@@ -352,7 +425,7 @@ impl DarcyGasBarrier {
         let mut permeabilities = [0.0; MAX_POROUS_LAYERS];
         let mut sealed = false;
         for (i, layer) in layers.iter().enumerate() {
-            let intrinsic = layer.permeability.normal_permeability(normal)?;
+            let intrinsic = flow_constraint.permeability(&layer.permeability, normal)?;
             let relative = layer.gas_relative_permeability();
             permeabilities[i] = intrinsic*relative;
             if intrinsic > 0.0 && relative > 0.0 && permeabilities[i] == 0.0 {
@@ -394,19 +467,28 @@ impl DarcyGasBarrier {
             }
         }
         support.validate()?;
-        Ok(Self { layers, normal, support,
+        Ok(Self { layers, normal, flow_constraint, support,
             geometric_resistance_per_m: if sealed { None } else { Some(resistance) },
             resistance_fractions, common_slip_pa: common_slip,
             minimum_slip_pa: minimum_slip, maximum_slip_pa: maximum_slip, slip_gas_model: model })
     }
     pub fn layers(&self) -> &[PorousGasLayer] { &self.layers }
     pub const fn normal(&self) -> [f64; 3] { self.normal }
+    pub const fn flow_constraint(&self) -> DarcyFlowConstraint { self.flow_constraint }
     pub const fn support(&self) -> PorousGasSupport { self.support }
     pub const fn geometric_resistance_per_m(&self) -> Option<f64> { self.geometric_resistance_per_m }
     /// The factor only when every layer has exactly the same calibrated b.
     /// None means heterogeneous factors, never an averaged or inferred factor.
     pub const fn klinkenberg_slip_pa(&self) -> Option<f64> { self.common_slip_pa }
     pub const fn calibrated_gas_model(&self) -> Option<&ThermochemicalGasModel> { self.slip_gas_model.as_ref() }
+    /// Recompile the original layers for an explicitly selected transverse
+    /// constraint. Sources, tensor frames, wet mobility and calibrated slip
+    /// retain their identities. Every gas and continuum consumer then uses the
+    /// same compiled series resistance; no per-query projection is introduced.
+    pub fn with_flow_constraint(&self, constraint: DarcyFlowConstraint) -> Result<Self, MaterialError> {
+        Self::compile(self.layers.clone(), self.normal, self.support,
+            self.slip_gas_model.clone(), constraint)
+    }
     /// Compile one current saturation response per original layer. The original
     /// ordered geometry, intrinsic tensors, sources and gas support are retained.
     /// Updating a wet barrier never applies its previous relative factor again.
@@ -417,7 +499,7 @@ impl DarcyGasBarrier {
         let layers = self.layers.iter().zip(states)
             .map(|(layer, state)| layer.with_wet_state(state.clone()))
             .collect::<Result<Vec<_>, _>>()?;
-        Self::compile(layers, self.normal, self.support, self.slip_gas_model.clone())
+        Self::compile(layers, self.normal, self.support, self.slip_gas_model.clone(), self.flow_constraint)
     }
 
     /// Frozen, low-pressure-drop resistance [Pa s/m3]. None means sealed.

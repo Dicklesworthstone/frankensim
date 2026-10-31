@@ -3,7 +3,9 @@ use super::*;
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::porous::{
     LiquidResistanceLaw, PorousLiquidResistance,
 };
-use fs_material::porous::permeability::{DarcyGasBarrier, PorousGasLayer, PorousGasSupport};
+use fs_material::porous::permeability::{
+    DarcyFlowConstraint, DarcyGasBarrier, IntrinsicPermeability, PorousGasLayer, PorousGasSupport,
+};
 use fs_material::state_point::{
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
@@ -99,6 +101,59 @@ fn mixed(
             resistance: LiquidResistanceLaw::Geometry(resistances()[1].resistance),
         },
     ]
+}
+
+#[test]
+fn the_original_liquid_pressure_solver_observes_anisotropic_confinement() {
+    // G1/G3: the same rotated skeleton and real liquid law, with only the
+    // authored transverse boundary condition changed. The separate ordinary
+    // hydraulic section remains in series with the porous section.
+    let k0 = 0.01 / (5e9 * area().value());
+    let s = core::f64::consts::FRAC_1_SQRT_2;
+    let tensor = IntrinsicPermeability::orthotropic(
+        [k0, 9.0 * k0, 0.0],
+        [[s, s, 0.0], [-s, s, 0.0], [0.0, 0.0, 1.0]],
+    )
+    .unwrap();
+    let layer = PorousGasLayer::try_new(
+        tensor,
+        0.01,
+        0.0,
+        "synthetic rotated fully developed plug, no entrance-flow claim",
+    )
+    .unwrap();
+    let original = DarcyGasBarrier::try_new(vec![layer], [1.0, 0.0, 0.0], support()).unwrap();
+    for (constraint, effective_k_over_k0) in [
+        (DarcyFlowConstraint::NormalPressureGradient, 5.0),
+        (DarcyFlowConstraint::ConfinedNormalFlow, 1.8),
+    ] {
+        let barrier = original.with_flow_constraint(constraint).unwrap();
+        with_path(
+            false,
+            1.0,
+            LiquidPropertyTemperature::BulkMean,
+            |cx, path| {
+                let result = path
+                    .solve_pressure_driven(
+                        cx,
+                        &[300.0, 300.0],
+                        &mixed(&barrier),
+                        Pressure::new(50.0),
+                        local(),
+                        pressure_budget(),
+                    )
+                    .unwrap();
+                let geometry = 5e9 / effective_k_over_k0 + 5e9;
+                let expected = 50.0 * 1000.0 / (0.002 * geometry);
+                close(result.mass_flow_kg_per_s, expected);
+                let observed = result.hydraulics.regions[0].porous.as_ref().unwrap();
+                assert_eq!(observed.barrier.flow_constraint(), constraint);
+                assert_eq!(observed.barrier.layers(), original.layers());
+                close(result.hydraulics.total_pressure_drop_pa, 50.0);
+                close(result.thermal.total_heat_rate_w, 0.0);
+            },
+        );
+    }
 }
 
 #[test]
