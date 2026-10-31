@@ -17,10 +17,15 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 use crate::charts::Ray;
-use crate::dielectric::{DielectricError, DielectricEvent, DielectricGlass};
+use crate::dielectric::{
+    DielectricError, DielectricEvent, DielectricGlass, DielectricSurface,
+    sample_rough_dielectric,
+};
 use crate::polarization::{Mueller, Stokes};
 
-use super::{attenuate_stokes, sample_smooth_dielectric_polarized};
+use super::{
+    attenuate_stokes, fresnel_dielectric_polarized, sample_smooth_dielectric_polarized,
+};
 
 /// Admission or representability refusal. Failed operations leave the beam unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,6 +227,70 @@ impl PolarizedBeam {
         Ok(BeamSample { beam, event: sample.event, pdf: sample.probability, delta: true })
     }
 
+    /// Sample the native smooth or isotropic-GGX surface without losing its
+    /// polarization frame. `samples` is `[microfacet_u, microfacet_v, event]`,
+    /// each in `[0,1)`. Smooth surfaces ignore the first two admitted samples.
+    ///
+    /// The original sampler owns directions, visibility/masking, branch
+    /// selection and density. Its scalar weight multiplies the normalized
+    /// Fresnel Mueller response of the reconstructed microfacet. Thus an
+    /// unpolarized input reproduces the native forward-power sample, while
+    /// subsequent noncoplanar interactions retain linear/circular polarization.
+    ///
+    /// `None` is the native zero-contribution microfacet rejection, not an
+    /// error. This keeps the native single-scattering microfacet approximation;
+    /// unresolved inter-facet multiple scattering is not synthesized here.
+    pub fn sample_interface(
+        self,
+        normal: Vec3,
+        target: DielectricGlass,
+        surface: DielectricSurface,
+        samples: [f64; 3],
+    ) -> Result<Option<BeamSample>, BeamError> {
+        if samples.iter().any(|u| !u.is_finite() || !(0.0..1.0).contains(u)) {
+            return Err(DielectricError::InvalidInterface.into());
+        }
+        let Some(alpha) = surface.roughness_alpha() else {
+            return self.sample_smooth_interface(normal, target, samples[2]).map(Some);
+        };
+        let normal = self.incident_normal(normal)?;
+        let wo = self.frame.direction.scale(-1.0);
+        let eta_i = self.medium.ior().eval(self.wavelength_nm)?;
+        let eta_t = target.ior().eval(self.wavelength_nm)?;
+        let Some(sample) = sample_rough_dielectric(
+            normal, wo, eta_i, eta_t, alpha, samples[0], samples[1], samples[2],
+        )? else { return Ok(None); };
+        if sample.delta {
+            // Equal phase index is a geometrically null interface, but not
+            // necessarily the same absorption law. Preserve the exact frame
+            // and power while installing the material on the other side.
+            return Ok(Some(BeamSample {
+                beam: Self { medium: target, ..self },
+                event: sample.event, pdf: sample.pdf, delta: true,
+            }));
+        }
+        // Match the native evaluator's normalized half-vector convention.
+        let wo = wo.scale(1.0 / wo.norm());
+        let wi = sample.direction.scale(1.0 / sample.direction.norm());
+        let ratio = if sample.event == DielectricEvent::Transmission { eta_t / eta_i } else { 1.0 };
+        let half = Vec3::new(wo.x + ratio * wi.x, wo.y + ratio * wi.y, wo.z + ratio * wi.z);
+        let mut micro_normal = unit(half)?;
+        if normal.dot(micro_normal) < 0.0 { micro_normal = micro_normal.scale(-1.0); }
+        let fresnel = fresnel_dielectric_polarized(wo.dot(micro_normal).clamp(0.0, 1.0), eta_i, eta_t)?;
+        let matrix = if sample.event == DielectricEvent::Reflection {
+            fresnel.reflection
+        } else { fresnel.transmission };
+        let mean = matrix.0[0][0];
+        if !mean.is_finite() || mean <= 0.0 { return Err(BeamError::NumericalRange); }
+        let weight = sample.radiance_weight * ratio * ratio;
+        if !weight.is_finite() { return Err(BeamError::NumericalRange); }
+        // Normalize before multiplying, avoiding weight/mean overflow for
+        // extremely weak reflectors. Each normalized entry is bounded by two.
+        let matrix = Mueller(matrix.0.map(|row| row.map(|v| (v / mean) * weight)));
+        let beam = self.scatter(micro_normal, sample.direction, matrix, sample.event, target)?;
+        Ok(Some(BeamSample { beam, event: sample.event, pdf: sample.pdf, delta: false }))
+    }
+
     fn incident_normal(self, normal: Vec3) -> Result<Vec3, BeamError> {
         let normal = unit(normal)?;
         Ok(if normal.dot(self.frame.direction) > 0.0 { normal.scale(-1.0) } else { normal })
@@ -247,6 +316,56 @@ impl PolarizedBeam {
         let frame = PolarizationFrame::try_new(direction, s)?;
         let medium = if event == DielectricEvent::Transmission { target } else { self.medium };
         Ok(Self { frame, power, medium, ..self })
+    }
+}
+
+#[cfg(feature = "photometry")]
+impl crate::polarization::photometry::PolarizedSource {
+    /// Emit a monochromatic polarized ray-power weight from the calibrated
+    /// fixture's native position, orientation and angular intensity profile.
+    ///
+    /// `bin` selects the existing midpoint wavelength. The result is W/nm:
+    /// surviving spectral intensity [W/(sr nm)] times the explicit angular
+    /// quadrature weight [sr], or `1/pdf` for a Monte Carlo direction sample.
+    /// Average Monte Carlo samples and integrate wavelength bins separately.
+    /// No implicit PDF, wavelength bandwidth or replacement flux is inferred.
+    ///
+    /// The local +X fixture axis projected transverse to the outgoing ray
+    /// defines positive Q. This is an explicit off-axis extension of the source
+    /// optics' paraxial reference; directions parallel to +X/-X are refused.
+    /// The caller supplies the actual surrounding medium and owns intersections
+    /// and nested-medium topology after emission. Scalar camera paths remain
+    /// unchanged; this method feeds the forward polarized beam path.
+    pub fn emit_beam(
+        &self,
+        world_direction: Vec3,
+        bin: usize,
+        solid_angle_weight_sr: f64,
+        medium: DielectricGlass,
+    ) -> Result<PolarizedBeam, crate::photometry::source::SourceError> {
+        use crate::photometry::source::{SPECTRAL_BINS, SourceError, wavelength_nm};
+        if bin >= SPECTRAL_BINS { return Err(SourceError::InvalidSpectrum); }
+        if !solid_angle_weight_sr.is_finite() || solid_angle_weight_sr < 0.0 {
+            return Err(SourceError::InvalidFlux);
+        }
+        let source = self.intensity_source();
+        let axis = source.transform().transform_vector(Vec3::new(1.0, 0.0, 0.0));
+        let frame = PolarizationFrame::try_new(world_direction, axis)
+            .map_err(|_| SourceError::InvalidDirection)?;
+        let wavelength = wavelength_nm(bin);
+        let intensity = source.spectral_intensity_w_sr_nm(frame.direction(), wavelength)?
+            * solid_angle_weight_sr;
+        if !intensity.is_finite() { return Err(SourceError::NumericalRange); }
+        let state = self.relative_stokes()[bin];
+        // The native intensity source ALREADY includes all optical-chain loss.
+        // Restore only normalized Q/U/V, never multiply by state.i again.
+        // A dark bin needs neither division nor an invented polarization axis.
+        let power = if state.i == 0.0 || intensity == 0.0 { Stokes::unpolarized(0.0) } else {
+            Stokes { i: intensity, q: intensity * (state.q / state.i),
+                u: intensity * (state.u / state.i), v: intensity * (state.v / state.i) }
+        };
+        PolarizedBeam::try_new(source.position_m(), frame, wavelength, medium, power)
+            .map_err(|_| SourceError::NumericalRange)
     }
 }
 
@@ -393,5 +512,156 @@ mod tests {
         assert!(b.sample_smooth_interface(Vec3::new(0.0, 0.0, 1.0), glass(1.5, 0.0), 1.0).is_err());
         assert!(PolarizedBeam::try_new(b.ray().origin, b.frame(), 10.0, b.medium(), b.power()).is_err());
         assert_eq!(b, original);
+    }
+
+    #[test]
+    fn g1_rough_glass_keeps_native_proposals_directions_and_unpolarized_power() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let mut contributing = [0; 2];
+        let mut rejected = 0;
+        for (eta_i, eta_t) in [(1.0, 1.5), (1.5, 1.0)] {
+            for cosine in [0.4_f64, 0.8, 1.0] {
+                let b = beam(Vec3::new((1.0 - cosine * cosine).sqrt(), 0.0, -cosine),
+                    Vec3::new(0.0, 1.0, 0.0), glass(eta_i, 0.0), Stokes::unpolarized(1.0));
+                for alpha in [0.05, 0.4, 1.0] {
+                    let surface = DielectricSurface::try_rough(alpha).unwrap();
+                    for samples in [[0.0, 0.0, 0.0], [0.17, 0.63, 0.999], [0.9, 0.2, 0.0]] {
+                        let native = sample_rough_dielectric(normal, b.frame().direction().scale(-1.0),
+                            eta_i, eta_t, alpha, samples[0], samples[1], samples[2]).unwrap();
+                        let actual = b.sample_interface(normal, glass(eta_t, 0.0), surface, samples).unwrap();
+                        match (native, actual) {
+                            (None, None) => rejected += 1,
+                            (Some(native), Some(actual)) => {
+                                assert_eq!(actual.event, native.event);
+                                assert_eq!(actual.pdf, native.pdf);
+                                assert_eq!(actual.delta, native.delta);
+                                near(actual.beam.ray().dir.x, native.direction.x);
+                                near(actual.beam.ray().dir.y, native.direction.y);
+                                near(actual.beam.ray().dir.z, native.direction.z);
+                                let transmitted = native.event == DielectricEvent::Transmission;
+                                contributing[usize::from(transmitted)] += 1;
+                                let ratio = if transmitted { eta_t / eta_i } else { 1.0 };
+                                near(actual.beam.power().i, native.radiance_weight * ratio * ratio);
+                            }
+                            other => panic!("native and polarized support differ: {other:?}"),
+                        }
+                    }
+                }
+            }
+        }
+        assert!(contributing.iter().all(|n| *n > 0));
+        assert!(rejected > 0);
+    }
+
+    #[test]
+    fn g3_rough_scattering_is_invariant_under_incoming_reference_changes() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let b = beam(Vec3::new(0.6, 0.0, -0.8), Vec3::new(0.0, 1.0, 0.0),
+            glass(1.0, 0.0), Stokes::try_new(1.0, 0.3, -0.4, 0.2).unwrap());
+        let reframed = b.with_reference_axis(Vec3::new(1.0, 2.0, 3.0)).unwrap();
+        for event in [0.0, 0.999] {
+            let samples = [0.17, 0.63, event];
+            let a = b.sample_interface(normal, glass(1.5, 0.0), DielectricSurface::POLISHED, samples)
+                .unwrap().unwrap();
+            let c = reframed.sample_interface(normal, glass(1.5, 0.0), DielectricSurface::POLISHED, samples)
+                .unwrap().unwrap();
+            same(a.beam.power(), c.beam.power());
+            assert_eq!(a.pdf, c.pdf);
+            let s = a.beam.power();
+            assert!(Stokes::try_new(s.i, s.q, s.u, s.v).is_some());
+        }
+    }
+
+    #[test]
+    fn g0_null_rough_boundary_changes_absorption_without_changing_frame_or_power() {
+        let b = beam(Vec3::new(0.6, 0.0, -0.8), Vec3::new(0.0, 1.0, 0.0),
+            glass(1.5, 0.0), Stokes::try_new(2.0, 0.4, 0.5, -0.7).unwrap());
+        let target = glass(1.5, 3.0);
+        let out = b.sample_interface(Vec3::new(0.0, 0.0, 1.0), target,
+            DielectricSurface::POLISHED, [0.3, 0.7, 0.5]).unwrap().unwrap();
+        assert!(out.delta);
+        assert_eq!(out.pdf, 1.0);
+        assert_eq!(out.beam.frame(), b.frame());
+        assert_eq!(out.beam.power(), b.power());
+        assert_eq!(out.beam.medium(), target);
+        near(out.beam.advance(0.2).unwrap().power().i, 2.0 * det::exp(-0.6));
+        assert!(b.sample_interface(Vec3::new(0.0, 0.0, 1.0), target,
+            DielectricSurface::SMOOTH, [f64::NAN, 0.0, 0.5]).is_err());
+    }
+
+    #[cfg(feature = "photometry")]
+    fn source() -> crate::photometry::source::PhotometricSource {
+        use crate::instances::RigidTransform;
+        use crate::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum, SPECTRAL_BINS};
+        PhotometricSource::try_new(
+            RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], [0.0; 3]).unwrap(),
+            1000.0, 1.0, AngularDistribution::isotropic(),
+            SourceSpectrum::try_from_bins([1.0; SPECTRAL_BINS]).unwrap(),
+        ).unwrap()
+    }
+
+    #[test]
+    #[cfg(feature = "photometry")]
+    fn g1_source_emission_keeps_circular_power_and_filters_exactly_once() {
+        use crate::photometry::source::{SPECTRAL_BINS, wavelength_nm};
+        use crate::polarization::photometry::SpectralOptics;
+        let direction = Vec3::new(0.0, 0.0, 1.0);
+        let original = source();
+        let circular = original.clone().with_unpolarized_optics()
+            .through(&SpectralOptics::linear_polarizer(core::f64::consts::FRAC_PI_4).unwrap()).unwrap()
+            .through(&SpectralOptics::linear_retarder(0.0,
+                [core::f64::consts::FRAC_PI_2; SPECTRAL_BINS]).unwrap()).unwrap();
+        let expected = original.spectral_intensity_w_sr_nm(direction, wavelength_nm(30)).unwrap()
+            * 0.125 * 0.5;
+        let emitted = circular.emit_beam(direction, 30, 0.125, glass(1.5, 2.0)).unwrap();
+        near(emitted.power().i, expected);
+        near(emitted.power().v, -expected);
+        near(emitted.power().degree(), 1.0);
+        assert_eq!(emitted.ray().origin, original.position_m());
+        near(emitted.advance(0.3).unwrap().power().i, expected * det::exp(-0.6));
+        let dark = circular.through(&SpectralOptics::neutral([0.0; SPECTRAL_BINS]).unwrap()).unwrap();
+        assert_eq!(dark.emit_beam(direction, 30, 0.125, glass(1.0, 0.0)).unwrap().power(),
+            Stokes::unpolarized(0.0));
+    }
+
+    #[test]
+    #[cfg(feature = "photometry")]
+    fn g3_emission_follows_fixture_rotation_and_refuses_undefined_axes() {
+        use crate::instances::RigidTransform;
+        use crate::photometry::source::{AngularDistribution, PhotometricSource, SourceSpectrum, SPECTRAL_BINS};
+        use crate::polarization::photometry::SpectralOptics;
+        let h = 0.5_f64.sqrt();
+        let polarized = PhotometricSource::try_new(
+            RigidTransform::try_new([0.0, 0.0, h, h], [1.0, 2.0, 3.0]).unwrap(),
+            1000.0, 1.0, AngularDistribution::isotropic(),
+            SourceSpectrum::try_from_bins([1.0; SPECTRAL_BINS]).unwrap(),
+        ).unwrap().with_unpolarized_optics()
+            .through(&SpectralOptics::linear_polarizer(0.0).unwrap()).unwrap();
+        let out = polarized.emit_beam(Vec3::new(0.0, 0.0, 1.0), 30, 0.2, glass(1.0, 0.0)).unwrap();
+        near(out.frame().horizontal().x, 0.0); near(out.frame().horizontal().y, 1.0);
+        near(out.power().q, out.power().i);
+        assert_eq!(out.ray().origin, Point3::new(1.0, 2.0, 3.0));
+        let original = source().with_unpolarized_optics();
+        assert!(original.emit_beam(Vec3::new(1.0, 0.0, 0.0), 30, 0.2, glass(1.0, 0.0)).is_err());
+        assert!(original.emit_beam(Vec3::new(0.0, 0.0, 1.0), SPECTRAL_BINS, 0.2, glass(1.0, 0.0)).is_err());
+        assert!(original.emit_beam(Vec3::new(0.0, 0.0, 1.0), 30, -0.2, glass(1.0, 0.0)).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "photometry")]
+    fn g1_calibrated_source_through_two_spatial_brewster_reflections() {
+        let b = source().with_unpolarized_optics()
+            .emit_beam(Vec3::new(0.0, 0.0, -1.0), 30, 0.2, glass(1.0, 0.0)).unwrap();
+        let ci = 1.0 / 1.5_f64.hypot(1.0);
+        let si = 1.5 * ci;
+        let first = b.advance(0.4).unwrap().sample_interface(Vec3::new(si, 0.0, ci),
+            glass(1.5, 0.0), DielectricSurface::SMOOTH, [0.0; 3]).unwrap().unwrap();
+        assert!(first.beam.power().i > 0.0);
+        let k = first.beam.frame().direction();
+        let x = first.beam.frame().horizontal();
+        let n = Vec3::new(-ci*k.x + si*x.x, -ci*k.y + si*x.y, -ci*k.z + si*x.z);
+        let second = first.beam.advance(0.3).unwrap().sample_interface(n,
+            glass(1.5, 0.0), DielectricSurface::SMOOTH, [0.0; 3]).unwrap().unwrap();
+        near(second.beam.power().i, 0.0);
     }
 }
