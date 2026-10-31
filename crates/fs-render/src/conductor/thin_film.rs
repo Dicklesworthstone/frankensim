@@ -9,7 +9,7 @@
 //! forward longitudinal wave number has nonnegative imaginary part.
 
 use super::{Complex, ComplexIor, ConductorDataStatus, ConductorError, ConductorSource};
-use crate::dielectric::CauchyIor;
+use crate::dielectric::DielectricIor;
 use fs_blake3::DomainHasher;
 use fs_math::det;
 
@@ -20,7 +20,7 @@ pub const MAX_COHERENT_COATING_THICKNESS_M: f64 = 1.0e-4;
 
 /// One transparent isotropic film, conformal to each conductor microfacet.
 ///
-/// The source must describe its visible Cauchy phase-index law and thickness.
+/// The source must describe its visible phase-index law and thickness.
 /// The model sums coherent s/p amplitudes within this film and then returns
 /// unpolarized reflected power. Thickness is normal to the local microfacet.
 /// It assumes locally parallel boundaries and a laterally uniform film; the
@@ -30,16 +30,18 @@ pub const MAX_COHERENT_COATING_THICKNESS_M: f64 = 1.0e-4;
 /// coherent propagation. The substrate retains its complex-index absorption.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoherentDielectricCoating {
-    ior: CauchyIor,
+    ior: DielectricIor,
     thickness_m: f64,
     source: ConductorSource,
 }
 
 impl CoherentDielectricCoating {
     /// Declare a source-bound film. Wavelength evaluation uses the existing
-    /// visible-band Cauchy law; thickness is in metres, including exact zero.
+    /// shared visible-band Cauchy or Sellmeier law; thickness is in metres,
+    /// including exact zero. The phase index controls both Snell's law and
+    /// coherent optical thickness at each wavelength; group index is not used.
     pub fn try_new(
-        ior: CauchyIor,
+        ior: impl Into<DielectricIor>,
         thickness_m: f64,
         source: ConductorSource,
     ) -> Result<Self, ConductorError> {
@@ -49,7 +51,7 @@ impl CoherentDielectricCoating {
             return Err(ConductorError::InvalidCoating);
         }
         Ok(Self {
-            ior,
+            ior: ior.into(),
             thickness_m: super::canonical_zero(thickness_m),
             source,
         })
@@ -57,7 +59,7 @@ impl CoherentDielectricCoating {
 
     /// Visible-band phase-index law, with no inferred material preset.
     #[must_use]
-    pub const fn ior(self) -> CauchyIor {
+    pub const fn ior(self) -> DielectricIor {
         self.ior
     }
 
@@ -74,9 +76,21 @@ impl CoherentDielectricCoating {
     }
 
     pub(super) fn update_identity(self, hasher: &mut DomainHasher) {
-        hasher.update(b"coherent-dielectric-coating.v1");
-        for coefficient in self.ior.coefficients() {
-            hasher.update(&coefficient.to_bits().to_le_bytes());
+        match self.ior {
+            DielectricIor::Cauchy(law) => {
+                // Retain the original Cauchy coating's complete identity bytes.
+                hasher.update(b"coherent-dielectric-coating.v1");
+                for coefficient in law.coefficients() {
+                    hasher.update(&coefficient.to_bits().to_le_bytes());
+                }
+            }
+            DielectricIor::Sellmeier(law) => {
+                hasher.update(b"coherent-dielectric-coating.sellmeier.v1");
+                let (strengths, resonances_um2) = law.coefficients();
+                for coefficient in strengths.into_iter().chain(resonances_um2) {
+                    hasher.update(&coefficient.to_bits().to_le_bytes());
+                }
+            }
         }
         hasher.update(&self.thickness_m.to_bits().to_le_bytes());
         hasher.update(self.source.identity().as_bytes());
@@ -104,7 +118,10 @@ impl CoherentDielectricCoating {
         if !cosine.is_finite() || !(0.0..=1.0).contains(&cosine) {
             return Err(ConductorError::InvalidIncidence);
         }
-        let film_eta = self.ior.eval_unchecked(wavelength_nm);
+        let film_eta = self
+            .ior
+            .eval(wavelength_nm)
+            .map_err(|_| ConductorError::NumericalFailure)?;
         // With no film or no first interface, the intensity is exactly the
         // bare-substrate result. Keep its established bits in these limits.
         if self.thickness_m == 0.0 || film_eta == incident_eta || cosine == 0.0 {
@@ -208,6 +225,7 @@ fn reflection(
 mod tests {
     use super::*;
     use crate::conductor::{CONDUCTOR_IOR_SAMPLE_COUNT, ConductorIorSample, ConductorOptics};
+    use crate::dielectric::{CauchyIor, SellmeierIor};
 
     fn source() -> ConductorSource {
         ConductorSource::try_new(
@@ -408,7 +426,10 @@ mod tests {
         let coated = bare.with_coating(film);
         assert_eq!(coated.coating(), Some(film));
         assert_eq!(film.thickness_m(), 100.0e-9);
-        assert_eq!(film.ior().coefficients(), [1.45, 0.0, 0.0]);
+        assert_eq!(
+            film.ior(),
+            DielectricIor::Cauchy(CauchyIor::try_constant(1.45).unwrap()),
+        );
         assert_eq!(film.source(), source());
         assert_ne!(coated.content_identity(), bare.content_identity());
         for other in [coating(1.45, 101.0e-9), coating(1.46, 100.0e-9)] {
@@ -444,6 +465,159 @@ mod tests {
             coated.fresnel(500.0, 1.0, f64::NAN),
             Err(ConductorError::InvalidIncidence)
         );
+    }
+
+    #[test]
+    fn g5_cauchy_coating_identity_stays_frozen() {
+        let source = ConductorSource::try_new(
+            fs_blake3::ContentHash([77; 32]),
+            ConductorDataStatus::Representative,
+        )
+        .unwrap();
+        let samples = core::array::from_fn(|i| {
+            ConductorIorSample::try_new(380.0 + 50.0 * i as f64, 0.2, 3.0).unwrap()
+        });
+        let optics = ConductorOptics::try_new(samples, source)
+            .unwrap()
+            .with_coating(
+                CoherentDielectricCoating::try_new(
+                    CauchyIor::try_new(1.45, 0.01, 0.0).unwrap(),
+                    100.0e-9,
+                    source,
+                )
+                .unwrap(),
+            );
+        // Captured by executing the pre-Sellmeier production coating/hash owner.
+        assert_eq!(
+            *optics.content_identity().as_bytes(),
+            [
+                249, 199, 58, 11, 211, 199, 239, 151, 74, 39, 38, 39, 85, 123, 191, 224, 131, 116,
+                98, 82, 67, 86, 162, 56, 163, 172, 212, 1, 234, 59, 237, 23
+            ],
+        );
+    }
+
+    fn sellmeier_coating(thickness_m: f64) -> CoherentDielectricCoating {
+        CoherentDielectricCoating::try_new(
+            SellmeierIor::try_new([1.1, 0.2, 0.8], [0.01, 0.04, 100.0]).unwrap(),
+            thickness_m,
+            source(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn g1_sellmeier_film_matches_independent_complex_airy_spectrum() {
+        // Synthetic Sellmeier strengths/resonances, evaluated independently in
+        // Python with the complex Airy formula from Byrnes, sections 2--5.
+        // These answers include both propagating and evanescent films.
+        for (n0, eta, k, thickness_nm, wavelength_nm, cosine, expected) in [
+            (1.0, 0.2, 3.0, 125.0, 400.0, 1.0, 0.9261497100473655),
+            (1.0, 0.2, 3.0, 125.0, 550.0, 0.5, 0.9024456746212396),
+            (1.33, 2.7, 4.1, 82.0, 430.0, 0.73, 0.46954541554138274),
+            (2.4, 0.2, 3.0, 200.0, 550.0, 0.5, 0.9975089344662884),
+            (1.0, 3.0, 4.0, 137.0, 750.0, 0.2, 0.36497674703594385),
+            (1.0, 0.2, 3.0, 125.0, 780.0, 1.0, 0.8756898552426906),
+            (1.33, 2.7, 4.1, 82.0, 650.0, 0.73, 0.49067376008162433),
+        ] {
+            let optics = substrate(eta, k).with_coating(sellmeier_coating(thickness_nm * 1.0e-9));
+            close(
+                optics.fresnel(wavelength_nm, n0, cosine).unwrap(),
+                expected,
+                4.0e-14,
+            );
+        }
+    }
+
+    #[test]
+    fn g3_sellmeier_film_constant_and_zero_thickness_limits_keep_fresnel_bits() {
+        let bare = substrate(0.2, 3.0);
+        let constant = SellmeierIor::try_new([1.25, 0.0, 0.0], [0.0; 3]).unwrap();
+        let sellmeier = bare.with_coating(
+            CoherentDielectricCoating::try_new(constant, 125.0e-9, source()).unwrap(),
+        );
+        let cauchy = bare.with_coating(coating(1.5, 125.0e-9));
+        assert_ne!(sellmeier.content_identity(), cauchy.content_identity());
+        for wavelength in [380.0, 430.0, 550.0, 710.0, 780.0] {
+            for incident in [1.0, 1.33, 2.4] {
+                for cosine in [0.0, 1.0e-6, 0.05, 0.5, 1.0] {
+                    assert_eq!(
+                        sellmeier
+                            .fresnel(wavelength, incident, cosine)
+                            .unwrap()
+                            .to_bits(),
+                        cauchy
+                            .fresnel(wavelength, incident, cosine)
+                            .unwrap()
+                            .to_bits(),
+                    );
+                    assert_eq!(
+                        bare.with_coating(sellmeier_coating(0.0))
+                            .fresnel(wavelength, incident, cosine)
+                            .unwrap()
+                            .to_bits(),
+                        bare.fresnel(wavelength, incident, cosine)
+                            .unwrap()
+                            .to_bits(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g3_sellmeier_film_dispersion_and_every_coefficient_reach_transport() {
+        let bare = substrate(0.2, 3.0);
+        let film = sellmeier_coating(125.0e-9);
+        let optics = bare.with_coating(film);
+        let reference =
+            bare.with_coating(coating(film.ior().eval(550.0).unwrap(), film.thickness_m()));
+        close(
+            optics.fresnel(550.0, 1.0, 0.6).unwrap(),
+            reference.fresnel(550.0, 1.0, 0.6).unwrap(),
+            1.0e-14,
+        );
+        assert!(
+            (optics.fresnel(400.0, 1.0, 0.6).unwrap()
+                - reference.fresnel(400.0, 1.0, 0.6).unwrap())
+            .abs()
+                > 1.0e-4
+        );
+        let DielectricIor::Sellmeier(law) = film.ior() else {
+            unreachable!()
+        };
+        for index in 0..6 {
+            let (mut strengths, mut resonances) = law.coefficients();
+            if index < 3 {
+                strengths[index] *= 1.01;
+            } else {
+                resonances[index - 3] *= 1.01;
+            }
+            let changed = bare.with_coating(
+                CoherentDielectricCoating::try_new(
+                    SellmeierIor::try_new(strengths, resonances).unwrap(),
+                    film.thickness_m(),
+                    source(),
+                )
+                .unwrap(),
+            );
+            assert_ne!(changed.content_identity(), optics.content_identity());
+            assert_ne!(
+                changed.fresnel(550.0, 1.0, 0.6).unwrap().to_bits(),
+                optics.fresnel(550.0, 1.0, 0.6).unwrap().to_bits(),
+            );
+        }
+        for thickness in [1.0e-12, 100.0e-9, MAX_COHERENT_COATING_THICKNESS_M] {
+            let coated = bare.with_coating(sellmeier_coating(thickness));
+            for wavelength in [380.0, 430.0, 550.0, 710.0, 780.0] {
+                for incident in [1.0, 1.33, 2.4] {
+                    for cosine in [0.0, 1.0e-6, 0.05, 0.2, 0.5, 0.8, 1.0] {
+                        let response = coated.fresnel(wavelength, incident, cosine).unwrap();
+                        assert!((0.0..=1.0).contains(&response));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

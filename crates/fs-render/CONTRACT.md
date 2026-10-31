@@ -74,9 +74,12 @@ differentiable lift). Pure Rust throughout.
   stainless-steel tables are explicitly representative look-development data;
   table/source/material identities prove replay binding, not specimen fidelity.
   `ConductorOptics::with_coating(CoherentDielectricCoating)` additionally admits
-  one explicitly source-bound transparent isotropic film: an existing visible
-  Cauchy phase-index law and a uniform thickness in metres, from zero through
-  100 micrometres. Separate complex s/p amplitudes retain substrate reflection
+  one explicitly source-bound transparent isotropic film: the shared visible
+  Cauchy or Sellmeier phase-index law and a uniform thickness in metres, from
+  zero through 100 micrometres. At each wavelength the same phase index sets
+  both the interface admittance and the coherent optical thickness; group
+  index is never substituted. Existing Cauchy coating identities retain their
+  original bytes; Sellmeier binds a separate law tag and all six coefficients. Separate complex s/p amplitudes retain substrate reflection
   phase and sum every internal reflection before unpolarized power averaging.
   A fixed-size characteristic-matrix evaluation handles the film's critical
   angle by its analytic sinc limit and scales evanescent transfer entries to
@@ -93,6 +96,8 @@ differentiable lift). Pure Rust throughout.
   G0/G1/G3 tests cover independent complex Airy answers, quarter-wave
   cancellation, half-wave/zero-thickness/bare limits, incident-medium effects,
   critical/evanescent continuity, passivity and both native conductor BSDFs.
+  Sellmeier regressions additionally cover independent Airy spectra, constant-law
+  bit equivalence, sensitivity to all six coefficients and frozen Cauchy identity.
   The derivation follows [Byrnes, *Multilayer optical calculations*,
   sections 2--5 and appendix D](https://arxiv.org/abs/1603.02720).
 
