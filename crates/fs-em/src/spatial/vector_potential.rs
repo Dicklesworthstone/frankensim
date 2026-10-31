@@ -22,6 +22,8 @@
 
 pub mod induction;
 pub mod nonlinear;
+/// Distributed 3D winding inductance and the original native circuit dynamics.
+pub mod winding;
 
 use super::{
     SpatialGeometry, SpatialMagneticError, SpatialMagneticMaterial, cross, dot, finite, invalid,

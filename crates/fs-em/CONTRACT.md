@@ -1,5 +1,49 @@
 # fs-em contract
 
+## Three-dimensional distributed windings and native mutual circuits
+
+`spatial::vector_potential::winding::SpatialWindingBasis` connects complete
+closed 3D unit-current profiles to the original source-bound Whitney field.
+Profiles include physical turns, orientation and return paths in the original
+mesh frame. Fixed induced-linear materials and homogeneous tangential magnetic
+traces admit one native unit-current solve per winding; original local current
+continuity, complete relative curl-kernel compatibility, gauge and source
+checks remain authoritative. Current cannot disappear through a prescribed
+boundary. Preparation explicitly bounds winding count and retained field data.
+
+Every self/mutual entry compares `integral(B_i.H_j dV)` against the original
+Whitney pairing `integral(A_j.J_unit_i dV)` in both directions. The complete
+reciprocal matrix includes source geometry and all meshed end effects; only
+explicitly declared omitted series self-inductance is added. There is no
+empirical coupling coefficient or invented leakage for dependent modes.
+
+`SpatialWindingCircuit` replaces selected original inductors through
+`assemble_circuit_with_mutual_inductance`. It preserves caller winding order,
+original branch/source indices, unrelated circuit stores and transformers.
+Consistent initialization, actual coupled currents and audited stepping use
+the native DAE. Full positive-definiteness admission remains with that owner;
+dependent modes need physical leakage or an explicit ideal-transformer model.
+
+Ordinary circuit steps reuse the small native system. Optional field
+reconstruction performs no new 3D solve: original curl, stiffness, source and
+constitutive operators recover potential, face flux, B/H, current and cell
+energy at the actual currents. Current compatibility, Ampere residual,
+divergence/conforming-flux and work allowances are rechecked at that amplitude.
+Declared external inductive energy is separate from meshed field energy;
+both already belong to the native winding storage and are never added twice.
+
+Geometry, material sources, winding profiles and boundary traces stay fixed.
+This linear reduction does not imply saturation, remanence, skin/proximity
+diffusion, thermal evolution, moving winding transport or an infinite exterior.
+G0/G1/G3 fixtures in `tests/spatial_winding.rs` independently normalize a compact
+closed current loop, compare direct and reconstructed fields, check gauge,
+polarity and material response, and solve a native mutual RL circuit against
+independent coupled equations with unrelated LC storage. Return, source, budget,
+dependent-mode and cancellation refusals preserve the native physical gates.
+These authored fixtures do not constitute measured-device qualification.
+
+
+
 ## Driven solid-winding motional EMF and reciprocal Lorentz work
 
 The nonlinear moving field and native winding circuit now admit driven solid
