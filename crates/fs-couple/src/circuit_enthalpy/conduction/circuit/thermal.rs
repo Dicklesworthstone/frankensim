@@ -34,6 +34,7 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
     pub(super) fn field_view(&self) -> FieldCircuitView<'_> {
         FieldCircuitView {
             graph: &self.graph,
+            mutual: &[],
             storage: &self.storage,
             charges_c: &self.charges_c,
             fluxes_wb: &self.fluxes_wb,

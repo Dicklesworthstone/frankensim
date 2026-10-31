@@ -26,7 +26,7 @@ use fs_phs::circuit::{Branch, CircuitDae, CircuitError};
 use super::storage::MaterialStorageElement;
 use super::contacts::{self, ContactHeat, SeriesElectricalContact};
 use super::{MaterialCircuit, MaterialCircuitError, MaterialCircuitSolve, MaterialResistor,
-    ResistorHeat, account_step, bind, extended, poll, positive};
+    ResistorHeat, account_step, bind_with_mutual, extended, poll, positive};
 
 /// A source-bound capacitor OR inductor and one translationally guided body.
 /// Positive gap velocity separates the electrodes or magnetic poles; the other
@@ -183,6 +183,10 @@ impl MaterialFieldMotion {
         support: Option<AxialSupport>, velocity_m_s: f64, gap_limits_m: [f64; 2])
         -> Result<Self, MaterialCircuitError>
     {
+        if circuit.mutual.iter().any(|link| link.henries != 0.0
+            && (link.branches.0 == branch || link.branches.1 == branch)) {
+            return Err(invalid("moving a mutually coupled winding requires a shared geometry-dependent inductance law"));
+        }
         let slot = circuit.storage.iter().position(|source| source.branch == branch)
             .ok_or_else(|| invalid("moving field requires an original material storage binding"))?;
         let element = &circuit.storage[slot].element;
@@ -379,7 +383,8 @@ impl MaterialFieldMotion {
             || !positive(controls.energy_tolerance_j) || !positive(controls.power_tolerance_w) {
             return Err(invalid("finite held force and positive duration/work/power tolerances required"));
         }
-        let (graph, resistors, dae) = bind(&self.circuit.graph, sources, &contacts)?;
+        let (graph, resistors, dae) = bind_with_mutual(&self.circuit.graph, sources,
+            &contacts, &self.circuit.mutual)?;
         let electrical_x0 = extended(&dae, &self.circuit.fluxes_wb, &self.circuit.charges_c,
             input.electrical_ports)?;
         let (system, law) = self.assemble(&dae)?;
@@ -428,7 +433,8 @@ impl MaterialFieldMotion {
         };
         poll(&mut cancelled)?;
         let graph = super::storage::lower(&graph, &mut storage)?;
-        let mut circuit = MaterialCircuit::new_with_contacts(graph, resistors, contacts,
+        let mut circuit = MaterialCircuit::new_with_contacts_and_mutual_inductance(graph, resistors,
+            contacts, self.circuit.mutual.clone(),
             dae.flux_index.iter().map(|&i| record.x[i]).collect(),
             dae.charge_index.iter().map(|&i| record.x[i]).collect(), input.electrical_ports)?;
         circuit.storage = storage;
@@ -467,7 +473,11 @@ impl MaterialFieldMotion {
         let old_q = dae.system.storage().exact_quadratic_matrix()
             .ok_or_else(|| invalid("gap coupling requires the original quadratic circuit storage"))?;
         if old_q.len() != old_n*old_n
-            || old_q[coordinate_index*old_n+coordinate_index] != 1.0/coefficient
+            // Scaled preparation of unrelated mutual windings may round the
+            // independent diagonal by an ULP. Off-diagonal coupling to the
+            // moving coordinate still must be exactly absent.
+            || (old_q[coordinate_index*old_n+coordinate_index]*coefficient-1.0).abs()
+                > 64.0*f64::EPSILON
             || (0..old_n).any(|i| i != coordinate_index &&
                 (old_q[coordinate_index*old_n+i] != 0.0 || old_q[i*old_n+coordinate_index] != 0.0)) {
             return Err(invalid("active field element does not match the original circuit storage stamp"));

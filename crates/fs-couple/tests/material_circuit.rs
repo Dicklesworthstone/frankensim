@@ -5,7 +5,7 @@ use fs_material::state_point::MaterialPropertySelection;
 use fs_matdb::{ClaimSet, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, UncertaintyModel, InterpolationPolicy};
 use fs_evidence::ValidityDomain;
-use fs_phs::circuit::{Branch, CircuitGraph, TransformerLink};
+use fs_phs::circuit::{Branch, CircuitGraph, MutualInductance, TransformerLink};
 
 fn conductor(r: f64) -> ResolvedConductor {
     let mut claims=ClaimSet::new();
@@ -138,4 +138,75 @@ fn bindings_nonfinite_ports_capacity_and_late_cancellation_refuse_atomically() {
         (1,0,Branch::VoltageSource {port:usize::MAX}),
     ],transformers:vec![]};
     assert!(MaterialCircuit::new(too_many,vec![],vec![],vec![],&[]).is_err());
+}
+
+#[test]
+fn mutual_coils_retain_cross_energy_and_material_heat_when_resistance_changes() {
+    // Two electrically isolated loops exchange energy through their common
+    // field. The independent reference solves (L + dt R/2)i1=(L - dt R/2)i0.
+    for m in [-0.75_f64, 0.75] {
+        let graph = CircuitGraph { node_count:3, branches:vec![
+            (1,0,Branch::Inductor {henries:2.0}),
+            (1,0,Branch::Resistor {ohms:999.0}),
+            (2,0,Branch::Resistor {ohms:999.0}),
+            (2,0,Branch::Inductor {henries:3.0}),
+        ], transformers:vec![] };
+        let links = vec![MutualInductance { branches:(0,3), henries:m }];
+        let mut current = [2.0_f64,-0.5_f64];
+        let flux = |i:[f64;2]| vec![2.0*i[0]+m*i[1],m*i[0]+3.0*i[1]];
+        let energy = |i:[f64;2]| 0.5*(2.0*i[0]*i[0]+2.0*m*i[0]*i[1]+3.0*i[1]*i[1]);
+        let mut circuit = MaterialCircuit::new_with_mutual_inductance(graph,
+            vec![material(1,1.0),material(2,3.0)], links.clone(), flux(current),vec![],&[]).unwrap();
+        let initial_energy = energy(current);
+        let mut total_heat = 0.0;
+        for k in 0..12 {
+            // Reconfiguration must retain M even when changing only contacts.
+            circuit = circuit.rebind_contacts_candidate(vec![],&[]).unwrap();
+            let r = [if k < 6 { 1.0 } else { 2.0 },3.0];
+            let dt = 0.1;
+            let a = 2.0+0.5*dt*r[0];
+            let d = 3.0+0.5*dt*r[1];
+            let rhs = [(2.0-0.5*dt*r[0])*current[0]+m*current[1],
+                m*current[0]+(3.0-0.5*dt*r[1])*current[1]];
+            let next = [(d*rhs[0]-m*rhs[1])/(a*d-m*m),
+                (a*rhs[1]-m*rhs[0])/(a*d-m*m)];
+            let original = circuit.clone();
+            let proposal = circuit.step_candidate(vec![material(1,r[0]),material(2,r[1])],
+                &[],dt,controls(),||false).unwrap();
+            assert_eq!(proposal.circuit().mutual_inductance(),links);
+            for (actual,expected) in proposal.circuit().fluxes_wb().iter().zip(flux(next)) {
+                close(*actual,expected);
+            }
+            close(proposal.step().stored_before_j,energy(current));
+            close(proposal.step().stored_after_j,energy(next));
+            for j in 0..2 {
+                let midpoint = 0.5*(current[j]+next[j]);
+                close(proposal.step().resistors[j].current_a,-midpoint);
+                close(proposal.step().resistors[j].heat_j,dt*r[j]*midpoint*midpoint);
+            }
+            total_heat += proposal.step().heat_j;
+            close(energy(next)+total_heat,initial_energy);
+            assert_eq!(circuit,original);
+            circuit = proposal.into_parts().0;
+            current = next;
+        }
+        let original = circuit.clone();
+        assert!(matches!(circuit.step_candidate(circuit.resistors().to_vec(),&[],0.1,
+            controls(),||true),Err(MaterialCircuitError::Cancelled)));
+        assert_eq!(circuit,original);
+    }
+}
+
+#[test]
+fn material_circuit_rejects_an_indefinite_multiwinding_energy() {
+    // Every |M| is below sqrt(Li Lj), but the three-winding matrix is indefinite.
+    let graph = CircuitGraph { node_count:4, branches:vec![
+        (1,0,Branch::Inductor {henries:1.0}),
+        (2,0,Branch::Inductor {henries:1.0}),
+        (3,0,Branch::Inductor {henries:1.0}),
+    ], transformers:vec![] };
+    let mutual = [(0,1),(0,2),(1,2)].into_iter().map(|branches|
+        MutualInductance {branches,henries:-0.75}).collect();
+    assert!(MaterialCircuit::new_with_mutual_inductance(graph,vec![],mutual,
+        vec![0.0;3],vec![],&[]).is_err());
 }

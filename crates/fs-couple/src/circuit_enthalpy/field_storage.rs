@@ -33,7 +33,7 @@ use fs_material::{
     },
     state_point::ResolvedMaterialStatePoint,
 };
-use fs_phs::circuit::{Branch, CircuitGraph};
+use fs_phs::circuit::{Branch, CircuitGraph, MutualInductance};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
 
@@ -221,6 +221,7 @@ fn volume(value: &ThermalFieldElement) -> f64 {
 // stepping law. Lumped and spatial circuits use the same field thermodynamics.
 pub(crate) struct FieldCircuitView<'a> {
     pub graph: &'a CircuitGraph,
+    pub mutual: &'a [MutualInductance],
     pub storage: &'a [MaterialStorage],
     pub charges_c: &'a [f64],
     pub fluxes_wb: &'a [f64],
@@ -229,6 +230,7 @@ impl<'a> From<&'a MaterialCircuit> for FieldCircuitView<'a> {
     fn from(circuit: &'a MaterialCircuit) -> Self {
         Self {
             graph: circuit.graph(),
+            mutual: circuit.mutual_inductance(),
             storage: circuit.storage(),
             charges_c: circuit.charges_c(),
             fluxes_wb: circuit.fluxes_wb(),
@@ -273,6 +275,11 @@ fn admit(
     bindings: &[FieldThermalBinding],
     cancel: &RefCell<impl FnMut() -> bool>,
 ) -> Result<Vec<InitialField>, Error> {
+    if circuit.mutual.iter().any(|link| link.henries != 0.0) {
+        return Err(invalid(
+            "mutual magnetic thermal feedback requires a shared inductance entropy and capacity law",
+        ));
+    }
     let initial = coordinates(circuit)?;
     if bindings.is_empty()
         || bindings.len() != initial.len()

@@ -6,7 +6,7 @@
 //! heat reservoir or external control that actually changed the coefficient.
 
 use fs_material::field_storage::{ResolvedCapacitor, ResolvedInductor};
-use fs_phs::circuit::{Branch, CircuitGraph};
+use fs_phs::circuit::{Branch, CircuitGraph, MutualInductance, assemble_circuit_with_mutual_inductance};
 
 use super::{MaterialCircuit, MaterialCircuitError, MaterialResistor, poll};
 
@@ -28,14 +28,17 @@ pub struct MaterialStorage {
     pub element: MaterialStorageElement,
 }
 
-/// Exactly one capacitor's or inductor's parameter work at fixed coordinate.
+/// One branch's contribution to parameter work at fixed conserved coordinates.
+/// With mutual coupling, magnetic contributions are `lambda_i * i_i / 2`.
+/// An individual contribution may be negative; only their sum is the physical
+/// magnetic storage. Mutual energy must never be added a second time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StorageParameterWork {
     /// Original graph branch.
     pub branch: usize,
-    /// Electric or magnetic field energy before reconfiguration [J].
+    /// Electric energy or signed magnetic energy contribution before [J].
     pub stored_before_j: f64,
-    /// Same charge/flux linkage evaluated with the new coefficient [J].
+    /// Same charge/total flux evaluated with the complete new storage law [J].
     pub stored_after_j: f64,
     /// Positive means supplied TO the electrical system; negative means returned.
     pub supplied_work_j: f64,
@@ -209,13 +212,33 @@ impl MaterialCircuit {
     pub fn new_with_storage(
         graph: CircuitGraph,
         resistors: Vec<MaterialResistor>,
+        storage: Vec<MaterialStorage>,
+        fluxes_wb: Vec<f64>,
+        charges_c: Vec<f64>,
+        initial_inputs: &[f64],
+    ) -> Result<Self, MaterialCircuitError> {
+        Self::new_with_storage_and_mutual_inductance(graph, resistors, storage,
+            Vec::new(), fluxes_wb, charges_c, initial_inputs)
+    }
+
+    /// Source-derived diagonal C/L and explicit signed mutual coupling on the
+    /// same native descriptor. Each inductance source owns its self L; authored
+    /// M supplies the shared-field cross terms without another energy store.
+    /// The full matrix must remain positive definite. No common-core geometry
+    /// or coupling coefficient is inferred from the individual material cards.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_storage_and_mutual_inductance(
+        graph: CircuitGraph,
+        resistors: Vec<MaterialResistor>,
         mut storage: Vec<MaterialStorage>,
+        mutual: Vec<MutualInductance>,
         fluxes_wb: Vec<f64>,
         charges_c: Vec<f64>,
         initial_inputs: &[f64],
     ) -> Result<Self, MaterialCircuitError> {
         let graph = lower(&graph, &mut storage)?;
-        let mut circuit = Self::new(graph, resistors, fluxes_wb, charges_c, initial_inputs)?;
+        let mut circuit = Self::new_with_mutual_inductance(graph, resistors, mutual,
+            fluxes_wb, charges_c, initial_inputs)?;
         circuit.storage = storage;
         Ok(circuit)
     }
@@ -228,7 +251,9 @@ impl MaterialCircuit {
 
     /// Rebind source-derived C/L at fixed charge and flux linkage, without time
     /// advance. This is an impulse-free parameter change with explicit work:
-    /// W = sum(q^2/2 * delta(1/C) + lambda^2/2 * delta(1/L)).
+    /// W = sum(q^2/2 * delta(1/C)) + lambda^T delta(L^-1) lambda / 2.
+    /// Mutual coefficients remain fixed, while native admission rechecks the
+    /// entire new L. Branch work includes the resulting shared-field terms.
     ///
     /// The existing descriptor must admit the SAME coordinates under the new
     /// algebraic constraints. A capacitor clamped by an ideal voltage source,
@@ -263,27 +288,78 @@ impl MaterialCircuit {
         // Storage changes must retain the accepted contact drops and sources.
         let mut storage = storage;
         let graph = lower(&self.graph, &mut storage)?;
-        let mut candidate = Self::new_with_contacts(
+        let mut candidate = Self::new_with_contacts_and_mutual_inductance(
             graph,
             self.resistors.clone(),
             self.contacts.clone(),
+            self.mutual.clone(),
             self.fluxes_wb.clone(),
             self.charges_c.clone(),
             inputs,
         )?;
         candidate.storage = storage;
-        let (work, total) = parameter_work(
+        let (work, total) = if self.mutual.is_empty() { parameter_work(
             &self.graph,
             &self.storage,
             &candidate.storage,
             &self.fluxes_wb,
             &self.charges_c,
             &mut cancelled,
-        )?;
+        )? } else { coupled_parameter_work(self, &candidate, inputs, &mut cancelled)? };
         Ok(MaterialStorageCandidate {
             circuit: candidate,
             work,
             parameter_work_j: total,
         })
     }
+}
+
+// Partition the original owner's full quadratic energy, not lambda_i^2/2L_ii.
+// The latter drops all induced-current changes when any shared self L changes.
+fn coupled_parameter_work(
+    before: &MaterialCircuit,
+    after: &MaterialCircuit,
+    inputs: &[f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<StorageParameterWork>, f64), MaterialCircuitError> {
+    let partition = |circuit: &MaterialCircuit| -> Result<Vec<f64>, MaterialCircuitError> {
+        let dae = assemble_circuit_with_mutual_inductance(&circuit.graph, &circuit.mutual)?;
+        let state = super::extended(&dae, &circuit.fluxes_wb, &circuit.charges_c, inputs)?;
+        let mut efforts = vec![0.0; state.len()];
+        dae.system.storage().gradient(&state, &mut efforts);
+        let mut fluxes = dae.flux_index.iter();
+        let mut charges = dae.charge_index.iter();
+        let mut values = Vec::with_capacity(circuit.storage.len());
+        for &(_, _, branch) in &circuit.graph.branches {
+            let index = match branch {
+                Branch::Inductor { .. } => fluxes.next(),
+                Branch::Capacitor { .. } => charges.next(),
+                _ => continue,
+            }.ok_or_else(|| invalid("missing coupled field coordinate"))?;
+            let energy = 0.5 * state[*index] * efforts[*index];
+            if !energy.is_finite() {
+                return Err(invalid("coupled field energy contribution is unrepresentable"));
+            }
+            values.push(energy);
+        }
+        Ok(values)
+    };
+    poll(cancelled)?;
+    let original = partition(before)?;
+    poll(cancelled)?;
+    let proposed = partition(after)?;
+    let mut work = Vec::with_capacity(original.len());
+    let mut total = 0.0;
+    for ((source, stored_before_j), stored_after_j) in before.storage.iter().zip(original).zip(proposed) {
+        poll(cancelled)?;
+        let supplied_work_j = stored_after_j - stored_before_j;
+        total += supplied_work_j;
+        if !supplied_work_j.is_finite() || !total.is_finite() {
+            return Err(invalid("coupled storage parameter work is unrepresentable"));
+        }
+        work.push(StorageParameterWork { branch: source.branch, stored_before_j,
+            stored_after_j, supplied_work_j });
+    }
+    poll(cancelled)?;
+    Ok((work, total))
 }

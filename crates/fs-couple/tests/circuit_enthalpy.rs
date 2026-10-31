@@ -62,6 +62,63 @@ fn actual_endpoint_resistance_feedback_and_restart_keep_all_storage() {
 }
 
 #[test]
+fn mutual_coil_currents_and_temperature_feedback_share_one_energy_balance() {
+    use fs_couple::material_circuit::MaterialCircuit;
+    use fs_phs::circuit::{Branch,CircuitGraph,MutualInductance};
+    let (a,ca)=material(1.0,1.0,0.005);let (b,cb)=material(3.0,2.0,0.002);
+    let cards=[a,b];let curves=[ca,cb];let mut thermal=initial(&curves,1.0,None);
+    let links=vec![MutualInductance {branches:(0,3),henries:1.0}];
+    let graph=CircuitGraph {node_count:3,branches:vec![
+        (1,0,Branch::Inductor {henries:2.0}),
+        (1,0,Branch::Resistor {ohms:999.0}),
+        (2,0,Branch::Resistor {ohms:999.0}),
+        (2,0,Branch::Inductor {henries:3.0}),
+    ],transformers:vec![]};
+    let mut electrical=MaterialCircuit::new_with_mutual_inductance(graph,
+        coefficients(&thermal,&cards,&curves).unwrap().resistors,links.clone(),
+        vec![3.5,0.5],vec![],&[]).unwrap();
+    let mut current=[2.0_f64,-0.5_f64];
+    let energy=|i:[f64;2]|i[0]*i[0]+i[0]*i[1]+1.5*i[1]*i[1];
+    let energy0=thermal.energy_j()+energy(current);
+    let dt=0.25;
+    for k in 1..=6 {
+        let solve=||step_candidate(&thermal,f64::from(k)*dt,input(&electrical),config(),&[0.0;2],
+            |s|coefficients(s,&cards,&curves),||false).unwrap();
+        let next=solve();let replay=solve();
+        assert_eq!(next.circuit(),replay.circuit());
+        assert_eq!(next.thermal().cells(),replay.thermal().cells());
+        assert_eq!(next.circuit().mutual_inductance(),links);
+        let report=next.report();
+        let t=[next.thermal().temperature_k(CellId(30)).unwrap(),
+            next.thermal().temperature_k(CellId(10)).unwrap()];
+        let r=[1.0+0.005*(t[0]-300.0),3.0*(1.0+0.002*(t[1]-300.0))];
+        // Algebraically eliminate the native circuit using its actual endpoint
+        // material resistances. This reference has no descriptor/state indexing.
+        let aa=2.0+0.5*dt*r[0];let dd=3.0+0.5*dt*r[1];
+        let rhs=[(2.0-0.5*dt*r[0])*current[0]+current[1],
+            current[0]+(3.0-0.5*dt*r[1])*current[1]];
+        let updated=[(dd*rhs[0]-rhs[1])/(aa*dd-1.0),
+            (aa*rhs[1]-rhs[0])/(aa*dd-1.0)];
+        near(next.circuit().fluxes_wb()[0],2.0*updated[0]+updated[1]);
+        near(next.circuit().fluxes_wb()[1],updated[0]+3.0*updated[1]);
+        near(report.electrical.stored_after_j,energy(updated));
+        for j in 0..2 {
+            let id=[CellId(30),CellId(10)][j];
+            let mid=0.5*(current[j]+updated[j]);
+            let q=dt*r[j]*mid*mid;
+            near(report.electrical.resistors[j].heat_j,q);
+            near(report.electrical.resistors[j].material.conductor.resistance_ohm(),r[j]);
+            // Fixed masses 1 kg, Cp=(1,2), and the original 1 W/K thermal link.
+            near([1.0,2.0][j]*(t[j]-thermal.temperature_k(id).unwrap()),
+                q+dt*(t[1-j]-t[j]));
+        }
+        near(next.thermal().energy_j()+energy(updated),energy0);
+        let (next_thermal,next_electrical,_)=next.into_parts();
+        thermal=next_thermal;electrical=next_electrical;current=updated;
+    }
+}
+
+#[test]
 fn independent_sources_remain_distinct_from_internal_electrical_heat() {
     let (a,ca)=material(1.0,1.0,0.0);let (b,cb)=material(3.0,2.0,0.0);
     let cards=[a,b];let curves=[ca,cb];let thermal=initial(&curves,2.0,None);let old=circuit(&thermal,&cards,&curves);

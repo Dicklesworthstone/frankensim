@@ -508,6 +508,7 @@ impl HystereticCircuit {
         let next = Self {
             circuit: MaterialCircuit {
                 graph,
+                mutual: self.circuit.mutual.clone(),
                 resistors,
                 contacts: vec![],
                 fluxes_wb: next_fluxes,

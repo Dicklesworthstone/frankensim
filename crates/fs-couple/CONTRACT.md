@@ -4906,6 +4906,34 @@ an independent RC/Maxwell-force ODE, closed-form external work/heating, complete
 prepared data, continuation, budget refusal and cancellation. Syntax parsing and
 independent equation checks passed; native Rust execution remains unverified.
 
+### Mutual inductance through material circuits and finite heat
+
+`MaterialCircuit::new_with_mutual_inductance` and the corresponding contact and
+source-bound storage constructors retain signed coupling between original
+inductor branches. The native `fs-phs` owner admits the full positive-definite
+inductance matrix and evolves total linkage `lambda=L i`. All material resistor,
+contact, conductivity and finite-enthalpy trials use that same full storage
+`lambda^T L^-1 lambda/2`; independently computed branch Joule heat is deposited
+once. Rebinding contacts cannot remove the magnetic coupling.
+
+A source-bound self-inductance update retains total linkage and mutual
+coefficients, readmits the complete matrix, and reports the full change in
+magnetic energy as parameter work. Signed branch contributions
+`lambda_i*i_i/2` sum to that shared-field energy; they are not independent
+positive stores. The scalar moving-gap adapter refuses motion of a mutually
+coupled winding until a shared geometry-dependent inductance law owns its force
+and work. Fixed mutual coupling elsewhere in a moving-gap circuit is retained.
+
+Coupling values are explicit linear parameters; material names do not infer
+core geometry, temperature-dependent M, saturation, hysteresis or skin/proximity
+effects. The independent-branch thermal field-entropy adapter refuses nonzero
+M until a shared magnetic entropy/capacity law is supplied; ordinary fixed-L/M
+Joule heating and temperature-dependent resistivity remain supported.
+Synthetic G1/G3 regressions compare signed coupled-RL midpoint
+solutions, contact heating, full inverse-matrix parameter work and repeated
+finite-temperature feedback against independent algebraic energy balances.
+Indefinite multiwinding matrices and cancellation refuse without publication.
+
 ## Reciprocal material electric and magnetic gap motion
 
 `material_circuit::motion::MaterialFieldMotion` composes the existing source-bound

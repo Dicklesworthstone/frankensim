@@ -8,7 +8,7 @@ use fs_matdb::{
 };
 use fs_material::field_storage::*;
 use fs_material::state_point::MaterialPropertySelection;
-use fs_phs::circuit::{Branch, CircuitGraph};
+use fs_phs::circuit::{Branch, CircuitGraph, MutualInductance};
 use fs_qty::Dims;
 
 fn card(property: &str, dims: Dims, value: f64) -> MaterialCard {
@@ -171,6 +171,44 @@ fn live_storage_update_preserves_coordinates_and_accounts_parameter_work() {
         .unwrap();
     near(reverse.parameter_work_j(), -work, 1e-14);
     assert_eq!(reverse.circuit(), &original);
+}
+
+#[test]
+fn shared_magnetic_material_update_uses_full_inverse_inductance_parameter_work() {
+    let graph = CircuitGraph { node_count:3, branches:vec![
+        (1,0,Branch::Inductor {henries:f64::NAN}),
+        (2,0,Branch::Inductor {henries:f64::NAN}),
+        (1,0,Branch::VoltageSource {port:0}),
+        (2,0,Branch::VoltageSource {port:1}),
+    ], transformers:vec![] };
+    let links = vec![MutualInductance {branches:(0,1),henries:1.0}];
+    let original = MaterialCircuit::new_with_storage_and_mutual_inductance(graph,vec![],
+        vec![inductor(0,2.0),inductor(1,3.0)],links.clone(),vec![1.0,4.0],vec![],&[0.0;2]).unwrap();
+    let saved = original.clone();
+    let change = original.rebind_storage_candidate(vec![inductor(0,4.0),inductor(1,5.0)],
+        &[0.0;2],||false).unwrap();
+    // L^-1=(L1 L2-M^2)^-1 [[L2,-M],[-M,L1]], at fixed total lambda=(1,4).
+    let energy = |l1:f64,l2:f64| 0.5*(l2-8.0+16.0*l1)/(l1*l2-1.0);
+    let h0 = energy(2.0,3.0);
+    let h1 = energy(4.0,5.0);
+    near(change.parameter_work_j(),h1-h0,1e-13);
+    near(change.work().iter().map(|w|w.stored_before_j).sum(),h0,1e-13);
+    near(change.work().iter().map(|w|w.stored_after_j).sum(),h1,1e-13);
+    // Individual shared-field contributions need not be positive.
+    near(change.work()[0].stored_before_j,-0.1,1e-13);
+    assert_eq!(change.circuit().mutual_inductance(),links);
+    assert_eq!(change.circuit().fluxes_wb(),original.fluxes_wb());
+    let next = change.circuit().step_candidate(vec![],&[0.0;2],0.01,controls(),||false).unwrap();
+    near(next.step().stored_before_j,h1,1e-13);
+    near(next.step().stored_after_j,h1,1e-13);
+    let reverse = change.circuit().rebind_storage_candidate(original.storage().to_vec(),
+        &[0.0;2],||false).unwrap();
+    near(reverse.parameter_work_j(),h0-h1,1e-13);
+    assert_eq!(reverse.circuit(),&original);
+    // A self-L refresh may destroy positive definiteness at held M; refuse it.
+    assert!(original.rebind_storage_candidate(vec![inductor(0,0.1),inductor(1,0.1)],
+        &[0.0;2],||false).is_err());
+    assert_eq!(original,saved);
 }
 
 #[test]

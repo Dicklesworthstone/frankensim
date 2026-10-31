@@ -278,6 +278,44 @@ fn near(a: f64, b: f64) {
     assert!((a - b).abs() < 3e-7, "{a} != {b}");
 }
 
+#[test]
+fn shared_magnetic_storage_cannot_use_independent_branch_field_entropy() {
+    use fs_couple::circuit_enthalpy::field_storage::FieldThermalError;
+    use fs_phs::circuit::MutualInductance;
+    let card = card(true, 0.001, 2.0);
+    let caloric = caloric(&card);
+    let thermal = thermal(&caloric, 0.0);
+    let context = point(300.0);
+    let cells = [cell(&card, &caloric, &context)];
+    let resistors = [resistor()];
+    let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
+    let (base, first) = initial(&material, &thermal, &card, true);
+    let mut graph = base.graph().clone();
+    graph.branches.push((1, 0, Branch::Inductor { henries: f64::NAN }));
+    let mut storage = base.storage().to_vec();
+    let mut second = storage[0].clone();
+    second.branch = 2;
+    let MaterialStorageElement::Inductor(ref coil) = second.element else { unreachable!() };
+    let second_binding = FieldThermalBinding { branch: 2, cell: CELL,
+        law: ThermalFieldStorage::inductor(&card, coil, "T", [250.0, 500.0]).unwrap(),
+        maximum_abs_coordinate: 10.0 };
+    storage.push(second);
+    let circuit = MaterialCircuit::new_with_storage_and_mutual_inductance(graph,
+        base.resistors().to_vec(), storage,
+        vec![MutualInductance { branches: (0, 2), henries: 0.5 }],
+        vec![1.0, 1.0], vec![], &[]).unwrap();
+    let saved = circuit.clone();
+    let thermal_before = thermal.cells().clone();
+    let result = field_storage::step_candidate(&material, &thermal, 0.2, &circuit,
+        &[], &[first, second_binding], &[(1, ElectricalPropertyBasis::Resistivity)],
+        controls(), &[0.0], || false);
+    assert!(matches!(result, Err(CircuitEnthalpyError::Source(FieldThermalError::Invalid(
+        "mutual magnetic thermal feedback requires a shared inductance entropy and capacity law"
+    )))));
+    assert_eq!(circuit, saved);
+    assert_eq!(thermal.cells(), &thermal_before);
+}
+
 // Independent closed-form native RC/RL midpoint decay and total-U equation.
 // R=C0=L0=1, and Cp=2; no production callback or derivative is called here.
 fn oracle(alpha: f64, dt: f64, external_heat: f64) -> (f64, f64) {

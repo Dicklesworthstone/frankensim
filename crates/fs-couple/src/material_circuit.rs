@@ -25,7 +25,10 @@ pub mod hysteretic;
 use contacts::{SeriesElectricalContact, ContactHeat};
 
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
-use fs_phs::circuit::{Branch, CircuitDae, CircuitError, CircuitGraph, assemble_circuit};
+use fs_phs::circuit::{
+    Branch, CircuitDae, CircuitError, CircuitGraph, MutualInductance,
+    assemble_circuit_with_mutual_inductance,
+};
 use fs_phs::StepRecord;
 
 /// Bounds on the existing allocating dense descriptor solve, not a sparse solver.
@@ -110,6 +113,7 @@ impl std::error::Error for MaterialCircuitError {}
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialCircuit {
     graph: CircuitGraph,
+    mutual: Vec<MutualInductance>,
     resistors: Vec<MaterialResistor>,
     contacts: Vec<SeriesElectricalContact>,
     fluxes_wb: Vec<f64>,
@@ -209,11 +213,23 @@ pub(crate) fn admit_graph(graph: &CircuitGraph) -> Result<usize, MaterialCircuit
     Ok(n_r)
 }
 
-fn bind(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>, contacts: &[SeriesElectricalContact])
+fn bind(graph: &CircuitGraph, sources: Vec<MaterialResistor>, contacts: &[SeriesElectricalContact])
+    -> Result<(CircuitGraph, Vec<MaterialResistor>, CircuitDae), MaterialCircuitError>
+{
+    bind_with_mutual(graph, sources, contacts, &[])
+}
+
+fn bind_with_mutual(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>,
+    contacts: &[SeriesElectricalContact], mutual: &[MutualInductance])
     -> Result<(CircuitGraph, Vec<MaterialResistor>, CircuitDae), MaterialCircuitError>
 {
     use MaterialCircuitError::Invalid;
     let n_r = admit_graph(graph)?;
+    // Every unordered branch pair can occur at most once. Bound caller input
+    // before the native owner allocates/factors the complete inductance matrix.
+    if mutual.len() > graph.branches.len().saturating_mul(graph.branches.len().saturating_sub(1))/2 {
+        return Err(Invalid("mutual inductance exceeds the bounded branch-pair capacity"));
+    }
     if sources.len() != n_r { return Err(Invalid("every resistor requires exactly one material binding")); }
     sources.sort_by_key(|s| s.branch);
     let mut lowered = graph.clone();
@@ -226,7 +242,7 @@ fn bind(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>, contacts: &[Se
         branch.2 = Branch::Resistor { ohms: r };
     }
     contacts::lower(&mut lowered, contacts)?;
-    let dae = assemble_circuit(&lowered)?;
+    let dae = assemble_circuit_with_mutual_inductance(&lowered, mutual)?;
     Ok((lowered, sources, dae))
 }
 pub(crate) fn extended(dae: &CircuitDae, fluxes: &[f64], charges: &[f64], inputs: &[f64])
@@ -329,11 +345,40 @@ impl MaterialCircuit {
     /// The existing descriptor owns initialization and all electrical storage.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_contacts(graph: CircuitGraph, sources: Vec<MaterialResistor>,
-        mut contacts: Vec<SeriesElectricalContact>, fluxes_wb: Vec<f64>,
+        contacts: Vec<SeriesElectricalContact>, fluxes_wb: Vec<f64>,
         charges_c: Vec<f64>, initial_inputs: &[f64]) -> Result<Self, MaterialCircuitError>
     {
+        Self::new_with_contacts_and_mutual_inductance(graph, sources, contacts,
+            Vec::new(), fluxes_wb, charges_c, initial_inputs)
+    }
+
+    /// Couple original inductor branches through signed, reciprocal M [H].
+    /// Flux history is TOTAL linkage `lambda = L i`, and magnetic energy is
+    /// `lambda^T L^-1 lambda / 2`, including every cross term. The native
+    /// descriptor admits the complete positive-definite L, not merely pairwise
+    /// coupling bounds. Winding polarity follows the original branch terminals.
+    ///
+    /// Couplings remain fixed during resistor, conductivity and thermal trials.
+    /// These are explicit linear parameters, not inferred core geometry,
+    /// saturation, hysteresis or temperature-dependent permeability.
+    pub fn new_with_mutual_inductance(graph: CircuitGraph, sources: Vec<MaterialResistor>,
+        mutual: Vec<MutualInductance>, fluxes_wb: Vec<f64>, charges_c: Vec<f64>,
+        initial_inputs: &[f64]) -> Result<Self, MaterialCircuitError>
+    {
+        Self::new_with_contacts_and_mutual_inductance(graph, sources, Vec::new(),
+            mutual, fluxes_wb, charges_c, initial_inputs)
+    }
+
+    /// Admit mutual magnetic storage with the same separate bulk/contact loss
+    /// owners. Contact refresh never removes or duplicates mutual field energy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_contacts_and_mutual_inductance(graph: CircuitGraph,
+        sources: Vec<MaterialResistor>, mut contacts: Vec<SeriesElectricalContact>,
+        mutual: Vec<MutualInductance>, fluxes_wb: Vec<f64>, charges_c: Vec<f64>,
+        initial_inputs: &[f64]) -> Result<Self, MaterialCircuitError>
+    {
         contacts::admit(&mut contacts)?;
-        let (graph, resistors, dae) = bind(&graph, sources, &contacts)?;
+        let (graph, resistors, dae) = bind_with_mutual(&graph, sources, &contacts, &mutual)?;
         let x = extended(&dae, &fluxes_wb, &charges_c, initial_inputs)?;
         let initial = dae.consistent_initial_state(&x, initial_inputs)?;
         let h = dae.system.hamiltonian(&x);
@@ -346,10 +391,14 @@ impl MaterialCircuit {
                 return Err(MaterialCircuitError::Invalid("algebraic initialization changed a conserved electrical coordinate"));
             }
         }
-        Ok(Self { graph, resistors, contacts, fluxes_wb, charges_c, storage: Vec::new() })
+        Ok(Self { graph, mutual, resistors, contacts, fluxes_wb, charges_c, storage: Vec::new() })
     }
     /// Original graph topology with the last accepted material resistor values.
     pub const fn graph(&self) -> &CircuitGraph { &self.graph }
+    /// Signed coupling links in original branch indices, retained through all
+    /// resistor/contact/thermal refreshes. Linkage is never divided by self L
+    /// alone when these links are present.
+    pub fn mutual_inductance(&self) -> &[MutualInductance] { &self.mutual }
     /// Original source bindings at construction or the last accepted step midpoint.
     pub fn resistors(&self) -> &[MaterialResistor] { &self.resistors }
     /// Explicit electrical contact sources, in stable ID order.
@@ -407,7 +456,7 @@ impl MaterialCircuit {
         if !positive(dt) || !positive(controls.energy_tolerance_j) || !positive(controls.power_tolerance_w) {
             return Err(MaterialCircuitError::Invalid("positive finite clock and absolute work/power tolerances required"));
         }
-        let (graph, resistors, dae) = bind(&self.graph, sources, &contacts)?;
+        let (graph, resistors, dae) = bind_with_mutual(&self.graph, sources, &contacts, &self.mutual)?;
         let x0 = extended(&dae, &self.fluxes_wb, &self.charges_c, inputs)?;
         poll(&mut cancelled)?;
         let (record, _) = dae.step_audited(&x0, inputs, dt)?;
@@ -415,7 +464,7 @@ impl MaterialCircuit {
         let h1 = dae.system.hamiltonian(&record.x);
         let (heat, contact_heat, heat_j, residual) = account_step(&graph, &resistors,
             &contacts, &dae.node_potential_index, &x0, &record, h0, h1, dt, controls, &mut cancelled)?;
-        let next = Self { graph, resistors, contacts,
+        let next = Self { graph, mutual:self.mutual.clone(), resistors, contacts,
             fluxes_wb:dae.flux_index.iter().map(|&i| record.x[i]).collect(),
             charges_c:dae.charge_index.iter().map(|&i| record.x[i]).collect(),
             storage:self.storage.clone() };

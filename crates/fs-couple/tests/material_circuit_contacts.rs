@@ -107,3 +107,36 @@ fn source_bound_storage_rebinding_preserves_contact_sources_and_exact_charge() {
     close(changed.parameter_work_j(),-25.0);
     assert_eq!(circuit.storage().len(),1);
 }
+
+#[test]
+fn contact_heat_and_mutual_field_energy_survive_contact_reconfiguration() {
+    use fs_phs::circuit::{Branch,CircuitGraph,MutualInductance};
+    let (base,cards)=fixture();
+    let graph=CircuitGraph {node_count:3,branches:vec![
+        (1,0,Branch::Inductor {henries:2.0}),
+        (1,0,Branch::Resistor {ohms:999.0}),
+        (2,0,Branch::Resistor {ohms:999.0}),
+        (2,0,Branch::Inductor {henries:3.0}),
+    ],transformers:vec![]};
+    let mutual=vec![MutualInductance {branches:(0,3),henries:1.0}];
+    let original=MaterialCircuit::new_with_mutual_inductance(graph,base.resistors().to_vec(),
+        mutual.clone(),vec![2.0,1.0],vec![],&[]).unwrap(); // i=(1,0), H=1 J
+    let card=source::card(&cards[0],&cards[1],2.0,0.0);
+    let contact=source::contact(7,1,&card,1.0);
+    let bound=original.rebind_contacts_candidate(vec![contact.clone()],&[]).unwrap();
+    assert_eq!(bound.mutual_inductance(),mutual);
+    assert_eq!(bound.rebind_contacts_candidate(vec![],&[]).unwrap(),original);
+    let step=bound.step_with_contacts_candidate(bound.resistors().to_vec(),vec![contact],
+        &[],0.25,controls(),||false).unwrap();
+    // The primary loop has 1 ohm bulk + 2 ohm interface. The induced secondary
+    // current heats only its own 3 ohm bulk; no shared field energy is heat.
+    let aa=2.375;let dd=3.375;
+    let i1=(dd*1.625-1.0)/(aa*dd-1.0);
+    let i2=(aa-1.625)/(aa*dd-1.0);
+    let mid=0.5*(1.0+i1);
+    close(step.step().resistors[0].heat_j,0.25*mid*mid);
+    close(step.step().contacts[0].heat_j,0.5*mid*mid);
+    close(step.step().resistors[1].heat_j,0.75*(0.5*i2)*(0.5*i2));
+    close(step.step().stored_after_j+step.step().heat_j,1.0);
+    assert_eq!(step.circuit().mutual_inductance(),mutual);
+}

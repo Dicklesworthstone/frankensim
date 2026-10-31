@@ -70,6 +70,53 @@ fn shorted(source: MaterialStorage, flux: f64) -> MaterialCircuit {
 }
 
 #[test]
+fn moving_a_shared_winding_requires_a_shared_geometry_law() {
+    use fs_couple::material_circuit::MaterialCircuitError;
+    use fs_phs::circuit::MutualInductance;
+    let circuit=MaterialCircuit::new_with_storage_and_mutual_inductance(
+        CircuitGraph {node_count:3,branches:vec![
+            (1,0,Branch::Inductor {henries:f64::NAN}),
+            (2,0,Branch::Inductor {henries:f64::NAN}),
+            (1,0,Branch::VoltageSource {port:0}),
+            (2,0,Branch::VoltageSource {port:1}),
+        ],transformers:vec![]},vec![],
+        vec![magnetic(0,2.0,1.0,1.0,1),magnetic(1,3.0,1.0,1.0,1)],
+        vec![MutualInductance {branches:(0,1),henries:1.0}],vec![0.2,0.1],vec![],&[0.0;2]).unwrap();
+    assert!(matches!(MaterialFieldMotion::new(circuit,0,body(1000.0),0.0,[0.5,1.5]),
+        Err(MaterialCircuitError::Invalid(
+            "moving a mutually coupled winding requires a shared geometry-dependent inductance law"))));
+}
+
+#[test]
+fn independent_gap_motion_retains_other_windings_mutual_energy() {
+    use fs_phs::circuit::MutualInductance;
+    let links=vec![MutualInductance {branches:(1,2),henries:1.0}];
+    let circuit=MaterialCircuit::new_with_storage_and_mutual_inductance(
+        CircuitGraph {node_count:4,branches:vec![
+            (1,0,Branch::Inductor {henries:f64::NAN}),
+            (2,0,Branch::Inductor {henries:f64::NAN}),
+            (3,0,Branch::Inductor {henries:f64::NAN}),
+            (1,0,Branch::VoltageSource {port:0}),
+            (2,0,Branch::VoltageSource {port:1}),
+            (3,0,Branch::VoltageSource {port:2}),
+        ],transformers:vec![]},vec![],
+        vec![magnetic(0,3.0,1.0,1.0,1),magnetic(1,2.0,1.0,1.0,1),
+            magnetic(2,4.0,1.0,1.0,1)],links.clone(),vec![0.2,0.3,0.4],vec![],&[0.0;3]).unwrap();
+    let moving=MaterialFieldMotion::new(circuit,0,body(1000.0),0.0,[0.5,1.5]).unwrap();
+    let next=moving.step_candidate(vec![],FieldMotionInput {electrical_ports:&[0.0;3],
+        external_force_n:0.0,duration_s:0.1},controls(),||false).unwrap();
+    let gap=1.0-0.5*(0.5*0.2*0.2/3.0)/0.1*0.1*0.1;
+    let shared=0.5*(4.0*0.3*0.3-2.0*0.3*0.4+2.0*0.4*0.4)/7.0;
+    near(next.model().gap_m(),gap,1e-12);
+    near(next.step().electrical_energy_j[0],shared+0.5*0.2*0.2/3.0,1e-12);
+    near(next.step().electrical_energy_j[1],shared+0.5*0.2*0.2*gap/3.0,1e-12);
+    assert_eq!(next.model().circuit().mutual_inductance(),links);
+    for (actual,expected) in next.model().circuit().fluxes_wb().iter().zip([0.2,0.3,0.4]) {
+        near(*actual,expected,1e-12);
+    }
+}
+
+#[test]
 fn permeability_turns_and_body_density_change_motion_at_fixed_flux_linkage() {
     let (area, initial_gap, initial_velocity, dt, external) = (0.5, 1.0, 0.02, 0.25, 0.01);
     for flux in [-0.2_f64, 0.0, 0.2] {
