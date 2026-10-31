@@ -3,7 +3,7 @@
 //! The original caloric cells store heat even at zero flow. The original PHS
 //! inertance stores momentum; a reversal never replaces it with a steady root.
 //! Density varies ONLY in gravity. Reference mass, volume, continuity and inertia
-//! use rho0; viscosity is resolved from the same liquid source at every trial.
+//! use rho0; viscosity is resolved from the same bound source at every trial.
 //!
 //! This is a low-Eckert, single-phase approximation. Thermal and mechanical
 //! accounts are separate: neither pressure work nor viscous/gravity work is
@@ -11,7 +11,10 @@
 //! No compressible total-energy, pipe-wall film, boiling or turbulent closure is
 //! inferred. Native thermal links/boundaries remain active while flow is zero.
 
+/// Source-backed fixed-composition gas circulation on the same finite inventory.
+pub mod gas;
 mod step;
+pub use gas::{FiniteGasLoop, GasLoopLimits};
 
 use super::super::super::{LiquidEnthalpyError, admit_liquid_caloric_source};
 use crate::graph::thermal::medium::series::hydraulic::{
@@ -20,6 +23,7 @@ use crate::graph::thermal::medium::series::hydraulic::{
 };
 use fs_conduction::transient::deposition::{
     CellGeometry, CellId, DepositionError, DepositionSimulation, EnergyAudit, MaterialId,
+    ThermalLaw,
 };
 use fs_exec::Cx;
 use fs_material::MaterialError;
@@ -85,6 +89,12 @@ pub enum FiniteLoopError<E = Infallible> {
     Invalid(&'static str),
     Caloric(LiquidEnthalpyError),
     Material(MaterialStatePointError),
+    GasCaloric(fs_material::thermochemical_gas::energy::GasEnergyError),
+    GasMach {
+        section: usize,
+        value: f64,
+        maximum: f64,
+    },
     Transport(MaterialError),
     Thermal(DepositionError),
     Resistance {
@@ -133,8 +143,8 @@ impl<E> From<DepositionError> for FiniteLoopError<E> {
 
 /// Source and original loss evaluations at the ACTUAL native step-average flow.
 #[derive(Debug)]
-pub struct FiniteLoopHydraulics {
-    pub sources: Vec<ResolvedLiquidState>,
+pub struct FiniteLoopHydraulics<F = ResolvedLiquidState> {
+    pub sources: Vec<F>,
     pub losses: Vec<ResistanceEvaluation>,
     /// Original loss/Reynolds admission at the nonnegative speed envelope.
     /// These bound omitted work; they are not native discrete dissipation.
@@ -163,8 +173,8 @@ pub struct FiniteLoopHydraulics {
 
 /// A successful joint publication, with the exact supplied heat-source payload.
 #[derive(Debug)]
-pub struct FiniteLoopStep<T> {
-    pub hydraulics: FiniteLoopHydraulics,
+pub struct FiniteLoopStep<T, F = ResolvedLiquidState> {
+    pub hydraulics: FiniteLoopHydraulics<F>,
     pub heat: T,
     pub thermal: EnergyAudit,
     pub maximum_cell_residual_j: f64,
@@ -187,6 +197,14 @@ struct BoundCell {
 pub struct FiniteLiquidLoop<'a, 'card> {
     law: &'a LiquidTemperatureLaw<'card>,
     source: &'a ResolvedHeatCapacityCurve,
+    core: FiniteLoopCore<'a>,
+}
+
+// The geometry, one momentum and native thermal transaction are shared; source
+// admission stays with the concrete liquid/gas adapters. This is not a second
+// material interface or a solver.
+struct FiniteLoopCore<'a> {
+    caloric: &'a dyn ThermalLaw,
     cells: Vec<BoundCell>,
     gravity: SeriesGravity,
     limits: FiniteLoopLimits,
@@ -197,14 +215,69 @@ pub struct FiniteLiquidLoop<'a, 'card> {
 }
 
 impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
-    /// Bind actual active cells to the SAME caloric object and liquid claims.
-    /// Cell centreline endpoints must match the closed gravity geometry exactly.
-    /// Reference V=A*length and M=rho0*V are checked within roundoff, not inferred
-    /// from temperature-dependent density. Every loss must admit Reynolds zero.
+    /// Bind actual cells to the original liquid source and caloric object.
+    /// Geometry, reference inventory and source admission are unchanged.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         cx: &Cx<'_>,
         law: &'a LiquidTemperatureLaw<'card>,
         source: &'a ResolvedHeatCapacityCurve,
+        thermal: &DepositionSimulation<'_>,
+        sections: &[PipeCell],
+        gravity: SeriesGravity,
+        initial_volume_flow_m3_s: f64,
+        limits: FiniteLoopLimits,
+    ) -> Result<Self, FiniteLoopError> {
+        poll(cx)?;
+        admit_liquid_caloric_source(cx, law.reference_state(), source, law.temperature_axis())
+            .map_err(FiniteLoopError::Caloric)?;
+        let reference = law
+            .reference_state()
+            .transport_state()
+            .map_err(FiniteLoopError::Transport)?;
+        let core = FiniteLoopCore::try_new(
+            cx,
+            source.curve(),
+            reference,
+            thermal,
+            sections,
+            gravity,
+            initial_volume_flow_m3_s,
+            limits,
+        )?;
+        let (_, transports) = core.resolve(cx, thermal, &|_, temperature| {
+            law.at_temperature(temperature)
+                .map_err(FiniteLoopError::<Infallible>::Material)
+        })?;
+        core.losses::<Infallible>(cx, &transports, initial_volume_flow_m3_s)?;
+        Ok(Self { law, source, core })
+    }
+    pub const fn source(&self) -> &'a ResolvedHeatCapacityCurve {
+        self.source
+    }
+    pub const fn reference_density_kg_m3(&self) -> f64 {
+        self.core.reference_density
+    }
+    pub const fn inertance_pa_s2_m3(&self) -> f64 {
+        self.core.inertance
+    }
+    pub const fn accepted_time_s(&self) -> f64 {
+        self.core.accepted_time_s
+    }
+    pub fn volume_flow_m3_s(&self) -> f64 {
+        self.core.volume_flow_m3_s()
+    }
+    pub fn kinetic_energy_j(&self) -> f64 {
+        self.core.kinetic_energy_j()
+    }
+}
+
+impl<'a> FiniteLoopCore<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn try_new(
+        cx: &Cx<'_>,
+        caloric: &'a dyn ThermalLaw,
+        reference: FluidTransportState,
         thermal: &DepositionSimulation<'_>,
         sections: &[PipeCell],
         gravity: SeriesGravity,
@@ -226,12 +299,6 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
                 "bounded closed finite-cell geometry and Boussinesq limits required",
             ));
         }
-        admit_liquid_caloric_source(cx, law.reference_state(), source, law.temperature_axis())
-            .map_err(FiniteLoopError::Caloric)?;
-        let reference = law
-            .reference_state()
-            .transport_state()
-            .map_err(FiniteLoopError::Transport)?;
         let rho0 = reference.density_kg_m3();
         let mut seen = BTreeSet::new();
         let mut cells = Vec::with_capacity(sections.len());
@@ -243,7 +310,7 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
                 .get(&section.cell)
                 .ok_or(FiniteLoopError::Invalid("pipe cell is not active"))?;
             if !seen.insert(section.cell)
-                || !thermal.uses_material_law(cell.material_id, source.curve())
+                || !thermal.uses_material_law(cell.material_id, caloric)
                 || cell.geometry.start_m != gravity.vertices_m()[i]
                 || cell.geometry.end_m != gravity.vertices_m()[i + 1]
             {
@@ -297,8 +364,7 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
             ));
         }
         let owner = Self {
-            law,
-            source,
+            caloric,
             cells,
             gravity,
             limits,
@@ -307,42 +373,29 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
             momentum_pa_s: momentum,
             accepted_time_s: thermal.time_s(),
         };
-        // Validate actual starting temperatures, never just the reference sample.
-        let sources = owner.resolve::<Infallible>(cx, thermal)?;
-        let _ = owner.losses::<Infallible>(cx, &sources, initial_volume_flow_m3_s)?;
         Ok(owner)
     }
 
-    pub const fn source(&self) -> &'a ResolvedHeatCapacityCurve {
-        self.source
-    }
-    pub const fn reference_density_kg_m3(&self) -> f64 {
-        self.reference_density
-    }
-    pub const fn inertance_pa_s2_m3(&self) -> f64 {
-        self.inertance
-    }
-    pub const fn accepted_time_s(&self) -> f64 {
-        self.accepted_time_s
-    }
-    pub fn volume_flow_m3_s(&self) -> f64 {
+    fn volume_flow_m3_s(&self) -> f64 {
         self.momentum_pa_s / self.inertance
     }
-    pub fn kinetic_energy_j(&self) -> f64 {
+    fn kinetic_energy_j(&self) -> f64 {
         0.5 * self.momentum_pa_s * self.volume_flow_m3_s()
     }
 
-    fn resolve<E>(
+    fn resolve<E, F: FluidTransport>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
-    ) -> Result<Vec<ResolvedLiquidState>, FiniteLoopError<E>> {
+        resolve: &impl Fn(CellId, Temperature) -> Result<F, FiniteLoopError<E>>,
+    ) -> Result<(Vec<F>, Vec<FluidTransportState>), FiniteLoopError<E>> {
         if thermal.cells().len() > self.limits.maximum_cells {
             return Err(FiniteLoopError::Invalid(
                 "finite loop thermal cell budget exceeded",
             ));
         }
         let mut sources = Vec::with_capacity(self.cells.len());
+        let mut transports = Vec::with_capacity(self.cells.len());
         for (i, bound) in self.cells.iter().enumerate() {
             poll(cx)?;
             let cell = thermal
@@ -352,18 +405,18 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
             if cell.material_id != bound.material
                 || cell.mass_kg != bound.mass_kg
                 || cell.geometry != bound.geometry
-                || !thermal.uses_material_law(cell.material_id, self.source.curve())
+                || !thermal.uses_material_law(cell.material_id, self.caloric)
             {
                 return Err(FiniteLoopError::Invalid(
                     "pipe geometry, mass or original caloric source changed",
                 ));
             }
             let temperature = thermal.temperature_k(bound.section.cell)?;
-            let source = self
-                .law
-                .at_temperature(Temperature::new(temperature))
-                .map_err(FiniteLoopError::Material)?;
-            let relative = (source.density_kg_m3() / self.reference_density - 1.0).abs();
+            let source = resolve(bound.section.cell, Temperature::new(temperature))?;
+            let transport = source
+                .transport_state()
+                .map_err(FiniteLoopError::Transport)?;
+            let relative = (transport.density_kg_m3() / self.reference_density - 1.0).abs();
             if !relative.is_finite() || relative > self.limits.maximum_relative_density_departure {
                 return Err(FiniteLoopError::DensityDeparture {
                     section: i,
@@ -372,15 +425,16 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
                 });
             }
             sources.push(source);
+            transports.push(transport);
         }
         poll(cx)?;
-        Ok(sources)
+        Ok((sources, transports))
     }
 
     fn losses<E>(
         &self,
         cx: &Cx<'_>,
-        sources: &[ResolvedLiquidState],
+        sources: &[FluidTransportState],
         flow: f64,
     ) -> Result<Vec<ResistanceEvaluation>, FiniteLoopError<E>> {
         let mass = self.reference_density * flow;
@@ -412,17 +466,18 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
             .collect()
     }
 
-    fn hydraulics<E>(
+    fn hydraulics<E, F: FluidTransport>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
+        resolve: &impl Fn(CellId, Temperature) -> Result<F, FiniteLoopError<E>>,
         candidate_average_flow: f64,
         drive: f64,
         dt: f64,
         controls: FiniteLoopControls,
-    ) -> Result<FiniteLoopHydraulics, FiniteLoopError<E>> {
-        let sources = self.resolve(cx, thermal)?;
-        let trial_losses = self.losses(cx, &sources, candidate_average_flow)?;
+    ) -> Result<FiniteLoopHydraulics<F>, FiniteLoopError<E>> {
+        let (sources, transports) = self.resolve(cx, thermal, resolve)?;
+        let trial_losses = self.losses(cx, &transports, candidate_average_flow)?;
         let resistance: f64 = trial_losses
             .iter()
             .map(|loss| {
@@ -448,7 +503,7 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
         let hydrostatic = self
             .gravity
             .evaluate_densities(
-                sources.iter().map(ResolvedLiquidState::density_kg_m3),
+                transports.iter().map(FluidTransportState::density_kg_m3),
                 0.0,
                 || cx.checkpoint().map_err(|_| SeriesPressureError::Cancelled),
             )
@@ -479,7 +534,7 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
         // Re-evaluate the ORIGINAL nonlinear loss at the actual native flow.
         // Acceptance below gates its own impulse/power residual, so a lagged
         // candidate coefficient cannot masquerade as a closed momentum solve.
-        let losses = self.losses(cx, &sources, average)?;
+        let losses = self.losses(cx, &transports, average)?;
         let loss_pressure: f64 = losses.iter().map(|loss| loss.pressure_drop_pa).sum();
         let loss_power: f64 = losses.iter().map(|loss| loss.dissipated_power_w).sum();
         let actual_resistance = if average == 0.0 {
@@ -509,7 +564,7 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
             .abs()
             .max(final_flow.abs())
             .max(average.abs());
-        let envelope_losses = self.losses(cx, &sources, speed_envelope)?;
+        let envelope_losses = self.losses(cx, &transports, speed_envelope)?;
         let envelope_loss_power: f64 = envelope_losses
             .iter()
             .map(|loss| loss.dissipated_power_w)
@@ -518,7 +573,7 @@ impl<'a, 'card> FiniteLiquidLoop<'a, 'card> {
         let local_buoyancy_bound: f64 = self
             .cells
             .iter()
-            .zip(&sources)
+            .zip(&transports)
             .map(|(cell, source)| {
                 ((source.density_kg_m3() - self.reference_density)
                     * cell.specific_gravity_work_j_kg

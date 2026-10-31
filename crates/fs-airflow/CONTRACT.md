@@ -1,5 +1,40 @@
 # CONTRACT: fs-airflow
 
+## Finite source-backed gas circulation
+
+`feedback::transient::FiniteGasLoop` uses the same private finite-inventory
+momentum/thermal transaction as `FiniteLiquidLoop`; the liquid API and native
+physical owners are unchanged. Its exact registered `GasEnthalpyLaw` owns
+NASA-9 enthalpy, bounded inversion, caloric stability and formation-energy
+references. Native cells store M*h and signed upwind links carry original donor
+h. Neither nonlinear heat capacity nor nonzero formation enthalpy is replaced
+with Cp(T)*T or temperature averaging.
+
+Reference density is evaluated at the caloric law's original context. Actual
+gas snapshots reevaluate only temperature, preserving pressure, composition,
+transport selections, source-pack identities and other source conditions.
+Mass, volume, continuity and inertance remain fixed reference quantities;
+source density departures act only in gravity. The original common density,
+Reynolds, omitted-work, energy, momentum and rollback gates still apply.
+An explicit Mach limit in (0,0.3] also admits the largest old/new/average speed
+using each endpoint source's sound speed. A small average during reversal
+cannot bypass either Mach or Reynolds admission.
+
+This lane describes a frozen-composition, fixed-pressure, low-Mach Boussinesq
+gas circuit. It does not evolve pressure, compressible mass, chemistry or
+condensation, or infer a zero-flow wall film. Original source/caloric support
+and all bounds are mandatory; an unsupported gas is never replaced by air.
+Returned hydraulic source snapshots retain the original thermochemical
+receipts. The native thermal ledger measures the original stored enthalpy and
+actual heat sources independently of the separate bounded mechanical account.
+
+`tests/finite_gas_loop.rs` uses a separately reduced nonlinear NASA polynomial
+and cyclic enthalpy balance to check finite storage, donor transport and buoyant
+acceleration, plus a reversal whose endpoint Mach limit must refuse atomically
+although its signed-average speed is smaller. These are regression definitions,
+not a claim of executed native tests or experimental validation.
+
+
 ## Finite pipe momentum and thermal inventory
 
 `LiquidHeatPath` remains a quasi-steady, zero-pipe-storage march. The separate

@@ -10,8 +10,8 @@ use fs_solver::NewtonKrylovState;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use std::cell::Cell;
 
-struct Prepared<T> {
-    hydraulics: FiniteLoopHydraulics,
+struct Prepared<T, F> {
+    hydraulics: FiniteLoopHydraulics<F>,
     heat: T,
 }
 
@@ -88,6 +88,42 @@ impl FiniteLiquidLoop<'_, '_> {
         controls: FiniteLoopControls,
         energy_guess_j: &[f64],
     ) -> Result<FiniteLoopStep<T>, FiniteLoopError<E>> {
+        let law = self.law;
+        self.core.advance(
+            cx,
+            thermal,
+            target_s,
+            driving_pressure_pa,
+            heat,
+            |_, temperature| {
+                law.at_temperature(temperature)
+                    .map_err(FiniteLoopError::Material)
+            },
+            |_| Ok(()),
+            controls,
+            energy_guess_j,
+        )
+    }
+}
+
+impl FiniteLoopCore<'_> {
+    // One original thermal/momentum transaction shared by the concrete adapters.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance<'m, T, E, F: FluidTransport>(
+        &mut self,
+        cx: &Cx<'_>,
+        thermal: &mut DepositionSimulation<'m>,
+        target_s: f64,
+        driving_pressure_pa: f64,
+        heat: impl Fn(
+            &DepositionSimulation<'m>,
+            &FiniteLoopHydraulics<F>,
+        ) -> Result<BoundaryStepCoefficients<T>, E>,
+        resolve: impl Fn(CellId, Temperature) -> Result<F, FiniteLoopError<E>>,
+        admit: impl Fn(&FiniteLoopHydraulics<F>) -> Result<(), FiniteLoopError<E>>,
+        controls: FiniteLoopControls,
+        energy_guess_j: &[f64],
+    ) -> Result<FiniteLoopStep<T, F>, FiniteLoopError<E>> {
         poll(cx)?;
         controls.admit()?;
         if thermal.time_s() != self.accepted_time_s || !driving_pressure_pa.is_finite() {
@@ -137,11 +173,14 @@ impl FiniteLiquidLoop<'_, '_> {
                         let hydraulics = self.hydraulics(
                             cx,
                             trial,
+                            &resolve,
                             candidate_average,
                             driving_pressure_pa,
                             step.duration_s(),
                             controls,
                         )?;
+                        admit(&hydraulics)?;
+                        poll(cx)?;
                         let mass = self.reference_density * hydraulics.average_volume_flow_m3_s;
                         let flows = self
                             .cells
