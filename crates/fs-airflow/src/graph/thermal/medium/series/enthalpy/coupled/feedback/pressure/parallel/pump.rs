@@ -163,6 +163,8 @@ pub enum PumpOperatingError {
     Invalid(&'static str),
     OutsideCurve { field: &'static str, value: f64, lower: f64, upper: f64 },
     Network(ParallelPressureError),
+    /// Original fixed-state series-law refusal.
+    Series(crate::graph::thermal::medium::series::hydraulic::pressure::SeriesPressureError),
     NotBracketed { lower_residual_pa: f64, upper_residual_pa: f64 },
     NotConverged { evaluations: usize, last_residual_pa: f64 },
     SolidBudget { performed: usize, maximum: usize },
@@ -174,7 +176,7 @@ impl core::fmt::Display for PumpOperatingError {
 }
 impl std::error::Error for PumpOperatingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Network(error) => Some(error), _ => None }
+        match self { Self::Network(error) => Some(error), Self::Series(error) => Some(error), _ => None }
     }
 }
 impl From<ParallelPressureError> for PumpOperatingError {
@@ -230,8 +232,9 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
     }
 }
 
-// The pressure matcher keeps the original payload instead of reconstructing a
-// thermal result from detached flow/temperature scalars. Shared by both drivers.
+// Keep the original steady/common-solid adapter intact. Other hydraulic
+// owners expose the same physical inputs without manufacturing a parallel
+// thermal result; all consumers still share the ONE matcher below.
 trait PumpLoad {
     fn fluid(&self) -> &ParallelLiquidSolution<'_>;
     fn flow_evaluations(&self) -> usize;
@@ -242,7 +245,22 @@ impl PumpLoad for ParallelLiquidSolution<'_> {
     fn flow_evaluations(&self) -> usize { self.flow_evaluations }
 }
 
-fn match_pump<'s, T: PumpLoad>(
+pub(crate) trait PumpState {
+    fn inlet_material(&self) -> &ResolvedLiquidState;
+    fn inlet_volume_flow_m3_s(&self) -> f64;
+    fn driving_pressure_pa(&self) -> f64;
+    fn flow_evaluations(&self) -> usize;
+    fn solid_solves(&self) -> usize { 0 }
+}
+impl<T: PumpLoad> PumpState for T {
+    fn inlet_material(&self) -> &ResolvedLiquidState { &self.fluid().inlet_material }
+    fn inlet_volume_flow_m3_s(&self) -> f64 { self.fluid().inlet_volume_flow_m3_per_s }
+    fn driving_pressure_pa(&self) -> f64 { self.fluid().driving_pressure_pa }
+    fn flow_evaluations(&self) -> usize { PumpLoad::flow_evaluations(self) }
+    fn solid_solves(&self) -> usize { PumpLoad::solid_solves(self) }
+}
+
+pub(crate) fn match_pump<'s, T: PumpState>(
     cx: &Cx<'_>, pump: &'s PumpHeadCurve, controls: PumpOperatingControls,
     mut evaluate: impl FnMut(Pressure) -> Result<T, PumpOperatingError>,
 ) -> Result<PumpOperatingPoint<'s, T>, PumpOperatingError> {
@@ -252,10 +270,9 @@ fn match_pump<'s, T: PumpLoad>(
     let mut probe = |pressure: f64, calls: usize| -> Result<_, PumpOperatingError> {
         checkpoint(cx).map_err(ParallelPressureError::from)?;
         let state = evaluate(Pressure::new(pressure))?;
-        let fluid = state.fluid();
-        let supply = pump.evaluate(&fluid.inlet_material, VolumetricFlowRate::new(fluid.inlet_volume_flow_m3_per_s))?;
+        let supply = pump.evaluate(state.inlet_material(), VolumetricFlowRate::new(state.inlet_volume_flow_m3_s()))?;
         let residual = pressure-supply.available_pressure_pa;
-        if !residual.is_finite() || fluid.driving_pressure_pa != pressure {
+        if !residual.is_finite() || state.driving_pressure_pa() != pressure {
             return Err(PumpOperatingError::Invalid("pump matching received an inconsistent or nonfinite network state"));
         }
         total_flow = total_flow.checked_add(state.flow_evaluations())
