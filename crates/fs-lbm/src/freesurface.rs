@@ -342,13 +342,14 @@ impl FreeSurface {
     /// (fluid = ρ, interface = ρ/2).
     ///
     /// # Panics
-    /// If surface tension is negative or non-finite, or a fluid cell touches
+    /// If surface tension is outside the conservative explicit capillary-wave
+    /// domain [`crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT`], or a fluid cell touches
     /// a gas cell after interface insertion (impossible by construction).
     #[must_use]
     pub fn new(mut grid: Grid, sigma: f64, contact: ContactModel) -> FreeSurface {
         assert!(
-            sigma.is_finite() && sigma >= 0.0,
-            "surface tension must be finite and nonnegative"
+            crate::admit_explicit_capillary_coefficient(sigma),
+            "surface tension exceeds conservative explicit capillary-wave domain"
         );
         let (nx, ny) = (grid.nx, grid.ny);
         // Insert interface cells: any fluid cell with a gas neighbor.
@@ -577,11 +578,12 @@ impl FreeSurface {
     /// + stream, conversion cascade with conservative redistribution.
     ///
     /// # Panics
-    /// If the publicly editable surface tension is negative or non-finite.
+    /// If the publicly editable surface tension leaves the conservative
+    /// explicit capillary-wave domain. Refuses before mutating physical state.
     pub fn step(&mut self) {
         assert!(
-            self.sigma.is_finite() && self.sigma >= 0.0,
-            "surface tension must be finite and nonnegative"
+            crate::admit_explicit_capillary_coefficient(self.sigma),
+            "surface tension exceeds conservative explicit capillary-wave domain"
         );
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         self.refresh_fill();
@@ -996,5 +998,18 @@ mod capillary_tests {
                 assert!(state.u[0].hypot(state.u[1]) < 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn g0_public_capillarity_change_refuses_before_the_dense_step_mutates_state() {
+        let mut sim = planar_wall_fixture();
+        let populations = sim.grid.f.clone();
+        let mass = sim.mass.clone();
+        let flags = sim.grid.flags.clone();
+        sim.sigma = 1.01 * crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT;
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.step())).is_err());
+        assert_eq!(sim.grid.f, populations);
+        assert_eq!(sim.mass, mass);
+        assert_eq!(sim.grid.flags, flags);
     }
 }

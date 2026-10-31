@@ -96,6 +96,34 @@ pub struct MaterialFreeSurface3<'a> {
     scaling: MaterialFreeSurfaceScaling<'a>,
 }
 
+/// Conservative maximum explicit capillary-wave timestep [s] for this liquid
+/// and grid spacing, `sqrt(rho*dx^3/(4*pi*sigma))`.
+///
+/// Returns `None` only when capillarity is explicitly neglected. This helper is
+/// available before a momentum plan is constructed, so the caller can choose
+/// a timestep satisfying capillary, viscosity and Mach constraints together.
+/// For evolving surface tension, use the largest admitted sigma (or recompute
+/// for each candidate source state). Native and evolving-material entrypoints
+/// enforce this same wave-resolution bound. The outer gas supplies pressure,
+/// not inertia. See [`crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT`] for the model
+/// assumptions; the result does not certify stability or interface accuracy.
+pub fn maximum_capillary_timestep_s(
+    material: &ResolvedLiquidSurfaceState,
+    cell_size_m: f64,
+) -> Result<Option<f64>, MaterialLbmError> {
+    positive(cell_size_m, "free-surface cell width must be finite and positive")?;
+    let Some(sigma) = material.surface_tension_n_m() else {
+        return Ok(None);
+    };
+    // Square roots before products avoid overflowing rho*dx^3 or underflowing
+    // dx^3 for otherwise representable physical time scales.
+    let time = (material.density_kg_m3().sqrt() / sigma.sqrt())
+        * cell_size_m.sqrt()
+        * crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT.sqrt()
+        * cell_size_m;
+    positive(time, "capillary-wave timestep is unrepresentable").map(Some)
+}
+
 /// Compile a liquid source bundle's reference momentum/capillary scaling.
 /// Frozen constructors refuse a source with required rheology evolution;
 /// the dedicated enthalpy/rheology constructor resolves it at every flow state.
@@ -104,11 +132,14 @@ pub struct MaterialFreeSurface3<'a> {
 /// The native bounded-curvature pressure reconstruction must remain strictly
 /// positive at either sign of its curvature limit. This prevents a known
 /// inadmissible boundary density; it does not establish low compressibility,
-/// capillary-wave convergence or a contact-angle law.
+/// capillary-wave convergence or a contact-angle law. Independently, the
+/// conservative capillary-wave bound from [`maximum_capillary_timestep_s`]
+/// must hold even for zero imposed flow velocity.
 ///
 /// # Errors
 /// Refuses the shared viscosity/relaxation/Mach/dx/dt gates, unrepresentable SI
-/// units, and a surface coefficient exceeding the native reconstruction domain.
+/// units, and a surface coefficient exceeding the native reconstruction or
+/// explicit capillary-wave domain.
 pub fn plan_free_surface_from_material(
     material: &ResolvedLiquidSurfaceState,
     cell_size_m: f64,
@@ -163,6 +194,11 @@ fn capillary_scaling(
             "surface tension and scaling can produce nonpositive native capillary boundary density",
         ));
     }
+    if !crate::admit_explicit_capillary_coefficient(surface_tension_lattice) {
+        return Err(MaterialLbmError::Invalid(
+            "timestep exceeds conservative explicit capillary-wave bound; use maximum_capillary_timestep_s",
+        ));
+    }
     Ok(surface_tension_lattice)
 }
 
@@ -195,6 +231,14 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// Native uniform surface-tension coefficient; zero means explicitly omitted.
     #[must_use]
     pub const fn surface_tension_lattice(&self) -> f64 { self.surface_tension_lattice }
+
+    /// Ratio of the selected timestep to the conservative capillary-wave
+    /// maximum. Zero means capillarity is explicitly omitted; admitted plans
+    /// are at most one up to conversion roundoff. This is not an error estimate.
+    #[must_use]
+    pub fn capillary_timestep_ratio(&self) -> f64 {
+        (self.surface_tension_lattice / crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT).sqrt()
+    }
 
     /// Worst capillary reference-density excursion from the native curvature
     /// clamp. This is a numerical bound, not a predicted actual interface value.

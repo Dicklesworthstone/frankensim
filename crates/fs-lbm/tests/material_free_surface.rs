@@ -5,7 +5,8 @@
 use fs_evidence::ValidityDomain;
 use fs_lbm::d3q19::freesurface3::{ContactModel3, FreeSurface3};
 use fs_lbm::material::free_surface::{
-    MaterialFreeSurfaceDomain3, MaterialFreeSurfaceScaling, plan_free_surface_from_material,
+    MaterialFreeSurfaceDomain3, MaterialFreeSurfaceScaling, maximum_capillary_timestep_s,
+    plan_free_surface_from_material,
 };
 use fs_lbm::material::plan_scaling_from_material;
 use fs_lbm::CS2;
@@ -270,4 +271,67 @@ fn capillary_reconstruction_and_allocation_domains_refuse_before_construction() 
     // Native clamp is the same owner used by the scaling admission.
     near(valid.capillary_density_excursion_bound(),
         valid.surface_tension_lattice() * FreeSurface3::CURVATURE_LIMIT / CS2, 1e-14);
+}
+
+#[test]
+fn g1_capillary_timestep_resolves_the_shortest_wave_and_scales_with_material_and_mesh() {
+    let source = liquid(1_000.0, 0.1, Some(0.01));
+    let dx = 0.001;
+    let limit = maximum_capillary_timestep_s(&source, dx).unwrap().unwrap();
+    // Independent inviscid dispersion omega^2 = sigma*k^3/rho. Two waves
+    // travelling in opposite directions cannot cover more than one cell in dt.
+    let k = core::f64::consts::PI / dx;
+    let omega = (0.01 * k.powi(3) / 1_000.0).sqrt();
+    near(2.0 * omega / k * limit, dx, 3e-15);
+    for (scale, expected) in [(0.25_f64, 0.125), (4.0, 8.0)] {
+        let refined = maximum_capillary_timestep_s(&source, dx * scale).unwrap().unwrap();
+        near(refined / limit, expected, 3e-15);
+    }
+    for (rho, sigma, expected) in [(4_000.0, 0.01, 2.0), (1_000.0, 0.04, 0.5),
+        (2_000.0, 0.02, 1.0)] {
+        let changed = liquid(rho, 0.1, Some(sigma));
+        let changed_limit = maximum_capillary_timestep_s(&changed, dx).unwrap().unwrap();
+        near(changed_limit / limit, expected, 3e-15);
+    }
+    let at_limit = plan_free_surface_from_material(&source, dx, limit, 0.0).unwrap();
+    near(at_limit.capillary_timestep_ratio(), 1.0, 3e-15);
+    let shorter = plan_free_surface_from_material(&source, dx, limit * 0.25, 0.0).unwrap();
+    near(shorter.capillary_timestep_ratio(), 0.25, 3e-15);
+}
+
+#[test]
+fn g0_zero_speed_and_positive_pressure_do_not_admit_underresolved_capillary_waves() {
+    use fs_lbm::material::MaterialLbmError;
+    let source = liquid(1_000.0, 0.1, Some(0.01));
+    let dx = 0.001;
+    let limit = maximum_capillary_timestep_s(&source, dx).unwrap().unwrap();
+    let dt = 1.1 * limit;
+    let sigma_lattice = 0.01 * dt.powi(2) / (1_000.0 * dx.powi(3));
+    assert!(sigma_lattice * FreeSurface3::CURVATURE_LIMIT / CS2 < 1.0);
+    assert!(matches!(
+        plan_free_surface_from_material(&source, dx, dt, 0.0),
+        Err(MaterialLbmError::Invalid(reason)) if reason.contains("capillary-wave")
+    ));
+    // Changing only source sigma tightens the bound for the same real timeline.
+    let stronger = liquid(1_000.0, 0.1, Some(0.04));
+    assert!(plan_free_surface_from_material(&source, dx, 0.75 * limit, 0.0).is_ok());
+    assert!(plan_free_surface_from_material(&stronger, dx, 0.75 * limit, 0.0).is_err());
+    let omitted = liquid(1_000.0, 0.1, None);
+    assert_eq!(maximum_capillary_timestep_s(&omitted, dx).unwrap(), None);
+    let no_capillarity = plan_free_surface_from_material(&omitted, dx, dt, 0.0).unwrap();
+    assert_eq!(no_capillarity.capillary_timestep_ratio(), 0.0);
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(maximum_capillary_timestep_s(&source, invalid).is_err());
+        assert!(maximum_capillary_timestep_s(&omitted, invalid).is_err());
+    }
+    // Native transferred-state ingress shares the same gate, independently of
+    // the material constructor. The coefficient refuses before missing cells.
+    let gate = fs_exec::CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        use fs_lbm::d3q19::freesurface3::FreeSurfaceError3;
+        assert!(matches!(FreeSurface3::from_cells([8; 3], 0.8, [0.0; 3],
+            sigma_lattice, ContactModel3::Neutral, &[], &[], cx),
+            Err(FreeSurfaceError3::InvalidInitialState { reason, .. })
+                if reason.contains("capillary-wave")));
+    });
 }

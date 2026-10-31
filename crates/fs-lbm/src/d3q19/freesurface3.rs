@@ -387,7 +387,8 @@ impl FreeSurface3 {
     /// # Errors
     /// As [`FreeSurface3::new`]; also refuses nonfinite/negative tension or a
     /// coefficient that can make the clamped capillary boundary density
-    /// nonpositive via [`FreeSurfaceError3::InvalidInitialState`].
+    /// nonpositive or exceed [`crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT`] via
+    /// [`FreeSurfaceError3::InvalidInitialState`].
     ///
     /// # Panics
     /// If interface insertion fails to separate fluid from gas, or if a
@@ -408,6 +409,12 @@ impl FreeSurface3 {
             return Err(FreeSurfaceError3::InvalidInitialState {
                 coordinates: None,
                 reason: "capillary boundary density can be nonpositive",
+            });
+        }
+        if !crate::admit_explicit_capillary_coefficient(sigma) {
+            return Err(FreeSurfaceError3::InvalidInitialState {
+                coordinates: None,
+                reason: "surface tension exceeds conservative explicit capillary-wave bound",
             });
         }
         let mut grid = SparseGrid3::new(nx, ny, nz, tau, gravity)?;
@@ -1632,6 +1639,24 @@ mod capillary_boundary_tests {
                 Err(FreeSurfaceError3::InvalidInitialState { .. })
             ));
         }
+    }
+
+    #[test]
+    fn g0_capillary_wave_admission_is_stricter_than_positive_boundary_pressure() {
+        let limit = crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT;
+        let excessive = 1.01 * limit;
+        assert!(excessive * FreeSurface3::CURVATURE_LIMIT / CS2_3 < 1.0);
+        assert!(matches!(
+            FreeSurface3::new(8, 8, 8, 0.8, [0.0; 3], excessive,
+                ContactModel3::Neutral, |_, _, _| panic!("refuse before geometry")),
+            Err(FreeSurfaceError3::InvalidInitialState { reason, .. })
+                if reason.contains("capillary-wave")
+        ));
+        let mut surface = FreeSurface3::new(8, 8, 8, 0.8, [0.0; 3], limit,
+            ContactModel3::Neutral, |_, _, z| z < 4).unwrap();
+        let mass = surface.ledger_mass();
+        surface.step().unwrap();
+        assert!((surface.ledger_mass() - mass).abs() < 1e-12);
     }
 
     #[test]

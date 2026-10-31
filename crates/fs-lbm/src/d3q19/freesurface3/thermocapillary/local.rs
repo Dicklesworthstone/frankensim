@@ -440,6 +440,11 @@ impl FreeSurface3 {
                     "extrapolated surface tension exceeds native pressure-boundary domain",
                 ));
             }
+            if !crate::admit_explicit_capillary_coefficient(surface_sigma) {
+                return Err(invalid(
+                    "extrapolated surface tension exceeds conservative explicit capillary-wave bound",
+                ));
+            }
             let normal_gradient = dot(gradient, patch.outward_normal);
             let force = core::array::from_fn(|d| {
                 (gradient[d] - normal_gradient * patch.outward_normal[d]) * patch.area
@@ -564,6 +569,11 @@ impl FreeSurface3 {
             if !value.is_finite() || value <= 0.0 || value * Self::CURVATURE_LIMIT / CS2_3 >= 1.0 {
                 return Err(invalid(
                     "extended surface tension exceeds native pressure-boundary domain",
+                ));
+            }
+            if !crate::admit_explicit_capillary_coefficient(value) {
+                return Err(invalid(
+                    "extended surface tension exceeds conservative explicit capillary-wave bound",
                 ));
             }
             extension.push((location, value));

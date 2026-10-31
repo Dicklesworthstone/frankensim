@@ -53,6 +53,11 @@ impl FreeSurface3 {
                         "local surface tension exceeds native pressure-boundary domain",
                     ));
                 }
+                if !crate::admit_explicit_capillary_coefficient(sigma) {
+                    return Err(invalid(
+                        "local surface tension exceeds conservative explicit capillary-wave bound",
+                    ));
+                }
                 count += 1;
             }
         }
@@ -590,6 +595,24 @@ mod tests {
         assert!(candidate.rebind_surface_tensions(missing, &gate).is_err());
         assert!(candidate.local_sigma.is_none());
         assert_eq!(before, candidate.grid().state_bits());
+    }
+
+    #[test]
+    fn g0_local_capillary_timestep_refuses_a_late_source_change_before_rebinding() {
+        let gate = CancelGate::new_clock_free();
+        let mut surface = FreeSurface3::new(8, 8, 8, 0.8, [0.0; 3], 0.01,
+            ContactModel3::Neutral, |_, _, z| z < 4).unwrap();
+        let accepted = field(&surface, |_| 0.02);
+        surface.rebind_surface_tensions(accepted.clone(), &gate).unwrap();
+        let before = surface.grid().state_bits();
+        let mass = surface.ledger_mass().to_bits();
+        let mut changed = accepted.clone();
+        *changed.last_entry().unwrap().get_mut() = 1.01 * crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT;
+        assert!(matches!(surface.rebind_surface_tensions(changed, &gate),
+            Err(FreeSurfaceError3::Transport(reason)) if reason.contains("capillary-wave")));
+        assert_eq!(surface.local_sigma.as_ref(), Some(&accepted));
+        assert_eq!(surface.grid().state_bits(), before);
+        assert_eq!(surface.ledger_mass().to_bits(), mass);
     }
 
     fn graph_surface(axis: usize, sign: i8, height: impl Fn(f64, f64) -> f64) -> FreeSurface3 {

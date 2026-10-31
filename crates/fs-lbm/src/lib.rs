@@ -81,6 +81,28 @@ pub(crate) const OPP: [usize; Q] = [0, 3, 4, 1, 2, 7, 8, 5, 6];
 /// The lattice sound speed squared `c_s² = 1/3`.
 pub const CS2: f64 = 1.0 / 3.0;
 
+/// Conservative explicit capillary-wave coefficient bound at unit reference
+/// density, unit cell width and one lattice timestep: `sigma <= 1/(4*pi)`.
+///
+/// At the shortest resolved wavelength `2*dx`, the inviscid capillary phase
+/// speed is `sqrt(pi*sigma/(rho*dx))`. Requiring that two counterpropagating
+/// waves travel at most one cell per step gives
+/// `dt <= sqrt(rho*dx^3/(4*pi*sigma))`. The free-surface owners model liquid
+/// inertia and an imposed gas pressure, so no unmodeled gas density is added.
+/// This conservative wave-resolution policy is separate from the Mach,
+/// collision, curvature and pressure-admissibility conditions; it is not a
+/// theorem of stability for the complete LBM/VOF discretization.
+/// See Denner et al., JCP (2022),
+/// <https://www.sciencedirect.com/science/article/pii/S0021999122001905>.
+pub const EXPLICIT_CAPILLARY_LATTICE_LIMIT: f64 = 1.0 / (4.0 * core::f64::consts::PI);
+
+/// Permit only roundoff from the SI-to-lattice conversions at the boundary.
+pub(crate) fn admit_explicit_capillary_coefficient(sigma: f64) -> bool {
+    sigma.is_finite()
+        && sigma >= 0.0
+        && sigma <= EXPLICIT_CAPILLARY_LATTICE_LIMIT * (1.0 + 16.0 * f64::EPSILON)
+}
+
 /// The D2Q9 equilibrium distribution at density `rho` and velocity `(ux, uy)`.
 #[must_use]
 pub fn equilibrium(rho: f64, ux: f64, uy: f64) -> [f64; Q] {

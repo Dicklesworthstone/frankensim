@@ -2802,6 +2802,26 @@ speed. `tests/material_free_surface.rs` covers dimensional Young-Laplace
 bookkeeping, material similitude, separate viscosity/capillary substitutions in
 real native evolution, mass accounting, Guo samples and domain refusals.
 
+An independent conservative explicit capillary-wave admission now requires
+`dt <= sqrt(rho0*dx^3/(4*pi*sigma))`, equivalently native sigma at most
+`EXPLICIT_CAPILLARY_LATTICE_LIMIT = 1/(4*pi)`. The pressure-only outer phase
+does not contribute gas inertia. This bounds the combined travel of two
+counterpropagating shortest resolved waves (`lambda = 2*dx`) to one cell per
+timestep; it remains a conservative wave-resolution policy, not a proof of
+complete LBM/VOF stability or convergence. Positive reconstructed density and
+zero advective Mach alone do not satisfy it. The dense D2Q9 constructor and
+every public-sigma step, sparse D3Q19 construction, physical source scaling,
+and local/extrapolated thermocapillary source updates share the same bound.
+No collision/curvature/pressure evolution is changed for admitted states.
+The helper `maximum_capillary_timestep_s` exposes the physical maximum before
+constructing a plan; `capillary_timestep_ratio` reports its consumed fraction.
+Explicitly neglected tension has no capillary limit. Source-temperature or
+interface extrapolation increases that exceed the bound refuse before accepted
+fluid/thermal state publication. The focused G0/G1 tests check independent
+wave dispersion, dx^(3/2) and material scaling, positive-pressure refusal,
+zero-tension behavior and unchanged state after rejected coefficient updates.
+These checks do not establish measured capillary-wave convergence.
+
 ### Sourced equilibrium angle at one planar domain wall
 
 `MaterialFreeSurfaceScaling::with_planar_wetting` binds a

@@ -87,6 +87,12 @@ impl FreeSurface3 {
                 "capillary boundary density can be nonpositive",
             ));
         }
+        if !crate::admit_explicit_capillary_coefficient(sigma) {
+            return Err(refused(
+                None,
+                "surface tension exceeds conservative explicit capillary-wave bound",
+            ));
+        }
         let tile_dims = cells.map(|n| n / TILE);
         let mut solid = BTreeSet::new();
         for &(tx, ty, tz) in solid_tiles {
