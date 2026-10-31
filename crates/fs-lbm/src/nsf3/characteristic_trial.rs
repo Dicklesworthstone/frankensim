@@ -374,6 +374,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             wall_out: self.wall_out, open: self.open,
             characteristic_pressure_offset_pa: self.characteristic_pressure_offset_pa,
             characteristic_inflow_temperature_k: self.characteristic_inflow_temperature_k,
+            characteristic_thermal_policy: self.characteristic_thermal_policy,
             characteristic_patch: self.characteristic_patch,
             open_faces: self.open_faces.clone(),
             reservoir_faces: self.reservoir_faces, open_out: self.open_out,

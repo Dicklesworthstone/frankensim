@@ -383,6 +383,52 @@ returning acoustic disturbances according to a fixed-pressure condition; it is
 not a nonreflecting boundary. All original source, pressure-perturbation,
 temperature and Mach restrictions still apply.
 
+### Advective–diffusive thermal contacts
+
+The optional row immediately after `characteristic` selects the thermal policy
+on the low and high faces, independently of which face couples to the bore:
+
+```text
+characteristic_thermal enthalpy-flux upwind-entropy
+```
+
+The typed equivalent is
+`NsfGrid3::with_characteristic_thermal_policy([low, high])` with
+`NsfCharacteristicThermalPolicy::{UpwindEntropy, EnthalpyFlux}`.
+Omitting the row, or selecting `upwind-entropy` twice, retains the existing
+boundary trajectory. The face and its optional rectangular patch share the
+selected policy while retaining their independently declared pressure controls.
+
+For `enthalpy-flux`, incoming gas supplies its upstream enthalpy through the
+original advective and conductive energy flux. The face temperature solves
+
+```text
+abs(rho_face * u_outward) * (h_face - h_upstream)
+    + (2 * conductivity / dx) * (T_face - T_cell) = 0
+```
+
+within the interval between upstream and adjacent-cell temperatures. The same
+original material owns density, sensible enthalpy and conductivity; the same face
+owns incoming populations, thermal-pressure force and conservative energy.
+An explicit pressure-temperature drive supplies the upstream temperature.
+Other controls retain the original isentropic reference temperature at the
+reconstructed face pressure. Outgoing and stationary flow use the adjacent
+lattice temperature exactly, giving zero conductive flux.
+
+This is an enthalpy-influx (Danckwerts) thermal condition; see the
+[primary inflow-boundary theory](https://doc.comsol.com/6.3/doc/com.comsol.help.heat/heat_ug_theory.07.009.html).
+It removes the selected thermal donor jump as inflow tends to zero without
+fitting a blend width, adding a heat source or changing the acoustic pressure
+condition. Tangential velocity retains its existing donor selection, so this
+does not establish general flow-reversal support or a transparent boundary.
+
+Policy selection is cold-only and travels through original trial/rollback
+state. Nonzero SGS is refused with this policy until its boundary-dependent
+gradient and heat coefficient can be resolved together; explicit zero SGS
+remains molecular transport. The warm-ramp example selects this thermal contact
+on both faces. Neither the example nor these numerical regressions establishes
+measured instrument fidelity or finite player thermal capacity.
+
 ### Finite upstream acoustic feedback
 
 `NsfDg::with_upstream_load` attaches a second original `DgPortLoad` to the other
@@ -637,6 +683,7 @@ bulk_viscosity BULK_TO_SHEAR_RATIO SOURCE_TOKEN
 wall adiabatic
 [optional sgs exploration MODEL COEFFICIENT FILTER_WIDTH_LU MAX_EDDY_TO_MOLECULAR TURBULENT_PRANDTL]
 characteristic AXIS low|high MAX_RELATIVE_PERTURBATION
+[optional characteristic_thermal LOW_POLICY HIGH_POLICY; each upwind-entropy|enthalpy-flux]
 [optional coupled_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
 [optional source_patch START0 END0 START1 END1 pressure REMAINDER_OFFSET_PA]
 [optional reservoir_apertures APERTURE_COUNT; repeat the following aperture block APERTURE_COUNT times]

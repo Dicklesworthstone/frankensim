@@ -23,7 +23,8 @@ use fs_exec::CancelGate;
 use fs_lbm::d3q27::D3q27;
 use fs_lbm::nsf3::{
     NsfBoundaryDrive, NsfCharacteristicAxis, NsfCharacteristicBoundary, NsfCharacteristicPatch,
-    NamedMixtureNsfGas, NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfReservoirAperture, NsfSgsConfig, NsfSpec,
+    NamedMixtureNsfGas, NsfCharacteristicThermalPolicy, NsfError, NsfGasMedium, NsfGrid3,
+    NsfOpenState, NsfReservoirAperture, NsfSgsConfig, NsfSpec,
     ThermochemicalNsfGas, WallThermal, MAX_NSF_RESERVOIR_APERTURES,
 };
 use fs_lbm::sgs3::{SgsConfig, SgsModel, SgsUse};
@@ -322,6 +323,20 @@ impl ResolvedDgFilePerformance {
         let maximum_relative_perturbation = row.scalar()?;
         row.end()?;
         if axis >= 3 || periodic[axis] { return Err(bad(rows.line, "characteristic axis must be a nonperiodic physical axis")); }
+        let characteristic_thermal = if rows.next_is("characteristic_thermal") {
+            let mut row = rows.row("characteristic_thermal")?;
+            let mut policies = [NsfCharacteristicThermalPolicy::UpwindEntropy; 2];
+            for policy in &mut policies {
+                *policy = match row.word()? {
+                    "upwind-entropy" => NsfCharacteristicThermalPolicy::UpwindEntropy,
+                    "enthalpy-flux" => NsfCharacteristicThermalPolicy::EnthalpyFlux,
+                    _ => return Err(bad(row.line,
+                        "characteristic thermal policy requires upwind-entropy or enthalpy-flux")),
+                };
+            }
+            row.end()?;
+            Some(policies)
+        } else { None };
         let mut characteristic_patches = [None; 2];
         loop {
             let (record, patch_high, physical) = if rows.next_is("coupled_patch") { ("coupled_patch", high, false) }
@@ -736,6 +751,10 @@ impl ResolvedDgFilePerformance {
         let mut zone = zone.with_characteristic_axis(NsfCharacteristicAxis {
             axis, faces: [face; 2], maximum_relative_perturbation,
         }).map_err(ResolvedDgInputError::Flow)?;
+        if let Some(policies) = characteristic_thermal {
+            zone = zone.with_characteristic_thermal_policy(policies)
+                .map_err(ResolvedDgInputError::Flow)?;
+        }
         for (side, patch) in characteristic_patches.iter().enumerate() {
             if let Some((patch, background)) = patch {
                 let mut drives = zone.boundary_drives().expect("constructed characteristic axis");

@@ -447,6 +447,13 @@ pub(super) fn resolved_provenance(
             config.closure.filter_width_lu * law.dx_m, config.closure.maximum_eddy_to_molecular,
             config.turbulent_prandtl, system.zone().sgs_config().is_some())
     });
+    let thermal_policy = system.zone().characteristic_thermal_policy().map(|policy| match policy {
+        fs_lbm::nsf3::NsfCharacteristicThermalPolicy::UpwindEntropy => "upwind-entropy",
+        fs_lbm::nsf3::NsfCharacteristicThermalPolicy::EnthalpyFlux => "enthalpy-flux",
+    });
+    let characteristic_thermal = format!(
+        ",\"characteristic_thermal_policy\":{{\"low\":\"{}\",\"high\":\"{}\"}}",
+        thermal_policy[0], thermal_policy[1]);
     let aperture = [
         (system.coupled_face_is_high(), "coupled_patch",
             "selected aperture pressure, volume flow and acoustic work feed the bore; complete face mass and energy include escaping flow; no exterior radiation observer on the remainder"),
@@ -459,7 +466,7 @@ pub(super) fn resolved_provenance(
             fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(value) => ("incoming-characteristic", value, "m/s", String::new()),
             fs_lbm::nsf3::NsfBoundaryDrive::PressureTemperature { pressure_offset_pa, inflow_temperature_k } =>
                 ("prescribed-pressure-and-inflow-temperature", pressure_offset_pa, "Pa",
-                    format!(",\"inflow_temperature_k\":{inflow_temperature_k:e},\"temperature_scope\":\"prescribed only at inward flow; outgoing entropy remains fluid-owned\"")),
+                    format!(",\"inflow_temperature_k\":{inflow_temperature_k:e},\"temperature_scope\":\"upstream temperature for inward flow; face trace or enthalpy influx follows the selected thermal policy\"")),
         };
         let open = system.zone().characteristic_axis().expect("original characteristic axis");
         Some(format!(",\"{name}\":{{\"normal_axis\":{},\"high_face\":{},\"start\":[{},{}],\"end\":[{},{}],\"bounds\":\"half-open original cells on increasing tangential axes\",\"remainder_boundary\":{{\"kind\":\"{kind}\",\"value\":{value:e},\"units\":\"{units}\"{temperature}}},\"scope\":\"{scope}\"}}",
@@ -537,7 +544,7 @@ pub(super) fn resolved_provenance(
     }
     let boundary = match renderer.drive_history().first().expect("finite native drive history") {
         fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::PressureTemperature { .. }) =>
-            ",\"external_boundary\":{\"kind\":\"prescribed-pressure-and-inflow-temperature\",\"pressure_units\":\"Pa offset from source reference\",\"inflow_temperature_units\":\"K\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\",\"temperature\":\"held physical source temperature for inward flow; outgoing fluid entropy is retained\",\"material\":\"original source equation of state, caloric and transport laws; fixed composition\"}",
+            ",\"external_boundary\":{\"kind\":\"prescribed-pressure-and-inflow-temperature\",\"pressure_units\":\"Pa offset from source reference\",\"inflow_temperature_units\":\"K\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\",\"temperature\":\"held physical upstream temperature for inward flow; the selected thermal policy owns face temperature and conduction\",\"material\":\"original source equation of state, caloric and transport laws; fixed composition\"}",
         fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::PressureOffset(_)) =>
             ",\"external_boundary\":{\"kind\":\"prescribed-pressure-offset\",\"units\":\"Pa\",\"reference\":\"original source-face material pressure\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\"}",
         fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::IncomingCharacteristic(_)) =>
@@ -599,7 +606,7 @@ pub(super) fn resolved_provenance(
         load.propagator().dt(), info.physical_intervals,
         load.propagator().dt() * info.physical_intervals as f64,
         info.sample_rate_hz, info.samples, info.samples as f64 / f64::from(info.sample_rate_hz));
-    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"boundary_ramps\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{sgs}{aperture}{reservoir}{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}{reservoir_observation}{reservoir_feedback}{finite_reservoir}}}",
+    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"boundary_ramps\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{sgs}{characteristic_thermal}{aperture}{reservoir}{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}{reservoir_observation}{reservoir_feedback}{finite_reservoir}}}",
         info.input_hash.to_hex(), info.dimensions[0], info.dimensions[1], info.dimensions[2],
         info.solid_cells, info.initial_state_cells, info.boundary_segments, info.boundary_ramps, law.dx_m, law.dt_s,
         limits.substeps, law.bulk_to_shear_ratio, json_string(system.zone().bulk_ratio_source()),

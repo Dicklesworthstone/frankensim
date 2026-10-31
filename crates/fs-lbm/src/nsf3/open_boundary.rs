@@ -5,6 +5,8 @@
 //! prescribed. For acoustic controls, entropy and tangential characteristics
 //! travel at the reference normal speed; stationary modes retain the interior.
 //! An explicit pressure/temperature source retains its actual inflow donor.
+//! An optional enthalpy-flux thermal contact instead balances upstream heat
+//! advection against the original Fourier flux; tangential donors are unchanged.
 //! This is the local linear, plane-normal rung of characteristic
 //! boundaries (Poinsot & Lele, JCP 101 (1992), 104-129,
 //! doi:10.1016/0021-9991(92)90046-2), not the full nonlinear NSCBC scheme.
@@ -22,6 +24,9 @@
 
 use super::{NsfError, NsfGrid3, NsfSgsTransport, Q, THETA0, check_state, equilibrium};
 use crate::lattice3::Lattice3;
+
+mod enthalpy;
+pub use enthalpy::NsfCharacteristicThermalPolicy;
 
 mod patch;
 pub use patch::NsfCharacteristicPatch;
@@ -58,9 +63,10 @@ pub enum NsfBoundaryDrive {
     /// Hold the reconstructed face pressure minus its reference pressure [Pa].
     /// Each local outgoing characteristic determines the resulting flow.
     PressureOffset(f64),
-    /// Hold pressure offset [Pa] and incoming gas temperature [K]. Temperature
-    /// is imposed only where the reconstructed normal flow is inward; outgoing
-    /// and stationary faces retain the adjacent fluid's entropy characteristic.
+    /// Hold pressure offset [Pa] and upstream gas temperature [K]. Temperature
+    /// feeds only inward flow. The selected thermal policy uses it as either
+    /// the incoming trace or upstream enthalpy; outgoing and stationary faces
+    /// retain that policy's adjacent-fluid thermal condition.
     /// This is an ideal thermal source of the original fixed composition, not
     /// stagnation temperature, a finite player inventory or species injection.
     PressureTemperature {
@@ -609,16 +615,31 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 } else {
                     normal_reference >= 0.0
                 };
-                let entropy_temperature = if outward_convected {
-                    ti - reference.temperature - alpha * (pi - reference.pressure)
+                // Preserve the original acoustic donor selection and arithmetic
+                // unless this face explicitly selects an enthalpy-flux contact.
+                let thermal_theta = if self.characteristic_thermal_policy[side]
+                    == NsfCharacteristicThermalPolicy::EnthalpyFlux
+                {
+                    Some(self.enthalpy_flux_theta(
+                        theta[i], pi, pressure, normal / velocity_unit,
+                        inflow_temperature.unwrap_or(reference.temperature
+                            + alpha * (pressure - reference.pressure)),
+                    )?)
+                } else { None };
+                let temperature = if let Some(face_theta) = thermal_theta {
+                    self.law.kelvin_of_theta(face_theta)
                 } else {
-                    0.0
-                };
-                let temperature = match inflow_temperature.filter(|_| normal < 0.0) {
-                    Some(temperature) => temperature,
-                    None => reference.temperature
-                        + alpha * (pressure - reference.pressure)
-                        + entropy_temperature,
+                    let entropy_temperature = if outward_convected {
+                        ti - reference.temperature - alpha * (pi - reference.pressure)
+                    } else {
+                        0.0
+                    };
+                    match inflow_temperature.filter(|_| normal < 0.0) {
+                        Some(temperature) => temperature,
+                        None => reference.temperature
+                            + alpha * (pressure - reference.pressure)
+                            + entropy_temperature,
+                    }
                 };
                 let mut velocity = if outward_convected {
                     ui
@@ -643,7 +664,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
                 let face_rho =
                     pressure / (self.law.gas_constant * temperature * self.law.rho_ref_kg_m3);
-                let face_theta = self.law.theta_of_kelvin(temperature);
+                // Keep exact adjacent theta for stationary/outgoing thermal
+                // contacts; a kelvin round trip would create spurious heat.
+                let face_theta = thermal_theta.unwrap_or_else(|| self.law.theta_of_kelvin(temperature));
                 let face_u = velocity.map(|v| v / velocity_unit);
                 let material = self.spec.gas.resolve(&self.law, face_rho, face_theta)?;
                 let gamma = match &material {

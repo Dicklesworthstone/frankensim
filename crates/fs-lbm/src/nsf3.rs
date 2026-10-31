@@ -81,7 +81,7 @@ mod open_boundary;
 use open_boundary::{BoundaryFlux, CharacteristicPatchBinding, IncomingPopulations, OpenFaces};
 pub use open_boundary::{
     NsfBoundaryDrive, NsfBoundaryExchange, NsfBoundaryTrace, NsfCharacteristicAxis,
-    NsfCharacteristicBoundary, NsfCharacteristicPatch,
+    NsfCharacteristicBoundary, NsfCharacteristicPatch, NsfCharacteristicThermalPolicy,
 };
 mod characteristic_trial;
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
@@ -570,6 +570,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     open: Option<NsfCharacteristicAxis>,
     characteristic_pressure_offset_pa: [Option<f64>; 2],
     characteristic_inflow_temperature_k: [Option<f64>; 2],
+    characteristic_thermal_policy: [NsfCharacteristicThermalPolicy; 2],
     characteristic_patch: [Option<CharacteristicPatchBinding>; 2],
     open_faces: Option<OpenFaces>,
     reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
@@ -772,6 +773,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             open: None,
             characteristic_pressure_offset_pa: [None; 2],
             characteristic_inflow_temperature_k: [None; 2],
+            characteristic_thermal_policy: [NsfCharacteristicThermalPolicy::UpwindEntropy; 2],
             characteristic_patch: [None; 2],
             open_faces: None,
             reservoir_faces: [[None; 2]; 3],
@@ -1969,6 +1971,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 feed(side as f64);
                 feed(self.characteristic_pressure_offset_pa[side].expect("thermal pressure drive"));
                 feed(*temperature);
+            }
+        }
+        // The default contributes no bits, preserving the existing trajectory
+        // identity. Tag 4 belongs to independent reservoir topology.
+        for (side, policy) in self.characteristic_thermal_policy.iter().enumerate() {
+            if *policy == NsfCharacteristicThermalPolicy::EnthalpyFlux {
+                feed(5.0);
+                feed(side as f64);
             }
         }
         h

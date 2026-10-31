@@ -3561,6 +3561,32 @@ acoustic-only control or a finite exterior material history. No donor smoothing
 or nonlinear entropy/enthalpy transport through an attached acoustic duct is
 implied. Both paths retain the same original face material and conservative flux.
 
+An explicit cold-only `with_characteristic_thermal_policy([low, high])`
+can select `NsfCharacteristicThermalPolicy::EnthalpyFlux` independently on
+each original face, including its selected patch. The default `UpwindEntropy`
+retains the legacy trajectory and hash. For incoming outward-normal flow, the
+new face temperature balances source enthalpy influx with the same half-cell
+Fourier flux used by `open_energy_flux`:
+`abs(rho*u_n)*(h_face-h_upstream) + 2*kappa*(theta_face-theta_cell) = 0`
+in the original lattice chart. Density, conductivity and thermochemical
+sensible enthalpy come from the retained material; the calorically perfect
+branch uses the original frozen `law.gamma`. Conductivity is evaluated at
+the original mean face/cell temperature and pressure. A bounded solve stays
+between the cell and upstream temperatures and propagates material refusals.
+
+Outgoing and stationary flow use the adjacent lattice temperature exactly,
+with zero boundary conduction. An explicit pressure-temperature drive provides
+the upstream temperature; other drives retain the existing isentropic reference
+temperature at the reconstructed pressure. Normal acoustic and tangential
+characteristics are unchanged. Policy, native face states, trial clones and
+rollback remain with the original owner. Active SGS is refused in either
+attachment order until its boundary-dependent gradient/conductivity can be
+resolved simultaneously; an explicit zero coefficient retains molecular
+transport. This is a thermal contact, not full nonlinear NSCBC, general
+flow-reversal admission, finite player heat capacity or species transport.
+Focused independent-flux and native-input regressions accompany the selection;
+these checks do not establish measured instrument fidelity.
+
 The same reconstructed face supplies incoming populations (adjacent
 post-collision non-equilibrium extrapolation), the conservative thermal-pressure
 force and the original FV enthalpy/conduction/viscous-work flux. Face energy is

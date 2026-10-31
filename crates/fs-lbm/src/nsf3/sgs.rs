@@ -83,6 +83,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 "NSF SGS does not support complete prescribed-reservoir faces",
             ));
         }
+        if self.characteristic_thermal_policy.contains(&NsfCharacteristicThermalPolicy::EnthalpyFlux) {
+            return Err(NsfError::Input(
+                "enthalpy-flux characteristic thermal contacts do not yet support active SGS",
+            ));
+        }
         self.sgs = Some(config);
         let (rho, mom) = self.macro_fields(&self.f);
         let velocity = self.velocity_field(&rho, &mom, &self.force);
