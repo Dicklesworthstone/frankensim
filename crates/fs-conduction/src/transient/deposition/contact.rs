@@ -11,6 +11,9 @@ use fs_material::thermal::interface::ThermalInterfacePoint;
 use fs_matdb::ClaimSelection;
 use fs_qty::QuantitySpec;
 
+mod observer;
+pub use observer::{MaterialContactObserver, MaterialContactObserverError};
+
 /// Maximum contacts queried during one coefficient evaluation.
 pub const MAX_MATERIAL_NETWORK_CONTACTS: usize = 256;
 
@@ -60,6 +63,16 @@ pub struct ContactLinkSample {
     pub series: Option<SeriesThermalResistance>,
 }
 
+/// Source state at an actual thermal endpoint, independent of any held bulk G.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContactInterfaceState {
+    pub link: u64,
+    pub cells: [CellId; 2],
+    pub phases: [EquilibriumPhaseState; 2],
+    pub interface: InterfaceResistance,
+    pub area_m2: f64,
+}
+
 /// Add contact resistance to freshly evaluated BULK-ONLY link conductances.
 ///
 /// Invoke inside the existing backward-Euler or circuit/enthalpy coefficient
@@ -98,48 +111,21 @@ pub fn apply_material_contacts(
         if index > 0 && ordered[index-1].link == binding.link {
             return Err(invalid("a physical link cannot receive duplicate contact resistance"));
         }
-        let link = thermal.links().get(&binding.link).ok_or_else(|| invalid("inactive thermal contact"))?;
-        if [binding.sides[0].cell, binding.sides[1].cell] != [link.a, link.b] {
-            return Err(invalid("caloric sides must retain the original ordered link endpoints"));
-        }
-        let phase = |side: ContactCell<'_>| {
-            let cell = thermal.cells().get(&side.cell).ok_or_else(|| invalid("inactive contact cell"))?;
-            if cell.material_id != side.material_id
-                || !thermal.uses_material_law(side.material_id, side.curve as &dyn ThermalLaw) {
-                return Err(invalid("contact must use each cell's actual borrowed caloric owner"));
-            }
-            side.curve.state_at_specific_enthalpy(cell.specific_h_j_kg)
-                .map_err(|e| invalid(&e.to_string()))
-        };
-        let phases = [phase(binding.sides[0])?, phase(binding.sides[1])?];
-        let point = binding.point.at(phases).map_err(|e| invalid(&e.to_string()))?;
-        let name = format!("thermal-link-{}", binding.link);
-        let interface = match binding.selection {
-            ClaimSelection::Policy(policy) => InterfaceResistance::from_card(&name, binding.point.interface, &point, policy)?,
-            ClaimSelection::Pinned(id) => InterfaceResistance::from_card_pinned(&name, binding.point.interface, &point, id)?,
-        };
-        let claim = binding.point.interface.claims().claim(interface.receipt().selected)
-            .ok_or_else(|| invalid("selected contact source is absent"))?;
-        if claim.key.quantity() != QuantitySpec::dimensional(AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS) {
-            return Err(invalid("static dimensional contact resistance is required"));
-        }
-        if !claim.value.axes().all(|(axis, dims)| binding.point.is_response_axis(axis, dims)) {
-            return Err(invalid("contact response requires declared thermal/phase or typed fixed external coordinates"));
-        }
+        let source = resolve_contact(thermal, binding)?;
         let bulk = *bulk_conductances.get(&binding.link).ok_or_else(|| invalid("contact lacks explicit bulk conductance"))?;
-        if !bulk.is_finite() || bulk < 0.0 || !link.area_m2.is_finite() || link.area_m2 < 0.0 {
+        if !bulk.is_finite() || bulk < 0.0 || !source.area_m2.is_finite() || source.area_m2 < 0.0 {
             return Err(invalid("finite nonnegative bulk conductance and contact area required"));
         }
-        let (conductance, series) = if bulk == 0.0 || link.area_m2 == 0.0 { (0.0, None) } else {
+        let (conductance, series) = if bulk == 0.0 || source.area_m2 == 0.0 { (0.0, None) } else {
             let bulk_term = ThermalResistanceTerm::declared("bulk", 1.0/bulk,
                 ResistanceUncertainty::Unstated, "original bulk-only endpoint coefficient; source retained by caller")?;
-            let series = SeriesThermalResistance::new(vec![bulk_term, interface.term_for_area("contact", link.area_m2)?])?;
+            let series = SeriesThermalResistance::new(vec![bulk_term, source.interface.term_for_area("contact", source.area_m2)?])?;
             let g = 1.0/series.budget().value_k_per_w;
             if !g.is_finite() || g <= 0.0 { return Err(invalid("series contact conductance is unrepresentable")); }
             (g, Some(series))
         };
-        samples.push(ContactLinkSample { link:binding.link, cells:[link.a,link.b], phases, interface,
-            area_m2:link.area_m2, bulk_conductance_w_k:bulk, conductance_w_k:conductance, series });
+        samples.push(ContactLinkSample { link:binding.link, cells:source.cells, phases:source.phases, interface:source.interface,
+            area_m2:source.area_m2, bulk_conductance_w_k:bulk, conductance_w_k:conductance, series });
     }
     check(&mut cancelled)?;
     for sample in &samples {
@@ -147,6 +133,43 @@ pub fn apply_material_contacts(
         *bulk_conductances.get_mut(&sample.link).expect("validated coefficient") = sample.conductance_w_k;
     }
     Ok(samples)
+}
+
+// Keep initial, callback and endpoint source evaluation under one owner.
+// Endpoint admission must not invent a bulk coefficient merely to query R''.
+fn resolve_contact(
+    thermal: &DepositionSimulation<'_>, binding: &MaterialContactLink<'_>,
+) -> Result<ContactInterfaceState, ConductionError> {
+    let link = thermal.links().get(&binding.link).ok_or_else(|| invalid("inactive thermal contact"))?;
+    if [binding.sides[0].cell, binding.sides[1].cell] != [link.a, link.b] {
+        return Err(invalid("caloric sides must retain the original ordered link endpoints"));
+    }
+    let phase = |side: ContactCell<'_>| {
+        let cell = thermal.cells().get(&side.cell).ok_or_else(|| invalid("inactive contact cell"))?;
+        if cell.material_id != side.material_id
+            || !thermal.uses_material_law(side.material_id, side.curve as &dyn ThermalLaw) {
+            return Err(invalid("contact must use each cell's actual borrowed caloric owner"));
+        }
+        side.curve.state_at_specific_enthalpy(cell.specific_h_j_kg)
+            .map_err(|e| invalid(&e.to_string()))
+    };
+    let phases = [phase(binding.sides[0])?, phase(binding.sides[1])?];
+    let point = binding.point.at(phases).map_err(|e| invalid(&e.to_string()))?;
+    let name = format!("thermal-link-{}", binding.link);
+    let interface = match binding.selection {
+        ClaimSelection::Policy(policy) => InterfaceResistance::from_card(&name, binding.point.interface, &point, policy)?,
+        ClaimSelection::Pinned(id) => InterfaceResistance::from_card_pinned(&name, binding.point.interface, &point, id)?,
+    };
+    let claim = binding.point.interface.claims().claim(interface.receipt().selected)
+        .ok_or_else(|| invalid("selected contact source is absent"))?;
+    if claim.key.quantity() != QuantitySpec::dimensional(AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS) {
+        return Err(invalid("static dimensional contact resistance is required"));
+    }
+    if !claim.value.axes().all(|(axis, dims)| binding.point.is_response_axis(axis, dims)) {
+        return Err(invalid("contact response requires declared thermal/phase or typed fixed external coordinates"));
+    }
+    Ok(ContactInterfaceState { link: binding.link, cells: [link.a, link.b], phases,
+        interface, area_m2: link.area_m2 })
 }
 fn invalid(what: &str) -> ConductionError {
     ConductionError::Interface { interface:"material-network-contact".into(), what:what.into(),

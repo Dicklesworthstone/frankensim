@@ -24,6 +24,53 @@ rollback are preserved. Focused finite-plate regressions compare the native
 trajectory with an independently evaluated explicit recurrence, vary only
 emissivity, and check work-budget refusal. Source/time refinement remains needed.
 
+## Material contact sources on the shared thermal timeline
+
+`transient::deposition::contact::MaterialContactObserver<O>` joins the original
+ordered interface-source adapter to any compatible bulk-only deposition
+observer. Each selected active link must appear explicitly in the inner owner's
+fresh conductance map. The existing `apply_material_contacts` composes
+`1/G_bulk + R''/A` once; untargeted coefficients and all other physical hooks
+remain with the inner observer. Do not wrap an owner that already included the
+same interface resistance. The same corrected G reaches native pairwise heat
+and the native CFL bound, with no new thermal solve or heat-source injection.
+
+Attachment resolves and pins the original contact claim, checking each side's
+exact borrowed caloric owner, ordered material card and physical cell. Probing
+uses a cloned inner observer in its original begin/sources/conductances order;
+the retained inner physical history does not advance. Bound reference mass,
+body/segment/material identity, cell geometry, link endpoints, nominal area and
+separate surface coverage cannot silently change. Reprepare for changes to
+these physical bindings. Authored link conductance may change because the
+fresh bulk/contact law replaces that coefficient explicitly.
+
+Every actual starting state reevaluates contact resistance from the two distinct
+caloric temperatures and phase fractions. Pressure and other admitted external
+conditions remain explicitly held; this does not infer mechanical contact load,
+area, interfacial storage, spreading resistance or an arbitrary moving-contact
+law. A zero area/bulk conductance remains insulating but still validates source
+data. Original selected claims cannot switch when a support boundary is reached.
+The endpoint and post-event checks use the same source owner before the candidate
+is accepted, including when no later substep would query that endpoint.
+
+`last_samples` retains the attachment or most recent starting-state bulk/contact
+series evaluation. `endpoint_sources` separately reports actual final interface
+sources, without calling frozen bulk coefficients final-state evaluations.
+All observer hooks—including interval-dependent heat, reservoir conductances,
+internal transfers, events and timestep restrictions—are forwarded. The original
+bulk/source/checkpoint errors remain typed. The existing deep-clone transaction
+rolls back physical observers and enthalpy together on any refusal.
+
+This is the existing first-order explicit coefficient-freezing scheme; frozen
+CFL admission does not establish arbitrary nonlinear time accuracy. Tests in
+`deposition_contact/observer.rs` exercise complete hook forwarding, fresh series
+composition, actual latent-phase/contact feedback, conserved internal exchange,
+original bulk errors, source pinning and failed-step retry. The cross-physics
+fixture `fs-couple/tests/material_contact_motion.rs` composes the same observer
+with continuing material-driven friction, heat and articulated motion. Native
+execution must be reported separately from parsing and source review; these
+synthetic regressions do not establish measured contact accuracy.
+
 ## Source-paired spatial sensible-enthalpy transport
 
 `transient::enthalpy::material::MaterialEnthalpyTransport::from_isotropic_card`
