@@ -514,6 +514,32 @@ that physical correspondence. Focused tests in `heating_loads` exercise analytic
 off-centre work/momentum, continued heating, source-only density and expansion
 changes, and atomic refusal. Native execution is reported separately.
 
+## Buoyancy through gas and layered liquid reservoirs
+
+`hydrostatic::LayeredHydrostaticMedium` accepts an optional upper
+`FluidTransport` owner plus at most 32 strictly ordered, finite interface depths.
+Each original source supplies one retained density snapshot; density must not
+decrease downward. With no upper fluid the first interface is a free surface;
+with no interfaces a supplied gas or liquid fills the entire local reservoir.
+The original single-fluid `HydrostaticMedium` behavior is unchanged.
+
+Force is `-g integral rho dV`, acting through the displaced-fluid mass centroid.
+The geometric centroid and displaced mass remain separately available. Positive
+density-jump combinations of the existing analytic tetrahedral clips integrate
+force, torque and continuous pressure potential without subtracting nearly equal
+thin-layer cut volumes. Cached whole-envelope moments make the uniform ambient
+contribution O(1); load evaluation allocates nothing and polls at interfaces and
+cells. Both medium types advance through the same native kick-drift mechanics
+and absolute energy-defect gate, with fresh geometry at each endpoint.
+
+This is a frozen, piecewise constant-density, quasi-static reservoir model.
+Rebuilding it after source changes is model replacement. No waves, added mass,
+drag, capillarity, entrainment, unstable stratification, compressible atmospheric
+profile or finite-container reaction is claimed. The `hydrostatic` G1/G3/G4
+tests cover analytic three-fluid moments, gas pressure/temperature-dependent
+lift, force/torque potential derivatives, native motion, interfacial heave and
+transactional cancellation/source refusal.
+
 ## Source-bound creeping-flow motion of a sphere (MR57)
 
 `VolumeMoments::sphere` supplies analytic volume and centroidal moments to the

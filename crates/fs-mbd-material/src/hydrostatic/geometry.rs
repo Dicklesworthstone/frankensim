@@ -14,6 +14,7 @@ pub const MAX_DISPLACEMENT_CELLS: usize = 65_536;
 pub struct DisplacementMesh {
     cells: Vec<[Vec3; 4]>,
     volume_m3: f64,
+    centroid_body_m: Vec3,
 }
 impl DisplacementMesh {
     /// Admit an immutable displacement envelope in the original body frame.
@@ -27,13 +28,16 @@ impl DisplacementMesh {
             return Err(HydrostaticError::Invalid("displacement cell budget exceeded or empty mesh"));
         }
         let mut volume_m3 = 0.0;
+        let mut centroid_body_m = Vec3::new(0.0, 0.0, 0.0);
         for cell in &cells {
             poll(&mut cancelled)?;
-            volume_m3 = finite(volume_m3 + VolumeMoments::tetrahedron(*cell)
-                .map_err(HydrostaticError::Geometry)?.volume_m3())?;
+            let moments = VolumeMoments::tetrahedron(*cell).map_err(HydrostaticError::Geometry)?;
+            volume_m3 = finite(volume_m3 + moments.volume_m3())?;
+            centroid_body_m = finite_vec(centroid_body_m
+                + (moments.centroid_m()-centroid_body_m).scale(moments.volume_m3()/volume_m3))?;
         }
         poll(&mut cancelled)?;
-        Ok(Self { cells, volume_m3 })
+        Ok(Self { cells, volume_m3, centroid_body_m })
     }
 
     /// A centered cuboid envelope, partitioned into six straight tetrahedra.
@@ -54,10 +58,26 @@ impl DisplacementMesh {
 
     pub(super) fn submerged(&self, world_from_body: Se3, down: Vec3,
         surface: Vec3, cancelled: &mut impl FnMut() -> bool) -> Result<DisplacedVolume, HydrostaticError> {
+        self.submerged_below(world_from_body, down, surface, 0.0, cancelled)
+    }
+
+    pub(super) fn whole(&self, world_from_body: Se3, down: Vec3,
+        datum: Vec3) -> Result<DisplacedVolume, HydrostaticError> {
+        let direction = world_from_body.rotation().inverse().rotate(down)?;
+        let mean_depth = finite(down.dot(world_from_body.translation()-datum)
+            + direction.dot(self.centroid_body_m))?;
+        Ok(DisplacedVolume { volume_m3: self.volume_m3,
+            centroid_body_m: Some(self.centroid_body_m),
+            depth_integral_m4: finite(self.volume_m3*mean_depth)? })
+    }
+
+    pub(super) fn submerged_below(&self, world_from_body: Se3, down: Vec3,
+        datum: Vec3, interface_depth_m: f64,
+        cancelled: &mut impl FnMut() -> bool) -> Result<DisplacedVolume, HydrostaticError> {
         poll(cancelled)?;
         // Transform the plane once, not every vertex into a large world origin.
         let direction = world_from_body.rotation().inverse().rotate(down)?;
-        let origin_depth = finite(down.dot(world_from_body.translation()-surface))?;
+        let origin_depth = finite(down.dot(world_from_body.translation()-datum)-interface_depth_m)?;
         let mut sum = Accumulator::default();
         for cell in &self.cells {
             poll(cancelled)?;
@@ -88,7 +108,8 @@ pub struct DisplacedVolume {
 impl DisplacedVolume {
     /// Immersed volume [m3]; exactly zero for a dry envelope.
     pub const fn volume_m3(&self) -> f64 { self.volume_m3 }
-    /// Center of buoyancy in the ORIGINAL geometry frame; None when dry.
+    /// Geometric centroid in the ORIGINAL geometry frame; None when dry.
+    /// Equals the center of buoyancy only for a homogeneous fluid density.
     pub const fn centroid_body_m(&self) -> Option<Vec3> { self.centroid_body_m }
 }
 

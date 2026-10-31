@@ -1,6 +1,6 @@
 //! Re-evaluated hydrostatic loading around the existing rigid-body time step.
 use fs_material::fluid_transport::FluidTransport;
-use fs_mbd::{RigidBodyIntegrator, RigidBodyState, StepReceipt};
+use fs_mbd::{Gravity, RigidBodyIntegrator, RigidBodyState, StepReceipt};
 use crate::principal::{PrincipalBody, PrincipalFrame};
 use super::{DisplacementMesh, HydrostaticError, HydrostaticLoad, HydrostaticMedium, finite, poll};
 
@@ -83,35 +83,43 @@ impl<F: FluidTransport + ?Sized> HydrostaticMedium<'_, F> {
     pub(crate) fn step_frame(&self, mesh: &DisplacementMesh, body: &PrincipalFrame,
         state: RigidBodyState, controls: HydrostaticStepControls,
         mut cancelled: impl FnMut() -> bool) -> Result<HydrostaticStep, HydrostaticStepError> {
-        poll(&mut cancelled)?;
-        if !controls.duration_s.is_finite() || controls.duration_s <= 0.0
-            || !controls.maximum_energy_defect_j.is_finite() || controls.maximum_energy_defect_j <= 0.0 {
-            return Err(HydrostaticError::Invalid("positive finite timestep and absolute energy allowance required").into());
-        }
-        let load_before = self.load_frame(mesh, body, state, &mut cancelled)?;
-        poll(&mut cancelled)?;
-        let dynamics = RigidBodyIntegrator::new(self.gravity())
-            .step_kick_drift(state, body.properties(), load_before.wrench(), controls.duration_s)
-            .map_err(HydrostaticError::Dynamics)?;
-        let load_after = self.load_frame(mesh, body, dynamics.state_after, &mut cancelled)?;
-        let before = dynamics.diagnostics_before;
-        let after = dynamics.diagnostics_after;
-        let total_energy_before_j = finite(before.mechanical_energy + load_before.pressure_potential_j())?;
-        let total_energy_after_j = finite(after.mechanical_energy + load_after.pressure_potential_j())?;
-        // Separate storage differences before summing. Do not first subtract
-        // totals containing a potentially large common gravity reference.
-        let energy_defect_j = finite(
-            (after.translational_kinetic_energy-before.translational_kinetic_energy)
-            + (after.rotational_kinetic_energy-before.rotational_kinetic_energy)
-            + (after.gravitational_potential_energy-before.gravitational_potential_energy)
-            + (load_after.pressure_potential_j()-load_before.pressure_potential_j()))?;
-        if energy_defect_j.abs() > controls.maximum_energy_defect_j {
-            return Err(HydrostaticStepError::EnergyDefect {
-                defect_j: energy_defect_j, maximum_j: controls.maximum_energy_defect_j,
-            });
-        }
-        poll(&mut cancelled)?;
-        Ok(HydrostaticStep { dynamics, load_before, load_after,
-            total_energy_before_j, total_energy_after_j, energy_defect_j })
+        step_with_load(self.gravity(), body, state, controls, &mut cancelled,
+            |state, cancel| self.load_frame(mesh, body, state, cancel))
     }
+}
+
+pub(super) fn step_with_load<C: FnMut() -> bool>(gravity: Gravity, body: &PrincipalFrame,
+    state: RigidBodyState, controls: HydrostaticStepControls, cancelled: &mut C,
+    mut load: impl FnMut(RigidBodyState, &mut C) -> Result<HydrostaticLoad, HydrostaticError>)
+    -> Result<HydrostaticStep, HydrostaticStepError> {
+    poll(cancelled)?;
+    if !controls.duration_s.is_finite() || controls.duration_s <= 0.0
+        || !controls.maximum_energy_defect_j.is_finite() || controls.maximum_energy_defect_j <= 0.0 {
+        return Err(HydrostaticError::Invalid("positive finite timestep and absolute energy allowance required").into());
+    }
+    let load_before = load(state, cancelled)?;
+    poll(cancelled)?;
+    let dynamics = RigidBodyIntegrator::new(gravity)
+        .step_kick_drift(state, body.properties(), load_before.wrench(), controls.duration_s)
+        .map_err(HydrostaticError::Dynamics)?;
+    let load_after = load(dynamics.state_after, cancelled)?;
+    let before = dynamics.diagnostics_before;
+    let after = dynamics.diagnostics_after;
+    let total_energy_before_j = finite(before.mechanical_energy + load_before.pressure_potential_j())?;
+    let total_energy_after_j = finite(after.mechanical_energy + load_after.pressure_potential_j())?;
+    // Separate storage differences before summing. Do not first subtract
+    // totals containing a potentially large common gravity reference.
+    let energy_defect_j = finite(
+        (after.translational_kinetic_energy-before.translational_kinetic_energy)
+        + (after.rotational_kinetic_energy-before.rotational_kinetic_energy)
+        + (after.gravitational_potential_energy-before.gravitational_potential_energy)
+        + (load_after.pressure_potential_j()-load_before.pressure_potential_j()))?;
+    if energy_defect_j.abs() > controls.maximum_energy_defect_j {
+        return Err(HydrostaticStepError::EnergyDefect {
+            defect_j: energy_defect_j, maximum_j: controls.maximum_energy_defect_j,
+        });
+    }
+    poll(cancelled)?;
+    Ok(HydrostaticStep { dynamics, load_before, load_after,
+        total_energy_before_j, total_energy_after_j, energy_defect_j })
 }

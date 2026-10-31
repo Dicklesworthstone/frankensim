@@ -5,8 +5,11 @@
 //! the existing material compiler; fluid density comes from the same transport
 //! snapshot used by heat/flow consumers. The two densities are never conflated.
 //!
-//! Uniform gravity and homogeneous constant-density fluid, negligible density
-//! above the surface, prescribed hydrostatic reservoir. Gauge pressure is zero
+//! `HydrostaticMedium` has uniform gravity and homogeneous constant-density
+//! fluid, negligible density above the surface, prescribed hydrostatic reservoir.
+//! `LayeredHydrostaticMedium` also admits an overlying fluid and stable density
+//! layers, integrating displaced fluid mass and its centroid across interfaces.
+//! In the single-medium model gauge pressure is zero
 //! on the plane; uniform exterior pressure cancels on a closed envelope. No
 //! waves, drag, added mass, flooding, capillarity, compressible stratification
 //! or finite-container reaction is modeled. A gas snapshot is admissible only
@@ -17,9 +20,11 @@
 //! <https://farside.ph.utexas.edu/teaching/336L/Fluidhtml/node27.html>
 
 mod geometry;
+mod layered;
 mod step;
 pub use step::{HydrostaticStep, HydrostaticStepControls, HydrostaticStepError};
 pub use geometry::{DisplacedVolume, DisplacementMesh, MAX_DISPLACEMENT_CELLS};
+pub use layered::{HydrostaticLayer, LayeredHydrostaticMedium, MAX_HYDROSTATIC_LAYERS};
 
 use fs_ga::{GaError, Se3, Vec3};
 use fs_material::MaterialError;
@@ -73,14 +78,7 @@ impl<'a, F: FluidTransport + ?Sized> HydrostaticMedium<'a, F> {
     /// gravity. Both the gravity and the geometry use the same world frame.
     pub fn new(source: &'a F, gravity: Gravity, surface_point_world: Vec3) -> Result<Self, HydrostaticError> {
         finite_vec(surface_point_world)?;
-        let g = ga(gravity.acceleration_world());
-        let scale = g.x.abs().max(g.y.abs()).max(g.z.abs());
-        if scale == 0.0 { return Err(HydrostaticError::Invalid("hydrostatic surface requires nonzero gravity")); }
-        let scaled = g.scale(scale.recip());
-        let norm = scaled.dot(scaled).sqrt();
-        let gravity_magnitude = finite(scale * norm)?;
-        if gravity_magnitude <= 0.0 { return Err(HydrostaticError::Invalid("unrepresentable gravity magnitude")); }
-        let down_world = finite_vec(scaled.scale(norm.recip()))?;
+        let (down_world, gravity_magnitude) = gravity_direction(gravity)?;
         let transport = source.transport_state()?;
         Ok(Self { source, transport, gravity, gravity_magnitude, down_world, surface_point_world })
     }
@@ -128,9 +126,30 @@ impl<'a, F: FluidTransport + ?Sized> HydrostaticMedium<'a, F> {
         }
         let pressure_potential_j = finite(self.transport.density_kg_m3()
             * self.gravity_magnitude * displaced.depth_integral_m4)?;
-        let force = self.gravity.acceleration_world().scale(-mass);
+        let load = HydrostaticLoad::from_mass_moments(displaced, mass,
+            displaced.centroid_body_m(), pressure_potential_j, self.gravity, body, state)?;
+        poll(&mut cancelled)?;
+        Ok(load)
+    }
+}
+
+/// Immutable hydrostatic load. Its center of buoyancy is weighted by the
+/// displaced fluid mass; this equals the volume centroid in a uniform medium.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HydrostaticLoad {
+    displaced: DisplacedVolume,
+    displaced_mass_kg: f64,
+    center_world: Option<Vec3>,
+    pressure_potential_j: f64,
+    wrench: Wrench,
+}
+impl HydrostaticLoad {
+    fn from_mass_moments(displaced: DisplacedVolume, mass: f64,
+        center_body: Option<Vec3>, pressure_potential_j: f64, gravity: Gravity,
+        body: &PrincipalFrame, state: RigidBodyState) -> Result<Self, HydrostaticError> {
+        let force = gravity.acceleration_world().scale(-mass);
         finite_vec(ga(force))?;
-        let (center_world, torque) = match displaced.centroid_body_m() {
+        let (center_world, torque) = match center_body {
             None => (None, fs_mbd::Vec3::ZERO),
             Some(center) => {
                 let arm = body.arm_for_body_point(center)?;
@@ -140,29 +159,31 @@ impl<'a, F: FluidTransport + ?Sized> HydrostaticMedium<'a, F> {
                 (Some(ga(state.pose().point_world_from_body(arm)?)), torque)
             }
         };
-        poll(&mut cancelled)?;
-        Ok(HydrostaticLoad { displaced, center_world, pressure_potential_j,
+        Ok(Self { displaced, displaced_mass_kg: mass, center_world, pressure_potential_j,
             wrench: Wrench { force_world: force, torque_body: torque } })
     }
-}
-
-/// Immutable load: center of buoyancy is volume-weighted, not mass-weighted.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HydrostaticLoad {
-    displaced: DisplacedVolume,
-    center_world: Option<Vec3>,
-    pressure_potential_j: f64,
-    wrench: Wrench,
-}
-impl HydrostaticLoad {
     /// Integrated immersed geometry in the original body frame.
     pub const fn displaced(&self) -> DisplacedVolume { self.displaced }
+    /// Actual displaced fluid mass [kg], including all declared density layers.
+    pub const fn displaced_mass_kg(&self) -> f64 { self.displaced_mass_kg }
     /// World-space center of buoyancy [m], or None when completely dry.
     pub const fn center_of_buoyancy_world(&self) -> Option<Vec3> { self.center_world }
     /// Buoyancy alone, in the exact frames accepted by `RigidBodyIntegrator`.
     pub const fn wrench(&self) -> Wrench { self.wrench }
     /// Hydrostatic reservoir displacement potential [J]; zero when dry.
+    /// With an overlying fluid, the reference plane fixes a signed datum.
     pub const fn pressure_potential_j(&self) -> f64 { self.pressure_potential_j }
+}
+
+fn gravity_direction(gravity: Gravity) -> Result<(Vec3, f64), HydrostaticError> {
+    let g = ga(gravity.acceleration_world());
+    let scale = g.x.abs().max(g.y.abs()).max(g.z.abs());
+    if scale == 0.0 { return Err(HydrostaticError::Invalid("hydrostatic surface requires nonzero gravity")); }
+    let scaled = g.scale(scale.recip());
+    let norm = scaled.dot(scaled).sqrt();
+    let magnitude = finite(scale * norm)?;
+    if magnitude <= 0.0 { return Err(HydrostaticError::Invalid("unrepresentable gravity magnitude")); }
+    Ok((finite_vec(scaled.scale(norm.recip()))?, magnitude))
 }
 
 fn finite(x: f64) -> Result<f64, HydrostaticError> {
