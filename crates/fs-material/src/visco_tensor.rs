@@ -361,8 +361,9 @@ impl TensorPronyHistory {
             poll(&mut cancelled)?;
             let gram_rows = branch.resolved_gram_rows(factor);
             let d = apply(&gram_rows, &delta);
+            let ramp = crate::visco::PronyRamp::new(dt_s / branch.tau_s);
             for i in 0..6 {
-                let (next,mean,loss) = ramp(q[i],d[i],dt_s/branch.tau_s);
+                let (next, mean, loss) = ramp.apply(q[i], d[i]);
                 q[i]=next; work += mean*d[i]; heat += loss;
             }
             stored += 0.5*dot(q,q); transpose_add(&gram_rows,q,&mut stress);
@@ -404,6 +405,7 @@ impl TensorPronyHistory {
     }
 }
 
+#[cfg(test)]
 fn ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
     crate::visco::prony_ramp(q0, delta, r)
 }

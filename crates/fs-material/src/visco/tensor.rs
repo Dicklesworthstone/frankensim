@@ -18,7 +18,7 @@
 
 use crate::plane_stress_viscosity::MaterialPlane;
 use crate::tensor::{mandel_rotation, rotate_mandel};
-use crate::visco::{GeneralizedMaxwell, ViscoError, prony_ramp};
+use crate::visco::{GeneralizedMaxwell, PronyRamp, ViscoError};
 use fs_la::eigen::jacobi_eigh;
 use fs_math::c64::C64;
 use fs_math::det;
@@ -905,12 +905,12 @@ impl TensorProny {
             .zip(&self.branches)
             .zip(self.factors.iter().zip(&self.branch_tags))
         {
-            let r = dt / branch.tau_s;
+            let ramp = PronyRamp::new(dt / branch.tau_s);
             let q0 = *q_j;
             let mut q_next = [0.0f64; 6];
             let mut q_mean = [0.0f64; 6];
             for i in 0..6 {
-                let (nxt, mn, _) = prony_ramp(q0[i], d_eps[i], r);
+                let (nxt, mn, _) = ramp.apply(q0[i], d_eps[i]);
                 q_next[i] = nxt;
                 q_mean[i] = mn;
             }
@@ -939,12 +939,12 @@ impl TensorProny {
                 }
             }
 
-            // Heat by polarization: A·‖L_jᵀ s‖² + R·‖L_jᵀ δ‖² via prony_ramp on L_jᵀ coordinates.
+            // Heat by polarization: reuse the same ramp on L_jᵀ coordinates.
             let u0 = factor_transpose_vec(factor, &q0);
             let du = factor_transpose_vec(factor, &d_eps);
             let mut u_next = [0.0f64; 6];
             for k in 0..6 {
-                let (un, _, loss_k) = prony_ramp(u0[k], du[k], r);
+                let (un, _, loss_k) = ramp.apply(u0[k], du[k]);
                 u_next[k] = un;
                 step_dissipated += loss_k;
             }
