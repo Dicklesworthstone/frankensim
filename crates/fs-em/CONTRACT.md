@@ -239,6 +239,20 @@ This remains an explicitly held-power energy interval followed by field
 feedback, without a second PDE, a free plasma common-velocity gauge, or an
 additional `E.J` charge to either thermal pool.
 
+`tests/collisional_ionization_feedback.rs` combines the two paths in one
+reacting energy evolution. Both an ionizing parcel and a recombining parcel
+consume the original atomic impact/reverse law, neutral momentum source and
+Coulomb screening policy while carrier amounts and both temperatures change.
+Independent monatomic budgets include changing electron heat capacity,
+original chemical storage, both internal exchange channels and the one held
+native electrical-work input. The final populations invalidate the original
+Coulomb transport binding; an explicit refreshed model retains its original
+screening and domain limits. Tests check actual neutral-density drag, compare
+the final coupled conductivity with an independent two-fluid inverse and a
+counterfactual holding the old populations, then verify native field current,
+Joule power and circuit resistance. No equilibrium projection or additional
+material/PDE owner is introduced.
+
 ## Prescribed Eulerian moving-conductor induction
 
 `PlanarEddy::step_with_eulerian_velocity_candidate` continues the original
