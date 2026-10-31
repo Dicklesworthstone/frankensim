@@ -217,6 +217,43 @@ nonlinear magnetics, motion, skin/proximity losses, changing-material work or
 three-dimensional winding-end fields.
 
 
+## Differential winding inductance at nonlinear bias
+
+`winding::incremental::PlanarIncrementalWindingBasis` first solves the actual
+nonlinear DC field from signed spatial winding profiles and terminal currents,
+with the original material laws, fixed recoil sources and prescribed potential
+trace. The operating field must pass the native nonlinear residual gate.
+Its source-derived constitutive Hessian is then assembled once and reused by
+checked CG for every unit-current derivative; perturbations are zero on exactly
+the original prescribed vertices. The mesh and tangent remain sparse.
+
+The resulting symmetric terminal matrix is `L_diff = d(lambda)/di`, including
+declared linear end self-inductances. It is not `lambda/i` or `2W/i^2` in a
+saturated or biased core. Both radial `dH/dB` and transverse `H/B` tangent
+eigenvalues are retained. Every entry of the Hessian-energy Gram matrix must
+agree with the original `integral(dA/di_j * J_unit,i dV)` pairing within the
+explicit henry allowance. The existing inverse-residual gate admits the small
+terminal inverse. The original operating field, actual absolute flux, signed
+profiles, boundary, source identities and true-residual reports remain reachable.
+Voltage evaluates `L_diff di/dt` with all mutual terms and no voltage from a
+fixed remanent flux offset.
+
+Source H(B) corners refuse within a caller-declared tesla exclusion band;
+maximum-flux and recoil-envelope edges refuse because a two-sided derivative
+is not supported there. The band is not a field-error certificate. This is a
+local, reversible, fixed-temperature and fixed-geometry DC derivative, not an
+arbitrary-amplitude circuit law, changing-temperature work law, hysteresis
+model, skin/proximity impedance or three-dimensional end-field calculation.
+
+G1/G3/G4 regressions compare saturation with an independent two-mode analytic
+solution, including the full transverse tangent under nonzero boundary bias;
+check signed mutual/turn/depth scaling, explicit end storage and inverse action;
+compare independent nonlinear current perturbations; retain permanent flux
+without spurious induced voltage; and exercise source corners, field bounds,
+work limits, singular modes, nonconvergence and cancellation. The formulation
+follows [ANSYS Theory Reference §5.5](https://ansyshelp.ansys.com/public/Views/Secured/corp/v251/en/ans_thry/thy_emg6.html).
+These manufactured sources do not qualify an empirical core or device.
+
 ## Spatial material winding resistance and native-circuit heat
 
 `winding::ohmic::OhmicWindingCircuit` binds every active original magnetic

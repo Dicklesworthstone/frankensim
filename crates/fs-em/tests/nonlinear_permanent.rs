@@ -403,6 +403,11 @@ fn conductive_recoil_history_relaxes_toward_its_nonzero_bias_with_separate_losse
 
 #[test]
 fn native_winding_circuit_preserves_fixed_magnet_flux_without_inventing_source_work() {
+    use fs_em::winding::{
+        WindingConfig,
+        incremental::{IncrementalWindingConfig, PlanarIncrementalWindingBasis},
+    };
+
     let depth = 0.3;
     let br = 0.5;
     let mu = 1.0;
@@ -426,6 +431,39 @@ fn native_winding_circuit_preserves_fixed_magnet_flux_without_inventing_source_w
     )
     .unwrap();
     let profiles = winding::profiles(1);
+    for current in [-0.4, 0.0, 0.4] {
+        let incremental = PlanarIncrementalWindingBasis::new(
+            &problem,
+            profiles.clone(),
+            &winding::boundary(),
+            vec![current],
+            vec![0.02],
+            &[0.0; 8],
+            IncrementalWindingConfig {
+                winding: WindingConfig {
+                    max_windings: 1,
+                    max_basis_values: 1000,
+                    pairing_tolerance_h: 1e-10,
+                    current_balance_tolerance_turns: 1e-10,
+                    inverse_residual_tolerance: 1e-10,
+                },
+                minimum_smooth_field_margin_t: 1e-8,
+            },
+            induction::controls().nonlinear,
+            &mut || false,
+        )
+        .unwrap();
+        let derivative = 2.0 * depth * mu + 0.02;
+        common::near(incremental.inductance_h()[0], derivative);
+        common::near(
+            incremental.operating_flux_linkages_wb()[0],
+            2.0 * depth * br + derivative * current,
+        );
+        common::near(
+            incremental.voltage_from_current_rate_v(&[3.0]).unwrap()[0],
+            3.0 * derivative,
+        );
+    }
     let conductors: Vec<_> = (0..8)
         .map(|triangle| WindingConductor {
             triangle,

@@ -19,6 +19,8 @@
 //! from the same spatial material/profile data and retains explicit graph losses.
 
 pub mod circuit;
+/// Differential self/mutual inductance at a solved nonlinear operating point.
+pub mod incremental;
 /// Circuit-driven reversible nonlinear fields with spatial conductor losses.
 pub mod nonlinear;
 /// Spatial material-derived winding resistance and native-circuit Joule heat.
