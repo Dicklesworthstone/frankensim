@@ -104,7 +104,7 @@ mod radiation;
 mod simple;
 mod transient;
 pub mod turbulence;
-mod unsteady;
+pub(crate) mod unsteady;
 
 pub use buoyant::{
     FvBuoyancyConfig, FvNaturalConvection, FvNaturalConvectionReport, fv_natural_convection,

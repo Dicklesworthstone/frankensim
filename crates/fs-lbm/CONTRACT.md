@@ -3054,6 +3054,29 @@ negative expansion, endpoint source refusal and independent force convergence.
 Low-conductivity warm and fan-driven starts keep the caller's initial field;
 conductive initialization is reserved for unanchored, exactly zero-flow startup.
 
+The same `MaterialChtFluid::march_natural_convection` now supplies local source
+density, viscosity and conductivity to the original native unsteady CHT march.
+Each accepted temperature is sampled once per fluid cell; the three coefficient
+buffers are reused, and the last applied and endpoint source epochs and times
+are retained. Reference rho/Cp still own inertia, continuity, sensible storage
+and heat-capacity advection. Source support and density/Cp bounds are checked at
+the initial state and every endpoint, including the final returned temperature.
+A refused source endpoint or cancellation returns no partial solution.
+
+This path retains MAC velocity, pressure and BE/BDF2 history. Local molecular
+viscosity also refreshes geometric Darcy resistance. The exact original
+backward-Euler thermal storage, fixed-cell reservoir account and converged
+endpoint radiation remain in use with the admitted conductivity field. Solids
+retain explicit fixed heat capacity and grid-aligned conductivity; scalar beta,
+SGS/LVEL, independently authored eddy conductivity and dynamic solid tables
+cannot compete with the material owner. Material/thermal coupling is FIRST
+ORDER even when momentum uses BDF2; time-step refinement remains necessary.
+No variable-density enthalpy, viscous-heating or gravitational-storage account
+is implied. Added `tests/material_unsteady_buoyancy.rs` cases cover independent
+nonlinear-conductivity storage and signed Darcy BE/BDF2 recurrences, unchanged
+radiation/reservoir accounting, and final source/departure/cancellation refusal.
+These are regression definitions; adding them does not claim numerical execution.
+
 `LiquidFlowEnthalpyInput::feedback_boussinesq` admits the same pinned liquid
 and caloric sources for bounded density variation. It delegates to
 `MaterialFlowFeedback::try_new_boussinesq` and the existing `BoussinesqMaterial`

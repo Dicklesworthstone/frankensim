@@ -2,7 +2,7 @@
 
 use super::{
     AdvectiveEnthalpyField, ChtError, EnergyConfig, EnergySolution, FlowField, FluidProperties,
-    SolidMaterial, ThermalSetup, VoxelDomain, solve_energy_field,
+    PseudoStep, SolidMaterial, ThermalSetup, VoxelDomain, solve_energy_field,
 };
 use fs_exec::CancelGate;
 
@@ -40,14 +40,58 @@ impl EnergyConfig {
         molecular_w_m_k: &[[f64; 3]],
         gate: &CancelGate,
     ) -> Result<EnergySolution, ChtError> {
-        self.solve_with_fields(domain, fluid, solids, flow, setup, molecular_w_m_k, None, gate)
+        self.solve_with_fields(
+            domain,
+            fluid,
+            solids,
+            flow,
+            setup,
+            molecular_w_m_k,
+            None,
+            None,
+            gate,
+        )
+    }
+
+    /// Native transient storage and radiation reuse the same admitted material
+    /// field assembly, without translating storage into an external heat sink.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_step_with_conductivity(
+        &self,
+        domain: &VoxelDomain,
+        fluid: &FluidProperties,
+        solids: &[SolidMaterial],
+        flow: &FlowField,
+        setup: &ThermalSetup,
+        molecular_w_m_k: &[[f64; 3]],
+        step: &PseudoStep<'_>,
+        gate: &CancelGate,
+    ) -> Result<EnergySolution, ChtError> {
+        self.solve_with_fields(
+            domain,
+            fluid,
+            solids,
+            flow,
+            setup,
+            molecular_w_m_k,
+            None,
+            Some(step),
+            gate,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn solve_with_fields(
-        &self, domain: &VoxelDomain, fluid: &FluidProperties, solids: &[SolidMaterial],
-        flow: &FlowField, setup: &ThermalSetup, molecular_w_m_k: &[[f64; 3]],
-        enthalpy: Option<AdvectiveEnthalpyField<'_>>, gate: &CancelGate,
+        &self,
+        domain: &VoxelDomain,
+        fluid: &FluidProperties,
+        solids: &[SolidMaterial],
+        flow: &FlowField,
+        setup: &ThermalSetup,
+        molecular_w_m_k: &[[f64; 3]],
+        enthalpy: Option<AdvectiveEnthalpyField<'_>>,
+        step: Option<&PseudoStep<'_>>,
+        gate: &CancelGate,
     ) -> Result<EnergySolution, ChtError> {
         super::super::poll(gate)?;
         if molecular_w_m_k.len() != domain.cell_count() {
@@ -74,7 +118,7 @@ impl EnergyConfig {
             });
         }
         let solution = solve_energy_field(
-            domain, fluid, solids, flow, setup, self, None, None,
+            domain, fluid, solids, flow, setup, self, step, None,
             Some(molecular_w_m_k), enthalpy, gate,
         )?;
         super::super::poll(gate)?;
@@ -188,7 +232,7 @@ impl EnergyConfig {
             });
         }
         let solution = self.solve_with_fields(
-            domain, fluid, solids, flow, &stepped, molecular_w_m_k, enthalpy, gate,
+            domain, fluid, solids, flow, &stepped, molecular_w_m_k, enthalpy, None, gate,
         )?;
         let mut stored = 0.0;
         for (cell, ((&capacity, &old), &new)) in capacity_j_k.iter().zip(previous_k)

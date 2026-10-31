@@ -1,9 +1,12 @@
-//! Steady natural/mixed convection from one local material response.
+//! Steady and transient natural/mixed convection from one local material response.
 //!
 //! The existing Boussinesq projection owns reference mass and heat capacity;
 //! the existing variable-viscosity SIMPLEC and conductivity-field energy solvers
 //! own the discrete equations. This driver only closes their temperature
 //! feedback. It never replaces density response with an ideal-gas beta.
+
+mod unsteady;
+pub use unsteady::MaterialBuoyancyMarch;
 
 use super::{
     EnergyConfig, EnergySolution, FvFlow, MaterialChtFluid, SimpleConfig, SolidMaterial,

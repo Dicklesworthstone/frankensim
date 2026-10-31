@@ -5,10 +5,10 @@
 //! chooses a fluid by name nor invents another equation of state. Momentum,
 //! heat-capacity flux and molecular/eddy conductivity use that SAME snapshot.
 //! The forced-flow entry point freezes properties. [`buoyant`] explicitly closes
-//! source-resolved steady temperature feedback through these same numerical
-//! owners; neither path infers compressibility, chemistry or phase change.
+//! source-resolved steady or transient temperature feedback through these same
+//! numerical owners; neither path infers compressibility, chemistry or phase change.
 
-/// Closed, source-resolved steady buoyancy, viscosity and conductivity feedback.
+/// Source-resolved steady and transient buoyancy, viscosity and conductivity feedback.
 pub mod buoyant;
 /// Original solid material sources on the coupled fluid/solid temperature field.
 pub mod solid;

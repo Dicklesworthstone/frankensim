@@ -52,7 +52,7 @@ use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
 use super::simple::sgs::FvSgsConfig;
 use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
-use super::transient::{TransientRecord, energy_step, heat_capacity};
+use super::transient::{TransientRecord, energy_step_with_conductivity, heat_capacity};
 use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
 
@@ -503,8 +503,98 @@ pub fn march_conjugate_with_sgs(
     )
 }
 
-#[allow(clippy::too_many_arguments)] // one owner for all transient entry paths
+/// Reused per-voxel coefficient buffers; material sources remain in their
+/// adapter, while the native solver owns momentum, temperature and time.
+pub(crate) struct MaterialCoefficients {
+    pub viscosity_pa_s: Vec<f64>,
+    pub conductivity_w_m_k: Vec<[f64; 3]>,
+    pub force_n_m3: Vec<[f64; 3]>,
+}
+
+struct MaterialCoupling<'a, E> {
+    fields: &'a mut MaterialCoefficients,
+    refresh: &'a mut dyn FnMut(&[f64], &mut MaterialCoefficients) -> Result<(), E>,
+}
+
+/// Internal source-material seam on the same march. Typed source errors return
+/// unchanged; neither a second time owner nor a replacement energy ledger exists.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn march_conjugate_with_material<E: From<ChtError>>(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    initial_temperature: &[f64],
+    inlet_schedule: impl Fn(f64) -> f64,
+    power_schedule: impl Fn(f64) -> f64,
+    energy: &EnergyConfig,
+    radiation: Option<&RadiationConfig>,
+    fields: &mut MaterialCoefficients,
+    refresh: &mut dyn FnMut(&[f64], &mut MaterialCoefficients) -> Result<(), E>,
+    gate: &CancelGate,
+) -> Result<ConjugateMarch, E> {
+    march_conjugate_inner_with_material(
+        domain,
+        fluid,
+        solids,
+        setup,
+        config,
+        unsteady,
+        None,
+        None,
+        None,
+        Some(MaterialCoupling { fields, refresh }),
+        initial_temperature,
+        inlet_schedule,
+        power_schedule,
+        energy,
+        radiation,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn march_conjugate_inner(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    config: &SimpleConfig,
+    unsteady: &UnsteadyConfig,
+    sgs: Option<FvSgsConfig>,
+    wall_heat: Option<&mut wall_heat::Coupling<'_>>,
+    buoyancy: Option<&Boussinesq>,
+    initial_temperature: &[f64],
+    inlet_schedule: impl Fn(f64) -> f64,
+    power_schedule: impl Fn(f64) -> f64,
+    energy: &EnergyConfig,
+    radiation: Option<&RadiationConfig>,
+    gate: &CancelGate,
+) -> Result<ConjugateMarch, ChtError> {
+    march_conjugate_inner_with_material(
+        domain,
+        fluid,
+        solids,
+        setup,
+        config,
+        unsteady,
+        sgs,
+        wall_heat,
+        buoyancy,
+        None,
+        initial_temperature,
+        inlet_schedule,
+        power_schedule,
+        energy,
+        radiation,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // one owner for all transient entry paths
+fn march_conjugate_inner_with_material<E: From<ChtError>>(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
     solids: &[SolidMaterial],
@@ -514,22 +604,35 @@ fn march_conjugate_inner(
     sgs: Option<FvSgsConfig>,
     mut wall_heat: Option<&mut wall_heat::Coupling<'_>>,
     buoyancy: Option<&Boussinesq>,
+    mut material: Option<MaterialCoupling<'_, E>>,
     initial_temperature: &[f64],
     inlet_schedule: impl Fn(f64) -> f64,
     power_schedule: impl Fn(f64) -> f64,
     energy: &EnergyConfig,
     radiation: Option<&RadiationConfig>,
     gate: &CancelGate,
-) -> Result<ConjugateMarch, ChtError> {
+) -> Result<ConjugateMarch, E> {
     admit(domain, fluid, config)?;
     admit_unsteady(domain, config, unsteady)?;
+    if material.is_some()
+        && (buoyancy.is_some()
+            || sgs.is_some()
+            || wall_heat.is_some()
+            || config.turbulence != Turbulence::Laminar
+            || !setup.eddy_conductivity_w_m_k.is_empty())
+    {
+        return Err(ChtError::InvalidInput {
+            field: "unsteady.material",
+            reason: "material transport owns laminar buoyancy and conductivity; scalar beta, SGS and wall closures cannot be combined".into(),
+        }.into());
+    }
     if let Some(sgs) = sgs {
         sgs.validate()?;
         if setup.eddy_conductivity_w_m_k.iter().any(|&k| k != 0.0) {
             return Err(ChtError::InvalidInput {
                 field: "thermal.eddy_conductivity_w_m_k",
                 reason: "explicit SGS supplies the fluid eddy conductivity; a second field cannot be combined".into(),
-            });
+            }.into());
         }
     }
     let cells = domain.cell_count();
@@ -540,7 +643,7 @@ fn march_conjugate_inner(
                 "expected {cells} entries, got {}",
                 initial_temperature.len()
             ),
-        });
+        }.into());
     }
     for &t in initial_temperature {
         finite("unsteady.initial_temperature", t)?;
@@ -550,7 +653,7 @@ fn march_conjugate_inner(
             field: "thermal.compact_components",
             reason: "two-resistor compact models are steady; the transient march refuses them"
                 .into(),
-        });
+        }.into());
     }
     if let Some(b) = buoyancy {
         for g in b.gravity_m_s2 {
@@ -578,8 +681,16 @@ fn march_conjugate_inner(
     let mut mean_temperature = vec![0.0; cells];
     let mut energy_records = Vec::with_capacity(unsteady.steps);
     let mut stepped = setup.clone();
+    if let Some(coupling) = material.as_mut() {
+        (coupling.refresh)(&temperature, coupling.fields)?;
+    }
     for step in 1..=unsteady.steps {
         poll(gate)?;
+        if let Some(coupling) = material.as_ref() {
+            marcher.solver.set_material_transport(
+                &coupling.fields.viscosity_pa_s, Some(&coupling.fields.force_n_m3), gate,
+            )?;
+        }
         if let Some(b) = buoyancy {
             marcher.solver.set_force(
                 (0..cells)
@@ -623,7 +734,7 @@ fn march_conjugate_inner(
             .map(|wall| wall.prepare(&marcher.solver, &field, &stepped, gate))
             .transpose()?;
         let thermal = prepared_walls.as_ref().map_or(&stepped, |walls| &walls.thermal);
-        let (next, record) = energy_step(
+        let (next, record) = energy_step_with_conductivity(
             domain,
             fluid,
             solids,
@@ -634,8 +745,14 @@ fn march_conjugate_inner(
             &temperature,
             (time_s, unsteady.time_step_s, solids_present),
             radiators.as_ref().zip(radiation),
+            material.as_ref().map(|coupling| coupling.fields.conductivity_w_m_k.as_slice()),
             gate,
         )?;
+        // Validate every source at the accepted endpoint, including the final
+        // step, before exposing results. Reuse these fields for the next step.
+        if let Some(coupling) = material.as_mut() {
+            (coupling.refresh)(&next, coupling.fields)?;
+        }
         if let (Some(wall), Some(prepared)) = (wall_heat.as_deref_mut(), prepared_walls) {
             wall.record(prepared, &next, time_s, unsteady.time_step_s, gate)?;
         }

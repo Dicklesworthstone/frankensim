@@ -209,8 +209,42 @@ pub(crate) fn energy_step(
     radiation: Option<(&Radiators, &RadiationConfig)>,
     gate: &CancelGate,
 ) -> Result<(Vec<f64>, TransientRecord), ChtError> {
+    energy_step_with_conductivity(
+        domain,
+        fluid,
+        solids,
+        flow,
+        setup,
+        energy,
+        (capacity, storage),
+        previous,
+        (time_s, dt, solids_present),
+        radiation,
+        None,
+        gate,
+    )
+}
+
+/// The same storage, radiation and closure owner with an optional admitted
+/// source-material conductivity field frozen at the preceding temperature.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn energy_step_with_conductivity(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    energy: &EnergyConfig,
+    (capacity, storage): (&[f64], &[f64]),
+    previous: &[f64],
+    (time_s, dt, solids_present): (f64, f64, bool),
+    radiation: Option<(&Radiators, &RadiationConfig)>,
+    molecular_w_m_k: Option<&[[f64; 3]]>,
+    gate: &CancelGate,
+) -> Result<(Vec<f64>, TransientRecord), ChtError> {
     let (next, radiated_w, radiation_outflow_correction_w) = solve_step(
-        domain, fluid, solids, flow, setup, energy, storage, previous, radiation, gate,
+        domain, fluid, solids, flow, setup, energy, storage, previous, radiation,
+        molecular_w_m_k, gate,
     )?;
     let stored: f64 = capacity
         .iter()
@@ -273,23 +307,30 @@ fn solve_step(
     storage: &[f64],
     previous: &[f64],
     radiation: Option<(&Radiators, &RadiationConfig)>,
+    molecular_w_m_k: Option<&[[f64; 3]]>,
     gate: &CancelGate,
 ) -> Result<(EnergySolution, f64, f64), ChtError> {
-    let solve = |step: &ThermalSetup| {
-        solve_energy_inner(
-            domain,
-            fluid,
-            solids,
-            flow,
-            step,
-            energy,
-            // This is the time level, not the previous nonlinear iterate.
-            Some(&PseudoStep {
-                coefficient_w_k: storage,
-                previous,
-            }),
-            gate,
-        )
+    let solve = |setup: &ThermalSetup| {
+        // This is the time level, not the previous radiation iterate.
+        let step = PseudoStep {
+            coefficient_w_k: storage,
+            previous,
+        };
+        match molecular_w_m_k {
+            Some(field) => energy.solve_step_with_conductivity(
+                domain, fluid, solids, flow, setup, field, &step, gate,
+            ),
+            None => solve_energy_inner(
+                domain,
+                fluid,
+                solids,
+                flow,
+                setup,
+                energy,
+                Some(&step),
+                gate,
+            ),
+        }
     };
     let Some((radiators, controls)) = radiation else {
         return Ok((solve(setup)?, 0.0, 0.0));

@@ -1264,6 +1264,77 @@ impl<'a> Solver<'a> {
         self.set_inlet_speed(side, speed);
     }
 
+    /// Refresh admitted molecular transport on the retained native time levels.
+    /// Geometric Darcy resistance follows the same local viscosity; pressure
+    /// preconditioning is rebuilt, while velocity, pressure and BDF history stay.
+    /// Apply before any separately supplied phase drag, whose constitutive
+    /// response has its own material owner.
+    pub(super) fn set_material_transport(
+        &mut self,
+        dynamic_viscosity_pa_s: &[f64],
+        force_density_n_m3: Option<&[[f64; 3]]>,
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        poll(gate)?;
+        if dynamic_viscosity_pa_s.len() != self.domain.cell_count()
+            || self.config.turbulence != Turbulence::Laminar
+            || self.has_sgs()
+        {
+            return Err(ChtError::InvalidInput {
+                field: "simple.dynamic_viscosity_pa_s",
+                reason: "one molecular viscosity per voxel and the laminar closure are required"
+                    .into(),
+            });
+        }
+        for (c, &mu) in dynamic_viscosity_pa_s.iter().enumerate() {
+            if c % 256 == 0 {
+                poll(gate)?;
+            }
+            finite_positive("simple.dynamic_viscosity_pa_s", mu)?;
+            finite_positive("simple.kinematic_viscosity_m2_s", mu / self.rho)?;
+        }
+        if let Some(force) = force_density_n_m3 {
+            if force.len() != self.domain.cell_count() {
+                return Err(ChtError::InvalidInput {
+                    field: "simple.force_density_n_m3",
+                    reason: "one body-force vector per voxel is required".into(),
+                });
+            }
+            for (c, components) in force.iter().enumerate() {
+                if c % 256 == 0 {
+                    poll(gate)?;
+                }
+                for &value in components {
+                    finite("simple.force_density_n_m3", value)?;
+                    if !self.domain.is_fluid(c) && value != 0.0 {
+                        return Err(ChtError::InvalidInput {
+                            field: "simple.force_density_n_m3",
+                            reason: "body force must be zero in solid voxels".into(),
+                        });
+                    }
+                }
+            }
+        }
+        if self.molecular_viscosity.as_slice() != dynamic_viscosity_pa_s {
+            for (c, axes) in self.porous.iter_mut().enumerate() {
+                let previous = self.molecular_viscosity.get(c).copied().unwrap_or(self.mu);
+                for (viscous, _) in axes {
+                    *viscous = (*viscous / previous) * dynamic_viscosity_pa_s[c];
+                    finite("simple.material_darcy_resistance", *viscous)?;
+                }
+            }
+            self.molecular_viscosity.clear();
+            self.molecular_viscosity
+                .extend_from_slice(dynamic_viscosity_pa_s);
+            self.amg = None;
+        }
+        self.force.clear();
+        if let Some(force) = force_density_n_m3 {
+            self.force.extend_from_slice(force);
+        }
+        Ok(())
+    }
+
     /// Replace the per-cell body force (N/m^3; zero in solids).
     pub(super) fn set_force(&mut self, force: Vec<[f64; 3]>) {
         debug_assert_eq!(force.len(), self.domain.cell_count());
@@ -2419,52 +2490,8 @@ pub(super) fn material_solver_with_directional<'a>(
 ) -> Result<Solver<'a>, ChtError> {
     poll(gate)?;
     admit(domain, fluid, config)?;
-    if dynamic_viscosity_pa_s.len() != domain.cell_count()
-        || config.turbulence != Turbulence::Laminar
-    {
-        return Err(ChtError::InvalidInput {
-            field: "simple.dynamic_viscosity_pa_s",
-            reason: "one molecular viscosity per voxel and the laminar closure are required".into(),
-        });
-    }
-    for (c, &mu) in dynamic_viscosity_pa_s.iter().enumerate() {
-        if c % 256 == 0 {
-            poll(gate)?;
-        }
-        finite_positive("simple.dynamic_viscosity_pa_s", mu)?;
-        finite_positive("simple.kinematic_viscosity_m2_s", mu / fluid.density_kg_m3)?;
-    }
-    if let Some(force) = force_density_n_m3 {
-        if force.len() != domain.cell_count() {
-            return Err(ChtError::InvalidInput {
-                field: "simple.force_density_n_m3",
-                reason: "one body-force vector per voxel is required".into(),
-            });
-        }
-        for (c, components) in force.iter().enumerate() {
-            if c % 256 == 0 {
-                poll(gate)?;
-            }
-            for &value in components {
-                finite("simple.force_density_n_m3", value)?;
-                if !domain.is_fluid(c) && value != 0.0 {
-                    return Err(ChtError::InvalidInput {
-                        field: "simple.force_density_n_m3",
-                        reason: "body force must be zero in solid voxels".into(),
-                    });
-                }
-            }
-        }
-    }
     let mut solver = Solver::new(domain, fluid, config);
-    // Existing Darcy coefficients are linear in molecular viscosity. Keep
-    // their geometric/permeability owner and update only that coefficient.
-    for (c, axes) in solver.porous.iter_mut().enumerate() {
-        for (viscous, _) in axes {
-            *viscous = (*viscous / solver.mu) * dynamic_viscosity_pa_s[c];
-            finite("simple.material_darcy_resistance", *viscous)?;
-        }
-    }
+    solver.set_material_transport(dynamic_viscosity_pa_s, force_density_n_m3, gate)?;
     if let Some(drag) = drag_pa_s_m2 {
         if drag.len() != domain.cell_count() {
             return Err(ChtError::InvalidInput {
@@ -2516,10 +2543,6 @@ pub(super) fn material_solver_with_directional<'a>(
                 finite("simple.material_darcy_resistance", solver.porous[c][axis].0)?;
             }
         }
-    }
-    solver.molecular_viscosity = dynamic_viscosity_pa_s.to_vec();
-    if let Some(force) = force_density_n_m3 {
-        solver.set_force(force.to_vec());
     }
     Ok(solver)
 }
