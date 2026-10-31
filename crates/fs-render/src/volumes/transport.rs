@@ -20,6 +20,8 @@ mod cells;
 pub mod deposition;
 /// Physical emitting-cell direction proposals and their solid-angle density.
 pub mod emission;
+mod mixture;
+pub use mixture::{MAX_OPTICAL_MIXTURE_COMPONENTS, OpticalMixtureBudget};
 mod palette;
 pub use palette::{CellPalette, CellPaletteBudget};
 /// Spectral free flights and phase functions for physical participating media.
@@ -162,6 +164,8 @@ pub enum VolumeTransportError {
     ScatteringSpectrum,
     /// Empty optical palette, invalid model index, or cell-map length mismatch.
     Palette,
+    /// Empty mixture or a negative/nonfinite component mass weight.
+    Mixture,
     /// An explicitly sourced optical table requires a nonzero source identity.
     SourceIdentity,
     /// Invalid phase asymmetry, direction, or scattering angle.

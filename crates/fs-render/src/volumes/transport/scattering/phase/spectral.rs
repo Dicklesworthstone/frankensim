@@ -13,7 +13,8 @@ pub const MAX_PHASE_WAVELENGTHS: usize = 16;
 /// Each interval is the convex mixture of its two endpoint laws. This exactly
 /// normalizes the retained interpolant, not an underlying continuous Mie or
 /// measured law. Callers must refine wavelength and angular data independently.
-/// Nested spectral tables are refused; storage is shared outside path loops.
+/// Spectral tables and scattering mixtures cannot be endpoint laws; storage is
+/// shared outside path loops.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpectralPhaseTable {
     knots: Arc<[(f64, PhaseFunction)]>,
@@ -73,7 +74,10 @@ impl SpectralPhaseTable {
             || knots.iter().any(|(wavelength, phase)| {
                 !wavelength.is_finite()
                     || *wavelength <= 0.0
-                    || matches!(phase, PhaseFunction::SpectralTable(_))
+                    || matches!(
+                        phase,
+                        PhaseFunction::SpectralTable(_) | PhaseFunction::SpectralMixture(_)
+                    )
             })
             || knots.windows(2).any(|pair| pair[0].0 >= pair[1].0)
         {
@@ -151,8 +155,12 @@ impl PhaseFunction {
         if !wavelength.is_finite() || wavelength <= 0.0 {
             return Err(VolumeTransportError::Wavelength);
         }
-        if let Self::SpectralTable(table) = self {
-            let (lower, upper) = table.wavelength_bounds_nm();
+        let bounds = match self {
+            Self::SpectralTable(table) => Some(table.wavelength_bounds_nm()),
+            Self::SpectralMixture(mixture) => Some(mixture.wavelength_bounds_nm()),
+            _ => None,
+        };
+        if let Some((lower, upper)) = bounds {
             if !(lower..=upper).contains(&wavelength) {
                 return Err(VolumeTransportError::Wavelength);
             }
@@ -175,6 +183,7 @@ impl PhaseFunction {
                 }
                 Ok((1.0 - t) * a.eval_cos(cos_theta)? + t * b.eval_cos(cos_theta)?)
             }
+            Self::SpectralMixture(mixture) => mixture.eval_at(wavelength_nm, cos_theta),
             _ => self.eval_cos(cos_theta),
         }
     }
@@ -187,7 +196,7 @@ impl PhaseFunction {
         cos_theta: f64,
     ) -> Result<PhasePacketEvaluation<N>, VolumeTransportError> {
         validate_packet(self, wavelengths_nm)?;
-        if !matches!(self, Self::SpectralTable(_)) {
+        if !matches!(self, Self::SpectralTable(_) | Self::SpectralMixture(_)) {
             let pdf = self.eval_cos(cos_theta)?;
             return Ok(PhasePacketEvaluation {
                 value: [pdf; N],
@@ -209,7 +218,8 @@ impl PhaseFunction {
     /// Sample the uniform mixture of the complete wavelength packet.
     ///
     /// Conditional CDF remapping uses one variate for lane selection, spectral
-    /// endpoint selection, and angular sampling. The second supplies azimuth.
+    /// endpoint/component selection, and angular sampling. The second supplies
+    /// azimuth. Mixture components retain their own complete spectral laws.
     /// No allocation or cloned phase table occurs at a scattering vertex.
     pub fn sample_packet<const N: usize>(
         &self,
@@ -222,30 +232,20 @@ impl PhaseFunction {
         if !unit_variate(u_cos) || !unit_variate(u_azimuth) {
             return Err(VolumeTransportError::Sample);
         }
-        let Self::SpectralTable(table) = self else {
+        if !matches!(self, Self::SpectralTable(_) | Self::SpectralMixture(_)) {
             let PhaseSample { direction, pdf } = self.sample(incoming_travel, u_cos, u_azimuth)?;
             return Ok(PhasePacketSample {
                 direction,
                 pdf,
                 weight: [1.0; N],
             });
-        };
+        }
         let scaled = u_cos * N as f64;
         let lane = (scaled as usize).min(N - 1);
         let u = unit_below_one(scaled - lane as f64);
-        let (a, b, t) = table.interval(wavelengths_nm[lane]);
-        let (phase, u) = if t == 0.0 {
-            (a, u)
-        } else if t == 1.0 {
-            (b, u)
-        } else if u < 1.0 - t {
-            (a, unit_below_one(u / (1.0 - t)))
-        } else {
-            (b, unit_below_one((u - (1.0 - t)) / t))
-        };
-        let sampled = phase.sample(incoming_travel, u, u_azimuth)?;
-        let evaluation =
-            self.eval_packet(wavelengths_nm, incoming_travel.dot(sampled.direction))?;
+        let direction =
+            self.sample_direction_at(wavelengths_nm[lane], incoming_travel, u, u_azimuth)?;
+        let evaluation = self.eval_packet(wavelengths_nm, incoming_travel.dot(direction))?;
         if !(evaluation.pdf > 0.0) {
             return Err(VolumeTransportError::Unrepresentable);
         }
@@ -254,14 +254,44 @@ impl PhaseFunction {
             return Err(VolumeTransportError::Unrepresentable);
         }
         Ok(PhasePacketSample {
-            direction: sampled.direction,
+            direction,
             pdf: evaluation.pdf,
             weight,
         })
     }
+
+    // Inputs are admitted by sample_packet. Mixtures are flat, and spectral
+    // table endpoints are achromatic, so this dispatch has bounded depth.
+    pub(super) fn sample_direction_at(
+        &self,
+        wavelength_nm: f64,
+        incoming_travel: Vec3,
+        u_cos: f64,
+        u_azimuth: f64,
+    ) -> Result<Vec3, VolumeTransportError> {
+        match self {
+            Self::SpectralTable(table) => {
+                let (a, b, t) = table.interval(wavelength_nm);
+                let (phase, u) = if t == 0.0 {
+                    (a, u_cos)
+                } else if t == 1.0 {
+                    (b, u_cos)
+                } else if u_cos < 1.0 - t {
+                    (a, unit_below_one(u_cos / (1.0 - t)))
+                } else {
+                    (b, unit_below_one((u_cos - (1.0 - t)) / t))
+                };
+                Ok(phase.sample(incoming_travel, u, u_azimuth)?.direction)
+            }
+            Self::SpectralMixture(mixture) => {
+                mixture.sample_direction_at(wavelength_nm, incoming_travel, u_cos, u_azimuth)
+            }
+            _ => Ok(self.sample(incoming_travel, u_cos, u_azimuth)?.direction),
+        }
+    }
 }
 
-fn unit_below_one(value: f64) -> f64 {
+pub(super) fn unit_below_one(value: f64) -> f64 {
     // Only conditional-probability endpoint roundoff is adjusted, never a PDF.
     value.clamp(0.0, fs_math::next_down(1.0))
 }

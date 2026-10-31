@@ -65,7 +65,10 @@ impl HomogeneousMedium {
         {
             return Err(MediumError::Asymmetry);
         }
-        if matches!(phase, PhaseFunction::SpectralTable(_)) {
+        if matches!(
+            phase,
+            PhaseFunction::SpectralTable(_) | PhaseFunction::SpectralMixture(_)
+        ) {
             return Err(MediumError::SpectralPhase);
         }
         phase.eval_cos(0.0).map_err(|_| MediumError::Phase)?;
@@ -146,7 +149,9 @@ impl HomogeneousMedium {
                 .phase
                 .eval_cos(cosine)
                 .map_err(|_| MediumError::ScatteringCosine)?,
-            PhaseFunction::SpectralTable(_) => return Err(MediumError::SpectralPhase),
+            PhaseFunction::SpectralTable(_) | PhaseFunction::SpectralMixture(_) => {
+                return Err(MediumError::SpectralPhase);
+            }
         })
     }
 }

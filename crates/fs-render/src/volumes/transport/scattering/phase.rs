@@ -11,6 +11,8 @@ mod spectral;
 pub use spectral::{
     MAX_PHASE_WAVELENGTHS, PhasePacketEvaluation, PhasePacketSample, SpectralPhaseTable,
 };
+mod mixture;
+pub use mixture::{ScatteringMixtureComponent, SpectralPhaseMixture};
 
 const INV_FOUR_PI: f64 = 1.0 / (4.0 * core::f64::consts::PI);
 
@@ -39,6 +41,10 @@ pub enum PhaseFunction {
     /// Convex interpolation of normalized angular laws at vacuum wavelengths.
     /// Use the wavelength/packet methods; gray evaluation refuses this law.
     SpectralTable(SpectralPhaseTable),
+    /// Coexisting independent scatterers, weighted at each wavelength by
+    /// their mass loading times their original mass scattering coefficient.
+    /// Use the wavelength/packet methods; gray evaluation refuses this law.
+    SpectralMixture(SpectralPhaseMixture),
 }
 
 /// An importance-sampled unit travel direction and its solid-angle density.
@@ -110,6 +116,10 @@ impl PhaseFunction {
                 hash.update(&[5]);
                 table.hash_into(hash);
             }
+            Self::SpectralMixture(mixture) => {
+                hash.update(&[6]);
+                mixture.hash_into(hash);
+            }
         }
     }
 
@@ -139,7 +149,9 @@ impl PhaseFunction {
                 1.5 * INV_FOUR_PI * ((1.0 + d) + (1.0 - d) * c * c) / (2.0 + d)
             }
             Self::Tabulated(table) => table.eval_clamped(c),
-            Self::SpectralTable(_) => return Err(VolumeTransportError::Wavelength),
+            Self::SpectralTable(_) | Self::SpectralMixture(_) => {
+                return Err(VolumeTransportError::Wavelength);
+            }
         })
     }
 
@@ -184,7 +196,9 @@ impl PhaseFunction {
                 }
             }
             Self::Tabulated(table) => table.sample_cosine(u_cos)?,
-            Self::SpectralTable(_) => return Err(VolumeTransportError::Wavelength),
+            Self::SpectralTable(_) | Self::SpectralMixture(_) => {
+                return Err(VolumeTransportError::Wavelength);
+            }
         }
         .clamp(-1.0, 1.0);
         let sine = det::sqrt(((1.0 - cosine) * (1.0 + cosine)).max(0.0));

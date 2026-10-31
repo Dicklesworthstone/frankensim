@@ -162,7 +162,7 @@ impl<'a> ScatteringGrid<'a> {
                         &p.at_cell(cell).expect("admitted cell map").scattering
                     });
                     validate_extinction(a, s)?;
-                    active = s.knots().iter().any(|(_, value)| *value > 0.0);
+                    active = !s.is_zero();
                     last_pair = Some(pair);
                 }
                 has_scattering |= rho > 0.0 && active;
@@ -170,7 +170,7 @@ impl<'a> ScatteringGrid<'a> {
         } else {
             // Retain the existing uniform admission arithmetic and hash bytes.
             validate_extinction(&absorption.absorption, &scattering)?;
-            if scattering.knots().iter().any(|(_, k)| *k > 0.0) {
+            if !scattering.is_zero() {
                 for chunk in absorption.grid.data.chunks(1024) {
                     checkpoint(cx)?;
                     if chunk.iter().any(|density| *density > 0.0) {
@@ -245,19 +245,7 @@ fn validate_extinction(
 }
 
 fn hash_model(scattering: &MassScatteringSpectrum, phase: &PhaseFunction, hash: &mut DomainHasher) {
-    hash.update(&(scattering.spectrum.count as u64).to_le_bytes());
-    for &(wavelength, coefficient) in scattering.knots() {
-        hash.update(&wavelength.to_bits().to_le_bytes());
-        hash.update(&coefficient.to_bits().to_le_bytes());
-    }
-    if let Some(source) = scattering.source_identity() {
-        hash.update(b"source-table");
-        hash.update(source.as_bytes());
-    }
-    if let Some(reference) = scattering.rayleigh_reference_nm {
-        hash.update(b"rayleigh-power-four");
-        hash.update(&reference.to_bits().to_le_bytes());
-    }
+    scattering.hash_into(hash);
     phase.hash_into(hash);
 }
 

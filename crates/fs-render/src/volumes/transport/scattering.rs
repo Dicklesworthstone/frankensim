@@ -28,11 +28,13 @@ use fs_math::det;
 #[cfg(feature = "photometry")]
 mod contraction;
 mod indexed;
+mod mixture;
 mod phase;
 pub use indexed::ScatteringOptics;
 pub use phase::{
     MAX_PHASE_KNOTS, MAX_PHASE_WAVELENGTHS, PhaseFunction, PhasePacketEvaluation,
-    PhasePacketSample, PhaseSample, SpectralPhaseTable, TabulatedPhase,
+    PhasePacketSample, PhaseSample, ScatteringMixtureComponent, SpectralPhaseMixture,
+    SpectralPhaseTable, TabulatedPhase,
 };
 /// Incident power absorbed after any number of native scattering events.
 pub mod deposition;
@@ -51,6 +53,9 @@ pub struct MassScatteringSpectrum {
     // reference wavelength (retained in both slots for canonical hashing).
     spectrum: MassAbsorptionSpectrum,
     rayleigh_reference_nm: Option<f64>,
+    // A prepared sum can retain its linear part and an exact nonnegative
+    // inverse-fourth molecular contribution without retabulating either.
+    rayleigh_addend: Option<(f64, f64)>,
 }
 
 impl MassScatteringSpectrum {
@@ -60,6 +65,7 @@ impl MassScatteringSpectrum {
             .map(|spectrum| Self {
                 spectrum,
                 rayleigh_reference_nm: None,
+                rayleigh_addend: None,
             })
             .map_err(|_| VolumeTransportError::ScatteringSpectrum)
     }
@@ -71,6 +77,7 @@ impl MassScatteringSpectrum {
             .map(|spectrum| Self {
                 spectrum,
                 rayleigh_reference_nm: None,
+                rayleigh_addend: None,
             })
             .map_err(|_| VolumeTransportError::ScatteringSpectrum)
     }
@@ -86,6 +93,7 @@ impl MassScatteringSpectrum {
             .map(|spectrum| Self {
                 spectrum,
                 rayleigh_reference_nm: None,
+                rayleigh_addend: None,
             })
             .map_err(|error| match error {
                 VolumeTransportError::AbsorptionSpectrum => {
@@ -110,14 +118,23 @@ impl MassScatteringSpectrum {
     /// Evaluate the admitted coefficient without wavelength extrapolation.
     pub fn at(&self, wavelength_nm: f64) -> Result<f64, VolumeTransportError> {
         let value = self.spectrum.at(wavelength_nm)?;
-        let Some(reference) = self.rayleigh_reference_nm else {
-            return Ok(value);
-        };
-        let ratio = reference / wavelength_nm;
-        let square = ratio * ratio;
-        let result = value * square * square;
-        if !result.is_finite() || (value > 0.0 && result == 0.0) {
-            return Err(VolumeTransportError::Unrepresentable);
+        let mut result = value;
+        if let Some(reference) = self.rayleigh_reference_nm {
+            let ratio = reference / wavelength_nm;
+            let square = ratio * ratio;
+            result = value * square * square;
+            if !result.is_finite() || (value > 0.0 && result == 0.0) {
+                return Err(VolumeTransportError::Unrepresentable);
+            }
+        }
+        if let Some((reference, coefficient)) = self.rayleigh_addend {
+            let ratio = reference / wavelength_nm;
+            let square = ratio * ratio;
+            let extra = coefficient * square * square;
+            result += extra;
+            if !result.is_finite() || (coefficient > 0.0 && extra == 0.0) {
+                return Err(VolumeTransportError::Unrepresentable);
+            }
         }
         Ok(result)
     }
@@ -136,6 +153,7 @@ impl MassScatteringSpectrum {
             spectrum: MassAbsorptionSpectrum::constant(value_m2_kg)
                 .map_err(|_| VolumeTransportError::ScatteringSpectrum)?,
             rayleigh_reference_nm: Some(reference_nm),
+            rayleigh_addend: None,
         };
         result.at(crate::spectral::LAMBDA_MIN)?;
         result.at(crate::spectral::LAMBDA_MAX)?;
@@ -144,6 +162,24 @@ impl MassScatteringSpectrum {
 
     fn knots(&self) -> &[(f64, f64)] {
         &self.spectrum.knots[..self.spectrum.count]
+    }
+
+    fn is_zero(&self) -> bool {
+        self.knots().iter().all(|(_, value)| *value == 0.0)
+            && self.rayleigh_addend.is_none_or(|(_, value)| value == 0.0)
+    }
+
+    pub(in crate::volumes::transport) fn hash_into(&self, hash: &mut DomainHasher) {
+        super::mixture::hash_absorption(&self.spectrum, hash);
+        if let Some(reference) = self.rayleigh_reference_nm {
+            hash.update(b"rayleigh-power-four");
+            hash.update(&reference.to_bits().to_le_bytes());
+        }
+        if let Some((reference, coefficient)) = self.rayleigh_addend {
+            hash.update(b"additive-rayleigh-power-four");
+            hash.update(&reference.to_bits().to_le_bytes());
+            hash.update(&coefficient.to_bits().to_le_bytes());
+        }
     }
 }
 
@@ -481,9 +517,21 @@ impl<'a> ScatteringGrid<'a> {
         include_emission: bool,
     ) -> Result<FreeFlightSample<N>, VolumeTransportError> {
         if !self.has_scattering {
-            let result =
+            let result = if include_emission {
                 self.absorption
-                    .transport(cx, origin, direction, max_distance_m, wavelengths_nm)?;
+                    .transport(cx, origin, direction, max_distance_m, wavelengths_nm)?
+            } else {
+                SegmentTransport {
+                    transmittance: self.absorption.transmittance(
+                        cx,
+                        origin,
+                        direction,
+                        max_distance_m,
+                        wavelengths_nm,
+                    )?,
+                    emission_w_m2_sr_nm: [0.0; N],
+                }
+            };
             return Ok(FreeFlightSample {
                 event: None,
                 weight: result.transmittance,

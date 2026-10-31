@@ -106,12 +106,12 @@ fn max_albedo_upper(
     scattering: &MassScatteringSpectrum,
 ) -> f64 {
     let mut maximum = 0.0_f64;
-    // Between successive knots in the combined tables, s/(a+s) is a ratio
-    // of affine functions. Its derivative has constant sign wherever the
-    // denominator is positive, so extrema occur at the combined knots. For
-    // Rayleigh s=K/lambda^4 and a=A+B*lambda, stationary a/s has derivative
-    // lambda^3*(4A+5B*lambda)/K. Any stationary point in a>=0 is a maximum
-    // of a/s and therefore a minimum of albedo: endpoints still suffice.
+    // On each combined-knot interval, a=A+B*lambda and
+    // s=C+D*lambda+K/lambda^4, with a,s,K nonnegative. The sign of the
+    // albedo derivative is h=s'*a-s*a'; h'=s''*a=20*K*a/lambda^6 >= 0.
+    // Every interior stationary point is therefore a minimum (or a flat
+    // region), so the maximum is still attained at a combined-table knot.
+    // This includes pure linear, pure Rayleigh, and their physical mixtures.
     for &(wavelength, _) in absorption.knots[..absorption.count]
         .iter()
         .chain(scattering.knots().iter())
@@ -122,6 +122,11 @@ fn max_albedo_upper(
             let ratio = Interval::point(reference) / Interval::point(wavelength);
             let square = ratio * ratio;
             s = s * square * square;
+        }
+        if let Some((reference, coefficient)) = scattering.rayleigh_addend {
+            let ratio = Interval::point(reference) / Interval::point(wavelength);
+            let square = ratio * ratio;
+            s = s + Interval::point(coefficient) * square * square;
         }
         if s.hi() == 0.0 {
             // Includes an exact zero-extinction knot. Adjacent positive
@@ -221,6 +226,25 @@ fn phase_integral_upper(
             }
             maximum
         }
+        PhaseFunction::SpectralMixture(mixture) => {
+            // At every wavelength the angular law is a convex combination
+            // weighted by component scattering, not by mass alone. Its
+            // integral cannot exceed the largest retained component bound.
+            // The unit baseline also covers the isotropic zero-scattering
+            // fallback where no component has a defined conditional weight.
+            let mut maximum = 1.0_f64;
+            for component in mixture.components() {
+                checkpoint(cx)?;
+                if component.mass_weight == 0.0 {
+                    continue;
+                }
+                let Some(bound) = phase_integral_upper(&component.phase, cx)? else {
+                    return Ok(None);
+                };
+                maximum = maximum.max(bound);
+            }
+            maximum
+        }
     };
     // Do not turn downward normalization roundoff into physical absorption.
     Ok((upper.is_finite() && upper > 0.0).then_some(upper.max(1.0)))
@@ -254,9 +278,11 @@ fn tabulated_phase_integral_upper(
 mod tests {
     use super::*;
     use crate::volumes::VolumeGrid;
-    use crate::volumes::transport::scattering::{MassScatteringSpectrum, ScatteringOptics};
+    use crate::volumes::transport::scattering::{
+        MassScatteringSpectrum, ScatteringMixtureComponent, ScatteringOptics,
+    };
     use crate::volumes::transport::{
-        AbsorbingGrid, AbsorbingGridBudget, CellPalette, CellPaletteBudget,
+        AbsorbingGrid, AbsorbingGridBudget, CellPalette, CellPaletteBudget, OpticalMixtureBudget,
     };
     use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
     use std::sync::Arc;
@@ -353,6 +379,94 @@ mod tests {
                 assert!(bound >= s / (a + s));
             }
         }
+    }
+
+    #[test]
+    fn linear_plus_rayleigh_albedo_retains_tight_endpoints_across_an_interior_minimum() {
+        let absorption = MassAbsorptionSpectrum::constant(1.0).unwrap();
+        let mut scattering =
+            MassScatteringSpectrum::table(&[(380.0, 380.0 / 150.0), (780.0, 780.0 / 150.0)])
+                .unwrap();
+        scattering.rayleigh_addend = Some((600.0, 1.0));
+        // Independent law s=lambda/150+(600/lambda)^4 has its minimum at
+        // 600 nm. The mixed law must retain both terms: bounding the linear
+        // table alone would miss the large short-wavelength Rayleigh tail.
+        let albedo = |wavelength: f64| {
+            let s = wavelength / 150.0 + (600.0 / wavelength).powi(4);
+            s / (1.0 + s)
+        };
+        assert!(albedo(600.0) < albedo(380.0));
+        assert!(albedo(600.0) < albedo(780.0));
+        let upper = max_albedo_upper(&absorption, &scattering);
+        encloses_tightly(upper, albedo(380.0).max(albedo(780.0)));
+        for sample in 0..=4000 {
+            let wavelength = 380.0 + f64::from(sample) / 10.0;
+            assert!(upper >= albedo(wavelength));
+        }
+
+        // A separate absorption knot creates additional extrema that the
+        // scattering table does not contain. The same union-knot bound must
+        // still enclose every independently evaluated mixed-law sample.
+        let absorption =
+            MassAbsorptionSpectrum::table(&[(380.0, 4.0), (480.0, 0.5), (780.0, 2.0)]).unwrap();
+        let upper = max_albedo_upper(&absorption, &scattering);
+        for sample in 0..=4000 {
+            let wavelength = 380.0 + f64::from(sample) / 10.0;
+            let a = if wavelength <= 480.0 {
+                4.0 - (wavelength - 380.0) * 0.035
+            } else {
+                0.5 + (wavelength - 480.0) * 0.005
+            };
+            let s = wavelength / 150.0 + (600.0 / wavelength).powi(4);
+            assert!(upper >= s / (a + s));
+        }
+    }
+
+    #[test]
+    fn spectral_mixture_envelope_covers_wavelength_dependent_normalized_phase() {
+        with_cx(|cx| {
+            let components = [
+                ScatteringMixtureComponent {
+                    mass_weight: 1.0,
+                    scattering: MassScatteringSpectrum::rayleigh(550.0, 1.0).unwrap(),
+                    phase: PhaseFunction::Rayleigh,
+                },
+                ScatteringMixtureComponent {
+                    mass_weight: 3.0,
+                    scattering: MassScatteringSpectrum::table(&[(380.0, 0.1), (780.0, 2.0)])
+                        .unwrap(),
+                    phase: PhaseFunction::Isotropic,
+                },
+                ScatteringMixtureComponent {
+                    mass_weight: 0.0,
+                    scattering: MassScatteringSpectrum::constant(100.0).unwrap(),
+                    phase: PhaseFunction::henyey_greenstein(0.9).unwrap(),
+                },
+            ];
+            let phase = PhaseFunction::scattering_mixture(
+                cx,
+                &components,
+                OpticalMixtureBudget { max_components: 3 },
+            )
+            .unwrap();
+            let upper = phase_integral_upper(&phase, cx).unwrap().unwrap();
+            encloses_tightly(upper, 1.0);
+            let expected = components[..2]
+                .iter()
+                .map(|component| phase_integral_upper(&component.phase, cx).unwrap().unwrap())
+                .fold(1.0_f64, f64::max);
+            assert_eq!(upper, expected);
+            for wavelength in [380.0, 550.0, 780.0] {
+                // These components are quadratic in mu, so Simpson's angular
+                // integral is exact in real arithmetic for every spectral mix.
+                let integral = 2.0 * core::f64::consts::PI / 3.0
+                    * (phase.eval_at(wavelength, -1.0).unwrap()
+                        + 4.0 * phase.eval_at(wavelength, 0.0).unwrap()
+                        + phase.eval_at(wavelength, 1.0).unwrap());
+                assert!((integral - 1.0).abs() < 2e-14);
+                assert!(integral <= upper + 4.0 * f64::EPSILON);
+            }
+        });
     }
 
     #[test]
