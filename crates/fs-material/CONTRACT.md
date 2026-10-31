@@ -7818,3 +7818,35 @@ nonlinear backtracking; endpoint stored energies remain separate diagnostics.
 Duplicate or aliased branch/backbone/reference-density roles, missing or ambiguous pins, evolving mechanical/rate/frequency coordinates, unsupported counts and total-strain tangent inference refuse. The complete original ResolvedVoceJ2 bundle, extra density/physics roles and source-use receipts survive adoption; ordered getters expose each original branch claim. SmallStrainLaw delegates stress, state, analytic tangent and symmetry declaration to the unchanged native constitutive owner, so existing generic continuum paths can use the resolved law directly.
 
 Synthetic cyclic/source regressions cover two and three distinct recovery scales through reversal, explicit inactive/linear branch limits, equal total modulus with differing cyclic response, full source identity and receipts, complete quantity/condition admission, and the eight-branch bound. Canonical N=1 agrees exactly with the original single-branch source API. These tests verify integration rather than empirical calibration. Re-resolution at another temperature does not supply thermal Chaboche history transport or its energy account.
+
+## Conserved-volume pure-fluid phase-changing energy closure
+
+`thermochemical_gas::nonideal::equilibrium` recovers temperature, pressure and
+phase amount from conserved density and original-reference internal energy.
+Every subcritical trial resolves the original PR coexistence: volumes inside
+the dome use the lever rule; outside volumes use the admitted liquid or vapor
+density EOS. Unresolved coexistence refuses instead of silently retaining a
+mechanically stable metastable state. The caller supplies a temperature interval
+and pressure bracket that supports saturation throughout that interval.
+
+The safeguarded solve uses the actual equilibrium isochoric tangent, physical
+energy residual and temperature correction/bracket tests. Temperature and EOS
+budgets cover the entire call, including nested phase searches and the initial
+reference state; cancellation is polled inside those searches and before
+publication. Increment solves integrate the original NASA energy change before
+combining PR departures, so even a large formation datum is counted once and
+does not erase small heat input. Source domains remain authoritative; no
+two-phase transport, acoustic, interfacial or reaction closure is inferred.
+Absolute-energy inversion refuses if adjacent represented energies cannot
+resolve the requested energy/temperature tolerances or the entire caloric span
+collapses; the source-anchored increment API remains available for large datums.
+
+`equilibrium::parcel::IsochoricEquilibriumParcel` conserves fixed mass and
+volume through signed heating/cooling and atomically commits the complete
+equilibrium state only after independently evaluated source increments close
+the joule balance. Failure or cancellation preserves the previous state.
+Public integration targets `nonideal_equilibrium` and
+`nonideal_equilibrium_parcel` exercise independent Maxwell-area/caloric targets,
+heating and cooling across both liquid and vapor dome boundaries, large-datum
+invariance, retained density, total-work limits and atomic refusal. Synthetic
+NASA fixtures check constitutive consistency rather than experimental accuracy.

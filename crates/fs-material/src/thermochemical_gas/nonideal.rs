@@ -28,6 +28,8 @@ use crate::fluid_transport::{
 
 /// Conservative density/energy reconstruction on a homogeneous PR branch.
 pub mod energy;
+/// Conserved-density calorics with liquid/vapor equilibrium and phase changes.
+pub mod equilibrium;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PengRobinsonSpeciesBinding {

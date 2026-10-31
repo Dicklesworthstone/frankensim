@@ -1649,7 +1649,7 @@ the lever rule; density uses conserved mass over additive phase volume. Latent
 enthalpy/internal energy, Clapeyron slope and amount-weighted residual h/u/s
 come from the original departure functions. Their matching ideal reference is
 added once by the caller; there is no extra latent source or ideal-mixing
-entropy between identical phases. Two-phase transport, acoustics, heat capacity,
+entropy between identical phases. Two-phase transport, acoustics,
 interfaces, metastable kinetics and chemical reactions are separate closures.
 
 Six focused regressions compare independently computed Maxwell-area methane
@@ -1659,3 +1659,12 @@ source-parameter changes, critical-domain refusal, cancellation and work caps.
 The original constitutive law is Peng and Robinson (1976),
 <https://doi.org/10.1021/i160057a011>; these verify that law's implementation,
 not experimental accuracy across all fluids or critical conditions.
+
+## Pure-fluid equilibrium isochoric caloric response
+
+The equilibrium isochoric residual-energy tangent differentiates the same
+moving saturation roots and volume lever rule using original pressure
+derivatives and the Clapeyron slope. The material owner adds its ideal molar Cv
+once. This is not a frozen-quality average; at either saturated endpoint the
+tangent is one-sided from inside the dome. Interior fixed-volume finite
+differences independently check the derivative at several qualities.

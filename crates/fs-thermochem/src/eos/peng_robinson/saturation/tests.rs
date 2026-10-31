@@ -252,6 +252,37 @@ fn g3_another_original_component_changes_saturation_and_latent_heat() {
 }
 
 #[test]
+fn g1_equilibrium_isochoric_tangent_differentiates_moving_phase_volumes() {
+    for temperature in [150.0, 180.0] {
+        let center = solve(methane(), temperature);
+        let step = 0.001;
+        let below = solve(methane(), temperature - step);
+        let above = solve(methane(), temperature + step);
+        for quality in [0.05, 0.4, 0.9] {
+            let mixture = center.at_vapor_fraction(quality).unwrap();
+            let volume = mixture.molar_volume();
+            let numerical = (above
+                .at_molar_volume(volume)
+                .unwrap()
+                .residual_internal_energy_j_mol()
+                - below
+                    .at_molar_volume(volume)
+                    .unwrap()
+                    .residual_internal_energy_j_mol())
+                / (2.0 * step);
+            close(
+                mixture.equilibrium_isochoric_residual_cv_j_mol_k().unwrap(),
+                numerical,
+                3e-7,
+            );
+            let frozen = (1.0 - quality) * center.liquid().residual_cv_j_mol_k()
+                + quality * center.vapor().residual_cv_j_mol_k();
+            assert!(mixture.equilibrium_isochoric_residual_cv_j_mol_k().unwrap() > frozen);
+        }
+    }
+}
+
+#[test]
 fn g4_critical_domain_cancellation_and_whole_call_work_limits_refuse() {
     let model = pure(methane());
     let bracket = [Pressure::new(1e5), Pressure::new(4.4e6)];

@@ -190,7 +190,8 @@ impl PengRobinsonSaturationV1 {
 }
 
 /// Two macroscopic equilibrium phases with amount-weighted extensive calorics.
-/// No surface excess, slip, transport, heat-capacity or sound-speed law is inferred.
+/// No surface excess, slip, transport or sound-speed law is inferred. The
+/// isochoric caloric tangent follows the original equilibrium EOS explicitly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PengRobinsonSaturatedMixtureV1 {
     saturation: PengRobinsonSaturationV1,
@@ -251,6 +252,33 @@ impl PengRobinsonSaturatedMixtureV1 {
             entropy(&self.saturation.liquid),
             entropy(&self.saturation.vapor),
         )
+    }
+
+    /// Derivative of the equilibrium internal-energy departure at fixed mean
+    /// molar volume [J/(mol K)]. Add the original ideal molar Cv exactly once.
+    /// This follows the moving saturation roots and phase amount; it is not a
+    /// frozen-quality average. At either pure endpoint it is the one-sided
+    /// derivative from inside the coexistence dome, not the homogeneous Cv.
+    ///
+    /// Along saturation, `v_i'=(p_sat'-p_T,i)/p_v,i` and
+    /// `Delta u/Delta v=T p_sat'-p`. Differentiating the volume lever rule gives
+    /// `Cv_eq=sum(w_i Cv_i)-T sum(w_i (p_sat'-p_T,i)^2/p_v,i)`.
+    pub fn equilibrium_isochoric_residual_cv_j_mol_k(&self) -> Result<f64, E> {
+        let slope = self.saturation.saturation_pressure_slope_pa_k();
+        let phase_tangent = |root: &PengRobinsonPhaseRootV1| {
+            let (pt, pv) = root.pressure_derivatives();
+            let difference = slope - pt;
+            root.residual_cv_j_mol_k()
+                - self.saturation.temperature.value() * difference * (difference / pv)
+        };
+        let value = self.mix(
+            phase_tangent(&self.saturation.liquid),
+            phase_tangent(&self.saturation.vapor),
+        );
+        if !value.is_finite() {
+            return Err(E::Unrepresentable("equilibrium isochoric caloric tangent"));
+        }
+        Ok(value)
     }
 }
 
