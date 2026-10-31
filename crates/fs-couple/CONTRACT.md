@@ -17528,3 +17528,23 @@ claim qualification of the refused higher-mode physical realizations.
 
 The new Rust regressions have not yet been executed in a native Rust toolchain;
 independent numerical reproductions do not substitute for that build/test gate.
+
+
+## Nonideal finite-solution activity in moisture transport
+
+`moisture::solution::FiniteMoistureSolution` now retains the same shared
+`AqueousSolution` as finite-volume membrane flow. Existing ideal inputs convert
+directly. A declared virial model supplies its own endpoint water activity and
+osmotic-pressure diagnostic; the existing native source-backed sorption law
+receives `RH = a_w` on the equal-pressure, isothermal, negligible-vapor-storage
+bridge. Retained solute moles and the shared thermodynamic model survive every
+candidate. Concentration-support refusal occurs before either accepted water
+inventory changes. Native diffusion, surface-exchange sources, solvent-plus-solid
+water balance, cancellation and downstream moisture-dependent plate/solid
+response retain their existing owners.
+
+This extension does not add liquid-immersion permeability, volatile-solute
+exchange, ionic transport into the solid, vapor-space storage, sorption heat or
+stress feedback into solvent chemical potential. New native regression sources
+manufacture a nonideal one-cell endpoint and verify the original sorption source
+queries, then exercise unsupported-concentration refusal and a supported retry.

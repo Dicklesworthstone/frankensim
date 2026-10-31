@@ -1,6 +1,6 @@
 //! Finite solution activity coupled to the original bound-water diffusion owner.
 //!
-//! The dilute solution and specimen exchange only water through an equilibrated
+//! The aqueous solution and specimen exchange only water through an equilibrated
 //! vapor path at equal prescribed pressure and temperature, using the same
 //! pure-water reference pressure as the sorption source. Nonvolatile solutes
 //! remain in the solution. The shared aqueous thermodynamics supplies `a_w`;
@@ -28,14 +28,14 @@ use super::{
     atmosphere::DryBasisSorption, poll, positive, surface::ResolvedMoistureFace,
 };
 use fs_exec::Cx;
-use fs_material::osmosis::{IdealDiluteSolution, OsmosisError};
+use fs_material::osmosis::{AqueousSolution, OsmosisError};
 
 /// Original thermodynamic/source/diffusion refusal; no endpoint is published.
 #[derive(Debug)]
 pub enum SolutionMoistureError {
     /// Original moisture/source/solid owner refused.
     Moisture(MoistureError),
-    /// Original dilute-solution owner refused.
+    /// Original aqueous thermodynamic or concentration-support owner refused.
     Solution(OsmosisError),
     /// Malformed, unsupported or unrepresentable data.
     Invalid(&'static str),
@@ -80,7 +80,7 @@ pub struct SolutionMoistureSolve {
 /// One original finite solution inventory and an explicit solvent mass scale.
 #[derive(Clone, Debug)]
 pub struct FiniteMoistureSolution {
-    solution: IdealDiluteSolution,
+    solution: AqueousSolution,
     solvent_molar_mass_kg_mol: f64,
     solvent_density_kg_m3: f64,
 }
@@ -132,7 +132,7 @@ impl SolutionMoistureCandidate {
 }
 
 struct Trial {
-    solution: IdealDiluteSolution,
+    solution: AqueousSolution,
     moisture: MoistureSlab,
     transport: MoistureStepReport,
     water_to_solid_kg: f64,
@@ -140,13 +140,14 @@ struct Trial {
 }
 
 impl FiniteMoistureSolution {
-    /// Retain the shared solution and an explicit water molar mass [kg/mol].
+    /// Retain the shared ideal or nonideal solution and an explicit water molar mass [kg/mol].
     /// Density follows the declared incompressible solvent volume convention;
     /// it is not inferred from a mixture name or a room-temperature constant.
     pub fn new(
-        solution: IdealDiluteSolution,
+        solution: impl Into<AqueousSolution>,
         solvent_molar_mass_kg_mol: f64,
     ) -> Result<Self, SolutionMoistureError> {
+        let solution = solution.into();
         solution.water_activity()?;
         let density = solvent_molar_mass_kg_mol / solution.solvent_molar_volume_m3_mol();
         let mass = solution.solvent_volume_m3() * density;
@@ -163,7 +164,7 @@ impl FiniteMoistureSolution {
     }
 
     /// Shared thermodynamic owner and its original solute amounts.
-    pub const fn solution(&self) -> &IdealDiluteSolution {
+    pub const fn solution(&self) -> &AqueousSolution {
         &self.solution
     }
     /// Explicit solvent molar mass [kg/mol].

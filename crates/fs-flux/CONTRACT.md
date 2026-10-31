@@ -1806,3 +1806,26 @@ bulk inventories and conserved interval-mean water flux, using illustrative
 explicit coefficients. Films prescribe quasi-steady mass transfer and negligible
 mechanical pressure loss; transient film storage, concentration-dependent
 transport, and empirically inferred crossflow coefficients remain separate.
+
+
+## Nonideal finite-volume osmosis
+
+`OsmoticCompartment` retains the shared `AqueousSolution`; original
+`IdealDiluteSolution` inputs convert directly. Nonideal membrane endpoints use
+that actual model's pressure at each implicit candidate volume and retained
+inventory. The original hydraulic mobility then applies mechanical pressure
+minus the full osmotic-pressure difference. A membrane touching a nonideal
+compartment must be bare and fully retaining (all reflection coefficients one,
+all solute permeances zero). Existing ideal leaky and concentration-film laws
+are refused for such endpoints because they lack matching nonideal chemical
+potential forces. Ideal network behavior and its original selective transport
+remain available.
+
+The existing adaptive pair exchange retains positive volumes and individual
+solute amounts, evaluates declared concentration support before publication,
+and can recover a supported nearby root after refusing a distant trial. Shared
+model storage is conservatively counted in every prepared state buffer; trial
+thermodynamics and successful network advances allocate no memory. Native
+focused fixtures include an independent nonideal equilibrium, cross interactions
+at equal ideal osmolarity, long-step conservation, concentration-boundary roots,
+unsupported combined-law admission and atomic failure/cancellation.

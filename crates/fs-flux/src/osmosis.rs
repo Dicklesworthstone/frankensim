@@ -13,17 +13,24 @@
 //! theorem is claimed for the nonlinear permeating-solute residual, nor is the
 //! local error estimate a certified global error bound.
 //!
-//! Compartments are well mixed, isothermal and dilute, with negligible solute
-//! volume. A common declared species ordering, solvent and temperature is
-//! mandatory. Optional quasi-steady concentration films reconstruct the actual
-//! membrane-face concentrations without adding hidden species inventories or
-//! another nonlinear solve. There is no ionic electrochemistry, solvent inertia,
-//! transient film storage, heat balance or mechanical inertia here.
+//! Compartments are well mixed and isothermal, with negligible solute volume.
+//! A common declared species ordering, solvent and temperature is mandatory.
+//! Ideal selective membranes can use quasi-steady concentration films, which
+//! reconstruct actual membrane-face concentrations without hidden inventories.
+//! Nonideal compartments use their shared free-energy pressure with fully
+//! retained solutes and bare membranes; leaky and film transport need matching
+//! chemical-potential laws. This network does not supply ionic electrochemistry,
+//! transient film storage, solvent inertia, a heat balance or mechanical inertia.
 //! Successful advances allocate no memory. All workspace is prepared up front;
 //! failed, cancelled or exhausted advances publish neither state nor time.
 
+#[cfg(test)]
+mod nonideal_tests;
+
+#[cfg(test)]
+use fs_material::osmosis::IdealDiluteSolution;
 use fs_material::osmosis::polarization::PolarizedMembraneTransport;
-use fs_material::osmosis::{IdealDiluteSolution, MembraneTransport, OsmosisError};
+use fs_material::osmosis::{AqueousSolution, MembraneTransport, OsmosisError};
 
 /// Maximum independently conserved dissolved particle species.
 pub const MAX_OSMOTIC_SPECIES: usize = 64;
@@ -118,7 +125,7 @@ impl OsmoticPressureVolume {
 /// One finite, well-mixed solution and its mechanical volume response.
 #[derive(Clone, Debug)]
 pub struct OsmoticCompartment {
-    solution: IdealDiluteSolution,
+    solution: AqueousSolution,
     pressure: OsmoticPressureVolume,
     minimum_volume_m3: f64,
 }
@@ -127,10 +134,11 @@ impl OsmoticCompartment {
     /// The explicit positive volume floor is an applicability boundary, never
     /// a clipped state or invented residual water inventory.
     pub fn new(
-        solution: IdealDiluteSolution,
+        solution: impl Into<AqueousSolution>,
         pressure: OsmoticPressureVolume,
         minimum_volume_m3: f64,
     ) -> Result<Self, OsmoticNetworkError> {
+        let solution = solution.into();
         if !positive(minimum_volume_m3) || minimum_volume_m3 >= solution.solvent_volume_m3() {
             return Err(OsmoticNetworkError::Invalid(
                 "volume floor must be below initial volume",
@@ -144,7 +152,7 @@ impl OsmoticCompartment {
         })
     }
     /// Actual finite solvent and dissolved inventories.
-    pub const fn solution(&self) -> &IdealDiluteSolution {
+    pub const fn solution(&self) -> &AqueousSolution {
         &self.solution
     }
     /// Current mechanical pressure [Pa].
@@ -336,15 +344,38 @@ impl OsmoticNetwork {
                 "all cells need one solvent, temperature and species ordering",
             ));
         }
+        for membrane in &membranes {
+            let nonideal = !cells[membrane.left].solution.is_ideal()
+                || !cells[membrane.right].solution.is_ideal();
+            if nonideal
+                && (!matches!(membrane.material, MembraneBoundary::WellMixed(_))
+                    || membrane
+                        .membrane_law()
+                        .solutes()
+                        .iter()
+                        .any(|(reflection, permeance)| {
+                            reflection.value() != 1.0 || permeance.value() != 0.0
+                        }))
+            {
+                return Err(OsmoticNetworkError::Invalid(
+                    "nonideal solutions require fully retained solutes and a bare membrane; leaking and film transport need matching chemical-potential laws",
+                ));
+            }
+        }
         // Four complete state buffers; input excess capacities and immutable
         // material/species data are counted conservatively. Bounded stack
         // scratch in the scalar solve is additional (under 4 KiB).
-        let cell_bytes = core::mem::size_of::<OsmoticCompartment>()
-            + species.len() * core::mem::size_of::<f64>();
+        let cell_bytes = core::mem::size_of::<OsmoticCompartment>();
         let required = cells
             .capacity()
             .checked_add(3 * cells.len())
             .and_then(|n| n.checked_mul(cell_bytes))
+            .and_then(|n| {
+                let heaps = cells.iter().try_fold(0usize, |total, cell| {
+                    total.checked_add(cell.solution.heap_bytes())
+                })?;
+                n.checked_add(heaps.checked_mul(4)?)
+            })
             .and_then(|n| {
                 n.checked_add(membranes.capacity() * core::mem::size_of::<OsmoticMembrane>())
             })
@@ -725,14 +756,31 @@ fn pair_endpoint(
             None => (bulk_left, bulk_right),
         };
     }
-    let flux = membrane.membrane_law().water_flux(
-        left.solution.temperature_k(),
-        left.pressure.pressure_pa(vl)?,
-        right.pressure.pressure_pa(vr)?,
-        &cl[..count],
-        &cr[..count],
-    )?;
-    endpoint.residual_m3 = water - area_time * flux.volume_flux_m_s;
+    let volume_flux = if left.solution.is_ideal() && right.solution.is_ideal() {
+        membrane
+            .membrane_law()
+            .water_flux(
+                left.solution.temperature_k(),
+                left.pressure.pressure_pa(vl)?,
+                right.pressure.pressure_pa(vr)?,
+                &cl[..count],
+                &cr[..count],
+            )?
+            .volume_flux_m_s
+    } else {
+        // Admission guarantees complete retention and no dilute Fick films.
+        // The same water chemical potential supplies pressure and activity;
+        // independent ionic/solute leakage is not inferred from this force.
+        let osmotic_drop = left
+            .solution
+            .osmotic_pressure_at(vl, &endpoint.left[..count])?
+            - right
+                .solution
+                .osmotic_pressure_at(vr, &endpoint.right[..count])?;
+        membrane.membrane_law().hydraulic_permeance().value()
+            * (left.pressure.pressure_pa(vl)? - right.pressure.pressure_pa(vr)? - osmotic_drop)
+    };
+    endpoint.residual_m3 = water - area_time * volume_flux;
     if !endpoint.residual_m3.is_finite() {
         return Err(OsmoticNetworkError::Invalid(
             "nonfinite implicit water residual",

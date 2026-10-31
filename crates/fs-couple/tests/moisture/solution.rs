@@ -2,7 +2,11 @@
 //! Solution and specimen coefficients are authored references, not calibration.
 use super::*;
 use fs_couple::moisture::solution::*;
-use fs_material::osmosis::IdealDiluteSolution;
+use fs_material::osmosis::{
+    AqueousSolution, IdealDiluteSolution, OsmosisError,
+    nonideal::{NonidealSolutionError, VirialSolutionModel},
+};
+use std::sync::Arc;
 
 pub(super) const WATER_VOLUME: f64 = 18e-6;
 const WATER_MOLAR_MASS: f64 = 0.018;
@@ -93,6 +97,141 @@ fn finite_solution_endpoint_matches_manufactured_uptake_and_desorption() {
             assert_eq!(initial.time_s(), 0.0);
             assert_eq!(bath.solution().solvent_volume_m3(), initial_volume);
         }
+    });
+}
+
+#[test]
+fn nonideal_activity_reaches_manufactured_native_moisture_endpoint_and_source_queries() {
+    with_cx(|cx| {
+        let final_activity = 0.95_f64;
+        let final_volume = 5e-5;
+        let initial_moisture = 0.18;
+        let slope = 0.2;
+        let diffusion = 0.01;
+        let dt = 2.0;
+        let interaction = 0.002;
+        let initial = slab(card([diffusion; 2], 0.3), 1.0, vec![initial_moisture], cx);
+        let alpha = 4.0 * dt * diffusion;
+        let final_moisture = (initial_moisture + alpha * slope * final_activity) / (1.0 + alpha);
+        let water = initial.dry_mass_kg() * (final_moisture - initial_moisture);
+        let initial_volume = final_volume + water / WATER_DENSITY;
+        // Independent inversion of -ln(a_w)/v_water = c + B*c²/2.
+        let osmotic_concentration = -final_activity.ln() / WATER_VOLUME;
+        let concentration = 2.0 * osmotic_concentration
+            / (1.0 + (1.0 + 2.0 * interaction * osmotic_concentration).sqrt());
+        let amount = concentration * final_volume;
+        let model = Arc::new(
+            VirialSolutionModel::new(293.15, WATER_VOLUME, 1.0, vec![3000.0], vec![interaction])
+                .unwrap(),
+        );
+        let bath = FiniteMoistureSolution::new(
+            AqueousSolution::nonideal(model.clone(), initial_volume, vec![amount]).unwrap(),
+            WATER_MOLAR_MASS,
+        )
+        .unwrap();
+        let original = bath.solution().clone();
+        let faces = [
+            Some(atmosphere::sorption(slope)),
+            Some(atmosphere::sorption(slope)),
+        ];
+        let solve = controls(initial_volume);
+        let endpoint = bath
+            .advance(&initial, dt, &faces, config(), solve, cx)
+            .unwrap();
+        near(
+            endpoint.reservoir().solution().solvent_volume_m3(),
+            final_volume,
+            2e-16,
+        );
+        near(
+            endpoint.reservoir().solution().water_activity().unwrap(),
+            final_activity,
+            1e-12,
+        );
+        near(endpoint.moisture().moisture()[0], final_moisture, 2e-13);
+        near(endpoint.step().water_to_solid_kg, water, 2e-13);
+        near(
+            endpoint.step().water_balance_residual_kg,
+            0.0,
+            solve.mass_tolerance_kg,
+        );
+        near(
+            endpoint.reservoir().solvent_mass_kg() + endpoint.moisture().water_mass_kg(),
+            bath.solvent_mass_kg() + initial.water_mass_kg(),
+            2e-13,
+        );
+        assert_eq!(endpoint.reservoir().solution().solute_moles(), &[amount]);
+        assert!(std::ptr::eq(
+            endpoint.reservoir().solution().nonideal_model().unwrap(),
+            model.as_ref(),
+        ));
+        assert_eq!(
+            endpoint
+                .step()
+                .transport
+                .surface_sorption
+                .iter()
+                .flatten()
+                .count(),
+            2
+        );
+        for source in endpoint.step().transport.surface_sorption.iter().flatten() {
+            near(
+                source.query().axes()["relative_humidity"],
+                final_activity,
+                1e-12,
+            );
+        }
+        let ideal_activity =
+            IdealDiluteSolution::new(293.15, WATER_VOLUME, final_volume, vec![amount])
+                .unwrap()
+                .water_activity()
+                .unwrap();
+        assert!(ideal_activity - final_activity > 0.02);
+        assert_eq!(bath.solution(), &original);
+        assert_eq!(initial.moisture(), &[initial_moisture]);
+        assert_eq!(initial.time_s(), 0.0);
+    });
+}
+
+#[test]
+fn nonideal_concentration_domain_refusal_preserves_bath_and_native_slab() {
+    with_cx(|cx| {
+        let volume = 1e-4;
+        let model = Arc::new(
+            VirialSolutionModel::new(293.15, WATER_VOLUME, 1.0, vec![1100.0], vec![0.002]).unwrap(),
+        );
+        let bath = FiniteMoistureSolution::new(
+            AqueousSolution::nonideal(model, volume, vec![0.1]).unwrap(),
+            WATER_MOLAR_MASS,
+        )
+        .unwrap();
+        let original = bath.solution().clone();
+        let initial = slab(card([0.01; 2], 0.3), 0.1, vec![0.1], cx);
+        let faces = [
+            Some(atmosphere::sorption(0.2)),
+            Some(atmosphere::sorption(0.2)),
+        ];
+        // The broad numerical bracket proposes 2000 mol/m³ at its lower end;
+        // the original virial source admits at most 1100. No extrapolation.
+        assert!(matches!(
+            bath.advance(&initial, 0.25, &faces, config(), controls(volume), cx),
+            Err(SolutionMoistureError::Solution(OsmosisError::Nonideal(
+                NonidealSolutionError::OutsideDomain { .. }
+            )))
+        ));
+        assert_eq!(bath.solution(), &original);
+        assert_eq!(initial.moisture(), &[0.1]);
+        assert_eq!(initial.time_s(), 0.0);
+        let mut supported = controls(volume);
+        supported.solvent_volume_bracket_m3 = [0.95 * volume, 1.05 * volume];
+        let endpoint = bath
+            .advance(&initial, 0.25, &faces, config(), supported, cx)
+            .unwrap();
+        assert!(endpoint.step().water_to_solid_kg > 0.0);
+        assert_eq!(endpoint.reservoir().solution().solute_moles(), &[0.1]);
+        assert_eq!(bath.solution(), &original);
+        assert_eq!(initial.moisture(), &[0.1]);
     });
 }
 
