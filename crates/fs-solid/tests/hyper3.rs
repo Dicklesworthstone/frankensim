@@ -12,6 +12,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
+use fs_solid::hyper3::pressure::ClosedTetPressureSurface;
 use fs_solid::linear3::{TetLinearElasticProblem, TetMaterialField};
 use fs_solid::{
     HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField, TetAssemblyBudget,
@@ -237,6 +238,80 @@ fn neo_hookean_uniaxial_stretch_matches_closed_form() {
         assert!(step.residual_history.len() <= 8, "{step:?}");
         assert_eq!(step.indefinite_fallbacks, 0);
     }
+}
+
+#[test]
+fn g1_face_pressure_compression_has_free_lateral_expansion_and_current_area_reactions() {
+    with_cx(|cx| {
+        let size = [1.0, 1.0, 1.0];
+        let (mu, lambda) = (1.0, 1.5);
+        let material = neo_hookean(mu, lambda);
+        // The affine uniaxial solution is exactly representable on both meshes.
+        // This checks load integration and nonlinear equilibrium, not locking.
+        for resolution in [1, 2] {
+            let (nodes, tets) = box_mesh([resolution; 3], size);
+            let prescribed: Vec<(usize, f64)> = nodes
+                .iter()
+                .enumerate()
+                .flat_map(|(node, point)| {
+                    (0..3).filter_map(move |axis| {
+                        (point[axis] == 0.0).then_some((3 * node + axis, 0.0))
+                    })
+                })
+                .collect();
+            let surface = ClosedTetPressureSurface::new(
+                &nodes,
+                &tets,
+                TetAssemblyBudget::standard(),
+                4 * tets.len(),
+                cx,
+            )
+            .unwrap();
+            let p = problem(&nodes, &tets, &material, &prescribed, &[], 8);
+            for stretch in [0.7, 0.85] {
+                let lateral = lateral_stretch(mu, lambda, stretch);
+                let jacobian = stretch * lateral * lateral;
+                let nominal = mu * (stretch - 1.0 / stretch) + lambda * jacobian.ln() / stretch;
+                // Cauchy pressure acts on the expanded CURRENT lateral area.
+                let pressure = -nominal / (lateral * lateral);
+                let values: Vec<f64> = surface
+                    .faces()
+                    .iter()
+                    .map(|face| {
+                        if face.iter().all(|&node| nodes[node][0] == size[0]) {
+                            pressure
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let solution = p.solve_with_face_pressures(&surface, &values, cx).unwrap();
+                for (motion, point) in solution.displacement_m.iter().zip(&nodes) {
+                    for (axis, scale) in [stretch, lateral, lateral].into_iter().enumerate() {
+                        assert!((motion[axis] - (scale - 1.0) * point[axis]).abs() < 5e-9);
+                    }
+                }
+                let reaction: f64 = solution
+                    .reactions_n
+                    .iter()
+                    .filter(|(dof, _)| dof % 3 == 0)
+                    .map(|(_, force)| force)
+                    .sum();
+                assert!((reaction + nominal * size[1] * size[2]).abs() < 5e-9);
+                assert!((solution.min_det_f - jacobian).abs() < 5e-9);
+                let log_j = jacobian.ln();
+                let energy = (0.5 * mu * (stretch * stretch + 2.0 * lateral * lateral - 3.0)
+                    - mu * log_j
+                    + 0.5 * lambda * log_j * log_j)
+                    * size.iter().product::<f64>();
+                assert!((solution.strain_energy_j - energy).abs() < 5e-9);
+                assert!(solution.steps.iter().all(|step| {
+                    *step.residual_history.last().unwrap() <= p.settings.relative_tolerance
+                        && step.indefinite_fallbacks == 0
+                }));
+            }
+        }
+    });
 }
 
 #[test]
@@ -905,11 +980,7 @@ fn skew_tet_preserves_force_energy_and_tangent_under_large_translation() {
     let tets = [[0, 1, 2, 3]];
     let material = neo_hookean(2.0, 5.0);
     let p = problem(&nodes, &tets, &material, &[], &[], 1);
-    let translation = [
-        1_099_511_627_776.0,
-        -549_755_813_888.0,
-        274_877_906_944.0,
-    ];
+    let translation = [1_099_511_627_776.0, -549_755_813_888.0, 274_877_906_944.0];
 
     for scale in [0.0, 1.0] {
         let u: Vec<f64> = nodes

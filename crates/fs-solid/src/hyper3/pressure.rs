@@ -38,7 +38,9 @@ pub enum TetPressure<'a> {
 }
 
 impl From<f64> for TetPressure<'_> {
-    fn from(pressure_pa: f64) -> Self { Self::Uniform(pressure_pa) }
+    fn from(pressure_pa: f64) -> Self {
+        Self::Uniform(pressure_pa)
+    }
 }
 
 impl TetPressure<'_> {
@@ -163,14 +165,21 @@ impl ClosedTetPressureSurface {
     ) -> Result<bool, HyperTetError> {
         checkpoint(cx)?;
         let unloaded = match pressure {
-            TetPressure::Uniform(value) => { finite(value)?; value == 0.0 }
+            TetPressure::Uniform(value) => {
+                finite(value)?;
+                value == 0.0
+            }
             TetPressure::PerFace(values) => {
                 if values.len() != self.faces.len() {
-                    return Err(invalid("pressure values must cover the canonical exterior faces exactly"));
+                    return Err(invalid(
+                        "pressure values must cover the canonical exterior faces exactly",
+                    ));
                 }
                 let mut unloaded = true;
                 for (index, &value) in values.iter().enumerate() {
-                    if index % 1024 == 0 { checkpoint(cx)?; }
+                    if index % 1024 == 0 {
+                        checkpoint(cx)?;
+                    }
                     finite(value)?;
                     unloaded &= value == 0.0;
                 }
@@ -215,13 +224,13 @@ impl ClosedTetPressureSurface {
     }
 
     /// Shared load evaluation retains the volume for conservative static work.
-    pub(super) fn force_and_volume(
+    pub(super) fn force_and_volume<'p>(
         &self,
         displacement_m: &[f64],
-        pressure_pa: f64,
+        pressure_pa: impl Into<TetPressure<'p>>,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, f64), HyperTetError> {
-        self.force_and_volume_loading(displacement_m, TetPressure::Uniform(pressure_pa), cx)
+        self.force_and_volume_loading(displacement_m, pressure_pa.into(), cx)
     }
 
     fn force_and_volume_loading(
@@ -327,16 +336,23 @@ impl ClosedTetPressureSurface {
         let after_force = self.force_n(after_m, pressure, cx)?;
         let mut midpoint = Vec::with_capacity(before_m.len());
         for (index, (&before, &after)) in before_m.iter().zip(after_m).enumerate() {
-            if index % 1024 == 0 { checkpoint(cx)?; }
+            if index % 1024 == 0 {
+                checkpoint(cx)?;
+            }
             midpoint.push(finite(0.5 * before + 0.5 * after)?);
         }
         let middle_force = self.force_n(&midpoint, pressure, cx)?;
         let mut work = 0.0;
         let mut compensation = 0.0;
         for index in 0..before_m.len() {
-            if index % 1024 == 0 { checkpoint(cx)?; }
-            let average = finite(before_force[index] / 6.0
-                + (2.0 / 3.0) * middle_force[index] + after_force[index] / 6.0)?;
+            if index % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            let average = finite(
+                before_force[index] / 6.0
+                    + (2.0 / 3.0) * middle_force[index]
+                    + after_force[index] / 6.0,
+            )?;
             let increment = finite(average * finite(after_m[index] - before_m[index])?)?;
             let corrected = finite(increment - compensation)?;
             let next = finite(work + corrected)?;
@@ -373,9 +389,8 @@ impl ClosedTetPressureSurface {
             let mut position = [0.0; 3];
             for axis in 0..3 {
                 let reference_offset = finite(reference[axis] - reference_origin[axis])?;
-                let displacement_offset = finite(
-                    finite(displacement_m[3 * node + axis])? - displacement_origin[axis],
-                )?;
+                let displacement_offset =
+                    finite(finite(displacement_m[3 * node + axis])? - displacement_origin[axis])?;
                 position[axis] = finite(reference_offset + displacement_offset)?;
             }
             positions.push(position);

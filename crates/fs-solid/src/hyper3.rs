@@ -18,10 +18,13 @@
 //!
 //! The static solve accepts DEAD (referential) nodal/body forces and, through
 //! [`HyperTetProblem::solve_with_pressure`], uniform follower pressure on the
-//! complete closed current boundary. Prescribed displacements and all loads
-//! ramp linearly over `load_steps`. Pressure uses the original [`pressure`]
-//! owner for current-area force, its analytic tangent, and increments of the
-//! conservative potential `p (V_current - V_reference)`.
+//! complete closed current boundary. [`HyperTetProblem::solve_with_face_pressures`]
+//! admits an explicit pressure field, including loaded patches with zero pressure
+//! elsewhere. Prescribed displacements and all loads ramp linearly over
+//! `load_steps`. The original [`pressure`] owner supplies current-area forces
+//! and their analytic tangent. Uniform pressure has conservative potential
+//! `p (V_current - V_reference)`; face fields use residual globalization without
+//! assigning a potential to their generally path-dependent work.
 //!
 //! # Newton globalization
 //!
@@ -43,14 +46,17 @@
 //! indefinite tangent (detected by a stalled CG) falls back to PMINRES with
 //! an absolute-diagonal Jacobi preconditioner. The accepted linear residual
 //! is the recomputed true residual.
+//! Face fields use cancellable FGMRES on the complete nonsymmetric tangent,
+//! with ILU(0) or absolute-diagonal preconditioning. Its true linear residual
+//! and an Armijo decrease of the nonlinear residual are checked independently.
 //!
 //! # No-claim boundaries
 //!
 //! Static, isothermal, rate-independent hyperelasticity on conforming P1
 //! tetrahedra (constant strain: volumetric locking for nearly incompressible
-//! cards is NOT mitigated; no mixed/F-bar formulation). Pressure is uniform on
-//! the complete closed boundary; selected open patches and spatially varying
-//! pressure are not admitted. No contact, no limit-point continuation (a solve that
+//! cards is NOT mitigated; no mixed/F-bar formulation). Face pressures are
+//! prescribed in reference-face coordinates, not inferred from a fluid state.
+//! No contact, no limit-point continuation (a solve that
 //! passes a limit point refuses or must be driven by displacement), no
 //! mesh-convergence claim from a single run. Determinism: sequential
 //! assembly and solves in canonical order, bit-reproducible on one
@@ -59,14 +65,15 @@
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::cards::HyperelasticMaterial;
-use fs_solver::krylov::PminresState;
+use fs_solver::krylov::{PminresState, StallDiagnosis};
+use fs_solver::nonlinear::{FgmresState, SolverRunProgress};
 use fs_solver::op::CsrOp;
-use fs_sparse::precond::{Precond, ilu0, pcg};
+use fs_sparse::precond::{Ilu0, Precond, ilu0, pcg};
 use fs_sparse::{Coo, Csr};
 
 use crate::linear3::TetAssemblyBudget;
 
-/// Closed-boundary uniform follower pressure for the native finite-strain geometry.
+/// Current-area follower pressure for the native finite-strain geometry.
 pub mod pressure;
 
 /// Immutable reference preparation for repeated finite-deformation evaluation.
@@ -240,7 +247,7 @@ pub enum HyperTetError {
         /// Relative residual history of that step.
         history: Vec<f64>,
     },
-    /// A linear solve missed its gate on both the PCG and PMINRES paths.
+    /// A linear solve missed its recomputed residual gate.
     LinearSolveFailed {
         /// Load factor of the failing step.
         load_factor: f64,
@@ -424,11 +431,12 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
     // Geometry admission belongs to this owner even when a material adapter
     // evaluates an elastic gradient relative to another stress-free state.
     fn deformation_jacobian(f: &[f64; 9]) -> Result<f64, String> {
-        let j = f[0] * (f[4] * f[8] - f[5] * f[7])
-            - f[1] * (f[3] * f[8] - f[5] * f[6])
+        let j = f[0] * (f[4] * f[8] - f[5] * f[7]) - f[1] * (f[3] * f[8] - f[5] * f[6])
             + f[2] * (f[3] * f[7] - f[4] * f[6]);
         if f.iter().any(|value| !value.is_finite()) || !j.is_finite() || j <= 0.0 {
-            Err(format!("total deformation has nonpositive or nonfinite det F = {j}"))
+            Err(format!(
+                "total deformation has nonpositive or nonfinite det F = {j}"
+            ))
         } else {
             Ok(j)
         }
@@ -622,8 +630,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         }
         let dofs = 3 * self.nodes_m.len();
         let mut coo = Coo::new(dofs, dofs);
-        for (index, (element, density)) in
-            elements.iter().zip(reference_density_kg_m3).enumerate()
+        for (index, (element, density)) in elements.iter().zip(reference_density_kg_m3).enumerate()
         {
             if index % 4096 == 0 {
                 checkpoint(cx)?;
@@ -751,16 +758,56 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         checkpoint(cx)?;
         if !pressure_pa.is_finite() || !surface.matches_reference(self.nodes_m, self.tetrahedra) {
             return Err(HyperTetError::InvalidInput {
-                what: "finite pressure and the exact reference pressure surface are required".into(),
+                what: "finite pressure and the exact reference pressure surface are required"
+                    .into(),
             });
         }
-        self.solve_loaded((pressure_pa != 0.0).then_some((surface, pressure_pa)), cx)
+        self.solve_loaded(
+            (pressure_pa != 0.0).then_some((surface, pressure::TetPressure::Uniform(pressure_pa))),
+            cx,
+        )
+    }
+
+    /// Solve dead loads and a current-area pressure field on exterior faces.
+    ///
+    /// Values are signed Pa in the exact canonical order of `surface.faces()`;
+    /// positive pressure compresses and zero selects an unloaded face. Every
+    /// value ramps with the load factor. Current face geometry, full follower
+    /// tangent and support reactions use the original pressure owner.
+    ///
+    /// An open loaded patch generally has a nonsymmetric tangent and no scalar
+    /// potential. This path therefore uses FGMRES and residual globalization,
+    /// without treating the pressure work as stored energy. An all-zero field
+    /// follows the original dead-load solve exactly.
+    ///
+    /// # Errors
+    /// Incomplete/nonfinite pressures, a mismatched reference surface, or
+    /// [`HyperTetError`]. No equilibrium branch or structural stability is
+    /// guaranteed beyond the reported force residual.
+    pub fn solve_with_face_pressures(
+        &self,
+        surface: &pressure::ClosedTetPressureSurface,
+        pressures_pa: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
+        checkpoint(cx)?;
+        if !surface.matches_reference(self.nodes_m, self.tetrahedra) {
+            return Err(HyperTetError::InvalidInput {
+                what: "the exact reference pressure surface is required".into(),
+            });
+        }
+        let pressure = pressure::TetPressure::PerFace(pressures_pa);
+        let unloaded = surface.validate_pressure(pressure, cx)?;
+        self.solve_loaded((!unloaded).then_some((surface, pressure)), cx)
     }
 
     #[allow(clippy::too_many_lines)] // one load-step / Newton / line-search owner
     fn solve_loaded(
         &self,
-        pressure: Option<(&pressure::ClosedTetPressureSurface, f64)>,
+        pressure: Option<(
+            &pressure::ClosedTetPressureSurface,
+            pressure::TetPressure<'_>,
+        )>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
         checkpoint(cx)?;
@@ -786,10 +833,32 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 what: "initial solid energy or internal force is not representable".into(),
             });
         }
+        let nonsymmetric = matches!(pressure, Some((_, pressure::TetPressure::PerFace(_))));
+        let mut scaled_faces = Vec::new();
         for step in 1..=self.settings.load_steps {
             let load = step as f64 / self.settings.load_steps as f64;
             let f_dead = self.external(&elements, load);
-            let applied_pressure = pressure.map(|(surface, value)| (surface, load * value));
+            if let Some((_, pressure::TetPressure::PerFace(values))) = pressure {
+                scaled_faces.clear();
+                scaled_faces.reserve(values.len());
+                for (index, &value) in values.iter().enumerate() {
+                    if index % 1024 == 0 {
+                        checkpoint(cx)?;
+                    }
+                    scaled_faces.push(load * value);
+                }
+            }
+            let applied_pressure = pressure.map(|(surface, values)| {
+                let values = match values {
+                    pressure::TetPressure::Uniform(value) => {
+                        pressure::TetPressure::Uniform(load * value)
+                    }
+                    pressure::TetPressure::PerFace(_) => {
+                        pressure::TetPressure::PerFace(&scaled_faces)
+                    }
+                };
+                (surface, values)
+            });
             // Accepted and trial states share one current-area load owner.
             // Retain its volume for direct pressure-work increments without
             // rebuilding the same current geometry for a separate volume call.
@@ -806,7 +875,8 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 }
                 if !volume.is_finite() || force.iter().any(|value| !value.is_finite()) {
                     return Err(HyperTetError::InvalidInput {
-                        what: "combined load or current pressure volume is not representable".into(),
+                        what: "combined load or current pressure volume is not representable"
+                            .into(),
                     });
                 }
                 Ok((force, volume))
@@ -859,7 +929,8 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                     }
                     if full.row(row).1.iter().any(|value| !value.is_finite()) {
                         return Err(HyperTetError::InvalidInput {
-                            what: "solid minus follower-pressure tangent is not representable".into(),
+                            what: "solid minus follower-pressure tangent is not representable"
+                                .into(),
                         });
                     }
                 }
@@ -905,7 +976,13 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                     }
                 }
                 let kff = coo.assemble();
-                let (direction, iterations, fallback) = self.linear_solve(&kff, &rhs, load)?;
+                let (direction, iterations, fallback) = if nonsymmetric {
+                    let (direction, iterations) =
+                        self.general_linear_solve(&kff, &rhs, load, cx)?;
+                    (direction, iterations, false)
+                } else {
+                    self.linear_solve(&kff, &rhs, load)?
+                };
                 record.linear_iterations += iterations;
                 record.indefinite_fallbacks += usize::from(fallback);
                 // Line search on the joint (free, prescribed) update.
@@ -936,7 +1013,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                         };
                         let acceptable = if pending_any {
                             true
-                        } else if slope < 0.0 {
+                        } else if !nonsymmetric && slope < 0.0 {
                             // Compare work increments rather than subtracting
                             // large absolute potentials after rigid drift.
                             let dead_work = f_dead
@@ -946,8 +1023,12 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                                     force.mul_add(after - before, sum)
                                 });
                             let energy_change = evaluated.energy - state.energy;
-                            let pressure_change = applied_pressure
-                                .map_or(0.0, |(_, value)| value * (trial_volume - current_volume));
+                            let pressure_change = match applied_pressure {
+                                Some((_, pressure::TetPressure::Uniform(value))) => {
+                                    value * (trial_volume - current_volume)
+                                }
+                                _ => 0.0,
+                            };
                             let change = energy_change - dead_work + pressure_change;
                             let roundoff = 1e-12
                                 * state
@@ -962,7 +1043,12 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                                 .iter()
                                 .map(|&d| evaluated.internal[d] - trial_ext[d])
                                 .collect();
-                            norm(&trial_residual) < residual_norm
+                            let target = if nonsymmetric {
+                                (1.0 - 1e-4 * alpha) * residual_norm
+                            } else {
+                                residual_norm
+                            };
+                            norm(&trial_residual) < target
                         };
                         if acceptable {
                             accepted = Some((trial, evaluated, trial_ext, trial_volume));
@@ -1014,6 +1100,86 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
             min_det_f: state.min_det_f,
             steps,
         })
+    }
+
+    /// General follower loads must keep their nonsymmetric Jacobian. FGMRES
+    /// is the existing generic owner; each restart respects the remaining
+    /// iteration budget and cancellation is checked inside Arnoldi work.
+    fn general_linear_solve(
+        &self,
+        kff: &Csr,
+        rhs: &[f64],
+        load: f64,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, usize), HyperTetError> {
+        checkpoint(cx)?;
+        if norm(rhs) == 0.0 {
+            return Ok((vec![0.0; rhs.len()], 0));
+        }
+        if self.settings.max_linear_iterations == 0 {
+            return Err(HyperTetError::LinearSolveFailed {
+                load_factor: load,
+                relative_residual: 1.0,
+            });
+        }
+        let preconditioner = match ilu0(kff) {
+            Ok(ilu) => GeneralPreconditioner::Ilu(ilu),
+            Err(_) => GeneralPreconditioner::Jacobi(AbsJacobi {
+                inv: (0..kff.nrows())
+                    .map(|i| {
+                        let diagonal = kff.get(i, i).abs();
+                        if diagonal > 0.0 { 1.0 / diagonal } else { 1.0 }
+                    })
+                    .collect(),
+            }),
+        };
+        let op = CsrOp::general(kff.clone());
+        let restart = rhs.len().min(32).min(self.settings.max_linear_iterations);
+        let mut state = FgmresState::new(rhs, restart);
+        while state.iters < self.settings.max_linear_iterations {
+            state.restart = restart.min(self.settings.max_linear_iterations - state.iters);
+            let before = state.iters;
+            let report = state.run_cancellable(
+                &op,
+                &preconditioner,
+                rhs,
+                self.settings.linear_tolerance,
+                1,
+                cx,
+            );
+            match report.progress {
+                SolverRunProgress::Paused => return Err(HyperTetError::Cancelled),
+                SolverRunProgress::Complete => {}
+                _ => {
+                    return Err(HyperTetError::LinearSolveFailed {
+                        load_factor: load,
+                        relative_residual: f64::INFINITY,
+                    });
+                }
+            }
+            if report.report.converged
+                || report.report.diagnosis == Some(StallDiagnosis::Breakdown)
+                || state.iters == before
+            {
+                break;
+            }
+        }
+        let mut applied = vec![0.0; rhs.len()];
+        kff.spmv(&state.x, &mut applied);
+        let residual: Vec<f64> = rhs.iter().zip(applied).map(|(b, a)| b - a).collect();
+        let relative = norm(&residual) / norm(rhs).max(f64::MIN_POSITIVE);
+        checkpoint(cx)?;
+        if relative.is_finite()
+            && relative <= 10.0 * self.settings.linear_tolerance
+            && state.x.iter().all(|value| value.is_finite())
+        {
+            Ok((state.x, state.iters))
+        } else {
+            Err(HyperTetError::LinearSolveFailed {
+                load_factor: load,
+                relative_residual: relative,
+            })
+        }
     }
 
     /// PCG with ILU(0); on a stalled or non-finite CG (indefinite tangent),
@@ -1070,6 +1236,20 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 load_factor: load,
                 relative_residual: rel,
             })
+        }
+    }
+}
+
+enum GeneralPreconditioner {
+    Ilu(Ilu0),
+    Jacobi(AbsJacobi),
+}
+
+impl Precond for GeneralPreconditioner {
+    fn apply(&self, r: &[f64], z: &mut [f64]) {
+        match self {
+            Self::Ilu(ilu) => ilu.apply(r, z),
+            Self::Jacobi(jacobi) => jacobi.apply(r, z),
         }
     }
 }

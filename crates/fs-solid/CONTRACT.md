@@ -71,6 +71,32 @@ continuation, complete rollback and source/history refusals. All fatigue data
 in those tests is explicitly synthetic; the regressions are implementation
 checks, not experimental material calibration.
 
+## Static compression by spatial follower pressure
+
+`HyperTetProblem::solve_with_face_pressures` consumes the existing canonical
+face-pressure field in native finite-deformation equilibrium. Explicit zero
+values select unloaded faces; positive values act inward on CURRENT area.
+Loads, prescribed displacements and pressures share the original load ramp,
+constitutive law, Newton assembly and support-reaction owner. The original
+scalar uniform-pressure entry point retains its conservative solver behavior.
+
+A partially loaded boundary generally has a nonsymmetric follower tangent and
+path-dependent work. The new path retains the full analytic pressure Jacobian,
+uses cancellable FGMRES with ILU(0) or absolute-diagonal preconditioning, and
+globalizes against the force residual. It does not manufacture a pressure-volume
+potential. The explicit linear iteration budget and independently recomputed
+linear residual apply. All-zero face fields use the dead-load path exactly.
+
+G1 tests in `tests/hyper3.rs` reproduce independent Neo-Hookean uniaxial
+compression on two meshes, including lateral expansion, current-area reaction,
+volume and stored energy. `tests/hyper3_pressure.rs` exercises a compressed,
+sheared equilibrium with an actually nonsymmetric free tangent, reaction loads,
+uniform-field equivalence, exact zero-field identity, invalid face coverage,
+nonfinite values, cancellation and an exhausted linear budget. The existing
+P1 volumetric-locking and stability limitations remain. Face loads are supplied
+data, not a fluid equation of state or contact/platen law; no mesh-convergence
+claim follows from an exactly representable affine test.
+
 ## Spatial follower pressure on finite-deformation exterior faces
 
 `hyper3::pressure::TetPressure::PerFace` supplies finite signed pressures in the
