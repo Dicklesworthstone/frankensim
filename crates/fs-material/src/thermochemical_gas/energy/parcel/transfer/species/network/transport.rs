@@ -10,31 +10,39 @@
 //! silently equated to a nozzle's bulk velocity. This is not a spatial CFD
 //! advection-diffusion discretization, pressure diffusion, or jet momentum law.
 
-/// Isothermal pressure-driven leakage through actual porous materials.
-pub mod porous;
-/// Species-selective solution-diffusion through dense membranes.
-pub mod membrane;
 /// Coupled molecular, Knudsen and viscous transport through one porous path.
 pub mod dusty_gas;
-/// Finite gas inventories linked by independently authored porous throats.
-pub mod pore_domain;
 /// Bidirectional free-molecular species and energy transfer through thin apertures.
 pub mod effusion;
+/// Species-selective solution-diffusion through dense membranes.
+pub mod membrane;
+/// Finite gas inventories linked by independently authored porous throats.
+pub mod pore_domain;
+/// Isothermal pressure-driven leakage through actual porous materials.
+pub mod porous;
 mod sample;
 pub use sample::GasTransportRates;
 pub(crate) use sample::sample_transfers;
+mod window;
+pub use window::{GasTransportWindowAudit, audit_closed_window};
 
-use std::collections::BTreeMap;
-use super::{ClosedGasParcel, GasEnergySolve, SpeciesNetworkError, SpeciesNetworkSolve,
-    SpeciesNetworkStep, SpeciesNetworkTransfer, SpeciesNetworkHeatTransfer, MAX_SNAPSHOT_TRANSFERS, inventory};
-use super::super::diffusion::network::{self as molecular, DiffusionNetworkError,
-    DiffusionNetworkLink, DiffusionNetworkLinkStep, DiffusionNetworkSolve};
-use super::super::super::nozzle::network::snapshot::{self as pressure,
-    SnapshotNozzleError, SnapshotNozzleLink, SnapshotNozzleLinkStep};
-use porous::{PorousNetworkError, PorousNetworkLink, PorousNetworkLinkStep};
-use membrane::{MembraneNetworkError, MembraneNetworkLink, MembraneNetworkLinkStep};
+use super::super::super::nozzle::network::snapshot::{
+    self as pressure, SnapshotNozzleError, SnapshotNozzleLink, SnapshotNozzleLinkStep,
+};
+use super::super::diffusion::network::{
+    self as molecular, DiffusionNetworkError, DiffusionNetworkLink, DiffusionNetworkLinkStep,
+    DiffusionNetworkSolve,
+};
+use super::{
+    ClosedGasParcel, GasEnergySolve, MAX_SNAPSHOT_TRANSFERS, SpeciesNetworkError,
+    SpeciesNetworkHeatTransfer, SpeciesNetworkSolve, SpeciesNetworkStep, SpeciesNetworkTransfer,
+    inventory,
+};
 use dusty_gas::{DustyGasNetworkError, DustyGasNetworkLink, DustyGasNetworkLinkStep};
 use effusion::{EffusionNetworkError, EffusionNetworkLink, EffusionNetworkLinkStep};
+use membrane::{MembraneNetworkError, MembraneNetworkLink, MembraneNetworkLinkStep};
+use porous::{PorousNetworkError, PorousNetworkLink, PorousNetworkLinkStep};
+use std::collections::BTreeMap;
 
 /// All authored mechanisms read the same original parcel inventory.
 ///
@@ -83,39 +91,60 @@ impl core::fmt::Display for GasTransportError {
 impl std::error::Error for GasTransportError {}
 impl From<SnapshotNozzleError> for GasTransportError {
     fn from(error: SnapshotNozzleError) -> Self {
-        match error { SnapshotNozzleError::Cancelled => Self::Cancelled, other => Self::Nozzle(other) }
+        match error {
+            SnapshotNozzleError::Cancelled => Self::Cancelled,
+            other => Self::Nozzle(other),
+        }
     }
 }
 impl From<DiffusionNetworkError> for GasTransportError {
     fn from(error: DiffusionNetworkError) -> Self {
-        match error { DiffusionNetworkError::Cancelled => Self::Cancelled, other => Self::Diffusion(other) }
+        match error {
+            DiffusionNetworkError::Cancelled => Self::Cancelled,
+            other => Self::Diffusion(other),
+        }
     }
 }
 impl From<SpeciesNetworkError> for GasTransportError {
     fn from(error: SpeciesNetworkError) -> Self {
-        match error { SpeciesNetworkError::Cancelled => Self::Cancelled, other => Self::Exchange(other) }
+        match error {
+            SpeciesNetworkError::Cancelled => Self::Cancelled,
+            other => Self::Exchange(other),
+        }
     }
 }
 impl From<PorousNetworkError> for GasTransportError {
     fn from(error: PorousNetworkError) -> Self {
-        match error { PorousNetworkError::Cancelled => Self::Cancelled, other => Self::Porous(other) }
+        match error {
+            PorousNetworkError::Cancelled => Self::Cancelled,
+            other => Self::Porous(other),
+        }
     }
 }
 impl From<MembraneNetworkError> for GasTransportError {
     fn from(error: MembraneNetworkError) -> Self {
-        match error { MembraneNetworkError::Cancelled => Self::Cancelled, other => Self::Membrane(other) }
+        match error {
+            MembraneNetworkError::Cancelled => Self::Cancelled,
+            other => Self::Membrane(other),
+        }
     }
 }
 
 impl From<DustyGasNetworkError> for GasTransportError {
     fn from(error: DustyGasNetworkError) -> Self {
-        match error { DustyGasNetworkError::Cancelled => Self::Cancelled, other => Self::DustyGas(other) }
+        match error {
+            DustyGasNetworkError::Cancelled => Self::Cancelled,
+            other => Self::DustyGas(other),
+        }
     }
 }
 
 impl From<EffusionNetworkError> for GasTransportError {
     fn from(error: EffusionNetworkError) -> Self {
-        match error { EffusionNetworkError::Cancelled => Self::Cancelled, other => Self::Effusion(other) }
+        match error {
+            EffusionNetworkError::Cancelled => Self::Cancelled,
+            other => Self::Effusion(other),
+        }
     }
 }
 
@@ -154,7 +183,8 @@ impl GasTransportStep {
     /// species' partial-pressure order. Heat/work can change entropy, and the transport
     /// entropy report is not a certificate for that subsequent process.
     pub fn admit_endpoint_nozzle_pressures(
-        &self, parcels: &BTreeMap<u64, ClosedGasParcel>,
+        &self,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<(), GasTransportError> {
         self.admit_endpoint_driving_forces(parcels, cancelled)
@@ -168,17 +198,34 @@ impl GasTransportStep {
     /// Effusive thermal transpiration also has no pressure-order gate. Both
     /// mechanisms instead share the inventory and total endpoint entropy gates.
     pub fn admit_endpoint_driving_forces(
-        &self, parcels: &BTreeMap<u64, ClosedGasParcel>,
+        &self,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), GasTransportError> {
         check(&mut cancelled)?;
-        if !parcels.keys().copied().eq(self.exchange.parcels.iter().map(|row| row.id))
-            || self.nozzles.iter().any(|row| !parcels.contains_key(&row.donor)
-                || !parcels.contains_key(&row.receiver))
-            || self.porous.iter().any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
-            || self.membranes.iter().any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
-            || self.dusty_gas.iter().any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
-            || self.effusion.iter().any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
+        if !parcels
+            .keys()
+            .copied()
+            .eq(self.exchange.parcels.iter().map(|row| row.id))
+            || self.nozzles.iter().any(|row| {
+                !parcels.contains_key(&row.donor) || !parcels.contains_key(&row.receiver)
+            })
+            || self
+                .porous
+                .iter()
+                .any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
+            || self
+                .membranes
+                .iter()
+                .any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
+            || self
+                .dusty_gas
+                .iter()
+                .any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
+            || self
+                .effusion
+                .iter()
+                .any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
         {
             return Err(GasTransportError::Invalid(
                 "final transport admission needs the complete original parcel identity map",
@@ -198,15 +245,23 @@ pub struct GasTransportCandidate {
     step: GasTransportStep,
 }
 impl GasTransportCandidate {
-    pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> { &self.parcels }
-    pub const fn step(&self) -> &GasTransportStep { &self.step }
+    pub fn parcels(&self) -> &BTreeMap<u64, ClosedGasParcel> {
+        &self.parcels
+    }
+    pub const fn step(&self) -> &GasTransportStep {
+        &self.step
+    }
     pub fn into_parts(self) -> (BTreeMap<u64, ClosedGasParcel>, GasTransportStep) {
         (self.parcels, self.step)
     }
 }
 use GasTransportError as Error;
 fn check(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
-    if cancelled() { Err(Error::Cancelled) } else { Ok(()) }
+    if cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 /// Advance explicitly declared pressure-driven AND diffusive connections once.
@@ -229,14 +284,26 @@ fn check(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
 /// Empty lists close that mechanism. Both empty preserve all gases exactly.
 /// No previously received species can leave another connection in this step.
 pub fn step_candidate(
-    parcels: &BTreeMap<u64, ClosedGasParcel>, nozzles: &[SnapshotNozzleLink],
-    diffusion: &[DiffusionNetworkLink<'_>], duration_s: f64,
-    endpoints: &BTreeMap<u64, GasEnergySolve>, controls: GasTransportSolve,
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    nozzles: &[SnapshotNozzleLink],
+    diffusion: &[DiffusionNetworkLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: GasTransportSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<GasTransportCandidate, Error> {
-    step_candidate_with_paths(parcels, GasTransportPaths {
-        nozzles, diffusion, ..GasTransportPaths::default()
-    }, duration_s, endpoints, controls, cancelled)
+    step_candidate_with_paths(
+        parcels,
+        GasTransportPaths {
+            nozzles,
+            diffusion,
+            ..GasTransportPaths::default()
+        },
+        duration_s,
+        endpoints,
+        controls,
+        cancelled,
+    )
 }
 
 /// Advance all declared pressure, porous, diffusive, membrane and molecular paths transactionally.
@@ -247,12 +314,23 @@ pub fn step_candidate(
 /// The caller controls first-order time refinement; failed proposals publish
 /// no partial state. Constitutive source domains remain owned by each law.
 pub fn step_candidate_with_paths(
-    parcels: &BTreeMap<u64, ClosedGasParcel>, paths: GasTransportPaths<'_>,
-    duration_s: f64, endpoints: &BTreeMap<u64, GasEnergySolve>,
-    controls: GasTransportSolve, cancelled: impl FnMut() -> bool,
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    paths: GasTransportPaths<'_>,
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: GasTransportSolve,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<GasTransportCandidate, Error> {
-    step_candidate_with_paths_and_fluxes(parcels, paths, duration_s, &[], &[], endpoints,
-        controls, cancelled)
+    step_candidate_with_paths_and_fluxes(
+        parcels,
+        paths,
+        duration_s,
+        &[],
+        &[],
+        endpoints,
+        controls,
+        cancelled,
+    )
 }
 
 /// Join externally sampled physical species/heat fluxes to the SAME snapshot.
@@ -265,30 +343,72 @@ pub fn step_candidate_with_paths(
 /// No incoming species can fund any outgoing flux in this interval.
 #[allow(clippy::too_many_arguments)]
 pub fn step_candidate_with_paths_and_fluxes(
-    parcels: &BTreeMap<u64, ClosedGasParcel>, paths: GasTransportPaths<'_>,
-    duration_s: f64, transfers: &[SpeciesNetworkTransfer], heat: &[SpeciesNetworkHeatTransfer],
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    paths: GasTransportPaths<'_>,
+    duration_s: f64,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
     endpoints: &BTreeMap<u64, GasEnergySolve>,
-    controls: GasTransportSolve, mut cancelled: impl FnMut() -> bool,
+    controls: GasTransportSolve,
+    mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasTransportCandidate, Error> {
-    if transfers.len().checked_add(heat.len()).is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
-        return Err(Error::Invalid("additional transport flux count exceeds the shared work bound"));
+    if transfers
+        .len()
+        .checked_add(heat.len())
+        .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS)
+    {
+        return Err(Error::Invalid(
+            "additional transport flux count exceeds the shared work bound",
+        ));
     }
-    let mut sampled = sample_transfers(parcels, paths, duration_s, endpoints, controls, &mut cancelled)?;
-    if [sampled.transfers.len(), sampled.heat.len(), transfers.len(), heat.len()]
-        .into_iter().try_fold(0usize, |total, n| total.checked_add(n))
-        .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
-        return Err(Error::Invalid("combined transport flux count exceeds the shared work bound"));
+    let mut sampled = sample_transfers(
+        parcels,
+        paths,
+        duration_s,
+        endpoints,
+        controls,
+        &mut cancelled,
+    )?;
+    if [
+        sampled.transfers.len(),
+        sampled.heat.len(),
+        transfers.len(),
+        heat.len(),
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, n| total.checked_add(n))
+    .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS)
+    {
+        return Err(Error::Invalid(
+            "combined transport flux count exceeds the shared work bound",
+        ));
     }
     sampled.transfers.extend_from_slice(transfers);
     sampled.heat.extend_from_slice(heat);
-    let proposal = super::exchange_candidate_with_heat(parcels, &sampled.transfers, &sampled.heat,
-        endpoints, controls.exchange, &mut cancelled)?;
-    sampled.rates.admit_endpoint_driving_forces(proposal.parcels(), &mut cancelled)?;
-    let entropy_change_j_k = molecular::admit_entropy(parcels, proposal.parcels(),
-        controls.entropy_tolerance_j_k, controls.exchange.mass_tolerance_kg, &mut cancelled)?;
+    let proposal = super::exchange_candidate_with_heat(
+        parcels,
+        &sampled.transfers,
+        &sampled.heat,
+        endpoints,
+        controls.exchange,
+        &mut cancelled,
+    )?;
+    sampled
+        .rates
+        .admit_endpoint_driving_forces(proposal.parcels(), &mut cancelled)?;
+    let entropy_change_j_k = molecular::admit_entropy(
+        parcels,
+        proposal.parcels(),
+        controls.entropy_tolerance_j_k,
+        controls.exchange.mass_tolerance_kg,
+        &mut cancelled,
+    )?;
     check(&mut cancelled)?;
     let (parcels, exchange) = proposal.into_parts();
-    Ok(GasTransportCandidate { parcels, step:sampled.rates.into_closed_step(exchange, entropy_change_j_k) })
+    Ok(GasTransportCandidate {
+        parcels,
+        step: sampled.rates.into_closed_step(exchange, entropy_change_j_k),
+    })
 }
 
 #[cfg(test)]

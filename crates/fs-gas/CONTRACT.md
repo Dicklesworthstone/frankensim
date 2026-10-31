@@ -1099,13 +1099,52 @@ The native combined work bound, gross original-species withdrawal, source catalo
 join, fixed absolute mass/energy budgets and closed endpoint entropy gate remain
 authoritative. Source refusal, cancellation or an overlarge explicit step returns
 no candidate state. This is a first-order physical candidate operator; it adds no
-independent timeline or accuracy controller.
+separate physical solver. Its whole-window accuracy owner is described below.
 
 `tests/material_parcel_transport.rs` covers independent binary Soret/Dufour
 temperature and inventory predictions, unequal-mass frame/orientation,
 formation/kinetic-datum invariance, shared nozzle withdrawal, absent species,
 initial and final source-domain refusal, and cancellation. Its coefficients are
 manufactured integration fixtures, not measured-material qualification.
+
+`ParcelMolecularTransport::{advance_candidate,advance_to}` completes a positive
+`[start,target]` interval using bounded full-versus-two-substep comparisons of
+those same native physical candidates. Only the fine path enters accepted
+states and accounts. Per-parcel species inventory (kg) and temperature (K)
+errors use absolute tolerances plus a relative allowance on actual changes,
+so large carriers or absolute temperatures cannot conceal a small response.
+The fine first-order estimate includes the correction for unequal represented
+half intervals. Endpoint clocks define every physical duration; the target is
+exact, a shorter final remainder still needs accuracy, and an unresolved
+midpoint refuses. An adjacent representable final tail is coalesced into the
+proposed span before its physical probes, never by snapping an already solved
+clock. The estimate is local and asymptotic, not a global error bound.
+
+The evaluation limit counts every full/fine probe, including discarded and
+failed probes. Only typed original withdrawal, pressure-order, entropy or
+caloric bracket/root-convergence refusals, and temporal error excess, can reduce
+the interval. Original temperatures must lie inside the supplied caloric
+brackets. Actual material, kinetic and thermal-cross source/domain refusals are
+hard failures. Every physical trial retains initial/final source qualification,
+the original enthalpy convention and simultaneous native `GasTransportPaths`.
+No extrapolated state, source substitution or clipped inventory is introduced.
+
+Accepted gross species streams and donor partial enthalpies reuse the native
+transfer account; additional internal energy retains both directions on each
+canonical parcel pair. Rejected probes contribute only to work counts. Detailed
+source reports are retained for the final accepted substep. The original material
+`audit_closed_window` independently evaluates actual original-to-final total and
+source-qualified species mass, NASA internal-energy increments with common
+species references cancelled, and caloric/mixing entropy. It and the compensated
+sum of accepted native energy residuals must fit the unchanged absolute physical
+budgets, with no multiplication by step count. Late refusal or cancellation
+publishes neither a gas-map prefix nor an advanced caller clock.
+
+The public adaptive fixtures exercise an independent exact coupled two-mode
+Soret/Dufour relaxation, separate species/temperature refinement, stiff pure-gas
+Fourier relaxation, accepted-only replay with native nozzle paths, reference
+invariance, typed physical retries, late source/work/cancellation rollback and
+ordinary plus large represented clocks.
 
 
 ## Reacting Navier-Stokes composition with original-source molecular transport

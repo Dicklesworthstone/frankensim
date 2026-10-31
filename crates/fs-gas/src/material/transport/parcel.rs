@@ -6,6 +6,9 @@
 //! final closed energy/entropy gates. This is a first-order candidate operator,
 //! not a second timeline or a thermal-transpiration model for dusty-gas pores.
 
+/// Bounded whole-window temporal accuracy over the original physical candidates.
+pub mod adaptive;
+
 use crate::multicomponent::dissipation::{
     DissipationError, MaxwellStefanSolveV1, PlanarTransport, TransportFaceReport, TransportLaw,
 };

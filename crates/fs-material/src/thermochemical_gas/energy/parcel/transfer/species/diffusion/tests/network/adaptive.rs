@@ -204,6 +204,11 @@ fn g3_adaptive_accuracy_and_energy_accounts_ignore_species_formation_datums() {
     };
     let a = run(&ordinary);
     let b = run(&shifted);
+    assert!(a.report().endpoint_energy_change_j.abs() <= solve().exchange.energy_tolerance_j);
+    assert_eq!(
+        a.report().endpoint_energy_change_j.to_bits(),
+        b.report().endpoint_energy_change_j.to_bits()
+    );
     for id in ordinary.keys() {
         assert_eq!(
             a.parcels()[id].mass_kg().to_bits(),

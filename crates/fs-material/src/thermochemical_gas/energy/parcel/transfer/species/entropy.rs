@@ -71,6 +71,7 @@ fn same_source(a: &Nasa9StandardStateModelV1, b: &Nasa9StandardStateModelV1) -> 
     a.species() == b.species()
         && a.molar_mass().value().to_bits() == b.molar_mass().value().to_bits()
         && a.convention() == b.convention()
+        && a.caloric_reference() == b.caloric_reference()
         && a.regions()
             .iter()
             .map(|r| r.card_identity())
@@ -192,8 +193,36 @@ fn contributions(
 pub(super) fn closed_entropy_change<'a>(
     states: impl IntoIterator<Item = (u64, &'a ClosedGasParcel, &'a ClosedGasParcel)>,
     mass_tolerance_kg: f64,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<f64, Error> {
+    closed_changes::<false>(states, mass_tolerance_kg, cancelled)
+        .map(|change| change.entropy_change_j_k)
+}
+
+/// Original-to-final inventory and caloric differences in one source-qualified
+/// traversal. Constant energy/entropy references cancel per conserved species;
+/// their bounded mass residuals remain separate physical acceptance accounts.
+pub(super) struct ClosedGasChanges {
+    pub total_mass_residual_kg: f64,
+    pub maximum_species_mass_residual_kg: f64,
+    pub energy_change_j: f64,
+    pub entropy_change_j_k: f64,
+}
+
+pub(super) fn closed_inventory_change<'a>(
+    states: impl IntoIterator<Item = (u64, &'a ClosedGasParcel, &'a ClosedGasParcel)>,
+    mass_tolerance_kg: f64,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ClosedGasChanges, Error> {
+    closed_changes::<true>(states, mass_tolerance_kg, cancelled)
+}
+
+// The ordinary entropy gate does not pay for unused NASA caloric differences.
+fn closed_changes<'a, const ENERGY: bool>(
+    states: impl IntoIterator<Item = (u64, &'a ClosedGasParcel, &'a ClosedGasParcel)>,
+    mass_tolerance_kg: f64,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ClosedGasChanges, Error> {
     check(&mut cancelled)?;
     if !mass_tolerance_kg.is_finite() || mass_tolerance_kg <= 0.0 {
         return Err(Error::Invalid(
@@ -201,12 +230,16 @@ pub(super) fn closed_entropy_change<'a>(
         ));
     }
     let mut rows = Vec::new();
+    let mut mass = Accumulator::default();
     for row in states {
         check(&mut cancelled)?;
         if rows.len() == MAX_SNAPSHOT_PARCELS || row.1.volume_m3() != row.2.volume_m3() {
             return Err(Error::Invalid(
                 "bounded entropy audit requires unchanged parcel volumes",
             ));
+        }
+        if ENERGY {
+            mass.add(row.2.mass_kg() - row.1.mass_kg())?;
         }
         rows.push(row);
     }
@@ -231,6 +264,7 @@ pub(super) fn closed_entropy_change<'a>(
         }
     }
     let mut entropy = Accumulator::default();
+    let mut energy = Accumulator::default();
     for &(id, old, next) in &rows {
         let before = old.model().thermodynamics().components();
         let after = next.model().thermodynamics().components();
@@ -284,23 +318,74 @@ pub(super) fn closed_entropy_change<'a>(
             )? {
                 entropy.add(term)?;
             }
+            if ENERGY {
+                // n1*u(T1)-n0*u(T0)-dn*u(Tref), with the common species
+                // reference removed before arithmetic. The first difference
+                // preserves adjacent-temperature sensible storage even when
+                // absolute formation energies dwarf it.
+                let t0 = old.state().state().temperature;
+                let t1 = next.state().state().temperature;
+                let du = |a, b| {
+                    reference
+                        .model
+                        .molar_internal_energy_change(Temperature::new(a), Temperature::new(b))
+                        .map(|value| value.value())
+                        .map_err(|error| Error::Parcel {
+                            id,
+                            error: source_error(error),
+                        })
+                };
+                if n0 == 0.0 {
+                    // This species need not support the temperature of a
+                    // parcel in which it was physically absent.
+                    energy.add(n1 * du(reference.temperature_k, t1)?)?;
+                } else if n1 == 0.0 {
+                    energy.add(-n0 * du(reference.temperature_k, t0)?)?;
+                } else {
+                    energy.add(n1 * du(t0, t1)?)?;
+                    if n0 != n1 {
+                        energy.add((n1 - n0) * du(reference.temperature_k, t0)?)?;
+                    }
+                }
+            }
             reference
                 .mass_change
                 .add((n1 - n0) * model.molar_mass().value())?;
         }
     }
+    let mut maximum_species_mass_residual_kg = 0.0_f64;
     for group in references.into_values() {
+        let mut species_mass = Accumulator::default();
         for reference in group {
             check(&mut cancelled)?;
-            if reference.mass_change.total()?.abs() > mass_tolerance_kg {
+            let residual = reference.mass_change.total()?;
+            if ENERGY {
+                species_mass.add(residual)?;
+            }
+            maximum_species_mass_residual_kg = maximum_species_mass_residual_kg.max(residual.abs());
+            if residual.abs() > mass_tolerance_kg {
                 return Err(Error::Invalid(
                     "closed entropy audit did not conserve each source-qualified species",
                 ));
             }
         }
+        if ENERGY {
+            let residual = species_mass.total()?.abs();
+            maximum_species_mass_residual_kg = maximum_species_mass_residual_kg.max(residual);
+            if residual > mass_tolerance_kg {
+                return Err(Error::Invalid(
+                    "closed gas window did not conserve each species across source groups",
+                ));
+            }
+        }
     }
     check(&mut cancelled)?;
-    entropy.total()
+    Ok(ClosedGasChanges {
+        total_mass_residual_kg: mass.total()?,
+        maximum_species_mass_residual_kg,
+        energy_change_j: energy.total()?,
+        entropy_change_j_k: entropy.total()?,
+    })
 }
 
 #[cfg(test)]

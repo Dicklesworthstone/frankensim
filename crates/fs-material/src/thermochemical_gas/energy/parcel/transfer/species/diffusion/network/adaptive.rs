@@ -7,11 +7,14 @@
 //! a license to leave the original isothermal/isobaric constitutive domain.
 
 use super::super::super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
+use super::super::super::network::transport::{
+    GasTransportError, GasTransportSolve, audit_closed_window,
+};
 use super::super::super::{SpeciesId, Sum, inventory};
 use super::{
     ClosedGasParcel, DiffusionNetworkCandidate, DiffusionNetworkError, DiffusionNetworkLink,
     DiffusionNetworkSolve, DiffusionNetworkStep, GasEnergySolve, SpeciesNetworkError,
-    candidate_before_entropy_gate, check, entropy_change,
+    candidate_before_entropy_gate, check,
 };
 use std::collections::BTreeMap;
 
@@ -68,6 +71,9 @@ pub struct DiffusionNetworkAdvanceReport {
     /// Compensated sum of accepted original-caloric residuals after reference
     /// cancellation, as in SpeciesNetworkStep. Inventory roundoff is separate.
     pub total_energy_residual_j: f64,
+    /// Actual original-to-final source-relative internal-energy change [J].
+    /// Independently bounded by the same fixed energy tolerance as the ledger.
+    pub endpoint_energy_change_j: f64,
     /// Original-to-final source-qualified closed-network entropy change [J/K].
     pub entropy_change_j_k: f64,
     /// Source receipts for the last accepted half step; history is not retained.
@@ -101,6 +107,8 @@ impl DiffusionNetworkAdvanceCandidate {
 #[derive(Clone, Debug, PartialEq)]
 pub enum DiffusionNetworkAdvanceError {
     Invalid(&'static str),
+    /// Direct original-to-final native conservation/thermodynamic refusal.
+    Window(GasTransportError),
     Step {
         elapsed_s: f64,
         step_s: f64,
@@ -260,44 +268,6 @@ impl Ledger {
         }
         Ok(())
     }
-}
-
-fn mass_balance(
-    initial: &BTreeMap<u64, ClosedGasParcel>,
-    final_state: &BTreeMap<u64, ClosedGasParcel>,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<(f64, f64), Error> {
-    let mut total = Sum::default();
-    let mut species: BTreeMap<SpeciesId, Sum> = BTreeMap::new();
-    for (&id, old) in initial {
-        poll(cancelled)?;
-        let next = &final_state[&id];
-        total
-            .add(next.mass_kg() - old.mass_kg())
-            .map_err(arithmetic)?;
-        let a = inventory(old.model(), old.mass_kg()).map_err(arithmetic)?;
-        let b = inventory(next.model(), next.mass_kg()).map_err(arithmetic)?;
-        for (name, mass) in &a {
-            species
-                .entry(name.clone())
-                .or_default()
-                .add(b.get(name).copied().unwrap_or(0.0) - mass)
-                .map_err(arithmetic)?;
-        }
-        for (name, mass) in &b {
-            if !a.contains_key(name) {
-                species
-                    .entry(name.clone())
-                    .or_default()
-                    .add(*mass)
-                    .map_err(arithmetic)?;
-            }
-        }
-    }
-    Ok((
-        total.value,
-        species.values().map(|s| s.value.abs()).fold(0.0, f64::max),
-    ))
 }
 
 /// Advance an arbitrary branching/cyclic molecular network through exactly the
@@ -485,28 +455,30 @@ pub fn advance_candidate(
         }
         ceiling = half;
     }
-    let (mass, species_mass) = mass_balance(original, &state, &mut cancelled)?;
-    let entropy = entropy_change(
+    let audit = audit_closed_window(
         original,
         &state,
-        physical.exchange.mass_tolerance_kg,
+        GasTransportSolve {
+            exchange: physical.exchange,
+            entropy_tolerance_j_k: physical.entropy_tolerance_j_k,
+        },
         &mut cancelled,
     )
-    .map_err(|e| physical_error(e, elapsed, 0.0))?;
-    if mass.abs() > physical.exchange.mass_tolerance_kg
-        || species_mass > physical.exchange.mass_tolerance_kg
-        || ledger.energy.value.abs() > physical.exchange.energy_tolerance_j
-    {
+    .map_err(|error| match error {
+        GasTransportError::Cancelled => Error::Cancelled,
+        GasTransportError::Diffusion(DiffusionNetworkError::EntropyDecrease {
+            change_j_k, ..
+        }) => Error::Entropy {
+            elapsed_s: elapsed,
+            step_s: 0.0,
+            change_j_k,
+        },
+        other => Error::Window(other),
+    })?;
+    if ledger.energy.value.abs() > physical.exchange.energy_tolerance_j {
         return Err(Error::Invalid(
             "complete diffusion window exceeds its species/mass/energy budget",
         ));
-    }
-    if entropy < -physical.entropy_tolerance_j_k {
-        return Err(Error::Entropy {
-            elapsed_s: elapsed,
-            step_s: 0.0,
-            change_j_k: entropy,
-        });
     }
     poll(&mut cancelled)?;
     let transfers = ledger
@@ -535,10 +507,11 @@ pub fn advance_candidate(
             maximum_species_error_ratio: max_species_error,
             maximum_temperature_error_ratio: max_temperature_error,
             transfers,
-            total_mass_residual_kg: mass,
-            maximum_species_mass_residual_kg: species_mass,
+            total_mass_residual_kg: audit.total_mass_residual_kg,
+            maximum_species_mass_residual_kg: audit.maximum_species_mass_residual_kg,
             total_energy_residual_j: ledger.energy.value,
-            entropy_change_j_k: entropy,
+            endpoint_energy_change_j: audit.energy_change_j,
+            entropy_change_j_k: audit.entropy_change_j_k,
             last_substep: last.ok_or(Error::Invalid("diffusion window accepted no interval"))?,
         },
     })

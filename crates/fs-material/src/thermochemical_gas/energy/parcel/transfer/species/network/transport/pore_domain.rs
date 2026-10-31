@@ -33,12 +33,11 @@ use fs_thermochem::SpeciesId;
 use super::super::super::diffusion::{
     BinaryDiffusionMaterial,
     dusty_gas::{DustyGasFaceSolve, DustyGasMedium},
-    network::admit_entropy,
 };
-use super::super::super::{Sum, inventory, stored_change};
+use super::super::super::{Sum, inventory};
 use super::super::{MAX_SNAPSHOT_PARCELS, SpeciesNetworkError, SpeciesNetworkStep};
 use super::{
-    GasTransportError, GasTransportPaths, GasTransportSolve, GasTransportStep,
+    GasTransportError, GasTransportPaths, GasTransportSolve, GasTransportStep, audit_closed_window,
     dusty_gas::DustyGasNetworkLink, step_candidate_with_paths,
 };
 use crate::thermochemical_gas::{
@@ -678,70 +677,28 @@ fn window_balances(
     controls: GasTransportSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(f64, f64, f64, f64, f64), Error> {
-    let (mut mass, mut energy, mut pore_mass) = (Sum::default(), Sum::default(), Sum::default());
-    let mut species: BTreeMap<SpeciesId, Sum> = BTreeMap::new();
+    let audit = audit_closed_window(old, next, controls, &mut *cancelled).map_err(|error| {
+        if error == GasTransportError::Cancelled {
+            Error::Cancelled
+        } else {
+            Error::WindowBalance(error)
+        }
+    })?;
+    let mut pore_mass = Sum::default();
     for (&id, before) in old {
         check(cancelled)?;
         let after = &next[&id];
         let dm = after.mass_kg() - before.mass_kg();
-        mass.add(dm).map_err(gas_error)?;
-        energy
-            .add(stored_change(before, after))
-            .map_err(gas_error)?;
         if id > 0 && id <= pore_count as u64 {
             pore_mass.add(dm).map_err(gas_error)?;
         }
-        let a = inventory(before.model(), before.mass_kg()).map_err(gas_error)?;
-        let b = inventory(after.model(), after.mass_kg()).map_err(gas_error)?;
-        for (name, value) in &b {
-            check(cancelled)?;
-            species
-                .entry(name.clone())
-                .or_default()
-                .add(value - a.get(name).copied().unwrap_or(0.0))
-                .map_err(gas_error)?;
-        }
-        for (name, value) in &a {
-            if !b.contains_key(name) {
-                species
-                    .entry(name.clone())
-                    .or_default()
-                    .add(-value)
-                    .map_err(gas_error)?;
-            }
-        }
     }
-    let species_error = species
-        .values()
-        .map(|s| s.value.abs())
-        .fold(0.0_f64, f64::max);
-    if mass.value.abs() > controls.exchange.mass_tolerance_kg
-        || species_error > controls.exchange.mass_tolerance_kg
-        || energy.value.abs() > controls.exchange.energy_tolerance_j
-    {
-        return Err(Error::Invalid(
-            "complete pore window exceeded its species/mass/energy balance budget",
-        ));
-    }
-    let entropy = admit_entropy(
-        old,
-        next,
-        controls.entropy_tolerance_j_k,
-        controls.exchange.mass_tolerance_kg,
-        &mut *cancelled,
-    )
-    .map_err(|error| match error {
-        super::super::super::diffusion::network::DiffusionNetworkError::Cancelled => {
-            Error::Cancelled
-        }
-        other => Error::WindowBalance(GasTransportError::Diffusion(other)),
-    })?;
     check(cancelled)?;
     Ok((
-        mass.value,
-        species_error,
-        energy.value,
-        entropy,
+        audit.total_mass_residual_kg,
+        audit.maximum_species_mass_residual_kg,
+        audit.energy_change_j,
+        audit.entropy_change_j_k,
         pore_mass.value,
     ))
 }

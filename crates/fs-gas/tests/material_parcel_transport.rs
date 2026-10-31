@@ -1,6 +1,11 @@
 //! Manufactured public-API checks for source-backed finite molecular transport.
 #![cfg(all(feature = "material", feature = "experimental-euler"))]
 
+#[path = "material_parcel_transport/adaptive.rs"]
+mod adaptive;
+#[path = "material_parcel_transport/closed_window.rs"]
+mod closed_window;
+
 use fs_evidence::ValidityDomain;
 use fs_gas::material::transport::parcel::{
     ParcelMolecularCandidate, ParcelMolecularError, ParcelMolecularLink, ParcelMolecularSolve,

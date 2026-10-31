@@ -8424,6 +8424,26 @@ once. Actual initial and final participating gas states must also satisfy the
 original transport sources. Continuum exposures remain distinct from dusty-gas
 pore transport; this composition supplies no porous thermal-transpiration law.
 
+`transport::audit_closed_window` closes a rigid gas network directly between
+its original and final inventories. It reuses the original source-qualified
+entropy traversal and, only when requested, accumulates analytic NASA internal
+energy increments with one common reference removed per conserved species.
+The identity is `n1*du(T0,T1) + (n1-n0)*du(Tref,T0)`; absent-species limits query
+only temperatures at which that species actually exists. Original source cards
+and explicit caloric-reconciliation metadata must match. Actual total and
+individual species mass residuals, internal energy and entropy obey one fixed
+budget independent of accepted-step count. Energy/entropy datum roundoff is not
+multiplied into the separate mass allowance. The existing closed `PoreDomain`
+window uses this same audit instead of subtracting absolute mixture energies.
+The existing molecular-diffusion adaptive window also checks actual endpoint
+energy independently of its compensated accepted-step residual ledger.
+`DiffusionNetworkError::EntropyDecrease` distinguishes finite-step entropy
+refusal from hard source/domain errors. Public gas integration tests exercise
+large formation references, sub-resolution absolute-energy defects, species
+appearance/disappearance, irreversible mixing, source/cancellation refusal and
+porous counterdiffusion. This is a closed endpoint account, not a temporal error
+estimate or an audit for externally heated, reacting or moving-volume systems.
+
 ### Source-bound conductivity through latent phase change
 
 `thermal::conduction::phase::PreparedPhaseConductivity` binds one selected
