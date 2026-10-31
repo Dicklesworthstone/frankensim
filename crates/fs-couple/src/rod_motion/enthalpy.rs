@@ -15,7 +15,8 @@
 //! alternate rod/thermal integrator is introduced.
 
 use super::{
-    RodMotion, RodMotionControls, RodMotionError, RodMotionInertia, RodMotionStep, RodNodalWrench,
+    PreparedRodLoads, RodMotion, RodMotionControls, RodMotionError, RodMotionInertia, RodMotionStep,
+    RodNodalWrench, StageLoads,
 };
 use crate::circuit_enthalpy::material::{
     MaterialNetwork, MaterialNetworkError, MaterialNetworkSample, PreparedMaterialNetwork,
@@ -534,6 +535,57 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         energy_guess_j: &[f64],
         gate: &CancelGate,
     ) -> Result<RodThermoelasticReport> {
+        self.step_with_loads(
+            thermal,
+            target_s,
+            StageLoads::World(loads),
+            mechanical_controls,
+            controls,
+            energy_guess_j,
+            gate,
+        )
+    }
+
+    /// Advance heated rod motion with prepared material-point forces and
+    /// body/world-held free couples. Both mechanical kicks evaluate the actual
+    /// attachment frames through the original spatial-load owner.
+    ///
+    /// This shares the complete native/source/caloric solve and atomic commit
+    /// with [`Self::step`]. Applied work and the signed mechanical integration
+    /// defect retain their original accounts; neither becomes fictitious heat.
+    /// Source refresh preserves the accepted endpoint pose and momenta. The
+    /// thermoelastic split remains first order and requires refinement.
+    pub fn step_spatial(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        target_s: f64,
+        loads: &PreparedRodLoads,
+        mechanical_controls: RodMotionControls,
+        controls: RodThermoelasticSolve,
+        energy_guess_j: &[f64],
+        gate: &CancelGate,
+    ) -> Result<RodThermoelasticReport> {
+        self.step_with_loads(
+            thermal,
+            target_s,
+            StageLoads::Spatial(loads),
+            mechanical_controls,
+            controls,
+            energy_guess_j,
+            gate,
+        )
+    }
+
+    fn step_with_loads(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        target_s: f64,
+        loads: StageLoads<'_>,
+        mechanical_controls: RodMotionControls,
+        controls: RodThermoelasticSolve,
+        energy_guess_j: &[f64],
+        gate: &CancelGate,
+    ) -> Result<RodThermoelasticReport> {
         check(gate)?;
         let before = self.mechanical.time_s();
         if thermal.time_s().to_bits() != before.to_bits()
@@ -558,7 +610,7 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
         let internal_before = self.mechanical_internal_energy_j()?;
         let (frozen, mechanical) = self
             .mechanical
-            .step_candidate(dt, loads, mechanical_controls, gate)
+            .step_with_loads(dt, loads, mechanical_controls, gate)
             .map_err(motion)?;
         if frozen.time_s().to_bits() != target_s.to_bits() {
             return Err(invalid(

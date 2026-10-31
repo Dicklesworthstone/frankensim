@@ -17005,6 +17005,40 @@ work terms. The single-point API delegates to this shared path. Tests use the
 analytic consistent tetrahedral inverse, including negative cross-vertex
 mobility, support elimination, combined impulse work and endpoint agreement.
 
+## Rotating material-point loads on native rod motion
+
+`rod_motion::PreparedRodLoads` binds world-held forces at original material
+points, world-held nodal forces/couples and material-following free couples.
+`RodMotion::step_spatial_candidate` evaluates each nodal resultant at both
+actual endpoint frames through the original momentum-kick, centroid-drift,
+free-rotation and accounting owner. A rotating force arm contributes `(R r) x F`
+at each kick; it is never frozen to its starting world moment. The existing
+`step_candidate` fixed-world wrench API retains its previous behavior.
+
+Offsets and reported nodal moments refer to material nodes. The existing native
+kick alone transports them to eccentric mass centroids and retains the full
+central tensor, support reactions, power and orbital/spin momentum accounting.
+Cold preparation reuses the mass-independent compensated `fs-mbd` first-moment
+reducer, with at most 16,384 points across the rod. Per-step load evaluation has
+constant storage and work per node, independent of attachment count.
+
+Applied work remains the native symmetric kick quadrature. Conservative held
+point forces have their usual potential; general free couples do not acquire a
+potential or a symplecticity claim. These interval-held loads do not implement
+velocity-dependent drag/friction, closed-loop motors, contact or moving supports.
+Focused fixtures cover scalar nonlinear torsion and work refinement, rotating
+body versus world couples, independent point power/frame covariance, full-tensor
+eccentric COM loading, supported moments and atomic refusal/replay.
+
+`RodThermoelasticSystem::step_spatial` carries these same prepared loads through
+the original frozen-temperature mechanics, finite-cell enthalpy solve and source
+refresh. Both thermal and mechanical histories publish only after all original
+material and energy gates pass. Applied force/couple work and the signed native
+integration defect retain separate accounts; numerical error is never deposited
+as heat. The complete thermoelastic split remains first order. Regressions check
+fixed-world parity, independent rotating attachment impulses, complete material
+plus caloric storage, and late thermal refusal followed by a valid retry.
+
 ## Point impulses on continuing geometrically exact rods
 
 `rod_motion::RodMotion::apply_point_impulses` applies simultaneous terminal or
