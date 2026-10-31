@@ -16,6 +16,9 @@ use fs_matdb::{
 use fs_qty::{Acceleration, Area, Density, Length, Pressure};
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
+#[path = "closed_room/tests.rs"]
+mod closed_room;
+
 // Original admitted low-temperature NASA9 air source, without a second caloric bank.
 #[path = "../../../../examples/compartment_fire/air.rs"]
 mod air;

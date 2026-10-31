@@ -17,17 +17,37 @@ cargo run --release -p fs-airflow --features compartment-fire \
   --example radiating_compartment -- spectral 10 0.1
 cargo run --release -p fs-airflow --features compartment-fire \
   --example radiating_compartment -- spectral 10 0.05
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example radiating_compartment -- implicit 10 2
 ```
 
-Arguments are optical mode (`gray` or `spectral`), end time [s] and maximum
+Arguments are mode (`gray`, `spectral` or `implicit`), end time [s] and maximum
 timestep [s]. Defaults are `spectral 10 0.1`. End time must be 0.001..300 s,
-maximum timestep 0.001..0.5 s, and requested and accepted work is bounded by
+maximum timestep 0.001..0.5 s (up to 300 s for `implicit`), and work is bounded by
 50,000 steps. CSV goes to stdout; model attribution and accumulated numerical
 diagnostics go to stderr. `--help` prints the invocation.
 
 The [executable](../radiating_compartment.rs) is a numerical coupling example.
 Its optical and wall properties are explicitly authored inputs. It provides no
 experimental validation or molecular absorption data.
+
+`implicit` uses the same authored gray absorption as `gray`, but closes gas
+temperature feedback as well as wall feedback. Every trial rebuilds optical
+path lengths from the endpoint interface and convective contacts from endpoint
+gas temperatures. The original gas solve retains variable calorics and
+interlayer pressure-volume work. This closed, fixed-inventory mode takes the
+requested interval without automatic step reduction; its bounded nonlinear
+solver may still refuse. A larger admitted step is not an accuracy guarantee:
+reduce the timestep to check first-order convergence.
+
+The reusable `candidate_closed_room_walls` API accepts a closure which evaluates
+the existing wall candidate at the supplied trial room. That closure must always
+start from the same accepted walls. Both returned owners are installed together;
+the exact wall-report heat advances gas, and final endpoint power/temperature
+mismatch and combined energy remain separately checked. It does not accept
+ventilation, mass transfer or pyrolysis streams. Reported implicit work counts
+sum successful inner candidate trials, including discarded derivatives and
+backtracks; failed inner calls do not return work counts.
 
 ## Original owners and coupling API
 

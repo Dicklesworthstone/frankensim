@@ -1801,6 +1801,26 @@ are retained in `data/reference/compartment_fire/radiating_compartment_example.j
 The authored constant-band optics exercise the finite-window gray limit; they
 are not a molecular absorption dataset or an experimental validation case.
 
+`radiation::walls::closed_room::candidate_closed_room_walls` adds endpoint
+feedback for fixed-inventory, unvented gas and finite walls. Gas heat powers
+are the one or two active unknowns. Each trial uses the original `TwoZone`
+advance, including its pressure/interface work, and a caller-supplied original
+wall candidate evaluated at that gas endpoint. The caller rebuilds opacity,
+paths and convection from that supplied state. Bounded Newton/backtracking
+reuses a small prepared LU; it never changes the requested timestep.
+
+At acceptance, the gas receives exactly the heat in the returned wall report.
+A fresh endpoint candidate checks heat and gas/wall-face temperature mismatch;
+combined storage is checked against original external wall heat without any
+residual redistribution. Candidate clocks and absent-layer heat ownership are
+checked. Failure/cancellation leaves both accepted inputs unchanged. This is a
+first-order closed-room heat integrator, not a ventilated/reacting-gas or
+unconditional convergence claim. The `radiating_compartment implicit` mode
+runs it with actual evolving NASA gas and wall storage. G1 tests compare stiff
+radiation/convection with a separately reduced scalar energy equation; G3 tests
+two-layer pressure/geometry feedback and time refinement; G4 tests cancellation,
+work budgets and incompatible clocks.
+
 ### Conservative solid-to-gas volatile transfer
 
 `compartment::pyrolysis::VolatileMixture` binds an explicit volatile mass

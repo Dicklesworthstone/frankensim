@@ -1,11 +1,11 @@
 //! Finite hot gas cooling into finite walls with implicit radiation feedback.
 //!
 //! cargo run --release -p fs-airflow --features compartment-fire \
-//!   --example radiating_compartment -- [gray|spectral] [end_s=10] [max_dt_s=0.1]
+//!   --example radiating_compartment -- [gray|spectral|implicit] [end_s=10] [max_dt_s=0.1]
 //!
 //! The original NASA air, TwoZone, ZoneNetwork, Wall1d, material-card emissivity
-//! and participating enclosure owners perform the calculation. Gas temperatures
-//! are frozen during each source candidate; wall storage and radiation are
+//! and participating enclosure owners perform the calculation. In `gray` and
+//! `spectral` modes gas temperatures are frozen per source candidate; wall storage and radiation are
 //! solved together. Accepted gas and wall clocks advance together. No external
 //! heat enters this closed example, so their combined physical energy is fixed.
 //!
@@ -14,13 +14,18 @@
 //! over a finite wavelength window, providing a gray-limit reference. The
 //! geometry is a reciprocal normal-chord, parallel-plate approximation, not an
 //! automatically generated room enclosure. This is a numerical integration
-//! example, not a validated fire or cooling experiment, soot-yield closure,
-//! fully implicit gas integration or second-order time method.
+//! example, not a validated fire or cooling experiment or soot-yield closure.
+//! `implicit` closes gas and wall endpoint feedback with gray optics, rebuilding
+//! paths and convective contacts from each gas trial without shortening a step.
+//! All modes retain first-order thermal integration.
 
 #[path = "compartment_fire/air.rs"]
 mod air;
 
 use fs_airflow::compartment::radiation::spectral::{SpectralBand, SpectralOptics, SpectralSolve};
+use fs_airflow::compartment::radiation::walls::closed_room::{
+    ClosedRoomWallSolve, ClosedRoomWallWorkspace, candidate_closed_room_walls,
+};
 use fs_airflow::compartment::radiation::walls::{EnclosureWallSolve, WallOptics};
 use fs_airflow::compartment::radiation::{
     AbsorptionCoefficient, LayerAbsorption, OpticalPath, OpticalSegment, ParticipatingEnclosure,
@@ -135,7 +140,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .is_some_and(|a| matches!(a.as_str(), "-h" | "--help"))
     {
         println!(
-            "radiating_compartment [gray|spectral] [end_s=10] [max_dt_s=0.1]\nOriginal two-layer NASA air and two finite walls; explicit authored opacity and normal-chord geometry.\nSpectral mode resolves the same constant opacity over 1e-7..1e-3 m as a finite-window gray-limit reference.\nGas/source composition is first order; radiation and wall surface temperatures are solved together.\nNo external heat, combustion, measured air spectroscopy or experimental-validation claim."
+            "radiating_compartment [gray|spectral|implicit] [end_s=10] [max_dt_s=0.1]\nOriginal two-layer NASA air and two finite walls; explicit authored opacity and normal-chord geometry.\nSpectral mode resolves the same constant opacity over 1e-7..1e-3 m as a finite-window gray-limit reference.\nImplicit mode solves gas/wall endpoint heat feedback with gray optics and supports requested timesteps up to 300 s.\nNo external heat, combustion, measured air spectroscopy or experimental-validation claim."
         );
         return Ok(());
     }
@@ -143,8 +148,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("expected at most mode, end time and maximum timestep".into());
     }
     let mode = args.first().map(String::as_str).unwrap_or("spectral");
-    if !matches!(mode, "gray" | "spectral") {
-        return Err("mode must be gray or spectral".into());
+    if !matches!(mode, "gray" | "spectral" | "implicit") {
+        return Err("mode must be gray, spectral or implicit".into());
     }
     let end = args
         .get(1)
@@ -159,10 +164,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !end.is_finite()
         || !(0.001..=300.0).contains(&end)
         || !maximum_dt.is_finite()
-        || !(0.001..=0.5).contains(&maximum_dt)
+        || !(0.001..=if mode == "implicit" { 300.0 } else { 0.5 }).contains(&maximum_dt)
         || end / maximum_dt > 50_000.0
     {
-        return Err("require 0.001 <= end <= 300 s, 0.001 <= max_dt <= 0.5 s and at most 50000 requested steps".into());
+        return Err("require 0.001 <= end <= 300 s, max_dt >= 0.001 s (up to 0.5 s, or 300 s for implicit) and at most 50000 requested steps".into());
     }
 
     let (gas, fractions) = air::source()?;
@@ -192,6 +197,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Acceleration::new(9.81),
         || false,
     )?;
+    let mut accepted_room = network.rooms()[0].gas.clone();
     let law = WallCaloric;
     let geometry = WallGeometry {
         area: Area::new(2.0),
@@ -222,7 +228,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         [None, None],
         "authored total surface emissivities held gray over the supplied window",
     )?;
-    let optics = if mode == "gray" {
+    let optics = if mode != "spectral" {
         WallOptics::Gray {
             absorption: &absorption,
             solve: RadiationSolve::default(),
@@ -238,6 +244,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
     let mut work = enclosure.wall_workspace(&walls)?;
+    let mut gas_work = ClosedRoomWallWorkspace::new(&accepted_room)?;
+    let mut previous_gas_power = [Power::new(0.0); 2];
     let mut previous_power = [Power::new(0.0); 2];
     let initial_energy = network.rooms()[0].gas.physical_internal_energy().value()
         + walls.iter().map(|w| w.simulation().energy_j()).sum::<f64>();
@@ -266,51 +274,107 @@ fn main() -> Result<(), Box<dyn Error>> {
         output,
         "mode,time_s,lower_temperature_k,upper_temperature_k,pressure_pa,interface_height_m,wall0_inner_face_k,wall1_inner_face_k,gas_lower_heat_w,gas_upper_heat_w,combined_energy_residual_j,maximum_endpoint_power_residual_w,maximum_endpoint_temperature_residual_k,outer_iterations,wall_evaluations,radiation_evaluations,wavelength_evaluations"
     )?;
-    while network.rooms()[0].gas.time().value() < end {
+    while accepted_room.time().value() < end {
         if steps >= 50_000 {
             return Err("accepted-step budget exhausted".into());
         }
-        let remaining = end - network.rooms()[0].gas.time().value();
-        let dt =
-            if remaining > maximum_dt && remaining - maximum_dt < network_controls.minimum_step_s {
-                0.5 * remaining
-            } else {
-                maximum_dt.min(remaining)
-            };
-        // Regenerate path lengths from the actual accepted interface; they
-        // remain frozen only during this candidate interval and its retries.
-        let enclosure = make_enclosure(&network.rooms()[0].gas)?;
-        let (network_report, candidate) = network.step_with_sources(
-            Time::new(dt),
-            network_controls,
-            |rooms, attempted, rates, cancel| {
-                let candidate = enclosure.candidate_room_walls(
-                    &rooms[0].gas,
-                    &walls,
-                    attempted,
-                    &[
-                        boundary(&rooms[0].gas, Layer::Lower),
-                        boundary(&rooms[0].gas, Layer::Upper),
-                    ],
-                    optics,
-                    |i, t| {
-                        SurfaceEmissivity::from_card(
-                            names[i],
-                            &cards[i],
-                            t.value(),
-                            SelectionPolicy::SingleClaimOnly,
-                        )
-                    },
-                    Some(&previous_power),
-                    EnclosureWallSolve::default(),
-                    &mut work,
-                    &mut *cancel,
-                )?;
-                candidate.report.add_gas_heat(&mut rates[0])?;
-                Ok(candidate)
-            },
-            || false,
-        )?;
+        let remaining = end - accepted_room.time().value();
+        let dt = if mode != "implicit"
+            && remaining > maximum_dt
+            && remaining - maximum_dt < network_controls.minimum_step_s
+        {
+            0.5 * remaining
+        } else {
+            maximum_dt.min(remaining)
+        };
+        // The implicit path rebuilds optical geometry at every gas endpoint;
+        // the network source path freezes it only within one candidate/retry.
+        let (candidate, step_halvings, step_work) = if mode == "implicit" {
+            let result = candidate_closed_room_walls(
+                &accepted_room,
+                Time::new(dt),
+                Some(previous_gas_power),
+                ClosedRoomWallSolve::default(),
+                &mut gas_work,
+                |endpoint, cancel| {
+                    make_enclosure(endpoint)?.candidate_walls(
+                        &walls,
+                        Time::new(dt),
+                        &[
+                            boundary(endpoint, Layer::Lower),
+                            boundary(endpoint, Layer::Upper),
+                        ],
+                        [
+                            endpoint.layer(Layer::Lower).temperature(),
+                            endpoint.layer(Layer::Upper).temperature(),
+                        ],
+                        optics,
+                        |i, t| {
+                            SurfaceEmissivity::from_card(
+                                names[i],
+                                &cards[i],
+                                t.value(),
+                                SelectionPolicy::SingleClaimOnly,
+                            )
+                        },
+                        Some(&previous_power),
+                        EnclosureWallSolve::default(),
+                        &mut work,
+                        cancel,
+                    )
+                },
+                || false,
+            )?;
+            previous_gas_power = result.walls.report.gas_heat_power;
+            maximum_power_residual = result
+                .report
+                .endpoint_power_residual_w
+                .into_iter()
+                .map(f64::abs)
+                .fold(maximum_power_residual, f64::max);
+            maximum_temperature_residual = maximum_temperature_residual
+                .max(result.report.maximum_gas_temperature_residual_k)
+                .max(result.report.maximum_wall_temperature_residual_k);
+            let counts = result.report.successful_trial_work;
+            accepted_room = result.room;
+            (result.walls, 0, counts)
+        } else {
+            let enclosure = make_enclosure(&accepted_room)?;
+            let (network_report, candidate) = network.step_with_sources(
+                Time::new(dt),
+                network_controls,
+                |rooms, attempted, rates, cancel| {
+                    let candidate = enclosure.candidate_room_walls(
+                        &rooms[0].gas,
+                        &walls,
+                        attempted,
+                        &[
+                            boundary(&rooms[0].gas, Layer::Lower),
+                            boundary(&rooms[0].gas, Layer::Upper),
+                        ],
+                        optics,
+                        |i, t| {
+                            SurfaceEmissivity::from_card(
+                                names[i],
+                                &cards[i],
+                                t.value(),
+                                SelectionPolicy::SingleClaimOnly,
+                            )
+                        },
+                        Some(&previous_power),
+                        EnclosureWallSolve::default(),
+                        &mut work,
+                        &mut *cancel,
+                    )?;
+                    candidate.report.add_gas_heat(&mut rates[0])?;
+                    Ok(candidate)
+                },
+                || false,
+            )?;
+            accepted_room = network.rooms()[0].gas.clone();
+            let counts = candidate.report.work;
+            (candidate, network_report.halvings, counts)
+        };
         let faces: [_; 2] =
             std::array::from_fn(|i| candidate.walls[i].report.surface_temperatures[0]);
         previous_power.copy_from_slice(candidate.report.radiation.surface_heat_power());
@@ -319,7 +383,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             *wall = next.wall;
         }
         let report = candidate.report;
-        let room = &network.rooms()[0].gas;
+        let room = &accepted_room;
         if walls.iter().any(|w| w.time() != room.time()) {
             return Err("accepted gas/wall clocks differ".into());
         }
@@ -347,10 +411,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         steps += 1;
-        halvings += network_report.halvings;
-        total_wall_evaluations += report.work.wall_evaluations;
-        total_radiation_evaluations += report.work.radiation_evaluations;
-        total_wavelength_evaluations += report.work.wavelength_evaluations;
+        halvings += step_halvings;
+        total_wall_evaluations += step_work.wall_evaluations;
+        total_radiation_evaluations += step_work.radiation_evaluations;
+        total_wavelength_evaluations += step_work.wavelength_evaluations;
         if room.time().value() >= next_output || room.time().value() >= end {
             writeln!(
                 output,
@@ -368,9 +432,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 report.maximum_power_residual_w,
                 report.maximum_temperature_residual_k,
                 report.iterations,
-                report.work.wall_evaluations,
-                report.work.radiation_evaluations,
-                report.work.wavelength_evaluations
+                step_work.wall_evaluations,
+                step_work.radiation_evaluations,
+                step_work.wavelength_evaluations
             )?;
             output.flush()?;
             next_output = room.time().value().floor() + 1.0;

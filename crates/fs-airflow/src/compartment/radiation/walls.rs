@@ -41,6 +41,9 @@ use fs_la::prepared_lu::{LuWorkspace, LuWorkspaceError};
 use fs_qty::{Energy, Power, Temperature, Time};
 use fs_thermal::enthalpy::pyrolysis::slab::SlabError;
 
+/// Endpoint gas feedback for an original closed room and finite walls.
+pub mod closed_room;
+
 /// Original, source-bearing optical closure, held over the candidate interval.
 #[derive(Clone, Copy)]
 pub enum WallOptics<'a, 's> {
