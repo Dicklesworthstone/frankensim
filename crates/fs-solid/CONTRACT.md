@@ -1,5 +1,37 @@
 # fs-solid CONTRACT
 
+## Critical-plane SWT from accepted native J2 cycles
+
+The quasistatic and inertial J2 fatigue owners can carry bounded critical-plane
+cycle gauges alongside fixed-plane rainflow gauges, or use critical-plane
+gauges alone. Both use the same private observer, original material-state
+binding, CMB source checks and actual native stress/total-mechanical-strain
+tensors. Plane projection and SWT inversion remain in `fs-material`; no
+alternative constitutive or motion solver is introduced.
+
+An explicit cycle-window restart samples the current accepted native solution
+and discards only the preceding critical-plane window and its optional result. It permits
+mechanical conditioning before the representative observation, preserving
+displacement, velocity, plastic history and fixed-plane fatigue counters.
+A closed stress/strain window is an admitted empirical input, not proof that
+the evolving constitutive state has stabilized.
+
+Ordinary advances retain every observation across processing chunks. Explicit
+`advance_cycle` operations close the requested observation on a private native
+candidate before publishing any motion or fatigue state. Nonclosure, nested
+strain cycles, unsupported life, a late gauge failure and cancellation preserve
+the previously accepted state. Finalization closes fixed and critical gauges
+together. Critical-plane results are exposed separately from the existing
+fixed-plane summaries.
+
+This fixed-temperature, small-strain tensile-mode SWT path admits only resolved
+representative cycles and declared candidate planes. Decaying free vibration,
+virgin plastic transients or ratcheting paths that do not close cannot silently
+become periodic-life estimates. Plane/time refinement and calibration
+applicability remain the caller's obligations; there is no multiaxial
+variable-amplitude counting, thermal-fatigue transfer, crack growth or
+fatigue-to-stiffness/heat coupling in this extension.
+
 ## Conservative gravity on the current finite-strain configuration
 
 `hyper3::gravity` integrates a stationary world-field potential, acceleration

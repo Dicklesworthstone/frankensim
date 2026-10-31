@@ -10,6 +10,9 @@ use fs_matdb::{
     ClaimSelection, ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
     PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
+use fs_material::fatigue::critical_plane::{
+    CriticalPlaneError, CriticalPlaneLimits, CycleClosureTolerance,
+};
 use fs_material::fatigue::strain_life::source::{
     CmbPowerBasis, CmbProperty, CmbSourceRequest, resolve_cmb,
 };
@@ -28,7 +31,9 @@ use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 use fs_solid::plastic3::dynamics::fatigue::{
     J2DynamicFatigueConfig, J2DynamicFatigueRun, J2DynamicFatigueTarget,
 };
-use fs_solid::plastic3::fatigue::{J2FatigueConfig, J2FatigueError, J2FatigueGauge, J2FatiguePath};
+use fs_solid::plastic3::fatigue::{
+    J2CriticalPlaneGauge, J2FatigueConfig, J2FatigueError, J2FatigueGauge, J2FatiguePath,
+};
 use fs_solid::{IncrementSettings, SmallStrainLawField, SmallStrainTetProblem, TetAssemblyBudget};
 
 const NODES: [[f64; 3]; 4] = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -312,6 +317,291 @@ fn same_state(a: &J2DynamicFatigueRun<'_, '_>, b: &J2DynamicFatigueRun<'_, '_>) 
     assert_eq!(a.last_step(), b.last_step());
     assert_eq!(a.samples(), b.samples());
     assert_eq!(a.summaries(), b.summaries());
+    assert_eq!(a.critical_plane_results(), b.critical_plane_results());
+}
+
+fn critical_gauge(
+    law: &ResolvedJ2Plasticity,
+    element: usize,
+    normals: Vec<[f64; 3]>,
+) -> J2CriticalPlaneGauge {
+    J2CriticalPlaneGauge {
+        element,
+        material_state_identity: law.material().identity(),
+        curve: curve(law, 0.5, 1e12),
+        normals_in_mesh_frame: normals,
+        limits: CriticalPlaneLimits {
+            maximum_samples: 32,
+            maximum_planes: 8,
+            maximum_projection_work: 256,
+        },
+        closure: CycleClosureTolerance {
+            absolute_strain: 1e-11,
+            absolute_stress_pa: 1e-8,
+            relative: 1e-10,
+        },
+    }
+}
+
+#[test]
+fn g1_native_closed_tensor_cycle_selects_rotated_critical_plane_and_preserves_fixed_history() {
+    let law = material(false, Some(Density::DIMS));
+    let amplitude = 0.003;
+    let loads = [amplitude, -amplitude, 0.0];
+    // Actual affine native displacement gives eps=e*n*n^T with n=(1,1,0)/sqrt(2).
+    // nu=0 gives sigma=E*eps. No tensor samples are supplied to the observer.
+    let fixed: Vec<_> = NODES
+        .iter()
+        .enumerate()
+        .flat_map(|(node, x)| {
+            (0..3).map(move |c| (3 * node + c, if c < 2 { 0.5 * (x[0] + x[1]) } else { 0.0 }))
+        })
+        .collect();
+    let p = problem(&law, &fixed, &loads);
+    let dynamic_p = problem(&law, &fixed, &[1.0]);
+    let coarse = critical_gauge(&law, 0, vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+    let fine = critical_gauge(
+        &law,
+        0,
+        vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]],
+    );
+    with_cx(&CancelGate::new(), |cx| {
+        let fixed_gauge = gauge(
+            &law,
+            curve(&law, 0.5, 1e12),
+            StrainLifeMeanStress::Uncorrected,
+        );
+        let mut native =
+            J2FatiguePath::new(&p, FRAME, vec![fixed_gauge.clone()], config(3).fatigue, cx)
+                .unwrap();
+        let mut observed = J2FatiguePath::new_with_critical_planes(
+            &p,
+            FRAME,
+            vec![fixed_gauge],
+            vec![coarse.clone(), fine.clone()],
+            config(3).fatigue,
+            cx,
+        )
+        .unwrap();
+        assert_eq!(observed.critical_plane_results(), vec![None, None]);
+        observed.advance_cycle(3, cx).unwrap();
+        native.advance(3, cx).unwrap();
+        assert_eq!(observed.solution(), native.solution());
+        assert_eq!(observed.summaries(), native.summaries());
+        let results = observed.critical_plane_results();
+        let (coarse_result, result) = (results[0].unwrap(), results[1].unwrap());
+        assert_eq!(coarse_result.selected_plane, 0);
+        assert_eq!(result.selected_plane, 2);
+        assert_eq!(result.samples, 4);
+        close(result.strain_amplitude, amplitude, 2e-12);
+        close(result.maximum_normal_stress_pa, 60.0 * amplitude, 2e-10);
+        close(result.minimum_normal_stress_pa, -60.0 * amplitude, 2e-10);
+        // b=c=-1/2: N = sigma_f*(sigma_f/E+epsilon_f)/(2*sigma_max*epsilon_a).
+        let life = 0.6 * 0.05 / (2.0 * (60.0 * amplitude) * amplitude);
+        close(result.cycles_to_failure.unwrap(), life, 2e-9);
+        close(result.damage_per_cycle, 1.0 / life, 2e-12);
+        close(
+            coarse_result.damage_per_cycle,
+            result.damage_per_cycle / 4.0,
+            2e-12,
+        );
+        assert_eq!(observed.finish(cx).unwrap(), native.finish(cx).unwrap());
+        assert_eq!(
+            observed.restart_critical_plane_cycle(cx),
+            Err(J2FatigueError::Finished)
+        );
+
+        // Critical-only observation uses the same source binding and actual
+        // inertial owner, with no artificial scalar/rainflow gauge required.
+        let mut dynamic = J2DynamicFatigueRun::new_with_critical_planes(
+            &dynamic_p,
+            FRAME,
+            vec![],
+            vec![coarse, fine],
+            config(3),
+            0.0,
+            vec![[0.0; 3]; 4],
+            cx,
+        )
+        .unwrap();
+        let mut whole = dynamic.clone();
+        let targets: Vec<_> = loads
+            .iter()
+            .enumerate()
+            .map(|(i, &load_factor)| J2DynamicFatigueTarget {
+                time_s: 0.1 * (i + 1) as f64,
+                load_factor,
+            })
+            .collect();
+        assert!(matches!(
+            dynamic.advance_cycle(&targets[..2], cx),
+            Err(J2FatigueError::CriticalPlane {
+                error: CriticalPlaneError::NotClosed { .. },
+                ..
+            })
+        ));
+        same_state(&dynamic, &whole);
+        whole.advance_cycle(&targets, cx).unwrap();
+        dynamic.advance(&targets[..2], cx).unwrap();
+        assert_eq!(dynamic.critical_plane_results(), vec![None, None]);
+        dynamic.advance_cycle(&targets[2..], cx).unwrap();
+        same_state(&dynamic, &whole);
+        assert_eq!(dynamic.critical_plane_results(), results);
+        assert_eq!(
+            dynamic.critical_plane_curve(1).unwrap().parameters(),
+            curve(&law, 0.5, 1e12).parameters()
+        );
+        assert!(dynamic.finish(cx).unwrap().is_empty());
+        assert_eq!(
+            dynamic.restart_critical_plane_cycle(cx),
+            Err(J2FatigueError::Finished)
+        );
+    });
+}
+
+#[test]
+fn g3_actual_plastic_nonclosure_rolls_back_all_gauges_and_warmup_restart_preserves_history() {
+    let laws = [
+        material(false, Some(Density::DIMS)),
+        material(true, Some(Density::DIMS)),
+    ];
+    let nodes: Vec<_> = NODES
+        .into_iter()
+        .chain(NODES.map(|mut x| {
+            x[0] += 2.0;
+            x
+        }))
+        .collect();
+    let tets = [[0, 1, 2, 3], [4, 5, 6, 7]];
+    // Opposite prescribed extension keeps the elastic bank in tension during
+    // the later small elastic cycle about the plastic specimen's warm state.
+    let fixed: Vec<_> = (0..24)
+        .map(|d| {
+            (
+                d,
+                if d == 3 {
+                    -1.0
+                } else if d == 15 {
+                    1.0
+                } else {
+                    0.0
+                },
+            )
+        })
+        .collect();
+    let base = -0.0005;
+    let delta = 0.00002;
+    let loads = [0.006, -0.006, 0.0, base, base + delta, base - delta, base];
+    let p = SmallStrainTetProblem {
+        nodes_m: &nodes,
+        tetrahedra: &tets,
+        laws: SmallStrainLawField::PerElement(&laws),
+        prescribed_m: &fixed,
+        nodal_forces_n: &[],
+        load_path: &loads,
+        budget: TetAssemblyBudget::standard(),
+        settings: IncrementSettings::default(),
+    };
+    let dynamic_p = SmallStrainTetProblem {
+        load_path: &[1.0],
+        ..p.clone()
+    };
+    let mut fixed_gauge = gauge(
+        &laws[1],
+        curve(&laws[1], 0.5, 1e12),
+        StrainLifeMeanStress::Uncorrected,
+    );
+    fixed_gauge.element = 1;
+    let banks = vec![
+        critical_gauge(&laws[0], 0, vec![[1.0, 0.0, 0.0]]),
+        critical_gauge(&laws[1], 1, vec![[1.0, 0.0, 0.0]]),
+    ];
+    with_cx(&CancelGate::new(), |cx| {
+        let mut run = J2DynamicFatigueRun::new_with_critical_planes(
+            &dynamic_p,
+            FRAME,
+            vec![fixed_gauge.clone()],
+            banks.clone(),
+            config(7),
+            0.0,
+            vec![[0.0; 3]; 8],
+            cx,
+        )
+        .unwrap();
+        let targets: Vec<_> = loads
+            .iter()
+            .enumerate()
+            .map(|(i, &load_factor)| J2DynamicFatigueTarget {
+                time_s: 0.1 * (i + 1) as f64,
+                load_factor,
+            })
+            .collect();
+        let initial = run.clone();
+        // Gauge zero closes; the actual residual stress at plastic gauge one
+        // prevents a representative cycle. No mechanics or fixed damage leaks.
+        assert!(matches!(
+            run.advance_cycle(&targets[..3], cx),
+            Err(J2FatigueError::CriticalPlane {
+                gauge: 1,
+                error: CriticalPlaneError::NotClosed { .. },
+            })
+        ));
+        same_state(&run, &initial);
+        run.advance(&targets[..4], cx).unwrap();
+        assert!(run.solution().element_states[1].alpha > 0.0);
+        let warm = run.clone();
+        assert!(matches!(
+            run.finish(cx),
+            Err(J2FatigueError::CriticalPlane { .. })
+        ));
+        same_state(&run, &warm);
+        run.restart_critical_plane_cycle(cx).unwrap();
+        same_state(&run, &warm);
+        run.advance_cycle(&targets[4..], cx).unwrap();
+        assert_eq!(
+            run.solution().element_states,
+            warm.solution().element_states
+        );
+        assert_eq!(run.summaries()[0].samples, 8);
+        assert!(
+            run.critical_plane_results()
+                .iter()
+                .all(|r| r.is_some_and(|r| r.samples == 4 && r.damage_per_cycle > 0.0))
+        );
+
+        let mut quasistatic = J2FatiguePath::new_with_critical_planes(
+            &p,
+            FRAME,
+            vec![fixed_gauge],
+            banks,
+            config(7).fatigue,
+            cx,
+        )
+        .unwrap();
+        let initial = quasistatic.clone();
+        assert!(matches!(
+            quasistatic.advance_cycle(3, cx),
+            Err(J2FatigueError::CriticalPlane { gauge: 1, .. })
+        ));
+        assert_eq!(quasistatic.solution(), initial.solution());
+        assert_eq!(quasistatic.summaries(), initial.summaries());
+        assert_eq!(
+            quasistatic.critical_plane_results(),
+            initial.critical_plane_results()
+        );
+        assert_eq!(quasistatic.accepted_increments(), 0);
+        quasistatic.advance(4, cx).unwrap();
+        let fixed_history = quasistatic.summaries();
+        quasistatic.restart_critical_plane_cycle(cx).unwrap();
+        assert_eq!(quasistatic.summaries(), fixed_history);
+        quasistatic.advance_cycle(3, cx).unwrap();
+        assert_eq!(quasistatic.samples(), run.samples());
+        assert_eq!(
+            quasistatic.critical_plane_results(),
+            run.critical_plane_results()
+        );
+        assert_eq!(quasistatic.finish(cx).unwrap(), run.finish(cx).unwrap());
+    });
 }
 
 #[test]
@@ -882,7 +1172,11 @@ fn g0_original_density_identity_initial_support_velocity_and_path_are_required()
             source_curve.source().unwrap().request().temperature_axis,
             "specimen-temperature"
         );
-        let source_gauge = gauge(&source_law, source_curve, StrainLifeMeanStress::Morrow);
+        let source_gauge = gauge(
+            &source_law,
+            source_curve.clone(),
+            StrainLifeMeanStress::Morrow,
+        );
         let source_problem = problem(&source_law, &fixed, &[1.0]);
         let static_problem = problem(&source_law, &fixed, &[0.001]);
         let mut dynamic = J2DynamicFatigueRun::new(
@@ -909,5 +1203,74 @@ fn g0_original_density_identity_initial_support_velocity_and_path_are_required()
         let result = dynamic.finish(cx).unwrap();
         assert_eq!(result, quasistatic.finish(cx).unwrap());
         assert!(result[0].miner_damage > 0.0);
+
+        // Critical-only banks bind the same immutable fit and typed temperature
+        // receipts; they cannot substitute a curve from a different native state.
+        let bank = J2CriticalPlaneGauge {
+            curve: source_curve,
+            ..critical_gauge(&source_law, 0, vec![[1.0, 0.0, 0.0]])
+        };
+        let mut wrong_bank = bank.clone();
+        wrong_bank.material_state_identity = ContentHash([7; 32]);
+        assert!(matches!(
+            J2DynamicFatigueRun::new_with_critical_planes(
+                &source_problem,
+                FRAME,
+                vec![],
+                vec![wrong_bank],
+                config(3),
+                0.0,
+                vec![[0.0; 3]; 4],
+                cx
+            ),
+            Err(J2FatigueError::SourceMismatch { gauge: 0, .. })
+        ));
+        let mut critical = J2DynamicFatigueRun::new_with_critical_planes(
+            &source_problem,
+            FRAME,
+            vec![],
+            vec![bank],
+            config(3),
+            0.0,
+            vec![[0.0; 3]; 4],
+            cx,
+        )
+        .unwrap();
+        critical
+            .advance_cycle(
+                &[
+                    J2DynamicFatigueTarget {
+                        time_s: 0.1,
+                        load_factor: 0.001,
+                    },
+                    J2DynamicFatigueTarget {
+                        time_s: 0.2,
+                        load_factor: -0.001,
+                    },
+                    J2DynamicFatigueTarget {
+                        time_s: 0.3,
+                        load_factor: 0.0,
+                    },
+                ],
+                cx,
+            )
+            .unwrap();
+        assert!(
+            critical.critical_plane_results()[0]
+                .unwrap()
+                .damage_per_cycle
+                > 0.0
+        );
+        assert_eq!(
+            critical
+                .critical_plane_curve(0)
+                .unwrap()
+                .source()
+                .unwrap()
+                .request()
+                .temperature_axis,
+            "specimen-temperature"
+        );
+        assert!(critical.finish(cx).unwrap().is_empty());
     });
 }

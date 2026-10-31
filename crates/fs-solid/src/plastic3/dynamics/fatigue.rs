@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
+use fs_material::fatigue::critical_plane::SwtCycleResult;
 use fs_material::fatigue::strain_life::{StrainLifeCurve, StrainLifeSummary};
 use fs_material::plastic::J2State;
 use fs_material::plastic::source::ResolvedJ2Plasticity;
@@ -29,8 +30,8 @@ use fs_qty::{Density, QuantitySpec};
 
 use super::InertialEnergy;
 use crate::plastic3::fatigue::{
-    J2FatigueConfig, J2FatigueError, J2FatigueGauge, J2FatigueObserver, J2FatigueSample, poll,
-    with_path,
+    J2CriticalPlaneGauge, J2FatigueConfig, J2FatigueError, J2FatigueGauge, J2FatigueObserver,
+    J2FatigueSample, poll, with_path,
 };
 use crate::plastic3::{SmallStrainTetProblem, SmallStrainTetSolution};
 
@@ -96,6 +97,33 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
         initial_velocity_mps: Vec<[f64; 3]>,
         cx: &Cx<'_>,
     ) -> Result<Self, J2FatigueError> {
+        Self::new_with_critical_planes(
+            problem,
+            mesh_frame,
+            gauges,
+            Vec::new(),
+            config,
+            initial_time_s,
+            initial_velocity_mps,
+            cx,
+        )
+    }
+
+    /// Observe fixed rainflow and/or declared closed tensor-cycle SWT searches
+    /// on the SAME native trajectory. Each critical bank initially starts at
+    /// the actual zero-load state. Explicit restart selects a later accepted
+    /// checkpoint after warm-up; supplied stress/strain histories cannot enter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_critical_planes(
+        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        mesh_frame: ContentHash,
+        gauges: Vec<J2FatigueGauge>,
+        critical: Vec<J2CriticalPlaneGauge>,
+        config: J2DynamicFatigueConfig,
+        initial_time_s: f64,
+        initial_velocity_mps: Vec<[f64; 3]>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, J2FatigueError> {
         poll(cx)?;
         if problem.load_path != [1.0]
             || !initial_time_s.is_finite()
@@ -118,7 +146,8 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
         {
             return Err(J2FatigueError::Budget);
         }
-        let mut observer = J2FatigueObserver::new(problem, mesh_frame, gauges, config.fatigue, cx)?;
+        let mut observer =
+            J2FatigueObserver::new(problem, mesh_frame, gauges, critical, config.fatigue, cx)?;
         let reference_density_kg_m3 = source_density(problem, cx)?;
         // This original solve validates the complete mesh, supports, law field
         // and native budgets before any constrained velocity is indexed.
@@ -186,6 +215,22 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
         self.observer.material(self.problem, gauge)
     }
 
+    /// One optional completed-cycle result per critical gauge. Results are not
+    /// extrapolated repetitions of changing plastic or inertial history.
+    pub fn critical_plane_results(&self) -> Vec<Option<SwtCycleResult>> {
+        self.observer.critical_plane_results()
+    }
+    pub fn critical_plane_curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
+        self.observer.critical_plane_curve(gauge)
+    }
+    /// Discard only the critical window/result and begin at the current accepted
+    /// native state. Physical time, velocity, plastic history and all fixed-gauge
+    /// samples remain intact. Warm-up cycles are not implicitly counted here.
+    pub fn restart_critical_plane_cycle(&mut self, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
+        self.observer
+            .restart_critical_plane_cycle(&self.solution, cx)
+    }
+
     /// Accept one physical interval atomically across mechanics and all gauges.
     pub fn advance_to(
         &mut self,
@@ -213,6 +258,28 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     pub fn advance(
         &mut self,
         targets: &[J2DynamicFatigueTarget],
+        cx: &Cx<'_>,
+    ) -> Result<J2DynamicFatigueStep, J2FatigueError> {
+        self.advance_block(targets, false, cx)
+    }
+
+    /// Advance all physical endpoints and close every critical bank before
+    /// publishing ANY mechanics or fixed-gauge history. A nonclosed cycle,
+    /// including a decaying free vibration, refuses the entire requested block.
+    /// Ordinary advance/chunk boundaries leave the representative cycle open.
+    pub fn advance_cycle(
+        &mut self,
+        targets: &[J2DynamicFatigueTarget],
+        cx: &Cx<'_>,
+    ) -> Result<J2DynamicFatigueStep, J2FatigueError> {
+        self.observer.require_critical(cx)?;
+        self.advance_block(targets, true, cx)
+    }
+
+    fn advance_block(
+        &mut self,
+        targets: &[J2DynamicFatigueTarget],
+        close_cycle: bool,
         cx: &Cx<'_>,
     ) -> Result<J2DynamicFatigueStep, J2FatigueError> {
         self.observer.check_sample(cx)?;
@@ -288,6 +355,9 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
             time_s = target.time_s;
         }
         let report = last_step.ok_or(J2FatigueError::Invalid("missing physical endpoint"))?;
+        if close_cycle {
+            observer.close_critical_plane_cycle(cx)?;
+        }
         poll(cx)?;
         self.solution = solution;
         self.velocity_mps = velocity;
@@ -298,8 +368,9 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
         Ok(report)
     }
 
-    /// Finalize all endpoint half cycles together; a failed finish changes
-    /// nothing. Successful finish is idempotent and prohibits later motion.
+    /// Finalize fixed-plane endpoint half cycles and closed critical cycles
+    /// together; a failed finish changes nothing. Successful finish is
+    /// idempotent and prohibits later motion or restarting cycle windows.
     pub fn finish(&mut self, cx: &Cx<'_>) -> Result<Vec<StrainLifeSummary>, J2FatigueError> {
         self.observer.finish(cx)
     }

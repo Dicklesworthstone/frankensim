@@ -12,9 +12,12 @@
 //! or an immutable source-card fit. Matching the original material state,
 //! process, modulus and temperature prevents accidental rebinding; source fits
 //! additionally pin the original card, external query and modulus claim. These
-//! checks do not validate the fit or predict component life. Morrow/SWT use
-//! actual paired stress/strain and refuse unsupported misaligned histories.
-//! Miner damage changes neither stiffness, heat nor failure topology. Native
+//! checks do not validate the fit or predict component life. Fixed-plane
+//! Morrow/SWT rainflow uses actual paired stress/strain and refuses unsupported
+//! misaligned histories. Optional closed-cycle SWT searches use the full native
+//! tensors and the maximum stress over each observed cycle. Local tensor closure
+//! alone does not establish plastic stabilization or repeatable component life.
+//! Fatigue damage changes neither stiffness, heat nor failure topology. Native
 //! small-strain/P1 and linear-hardening limits remain in force. Resolve every
 //! physical turning point in `load_path`; no extrema between targets are inferred.
 
@@ -22,6 +25,10 @@ use std::sync::Arc;
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
+use fs_material::fatigue::critical_plane::{
+    CriticalPlaneError, CriticalPlaneLimits, CycleClosureTolerance, SwtCycle, SwtCycleResult,
+    TensorFatigueSample,
+};
 use fs_material::fatigue::strain_life::{
     PairedStrainLifeMiner, StrainLifeCurve, StrainLifeMeanStress, StrainLifeMiner,
     StrainLifeSummary, StrainStressSample,
@@ -46,12 +53,28 @@ pub struct J2FatigueGauge {
     pub mean_stress: StrainLifeMeanStress,
 }
 
+/// A declared finite plane search on one CLOSED representative tensor cycle.
+/// Plane directions use the same fixed mesh frame as the native solution.
+/// This retains the source-bound CMB fit; no repeated plastic state is inferred.
+#[derive(Debug, Clone)]
+pub struct J2CriticalPlaneGauge {
+    pub element: usize,
+    pub material_state_identity: ContentHash,
+    pub curve: Arc<StrainLifeCurve>,
+    pub normals_in_mesh_frame: Vec<[f64; 3]>,
+    pub limits: CriticalPlaneLimits,
+    pub closure: CycleClosureTolerance,
+}
+
 /// Logical storage/work limits; transactional proposals need an additional
 /// copy of the latest native solution and these bounded gauge histories.
 #[derive(Debug, Clone, Copy)]
 pub struct J2FatigueConfig {
     pub history: RainflowLimits,
+    /// Combined fixed-plane and critical-plane gauge count.
     pub maximum_gauges: usize,
+    /// Fixed-plane rainflow storage. Each critical gauge has separate explicit
+    /// plane, sample and projection-work limits in `J2CriticalPlaneGauge`.
     pub maximum_total_residue: usize,
 }
 
@@ -59,8 +82,18 @@ pub struct J2FatigueConfig {
 pub enum J2FatigueError {
     Invalid(&'static str),
     Budget,
-    SourceMismatch { gauge: usize, what: &'static str },
-    Gauge { gauge: usize, error: FatigueError },
+    SourceMismatch {
+        gauge: usize,
+        what: &'static str,
+    },
+    Gauge {
+        gauge: usize,
+        error: FatigueError,
+    },
+    CriticalPlane {
+        gauge: usize,
+        error: CriticalPlaneError,
+    },
     Mechanics(SmallStrainTetError),
     Cancelled,
     Finished,
@@ -95,6 +128,12 @@ struct GaugeState {
     normal: NormalStressDirection,
     counter: GaugeCounter,
     sample: J2FatigueSample,
+}
+
+#[derive(Debug, Clone)]
+struct CriticalGaugeState {
+    element: usize,
+    counter: SwtCycle,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +200,8 @@ impl GaugeCounter {
 pub(super) struct J2FatigueObserver {
     mesh_frame: ContentHash,
     gauges: Vec<GaugeState>,
+    critical: Vec<CriticalGaugeState>,
+    samples: u64,
     maximum_samples: u64,
     finished: bool,
 }
@@ -190,6 +231,21 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
         config: J2FatigueConfig,
         cx: &Cx<'_>,
     ) -> Result<Self, J2FatigueError> {
+        Self::new_with_critical_planes(problem, mesh_frame, gauges, Vec::new(), config, cx)
+    }
+
+    /// Observe fixed-plane rainflow, closed-cycle SWT searches, or both on the
+    /// same native trajectory. Every bank starts at the real zero-load state.
+    /// After conditioning, explicitly restart its cycle at an accepted native
+    /// checkpoint; no supplied tensor or imported constitutive state is accepted.
+    pub fn new_with_critical_planes(
+        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        mesh_frame: ContentHash,
+        gauges: Vec<J2FatigueGauge>,
+        critical: Vec<J2CriticalPlaneGauge>,
+        config: J2FatigueConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self, J2FatigueError> {
         poll(cx)?;
         if mesh_frame == ContentHash([0; 32]) || problem.load_path.is_empty() {
             return Err(J2FatigueError::Invalid(
@@ -208,7 +264,8 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
                 return Err(J2FatigueError::Invalid("load factors must be finite"));
             }
         }
-        let mut observer = J2FatigueObserver::new(problem, mesh_frame, gauges, config, cx)?;
+        let mut observer =
+            J2FatigueObserver::new(problem, mesh_frame, gauges, critical, config, cx)?;
         let solution = with_path(problem, &[0.0]).solve(cx)?;
         observer.observe(problem, &solution, cx)?;
         poll(cx)?;
@@ -246,11 +303,46 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
         self.observer.material(self.problem, gauge)
     }
 
+    /// One entry per critical gauge; an unfinished window has no life result.
+    pub fn critical_plane_results(&self) -> Vec<Option<SwtCycleResult>> {
+        self.observer.critical_plane_results()
+    }
+    pub fn critical_plane_curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
+        self.observer.critical_plane_curve(gauge)
+    }
+
+    /// Discard only the previous critical cycle window/result and begin at the
+    /// CURRENT accepted native tensors, for example after physical warm-up.
+    /// Mechanics, accepted increments and every fixed-gauge history are retained.
+    /// Discarded windows are not silently credited as counted fatigue cycles.
+    pub fn restart_critical_plane_cycle(&mut self, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
+        self.observer
+            .restart_critical_plane_cycle(&self.solution, cx)
+    }
+
     /// Accept exactly `count` planned increments as one transaction. Every
     /// original load factor is observed; callback boundaries close no cycles.
     /// Nonconvergence, cancellation, strain/calibration refusal or any gauge
     /// failure preserves the complete prior mechanics and fatigue histories.
     pub fn advance(&mut self, count: usize, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
+        self.advance_block(count, false, cx)
+    }
+
+    /// Advance native increments and require all critical windows to be closed
+    /// representative cycles BEFORE committing mechanics or any gauge. Neither
+    /// ordinary advance boundaries nor individual Newton steps close a cycle.
+    /// Results describe the observed cycle, without repeated-history scaling.
+    pub fn advance_cycle(&mut self, count: usize, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
+        self.observer.require_critical(cx)?;
+        self.advance_block(count, true, cx)
+    }
+
+    fn advance_block(
+        &mut self,
+        count: usize,
+        close_cycle: bool,
+        cx: &Cx<'_>,
+    ) -> Result<(), J2FatigueError> {
         poll(cx)?;
         if self.observer.finished {
             return Err(J2FatigueError::Finished);
@@ -260,6 +352,7 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
                 "advance needs a nonzero count within the remaining load path",
             ));
         }
+        self.observer.check_sample(cx)?;
         let end = self.accepted_increments + count;
         let mut solution = self.solution.clone();
         let mut observer = self.observer.clone();
@@ -272,6 +365,9 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
             )?;
             observer.observe(self.problem, &solution, cx)?;
         }
+        if close_cycle {
+            observer.close_critical_plane_cycle(cx)?;
+        }
         poll(cx)?;
         self.solution = solution;
         self.observer = observer;
@@ -280,7 +376,8 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
     }
 
     /// Finish the entire declared observation once, after all planned targets.
-    /// Open endpoint half cycles are finalized together for every gauge.
+    /// Fixed-plane endpoint half cycles and every critical cycle are finalized
+    /// atomically. A critical bank must contain a resolved, closed single cycle.
     pub fn finish(&mut self, cx: &Cx<'_>) -> Result<Vec<StrainLifeSummary>, J2FatigueError> {
         poll(cx)?;
         if self.remaining_increments() != 0 {
@@ -295,6 +392,7 @@ impl J2FatigueObserver {
         problem: &SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
         mesh_frame: ContentHash,
         gauges: Vec<J2FatigueGauge>,
+        critical: Vec<J2CriticalPlaneGauge>,
         config: J2FatigueConfig,
         cx: &Cx<'_>,
     ) -> Result<Self, J2FatigueError> {
@@ -302,8 +400,10 @@ impl J2FatigueObserver {
         if mesh_frame == ContentHash([0; 32]) {
             return Err(J2FatigueError::Invalid("declare a nonzero mesh frame"));
         }
-        if gauges.is_empty()
-            || gauges.len() > config.maximum_gauges
+        if gauges
+            .len()
+            .checked_add(critical.len())
+            .is_none_or(|count| count == 0 || count > config.maximum_gauges)
             || gauges
                 .len()
                 .checked_mul(config.history.maximum_residue)
@@ -315,54 +415,13 @@ impl J2FatigueObserver {
         let mut prepared = Vec::with_capacity(gauges.len());
         for (index, gauge) in gauges.into_iter().enumerate() {
             poll(cx)?;
-            if gauge.element >= problem.tetrahedra.len() {
-                return Err(J2FatigueError::Invalid(
-                    "gauge is outside the original tetrahedral field",
-                ));
-            }
-            let law = problem.laws.at(gauge.element);
-            let material = law.material();
-            let scope = gauge.curve.scope();
-            if gauge.material_state_identity != material.identity()
-                || scope.material != material.material().chemistry
-                || scope.process != material.material().process
-            {
-                return Err(J2FatigueError::SourceMismatch {
-                    gauge: index,
-                    what: "strain-life identity/material/process differs from the original J2 state",
-                });
-            }
-            let temperature_axis = gauge
-                .curve
-                .source()
-                .map_or("T", |source| source.request().temperature_axis.as_str());
-            if material.state_coordinate(temperature_axis) != Some(scope.temperature_k)
-                || gauge.curve.parameters().youngs_modulus_pa != law.law().elastic.youngs
-            {
-                return Err(J2FatigueError::SourceMismatch {
-                    gauge: index,
-                    what: "strain-life temperature/modulus differs from the frozen J2 law",
-                });
-            }
-            if let Some(source) = gauge.curve.source() {
-                let youngs = material.property(YOUNG_MODULUS_PROPERTY).ok_or(
-                    J2FatigueError::SourceMismatch {
-                        gauge: index,
-                        what: "original J2 modulus receipt is missing or ambiguous",
-                    },
-                )?;
-                if !source.matches_material_state(
-                    material.card_identity(),
-                    material.material(),
-                    &material.query(),
-                    youngs.answer(),
-                ) {
-                    return Err(J2FatigueError::SourceMismatch {
-                        gauge: index,
-                        what: "CMB card, state, external conditions or modulus claim differs from the original J2 source",
-                    });
-                }
-            }
+            bind_curve(
+                problem,
+                index,
+                gauge.element,
+                gauge.material_state_identity,
+                &gauge.curve,
+            )?;
             let normal =
                 NormalStressDirection::new(gauge.normal_in_mesh_frame).map_err(|error| {
                     J2FatigueError::Gauge {
@@ -385,10 +444,38 @@ impl J2FatigueObserver {
                 },
             });
         }
+        let fixed_count = prepared.len();
+        let mut searches = Vec::with_capacity(critical.len());
+        for (index, gauge) in critical.into_iter().enumerate() {
+            poll(cx)?;
+            bind_curve(
+                problem,
+                fixed_count + index,
+                gauge.element,
+                gauge.material_state_identity,
+                &gauge.curve,
+            )?;
+            let counter = SwtCycle::new(
+                gauge.curve,
+                gauge.normals_in_mesh_frame,
+                gauge.limits,
+                gauge.closure,
+            )
+            .map_err(|error| J2FatigueError::CriticalPlane {
+                gauge: index,
+                error,
+            })?;
+            searches.push(CriticalGaugeState {
+                element: gauge.element,
+                counter,
+            });
+        }
         poll(cx)?;
         Ok(Self {
             mesh_frame,
             gauges: prepared,
+            critical: searches,
+            samples: 0,
             maximum_samples: config.history.maximum_samples,
             finished: false,
         })
@@ -412,17 +499,81 @@ impl J2FatigueObserver {
     ) -> Option<&'a ResolvedJ2Plasticity> {
         self.gauges.get(gauge).map(|g| problem.laws.at(g.element))
     }
+    pub(super) fn critical_plane_results(&self) -> Vec<Option<SwtCycleResult>> {
+        self.critical
+            .iter()
+            .map(|g| g.counter.result().cloned())
+            .collect()
+    }
+    pub(super) fn critical_plane_curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
+        self.critical.get(gauge).map(|g| g.counter.curve())
+    }
+    pub(super) fn require_critical(&self, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
+        poll(cx)?;
+        if self.finished {
+            return Err(J2FatigueError::Finished);
+        }
+        if self.critical.is_empty() {
+            return Err(J2FatigueError::Invalid(
+                "no critical-plane cycle gauges were declared",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn restart_critical_plane_cycle(
+        &mut self,
+        solution: &SmallStrainTetSolution<J2State>,
+        cx: &Cx<'_>,
+    ) -> Result<(), J2FatigueError> {
+        self.require_critical(cx)?;
+        let mut critical = self.critical.clone();
+        for (index, gauge) in critical.iter_mut().enumerate() {
+            poll(cx)?;
+            gauge.counter =
+                gauge
+                    .counter
+                    .fresh()
+                    .map_err(|error| J2FatigueError::CriticalPlane {
+                        gauge: index,
+                        error,
+                    })?;
+            push_critical(gauge, index, solution, cx)?;
+        }
+        poll(cx)?;
+        self.critical = critical;
+        Ok(())
+    }
+
+    pub(super) fn close_critical_plane_cycle(&mut self, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
+        self.require_critical(cx)?;
+        let mut critical = self.critical.clone();
+        for (index, gauge) in critical.iter_mut().enumerate() {
+            gauge
+                .counter
+                .finish_with_cancel(&mut || cx.checkpoint().is_err())
+                .map_err(|error| J2FatigueError::CriticalPlane {
+                    gauge: index,
+                    error,
+                })?;
+        }
+        poll(cx)?;
+        self.critical = critical;
+        Ok(())
+    }
+
     pub(super) fn check_sample(&self, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
         poll(cx)?;
         if self.finished {
             return Err(J2FatigueError::Finished);
         }
-        if self
-            .gauges
-            .iter()
-            .any(|g| g.counter.summary().samples >= self.maximum_samples)
-        {
+        if self.samples >= self.maximum_samples {
             return Err(J2FatigueError::Budget);
+        }
+        if self.critical.iter().any(|g| g.counter.result().is_some()) {
+            return Err(J2FatigueError::Invalid(
+                "restart a closed critical-plane cycle before advancing",
+            ));
         }
         Ok(())
     }
@@ -434,15 +585,21 @@ impl J2FatigueObserver {
         cx: &Cx<'_>,
     ) -> Result<(), J2FatigueError> {
         self.check_sample(cx)?;
-        observe(problem, solution, &mut self.gauges, cx)
+        observe(problem, solution, &mut self.gauges, cx)?;
+        for (index, gauge) in self.critical.iter_mut().enumerate() {
+            push_critical(gauge, index, solution, cx)?;
+        }
+        poll(cx)?;
+        self.samples += 1;
+        Ok(())
     }
     pub(super) fn finish(&mut self, cx: &Cx<'_>) -> Result<Vec<StrainLifeSummary>, J2FatigueError> {
         poll(cx)?;
         if self.finished {
             return Ok(self.summaries());
         }
-        let mut gauges = self.gauges.clone();
-        for (index, gauge) in gauges.iter_mut().enumerate() {
+        let mut candidate = self.clone();
+        for (index, gauge) in candidate.gauges.iter_mut().enumerate() {
             gauge
                 .counter
                 .finish(&mut || cx.checkpoint().is_err())
@@ -451,11 +608,94 @@ impl J2FatigueObserver {
                     error,
                 })?;
         }
+        if !candidate.critical.is_empty() {
+            candidate.close_critical_plane_cycle(cx)?;
+        }
         poll(cx)?;
-        self.gauges = gauges;
-        self.finished = true;
+        candidate.finished = true;
+        *self = candidate;
         Ok(self.summaries())
     }
+}
+
+fn push_critical(
+    gauge: &mut CriticalGaugeState,
+    index: usize,
+    solution: &SmallStrainTetSolution<J2State>,
+    cx: &Cx<'_>,
+) -> Result<(), J2FatigueError> {
+    gauge
+        .counter
+        .push_with_cancel(
+            TensorFatigueSample {
+                stress_pa: solution.element_stress[gauge.element],
+                total_mechanical_strain: solution.element_strain[gauge.element],
+            },
+            &mut || cx.checkpoint().is_err(),
+        )
+        .map_err(|error| J2FatigueError::CriticalPlane {
+            gauge: index,
+            error,
+        })
+}
+
+// SourceMismatch uses the combined fixed-first, critical-second gauge index.
+fn bind_curve(
+    problem: &SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
+    index: usize,
+    element: usize,
+    identity: ContentHash,
+    curve: &StrainLifeCurve,
+) -> Result<(), J2FatigueError> {
+    if element >= problem.tetrahedra.len() {
+        return Err(J2FatigueError::Invalid(
+            "gauge is outside the original tetrahedral field",
+        ));
+    }
+    let law = problem.laws.at(element);
+    let material = law.material();
+    let scope = curve.scope();
+    if identity != material.identity()
+        || scope.material != material.material().chemistry
+        || scope.process != material.material().process
+    {
+        return Err(J2FatigueError::SourceMismatch {
+            gauge: index,
+            what: "strain-life identity/material/process differs from the original J2 state",
+        });
+    }
+    let temperature_axis = curve
+        .source()
+        .map_or("T", |source| source.request().temperature_axis.as_str());
+    if material.state_coordinate(temperature_axis) != Some(scope.temperature_k)
+        || curve.parameters().youngs_modulus_pa != law.law().elastic.youngs
+    {
+        return Err(J2FatigueError::SourceMismatch {
+            gauge: index,
+            what: "strain-life temperature/modulus differs from the frozen J2 law",
+        });
+    }
+    if let Some(source) = curve.source() {
+        let youngs =
+            material
+                .property(YOUNG_MODULUS_PROPERTY)
+                .ok_or(J2FatigueError::SourceMismatch {
+                    gauge: index,
+                    what: "original J2 modulus receipt is missing or ambiguous",
+                })?;
+        if !source.matches_material_state(
+            material.card_identity(),
+            material.material(),
+            &material.query(),
+            youngs.answer(),
+        ) {
+            return Err(J2FatigueError::SourceMismatch {
+                gauge: index,
+                what: "CMB card, state, external conditions or modulus claim differs from the original J2 source",
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn poll(cx: &Cx<'_>) -> Result<(), J2FatigueError> {
