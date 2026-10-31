@@ -2346,3 +2346,27 @@ mapping, then continues cooling through unloading with retained plastic
 history. Physical heat, finite internal exchange, original mechanical storage
 and numerical loss remain separate. Fixed geometry and the existing thermal
 and mechanical refinement requirements continue to apply.
+
+### Prescribed liquid saturation in porous pressure/heat paths
+
+`PorousLiquidResistance::with_liquid_states` updates each original porous layer
+with its explicit wetting-liquid calibration through the shared continuum
+geometry. The native pressure/enthalpy solver uses sum(L/(k_effective*kr_l))
+and the same current liquid density and viscosity already used by its thermal
+operating point. Flow area, Reynolds length/range and the common absolute outlet
+datum are retained. Repeated updates replace the old saturation states and
+recompile from intrinsic k, never compound earlier mobility reductions.
+
+Every accepted porous regional report retains the original barrier plus the
+exact ordered `liquid_states` used by that trial. Actual bulk and endpoint
+temperatures, both absolute pressure faces and superficial speeds must satisfy
+the intersected original-skeleton and liquid-calibration limits. Unsupported
+bracket trials refuse even if a proposed root would be admissible. Exact dry
+seals refuse positive-flow series paths; no permeability floor opens them.
+
+Capillary pressure remains Pc=pg-pl from the retention law. Changing its
+calibration at prescribed saturation cannot create another hydraulic pressure
+loss or thermal source. The existing declared dissipation convention remains
+responsible for pressure-work/heat accounting. This is an instantaneous
+operating point on prescribed saturation: liquid storage, gas pressure,
+Richards evolution, wetting fronts and hysteresis are not advanced.

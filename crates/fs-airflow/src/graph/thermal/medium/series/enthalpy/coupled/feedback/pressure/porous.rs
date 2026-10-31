@@ -1,7 +1,9 @@
 //! Original continuum permeability in the native liquid pressure/heat solver.
 //!
-//! A rigid, fully liquid-filled skeleton supplies intrinsic geometry and any
-//! explicitly calibrated superficial-velocity Forchheimer coefficient.
+//! A rigid skeleton supplies intrinsic geometry and either full liquid occupation
+//! or an explicitly calibrated, prescribed liquid relative-permeability state.
+//! Fully occupied pores may retain a calibrated Forchheimer coefficient; wet
+//! inertial extrapolation is not inferred.
 //! The existing resistance owner supplies the SAME current liquid rho/mu, Re,
 //! pressure loss and power used by the thermal operating point. Gas slip and
 //! gas relative saturation are never converted into a liquid constitutive law.
@@ -11,6 +13,7 @@
 use fs_exec::Cx;
 use fs_material::liquid::ResolvedLiquidState;
 use fs_material::porous::permeability::{ContinuumDarcyGeometry, DarcyGasBarrier};
+use fs_material::porous::wet::liquid::WetPoreLiquidState;
 use fs_qty::{Area, Length, MassFlowRate, Pressure, Temperature};
 
 use super::super::LiquidHeatRegion;
@@ -122,6 +125,29 @@ impl<'a> PorousLiquidResistance<'a> {
             outlet_pressure_pa,
         })
     }
+    /// Rebind prescribed liquid saturations on the SAME original skeleton.
+    /// Every layer supplies its own calibrated wetting-phase state. The shared
+    /// continuum owner compiles sum(L/(k*kr)) from original k, so repeated calls
+    /// never multiply a new mobility into an already reduced permeability.
+    ///
+    /// This is an instantaneous hydraulic/thermal operating-point update. It
+    /// does not evolve liquid storage, gas pressure or a wetting front. Reported
+    /// capillary pressure is pg-pl, not another hydraulic pressure loss or heat
+    /// source. Original area, Reynolds support and outlet datum stay fixed.
+    /// A dry seal or unsupported wet inertial law refuses atomically.
+    pub fn with_liquid_states(
+        self,
+        states: &'a [WetPoreLiquidState],
+    ) -> Result<Self, ResistanceError> {
+        Self::try_new(
+            self.source.with_liquid_states(states)?,
+            self.law.flow_area(),
+            self.law.reynolds_length(),
+            self.law.reynolds_range(),
+            Pressure::new(self.outlet_pressure_pa),
+        )
+    }
+
     /// Borrow the unchanged original layer sources, frame and support.
     pub const fn source(&self) -> ContinuumDarcyGeometry<'a> {
         self.source
@@ -172,6 +198,10 @@ impl LiquidResistanceModel for LiquidResistanceLaw<'_> {
 pub struct PorousLiquidReceipt {
     /// Unchanged original layers, tensor frame, source claims and support.
     pub barrier: DarcyGasBarrier,
+    /// Exact prescribed liquid calibration/state for each ordered layer.
+    /// None denotes the original fully occupied continuum law. These states
+    /// qualify relative mobility; their capillary pressure is not flow loss.
+    pub liquid_states: Option<Vec<WetPoreLiquidState>>,
     /// Actual regional upstream absolute pressure, Pa.
     pub inlet_pressure_pa: f64,
     /// Actual regional downstream absolute pressure, Pa.
@@ -250,6 +280,7 @@ impl LiquidHeatPath<'_, '_> {
                 }
                 loss.porous = Some(PorousLiquidReceipt {
                     barrier: porous.source.barrier().clone(),
+                    liquid_states: porous.source.liquid_states().map(<[WetPoreLiquidState]>::to_vec),
                     inlet_pressure_pa: upstream,
                     outlet_pressure_pa: downstream,
                 });

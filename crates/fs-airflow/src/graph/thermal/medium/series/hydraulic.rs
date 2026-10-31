@@ -108,6 +108,14 @@ impl MaterialFlowResistance {
     #[must_use]
     pub const fn flow_area(&self) -> Area { self.flow_area }
 
+    /// Declared length used to qualify this law's Reynolds number.
+    #[must_use]
+    pub const fn reynolds_length(&self) -> Length { self.reynolds_length }
+
+    /// Inclusive Reynolds applicability retained when constitutive geometry changes.
+    #[must_use]
+    pub const fn reynolds_range(&self) -> (f64, f64) { self.reynolds_range }
+
     /// Evaluate using one snapshot shared with the thermal/flow material owners.
     /// Signed and zero flow are supported when their Reynolds number is admitted.
     ///
