@@ -338,7 +338,7 @@ mod tests {
         // The first envelope overflows radiance; the second still has finite
         // radiance but its hemisphere integral cannot fit in a finite f64.
         for (q, source) in [(0.9, f64::MAX / 4.0), (0.5, f64::MAX / 2.0)] {
-            assert!(DiffuseVacuumRemainder::from_envelope(1, q, source).is_none());
+            assert!(DiffuseVacuumRemainder::from_envelope(1, q, Interval::point(source)).is_none());
         }
     }
 
