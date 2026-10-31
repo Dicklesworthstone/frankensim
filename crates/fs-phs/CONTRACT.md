@@ -164,6 +164,21 @@ a force-supported equilibrium. Initial loss effort and the original force
 imbalance supply numerically stable coordinates; no equilibrium solve, state
 reduction or change of physical generator occurs.
 
+Ordinary and prepared base-state exact flows, their positive heat factors,
+and the nonlinear exact-flow owner use the same diagonal coordinate scaling
+`D_ii = sqrt(Q_ii)` for positive diagonals, with unit scale at zero diagonals.
+The original complete `Q/J/R/G` remains in every operator. This avoids
+inverting spurious positive eigenvalues of a rank-deficient storage matrix;
+weak physical storage is retained at its own scale. The lossless spectrum and
+frequency-matched spectral machinery are unchanged. Externally extended flows
+retain their original spectral energy coordinates to preserve the existing
+logarithmic-growth admission. Prepared interval envelopes additionally bind
+the actual inverse-transformed storage by a cached row-sum bound, so correlated
+storage is still bounded by half the reported interval norm squared.
+`tests/stiff_energy.rs` covers stiff singular Maxwell histories and analytic
+heat, coupled storage scales from 1e-200 to 1e200, forced free coordinates,
+correlated storage envelopes, and passive stiff external-state admission.
+
 Positive eight-point Gauss quadrature on a norm-bounded short interval and QR
 semigroup doubling preserve the heat factor. The existing fs-la Householder QR
 owns factorization, and the existing bounded exponential owns every transition.

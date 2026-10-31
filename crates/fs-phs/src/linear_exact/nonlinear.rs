@@ -23,7 +23,6 @@ use crate::{
     Storage, discrete_gradient_into_unchecked, quadratic_midpoint_remainder, storage_energy_change,
 };
 use fs_la::LuWorkspace;
-use fs_math::det;
 
 const MAX_NEWTON: usize = 50;
 const MAX_BACKTRACK: usize = 24;
@@ -208,15 +207,9 @@ impl PreparedNonlinearZoh {
         let mut forward = vec![0.0; n * n];
         let mut inverse = vec![0.0; n * n];
         for i in 0..n {
-            let weight = if split.values[i] > 0.0 {
-                det::sqrt(split.values[i])
-            } else {
-                1.0
-            };
-            for j in 0..n {
-                forward[i * n + j] = weight * split.basis[j * n + i];
-                inverse[j * n + i] = split.basis[j * n + i] / weight;
-            }
+            let scale = split.coordinate_scale(i);
+            forward[i * n + i] = scale;
+            inverse[i * n + i] = 1.0 / scale;
         }
         Ok(Self {
             model: Model {

@@ -1,8 +1,9 @@
 //! Opt-in linear propagation; the reference Gonzalez path is unchanged.
 //!
 //! Exact ZOH retains the full state and all damping/coupling entries. A Jacobi
-//! basis balances the quadratic energy before a dense exponential; it is not
-//! modal truncation. Held-force work and loss are independently integrated by
+//! basis retains the complete lossless spectrum; exact propagation equilibrates
+//! the original storage diagonally without inverting small eigenvalues or
+//! truncating modes. Held-force work and loss are independently integrated by
 //! a jointly integrated finite-horizon Gramian, not inferred from the energy
 //! difference. Stable doubling never forms an exponentially growing inverse
 //! propagator for a physically decaying mode.
@@ -574,6 +575,21 @@ fn checked_eigh(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), PhsError> {
 }
 
 impl LinearSplit {
+    // Diagonal congruence gives D^-1 Q D^-1 unit diagonal wherever Q_ii>0.
+    // For PSD Q, its off-diagonals then have magnitude <=1. This is only an
+    // invertible change of coordinates: every original entry of Q remains in
+    // the flow and effort maps. In particular, a rounded positive eigenvalue
+    // of a true storage nullspace is never inverted. Exact zero diagonals
+    // retain unit scale, including free displacement coordinates.
+    fn coordinate_scale(&self, coordinate: usize) -> f64 {
+        let diagonal = self.quadratic.matrix[coordinate * self.n + coordinate];
+        if diagonal > 0.0 {
+            det::sqrt(diagonal)
+        } else {
+            1.0
+        }
+    }
+
     /// Conservative upper bound on magnitudes of ALL linear poles [1/s].
     #[must_use]
     pub fn pole_rate_bound_rad_s(&self) -> f64 {
@@ -841,19 +857,13 @@ fn exact_zoh_loss(
     }
     let n = split.n;
     let d = n + 1 + split.m;
-    let weights: Vec<_> = split
-        .values
-        .iter()
-        .map(|&v| if v > 0.0 { det::sqrt(v) } else { 1.0 })
-        .collect();
-    // z = W V^T x, x = V W^-1 z; zero-energy directions retain unit scale.
+    // z = D x, x = D^-1 z, with the original complete Q retained below.
     let mut forward = vec![0.0; n * n];
     let mut inverse = vec![0.0; n * n];
     for i in 0..n {
-        for j in 0..n {
-            forward[i * n + j] = weights[i] * split.basis[j * n + i];
-            inverse[j * n + i] = split.basis[j * n + i] / weights[i];
-        }
+        let scale = split.coordinate_scale(i);
+        forward[i * n + i] = scale;
+        inverse[i * n + i] = 1.0 / scale;
     }
     let mut flow = vec![0.0; n * n];
     for i in 0..n {

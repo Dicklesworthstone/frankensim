@@ -42,6 +42,7 @@ pub struct PreparedQuadraticFlow {
     integrals: Vec<Vec<f64>>,
     dt: f64,
     growth_factor: f64,
+    storage_norm_factor: f64,
     balanced_input: Vec<f64>,
 }
 impl PreparedQuadraticFlow {
@@ -217,15 +218,82 @@ impl PreparedQuadraticFlow {
         let mut inverse = vec![0.0; n * n];
         for i in 0..base_n {
             check_cancel(&mut cancelled)?;
-            let weight = if split.values[i] > 0.0 {
-                det::sqrt(split.values[i])
+            if extension.is_some() {
+                // External-state trajectory admission uses the original
+                // energy-coordinate logarithmic growth envelope. Preserve
+                // that metric: diagonal coordinates can give a very loose
+                // positive growth bound for a stiff passive correlated Q.
+                let scale = if split.values[i] > 0.0 {
+                    det::sqrt(split.values[i])
+                } else {
+                    1.0
+                };
+                for j in 0..base_n {
+                    forward[i * n + j] = scale * split.basis[j * base_n + i];
+                    inverse[j * n + i] = split.basis[j * base_n + i] / scale;
+                }
             } else {
-                1.0
-            };
-            for j in 0..base_n {
-                forward[i * n + j] = weight * split.basis[j * base_n + i];
-                inverse[j * n + i] = split.basis[j * base_n + i] / weight;
+                let scale = split.coordinate_scale(i);
+                forward[i * n + i] = scale;
+                inverse[i * n + i] = 1.0 / scale;
             }
+        }
+        // Diagonal equilibration does not whiten correlated storage. The
+        // symmetric row-sum bound controls lambda_max(D^-T Q D^-1), so the
+        // interval norm still bounds the ORIGINAL physical base energy.
+        // Keeping at least one also bounds numerical extension coordinates.
+        let mut storage_norm = 1.0_f64;
+        let spectral_effort = if extension.is_some() {
+            // These maps use the actual retained inverse, including its
+            // expanded stride. Absolute products bound cancellation roundoff.
+            let mut effort = vec![0.0; base_n * base_n];
+            let mut absolute = vec![0.0; base_n * base_n];
+            for i in 0..base_n {
+                check_cancel(&mut cancelled)?;
+                for j in 0..base_n {
+                    for k in 0..base_n {
+                        let term = split.quadratic.matrix[i * base_n + k]
+                            * inverse[k * n + j];
+                        effort[i * base_n + j] += term;
+                        absolute[i * base_n + j] += term.abs();
+                    }
+                }
+            }
+            Some((effort, absolute))
+        } else {
+            None
+        };
+        for i in 0..base_n {
+            check_cancel(&mut cancelled)?;
+            let row: f64 = (0..base_n)
+                .map(|j| {
+                    if let Some((effort, absolute)) = &spectral_effort {
+                        let mut value = 0.0;
+                        let mut products = 0.0;
+                        for k in 0..base_n {
+                            value += inverse[k * n + i] * effort[k * base_n + j];
+                            products += inverse[k * n + i].abs() * absolute[k * base_n + j];
+                        }
+                        value.abs() + 16.0 * base_n as f64 * f64::EPSILON * products
+                    } else {
+                        (split.quadratic.matrix[i * base_n + j]
+                            / forward[i * n + i]
+                            / forward[j * n + j])
+                            .abs()
+                    }
+                })
+                .sum();
+            if !row.is_finite() {
+                return Err(refuse("prepared storage norm row is not finite").into());
+            }
+            storage_norm = storage_norm.max(row);
+        }
+        // Numerical roundoff allowance for the two divisions and row sum;
+        // this changes only the conservative envelope, never Q or the flow.
+        let storage_norm_factor =
+            det::sqrt(storage_norm * (1.0 + 8.0 * base_n as f64 * f64::EPSILON));
+        if !storage_norm_factor.is_finite() {
+            return Err(refuse("prepared storage norm bound is not finite").into());
         }
         let flow = if let Some((generator, scales)) = extension {
             for (i, scale) in scales.iter().enumerate() {
@@ -334,14 +402,17 @@ impl PreparedQuadraticFlow {
             integrals,
             dt,
             growth_factor,
+            storage_norm_factor,
             balanced_input,
         })
     }
 
     /// Bound the numerical coordinate norm throughout the complete interval:
-    /// exp(max(0,mu)*dt) * (||T x0|| + dt*||T G u||). The retained base storage
-    /// is at most half this norm squared, even when added states have NO known
-    /// physical storage. No terminal energy or all-frequency passivity follows.
+    /// sqrt(max(1,rho)) * exp(max(0,mu)*dt) * (||T x0|| + dt*||T G u||),
+    /// where rho bounds the original storage in the equilibrated coordinates.
+    /// The retained base storage is at most half this norm squared, even when
+    /// added states have NO known physical storage. No terminal energy or
+    /// all-frequency passivity follows.
     pub fn interval_coordinate_norm_bound(
         &self,
         state: &[f64],
@@ -364,7 +435,9 @@ impl PreparedQuadraticFlow {
             initial += x * x;
             drive += f * f;
         }
-        let bound = self.growth_factor * (det::sqrt(initial) + self.dt * det::sqrt(drive));
+        let bound = self.storage_norm_factor
+            * self.growth_factor
+            * (det::sqrt(initial) + self.dt * det::sqrt(drive));
         if !bound.is_finite() {
             return Err(refuse("coordinate interval bound overflows"));
         }
