@@ -1,4 +1,4 @@
-//! Joint live-IR compliance and physical-volume derivatives of raw SIMP densities.
+//! Joint live-IR compliance, physical-volume and material-mass derivatives.
 //!
 //! Both views borrow one owner: one exact-point linearization, immutable loads,
 //! and one lifetime work budget. Ordinary SIMP shares a projection; robust SIMP
@@ -19,6 +19,9 @@ use crate::filter::DensityFilter;
 use crate::pipeline::{LoadCase, SimpParams};
 use crate::simp_second_order::{SimpComplianceGoal, robust_parameters};
 use crate::{DensityElasticity, DesignPipeline, EvaluationStop, RobustPipeline, SolveBudget, SolveControl};
+
+/// SI kilograms for a physical material inventory objective or constraint.
+pub const MASS_DIMS: Dims = Dims([0, 1, 0, 0, 0, 0]);
 
 /// Shared lifetime admission for a family of immutable SIMP continuation stages.
 /// Clones share counters and absolute ceilings, not numerical caches or model
@@ -49,15 +52,18 @@ struct Cached<'a> {
     bits: Vec<u64>,
     goal: SimpComplianceGoal<'a>,
     volume: PhysicsSample,
+    mass: Option<PhysicsSample>,
 }
 
 /// Joint raw-density physics for compliance objectives / volume constraints, or
 /// minimum-volume objectives / compliance constraints. Create the scalar views
-/// with [`Self::compliance`] and [`Self::volume`], then bind both into the IR.
-/// [`Self::new_robust`] selects eroded stiffness and dilated physical volume.
+/// with [`Self::compliance`], [`Self::volume`] and [`Self::mass`], then bind
+/// them into the IR. Material mass uses the stiffness owner's source-bound
+/// densities and geometric cell volumes, without normalizing kilograms away.
+/// [`Self::new_robust`] selects eroded stiffness and dilated volume AND mass.
 ///
 /// Preparation reserves one forward filter, each independent load, and two
-/// transpose filters. Compliance products reserve two filters and each active
+/// transpose filters, plus one transpose for material-bound mass. Compliance products reserve two filters and each active
 /// load tangent; nonlinear volume products reserve only two filters. Reservations
 /// are conservative ceilings, not actual solve counts. All Krylov work, including
 /// failures, is charged once to this owner rather than to either scalar view.
@@ -96,7 +102,12 @@ impl std::fmt::Debug for SimpNewtonModel<'_> {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Output { Compliance, Volume, LoadCase(usize) }
+enum Output {
+    Compliance,
+    Volume,
+    Mass,
+    LoadCase(usize),
+}
 
 /// A named scalar view. Cloning shares, and cannot reset, its owner's state.
 #[derive(Debug, Clone)]
@@ -175,9 +186,15 @@ impl<'a> SimpNewtonModel<'a> {
     pub fn resources(&self) -> SimpNewtonResources { self.resources.clone() }
 
     #[allow(clippy::too_many_arguments)]
-    fn from_parts(filter: &'a DensityFilter, p: SimpParams, volume_eta: f64,
-        elasticity: &'a DensityElasticity, loads: &[LoadCase<'_>], volumes: &[f64],
-        options: ComplianceSolveOptions, budget: ComplianceNewtonBudget,
+    fn from_parts(
+        filter: &'a DensityFilter,
+        p: SimpParams,
+        volume_eta: f64,
+        elasticity: &'a DensityElasticity,
+        loads: &[LoadCase<'_>],
+        volumes: &[f64],
+        options: ComplianceSolveOptions,
+        budget: ComplianceNewtonBudget,
     ) -> Result<Self, PhysicsError> {
         let n = elasticity.cells();
         if n == 0 || filter.cells() != n || volumes.len() != n {
@@ -208,7 +225,10 @@ impl<'a> SimpNewtonModel<'a> {
             }
             for &force in load.force { finite(force, "structural force")?; }
         }
-        loads.len().checked_add(3).ok_or(PhysicsError::InvalidInput("too many loads"))?;
+        loads
+            .len()
+            .checked_add(3 + usize::from(elasticity.material_field().is_some()))
+            .ok_or(PhysicsError::InvalidInput("too many loads"))?;
         Ok(Self { filter, params: p, volume_eta, elasticity,
             loads: loads.iter().map(|l| (l.force.to_vec(), l.weight)).collect(),
             volumes: volumes.to_vec(), options, resources: SimpNewtonResources::new(budget),
@@ -221,6 +241,17 @@ impl<'a> SimpNewtonModel<'a> {
     }
     pub fn volume(&self, study: impl Into<String>) -> Result<SimpNewtonGoal<'_, 'a>, PhysicsError> {
         self.view(study.into(), Output::Volume)
+    }
+    /// Kilograms of projected material, for minimum-mass design or a physical
+    /// mass limit. Shares the same primal state and lifetime work account as
+    /// compliance and volume; requires an assigned material field.
+    pub fn mass(&self, study: impl Into<String>) -> Result<SimpNewtonGoal<'_, 'a>, PhysicsError> {
+        if self.elasticity.reference_cell_masses_kg().is_none() {
+            return Err(PhysicsError::InvalidInput(
+                "physical mass requires an assigned material field",
+            ));
+        }
+        self.view(study.into(), Output::Mass)
     }
     /// Expose one independently solved structural load case as its own scalar
     /// compliance physics view. The original aggregate weight is not applied.
@@ -237,7 +268,7 @@ impl<'a> SimpNewtonModel<'a> {
         if study.is_empty() { return Err(PhysicsError::InvalidInput("nonempty study name required")); }
         Ok(SimpNewtonGoal { model: self, study, output })
     }
-    /// Actual stiffness and physical-volume projection thresholds, in that order.
+    /// Actual stiffness and physical-inventory (volume and mass) thresholds.
     pub fn projection_thresholds(&self) -> (f64, f64) { (self.params.eta, self.volume_eta) }
     pub fn work(&self) -> ComplianceNewtonWork { self.resources.0.work.get() }
     pub fn budget(&self) -> ComplianceNewtonBudget { self.resources.0.budget.get() }
@@ -296,7 +327,10 @@ impl<'a> SimpNewtonModel<'a> {
         Ok(result)
     }
 
-    fn at_point<R>(&self, point: &[f64], cx: Option<&Cx<'_>>,
+    fn at_point<R>(
+        &self,
+        point: &[f64],
+        cx: Option<&Cx<'_>>,
         action: impl FnOnce(&Cached<'a>) -> Result<R, PhysicsError>,
     ) -> Result<R, PhysicsError> {
         poll(cx)?;
@@ -313,12 +347,17 @@ impl<'a> SimpNewtonModel<'a> {
         let mut cache = self.cache.borrow_mut();
         if !cache.as_ref().is_some_and(|c| c.bits.iter().zip(point).all(|(&b, x)| b == x.to_bits())) {
             let loads: Vec<_> = self.loads.iter().map(|(force, weight)| LoadCase { force, weight: *weight }).collect();
-            let prepared = self.controlled(loads.len() + 3, cx, |control| {
+            let has_mass = self.elasticity.reference_cell_masses_kg().is_some();
+            let prepared = self.controlled(loads.len() + 3 + usize::from(has_mass), cx, |control| {
                 let goal = SimpComplianceGoal::prepare(self.filter, self.params, self.volume_eta,
                     self.elasticity, point, &loads, self.options, control)?;
                 let (value, gradient) = goal.volume_value_gradient(&self.volumes, control)?;
+                let mass = if has_mass {
+                    let (value, gradient) = goal.mass_value_gradient(control)?;
+                    Some(PhysicsSample { value, gradient })
+                } else { None };
                 Ok(Cached { bits: point.iter().map(|x| x.to_bits()).collect(), goal,
-                    volume: PhysicsSample { value, gradient } })
+                    volume: PhysicsSample { value, gradient }, mass })
             })?;
             poll(cx)?;
             *cache = Some(prepared);
@@ -334,12 +373,18 @@ impl PhysicsModel for SimpNewtonGoal<'_, '_> {
         PhysicsSignature { study: &self.study, parameter_count: self.model.elasticity.cells(),
             parameter_dims: Dims::NONE, residual_dims: match self.output {
                 Output::Compliance | Output::LoadCase(_) => COMPLIANCE_DIMS, Output::Volume => Dims::NONE,
+                Output::Mass => MASS_DIMS,
             } }
     }
-    fn value_gradient(&self, point: &[f64], cx: Option<&Cx<'_>>) -> Result<PhysicsSample, PhysicsError> {
+    fn value_gradient(
+        &self,
+        point: &[f64],
+        cx: Option<&Cx<'_>>,
+    ) -> Result<PhysicsSample, PhysicsError> {
         self.model.at_point(point, cx, |c| match self.output {
             Output::Compliance => Ok(PhysicsSample { value: c.goal.value(), gradient: c.goal.gradient().to_vec() }),
             Output::Volume => Ok(c.volume.clone()),
+            Output::Mass => Ok(c.mass.as_ref().expect("admitted material mass view").clone()),
             Output::LoadCase(index) => self.model.controlled(1, cx, |control| {
                 let (value, gradient) = c.goal.load_case_value_gradient(index, control)?;
                 Ok(PhysicsSample { value, gradient })
@@ -349,9 +394,12 @@ impl PhysicsModel for SimpNewtonGoal<'_, '_> {
     fn second_order(&self) -> Option<&dyn PhysicsHessian> { Some(self) }
 }
 impl PhysicsHessian for SimpNewtonGoal<'_, '_> {
-    fn hessian_vector_product(&self, point: &[f64], direction: &[f64], cx: Option<&Cx<'_>>)
-        -> Result<Vec<f64>, PhysicsError>
-    {
+    fn hessian_vector_product(
+        &self,
+        point: &[f64],
+        direction: &[f64],
+        cx: Option<&Cx<'_>>,
+    ) -> Result<Vec<f64>, PhysicsError> {
         poll(cx)?;
         if direction.len() != self.model.elasticity.cells() {
             return Err(PhysicsError::InvalidInput("raw-density Hessian direction shape mismatch"));
@@ -370,6 +418,11 @@ impl PhysicsHessian for SimpNewtonGoal<'_, '_> {
                     if self.model.params.beta == 0.0 { return Ok(vec![0.0; direction.len()]); }
                     self.model.controlled(2, cx, |control|
                         c.goal.volume_hessian_vector_product(&self.model.volumes, direction, control))
+                }
+                Output::Mass => {
+                    if self.model.params.beta == 0.0 { return Ok(vec![0.0; direction.len()]); }
+                    self.model.controlled(2, cx, |control|
+                        c.goal.mass_hessian_vector_product(direction, control))
                 }
                 Output::LoadCase(index) => self.model.controlled(3, cx, |control|
                     c.goal.load_case_hessian_vector_product(index, direction, control)),

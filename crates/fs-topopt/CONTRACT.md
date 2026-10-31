@@ -3,7 +3,7 @@
 ## Purpose and layer
 
 Layer: **L4 ASCENT** (deps: fs-adjoint/fs-solver/fs-feec L3,
-fs-ascent L4, fs-material L3, fs-la/fs-sparse L1, fs-math L0,
+fs-ascent L4, fs-material/fs-solid L3, fs-la/fs-sparse L1, fs-math L0,
 fs-rep-mesh L2). Density-based topology optimization (plan §9.5 [S]):
 SIMP with the modern hygiene stack — Helmholtz PDE filtering,
 Heaviside projection with continuation, exact chain-rule
@@ -16,8 +16,8 @@ cubical homology), so the optimization stack lives here.
 ## Public types and semantics
 
 - `DensityElasticity` — matrix-free K(ρ̄) = Σ_c E_c·K_c with per-cell
-  UNIT-modulus 12×12 blocks (fs-material `IsotropicElastic` tangent ×
-  fs-feec barycentric-gradient B-matrices) kept separate for the
+  reference-material 12×12 blocks (native solid tensors or the legacy
+  fs-material isotropic tangent × fs-feec barycentric-gradient B-matrices) kept separate for the
   exact chain rule; Dirichlet dofs handled by identity-on-fixed
   masking (SPD on the full vector space); `cell_energies` =
   uᵀK_c u per cell (the compliance sensitivity kernel).
@@ -107,6 +107,44 @@ cubical homology), so the optimization stack lives here.
   flux probes project THROUGH the interface so void-side nodes read
   real flux; and the volume projection lives ON THE BAND — a global
   shift silently fills voids from the inside.
+
+## Shared physical materials and mass design
+
+`DensityElasticity::with_material_field` accepts the existing
+`fs_solid::linear3::TetMaterialField`, owning a uniform state or an ordered
+heterogeneous field. Full Mandel stiffness tensors, physical densities and
+material-state identities remain attached to one operator. The shared element
+assembly converts both axes of the Mandel tensor to engineering-shear coordinates,
+so compliance, stress recovery and their sensitivities use the same anisotropic
+reference stiffness. Native material admission is repeated because callers can
+edit a source state's public density or identity before construction.
+
+Dense and matrix-free frequency objectives use each assigned reference density
+in both consistent mass and its design derivative. Low-level mass actions still
+accept absolute physical density weights over geometric unit-density blocks.
+The matrix-free objective's legacy scalar `reference_density` must remain 1.0
+when a material field is assigned; it cannot replace or multiply that field.
+
+`DesignPipeline::mass_and_gradient` and its controlled counterpart return
+kilograms and the full filter/projection gradient. Reference cell masses are
+original tetrahedral volume times material density, including supported cells.
+Physical inventory uses projected occupancy linearly; SIMP stiffness and the
+modal low-density sixth-power interpolation do not define mass inventory.
+`volume_and_gradient` retains its dimensionless volume-fraction semantics.
+
+`SimpComplianceGoal` supplies mass gradients and matrix-free Hessian products
+through the same weighted-projection helpers as volume. With `newton-design`,
+`SimpNewtonModel::mass` exposes an SI-kilogram physics node for a minimum-mass
+objective or mass constraint. It shares the exact-point compliance/volume cache
+and lifetime work account; material-bearing preparation reserves one additional
+transpose filter. Robust goals use dilated mass with eroded compliance. Legacy
+stiffness-only models refuse the kg view. Material assignment is prescribed:
+these derivatives vary occupancy, not the selected material card or its state.
+
+`material_elasticity`, `material_modal` and `material_mass` cover tensor work,
+physical density scaling, full-chain derivatives, robust mass curvature and
+live-IR mass/compliance composition. This fixed-tetrahedron integration does not
+extend the separate CutFEM operator's material model or close the raw-SDF marquee.
 
 ## 3-D cut-cell continuation
 

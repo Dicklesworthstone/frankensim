@@ -2,8 +2,8 @@
 //!
 //! For `t = F rho` and the projection/SIMP map `m(t)`,
 //! `H_rho v = F^T [m' * H_m(m' * Fv) + m'' * Fv * g_m]`.
-//! The ordinary constructor uses one projection for compliance and volume.
-//! The robust constructor uses eroded stiffness and dilated physical volume,
+//! The ordinary constructor uses one projection for compliance and inventory.
+//! The robust constructor uses eroded stiffness and dilated volume and mass,
 //! sharing ONE filtered field. The two projections have distinct derivatives.
 //!
 //! Stiffness projected densities must lie strictly in `(1e-12, 1)`: no
@@ -15,12 +15,13 @@ use crate::filter::{DensityFilter, heaviside, heaviside_derivative, heaviside_se
 use crate::pipeline::{LoadCase, SimpParams};
 use crate::robust::RobustPipeline;
 
-/// Smooth compliance and physical-volume linearization at one raw design.
+/// Smooth compliance, volume and material-mass linearization at one raw design.
 /// All filter, transpose-filter and tangent solves share the caller's work
 /// controller. There is no dense filter or parameter Hessian.
 pub struct SimpComplianceGoal<'a> {
     filter: &'a DensityFilter,
     physical: ComplianceGoal<'a>,
+    reference_cell_masses_kg: Option<&'a [f64]>,
     projected: Vec<f64>,
     volume_projected: Vec<f64>,
     first: Vec<f64>,
@@ -77,9 +78,15 @@ impl<'a> SimpComplianceGoal<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn prepare(filter: &'a DensityFilter, p: SimpParams, volume_eta: f64,
-        elasticity: &'a DensityElasticity, rho: &[f64], loads: &[LoadCase<'_>],
-        options: ComplianceSolveOptions, control: &mut SolveControl<'_>,
+    pub(crate) fn prepare(
+        filter: &'a DensityFilter,
+        p: SimpParams,
+        volume_eta: f64,
+        elasticity: &'a DensityElasticity,
+        rho: &[f64],
+        loads: &[LoadCase<'_>],
+        options: ComplianceSolveOptions,
+        control: &mut SolveControl<'_>,
     ) -> Result<Self, ComplianceError> {
         control.checkpoint("simp-hessian-admission")?;
         let n = elasticity.cells();
@@ -155,8 +162,18 @@ impl<'a> SimpComplianceGoal<'a> {
         }
         let gradient = filter.try_apply_transpose(&local, control)?;
         control.checkpoint("simp-linearization-publish")?;
-        Ok(Self { filter, physical, projected, volume_projected, first, second,
-            projection_first, projection_second, gradient })
+        Ok(Self {
+            filter,
+            physical,
+            reference_cell_masses_kg: elasticity.reference_cell_masses_kg(),
+            projected,
+            volume_projected,
+            first,
+            second,
+            projection_first,
+            projection_second,
+            gradient,
+        })
     }
 
     pub fn value(&self) -> f64 { self.physical.value() }
@@ -268,34 +285,99 @@ impl<'a> SimpComplianceGoal<'a> {
 
     /// Physical projected volume. For robust goals this is DILATED volume,
     /// not eroded stiffness, nominal material, or an unweighted cell mean.
-    pub fn volume_value_gradient(&self, volumes: &[f64], control: &mut SolveControl<'_>)
-        -> Result<(f64, Vec<f64>), ComplianceError>
-    {
+    pub fn volume_value_gradient(
+        &self,
+        volumes: &[f64],
+        control: &mut SolveControl<'_>,
+    ) -> Result<(f64, Vec<f64>), ComplianceError> {
         let weights = self.weights(volumes, control)?;
+        self.projected_quantity_value_gradient(&weights, "simp-volume-gradient", control)
+    }
+
+    /// Material inventory in kilograms, with its exact raw-occupancy gradient.
+    /// Uses the stiffness owner's reference cell masses, without normalization
+    /// or modal void-mass interpolation. Robust goals use DILATED occupancy.
+    pub fn mass_value_gradient(
+        &self,
+        control: &mut SolveControl<'_>,
+    ) -> Result<(f64, Vec<f64>), ComplianceError> {
+        let masses = self
+            .reference_cell_masses_kg
+            .ok_or(ComplianceError::InvalidInput(
+                "physical mass requires an assigned material field",
+            ))?;
+        self.projected_quantity_value_gradient(masses, "simp-mass-gradient", control)
+    }
+
+    fn projected_quantity_value_gradient(
+        &self,
+        weights: &[f64],
+        stage: &'static str,
+        control: &mut SolveControl<'_>,
+    ) -> Result<(f64, Vec<f64>), ComplianceError> {
         let mut value = 0.0; let mut local = Vec::with_capacity(weights.len());
         for (e, &w) in weights.iter().enumerate() {
-            if e % 256 == 0 { control.checkpoint("simp-volume-gradient")?; }
+            if e % 256 == 0 { control.checkpoint(stage)?; }
             value += w*self.volume_projected[e];
-            local.push(finite(w*self.projection_first[e], "projected volume gradient")?);
+            local.push(finite(w*self.projection_first[e], stage)?);
         }
-        let value = finite(value, "projected volume")?;
+        let value = finite(value, stage)?;
         Ok((value, self.filter.try_apply_transpose(&local, control)?))
     }
 
     /// F^T diag(V/sum(V) * H_volume'') F v; no SIMP term belongs in volume.
-    pub fn volume_hessian_vector_product(&self, volumes: &[f64], direction: &[f64], control: &mut SolveControl<'_>)
-        -> Result<Vec<f64>, ComplianceError>
-    {
+    pub fn volume_hessian_vector_product(
+        &self,
+        volumes: &[f64],
+        direction: &[f64],
+        control: &mut SolveControl<'_>,
+    ) -> Result<Vec<f64>, ComplianceError> {
         self.direction(direction, control)?;
         let weights = self.weights(volumes, control)?;
+        self.projected_quantity_hessian_vector_product(
+            &weights,
+            direction,
+            "simp-volume-hessian",
+            control,
+        )
+    }
+
+    /// F^T diag(m_ref * H_inventory'') F v, in kilograms. Includes the same
+    /// robust dilation as the mass value; no stiffness or modal mass derivative.
+    pub fn mass_hessian_vector_product(
+        &self,
+        direction: &[f64],
+        control: &mut SolveControl<'_>,
+    ) -> Result<Vec<f64>, ComplianceError> {
+        self.direction(direction, control)?;
+        let masses = self
+            .reference_cell_masses_kg
+            .ok_or(ComplianceError::InvalidInput(
+                "physical mass requires an assigned material field",
+            ))?;
+        self.projected_quantity_hessian_vector_product(
+            masses,
+            direction,
+            "simp-mass-hessian",
+            control,
+        )
+    }
+
+    fn projected_quantity_hessian_vector_product(
+        &self,
+        weights: &[f64],
+        direction: &[f64],
+        stage: &'static str,
+        control: &mut SolveControl<'_>,
+    ) -> Result<Vec<f64>, ComplianceError> {
         if direction.iter().all(|&v| v == 0.0) || self.projection_second.iter().all(|&h| h == 0.0) {
             return Ok(vec![0.0; direction.len()]);
         }
         let filtered = self.filter.try_apply(direction, control)?;
         let mut local = Vec::with_capacity(direction.len());
         for e in 0..direction.len() {
-            if e % 256 == 0 { control.checkpoint("simp-volume-hessian")?; }
-            local.push(finite(weights[e]*self.projection_second[e]*filtered[e], "projected volume Hessian")?);
+            if e % 256 == 0 { control.checkpoint(stage)?; }
+            local.push(finite(weights[e]*self.projection_second[e]*filtered[e], stage)?);
         }
         Ok(self.filter.try_apply_transpose(&local, control)?)
     }

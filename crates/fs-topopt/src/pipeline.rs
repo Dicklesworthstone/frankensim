@@ -227,6 +227,61 @@ impl DesignPipeline {
         Ok((volume, self.filter.try_apply_transpose(&local, control)?))
     }
 
+    /// Physical material mass in kilograms and its raw-design gradient.
+    /// Uses the assigned material's reference density and the original cell
+    /// volume, including supported cells. Occupancy is the projected density;
+    /// neither SIMP stiffness nor the modal void-mass stabilization is inventory.
+    /// The material assignment is fixed while differentiating raw occupancy.
+    #[must_use]
+    pub fn mass_and_gradient(
+        &self,
+        elasticity: &DensityElasticity,
+        rho: &[f64],
+    ) -> (f64, Vec<f64>) {
+        let mut callback = |_| std::ops::ControlFlow::Continue(());
+        self.try_mass_and_gradient(
+            elasticity,
+            rho,
+            &mut SolveControl::new(SolveBudget::default(), &mut callback),
+        )
+        .expect("material mass evaluation failed")
+    }
+
+    /// Mass inventory with the same interruptible filter and transpose as the
+    /// other design objectives. Requires an assigned physical material field;
+    /// the legacy elasticity constructor does not supply a density in kg/m^3.
+    pub fn try_mass_and_gradient(
+        &self,
+        elasticity: &DensityElasticity,
+        rho: &[f64],
+        control: &mut SolveControl<'_>,
+    ) -> Result<(f64, Vec<f64>), EvaluationStop> {
+        control.checkpoint("material-mass")?;
+        let masses = elasticity
+            .reference_cell_masses_kg()
+            .expect("physical mass requires an assigned material field");
+        assert_eq!(
+            rho.len(),
+            masses.len(),
+            "one occupancy per material cell is required"
+        );
+        let (filtered, projected, _) = self.try_forward(rho, control)?;
+        let mass: f64 = projected.iter().zip(masses).map(|(&r, &m)| r * m).sum();
+        let local: Vec<f64> = filtered
+            .iter()
+            .zip(masses)
+            .map(|(&r, &m)| m * heaviside_derivative(r, self.params.beta, self.params.eta))
+            .collect();
+        if !mass.is_finite() || local.iter().any(|value| !value.is_finite()) {
+            return Err(EvaluationStop::Breakdown {
+                stage: "material-mass",
+            });
+        }
+        let gradient = self.filter.try_apply_transpose(&local, control)?;
+        control.checkpoint("material-mass-publish")?;
+        Ok((mass, gradient))
+    }
+
     /// Compliance objective and its EXACT design gradient for the
     /// elasticity problem: c = fᵀu (self-adjoint: λ = u, so
     /// dc/dE_c = −u_cᵀK_cu_c — no extra solve), then the reverse
