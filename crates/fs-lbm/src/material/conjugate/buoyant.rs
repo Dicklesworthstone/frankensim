@@ -24,6 +24,11 @@ use fs_material::{
 };
 use super::solid::{SolidConductivityLaw, SolidConductivitySample};
 
+/// Source-caloric h(T) transport on the same steady material fixed point.
+pub mod enthalpy;
+use enthalpy::{CaloricCoupling, MaterialEnthalpyReport, MaterialEnthalpyState};
+use crate::conjugate::AdvectiveEnthalpyField;
+
 /// Physical approximation limits and bounded steady fixed-point iteration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialBuoyancyConfig {
@@ -108,10 +113,20 @@ pub enum MaterialBuoyancyError {
         temperature_k: f64,
         source: MaterialStatePointError,
     },
+    /// Original single-phase caloric law refused this trial or endpoint.
+    Caloric {
+        temperature_k: f64,
+        source: MaterialError,
+    },
     /// Original momentum, thermal or cancellation refusal.
     Solver(ChtError),
     /// All available passes completed without a consistent material endpoint.
     NotConverged(MaterialBuoyancyReport),
+    /// Local nonlinear enthalpy transport did not close within the same budget.
+    EnthalpyNotConverged {
+        material: MaterialBuoyancyReport,
+        enthalpy: MaterialEnthalpyReport,
+    },
 }
 impl core::fmt::Display for MaterialBuoyancyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -221,6 +236,34 @@ fn solid_samples(
     Ok(samples)
 }
 
+fn admit_open_boundary_materials<F: FluidTransport>(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    reference: &FluidTransportState,
+    config: BoussinesqConfig<3>,
+    gate: &CancelGate,
+    resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
+) -> Result<(), MaterialBuoyancyError> {
+    for (face, rule) in setup.faces.iter().enumerate() {
+        let temperature_k = match *rule {
+            ThermalFace::Inflow { temperature }
+                | ThermalFace::Outflow { backflow_temperature: temperature } => temperature,
+            _ => continue,
+        };
+        for cell in 0..domain.cell_count() {
+            poll(gate)?;
+            if !domain.is_fluid(cell) || domain.neighbor(cell, face).is_some() { continue; }
+            // The incident cell identifies the SAME caller-owned fluid/source
+            // context. A supported downstream temperature cannot admit an
+            // unsupported inlet, including potential pressure-opening backflow.
+            let error = |source| MaterialBuoyancyError::Material { cell, temperature_k, source };
+            let source = resolve(cell, temperature_k, reference).map_err(error)?;
+            BoussinesqMaterial::try_new(source, reference, config).map_err(error)?;
+        }
+    }
+    Ok(())
+}
+
 impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// Close material feedback through the original steady flow/heat solvers.
     ///
@@ -270,7 +313,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialBuoyancySolution<S>, MaterialBuoyancyError> {
         self.solve_natural_convection_inner(domain, solids, None, flow_config, thermal,
-            energy_config, initial_temperature_k, config, gate, resolve)
+            energy_config, initial_temperature_k, config, None, gate, resolve)
+            .map(|(solution, _)| solution)
     }
 
     /// Close BOTH solid and fluid material response on the same temperature field.
@@ -302,7 +346,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             SolidMaterial::new("source-bound solid", k[0]).with_orthotropic(k)
         }).collect();
         self.solve_natural_convection_inner(domain, &solids, Some(sources), flow_config,
-            thermal, energy_config, initial_temperature_k, config, gate, resolve)
+            thermal, energy_config, initial_temperature_k, config, None, gate, resolve)
+            .map(|(solution, _)| solution)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -310,11 +355,13 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         &self, domain: &VoxelDomain, solids: &[SolidMaterial],
         solid_sources: Option<&[SolidConductivityLaw<'_>]>,
         flow_config: &SimpleConfig, thermal: &ThermalSetup, energy_config: &EnergyConfig,
-        initial_temperature_k: &[f64], config: MaterialBuoyancyConfig, gate: &CancelGate,
+        initial_temperature_k: &[f64], config: MaterialBuoyancyConfig,
+        caloric: Option<CaloricCoupling<'_>>, gate: &CancelGate,
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
-    ) -> Result<MaterialBuoyancySolution<S>, MaterialBuoyancyError> {
+    ) -> Result<(MaterialBuoyancySolution<S>, Option<MaterialEnthalpyState>), MaterialBuoyancyError> {
         poll(gate)?;
         config.validate()?;
+        if let Some(caloric) = caloric { caloric.validate(energy_config)?; }
         if initial_temperature_k.len() != domain.cell_count() || domain.fluid_count() == 0 {
             return Err(MaterialBuoyancyError::Invalid(
                 "one initial temperature per cell and at least one fluid cell required",
@@ -351,6 +398,16 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             &mut resolve,
         )?;
         let mut solid_applied = solid_samples(domain, &temperature, solid_sources, gate)?;
+        if caloric.is_some() {
+            admit_open_boundary_materials(domain, thermal, &self.transport,
+                config.boussinesq, gate, &mut resolve)?;
+        }
+        // Boundary data belong to the same immutable caloric source and common
+        // datum. They stay at their actual inlet/backflow temperatures.
+        let boundary_h = caloric.map(|law| law.boundaries(thermal, &self.transport, config, gate))
+            .transpose()?.unwrap_or([None; 6]);
+        let mut caloric_applied = caloric.map(|law|
+            law.field(domain, &temperature, &self.transport, config, gate)).transpose()?;
         let mut viscosity = vec![self.transport.dynamic_viscosity_pa_s(); domain.cell_count()];
         let mut force = vec![[0.0; 3]; domain.cell_count()];
         let mut seeded = false;
@@ -374,15 +431,17 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     flow_config,
                     gate,
                 )?;
-                let error = match energy_config.solve_with_conductivity(
-                    domain,
-                    &self.properties,
-                    solids,
-                    &flow.field,
-                    thermal,
-                    &conductivity,
-                    gate,
-                ) {
+                let solved = if let Some(cells) = &caloric_applied {
+                    energy_config.solve_with_enthalpy(
+                        domain, &self.properties, solids, &flow.field, thermal, &conductivity,
+                        AdvectiveEnthalpyField { cells, boundary_j_kg: boundary_h }, gate,
+                    )
+                } else {
+                    energy_config.solve_with_conductivity(
+                        domain, &self.properties, solids, &flow.field, thermal, &conductivity, gate,
+                    )
+                };
+                let error = match solved {
                     Ok(energy) => break (flow, energy),
                     Err(error) => error,
                 };
@@ -428,6 +487,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     &mut resolve,
                 )?;
                 solid_applied = solid_samples(domain, &temperature, solid_sources, gate)?;
+                caloric_applied = caloric.map(|law|
+                    law.field(domain, &temperature, &self.transport, config, gate)).transpose()?;
                 seeded = true;
             };
             let endpoint = samples(
@@ -439,6 +500,12 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                 &mut resolve,
             )?;
             let solid_endpoint = solid_samples(domain, &energy.temperature, solid_sources, gate)?;
+            let caloric_endpoint = caloric.map(|law|
+                law.field(domain, &energy.temperature, &self.transport, config, gate)).transpose()?;
+            let caloric_report = if let (Some(old), Some(next)) = (&caloric_applied, &caloric_endpoint) {
+                Some(enthalpy::defects(domain, &flow.field, self.transport.density_kg_m3(),
+                    &energy.temperature, old, next, gate)?)
+            } else { None };
             let mut report = MaterialBuoyancyReport {
                 passes: pass,
                 temperature_defect_k: 0.0,
@@ -478,8 +545,18 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             if report.temperature_defect_k <= config.temperature_tolerance_k
                 && report.transport_relative_defect <= config.transport_relative_tolerance
                 && report.force_defect_n_m3 <= config.force_tolerance_n_m3
+                && caloric_report.zip(caloric).is_none_or(|(report, law)| {
+                    report.maximum_face_flux_defect_w <= law.config.maximum_flux_defect_w
+                        && report.maximum_cell_flux_defect_w <= law.config.maximum_flux_defect_w
+                })
             {
-                return Ok(MaterialBuoyancySolution {
+                let enthalpy = caloric_report.map(|report| MaterialEnthalpyState {
+                    applied: caloric_applied.expect("caloric report has an applied field"),
+                    endpoint: caloric_endpoint.expect("caloric report has an endpoint field"),
+                    boundary_j_kg: boundary_h,
+                    report,
+                });
+                return Ok((MaterialBuoyancySolution {
                     reference: self.transport,
                     flow,
                     energy,
@@ -488,15 +565,21 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     solid_applied,
                     solid_endpoint,
                     report,
-                });
+                }, enthalpy));
             }
             if pass == config.maximum_passes {
-                return Err(MaterialBuoyancyError::NotConverged(report));
+                return Err(match caloric_report {
+                    Some(enthalpy) => MaterialBuoyancyError::EnthalpyNotConverged {
+                        material: report, enthalpy,
+                    },
+                    None => MaterialBuoyancyError::NotConverged(report),
+                });
             }
             if config.temperature_relaxation == 1.0 {
                 temperature = energy.temperature;
                 applied = endpoint;
                 solid_applied = solid_endpoint;
+                caloric_applied = caloric_endpoint;
             } else {
                 for (old, next) in temperature.iter_mut().zip(energy.temperature) {
                     *old = (1.0 - config.temperature_relaxation) * *old
@@ -511,6 +594,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     &mut resolve,
                 )?;
                 solid_applied = solid_samples(domain, &temperature, solid_sources, gate)?;
+                caloric_applied = caloric.map(|law|
+                    law.field(domain, &temperature, &self.transport, config, gate)).transpose()?;
             }
         }
         unreachable!("positive bounded pass count either accepts or refuses its final pass")

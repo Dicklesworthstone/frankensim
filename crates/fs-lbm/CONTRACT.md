@@ -69,6 +69,39 @@ and a sharp conductivity change hidden by a small temperature defect. A coarse
 heated-cavity G3 regression checks that a solid-only source substitution changes
 the actual fluid buoyancy and circulation while conserving heat.
 
+### Source-caloric steady conjugate convection
+
+`MaterialChtFluid::solve_natural_convection_with_enthalpy` and its
+`with_material_solids_and_enthalpy` counterpart reuse the existing steady
+material/momentum/heat fixed point with the original fluid's full h(T).
+`ConvectionCaloricLaw` adapters borrow `ResolvedHeatCapacityCurve` or
+`GasEnthalpyLaw`; the caller binds that same fluid and fixed source context to
+the transport resolver. This correspondence is a caller contract; the chart's
+chord Cp can differ from raw source Cp within its admitted interpolation
+approximation, so no arbitrary pointwise equality is imposed. Every incident
+fluid cell is also queried through that transport resolver at each inlet or
+potential-backflow temperature, admitting its source domain and both density
+and Cp departures before a solve. Direct original-law enthalpy increments establish one
+common temperature datum, including every inlet/backflow state, so arbitrary
+formation-energy offsets do not become numerical heat. The same donor h and
+positive chart Cp enter both sides of each native upwind face. Reference rho
+still owns continuity/inertia, and the existing rho AND Cp departure bounds
+remain enforced; no physical approximation gate is bypassed.
+
+`EnergyConfig::solve_with_enthalpy` supplies the steady affine operator.
+The material owner re-evaluates the true caloric chart at the returned state
+and requires both the maximum individual face-heat defect and the maximum
+cell net-heat defect to meet the explicit tolerance, alongside its original
+temperature, conductivity, viscosity and force checks. Interior cancellation
+in the global balance cannot manufacture nonlinear acceptance. The result
+retains the borrowed caloric owner, applied/endpoint fields and exact boundary
+enthalpies. Source-domain, local mass-conservation, cancellation or iteration
+failure publishes no solution. Existing source-solid conduction/contact paths
+remain shared; latent plateaux, variable-density mass transport and pressure
+work remain outside this steady single-phase entry. `material_conjugate`'s
+`source_enthalpy` regressions specify actual channel heat, source Cp(T) changes,
+reversed flow, datum invariance, local closure and atomic refusal.
+
 ### Solved material flow on the shared enthalpy timeline
 
 With `enthalpy-coupling`, `MaterialChtFluid::solve_flow` retains the actual

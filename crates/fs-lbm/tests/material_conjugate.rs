@@ -11,6 +11,9 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::gas::{GasSpec, GasState};
 
+#[path = "material_conjugate/source_enthalpy.rs"]
+mod source_enthalpy;
+
 fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance * b.abs().max(1.0), "{a} != {b}");
 }

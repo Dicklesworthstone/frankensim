@@ -80,6 +80,36 @@ impl EnergyConfig {
         )
     }
 
+    /// Steady conservative transport of a frozen source-caloric linearization.
+    ///
+    /// Each interior face carries one donor's `rho * Q * h(T)` on both sides;
+    /// the reference Cp in `fluid` is not substituted for that enthalpy. The
+    /// same original molecular/contact/boundary heat operator is used. All
+    /// caloric entries and inlet/backflow values must share one datum.
+    ///
+    /// The caller owns nonlinear material iteration and must check the true
+    /// chart's local face flux at the returned temperatures. This result audits
+    /// the supplied affine law, not convergence of the nonlinear chart.
+    ///
+    /// # Errors
+    /// Requires first-order upwind, positive finite caloric tangents and local
+    /// volume conservation, in addition to `solve_with_conductivity` admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_enthalpy(
+        &self,
+        domain: &VoxelDomain,
+        fluid: &FluidProperties,
+        solids: &[SolidMaterial],
+        flow: &FlowField,
+        setup: &ThermalSetup,
+        molecular_w_m_k: &[[f64; 3]],
+        enthalpy: AdvectiveEnthalpyField<'_>,
+        gate: &CancelGate,
+    ) -> Result<EnergySolution, ChtError> {
+        self.solve_with_fields(domain, fluid, solids, flow, setup, molecular_w_m_k,
+            Some(enthalpy), None, gate)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn solve_with_fields(
         &self,
