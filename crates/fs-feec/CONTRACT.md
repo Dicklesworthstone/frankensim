@@ -1452,3 +1452,56 @@ unit-test code type-checks with genuine dependencies. Four full-field tests
 cover the original constrained equations, transmission with complete caloric
 fields and independent work, time subdivision, and transactional refusals;
 their native FE execution remains unperformed in this environment.
+
+### Complete conforming resolved-fluid time interface
+
+`PreparedThermoviscousTime::connect_conforming` joins matching original boundary
+triangulations through complete hierarchical P2 Cartesian velocity and
+translational-temperature traces. Geometric vertex/edge identities match across
+different node numbering; opposite original outward normals and the complete
+original P2 surface mass must agree. Every original pressure mode touching the
+cut is removed from the external inputs and must lie entirely on that cut.
+Unselected pressures and all original structural forces remain explicit inputs.
+
+The original checked normalized mixed-mass inverse maps actual P2 Cartesian
+traction and conductive-flux loads to the existing common-flow constraint. The
+same original pair owner, `CommonFlowProjection` and `PreparedQuadraticFlow`
+advance both complete velocity/pressure/temperature fields, all molecular
+reservoirs, finite solid fields and structural coordinates. Pressure remains in
+each original P1 volume space: total viscous traction is balanced; pressure
+continuity is not an additional constraint. No second integrator, artificial
+interface resistance, fitted trace or model reduction enters.
+
+Traction [Pa] is work-conjugate to area-integrated Cartesian velocity. Inward
+conductive flux [W/m2] is conjugate to area-integrated `theta=T'/T0`; the original
+thermal storage already carries `T0`, so the flux input has no additional `T0`.
+Independent same-trajectory quadratics integrate mechanical `t.v` and thermal
+`theta*q` interface work separately. Both signed transfers cancel across the
+pair and each region retains its original five physical volume-loss channels.
+`ThermoviscousTimeWork::conductive_boundary_work_j` is acoustic available-energy
+transfer, not caloric heat or dissipation. An actual signed `integral(q dA dt)`
+is exposed separately only for a complete active thermal trace and never added
+to the quadratic acoustic ledger.
+
+Stationary constraints present on one side also constrain the other side.
+Coordinates fixed on both sides are removed from the active trace test space;
+reported tractions/fluxes there are only Galerkin representatives modulo
+work-null loads, not claims of zero physical stress or heat flux. When the
+thermal trace is incomplete, `caloric_heat_transfer_j` is `None`: the actual
+caloric integral cannot be inferred from the available-energy transfer.
+Moving structural traces overlapping interface DOFs, mismatched geometry,
+rank loss, mixed internal/external pressure modes, inconsistent initial traces,
+different clocks/equilibria and exceeded dense budgets refuse without publishing
+either state. The original normal-flow `connect` retains its insulated thermal
+and free-tangential interpretation through the same generalized pair owner.
+
+Scope remains fixed geometry and one common reference pressure/temperature,
+bounded dense exact held-input time evolution, and source-owned fixed material
+coefficients. There is no mean-flow/species transport, mean thermal-reservoir
+update, moving mesh or unqualified acoustic-resolution claim.
+
+Focused regressions compare the projected dynamics with independent primal
+identification of the original physical trace coefficients and original weak
+mass/force equations, check the actual thermal-flux units, permute geometric
+node numbering, retain all molecular fields, test shear and thermal transfer,
+exercise one-sided/shared stationary constraints, and check refusal/retry.

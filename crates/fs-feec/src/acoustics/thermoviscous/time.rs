@@ -34,7 +34,11 @@ pub use caloric::ThermoviscousCaloricReservoir;
 mod wall;
 pub use wall::{ConductiveWallTimeLayout, ThermoviscousWallDiscretization};
 mod interface;
-pub use interface::{PreparedThermoviscousTimePair, ThermoviscousTimePairStep};
+pub use interface::{
+    ConformingThermoviscousInterface, ConformingThermoviscousTimePairStep,
+    PreparedConformingThermoviscousTimePair, PreparedThermoviscousTimePair,
+    ThermoviscousTimePairStep,
+};
 const HEAT_CHANNELS: usize = 5;
 
 /// Original-owner refusals; no state is published on failure or cancellation.
@@ -136,6 +140,10 @@ pub struct ThermoviscousTimeWork {
     pub delta_energy_j: f64,
     pub pressure_work_j: f64,
     pub structural_work_j: f64,
+    /// Signed conductive boundary transfer of acoustic available energy,
+    /// integral((T'/T0) q_in dA dt) [J]. This is not the first-order caloric
+    /// heat integral(q_in dA dt), nor a volume dissipation channel.
+    pub conductive_boundary_work_j: f64,
     /// Combined deviatoric and dilatational viscosity in the original fluid.
     pub fluid_viscous_heat_j: f64,
     pub fluid_conductive_heat_j: f64,
@@ -155,7 +163,7 @@ impl ThermoviscousTimeWork {
             + self.solid_conductive_heat_j
     }
     pub fn supplied_j(self) -> f64 {
-        self.pressure_work_j + self.structural_work_j
+        self.pressure_work_j + self.structural_work_j + self.conductive_boundary_work_j
     }
     pub fn balance_residual_j(self) -> f64 {
         self.delta_energy_j + self.dissipated_j() - self.supplied_j()
@@ -187,6 +195,9 @@ pub struct PreparedThermoviscousTime<'a, 'c> {
     // Original physical forms, retained for causal multi-region composition.
     // Never replace these with projected resistance or an energy remainder.
     heat: [Vec<f64>; HEAT_CHANNELS],
+    // The SAME checked normalized mixed-mass inverse used to construct J/R/G.
+    // Retained so physical P2 interface loads use the original field owner.
+    inverse_mass: Vec<f64>,
     system: PortHamiltonian,
     flow: PreparedQuadraticFlow,
     mean_state: Vec<f64>,
@@ -481,6 +492,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             reservoir_offsets,
             conductive_wall_fields,
             heat,
+            inverse_mass: inverse,
             system,
             flow,
             mean_state,
@@ -839,6 +851,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             delta_energy_j,
             pressure_work_j,
             structural_work_j,
+            conductive_boundary_work_j: 0.0,
             fluid_viscous_heat_j: candidate.integrals[0],
             fluid_conductive_heat_j: candidate.integrals[1],
             structural_damping_heat_j: candidate.integrals[2],

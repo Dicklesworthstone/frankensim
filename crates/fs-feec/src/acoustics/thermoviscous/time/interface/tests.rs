@@ -1,6 +1,6 @@
 use super::*;
 
-fn geometry(right: bool) -> (TetComplex, Vec<[f64; 3]>) {
+pub(super) fn geometry(right: bool) -> (TetComplex, Vec<[f64; 3]>) {
     let (mesh, mut points) = crate::fixtures::single_tet();
     for p in &mut points {
         for x in p {
@@ -69,7 +69,7 @@ fn model<'c>(
     .unwrap()
 }
 
-fn prepared<'a, 'c>(model: &'a ThermoviscousFe<'c>, dt: f64) -> PreparedThermoviscousTime<'a, 'c> {
+pub(super) fn prepared<'a, 'c>(model: &'a ThermoviscousFe<'c>, dt: f64) -> PreparedThermoviscousTime<'a, 'c> {
     model
         .prepare_time_with_caloric_reservoirs(
             dt,

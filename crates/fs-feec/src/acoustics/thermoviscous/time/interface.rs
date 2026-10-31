@@ -5,16 +5,37 @@
 //! The shared pHS common-flow constraint evolves all original fields together;
 //! no frequency response, fitted pole, modal truncation or partitioned lag enters.
 //!
-//! This is a Galerkin normal-flow interface, with insulated temperature and
-//! free tangential traction. It is not full conforming P2 velocity/temperature
-//! continuity. Interface placement and retained-trace convergence remain physical
-//! obligations, particularly in viscous/thermal layers. Equilibrium geometry,
-//! pressure and temperature are fixed; composition is not advected or mixed.
+//! `connect` retains its Galerkin normal-flow, insulated interface. The separate
+//! `connect_conforming` binding supplies the COMPLETE original P2 vector and
+//! thermal trace to this SAME trajectory owner. Equilibrium geometry, pressure
+//! and temperature are fixed; composition is not advected or mixed.
 use super::*;
 use fs_phs::linear_exact::CommonFlowProjection;
 use std::collections::BTreeMap;
 
-const QUADRATIC_FORMS: usize = 2 * HEAT_CHANNELS + 2;
+mod conforming;
+pub use conforming::{
+    ConformingThermoviscousInterface, ConformingThermoviscousTimePairStep,
+    PreparedConformingThermoviscousTimePair,
+};
+
+const QUADRATIC_FORMS: usize = 2 * HEAT_CHANNELS + 4;
+
+// Original load columns and their physical kind, not another dynamical owner.
+struct InterfaceColumns {
+    count: usize,
+    mechanical: usize,
+    loads: Vec<f64>,
+}
+
+struct PairEvaluation {
+    regions: [ThermoviscousTimeStep; 2],
+    mechanical_work_j: [f64; 2],
+    conductive_work_j: [f64; 2],
+    external_pressure_work_j: f64,
+    mean_reaction: Vec<f64>,
+    endpoint_reaction: Vec<f64>,
+}
 
 /// Both admitted original field endpoints and same-trajectory physical work.
 #[derive(Clone, Debug)]
@@ -48,6 +69,8 @@ pub struct PreparedThermoviscousTimePair<'p, 'a, 'c> {
     selected: [Vec<usize>; 2],
     traction_map: Vec<f64>,
     external_pressure: Vec<(usize, usize)>,
+    interface_count: usize,
+    mechanical_count: usize,
     system: PortHamiltonian,
     projection: CommonFlowProjection,
     flow: PreparedQuadraticFlow,
@@ -101,6 +124,24 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                 ));
             }
         }
+        let traction_map = trace_map(left.model, right.model, left_modes, right_modes, cancelled)?;
+        Self::prepare(regions, selected, traction_map, None, limits, cancelled)
+    }
+
+    fn prepare(
+        regions: [&'p PreparedThermoviscousTime<'a, 'c>; 2],
+        selected: [Vec<usize>; 2],
+        traction_map: Vec<f64>,
+        columns: Option<InterfaceColumns>,
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousTimeError> {
+        poll(cancelled)?;
+        let [left, right] = regions;
+        let left_modes = &selected[0];
+        let right_modes = &selected[1];
+        let count = columns.as_ref().map_or(left_modes.len(), |c| c.count);
+        let mechanical_count = columns.as_ref().map_or(count, |c| c.mechanical);
         let same = |a: f64, b: f64| (a - b).abs() <= 64.0 * f64::EPSILON * a.abs().max(b.abs());
         if left.duration_s.to_bits() != right.duration_s.to_bits()
             || !same(
@@ -148,12 +189,15 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                 "complete coupled state/port capacity and bounded tolerance required",
             ));
         }
-        let traction_map = trace_map(left.model, right.model, left_modes, right_modes, cancelled)?;
         let mut q = vec![0.0; n * n];
         let mut j = vec![0.0; n * n];
         let mut r = vec![0.0; n * n];
         let mut g = vec![0.0; n * ports];
-        let mut b = vec![0.0; n * count];
+        let custom = columns.is_some();
+        let mut b = columns.map_or_else(|| vec![0.0; n * count], |c| c.loads);
+        if count == 0 || count > n || mechanical_count > count || b.len() != n * count {
+            return Err(invalid("complete independent physical interface columns required"));
+        }
         let mut forms = vec![vec![0.0; n * n]; QUADRATIC_FORMS];
         let mut observations = vec![vec![0.0; n]; all_ports];
         for side in 0..2 {
@@ -187,7 +231,7 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                         g[(start + row) * ports + p] = sg[row * original_ports[side] + source_port];
                     }
                 }
-                for a in 0..count {
+                for a in 0..if custom { 0 } else { count } {
                     b[(start + row) * count + a] = if side == 0 {
                         (0..count)
                             .map(|i| {
@@ -218,7 +262,7 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
             j.to_vec(),
             r.to_vec(),
             g.to_vec(),
-            Box::new(QuadraticStorage::new(q, n)?),
+            Box::new(QuadraticStorage::new(q.clone(), n)?),
         )?;
         let (reaction_state, _) = projection.reaction_maps();
         let mut interface_flows: [Vec<Vec<f64>>; 2] =
@@ -226,23 +270,21 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
         for side in 0..2 {
             for a in 0..count {
                 for col in 0..n {
-                    interface_flows[side][a][col] = if side == 0 {
-                        (0..count)
-                            .map(|i| traction_map[i * count + a] * observations[left_modes[i]][col])
-                            .sum()
-                    } else {
-                        observations[port_starts[1] + right_modes[a]][col]
-                    };
+                    interface_flows[side][a][col] = (starts[side]..starts[side] + sizes[side])
+                        .map(|row| b[row * count + a] * q[row * n + col])
+                        .sum();
                 }
+                let kind = usize::from(a >= mechanical_count);
                 for row in 0..n {
                     poll(cancelled)?;
                     for col in 0..n {
-                        forms[2 * HEAT_CHANNELS + side][row * n + col] +=
+                        forms[2 * HEAT_CHANNELS + 2 * side + kind][row * n + col] +=
                             reaction_state[a * n + row] * interface_flows[side][a][col];
                     }
                 }
             }
         }
+        observations.extend(interface_flows.into_iter().flatten());
         observations.extend((0..count).map(|a| reaction_state[a * n..(a + 1) * n].to_vec()));
         let split = split_quadratic(
             &system,
@@ -266,6 +308,8 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
             selected,
             traction_map,
             external_pressure,
+            interface_count: count,
+            mechanical_count,
             system,
             projection,
             flow,
@@ -306,6 +350,23 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
         wall_forces_n_per_sqrt_kg: [&[f64]; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousTimePairStep, ThermoviscousTimeError> {
+        let frame = self.evaluate(initial, external_traction_pa, wall_forces_n_per_sqrt_kg, cancelled)?;
+        Ok(ThermoviscousTimePairStep {
+            regions: frame.regions,
+            interface_work_j: frame.mechanical_work_j,
+            external_pressure_work_j: frame.external_pressure_work_j,
+            mean_interface_traction_pa: frame.mean_reaction,
+            endpoint_interface_traction_pa: frame.endpoint_reaction,
+        })
+    }
+
+    fn evaluate(
+        &self,
+        initial: [&ThermoviscousTimeState; 2],
+        external_traction_pa: &[f64],
+        wall_forces_n_per_sqrt_kg: [&[f64]; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PairEvaluation, ThermoviscousTimeError> {
         poll(cancelled)?;
         if external_traction_pa.len() != self.external_pressure.len()
             || (0..2)
@@ -330,8 +391,8 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
         let candidate = self.flow.evaluate(&x, &input)?;
         poll(cancelled)?;
         self.projection.admit_state(&candidate.state)?;
-        let endpoint_interface_traction_pa = self.projection.reaction(&candidate.state, &input)?;
-        let count = self.selected[0].len();
+        let endpoint_reaction = self.projection.reaction(&candidate.state, &input)?;
+        let count = self.interface_count;
         let all_ports = self
             .regions
             .iter()
@@ -348,28 +409,29 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                     .sum::<f64>()
             })
             .collect();
-        let mean_interface_traction_pa: Vec<_> = (0..count)
+        let mean_reaction: Vec<_> = (0..count)
             .map(|a| {
-                candidate.integrals[QUADRATIC_FORMS + all_ports + a] / self.duration_s() + feed[a]
+                candidate.integrals[QUADRATIC_FORMS + all_ports + 2 * count + a]
+                    / self.duration_s() + feed[a]
             })
             .collect();
         let mut interface_work_j = [0.0; 2];
+        let mut conductive_work_j = [0.0; 2];
         let mut external_work = [0.0; 2];
         let port_starts = [0, self.regions[0].system.port_dim()];
         for (p, &(side, original)) in self.external_pressure.iter().enumerate() {
             external_work[side] += external_traction_pa[p] * outputs[port_starts[side] + original];
         }
         for side in 0..2 {
-            interface_work_j[side] = candidate.integrals[2 * HEAT_CHANNELS + side];
+            interface_work_j[side] = candidate.integrals[2 * HEAT_CHANNELS + 2 * side];
+            conductive_work_j[side] = candidate.integrals[2 * HEAT_CHANNELS + 2 * side + 1];
             for a in 0..count {
-                let integrated_flow = if side == 0 {
-                    (0..count)
-                        .map(|i| self.traction_map[i * count + a] * outputs[self.selected[0][i]])
-                        .sum()
+                let integrated_flow = candidate.integrals[QUADRATIC_FORMS + all_ports + side * count + a];
+                if a < self.mechanical_count {
+                    interface_work_j[side] += feed[a] * integrated_flow;
                 } else {
-                    outputs[port_starts[1] + self.selected[1][a]]
-                };
-                interface_work_j[side] += feed[a] * integrated_flow;
+                    conductive_work_j[side] += feed[a] * integrated_flow;
+                }
             }
         }
         let mut frames = Vec::with_capacity(2);
@@ -388,6 +450,7 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                     &candidate.state[start..end],
                 ),
                 pressure_work_j: external_work[side] + interface_work_j[side],
+                conductive_boundary_work_j: conductive_work_j[side],
                 structural_work_j: wall_forces_n_per_sqrt_kg[side]
                     .iter()
                     .enumerate()
@@ -416,14 +479,15 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
             });
             start = end;
         }
-        let result = ThermoviscousTimePairStep {
+        let result = PairEvaluation {
             regions: frames
                 .try_into()
                 .map_err(|_| invalid("complete pair candidate required"))?,
-            interface_work_j,
+            mechanical_work_j: interface_work_j,
+            conductive_work_j,
             external_pressure_work_j: external_work.iter().sum(),
-            mean_interface_traction_pa,
-            endpoint_interface_traction_pa,
+            mean_reaction,
+            endpoint_reaction,
         };
         let scale = result
             .regions
@@ -439,12 +503,16 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
         if candidate.integrals.iter().any(|v| !v.is_finite())
             || !scale.is_finite()
             || result
-                .mean_interface_traction_pa
+                .mean_reaction
                 .iter()
                 .any(|v| !v.is_finite())
-            || result.interface_work_j.iter().sum::<f64>().abs()
+            || result.mechanical_work_j.iter().sum::<f64>().abs()
                 > self.maximum_relative_energy_residual * scale
-            || result.balance_residual_j().abs() > self.maximum_relative_energy_residual * scale
+            || result.conductive_work_j.iter().sum::<f64>().abs()
+                > self.maximum_relative_energy_residual * scale
+            || (result.regions.iter().map(|r| r.work.delta_energy_j + r.work.dissipated_j()
+                    - r.work.structural_work_j).sum::<f64>() - result.external_pressure_work_j).abs()
+                > self.maximum_relative_energy_residual * scale
         {
             return Err(invalid(
                 "original coupled interface work or enclosing energy balance refused",
