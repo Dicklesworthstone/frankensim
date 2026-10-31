@@ -285,7 +285,7 @@ impl<'a> DepositionSimulation<'a> {
         checkpoint()
     }
 
-    fn add_step_transfers(&self, rates: &mut HeatRates, transfers: &[HeatTransfer],
+    pub(super) fn add_step_transfers(&self, rates: &mut HeatRates, transfers: &[HeatTransfer],
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
         -> Result<(), DepositionError> {
         if transfers.len() > self.budget.max_links {

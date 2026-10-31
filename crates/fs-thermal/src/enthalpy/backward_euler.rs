@@ -18,6 +18,10 @@ use super::*;
 mod boundaries;
 pub use boundaries::{BoundaryConductances, BoundaryStepCoefficients};
 
+#[path = "backward_euler/transport.rs"]
+mod transport;
+pub use transport::TransportStepCoefficients;
+
 impl DepositionSimulation<'_> {
     /// Evaluate the ORIGINAL thermal rate owner's external power at this state.
     /// Trial sources add to authored sources; link replacements keep their
@@ -285,6 +289,17 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         energy_increments_j: &[f64],
         resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<BoundaryStepCoefficients<T>, E>,
         with_entropy: bool,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, T>, E> {
+        self.evaluate_transport_option(energy_increments_j,
+            |state| resolve(state).map(TransportStepCoefficients::from), with_entropy, checkpoint)
+    }
+
+    fn evaluate_transport_option<T, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<TransportStepCoefficients<T>, E>,
+        with_entropy: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
         checkpoint()?;
@@ -323,7 +338,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             storage.push(actual);
         }
         checkpoint()?;
-        let BoundaryStepCoefficients {
+        let TransportStepCoefficients { heat: BoundaryStepCoefficients {
             bulk:
                 StepCoefficients {
                     sources_w,
@@ -331,33 +346,41 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                     payload,
                 },
             boundaries,
-        } = resolve(&next)?;
+        }, transfers } = resolve(&next)?;
         checkpoint()?;
         let links = next.set_step_conductances(&conductances_w_k, &mut checkpoint)?;
         let sources = next.add_step_sources(&sources_w, &mut checkpoint)?;
-        let rates = next.heat_rates_with_boundaries(f64::MAX, &boundaries, &mut checkpoint)?;
+        let mut rates = next.heat_rates_with_boundaries(f64::MAX, &boundaries, &mut checkpoint)?;
+        if !transfers.is_empty() {
+            next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
+        }
         let entropy = if let Some(initial_h) = initial_h {
-            Some(
-                if boundaries.ambient_w_k.is_empty() && boundaries.reservoir_w_k.is_empty() {
-                    next.entropy_step_audit(
-                        &initial_h,
-                        &rates.temperatures,
-                        self.duration_s,
-                        &mut checkpoint,
-                    )?
-                } else {
-                    next.entropy_step_audit_with_boundary_coefficients(
-                        &initial_h,
-                        &rates.temperatures,
-                        self.duration_s,
-                        &BTreeMap::new(),
-                        &BTreeMap::new(),
-                        &boundaries.ambient_w_k,
-                        &boundaries.reservoir_w_k,
-                        &mut checkpoint,
-                    )?
-                },
-            )
+            // The same signed at-cell convention as the explicit entropy
+            // observer. These are NOT heat sources for the energy residual:
+            // the native transfer kernel above already applied them once.
+            let mut transfer_sources = BTreeMap::new();
+            let mut has_transfer = false;
+            for (i, transfer) in transfers.iter().enumerate() {
+                if i % 256 == 0 { checkpoint()?; }
+                has_transfer |= transfer.power_w != 0.0;
+                for (id, sign) in [(transfer.a, -1.0), (transfer.b, 1.0)] {
+                    let old = transfer_sources.get(&id).copied()
+                        .unwrap_or(next.cells[&id].boundary.source_w);
+                    transfer_sources.insert(id, finite(old + sign * transfer.power_w)?);
+                }
+            }
+            let mut audit = if transfers.is_empty()
+                && boundaries.ambient_w_k.is_empty() && boundaries.reservoir_w_k.is_empty() {
+                next.entropy_step_audit(&initial_h, &rates.temperatures,
+                    self.duration_s, &mut checkpoint)?
+            } else {
+                next.entropy_step_audit_with_boundary_coefficients(&initial_h,
+                    &rates.temperatures, self.duration_s, &transfer_sources,
+                    &BTreeMap::new(), &boundaries.ambient_w_k, &boundaries.reservoir_w_k,
+                    &mut checkpoint)?
+            };
+            audit.has_unclassified_sources |= has_transfer;
+            Some(audit)
         } else {
             None
         };
