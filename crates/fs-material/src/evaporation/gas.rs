@@ -10,16 +10,23 @@
 //! This is a first-order, frozen-rate interval. The film uses the initial gas
 //! temperature, pressure and composition and a caller-supplied mass-transfer
 //! coefficient. Incoming vapor carries its upstream gas enthalpy; outgoing
-//! vapor carries its surface enthalpy. Separate sensible film conduction is
-//! absent. A step that overshoots equilibrium, consumes too much inventory or
+//! vapor carries its surface enthalpy. The optional [`heat`] path first solves
+//! reciprocal sensible film heat on the same original calorics. A step that
+//! overshoots equilibrium, consumes too much inventory or
 //! changes temperature too far refuses with a smaller duration to retry.
 //!
 //! Gas volume and thermal reference geometry are fixed. The conserved thermal
 //! account is liquid enthalpy plus gas internal energy; this is not a moving
 //! liquid boundary, a rigid two-phase vessel, a boiling or a spray model.
 
+/// Implicit reciprocal sensible film heat, separately from vapor-carried energy.
+pub mod heat;
 /// Original heat transport and finite humidity feedback on one physical clock.
 pub mod timeline;
+pub use heat::{
+    GasEvaporationHeatCandidate, GasFilmHeatSolve, GasFilmHeatStep,
+    advance_surface_with_gas_and_heat,
+};
 
 use crate::thermochemical_gas::{
     ThermochemicalGasModel,
@@ -77,6 +84,15 @@ pub enum GasEvaporationError {
     EnergyBalance {
         residual_j: f64,
         tolerance_j: f64,
+    },
+    /// The admitted original gas/liquid branches do not contain the heat endpoint.
+    HeatOutsideBracket {
+        residual_temperature_k: [f64; 2],
+    },
+    /// The implicit sensible heat equation could not meet its temperature budget.
+    HeatNotConverged {
+        iterations: usize,
+        residual_temperature_k: f64,
     },
     Cancelled,
 }

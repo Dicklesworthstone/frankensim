@@ -11,7 +11,7 @@ const R: f64 = fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / M;
 const LATENT: f64 = 200000.0;
 const SLOPE: f64 = 0.001;
 
-struct Phase;
+pub(super) struct Phase;
 impl EvaporationLaw for Phase {
     fn temperature_range_k(&self) -> [f64; 2] {
         [200.0, 900.0]
@@ -33,7 +33,7 @@ fn id() -> SpeciesId {
 fn carrier() -> SpeciesId {
     SpeciesId::new("A").unwrap()
 }
-fn catalog(reference: f64) -> ThermochemicalGasModel {
+pub(super) fn catalog(reference: f64) -> ThermochemicalGasModel {
     ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(
             vec![
@@ -48,7 +48,12 @@ fn catalog(reference: f64) -> ThermochemicalGasModel {
     )
     .unwrap()
 }
-fn gas(catalog: &ThermochemicalGasModel, t: f64, pv: f64, volume: f64) -> ClosedGasParcel {
+pub(super) fn gas(
+    catalog: &ThermochemicalGasModel,
+    t: f64,
+    pv: f64,
+    volume: f64,
+) -> ClosedGasParcel {
     let x = pv / 100000.0;
     ClosedGasParcel::new(
         catalog
@@ -61,24 +66,24 @@ fn gas(catalog: &ThermochemicalGasModel, t: f64, pv: f64, volume: f64) -> Closed
     )
     .unwrap()
 }
-fn liquid(t: f64) -> LiquidSurfaceState {
+pub(super) fn liquid(t: f64) -> LiquidSurfaceState {
     LiquidSurfaceState {
         mass_kg: 0.01,
         area_m2: 1e-3,
         specific_enthalpy_j_kg: R * (4.0 * t + 0.5 * SLOPE * t * t) - LATENT,
     }
 }
-fn temperature(h: f64) -> Result<f64, EvaporationError> {
+pub(super) fn temperature(h: f64) -> Result<f64, EvaporationError> {
     let c = (h + LATENT) / R;
     Ok(2.0 * c / (4.0 + (16.0 + 2.0 * SLOPE * c).sqrt()))
 }
-fn binding(reference: f64) -> GasLiquidBinding {
+pub(super) fn binding(reference: f64) -> GasLiquidBinding {
     GasLiquidBinding {
         species: id(),
         liquid_enthalpy_offset_j_kg: reference,
     }
 }
-fn controls() -> GasEvaporationSolve {
+pub(super) fn controls() -> GasEvaporationSolve {
     GasEvaporationSolve {
         gas: GasSpeciesBoundarySolve {
             gas: crate::thermochemical_gas::energy::GasEnergySolve {

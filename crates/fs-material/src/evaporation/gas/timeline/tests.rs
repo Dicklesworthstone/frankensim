@@ -390,11 +390,15 @@ fn full_timeline_cancellation_and_work_refusal_publish_neither_owner() {
         .is_err()
     );
     let changed_catalog = self::catalog(1e6);
+    // A dry parcel has no original vapor card to compare. Retain actual vapor
+    // inventory so this tests substitution of an owned source.
+    let humid_gas = ClosedGasParcel::new(catalog.clone(), point(300.0, 100000.0), 1e-3).unwrap();
+    let before_humid = humid_gas.clone();
     assert!(
         advance_deposition_with_gas(
             &future,
             surface(&binding),
-            &initial_gas,
+            &humid_gas,
             &changed_catalog,
             0.0,
             heat(0.05),
@@ -405,6 +409,7 @@ fn full_timeline_cancellation_and_work_refusal_publish_neither_owner() {
     );
     assert!(future.cells().is_empty());
     assert_eq!(initial_gas, before);
+    assert_eq!(humid_gas, before_humid);
 }
 
 #[test]
