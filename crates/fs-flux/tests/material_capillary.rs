@@ -547,3 +547,6 @@ fn g3_equal_density_two_fluid_rise_retains_outlet_potential_transport() {
     assert_eq!(zero.inclined_discrete().gravitational_storage_change_j, 0.0);
     assert_eq!(zero.inclined_discrete().outlet_potential_energy_j, 0.0);
 }
+
+#[path = "material_capillary/sealed.rs"]
+mod sealed;

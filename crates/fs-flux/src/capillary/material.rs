@@ -6,6 +6,9 @@
 //! remain frozen at the complete admitted source point; neither heat nor a
 //! dynamic contact-line law is inferred from an equilibrium angle.
 
+/// Coupled filling, gas compression and heating through original material owners.
+pub mod sealed;
+
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::liquid::surface::{ResolvedLiquidSurfaceState, ResolvedLiquidWettingState};

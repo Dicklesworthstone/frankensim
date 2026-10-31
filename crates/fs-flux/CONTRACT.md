@@ -1721,3 +1721,41 @@ events, and independent spatial integration of the two phase losses. This
 remains a rigid, quasisteady, Newtonian, frozen-property two-reservoir model:
 it does not supply trapped-gas storage, inertia, deposited films, thermal
 evolution or a dynamic contact-angle law.
+
+## Capillary filling against a closed thermochemical gas pocket
+
+`capillary::material::sealed` connects the original material-bound tube to
+`ClosedGasParcel`, retaining the shared NASA-9 caloric/transport model, species,
+mass, source query context and liquid/wetting assignments. The tube geometry
+explicitly includes any downstream dead volume and must agree with the actual
+gas volume. Inlet pressure is absolute. Gas heat is a signed power integrated
+over the requested positive interval; changing gas pressure and temperature
+feed back into the meniscus motion.
+
+The bounded implicit-midpoint solve uses the SAME gas midpoint pressure for
+liquid motion and gas boundary work, and its original analytic volume tangent
+for safeguarded Newton iteration. The receiving immutable candidate retains
+the accepted gas state and separate inlet work, wall surface-energy change,
+liquid gravity, viscous dissipation, signed liquid mass, gas heat and actual
+gas storage increments. Whole-system energy and mechanical pressure/length
+tolerances must pass independently. Viscous dissipation is not silently added
+to supplied gas heat or duplicated as a second loss.
+
+Cancellation, original source-domain failures, unrepresentable volume/mass/
+heat, exhausted convergence, unsupported downward-gravity conditioning, and
+oversized unheated equilibrium crossings refuse before publication. Tube-end
+crossing requires a smaller step or an appropriate boundary/event model;
+the owner never clamps motion and consumes a full interval's heat at an
+invented partial event. This is a second-order time discretization, not the
+exact finite-time Washburn or exact finite isentropic gas operation.
+
+Focused tests exercise independently manufactured perfect-gas midpoint states,
+compression/drainage and supplied heat, shared work balance, source retention
+and caloric substitutions. The scalar production solver has an 8/16/32-step
+refinement check against an independently integrated continuous adiabatic law.
+The liquid remains frozen, incompressible and Newtonian at its original source
+point. The gas is spatially uniform, with its original frozen composition;
+internal gas pressure gradients/viscous resistance, liquid/gas inertia,
+dynamic contact-angle laws, liquid heating, dissolution and phase change
+are outside this rung. The caller explicitly assigns the gas to the declared
+wetting environment; material-name strings do not establish that assignment.
