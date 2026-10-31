@@ -1810,6 +1810,15 @@ progressive replay tests remain in the photometry batteries.
   uniformly emitting diffuse cube tests the finite-depth geometric reflection
   series, camera/probe units, terminal MIS weighting and absorbed-power balance.
   Its analytic vacuum tail is a property of that benchmark only.
+- `photometric_path::point_energy` instead lights passive cube walls with two
+  off-center point fixtures totaling 1000 lm. Integrating lux over all six
+  walls checks source injection and repeated diffuse reflection against
+  `Phi * sum(rho^k, k=0..depth)`. The absorbed flux plus the known finite-depth
+  residual must recover the emitted flux. Black walls, two spatial quadrature
+  orders and three reflection depths distinguish direct, sampled and omitted
+  contributions. This is an area-integrated balance; local wall illuminance
+  is nonuniform. Its gray closed-cavity tail and fixed regression tolerances
+  are not general error bounds.
 - `photometric_image::scattering_reference` compares three non-collinear
   fixtures with an independent angle-space airlight integral for isotropic,
   forward/backward HG and Rayleigh phases. It checks passive extinction and SI
@@ -1839,12 +1848,25 @@ progressive replay tests remain in the photometry batteries.
   shared multi-fixture partition budgets, and unknown discrepancy when no
   actual refinement comparison fits the budget.
 
-These original analytic scenes are not reproductions of CIE 171 test cases.
-The public CIE 171:2006 description does not supply the complete reference case
-data or permission to redistribute the report; no normative tables have been
-copied or inferred. The open observer dataset above is a separate CIE reference.
-Real-fixture accuracy still requires the reporter's licensed measurements,
-material/medium characterization and calibration uncertainties.
+`photometric_path::cie171_analytical` independently reconstructs the diffuse
+point-source subcase of CIE 171:2006 section 5.2 from the factual setup in the
+[DDCI/Lighting Analysts validation report, page 17](https://www.agi32.com/Downloads/TechnicalDocs/Report%20on%20AGI%2032%20validation%20of%20CIE%20171_Compiled_070620.pdf#page=17).
+A downward `1000*cos(theta)` cd source sits 3 m above ten horizontal probes.
+Expected lux is evaluated from the original expression
+`9000 / (9 + x*x + y*y)^2`, combining source and receiver cosines with inverse
+square, rather than copying rounded reference values. Both the direct scene
+and progressive path-probe APIs are checked, including their unknown total
+error and numerical `NoClaim`.
+
+Only this analytical subcase is reconstructed; the other original scenes above
+are independent references. Neither the CIE publication nor the validation
+report's text, diagrams or reference tables is redistributed. The
+[engine author's publication note](https://discourse.radiance-online.org/t/radiance-validation-challenge-cie-171-2006/1981)
+distinguishes independently implemented test models from the publication.
+This selected case does not establish full CIE 171 conformance or physical
+fixture accuracy. The open observer dataset is a separate CIE reference.
+Real-fixture accuracy still requires licensed measurements, material/medium
+characterization and calibration uncertainties.
 
 ### Passive spectral diffuse materials
 

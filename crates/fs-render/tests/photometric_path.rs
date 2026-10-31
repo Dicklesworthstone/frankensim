@@ -9,6 +9,9 @@ mod probe_throughput;
 #[path = "photometric_path/illuminance.rs"]
 mod illuminance;
 
+#[path = "photometric_path/cie171_analytical.rs"]
+mod cie171_analytical;
+
 #[path = "photometric_path/parallel.rs"]
 mod parallel;
 
@@ -32,6 +35,9 @@ mod spectral_reference;
 
 #[path = "photometric_path/measured_reflectance.rs"]
 mod measured_reflectance;
+
+#[path = "photometric_path/point_energy.rs"]
+mod point_energy;
 
 #[path = "photometric_path/uncertainty_reference.rs"]
 mod uncertainty_reference;
