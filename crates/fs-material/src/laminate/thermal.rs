@@ -23,6 +23,8 @@ use std::sync::Arc;
 pub mod history;
 /// Source-bound elastic snapshots at one admitted temperature per layer.
 pub mod source;
+/// Whole-stack transverse shear potential and its nonlocal thermal derivatives.
+pub mod shear;
 /// Source-pinned plane-stress potentials and exact temperature derivatives.
 pub mod thermoelastic;
 

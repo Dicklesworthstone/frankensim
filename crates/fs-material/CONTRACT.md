@@ -259,6 +259,28 @@ oracles for all four schemas, work/Maxwell and thermal derivatives, capacity
 bounds, source pinning and domain/kink refusals. Targeted Cargo metadata checks
 pass; numerical execution and experimental validation are separate evidence.
 
+### Nonlocal thermal derivatives of native laminate shear
+
+`laminate::thermal::shear::ResolvedLaminateShearThermoelastic` differentiates
+the SAME directional Whitney shear operator with original source-pinned Q/G
+derivatives, fixed reference geometry and `fs-ad`. Neutral-axis motion,
+through-thickness energy integrals and off-axis congruence remain in the chain
+rule. Native coefficient agreement is checked; its numerical fallback refuses
+instead of acquiring invented derivatives. The one stack potential supplies
+per-cell entropy conjugates, `U=Psi+sum(T_i*S_i)`, directional stiffness
+derivatives and the entropy Hessian action, including mixed layer derivatives.
+There is no arbitrary allocation of shear internal energy among cells.
+
+Preparation and Hessian actions use O(n²) work and O(n) storage; directional
+derivatives use O(n) work, and point evaluation uses cached gradients. This is
+a local constitutive foundation, not a whole-interval thermal-capacity bound,
+heat stepper or fully coupled 3-D warping model. Its directional native Whitney
+approximation does not establish general off-axis multilayer covariance.
+`tests/laminate_thermal_shear.rs` covers the homogeneous closed form, unequal
+temperature derivatives, mixed symmetry, reference/axis transformations and
+source/domain/cancellation/fallback refusals. Numerical execution and physical
+validation require their own evidence.
+
 ### Thermal-strain histories of compatible viscoelastic laminates
 
 `laminate::thermal::history::LaminateThermalHistory` retains original full-3D
