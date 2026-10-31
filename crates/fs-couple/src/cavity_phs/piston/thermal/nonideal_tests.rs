@@ -88,10 +88,10 @@ fn g3_real_gas_compression_and_sourced_wall_heat_close_accepted_state_energy() {
         assert!(report.piston.gas.work_by_gas_j < 0.0);
         assert_eq!(accepted.external_heat_j, -report.exchanged_heat_j);
         assert_eq!(accepted.report.card_identity(), card.content_hash());
-        assert_eq!(accepted.report.query_point().get("lot"), Some(&7.0));
+        assert_eq!(accepted.report.state_coordinate("lot"), Some(7.0));
         assert_eq!(
-            accepted.report.query_point().get("T"),
-            Some(&report.thermal_midpoint.temperature_k())
+            accepted.report.state_coordinate("T"),
+            Some(report.thermal_midpoint.temperature_k())
         );
         let transport = report.piston.midpoint.transport_state().unwrap();
         assert_eq!(
@@ -199,8 +199,8 @@ fn g3_dense_gas_receives_latent_wall_heat_from_the_actual_fraction_midpoint() {
     );
     assert_eq!(report.thermal_midpoint.temperature_k(), 350.0);
     assert_eq!(
-        candidate.thermal().report.query_point().get("melt"),
-        Some(&report.thermal_midpoint.liquid_mass_fraction())
+        candidate.thermal().report.state_coordinate("melt"),
+        Some(report.thermal_midpoint.liquid_mass_fraction())
     );
     assert!(
         candidate.piston().gas().state().temperature_k() > piston.gas().state().temperature_k()

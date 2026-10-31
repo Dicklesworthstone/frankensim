@@ -469,10 +469,10 @@ mod nonideal {
         assert_eq!(accepted.body(), before.body());
         assert_eq!(accepted_thermal.report.card_identity(), card.content_hash());
         assert_eq!(
-            accepted_thermal.report.query_point().get("T"),
-            Some(&report.thermal_midpoint.temperature_k())
+            accepted_thermal.report.state_coordinate("T"),
+            Some(report.thermal_midpoint.temperature_k())
         );
-        assert_eq!(accepted_thermal.report.query_point().get("lot"), Some(&7.0));
+        assert_eq!(accepted_thermal.report.state_coordinate("lot"), Some(7.0));
         assert_eq!(accepted_thermal.external_heat_j, -report.exchanged_heat_j);
         same_ports(&accepted, native.piston());
     }
