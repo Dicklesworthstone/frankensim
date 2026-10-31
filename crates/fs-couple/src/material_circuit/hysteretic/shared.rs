@@ -19,6 +19,8 @@
 //! directions. Refinement and caller-supplied waveform/reversal cuts remain
 //! necessary; three samples do not certify an unresolved oscillation.
 
+/// Source-derived body motion and reciprocal work of the same hysteretic gap.
+pub mod motion;
 pub mod thermal;
 
 use super::{HystereticCircuitError, HystereticCircuitSolve, finite, invalid, numerical};
@@ -265,16 +267,10 @@ impl SharedHystereticCircuit {
                 "positive interval, budgets and complete finite shared-core ports required",
             ));
         }
-        let (graph, resistors, dae) = bind(&self.circuit.graph, resistors, &[])?;
-        let mut inputs = external_inputs.to_vec();
-        inputs.extend(self.state.currents_a().iter().map(|&current| -current));
-        let x0 = extended(
-            &dae,
-            &self.circuit.fluxes_wb,
-            &self.circuit.charges_c,
-            &inputs,
-        )?;
-        let circuit_before = finite(dae.system.hamiltonian(&x0))?;
+        let ports = NativeWindingPorts::new(self, resistors, external_inputs)?;
+        let dae = &ports.dae;
+        let graph = &ports.graph;
+        let circuit_before = ports.stored_before_j;
         let trials = Cell::new(0usize);
         let reserve = || {
             check()?;
@@ -306,9 +302,7 @@ impl SharedHystereticCircuit {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let magnetic = self.core.candidate_linkages(&self.state, &linkages)?;
-            let mut input = external_inputs.to_vec();
-            input.extend(magnetic.mean_currents_a.iter().map(|&current| -current));
-            let (native, _) = dae.step_audited(&x0, &input, dt)?;
+            let native = ports.step(external_inputs, &magnetic.mean_currents_a, dt)?;
             let residuals = magnetic
                 .state
                 .flux_linkages_wb()
@@ -322,31 +316,14 @@ impl SharedHystereticCircuit {
             check()?;
             Ok((magnetic, native, residuals))
         };
-        let problem =
-            FallibleFiniteDifference::new(count, controls.difference_step_wb, |delta: &[f64]| {
-                evaluate(delta).map(|(_, _, residuals)| residuals)
-            })
-            .map_err(numerical)?;
-        let construction = NewtonKrylovState::new(&problem, vec![0.0; count], controls.newton);
-        if let Some(error) = problem.take_failure() {
-            return Err(numerical(error));
-        }
-        let mut solver = construction?;
-        let result =
-            solver.run_controlled(&problem, controls.maximum_newton_iterations, &mut || {
-                (*cancel.borrow_mut())() || problem.has_failed()
-            });
-        if let Some(error) = problem.take_failure() {
-            return Err(numerical(error));
-        }
+        let (solution, nonlinear) = solve_interface(
+            count,
+            controls,
+            |delta| evaluate(delta).map(|(_, _, residuals)| residuals),
+            &mut || (*cancel.borrow_mut())(),
+        )?;
         check()?;
-        if result.progress != SolverRunProgress::Complete {
-            return Err(HystereticCircuitError::Interrupted(result.progress));
-        }
-        if !result.report.converged {
-            return Err(HystereticCircuitError::NotConverged(result.report));
-        }
-        let (magnetic, native, residuals) = evaluate(&solver.x)?;
+        let (magnetic, native, residuals) = evaluate(&solution)?;
         let terminal_voltages_v = native.y[self.external_ports..].to_vec();
         let terminal_voltage_residuals_v = residuals
             .into_iter()
@@ -401,8 +378,8 @@ impl SharedHystereticCircuit {
         {
             reserve()?;
             let voltages = instantaneous_voltages(
-                &dae,
-                &graph,
+                dae,
+                graph,
                 &self.branch_indices,
                 fluxes,
                 charges,
@@ -434,20 +411,6 @@ impl SharedHystereticCircuit {
                 drive_rate_start_mid_end_a_s: rates,
             });
         }
-        let circuit_after = finite(dae.system.hamiltonian(&native.x))?;
-        let (resistor_heat, contacts, graph_heat, graph_residual) = account_step(
-            &graph,
-            &resistors,
-            &[],
-            &dae.node_potential_index,
-            &x0,
-            &native,
-            circuit_before,
-            circuit_after,
-            dt,
-            controls.circuit,
-            &mut || (*cancel.borrow_mut())(),
-        )?;
         let supplied = finite(
             dt * external_inputs
                 .iter()
@@ -457,28 +420,22 @@ impl SharedHystereticCircuit {
         )?;
         let magnetic_work = finite(magnetic.stored_change_j + magnetic.core.core_heat_j)?;
         let stored_change = finite(native.delta_h + magnetic.stored_change_j)?;
-        let total_heat = finite(graph_heat + magnetic.core.core_heat_j)?;
+        let native_supplied = native.supplied;
+        let (circuit, circuit_step) =
+            ports.finish(self, native, dt, controls.circuit, &mut || {
+                (*cancel.borrow_mut())()
+            })?;
+        let total_heat = finite(circuit_step.heat_j + magnetic.core.core_heat_j)?;
         let balance = finite(stored_change + total_heat - supplied)?;
         if balance.abs() > controls.energy_tolerance_j
-            || (supplied - native.supplied - magnetic_work).abs() > controls.energy_tolerance_j
+            || (supplied - native_supplied - magnetic_work).abs() > controls.energy_tolerance_j
         {
             return Err(HystereticCircuitError::Balance(
                 "shared-core storage, physical losses and external native work do not close",
             ));
         }
         let next = Self {
-            circuit: MaterialCircuit {
-                graph,
-                mutual: self.circuit.mutual.clone(),
-                magnetic_couplings: self.circuit.magnetic_couplings.clone(),
-                capacitor_curves: self.circuit.capacitor_curves.clone(),
-                dielectric_capacitors: self.circuit.dielectric_capacitors.clone(),
-                resistors,
-                contacts: vec![],
-                fluxes_wb: next_fluxes,
-                charges_c: next_charges,
-                storage: self.circuit.storage.clone(),
-            },
+            circuit,
             core: self.core.clone(),
             state: magnetic.state.clone(),
             branch_indices: self.branch_indices.clone(),
@@ -491,23 +448,15 @@ impl SharedHystereticCircuit {
             terminal_voltage_residuals_v,
             drive_rate_start_mid_end_a_s: rates,
             stored_before_j: finite(circuit_before + self.state.stored_energy_j())?,
-            stored_after_j: finite(circuit_after + magnetic.stored_energy_j)?,
+            stored_after_j: finite(circuit_step.stored_after_j + magnetic.stored_energy_j)?,
             stored_change_j: stored_change,
             heat_j: total_heat,
             supplied_work_j: supplied,
             numerical_dissipation_j: 0.0,
             energy_residual_j: balance,
             circuit_trials: trials.get(),
-            nonlinear: result.report,
-            circuit: MaterialCircuitStep {
-                native,
-                stored_before_j: circuit_before,
-                stored_after_j: circuit_after,
-                resistors: resistor_heat,
-                contacts,
-                heat_j: graph_heat,
-                energy_residual_j: graph_residual,
-            },
+            nonlinear,
+            circuit: circuit_step,
             magnetic,
         };
         check()?;
@@ -516,6 +465,126 @@ impl SharedHystereticCircuit {
             step,
         })
     }
+}
+
+// One immutable native circuit preparation serves stationary and moving gaps.
+// Only material work-conjugate currents enter its private winding ports.
+struct NativeWindingPorts {
+    graph: CircuitGraph,
+    resistors: Vec<MaterialResistor>,
+    dae: CircuitDae,
+    initial: Vec<f64>,
+    stored_before_j: f64,
+}
+impl NativeWindingPorts {
+    fn new(
+        accepted: &SharedHystereticCircuit,
+        resistors: Vec<MaterialResistor>,
+        external: &[f64],
+    ) -> Result<Self> {
+        let (graph, resistors, dae) = bind(&accepted.circuit.graph, resistors, &[])?;
+        let mut inputs = external.to_vec();
+        inputs.extend(accepted.state.currents_a().iter().map(|&current| -current));
+        let initial = extended(
+            &dae,
+            &accepted.circuit.fluxes_wb,
+            &accepted.circuit.charges_c,
+            &inputs,
+        )?;
+        let stored_before_j = finite(dae.system.hamiltonian(&initial))?;
+        Ok(Self {
+            graph,
+            resistors,
+            dae,
+            initial,
+            stored_before_j,
+        })
+    }
+
+    fn step(&self, external: &[f64], mean_currents: &[f64], dt: f64) -> Result<StepRecord> {
+        let mut inputs = external.to_vec();
+        inputs.extend(mean_currents.iter().map(|&current| -current));
+        Ok(self.dae.step_audited(&self.initial, &inputs, dt)?.0)
+    }
+
+    fn finish(
+        self,
+        accepted: &SharedHystereticCircuit,
+        native: StepRecord,
+        dt: f64,
+        controls: crate::material_circuit::MaterialCircuitSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(MaterialCircuit, MaterialCircuitStep)> {
+        let stored_after_j = finite(self.dae.system.hamiltonian(&native.x))?;
+        let (resistors, contacts, heat_j, energy_residual_j) = account_step(
+            &self.graph,
+            &self.resistors,
+            &[],
+            &self.dae.node_potential_index,
+            &self.initial,
+            &native,
+            self.stored_before_j,
+            stored_after_j,
+            dt,
+            controls,
+            cancelled,
+        )?;
+        let circuit = MaterialCircuit {
+            graph: self.graph,
+            mutual: accepted.circuit.mutual.clone(),
+            magnetic_couplings: accepted.circuit.magnetic_couplings.clone(),
+            capacitor_curves: accepted.circuit.capacitor_curves.clone(),
+            dielectric_capacitors: accepted.circuit.dielectric_capacitors.clone(),
+            resistors: self.resistors,
+            contacts: vec![],
+            fluxes_wb: self.dae.flux_index.iter().map(|&i| native.x[i]).collect(),
+            charges_c: self.dae.charge_index.iter().map(|&i| native.x[i]).collect(),
+            storage: accepted.circuit.storage.clone(),
+        };
+        Ok((
+            circuit,
+            MaterialCircuitStep {
+                native,
+                stored_before_j: self.stored_before_j,
+                stored_after_j,
+                resistors,
+                contacts,
+                heat_j,
+                energy_residual_j,
+            },
+        ))
+    }
+}
+
+fn solve_interface(
+    dimension: usize,
+    controls: HystereticCircuitSolve,
+    evaluate: impl Fn(&[f64]) -> Result<Vec<f64>>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<f64>, NewtonReport)> {
+    let problem = FallibleFiniteDifference::new(dimension, controls.difference_step_wb, evaluate)
+        .map_err(numerical)?;
+    let construction = NewtonKrylovState::new(&problem, vec![0.0; dimension], controls.newton);
+    if let Some(error) = problem.take_failure() {
+        return Err(numerical(error));
+    }
+    let mut solver = construction?;
+    let result = solver.run_controlled(&problem, controls.maximum_newton_iterations, &mut || {
+        cancelled() || problem.has_failed()
+    });
+    if let Some(error) = problem.take_failure() {
+        return Err(numerical(error));
+    }
+    if cancelled() {
+        return Err(HystereticCircuitError::Cancelled);
+    }
+    if result.progress != SolverRunProgress::Complete {
+        return Err(HystereticCircuitError::Interrupted(result.progress));
+    }
+    if !result.report.converged {
+        return Err(HystereticCircuitError::NotConverged(result.report));
+    }
+    Ok((solver.x, result.report))
 }
 
 #[allow(clippy::too_many_arguments)]

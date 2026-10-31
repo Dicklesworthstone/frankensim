@@ -1,5 +1,40 @@
 # CONTRACT: fs-couple
 
+## Native motion of a shared hysteretic series gap
+
+`material_circuit::hysteretic::shared::motion::SharedHystereticGapMotion` binds
+the original shared source/core/gap history to `ResolvedBody` inertia and an
+optional existing frozen `AxialSupport`. One bounded vector closure advances
+all total winding linkages, physical gap and native body momentum against the
+existing circuit and descriptor steppers. Electrical trials consume the
+material's exact path-mean winding currents; mechanics consumes its exact
+path-mean attractive force. Every trial starts from the same accepted magnetic
+memory, circuit stores and body momentum.
+
+Independent terminal-voltage, displacement, electrical-work, mechanical-work
+and total-energy gates precede publication. The total account retains physical
+leakage, core and gap energy, unrelated native electrical stores, body/support
+energy, external electrical/mechanical work, resistor heat and exactly one core
+pinning heat. Shared native port preparation and interface Newton closure serve
+stationary and moving owners while preserving original branch/winding order,
+conserved initial stores and retained capacitor metadata.
+
+Three native rate probes include `sum((r_i/D_i) V_i) - R' lambda_ref velocity`
+and reject detectable common-flux reversals. These samples do not certify
+unresolved turns; waveform/reversal cuts and interval refinement remain required.
+Open gap limits, original source restrictions, incompatible native constraints,
+work budgets and cancellation refuse without advancing any accepted history.
+This fixed-medium, one-coordinate owner excludes thermal evolution, contact,
+fringing, changing area and vector-field force qualification.
+
+G0/G1/G3 fixtures in `hysteretic/tests/shared_motion.rs` compare native motion
+with an independent full mutual-inductance ODE and refinement, fixed-linkage
+reciprocal work, source pinning and body-density changes, original axial-support
+mass/stiffness, and deterministic rollback/retry. Native execution requires the
+workspace dependency repositories; authored sources are not device validation.
+
+
+
 ## Driven solid windings on the existing finite-enthalpy transaction
 
 `WindingThermalNetwork::step_nonlinear_*` consumes driven solid regions through
