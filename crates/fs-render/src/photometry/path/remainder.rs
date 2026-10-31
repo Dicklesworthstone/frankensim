@@ -69,6 +69,92 @@ impl DiffuseVacuumRemainder {
         self.illuminance_bound_lux
     }
 
+    /// Re-evaluate this admitted source/material envelope at another depth.
+    ///
+    /// This changes only planning metadata, not a render job or its accepted
+    /// samples. The caller must use the returned depth with the same scene and
+    /// recheck the new job's bound. The retained source ceiling is used as an
+    /// upper bound; no source normalization, visibility or material is refitted.
+    /// Zero depth or an envelope without a finite representable bound returns
+    /// `None`.
+    #[must_use]
+    pub fn at_depth(self, max_depth: u32) -> Option<Self> {
+        Self::from_envelope(
+            max_depth,
+            self.max_reflectance,
+            Interval::point(self.source_luminance_ceiling_cd_m2),
+        )
+    }
+
+    /// Select a depth in `1..=depth_cap` whose outward luminance remainder is
+    /// no greater than `absolute_budget_cd_m2`.
+    ///
+    /// The finite, nonnegative budget concerns omitted diffuse transport only.
+    /// It is NOT an image-accuracy or sampling-error target. A zero budget is
+    /// attainable only for an exactly zero model tail, never by underflow.
+    /// Invalid inputs, or failure of the tested cap to meet the budget, return
+    /// `None`. This is not proof that a smaller geometric scene-specific bound
+    /// cannot exist. Bisection retains an explicitly verified successful depth;
+    /// floating-point enclosure slack means minimum depth is not promised.
+    /// Work is bounded by 33 envelope evaluations, each logarithmic in depth.
+    /// Like [`Self::at_depth`], this does not alter an existing calculation.
+    #[must_use]
+    pub fn depth_for_luminance_budget(
+        self,
+        absolute_budget_cd_m2: f64,
+        depth_cap: u32,
+    ) -> Option<Self> {
+        self.depth_for_budget(absolute_budget_cd_m2, depth_cap, false)
+    }
+
+    /// Select a depth whose outward omitted-illuminance bound meets a lux
+    /// budget. The same admission and no-total-accuracy rules as
+    /// [`Self::depth_for_luminance_budget`] apply.
+    ///
+    /// This compares the already outward-rounded hemisphere integral directly;
+    /// it never divides the budget by an approximate pi to decide acceptance.
+    #[must_use]
+    pub fn depth_for_illuminance_budget(
+        self,
+        absolute_budget_lux: f64,
+        depth_cap: u32,
+    ) -> Option<Self> {
+        self.depth_for_budget(absolute_budget_lux, depth_cap, true)
+    }
+
+    fn depth_for_budget(self, budget: f64, depth_cap: u32, illuminance: bool) -> Option<Self> {
+        if !budget.is_finite() || budget < 0.0 || depth_cap == 0 {
+            return None;
+        }
+        let meets_budget = |bound: Self| {
+            let upper = if illuminance {
+                bound.illuminance_bound_lux
+            } else {
+                bound.luminance_bound_cd_m2
+            };
+            upper <= budget
+        };
+        let mut accepted = self.at_depth(depth_cap)?;
+        if !meets_budget(accepted) {
+            return None;
+        }
+        let mut lower = 1;
+        let mut upper = depth_cap;
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            match self.at_depth(middle) {
+                Some(candidate) if meets_budget(candidate) => {
+                    accepted = candidate;
+                    upper = middle;
+                }
+                // A shallow tail may overflow even though a deeper one fits.
+                // It is not a zero, a successful budget, or a render refusal.
+                _ => lower = middle + 1,
+            }
+        }
+        Some(accepted)
+    }
+
     /// Evaluate a previously admitted scene envelope with outward arithmetic.
     ///
     /// Scene-wide source, material and vacuum eligibility must be checked by
@@ -252,7 +338,118 @@ mod tests {
         // The first envelope overflows radiance; the second still has finite
         // radiance but its hemisphere integral cannot fit in a finite f64.
         for (q, source) in [(0.9, f64::MAX / 4.0), (0.5, f64::MAX / 2.0)] {
-            assert!(DiffuseVacuumRemainder::from_envelope(1, q, Interval::point(source)).is_none());
+            assert!(DiffuseVacuumRemainder::from_envelope(1, q, source).is_none());
         }
+    }
+
+    #[test]
+    fn replanning_retains_the_admitted_source_ceiling_and_reflectance() {
+        let original =
+            DiffuseVacuumRemainder::from_envelope(2, 0.5, Interval::new(8.0, 16.0)).unwrap();
+        let planned = original.at_depth(4).unwrap();
+        assert_eq!(planned.max_depth(), 4);
+        assert_eq!(planned.max_reflectance(), original.max_reflectance());
+        assert_eq!(planned.source_luminance_ceiling_cd_m2(), 16.0);
+        assert!(planned.luminance_bound_cd_m2() >= 2.0);
+        assert!(planned.luminance_bound_cd_m2() < 2.0 + 1e-12);
+        assert_eq!(original.max_depth(), 2);
+        assert!(original.at_depth(0).is_none());
+    }
+
+    #[test]
+    fn independent_dyadic_tails_select_the_expected_depth_in_each_unit() {
+        let envelope =
+            DiffuseVacuumRemainder::from_envelope(1, 0.5, Interval::point(16.0)).unwrap();
+        for depth in 1..=20 {
+            // Independent exact dyadic series: 16 * (1/2)^D / (1-1/2).
+            let tail = 32.0 / f64::from(1_u32 << depth);
+            let luminance = envelope.depth_for_luminance_budget(1.5 * tail, 64).unwrap();
+            let lux_budget = 1.5 * std::f64::consts::PI * tail;
+            let illuminance = envelope.depth_for_illuminance_budget(lux_budget, 64).unwrap();
+            assert_eq!(luminance.max_depth(), depth);
+            assert_eq!(illuminance.max_depth(), depth);
+            assert!(luminance.luminance_bound_cd_m2() >= tail);
+            assert!(luminance.luminance_bound_cd_m2() <= 1.5 * tail);
+            assert!(illuminance.illuminance_bound_lux() <= lux_budget);
+        }
+        // The same number in lux is not the same budget as in cd/m².
+        assert_eq!(
+            envelope.depth_for_luminance_budget(3.0, 64).unwrap().max_depth(),
+            4
+        );
+        assert_eq!(
+            envelope.depth_for_illuminance_budget(3.0, 64).unwrap().max_depth(),
+            6
+        );
+    }
+
+    #[test]
+    fn budget_equality_uses_the_outward_bound_not_the_unrounded_series() {
+        let envelope =
+            DiffuseVacuumRemainder::from_envelope(3, 0.5, Interval::point(16.0)).unwrap();
+        let limit = envelope.luminance_bound_cd_m2();
+        assert_eq!(
+            envelope.depth_for_luminance_budget(limit, 3).unwrap().max_depth(),
+            3
+        );
+        assert!(
+            envelope
+                .depth_for_luminance_budget(fs_math::next_down(limit), 3)
+                .is_none()
+        );
+        assert_eq!(
+            envelope.depth_for_luminance_budget(4.0, 64).unwrap().max_depth(),
+            4
+        );
+        assert!(envelope.depth_for_illuminance_budget(1.0, 4).is_none());
+    }
+
+    #[test]
+    fn invalid_budgets_and_positive_underflow_never_meet_zero() {
+        let envelope =
+            DiffuseVacuumRemainder::from_envelope(1, 0.5, Interval::point(1.0)).unwrap();
+        for budget in [-1.0, f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
+            assert!(envelope.depth_for_luminance_budget(budget, 64).is_none());
+            assert!(envelope.depth_for_illuminance_budget(budget, 64).is_none());
+        }
+        assert!(envelope.depth_for_luminance_budget(1.0, 0).is_none());
+        assert!(envelope.depth_for_illuminance_budget(0.0, u32::MAX).is_none());
+        assert!(envelope.depth_for_luminance_budget(0.0, u32::MAX).is_none());
+        let tiny = envelope.depth_for_luminance_budget(1e-280, u32::MAX).unwrap();
+        assert!(tiny.max_depth() > 900 && tiny.max_depth() < 1024);
+        assert!(tiny.luminance_bound_cd_m2() > 0.0);
+        assert!(tiny.luminance_bound_cd_m2() <= 1e-280);
+    }
+
+    #[test]
+    fn exact_black_or_zero_source_tail_can_meet_a_zero_budget() {
+        for (q, source) in [(0.0, 16.0), (0.75, 0.0)] {
+            let envelope =
+                DiffuseVacuumRemainder::from_envelope(8, q, Interval::point(source)).unwrap();
+            for planned in [
+                envelope.depth_for_luminance_budget(0.0, u32::MAX).unwrap(),
+                envelope.depth_for_illuminance_budget(-0.0, u32::MAX).unwrap(),
+            ] {
+                assert_eq!(planned.max_depth(), 1);
+                assert_eq!(planned.luminance_bound_cd_m2().to_bits(), 0);
+                assert_eq!(planned.illuminance_bound_lux().to_bits(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn shallow_overflow_does_not_prevent_a_verified_deeper_plan() {
+        let envelope = DiffuseVacuumRemainder::from_envelope(
+            100,
+            0.9,
+            Interval::point(f64::MAX / 4.0),
+        )
+        .unwrap();
+        assert!(envelope.at_depth(1).is_none());
+        let planned = envelope.depth_for_illuminance_budget(1e306, 1000).unwrap();
+        assert!(planned.illuminance_bound_lux().is_finite());
+        assert!(planned.illuminance_bound_lux() <= 1e306);
+        assert!(planned.max_depth() > 1 && planned.max_depth() <= 1000);
+        assert_eq!(planned.source_luminance_ceiling_cd_m2(), f64::MAX / 4.0);
     }
 }
