@@ -9,11 +9,16 @@ use super::{Cell, Error as FlowError, MixtureGas, positive};
 use fs_math::det;
 use fs_qty::{DynViscosity, Length, Time};
 
+mod gas;
+use gas::MixtureCaloric;
+pub(crate) use gas::{WallGasCaloric, WallGasState};
+
 /// Original thermal laws in finite gas-wall storage, including latent plateaus.
 mod caloric;
-pub use caloric::{MaterialWallCaloric, WallCaloricConstraint, exchange_cell_with_heat_storage};
+pub(crate) use caloric::exchange_caloric_with_heat_storage;
 #[cfg(feature = "material")]
 pub(crate) use caloric::exchange_cell_with_heat_storage_and_conductance;
+pub use caloric::{MaterialWallCaloric, WallCaloricConstraint, exchange_cell_with_heat_storage};
 
 /// Stationary radial wall drag; its lost kinetic energy stays in the gas.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,12 +53,15 @@ impl WallDrag {
             || !positive(density_kg_m3)
             || !positive(diameter.value())
         {
-            return Err(WallExchangeError::Invalid("laminar wall coefficient inputs"));
+            return Err(WallExchangeError::Invalid(
+                "laminar wall coefficient inputs",
+            ));
         }
-        let rate = 32.0 * (viscosity.value() / density_kg_m3)
-            / diameter.value() / diameter.value();
+        let rate = 32.0 * (viscosity.value() / density_kg_m3) / diameter.value() / diameter.value();
         if !nonnegative(rate) {
-            return Err(WallExchangeError::Invalid("unrepresentable laminar wall rate"));
+            return Err(WallExchangeError::Invalid(
+                "unrepresentable laminar wall rate",
+            ));
         }
         Ok(Self::Linear { rate_per_s: rate })
     }
@@ -61,11 +69,16 @@ impl WallDrag {
         let valid = match self {
             Self::None => true,
             Self::Linear { rate_per_s } => nonnegative(rate_per_s),
-            Self::Darcy { friction_factor, hydraulic_diameter_m } => {
-                nonnegative(friction_factor) && positive(hydraulic_diameter_m)
-            }
+            Self::Darcy {
+                friction_factor,
+                hydraulic_diameter_m,
+            } => nonnegative(friction_factor) && positive(hydraulic_diameter_m),
         };
-        if valid { Ok(()) } else { Err(WallExchangeError::Invalid("wall drag inputs")) }
+        if valid {
+            Ok(())
+        } else {
+            Err(WallExchangeError::Invalid("wall drag inputs"))
+        }
     }
 }
 
@@ -115,24 +128,38 @@ pub struct WallContact {
     pub thermal: WallThermal,
 }
 impl WallContact {
-    pub(super) fn validate(self) -> Result<(), WallExchangeError> {
+    pub(crate) fn validate(self) -> Result<(), WallExchangeError> {
         self.drag.validate()?;
         let valid = match self.thermal {
             WallThermal::Adiabatic => true,
-            WallThermal::Reservoir { temperature_k, conductance_w_per_k } => {
-                positive(temperature_k) && nonnegative(conductance_w_per_k)
-            }
+            WallThermal::Reservoir {
+                temperature_k,
+                conductance_w_per_k,
+            } => positive(temperature_k) && nonnegative(conductance_w_per_k),
             WallThermal::Lumped {
-                temperature_k, heat_capacity_j_per_k, conductance_w_per_k,
-            } => positive(temperature_k)
-                && positive(heat_capacity_j_per_k)
-                && nonnegative(conductance_w_per_k),
+                temperature_k,
+                heat_capacity_j_per_k,
+                conductance_w_per_k,
+            } => {
+                positive(temperature_k)
+                    && positive(heat_capacity_j_per_k)
+                    && nonnegative(conductance_w_per_k)
+            }
             WallThermal::Caloric {
-                mass_kg, specific_energy_j_kg, conductance_w_per_k,
-            } => positive(mass_kg) && specific_energy_j_kg.is_finite()
-                && nonnegative(conductance_w_per_k),
+                mass_kg,
+                specific_energy_j_kg,
+                conductance_w_per_k,
+            } => {
+                positive(mass_kg)
+                    && specific_energy_j_kg.is_finite()
+                    && nonnegative(conductance_w_per_k)
+            }
         };
-        if valid { Ok(()) } else { Err(WallExchangeError::Invalid("wall thermal inputs")) }
+        if valid {
+            Ok(())
+        } else {
+            Err(WallExchangeError::Invalid("wall thermal inputs"))
+        }
     }
 }
 
@@ -156,7 +183,7 @@ impl Default for WallControl {
     }
 }
 impl WallControl {
-    pub(super) fn validate(self) -> Result<(), WallExchangeError> {
+    pub(crate) fn validate(self) -> Result<(), WallExchangeError> {
         if !positive(self.absolute_energy_tolerance_j)
             || !positive(self.relative_energy_tolerance)
             || self.relative_energy_tolerance > 1e-3
@@ -178,6 +205,8 @@ pub enum WallExchangeError {
     Invalid(&'static str),
     /// Original caloric/source admission refused.
     Flow(FlowError),
+    /// Original fixed-composition caloric/source admission refused.
+    FrozenFlow(crate::dynamics::Error),
     /// Original source-bound molecular or material transport law refused.
     Transport(super::dissipation::DissipationError),
     /// Original fixed-amount wall heat-storage source refused.
@@ -236,6 +265,14 @@ impl From<FlowError> for WallExchangeError {
         match value {
             FlowError::Cancelled => Self::Cancelled,
             other => Self::Flow(other),
+        }
+    }
+}
+impl From<crate::dynamics::Error> for WallExchangeError {
+    fn from(value: crate::dynamics::Error) -> Self {
+        match value {
+            crate::dynamics::Error::Cancelled => Self::Cancelled,
+            other => Self::FrozenFlow(other),
         }
     }
 }
@@ -307,6 +344,33 @@ pub fn exchange_cell(
     duration: Time,
     contact: WallContact,
     control: WallControl,
+    cancelled: impl FnMut() -> bool,
+) -> Result<WallUpdate, WallExchangeError> {
+    exchange_caloric(
+        &MixtureCaloric {
+            gas,
+            partial_densities: state.partial_densities,
+        },
+        state.momentum,
+        state.energy,
+        volume_m3,
+        duration,
+        contact,
+        control,
+        cancelled,
+    )
+}
+
+/// The same source equation for any borrowed original gas caloric owner.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exchange_caloric(
+    gas: &impl WallGasCaloric,
+    initial_momentum: f64,
+    initial_energy: f64,
+    volume_m3: f64,
+    duration: Time,
+    contact: WallContact,
+    control: WallControl,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<WallUpdate, WallExchangeError> {
     poll(&mut cancelled)?;
@@ -315,7 +379,7 @@ pub fn exchange_cell(
     if !positive(volume_m3) || !nonnegative(duration.value()) {
         return Err(WallExchangeError::Invalid("wall volume or interval"));
     }
-    let initial = gas.primitive(state, &mut cancelled)?;
+    let initial = gas.primitive(initial_momentum, initial_energy, &mut cancelled)?;
     let dt = duration.value();
     let factor = match contact.drag {
         WallDrag::None => 1.0,
@@ -326,25 +390,27 @@ pub fn exchange_cell(
             }
             det::exp(-exponent)
         }
-        WallDrag::Darcy { friction_factor, hydraulic_diameter_m } => {
-            let damping = 0.5 * friction_factor * dt
-                * (initial.velocity.abs() / hydraulic_diameter_m);
+        WallDrag::Darcy {
+            friction_factor,
+            hydraulic_diameter_m,
+        } => {
+            let damping =
+                0.5 * friction_factor * dt * (initial.velocity.abs() / hydraulic_diameter_m);
             if !nonnegative(damping) {
                 return Err(WallExchangeError::Invalid("wall Darcy increment"));
             }
             1.0 / (1.0 + damping)
         }
     };
-    let momentum = state.momentum * factor;
-    let old_kinetic = 0.5 * state.momentum * (state.momentum / initial.density);
+    let momentum = initial_momentum * factor;
+    let old_kinetic = 0.5 * initial_momentum * (initial_momentum / initial.density);
     let kinetic = 0.5 * momentum * (momentum / initial.density);
-    let mut energy = state.energy;
-    let heated = Cell { partial_densities: state.partial_densities, momentum, energy };
-    let primitive = gas.primitive(heated, &mut cancelled)?;
+    let mut energy = initial_energy;
+    let primitive = gas.primitive(momentum, energy, &mut cancelled)?;
     let mut updated = contact;
     let mut report = WallCellReport {
         elapsed: duration,
-        wall_impulse_ns: (state.momentum - momentum) * volume_m3,
+        wall_impulse_ns: (initial_momentum - momentum) * volume_m3,
         drag_heating_j: (old_kinetic - kinetic) * volume_m3,
         heat_to_gas_j: 0.0,
         wall_energy_change_j: 0.0,
@@ -355,14 +421,23 @@ pub fn exchange_cell(
     };
     let thermal = match contact.thermal {
         WallThermal::Adiabatic => None,
-        WallThermal::Reservoir { temperature_k, conductance_w_per_k } => {
-            Some((temperature_k, conductance_w_per_k, None))
-        }
+        WallThermal::Reservoir {
+            temperature_k,
+            conductance_w_per_k,
+        } => Some((temperature_k, conductance_w_per_k, None)),
         WallThermal::Lumped {
-            temperature_k, heat_capacity_j_per_k, conductance_w_per_k,
-        } => Some((temperature_k, conductance_w_per_k, Some(heat_capacity_j_per_k))),
+            temperature_k,
+            heat_capacity_j_per_k,
+            conductance_w_per_k,
+        } => Some((
+            temperature_k,
+            conductance_w_per_k,
+            Some(heat_capacity_j_per_k),
+        )),
         WallThermal::Caloric { .. } => {
-            return Err(WallExchangeError::Invalid("caloric wall requires its original thermal law"));
+            return Err(WallExchangeError::Invalid(
+                "caloric wall requires its original thermal law",
+            ));
         }
     };
     if let Some((wall_t, conductance, capacity)) = thermal {
@@ -378,13 +453,20 @@ pub fn exchange_cell(
                     c / (1.0 + c / integrated)
                 }
             });
-            let target = state.energy - kinetic;
+            let target = initial_energy - kinetic;
             let domain = gas.domain();
-            let lo = primitive.temperature.min(wall_t).max(domain.minimum_temperature);
-            let hi = primitive.temperature.max(wall_t).min(domain.maximum_temperature);
-            let equation = |t: f64, _: &mut dyn FnMut() -> bool|
-                -> Result<(f64, Option<f64>, f64), WallExchangeError> {
-                let (thermal, cv) = gas.caloric(state.partial_densities, t)?;
+            let lo = primitive
+                .temperature
+                .min(wall_t)
+                .max(domain.minimum_temperature);
+            let hi = primitive
+                .temperature
+                .max(wall_t)
+                .min(domain.maximum_temperature);
+            let equation = |t: f64,
+                            _: &mut dyn FnMut() -> bool|
+             -> Result<(f64, Option<f64>, f64), WallExchangeError> {
+                let (thermal, cv) = gas.caloric(t)?;
                 let change = (thermal - target) * volume_m3;
                 let heat = effective * (wall_t - t);
                 let slope = cv * volume_m3 + effective;
@@ -395,16 +477,18 @@ pub fn exchange_cell(
                 Ok((residual, Some(slope), change.abs().max(heat.abs())))
             };
             let (temperature, iterations) = solve_scalar(
-                lo, hi, primitive.temperature, control, equation, &mut cancelled,
-            )?;
-            report.iterations = iterations;
-            let (thermal, _) = gas.caloric(state.partial_densities, temperature)?;
-            energy = state.energy + (thermal - target);
-            let actual = gas.primitive(
-                Cell { partial_densities: state.partial_densities, momentum, energy },
+                lo,
+                hi,
+                primitive.temperature,
+                control,
+                equation,
                 &mut cancelled,
             )?;
-            report.heat_to_gas_j = (energy - state.energy) * volume_m3;
+            report.iterations = iterations;
+            let (thermal, _) = gas.caloric(temperature)?;
+            energy = initial_energy + (thermal - target);
+            let actual = gas.primitive(momentum, energy, &mut cancelled)?;
+            report.heat_to_gas_j = (energy - initial_energy) * volume_m3;
             let actual_wall_t = if let Some(capacity) = capacity {
                 let fraction = effective / capacity;
                 let next = if fraction <= 0.5 {
@@ -425,9 +509,12 @@ pub fn exchange_cell(
             };
             report.thermal_residual_j =
                 report.heat_to_gas_j - integrated * (actual_wall_t - actual.temperature);
-            report.energy_residual_j = report.heat_to_gas_j + report.wall_energy_change_j
-                - report.external_heat_to_gas_j;
-            let scale = report.heat_to_gas_j.abs().max(report.wall_energy_change_j.abs());
+            report.energy_residual_j =
+                report.heat_to_gas_j + report.wall_energy_change_j - report.external_heat_to_gas_j;
+            let scale = report
+                .heat_to_gas_j
+                .abs()
+                .max(report.wall_energy_change_j.abs());
             let tolerance = control.tolerance(scale);
             if report.energy_residual_j.abs() > tolerance
                 || report.thermal_residual_j.abs() > tolerance
@@ -441,15 +528,28 @@ pub fn exchange_cell(
     }
     updated.validate()?;
     if ![
-        momentum, energy, report.wall_impulse_ns, report.drag_heating_j,
-        report.heat_to_gas_j, report.wall_energy_change_j,
-        report.external_heat_to_gas_j, report.energy_residual_j,
+        momentum,
+        energy,
+        report.wall_impulse_ns,
+        report.drag_heating_j,
+        report.heat_to_gas_j,
+        report.wall_energy_change_j,
+        report.external_heat_to_gas_j,
+        report.energy_residual_j,
         report.thermal_residual_j,
-    ].iter().all(|x| x.is_finite()) {
+    ]
+    .iter()
+    .all(|x| x.is_finite())
+    {
         return Err(WallExchangeError::Invalid("wall extensive source balance"));
     }
     poll(&mut cancelled)?;
-    Ok(WallUpdate { momentum, energy, contact: updated, report })
+    Ok(WallUpdate {
+        momentum,
+        energy,
+        contact: updated,
+        report,
+    })
 }
 
 /// One safeguarded bracketed equation owner for authored and original-source
@@ -461,8 +561,10 @@ fn solve_scalar(
     mut hi: f64,
     initial: f64,
     control: WallControl,
-    mut equation: impl FnMut(f64, &mut dyn FnMut() -> bool)
-        -> Result<(f64, Option<f64>, f64), WallExchangeError>,
+    mut equation: impl FnMut(
+        f64,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<(f64, Option<f64>, f64), WallExchangeError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(f64, usize), WallExchangeError> {
     let lower = equation(lo, cancelled)?;
@@ -477,13 +579,19 @@ fn solve_scalar(
         if residual.abs() <= control.tolerance(scale) {
             return Ok((value, iteration));
         }
-        if residual < 0.0 { lo = value; } else { hi = value; }
+        if residual < 0.0 {
+            lo = value;
+        } else {
+            hi = value;
+        }
         let newton = slope.map(|slope| value - residual / slope);
         let next = match newton {
             Some(next) if next.is_finite() && next > lo && next < hi => next,
             _ => 0.5 * lo + 0.5 * hi,
         };
-        if next == value { break; }
+        if next == value {
+            break;
+        }
         value = next;
     }
     Err(WallExchangeError::TemperatureIterations)
@@ -493,5 +601,9 @@ fn nonnegative(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), WallExchangeError> {
-    if cancelled() { Err(WallExchangeError::Cancelled) } else { Ok(()) }
+    if cancelled() {
+        Err(WallExchangeError::Cancelled)
+    } else {
+        Ok(())
+    }
 }

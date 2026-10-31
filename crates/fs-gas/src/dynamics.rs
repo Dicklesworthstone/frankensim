@@ -101,6 +101,8 @@ pub enum Error {
     },
     /// Temperature inversion exhausted its explicit iteration budget.
     TemperatureIterations,
+    /// The original implicit gas/wall source refused its state or work budget.
+    Thermal(Box<crate::multicomponent::wall_exchange::WallExchangeError>),
     /// A trial stage exceeded the explicitly admitted face-speed CFL.
     CflExceeded {
         /// Actual trial face-speed CFL.
@@ -130,6 +132,14 @@ impl std::error::Error for Error {}
 impl From<FrozenIdealGasMixtureErrorV1> for Error {
     fn from(error: FrozenIdealGasMixtureErrorV1) -> Self {
         Self::Thermochemistry(error)
+    }
+}
+impl From<crate::multicomponent::wall_exchange::WallExchangeError> for Error {
+    fn from(error: crate::multicomponent::wall_exchange::WallExchangeError) -> Self {
+        match error {
+            crate::multicomponent::wall_exchange::WallExchangeError::Cancelled => Self::Cancelled,
+            other => Self::Thermal(Box::new(other)),
+        }
     }
 }
 fn positive(x: f64) -> bool {

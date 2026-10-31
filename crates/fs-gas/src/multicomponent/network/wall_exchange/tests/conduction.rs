@@ -42,7 +42,7 @@ fn source(
                     knots: vec![(lo, a + b * lo), (hi, a + b * hi)],
                     dims: key.dims(),
                 },
-                validity: ValidityDomain::unconstrained(),
+                validity: ValidityDomain::unconstrained().with_quantity("T", QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature, ValueForm::Static)), lo, hi),
                 interpolation: InterpolationPolicy::LinearInside,
                 uncertainty: UncertaintyModel::Unstated,
                 observations: vec![],

@@ -2324,3 +2324,59 @@ These are numerical checks of the declared classical Maxwellian ground-state
 model. They do not establish experimental discharge validation, radiation or
 photoionization, excited-state kinetics, a continuously fixed-voltage transient,
 spatial charged transport, or a general multireaction plasma network.
+
+## Finite-plenum thermal equilibrium in gravity networks
+
+`GasNetwork1d::step_with_thermal` couples the original frozen-gas transport to
+a prepared `PlenumThermalOperator`. Each compact volume has one explicit
+`PlenumThermalContact`: adiabatic, a prescribed-temperature reservoir,
+authored finite capacity, or retained original `MaterialWallCaloric` storage.
+The latter keeps its nonlinear h/u integral, original identity/geometry and
+latent inventory; a plateau is not replaced by apparent heat capacity.
+Distinct contacts represent distinct physical wall masses.
+
+The existing implicit gas/wall source now borrows either the original frozen
+or species-carrying gas calorics. Both adapters retain their actual source,
+energy gauge and inversion; no equivalent species bank or constant-gamma
+substitute is constructed. Existing mixture entry points and source-dependent
+wall-conductance behavior remain on the same equation owner. Exact
+source-representable thermal fixed points avoid introducing inversion
+tolerance into zero heat flux. Passive source brackets, original source
+domains, actual represented heat, energy residuals and bounded work remain
+authoritative.
+
+The wave owner first prepares its ordinary SSPRK2 candidate. Backward-Euler
+plenum heat then uses that trial's actual accepted duration, including CFL and
+source retries. This is first-order thermal/transport splitting. All gas
+states, finite-wall states, clock, port exchanges and reports publish together
+only after the final poll. Failed later contacts and final cancellation retain
+both accepted owners; prepared source buffers are reused. Amount and volume
+are fixed during heat exchange, so it adds neither momentum nor gravitational
+work.
+
+Gas balances subtract heat exactly once. `NetworkThermalReport` separately
+records the original wall source and closes gas plus finite-wall storage
+against external gas/reservoir transfer; with gravity it also includes
+centered potential storage and external potential transport. The complete
+absolute-potential residual is reconstructed from the complete centered
+residual plus `phi_ref*mass_residual`. Formation energy retains the original
+separate convention.
+
+Seven focused native regressions cover exact stiff hydrostatic/thermal
+equilibrium, independent variable-Cv finite-wall roots and long-time
+equilibration, heating/cooling without temperature crossing, actual accepted
+duration, nonlinear original wall storage, latent inventory, pressure-driven
+gravity flow with independently reconstructed energy, large potential/formation
+datum invariance, final cancellation/reuse and later-source rollback.
+The seven new cases, all 87 dynamics tests and 14 existing shared-wall
+regressions passed against the original production crate. The material-enabled
+production path compiled. Its supplemental gate initially rejected three shared
+fixtures with undeclared T/phi quantity types; their validity declarations now
+match the original source support and strict query types. The corrected
+material-only cases remain unverified: the rerun was killed by the shared-memory
+limit during test compilation.
+
+This remains a compact-volume, frozen ideal-mixture engineering model with
+explicitly authored conductance. It supplies neither a validated heat-transfer
+correlation, resolved wall conduction or shared wall mass, moving-volume work,
+gas phase change, nor a second-order or entropy-stability certificate.

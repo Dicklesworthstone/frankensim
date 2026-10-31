@@ -108,7 +108,9 @@ impl<'law> MaterialWallCaloric<'law> {
         }
         Ok(Self {
             storage: Storage::Energy(EnergyStorage::from_shared(
-                curve.clone(), initial, energy_range_j_kg,
+                curve.clone(),
+                initial,
+                energy_range_j_kg,
             )?),
             constraint: WallCaloricConstraint::SourceEnthalpy,
             phase_curve: Some(curve),
@@ -339,6 +341,38 @@ pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
     duration: Time,
     contact: WallContact,
     wall: &MaterialWallCaloric<'_>,
+    conductance: Option<&mut dyn FnMut(WallContact) -> Result<f64, WallExchangeError>>,
+    control: WallControl,
+    cancelled: impl FnMut() -> bool,
+) -> Result<WallUpdate, WallExchangeError> {
+    exchange_caloric_with_heat_storage(
+        &MixtureCaloric {
+            gas,
+            partial_densities: state.partial_densities,
+        },
+        state.momentum,
+        state.energy,
+        volume_m3,
+        duration,
+        contact,
+        wall,
+        conductance,
+        control,
+        cancelled,
+    )
+}
+
+/// Borrow the unchanged gas energy owner; wall source and implicit equation
+/// are shared with the original species-carrying entry points above.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exchange_caloric_with_heat_storage(
+    gas: &impl WallGasCaloric,
+    initial_momentum: f64,
+    initial_energy: f64,
+    volume_m3: f64,
+    duration: Time,
+    contact: WallContact,
+    wall: &MaterialWallCaloric<'_>,
     mut conductance: Option<&mut dyn FnMut(WallContact) -> Result<f64, WallExchangeError>>,
     control: WallControl,
     mut cancelled: impl FnMut() -> bool,
@@ -364,15 +398,18 @@ pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
             None => authored_conductance,
         };
         if !nonnegative(value) {
-            return Err(WallExchangeError::Invalid("material wall endpoint conductance"));
+            return Err(WallExchangeError::Invalid(
+                "material wall endpoint conductance",
+            ));
         }
         Ok(value)
     };
     let conductance_w_per_k = conductance_at(contact)?;
     // Reuse the original radial loss and gas sensible-heating owner exactly.
-    let mut update = exchange_cell(
+    let mut update = exchange_caloric(
         gas,
-        state,
+        initial_momentum,
+        initial_energy,
         volume_m3,
         duration,
         WallContact {
@@ -384,14 +421,7 @@ pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
     )?;
     update.contact = with_conductance(contact, conductance_w_per_k);
     let gas_at = |energy, cancelled: &mut dyn FnMut() -> bool| {
-        gas.primitive(
-            Cell {
-                partial_densities: state.partial_densities,
-                momentum: update.momentum,
-                energy,
-            },
-            cancelled,
-        )
+        gas.primitive(update.momentum, energy, cancelled)
     };
     let initial_gas = gas_at(update.energy, &mut cancelled)?;
     let integrated = conductance_w_per_k * duration.value();
@@ -418,7 +448,7 @@ pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
     let kinetic = 0.5 * update.momentum * (update.momentum / initial_gas.density);
     let target = update.energy - kinetic;
     let gas_change_at = |temperature| -> Result<f64, WallExchangeError> {
-        let energy = gas.caloric(state.partial_densities, temperature)?.0;
+        let energy = gas.caloric(temperature)?.0;
         let change = (energy - target) * volume_m3;
         if !change.is_finite() {
             return Err(WallExchangeError::Invalid("material wall gas energy range"));
@@ -428,7 +458,11 @@ pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
     // Source-energy bounds also retain exact latent intervals, whose inventory
     // is not determined by temperature. A held-flux bound is valid only for
     // fixed conductance: an endpoint material law can increase that flux.
-    let flux_limit = if state_dependent { f64::INFINITY } else { initial_flux.abs() };
+    let flux_limit = if state_dependent {
+        f64::INFINITY
+    } else {
+        initial_flux.abs()
+    };
     let (mut low, mut high) = if initial_wall > initial_gas.temperature {
         (
             0.0,
@@ -461,10 +495,7 @@ pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
     let equation = |heat: f64, cancelled: &mut dyn FnMut() -> bool| {
         let gas_state = gas_at(update.energy + heat / volume_m3, cancelled)?;
         let wall_state = wall.after(contact, -heat)?;
-        let gas_capacity = gas
-            .caloric(state.partial_densities, gas_state.temperature)?
-            .1
-            * volume_m3;
+        let gas_capacity = gas.caloric(gas_state.temperature)?.1 * volume_m3;
         let endpoint_integrated = conductance_at(wall_state.contact)? * duration.value();
         let flux = endpoint_integrated * (wall_state.temperature_k - gas_state.temperature);
         let residual = heat - flux;
@@ -473,7 +504,8 @@ pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
         let slope = if state_dependent {
             None
         } else {
-            wall_state.temperature_slope_k_per_j
+            wall_state
+                .temperature_slope_k_per_j
                 .map(|wall_slope| 1.0 + integrated * (wall_slope + 1.0 / gas_capacity))
         };
         if !positive(gas_capacity)
@@ -527,8 +559,14 @@ pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
 
 fn with_conductance(mut contact: WallContact, value: f64) -> WallContact {
     match &mut contact.thermal {
-        WallThermal::Lumped { conductance_w_per_k, .. }
-        | WallThermal::Caloric { conductance_w_per_k, .. } => *conductance_w_per_k = value,
+        WallThermal::Lumped {
+            conductance_w_per_k,
+            ..
+        }
+        | WallThermal::Caloric {
+            conductance_w_per_k,
+            ..
+        } => *conductance_w_per_k = value,
         _ => unreachable!("binding admitted finite storage"),
     }
     contact

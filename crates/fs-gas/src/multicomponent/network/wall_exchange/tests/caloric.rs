@@ -30,7 +30,7 @@ fn source(a: f64, b: f64, low: f64, high: f64) -> MaterialWallCaloric<'static> {
                 knots: vec![(low, a + b * low), (high, a + b * high)],
                 dims: key.dims(),
             },
-            validity: ValidityDomain::unconstrained(),
+            validity: ValidityDomain::unconstrained().with_quantity("T", QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature, ValueForm::Static)), low, high),
             interpolation: InterpolationPolicy::LinearInside,
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],

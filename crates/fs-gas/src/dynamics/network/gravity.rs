@@ -35,7 +35,9 @@ pub struct NetworkGravityReport {
     pub boundary_centered_potential_energy_change: f64,
     /// Actual gravitational work on the resolved branch gas [J].
     pub gravity_work: f64,
-    /// Gas-plus-centered-potential change minus its external transport [J].
+    /// Gas-plus-centered-potential change minus its external transport and
+    /// explicitly reported plenum heat [J]. The thermal report adds the wall
+    /// storage and external reservoir heat for the complete thermal balance.
     /// This conditioned residual retains small gravitational work even under
     /// a large arbitrary common datum. Internal port transfer cancels.
     pub conservation_residual: f64,

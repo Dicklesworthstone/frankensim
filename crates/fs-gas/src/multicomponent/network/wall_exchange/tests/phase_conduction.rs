@@ -33,7 +33,7 @@ fn source(scale: f64, maximum_fraction: f64, anchor: f64) -> Arc<PhaseWallConduc
             ],
             dims: key.dims(),
         },
-        validity: ValidityDomain::unconstrained(),
+        validity: ValidityDomain::unconstrained().with_quantity("phi", QuantitySpec::dimensional(Dims::NONE), 0.0, end),
         interpolation: InterpolationPolicy::LinearInside,
         uncertainty: UncertaintyModel::Unstated,
         observations: vec![],

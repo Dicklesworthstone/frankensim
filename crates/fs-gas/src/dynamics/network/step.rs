@@ -3,9 +3,11 @@ use super::super::{
     Boundaries, Conserved, Error, Reconstruction, StepControl, StepReport, Totals, poll, positive,
 };
 use super::{
-    Accumulator, BranchEnd, GasNetwork1d, NetworkGravityReport, NetworkStepReport, NetworkTotals,
-    PortExchange,
+    Accumulator, BranchEnd, GasNetwork1d, NetworkGravityReport, NetworkStepReport,
+    NetworkThermalReport, NetworkTotals, PlenumThermalOperator, PortExchange,
 };
+use crate::multicomponent::network::wall_exchange::NetworkWallReport;
+use crate::multicomponent::wall_exchange::WallControl;
 use fs_qty::Time;
 
 impl GasNetwork1d {
@@ -42,6 +44,38 @@ impl GasNetwork1d {
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        self.step_inner(maximum_duration, controls, None, cancelled)
+    }
+
+    /// Advance transport, then original implicit finite-plenum heat exchange.
+    ///
+    /// Heat uses the actual accepted wave duration after all CFL retries. The
+    /// complete gas and wall candidates publish together after the final poll.
+    /// Splitting is first order even though the inner wave step is SSP RK2;
+    /// original backward-Euler thermal work and source-domain caps still apply.
+    pub fn step_with_thermal(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        thermal: &mut PlenumThermalOperator<'_>,
+        thermal_controls: WallControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        self.step_inner(
+            maximum_duration,
+            controls,
+            Some((thermal, thermal_controls)),
+            cancelled,
+        )
+    }
+
+    fn step_inner(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        mut thermal: Option<(&mut PlenumThermalOperator<'_>, WallControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
         poll(&mut cancelled)?;
@@ -51,6 +85,10 @@ impl GasNetwork1d {
             || controls.maximum_halvings > 32
         {
             return Err(Error::Invalid("network time step, CFL or retry controls"));
+        }
+        if let Some((operator, controls)) = &thermal {
+            controls.validate()?;
+            operator.validate_binding(self)?;
         }
         let mut rate = 0.0_f64;
         let mut before = Accumulator::default();
@@ -135,14 +173,29 @@ impl GasNetwork1d {
             } else {
                 controls.reconstruction
             };
-            match self.attempt(dt, controls.cfl, reconstruction, &mut cancelled) {
-                Ok(maximum_rate) => {
+            let trial = self
+                .attempt(dt, controls.cfl, reconstruction, &mut cancelled)
+                .and_then(|maximum_rate| {
+                    let heat = match &mut thermal {
+                        Some((operator, controls)) => Some(operator.prepare(
+                            &mut self.work.plenum_candidate,
+                            Time::new(dt),
+                            *controls,
+                            &mut cancelled,
+                        )?),
+                        None => None,
+                    };
+                    Ok((maximum_rate, heat))
+                });
+            match trial {
+                Ok((maximum_rate, heat)) => {
                     let report = self.prepare_report(
                         (before, potential_before),
                         dt,
                         maximum_rate,
                         halvings,
                         first_order_retry && controls.reconstruction == Reconstruction::Muscl,
+                        heat,
                         &mut cancelled,
                     )?;
                     // Everything after this final cancellation point is infallible.
@@ -166,12 +219,15 @@ impl GasNetwork1d {
                         &mut self.branch_reports,
                         &mut self.work.branch_report_candidate,
                     );
+                    if let (Some((operator, _)), Some(heat)) = (&mut thermal, heat) {
+                        operator.commit(heat);
+                    }
                     self.last_report = Some(report);
                     return Ok(report);
                 }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(error) => {
-                    if !matches!(error, Error::CflExceeded { .. }) {
+                    if !matches!(error, Error::CflExceeded { .. } | Error::Thermal(_)) {
                         first_order_retry = true;
                     }
                     last = error;
@@ -432,6 +488,7 @@ impl GasNetwork1d {
         maximum_rate: f64,
         halvings: usize,
         first_order_retry: bool,
+        heat: Option<NetworkWallReport>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
         let factor = 0.5 * dt;
@@ -577,9 +634,14 @@ impl GasNetwork1d {
         }
         let (after, boundary_change) = (after.totals(), boundary.totals());
         let gravity_work = gravity_work_sum.totals().energy;
+        let heat_to_gas = heat.map_or(0.0, |report| report.heat_to_gas_j);
         let conservation_residual = NetworkTotals {
             mass: after.mass - before.mass - boundary_change.mass,
-            energy: after.energy - before.energy - boundary_change.energy - gravity_work,
+            energy: after.energy
+                - before.energy
+                - boundary_change.energy
+                - gravity_work
+                - heat_to_gas,
         };
         if !conservation_residual.mass.is_finite() || !conservation_residual.energy.is_finite() {
             return Err(Error::Invalid("non-finite complete network balance"));
@@ -591,10 +653,11 @@ impl GasNetwork1d {
             // Every term was accumulated AFTER subtracting the same potential
             // reference. Merely differencing absolute potential storage would
             // discard small resolved gravity work under a large common datum.
-            let total_residual = (after.energy - before.energy - boundary_change.energy)
-                + (after_centered_potential_energy
-                    - potential_before
-                    - boundary_centered_potential_energy_change);
+            let total_residual =
+                (after.energy - before.energy - boundary_change.energy - heat_to_gas)
+                    + (after_centered_potential_energy
+                        - potential_before
+                        - boundary_centered_potential_energy_change);
             let absolute_conservation_residual =
                 total_residual + frame.reference() * conservation_residual.mass;
             if !total_residual.is_finite()
@@ -615,6 +678,30 @@ impl GasNetwork1d {
         } else {
             None
         };
+        let thermal = heat.map(|source| NetworkThermalReport {
+            source,
+            gas_wall_conservation_residual_j: conservation_residual.energy
+                + source.energy_residual_j,
+            gas_wall_potential_conservation_residual_j: gravity
+                .map(|g| g.conservation_residual + source.energy_residual_j),
+            absolute_gas_wall_potential_conservation_residual_j: gravity.map(|g| {
+                (g.conservation_residual + source.energy_residual_j)
+                    + g.reference_potential_j_kg * conservation_residual.mass
+            }),
+        });
+        if thermal.is_some_and(|report| {
+            !report.gas_wall_conservation_residual_j.is_finite()
+                || report
+                    .gas_wall_potential_conservation_residual_j
+                    .is_some_and(|r| !r.is_finite())
+                || report
+                    .absolute_gas_wall_potential_conservation_residual_j
+                    .is_some_and(|r| !r.is_finite())
+        }) {
+            return Err(Error::Invalid(
+                "non-finite complete gas/wall/potential balance",
+            ));
+        }
         Ok(NetworkStepReport {
             elapsed: Time::new(dt),
             maximum_cfl: maximum_rate * dt,
@@ -627,6 +714,7 @@ impl GasNetwork1d {
             boundary_change,
             conservation_residual,
             gravity,
+            thermal,
         })
     }
 }
