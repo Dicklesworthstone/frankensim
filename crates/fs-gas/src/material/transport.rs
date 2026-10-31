@@ -7,6 +7,8 @@
 //! explicit nonnegative declaration, never inferred from either source.
 
 mod thermal_cross;
+/// Original molecular faces driving finite material gas inventories.
+pub mod parcel;
 pub use thermal_cross::{
     MaterialSoretDufourTransport, ResolvedMaterialHeatsOfTransport, SpeciesHeatOfTransportMaterial,
     ThermalConductivityConvention,

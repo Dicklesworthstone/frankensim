@@ -1070,6 +1070,43 @@ source-axis/domain/cancellation refusal; and periodic composition evolution with
 closed original species and total-energy balances. Authored fixture coefficients
 are not empirical transport validation.
 
+### Finite material gas inventories with thermal cross diffusion
+
+With `material` and `experimental-euler`,
+`material::transport::parcel::ParcelMolecularTransport<L>` consumes the same
+prepared `PlanarTransport<L>`, including `MaterialSoretDufourTransport`, on
+explicit continuum links between rigid `ClosedGasParcel` inventories. Every
+link uses zero barycentric bulk velocity and the original canonical mass-frame
+species flux. These are separately exposed continuum paths; they do not add a
+second molecular law to the same dusty-gas pore or supply thermal transpiration.
+The original caloric species must match exactly, including initially absent
+species when they enter a receiving parcel.
+
+Each distinct participating original and proposed endpoint state is qualified
+through the shared zero-gradient face kernel, in addition to every actual face
+query. The kinetic, material and thermal-cross source domains therefore apply
+jointly to the admitted states. The law retains its last successful query,
+which may be an endpoint qualification. Per-link reports separately retain the
+actual transported species, face enthalpy temperature and reduced heat flux.
+
+All continuum fluxes and native `GasTransportPaths` sample one unchanged
+inventory and enter the existing material snapshot reconstruction together.
+Each species carries its original donor partial enthalpy once. Added energy is
+`q_reduced*A*dt + sum_i dm_i [h_i(T_face)-h_i(T_donor)]`, with the differences
+evaluated by the original analytic caloric owner before rounding. Neither large
+formation references nor kinetic heat-of-transport datums become extra heat.
+The native combined work bound, gross original-species withdrawal, source catalog
+join, fixed absolute mass/energy budgets and closed endpoint entropy gate remain
+authoritative. Source refusal, cancellation or an overlarge explicit step returns
+no candidate state. This is a first-order physical candidate operator; it adds no
+independent timeline or accuracy controller.
+
+`tests/material_parcel_transport.rs` covers independent binary Soret/Dufour
+temperature and inventory predictions, unequal-mass frame/orientation,
+formation/kinetic-datum invariance, shared nozzle withdrawal, absent species,
+initial and final source-domain refusal, and cancellation. Its coefficients are
+manufactured integration fixtures, not measured-material qualification.
+
 
 ## Reacting Navier-Stokes composition with original-source molecular transport
 

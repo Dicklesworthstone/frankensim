@@ -8309,6 +8309,31 @@ differences, concentration-reference invariance, the fixed-volume limit,
 next-representable-volume dilution and its osmotic-pressure derivative,
 chemical-potential derivatives, zero-species limits and original support.
 
+### Joint native and externally sampled gas transport
+
+`species::network::transport::step_candidate_with_paths_and_fluxes` joins
+integrated species and additional heat records to the same immutable snapshot
+as all native `GasTransportPaths`. Their physical owner must qualify the
+original constitutive sources, frame, geometry and interval and declare a
+distinct exposure. Added heat excludes the original donor partial enthalpy
+already carried by each species. Existing entry points delegate with empty
+additional records.
+
+The original combined work bound, gross original-species withdrawal, source
+catalog join, one caloric reconstruction per endpoint, fixed absolute mass and
+energy budgets and closed entropy gate apply jointly. No incoming species can
+fund outgoing allowance. Cancellation or any refusal publishes no endpoint.
+The seam supplies no new constitutive law or temporal controller.
+
+The finite continuum adapter in `fs-gas::material::transport::parcel` consumes
+this seam for the native mass-frame Maxwell–Stefan/Soret/Fourier/Dufour face.
+Its additional heat is reduced heat times area/time plus each signed species
+mass times the original analytic donor-to-face partial-enthalpy increment.
+Formation references cancel before arithmetic, and donor enthalpy is charged
+once. Actual initial and final participating gas states must also satisfy the
+original transport sources. Continuum exposures remain distinct from dusty-gas
+pore transport; this composition supplies no porous thermal-transpiration law.
+
 ### Source-bound conductivity through latent phase change
 
 `thermal::conduction::phase::PreparedPhaseConductivity` binds one selected

@@ -20,6 +20,12 @@ pub struct TransportFaceReport {
     pub maximum_gradient_residual_per_m: f64,
     /// Signed sum of all diffusive species mass fluxes [kg/(m² s)].
     pub mass_frame_residual_kg_m2_s: f64,
+    /// Temperature of the original partial enthalpies in the energy flux [K].
+    /// Reservoir effort may differ from the constitutive sampling temperature.
+    pub enthalpy_temperature_k: f64,
+    /// Fourier plus reciprocal Dufour heat, excluding species enthalpy and
+    /// mechanical work [W/m²], positive in the oriented face direction.
+    pub reduced_heat_flux_w_m2: f64,
 }
 
 /// Thermal boundary for an impermeable no-slip molecular wall.
@@ -164,6 +170,30 @@ impl<L: TransportLaw> PlanarTransport<L> {
             controls,
             &mut cancelled,
         )
+    }
+
+    /// Qualify the original caloric trace and every constitutive source at one
+    /// actual state. The shared zero-gradient face performs the same binary,
+    /// scalar and thermal-cross admission without transporting any inventory.
+    /// Source-law receipts become those of this last successful qualification.
+    pub fn qualify_primitive(
+        &mut self,
+        primitive: NormalPrimitive<'_>,
+        controls: MaxwellStefanSolveV1,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
+        let mut flux = [0.0; MAX_NORMAL_COMPONENTS];
+        let n = self.gas.species_count();
+        self.face_from_primitives(
+            primitive,
+            primitive,
+            1.0,
+            [0.0; 2],
+            controls,
+            &mut flux[..n + 3],
+            cancelled,
+        )
+        .map(|_| ())
     }
 
     /// Held exterior state at a physical reservoir face. `boundary_on_left`
@@ -649,6 +679,8 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
         diffusivity_m2_s: 0.0,
         maximum_gradient_residual_per_m: evaluated.maximum_gradient_residual_per_m(),
         mass_frame_residual_kg_m2_s: evaluated.mass_frame_residual_kg_m2_s(),
+        enthalpy_temperature_k: enthalpy_temperature,
+        reduced_heat_flux_w_m2: 0.0,
     };
     out[..n].copy_from_slice(evaluated.mass_fluxes());
     let longitudinal = coefficients.longitudinal_viscosity()?;
@@ -700,8 +732,15 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     // This is the Onsager Schur-complement construction, not an assumption
     // that the finite-volume discretization inherits a full entropy theorem.
     // Van-Brunt et al., https://arxiv.org/pdf/2109.05082, equations 3.5–3.9.
+    let reciprocal_heat = if coupled {
+        sum((0..n).map(|k| heats[k] * out[k]))
+    } else {
+        0.0
+    };
+    report.reduced_heat_flux_w_m2 =
+        -coefficients.thermal_conductivity.value() * grad_t + reciprocal_heat;
     let energy = if coupled {
-        energy + sum((0..n).map(|k| heats[k] * out[k]))
+        energy + reciprocal_heat
     } else {
         energy
     };
@@ -710,7 +749,7 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     } else {
         energy
     };
-    if !out.iter().all(|value| value.is_finite()) {
+    if !out.iter().all(|value| value.is_finite()) || !report.reduced_heat_flux_w_m2.is_finite() {
         return Err(DissipationError::Invalid("non-finite molecular face flux"));
     }
     let gamma = 1.0
@@ -828,6 +867,7 @@ fn wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     poll(cancelled)?;
     Ok(TransportFaceReport {
         diffusivity_m2_s,
+        enthalpy_temperature_k: p.temperature,
         ..TransportFaceReport::default()
     })
 }
@@ -923,6 +963,8 @@ fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     poll(cancelled)?;
     Ok(TransportFaceReport {
         diffusivity_m2_s,
+        enthalpy_temperature_k: face_temperature,
+        reduced_heat_flux_w_m2: -c.thermal_conductivity.value() * temperature_gradient,
         ..TransportFaceReport::default()
     })
 }

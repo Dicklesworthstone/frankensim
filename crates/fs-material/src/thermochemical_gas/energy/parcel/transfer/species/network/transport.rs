@@ -26,7 +26,7 @@ pub(crate) use sample::sample_transfers;
 
 use std::collections::BTreeMap;
 use super::{ClosedGasParcel, GasEnergySolve, SpeciesNetworkError, SpeciesNetworkSolve,
-    SpeciesNetworkStep, SpeciesNetworkTransfer, MAX_SNAPSHOT_TRANSFERS, inventory};
+    SpeciesNetworkStep, SpeciesNetworkTransfer, SpeciesNetworkHeatTransfer, MAX_SNAPSHOT_TRANSFERS, inventory};
 use super::super::diffusion::network::{self as molecular, DiffusionNetworkError,
     DiffusionNetworkLink, DiffusionNetworkLinkStep, DiffusionNetworkSolve};
 use super::super::super::nozzle::network::snapshot::{self as pressure,
@@ -249,9 +249,38 @@ pub fn step_candidate(
 pub fn step_candidate_with_paths(
     parcels: &BTreeMap<u64, ClosedGasParcel>, paths: GasTransportPaths<'_>,
     duration_s: f64, endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: GasTransportSolve, cancelled: impl FnMut() -> bool,
+) -> Result<GasTransportCandidate, Error> {
+    step_candidate_with_paths_and_fluxes(parcels, paths, duration_s, &[], &[], endpoints,
+        controls, cancelled)
+}
+
+/// Join externally sampled physical species/heat fluxes to the SAME snapshot.
+///
+/// The caller owns their constitutive law, source support and integrated time;
+/// these records describe separate physical exposures from `paths`. Additional
+/// heat excludes the donor partial enthalpy already carried by each species.
+/// All gross withdrawals, endpoint sources, absolute energy budgets and the
+/// closed-network entropy gate are still admitted together before publication.
+/// No incoming species can fund any outgoing flux in this interval.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_paths_and_fluxes(
+    parcels: &BTreeMap<u64, ClosedGasParcel>, paths: GasTransportPaths<'_>,
+    duration_s: f64, transfers: &[SpeciesNetworkTransfer], heat: &[SpeciesNetworkHeatTransfer],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: GasTransportSolve, mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasTransportCandidate, Error> {
-    let sampled = sample_transfers(parcels, paths, duration_s, endpoints, controls, &mut cancelled)?;
+    if transfers.len().checked_add(heat.len()).is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
+        return Err(Error::Invalid("additional transport flux count exceeds the shared work bound"));
+    }
+    let mut sampled = sample_transfers(parcels, paths, duration_s, endpoints, controls, &mut cancelled)?;
+    if [sampled.transfers.len(), sampled.heat.len(), transfers.len(), heat.len()]
+        .into_iter().try_fold(0usize, |total, n| total.checked_add(n))
+        .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
+        return Err(Error::Invalid("combined transport flux count exceeds the shared work bound"));
+    }
+    sampled.transfers.extend_from_slice(transfers);
+    sampled.heat.extend_from_slice(heat);
     let proposal = super::exchange_candidate_with_heat(parcels, &sampled.transfers, &sampled.heat,
         endpoints, controls.exchange, &mut cancelled)?;
     sampled.rates.admit_endpoint_driving_forces(proposal.parcels(), &mut cancelled)?;
