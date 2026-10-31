@@ -18545,3 +18545,62 @@ independent scalar thermal/mechanical reference, and exercises nonconvergence,
 observer failure, cancellation and retry with both memories intact. This adds
 no expansion, variable stored-energy coefficients, finite deformation, phase
 flow, damage or life qualification.
+
+## Reversible nonlinear dielectric gap motion
+
+`material_circuit::motion::dielectric::ReversibleDielectricGapMotion` advances a
+source-backed nonlinear dielectric branch, the original circuit and a guided
+material body in one native descriptor. The retained reversible material owns
+the monotone D(E) source and its inverse and integral. With fixed electrode area
+A, gap d and conserved free charge q, the joint potential is
+H_field=A*d*w(q/A), w(D)=integral E(D) dD. Terminal voltage is d*E(q/A); the force
+on increasing gap is -A*w(q/A), the derivative at fixed charge. Both charge
+polarities use this same even energy and attractive force. The nonlinear energy
+is not inferred from a secant or differential capacitance or from half qV.
+
+Body mass comes from the original regional density/geometry compiler. An
+optional original `AxialSupport` contributes its material restoring force,
+elastic potential and consistent modal inertia. Gap and momentum extend the
+original charge/flux coordinates with a canonical power port; the original
+solver, ideal-source/transformer topology, bulk conductor and series-contact
+loss owners remain in use. Other authored capacitor curves and the complete
+signed mutual-inductance matrix retain their original native energy. Immutable
+prepared dielectric and capacitor source tables are shared across proposals.
+The `routing_circuit()` accessor is explicitly a topology/source view: the
+selected graph C is only a routing placeholder, and does not represent the
+active field's physical storage. Advancing or auditing the isolated routing
+view does not substitute for the joint owner.
+
+Independent electrical, kinetic and support energy increments use the original
+constitutive integrals and represented-midpoint corrections with compensated
+summation. The combined native storage supplies the corresponding analytic
+midpoint remainder, including the charge-to-displacement transform; it does
+not subtract large endpoint energies. Absolute endpoint energies remain
+diagnostics. Each candidate checks these increments against native work and
+dissipation, retains separate original bulk/contact heat, and reports external
+force work from force times actual gap displacement. Field work is one internal
+exchange between the electrical and mechanical stores, never additional heat.
+
+This bounded model has one uniform, fixed-area moving dielectric gap. Its
+source must depend only on field magnitude; an actual temperature-dependent
+source slice refuses because a frozen free-energy law does not supply missing
+reversible heat. Applicability-only temperature bounds are retained. A live
+thermal support likewise requires its separate reciprocal thermal owner and
+is refused here. Original field/charge support, open positive gap limits,
+support strain limits, finite controls, bounded descriptor capacity and
+cancellation are admission gates. Native initial and endpoint consistency must
+preserve every charge, flux, gap and momentum coordinate; incompatible ideal
+clamps refuse without a charge projection or unreported impulse. Both circuit
+and body histories publish together only after the complete physical audit.
+No fringing, electrostriction, material-flow work, changing area, dielectric
+memory, breakdown, collision law or thermal evolution is supplied by this
+uniform reversible profile. Energy closure alone is not a temporal-error proof.
+
+`tests/dielectric_motion.rs` exercises independent fixed-charge energy
+derivatives and constant acceleration for both polarities and source masses;
+nonlinear RC motion across a material knot against independent RK4 and step
+refinement; the existing linear dielectric-motion limit; retained unrelated
+nonlinear capacitance and full mutual field storage; original contact heat;
+source support inertia and elasticity; tiny SI work below a large unchanged
+capacitor bias; and source/domain/ideal-clamp/cancellation refusal. The source
+curves are authored numerical fixtures, not claims of measured material data.

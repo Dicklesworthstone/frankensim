@@ -1233,6 +1233,9 @@ its own explicit parameter-work candidate; a retained linear material law may
 not silently describe an independently authored nonlinear curve. Prepared
 knots, slopes and energies are immutable shared slices, so repeated trial
 clones retain the same prepared tables without copying them.
+`CapacitorChargeCurve::energy_change_remainder_j` exposes that same retained
+piecewise integral relative to a supported reference charge, allowing composite
+field/mechanical storage to keep unrelated curves' stable native remainder.
 
 Cancellation-stable analytic midpoint remainders are applied for every finite,
 nonzero represented squared increment. A large stationary coordinate cannot

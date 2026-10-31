@@ -16,6 +16,8 @@ pub mod support;
 pub mod conductivity;
 /// Multiple physical windings sharing one moving magnetic gap and explicit leakage.
 pub mod coupled_gap;
+/// Source-backed nonlinear dielectric energy and reciprocal guided-gap motion.
+pub mod dielectric;
 use support::AxialSupport;
 
 use fs_matdb::EvaluationDecision;

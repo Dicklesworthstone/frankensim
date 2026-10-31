@@ -262,6 +262,19 @@ impl CapacitorChargeCurve {
                 + self.midpoint_remainder(before_c, after_c, midpoint)?,
         )
     }
+
+    /// Integral of `V(q)-V(reference_c)` from `before_c` to `after_c` [J].
+    /// Evaluates the original piecewise law without subtracting large endpoint
+    /// energies. A composite storage owner may use its represented midpoint
+    /// as the reference while retaining every other physical energy term.
+    pub fn energy_change_remainder_j(
+        &self,
+        before_c: f64,
+        after_c: f64,
+        reference_c: f64,
+    ) -> Result<f64, CircuitError> {
+        self.midpoint_remainder(before_c, after_c, reference_c)
+    }
 }
 
 /// A replacement law for one ORIGINAL capacitor branch, not its compressed slot.
