@@ -11,6 +11,10 @@
 //! energy balance telescopes exactly. `k_h = 2 k_P k_N / (k_P + k_N)` is the
 //! series (harmonic) conductance of two half cells, exact for
 //! piecewise-constant conductivity meeting at the face.
+//! With an authored k(T) table, continuous solid faces and Dirichlet/Robin half
+//! cells instead integrate the declared law in temperature. Positive Kirchhoff
+//! secants preserve the conservative stencil and the source-free 1-D solution;
+//! a Robin surface solves the same integrated half cell in series with its film.
 
 use fs_exec::CancelGate;
 use fs_sparse::Coo;
@@ -309,7 +313,10 @@ pub struct EnergyReport {
 pub struct EnergySolution {
     /// Temperature per cell, K.
     pub temperature: Vec<f64>,
-    /// Conductivity per cell along x, y, z used by the solve, W/(m K).
+    /// Cell-centre conductivity along x, y, z, W/(m K), retained for material
+    /// reporting and discontinuous interfaces. Authored k(T) tables integrate
+    /// continuous solid faces and Dirichlet/Robin half cells separately; these
+    /// local values alone do not reconstruct those nonlinear face coefficients.
     pub conductivity: Vec<[f64; 3]>,
     /// Canonical `(lower cell, upper cell)` face resistances actually used by
     /// this solve, m² K/W. Kept for consistent downstream heat-flow observers.
@@ -422,6 +429,9 @@ enum Advective {
 struct Context<'a> {
     domain: &'a VoxelDomain,
     flow: &'a FlowField,
+    solids: &'a [SolidMaterial],
+    /// Previous Picard state, only for the authored k(T) table path.
+    conductivity_temperature: Option<&'a [f64]>,
     faces: [ThermalFace; 6],
     /// Conductivity along x, y, z per cell.
     k: Vec<[f64; 3]>,
@@ -435,6 +445,22 @@ struct Context<'a> {
 }
 
 impl Context<'_> {
+    fn checked_term(&self, c: usize, f: usize) -> Result<FaceTerm, ChtError> {
+        let term = self.term(c, f);
+        if !term.diag.is_finite()
+            || !term.rhs.is_finite()
+            || term
+                .off
+                .is_some_and(|(_, coefficient)| !coefficient.is_finite())
+        {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.face_coefficients",
+                reason: "face energy coefficients or nonlinear film are unrepresentable".into(),
+            });
+        }
+        Ok(term)
+    }
+
     fn contact(&self, c: usize, n: usize) -> f64 {
         if let Some(&resistance) = self.face_contacts.get(&(c.min(n), c.max(n))) {
             return resistance;
@@ -493,7 +519,25 @@ impl Context<'_> {
             // between their materials: exact for piecewise-constant k.
             let contact = self.contact(c, n);
             let half_n = 0.5 * self.domain.widths(n)[axis];
-            let d = area / (half_c / kc + contact + half_n / kn);
+            let d = if let Some(t) = self.conductivity_temperature
+                && let (Voxel::Solid(a), Voxel::Solid(b)) =
+                    (self.domain.voxel_at(c), self.domain.voxel_at(n))
+                && a == b
+                && contact == 0.0
+            {
+                // Within one continuous material, Fourier's law integrates
+                // to q = A * integral(k dT) / centre_distance. Its positive
+                // secant preserves the original reciprocal face stencil and
+                // is exact across every crossed conductivity-table knot.
+                let solid = &self.solids[usize::from(a)];
+                area * solid.axis_conductivity()[axis]
+                    * solid.conductivity_secant_factor(t[c], t[n])
+                    / (half_c + half_n)
+            } else {
+                // Material jumps and finite contact resistances keep their
+                // declared two-half-cell series model.
+                area / (half_c / kc + contact + half_n / kn)
+            };
             if let Some(field) = self.enthalpy {
                 let mass = self.density * self.flow.outward(self.domain, c, f);
                 // Solid faces are impermeable. At a fluid face both rows use
@@ -527,12 +571,24 @@ impl Context<'_> {
                 rhs: 0.0,
                 advective: Advective::None,
             },
-            ThermalFace::Temperature(t) => FaceTerm {
-                diag: half,
-                off: None,
-                rhs: half * t,
-                advective: Advective::None,
-            },
+            ThermalFace::Temperature(t) => {
+                let half = if let Some(previous) = self.conductivity_temperature
+                    && let Voxel::Solid(m) = self.domain.voxel_at(c)
+                {
+                    let material = &self.solids[usize::from(m)];
+                    area * material.axis_conductivity()[axis]
+                        * material.conductivity_secant_factor(previous[c], t)
+                        / half_c
+                } else {
+                    half
+                };
+                FaceTerm {
+                    diag: half,
+                    off: None,
+                    rhs: half * t,
+                    advective: Advective::None,
+                }
+            }
             ThermalFace::HeatFlux(q) => FaceTerm {
                 diag: 0.0,
                 off: None,
@@ -540,6 +596,16 @@ impl Context<'_> {
                 advective: Advective::None,
             },
             ThermalFace::Convective { h, ambient } => {
+                let kc = if let Some(previous) = self.conductivity_temperature
+                    && let Voxel::Solid(m) = self.domain.voxel_at(c)
+                {
+                    let material = &self.solids[usize::from(m)];
+                    let axis_k = material.axis_conductivity()[axis];
+                    axis_k
+                        * material.film_conductivity_factor(previous[c], ambient, axis_k, half_c, h)
+                } else {
+                    kc
+                };
                 let u = area / (1.0 / h + half_c / kc);
                 FaceTerm {
                     diag: u,
@@ -632,9 +698,10 @@ pub(crate) struct PseudoStep<'a> {
 }
 
 /// The energy solve, iterated to a consistent temperature field when a solid
-/// declares a temperature-dependent conductivity (Picard: each pass
-/// evaluates every solid cell's `k(T)` at the previous pass's temperature,
-/// until the largest change is below 1e-10 of the temperature span).
+/// declares a temperature-dependent conductivity. Each Picard pass evaluates
+/// continuous solid faces and Dirichlet/Robin half cells with the table's
+/// integrated secant, and material/contact jumps with cell-centred series
+/// coefficients, until the largest temperature change is below 1e-10 of its span.
 #[allow(clippy::too_many_arguments)] // physics inputs + step state
 pub(crate) fn solve_energy_inner(
     domain: &VoxelDomain,
@@ -917,6 +984,8 @@ fn solve_energy_field(
     let ctx = Context {
         domain,
         flow,
+        solids,
+        conductivity_temperature: nonlinear.and_then(|(_, temperature)| temperature),
         faces: setup.faces,
         k,
         contacts,
@@ -1003,14 +1072,7 @@ fn solve_energy_field(
             if compact.toward_component(c, f) {
                 continue;
             }
-            let term = ctx.term(c, f);
-            if !term.diag.is_finite() || !term.rhs.is_finite()
-                || term.off.is_some_and(|(_, a)| !a.is_finite())
-            {
-                return Err(ChtError::InvalidInput {
-                    field: "thermal.face_coefficients", reason: "face energy coefficients overflow".into(),
-                });
-            }
+            let term = ctx.checked_term(c, f)?;
             diag += term.diag;
             rhs += term.rhs;
             anchored |= term.off.is_none() && term.diag > 0.0;
@@ -1123,7 +1185,7 @@ fn solve_energy_field(
                 if compact.toward_component(c, f) {
                     continue;
                 }
-                let term = ctx.term(c, f);
+                let term = ctx.checked_term(c, f)?;
                 fixed_w += flux_of(&term, c);
             }
             for &(j, g) in compact.links_of(c) {
@@ -1137,7 +1199,7 @@ fn solve_energy_field(
             if domain.neighbor(c, f).is_some() {
                 continue;
             }
-            let term = ctx.term(c, f);
+            let term = ctx.checked_term(c, f)?;
             let advective = match term.advective {
                 Advective::None => 0.0,
                 Advective::OwnCell(q) => q * temperature[c],

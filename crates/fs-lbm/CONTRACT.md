@@ -2496,15 +2496,40 @@ properties. `EnergySolution::conductivity` reports the per-axis values.
 
 A solid may declare `k(T)` as a piecewise-linear table; every axis
 conductivity scales by `k(T) / conductivity_w_m_k` at the cell's
-temperature. The energy solve (steady, and each transient step) iterates
-Picard passes, each evaluating `k` at the previous pass and warm-starting
-the Krylov solve, until the largest temperature change is below 1e-10 of
-the span (200 passes, else `SolverNotConverged { system: "energy
-conductivity" }`). Face conductances stay harmonic in the cell values.
+temperature. Within one continuous material with zero contact resistance,
+each face instead uses the positive Kirchhoff secant
+`mean(k; Ta,Tb) = integral(Ta..Tb, k(T) dT)/(Tb-Ta)` over the centre distance.
+Solid Dirichlet half cells use the same integral to the boundary temperature.
+For Robin films, the physical surface temperature lies between cell and ambient
+and solves `integral(Tsurface..Tcell, k(T) dT) = d*h*(Tsurface-Tambient)`.
+The same table traversal locates its piece; a scaled, rationalized quadratic
+solves that piece analytically, with no separate iterative tolerance or budget.
+The resulting half-cell secant enters the original series-film conductance.
+Integration is exact across every linear table piece, including its declared
+constant endpoint extensions; near equilibrium it integrates temperature
+intervals directly rather than subtracting two large potentials. Table lookup
+is logarithmic, followed only by the crossed knots, with no face allocations.
+Reciprocal rows use identical coefficients. Cell-reported conductivity remains
+the local value. Material jumps, finite contact resistances and compact-component
+links retain their cell-centred series model and require spatial refinement;
+no exact nonlinear interface solution is claimed there. The analytic film is
+the declared stationary scalar Robin law, not a resolved fluid boundary layer.
 
-| Fixture | Reference | Measured |
-|---|---|---|
-| Slab, `k = 1 + (T - 300)/100`, faces 400 K / 300 K, 10 and 20 cells | Kirchhoff transform: `int k dT` linear in x | max error 0.229 K -> 0.063 K of a 100 K span: order 1.86 |
+The existing steady and transient Picard/Krylov owner evaluates these
+coefficients from the previous pass and warm-starts the next solve until the
+largest temperature change is below 1e-10 of the span (200 passes, else
+`SolverNotConverged { system: "energy conductivity" }`). Storage, sources,
+contacts and independent energy accounting retain their original owners.
+G1/G3 regressions in `tests/conjugate.rs` check the source-free analytic
+Kirchhoff profile at 1/2/10/20 cells, crossed knots on arbitrary widths along
+all orthotropic axes under both heat-flow signs, a finite same-material contact
+jump, the equal-temperature limit, and a two-cell backward-Euler contrast-decay
+solution with independently closed stored energy. The profile acceptance is
+1e-7 K; this is numerical model verification, not measured-material validation.
+Additional Robin regressions cover single-cell heating and cooling with an
+independent quadratic reference, two opposing films, crossed table knots on a
+graded slab in both heat directions, and an analytic backward-Euler cooling
+step with actual boundary heat and stored energy checked separately.
 
 ### DC Joule heating (`solve_electric`, `solve_electrothermal`)
 

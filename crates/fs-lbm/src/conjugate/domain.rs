@@ -428,8 +428,10 @@ pub struct SolidMaterial {
     pub volumetric_heat_capacity_j_m3_k: Option<f64>,
     /// Temperature dependence `[(T K, k W/(m K)), ...]` (empty: constant):
     /// piecewise linear in T, constant beyond the ends, scaling every axis
-    /// conductivity by `k(T) / conductivity_w_m_k` at each cell's
-    /// temperature (the energy solve iterates to consistency).
+    /// conductivity by `k(T) / conductivity_w_m_k`. Continuous same-material
+    /// faces and Dirichlet/Robin half cells integrate the table exactly;
+    /// discontinuous/contact faces retain cell-centred series coefficients.
+    /// The energy solve iterates to consistency.
     pub conductivity_table: Vec<(f64, f64)>,
 }
 
@@ -459,18 +461,162 @@ impl SolidMaterial {
     #[must_use]
     pub fn conductivity_factor(&self, t: f64) -> f64 {
         let table = &self.conductivity_table;
-        let Some(&(t0, k0)) = table.first() else {
+        let Some(&(_, k0)) = table.first() else {
             return 1.0;
         };
-        let k = if t <= t0 {
+        let upper = table.partition_point(|&(temperature, _)| temperature < t);
+        let k = if upper == 0 {
             k0
+        } else if upper == table.len() {
+            table[table.len() - 1].1
         } else {
-            table.windows(2).find(|w| t <= w[1].0).map_or_else(
-                || table[table.len() - 1].1,
-                |w| w[0].1 + (w[1].1 - w[0].1) * (t - w[0].0) / (w[1].0 - w[0].0),
-            )
+            let (a, b) = (table[upper - 1], table[upper]);
+            a.1 + (b.1 - a.1) * (t - a.0) / (b.0 - a.0)
         };
         k / self.conductivity_w_m_k
+    }
+
+    /// Mean of the declared conductivity factor over a temperature interval.
+    /// Integrating each crossed linear piece exactly avoids subtracting large
+    /// Kirchhoff potentials when the two temperatures are nearly equal. The
+    /// table retains its declared constant extensions beyond the end knots.
+    pub(super) fn conductivity_secant_factor(&self, a: f64, b: f64) -> f64 {
+        if a == b || self.conductivity_table.is_empty() {
+            return self.conductivity_factor(a);
+        }
+        let (lo, hi) = (a.min(b), a.max(b));
+        let span = hi - lo;
+        let mut left = lo;
+        let mut left_factor = self.conductivity_factor(left);
+        let mut mean = 0.0;
+        let first = self
+            .conductivity_table
+            .partition_point(|&(temperature, _)| temperature <= lo);
+        for &(temperature, conductivity) in &self.conductivity_table[first..] {
+            if temperature >= hi {
+                break;
+            }
+            let right_factor = conductivity / self.conductivity_w_m_k;
+            mean += (temperature - left) / span * (0.5 * left_factor + 0.5 * right_factor);
+            left = temperature;
+            left_factor = right_factor;
+        }
+        mean + (hi - left) / span * (0.5 * left_factor + 0.5 * self.conductivity_factor(hi))
+    }
+
+    /// Conductivity factor averaged from a cell to its solved Robin surface.
+    /// With z the temperature drop from cell toward ambient, the unique root
+    /// satisfies integral(0..z, k + d*h) = d*h*abs(Tcell-Tambient). Each table
+    /// piece gives a quadratic with a positive derivative. Resistance scaling
+    /// keeps its coefficients bounded, and the rationalized root avoids
+    /// subtracting nearly equal roots. NaN refuses unrepresentable input via
+    /// the energy assembly's existing finite-coefficient check.
+    pub(super) fn film_conductivity_factor(
+        &self,
+        cell: f64,
+        ambient: f64,
+        axis_k: f64,
+        distance: f64,
+        h: f64,
+    ) -> f64 {
+        if cell == ambient || self.conductivity_table.is_empty() {
+            return self.conductivity_factor(cell);
+        }
+        let (lo, hi) = (cell.min(ambient), cell.max(ambient));
+        let span = hi - lo;
+        let table = &self.conductivity_table;
+        let first = table.partition_point(|&(temperature, _)| temperature <= lo);
+        let end = table.partition_point(|&(temperature, _)| temperature < hi);
+        let cell_factor = self.conductivity_factor(cell);
+        let ambient_factor = self.conductivity_factor(ambient);
+        let mut maximum = cell_factor.max(ambient_factor);
+        for &(_, k) in &table[first..end] {
+            maximum = maximum.max(k / self.conductivity_w_m_k);
+        }
+        let maximum_k = axis_k * maximum;
+        let bulk = distance / maximum_k;
+        let film = 1.0 / h;
+        let resistance_scale = bulk.max(film);
+        if !span.is_finite()
+            || !maximum_k.is_finite()
+            || maximum_k <= 0.0
+            || !resistance_scale.is_finite()
+            || resistance_scale <= 0.0
+        {
+            return f64::NAN;
+        }
+        // alpha*k/kmax + beta is (k+d*h) divided by a common scale.
+        let alpha = film / resistance_scale;
+        let beta = bulk / resistance_scale;
+        if beta == 0.0 {
+            return cell_factor;
+        }
+        let mut remaining = beta;
+        let mut start = cell;
+        let mut k_start = cell_factor / maximum;
+        let mut covered = 0.0;
+        let mut mean = 0.0;
+        let knots = end - first;
+        for piece in 0..=knots {
+            let (finish, k_finish) = if piece == knots {
+                (ambient, ambient_factor / maximum)
+            } else {
+                let index = if cell < ambient {
+                    first + piece
+                } else {
+                    end - 1 - piece
+                };
+                let (temperature, conductivity) = table[index];
+                (
+                    temperature,
+                    conductivity / self.conductivity_w_m_k / maximum,
+                )
+            };
+            let fraction = (finish - start).abs() / span;
+            let a = beta + alpha * k_start;
+            let b = 0.5 * alpha * (k_finish - k_start);
+            let average = beta + 0.5 * alpha * (k_start + k_finish);
+            let integral = fraction * average;
+            if remaining <= integral || piece == knots {
+                // Positive conductivity places the exact root in the closed
+                // interval. Clamp only accumulated endpoint roundoff when the
+                // film tends to an imposed surface temperature.
+                let y = (remaining / fraction).min(average);
+                let discriminant = if b < 0.0 {
+                    // Equivalent to a*a+4*b*y, but all terms are positive
+                    // even when the endpoint slope is much smaller than a.
+                    let endpoint = beta + alpha * k_finish;
+                    endpoint * endpoint + (-4.0 * b) * (average - y).max(0.0)
+                } else {
+                    a * a + 4.0 * b * y
+                };
+                let position = 2.0 * y / (a + discriminant.sqrt());
+                if !position.is_finite() {
+                    return f64::NAN;
+                }
+                let position = position.clamp(0.0, 1.0);
+                let used = fraction * position;
+                let local_mean = k_start + 0.5 * position * (k_finish - k_start);
+                // Retain the fractional drop: an absolute surface temperature
+                // can round back to the cell even when its mean k differs.
+                return maximum
+                    * if covered == 0.0 {
+                        local_mean
+                    } else {
+                        let total = covered + used;
+                        covered / total * mean + used / total * local_mean
+                    };
+            }
+            if fraction > 0.0 {
+                let total = covered + fraction;
+                mean = covered / total * mean + fraction / total * (0.5 * k_start + 0.5 * k_finish);
+                covered = total;
+            }
+            remaining -= integral;
+            start = finish;
+            k_start = k_finish;
+        }
+        f64::NAN
     }
 
     /// Declare grid-aligned principal conductivities `[k_x, k_y, k_z]`,

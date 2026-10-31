@@ -202,9 +202,8 @@ fn clustered(n: usize, h: f64) -> Vec<f64> {
 fn temperature_dependent_conductivity_follows_the_kirchhoff_transform() {
     // k(T) = 1 + (T - 300) / 100 between 400 K and 300 K faces: the
     // Kirchhoff potential theta = int k dT = (T - 300) + (T - 300)^2 / 200
-    // is linear in x, so T(x) is known exactly; the finite-volume solution
-    // (harmonic face conductivities at the cell temperatures) converges to
-    // it at second order. Without the table the profile would be linear.
+    // is linear in x. Integrated face/half-cell conductivities reproduce it
+    // even on a single cell. Without the table the profile would be linear.
     let gate = CancelGate::new();
     let solve = |n: usize| {
         let dx = 0.1 / n as f64;
@@ -236,11 +235,334 @@ fn temperature_dependent_conductivity_follows_the_kirchhoff_transform() {
             })
             .fold(0.0f64, f64::max)
     };
-    let (coarse, fine) = (solve(10), solve(20));
-    let order = (coarse / fine).log2();
-    eprintln!("k(T) slab: max errors {coarse:.3e} {fine:.3e}, order {order:.3}");
-    // Measured: 0.229 K and 0.063 K of a 100 K span (order 1.86).
-    assert!(fine < 0.07 && (order - 2.0).abs() < 0.3, "{coarse} {fine}");
+    for n in [1, 2, 10, 20] {
+        let error = solve(n);
+        assert!(error < 1e-7, "n={n}, max temperature error {error}");
+    }
+}
+
+#[test]
+fn nonlinear_conduction_integrates_crossed_knots_on_graded_orthotropic_axes() {
+    // Independent antiderivative of k=1, then 1->4, then 4->2, then 2.
+    // Both constant extensions of the declared table and all internal knots
+    // are crossed, with reversed heat flow and each principal direction.
+    let potential = |t: f64| {
+        if t <= 300.0 {
+            t - 300.0
+        } else if t <= 350.0 {
+            let u = t - 300.0;
+            u + 0.03 * u * u
+        } else if t <= 400.0 {
+            let u = t - 350.0;
+            125.0 + 4.0 * u - 0.02 * u * u
+        } else {
+            275.0 + 2.0 * (t - 400.0)
+        }
+    };
+    let gate = CancelGate::new();
+    for axis in 0..3 {
+        for (left, right) in [(430.0, 280.0), (280.0, 430.0)] {
+            let mut widths = [vec![0.2], vec![0.3], vec![0.4]];
+            widths[axis] = vec![0.005, 0.05, 0.015, 0.03];
+            let domain = VoxelDomain::graded_from_fn(widths, |_| Voxel::Solid(0)).unwrap();
+            let material = SolidMaterial::new("crossed-table", 2.0)
+                .with_orthotropic([0.4, 2.0, 6.0])
+                .with_conductivity_table(&[(300.0, 1.0), (350.0, 4.0), (400.0, 2.0)]);
+            let mut faces = [ThermalFace::Adiabatic; 6];
+            // A prescribed flux also checks the magnitude of each principal
+            // coefficient, which two temperature anchors alone cannot test.
+            let flux = [0.4, 2.0, 6.0][axis] / 2.0 * (potential(left) - potential(right)) / 0.1;
+            faces[2 * axis] = ThermalFace::HeatFlux(flux);
+            faces[2 * axis + 1] = ThermalFace::Temperature(right);
+            let solution = solve_energy(
+                &domain,
+                &unit_fluid(),
+                &[material],
+                &FlowField::quiescent(&domain),
+                &ThermalSetup::new(faces),
+                &EnergyConfig::default(),
+                &gate,
+            )
+            .unwrap();
+            for c in 0..domain.cell_count() {
+                let [x, y, z] = domain.coords(c);
+                let fraction = domain.center(x, y, z)[axis] / 0.1;
+                let target = potential(left) + fraction * (potential(right) - potential(left));
+                let (mut lo, mut hi) = (280.0, 430.0);
+                for _ in 0..60 {
+                    let mid = 0.5 * (lo + hi);
+                    if potential(mid) < target {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                assert!(
+                    (solution.temperature[c] - 0.5 * (lo + hi)).abs() < 1e-7,
+                    "axis={axis}, left={left}, cell={c}, actual={}",
+                    solution.temperature[c]
+                );
+            }
+            assert!(solution.report.balance.relative_residual < 1e-9);
+        }
+    }
+}
+
+#[test]
+fn nonlinear_conduction_keeps_finite_contact_jump_and_equal_temperature_limit() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::from_fn(2, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let material = SolidMaterial::new("constant-table", 2.0)
+        .with_conductivity_table(&[(300.0, 2.0), (400.0, 2.0)]);
+    for left in [300.0, 400.0] {
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[0] = ThermalFace::Temperature(left);
+        faces[1] = ThermalFace::Temperature(300.0);
+        let mut setup = ThermalSetup::new(faces);
+        setup
+            .face_contacts
+            .push(fs_lbm::conjugate::FaceContactResistance {
+                cells: [1, 0],
+                resistance_m2_k_w: 2.0,
+            });
+        let solution = solve_energy(
+            &domain,
+            &unit_fluid(),
+            std::slice::from_ref(&material),
+            &FlowField::quiescent(&domain),
+            &setup,
+            &EnergyConfig::default(),
+            &gate,
+        )
+        .unwrap();
+        let flux = (left - 300.0) / (2.0 / 2.0 + 2.0);
+        assert!((solution.temperature[0] - (left - flux * 0.5 / 2.0)).abs() < 1e-9);
+        assert!((solution.temperature[1] - (300.0 + flux * 0.5 / 2.0)).abs() < 1e-9);
+        assert!(solution.report.balance.residual_w.abs() < 1e-9);
+    }
+}
+
+#[test]
+fn nonlinear_conduction_transient_uses_same_secants_and_conserves_storage() {
+    // Two insulated unit-capacity cells. Their mean remains 350 K, so the
+    // integrated linear k(T) is exactly 1.5 W/(m K) throughout relaxation.
+    // Backward Euler therefore divides the contrast by 1 + 2*dt*1.5/C.
+    let domain = VoxelDomain::from_fn(2, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let material = SolidMaterial::new("ramp", 1.0)
+        .with_conductivity_table(&[(300.0, 1.0), (400.0, 2.0)])
+        .with_heat_capacity(1.0);
+    let march = march_energy(
+        &domain,
+        &unit_fluid(),
+        &[material],
+        &FlowField::quiescent(&domain),
+        &ThermalSetup::new([ThermalFace::Adiabatic; 6]),
+        &[400.0, 300.0],
+        |_| 1.0,
+        &TransientConfig {
+            time_step_s: 0.1,
+            steps: 1,
+            energy: EnergyConfig::default(),
+        },
+        None,
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let contrast = 100.0 / 1.3;
+    assert!((march.temperature[0] - (350.0 + 0.5 * contrast)).abs() < 1e-8);
+    assert!((march.temperature[1] - (350.0 - 0.5 * contrast)).abs() < 1e-8);
+    assert!(march.records[0].stored_energy_change_j.abs() < 1e-9);
+    assert!(march.records[0].closure_j.abs() < 1e-9);
+}
+
+#[test]
+fn nonlinear_robin_conduction_matches_the_analytic_surface_drop_in_both_directions() {
+    let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let material =
+        SolidMaterial::new("ramp", 1.0).with_conductivity_table(&[(300.0, 1.0), (400.0, 2.0)]);
+    for (ambient, power) in [(300.0, 50.0), (400.0, -50.0)] {
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[1] = ThermalFace::Convective { h: 2.0, ambient };
+        let mut setup = ThermalSetup::new(faces);
+        setup.power_w = vec![power];
+        let solution = solve_energy(
+            &domain,
+            &unit_fluid(),
+            std::slice::from_ref(&material),
+            &FlowField::quiescent(&domain),
+            &setup,
+            &EnergyConfig::default(),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        let surface = ambient + power / 2.0;
+        let u = surface - 300.0;
+        let potential = u + 0.005 * u * u + 0.5 * power;
+        let exact = 300.0 + 100.0 * ((1.0 + 0.02 * potential).sqrt() - 1.0);
+        assert!(
+            (solution.temperature[0] - exact).abs() < 1e-7,
+            "ambient={ambient}, power={power}, actual={}, expected={exact}",
+            solution.temperature[0]
+        );
+        assert!((solution.report.balance.boundary_outflow_w - power).abs() < 1e-8);
+    }
+
+    // Both faces convect; the independently chosen film temperatures are
+    // 400 K and 300 K, with 150 W crossing the unit slab and zero net supply.
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Convective {
+        h: 3.0,
+        ambient: 450.0,
+    };
+    faces[1] = ThermalFace::Convective {
+        h: 5.0,
+        ambient: 270.0,
+    };
+    let solution = solve_energy(
+        &domain,
+        &unit_fluid(),
+        &[material],
+        &FlowField::quiescent(&domain),
+        &ThermalSetup::new(faces),
+        &EnergyConfig::default(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let exact = 300.0 + 100.0 * (2.5f64.sqrt() - 1.0);
+    assert!((solution.temperature[0] - exact).abs() < 1e-7);
+    assert!(solution.report.balance.residual_w.abs() < 1e-8);
+}
+
+#[test]
+fn nonlinear_robin_conduction_crosses_table_knots_on_a_graded_slab() {
+    let potential = |t: f64| {
+        if t <= 300.0 {
+            t - 300.0
+        } else if t <= 350.0 {
+            let u = t - 300.0;
+            u + 0.03 * u * u
+        } else if t <= 400.0 {
+            let u = t - 350.0;
+            125.0 + 4.0 * u - 0.02 * u * u
+        } else {
+            275.0 + 2.0 * (t - 400.0)
+        }
+    };
+    let domain = VoxelDomain::graded_from_fn([vec![0.5, 0.5, 3.0], vec![1.0], vec![1.0]], |_| {
+        Voxel::Solid(0)
+    })
+    .unwrap();
+    let material = SolidMaterial::new("crossed-table", 1.0).with_conductivity_table(&[
+        (300.0, 1.0),
+        (350.0, 4.0),
+        (400.0, 2.0),
+    ]);
+    for (surface, flux) in [(310.0, 100.0), (390.0, -100.0)] {
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[0] = ThermalFace::HeatFlux(flux);
+        faces[1] = ThermalFace::Convective {
+            h: 10.0,
+            ambient: surface - flux / 10.0,
+        };
+        let solution = solve_energy(
+            &domain,
+            &unit_fluid(),
+            std::slice::from_ref(&material),
+            &FlowField::quiescent(&domain),
+            &ThermalSetup::new(faces),
+            &EnergyConfig::default(),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        for c in 0..3 {
+            let target = potential(surface) + flux * (4.0 - domain.center(c, 0, 0)[0]);
+            let (mut lo, mut hi) = (100.0, 600.0);
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if potential(mid) < target {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            assert!(
+                (solution.temperature[c] - 0.5 * (lo + hi)).abs() < 1e-7,
+                "flux={flux}, cell={c}, actual={}",
+                solution.temperature[c]
+            );
+        }
+        assert!(solution.report.balance.residual_w.abs() < 1e-7);
+    }
+}
+
+#[test]
+fn nonlinear_robin_conduction_transient_closes_surface_heat_and_storage() {
+    let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let material = SolidMaterial::new("ramp", 1.0)
+        .with_conductivity_table(&[(300.0, 1.0), (400.0, 2.0)])
+        .with_heat_capacity(1.0);
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[1] = ThermalFace::Convective {
+        h: 2.0,
+        ambient: 300.0,
+    };
+    let march = march_energy(
+        &domain,
+        &unit_fluid(),
+        &[material],
+        &FlowField::quiescent(&domain),
+        &ThermalSetup::new(faces),
+        &[400.0],
+        |_| 1.0,
+        &TransientConfig {
+            time_step_s: 0.1,
+            steps: 1,
+            energy: EnergyConfig::default(),
+        },
+        None,
+        &CancelGate::new(),
+    )
+    .unwrap();
+    // q=10*(400-T), Ts=300+q/2, and Phi(T)-Phi(Ts)=q/2 give
+    // 0.12*(T-300)^2-36*(T-300)+2250=0 on the physical branch.
+    let exact = 300.0 + (36.0 - 216.0f64.sqrt()) / 0.24;
+    let heat_j = 400.0 - exact;
+    assert!((march.temperature[0] - exact).abs() < 1e-7);
+    assert!((march.records[0].stored_energy_change_j + heat_j).abs() < 1e-7);
+    assert!((march.records[0].boundary_outflow_j - heat_j).abs() < 1e-7);
+    assert!(march.records[0].closure_j.abs() < 1e-8);
+}
+
+#[test]
+fn nonlinear_robin_conduction_refuses_unrepresentable_fixed_cell_reaction() {
+    // A fixed row bypasses ordinary matrix face assembly. It must still refuse
+    // a film whose half-cell resistance is unrepresentable during heat accounting.
+    let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let tiny = f64::from_bits(1);
+    let material = SolidMaterial::new("unrepresentable-resistance", tiny)
+        .with_conductivity_table(&[(300.0, tiny), (400.0, tiny)]);
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[1] = ThermalFace::Convective {
+        h: 1.0,
+        ambient: 400.0,
+    };
+    let mut setup = ThermalSetup::new(faces);
+    setup.fixed_temperature.push((0, 300.0));
+    assert!(matches!(
+        solve_energy(
+            &domain,
+            &unit_fluid(),
+            &[material],
+            &FlowField::quiescent(&domain),
+            &setup,
+            &EnergyConfig::default(),
+            &CancelGate::new()
+        ),
+        Err(ChtError::InvalidInput {
+            field: "thermal.face_coefficients",
+            ..
+        })
+    ));
 }
 
 #[test]
