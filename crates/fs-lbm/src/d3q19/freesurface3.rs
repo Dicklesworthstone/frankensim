@@ -1018,17 +1018,29 @@ impl FreeSurface3 {
                 phi(0, -1, 0) - phi(0, 1, 0),
                 phi(0, 0, -1) - phi(0, 0, 1),
             ];
-            if let Some(kappa) = curvature::height_function(normal, |offset| {
-                let position = [cx + offset[0], cy + offset[1], cz + offset[2]];
-                if self.planar_piston_contains(position) {
-                    return None;
+            // Share the bounded complete-height family used by local surface
+            // traction. The original 7-cell column remains first; wider
+            // deterministic columns are attempted only when needed before
+            // falling back to the smoothed wall/contact-angle reconstruction.
+            for half_depth in [3, 5, 7] {
+                if let Some(geometry) = curvature::height_geometry_with_depth(
+                    normal,
+                    half_depth,
+                    |offset| {
+                        let position = [cx + offset[0], cy + offset[1], cz + offset[2]];
+                        if self.planar_piston_contains(position) {
+                            return None;
+                        }
+                        let (slot, sample_lane) =
+                            self.grid
+                                .resolve_source(position[0], position[1], position[2])?;
+                        Some(self.fill(self.grid.active_keys()[slot], sample_lane))
+                    },
+                ) {
+                    return geometry
+                        .curvature
+                        .clamp(-Self::CURVATURE_LIMIT, Self::CURVATURE_LIMIT);
                 }
-                let (slot, sample_lane) =
-                    self.grid
-                        .resolve_source(position[0], position[1], position[2])?;
-                Some(self.fill(self.grid.active_keys()[slot], sample_lane))
-            }) {
-                return kappa.clamp(-Self::CURVATURE_LIMIT, Self::CURVATURE_LIMIT);
             }
         }
         let nhat = |dx: i64, dy: i64, dz: i64| -> [f64; 3] {
