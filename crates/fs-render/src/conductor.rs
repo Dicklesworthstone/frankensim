@@ -15,6 +15,7 @@ use fs_math::det;
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 
 mod thin_film;
+pub(crate) use thin_film::propagation as coating_propagation;
 pub use thin_film::{CoherentDielectricCoating, MAX_COHERENT_COATING_THICKNESS_M};
 mod absorbing_film;
 pub use absorbing_film::{CoatingIorSample, CoherentAbsorbingCoating};

@@ -448,6 +448,40 @@ impl PolarizedBeam {
         let sample = sample_smooth_dielectric_polarized(
             normal, self.frame.direction.scale(-1.0), eta_i, eta_t, event_sample,
         )?;
+        self.scatter_smooth_sample(normal, target, eta_i, eta_t, sample)
+    }
+
+    /// Sample one original transparent coating on a smooth dielectric boundary.
+    /// Reflection/transmission use this beam's actual spectral/local index and
+    /// the supplied target medium, with coherent s/p phase and normal power.
+    /// Only transmission changes the medium. Film thickness is optical; both
+    /// local film faces are collapsed onto the current geometric hit.
+    pub fn sample_coated_interface(
+        self,
+        normal: Vec3,
+        target: impl Into<BeamMedium>,
+        coating: &crate::conductor::CoherentDielectricCoating,
+        event_sample: f64,
+    ) -> Result<BeamSample, BeamError> {
+        let normal = self.incident_normal(normal)?;
+        let target = target.into();
+        let eta_i = self.medium.phase_index_at(self.origin, self.wavelength_nm)?;
+        let eta_t = target.phase_index_at(self.origin, self.wavelength_nm)?;
+        let sample = super::sample_smooth_coated_dielectric_polarized(
+            normal, self.frame.direction.scale(-1.0), eta_i, eta_t,
+            self.wavelength_nm, coating, event_sample,
+        )?;
+        self.scatter_smooth_sample(normal, target, eta_i, eta_t, sample)
+    }
+
+    fn scatter_smooth_sample(
+        self,
+        normal: Vec3,
+        target: BeamMedium,
+        eta_i: f64,
+        eta_t: f64,
+        sample: super::PolarizedDielectricSample,
+    ) -> Result<BeamSample, BeamError> {
         // This is a forward ray-power path. The native camera/radiance
         // proposal is useful, but its eta Jacobian is not a power loss.
         let factor = if sample.event == DielectricEvent::Transmission {

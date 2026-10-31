@@ -182,3 +182,112 @@ fn g3_native_scene_order_and_counter_stream_are_replayable() {
         }
     });
 }
+
+fn transparent_film() -> CoherentDielectricCoating {
+    use crate::conductor::{ConductorDataStatus, ConductorSource};
+    CoherentDielectricCoating::try_new(
+        CauchyIor::try_constant(2.0).unwrap(), 80e-9,
+        ConductorSource::try_new(hash_domain("polarized-coated-glass-test",b"original-film"),
+            ConductorDataStatus::Representative).unwrap(),
+    ).unwrap()
+}
+fn coated_boundary(coating: usize) -> SurfaceBinding {
+    SurfaceBinding { object_id:1, interaction:Interaction::CoatedDielectric {
+        outside:0, inside:1, coating,
+    }}
+}
+
+#[test]
+fn g1_original_coating_controls_real_scene_branches_in_both_directions() {
+    with_cx(|cx| {
+        let geometry=InstanceScene::try_new(vec![
+            plane(1,0.0,true),plane(2,2.0,true),plane(3,-2.0,true),
+        ]).unwrap();
+        let media=[glass(1.0,0.1),glass(1.5,0.3)];
+        let coatings=[transparent_film()];
+        let bindings=vec![coated_boundary(0),detector(2),detector(3)];
+        assert!(PolarizedScene::try_new(&geometry,&media,bindings.clone()).is_err());
+        assert!(PolarizedScene::try_new_with_optics(&geometry,&media,&[],&coatings,
+            vec![coated_boundary(1),detector(2),detector(3)]).is_err());
+        let scene=PolarizedScene::try_new_with_optics(&geometry,&media,&[],&coatings,bindings).unwrap();
+        assert!(std::ptr::eq(scene.coatings.as_ptr(),coatings.as_ptr()));
+        for reverse in [false,true] {
+            let (initial,target,z,direction)=if reverse {(1,0,-1.0,1.0)} else {(0,1,1.0,-1.0)};
+            let input=PolarizedBeam::try_new(Point3::new(0.0,0.0,z),
+                PolarizationFrame::try_new(Vec3::new(0.0,0.0,direction),Vec3::new(1.0,0.0,0.0)).unwrap(),
+                550.0,media[initial],Stokes::try_new(1.0,0.3,0.4,0.2).unwrap()).unwrap();
+            // Independent Airy R=0.1976117838 here; bare glass has R=0.04.
+            // u=0.1 must therefore reflect specifically because of the film.
+            for (u,reflection) in [(0.1,true),(0.999,false)] {
+                let result=scene.trace_with_samples(cx,input,initial,settings(), |_| [0.2,0.7,u]).unwrap();
+                assert_eq!(result.termination(),PathTermination::Detected);
+                let final_medium=if reflection {initial} else {target};
+                assert_eq!(result.medium_index(),final_medium);
+                assert_eq!(result.last_hit().unwrap().object_id,if reflection != reverse {2} else {3});
+                near(result.traveled_m(),3.0);
+                let sigma=[0.1,0.3];
+                let power=fs_math::det::exp(-(sigma[initial]+2.0*sigma[final_medium]));
+                let sign=if reflection {-1.0} else {1.0};
+                for (a,b) in [result.beam().power().i,result.beam().power().q,
+                    result.beam().power().u,result.beam().power().v].into_iter()
+                    .zip([power,0.3*power,sign*0.4*power,sign*0.2*power]) { near(a,b); }
+            }
+        }
+    });
+}
+
+#[cfg(feature="photometry")]
+#[test]
+fn g1_coated_scene_detector_reads_independent_spectral_power_and_handedness() {
+    use crate::photometry::source::{BIN_WIDTH_NM,LUMINOUS_EFFICACY_LM_W,SPECTRAL_BINS,
+        photopic_weight_nm,wavelength_nm};
+    with_cx(|cx| {
+        let geometry=InstanceScene::try_new(vec![
+            plane(1,0.0,true),plane(2,2.0,true),plane(3,-2.0,true),
+        ]).unwrap();
+        let media=[glass(1.0,0.0),glass(1.5,0.0)];
+        let coatings=[transparent_film()];
+        let scene=PolarizedScene::try_new_with_optics(&geometry,&media,&[],&coatings,
+            vec![coated_boundary(0),detector(2),detector(3)]).unwrap();
+        let mut reflected=scene.power_meter(2).unwrap();
+        let mut transmitted=scene.power_meter(3).unwrap();
+        let mut expected_r=0.0;
+        let mut expected_t=0.0;
+        let mut expected_lumens=0.0;
+        for bin in 0..SPECTRAL_BINS {
+            let wavelength=wavelength_nm(bin);
+            // Independent normal-incidence Airy power, summing the geometric
+            // series of film-interface reflections. No production matrix call.
+            let r01=-1.0_f64/3.0;
+            let r12=1.0_f64/7.0;
+            let phase=4.0*core::f64::consts::PI*2.0*80.0/wavelength;
+            let interference=2.0*r01*r12*fs_math::det::cos(phase);
+            let r=(r01*r01+r12*r12+interference)/
+                (1.0+(r01*r12)*(r01*r12)+interference);
+            let t=1.0-r;
+            expected_r+=r*BIN_WIDTH_NM;
+            expected_t+=t*BIN_WIDTH_NM;
+            expected_lumens+=t*LUMINOUS_EFFICACY_LM_W*photopic_weight_nm(bin);
+            // Exact two-branch quadrature: meter averages two original
+            // launches, so each launch carries twice its branch mass.
+            for (mass,u) in [(r,0.0),(t,0.999999)] {
+                let input=PolarizedBeam::try_new(Point3::new(0.0,0.0,1.0),
+                    PolarizationFrame::try_new(Vec3::new(0.0,0.0,-1.0),Vec3::new(1.0,0.0,0.0)).unwrap(),
+                    wavelength,media[0],Stokes::try_new(2.0*mass,0.0,0.0,2.0*mass).unwrap()).unwrap();
+                let result=scene.trace_with_samples(cx,input,0,settings(), |_| [0.2,0.7,u]).unwrap();
+                reflected.record(bin,&result).unwrap();
+                transmitted.record(bin,&result).unwrap();
+            }
+        }
+        let r=reflected.reading().unwrap().require_complete().unwrap();
+        let t=transmitted.reading().unwrap().require_complete().unwrap();
+        near(r.radiant_stokes_w().i,expected_r);
+        near(r.radiant_stokes_w().v,-expected_r);
+        near(t.radiant_stokes_w().i,expected_t);
+        near(t.radiant_stokes_w().v,expected_t);
+        assert!((t.photopic_stokes_lm().i-expected_lumens).abs() < 3e-12*expected_lumens);
+        near(t.circular_analyzer(false).unwrap().radiant_w,0.0);
+        near(t.circular_analyzer(true).unwrap().radiant_w,expected_t);
+        assert_eq!(t.launched_paths(),2*SPECTRAL_BINS as u64);
+    });
+}

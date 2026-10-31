@@ -12,6 +12,9 @@
 //! for the scalar camera-path integrator.
 
 mod interface;
+/// Source-bound coherent transparent films on native smooth boundaries.
+pub mod coating;
+pub use coating::{fresnel_coated_dielectric_polarized, sample_smooth_coated_dielectric_polarized};
 #[cfg(feature = "photometry")]
 pub(super) use interface::spectral_fresnel_dielectric_polarized_borrowed;
 pub use interface::{

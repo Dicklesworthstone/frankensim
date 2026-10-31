@@ -495,3 +495,59 @@ fn g1_curved_native_detector_feeds_original_spectral_meter() {
         assert_eq!(reading.launched_paths(), 2 * SPECTRAL_BINS as u64);
     });
 }
+
+#[test]
+fn g1_coated_curved_contact_uses_local_index_and_reaches_polarized_receiver() {
+    use crate::conductor::{CoherentDielectricCoating,ConductorDataStatus,ConductorSource};
+    with_cx(|cx,_| {
+        let (n0,g,d,after)=(1.2_f64,0.2_f64,1.0_f64,1.0_f64);
+        let s=n0/g*(g*d/n0).sinh();
+        let n_exit=n0*(g*d/n0).cosh();
+        let x_exit=(n_exit-n0)/g;
+        let air_x=g*s;
+        let air_z=(1.0-air_x*air_x).sqrt();
+        let receiver_x=x_exit+after*air_x/air_z;
+        let geometry=InstanceScene::try_new(vec![
+            plane(1,d,0.0,10.0),plane(9,d+after,receiver_x,0.04),
+        ]).unwrap();
+        let air=glass(1.0,0.0);
+        let field=SlabField;
+        let media=[
+            SceneMedium::GradientIndex {field:&field,identity:ContentHash([17;32])},
+            SceneMedium::Homogeneous(&air),
+        ];
+        let coatings=[CoherentDielectricCoating::try_new(
+            CauchyIor::try_constant(2.0).unwrap(),80e-9,
+            ConductorSource::try_new(ContentHash([105;32]),ConductorDataStatus::Representative).unwrap(),
+        ).unwrap()];
+        let mut bindings=bindings(9);
+        bindings[0].interaction=Interaction::CoatedDielectric {outside:1,inside:0,coating:0};
+        let scene=CurvedPolarizedScene::try_new_with_optics(
+            cx,&geometry,&media,&[],&coatings,bindings,100_000,
+        ).unwrap();
+        assert!(std::ptr::eq(scene.coatings.as_ptr(),coatings.as_ptr()));
+        let input=scene.launch_beam(Point3::new(0.0,0.0,0.0),frame(),550.0,0,
+            Stokes::try_new(1.0,0.0,1.0,0.0).unwrap()).unwrap();
+        let result=scene.trace_with_samples(cx,input,0,settings(), |_| [0.3,0.7,0.999999]).unwrap();
+        assert_eq!(result.termination(),PathTermination::Detected);
+        assert_eq!(result.medium_index(),1);
+        assert_eq!(result.last_contact().unwrap().object_id,9);
+        assert!((result.beam().ray().origin.x-receiver_x).abs() < 2e-6);
+        // Airy calculation at analytic n_exit=1.2167052826537559,
+        // cos(theta_i)=n0/n_exit. Bare-interface or nominal-index scattering
+        // cannot reproduce this generated circular component.
+        let transmission=[0.7274756716013036,-0.009030087759154537,
+            0.7274173032478068,-0.0018377221002666144];
+        let attenuation=(-0.3*s).exp();
+        let expected=[attenuation,
+            attenuation*transmission[1]/transmission[0],
+            attenuation*transmission[2]/transmission[0],
+            attenuation*transmission[3]/transmission[0]];
+        let actual=result.beam().power();
+        for (a,b) in [actual.i,actual.q,actual.u,actual.v].into_iter().zip(expected) {
+            assert!((a-b).abs() < 4e-6,"{a} != {b}");
+        }
+        assert!(actual.v < -1e-3);
+        assert_eq!(result.medium_snapshot_identity(),None);
+    });
+}

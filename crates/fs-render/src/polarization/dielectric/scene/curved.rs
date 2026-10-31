@@ -26,9 +26,9 @@ use fs_rand::philox::philox4x32_10;
 use super::super::transport::{BeamError, BeamMedium, PolarizationFrame, PolarizedBeam};
 use super::{
     Interaction, MAX_POLARIZED_PATH_EVENTS, PathTermination, SceneError, SurfaceBinding,
-    admit_bindings,
+    admit_bindings, sample_boundary,
 };
-use crate::conductor::ConductorOptics;
+use crate::conductor::{CoherentDielectricCoating, ConductorOptics};
 use crate::dielectric::{DielectricEvent, DielectricGlass};
 use crate::gradient_index::event::{
     BoundarySide, BoundaryTermination, BoundaryWitness, GradientDeparture, GradientEventOptions,
@@ -181,6 +181,7 @@ pub struct CurvedPolarizedScene<'a> {
     pub(super) bindings: Vec<SurfaceBinding>,
     media: &'a [SceneMedium<'a>],
     conductors: &'a [ConductorOptics],
+    coatings: &'a [CoherentDielectricCoating],
     boundaries: BoundaryGeometry<'a>,
 }
 
@@ -205,8 +206,24 @@ impl<'a> CurvedPolarizedScene<'a> {
         bindings: Vec<SurfaceBinding>,
         max_build_work: u64,
     ) -> Result<Self, CurvedSceneError> {
+        Self::try_new_with_optics(cx, geometry, media, conductors, &[], bindings, max_build_work)
+    }
+
+    /// Borrow original coherent dielectric films for local curved-ray boundary
+    /// scattering; both indices come from the physical contact, not nominal glass.
+    pub fn try_new_with_optics(
+        cx: &Cx<'_>,
+        geometry: &'a InstanceScene,
+        media: &'a [SceneMedium<'a>],
+        conductors: &'a [ConductorOptics],
+        coatings: &'a [CoherentDielectricCoating],
+        bindings: Vec<SurfaceBinding>,
+        max_build_work: u64,
+    ) -> Result<Self, CurvedSceneError> {
         cx.checkpoint()?;
-        let bindings = admit_bindings(geometry, media.len(), conductors.len(), bindings)?;
+        let bindings = admit_bindings(
+            geometry, media.len(), conductors.len(), coatings.len(), bindings,
+        )?;
         if media.iter().any(|medium| {
             matches!(medium,
             SceneMedium::GradientIndex { identity, .. } if *identity == ContentHash([0; 32]))
@@ -218,6 +235,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             geometry,
             media,
             conductors,
+            coatings,
             bindings,
             boundaries,
         })
@@ -466,11 +484,8 @@ impl<'a> CurvedPolarizedScene<'a> {
                     };
                     result.beam = next.beam;
                 }
-                Interaction::Dielectric {
-                    outside,
-                    inside,
-                    surface,
-                } => {
+                interaction @ (Interaction::Dielectric { outside, inside, .. }
+                | Interaction::CoatedDielectric { outside, inside, .. }) => {
                     let cosine = witness.normal.dot(result.beam.ray().dir);
                     if !cosine.is_finite() || cosine == 0.0 {
                         return Err(CurvedSceneError::InvalidContact);
@@ -490,11 +505,9 @@ impl<'a> CurvedPolarizedScene<'a> {
                     }
                     let target_medium =
                         self.medium_at(target, result.beam.ray().origin, wavelength)?;
-                    let Some(next) = result.beam.sample_interface(
-                        witness.normal,
-                        target_medium,
-                        surface,
-                        samples(event),
+                    let Some(next) = sample_boundary(
+                        result.beam, witness.normal, target_medium, interaction,
+                        self.coatings, samples(event),
                     )?
                     else {
                         result.termination = PathTermination::RejectedMicrofacet;

@@ -3841,3 +3841,43 @@ original continuation budget is restored. This is conditional time-convergence
 evidence; it neither resamples the operator nor certifies spatial, spectral,
 constitutive or Monte Carlo trajectory errors. Independent-operator ensembles
 would be required to assess sampling variability of the thermal trajectory.
+
+### Coherent transparent coatings on dielectric ray boundaries
+
+The polarized forward-power path accepts an original
+`CoherentDielectricCoating` on a smooth dielectric boundary. Its admitted
+visible Cauchy, Sellmeier or sampled phase-index law, physical thickness and
+source assertion remain intact. The same bounded single-film propagation used
+by conductor coatings supplies the dielectric reflection and transmission;
+no synthetic permittivity/permeability or material-name preset is introduced.
+
+`fresnel_coated_dielectric_polarized` retains complex s/p phase in both Mueller
+matrices and normal Poynting transmission. Equal surrounding indices do not
+remove a contrasting film. Zero thickness and index-matched films recover the
+bare response; critical film waves, frustrated total internal reflection and
+an opaque evanescent-film limit remain finite. Nontrivial exact grazing refuses
+because its incident normal power vanishes. Boundary indices retain the native
+real-index domain, with original bulk absorption applied separately by segment
+transport.
+
+`sample_smooth_coated_dielectric_polarized` reuses native direction admission,
+reflection and Snell refraction. It chooses from the two positive optical powers,
+placing the smaller branch first so weak reflection or transmission is not
+erased by a rounded complement. `PolarizedBeam::sample_coated_interface` rotates
+the actual ray frames, transfers forward power and changes the medium only on
+transmission. It removes the camera radiance Jacobian exactly once.
+
+Straight and curved scenes expose `try_new_with_optics` and an indexed
+`Interaction::CoatedDielectric`; existing constructors retain their behavior.
+Both owners borrow one original coating table and use the same boundary sampler.
+Curved contacts evaluate the arriving and target local phase indices while
+retaining the original field snapshot, geometry witness and detector route.
+The existing spectral receiver/analyzers consume these path outcomes directly.
+
+This is a coherent smooth, isotropic, locally parallel film model with both film
+faces collapsed onto the geometric boundary. Film thickness changes optical
+interference; no nanometre displacement, group delay, rough coated interface,
+scene-wide coherent phase or scalar camera-path coating is inferred. Regression
+cases cover independent Airy phase/work, antireflection, reversed media, critical
+and evanescent films, original spectral laws, weak positive branch support, both
+native scene consumers and calibrated detector power/handedness.

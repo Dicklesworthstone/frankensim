@@ -29,11 +29,11 @@ pub struct PolarizedFresnel {
     pub reflection: Mueller,
     /// Transmission of ray power; zero for total internal reflection.
     pub transmission: Mueller,
-    /// The unchanged scalar renderer result (including its boundary policy).
+    /// Unpolarized reflection and the native Snell geometry/boundary policy.
     pub scalar: FresnelDielectric,
 }
 
-fn diagonal(s_power: f64, p_power: f64, cross_re: f64, cross_im: f64) -> Mueller {
+pub(super) fn diagonal(s_power: f64, p_power: f64, cross_re: f64, cross_im: f64) -> Mueller {
     let mean = 0.5 * s_power + 0.5 * p_power;
     let difference = 0.5 * s_power - 0.5 * p_power;
     Mueller([

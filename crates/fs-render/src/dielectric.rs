@@ -1275,7 +1275,7 @@ fn validate_roughness(alpha: f64) -> Result<(), DielectricError> {
     }
 }
 
-fn validate_direction_frame(normal: Vec3, wo: Vec3) -> Result<(), DielectricError> {
+pub(crate) fn validate_direction_frame(normal: Vec3, wo: Vec3) -> Result<(), DielectricError> {
     validate_unit(normal)?;
     validate_unit(wo)?;
     let cosine = normal.dot(wo);
@@ -1298,7 +1298,7 @@ fn validate_unit(direction: Vec3) -> Result<(), DielectricError> {
     }
 }
 
-fn normalize_admitted(direction: Vec3) -> Vec3 {
+pub(crate) fn normalize_admitted(direction: Vec3) -> Vec3 {
     direction.scale(1.0 / direction.norm())
 }
 
@@ -1318,12 +1318,12 @@ fn scale_safe_norm(vector: Vec3) -> f64 {
     }
 }
 
-fn reflect(wo: Vec3, normal: Vec3) -> Vec3 {
+pub(crate) fn reflect(wo: Vec3, normal: Vec3) -> Vec3 {
     let cosine = wo.dot(normal);
     add(normal.scale(2.0 * cosine), wo.scale(-1.0))
 }
 
-fn refract(
+pub(crate) fn refract(
     wo: Vec3,
     normal: Vec3,
     eta_i: f64,

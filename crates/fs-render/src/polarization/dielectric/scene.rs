@@ -17,8 +17,8 @@ use fs_geom::Vec3;
 use fs_rand::philox::philox4x32_10;
 
 use super::mirrors::ConductorBeamError;
-use super::transport::{BeamError, BeamMedium, PolarizedBeam};
-use crate::conductor::{ConductorOptics, ConductorSurface};
+use super::transport::{BeamError, BeamMedium, BeamSample, PolarizedBeam};
+use crate::conductor::{CoherentDielectricCoating, ConductorOptics, ConductorSurface};
 use crate::dielectric::{DielectricEvent, DielectricGlass, DielectricSurface};
 use crate::instances::{InstanceError, InstanceHit, InstanceScene};
 
@@ -37,6 +37,10 @@ pub enum Interaction {
     /// refer to the scene's original media slice; equal-index glass may still
     /// have different absorption. Misoriented/overlapping media fail closed.
     Dielectric { outside: usize, inside: usize, surface: DielectricSurface },
+    /// Smooth dielectric boundary carrying one original transparent film.
+    /// `coating` indexes the borrowed coating table. The same physical film
+    /// applies in both directions, with the actual incident/exit media.
+    CoatedDielectric { outside: usize, inside: usize, coating: usize },
     /// Two-sided smooth opaque reflector in the declared surrounding medium.
     /// `optics` indexes the separately borrowed conductor table. The same law
     /// (including an explicitly supplied film) applies on both sides; distinct
@@ -164,6 +168,7 @@ pub struct PolarizedScene<'a> {
     geometry: &'a InstanceScene,
     media: &'a [DielectricGlass],
     conductors: &'a [ConductorOptics],
+    coatings: &'a [CoherentDielectricCoating],
     bindings: Vec<SurfaceBinding>,
 }
 impl<'a> PolarizedScene<'a> {
@@ -183,8 +188,22 @@ impl<'a> PolarizedScene<'a> {
         conductors: &'a [ConductorOptics],
         bindings: Vec<SurfaceBinding>,
     ) -> Result<Self, SceneError> {
-        let bindings = admit_bindings(geometry, media.len(), conductors.len(), bindings)?;
-        Ok(Self { geometry, media, conductors, bindings })
+        Self::try_new_with_optics(geometry, media, conductors, &[], bindings)
+    }
+
+    /// Borrow source-bound smooth dielectric films and metal optics alongside
+    /// the original media/geometry. Coating data are not copied into every hit.
+    pub fn try_new_with_optics(
+        geometry: &'a InstanceScene,
+        media: &'a [DielectricGlass],
+        conductors: &'a [ConductorOptics],
+        coatings: &'a [CoherentDielectricCoating],
+        bindings: Vec<SurfaceBinding>,
+    ) -> Result<Self, SceneError> {
+        let bindings = admit_bindings(
+            geometry, media.len(), conductors.len(), coatings.len(), bindings,
+        )?;
+        Ok(Self { geometry, media, conductors, coatings, bindings })
     }
 
     /// Deterministic counter-based sampling keyed by `(seed, path_id, event)`.
@@ -306,7 +325,8 @@ impl<'a> PolarizedScene<'a> {
                     result.beam = next.beam;
                     offset = settings.query_offset_m;
                 }
-                Interaction::Dielectric { outside, inside, surface } => {
+                interaction @ (Interaction::Dielectric { outside, inside, .. }
+                | Interaction::CoatedDielectric { outside, inside, .. }) => {
                     let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
                     let cosine = normal.dot(result.beam.ray().dir);
                     if !cosine.is_finite() || cosine == 0.0 { return Err(SceneError::InvalidHit); }
@@ -316,8 +336,9 @@ impl<'a> PolarizedScene<'a> {
                             object_id: hit.object_id, expected, actual: result.medium,
                         });
                     }
-                    let Some(next) = result.beam.sample_interface(
-                        normal, self.media[target], surface, samples(event),
+                    let Some(next) = sample_boundary(
+                        result.beam, normal, self.media[target].into(), interaction,
+                        self.coatings, samples(event),
                     )? else {
                         result.termination = PathTermination::RejectedMicrofacet;
                         return finish(cx, result);
@@ -336,11 +357,13 @@ fn admit_bindings(
     geometry: &InstanceScene,
     media_count: usize,
     conductor_count: usize,
+    coating_count: usize,
     mut bindings: Vec<SurfaceBinding>,
 ) -> Result<Vec<SurfaceBinding>, SceneError> {
     if media_count == 0
         || media_count > MAX_POLARIZED_SCENE_ITEMS
         || conductor_count > MAX_POLARIZED_SCENE_ITEMS
+        || coating_count > MAX_POLARIZED_SCENE_ITEMS
         || bindings.len() != geometry.instances().len()
         || bindings.len() > MAX_POLARIZED_SCENE_ITEMS
     {
@@ -352,11 +375,13 @@ fn admit_bindings(
             return Err(SceneError::InvalidBindings);
         }
         match binding.interaction {
-            Interaction::Dielectric {
-                outside, inside, ..
-            } => {
+            Interaction::Dielectric { outside, inside, .. }
+            | Interaction::CoatedDielectric { outside, inside, .. } => {
                 if outside >= media_count || inside >= media_count {
                     return Err(SceneError::InvalidBindings);
+                }
+                if let Interaction::CoatedDielectric { coating, .. } = binding.interaction {
+                    if coating >= coating_count { return Err(SceneError::InvalidBindings); }
                 }
             }
             Interaction::Detector { reference_axis: a } => {
@@ -376,6 +401,31 @@ fn admit_bindings(
         }
     }
     Ok(bindings)
+}
+
+// Both straight and curved scenes use exactly the same boundary sampler.
+fn sample_boundary(
+    beam: PolarizedBeam,
+    normal: Vec3,
+    target: BeamMedium,
+    interaction: Interaction,
+    coatings: &[CoherentDielectricCoating],
+    samples: [f64; 3],
+) -> Result<Option<BeamSample>, BeamError> {
+    match interaction {
+        Interaction::Dielectric { surface, .. } => {
+            beam.sample_interface(normal, target, surface, samples)
+        }
+        Interaction::CoatedDielectric { coating, .. } => {
+            if samples.iter().any(|u| !u.is_finite() || !(0.0..1.0).contains(u)) {
+                return Err(crate::dielectric::DielectricError::InvalidInterface.into());
+            }
+            let coating = coatings.get(coating)
+                .ok_or(crate::dielectric::DielectricError::InvalidInterface)?;
+            beam.sample_coated_interface(normal, target, coating, samples[2]).map(Some)
+        }
+        _ => Err(crate::dielectric::DielectricError::InvalidInterface.into()),
+    }
 }
 
 fn finish(cx: &Cx<'_>, result: PathResult) -> Result<PathResult, SceneError> {

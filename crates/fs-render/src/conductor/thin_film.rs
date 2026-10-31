@@ -20,12 +20,14 @@ pub(super) mod polarization;
 /// that a particular source has sufficient temporal or spatial coherence.
 pub const MAX_COHERENT_COATING_THICKNESS_M: f64 = 1.0e-4;
 
-/// One transparent isotropic film, conformal to each conductor microfacet.
+/// One transparent isotropic film, conformal to a locally planar surface.
 ///
 /// The source must describe its visible phase-index law and thickness.
 /// The model sums coherent s/p amplitudes within this film. Scalar Fresnel
 /// returns their mean power; `ConductorOptics::fresnel_mueller` retains their
-/// relative phase for polarized transport. Thickness is normal to the microfacet.
+/// relative phase for polarized transport. Dielectric boundaries consume the same
+/// source through `crate::polarization::dielectric::coating`. Thickness is normal
+/// to the local surface.
 /// It assumes locally parallel boundaries and a laterally uniform film; the
 /// caller must ensure coherence across its optical path difference. It adds
 /// no absorption in the film, arbitrary
@@ -170,7 +172,7 @@ pub(super) fn forward_sqrt(value: Complex) -> Complex {
 // cancels from reflection. The sinc limit removes the Airy formula's 0/0
 // at the film's critical angle. Evanescent layers use exp(-2 a |q|), never
 // exponentially growing transfer entries, so frustrated TIR stays finite.
-fn propagation(q_squared: f64, phase_scale: f64) -> (f64, f64) {
+pub(crate) fn propagation(q_squared: f64, phase_scale: f64) -> (f64, f64) {
     if q_squared >= 0.0 {
         let q = det::sqrt(q_squared);
         let phase = phase_scale * q;
