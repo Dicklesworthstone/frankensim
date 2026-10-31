@@ -14,10 +14,11 @@ pub mod gas_scattering;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_conduction::radiation::SurfaceEmissivity;
+use fs_matdb::MaterialCard;
 use fs_material::state_point::{
-    ResolvedMaterialStatePoint, VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM, VisibleConductorStatePoint,
-    VisibleDielectricAbsorption, VisibleDielectricStatePoint, VisibleOpticalStatePoint,
-    VisibleSellmeierStatePoint,
+    MaterialStatePointError, ResolvedMaterialStatePoint, VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM,
+    VisibleConductorStatePoint, VisibleDielectricAbsorption, VisibleDielectricStatePoint,
+    VisibleOpticalStatePoint, VisibleSellmeierStatePoint,
 };
 
 use crate::conductor::{
@@ -276,6 +277,63 @@ impl MaterialOpticalBinding {
         ))
     }
 
+    /// Refresh bulk optics to the new accepted material state while retaining
+    /// the original optical family, source claims and independent surface finish.
+    /// `optical` must be the exact source state used by this binding. The returned
+    /// source accompanies the new binding for subsequent accepted endpoints.
+    ///
+    /// Complete coordinates and quantity meanings come from `accepted`; no
+    /// temperature axis name is assumed. This evaluates an endpoint, not a
+    /// phase change, surface evolution or support along the intervening path.
+    /// Refusal leaves both the physical state and original appearance unchanged.
+    pub fn at_material_state(
+        &self,
+        optical: &VisibleOpticalStatePoint,
+        card: &MaterialCard,
+        accepted: &ResolvedMaterialStatePoint,
+    ) -> Result<(Self, VisibleOpticalStatePoint), MaterialOpticalRefreshError> {
+        if optical.resolved().identity() != self.optical_state_identity
+            || accepted.card_identity() != self.material_card_identity
+        {
+            return Err(MaterialOpticalRefreshError::SourceMismatch);
+        }
+        let refreshed = optical
+            .at_query_point(card, &accepted.query())
+            .map_err(MaterialOpticalRefreshError::Source)?;
+        let binding = match (self.appearance, &refreshed) {
+            (
+                OpticalAppearance::Conductor { surface, .. },
+                VisibleOpticalStatePoint::Conductor(state),
+            ) => Self::try_conductor(
+                accepted,
+                state,
+                surface.roughness_alpha(),
+                self.surface_state_identity,
+            ),
+            (
+                OpticalAppearance::Dielectric { surface, .. },
+                VisibleOpticalStatePoint::Dielectric(state),
+            ) => Self::try_dielectric(
+                accepted,
+                state,
+                surface.roughness_alpha(),
+                self.surface_state_identity,
+            ),
+            (
+                OpticalAppearance::Dielectric { surface, .. },
+                VisibleOpticalStatePoint::DielectricSellmeier(state),
+            ) => Self::try_sellmeier(
+                accepted,
+                state,
+                surface.roughness_alpha(),
+                self.surface_state_identity,
+            ),
+            _ => return Err(MaterialOpticalRefreshError::SourceMismatch),
+        }
+        .map_err(MaterialOpticalRefreshError::Binding)?;
+        Ok((binding, refreshed))
+    }
+
     /// Bind source-backed Sellmeier optics to the same accepted material state.
     ///
     /// The source retains SI squared vacuum resonance wavelengths; conversion
@@ -395,6 +453,39 @@ impl MaterialOpticalBinding {
             hasher.update(identity.as_bytes());
         }
         hasher.finalize()
+    }
+}
+
+/// Atomic refusal while continuing an existing optical material observation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaterialOpticalRefreshError {
+    /// The supplied optical state or accepted material is not this binding's source.
+    SourceMismatch,
+    /// An original property claim cannot support the new complete condition.
+    Source(MaterialStatePointError),
+    /// The refreshed source cannot be admitted by the original renderer model.
+    Binding(MaterialOpticalError),
+}
+
+impl core::fmt::Display for MaterialOpticalRefreshError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::SourceMismatch => f.write_str(
+                "optical refresh requires this binding's original optical source and material card",
+            ),
+            Self::Source(error) => error.fmt(f),
+            Self::Binding(error) => error.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for MaterialOpticalRefreshError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::SourceMismatch => None,
+            Self::Source(error) => Some(error),
+            Self::Binding(error) => Some(error),
+        }
     }
 }
 

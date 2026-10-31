@@ -2754,6 +2754,24 @@ impl VisibleOpticalStatePoint {
             Self::DielectricSellmeier(state) => state.resolved(),
         }
     }
+
+    /// Refresh the original optical family and source claims at a new complete
+    /// physical condition. A different family becoming available does not
+    /// replace the admitted law. All original quantity conventions, validity
+    /// domains and consumer admissibility remain binding.
+    pub fn at_query_point(
+        &self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        match self {
+            Self::Conductor(state) => state.at_query_point(card, point).map(Self::Conductor),
+            Self::Dielectric(state) => state.at_query_point(card, point).map(Self::Dielectric),
+            Self::DielectricSellmeier(state) => state
+                .at_query_point(card, point)
+                .map(Self::DielectricSellmeier),
+        }
+    }
 }
 
 impl VisibleDielectricStatePoint {
@@ -2774,6 +2792,24 @@ impl VisibleDielectricStatePoint {
     pub const fn absorption(&self) -> VisibleDielectricAbsorption {
         self.absorption
     }
+
+    /// Reevaluate the same Cauchy and absorption claims together. The admitted
+    /// spectral or RGB parameterization is retained; newly available spectra
+    /// cannot substitute for an original RGB law, or vice versa. Refresh also
+    /// reapplies the passive-transmittance bound before returning a candidate.
+    pub fn at_query_point(
+        &self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        visible_dielectric_from_resolved(
+            self.resolved.at_query_point(card, point)?,
+            matches!(
+                self.absorption,
+                VisibleDielectricAbsorption::Spectral { .. }
+            ),
+        )
+    }
 }
 
 impl VisibleConductorStatePoint {
@@ -2787,6 +2823,19 @@ impl VisibleConductorStatePoint {
     #[must_use]
     pub const fn samples(&self) -> &[VisibleComplexIndexSample; 9] {
         &self.samples
+    }
+
+    /// Reevaluate every eta/k knot from its original source claim at one new
+    /// complete condition. Missing support or nonphysical values refuse the
+    /// whole candidate without changing the original table.
+    pub fn at_query_point(
+        &self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        Ok(visible_conductor_from_resolved(
+            self.resolved.at_query_point(card, point)?,
+        ))
     }
 }
 
@@ -2817,6 +2866,12 @@ pub fn resolve_visible_conductor_state_point(
         )?);
     }
     let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    Ok(visible_conductor_from_resolved(resolved))
+}
+
+fn visible_conductor_from_resolved(
+    resolved: ResolvedMaterialStatePoint,
+) -> VisibleConductorStatePoint {
     let samples = core::array::from_fn(|index| VisibleComplexIndexSample {
         wavelength_nm: VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM[index],
         eta: resolved
@@ -2828,7 +2883,7 @@ pub fn resolve_visible_conductor_state_point(
             .expect("canonical extinction requirement was resolved")
             .value_si(),
     });
-    Ok(VisibleConductorStatePoint { resolved, samples })
+    VisibleConductorStatePoint { resolved, samples }
 }
 
 /// Resolve a homogeneous visible dielectric at one exact material state.
@@ -2867,6 +2922,13 @@ pub fn resolve_visible_dielectric_state_point(
     )?);
     append_visible_dielectric_absorption_requirements(&mut requirements, spectral)?;
     let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    visible_dielectric_from_resolved(resolved, spectral)
+}
+
+fn visible_dielectric_from_resolved(
+    resolved: ResolvedMaterialStatePoint,
+    spectral: bool,
+) -> Result<VisibleDielectricStatePoint, MaterialStatePointError> {
     let value = |name: &str| {
         resolved
             .property(name)
@@ -5004,6 +5066,125 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn g0_visible_refresh_pins_original_family_and_claims_through_competing_sources() {
+        let base = ambiguous_optical_card();
+        let mut claims = ClaimSet::new();
+        for (_, source) in base.claims().claims_ordered() {
+            let mut source = source.clone();
+            if source.key.name() == VISIBLE_COMPLEX_IOR_ETA_PROPERTIES[0] {
+                source.validity = ValidityDomain::unconstrained().with("T", 250.0, 450.0);
+            }
+            claims.insert_claim(source).unwrap();
+        }
+        let mut alternative = claim(
+            VISIBLE_COMPLEX_IOR_ETA_PROPERTIES[0],
+            Dims::NONE,
+            vec![(400.0, 4.0), (600.0, 5.0)],
+            600.0,
+        );
+        alternative.validity = ValidityDomain::unconstrained().with("T", 400.0, 600.0);
+        alternative.provenance.source = "independent competing optical source".into();
+        claims.insert_claim(alternative).unwrap();
+        let card = MaterialCard::assemble(base.id().clone(), claims, Vec::new()).unwrap();
+        let initial = VisibleOpticalStatePoint::Conductor(
+            resolve_visible_conductor_state_point(
+                &card,
+                &point(250.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap(),
+        );
+        let retained = initial.clone();
+        assert!(
+            resolve_visible_conductor_state_point(
+                &card,
+                &point(425.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .is_err(),
+            "a fresh selection is now ambiguous"
+        );
+        let refreshed = initial.at_query_point(&card, &point(425.0)).unwrap();
+        let VisibleOpticalStatePoint::Conductor(conductor) = &refreshed else {
+            panic!("the admitted conductor cannot become a dielectric");
+        };
+        assert_eq!(conductor.samples()[0].eta, 1.45);
+        assert_eq!(conductor.samples()[0].k, 2.25);
+        for (before, after) in initial
+            .resolved()
+            .properties()
+            .iter()
+            .zip(refreshed.resolved().properties())
+        {
+            assert_eq!(before.requirement(), after.requirement());
+            assert_eq!(
+                before.answer().receipt.selected,
+                after.answer().receipt.selected
+            );
+            card.claims()
+                .verify_receipt(&after.answer().receipt)
+                .unwrap();
+        }
+        assert!(
+            resolve_visible_conductor_state_point(
+                &card,
+                &point(550.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .is_ok(),
+            "the replacement source would cover the unsupported endpoint"
+        );
+        assert!(refreshed.at_query_point(&card, &point(550.0)).is_err());
+        assert_eq!(initial, retained);
+        assert_eq!(
+            refreshed.at_query_point(&card, &point(250.0)).unwrap(),
+            initial.at_query_point(&card, &point(250.0)).unwrap()
+        );
+    }
+
+    #[test]
+    fn g0_visible_dielectric_refresh_reapplies_passivity_without_mutating_source() {
+        let base = dielectric_optical_card(0.9);
+        let mut claims = ClaimSet::new();
+        for (_, source) in base.claims().claims_ordered() {
+            let mut source = source.clone();
+            if source.key.name() == VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[0] {
+                source.value = fs_matdb::PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: fs_qty::Temperature::DIMS,
+                    knots: vec![(250.0, 0.9), (600.0, 1.1)],
+                    dims: Dims::NONE,
+                };
+            }
+            claims.insert_claim(source).unwrap();
+        }
+        let card = MaterialCard::assemble(base.id().clone(), claims, Vec::new()).unwrap();
+        let initial = resolve_visible_dielectric_state_point(
+            &card,
+            &point(250.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let retained = initial.clone();
+        let middle = initial.at_query_point(&card, &point(400.0)).unwrap();
+        assert!(matches!(
+            middle.absorption(),
+            VisibleDielectricAbsorption::ReferenceRgb { .. }
+        ));
+        assert_ne!(
+            initial.cauchy_coefficients_si(),
+            middle.cauchy_coefficients_si()
+        );
+        assert!(matches!(
+            initial.at_query_point(&card, &point(600.0)),
+            Err(MaterialStatePointError::InvalidDerived {
+                quantity: "visible_dielectric_reference_transmittance"
+            })
+        ));
+        assert_eq!(initial, retained);
+    }
+
     // Synthetic spectra isolate source/state/quantity plumbing. They are not
     // measured glass data and make no material-identification claim.
     fn spectral_dielectric_card(
@@ -5143,6 +5324,25 @@ mod tests {
             resolved.absorption(),
             VisibleDielectricAbsorption::Spectral { .. }
         ));
+        let refreshed = resolved.at_query_point(&ambiguous, &point(600.0)).unwrap();
+        assert_eq!(
+            refreshed.absorption(),
+            VisibleDielectricAbsorption::Spectral {
+                absorption_per_m: [20.0, 20.0, 20.0, 120.0, 20.0, 20.0, 20.0, 20.0, 20.0],
+            }
+        );
+        assert_eq!(refreshed.resolved().properties().len(), 12);
+        for (before, after) in resolved
+            .resolved()
+            .properties()
+            .iter()
+            .zip(refreshed.resolved().properties())
+        {
+            assert_eq!(
+                before.answer().receipt.selected,
+                after.answer().receipt.selected
+            );
+        }
     }
 
     fn sellmeier_optical_card(
@@ -5628,4 +5828,3 @@ mod tests {
         ));
     }
 }
-

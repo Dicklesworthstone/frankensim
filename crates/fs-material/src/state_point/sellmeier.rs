@@ -65,6 +65,25 @@ impl VisibleSellmeierStatePoint {
     pub const fn absorption(&self) -> VisibleDielectricAbsorption {
         self.absorption
     }
+
+    /// Refresh every oscillator and absorption coefficient from its original
+    /// selected claim at a new complete physical condition. The original
+    /// spectral or RGB absorption schema and scalar bounds remain binding.
+    /// The renderer must re-admit the refreshed transparent wavelength band;
+    /// source support alone does not exclude a resonance moving into that band.
+    pub fn at_query_point(
+        &self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        visible_sellmeier_from_resolved(
+            self.resolved.at_query_point(card, point)?,
+            matches!(
+                self.absorption,
+                VisibleDielectricAbsorption::Spectral { .. }
+            ),
+        )
+    }
 }
 
 /// Resolve all six Sellmeier coefficients and the complete absorption schema.
@@ -99,6 +118,13 @@ pub fn resolve_visible_sellmeier_state_point(
     }
     append_visible_dielectric_absorption_requirements(&mut requirements, spectral)?;
     let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    visible_sellmeier_from_resolved(resolved, spectral)
+}
+
+fn visible_sellmeier_from_resolved(
+    resolved: ResolvedMaterialStatePoint,
+    spectral: bool,
+) -> Result<VisibleSellmeierStatePoint, MaterialStatePointError> {
     let value = |name: &str| {
         resolved
             .property(name)

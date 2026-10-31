@@ -191,6 +191,18 @@ homogenization, the P2 milestone.
 
 ## Public types and semantics
 
+- `state_point::VisibleOpticalStatePoint::at_query_point` and the conductor /
+  dielectric variants continue the original visible optical law at a new
+  complete physical condition. They reuse the shared pinned-claim refresh,
+  retaining the immutable card, every exact property key, axis convention,
+  consumer bound, optical family and spectral-versus-RGB absorption schema.
+  The original decoders also reapply dielectric passivity before publication.
+  Competing claims cannot replace an unsupported original source. This is an
+  atomic endpoint observation, not phase or surface evolution, nor a guarantee
+  of source support along the intervening path. Focused G0 regressions cover
+  overlapping replacement claims, unsupported endpoints, passive RGB bounds
+  and continued spectral absorption on a card that also declares RGB data.
+
 - `wood_moisture::ResolvedWoodMoisture` binds the original 12% dry-basis
   density and independent green-to-ovendry radial, tangential and volumetric
   shrinkages, plus the source-declared fiber-saturation approximation. Exact

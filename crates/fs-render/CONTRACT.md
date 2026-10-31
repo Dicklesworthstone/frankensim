@@ -105,6 +105,17 @@ differentiable lift). Pure Rust throughout.
   native nine-knot intensity absorption with typed power-nepers/metre semantics;
   the separately selected legacy RGB schema retains its lifting approximation.
   The material resolver refuses ambiguous or incomplete absorption schemas.
+  `MaterialOpticalBinding::at_material_state` refreshes the exact original
+  optical source to a new accepted state's complete condition through that
+  shared pinned-claim owner. It retains the admitted optical family, smooth or
+  GGX finish, surface identity and spectral-versus-RGB absorption schema, and
+  returns both the native material binding and refreshed source for subsequent
+  endpoints. Stale or substituted source states, foreign cards, changed axis
+  meanings and unsupported original claims refuse before either input changes.
+  The existing conductor Fresnel and dielectric Beer-Lambert owners consume the
+  refreshed values; no temperature-color curve or new optical law is introduced.
+  Focused G0/G1/G3 material-state tests cover those refusals, continued spectral
+  transmittance, independent complex-index Fresnel and actual reflected pixels.
   This optical binding adds no thermal
   emission, birefringence, phase evolution, or measured-spectrum validation.
   Focused G0/G1 regressions in the

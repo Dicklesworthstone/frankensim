@@ -15,7 +15,8 @@ use fs_material::thermal::source::ThermalMaterialPoint;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_render::material_state::{
-    MaterialOpticalBinding, MaterialOpticalError, MaterialThermalBinding, MaterialThermalError,
+    MaterialOpticalBinding, MaterialOpticalError, MaterialOpticalRefreshError,
+    MaterialThermalBinding, MaterialThermalError,
 };
 
 fn card(epsilon: f64) -> MaterialCard {
@@ -326,32 +327,43 @@ fn g0_optical_binding_retains_quantity_meaning_at_identical_numeric_coordinates(
 #[test]
 fn g1_spectral_material_absorption_reaches_the_same_accepted_dielectric() {
     use fs_material::state_point::{
-        VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM, resolve_visible_dielectric_state_point,
+        VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM, VisibleOpticalStatePoint,
+        resolve_visible_dielectric_state_point,
     };
     use fs_render::dielectric::BeerLambertParameters;
 
     let coefficients = [0.0, 2.0, 4.0, 8.0, 16.0, 12.0, 8.0, 4.0, 2.0];
     let card = condition_card_with_spectrum("Ts", Some(coefficients));
+    let initial_point = condition("Ts", 1200.0);
+    let initial_state = state_at(&card, &initial_point);
+    let initial_optical = resolve_visible_dielectric_state_point(
+        &card,
+        &initial_point,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let mut binding = MaterialOpticalBinding::try_dielectric(
+        &initial_state,
+        &initial_optical,
+        None,
+        ContentHash([19; 32]),
+    )
+    .unwrap();
+    let mut optical = VisibleOpticalStatePoint::Dielectric(initial_optical);
     let mut identities = Vec::new();
     for (temperature_k, factor) in [(1200.0, 1.0), (1800.0, 2.0)] {
         let point = condition("Ts", temperature_k);
-        let accepted = state_at(&card, &point);
-        let optical = resolve_visible_dielectric_state_point(
-            &card,
-            &point,
-            MaterialPropertySelection::SingleClaimOnly,
-        )
-        .expect("complete typed intensity absorption");
-        let binding = MaterialOpticalBinding::try_dielectric(
-            &accepted,
-            &optical,
-            None,
-            ContentHash([19; 32]),
-        )
-        .expect("shared accepted optical state");
-        let Material::Dielectric { glass, .. } = binding.material() else {
+        let accepted = initial_state.at_query_point(&card, &point).unwrap();
+        (binding, optical) = binding
+            .at_material_state(&optical, &card, &accepted)
+            .expect("original spectral claims follow the accepted thermal endpoint");
+        let Material::Dielectric { glass, surface } = binding.material() else {
             panic!("spectral glass must reach the native dielectric material");
         };
+        assert!(
+            surface.is_delta(),
+            "refresh must preserve the smooth finish"
+        );
         let BeerLambertParameters::Spectral { spectrum } = glass.absorption().parameters() else {
             panic!("material spectrum was reduced to RGB");
         };
@@ -375,6 +387,229 @@ fn g1_spectral_material_absorption_reaches_the_same_accepted_dielectric() {
     assert_ne!(
         identities[0], identities[1],
         "changed accepted absorption must change identity"
+    );
+}
+
+#[test]
+fn g3_optical_continuation_changes_native_conductor_response_and_rejects_substitution() {
+    use fs_material::state_point::{
+        VISIBLE_COMPLEX_IOR_ETA_PROPERTIES, VISIBLE_COMPLEX_IOR_K_PROPERTIES,
+        VisibleOpticalStatePoint, resolve_visible_conductor_state_point,
+    };
+    let base = condition_card("Ts");
+    let mut claims = base.claims().clone();
+    let template = base.claims().claims_ordered().next().unwrap().1.clone();
+    for (names, values) in [
+        (VISIBLE_COMPLEX_IOR_ETA_PROPERTIES, [1.5, 2.0]),
+        (VISIBLE_COMPLEX_IOR_K_PROPERTIES, [2.0, 3.0]),
+    ] {
+        for name in names {
+            let mut source = template.clone();
+            source.key = PropertyKey::new(name, Dims::NONE);
+            source.value = PropertyValue::Curve {
+                abscissa: "Ts".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![(1200.0, values[0]), (1800.0, values[1])],
+                dims: Dims::NONE,
+            };
+            source.validity = ValidityDomain::unconstrained().with_quantity(
+                "Ts",
+                quantity(QuantityKind::AbsoluteTemperature),
+                1200.0,
+                1600.0,
+            );
+            source.interpolation = InterpolationPolicy::LinearInside;
+            claims.insert_claim(source).unwrap();
+        }
+    }
+    let card = MaterialCard::assemble(base.id().clone(), claims, Vec::new()).unwrap();
+    let cold = state_at(&card, &condition("Ts", 1200.0));
+    let original = VisibleOpticalStatePoint::Conductor(
+        resolve_visible_conductor_state_point(
+            &card,
+            &cold.query(),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap(),
+    );
+    let binding =
+        MaterialOpticalBinding::try_visible(&cold, &original, 0.15, ContentHash([29; 32])).unwrap();
+    // Refresh receipts honestly record pinned selection, so returning to the
+    // initial endpoint matches its pinned evaluation, not its discovery policy.
+    let pinned_at_cold = binding.at_material_state(&original, &card, &cold).unwrap().0;
+    assert_eq!(pinned_at_cold.accepted_state_identity(), cold.identity());
+    let hot = cold
+        .at_query_point(&card, &condition("Ts", 1600.0))
+        .unwrap();
+    let (heated, optical) = binding.at_material_state(&original, &card, &hot).unwrap();
+    assert_eq!(heated.accepted_state_identity(), hot.identity());
+    let mut reflectances = Vec::new();
+    for (bound, eta, k) in [(binding, 1.5_f64, 2.0_f64), (heated, 11.0 / 6.0, 8.0 / 3.0)] {
+        let Material::Conductor { optics, surface } = bound.material() else {
+            panic!("an available dielectric family cannot replace the original conductor");
+        };
+        assert_eq!(surface.roughness_alpha(), 0.15);
+        let expected = ((eta - 1.0).powi(2) + k * k) / ((eta + 1.0).powi(2) + k * k);
+        let actual = optics.fresnel(580.0, 1.0, 1.0).unwrap();
+        assert!((actual - expected).abs() < 2e-15);
+        reflectances.push(actual);
+    }
+    assert_ne!(reflectances[0], reflectances[1]);
+    with_cx(|cx| {
+        let pixel = |bound: MaterialOpticalBinding| {
+            let mut s = scene(bound.material());
+            s.environment =
+                Some(EnvironmentMap::try_from_linear_srgb(1, 1, vec![[1.0; 3]], 0.0).unwrap());
+            render(&s, cx, &settings(DirectStrategy::BsdfOnly))
+                .unwrap()
+                .xyz[0][1]
+        };
+        assert!(
+            pixel(heated) > pixel(binding),
+            "the same native scene must observe changed source optics"
+        );
+    });
+    assert!(matches!(
+        heated.at_material_state(&original, &card, &hot),
+        Err(MaterialOpticalRefreshError::SourceMismatch)
+    ));
+    assert!(matches!(
+        binding.at_material_state(&optical, &card, &hot),
+        Err(MaterialOpticalRefreshError::SourceMismatch)
+    ));
+    let foreign = MaterialCard::supersede(&card, card.claims().clone(), Vec::new()).unwrap();
+    assert!(matches!(
+        binding.at_material_state(&original, &foreign, &hot),
+        Err(MaterialOpticalRefreshError::Source(_))
+    ));
+    for point in [
+        condition("Ts", 1800.0),
+        condition("Ts", 1600.0)
+            .with_quantity("load_context", quantity(QuantityKind::Stress), 100_000.0)
+            .unwrap(),
+    ] {
+        let accepted = state_at(&card, &point);
+        assert!(matches!(
+            binding.at_material_state(&original, &card, &accepted),
+            Err(MaterialOpticalRefreshError::Source(_))
+        ));
+    }
+    assert_eq!(
+        heated.at_material_state(&optical, &card, &cold).unwrap().0,
+        pinned_at_cold
+    );
+}
+
+#[test]
+fn g0_sellmeier_continuation_preserves_spectral_state_and_readmits_the_transparent_band() {
+    use fs_material::state_point::{
+        VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES, VISIBLE_DIELECTRIC_SELLMEIER_C_M2_PROPERTIES,
+        VisibleOpticalStatePoint, resolve_visible_sellmeier_state_point,
+    };
+    use fs_render::dielectric::{BeerLambertParameters, DielectricError, DielectricIor};
+
+    let base = condition_card_with_spectrum("Ts", Some([2.0; 9]));
+    let mut claims = base.claims().clone();
+    let template = base.claims().claims_ordered().next().unwrap().1.clone();
+    for (names, dims, cold, hot) in [
+        (
+            VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES,
+            Dims::NONE,
+            [1.0, 0.2, 1.0],
+            [1.1, 0.2, 1.0],
+        ),
+        (
+            VISIBLE_DIELECTRIC_SELLMEIER_C_M2_PROPERTIES,
+            Dims([2, 0, 0, 0, 0, 0]),
+            [0.0, 2.0e-14, 1.0e-10],
+            [2.0e-13, 2.0e-14, 1.0e-10],
+        ),
+    ] {
+        for (index, name) in names.into_iter().enumerate() {
+            let mut source = template.clone();
+            source.key = PropertyKey::new(name, dims);
+            source.value = PropertyValue::Curve {
+                abscissa: "Ts".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![(1200.0, cold[index]), (1800.0, hot[index])],
+                dims,
+            };
+            source.interpolation = InterpolationPolicy::LinearInside;
+            claims.insert_claim(source).unwrap();
+        }
+    }
+    let card = MaterialCard::assemble(base.id().clone(), claims, Vec::new()).unwrap();
+    let initial = state_at(&card, &condition("Ts", 1200.0));
+    let optical = VisibleOpticalStatePoint::DielectricSellmeier(
+        resolve_visible_sellmeier_state_point(
+            &card,
+            &initial.query(),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap(),
+    );
+    let binding =
+        MaterialOpticalBinding::try_visible(&initial, &optical, 0.12, ContentHash([31; 32]))
+            .unwrap();
+    let hot = initial
+        .at_query_point(&card, &condition("Ts", 1500.0))
+        .unwrap();
+    let (heated, successor) = binding.at_material_state(&optical, &card, &hot).unwrap();
+    let Material::Dielectric { glass, surface } = heated.material() else {
+        panic!("Sellmeier continuation must retain dielectric transport");
+    };
+    let DielectricIor::Sellmeier(law) = glass.ior() else {
+        panic!("available Cauchy properties cannot replace the selected Sellmeier law");
+    };
+    assert_eq!(surface.roughness_alpha(), Some(0.12));
+    assert_eq!(heated.accepted_state_identity(), hot.identity());
+    let square = (580.0e-9_f64).powi(2);
+    let expected_squared = 1.0
+        + [1.05, 0.2, 1.0]
+            .into_iter()
+            .zip([1.0e-13, 2.0e-14, 1.0e-10])
+            .map(|(strength, resonance)| strength * square / (square - resonance))
+            .sum::<f64>();
+    assert!((law.eval(580.0).unwrap().powi(2) - expected_squared).abs() < 3.0e-14);
+    assert!(matches!(
+        glass.absorption().parameters(),
+        BeerLambertParameters::Spectral { .. }
+    ));
+    assert!(
+        (glass.absorption().transmittance(580.0, 0.1).unwrap() - (-0.3_f64).exp()).abs() < 3e-15
+    );
+    for (before, after) in optical
+        .resolved()
+        .properties()
+        .iter()
+        .zip(successor.resolved().properties())
+    {
+        assert_eq!(
+            before.answer().receipt.selected,
+            after.answer().receipt.selected
+        );
+    }
+    let unsupported = initial
+        .at_query_point(&card, &condition("Ts", 1800.0))
+        .unwrap();
+    assert!(
+        successor
+            .at_query_point(&card, &unsupported.query())
+            .is_ok(),
+        "material coefficient support alone cannot admit the optical band"
+    );
+    assert!(matches!(
+        heated.at_material_state(&successor, &card, &unsupported),
+        Err(MaterialOpticalRefreshError::Binding(
+            MaterialOpticalError::Dielectric(DielectricError::InvalidIor)
+        ))
+    ));
+    assert_eq!(
+        heated
+            .at_material_state(&successor, &card, &initial)
+            .unwrap()
+            .0,
+        binding.at_material_state(&optical, &card, &initial).unwrap().0
     );
 }
 

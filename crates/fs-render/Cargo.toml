@@ -20,6 +20,7 @@ fs-exec = { path = "../fs-exec", optional = true }
 fs-geom = { path = "../fs-geom", optional = true }
 fs-img = { path = "../fs-img", optional = true }
 fs-ivl = { path = "../fs-ivl", optional = true }
+fs-matdb = { path = "../fs-matdb", optional = true }
 fs-material = { path = "../fs-material", optional = true }
 fs-math = { path = "../fs-math" }
 fs-mbd-material = { path = "../fs-mbd-material", optional = true, features = ["thermoelastic-coupling"] }
@@ -59,7 +60,7 @@ tracer = ["chart-backends", "dep:fs-alloc", "dep:fs-rand", "dep:fs-img", "dep:fs
 # Explicitly opt-in while the observer/model error remains unbounded.
 photometry = ["tracer", "volumes", "dep:fs-ivl"]
 # Resolve optical/thermal appearance from the same material state as mechanics.
-material-state = ["tracer", "dep:fs-material", "dep:fs-conduction"]
+material-state = ["tracer", "dep:fs-matdb", "dep:fs-material", "dep:fs-conduction"]
 # Actual accepted material-body vertices through the original solid boundary and BVH.
 material-geometry = ["chart-backends", "dep:fs-mbd-material", "dep:fs-solid"]
 
