@@ -480,15 +480,15 @@ impl MaterialGasPiston {
     }
 }
 
-impl MaterialGasPiston {
+impl<G: PistonGas> MaterialGasPiston<G> {
     /// Add an opposing finite gas volume without discarding the original body,
     /// density receipts, primary material history or accepted wall momentum.
     /// No second inertial mass or independent opposing velocity is admitted.
     /// This consumes the old single-sided model to prevent advancing it behind
     /// the new shared coupling's back; construction failures return no new model.
     pub fn with_opposing_gas(
-        self, opposing: ClosedGasParcel, opposing_area_m2: f64,
-    ) -> Result<MaterialDoubleActingGasPiston, PistonError> {
+        self, opposing: G, opposing_area_m2: f64,
+    ) -> Result<MaterialDoubleActingGasPiston<G>, PistonError> {
         let piston = DoubleActingGasPiston::new(self.piston, opposing, opposing_area_m2)?;
         Ok(MaterialDoubleActingGasPiston { body: self.body, piston })
     }
@@ -502,12 +502,12 @@ impl MaterialGasPiston {
 /// The specimen is still rigid and its material state is frozen; gas heating
 /// does not implicitly heat, melt, deform or change the mass of the wall.
 #[derive(Clone, Debug, PartialEq)]
-pub struct MaterialDoubleActingGasPiston {
+pub struct MaterialDoubleActingGasPiston<G: PistonGas = ClosedGasParcel> {
     body: ResolvedBody,
-    piston: DoubleActingGasPiston,
+    piston: DoubleActingGasPiston<G>,
 }
 
-impl MaterialDoubleActingGasPiston {
+impl<G: PistonGas> MaterialDoubleActingGasPiston<G> {
     /// Bind two gases and one existing source-resolved body. Areas are the
     /// positive pressure-exposed [primary, opposing] face areas [m2], supplied
     /// by geometry. Positive velocity expands the primary gas.
@@ -516,7 +516,7 @@ impl MaterialDoubleActingGasPiston {
     /// constructor changes the subsequent motion AND both gas states without
     /// editing physics. Replacing the mass of a live system is not modeled.
     pub fn new(
-        primary: ClosedGasParcel, opposing: ClosedGasParcel, body: ResolvedBody,
+        primary: G, opposing: G, body: ResolvedBody,
         areas_m2: [f64; 2], velocity_m_s: f64,
     ) -> Result<Self, PistonError> {
         MaterialGasPiston::new(primary, body, areas_m2[0], velocity_m_s)?
@@ -528,13 +528,13 @@ impl MaterialDoubleActingGasPiston {
     pub const fn body(&self) -> &ResolvedBody { &self.body }
     /// One accepted shared dynamics owner; cannot independently step either gas.
     #[must_use]
-    pub const fn piston(&self) -> &DoubleActingGasPiston { &self.piston }
+    pub const fn piston(&self) -> &DoubleActingGasPiston<G> { &self.piston }
 
     // Preserve the complete accepted-candidate owner, including both port clocks
     // and cumulative histories. Reconstructing from gas/velocity snapshots would
     // reset that history and detach continuation from its coupled acoustic clock.
     pub(in crate::cavity_phs::piston) fn bind_piston_candidate(
-        &self, piston: DoubleActingGasPiston,
+        &self, piston: DoubleActingGasPiston<G>,
     ) -> Result<Self, PistonError> {
         if piston.primary().mass_kg().to_bits() != self.piston.primary().mass_kg().to_bits()
             || piston.primary().area_m2().to_bits() != self.piston.primary().area_m2().to_bits()
@@ -547,7 +547,7 @@ impl MaterialDoubleActingGasPiston {
     /// Source-bearing [primary, opposing] gas states for existing thermal,
     /// transport and acoustic consumers. No duplicate coefficient cache.
     #[must_use]
-    pub const fn gases(&self) -> [&ClosedGasParcel; 2] {
+    pub const fn gases(&self) -> [&G; 2] {
         [self.piston.primary().gas(), self.piston.opposing()]
     }
 
@@ -556,7 +556,7 @@ impl MaterialDoubleActingGasPiston {
     pub fn step(
         &mut self, input: DoublePistonInput, controls: DoublePistonSolve,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<DoublePistonStep, PistonError> {
+    ) -> Result<DoublePistonStep<G::State>, PistonError> {
         self.piston.step(input, controls, cancelled)
     }
 }

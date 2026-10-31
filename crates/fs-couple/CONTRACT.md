@@ -7789,7 +7789,7 @@ gas mass and solid mass remain separate conserved inventories. The same
 midpoint pressure supplies force and boundary work; the gas retains its actual
 `rho=m/V`, source calorics and acoustic compressibility. Free-wall and
 fixed-support steps preserve the common residual gates and atomic cancellation.
-Reaction and double-acting compositions retain their ideal specialization.
+Reaction compositions retain their ideal specialization.
 
 Synthetic regression definitions in `piston/tests/real_gas.rs` compare dense
 motion with independent joint PR energy/impulse roots, reversal and continuing
@@ -7827,6 +7827,27 @@ substitution, reference shifts and atomic refusals have focused regressions.
 This is a first-order flow-then-heat/motion split with identical frozen sources
 and composition, homogeneous gas branches and explicit timestep refinement;
 it does not supply jet thrust, phase change or a simultaneous flow/heat root.
+
+### Two finite real-gas chambers on one material-derived piston
+
+`DoubleActingGasPiston<G: PistonGas>` and `MaterialDoubleActingGasPiston<G>`
+reuse the original paired impulse and heat/volume residuals for ideal and PR
+parcels. Each chamber retains its own source law, composition, conserved mass,
+actual `rho=m/V`, calorics and work-conjugate pressure. Opposed face areas map
+one displacement to both volume changes; there is one solid inertia and one
+momentum. Source-bound construction and continuation retain the original rigid
+body's density/geometry records and complete accepted port histories.
+
+The midpoint time-resolution check uses the sum of BOTH gas stiffnesses,
+`omega^2 = sum(rho*c^2*A^2/V)/M`, at initial, accepted midpoint and endpoint
+states. The original one-sided check could miss a stiff opposing chamber.
+Actual PR acoustic compressibility replaces ideal-reference coefficients.
+Rejected clocks, sources, roots or cancellation publish neither gas nor motion.
+Focused synthetic regressions include an independent 80-digit variable-Cp PR
+joint root, opposing-composition substitution, the discrete impulse tangent,
+reversal, continuing energy and source-density-driven material inertia.
+This remains homogeneous closed-gas motion with rigid prescribed face geometry;
+it supplies no two-phase closure, species transport or moving-chamber wave field.
 
 ### Fixed-volume chambers in the shared reacting gas assembly
 

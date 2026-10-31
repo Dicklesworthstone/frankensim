@@ -1,4 +1,6 @@
 //! Density/geometry source changes exercise the actual coupled piston solver.
+mod double_nonideal;
+
 use super::*;
 use crate::cavity_phs::piston::tests::{controls, drive, gas};
 use fs_evidence::ValidityDomain;

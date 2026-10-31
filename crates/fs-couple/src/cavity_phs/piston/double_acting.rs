@@ -14,7 +14,8 @@ pub mod valve;
 
 use super::{
     ClosedGasParcel, GasEnergySolve, GasHeatVolumeCandidate, GasHeatVolumeStep,
-    GasPiston, PistonError, PistonInput, PistonSolve, ResolvedThermochemicalGasState,
+    GasPiston, PistonError, PistonGas, PistonGasState, PistonInput, PistonSolve,
+    ResolvedThermochemicalGasState,
     Trial, impulse, invalid, poll, positive,
 };
 
@@ -24,14 +25,16 @@ use super::{
 /// Only the primary owner holds mass and velocity. The opposing gas has no
 /// fictitious independent inertia or motion coordinate. Different positive face
 /// areas are allowed (e.g. a piston rod); any other load is explicit input.
+/// Both parcels use the original ideal or Peng--Robinson material owner; each
+/// retains its own source model, composition, conserved mass and density.
 #[derive(Clone, Debug)]
-pub struct DoubleActingGasPiston {
-    primary: GasPiston,
-    opposing: ClosedGasParcel,
+pub struct DoubleActingGasPiston<G: PistonGas = ClosedGasParcel> {
+    primary: GasPiston<G>,
+    opposing: G,
     opposing_area_m2: f64,
     ports: crate::port_adoption::ModulePorts,
 }
-impl PartialEq for DoubleActingGasPiston {
+impl<G: PistonGas> PartialEq for DoubleActingGasPiston<G> {
     fn eq(&self, other: &Self) -> bool {
         self.primary == other.primary
             && self.opposing == other.opposing
@@ -68,11 +71,11 @@ pub struct DoublePistonSolve {
 /// Joint accepted state accounting. There is NO exterior-pressure supply term:
 /// pressure work between these two finite gases and their wall is internal.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DoublePistonStep {
+pub struct DoublePistonStep<S = ResolvedThermochemicalGasState> {
     /// Original gas heat/work/entropy reports, [primary, opposing].
     pub gas: [GasHeatVolumeStep; 2],
     /// Source-bearing pressure/thermal/acoustic midpoint states in the same order.
-    pub midpoint: [ResolvedThermochemicalGasState; 2],
+    pub midpoint: [S; 2],
     /// Common signed wall displacement [m].
     pub displacement_m: f64,
     /// Initial and accepted final wall velocity [m/s].
@@ -117,21 +120,21 @@ pub(in crate::cavity_phs::piston) fn midpoint_force_n(
     Ok(force)
 }
 
-struct PairedTrial {
-    primary: Trial,
-    opposing: GasHeatVolumeCandidate,
+struct PairedTrial<G: PistonGas> {
+    primary: Trial<G>,
+    opposing: GasHeatVolumeCandidate<G, G::State>,
     primary_input: PistonInput,
     volume_residual: f64,
 }
 
-impl DoubleActingGasPiston {
+impl<G: PistonGas> DoubleActingGasPiston<G> {
     /// Bind an existing accepted piston to a second closed material volume.
     /// No source is resampled, no gas state is reset, and no second body mass
     /// can be supplied. This constructs a new coupling, not an impulse-free
     /// connection of two formerly moving mechanical bodies.
     pub fn new(
-        primary: GasPiston,
-        opposing: ClosedGasParcel,
+        primary: GasPiston<G>,
+        opposing: G,
         opposing_area_m2: f64,
     ) -> Result<Self, PistonError> {
         if primary.support() == super::PistonSupport::Fixed {
@@ -173,13 +176,31 @@ impl DoubleActingGasPiston {
     /// Original primary dynamics owner. Immutable: a caller cannot advance only
     /// one side and leave the opposing volume or shared momentum behind.
     #[must_use]
-    pub const fn primary(&self) -> &GasPiston { &self.primary }
+    pub const fn primary(&self) -> &GasPiston<G> { &self.primary }
     /// Original opposing material state, conserved gas mass and source context.
     #[must_use]
-    pub const fn opposing(&self) -> &ClosedGasParcel { &self.opposing }
+    pub const fn opposing(&self) -> &G { &self.opposing }
     /// Positive pressure-exposed area of the opposing face [m2].
     #[must_use]
     pub const fn opposing_area_m2(&self) -> f64 { self.opposing_area_m2 }
+
+    fn admit_linear_clock(
+        &self, states: [&G::State; 2], volumes_m3: [f64; 2], duration_s: f64,
+    ) -> Result<(), PistonError> {
+        // Both closed gases supply restoring stiffness to the SAME inertial
+        // coordinate. Actual rho*c^2 includes the source EOS departures;
+        // either individual face alone can understate the shared frequency.
+        let stiffness: f64 = states.into_iter()
+            .zip(volumes_m3)
+            .zip([self.primary.area_m2(), self.opposing_area_m2])
+            .map(|((state, volume), area)| {
+                let speed = state.sound_speed_m_s();
+                state.density_kg_m3() * speed * speed * area * area / volume
+            }).sum();
+        let omega = (stiffness / self.primary.mass_kg()).sqrt();
+        fs_phs::linear_exact::admit_midpoint_band(omega, duration_s)
+            .map_err(PistonError::TimeResolution)
+    }
 
     fn opposing_volume(&self, primary_volume: f64) -> Result<f64, PistonError> {
         let displacement = (primary_volume - self.primary.gas().volume_m3()) / self.primary.area_m2();
@@ -195,14 +216,14 @@ impl DoubleActingGasPiston {
     fn trial(
         &self, volume: f64, input: DoublePistonInput, controls: DoublePistonSolve,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<impulse::Trial<PairedTrial>, PistonError> {
+    ) -> Result<impulse::Trial<PairedTrial<G>>, PistonError> {
         self.trial_with_midpoint_resistance(volume, input, controls, 0.0, cancelled)
     }
 
     fn trial_with_midpoint_resistance(
         &self, volume: f64, input: DoublePistonInput, controls: DoublePistonSolve,
         resistance_n_s_m: f64, cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<impulse::Trial<PairedTrial>, PistonError> {
+    ) -> Result<impulse::Trial<PairedTrial<G>>, PistonError> {
         poll(cancelled)?;
         let opposing_volume = self.opposing_volume(volume)?;
         let opposing = self.opposing.midpoint_heat_volume(
@@ -211,7 +232,7 @@ impl DoubleActingGasPiston {
         let ratio = self.opposing_area_m2 / self.primary.area_m2();
         // The original one-sided trial already owns its gas/momentum equations.
         // Its exterior load is now a material proposal, NOT a fixed reservoir.
-        let exterior = opposing.midpoint().state().pressure * ratio;
+        let exterior = opposing.midpoint().pressure_pa() * ratio;
         if !positive(exterior) {
             return Err(invalid("opposing pressure load is unrepresentable"));
         }
@@ -256,8 +277,10 @@ impl DoubleActingGasPiston {
     /// Both geometric endpoint volumes must be positive BEFORE querying sources.
     /// At most 2*(maximum_iterations+3) gas proposals are made. Sources, geometry,
     /// balances, exhausted work and cancellation cannot publish either side alone.
-    /// This closed step has no mass/species exchange; [`Self::valve_candidate`]
-    /// adds the original compressible transport through a moving metering edge.
+    /// This closed step has no mass/species exchange; the ideal-parcel
+    /// [`DoubleActingGasPiston::valve_candidate`] adds compressible transport
+    /// through a moving metering edge. Initial, midpoint and endpoint acoustic
+    /// admission include both source-backed gas stiffnesses on the single wall.
     /// Contact stops, crank linkages, combustion, wall heat capacity and acoustic
     /// propagation remain separate owners.
     pub fn step(
@@ -265,7 +288,7 @@ impl DoubleActingGasPiston {
         input: DoublePistonInput,
         controls: DoublePistonSolve,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<DoublePistonStep, PistonError> {
+    ) -> Result<DoublePistonStep<G::State>, PistonError> {
         self.step_with_midpoint_resistance(input, controls, 0.0, cancelled)
     }
 
@@ -278,7 +301,7 @@ impl DoubleActingGasPiston {
         controls: DoublePistonSolve,
         resistance_n_s_m: f64,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DoublePistonStep, PistonError> {
+    ) -> Result<DoublePistonStep<G::State>, PistonError> {
         poll(&mut cancelled)?;
         let [lo, hi] = controls.piston.volume_bracket_m3;
         if !positive(input.duration_s) || !input.heat_j.iter().all(|q| q.is_finite())
@@ -293,6 +316,10 @@ impl DoubleActingGasPiston {
         }
         self.opposing_volume(lo)?;
         self.opposing_volume(hi)?;
+        self.admit_linear_clock(
+            [self.primary.gas().state(), self.opposing.state()],
+            [self.primary.gas().volume_m3(), self.opposing.volume_m3()], input.duration_s,
+        )?;
         let solved = impulse::solve(self.primary.gas().volume_m3(), controls.piston, |volume| {
             if resistance_n_s_m == 0.0 {
                 self.trial(volume, input, controls, &mut cancelled)
@@ -302,6 +329,17 @@ impl DoubleActingGasPiston {
             }
         })?;
         let PairedTrial { primary, opposing, primary_input, volume_residual } = solved.value;
+        self.admit_linear_clock(
+            [primary.gas.midpoint(), opposing.midpoint()],
+            [
+                f64::midpoint(self.primary.gas().volume_m3(), primary.gas.endpoint().volume_m3()),
+                f64::midpoint(self.opposing.volume_m3(), opposing.endpoint().volume_m3()),
+            ], input.duration_s,
+        )?;
+        self.admit_linear_clock(
+            [primary.gas.endpoint().state(), opposing.endpoint().state()],
+            [primary.gas.endpoint().volume_m3(), opposing.endpoint().volume_m3()], input.duration_s,
+        )?;
         // The accepted force, not the affine intercept, supplies all original
         // momentum, energy and port-account audits at the actual displacement.
         let input = DoublePistonInput {
@@ -314,8 +352,8 @@ impl DoubleActingGasPiston {
         let primary_step = next_primary.finish(primary, primary_input, controls.piston,
             solved.iterations, solved.proposals, &mut cancelled)?;
         let (next_opposing, opposing_step) = opposing.into_parts();
-        let force = self.primary.area_m2() * primary_step.midpoint.state().pressure
-            - self.opposing_area_m2 * opposing_midpoint.state().pressure + input.external_force_n;
+        let force = self.primary.area_m2() * primary_step.midpoint.pressure_pa()
+            - self.opposing_area_m2 * opposing_midpoint.pressure_pa() + input.external_force_n;
         let momentum = self.primary.mass_kg()
             * (primary_step.velocity_m_s[1] - primary_step.velocity_m_s[0]) - input.duration_s * force;
         let mechanical = (primary_step.kinetic_energy_change_j - primary_step.gas.work_by_gas_j)
@@ -345,8 +383,8 @@ impl DoubleActingGasPiston {
         self.primary = next_primary;
         self.opposing = next_opposing;
         let force = [
-            self.primary.area_m2() * report.midpoint[0].state().pressure,
-            -self.opposing_area_m2 * report.midpoint[1].state().pressure,
+            self.primary.area_m2() * report.midpoint[0].pressure_pa(),
+            -self.opposing_area_m2 * report.midpoint[1].pressure_pa(),
         ];
         let face = [
             force[0] * report.displacement_m,
@@ -375,11 +413,11 @@ impl DoubleActingGasPiston {
                 crate::port_adoption::PortTransfer::work(wall_work, false),
                 crate::port_adoption::PortTransfer::heat(
                     input.heat_j[0],
-                    report.midpoint[0].state().temperature,
+                    report.midpoint[0].temperature_k(),
                 ),
                 crate::port_adoption::PortTransfer::heat(
                     input.heat_j[1],
-                    report.midpoint[1].state().temperature,
+                    report.midpoint[1].temperature_k(),
                 ),
             ],
         );
@@ -390,4 +428,21 @@ impl DoubleActingGasPiston {
 #[cfg(test)]
 mod tests;
 
-crate::port_adoption::impl_ported_module!(DoubleActingGasPiston, ports);
+#[cfg(test)]
+pub(super) mod real_gas;
+
+impl<G: PistonGas> fs_ports::PortedModule for DoubleActingGasPiston<G> {
+    fn port_schemas(&self) -> &[fs_ports::PortSchema] { &self.ports.schemas }
+    fn port_coordinate_charts(&self) -> &[fs_ports::PortCoordinateChart] { &self.ports.charts }
+    fn junction_schemas(&self) -> &[fs_ports::JunctionSchema] { &self.ports.junctions }
+    fn last_window_duration_s(&self) -> Option<f64> { self.ports.duration_s() }
+    fn last_window_transfers(&self) -> Option<&[fs_ports::IntegratedWindowTransfer]> {
+        self.ports.transfers()
+    }
+    fn last_window_transfer_error(&self) -> Option<&fs_ports::CoupleError> {
+        self.ports.transfer_error()
+    }
+    fn audit_last_window(&self) -> Result<fs_ports::ModuleWindowAudit, fs_ports::CoupleError> {
+        self.ports.audit()
+    }
+}
