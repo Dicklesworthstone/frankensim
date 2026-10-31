@@ -201,6 +201,43 @@ fn template() -> AcousticAssembly {
 }
 
 #[test]
+fn compiled_material_reed_reaches_the_physical_exterior_microphone() {
+    use fs_couple::acoustic_realize::{RealizeOptions, duct_observer::BaffledDuctObserver};
+    use fs_couple::air_path::GasAbsorptionModel;
+    use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
+    with_cx(|cx| {
+        let mut input = template();
+        input.duct.as_mut().unwrap().termination = WaveguideEnd::FlangedOpen;
+        input.duration_s = 1024.0 / f64::from(input.sample_rate_hz);
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.15, 101_325.0).unwrap();
+        let exterior = GasState::try_new(&GasSpec::dry_air_ussa1976(), 283.15, 101_325.0).unwrap();
+        let options = RealizeOptions {
+            gas: Some(gas), observer_absorption: Some(GasAbsorptionModel::Lossless),
+            baffled_duct: Some(BaffledDuctObserver {
+                segment_gases: None, exterior_gas: Some(exterior),
+                receiver: CircularOutletReceiver {
+                    position_m: [0.0, 0.0, 0.5], radial_rings: 4, angular_points: 16,
+                    maximum_frequency_hz: 1000.0,
+                },
+            }), ..RealizeOptions::default()
+        };
+        let render = |young| {
+            let compiled = compile_pressure_loaded_reed_assembly(&input, valve(cx, young),
+                admission(), &AcousticMaterialBindings::default()).unwrap();
+            let resolved = compiled.realize_with_options(&options).unwrap();
+            assert_eq!(resolved.gas, exterior);
+            assert_eq!(resolved.duct_observer.as_ref().unwrap().segment_gases, vec![gas]);
+            assert!(resolved.pressure_pa.iter().all(|p| p.is_finite()));
+            assert!(resolved.pressure_pa.iter().any(|p| *p != 0.0));
+            resolved
+        };
+        // The same actual gas and microphone retain sensitivity to the original
+        // solid-reduced valve's mass/stiffness, without a second synthesis loop.
+        assert_ne!(render(1e6).pressure_pa, render(4e6).pressure_pa);
+    });
+}
+
+#[test]
 fn material_swap_replaces_all_derived_reed_coefficients_and_keeps_the_template() {
     with_cx(|cx| {
         let template = template();

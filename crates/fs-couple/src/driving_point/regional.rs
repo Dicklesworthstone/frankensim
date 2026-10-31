@@ -141,6 +141,11 @@ impl RegionalDuct {
     #[must_use]
     pub fn inlet_gas(&self) -> &GasState { self.inlet_gas_override.as_ref().unwrap_or(&self.gases[0]) }
 
+    /// Inlet radius of this same admitted geometry [m]. Source builders use it
+    /// with `inlet_gas` instead of accepting a second, possibly different duct.
+    #[must_use]
+    pub fn inlet_radius_m(&self) -> f64 { self.regions[0].duct.segments[0].inlet_radius() }
+
     /// Actual internal medium at the terminal axial segment. Radiation uses
     /// [`Self::exterior_gas`], which defaults to this state.
     #[must_use]
@@ -396,7 +401,7 @@ impl RegionalDuct {
     /// Plane-wave impedance rho*c/S at the original inlet geometry.
     #[must_use]
     pub fn inlet_impedance(&self) -> f64 {
-        let radius = self.regions[0].duct.segments[0].inlet_radius();
+        let radius = self.inlet_radius_m();
         let area = core::f64::consts::PI * radius * radius;
         self.inlet_gas().density * self.inlet_gas().sound_speed / area
     }

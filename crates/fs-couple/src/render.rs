@@ -389,10 +389,34 @@ impl ReedBoreVoice {
         let termination = termination.into();
         let regional = crate::driving_point::regional::RegionalDuct::new(physics, gases)
             .map_err(|e| crate::acoustic_realize::map_drive(crate::driving_point::DrivingPointError::Duct(e)))?;
-        Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m, sample_rate_hz, |_| {
-            regional.characteristic_line_realized(termination, sample_rate_hz, line_samples, wall, None)
-                .map_err(crate::acoustic_realize::map_drive)
-        })
+        Self::new_with_regional(&regional, reed, termination, plates, listener_m,
+            sample_rate_hz, line_samples, wall)
+    }
+
+    /// Bind the original reed to an already-admitted regional duct, including
+    /// its independent exterior radiation load. Source area, source gas and
+    /// propagation all come from that ONE geometry/material binding.
+    ///
+    /// A physical receiver consumes [`Self::outgoing_pressure_pa`] after each
+    /// accepted sample. The voice's ordinary output remains its legacy proxy.
+    /// This uses the regional owner's existing default convergence ladder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_regional<'a>(
+        regional: &crate::driving_point::regional::RegionalDuct,
+        reed: BeatingReed,
+        termination: impl Into<fs_duct::MouthLoad<'a>>,
+        plates: PlateBank,
+        listener_m: f64,
+        sample_rate_hz: u32,
+        line_samples: usize,
+        wall: Option<&fs_phs::WallPin>,
+    ) -> Result<Self, AcousticRealizeError> {
+        let termination = termination.into();
+        Self::with_inlet_line(|| Ok(regional.inlet_radius_m()), regional.inlet_gas(),
+            reed, plates, listener_m, sample_rate_hz, |_| {
+                regional.characteristic_line_realized(termination, sample_rate_hz,
+                    line_samples, wall, None).map_err(crate::acoustic_realize::map_drive)
+            })
     }
 
     /// Render the same reed mechanics against a prescribed continuous
@@ -670,6 +694,12 @@ impl ReedBoreVoice {
     pub const fn samples_rendered(&self) -> u64 {
         self.sample_index
     }
+
+    /// Last accepted outgoing characteristic pressure [Pa] at the original
+    /// inlet plane. Immediately after construction this is the existing priming
+    /// sample; a downstream observer must consume it once before sample zero.
+    #[must_use]
+    pub const fn outgoing_pressure_pa(&self) -> f64 { self.p_plus_prev }
 
     /// Characteristic-line realization receipt (`n_fft`, rungs tried, tail energy,
     /// peak shift, and explicit pole states).

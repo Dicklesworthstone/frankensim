@@ -16333,3 +16333,29 @@ varying-force trajectories. Thermal expansion, phase change and finer spatial
 body-temperature projection require their corresponding physical owners.
 The new source/fiber/finite-heat fixtures are manufactured verification cases;
 they supply no measured rosin parameters or instrument-sound validation.
+
+### Physical duct observation through material assemblies
+
+`RealizeOptions::baffled_duct` connects ordinary and compiled material-reed
+assemblies to the existing regional TMM, moving-reed junction, terminal flow
+transfer, retarded Rayleigh microphone and causal `ObserverFilter`. Every axial
+segment retains its own coherent material gas; a separately bound, pressure-matched
+exterior supplies both radiation loading and observation. The accepted source
+wave, including its original priming sample, reaches that same physical receiver.
+Internal bore pressure and the compact jet proxy are not included in microphone
+output. The returned gas is the exterior; `duct_observer` retains interior states,
+receiver geometry and both propagation/filter delay accounts. Solid-reduced reed
+mass, stiffness, area and loss remain those of the existing material compilation.
+
+This explicit image currently admits unbranched cylinder/cone bores, their local
+wall law, a flanged terminal and the original default characteristic ladder.
+Other body/string/cavity members, side holes, extra excitations and unsupported
+discretization requests refuse. Existing default assembly paths are unchanged.
+Any explicit gas binding requires an explicit observer law, including an explicit
+lossless/classical choice with its labelled molecular-relaxation omission. ISO or
+molecular laws retain their original admission; scenario air alone preserves the
+original default selection. Tests compare original-owner pressure and earliest arrival, independent
+interior/exterior changes and a solid-material valve substitution. These are
+frozen-media numerical integrations, not mean-flow transport, radiating walls or
+experimental instrument validation.
+

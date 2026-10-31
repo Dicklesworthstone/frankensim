@@ -11,6 +11,8 @@ pub mod finite_gas;
 pub mod thermoelastic;
 /// Layer-resolved heat and continuing vibration on the same material sources.
 pub mod concentric;
+/// Regional reed-bore media and a physical exterior microphone on the same assembly.
+pub mod duct_observer;
 mod thermal_step;
 mod dirac_body;
 mod reed_ode;
@@ -119,6 +121,8 @@ pub enum AcousticRealizeError {
     },
     /// Waveguide TMM refusal.
     Duct(fs_duct::DuctError),
+    /// Original terminal-transfer or retarded-pressure observer refusal.
+    DuctObserver(crate::driving_point::regional::outlet::OutletError),
     /// Kirchhoff–Carrier / pHS refusal.
     Nonlinear(String),
     /// Algebraic work/flow refusal with the original quantitative certificate.
@@ -182,6 +186,7 @@ impl core::fmt::Display for AcousticRealizeError {
                 "FS-COUPLE-PLATE-ASSIGNMENT: region {region:?}, element {element:?}: {what}"
             ),
             Self::Duct(e) => write!(f, "{e}"),
+            Self::DuctObserver(e) => write!(f, "{e}"),
             Self::Nonlinear(e) => write!(f, "FS-COUPLE-ASSEMBLY-NL: {e}"),
             Self::AlgebraicSolve(e) => write!(f, "FS-COUPLE-ASSEMBLY-BALANCE: {e}"),
             Self::LumpedLadderBand {
@@ -281,14 +286,17 @@ pub struct RealizeOptions<'a> {
     /// requests refuse on joined string/duct and prescribed-flow paths whose
     /// propagators do not implement this selector.
     pub bore: BoreRealization,
-    /// Explicit, coherently resolved surrounding gas. Every excitation,
-    /// propagation, loading and pressure-observation consumer receives this
-    /// same state. `None` resolves the scenario's ambient-air declaration.
+    /// Explicit, coherently resolved gas shared by ordinary excitation,
+    /// propagation, loading and pressure observation. `None` resolves the
+    /// scenario's ambient-air declaration. `baffled_duct` can instead bind
+    /// individual interior regions and an independent exterior explicitly.
     /// Solid material temperature and prestress remain independent inputs.
     pub gas: Option<GasState>,
     /// Explicit observer absorption law, independent of gas-state provenance
     /// and the mechanical discretization. `None` preserves the scenario-air
-    /// path when `gas` is absent, and selects Stokes-Kirchhoff for supplied gas.
+    /// path when `gas` is absent, and selects Stokes-Kirchhoff for supplied gas
+    /// in the ordinary assembly. Physical `baffled_duct` material overrides
+    /// require an explicit law, including an explicit choice to omit relaxation.
     /// A supplied NASA-9 air state therefore needs an explicit ISO declaration
     /// to include that air-specific molecular-relaxation model.
     pub observer_absorption: Option<crate::air_path::GasAbsorptionModel>,
@@ -298,6 +306,12 @@ pub struct RealizeOptions<'a> {
     /// evaluated for another gas, or a state supplied with another law, refuses
     /// instead of being ignored.
     pub observer_relaxation: Option<&'a fs_material::relaxation::RelaxationState>,
+    /// Physical flanged-outlet microphone for an unbranched reed-driven duct.
+    /// Its regional gas, exterior load and causal observation share the existing
+    /// owners. Other coupled members and unsupported bore selectors refuse.
+    /// The observer law/relaxation above applies to this path's exterior gas;
+    /// the receiver position replaces `assembly.listener.distance_m`.
+    pub baffled_duct: Option<duct_observer::BaffledDuctObserver<'a>>,
 }
 
 /// The observer law and, for molecular relaxation, its evaluated state.
@@ -320,13 +334,16 @@ pub struct RealizedAssembly {
     pub sample_rate_hz: u32,
     /// Observer pressure [Pa], one sample per period.
     pub pressure_pa: Vec<f64>,
-    /// Derived ambient state (rho, c, mu, …).
+    /// Derived ambient state (rho, c, mu, …). On the physical duct path this is
+    /// the exterior observer gas; `duct_observer` retains the interior regions.
     pub gas: GasState,
     /// Bore realization receipt when a reed bore was realized.
     pub bore_receipt: Option<BoreRealizationReceipt>,
     /// The observer absorption law applied, and any molecular relaxation it
     /// left out, with an upper bound on its effect at the listener.
     pub observer_absorption: crate::air_path::ObserverAbsorptionReceipt,
+    /// Physical media, receiver and causal-delay binding when explicitly selected.
+    pub duct_observer: Option<duct_observer::BaffledDuctObservation>,
 }
 
 /// Realize every described member and sum their observer pressures.
@@ -522,6 +539,9 @@ fn realize_assembly_inner(
         return Err(AcousticRealizeError::InvalidDescription {
             what: "sample rate and duration must be positive and finite",
         });
+    }
+    if let Some(observer) = realize_options.baffled_duct {
+        return duct_observer::realize(assembly, chart.is_some(), realize_options, observer);
     }
     if !(assembly.listener.distance_m > 0.0 && assembly.listener.distance_m.is_finite()) {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -1442,23 +1462,7 @@ fn finish_observer(
     // admits the conditions, and otherwise the documented Stokes-Kirchhoff
     // fallback. Stokes-Kirchhoff leaves molecular relaxation out, which is
     // never silent: the receipt carries the labelled figure over the band.
-    let law = absorption.model.unwrap_or_else(|| {
-        let ambient = assembly.ambient;
-        let relative_humidity = ambient.relative_humidity;
-        match fs_material::iso9613::TerrestrialAir::moist_air(
-            ambient.temperature_k,
-            ambient.pressure_pa,
-            relative_humidity,
-        ) {
-            Ok((_, air))
-                if fs_material::iso9613::iso9613_absorption(&air, gas, relative_humidity, 1.0)
-                    .is_ok() =>
-            {
-                GasAbsorptionModel::Iso9613Air { relative_humidity, air }
-            }
-            _ => GasAbsorptionModel::StokesKirchhoff,
-        }
-    });
+    let law = selected_observer_law(assembly.ambient, gas, absorption.model);
     let relaxation_omitted = match law {
         GasAbsorptionModel::Iso9613Air { .. } | GasAbsorptionModel::MolecularRelaxation => None,
         GasAbsorptionModel::StokesKirchhoff | GasAbsorptionModel::Lossless => Some(relaxation_omission(
@@ -1490,6 +1494,33 @@ fn finish_observer(
         gas: *gas,
         bore_receipt: None,
         observer_absorption: ObserverAbsorptionReceipt { law, relaxation_omitted },
+        duct_observer: None,
+    })
+}
+
+// Explicit constitutive selection is shared by offline and physical causal
+// observers. Only a scenario-air input is eligible for the ambient default.
+fn selected_observer_law(
+    ambient: AmbientGas,
+    gas: &GasState,
+    selected: Option<crate::air_path::GasAbsorptionModel>,
+) -> crate::air_path::GasAbsorptionModel {
+    use crate::air_path::GasAbsorptionModel;
+    selected.unwrap_or_else(|| {
+        let relative_humidity = ambient.relative_humidity;
+        match fs_material::iso9613::TerrestrialAir::moist_air(
+            ambient.temperature_k,
+            ambient.pressure_pa,
+            relative_humidity,
+        ) {
+            Ok((_, air))
+                if fs_material::iso9613::iso9613_absorption(&air, gas, relative_humidity, 1.0)
+                    .is_ok() =>
+            {
+                GasAbsorptionModel::Iso9613Air { relative_humidity, air }
+            }
+            _ => GasAbsorptionModel::StokesKirchhoff,
+        }
     })
 }
 
