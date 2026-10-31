@@ -1033,7 +1033,8 @@ def main():
         row = next(q for q in rows if q["id"] == "ff-brightness")
         row["status"] = "confirmed"
         row["suspect"] = ("Geometric string nonlinearity: a hard strike stretches the string, modulating its tension (phantom partials) and driving "
-                          "longitudinal waves whose axial force reaches the bridge through the string's downbearing and bridge-cap rocking.")
+                          "longitudinal waves whose axial force reaches the bridge through a per-mode participation row read from the board file "
+                          "(the string's direction is taken perpendicular to the bridge, an assumption).")
         row["test"] = ("Carry the waves rows into the graded A3 renders, then compare hammer contact time and 2-8 kHz brightness across felt laws "
                        "for the dullness the strings do not supply.")
         w_by_k = {q["k"]: q for q in sw["phantoms_ff"]["waves"]}

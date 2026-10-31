@@ -201,8 +201,11 @@ moderate-slope bound. A waves row also supplies axial band, mode cap, damping
 ratio and material-strain bound; these
 are not inferred from tension, EI or winding mass. Axial modes share the
 existing string/contact clock and react through the moving transverse bridge;
-the speaking end's axial force also drives the bridge through the declared
-downbearing/bridge-cap projection. It requires --render; all-linear selection
+the speaking end's axial force also drives the bridge through a per-mode
+participation row read from the board file (each mode's translation plus its
+rotation acting on the lever arm to the bridge-top contact; the string
+direction is taken perpendicular to the bridge, an assumption; a crowned shell
+is refused). It requires --render; all-linear selection
 preserves the original image. See STRING_STRETCHING.md for SI rows, explicit
 retention limits and the distinction from a full longitudinal bridge model.
 --dump-geometry/--dump-obj export the board model; export alone skips eigenanalysis.
