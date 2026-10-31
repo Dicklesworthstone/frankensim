@@ -37,6 +37,8 @@ pub enum ThermalMaterialError {
     Coordinate(String),
     /// The canonical property owner refused the exact source query.
     Material(MaterialStatePointError),
+    /// The original fluid transport owner refused its current physical state.
+    Fluid(crate::MaterialError),
 }
 impl core::fmt::Display for ThermalMaterialError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -44,6 +46,7 @@ impl core::fmt::Display for ThermalMaterialError {
             Self::Invalid(s) => write!(f, "thermal material: {s}"),
             Self::Coordinate(s) => write!(f, "thermal material coordinate: {s}"),
             Self::Material(e) => write!(f, "thermal material source: {e}"),
+            Self::Fluid(e) => write!(f, "thermal fluid source: {e}"),
         }
     }
 }

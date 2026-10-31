@@ -10,11 +10,15 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim,
     Provenance, SelectionPolicy, UncertaintyModel};
 use fs_qty::Density;
 
-fn point(t: f64) -> QueryPoint {
+pub(in crate::cavity_phs::piston::thermal) fn point(t: f64) -> QueryPoint {
     QueryPoint::new().with_quantity("T",semantic(QuantityKind::AbsoluteTemperature),t).unwrap()
         .with("lot",7.0).unwrap().with("melt",0.0).unwrap()
 }
-fn material(k: Option<f64>, typed: bool, phase_curve: bool) -> (MaterialCard, PropertyKey, ResolvedHeatCapacityCurve) {
+pub(in crate::cavity_phs::piston::thermal) fn material(
+    k: Option<f64>,
+    typed: bool,
+    phase_curve: bool,
+) -> (MaterialCard, PropertyKey, ResolvedHeatCapacityCurve) {
     let quantity = if typed { semantic(QuantityKind::ThermalConductivity) }
         else { QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS) };
     let conductivity = PropertyKey::with_quantity("thermal_conductivity",quantity);

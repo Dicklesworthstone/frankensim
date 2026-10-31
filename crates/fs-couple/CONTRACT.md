@@ -18257,8 +18257,11 @@ synthetic material data.
 or the existing `IsochoricRealGasParcel` through a sealed constitutive interface.
 Both use the same native wall coordinate, free/fixed support, impulse solver,
 acceptance gates and port account. `PistonStep<S>` retains the complete resolved
-midpoint state. Existing ideal defaults and ideal-only nozzle, reaction and
-thermal adapters retain their original applicability.
+midpoint state. Existing ideal defaults retain their original applicability.
+The reciprocal finite-body heat solve, state-dependent body-power solve and
+source-bound translating inertia now accept either gas owner. Specialized
+nozzle, reaction, double-acting and network adapters keep their stated ideal-gas
+applicability.
 
 The gas owner supplies conservative heat/volume candidates, work-conjugate
 midpoint pressure and its discrete endpoint-volume derivative. Actual resolved
@@ -18274,6 +18277,39 @@ It supplies no phase equilibrium, latent heat, reacting/nozzle exchange,
 friction/contact stops or exact-isentropy/nonnegative-entropy guarantee. Focused
 regression sources cover dense-gas motion and energy accounting, fixed-wall
 heating, real-EOS acoustic admission, and source/cancellation refusal with replay.
+
+#### Dense-gas compression with finite wall heat and source-bound inertia
+
+`ThermalPistonCandidate<S, G>` and `PoweredThermalCandidate<I, P, G>` retain the
+original `GasPiston<G>` endpoint. Their existing bounded feedback solve evaluates
+the gas at its actual conservative energy/volume midpoint and the thermal body
+at its enthalpy midpoint. The same signed interface heat enters the gas and leaves
+the finite body; it cancels from the independently checked combined gas, body,
+kinetic and external-work balance. A body enthalpy plateau may supply latent heat
+without claiming gas phase equilibrium. State-dependent body power receives those
+same two material states and is counted once as external energy.
+
+`MaterialConductionLayers` consumes the existing `FluidTransport` snapshot, so
+real-fluid density, heat capacity and conductivity stay attached to the resolved
+dense-gas state. Body conductivity retains the original card, selection policy,
+auxiliary axes, temperature and optional liquid-fraction coordinates, with typed
+source refusals. No ideal-reference transport or name-based property fallback is
+introduced.
+
+`MaterialGasPiston<G>` obtains translating mass from the original `ResolvedBody`
+inertia and retains that body together with the original native piston. Its
+thermal candidates preserve both owners and the native port account; they do not
+reconstruct a fresh piston or silently change mechanical mass when a thermal
+body heats or changes phase. Thermal storage may represent a separate wall, and
+its uniform-temperature, fixed-geometry and negligible-deformation-work assumptions
+remain explicit.
+
+Focused regression sources cover repeated dense-gas compression with sourced
+finite-wall heat, latent-wall cooling, actual-midpoint state-dependent power,
+source-derived inertia, fixed supports, isolation, and refusal/cancellation
+without accepted-state or port-history mutation. These extend the existing
+integrators and acceptance budgets; they do not introduce a higher-order scheme
+or an unconditional stability guarantee.
 
 
 ## Current tetrahedral-surface contact geometry

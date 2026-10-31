@@ -8,9 +8,13 @@
 /// Source-resolved resistive power, using the existing conductor owner.
 pub mod joule;
 
-use super::{ConductanceSample, GasPiston, HeatExchangeSolve, PistonInput, PistonSolve,
-    ThermalPistonCandidate, ThermalPistonError, UniformEnthalpyStepInput,
-    EquilibriumPhaseState, ResolvedThermochemicalGasState, feedback, poll};
+#[cfg(test)]
+use super::ResolvedThermochemicalGasState;
+use super::{
+    ClosedGasParcel, ConductanceSample, EquilibriumPhaseState, GasPiston, HeatExchangeSolve,
+    PistonGas, PistonInput, PistonSolve, ThermalPistonCandidate, ThermalPistonError,
+    UniformEnthalpyStepInput, feedback, poll,
+};
 
 /// A signed instantaneous power and the original concrete source evaluation.
 #[derive(Clone, Debug, PartialEq)]
@@ -43,26 +47,34 @@ pub struct PowerFeedbackStep {
 
 /// Both physical endpoints and the source law at their common energy midpoint.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PoweredThermalCandidate<I, P> {
-    coupled: ThermalPistonCandidate<I>,
+pub struct PoweredThermalCandidate<I, P, G: PistonGas = ClosedGasParcel> {
+    coupled: ThermalPistonCandidate<I, G>,
     power: PowerSample<P>,
     step: PowerFeedbackStep,
 }
-impl<I, P> PoweredThermalCandidate<I, P> {
+impl<I, P, G: PistonGas> PoweredThermalCandidate<I, P, G> {
     /// The original reciprocal thermal/gas/momentum candidate, not a second state.
-    pub const fn coupled(&self) -> &ThermalPistonCandidate<I> { &self.coupled }
+    pub const fn coupled(&self) -> &ThermalPistonCandidate<I, G> {
+        &self.coupled
+    }
     /// Exact source sample used in the physical consistency test.
     pub const fn power(&self) -> &PowerSample<P> { &self.power }
     /// Actual source and total-energy residuals and bounded work counts.
     pub const fn step(&self) -> &PowerFeedbackStep { &self.step }
     /// Publish both endpoints together. Source energy is ALREADY in their
     /// storage; neither the returned power nor interface heat is added again.
-    pub fn into_parts(self) -> (ThermalPistonCandidate<I>, PowerSample<P>, PowerFeedbackStep) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ThermalPistonCandidate<I, G>,
+        PowerSample<P>,
+        PowerFeedbackStep,
+    ) {
         (self.coupled, self.power, self.step)
     }
 }
 
-impl GasPiston {
+impl<G: PistonGas> GasPiston<G> {
     /// Couple a repeatable state-dependent body power to the existing thermal
     /// and mechanical equations. Both callbacks receive the ACTUAL gas and body
     /// energy midpoints; neither may debit a live external energy store.
@@ -81,14 +93,16 @@ impl GasPiston {
     /// unchanged; the source callback's external side effects are not reversible.
     #[allow(clippy::too_many_arguments)]
     pub fn powered_thermal_candidate<I, P, E>(
-        &self, input: PistonInput, body: UniformEnthalpyStepInput<'_>,
-        controls: PistonSolve, exchange: HeatExchangeSolve, source: HeatExchangeSolve,
-        mut conductance: impl FnMut(&ResolvedThermochemicalGasState, EquilibriumPhaseState)
-            -> Result<ConductanceSample<I>, E>,
-        mut power: impl FnMut(&ResolvedThermochemicalGasState, EquilibriumPhaseState)
-            -> Result<PowerSample<P>, E>,
+        &self,
+        input: PistonInput,
+        body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve,
+        exchange: HeatExchangeSolve,
+        source: HeatExchangeSolve,
+        mut conductance: impl FnMut(&G::State, EquilibriumPhaseState) -> Result<ConductanceSample<I>, E>,
+        mut power: impl FnMut(&G::State, EquilibriumPhaseState) -> Result<PowerSample<P>, E>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<PoweredThermalCandidate<I, P>, ThermalPistonError<E>> {
+    ) -> Result<PoweredThermalCandidate<I, P, G>, ThermalPistonError<E>> {
         poll(&mut cancelled)?;
         feedback::admit(source)?;
         let mut exchange_trials = 0usize;

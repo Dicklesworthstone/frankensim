@@ -6,6 +6,9 @@
 //! evaluated on their actual energy midpoints, never averaged temperatures.
 //! The thermal body uses the existing negligible-pV-work enthalpy storage model.
 //! Its volume is fixed during this proposal; expansion/deformation is not inferred.
+//! Ideal and nonideal source parcels share this exact thermal/mechanical solve.
+//! Gas calorics, density, pressure and transport remain on the supplied owner;
+//! no ideal-reference state is substituted for a dense-fluid midpoint.
 
 /// One finite enthalpy/phase body feeding both faces of the shared gas piston.
 pub mod double_acting;
@@ -241,3 +244,5 @@ impl<G: PistonGas> GasPiston<G> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod nonideal_tests;

@@ -7,25 +7,27 @@
 //! https://web.mit.edu/16.unified/www/FALL/thermodynamics/notes/node118.html
 
 use super::ConductanceSample;
-use super::source::ThermalMaterialPoint;
 /// Compatibility name for the shared thermal/electrical material-source refusal.
 pub use super::source::ThermalMaterialError as LayerConductionError;
-use fs_material::phase::EquilibriumPhaseState;
-use fs_material::state_point::{MaterialPropertySelection,
-    ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
-    THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point};
-use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
-use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
-use fs_qty::QuantitySpec;
-#[cfg(test)]
-use fs_qty::{Dims, Temperature};
+use super::source::ThermalMaterialPoint;
 #[cfg(test)]
 use fs_matdb::PropertyValue;
+use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
+use fs_material::fluid_transport::FluidTransport;
+use fs_material::phase::EquilibriumPhaseState;
+use fs_material::state_point::{
+    MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
+    ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point,
+};
+use fs_qty::QuantitySpec;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+#[cfg(test)]
+use fs_qty::{Dims, Temperature};
 
 /// Original body source, explicit condition axes, and caller-owned layer geometry.
 /// No independent gas conductivity is accepted: it comes from the same resolved
-/// midpoint that drove gas energy and piston momentum.
+/// midpoint that drove gas energy and piston momentum. The existing fluid
+/// transport interface retains the actual ideal or real-fluid state.
 pub struct MaterialConductionLayers<'a> {
     /// Must be the SAME card that owns the body's enthalpy/phase chart.
     pub material: &'a MaterialCard,
@@ -83,8 +85,10 @@ impl MaterialConductionLayers<'_> {
     /// data cannot silently become insulation. Explicit zero body conductivity
     /// means insulation. Spatial homogenization, phase/pressure validity and the
     /// effective layer lengths remain source/caller obligations.
-    pub fn resolve(
-        &self, gas: &ResolvedThermochemicalGasState, body: EquilibriumPhaseState,
+    pub fn resolve<G: FluidTransport + ?Sized>(
+        &self,
+        gas: &G,
+        body: EquilibriumPhaseState,
     ) -> Result<ConductanceSample<ResolvedMaterialStatePoint>, LayerConductionError> {
         let point = self.binding().at(body)?;
         self.validate_geometry_and_key()?;
@@ -105,8 +109,10 @@ impl MaterialConductionLayers<'_> {
     /// conductivity pin are checked even at zero area. A pre-resolved snapshot
     /// owns its policy selection; policies are not run again against another
     /// set of requirements. This does not refresh a stale material state.
-    pub fn resolve_from_material(
-        &self, gas: &ResolvedThermochemicalGasState, body: EquilibriumPhaseState,
+    pub fn resolve_from_material<G: FluidTransport + ?Sized>(
+        &self,
+        gas: &G,
+        body: EquilibriumPhaseState,
         source: ResolvedMaterialStatePoint,
     ) -> Result<ConductanceSample<ResolvedMaterialStatePoint>, LayerConductionError> {
         let invalid = LayerConductionError::Invalid;
@@ -130,7 +136,10 @@ impl MaterialConductionLayers<'_> {
         }
         binding.admit_static(property)?;
         let kb = property.value_si();
-        let kg = gas.state().thermal_conductivity;
+        let kg = gas
+            .transport_state()
+            .map_err(LayerConductionError::Fluid)?
+            .thermal_conductivity_w_m_k();
         if !kb.is_finite() || kb < 0.0 {
             return Err(invalid("body conductivity is not nonnegative and finite"));
         }
@@ -150,4 +159,4 @@ impl MaterialConductionLayers<'_> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
