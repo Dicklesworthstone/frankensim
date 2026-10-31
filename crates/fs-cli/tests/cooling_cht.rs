@@ -1805,6 +1805,61 @@ fn two_resistor_component_on_a_board_reports_its_junction() {
     assert!(tj > 300.0, "{tj}");
 }
 
+const COMPACT_TRANSIENT: &str = r#"{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.006, 0.003, 0.002], "voxel_m": 0.001,
+ "materials": [{"name": "board", "conductivity_w_m_k": 200.0,
+   "volumetric_heat_capacity_j_m3_k": 2400000.0}],
+ "solids": [{"material": "board", "min_m": [0.0, 0.0, 0.0],
+   "max_m": [0.006, 0.001, 0.002]}],
+ "components": [{"name": "u1", "min_m": [0.002, 0.001, 0.0],
+   "max_m": [0.004, 0.002, 0.002], "board_side": "y-", "power_w": 0.02,
+   "junction_to_case_k_w": 40.0, "junction_to_board_k_w": 15.0,
+   "heat_capacity_j_k": 0.5}],
+ "faces": {
+   "x-": {"type": "inlet", "velocity_m_s": [0.1, 0.0, 0.0], "temperature_k": 300.0},
+   "x+": {"type": "opening", "ambient_k": 300.0}
+ },
+ "transient": {"time_step_s": 0.25, "steps": 1, "initial_temperature_k": 300.0},
+ "solver": {"tolerance": 1e-8}
+}"#;
+
+#[test]
+fn compact_junction_capacity_controls_the_cli_energy_march() {
+    // The hidden compact material has no volumetric capacity. Only the
+    // authored junction capacity owns storage in its occupied cells.
+    let (code, light, stderr) = run(&scratch("compact-transient-light.json", COMPACT_TRANSIENT));
+    assert_eq!(code, 0, "{stderr}");
+    let heavy_scene = COMPACT_TRANSIENT.replace("\"heat_capacity_j_k\": 0.5", "\"heat_capacity_j_k\": 2.0");
+    let (code, heavy, stderr) = run(&scratch("compact-transient-heavy.json", &heavy_scene));
+    assert_eq!(code, 0, "{stderr}");
+    let light_peak = f(&light, &["transient", "final_max_solid_temperature_k"]);
+    let heavy_peak = f(&heavy, &["transient", "final_max_solid_temperature_k"]);
+    assert!(light_peak > heavy_peak && heavy_peak > 300.0, "{light_peak} {heavy_peak}");
+    // The junction cannot retain more than the complete 0.02 W * 0.25 s input.
+    assert!(light_peak <= 300.0 + 0.02 * 0.25 / 0.5 + 1e-8);
+    for result in [&light, &heavy] {
+        assert!(f(result, &["transient", "worst_step_closure_j"]) < 1e-8);
+    }
+}
+
+#[test]
+fn compact_junction_capacity_is_required_and_positive_for_cli_marches() {
+    let key = "\"heat_capacity_j_k\": 0.5";
+    for (index, value) in ["0", "-2", "\"missing\""].into_iter().enumerate() {
+        let scene = COMPACT_TRANSIENT.replace(key, &format!("\"heat_capacity_j_k\": {value}"));
+        let (code, diagnostic, _) = run(&scratch(&format!("compact-capacity-{index}.json"), &scene));
+        assert_eq!(code, 4, "{diagnostic:?}");
+        assert_eq!(diagnostic.str_field("code"), Some("cooling-cht-input"));
+        assert!(diagnostic.str_field("message").unwrap().contains("heat_capacity_j_k"));
+    }
+    let missing = COMPACT_TRANSIENT.replace(",\n   \"heat_capacity_j_k\": 0.5", "");
+    assert_ne!(missing, COMPACT_TRANSIENT);
+    let (code, diagnostic, _) = run(&scratch("compact-capacity-missing.json", &missing));
+    assert_eq!(code, 4, "{diagnostic:?}");
+    assert!(diagnostic.str_field("message").unwrap().contains("heat_capacity_j_k is required"));
+}
+
 #[test]
 fn sealed_box_radiates_from_the_block_to_its_walls() {
     // A heated block inside a sealed box whose 2 mm walls are an emissive

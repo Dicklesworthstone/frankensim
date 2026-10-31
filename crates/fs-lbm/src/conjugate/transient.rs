@@ -12,8 +12,10 @@
 //!
 //! `C_c = (rho c)_c V_c` uses the fluid's volumetric heat capacity in fluid
 //! cells and each solid's declared `volumetric_heat_capacity_j_m3_k` (a
-//! solid without one refuses). Sources are `power_w` scaled by
-//! `power_schedule(t)`. Each step retains an energy closure computed two
+//! non-collapsed solid without one refuses). A compact component declares
+//! its own total junction capacity; its voxel aliases carry no extra storage.
+//! Ordinary and compact sources are `power_w` scaled by `power_schedule(t)`.
+//! Each step retains an energy closure computed two
 //! independent ways: the stored-energy change `sum C (T^(n+1) - T^n)` and
 //! `dt (source - boundary outflow)` from boundary fluxes alone; their
 //! difference is the solver residual, never a modelling term.
@@ -31,7 +33,7 @@
 use fs_exec::CancelGate;
 
 use super::domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
-use super::energy::{AdvectiveEnthalpyField, EnergyConfig, EnergySolution, PseudoStep, ThermalSetup, solve_energy_inner};
+use super::energy::{AdvectiveEnthalpyField, EnergyConfig, EnergySolution, PseudoStep, ThermalSetup, compact_owners, solve_energy_inner};
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
 use super::{ChtError, finite, finite_positive, poll};
@@ -56,8 +58,9 @@ pub struct TransientRecord {
     pub max_temperature_k: f64,
     /// Largest solid-cell temperature, K (NaN without solids).
     pub max_solid_temperature_k: f64,
-    /// Actual stored-energy change, J: `sum C delta(T)` for fixed Cp, or
-    /// `sum rho0 V delta(h)` for explicitly coupled fluid or solid calorics.
+    /// Actual stored-energy change, J: `sum C delta(T)` for ordinary cells
+    /// and compact junctions, or `sum rho0 V delta(h)` for explicitly coupled
+    /// fluid or solid calorics. Collapsed aliases add no duplicate capacity.
     pub stored_energy_change_j: f64,
     /// `dt * sources`, J.
     pub source_j: f64,
@@ -101,14 +104,6 @@ pub fn march_energy(
 ) -> Result<TransientSolution, ChtError> {
     fluid.validate()?;
     finite_positive("transient.time_step_s", config.time_step_s)?;
-    if !setup.compact_components.is_empty() {
-        // A two-resistor model has no heat capacity: it is a steady model.
-        return Err(ChtError::InvalidInput {
-            field: "thermal.compact_components",
-            reason: "two-resistor compact models are steady; the transient march refuses them"
-                .into(),
-        });
-    }
     let cells = domain.cell_count();
     if initial_temperature.len() != cells {
         return Err(ChtError::InvalidInput {
@@ -123,7 +118,7 @@ pub fn march_energy(
         finite("transient.initial_temperature", t)?;
     }
     domain.check_materials(solids.len())?;
-    let capacity = heat_capacity(domain, fluid, solids)?;
+    let capacity = heat_capacity(domain, fluid, solids, setup, initial_temperature, gate)?;
     let storage: Vec<f64> = capacity.iter().map(|c| c / config.time_step_s).collect();
     let solids_present = (0..cells).any(|c| !domain.is_fluid(c));
     let mut temperature = initial_temperature.to_vec();
@@ -138,11 +133,7 @@ pub fn march_energy(
         let time_s = step as f64 * config.time_step_s;
         let scale = power_schedule(time_s);
         finite("transient.power_schedule", scale)?;
-        if !setup.power_w.is_empty() {
-            for (out, base) in stepped.power_w.iter_mut().zip(&setup.power_w) {
-                *out = base * scale;
-            }
-        }
+        scale_power(&mut stepped, setup, scale);
         let (next, record) = energy_step(
             domain,
             fluid,
@@ -165,36 +156,96 @@ pub fn march_energy(
     })
 }
 
-/// Heat capacity `(rho c)_c V_c` of every cell, J/K (a solid without a
-/// declared heat capacity refuses).
+/// Scale from authored powers every step, never from a previous scaled value.
+pub(super) fn scale_power(stepped: &mut ThermalSetup, authored: &ThermalSetup, scale: f64) {
+    for (out, base) in stepped.power_w.iter_mut().zip(&authored.power_w) {
+        *out = base * scale;
+    }
+    for (out, base) in stepped.compact_components.iter_mut().zip(&authored.compact_components) {
+        out.power_w = base.power_w * scale;
+    }
+}
+
+/// Capacity in the solver's unknown order: cells, then compact junctions.
+/// Collapsed aliases carry zero; each authored junction capacity appears once.
+/// Ordinary solids require volumetric capacity. Compact material capacity is
+/// irrelevant because the component declares the complete lumped storage law.
 pub(crate) fn heat_capacity(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
     solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    initial: &[f64],
+    gate: &CancelGate,
 ) -> Result<Vec<f64>, ChtError> {
-    (0..domain.cell_count())
-        .map(|c| {
-            let rho_c = match domain.voxel_at(c) {
-                Voxel::Fluid => fluid.volumetric_heat_capacity(),
-                Voxel::Solid(m) => {
-                    let solid = &solids[usize::from(m)];
-                    let value = solid.volumetric_heat_capacity_j_m3_k.ok_or_else(|| {
-                        ChtError::InvalidInput {
-                            field: "solid.volumetric_heat_capacity_j_m3_k",
-                            reason: format!("solid `{}` declares no heat capacity", solid.label),
-                        }
-                    })?;
-                    finite_positive("solid.volumetric_heat_capacity_j_m3_k", value)?;
-                    value
-                }
-            };
-            Ok(rho_c * domain.volume(c))
-        })
-        .collect()
+    let owners = compact_owners(domain, &setup.compact_components, gate)?;
+    let junctions = junction_capacity(domain, setup, &owners, initial, gate)?;
+    let cells = domain.cell_count();
+    let mut capacity = Vec::with_capacity(cells + junctions.len());
+    for c in 0..cells {
+        if c.is_multiple_of(4096) { poll(gate)?; }
+        if owners.get(c).is_some_and(|&j| j != usize::MAX) {
+            capacity.push(0.0);
+            continue;
+        }
+        let rho_c = match domain.voxel_at(c) {
+            Voxel::Fluid => fluid.volumetric_heat_capacity(),
+            Voxel::Solid(m) => {
+                let solid = &solids[usize::from(m)];
+                let value = solid.volumetric_heat_capacity_j_m3_k.ok_or_else(|| {
+                    ChtError::InvalidInput {
+                        field: "solid.volumetric_heat_capacity_j_m3_k",
+                        reason: format!("solid `{}` declares no heat capacity", solid.label),
+                    }
+                })?;
+                finite_positive("solid.volumetric_heat_capacity_j_m3_k", value)?;
+                value
+            }
+        };
+        let value = rho_c * domain.volume(c);
+        finite_positive("thermal.storage.capacity_j_k", value)?;
+        capacity.push(value);
+    }
+    capacity.extend(junctions);
+    Ok(capacity)
+}
+
+/// Physical junction storage and a single consistent old temperature for each
+/// alias box. Shared by native and explicitly resolved material storage paths.
+pub(super) fn junction_capacity(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    owners: &[usize],
+    initial: &[f64],
+    gate: &CancelGate,
+) -> Result<Vec<f64>, ChtError> {
+    let mut capacities = Vec::with_capacity(setup.compact_components.len());
+    for (j, part) in setup.compact_components.iter().enumerate() {
+        let capacity = part.heat_capacity_j_k.ok_or_else(|| ChtError::InvalidInput {
+            field: "thermal.compact_components",
+            reason: format!("component {j}: a physical transient requires heat_capacity_j_k"),
+        })?;
+        finite_positive("thermal.compact_components.heat_capacity_j_k", capacity)?;
+        capacities.push(capacity);
+    }
+    for (c, &j) in owners.iter().enumerate() {
+        if c.is_multiple_of(4096) { poll(gate)?; }
+        if j != usize::MAX {
+            let part = &setup.compact_components[j];
+            let representative = domain.index(part.lo[0], part.lo[1], part.lo[2]);
+            if initial[c] != initial[representative] {
+                return Err(ChtError::InvalidInput {
+                    field: "thermal.compact_components.initial_temperature",
+                    reason: format!("component {j}: collapsed cells must share one initial junction temperature"),
+                });
+            }
+        }
+    }
+    Ok(capacities)
 }
 
 /// One backward-Euler energy step on `flow` from `previous`, with its
-/// closure record. `(capacity, storage)` are `C` and `C / dt` per cell;
+/// closure record. `(capacity, storage)` are `C` and `C / dt` in cell/junction order;
 /// `(time_s, dt, solids_present)` label the record.
 #[allow(clippy::too_many_arguments)] // physics inputs + step state
 pub(crate) fn energy_step(
@@ -247,10 +298,38 @@ pub(crate) fn energy_step_with_conductivity(
         domain, fluid, solids, flow, setup, energy, storage, previous, radiation,
         molecular_w_m_k, gate,
     )?;
-    let record = record_energy_step(domain, setup, &next,
-        |cell| capacity[cell] * (next.temperature[cell] - previous[cell]),
-        (time_s, dt, solids_present), radiated_w, radiation_outflow_correction_w)?;
+    let record = storage_record(domain, setup, capacity, previous, &next,
+        (time_s, dt, solids_present), (radiated_w, radiation_outflow_correction_w), gate)?;
     Ok((next.temperature, record))
+}
+
+/// Constant-capacity storage, including one independent contribution per
+/// compact junction, composed with the shared physical boundary ledger.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn storage_record(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    capacity: &[f64],
+    previous: &[f64],
+    next: &EnergySolution,
+    (time_s, dt, solids_present): (f64, f64, bool),
+    (radiated_w, outflow_correction_w): (f64, f64),
+    gate: &CancelGate,
+) -> Result<TransientRecord, ChtError> {
+    poll(gate)?;
+    let cells = domain.cell_count();
+    let mut record = record_energy_step(domain, setup, next,
+        |cell| capacity[cell] * (next.temperature[cell] - previous[cell]),
+        (time_s, dt, solids_present), radiated_w, outflow_correction_w)?;
+    for (j, (part, junction)) in setup.compact_components.iter().zip(&next.junctions).enumerate() {
+        if j.is_multiple_of(256) { poll(gate)?; }
+        let old = previous[domain.index(part.lo[0], part.lo[1], part.lo[2])];
+        record.stored_energy_change_j += capacity[cells + j] * (junction.temperature_k - old);
+    }
+    record.closure_j = record.stored_energy_change_j - (record.source_j - record.boundary_outflow_j);
+    finite("thermal.storage.energy_j", record.stored_energy_change_j)?;
+    finite("thermal.storage.energy_j", record.closure_j)?;
+    Ok(record)
 }
 
 /// One physical heat ledger for constant-Cp and source-caloric steps. Storage
@@ -362,8 +441,9 @@ pub(super) fn solve_step_with_fields(
         }
         // This is the time level, not the previous radiation iterate.
         let step = PseudoStep {
-            coefficient_w_k: storage,
+            coefficient_w_k: &storage[..domain.cell_count()],
             previous,
+            junction_coefficient_w_k: &storage[domain.cell_count()..],
         };
         match (molecular_w_m_k, enthalpy) {
             (Some(field), Some(caloric)) => energy.solve_step_with_enthalpy(

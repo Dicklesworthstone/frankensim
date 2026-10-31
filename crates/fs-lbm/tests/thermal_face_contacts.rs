@@ -126,7 +126,7 @@ fn g0_ambiguous_and_nonphysical_faces_refuse() {
     setup.contacts.clear();
     setup.compact_components.push(CompactComponent { lo: [1,0,0], hi: [2,1,1],
         board_face: fs_lbm::Face3::ALL[0], power_w: 0.0,
-        junction_to_case_k_w: 1.0, junction_to_board_k_w: 1.0 });
+        junction_to_case_k_w: 1.0, junction_to_board_k_w: 1.0, heat_capacity_j_k: None });
     assert!(check(&setup).is_err());
 }
 

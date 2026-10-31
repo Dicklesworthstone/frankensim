@@ -2251,8 +2251,11 @@ Release lane (`--ignored`, executed) on 32 x 32: Ra = 1e4 (tau 0.8) Nu
 
 Backward-Euler steps of `C dT/dt + A T = b(t)` over a FROZEN flow field
 (forced convection), with `C = (rho c) V` from the fluid and each solid's
-declared `SolidMaterial::with_heat_capacity` (a solid without one refuses),
-sources `power_w * power_schedule(t)`, and per-step records of the peak
+declared `SolidMaterial::with_heat_capacity` (an ordinary solid without one
+refuses). Compact components instead require an authored total
+`CompactComponent::heat_capacity_j_k`; their collapsed voxel aliases carry
+zero additional capacity. Both cell and component sources use
+`power_w * power_schedule(t)`, with per-step records of the peak
 (solid) temperature and an energy closure computed two independent ways
 (stored-energy change vs `dt (source - boundary outflow)`). Positive `C / dt`
 storage anchors the absolute temperature even with completely insulated or
@@ -2500,7 +2503,7 @@ those fluxes with its two-way closure.
 | Smoothly started channel (32 x 8, inlet `1 - exp(-t/0.05)`), probe at t = 0.05 viscous times | 256-step BDF2 reference | errors 1.894e-5 -> 4.100e-6 (32 -> 64 steps): order 2.21 (BDF2); 1.330e-4 -> 6.799e-5: order 0.97 (backward Euler) |
 | Same channel, 40 steps of one viscous time | steady SIMPLEC solution | largest velocity difference 2.5e-10 |
 | Plug flow heated mid-channel, 10 steps | `march_energy` on the steady plug flow | 8.2e-11 K; every step closes |
-| Refusals | face fan, empty march, compact components | structured errors |
+| Refusals | face fan, empty march, compact junction without declared capacity | structured errors |
 
 An impulsively started flow (inlet on at t = 0 over fluid at rest) is
 non-smooth initial data: BDF2 measured order 1.35 at t = 0.04 there;
@@ -2614,8 +2617,8 @@ all use the same stored links. Ordinary boundary conditions on collapsed compone
 sides contribute no heat, matching the assembly's adiabatic side ownership.
 `tests/conjugate/nonlinear_compact.rs` checks independently derived heating and
 cooling profiles with unequal face areas, branch powers, and the compact-side
-heat-balance regression. Compact components remain steady-state models without
-an invented junction heat capacity. The analytic film is the declared stationary
+heat-balance regression. Physical marches use explicitly declared compact
+junction heat capacity; no capacity is inferred from a resistor. The analytic film is the declared stationary
 scalar Robin law, not a resolved fluid boundary layer.
 
 The existing steady and transient Picard/Krylov owner evaluates these
@@ -2680,16 +2683,41 @@ rows. `EnergySolution::junctions` gives the junction temperature and the
 case and board heats; `solid_to_fluid_heat_w` counts the case links into
 fluid instead of the collapsed cells. Refusals: a box that holds fluid,
 overlaps or sits on another component, or puts its case or board face on
-the domain boundary; power, sinks or fixed temperatures inside a box; any
-transient march (the model has no heat capacity).
+the domain boundary; power, sinks or fixed temperatures inside a box; a
+physical transient without an explicitly declared positive junction capacity.
+
+`heat_capacity_j_k: Some(C_j)` adds a constant lumped junction storage law to
+the same resistive model. `march_energy` and `march_conjugate` solve
+`(C_j/dt + sum G) T_j_new - sum G T_neighbor_new = P_j_new + (C_j/dt) T_j_old`
+in the existing implicit energy system, including nonlinear outside bulk
+conductivities. Capacities follow the actual unknown layout: ordinary cells,
+zero-capacity collapsed aliases, then one capacity per junction. The independent
+step audit adds `C_j * (T_j_new - T_j_old)` exactly once. Package voxel size or
+subdivision cannot multiply its capacity. A component's initial aliases must
+share one temperature; accepted junction temperatures are copied to aliases
+exactly, so a frozen-flow march can restart from its returned temperature field.
+The caller offsets the schedule clock on restart. Both native marches apply
+`power_schedule` to cell and component powers from the authored setup each step.
+Artificial steady pseudo-time explicitly omits physical junction storage.
+
+`tests/conjugate/compact_transient.rs` checks an independent pulsed RC recurrence,
+unequal-area aliases, closed-system equilibration, backward-Euler refinement,
+nonlinear outside half cells, admission, cancellation and split restart.
+`tests/conjugate/compact_coupled.rs` checks the same storage and power schedule
+through the actual coupled flow/energy march. Energy remains backward Euler
+even when momentum selects BDF2. Radiating ordinary surroundings retain their
+existing owner; an exposed compact alias cannot receive a second ordinary
+radiation or wall sink because it is not a resolved package surface.
 
 | Fixture | Reference | Measured |
 |---|---|---|
 | 4 x 4 x 2-cell component (R_jc 50, R_jb 20 K/W, 1 W) between k = 5 slabs held at 300 K / 310 K | two-path network `R_b = R_jb + 2 dx/(kA)`, `R_t = R_jc + 2 dx/(kA)` | junction temperature and both resistor heats within 1e-9; balance 8e-12 |
 
-No-claims: the two-resistor model's own limits (boundary-condition
-dependence of a 2R reduction, no spreading inside the package, adiabatic
-sides); steady only.
+No-claims: the two-resistor model's own limits (boundary-condition dependence
+of a 2R reduction, no spreading inside the package, adiabatic sides). The
+optional single-junction capacity is an authored constant storage reduction,
+not a measured dynamic package impedance, a distributed die/case model,
+temperature-dependent enthalpy, or latent heat.
 
 ### Surface radiation to the surroundings (`radiation`)
 

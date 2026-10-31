@@ -19,6 +19,10 @@ use fs_exec::CancelGate;
 mod nonlinear_contact;
 #[path = "conjugate/nonlinear_compact.rs"]
 mod nonlinear_compact;
+#[path = "conjugate/compact_transient.rs"]
+mod compact_transient;
+#[path = "conjugate/compact_coupled.rs"]
+mod compact_coupled;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::turbulence::{eddy_viscosity_ratio, law_of_the_wall_ratios, wall_distance};
 use fs_lbm::conjugate::{
@@ -117,6 +121,7 @@ fn two_resistor_component_matches_its_network() {
         power_w: power,
         junction_to_case_k_w: r_jc,
         junction_to_board_k_w: r_jb,
+        heat_capacity_j_k: None,
     });
     let solve = |setup: &ThermalSetup| {
         solve_energy(

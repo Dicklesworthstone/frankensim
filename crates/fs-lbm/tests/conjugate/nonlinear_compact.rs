@@ -61,6 +61,7 @@ fn nonlinear_compact_links_match_whole_slab_oracles_and_area_shares() {
             power_w: power,
             junction_to_case_k_w: case_r,
             junction_to_board_k_w: board_r,
+            heat_capacity_j_k: None,
         });
         let solution = solve_energy(
             &domain,
@@ -119,6 +120,7 @@ fn collapsed_component_sides_do_not_invent_ordinary_boundary_heat() {
         power_w: 4.0,
         junction_to_case_k_w: 1.0,
         junction_to_board_k_w: 1.0,
+        heat_capacity_j_k: None,
     });
     let solution = solve_energy(
         &domain,

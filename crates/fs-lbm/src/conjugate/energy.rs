@@ -109,7 +109,9 @@ pub struct ThermalSetup {
 /// sides are adiabatic and the box interior is collapsed (its cells report
 /// the junction temperature and carry no conduction of their own). The box
 /// blocks flow like any solid. Both faces must border cells inside the
-/// domain that belong to no other component.
+/// domain that belong to no other component. Physical transients require
+/// an explicitly declared junction heat capacity; collapsed voxel material
+/// capacities are not added to it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactComponent {
     /// First cells of the box (inclusive).
@@ -125,6 +127,10 @@ pub struct CompactComponent {
     pub junction_to_case_k_w: f64,
     /// Junction-to-board resistance, K/W.
     pub junction_to_board_k_w: f64,
+    /// Constant total junction heat capacity, J/K. `None` declares only a
+    /// steady model; a transient requires a finite positive value. This is
+    /// an authored lumped storage model, not inferred from either resistor.
+    pub heat_capacity_j_k: Option<f64>,
 }
 
 impl CompactComponent {
@@ -142,7 +148,8 @@ impl CompactComponent {
     }
 }
 
-/// Steady state of one compact component.
+/// Resolved state of one compact component. During a transient, source power
+/// minus the two branch heats supplies the junction's stored-energy rate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JunctionSolution {
     /// Junction temperature, K.
@@ -712,6 +719,9 @@ pub fn solve_energy(
 pub(crate) struct PseudoStep<'a> {
     pub coefficient_w_k: &'a [f64],
     pub previous: &'a [f64],
+    /// Physical junction storage in component order. Empty for a steady
+    /// pseudo-time solve: artificial cell storage must not invent package C.
+    pub junction_coefficient_w_k: &'a [f64],
 }
 
 /// The energy solve, iterated to a consistent temperature field when a solid
@@ -996,7 +1006,7 @@ fn solve_energy_field(
         contacts.push(((a.min(b), a.max(b)), contact.resistance_m2_k_w));
     }
     let conductivity_temperature = nonlinear.and_then(|(_, temperature)| temperature);
-    let compact = Compact::new(domain, solids, &k, setup, conductivity_temperature)?;
+    let compact = Compact::new(domain, solids, &k, setup, conductivity_temperature, gate)?;
     let face_contacts = face_contact::prepare(domain, flow, setup, &compact, gate)?;
     let ctx = Context {
         domain,
@@ -1034,6 +1044,15 @@ fn solve_energy_field(
     };
     let parts = setup.compact_components.len();
     let unknowns = cells + parts;
+    if let Some(step) = step
+        && !step.junction_coefficient_w_k.is_empty()
+        && step.junction_coefficient_w_k.len() != parts
+    {
+        return Err(ChtError::InvalidInput {
+            field: "thermal.storage.junction_coefficient_w_k",
+            reason: "needs one physical storage coefficient per compact junction".into(),
+        });
+    }
 
     let mut coo = Coo::new(unknowns, unknowns);
     let mut b = vec![0.0f64; unknowns];
@@ -1136,13 +1155,24 @@ fn solve_energy_field(
     }
     for (j, part) in setup.compact_components.iter().enumerate() {
         let row = cells + j;
-        let mut diag = 0.0;
+        let (mut diag, rhs) = match step {
+            Some(step) if !step.junction_coefficient_w_k.is_empty() => {
+                let coefficient = step.junction_coefficient_w_k[j];
+                finite_positive("thermal.storage.junction_coefficient_w_k", coefficient)?;
+                let previous = step.previous[domain.index(part.lo[0], part.lo[1], part.lo[2])];
+                let rhs = coefficient.mul_add(previous, part.power_w);
+                finite("thermal.storage.junction_rhs_w", rhs)?;
+                anchored = true;
+                (coefficient, rhs)
+            }
+            _ => (0.0, part.power_w),
+        };
         for &(n, g, _) in &compact.links[j] {
             diag += g;
             coo.push(row, n, -g);
         }
         coo.push(row, row, diag);
-        b[row] = part.power_w;
+        b[row] = rhs;
     }
     if !anchored {
         return Err(ChtError::InvalidInput {
@@ -1318,6 +1348,22 @@ fn solve_energy_field(
             }
         })
         .collect();
+    // Aliases are a representation of the same state, not extra thermal
+    // degrees of freedom. Copy exactly so a returned state can restart a
+    // physical march without accumulating identity-row solver roundoff.
+    let mut copied = 0usize;
+    for (j, part) in setup.compact_components.iter().enumerate() {
+        let junction = temperature[cells + j];
+        for z in part.lo[2]..part.hi[2] {
+            for y in part.lo[1]..part.hi[1] {
+                for x in part.lo[0]..part.hi[0] {
+                    if copied.is_multiple_of(4096) { super::poll(gate)?; }
+                    copied += 1;
+                    temperature[domain.index(x, y, z)] = junction;
+                }
+            }
+        }
+    }
     temperature.truncate(cells);
     let report = EnergyReport {
         unknowns,
@@ -1338,6 +1384,65 @@ fn solve_energy_field(
     })
 }
 
+/// Shared compact geometry admission for conduction and physical storage.
+/// `usize::MAX` denotes an ordinary cell; an empty result means no components.
+pub(super) fn compact_owners(
+    domain: &VoxelDomain,
+    parts: &[CompactComponent],
+    gate: &CancelGate,
+) -> Result<Vec<usize>, ChtError> {
+    if parts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n = domain.dims();
+    let refuse = |reason: String| ChtError::InvalidInput {
+        field: "thermal.compact_components",
+        reason,
+    };
+    let mut owner = vec![usize::MAX; domain.cell_count()];
+    let mut visited = 0usize;
+    for (i, part) in parts.iter().enumerate() {
+        super::poll(gate)?;
+        if (0..3).any(|a| part.lo[a] >= part.hi[a] || part.hi[a] > n[a]) {
+            return Err(refuse(format!(
+                "component {i}: cells {:?}..{:?} must be non-empty within {n:?}",
+                part.lo, part.hi
+            )));
+        }
+        finite("thermal.compact_components.power_w", part.power_w)?;
+        finite_positive(
+            "thermal.compact_components.junction_to_case_k_w",
+            part.junction_to_case_k_w,
+        )?;
+        finite_positive(
+            "thermal.compact_components.junction_to_board_k_w",
+            part.junction_to_board_k_w,
+        )?;
+        if let Some(capacity) = part.heat_capacity_j_k {
+            finite_positive("thermal.compact_components.heat_capacity_j_k", capacity)?;
+        }
+        for z in part.lo[2]..part.hi[2] {
+            for y in part.lo[1]..part.hi[1] {
+                for x in part.lo[0]..part.hi[0] {
+                    if visited.is_multiple_of(4096) { super::poll(gate)?; }
+                    visited += 1;
+                    let c = domain.index(x, y, z);
+                    if domain.is_fluid(c) {
+                        return Err(refuse(format!(
+                            "component {i}: cell ({x}, {y}, {z}) is fluid; the box must be solid"
+                        )));
+                    }
+                    if owner[c] != usize::MAX {
+                        return Err(refuse(format!("components {} and {i} overlap", owner[c])));
+                    }
+                    owner[c] = i;
+                }
+            }
+        }
+    }
+    Ok(owner)
+}
+
 /// Compact components prepared for assembly: the owning component of each
 /// cell, each junction's links `(outside cell, conductance, board side)`,
 /// and the same links indexed by outside cell.
@@ -1355,52 +1460,15 @@ impl Compact {
         k: &[[f64; 3]],
         setup: &ThermalSetup,
         conductivity_temperature: Option<&[f64]>,
+        gate: &CancelGate,
     ) -> Result<Self, ChtError> {
         let parts = &setup.compact_components;
-        let cells = domain.cell_count();
         let n = domain.dims();
         let refuse = |reason: String| ChtError::InvalidInput {
             field: "thermal.compact_components",
             reason,
         };
-        let mut owner = if parts.is_empty() {
-            Vec::new()
-        } else {
-            vec![usize::MAX; cells]
-        };
-        for (i, part) in parts.iter().enumerate() {
-            if (0..3).any(|a| part.lo[a] >= part.hi[a] || part.hi[a] > n[a]) {
-                return Err(refuse(format!(
-                    "component {i}: cells {:?}..{:?} must be non-empty within {n:?}",
-                    part.lo, part.hi
-                )));
-            }
-            finite("thermal.compact_components.power_w", part.power_w)?;
-            finite_positive(
-                "thermal.compact_components.junction_to_case_k_w",
-                part.junction_to_case_k_w,
-            )?;
-            finite_positive(
-                "thermal.compact_components.junction_to_board_k_w",
-                part.junction_to_board_k_w,
-            )?;
-            for z in part.lo[2]..part.hi[2] {
-                for y in part.lo[1]..part.hi[1] {
-                    for x in part.lo[0]..part.hi[0] {
-                        let c = domain.index(x, y, z);
-                        if domain.is_fluid(c) {
-                            return Err(refuse(format!(
-                                "component {i}: cell ({x}, {y}, {z}) is fluid; the box must be solid"
-                            )));
-                        }
-                        if owner[c] != usize::MAX {
-                            return Err(refuse(format!("components {} and {i} overlap", owner[c])));
-                        }
-                        owner[c] = i;
-                    }
-                }
-            }
-        }
+        let owner = compact_owners(domain, parts, gate)?;
         let mut links = Vec::with_capacity(parts.len());
         let mut by_cell: std::collections::BTreeMap<usize, Vec<(usize, f64)>> =
             std::collections::BTreeMap::new();

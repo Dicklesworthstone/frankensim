@@ -410,6 +410,7 @@ pub fn natural_convection(
                 Some(&PseudoStep {
                     coefficient_w_k: &storage,
                     previous: &temperature,
+                    junction_coefficient_w_k: &[],
                 }),
                 gate,
             )?;

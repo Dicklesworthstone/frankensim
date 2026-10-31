@@ -34,7 +34,7 @@
 //! iterate's full velocity gradient, for exploration only; they do not
 //! establish resolved turbulent spectra or thermal wall resolution. The
 //! energy coupling is first order in time and lags buoyancy by one step.
-//! Face fans and compact components are steady models and refuse here; use
+//! Face fans are steady models and refuse here; use
 //! internal fans. The opt-in thermal_wall::march_conjugate_with_wall_heat
 //! entry uses this same march with freshly prepared equilibrium wall transport.
 
@@ -53,7 +53,7 @@ use super::radiation::{RadiationConfig, Radiators};
 use super::simple::sgs::FvSgsConfig;
 use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
 use super::transient::{TransientRecord, energy_step_with_conductivity, heat_capacity,
-    record_energy_step, solve_step_with_fields};
+    record_energy_step, scale_power, solve_step_with_fields};
 use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
 
@@ -418,7 +418,7 @@ fn simple_unsteady_inner(
 ///
 /// # Errors
 /// The refusals of [`simple_unsteady`] and [`super::march_energy`]
-/// (including solids without heat capacity and compact components), or
+/// (including ordinary solids or compact junctions without heat capacity), or
 /// [`ChtError::Cancelled`].
 #[allow(clippy::too_many_arguments)] // physics inputs + both controls
 pub fn march_conjugate(
@@ -732,11 +732,10 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
     for &t in initial_temperature {
         finite("unsteady.initial_temperature", t)?;
     }
-    if !setup.compact_components.is_empty() {
+    if material_heat.is_some() && !setup.compact_components.is_empty() {
         return Err(ChtError::InvalidInput {
             field: "thermal.compact_components",
-            reason: "two-resistor compact models are steady; the transient march refuses them"
-                .into(),
+            reason: "source-caloric marching does not own compact-junction storage; use the native constant-capacity march".into(),
         }.into());
     }
     if let Some(b) = buoyancy {
@@ -750,7 +749,7 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
         )?;
     }
     domain.check_materials(solids.len())?;
-    let capacity = heat_capacity(domain, fluid, solids)?;
+    let capacity = heat_capacity(domain, fluid, solids, setup, initial_temperature, gate)?;
     let storage: Vec<f64> = capacity.iter().map(|c| c / unsteady.time_step_s).collect();
     let solids_present = (0..cells).any(|c| !domain.is_fluid(c));
     let radiators = match radiation {
@@ -794,11 +793,7 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
         marcher.step(step, inlet_schedule(time_s), gate)?;
         let scale = power_schedule(time_s);
         finite("unsteady.power_schedule", scale)?;
-        if !setup.power_w.is_empty() {
-            for (out, base) in stepped.power_w.iter_mut().zip(&setup.power_w) {
-                *out = base * scale;
-            }
-        }
+        scale_power(&mut stepped, setup, scale);
 
         if wall_heat.is_none()
             && (config.turbulence != Turbulence::Laminar || marcher.solver.has_sgs())
