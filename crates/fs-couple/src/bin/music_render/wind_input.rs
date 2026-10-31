@@ -756,7 +756,8 @@ pub(super) fn material_modal_dg_provenance(
         _ => String::new(),
     };
     let supply = fixed_channel_provenance(source.system().supply_channel());
-    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"supply_channel\":{supply},\"model_scope\":\"{model_scope}\"{structure}{surface_closure}{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}}}",
+    let finite_gas = finite_gas_heat::loaded_provenance(source, i.mechanics_rate_hz);
+    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"supply_channel\":{supply},\"model_scope\":\"{model_scope}\"{structure}{surface_closure}{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}{finite_gas}}}",
         i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
         i.mechanics_rate_hz, load.duct().operator_identity().to_hex(),
         load.duct().total_length());

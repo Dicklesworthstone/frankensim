@@ -3,6 +3,8 @@ use super::{AperturePerformance, CoupledAperture, PlateValveInputError, Reader,
     ThermochemicalSources, GasRecord, CancelGate, MAX_CONTROLS, bad, checkpoint};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::performance::finite_gas::{FiniteGasHeatProgram, GasHeatControl};
+use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
+use crate::dg_port::DgPortLoad;
 use crate::dg_port::finite_gas::{FiniteGasDgLoss, FiniteGasDgSolve, admitted_volume};
 use fs_material::gas_species::input::{GasInputError, read_frozen_thermochemical_model};
 use fs_material::thermochemical_gas::ThermochemicalGasModel;
@@ -76,18 +78,37 @@ impl FiniteGasInput {
         let CoupledAperture::Dg(system) = renderer.system() else {
             return Err(bad(self.line, "finite gas heat requires an original DG aperture"));
         };
+        self.into_inventory_for_load(system.load(), gate)
+    }
+
+    fn into_inventory_for_load(self, load: &DgPortLoad,
+        gate: &CancelGate) -> Result<(ClosedGasParcel, FiniteGasHeatProgram), PlateValveInputError>
+    {
+        checkpoint(gate)?;
         // Resolve the original source first, then ask the existing complete-port
         // owner for the volume of that SAME gas. The unit-volume temporary does
         // not advance or publish an inventory, and no geometry formula is copied.
         let probe = ClosedGasParcel::new(self.model, self.point, 1.0)
             .map_err(|source| PlateValveInputError::GasEnergy { line: self.line, source })?;
-        let volume = admitted_volume::<GasEnergyError>(system.load(), &probe,
+        let volume = admitted_volume::<GasEnergyError>(load, &probe,
             &mut || gate.is_requested()).map_err(|error| PlateValveInputError::Physics(
                 AcousticRealizeError::Nonlinear(error.to_string())))?;
         let gas = ClosedGasParcel::new(probe.model().clone(), probe.point().clone(), volume)
             .map_err(|source| PlateValveInputError::GasEnergy { line: self.line, source })?;
         checkpoint(gate)?;
         Ok((gas, self.program))
+    }
+
+    pub(super) fn bind_loaded(self, renderer: LoadedDgPerformance, gate: &CancelGate,
+        records: &mut Vec<GasRecord>) -> Result<LoadedDgPerformance, PlateValveInputError>
+    {
+        let (gas, program) = self.into_inventory_for_load(renderer.system().load(), gate)?;
+        let initial = GasRecord::Thermochemical(gas.state().clone());
+        let renderer = renderer.with_finite_gas_heat(gas, program,
+            Arc::new(CancelGate::new_clock_free())).map_err(PlateValveInputError::Gesture)?;
+        checkpoint(gate)?;
+        records.push(initial);
+        Ok(renderer)
     }
 
     pub(super) fn bind(self, renderer: AperturePerformance, gate: &CancelGate,

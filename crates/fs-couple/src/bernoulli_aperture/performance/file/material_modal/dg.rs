@@ -9,7 +9,8 @@
 //! propagator exact-zoh; ambient GAS_RECORD; shared dg_tube/dg_bore and its
 //! geometry/gas/radiation records and optional material walls; optional
 //! upstream_tract followed by the same DG source/wall records; optional supply
-//! none|slit LENGTH WIDTH HEIGHT CELLS|circular LENGTH RADIUS CELLS; slit_length
+//! none|slit LENGTH WIDTH HEIGHT CELLS|circular LENGTH RADIUS CELLS; optional
+//! finite_gas, gas_energy, gas_feedback, gas_heat and heat records; slit_length
 //! none|LENGTH; observation
 //! inlet-pressure|baffled-outlet X Y Z RINGS ANGLES FMAX_HZ; optional observer_gas
 //! stokes-kirchhoff|lossless MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS;
@@ -27,6 +28,9 @@
 //! transverse momentum owner as network valves. Its pressure, inertia and
 //! viscous heat are coupled to both blade and duct states in the same sample.
 //! It is distinct geometry from the moving slit and from either acoustic duct.
+//! Optional finite_gas heat uses the existing closed-inventory work transaction
+//! and internal sensor; computed exterior, branch gases, upstream tracts and
+//! fixed supply passages remain refused until their inventory exchange is explicit.
 //!
 //! Alternatively, `solid tet4 SOURCE_TOKEN` replaces `loss`/`blades` and
 //! selects an original source-bound volume mesh. Complete source histories or
@@ -45,6 +49,7 @@ use super::{
 use crate::bernoulli_aperture::dg::LoadedApertureDg;
 use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
 use crate::bernoulli_aperture::performance::{ApertureObservation, AperturePerformanceConfig};
+use crate::bernoulli_aperture::performance::file::finite_gas::FiniteGasInput;
 use crate::dg_port::input::DgSourceInput;
 use crate::dg_port::input::wall::DgMaterialWallRecord;
 use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallLayoutInput};
@@ -209,6 +214,11 @@ impl MaterialModalDgValvePerformance {
         {
             SupplyInput::read(&mut rows)?
         } else { SupplyInput::None };
+        let finite_gas = if rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("finite_gas")
+        {
+            Some(FiniteGasInput::read(&mut rows, gas_sources, gate)?)
+        } else { None };
         let mut row = rows.row("slit_length")?;
         let slit = optional_positive(&mut row)?;
         row.finish()?;
@@ -401,6 +411,9 @@ impl MaterialModalDgValvePerformance {
                 renderer = renderer.with_material_pressure_controls(blade, events)
                     .map_err(PlateValveInputError::Gesture)?;
             }
+        }
+        if let Some(heat) = finite_gas {
+            renderer = heat.bind_loaded(renderer, gate, &mut gases)?;
         }
         checkpoint(gate)?;
         Ok(Self {

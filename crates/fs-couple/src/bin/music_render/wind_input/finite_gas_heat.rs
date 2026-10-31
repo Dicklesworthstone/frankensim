@@ -2,6 +2,9 @@
 use super::json_string;
 use fs_couple::bernoulli_aperture::dg::thermal_wall::FiniteWallThermalSolve;
 use fs_couple::bernoulli_aperture::performance::AperturePerformance;
+use fs_couple::bernoulli_aperture::performance::finite_gas::FiniteGasHeatProgram;
+use fs_couple::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
+use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_couple::bernoulli_aperture::performance::gas_wall::GasWallConduction;
 use fs_couple::cavity_phs::piston::thermal::HeatExchangeSolve;
 use fs_couple::dg_port::finite_gas::{FiniteGasDgLoss, FiniteGasDgSolve};
@@ -12,6 +15,16 @@ use fs_material::thermochemical_gas::energy::GasEnergySolve;
 pub(super) fn provenance(renderer: &AperturePerformance, clock_hz: u32) -> String {
     let Some(program) = renderer.finite_gas_heat_program() else { return String::new(); };
     let gas = renderer.finite_gas().expect("heat program retains its original inventory");
+    inventory_provenance(gas, program, clock_hz)
+}
+
+pub(super) fn loaded_provenance(renderer: &LoadedDgPerformance, clock_hz: u32) -> String {
+    let Some(program) = renderer.finite_gas_heat_program() else { return String::new(); };
+    let gas = renderer.finite_gas().expect("loaded heat program retains its original inventory");
+    inventory_provenance(gas, program, clock_hz)
+}
+
+fn inventory_provenance(gas: &ClosedGasParcel, program: &FiniteGasHeatProgram, clock_hz: u32) -> String {
     let state = gas.state().state();
     let controls = program.controls.iter().map(|control| format!(
         "{{\"sample\":{},\"power_w\":{:e}}}", control.sample, control.power_w))

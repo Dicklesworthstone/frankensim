@@ -7,10 +7,11 @@
 
 use super::{AperturePerformance, CoupledAperture, GestureCompileError, invalid, receiver_error};
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::bernoulli_aperture::dg::{ApertureDg, DgApertureFrame};
+use crate::bernoulli_aperture::dg::{ApertureDg, DgApertureFrame, LoadedApertureDg};
 use crate::bernoulli_aperture::dg::finite_gas::FiniteGasApertureDgStep;
 use crate::bernoulli_aperture::tube::TubeDrive;
 use crate::dg_port::finite_gas::{FiniteGasDgError, FiniteGasDgSolve, admit_initial};
+use crate::dg_port::DgPortLoad;
 use crate::render::RenderError;
 use fs_exec::CancelGate;
 use fs_material::gas_species::input::ThermochemicalPhase;
@@ -39,13 +40,13 @@ pub struct FiniteGasHeatProgram {
     pub coupling: FiniteGasDgSolve,
 }
 
-pub(super) struct FiniteGasPlayback {
-    gas: ClosedGasParcel,
-    pub(super) program: FiniteGasHeatProgram,
-    gate: Arc<CancelGate>,
-    next: usize,
+pub(crate) struct FiniteGasPlayback {
+    pub(crate) gas: ClosedGasParcel,
+    pub(crate) program: FiniteGasHeatProgram,
+    pub(crate) gate: Arc<CancelGate>,
+    pub(crate) next: usize,
     held_power_w: f64,
-    last: Option<FiniteGasApertureDgStep<GasCompositionStep>>,
+    pub(crate) last: Option<FiniteGasApertureDgStep<GasCompositionStep>>,
 }
 
 fn runtime(error: FiniteGasDgError<GasEnergyError>) -> RenderError {
@@ -58,6 +59,61 @@ fn runtime(error: FiniteGasDgError<GasEnergyError>) -> RenderError {
 }
 
 impl FiniteGasPlayback {
+    /// Admit the original inventory, heat schedule and acoustic refresh once for
+    /// either scalar or retained material/modal mechanics.
+    pub(crate) fn new(
+        gas: ClosedGasParcel, program: FiniteGasHeatProgram, gate: Arc<CancelGate>,
+        load: &DgPortLoad, dt: f64, samples: u64, capacity: (usize, u64),
+    ) -> Result<Self, GestureCompileError> {
+        let (assignments, work) = capacity;
+        if program.controls.is_empty() || program.controls.len() > assignments
+            || program.controls.len() as u128 > u128::from(work)
+            || program.controls[0].sample != 0
+        {
+            return Err(invalid("finite gas heat requires an initial assignment and shared control/work capacity"));
+        }
+        let mut previous = None;
+        for event in &program.controls {
+            if gate.is_requested() {
+                return Err(GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Cancelled)));
+            }
+            if event.sample >= samples || previous.is_some_and(|sample| event.sample <= sample)
+                || !event.power_w.is_finite() || !(event.power_w * dt).is_finite()
+                || (event.power_w != 0.0 && event.power_w * dt == 0.0)
+            {
+                return Err(invalid("heat assignments require increasing in-window samples and representable signed power"));
+            }
+            previous = Some(event.sample);
+        }
+        program.caloric.validate().map_err(|error|
+            GestureCompileError::Render(receiver_error(error.to_string())))?;
+        let temperature = gas.state().state().temperature;
+        if temperature < program.caloric.minimum_temperature_k
+            || temperature > program.caloric.maximum_temperature_k
+        {
+            return Err(invalid("finite gas caloric bracket must contain the original temperature"));
+        }
+        if load.radiation_record().is_some() || !load.branches().is_empty() {
+            return Err(invalid("closed-inventory heating cannot impose a mean-pressure jump on a computed exterior or independent branch; transport is required"));
+        }
+        if load.duct().gas_field().is_none_or(|field| field.phase() != ThermochemicalPhase::FrozenGas) {
+            return Err(invalid("finite gas heat requires the original explicit frozen-gas field"));
+        }
+        admit_initial::<GasEnergyError>(load, &gas, program.coupling,
+            &mut || gate.is_requested()).map_err(|error| GestureCompileError::Render(runtime(error)))?;
+        // Admit the selected existing loss/transfer owner without advancing or
+        // publishing any history. An incompatible refresh mode fails during
+        // attachment, before an output consumer can start a physical sample.
+        let mut admitted = load.clone();
+        admitted.rebind_gas_field_controlled(
+            load.duct().gas_field().expect("admitted original field"),
+            program.coupling.loss.into(),
+            program.coupling.work_bracket_j[0].abs().max(program.coupling.work_bracket_j[1].abs()),
+            &mut || gate.is_requested(),
+        ).map_err(|error| GestureCompileError::Render(RenderError::Voice(error)))?;
+        Ok(Self { gas, program, gate, next: 0, held_power_w: 0.0, last: None })
+    }
+
     fn candidate(&self, sample: u64) -> f64 {
         self.program.controls.get(self.next).filter(|event| event.sample == sample)
             .map_or(self.held_power_w, |event| event.power_w)
@@ -77,7 +133,23 @@ impl FiniteGasPlayback {
         Ok(frame)
     }
 
-    pub(super) fn accept(&mut self, sample: u64) {
+    pub(crate) fn step_loaded(
+        &mut self, system: &mut LoadedApertureDg, drive: TubeDrive,
+        forces_n: [f64; 2], pressures_pa: [f64; 2],
+    ) -> Result<DgApertureFrame, RenderError> {
+        let heat_j = self.candidate(system.aperture().accepted_steps())
+            * system.aperture().time_step_s();
+        let report = system.step_with_finite_gas_heat_controlled(
+            &mut self.gas, drive, forces_n, pressures_pa, heat_j,
+            self.program.caloric, self.program.coupling,
+            &mut || self.gate.is_requested(),
+        ).map_err(runtime)?;
+        let frame = report.coupled.clone();
+        self.last = Some(report);
+        Ok(frame)
+    }
+
+    pub(crate) fn accept(&mut self, sample: u64) {
         if let Some(event) = self.program.controls.get(self.next).filter(|event| event.sample == sample) {
             self.held_power_w = event.power_w;
             self.next += 1;
@@ -110,62 +182,17 @@ impl AperturePerformance {
         {
             return Err(invalid("finite gas heat must bind once before playback; use with_finite_gas_wall_heat for joint thermal exchange"));
         }
-        let (assignments, work) = self.remaining_control_budgets()?;
-        if program.controls.is_empty() || program.controls.len() > assignments
-            || program.controls.len() as u128 > u128::from(work)
-            || program.controls[0].sample != 0
-        {
-            return Err(invalid("finite gas heat requires an initial assignment and shared control/work capacity"));
-        }
-        let dt = self.system.aperture().spec().time_step_s;
-        let mut previous = None;
-        for event in &program.controls {
-            if gate.is_requested() {
-                return Err(GestureCompileError::Render(RenderError::Voice(AcousticRealizeError::Cancelled)));
-            }
-            if event.sample >= self.config.samples || previous.is_some_and(|sample| event.sample <= sample)
-                || !event.power_w.is_finite() || !(event.power_w * dt).is_finite()
-                || (event.power_w != 0.0 && event.power_w * dt == 0.0)
-            {
-                return Err(invalid("heat assignments require increasing in-window samples and representable signed power"));
-            }
-            previous = Some(event.sample);
-        }
-        program.caloric.validate().map_err(|error|
-            GestureCompileError::Render(receiver_error(error.to_string())))?;
-        let temperature = gas.state().state().temperature;
-        if temperature < program.caloric.minimum_temperature_k
-            || temperature > program.caloric.maximum_temperature_k
-        {
-            return Err(invalid("finite gas caloric bracket must contain the original temperature"));
-        }
+        let capacity = self.remaining_control_budgets()?;
         let CoupledAperture::Dg(system) = &self.system else {
             return Err(invalid("finite thermochemical heat requires the original DG aperture owner"));
         };
-        if system.upstream_load().is_some() {
-            return Err(invalid("one heated parcel cannot replace independent upstream and downstream inventories"));
+        if system.upstream_load().is_some() || system.supply_channel().is_some() {
+            return Err(invalid("finite gas heat requires independent inventories for an upstream tract or fixed supply passage"));
         }
-        if system.load().radiation_record().is_some() || !system.load().branches().is_empty() {
-            return Err(invalid("closed-inventory heating cannot impose a mean-pressure jump on a computed exterior or independent branch; transport is required"));
-        }
-        if system.load().duct().gas_field().is_none_or(|field| field.phase() != ThermochemicalPhase::FrozenGas) {
-            return Err(invalid("finite gas heat requires the original explicit frozen-gas field"));
-        }
-        admit_initial::<GasEnergyError>(system.load(), &gas, program.coupling,
-            &mut || gate.is_requested()).map_err(|error| GestureCompileError::Render(runtime(error)))?;
-        // Admit the selected existing loss/transfer owner without advancing or
-        // publishing any history. An incompatible refresh mode fails during
-        // attachment, before an output consumer can start a physical sample.
-        let mut admitted = system.load().clone();
-        admitted.rebind_gas_field_controlled(
-            system.load().duct().gas_field().expect("admitted original field"),
-            program.coupling.loss.into(),
-            program.coupling.work_bracket_j[0].abs().max(program.coupling.work_bracket_j[1].abs()),
-            &mut || gate.is_requested(),
-        ).map_err(|error| GestureCompileError::Render(RenderError::Voice(error)))?;
-        self.finite_gas = Some(FiniteGasPlayback {
-            gas, program, gate, next: 0, held_power_w: 0.0, last: None,
-        });
+        self.finite_gas = Some(FiniteGasPlayback::new(
+            gas, program, gate, system.load(), system.aperture().spec().time_step_s,
+            self.config.samples, capacity,
+        )?);
         Ok(self)
     }
 

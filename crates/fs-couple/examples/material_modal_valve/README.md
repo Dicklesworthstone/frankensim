@@ -26,7 +26,9 @@ retains the integrated frozen pressure mass and preserves pressure/flow work.
 The main bore and upstream tract may bind independently declared field laws.
 Absent species data, unsupported local temperatures and ineligible ISO mixtures
 refuse; the source never substitutes a generic air-loss coefficient. Fields
-remain frozen during a performance; live molecular-history transfer is absent.
+remain prescribed during ordinary playback. The optional finite-gas experiment
+below uses the original admitted uniform molecular/diffusion refresh, including
+its retained histories and acoustic parameter work.
 
 ## Exterior material propagation on both acoustic hosts
 
@@ -163,7 +165,69 @@ To change one blade or region, normalize another material source and change its
 `section` pack path. Original geometry and numerical choices remain explicit.
 No pitch normalization or output equalizer compensates for that substitution.
 Solid state queries are independent of the declared gas state. Material and
-gas changes construct a new complete source; they are not live evolving fields.
+gas changes ordinarily construct a new complete source. The DG heat experiment
+below is an explicit evolving inventory with its own caloric and work budgets.
+
+## Finite gas heating with the original material modes
+
+[`paired-dg-finite-gas.performance`](paired-dg-finite-gas.performance) connects
+the same six material mode coordinates, tensor loss and moving slit to the
+existing finite-gas heat/work transaction. Its 50 mm long, 1 mm radius DG bore
+starts with source-supported nitrogen at 300 K and 95000 Pa. The 50 ms
+performance holds 10 mW, zero, then -5 mW for equal thirds while the original
+5 Pa blowing-pressure control remains active. Carbon dioxide stays an explicit
+zero-fraction source column. The lower initial pressure leaves room to heat
+within the supplied transport source's pressure domain.
+
+Build `blade.matpack` using the commands above and the six nitrogen/carbon
+dioxide packs using
+[the shared gas-source instructions](../reed-axial-gas-field.md#build-the-supplied-source-packs-and-render).
+Then select the complete copied example:
+
+```bash
+cargo run --release -p fs-couple --bin music_render -- wind \
+  "$modal_demo_dir/paired-dg-finite-gas.performance" \
+  "$modal_demo_dir/paired-dg-finite-gas.wav" --block 37 --decimate \
+  --gas-component target/reed-field-packs/nitrogen.pack \
+    target/reed-field-packs/nitrogen-nasa9-mcbride2002.pack \
+    target/reed-field-packs/nitrogen-transport-lemmon2004.pack \
+  --gas-component target/reed-field-packs/carbon-dioxide.pack \
+    target/reed-field-packs/carbon-dioxide-nasa9-mcbride2002.pack \
+    target/reed-field-packs/carbon-dioxide-transport-laesecke2017-huber2016.pack \
+  --gas-water none --gas-phase frozen
+```
+
+This is a **closed-inventory thermal experiment with an internal inlet-pressure
+sensor**. It is not an exterior microphone or an open instrument model. The
+native grammar accepts the existing `finite_gas`, `gas_energy`,
+`gas_feedback`, `gas_heat` and `heat` records after the complete DG/wall and
+optional upstream/supply declarations, before `slit_length`.
+[Their units and source/solver requirements](../plate-valve-finite-gas.md#author-heat-on-the-physical-clock)
+are shared with the scalar plate-valve path.
+
+Each accepted mechanical sample advances the original loaded source and wave
+state, pays acoustic parameter work from the original finite material inventory,
+and refreshes the same gas-dependent slit and DG load. All requested plate or
+solid modes, independent blade forces, spatial pressure work and material
+histories remain in their original owners. Heat controls share the existing
+storage/work allowance and publish only with accepted source samples. Changing
+callback size or output decimation preserves the physical trajectory.
+
+Set all three powers to zero in a copy to compare with the same original
+geometry, materials and drives. The renderer retains the accepted inventory,
+heat assignments and complete gas/acoustic/mechanical report through
+`LoadedDgPerformance::finite_gas()`, `applied_heat_controls()` and
+`last_finite_gas_step()`; the ordinary wind/ensemble sidecar records the
+initial inventory and authored heat program.
+
+The initial gas field must be uniform, frozen and source-identical to the
+inventory; its volume comes from the original circular DG geometry. Computed
+exterior radiation, independent branch gases, an upstream tract and a fixed
+supply passage remain refused because they require explicit inventory and
+mass/enthalpy exchange. Open-flow thermal/composition feedback through a
+material reed to an exterior microphone is still missing. Solid material state
+does not heat automatically, and numerical losses are not silently converted
+into bulk heat.
 
 ## Source grammar
 

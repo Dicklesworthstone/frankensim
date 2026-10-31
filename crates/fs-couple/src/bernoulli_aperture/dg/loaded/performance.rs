@@ -12,6 +12,7 @@ use crate::bernoulli_aperture::performance::{
     ApertureObservation, AperturePerformanceConfig, compile_schedule, pressure_candidate,
 };
 use crate::bernoulli_aperture::performance::force::ForceSchedule;
+use crate::bernoulli_aperture::performance::finite_gas::FiniteGasPlayback;
 use crate::bernoulli_aperture::tube::TubeDrive;
 use crate::bernoulli_aperture::two_sided::observer::schedule::spatial_pressures::PressureSchedule;
 use crate::pcm_wav::baffled::BaffledPressure;
@@ -22,6 +23,7 @@ use crate::render::schedule::{GestureCompileError, ScheduledControl};
 use fs_scenario::gesture::GestureSchedule;
 
 mod controls;
+mod finite_gas;
 
 fn invalid(what: &'static str) -> GestureCompileError {
     GestureCompileError::Invalid { what }
@@ -46,6 +48,7 @@ pub struct LoadedDgPerformance {
     held_pressure_pa: f64,
     plate_forces: [Option<ForceSchedule>; 2],
     spatial_pressures: [Option<PressureSchedule>; 2],
+    finite_gas: Option<FiniteGasPlayback>,
     last: Option<DgApertureFrame>,
     poisoned: bool,
 }
@@ -87,7 +90,7 @@ impl LoadedDgPerformance {
         Ok(Self {
             system, observation, receiver, observer_gas: None, terminal_flows, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, plate_forces: [None, None],
-            spatial_pressures: [None, None], last: None, poisoned: false,
+            spatial_pressures: [None, None], finite_gas: None, last: None, poisoned: false,
         })
     }
 
@@ -150,10 +153,13 @@ impl LoadedDgPerformance {
     // Pressure compilation retains the existing independent work allowance.
     // Both blades' auxiliary loads share ONE remaining storage/work allowance.
     fn remaining_control_budgets(&self) -> Result<(usize, u64), GestureCompileError> {
-        let assignments = self.controls.len() as u128
+        let heat = self.finite_gas.as_ref()
+            .map_or(0, |state| state.program.controls.len() as u128);
+        let assignments = self.controls.len() as u128 + heat
             + self.plate_forces.iter().flatten().map(|f| f.events.len() as u128).sum::<u128>()
             + self.spatial_pressures.iter().flatten().map(|p| p.events.len() as u128).sum::<u128>();
-        let work = self.plate_forces.iter().flatten().map(|f| u128::from(f.work)).sum::<u128>()
+        let work = heat
+            + self.plate_forces.iter().flatten().map(|f| u128::from(f.work)).sum::<u128>()
             + self.spatial_pressures.iter().flatten().map(|p| u128::from(p.work)).sum::<u128>();
         if assignments > self.config.max_controls as u128
             || work > u128::from(self.config.max_compile_work)
@@ -173,10 +179,13 @@ impl LoadedDgPerformance {
             self.plate_forces[i].as_ref().map_or(0.0, |f| f.candidate(sample)));
         let pressures = std::array::from_fn(|i|
             self.spatial_pressures[i].as_ref().map_or(0.0, |p| p.candidate(sample)));
-        let frame = self.system.step_with_forces_and_pressures(
-            TubeDrive { upstream_pressure_pa: pressure, body_flow_m3_s: 0.0 },
-            forces, pressures,
-        ).map_err(RenderError::Voice)?;
+        let drive = TubeDrive { upstream_pressure_pa: pressure, body_flow_m3_s: 0.0 };
+        let frame = if let Some(gas) = &mut self.finite_gas {
+            gas.step_loaded(&mut self.system, drive, forces, pressures)?
+        } else {
+            self.system.step_with_forces_and_pressures(drive, forces, pressures)
+                .map_err(RenderError::Voice)?
+        };
 
         // Publish each accepted physical sample before its fallible observer.
         // A later refusal must not make accepted source histories appear pending.
@@ -184,6 +193,7 @@ impl LoadedDgPerformance {
         self.held_pressure_pa = pressure;
         for force in self.plate_forces.iter_mut().flatten() { force.accept(sample); }
         for pressure in self.spatial_pressures.iter_mut().flatten() { pressure.accept(sample); }
+        if let Some(gas) = &mut self.finite_gas { gas.accept(sample); }
         self.last = Some(frame);
         let frame = self.last.as_ref().expect("accepted physical frame");
         let output = match self.observation {

@@ -1,0 +1,148 @@
+frankensim-material-modal-dg-valve-v1
+audio 96000 96000 4800 20
+propagator exact-zoh
+ambient thermochemical 300 95000 mole 1 N2 1
+dg_bore 1 open 1 2 12 50 2000 0.01 1e-11 128 3 gas_field 2 mole 2 N2 CO2
+dg_segment cylinder 0.001 0.05
+gas_station 0 300 1 0
+gas_station 0.05 300 1 0
+finite_gas thermochemical 300 95000 mole 1 N2 1
+gas_energy 200 900 1e-8 128
+gas_feedback -1e-5 1e-5 1e-15 1e-11 80 2 spatial-viscothermal 0.01
+gas_heat 3
+heat 0 0.01
+heat 1600 0
+heat 3200 -0.005
+slit_length 0.001
+observation inlet-pressure
+valve 0.0004
+limits 0.001 10 1 512 1e-14 1e-11
+contact 100000000 2 0.5
+loss tensor eta11 eta22 eta66 eta12 eta16 eta26 1 1000000
+blades 2
+blade 3 0.2 3000 0.25 0.1 0.00002 1000000
+support clamped 0
+sections 2
+section blade.matpack isotropic 293.15 100 0.0003 0
+section blade.matpack isotropic 293.15 100 0.00027 0
+nodes 21
+node 0 0 1 0
+node 0.004166666666666667 0 0 0
+node 0.008333333333333333 0 0 0
+node 0.012500000000000002 0 0 0
+node 0.016666666666666666 0 0 0
+node 0.020833333333333332 0 0 0
+node 0.025000000000000005 0 0 0
+node 0 0.005 1 0
+node 0.004166666666666667 0.005 0 0
+node 0.008333333333333333 0.005 0 0
+node 0.012500000000000002 0.005 0 0
+node 0.016666666666666666 0.005 0 0
+node 0.020833333333333332 0.005 0 0
+node 0.025000000000000005 0.005 0 1
+node 0 0.01 1 0
+node 0.004166666666666667 0.01 0 0
+node 0.008333333333333333 0.01 0 0
+node 0.012500000000000002 0.01 0 0
+node 0.016666666666666666 0.01 0 0
+node 0.020833333333333332 0.01 0 0
+node 0.025000000000000005 0.01 0 0
+triangles 24
+triangle 0 1 8 0
+triangle 0 8 7 0
+triangle 1 2 9 0
+triangle 1 9 8 0
+triangle 2 3 10 0
+triangle 2 10 9 0
+triangle 3 4 11 1
+triangle 3 11 10 1
+triangle 4 5 12 1
+triangle 4 12 11 1
+triangle 5 6 13 1
+triangle 5 13 12 1
+triangle 7 8 15 0
+triangle 7 15 14 0
+triangle 8 9 16 0
+triangle 8 16 15 0
+triangle 9 10 17 0
+triangle 9 17 16 0
+triangle 10 11 18 1
+triangle 10 18 17 1
+triangle 11 12 19 1
+triangle 11 19 18 1
+triangle 12 13 20 1
+triangle 12 20 19 1
+slit_edges 2
+edge 6 13
+edge 13 20
+initial 3
+state 0 0
+state 0 0
+state 0 0
+blade 3 0.2 3000 0.25 0.1 0.00002 1000000
+support clamped 0
+sections 2
+section blade.matpack isotropic 293.15 100 0.0003 0
+section blade.matpack isotropic 293.15 100 0.00027 0
+nodes 21
+node 0 0 1 0
+node 0.004166666666666667 0 0 0
+node 0.008333333333333333 0 0 0
+node 0.012500000000000002 0 0 0
+node 0.016666666666666666 0 0 0
+node 0.020833333333333332 0 0 0
+node 0.025000000000000005 0 0 0
+node 0 0.005 1 0
+node 0.004166666666666667 0.005 0 0
+node 0.008333333333333333 0.005 0 0
+node 0.012500000000000002 0.005 0 0
+node 0.016666666666666666 0.005 0 0
+node 0.020833333333333332 0.005 0 0
+node 0.025000000000000005 0.005 0 1
+node 0 0.01 1 0
+node 0.004166666666666667 0.01 0 0
+node 0.008333333333333333 0.01 0 0
+node 0.012500000000000002 0.01 0 0
+node 0.016666666666666666 0.01 0 0
+node 0.020833333333333332 0.01 0 0
+node 0.025000000000000005 0.01 0 0
+triangles 24
+triangle 0 1 8 0
+triangle 0 8 7 0
+triangle 1 2 9 0
+triangle 1 9 8 0
+triangle 2 3 10 0
+triangle 2 10 9 0
+triangle 3 4 11 1
+triangle 3 11 10 1
+triangle 4 5 12 1
+triangle 4 12 11 1
+triangle 5 6 13 1
+triangle 5 13 12 1
+triangle 7 8 15 0
+triangle 7 15 14 0
+triangle 8 9 16 0
+triangle 8 16 15 0
+triangle 9 10 17 0
+triangle 9 17 16 0
+triangle 10 11 18 1
+triangle 10 18 17 1
+triangle 11 12 19 1
+triangle 11 19 18 1
+triangle 12 13 20 1
+triangle 12 20 19 1
+slit_edges 2
+edge 6 13
+edge 13 20
+initial 3
+state 0 0
+state 0 0
+state 0 0
+compile_limits 100000 8192
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	mouth	blowing-pressure
+initial	pressure-pa	5e0
+events	0
