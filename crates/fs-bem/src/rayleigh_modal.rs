@@ -39,6 +39,24 @@ pub const MAX_MODAL_RAYLEIGH_CELLS: usize = 16_384;
 /// bound its complete sweep. No cells or fields are silently discarded.
 pub const MAX_MODAL_RAYLEIGH_WORK: u64 = 20_000_000_000;
 
+/// Highest polar order admitted by direct outgoing-power integration. The
+/// azimuth rule has twice this order. An unresolved angular field refuses;
+/// it is never replaced by a negative or clipped matrix quadratic form.
+pub const MAX_RAYLEIGH_POWER_POLAR_ORDER: usize = 128;
+
+/// Mean power of the coherent point-area field into one radiating half-space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoherentRadiatedPower {
+    /// Mean outgoing power [W] for peak modal velocity phasors.
+    pub power_w: f64,
+    /// Analytic angular truncation bound [W], in exact arithmetic. This does
+    /// not enclose floating-point error, finite-cell quadrature error, or
+    /// uncertainty in geometry, source phases or material properties.
+    pub angular_truncation_bound_w: f64,
+    /// Number of distinct directions evaluated after planar symmetries.
+    pub angular_directions: usize,
+}
+
 /// Admit a declared number of per-frequency Rayleigh scalar-work units.
 /// This is also the allocation-free boundary used by sweep planners.
 pub fn admit_modal_work(work: u128) -> Result<(), HelmholtzError> {
@@ -221,6 +239,35 @@ impl PreparedSurface {
     pub fn power_consistent_impedance(&self, omega: f64, medium: Medium)
         -> Result<Vec<C64>, HelmholtzError> {
         self.impedance_image(omega, medium, true)
+    }
+
+    /// Evaluate coherent outgoing power without first rounding a resistance
+    /// matrix. Every modal velocity is a peak phasor on the same exp(-i omega t)
+    /// clock. Mode amplitudes are combined BEFORE squaring; independent modal
+    /// powers must not be added for a coherent excitation.
+    ///
+    /// Compact sources reuse the cached degree-16 directional coefficients,
+    /// contracting modes at each degree before frequency evaluation. Larger
+    /// sources use positive angular quadrature of the combined cell field;
+    /// its order is chosen from the exponential Taylor remainder, up to
+    /// [`MAX_RAYLEIGH_POWER_POLAR_ORDER`]. Both use compensated arithmetic and
+    /// retain signed cross terms without a loss floor. The returned analytic
+    /// bound is absolute, not a relative guarantee for arbitrarily dark fields.
+    ///
+    /// This evaluates the SAME area-point radiation as
+    /// [`Self::power_consistent_impedance`], without assembling its reactance
+    /// or solving a boundary problem. It neither changes loading nor certifies
+    /// a causal time model. Work is admitted before allocation. Cancellation
+    /// is checked at entry and each angular direction; initial compact-source
+    /// cache construction has the existing bounded, noninterruptible projection.
+    pub fn coherent_radiated_power(
+        &self,
+        omega: f64,
+        medium: Medium,
+        velocity: &[C64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CoherentRadiatedPower, HelmholtzError> {
+        resistance::coherent_power(self, omega, medium, velocity, &mut cancelled)
     }
 
     fn impedance_image(&self, omega: f64, medium: Medium, power_consistent: bool)

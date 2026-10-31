@@ -597,6 +597,33 @@ rotated and reordered sources. No eigenvalue clipping or loss floor is applied.
 This absolute approximation is not a relative guarantee for arbitrary dark modes,
 nor does it cure cancellation in a downstream ill-conditioned matrix quadratic form.
 
+`PreparedSurface::coherent_radiated_power` supplies a direct outgoing-power
+observation that avoids that downstream matrix cancellation. For compact sources,
+it contracts complex modal velocities into each cached directional coefficient
+BEFORE summing Taylor degrees and squaring. Larger sources combine modal velocities
+at each cell and integrate the resulting field with positive angular weights.
+The opposite azimuths are paired as `|even|² + |odd|²`; simply halving the angular
+domain would be wrong for complex velocities. Double-double contractions retain
+weak residuals, without negative-power clipping or an artificial loss floor.
+
+The noncompact rule selects polar order n and 2n azimuth points from
+`epsilon = (kD)^n/n! <= 1e-18`, capped at n=128, and refuses if unresolved or over
+the existing scalar-work ceiling. In exact arithmetic it integrates products of
+degree-(n-1) plane-wave polynomials exactly. With
+`A = sum_cells,modes |area*shape| |velocity|` and
+`s = rho*omega²/(4*pi*c)`, the absolute angular truncation bound is
+`s*A²*(2*epsilon+epsilon²)` for the compact polynomial, twice this for the
+noncompact exact-exponential rule. The reported bound excludes floating-point,
+geometry, finite-cell quadrature and material errors; it is not a relative
+accuracy or passivity certificate for arbitrarily dark sources. A single cell
+uses its exact point-source limit. The observation retains the six-cell-per-
+wavelength admission and does not alter the loading or time realization.
+Cancellation is polled at entry, during source contraction and each angular
+direction; the existing compact geometry-cache initialization remains bounded
+but noninterruptible. G1/G3 regressions include separate-coordinate order-1/2/4
+cancellation down to 0.001 Hz, complex directional phases, angular-branch
+agreement, 128 retained modes, source/basis/frame changes and exact nulls.
+
 Rows use `exp(-i omega t)`: resistance is `Re Z`, added mass is `-Im Z/omega`.
 The unchanged matrix must have relative reciprocity defect at most
 `DENSE_RECIPROCITY_BOUND` = 1e-12 (an iterative row's bound is below) and

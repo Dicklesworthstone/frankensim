@@ -104,6 +104,9 @@ fn complex_modal_work_matches_outgoing_power_with_all_128_fields() {
             let got = work(&z, &velocity);
             assert!(got > 0.0 && (got/expected-1.0).abs() < 2e-6,
                 "{fields} fields at {hz} Hz: {got} vs {expected}");
+            let outgoing = prepared.coherent_radiated_power(omega, air(), &velocity, || false).unwrap();
+            assert!((outgoing.power_w / expected - 1.0).abs() < 2e-6,
+                "direct power with {fields} fields at {hz} Hz: {} vs {expected}", outgoing.power_w);
         }
     }
 }
@@ -281,4 +284,181 @@ fn g3_moment_gram_matches_sinc_across_the_branch_and_preserves_reference_frames(
         assert!((changed[i].re - original[i].re).abs() < 2e-12 * original[0].re);
         assert_eq!(replay[i], original[i], "cached source moments changed replay");
     }
+}
+
+#[test]
+fn g1_direct_power_preserves_multipoles_combined_from_separate_modal_coordinates() {
+    let area = 1.0 / 16_384.0;
+    let spacing = 1.0 / 64.0;
+    for coefficients in [
+        vec![1.0, -1.0],
+        vec![1.0, -2.0, 1.0],
+        vec![1.0, -4.0, 6.0, -4.0, 1.0],
+    ] {
+        let modes = coefficients.len();
+        let order = modes - 1;
+        // Unlike the signed-field tests above, each point has its OWN modal
+        // coordinate. All cancellation now happens in the supplied velocity,
+        // after a rounded resistance matrix has already lost the quiet power.
+        let cells: Vec<_> = (0..modes)
+            .map(|point| AreaSample {
+                position_m: [(point as f64 - 0.5 * order as f64) * spacing, 0.0],
+                area_m2: area,
+                mode_shape: (0..modes).map(|mode| if mode == point { 1.0 } else { 0.0 }).collect(),
+            })
+            .collect();
+        let prepared = PreparedSurface::new(&cells).unwrap();
+        let phase = C64::new(1.0, 0.75);
+        let velocity: Vec<_> = coefficients.iter().map(|&v| phase.scale(v)).collect();
+        for hz in [0.001, 0.1, 10.0] {
+            let omega = TAU * hz;
+            let actual = prepared.coherent_radiated_power(omega, air(), &velocity, || false).unwrap();
+            let expected = 0.5 * air().density * omega * omega / (TAU * air().sound_speed)
+                * area * area * phase.norm_sq()
+                * difference_power(order, omega * spacing / air().sound_speed);
+            assert!(actual.power_w > 0.0 && (actual.power_w / expected - 1.0).abs() < 2e-10,
+                "order {order} at {hz} Hz: {} vs {expected}", actual.power_w);
+            assert!(actual.angular_truncation_bound_w.is_finite()
+                && actual.angular_truncation_bound_w >= 0.0);
+            if hz == 0.001 && order >= 2 {
+                let real_velocity: Vec<_> = coefficients.iter().map(|&v| C64::from_re(v)).collect();
+                let rounded = work(&prepared.power_consistent_impedance(omega, air()).unwrap(),
+                    &real_velocity);
+                let expected_real = expected / phase.norm_sq();
+                assert!((rounded / expected_real - 1.0).abs() > 0.1,
+                    "fixture must expose matrix quadratic-form cancellation: {rounded} vs {expected_real}");
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_complex_quadrature_sources_require_both_opposite_azimuths() {
+    let area = 1e-6;
+    let cells = [
+        AreaSample { position_m: [0.0, -0.0625], area_m2: area, mode_shape: vec![1.0, 0.0] },
+        AreaSample { position_m: [0.0, 0.0625], area_m2: area, mode_shape: vec![0.0, 1.0] },
+    ];
+    let prepared = PreparedSurface::new(&cells).unwrap();
+    let velocity = [C64::ONE, C64::new(0.0, 1.0)];
+    // The cross power integrates to zero for quadrature source phases. The
+    // individual directional powers are NOT pi-periodic: the retained angles
+    // have nonnegative y, deliberately making a missing opposite partner fail.
+    for kd in [0.2, 0.5, 0.500_001, 1.5, 6.0] {
+        let omega = kd / prepared.maximum_distance_m() * air().sound_speed;
+        let actual = prepared.coherent_radiated_power(omega, air(), &velocity, || false).unwrap();
+        let expected = air().density * omega * omega / (TAU * air().sound_speed) * area * area;
+        assert!((actual.power_w / expected - 1.0).abs() < 3e-13,
+            "kd={kd}: {} vs {expected}", actual.power_w);
+        let reversed_clock = prepared.coherent_radiated_power(
+            omega, air(), &[velocity[0].conj(), velocity[1].conj()], || false).unwrap();
+        assert!((reversed_clock.power_w / expected - 1.0).abs() < 3e-13);
+    }
+}
+
+#[test]
+fn g1_direct_power_matches_independent_far_field_and_well_conditioned_modal_work() {
+    let cells = surface(3);
+    let prepared = PreparedSurface::new(&cells).unwrap();
+    let velocity = [C64::new(0.7, -0.3), C64::new(-0.4, 0.5), C64::new(0.2, 0.8)];
+    for kd in [0.49, 0.5, 0.500_001, 0.8, 3.0, 6.0] {
+        let omega = kd / prepared.maximum_distance_m() * air().sound_speed;
+        let actual = prepared.coherent_radiated_power(omega, air(), &velocity, || false).unwrap();
+        let outgoing = far_power(&cells, &velocity, omega, air());
+        let matrix = work(&prepared.power_consistent_impedance(omega, air()).unwrap(), &velocity);
+        assert!(actual.power_w > 0.0);
+        assert!((actual.power_w / outgoing - 1.0).abs() < 2e-6,
+            "kd={kd}: {} vs outgoing {outgoing}", actual.power_w);
+        assert!((actual.power_w / matrix - 1.0).abs() < 2e-12,
+            "kd={kd}: {} vs matrix {matrix}", actual.power_w);
+        assert!(actual.angular_truncation_bound_w.is_finite()
+            && actual.angular_truncation_bound_w >= 0.0);
+        if kd >= 3.0 {
+            assert!(actual.angular_directions > 153, "larger sources need increased angular order");
+        }
+    }
+}
+
+#[test]
+fn g3_direct_power_preserves_basis_source_order_reference_frame_and_clock() {
+    let cells = surface(3);
+    let prepared = PreparedSurface::new(&cells).unwrap();
+    let velocity = [C64::new(0.7, -0.3), C64::new(-0.4, 0.5), C64::new(0.2, 0.8)];
+    let changed: Vec<_> = cells.iter().rev().map(|cell| {
+        let [x, y] = cell.position_m;
+        AreaSample {
+            position_m: [2.0 - y, x - 4.0],
+            area_m2: cell.area_m2,
+            // phi'_1 = phi_1 + phi_0/2; phi'_2 = -2 phi_2.
+            mode_shape: vec![cell.mode_shape[0], cell.mode_shape[1] + 0.5 * cell.mode_shape[0],
+                -2.0 * cell.mode_shape[2]],
+        }
+    }).collect();
+    let transformed = PreparedSurface::new(&changed).unwrap();
+    let transformed_velocity = [velocity[0] - velocity[1].scale(0.5), velocity[1], velocity[2].scale(-0.5)];
+    let phase = C64::new(0.7_f64.cos(), 0.7_f64.sin());
+    for kd in [0.2, 0.500_001, 4.0] {
+        let omega = kd / prepared.maximum_distance_m() * air().sound_speed;
+        let baseline = prepared.coherent_radiated_power(omega, air(), &velocity, || false).unwrap();
+        let changed = transformed.coherent_radiated_power(omega, air(), &transformed_velocity, || false).unwrap();
+        let shifted = prepared.coherent_radiated_power(omega, air(), &velocity.map(|v| v * phase), || false).unwrap();
+        let dense = prepared.coherent_radiated_power(omega, Medium { density: 2.4, ..air() }, &velocity, || false).unwrap();
+        assert!((changed.power_w / baseline.power_w - 1.0).abs() < 3e-12);
+        assert!((shifted.power_w / baseline.power_w - 1.0).abs() < 3e-13);
+        assert!((dense.power_w / baseline.power_w - 2.0).abs() < 5e-13);
+        assert_eq!(prepared.coherent_radiated_power(omega, air(), &velocity, || false).unwrap(), baseline);
+    }
+}
+
+#[test]
+fn g0_direct_power_single_point_nulls_cancellation_and_refusals() {
+    let area = 2e-4;
+    let single = PreparedSurface::new(&[AreaSample {
+        position_m: [1.0, -2.0], area_m2: area, mode_shape: vec![1.0, -2.0, 0.5],
+    }]).unwrap();
+    let velocity = [C64::new(1.0, 1.0), C64::new(0.25, -0.5), C64::new(-2.0, 1.0)];
+    let omega = TAU * 100.0;
+    let actual = single.coherent_radiated_power(omega, air(), &velocity, || false).unwrap();
+    let expected = air().density * omega * omega / (2.0 * TAU * air().sound_speed)
+        * area * area * C64::new(-0.5, 2.5).norm_sq();
+    assert!((actual.power_w / expected - 1.0).abs() < 3e-14);
+    assert_eq!(actual.angular_directions, 1);
+    assert_eq!(actual.angular_truncation_bound_w, 0.0);
+    let null = single.coherent_radiated_power(omega, air(), &[C64::ONE, C64::from_re(0.5), C64::ZERO], || false).unwrap();
+    assert_eq!(null.power_w, 0.0, "a physical null receives no loss floor");
+
+    let prepared = PreparedSurface::new(&surface(3)).unwrap();
+    for kd in [0.2, 4.0] {
+        let omega = kd / prepared.maximum_distance_m() * air().sound_speed;
+        assert!(matches!(prepared.coherent_radiated_power(omega, air(), &velocity, || true),
+            Err(HelmholtzError::Cancelled)));
+        let mut polls = 0;
+        let interrupted = prepared.coherent_radiated_power(omega, air(), &velocity, || {
+            polls += 1;
+            polls == 5
+        });
+        assert!(matches!(interrupted, Err(HelmholtzError::Cancelled)));
+        assert_eq!(polls, 5);
+        assert!(prepared.coherent_radiated_power(omega, air(), &velocity, || false).is_ok());
+    }
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(prepared.coherent_radiated_power(bad, air(), &velocity, || false).is_err());
+    }
+    for bad in [f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(prepared.coherent_radiated_power(omega, air(), &[C64::from_re(bad); 3], || false).is_err());
+    }
+    assert!(prepared.coherent_radiated_power(omega, air(), &velocity[..2], || false).is_err());
+    assert!(prepared.coherent_radiated_power(omega, Medium { density: 0.0, ..air() }, &velocity, || false).is_err());
+    assert!(matches!(prepared.coherent_radiated_power(TAU * 100_000.0, air(), &velocity, || false),
+        Err(HelmholtzError::TooCoarse { .. })));
+    // Tiny cells satisfy the wavelength gate, but this wide separation needs
+    // more directions than the explicitly bounded angular solver permits.
+    let wide = PreparedSurface::new(&[
+        AreaSample { position_m: [0.0, 0.0], area_m2: 1e-8, mode_shape: vec![1.0] },
+        AreaSample { position_m: [1.0, 0.0], area_m2: 1e-8, mode_shape: vec![1.0] },
+    ]).unwrap();
+    let unresolved_omega = (MAX_RAYLEIGH_POWER_POLAR_ORDER as f64 + 1.0) * air().sound_speed;
+    assert!(wide.equivalent_disc_ppw(unresolved_omega, air()).unwrap() > MIN_PANELS_PER_WAVELENGTH);
+    assert!(matches!(wide.coherent_radiated_power(unresolved_omega, air(), &[C64::ONE], || false),
+        Err(HelmholtzError::BadParameter { what: "Rayleigh outgoing power requires a higher angular order" })));
 }
