@@ -7,7 +7,9 @@
 //! mistaken for their dimensioned counterparts.
 //!
 //! The uniform reductions below are isotropic, linear, nondispersive and lossless.
-//! The planar module additionally admits explicitly oriented dielectric sources. Fringing, leakage,
+//! The planar module additionally admits explicitly oriented dielectric sources;
+//! [`dielectric`] supplies a separate passive Debye polarization-memory model.
+//! Fringing, leakage,
 //! saturation, hysteresis, dielectric loss and geometry evolution require other
 //! laws. Source curves and surfaces may be resolved at fixed temperature,
 //! pressure, composition, moisture and concentration, with typed external roles.
@@ -25,6 +27,8 @@ pub mod hysteresis;
 pub mod thermal;
 /// Source-backed scalar or oriented planar dielectric response.
 pub mod planar;
+/// Passive source-backed dielectric polarization memory and its RC realization.
+pub mod dielectric;
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
@@ -74,7 +78,7 @@ fn positive(value: f64, what: &'static str) -> Result<f64, FieldStorageError> {
 
 fn coefficient(
     material: &ResolvedMaterialStatePoint,
-    name: &'static str,
+    name: &str,
     dims: Dims,
 ) -> Result<f64, FieldStorageError> {
     let property = material.property(name).ok_or(FieldStorageError::Invalid(

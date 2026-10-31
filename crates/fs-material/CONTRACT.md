@@ -6171,3 +6171,32 @@ arithmetic and shared mass/energy conservation. This is a near-isothermal,
 linear Henry-sorption, negligible-storage closure. Porous supports, bypass
 defects, nonlinear competitive sorption, polymer stress, thermal storage and
 transient breakthrough remain outside this model.
+
+## Source-bound dielectric polarization memory
+
+`field_storage::dielectric::ResolvedDebyeCapacitor` retains one complete material
+bundle, explicitly named high-frequency absolute permittivity, positive absolute
+permittivity increments and positive relaxation times, plus uniform facing area
+and gap. The shared source gate enforces SI dimensions, original claims and fixed
+external conditions; frequency/field/strain/stress-dependent parameters cannot be
+frozen into this time-domain law. At most 16 processes are admitted, with distinct
+source properties and no fitted defaults. Empty process lists recover ordinary
+lossless capacitance.
+
+For the `exp(i omega t)` convention the law is
+`epsilon = epsilon_inf + sum(delta_epsilon_k/(1+i omega tau_k))`. Its native
+realization is C_inf in parallel with series R_k/C_k arms, where
+`C_k=delta_epsilon_k A/d` and `R_k=tau_k/C_k`. Each process retains a separate
+polarization charge. Storage is `q_inf^2/(2 C_inf)+sum(q_k^2/(2 C_k))`, rather
+than applying a frequency-dependent capacitance to total charge. The bounded,
+allocation-free admittance evaluator retains the passive high-frequency loss
+limit even when omega*tau overflows.
+
+This is an explicitly declared isotropic linear Debye model at frozen material
+state and geometry. It does not infer measured pole data, parameter-temperature
+work/entropy, leakage, electrode ESR/ESL, fringing, hysteresis or breakdown.
+`fs-couple::material_circuit::dielectric` supplies its native circuit consumer.
+G0/G1 source tests cover geometry and SI scaling, source retention, independent
+single-pole frequency limits, multipole additivity, the zero-memory limit and
+passivity/source-domain refusals. These synthetic fixtures verify the model's
+implementation and do not establish experimental material accuracy.
