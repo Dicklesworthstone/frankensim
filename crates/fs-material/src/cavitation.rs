@@ -7,9 +7,12 @@
 //! are frozen during a consumer's isothermal advance. Thermal feedback must
 //! refresh the original source before the next accepted advance.
 //!
-//! This module owns no flow, bubble history, phase-transfer rate or thermal
+//! The property view below owns no flow, bubble history, phase-transfer rate or thermal
 //! integrator. Saturated vapor density and latent enthalpy are explicitly
 //! optional; their absence must never be replaced by an ideal-gas assumption.
+
+/// Finite dissolved-gas exchange with an original gas inventory and calorics.
+pub mod dissolved_gas;
 
 use crate::MaterialError;
 use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};

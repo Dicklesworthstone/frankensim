@@ -8326,3 +8326,33 @@ cross-owner latent transport and contact tests live in `fs-couple`.
 Physical dissipation is `(sigma_y + f_visc) delta_alpha`. Recoverable saturation energy and its convex backward-Euler remainder retain their original storage and numerical accounts. Q=0 delegates exactly to the original selected rate law; n=1 recovers linear kinetics. Explicit positive viscosity/duration/stress normalization, n>=1, finite native histories and the declared small-strain ceiling remain mandatory. Nonlinear Chaboche recovery, sub-yield creep, finite deformation and empirical calibration are outside this law.
 
 `tests/plastic_voce_overstress.rs` verifies independently prescribed joint rates, all tangent components under reversal, cyclic work partitions, exact reductions, a closed-form constant-stress Voce creep solution with first-order refinement, tiny representable rate increments and invalid input refusal. Focused native execution does not qualify the whole Cargo workspace or the live cancellation runtime.
+
+## Finite dissolved gas in cavitating liquids
+
+`cavitation::dissolved_gas::HenryDissolution` exchanges one selected
+noncondensable species between a finite liquid inventory and an original
+`ClosedGasParcel`. Source-resolved molar Henry solubility (C*=H p_i) and
+molecular diffusivity combine with authored film area/thickness. The exact
+affine finite-pair relaxation includes changing gas partial pressure and uses
+the native deterministic expm1 owner; it neither assumes an infinite reservoir
+nor clips an explicit Euler update. Other gas species retain their inventories,
+and exsolution can introduce an initially absent selected species into an
+existing carrier without a numerical seed.
+
+The original species-boundary/caloric owner reconstructs gas composition,
+pressure, transport and acoustics. Original gas partial enthalpy and an
+explicitly aligned dissolved partial-enthalpy chart determine separate gas
+and solution thermostat heat; pressure-flow work is counted once. Gas and
+liquid state/clock publish together only after source, mass, energy and final
+cancellation checks. Both bulk and interfacial concentrations must fit the
+original material support and authored dilute limit.
+
+This is a fixed-temperature, fixed-volume dilute-solution model with negligible
+solute partial volume and gas-side resistance and an already quasi-steady liquid
+film. The authored film-relaxation bound is an applicability check, not a
+transient diffusion-layer solution or accuracy theorem. Nucleation, bubble
+radius motion, evaporation and adiabatic thermal evolution require separate
+physical owners; no generic entropy-production claim is made. Four native
+tests cover independent finite equilibrium/relaxation and thermostat energy,
+carrier-preserving exsolution, small-step/partition identities, and atomic
+source/dilution/film/cancellation refusals.
