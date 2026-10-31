@@ -76,6 +76,7 @@ FAMILIES = [
     ("vibraphone", "Vibraphone", "Mallets", ["irp-vibraphone"], ["bar"], ["vibraphone"]),
     ("timpani", "Timpani", "Drums", [], [], ["timpani", "kettle ?drum"]),
     ("kit", "Drum kit", "Drums", [], [], ["drum", "kit", "snare", "cymbals?", "kick", "toms?"]),
+    ("snare", "Snare drum", "Drums", [], [], ["snare"]),
     ("voice", "Voice", "Voice", ["irp-voice"], ["voice-glottis", "voice-tract"], ["voice", "vowels?", "glott\\w*", "vocal tract"]),
 ]
 SECTIONS = ["Reeds", "Flutes and pipes", "Brass", "Bowed strings", "Plucked strings", "Keyboard", "Mallets", "Drums", "Voice"]
@@ -993,6 +994,8 @@ def main() -> int:
         kit_dir = mirror / "kit" if (mirror / "kit").is_dir() else mirror / "kit9"  # mirrors before 2026-10-26T03:30Z
         if fid == "kit":
             pairs += kit_pairs(kit_dir, media)
+        elif fid == "snare":  # its own status card, with its two strokes from the kit grade; the kit page keeps them too
+            pairs += [p for p in kit_pairs(kit_dir, media) if p["id"].startswith("kit9-snare")]
         verdict = judge(pairs, status)
         if verdict["badge"] == "none" and (extras.get(fid) or fixtures.get(fid)):
             verdict.update(badge="ungraded", label=BADGE_LABEL["ungraded"])

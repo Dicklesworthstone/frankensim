@@ -110,7 +110,7 @@ export async function render(root, r) {
         h('span', null, 'The qualification gates, the 16 measures and how often each is passed, the rulers checked against a second library, and the score over time.')),
       h('a.card', { href: '#/decisions' }, h('b', null, 'Decisions'),
         h('span', null, 'What was decided and why: the first-principles pivot, materials and air as data, the grading changes, the findings that changed the plan.')),
-      h('a.card', { href: '#/instruments' }, h('b', null, 'All 27 families'),
+      h('a.card', { href: '#/instruments' }, h('b', null, 'All families'),
         h('span', null, 'Which instruments speak, which are graded, which are still blocked on geometry or data, and the qualification ladder of each.'))));
   const unknown = r && r.unknown
     ? h('div.note.warn', { role: 'status' }, h('p', null, `There is no page at ${r.unknown}, so this is the start page.`))
