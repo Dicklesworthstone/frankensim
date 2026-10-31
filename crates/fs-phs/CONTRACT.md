@@ -1212,8 +1212,12 @@ charge/flux and mutual-inductance mapping, biased small energy increments and
 malformed/source-domain refusals. Authored curves supply no inferred material
 authority, interpolation-error bound, extrapolation, absorption, leakage,
 hysteresis, breakdown, temperature evolution or switching behavior.
-`MaterialCircuit` thermal/material rebuilds do not yet retain these nonlinear
-bindings; the native `CircuitDae` API is their current integration boundary.
+`fs-couple::MaterialCircuit` retains these bindings through ordinary material,
+contact, conductivity and thermal trials. Replacing a law at fixed charge has
+its own explicit parameter-work candidate; a retained linear material law may
+not silently describe an independently authored nonlinear curve. Prepared
+knots, slopes and energies are immutable shared slices, so repeated trial
+clones retain the same prepared tables without copying them.
 
 Cancellation-stable analytic midpoint remainders are applied for every finite,
 nonzero represented squared increment. A large stationary coordinate cannot

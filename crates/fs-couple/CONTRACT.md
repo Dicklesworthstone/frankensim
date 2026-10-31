@@ -17715,3 +17715,40 @@ creep with an independent scalar thermal/kinetic equation, varies material rate
 and thermal substeps, conducts heat through a nonuniform six-tetrahedron loaded
 bar, checks original source identities, and exercises reservoir/interval-source
 composition and transactional failure/cancellation.
+
+## Retained nonlinear material-circuit capacitance
+
+`MaterialCircuit::new_with_capacitor_curves` binds explicitly authored monotone
+V(q) curves through the original native descriptor alongside source-resolved
+bulk/contact resistance and signed mutual inductance. Original capacitor branch
+indices, charges, flux linkages, ideal-source ports and transformer topology are
+retained. Ordinary material, contact, conductivity and finite-enthalpy trials
+keep the same prepared charge laws; they do not silently return to the graph's
+linear placeholder capacitance. Immutable prepared knot/slopes/energy tables
+are shared across candidates. This supplies no inferred measured provenance or
+temperature dependence for an authored curve.
+
+`rebind_capacitor_curves_candidate` replaces the complete curve binding set at
+fixed charge and flux. Removed bindings return to their original graph C. The
+candidate reports signed reversible work from the exact piecewise integral of
+V_new(q)-V_old(q), summing over the union of both original knot partitions.
+Voltage differences are integrated directly, so resolvable work survives below
+the spacing of biased endpoint energies. The physical parameter owner pays or
+receives that work when publishing the candidate; it is not resistor heat.
+Ideal-source consistency, curve support, bounded work and cancellation remain
+admission gates. Retained source-derived linear storage cannot claim authority
+for a different authored curve. The existing quadratic gap-motion owner also
+refuses these curves until a joint geometry-dependent energy law is supplied.
+
+The ordinary circuit independently computes its stored-energy increment from
+each capacitor's declared integral and the native full mutual-inductance
+gradient, including represented-midpoint rounding. Compensated summation and
+bounded stack scratch avoid subtracting large endpoint energies or refactoring
+the inductance matrix. `MaterialCircuitStep::stored_energy_change_j` exposes the
+native increment after this independent check; primary finite-enthalpy,
+conductivity and piston-thermal accounts consume it. Endpoint energies remain
+diagnostics. Source-free energy, independent RC trajectories across a knot,
+contact/bulk heat partition, conductivity refresh, mutual-field retention,
+signed parameter work, ideal-source/source-authority refusals and atomic
+cancellation are exercised in `tests/material_circuit_capacitance.rs` with
+synthetic material data.

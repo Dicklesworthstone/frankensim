@@ -52,9 +52,9 @@ pub struct StorageParameterWork {
 /// A proposal never changes the original circuit; the caller publishes this
 /// together with the physical owner that pays/receives the reported work.
 pub struct MaterialStorageCandidate {
-    circuit: MaterialCircuit,
-    work: Vec<StorageParameterWork>,
-    parameter_work_j: f64,
+    pub(super) circuit: MaterialCircuit,
+    pub(super) work: Vec<StorageParameterWork>,
+    pub(super) parameter_work_j: f64,
 }
 impl MaterialStorageCandidate {
     /// New material coefficients and unchanged conserved charge/flux coordinates.
@@ -310,6 +310,9 @@ impl MaterialCircuit {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialStorageCandidate, MaterialCircuitError> {
         poll(&mut cancelled)?;
+        if !self.capacitor_curves.is_empty() {
+            return Err(invalid("authored capacitor curves require their explicit charge-law work owner"));
+        }
         let storage_count = self
             .graph
             .branches

@@ -298,8 +298,8 @@ pub(super) fn finish_candidate_with_internal_heat<'m, S>(
         - coupled.source.reversible_electrical_work_j)?;
     let external_heat_j = finite(coupled.non_electrical_heat_j
         - coupled.source.reversible_heat_j - internal_heat_j)?;
-    let total_energy_residual_j = finite(coupled.electrical.stored_after_j
-        - coupled.electrical.stored_before_j + coupled.thermal.stored_energy_change_j
+    let total_energy_residual_j = finite(coupled.electrical.stored_energy_change_j()
+        + coupled.thermal.stored_energy_change_j
         - external_electrical_work_j - external_heat_j)?;
     if total_energy_residual_j.abs() > controls.total_energy_tolerance_j {
         return Err(invalid("combined thermoelectric and thermal storage do not close external supply"));

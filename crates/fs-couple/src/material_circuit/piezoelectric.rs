@@ -103,8 +103,9 @@ impl PiezoelectricCircuit {
         // The native parent owns this exact storage representation. Only the
         // composite descriptor below may admit/advance the active capacitor.
         let circuit = MaterialCircuit {
-            graph, mutual: Vec::new(), magnetic_couplings: Vec::new(), resistors,
-            contacts: Vec::new(), fluxes_wb, charges_c, storage: Vec::new(),
+            graph, mutual: Vec::new(), magnetic_couplings: Vec::new(),
+            capacitor_curves: Vec::new().into(),
+            resistors, contacts: Vec::new(), fluxes_wb, charges_c, storage: Vec::new(),
         };
         let model = Self { circuit, rod, branch, charge_slot, extension_m, momentum_kg_m_s };
         let (coupled, _) = model.assemble(&dae)?;

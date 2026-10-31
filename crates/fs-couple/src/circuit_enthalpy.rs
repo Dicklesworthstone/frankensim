@@ -360,7 +360,7 @@ impl ThermalDriver for MaterialCircuitCandidate {
         let step = self.step();
         DriverAccount { resistors: &step.resistors, contacts: &step.contacts,
             heat_j: step.heat_j, numerical_dissipation_j: 0.0,
-            stored_change_j: step.stored_after_j-step.stored_before_j,
+            stored_change_j: step.stored_energy_change_j(),
             supplied_j: step.native.supplied }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {

@@ -143,7 +143,7 @@ fn total_energy<E>(thermal: &ThermalPistonStep, circuit: &MaterialCircuitStep,
     input: PistonInput, body: UniformEnthalpyStepInput<'_>, tolerance: f64)
     -> Result<f64, ThermalPistonError<CircuitHeatingError<E>>> {
     let mechanics = &thermal.piston;
-    let total = ((circuit.stored_after_j - circuit.stored_before_j)
+    let total = (circuit.stored_energy_change_j()
         + mechanics.gas.stored_energy_change_j + mechanics.kinetic_energy_change_j
         + thermal.thermal_energy_change_j) + mechanics.exterior_pressure_work_j
         - mechanics.external_force_work_j - input.heat_j - body.internal_heat_j - circuit.native.supplied;

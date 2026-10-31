@@ -185,6 +185,9 @@ impl MaterialFieldMotion {
         support: Option<AxialSupport>, velocity_m_s: f64, gap_limits_m: [f64; 2])
         -> Result<Self, MaterialCircuitError>
     {
+        if !circuit.capacitor_curves.is_empty() {
+            return Err(invalid("gap motion requires a jointly derived geometry-dependent capacitor law"));
+        }
         if circuit.mutual.iter().any(|link| link.henries != 0.0
             && (link.branches.0 == branch || link.branches.1 == branch)) {
             return Err(invalid("moving a mutually coupled winding requires a shared geometry-dependent inductance law"));

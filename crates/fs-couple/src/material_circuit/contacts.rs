@@ -116,8 +116,9 @@ impl MaterialCircuit {
     pub fn rebind_contacts_candidate(&self, contacts: Vec<SeriesElectricalContact>, inputs: &[f64])
         -> Result<Self, MaterialCircuitError>
     {
-        let mut result = Self::new_with_contacts_and_mutual_inductance(self.graph.clone(),
+        let mut result = Self::new_with_capacitor_curves(self.graph.clone(),
             self.resistors.clone(), contacts, self.mutual.clone(),
+            self.capacitor_curves.to_vec(),
             self.fluxes_wb.clone(), self.charges_c.clone(), inputs)?;
         result.storage = self.storage.clone();
         result.magnetic_couplings = self.magnetic_couplings.clone();

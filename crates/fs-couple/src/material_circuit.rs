@@ -24,14 +24,17 @@ pub mod magnetostrictive;
 pub mod hysteretic;
 /// Source-backed dielectric polarization memory on the native circuit solver.
 pub mod dielectric;
+/// Retained nonlinear capacitor laws and explicit work on their reconfiguration.
+pub mod capacitance;
 use contacts::{SeriesElectricalContact, ContactHeat};
 
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
 use fs_phs::circuit::{
     Branch, CircuitDae, CircuitError, CircuitGraph, MutualInductance,
-    assemble_circuit_with_mutual_inductance,
 };
+use fs_phs::circuit::capacitance::{CapacitorCurve, assemble_circuit_with_capacitor_curves};
 use fs_phs::StepRecord;
+use std::sync::Arc;
 
 /// Bounds on the existing allocating dense descriptor solve, not a sparse solver.
 pub const MAX_MATERIAL_CIRCUIT_NODES: usize = 32;
@@ -117,6 +120,7 @@ pub struct MaterialCircuit {
     graph: CircuitGraph,
     mutual: Vec<MutualInductance>,
     magnetic_couplings: Vec<storage::MaterialMagneticCoupling>,
+    capacitor_curves: Arc<[CapacitorCurve]>,
     resistors: Vec<MaterialResistor>,
     contacts: Vec<SeriesElectricalContact>,
     fluxes_wb: Vec<f64>,
@@ -158,6 +162,12 @@ pub struct MaterialCircuitStep {
     pub heat_j: f64,
     /// Actual storage change plus branch heat minus source work [J].
     pub energy_residual_j: f64,
+}
+impl MaterialCircuitStep {
+    /// Constitutive storage increment [J], checked independently against the
+    /// native descriptor. Endpoint energies are diagnostics and can round to
+    /// the same value while a small physical charge/flux transfer remains real.
+    pub fn stored_energy_change_j(&self) -> f64 { self.native.delta_h }
 }
 /// Electrical endpoint and its original per-branch source/heat records. Consumers
 /// must publish this with ALL receiving thermal candidates, not debit it in a
@@ -222,8 +232,16 @@ fn bind(graph: &CircuitGraph, sources: Vec<MaterialResistor>, contacts: &[Series
     bind_with_mutual(graph, sources, contacts, &[])
 }
 
-fn bind_with_mutual(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>,
+fn bind_with_mutual(graph: &CircuitGraph, sources: Vec<MaterialResistor>,
     contacts: &[SeriesElectricalContact], mutual: &[MutualInductance])
+    -> Result<(CircuitGraph, Vec<MaterialResistor>, CircuitDae), MaterialCircuitError>
+{
+    bind_with_storage_laws(graph, sources, contacts, mutual, &[])
+}
+
+fn bind_with_storage_laws(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>,
+    contacts: &[SeriesElectricalContact], mutual: &[MutualInductance],
+    capacitor_curves: &[CapacitorCurve])
     -> Result<(CircuitGraph, Vec<MaterialResistor>, CircuitDae), MaterialCircuitError>
 {
     use MaterialCircuitError::Invalid;
@@ -245,7 +263,10 @@ fn bind_with_mutual(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>,
         branch.2 = Branch::Resistor { ohms: r };
     }
     contacts::lower(&mut lowered, contacts)?;
-    let dae = assemble_circuit_with_mutual_inductance(&lowered, mutual)?;
+    if capacitor_curves.len() > lowered.branches.len() {
+        return Err(Invalid("capacitor laws exceed bounded branch capacity"));
+    }
+    let dae = assemble_circuit_with_capacitor_curves(&lowered, capacitor_curves, mutual)?;
     Ok((lowered, sources, dae))
 }
 pub(crate) fn extended(dae: &CircuitDae, fluxes: &[f64], charges: &[f64], inputs: &[f64])
@@ -270,8 +291,19 @@ fn account_step(
     node_indices: &[usize], x0: &[f64], record: &StepRecord, h0: f64, h1: f64, dt: f64,
     controls: MaterialCircuitSolve, cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<ResistorHeat>, Vec<ContactHeat>, f64, f64), MaterialCircuitError> {
+    account_step_with_storage_change(graph, resistors, contacts, node_indices,
+        x0, record, h0, h1, h1-h0, dt, controls, cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn account_step_with_storage_change(
+    graph: &CircuitGraph, resistors: &[MaterialResistor], contacts: &[SeriesElectricalContact],
+    node_indices: &[usize], x0: &[f64], record: &StepRecord, h0: f64, h1: f64,
+    storage_change_j: f64, dt: f64, controls: MaterialCircuitSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<ResistorHeat>, Vec<ContactHeat>, f64, f64), MaterialCircuitError> {
     if record.x.iter().chain(&record.y).any(|v| !v.is_finite())
-        || [h0, h1, record.delta_h, record.dissipated, record.supplied, record.solver_residual]
+        || [h0, h1, storage_change_j, record.delta_h, record.dissipated, record.supplied, record.solver_residual]
             .iter().any(|v| !v.is_finite()) || h0 < 0.0 || h1 < 0.0 || record.dissipated < 0.0 {
         return Err(MaterialCircuitError::Balance("nonfinite or negative storage/loss"));
     }
@@ -321,10 +353,10 @@ fn account_step(
         heat.push(ResistorHeat { material:source.clone(), voltage_v:v, current_a:i, power_w:p, heat_j:q });
     }
     contact_heat.sort_by_key(|h| h.contact.id());
-    let residual = (h1-h0)+heat_j-record.supplied;
+    let residual = storage_change_j+heat_j-record.supplied;
     if !heat_j.is_finite() || !residual.is_finite()
         || (heat_j-record.dissipated).abs() > controls.energy_tolerance_j
-        || ((h1-h0)-record.delta_h).abs() > controls.energy_tolerance_j
+        || (storage_change_j-record.delta_h).abs() > controls.energy_tolerance_j
         || residual.abs() > controls.energy_tolerance_j {
         return Err(MaterialCircuitError::Balance("branch heat, storage and external supply do not close"));
     }
@@ -376,12 +408,37 @@ impl MaterialCircuit {
     /// owners. Contact refresh never removes or duplicates mutual field energy.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_contacts_and_mutual_inductance(graph: CircuitGraph,
-        sources: Vec<MaterialResistor>, mut contacts: Vec<SeriesElectricalContact>,
+        sources: Vec<MaterialResistor>, contacts: Vec<SeriesElectricalContact>,
         mutual: Vec<MutualInductance>, fluxes_wb: Vec<f64>, charges_c: Vec<f64>,
         initial_inputs: &[f64]) -> Result<Self, MaterialCircuitError>
     {
+        Self::new_with_capacitor_curves(graph, sources, contacts, mutual, Vec::new(),
+            fluxes_wb, charges_c, initial_inputs)
+    }
+
+    /// Bind explicit reversible V(q) laws alongside original bulk/contact
+    /// losses and mutual inductance. Every resistor/contact/conductivity/thermal
+    /// trial retains these same curves. Material-derived linear storage records
+    /// are a separate source owner; this constructor infers no material data.
+    ///
+    /// The graph's positive capacitor coefficients are placeholders on bound
+    /// branches. Unbound capacitors retain their original linear law. Charge,
+    /// flux, source ports and ideal-transformer topology keep their native order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_capacitor_curves(graph: CircuitGraph,
+        sources: Vec<MaterialResistor>, mut contacts: Vec<SeriesElectricalContact>,
+        mutual: Vec<MutualInductance>, mut capacitor_curves: Vec<CapacitorCurve>,
+        fluxes_wb: Vec<f64>, charges_c: Vec<f64>, initial_inputs: &[f64])
+        -> Result<Self, MaterialCircuitError>
+    {
+        if capacitor_curves.len() > MAX_MATERIAL_CIRCUIT_BRANCHES
+            || capacitor_curves.len() > graph.branches.len() {
+            return Err(MaterialCircuitError::Invalid("capacitor laws exceed bounded branch capacity"));
+        }
+        capacitor_curves.sort_by_key(|law| law.branch);
         contacts::admit(&mut contacts)?;
-        let (graph, resistors, dae) = bind_with_mutual(&graph, sources, &contacts, &mutual)?;
+        let (graph, resistors, dae) = bind_with_storage_laws(&graph, sources,
+            &contacts, &mutual, &capacitor_curves)?;
         let x = extended(&dae, &fluxes_wb, &charges_c, initial_inputs)?;
         let initial = dae.consistent_initial_state(&x, initial_inputs)?;
         let h = dae.system.hamiltonian(&x);
@@ -394,7 +451,8 @@ impl MaterialCircuit {
                 return Err(MaterialCircuitError::Invalid("algebraic initialization changed a conserved electrical coordinate"));
             }
         }
-        Ok(Self { graph, mutual, magnetic_couplings: Vec::new(), resistors, contacts,
+        Ok(Self { graph, mutual, magnetic_couplings:Vec::new(),
+            capacitor_curves:capacitor_curves.into(), resistors, contacts,
             fluxes_wb, charges_c, storage: Vec::new() })
     }
     /// Original graph topology with the last accepted material resistor values.
@@ -408,6 +466,9 @@ impl MaterialCircuit {
     pub fn magnetic_couplings(&self) -> &[storage::MaterialMagneticCoupling] {
         &self.magnetic_couplings
     }
+    /// Original branch-indexed reversible capacitor laws. Their charge support
+    /// and exact integral energy survive all ordinary material/thermal trials.
+    pub fn capacitor_curves(&self) -> &[CapacitorCurve] { &self.capacitor_curves }
     /// Original source bindings at construction or the last accepted step midpoint.
     pub fn resistors(&self) -> &[MaterialResistor] { &self.resistors }
     /// Explicit electrical contact sources, in stable ID order.
@@ -465,16 +526,21 @@ impl MaterialCircuit {
         if !positive(dt) || !positive(controls.energy_tolerance_j) || !positive(controls.power_tolerance_w) {
             return Err(MaterialCircuitError::Invalid("positive finite clock and absolute work/power tolerances required"));
         }
-        let (graph, resistors, dae) = bind_with_mutual(&self.graph, sources, &contacts, &self.mutual)?;
+        let (graph, resistors, dae) = bind_with_storage_laws(&self.graph, sources,
+            &contacts, &self.mutual, &self.capacitor_curves)?;
         let x0 = extended(&dae, &self.fluxes_wb, &self.charges_c, inputs)?;
         poll(&mut cancelled)?;
         let (record, _) = dae.step_audited(&x0, inputs, dt)?;
         let h0 = dae.system.hamiltonian(&x0);
         let h1 = dae.system.hamiltonian(&record.x);
-        let (heat, contact_heat, heat_j, residual) = account_step(&graph, &resistors,
-            &contacts, &dae.node_potential_index, &x0, &record, h0, h1, dt, controls, &mut cancelled)?;
-        let next = Self { graph, mutual:self.mutual.clone(), resistors, contacts,
+        let storage_change_j = capacitance::storage_change(&graph, &self.capacitor_curves,
+            &dae, &x0, &record.x)?;
+        let (heat, contact_heat, heat_j, residual) = account_step_with_storage_change(
+            &graph, &resistors, &contacts, &dae.node_potential_index, &x0, &record,
+            h0, h1, storage_change_j, dt, controls, &mut cancelled)?;
+        let next = Self { graph, mutual:self.mutual.clone(),
             magnetic_couplings:self.magnetic_couplings.clone(),
+            capacitor_curves:self.capacitor_curves.clone(), resistors, contacts,
             fluxes_wb:dae.flux_index.iter().map(|&i| record.x[i]).collect(),
             charges_c:dae.charge_index.iter().map(|&i| record.x[i]).collect(),
             storage:self.storage.clone() };
