@@ -14,6 +14,8 @@
 //! This estimated inviscid model does not resolve three-dimensional junction
 //! mixing, molecular diffusion, wall losses or chemical reaction. All branches
 //! and plenums share one atomic SSP RK2 step and accepted clock.
+//! Prescribed species-bearing end reservoirs can drive the same network step
+//! while finite plenums retain their conservative internal exchanges.
 
 use super::evolve::{Stage, totals};
 use super::{
@@ -192,6 +194,7 @@ pub struct NetworkStepReport {
 
 struct NetworkWorkspace {
     plenum_primitive: Vec<Primitive>,
+    reservoir_primitive: Vec<[Primitive; 2]>,
     plenum_stage: Vec<f64>,
     plenum_candidate: Vec<f64>,
     plenum_rhs: Vec<f64>,
@@ -213,6 +216,8 @@ struct NetworkWorkspace {
 /// and accepted clocks must match exactly. Local composition and temperature may
 /// differ. Immutable branch access prevents separately advancing a network owner.
 /// Successful numerical steps reuse construction-time buffers without allocation.
+/// [`Self::step_with_reservoirs`] supplies prescribed pressure, temperature and
+/// composition at unconnected physical ends without depleting those sources.
 pub struct MixtureNetwork1d {
     branches: Vec<MixtureEuler1d>,
     plenums: Vec<Plenum>,
@@ -300,6 +305,7 @@ impl MixtureNetwork1d {
         let endpoint_size = branches.len().checked_mul(2 * m).ok_or(Error::Allocation)?;
         let work = NetworkWorkspace {
             plenum_primitive,
+            reservoir_primitive: allocated(branches.len(), [Primitive::default(); 2])?,
             plenum_stage: allocated(plenum_size, 0.0)?,
             plenum_candidate: allocated(plenum_size, 0.0)?,
             plenum_rhs: allocated(plenum_size, 0.0)?,

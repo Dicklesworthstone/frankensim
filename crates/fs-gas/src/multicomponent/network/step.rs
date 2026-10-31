@@ -1,6 +1,6 @@
 use super::super::evolve::{EndpointFlux, forward, operator, totals};
 use super::super::{
-    Boundaries, Error, MAX_COMPONENTS, MAX_SPECIES, Reconstruction, StepControl, StepReport,
+    Boundaries, Cell, Error, MAX_COMPONENTS, MAX_SPECIES, Reconstruction, StepControl, StepReport,
     Totals, cell, poll, positive, sum,
 };
 use super::{
@@ -40,7 +40,7 @@ impl MixtureNetwork1d {
         controls: StepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
-        self.step_impl(maximum_duration, controls, None, cancelled)
+        self.step_impl(maximum_duration, controls, None, None, cancelled)
     }
 
     /// Advance prescribed compact-volume motion and branch flow simultaneously.
@@ -68,7 +68,96 @@ impl MixtureNetwork1d {
         volume_rates_m3_s: &[f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
-        poll(&mut cancelled)?;
+        let moving = self.admit_volume_rates(volume_rates_m3_s, &mut cancelled)?;
+        self.step_impl(
+            maximum_duration,
+            controls,
+            moving.then_some(volume_rates_m3_s),
+            None,
+            cancelled,
+        )
+    }
+
+    /// Advance the complete network against prescribed species-bearing reservoirs.
+    ///
+    /// Supply exactly one `[left, right]` pair per branch in retained order.
+    /// `Some` overrides an unconnected physical end for this call; `None` keeps
+    /// its original boundary or finite-plenum connection. An all-`None` slice
+    /// executes the original step exactly. Periodic ends and ends already owned
+    /// by a finite plenum cannot receive an external reservoir.
+    ///
+    /// Each stationary borrowed cell must use this network's original species
+    /// bank, canonical order and per-species energy references, as required by
+    /// [`super::super::MixtureGas::reservoir_flux`]. Raw cells carry no source
+    /// identity tag; that compatibility is the caller's responsibility. Species
+    /// dimensions, stationarity and the complete source state are admitted here.
+    ///
+    /// Pressure and temperature are stagnation conditions for inflow; outflow
+    /// sees the reservoir backpressure. The original characteristic closure
+    /// transports reservoir species and stagnation enthalpy into a branch and
+    /// interior species and total enthalpy out. Every RK stage and halved retry
+    /// recomputes each flux from that stage's actual branch end cell. External
+    /// exchange enters the network boundary report; finite-plenum exchanges
+    /// remain internal, with exact opposite accepted port reports.
+    ///
+    /// Reservoirs are prescribed throughout the call and are not depleted.
+    /// Their states may change between accepted calls. No borrowed state is
+    /// retained and no numerical heap workspace is allocated per step. All
+    /// branches, finite plenums, clocks and accepted reports publish together;
+    /// refusal or cancellation publishes none of them.
+    pub fn step_with_reservoirs(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        let active = self.admit_reservoirs(reservoirs, &mut cancelled)?;
+        self.step_impl(
+            maximum_duration,
+            controls,
+            None,
+            active.then_some(reservoirs),
+            cancelled,
+        )
+    }
+
+    /// Advance prescribed end reservoirs and moving finite plenums in one step.
+    ///
+    /// Source pairs and signed plenum rates have the same admission and retained
+    /// order as [`Self::step_with_reservoirs`] and [`Self::step_with_volume_rates`].
+    /// Both drives act in each shared SSP RK2 stage: finite-port states use the
+    /// evolving plenum volume, species and energy, exterior fluxes use that
+    /// stage's branch cells, and `-p*dV/dt` is included in extensive storage.
+    /// Reports keep transported external energy separate from mechanical work.
+    /// No sequential volume/transport split or intermediate publication occurs.
+    /// All-None sources retain the volume-rate path; all-zero rates retain the
+    /// rigid reservoir arithmetic. Every retry replays both drives together.
+    pub fn step_with_reservoirs_and_volume_rates(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        volume_rates_m3_s: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        let active = self.admit_reservoirs(reservoirs, &mut cancelled)?;
+        let moving = self.admit_volume_rates(volume_rates_m3_s, &mut cancelled)?;
+        self.step_impl(
+            maximum_duration,
+            controls,
+            moving.then_some(volume_rates_m3_s),
+            active.then_some(reservoirs),
+            cancelled,
+        )
+    }
+
+    fn admit_volume_rates(
+        &self,
+        volume_rates_m3_s: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, Error> {
+        poll(cancelled)?;
         if volume_rates_m3_s.len() != self.plenums.len() {
             return Err(Error::Invalid(
                 "one volume rate is required for every plenum",
@@ -76,18 +165,52 @@ impl MixtureNetwork1d {
         }
         let mut moving = false;
         for &rate in volume_rates_m3_s {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             if !rate.is_finite() {
                 return Err(Error::Invalid("plenum volume rates must be finite"));
             }
             moving |= rate != 0.0;
         }
-        self.step_impl(
-            maximum_duration,
-            controls,
-            moving.then_some(volume_rates_m3_s),
-            cancelled,
-        )
+        Ok(moving)
+    }
+
+    fn admit_reservoirs(
+        &mut self,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, Error> {
+        if reservoirs.len() != self.branches.len() {
+            poll(cancelled)?;
+            return Err(Error::Invalid(
+                "one reservoir pair per mixture network branch required",
+            ));
+        }
+        if reservoirs.iter().flatten().all(Option::is_none) {
+            return Ok(false);
+        }
+        poll(cancelled)?;
+        for (index, (branch, ends)) in self.branches.iter().zip(reservoirs).enumerate() {
+            for (end, reservoir) in ends.iter().copied().enumerate() {
+                if let Some(state) = reservoir {
+                    poll(cancelled)?;
+                    if branch.boundaries == Boundaries::Periodic
+                        || self.endpoint_connections[index][end].is_some()
+                    {
+                        return Err(Error::Invalid(
+                            "external mixture reservoir requires an unconnected physical end",
+                        ));
+                    }
+                    if state.momentum != 0.0 {
+                        return Err(Error::Invalid(
+                            "stationary mixture reservoir has nonzero momentum",
+                        ));
+                    }
+                    self.work.reservoir_primitive[index][end] =
+                        branch.gas.primitive(state, &mut *cancelled)?;
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn step_impl(
@@ -95,6 +218,7 @@ impl MixtureNetwork1d {
         maximum_duration: Time,
         controls: StepControl,
         volume_rates: Option<&[f64]>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
         poll(&mut cancelled)?;
@@ -194,6 +318,7 @@ impl MixtureNetwork1d {
                 controls.cfl,
                 reconstruction,
                 volume_rates,
+                reservoirs,
                 &mut cancelled,
             ) {
                 Ok(maximum_rate) => {
@@ -253,6 +378,7 @@ impl MixtureNetwork1d {
         cfl: f64,
         reconstruction: Reconstruction,
         volume_rates: Option<&[f64]>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
         // Admit actual, represented geometry before evaluating either stage.
@@ -275,10 +401,10 @@ impl MixtureNetwork1d {
                 work_on_gas_j: 0.0,
             };
         }
-        let a = self.evaluate(false, reconstruction, volume_rates, cancelled)?;
+        let a = self.evaluate(false, reconstruction, volume_rates, reservoirs, cancelled)?;
         admit_cfl(a, dt, cfl)?;
         self.forward_stage(false, dt, volume_rates, cancelled)?;
-        let b = self.evaluate(true, reconstruction, volume_rates, cancelled)?;
+        let b = self.evaluate(true, reconstruction, volume_rates, reservoirs, cancelled)?;
         admit_cfl(b, dt, cfl)?;
         self.forward_stage(true, dt, volume_rates, cancelled)?;
         Ok(a.max(b))
@@ -289,6 +415,7 @@ impl MixtureNetwork1d {
         second: bool,
         reconstruction: Reconstruction,
         volume_rates: Option<&[f64]>,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
         let n = self.gas().species_count();
@@ -401,6 +528,31 @@ impl MixtureNetwork1d {
                 branch.states.as_slice()
             };
             let offset = 2 * index * m;
+            if let Some(reservoirs) = reservoirs {
+                for (end, reservoir) in reservoirs[index].iter().copied().enumerate() {
+                    if let Some(outside) = reservoir {
+                        let i = if end == 0 { 0 } else { branch.cell_count() - 1 };
+                        let inside = cell(&current[i * m..(i + 1) * m], n);
+                        let primitive = branch.gas.decode_cell(
+                            inside,
+                            Some(branch.work.primitive[i].temperature),
+                            cancelled,
+                        )?;
+                        branch.work.primitive[i] = primitive;
+                        let start = offset + end * m;
+                        let data = branch.gas.plenum_flux(
+                            inside,
+                            primitive,
+                            outside,
+                            self.work.reservoir_primitive[index][end],
+                            if end == 0 { -1.0 } else { 1.0 },
+                            &mut self.work.endpoint_values[start..start + m],
+                            cancelled,
+                        )?;
+                        self.work.endpoint_data[index][end] = Some(data);
+                    }
+                }
+            }
             let left = self.work.endpoint_data[index][0].map(|data| EndpointFlux {
                 values: &self.work.endpoint_values[offset..offset + m],
                 data,

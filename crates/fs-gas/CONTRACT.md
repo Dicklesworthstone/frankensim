@@ -2133,3 +2133,10 @@ reconstructed predictor/corrector fluxes, variable-Cp donor enthalpy, pressure/
 temperature/composition drives, end reversal, formation-reference invariance,
 CFL retry replay, exact absent-reservoir parity and cancellation/refusal rollback.
 Their presence does not establish executed native validation.
+
+
+## Prescribed mixture pressure reservoirs with finite-volume motion
+
+`MixtureNetwork1d::step_with_reservoirs` accepts one optional stationary left/right source pair per branch, in canonical species order and energy reference gauges. Raw `Cell` source compatibility remains caller-owned; species dimensions, stationarity and source-state validity are admitted. Only unconnected physical ends may have prescribed reservoirs. Characteristic fluxes refresh at both SSP RK2 stages and every retry, preserving reservoir inflow species and stagnation enthalpy, and interior outflow species and total enthalpy. External fluxes enter the global boundary balance; finite-plenum exchanges remain exact opposites. An all-None source slice keeps the original step. Fields, clocks and accepted reports publish atomically. Construction-time primitive caches and existing endpoint workspaces avoid per-step numerical heap allocation.
+
+`step_with_reservoirs_and_volume_rates` applies prescribed exterior sources and finite-plenum motion in the same native SSP RK2 transaction. Each stage uses the evolving chamber volume, composition and energy alongside fresh branch-end characteristic states; mechanical `-p*dV/dt` updates extensive energy beside conservative port transport. Reports separate exterior enthalpy transfer from accepted plenum boundary work. All-None sources preserve the volume-rate lane; all-zero rates preserve rigid-reservoir arithmetic, and every retry replays both drives before one shared publication point. Reservoir controls are not yet propagated through reactive or wall-source composed network wrappers.

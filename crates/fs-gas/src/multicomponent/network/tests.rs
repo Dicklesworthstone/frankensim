@@ -9,6 +9,8 @@ use crate::multicomponent::{
 };
 use fs_qty::{Length, Time};
 
+mod reservoir;
+
 fn walls() -> Boundaries {
     Boundaries::Ends {
         left: Boundary::Reflecting,
