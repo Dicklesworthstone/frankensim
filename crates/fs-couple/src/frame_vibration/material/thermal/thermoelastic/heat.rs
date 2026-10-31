@@ -2,7 +2,7 @@
 use super::*;
 use crate::circuit_enthalpy::{CircuitThermalCoefficients, contacts::ContactThermalCoefficients};
 use crate::circuit_enthalpy::contacts::heat::{
-    HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork,
+    HeatAssembly, HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork,
 };
 use fs_conduction::transient::deposition::{
     contact::ContactLinkSample, radiation::RadiationCellSources,
@@ -30,35 +30,33 @@ pub struct FrameHeatTransfer {
     pub integrated_conduction: Vec<LayerLinkSample>,
     pub radiation: Option<RadiationCellSources>,
 }
-impl FrameHeatTransfer {
-    pub(super) fn cell_power_w(&self, cell: CellId) -> f64 {
-        self.radiation.as_ref()
-            .and_then(|radiation| radiation.sources_w().get(&cell)).copied().unwrap_or(0.0)
-    }
+pub(super) fn cell_power_w(radiation: Option<&RadiationCellSources>, cell: CellId) -> f64 {
+    radiation.and_then(|radiation| radiation.sources_w().get(&cell)).copied().unwrap_or(0.0)
+}
 
-    pub(super) fn exchange(
-        &self, thermal: &DepositionSimulation<'_>, dt: f64, gate: &CancelGate,
-    ) -> Result<(f64, f64)> {
-        let mut entropy = 0.0;
-        if let Some(radiation) = &self.radiation {
-            for (&cell, &power) in radiation.sources_w() {
-                check(gate)?;
-                entropy = finite(entropy + dt * power / thermal.temperature_k(cell)?)?;
-            }
+pub(super) fn exchange(
+    radiation: Option<&RadiationCellSources>,
+    thermal: &DepositionSimulation<'_>, dt: f64, gate: &CancelGate,
+) -> Result<(f64, f64)> {
+    let mut entropy = 0.0;
+    if let Some(radiation) = radiation {
+        for (&cell, &power) in radiation.sources_w() {
+            check(gate)?;
+            entropy = finite(entropy + dt * power / thermal.temperature_k(cell)?)?;
         }
-        let net = finite(dt * self.radiation.as_ref().map_or(0.0, |r| r.net_heat_w()))?;
-        Ok((net, entropy))
     }
+    let net = finite(dt * radiation.map_or(0.0, |r| r.net_heat_w()))?;
+    Ok((net, entropy))
 }
 
 /// Preserve typed source refusals and all original mechanical/thermal failures.
 /// Cancellation remains `Frame(CircuitEnthalpyError::Cancelled)`.
 #[derive(Debug)]
-pub enum FrameHeatError {
-    Heat(HeatNetworkError),
+pub enum FrameHeatError<E = HeatNetworkError> {
+    Heat(E),
     Frame(FrameThermalError),
 }
-impl From<FrameThermalError> for FrameHeatError {
+impl<E> From<FrameThermalError> for FrameHeatError<E> {
     fn from(error: FrameThermalError) -> Self { Self::Frame(error) }
 }
 impl From<HeatNetworkError> for FrameHeatError {
@@ -69,12 +67,12 @@ impl From<HeatNetworkError> for FrameHeatError {
         }
     }
 }
-impl core::fmt::Display for FrameHeatError {
+impl<E: core::fmt::Debug> core::fmt::Display for FrameHeatError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "frame and complete material heat transport: {self:?}")
     }
 }
-impl std::error::Error for FrameHeatError {}
+impl<E: core::fmt::Debug> std::error::Error for FrameHeatError<E> {}
 
 impl FrameThermoelasticSystem<'_, '_> {
     /// Advance the SAME native assembly with complete source-defined thermal
@@ -139,7 +137,7 @@ impl FrameThermoelasticSystem<'_, '_> {
         // The callback has the original frame error type. Retain a typed source
         // error across that seam; never replace it with a fabricated fallback.
         let result = self.step_inner(thermal, external_modal_forces, electrical_input,
-            Some(&trial), controls, energy_guess_j, gate);
+            &trial, controls, energy_guess_j, gate);
         if result.is_err() { self.restore_conductor_geometry(previous_geometry); }
         match result {
             Err(CircuitEnthalpyError::Invalid(SOURCE_REFUSAL)) => {
@@ -151,6 +149,101 @@ impl FrameThermoelasticSystem<'_, '_> {
             other => other.map_err(FrameHeatError::from),
         }
     }
+
+    /// Advance an original complete heat assembly, including finite coolant
+    /// cells and source-derived reservoir exchange, on the SAME frame/circuit
+    /// enthalpy residual. The complete `A::Sample` is retained in `report.source`;
+    /// no coolant, reservoir, contact or radiation receipt is extracted or lost.
+    /// Electrical and reversible field/elastic heat still have their original
+    /// owners and enter the same finite cells once.
+    ///
+    /// The assembly must retain the frame's original cell/link slices and
+    /// electrical destinations. Additional native links require explicit cold
+    /// admission with `into_thermoelastic_parts_with_link_conductances` (or its
+    /// single-system counterpart). Preparation values are never reused here:
+    /// every actual thermal trial resolves the original complete assembly.
+    /// Source refusal or either cancellation authority publishes no history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_heat_assembly<A: HeatAssembly + ?Sized>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        external_modal_forces: &[f64],
+        assembly: &A,
+        cx: &Cx<'_>,
+        electrical_input: Option<FrameElectricalInput<'_>>,
+        controls: FrameThermalSolve,
+        energy_guess_j: &[f64],
+        gate: &CancelGate,
+    ) -> core::result::Result<FrameThermoelasticReport<A::Sample>, FrameHeatError<A::Error>> {
+        let trial = AssemblyTrial { assembly, cx, failure: RefCell::new(None) };
+        trial.checkpoint(gate)?;
+        let admission: Result<()> = crate::circuit_enthalpy::admit_driver_unknowns(
+            thermal, controls.driver(), energy_guess_j);
+        admission?;
+        if self.electrical.is_some() != electrical_input.is_some() {
+            return Err(invalid("electrically bound frame histories require explicit held electrical inputs").into());
+        }
+        let heat = assembly.prepared_heat_network();
+        let material = heat.field_storage_material_network();
+        if !core::ptr::eq(self.source.cells, material.cells)
+            || !core::ptr::eq(self.source.links, material.links) {
+            return Err(invalid("frame and complete heat assembly require the original cell/link slices").into());
+        }
+        let mut initial = assembly.resolve_heat(cx, thermal).map_err(|error| assembly_error(error, gate))?;
+        let destinations = heat.resistor_destinations();
+        let routes = heat.heat_destinations(thermal).map_err(|error| match error {
+            HeatNetworkError::Cancelled => {
+                gate.request();
+                FrameHeatError::Frame(CircuitEnthalpyError::Cancelled)
+            }
+            other => FrameHeatError::Heat(A::Error::from(other)),
+        })?;
+        electrical::admit_heat_sources(self.electrical.as_ref(), &mut initial,
+            &destinations, &routes, thermal, gate)?;
+        drop(initial);
+        trial.checkpoint(gate)?;
+        let previous_geometry = self.refresh_conductor_geometry(gate)?;
+        let result = self.step_inner(thermal, external_modal_forces, electrical_input,
+            &trial, controls, energy_guess_j, gate);
+        if result.is_err() { self.restore_conductor_geometry(previous_geometry); }
+        match result {
+            Err(CircuitEnthalpyError::Invalid(SOURCE_REFUSAL)) => match trial.failure.into_inner() {
+                Some(error) => Err(FrameHeatError::Heat(error)),
+                None => Err(invalid("complete heat assembly refusal lost its original cause").into()),
+            },
+            other => other.map_err(FrameHeatError::from),
+        }
+    }
+}
+
+// The single frame residual owns electrical work, elastic work and publication.
+// Providers only resolve transport and lend its radiation account; associated
+// source payloads pass through all existing owners without cloning.
+pub(super) trait Transport {
+    type Sample;
+    fn checkpoint(&self, gate: &CancelGate) -> Result<()> { check(gate) }
+    fn resolve(
+        &self, prepared: &PreparedMaterialNetwork<'_, '_>,
+        electrical: Option<&electrical::Binding<'_, '_>>,
+        thermal: &DepositionSimulation<'_>, gate: &CancelGate,
+    ) -> Result<(ContactThermalCoefficients<Self::Sample>, Option<FrameHeatTransfer>)>;
+    fn radiation<'s>(
+        &self, _source: &'s Self::Sample, transfer: Option<&'s FrameHeatTransfer>,
+    ) -> Option<&'s RadiationCellSources> {
+        transfer.and_then(|transfer| transfer.radiation.as_ref())
+    }
+}
+
+pub(super) struct Plain;
+impl Transport for Plain {
+    type Sample = MaterialNetworkSample;
+    fn resolve(
+        &self, prepared: &PreparedMaterialNetwork<'_, '_>,
+        electrical: Option<&electrical::Binding<'_, '_>>,
+        thermal: &DepositionSimulation<'_>, gate: &CancelGate,
+    ) -> Result<(ContactThermalCoefficients<Self::Sample>, Option<FrameHeatTransfer>)> {
+        Ok((electrical::resolve_material(electrical, prepared, thermal, gate)?, None))
+    }
 }
 
 // A private marker cannot be mistaken for a source law. The original failure
@@ -160,15 +253,18 @@ pub(super) struct Trial<'p, 'n, 'a, 'scope> {
     input: FrameHeatInput<'p, 'n, 'a, 'scope>,
     failure: RefCell<Option<HeatNetworkError>>,
 }
-impl Trial<'_, '_, '_, '_> {
-    pub(super) fn checkpoint(&self, gate: &CancelGate) -> Result<()> {
+impl Transport for Trial<'_, '_, '_, '_> {
+    type Sample = MaterialNetworkSample;
+    fn checkpoint(&self, gate: &CancelGate) -> Result<()> {
         if self.input.cx.checkpoint().is_err() { gate.request(); }
         check(gate)
     }
 
-    pub(super) fn resolve(
-        &self, thermal: &DepositionSimulation<'_>, gate: &CancelGate,
-    ) -> Result<(ContactThermalCoefficients<MaterialNetworkSample>, FrameHeatTransfer)> {
+    fn resolve(
+        &self, _prepared: &PreparedMaterialNetwork<'_, '_>,
+        _electrical: Option<&electrical::Binding<'_, '_>>,
+        thermal: &DepositionSimulation<'_>, gate: &CancelGate,
+    ) -> Result<(ContactThermalCoefficients<Self::Sample>, Option<FrameHeatTransfer>)> {
         self.checkpoint(gate)?;
         self.failure.borrow_mut().take();
         let resolved = match self.input.network.resolve(self.input.cx, thermal) {
@@ -191,6 +287,60 @@ impl Trial<'_, '_, '_, '_> {
                 resistors: bulk.resistors, sources_w: bulk.sources_w,
                 conductances_w_k: bulk.conductances_w_k, source: material,
             },
-        }, FrameHeatTransfer { thermal_contacts, integrated_conduction, radiation }))
+        }, Some(FrameHeatTransfer { thermal_contacts, integrated_conduction, radiation })))
     }
+}
+
+struct AssemblyTrial<'p, 'scope, A: HeatAssembly + ?Sized> {
+    assembly: &'p A,
+    cx: &'p Cx<'scope>,
+    failure: RefCell<Option<A::Error>>,
+}
+impl<A: HeatAssembly + ?Sized> Transport for AssemblyTrial<'_, '_, A> {
+    type Sample = A::Sample;
+    fn checkpoint(&self, gate: &CancelGate) -> Result<()> {
+        if self.cx.checkpoint().is_err() { gate.request(); }
+        check(gate)
+    }
+    fn resolve(
+        &self, _prepared: &PreparedMaterialNetwork<'_, '_>,
+        _electrical: Option<&electrical::Binding<'_, '_>>,
+        thermal: &DepositionSimulation<'_>, gate: &CancelGate,
+    ) -> Result<(ContactThermalCoefficients<Self::Sample>, Option<FrameHeatTransfer>)> {
+        self.checkpoint(gate)?;
+        self.failure.borrow_mut().take();
+        let resolved = match self.assembly.resolve_heat(self.cx, thermal) {
+            Ok(resolved) => resolved,
+            Err(error) => match assembly_error(error, gate) {
+                FrameHeatError::Frame(error) => return Err(error),
+                FrameHeatError::Heat(error) => {
+                    *self.failure.borrow_mut() = Some(error);
+                    return Err(invalid(SOURCE_REFUSAL));
+                }
+            },
+        };
+        self.checkpoint(gate)?;
+        Ok((resolved, None))
+    }
+    fn radiation<'s>(
+        &self, source: &'s Self::Sample, _transfer: Option<&'s FrameHeatTransfer>,
+    ) -> Option<&'s RadiationCellSources> {
+        source.as_ref().radiation.as_ref()
+    }
+}
+
+fn assembly_error<E>(error: CircuitEnthalpyError<E>, gate: &CancelGate) -> FrameHeatError<E> {
+    let native = match error {
+        CircuitEnthalpyError::Source(error) => return FrameHeatError::Heat(error),
+        CircuitEnthalpyError::Invalid(message) => CircuitEnthalpyError::Invalid(message),
+        CircuitEnthalpyError::Circuit(error) => error.into(),
+        CircuitEnthalpyError::Thermal(error) => error.into(),
+        CircuitEnthalpyError::Newton(error) => CircuitEnthalpyError::Newton(error),
+        CircuitEnthalpyError::NotConverged(report) => CircuitEnthalpyError::NotConverged(report),
+        CircuitEnthalpyError::Interrupted(progress) => CircuitEnthalpyError::Interrupted(progress),
+        CircuitEnthalpyError::CircuitBudget => CircuitEnthalpyError::CircuitBudget,
+        CircuitEnthalpyError::Cancelled => CircuitEnthalpyError::Cancelled,
+    };
+    if matches!(&native, CircuitEnthalpyError::Cancelled) { gate.request(); }
+    FrameHeatError::Frame(native)
 }

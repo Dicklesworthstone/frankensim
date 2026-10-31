@@ -12,6 +12,7 @@ use crate::air_path::cylinder::frame::modal::{FrameFluidCoordinates, FrameFluidM
 use crate::modal_acoustic_time::ModalAcousticTimeBudget;
 use crate::material_circuit::MaterialCircuit;
 use fs_material::conductor::ElectricalPropertyBasis;
+use crate::circuit_enthalpy::contacts::heat::{HeatAssembly, HeatNetworkError};
 
 mod assembly;
 pub use assembly::{FrameFluidThermoelasticBinding, FrameFluidThermoelasticParts};
@@ -30,29 +31,29 @@ pub struct FrameFluidThermoelasticConfig {
 }
 
 #[derive(Debug)]
-pub enum FrameFluidThermoelasticError {
+pub enum FrameFluidThermoelasticError<E = HeatNetworkError> {
     Thermal(FrameThermalError),
     Fluid(FrameFluidError),
-    Heat(FrameHeatError),
+    Heat(FrameHeatError<E>),
 }
-impl core::fmt::Display for FrameFluidThermoelasticError {
+impl<E: core::fmt::Debug> core::fmt::Display for FrameFluidThermoelasticError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "fluid-loaded frame thermodynamics: {self:?}")
     }
 }
-impl std::error::Error for FrameFluidThermoelasticError {}
-impl From<FrameThermalError> for FrameFluidThermoelasticError {
+impl<E: core::fmt::Debug> std::error::Error for FrameFluidThermoelasticError<E> {}
+impl<E> From<FrameThermalError> for FrameFluidThermoelasticError<E> {
     fn from(e: FrameThermalError) -> Self { Self::Thermal(e) }
 }
-impl From<FrameFluidError> for FrameFluidThermoelasticError {
+impl<E> From<FrameFluidError> for FrameFluidThermoelasticError<E> {
     fn from(e: FrameFluidError) -> Self { Self::Fluid(e) }
 }
-impl From<FrameHeatError> for FrameFluidThermoelasticError {
-    fn from(e: FrameHeatError) -> Self {
+impl<E> From<FrameHeatError<E>> for FrameFluidThermoelasticError<E> {
+    fn from(e: FrameHeatError<E>) -> Self {
         match e { FrameHeatError::Frame(error) => Self::Thermal(error), other => Self::Heat(other) }
     }
 }
-type FluidResult<T> = core::result::Result<T, FrameFluidThermoelasticError>;
+type FluidResult<T, E = HeatNetworkError> = core::result::Result<T, FrameFluidThermoelasticError<E>>;
 fn frame_error(e: FrameVibrationError) -> FrameFluidThermoelasticError {
     match e {
         FrameVibrationError::Cancelled => FrameThermalError::Cancelled.into(),
@@ -92,13 +93,46 @@ impl<'m, 'f, 'n, 'a, F> FrameFluidThermoelasticSystem<'m, 'f, 'n, 'a, F> {
         config: FrameFluidThermoelasticConfig,
         gate: &CancelGate,
     ) -> FluidResult<Self> {
+        Self::new_bound(model, initial_state, thermal, source, None, destinations, config, gate)
+    }
+
+    /// Original complete wet-frame preparation alongside explicitly owned
+    /// finite coolant or other external thermal links. The original material
+    /// graph validates their disjoint coverage; subsequent complete assembly
+    /// steps must supply fresh coefficients from the original physical sources.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_link_conductances(
+        model: &'m MaterialFluidFrame<'f, F>,
+        initial_state: &[f64],
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        additional_links: &BTreeMap<u64, f64>,
+        destinations: &[FrameLayerCell],
+        config: FrameFluidThermoelasticConfig,
+        gate: &CancelGate,
+    ) -> FluidResult<Self> {
+        Self::new_bound(model, initial_state, thermal, source, Some(additional_links),
+            destinations, config, gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_bound(
+        model: &'m MaterialFluidFrame<'f, F>,
+        initial_state: &[f64],
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
+        destinations: &[FrameLayerCell],
+        config: FrameFluidThermoelasticConfig,
+        gate: &CancelGate,
+    ) -> FluidResult<Self> {
         check(gate)?;
         let count = model.basis().modes().len();
         let coupling = config.coupling;
         let prepared = config.prepared;
         let tolerance = config.initial_energy_tolerance_j;
         let FrameFluidThermoelasticParts { placement, binding, components, connections } =
-            model.thermoelastic_parts(initial_state, thermal, source, destinations,
+            model.thermoelastic_parts_bound(initial_state, thermal, source, additional_links, destinations,
                 config, 0, 0, gate)?;
         let mechanical = match prepared {
             Some(budget) => CoupledModalSystem::new_prepared(components, connections,
@@ -218,6 +252,55 @@ impl<'m, 'f, 'n, 'a, F> FrameFluidThermoelasticSystem<'m, 'f, 'n, 'a, F> {
         Ok(self)
     }
 
+    /// Original bulk circuit with explicit external thermal-link ownership.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_material_circuit_and_link_conductances(mut self, thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>, circuit: MaterialCircuit,
+        bases: &[(usize, ElectricalPropertyBasis)], additional_links: &BTreeMap<u64, f64>,
+        gate: &CancelGate) -> FluidResult<Self> {
+        self.inner = self.inner.with_material_circuit_and_link_conductances(
+            thermal, source, circuit, bases, additional_links, gate)?;
+        Ok(self)
+    }
+
+    /// Original contact circuit with explicit external thermal-link ownership.
+    pub fn with_material_contact_circuit_and_link_conductances(mut self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n crate::circuit_enthalpy::contacts::material::ElectricalContactNetwork<'a>,
+        circuit: MaterialCircuit, additional_links: &BTreeMap<u64, f64>, gate: &CancelGate,
+    ) -> FluidResult<Self> {
+        self.inner = self.inner.with_material_contact_circuit_and_link_conductances(
+            thermal, source, circuit, additional_links, gate)?;
+        Ok(self)
+    }
+
+    /// Original material C(T)/L(T) circuit with explicit external thermal links.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_material_field_circuit_and_link_conductances(mut self,
+        thermal: &DepositionSimulation<'_>, source: &'n MaterialNetwork<'a>,
+        circuit: MaterialCircuit, bases: &[(usize, ElectricalPropertyBasis)],
+        fields: Vec<crate::circuit_enthalpy::field_storage::FieldThermalBinding>,
+        additional_links: &BTreeMap<u64, f64>, gate: &CancelGate,
+    ) -> FluidResult<Self> {
+        self.inner = self.inner.with_material_field_circuit_and_link_conductances(
+            thermal, source, circuit, bases, fields, additional_links, gate)?;
+        Ok(self)
+    }
+
+    /// Original contact and material-field circuit with external thermal links.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_material_contact_field_circuit_and_link_conductances(mut self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n crate::circuit_enthalpy::contacts::material::ElectricalContactNetwork<'a>,
+        circuit: MaterialCircuit,
+        fields: Vec<crate::circuit_enthalpy::field_storage::FieldThermalBinding>,
+        additional_links: &BTreeMap<u64, f64>, gate: &CancelGate,
+    ) -> FluidResult<Self> {
+        self.inner = self.inner.with_material_contact_field_circuit_and_link_conductances(
+            thermal, source, circuit, fields, additional_links, gate)?;
+        Ok(self)
+    }
+
     /// Full material heat transport acts on the same original fluid-loaded
     /// motion. Forces retain the original work-conjugate coordinate transform;
     /// source and finite heat checks finish before any native state publishes.
@@ -231,6 +314,27 @@ impl<'m, 'f, 'n, 'a, F> FrameFluidThermoelasticSystem<'m, 'f, 'n, 'a, F> {
         self.project_forces(nodal_force, gate)?;
         Ok(self.inner.step_heat_network(thermal, &self.native_force, heat, electrical,
             controls, energy_guess_j, gate)?)
+    }
+
+    /// Retain complete assembly receipts through the original wet-frame force
+    /// transform and joint frame/circuit/thermal publication boundary. The
+    /// exterior mechanical fluid remains its original explicit loss owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_heat_assembly<A: HeatAssembly + ?Sized>(
+        &mut self, thermal: &mut DepositionSimulation<'_>, nodal_force: &[f64],
+        assembly: &A, cx: &fs_exec::Cx<'_>, electrical: Option<FrameElectricalInput<'_>>,
+        controls: FrameThermalSolve, energy_guess_j: &[f64], gate: &CancelGate,
+    ) -> FluidResult<FrameThermoelasticReport<A::Sample>, A::Error> {
+        self.project_forces(nodal_force, gate).map_err(|error| match error {
+            FrameFluidThermoelasticError::Thermal(error) => FrameFluidThermoelasticError::Thermal(error),
+            FrameFluidThermoelasticError::Fluid(error) => FrameFluidThermoelasticError::Fluid(error),
+            FrameFluidThermoelasticError::Heat(FrameHeatError::Frame(error)) =>
+                FrameFluidThermoelasticError::Thermal(error),
+            FrameFluidThermoelasticError::Heat(FrameHeatError::Heat(error)) =>
+                FrameFluidThermoelasticError::Heat(FrameHeatError::Heat(A::Error::from(error))),
+        })?;
+        Ok(self.inner.step_heat_assembly(thermal, &self.native_force, assembly, cx,
+            electrical, controls, energy_guess_j, gate)?)
     }
 
     pub fn electrical(&self) -> Option<&MaterialCircuit> { self.inner.electrical() }

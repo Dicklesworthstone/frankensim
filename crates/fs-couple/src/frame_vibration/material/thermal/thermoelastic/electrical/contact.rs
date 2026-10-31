@@ -92,19 +92,57 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
     }
 
     pub(super) fn bind_material_contact_circuit(
-        mut self,
+        self,
         thermal: &DepositionSimulation<'_>,
         source: &'n ElectricalContactNetwork<'a>,
         circuit: MaterialCircuit,
         fields: Vec<FieldThermalBinding>,
         gate: &CancelGate,
     ) -> Result<Self> {
+        self.bind_material_contact_circuit_with_links(
+            thermal, source, circuit, fields, None, gate)
+    }
+
+    /// Original interface resistance and two-sided Joule destinations alongside
+    /// explicitly owned external thermal links. Initial source coefficients
+    /// admit the cold binding only; a complete heat assembly supplies fresh
+    /// transport on each subsequent frame/circuit residual evaluation.
+    pub fn with_material_contact_circuit_and_link_conductances(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n ElectricalContactNetwork<'a>,
+        circuit: MaterialCircuit,
+        additional_links: &BTreeMap<u64, f64>,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        self.bind_material_contact_circuit_with_links(
+            thermal, source, circuit, Vec::new(), Some(additional_links), gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn bind_material_contact_circuit_with_links(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n ElectricalContactNetwork<'a>,
+        circuit: MaterialCircuit,
+        fields: Vec<FieldThermalBinding>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
+        gate: &CancelGate,
+    ) -> Result<Self> {
         self.admit_electrical_binding(thermal, source.bulk, &circuit, &fields, gate)?;
         if source.contacts.is_empty() {
             return Err(invalid("contact frame binding requires explicit original interfaces"));
         }
-        let prepared = source.prepare(thermal, || gate.is_requested()).map_err(source_error)?;
-        let mut initial = prepared.resolve(thermal, || gate.is_requested()).map_err(source_error)?;
+        let prepared = match additional_links {
+            Some(links) => source.prepare_with_link_conductances(
+                thermal, links, || gate.is_requested()),
+            None => source.prepare(thermal, || gate.is_requested()),
+        }.map_err(source_error)?;
+        let mut initial = match additional_links {
+            Some(links) => prepared.resolve_with_link_conductances(
+                thermal, links, || gate.is_requested()),
+            None => prepared.resolve(thermal, || gate.is_requested()),
+        }.map_err(source_error)?;
         initial.bulk.resistors.sort_unstable_by_key(|resistor| resistor.branch);
         if initial.bulk.resistors.as_slice() != circuit.resistors() {
             return Err(invalid("initial contact circuit changed its original bulk sources or geometry"));

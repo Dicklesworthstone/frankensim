@@ -60,6 +60,45 @@ impl<'f, F> MaterialFluidFrame<'f, F> {
         connection_start: usize,
         gate: &CancelGate,
     ) -> FluidResult<FrameFluidThermoelasticParts<'m, 'f, 'n, 'a, F>> {
+        self.thermoelastic_parts_bound(initial_state, thermal, source, None, destinations,
+            config, component_start, connection_start, gate)
+    }
+
+    /// Preserve the complete wet-frame source while explicitly admitting other
+    /// physical owners of native thermal links. The map only admits cold source
+    /// selection; complete heat assemblies re-evaluate transport on every trial.
+    /// Exterior mechanical fluid memory retains its original separate energy
+    /// account and is never inferred to be one of these finite caloric cells.
+    #[allow(clippy::too_many_arguments)]
+    pub fn thermoelastic_parts_with_link_conductances<'m, 'n, 'a>(
+        &'m self,
+        initial_state: &[f64],
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        additional_links: &BTreeMap<u64, f64>,
+        destinations: &[FrameLayerCell],
+        config: FrameFluidThermoelasticConfig,
+        component_start: usize,
+        connection_start: usize,
+        gate: &CancelGate,
+    ) -> FluidResult<FrameFluidThermoelasticParts<'m, 'f, 'n, 'a, F>> {
+        self.thermoelastic_parts_bound(initial_state, thermal, source, Some(additional_links),
+            destinations, config, component_start, connection_start, gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn thermoelastic_parts_bound<'m, 'n, 'a>(
+        &'m self,
+        initial_state: &[f64],
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
+        destinations: &[FrameLayerCell],
+        config: FrameFluidThermoelasticConfig,
+        component_start: usize,
+        connection_start: usize,
+        gate: &CancelGate,
+    ) -> FluidResult<FrameFluidThermoelasticParts<'m, 'f, 'n, 'a, F>> {
         check(gate)?;
         positive(config.initial_energy_tolerance_j)?;
         let count = self.basis().modes().len();
@@ -67,8 +106,8 @@ impl<'f, F> MaterialFluidFrame<'f, F> {
             &vec![0.0; count], config.modal, config.maximum_projection_terms,
             || gate.is_requested()).map_err(frame_error)?;
         component.restore_states(&self.modal_states(initial_state)?).map_err(frame_error)?;
-        let (mut material, _, mut definitions) = component.into_thermoelastic_parts(
-            thermal, source, destinations, config.maximum_absolute_strain,
+        let (mut material, _, mut definitions) = component.into_thermoelastic_parts_bound(
+            thermal, source, additional_links, destinations, config.maximum_absolute_strain,
             component_start, connection_start, config.coupling, gate)?;
         let FrameFluidModalParts { coordinates, structural, memory, mut connections } =
             self.modal_parts(initial_state, config.sample_rate_hz, config.modal,

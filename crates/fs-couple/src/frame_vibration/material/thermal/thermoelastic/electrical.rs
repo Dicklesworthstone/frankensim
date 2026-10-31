@@ -64,7 +64,7 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn bind_material_circuit(
-        mut self,
+        self,
         thermal: &DepositionSimulation<'_>,
         source: &'n MaterialNetwork<'a>,
         circuit: MaterialCircuit,
@@ -72,13 +72,54 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
         fields: Vec<FieldThermalBinding>,
         gate: &CancelGate,
     ) -> Result<Self> {
+        self.bind_material_circuit_with_links(
+            thermal, source, circuit, electrical_bases, fields, None, gate)
+    }
+
+    /// Bind original resistor and fixed C/L history alongside explicitly owned
+    /// finite coolant or other external thermal links. The supplied coefficients
+    /// only admit cold source selection; `step_heat_assembly` re-evaluates the
+    /// complete physical transport at each thermal trial. Cell/link slices,
+    /// resistor geometry and the native circuit remain under their usual checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_material_circuit_and_link_conductances(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        circuit: MaterialCircuit,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        additional_links: &BTreeMap<u64, f64>,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        self.bind_material_circuit_with_links(
+            thermal, source, circuit, electrical_bases, Vec::new(), Some(additional_links), gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_material_circuit_with_links(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        circuit: MaterialCircuit,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        fields: Vec<FieldThermalBinding>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
+        gate: &CancelGate,
+    ) -> Result<Self> {
         self.admit_electrical_binding(thermal, source, &circuit, &fields, gate)?;
         if !circuit.contacts().is_empty() {
             return Err(invalid("contact-bound frames require their original electrical contact network"));
         }
-        let prepared = source.prepare_with_bases(thermal, electrical_bases,
-            || gate.is_requested()).map_err(network)?;
-        let mut resolved = prepared.resolve(thermal, || gate.is_requested()).map_err(network)?.resistors;
+        let prepared = match additional_links {
+            Some(links) => source.prepare_with_link_conductances(
+                thermal, electrical_bases, links, || gate.is_requested()),
+            None => source.prepare_with_bases(thermal, electrical_bases, || gate.is_requested()),
+        }.map_err(network)?;
+        let mut resolved = match additional_links {
+            Some(links) => prepared.resolve_with_link_conductances(
+                thermal, links, || gate.is_requested()),
+            None => prepared.resolve(thermal, || gate.is_requested()),
+        }.map_err(network)?.resistors;
         resolved.sort_unstable_by_key(|resistor| resistor.branch);
         if resolved.as_slice() != circuit.resistors() {
             return Err(invalid("initial circuit must retain every original material resistor and its geometry"));
@@ -117,7 +158,7 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
     ) -> Result<FrameThermoelasticReport> {
         let previous = self.refresh_conductor_geometry(gate)?;
         let result = self.step_inner(
-            thermal, external_modal_forces, Some(input), None, controls, energy_guess_j, gate,
+            thermal, external_modal_forces, Some(input), &heat::Plain, controls, energy_guess_j, gate,
         );
         if result.is_err() { self.restore_conductor_geometry(previous); }
         result
@@ -205,24 +246,19 @@ impl ThermalDriver for Driver {
 // Original material resolution and native circuit work, with optional field
 // thermodynamics. A separate reversible-source map keeps physical exchange out
 // of authored-source entropy; the caller inserts it into the SAME residual.
-pub(super) struct ResolvedElectrical {
-    pub bulk: crate::circuit_enthalpy::CircuitThermalCoefficients<MaterialNetworkSample>,
+pub(super) struct ResolvedElectrical<S = MaterialNetworkSample> {
+    pub bulk: crate::circuit_enthalpy::CircuitThermalCoefficients<S>,
     pub circuit: Option<MaterialCircuitCandidate>,
     pub field_storage: Option<FrameFieldStorageReport>,
     pub reversible_sources: BTreeMap<CellId, f64>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn resolve(
+pub(super) fn resolve_material(
     binding: Option<&Binding<'_, '_>>,
-    input: Option<FrameElectricalInput<'_>>,
     prepared: &PreparedMaterialNetwork<'_, '_>,
-    fields: Option<&PreparedFieldThermal<'_>>,
     trial: &DepositionSimulation<'_>,
-    dt: f64,
-    tolerance_j: f64,
     gate: &CancelGate,
-) -> Result<ResolvedElectrical> {
+) -> Result<crate::circuit_enthalpy::contacts::ContactThermalCoefficients<MaterialNetworkSample>> {
     check(gate)?;
     let coefficients = match binding {
         Some(binding) => match &binding.contacts {
@@ -238,22 +274,22 @@ pub(super) fn resolve(
             contacts: Vec::new(),
         },
     };
-    advance_resolved(binding, input, fields, coefficients, trial, dt, tolerance_j, gate)
+    Ok(coefficients)
 }
 
 // Source resolution is separable from native electrical evolution so a complete
 // heat network can supply the SAME thermal trial without repeating bulk work.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn advance_resolved(
+pub(super) fn advance_resolved<S>(
     binding: Option<&Binding<'_, '_>>,
     input: Option<FrameElectricalInput<'_>>,
     fields: Option<&PreparedFieldThermal<'_>>,
-    coefficients: crate::circuit_enthalpy::contacts::ContactThermalCoefficients<MaterialNetworkSample>,
+    coefficients: crate::circuit_enthalpy::contacts::ContactThermalCoefficients<S>,
     trial: &DepositionSimulation<'_>,
     dt: f64,
     tolerance_j: f64,
     gate: &CancelGate,
-) -> Result<ResolvedElectrical> {
+) -> Result<ResolvedElectrical<S>> {
     check(gate)?;
     let crate::circuit_enthalpy::contacts::ContactThermalCoefficients { mut bulk, contacts } = coefficients;
     if let Some(binding) = binding {

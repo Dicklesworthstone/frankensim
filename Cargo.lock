@@ -971,6 +971,7 @@ dependencies = [
  "fs-qty",
  "fs-regime",
  "fs-rep-mesh",
+ "fs-solid",
  "fs-solver",
  "fs-sparse",
  "fs-thermal",

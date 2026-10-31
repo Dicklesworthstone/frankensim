@@ -131,15 +131,16 @@ pub struct FrameThermoelasticEntropy {
 }
 
 /// One jointly accepted sample; native mechanics describes its frozen-T interval.
-pub struct FrameThermoelasticReport {
+pub struct FrameThermoelasticReport<S = MaterialNetworkSample> {
     pub mechanical: CoupledModalFrame,
     /// Original electrical work, finite storage and branch heat, when bound.
     pub electrical: Option<crate::material_circuit::MaterialCircuitStep>,
     /// Physical field U and S at actual endpoints; native circuit storage is psi.
     pub field_storage: Option<FrameFieldStorageReport>,
     pub thermal: EnergyAudit,
-    pub source: MaterialNetworkSample,
-    /// Complete optional interface/layer/radiative calculation at the accepted endpoint.
+    pub source: S,
+    /// Prepared-network interface/layer/radiative results. Complete assembly
+    /// calls retain these and all assembly-specific receipts in `source` instead.
     pub heat_transfer: Option<FrameHeatTransfer>,
     /// Uncorrected numerical net of the closed enclosure, excluded from supply.
     pub closed_radiation_net_j: f64,
@@ -405,6 +406,36 @@ impl FrameVibrationComponent {
         binding.into_system(mechanical, thermal, gate)
     }
 
+    /// Prepare a frame sharing native finite thermal links with an external
+    /// physical heat owner. `additional_links` and the original Fourier links
+    /// must exactly partition the native graph; the added links must have zero
+    /// authored conductance. Values admit the initial sources only and are not
+    /// cached. Advance with `step_heat_assembly` to resolve their actual source
+    /// laws at every trial; ordinary stepping still refuses incomplete coverage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn into_thermoelastic_system_with_link_conductances<'n, 'a>(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        additional_links: &BTreeMap<u64, f64>,
+        destinations: &[FrameLayerCell],
+        linear_strain_limit: f64,
+        config: ModalCouplingConfig,
+        prepared: Option<PreparedModalBudget>,
+        gate: &CancelGate,
+    ) -> Result<FrameThermoelasticSystem<'n, 'a>> {
+        let (binding, model, connections) = self.into_thermoelastic_parts_with_link_conductances(
+            thermal, source, additional_links, destinations, linear_strain_limit,
+            0, 0, config, gate,
+        )?;
+        let mechanical = match prepared {
+            Some(budget) => CoupledModalSystem::new_prepared(
+                vec![model], connections, config, budget, gate)?,
+            None => CoupledModalSystem::new(vec![model], connections, config, gate)?,
+        };
+        binding.into_system(mechanical, thermal, gate)
+    }
+
     /// Prepare the SAME source-bound frame for a larger original coupled owner.
     /// Append its returned model at `component` and EVERY returned connection
     /// contiguously at `connection_start`, in unchanged order. Other components
@@ -420,6 +451,52 @@ impl FrameVibrationComponent {
         self,
         thermal: &DepositionSimulation<'_>,
         source: &'n MaterialNetwork<'a>,
+        destinations: &[FrameLayerCell],
+        linear_strain_limit: f64,
+        component: usize,
+        connection_start: usize,
+        config: ModalCouplingConfig,
+        gate: &CancelGate,
+    ) -> Result<(
+        FrameThermoelasticBinding<'n, 'a>,
+        ModalAcousticTimeModel,
+        Vec<ModalConnection>,
+    )> {
+        self.into_thermoelastic_parts_bound(thermal, source, None, destinations,
+            linear_strain_limit, component, connection_start, config, gate)
+    }
+
+    /// The original shared-frame preparation with explicitly owned external
+    /// thermal links. This has the same partition and fresh-source requirements
+    /// as `into_thermoelastic_system_with_link_conductances` and retains the same
+    /// native assembly, complete frame basis and original material slices.
+    #[allow(clippy::too_many_arguments)]
+    pub fn into_thermoelastic_parts_with_link_conductances<'n, 'a>(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        additional_links: &BTreeMap<u64, f64>,
+        destinations: &[FrameLayerCell],
+        linear_strain_limit: f64,
+        component: usize,
+        connection_start: usize,
+        config: ModalCouplingConfig,
+        gate: &CancelGate,
+    ) -> Result<(
+        FrameThermoelasticBinding<'n, 'a>,
+        ModalAcousticTimeModel,
+        Vec<ModalConnection>,
+    )> {
+        self.into_thermoelastic_parts_bound(thermal, source, Some(additional_links), destinations,
+            linear_strain_limit, component, connection_start, config, gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn into_thermoelastic_parts_bound<'n, 'a>(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        additional_links: Option<&BTreeMap<u64, f64>>,
         destinations: &[FrameLayerCell],
         linear_strain_limit: f64,
         component: usize,
@@ -450,8 +527,8 @@ impl FrameVibrationComponent {
                 "thermoelastic frame requires complete source-bound mass basis, zero frozen preload, explicit strain limit and no authored modal damping",
             ));
         }
-        let (binding, regions, viscosity) =
-            bind_regions(&self.basis, thermal, source, destinations, false, gate)?;
+        let (binding, regions, viscosity) = bind_regions_with_links(
+            &self.basis, thermal, source, destinations, false, additional_links, gate)?;
         let FrameVibrationComponent {
             basis,
             model,
@@ -651,20 +728,20 @@ impl FrameThermoelasticSystem<'_, '_> {
         energy_guess_j: &[f64],
         gate: &CancelGate,
     ) -> Result<FrameThermoelasticReport> {
-        self.step_inner(thermal, external_modal_forces, None, None, controls, energy_guess_j, gate)
+        self.step_inner(thermal, external_modal_forces, None, &heat::Plain, controls, energy_guess_j, gate)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_inner(
+    fn step_inner<T: heat::Transport + ?Sized>(
         &mut self,
         thermal: &mut DepositionSimulation<'_>,
         external_modal_forces: &[f64],
         electrical_input: Option<FrameElectricalInput<'_>>,
-        heat: Option<&heat::Trial<'_, '_, '_, '_>>,
+        heat: &T,
         controls: FrameThermalSolve,
         energy_guess_j: &[f64],
         gate: &CancelGate,
-    ) -> Result<FrameThermoelasticReport> {
+    ) -> Result<FrameThermoelasticReport<T::Sample>> {
         check(gate)?;
         if self.electrical.is_some() != electrical_input.is_some() {
             return Err(invalid("electrically bound frame histories require explicit held electrical inputs"));
@@ -768,18 +845,12 @@ impl FrameThermoelasticSystem<'_, '_> {
                     thermal, target, controls.driver(), energy_guess_j,
                     |trial, _remaining| {
                         check(gate)?;
-                        let (resolved, heat_transfer) = match heat {
-                            Some(heat) => {
-                                let (coefficients, transfer) = heat.resolve(trial, gate)?;
-                                (electrical::advance_resolved(electrical.as_ref(), electrical_input,
-                                    field_prepared.as_ref(), coefficients, trial, dt_heat,
-                                    controls.total_energy_tolerance_j, gate)?, Some(transfer))
-                            }
-                            None => (electrical::resolve(
-                                electrical.as_ref(), electrical_input, prepared, field_prepared.as_ref(),
-                                trial, dt_heat, controls.total_energy_tolerance_j, gate,
-                            )?, None),
-                        };
+                        let (coefficients, heat_transfer) =
+                            heat.resolve(prepared, electrical.as_ref(), trial, gate)?;
+                        let resolved = electrical::advance_resolved(
+                            electrical.as_ref(), electrical_input, field_prepared.as_ref(),
+                            coefficients, trial, dt_heat, controls.total_energy_tolerance_j, gate,
+                        )?;
                         let electrical::ResolvedElectrical {
                             bulk: mut network_source, circuit, field_storage, reversible_sources,
                         } = resolved;
@@ -789,7 +860,9 @@ impl FrameThermoelasticSystem<'_, '_> {
                         for (&id, cell) in trial.cells() {
                             // Radiation is already present in the native source map but is
                             // internal transfer, not independent external heating.
-                            let radiative = heat_transfer.as_ref().map_or(0.0, |h| h.cell_power_w(id));
+                            let radiative = heat::cell_power_w(
+                                heat.radiation(&network_source.source, heat_transfer.as_ref()), id,
+                            );
                             let independent = finite(network_source.sources_w.get(&id).copied().unwrap_or(0.0) - radiative)?;
                             for power in [cell.boundary.source_w, independent] {
                                 if power != 0.0 { has_independent = true; }
@@ -860,10 +933,9 @@ impl FrameThermoelasticSystem<'_, '_> {
                 let electrical_work = electrical_report.as_ref().map_or(0.0, |step| step.native.supplied);
                 let electrical_heat = electrical_report.as_ref().map_or(0.0, |step| step.heat_j);
                 let (source, next_states, layers, independent_entropy, has_independent, field_storage, heat_transfer) = audit.source;
-                let (closed_radiation_net_j, radiation_entropy) = match &heat_transfer {
-                    Some(transfer) => transfer.exchange(&candidate, dt_heat, gate)?,
-                    None => (0.0, 0.0),
-                };
+                let (closed_radiation_net_j, radiation_entropy) = heat::exchange(
+                    heat.radiation(&source, heat_transfer.as_ref()), &candidate, dt_heat, gate,
+                )?;
                 let electrical_storage_change = match &field_storage {
                     Some(field) => finite(field.internal_energy_j[1] - field.internal_energy_j[0])?,
                     None => electrical_report.as_ref().map_or(0.0,
@@ -989,7 +1061,7 @@ impl FrameThermoelasticSystem<'_, '_> {
                 };
                 // Both execution authorities must admit BEFORE native mechanics
                 // publishes. No fallible thermal/source check follows publication.
-                if let Some(heat) = heat { heat.checkpoint(gate)?; }
+                heat.checkpoint(gate)?;
                 Ok((candidate, report, update, next_states, next_circuit))
             },
         )?;

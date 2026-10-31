@@ -19,6 +19,8 @@ mod hysteretic;
 mod spatial_induction;
 #[path = "finite_links/magnetostrictive.rs"]
 mod magnetostrictive;
+#[path = "finite_links/frame.rs"]
+mod frame;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::{
     SourceConvectiveLink, evaluate_source_link_convection,
 };

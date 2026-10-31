@@ -304,13 +304,32 @@ fn bind_regions<'n, 'a>(
     Vec<Region<'a>>,
     Vec<(usize, FrameViscousSection)>,
 )> {
+    bind_regions_with_links(basis, thermal, source, destinations, frozen_elasticity, None, gate)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_regions_with_links<'n, 'a>(
+    basis: &FrameVibrationBasis,
+    thermal: &DepositionSimulation<'_>,
+    source: &'n MaterialNetwork<'a>,
+    destinations: &[FrameLayerCell],
+    frozen_elasticity: bool,
+    additional_links: Option<&BTreeMap<u64, f64>>,
+    gate: &CancelGate,
+) -> Result<(
+    PreparedMaterialNetwork<'n, 'a>,
+    Vec<Region<'a>>,
+    Vec<(usize, FrameViscousSection)>,
+)> {
     check(gate)?;
     if !source.resistors.is_empty() {
         return Err(invalid("frame heat needs a thermal-only material network"));
     }
-    let binding = source
-        .prepare(thermal, || gate.is_requested())
-        .map_err(network)?;
+    let binding = match additional_links {
+        Some(links) => source.prepare_with_link_conductances(
+            thermal, &[], links, || gate.is_requested()),
+        None => source.prepare(thermal, || gate.is_requested()),
+    }.map_err(network)?;
     let operator = basis
         .material_damping()
         .ok_or_else(|| invalid("frame heat requires its original material viscosity"))?;

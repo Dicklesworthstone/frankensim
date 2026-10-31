@@ -96,6 +96,49 @@ impl<'n, 'a> FrameThermoelasticSystem<'n, 'a> {
         }
         self.bind_material_contact_circuit(thermal, source, circuit, fields, gate)
     }
+
+    /// Source-dependent field storage with the same explicit external-link
+    /// admission as `with_material_circuit_and_link_conductances`. Original
+    /// combined elastic/field/caloric capacity checks remain authoritative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_material_field_circuit_and_link_conductances(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n MaterialNetwork<'a>,
+        circuit: MaterialCircuit,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        fields: Vec<FieldThermalBinding>,
+        additional_links: &BTreeMap<u64, f64>,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        check(gate)?;
+        if fields.is_empty() {
+            return Err(invalid("material field circuit requires complete thermal field bindings"));
+        }
+        self.bind_material_circuit_with_links(thermal, source, circuit, electrical_bases,
+            fields, Some(additional_links), gate)
+    }
+
+    /// Complete contact and material-field ownership with externally sourced
+    /// finite thermal links. No contact work or reversible field heat is moved
+    /// to the transport provider; all retain the original joint transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_material_contact_field_circuit_and_link_conductances(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        source: &'n ElectricalContactNetwork<'a>,
+        circuit: MaterialCircuit,
+        fields: Vec<FieldThermalBinding>,
+        additional_links: &BTreeMap<u64, f64>,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        check(gate)?;
+        if fields.is_empty() {
+            return Err(invalid("material contact field circuit requires thermal field bindings"));
+        }
+        self.bind_material_contact_circuit_with_links(thermal, source, circuit,
+            fields, Some(additional_links), gate)
+    }
 }
 
 // Independent positivity of (caloric + elastic) and each (caloric + field)
@@ -160,17 +203,17 @@ pub(in super::super) fn prepare_fields<'b>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn advance(
+pub(super) fn advance<S>(
     binding: &Binding<'_, '_>,
     input: FrameElectricalInput<'_>,
     fields: Option<&PreparedFieldThermal<'_>>,
-    mut bulk: CircuitThermalCoefficients<MaterialNetworkSample>,
+    mut bulk: CircuitThermalCoefficients<S>,
     contacts: Vec<SeriesElectricalContact>,
     trial: &DepositionSimulation<'_>,
     dt: f64,
     tolerance_j: f64,
     gate: &CancelGate,
-) -> Result<ResolvedElectrical> {
+) -> Result<ResolvedElectrical<S>> {
     check(gate)?;
     if fields.is_some() != !binding.fields.is_empty() {
         return Err(invalid("material field history cannot be silently frozen"));

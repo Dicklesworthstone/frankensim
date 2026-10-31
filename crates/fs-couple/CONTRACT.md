@@ -13880,6 +13880,36 @@ unequal-temperature/alpha layers and simultaneous E(T)/eta(T). Both native
 backends, actual continued motion, off-diagonal stiffness, layer U/S, caloric
 closure, and nonzero-prefix refusal/retry are covered.
 
+`FrameThermoelasticSystem::step_heat_assembly` now accepts the original
+`HeatAssembly` contract on this same frame/circuit/enthalpy residual. Finite
+coolant links, prescribed reservoirs, thermal interfaces, integrated conduction
+and enclosure radiation retain their complete associated source sample in
+`FrameThermoelasticReport<S>::source`; concrete source errors survive refusal.
+The existing prepared-network entry retains its original report shape. Circuit
+Joule heat, reversible material-field heat and reversible frame heat remain
+with their existing owners, and internal radiation remains separate from
+external supply. Both cancellation authorities admit before joint publication.
+
+The explicit `*_with_link_conductances` cold constructors admit a disjoint
+partition of native thermal links alongside the original Fourier bindings.
+They retain the original cell/link slices and do not cache external transport
+coefficients. Ordinary stepping continues to refuse incomplete coverage; each
+complete-assembly trial resolves the actual source laws afresh. The same
+admission reaches standalone/shared frames, original contact and material-field
+circuits, and the existing full-inertia fluid-loaded frame wrappers. Exterior
+mechanical-fluid losses retain their separate account. Reference geometry,
+source support, solid phase, capacity/strain bounds and first-order splitting
+retain their existing limits.
+
+The focused native fixture in
+`fs-airflow/tests/material_cell_convection/film_source/heat_network/finite_links/frame.rs`
+defines powered and unpowered finite-coolant cases, independent two-cell/RC
+balances, source-only coolant substitutions, subsequent exact forced-frame
+motion, complete source receipts, in-residual source-domain rollback and
+separate-authority cancellation. The changed Rust files pass the pinned syntax
+parser; native test execution remains unverified in the shared dependency and
+resource environment.
+
 ## Two-axis modal shear and same-step finite-body thermal feedback
 
 `friction::tangential::planar::heat` connects the original

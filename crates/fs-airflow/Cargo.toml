@@ -57,6 +57,8 @@ fs-phs = { path = "../fs-phs" }
 # plate-fin end-to-end fixture.
 fs-matdb = { path = "../fs-matdb" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
+# Exercise sourced finite coolant on the native material frame/heat transaction.
+fs-solid = { path = "../fs-solid" }
 
 [[example]]
 name = "compartment_fire"
