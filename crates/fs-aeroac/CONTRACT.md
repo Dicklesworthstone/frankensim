@@ -100,6 +100,33 @@ material scaling and domain/representability refusals.
   signed directivity, rigid motion, density independence and refusals. This is
   an ideal free-space transfer for prescribed forces, not validation of a
   source model, finite-size compactness, enclosure scattering or measured SPL.
+- `curle3d::PreparedCompactSourceObserver` prepares actual 3D source positions
+  at one frequency and checked material state. `CompactSourcePhasor` explicitly
+  separates volume injection Q [m³/s] from force ON the fluid F [N]. In
+  `exp(-i omega t)` convention it applies the outgoing spherical Green function
+  `G = exp(ikr)/(4 pi r)` with `p = -i omega rho G Q - F.grad(G)` and
+  `u = grad(p)/(i omega rho)`. The full gradient includes angular derivatives:
+  a dipole pressure null may still have tangential particle motion. Sources and
+  mechanisms sum coherently before signed active/reactive intensity is formed.
+  Sixteen cached complex coefficients per source give allocation-free O(N)
+  application, with explicit preparation budget and double-double reductions.
+  `CompactForceObserver::prepare_harmonic` preserves the same original source
+  and observer coordinates, material and retarded phase. Force pressure does
+  not acquire an extra density factor; monopole pressure does depend on density.
+  `evaluate_coherence_modes` accepts explicit peak-unit factors of the joint
+  Q/F source second moment, under `curle3d::CoherenceBudget` limits; its O(N r)
+  application forms pressure variance, the full Hermitian 3D velocity covariance
+  and active/reactive intensity. `evaluate_independent_sources` is the O(N)
+  specialization, retaining coherence among Q/F components of each source.
+  Neither path invents correlation or treats a spectral-line power as PSD/Hz.
+  No periodic-flow force or N/m line source is automatically made an isolated
+  3D radiator. These are prescribed compact sources with no finite-size
+  validation, source motion, scattering, absorption or mutual loading.
+  `tests/compact_interference.rs` checks both existing retarded owners,
+  independently differentiated pressure, monopole/dipole spherical power,
+  pressure-null velocity, separated-source and mixed-mechanism interference,
+  standing waves, complex partial coherence against dense algebra, material
+  density scaling, dynamic-range residuals and bounded admission.
 - `bickley::bickley_rayleigh_mode` — Rayleigh-equation shooting
   solver (RK4 + complex secant, half-line with symmetry boundary
   conditions and the exact `phi' = -alpha phi` far-field decay) for

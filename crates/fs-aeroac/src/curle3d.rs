@@ -12,6 +12,12 @@
 //! does not validate a force model, resolve finite source size, moving sources,
 //! boundaries, absorption or feedback, or confer measured-SPL authority.
 
+/// Prepared harmonic arrays of physical volume sources and force dipoles.
+pub mod array;
+mod statistics;
+pub use array::{CoherentCompactField, CompactSourcePhasor, PreparedCompactSourceObserver};
+pub use statistics::{CoherenceBudget, CompactFieldStatistics};
+
 use crate::AeroacError;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::det;
@@ -22,6 +28,8 @@ use fs_math::det;
 #[derive(Clone, Copy, Debug)]
 pub struct CompactForceObserver {
     acoustic: FluidAcousticState,
+    observer_m: [f64; 3],
+    source_m: [f64; 3],
     direction: [f64; 3],
     near_scale: f64,
     far_scale: f64,
@@ -61,6 +69,8 @@ impl CompactForceObserver {
         }
         Ok(Self {
             acoustic,
+            observer_m,
+            source_m,
             direction: displacement.map(|v| v / range),
             near_scale,
             far_scale,
@@ -79,6 +89,28 @@ impl CompactForceObserver {
     #[must_use]
     pub const fn delay_s(&self) -> f64 {
         self.delay_s
+    }
+
+    /// Prepare this same material and geometry for a stationary harmonic source.
+    ///
+    /// The resulting operator retains pressure, all three particle-velocity
+    /// components and active/reactive intensity. Supply a
+    /// [`CompactSourcePhasor::force_dipole`] with physical force on the fluid [N].
+    /// The source phasor uses exp(-i omega t) at the original source clock;
+    /// the outgoing transfer already includes the travel phase. Do not delay
+    /// the phasor again. Preparation allocates once; subsequent evaluation does
+    /// not allocate. This does not validate compactness or a force source model.
+    pub fn prepare_harmonic(
+        &self,
+        frequency_hz: f64,
+    ) -> Result<PreparedCompactSourceObserver, AeroacError> {
+        PreparedCompactSourceObserver::new(
+            self.acoustic,
+            frequency_hz,
+            self.observer_m,
+            &[self.source_m],
+            1,
+        )
     }
 
     /// Full pressure [Pa], including the `1/r²` induction term. Both arguments

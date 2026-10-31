@@ -27,9 +27,11 @@
 //! - [`curle2d`]: 2D frequency-domain Curle dipole radiation
 //!   (e^{-i omega t} convention, matching the workspace acoustics
 //!   doctrine).
-//! - [`curle3d`]: free-space radiation of prescribed compact 3D forces [N],
-//!   with induction, dipole directivity and explicit retarded-time semantics.
-//!   This separate SI operator does not promote 2D data or validate source levels.
+//! - [`curle3d`]: free-space radiation of prescribed compact 3D forces [N] and
+//!   volume sources [m³/s], with retarded-time and prepared harmonic operators.
+//!   Coherent pressure/velocity and explicit source-coherence statistics retain
+//!   interference, near-field motion and active/reactive intensity. These SI
+//!   operators do not promote 2D data or validate source levels.
 //! - [`bickley`]: Rayleigh-equation instability oracle for the
 //!   Bickley jet `U = sech^2(y)` — the analytic reference the fs-lbm
 //!   jet runs are validated against. Its own pins are SELF-VERIFIED
