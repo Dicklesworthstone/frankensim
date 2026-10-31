@@ -11,9 +11,10 @@
 //! for position, direction, transverse axis and both path integrals. These are
 //! numerical estimates, not interval certificates or global error bounds.
 //! Callers must resolve field features with `max_step_m`, provide a smooth
-//! field and terminate segments at material discontinuities. This owner does
-//! not intersect scene surfaces, compute ray-bundle focusing or MIS Jacobians,
-//! or model scattering, birefringence, diffraction or spin-Hall corrections.
+//! field and terminate segments at material discontinuities. [`event`] adds
+//! bounded scene-boundary advancement; [`bundle`] adds analytic angular
+//! variations and endpoint-plane focusing. Neither supplies scalar-camera/BDPT
+//! MIS, scattering, birefringence, diffraction or spin-Hall corrections.
 //!
 //! References: Moore, JOSA 65, 451–455 (1975),
 //! <https://doi.org/10.1364/JOSA.65.000451>; Dormand and Prince, JCAM 6, 19–26
@@ -27,6 +28,7 @@ use crate::charts::Ray;
 use crate::dielectric::{DielectricError, DielectricGlass, DielectricIor};
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 
+pub mod bundle;
 pub mod event;
 
 /// Version of the deterministic gradient-index propagation arithmetic.
@@ -63,7 +65,7 @@ pub enum GradientIndexError {
     InvalidBoundaryQuery,
     /// A nearby surface lacked a resolvable transverse contact or safe progress.
     BoundaryResolutionLimit,
-    /// The previous contact has no admitted local planar departure neighborhood.
+    /// The previous contact has no admitted local departure neighborhood.
     UnsupportedBoundaryDeparture,
     /// The explicit per-path geometry-query budget was exhausted.
     BoundaryQueryBudgetExceeded,

@@ -117,12 +117,34 @@ differentiable lift). Pure Rust throughout.
   exhausted step/query budgets refuse. Spatially uniform fields reuse one
   optical sample and take analytic steps limited by geometry. The caller
   retains the same accepted field and geometry snapshots.
-  No scalar camera/BDPT curved visibility, ray-bundle Jacobians,
-  scattering, diffraction, birefringence or full-wave accuracy is claimed.
+  No scalar camera/BDPT curved visibility, scattering, diffraction,
+  birefringence or full-wave accuracy is claimed.
   G1 checks include analytic affine-index trajectories, Snell invariants,
   phase/group separation, absorption and tolerance refinement; G3 checks
   cover reverse paths, transported frames and composed segments; G4 checks
   include cancellation during rejected adaptive trials.
+
+- `gradient_index::bundle` differentiates the same physical-arc-length ray
+  equation with respect to two orthonormal launch angles. Immutable
+  `SecondOrderIndexField` samples supply the analytic symmetric spatial Hessian
+  together with the optical sample; no finite-difference Hessian is inferred.
+  Native homogeneous and affine fields provide exact zero Hessians. A bounded
+  `QuadraticIndexField` retains native spectral dispersion, group index and
+  absorption, admitting its entire spatial box with interval arithmetic,
+  including interior extrema. The allocation-free augmented Dormand--Prince
+  state controls both angular-derivative columns alongside the central ray,
+  differentiates direction normalization and retains explicit step budgets
+  and cancellation. Uniform fields use a one-sample analytic fast path.
+  Endpoint-plane projection accounts for neighboring rays' different arrival
+  lengths and returns signed/absolute area per launch solid angle. Point-source
+  irradiance divides spectral intensity by this area and applies central
+  Beer--Lambert attenuation once; it needs no additional cosine or index-square
+  factor. Explicit grazing, footprint-area and conditioning thresholds refuse
+  unresolved caustic results. This is a local differential of one supplied ray
+  through a smooth field, not a connecting-ray search, visibility test,
+  discontinuous-interface differential, finite-pixel caustic integral or MIS
+  density. Analytic homogeneous obliquity, quadratic focusing/defocusing and
+  independently perturbed affine/mixed-Hessian trajectories check the result.
 
 - `polarization::dielectric::scene::curved` connects the field propagator,
   native instance boundaries, spectral interfaces and calibrated receiving
