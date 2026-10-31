@@ -76,6 +76,28 @@ pub use zk::{
     ZkDiffusiveBasis, ZkDiffusiveTerm, zk_one_minus_f, zwikker_kosten_f,
 };
 
+/// A storage-owned symmetric discrete gradient of the ORIGINAL Hamiltonian.
+///
+/// The rule must account for every stored-energy contribution, satisfy
+/// `e(a,b).(b-a) = H(b)-H(a)` and agree with the analytic effort at coincidence.
+/// It may preserve physical component work that a global Gonzalez correction
+/// cannot distinguish. Callbacks are read-only and allocation-free; invalid
+/// source support or unrepresentable arithmetic must produce nonfinite output.
+pub trait ConstitutiveDiscreteGradient {
+    /// Complete effort at the two endpoints and their represented midpoint.
+    fn evaluate(&self, a: &[f64], b: &[f64], midpoint: &[f64], out: &mut [f64]);
+
+    /// Derivative of THIS rule with respect to `b`, applied to `direction`.
+    ///
+    /// Return false when an analytic action is unavailable. Newton may use
+    /// bounded residual probes; explicitly analytic prepared execution refuses
+    /// rather than substituting a Gonzalez or midpoint tangent. At a source
+    /// kink the owner must document any chosen one-sided Newton representative.
+    fn end_jacobian_action(
+        &self, _a: &[f64], _b: &[f64], _direction: &[f64], _out: &mut [f64],
+    ) -> bool { false }
+}
+
 /// Energy storage: the Hamiltonian and its exact gradient.
 ///
 /// Implementations supply ANALYTIC gradients; the discrete-gradient
@@ -91,6 +113,11 @@ pub trait Storage {
     fn hamiltonian(&self, x: &[f64]) -> f64;
     /// `grad H(x)` into `out` (efforts).
     fn gradient(&self, x: &[f64], out: &mut [f64]);
+
+    /// Optional complete constitutive discrete gradient. The default retains
+    /// the canonical Gonzalez rule. Independent energy accounting still uses
+    /// the original Hamiltonian and its stable remainder, never port work.
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> { None }
 
     /// Optional numerical magnitude of a stored coordinate in its OWN units,
     /// used only to size finite-difference probes. A bounded constitutive owner
@@ -176,6 +203,34 @@ impl QuadraticStorage {
     #[must_use]
     pub fn matrix(&self) -> &[f64] {
         &self.q
+    }
+
+    // The original quadratic energy's mean effort, including represented
+    // midpoint rounding and the tiny matrix asymmetry allowed by admission.
+    // Keep reciprocal off-diagonal energy together instead of splitting it
+    // among coordinates or assigning another component's nonlinear work here.
+    fn mean_gradient(&self, a: &[f64], b: &[f64], mid: &[f64], out: &mut [f64]) {
+        self.gradient(mid, out);
+        for (i, value) in out.iter_mut().enumerate().take(self.n) {
+            let mut correction = 0.0;
+            for &j in self.row_cols(i) {
+                let qij = self.q[i * self.n + j];
+                let qji = self.q[j * self.n + i];
+                let offset = (a[j] - mid[j]) + (b[j] - mid[j]);
+                correction += (0.25 * qij + 0.25 * qji) * offset
+                    + (0.5 * qji - 0.5 * qij) * mid[j];
+            }
+            *value += correction;
+        }
+    }
+
+    fn mean_end_jacobian_action(&self, direction: &[f64], out: &mut [f64]) {
+        for (i, value) in out.iter_mut().enumerate().take(self.n) {
+            *value = self.row_cols(i).iter().map(|&j| {
+                (0.25 * self.q[i * self.n + j] + 0.25 * self.q[j * self.n + i])
+                    * direction[j]
+            }).sum();
+        }
     }
 }
 
@@ -296,6 +351,11 @@ pub struct SumStorage {
 }
 
 impl Storage for SumStorage {
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        (self.a.0.discrete_gradient_rule().is_some()
+            || self.b.0.discrete_gradient_rule().is_some()).then_some(self)
+    }
+
     fn coordinate_scale(&self, coordinate: usize) -> Option<f64> {
         if coordinate < self.a.1 { self.a.0.coordinate_scale(coordinate) }
         else { self.b.0.coordinate_scale(coordinate - self.a.1) }
@@ -336,6 +396,47 @@ impl Storage for SumStorage {
         self.a.0.gradient(&x[..na], &mut out[..na]);
         self.b.0.gradient(&x[na..], &mut out[na..]);
     }
+}
+
+impl ConstitutiveDiscreteGradient for SumStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], mid: &[f64], out: &mut [f64]) {
+        let na = self.a.1;
+        discrete_gradient_from_midpoint_unchecked(self.a.0.as_ref(),
+            &a[..na], &b[..na], &mid[..na], &mut out[..na], na);
+        discrete_gradient_from_midpoint_unchecked(self.b.0.as_ref(),
+            &a[na..], &b[na..], &mid[na..], &mut out[na..], self.b.1);
+    }
+
+    fn end_jacobian_action(
+        &self, a: &[f64], b: &[f64], direction: &[f64], out: &mut [f64],
+    ) -> bool {
+        let na = self.a.1;
+        component_end_jacobian_action(self.a.0.as_ref(), &a[..na], &b[..na],
+            &direction[..na], &mut out[..na])
+            && component_end_jacobian_action(self.b.0.as_ref(), &a[na..], &b[na..],
+                &direction[na..], &mut out[na..])
+    }
+}
+
+// A direct sum retains each declared rule. An unchanged, exactly symmetric
+// quadratic sibling has its original midpoint action. Other Gonzalez laws
+// retain finite-difference execution instead of inventing an analytic tangent.
+fn component_end_jacobian_action(
+    storage: &dyn Storage, a: &[f64], b: &[f64], direction: &[f64], out: &mut [f64],
+) -> bool {
+    if let Some(rule) = storage.discrete_gradient_rule() {
+        return rule.end_jacobian_action(a, b, direction, out);
+    }
+    let Some(q) = storage.exact_quadratic_matrix() else { return false; };
+    let n = a.len();
+    if q.len() != n * n { return false; }
+    for i in 0..n {
+        for j in 0..n {
+            if q[i*n+j] != q[j*n+i] { return false; }
+        }
+        out[i] = (0..n).map(|j| 0.5 * q[i*n+j] * direction[j]).sum();
+    }
+    out.iter().all(|value| value.is_finite())
 }
 
 /// Typed refusal.
@@ -930,6 +1031,10 @@ fn pad_differential_matrix(matrix: &[f64], n_diff: usize, n: usize) -> Option<Ve
 }
 
 impl Storage for DifferentialStorage {
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        self.inner.discrete_gradient_rule().map(|_| self as &dyn ConstitutiveDiscreteGradient)
+    }
+
     fn coordinate_scale(&self, coordinate: usize) -> Option<f64> {
         if coordinate < self.n_diff { self.inner.coordinate_scale(coordinate) } else { None }
     }
@@ -958,6 +1063,24 @@ impl Storage for DifferentialStorage {
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
         self.inner.midpoint_energy_remainder(
             &a[..self.n_diff], &b[..self.n_diff], &mid[..self.n_diff],
+        )
+    }
+}
+
+impl ConstitutiveDiscreteGradient for DifferentialStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], mid: &[f64], out: &mut [f64]) {
+        out.fill(0.0);
+        self.inner.discrete_gradient_rule().expect("declared differential rule").evaluate(
+            &a[..self.n_diff], &b[..self.n_diff], &mid[..self.n_diff], &mut out[..self.n_diff],
+        );
+    }
+
+    fn end_jacobian_action(
+        &self, a: &[f64], b: &[f64], direction: &[f64], out: &mut [f64],
+    ) -> bool {
+        out.fill(0.0);
+        self.inner.discrete_gradient_rule().expect("declared differential rule").end_jacobian_action(
+            &a[..self.n_diff], &b[..self.n_diff], &direction[..self.n_diff], &mut out[..self.n_diff],
         )
     }
 }
@@ -1293,6 +1416,9 @@ pub fn common_effort_star(
 // on constraint rows. In particular, constraints must NOT acquire a dt factor
 // or fictitious storage, and Q must retain all mutual-inductance entries.
 fn descriptor_quadratic_jacobian(sys: &DescriptorPortHamiltonian, dt: f64) -> Option<Vec<f64>> {
+    // An exact Q declares the Hamiltonian, not a replacement for a storage's
+    // explicit finite-step effort. Its own action (or probes) takes priority.
+    if sys.storage.discrete_gradient_rule().is_some() { return None; }
     let n = sys.n;
     let nd = sys.n_diff;
     let q = sys.storage.exact_quadratic_matrix()?;
@@ -1337,15 +1463,59 @@ fn descriptor_quadratic_jacobian(sys: &DescriptorPortHamiltonian, dt: f64) -> Op
     Some(jac)
 }
 
-/// Implicit descriptor step: Gonzalez on the differential block,
+// Differentiate the actual declared storage rule at fixed original endpoint.
+// Algebraic coordinates remain midpoint multipliers, with no stored energy.
+// Missing actions retain bounded residual probes; no other rule's tangent is
+// substituted. Allocation and LU remain with the existing descriptor owner.
+fn descriptor_constitutive_jacobian(
+    sys: &DescriptorPortHamiltonian, a: &[f64], b: &[f64], dt: f64,
+) -> Option<Vec<f64>> {
+    let rule = sys.storage.discrete_gradient_rule()?;
+    let (n, nd) = (sys.n, sys.n_diff);
+    let mut endpoint = b.to_vec();
+    endpoint[nd..].copy_from_slice(&a[nd..]);
+    let mut direction = vec![0.0; n];
+    let mut action = vec![0.0; n];
+    let mut jac = vec![0.0; n * n];
+    for col in 0..n {
+        action.fill(0.0);
+        if col < nd {
+            direction[col] = 1.0;
+            if !rule.end_jacobian_action(a, &endpoint, &direction, &mut action) {
+                return None;
+            }
+            direction[col] = 0.0;
+            action[nd..].fill(0.0);
+        } else {
+            action[col] = 0.5;
+        }
+        for row in 0..n {
+            let mut flow = 0.0;
+            for k in 0..n {
+                if action[k] != 0.0 {
+                    flow += (sys.j[row*n+k] - sys.r[row*n+k]) * action[k];
+                }
+            }
+            let value = if row < nd {
+                (if row == col { 1.0 } else { 0.0 }) - dt * flow
+            } else { flow };
+            if !value.is_finite() { return None; }
+            jac[row*n+col] = value;
+        }
+    }
+    Some(jac)
+}
+
+/// Implicit descriptor step: constitutive discrete gradient on the differential block,
 /// algebraic residual `0 = ((J−R) e + G u)_alg` at the new state
 /// with effort `e = [∇H(x), λ]` (multipliers are not stored energy).
 ///
 /// Exact quadratic storage supplies an analytic, fixed Jacobian. Its LU is
 /// reused for residual corrections within this step, including all mutual
 /// inductance terms and algebraic constraints. The original discrete gradient,
-/// residual admission and work/loss ledger still decide acceptance; nonlinear
-/// storage retains the bounded centered-probe path.
+/// residual admission and work/loss ledger still decide acceptance. Nonlinear
+/// storage with a declared discrete gradient supplies its actual end-state
+/// Jacobian action; other nonlinear laws retain bounded centered probes.
 ///
 /// # Errors
 /// Dimension / `dt` refusals; [`PhsError::NewtonStalled`];
@@ -1468,6 +1638,7 @@ pub fn step_descriptor(
     }).collect();
     let mut storage_endpoint = x0.to_vec();
     let mut storage_midpoint = x0.to_vec();
+    let constitutive_rule = sys.storage.discrete_gradient_rule().is_some();
     let mut continuity = |x: &[f64], dg: &[f64], res: &[f64], iterations, stagnant_iterations|
         -> Option<(f64, f64, SolveCertificate)> {
         storage_endpoint[..n_d].copy_from_slice(&x[..n_d]);
@@ -1490,13 +1661,15 @@ pub fn step_descriptor(
             // nearly cancelled final effort alone loses their roundoff scale.
             storage_endpoint.fill(0.0);
             sys.storage.gradient(&storage_midpoint, &mut storage_endpoint);
-            let mut length2 = 0.0;
-            for i in 0..n_d {
-                let change = x[i] - x0[i];
-                length2 += change * change;
-            }
-            if length2 > 0.0 && length2.is_finite() {
-                correction = remainder / length2;
+            if !constitutive_rule {
+                let mut length2 = 0.0;
+                for i in 0..n_d {
+                    let change = x[i] - x0[i];
+                    length2 += change * change;
+                }
+                if length2 > 0.0 && length2.is_finite() {
+                    correction = remainder / length2;
+                }
             }
             if !correction.is_finite()
                 || storage_endpoint.iter().any(|value| !value.is_finite()) { return None; }
@@ -1521,7 +1694,11 @@ pub fn step_descriptor(
                 // midpoint. Its attainable resolution still depends on those
                 // SAME coupled endpoints, not on unrelated voltages/currents.
                 rounding_magnitude += coefficient * if col < n_d {
-                    storage_endpoint[col].abs() + (correction * (x[col] - x0[col])).abs()
+                    storage_endpoint[col].abs() + if constitutive_rule {
+                        // Bound the operands of the actual source-owned effort,
+                        // not a global correction this storage never used.
+                        (dg[col] - storage_endpoint[col]).abs()
+                    } else { (correction * (x[col] - x0[col])).abs() }
                 } else {
                     0.5 * x0[col].abs() + 0.5 * x[col].abs()
                 };
@@ -1623,7 +1800,9 @@ pub fn step_descriptor(
         let fact = if let Some(fact) = quadratic_factor.as_ref() {
             fact
         } else {
-            let jac = {
+            let jac = if let Some(jac) = descriptor_constitutive_jacobian(sys, x0, &x1, dt) {
+                jac
+            } else {
                 let mut jac = vec![0.0; n * n];
                 for col in 0..n {
                     let probe_scale = sys.storage.coordinate_scale(col)
@@ -1785,13 +1964,16 @@ pub fn step_descriptor(
     })
 }
 
-/// Gonzalez midpoint discrete gradient:
+/// Constitutive discrete gradient, or the default Gonzalez midpoint rule:
 /// `dg(a, b) = gradH(m) + [(H(b) - H(a) - gradH(m).(b-a)) / |b-a|^2]
 /// (b - a)` with `m = (a+b)/2`; for `b == a` it is `gradH(a)`.
 ///
-/// Satisfies `dg . (b - a) = H(b) - H(a)` EXACTLY by construction —
-/// the property the discrete energy balance rests on. Order 2 in time
-/// when used in the midpoint step (the pinned formula choice).
+/// Both rules satisfy `dg . (b - a) = H(b) - H(a)` in exact arithmetic,
+/// the identity underlying the discrete energy balance. A storage may declare
+/// a symmetric component-work-preserving rule through
+/// [`Storage::discrete_gradient_rule`]; otherwise Gonzalez is unchanged.
+/// Symmetry and consistency retain second order in the midpoint step on smooth
+/// source segments; source-knot regularity and timestep error remain separate.
 #[must_use]
 pub fn discrete_gradient(storage: &dyn Storage, a: &[f64], b: &[f64]) -> Vec<f64> {
     let mut mid = vec![0.0; a.len()];
@@ -1826,7 +2008,24 @@ fn discrete_gradient_into_prefix_unchecked(
     for i in 0..n {
         mid[i] = f64::midpoint(a[i], b[i]);
     }
+    discrete_gradient_from_midpoint_unchecked(storage, a, b, mid, dg, n_diff);
+}
+
+// Also lets direct-sum wrappers reuse the canonical rule on each original
+// storage block without allocating another midpoint or altering its potential.
+fn discrete_gradient_from_midpoint_unchecked(
+    storage: &dyn Storage,
+    a: &[f64],
+    b: &[f64],
+    mid: &[f64],
+    dg: &mut [f64],
+    n_diff: usize,
+) {
     dg.fill(0.0);
+    if let Some(rule) = storage.discrete_gradient_rule() {
+        rule.evaluate(a, b, mid, dg);
+        return;
+    }
     storage.gradient(mid, dg);
     let mut dx_norm_sq = 0.0;
     let mut mid_dot = 0.0;

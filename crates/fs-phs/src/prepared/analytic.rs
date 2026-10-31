@@ -1,9 +1,11 @@
-//! Analytic derivative of the SAME Gonzalez discrete gradient, not midpoint
-//! linearization. All scratch belongs to StepWorkspace; physical storage and
-//! candidate outputs are untouched. The Jacobian is generally nonsymmetric.
+//! Analytic derivative of the SAME source-owned or Gonzalez discrete gradient,
+//! not midpoint linearization. All scratch belongs to StepWorkspace; physical
+//! storage and candidate outputs are untouched. The Jacobian is nonsymmetric.
 use super::{StepWorkspace, PreparedStepError, dimensions, norm};
 use crate::PortHamiltonian;
 use super::dissipation::Dissipation;
+
+mod constitutive;
 
 impl StepWorkspace {
     #[allow(clippy::type_complexity)]
@@ -13,6 +15,9 @@ impl StepWorkspace {
         dissipation: Option<Dissipation<'_>>, poll: &mut F,
     ) -> Result<(), PreparedStepError>
     where F: FnMut() -> Result<(), PreparedStepError> {
+        if let Some(rule) = sys.storage.discrete_gradient_rule() {
+            return self.constitutive_jacobian_into(sys, x0, dt, rule, dissipation, poll);
+        }
         let n = self.n;
         let condensed=self.condensation.is_some();
         for i in 0..n {

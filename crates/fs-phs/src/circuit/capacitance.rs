@@ -11,13 +11,14 @@
 //! dielectric memory, leakage, thermal dependence or measured-data authority
 //! is inferred. Source selection and interpolation accuracy belong to the
 //! caller. The existing bounded descriptor solve supplies the time update;
-//! this module only supplies its constitutive energy and analytic gradient.
+//! this module supplies constitutive energy, componentwise mean effort and
+//! its analytic end-state tangent to that same solver.
 
 use super::{
     Branch, CircuitDae, CircuitError, CircuitGraph, MutualInductance,
     assemble_circuit_with_mutual_inductance,
 };
-use crate::{QuadraticStorage, Storage, linear_exact::QuadraticPart};
+use crate::{ConstitutiveDiscreteGradient, QuadraticStorage, Storage, linear_exact::QuadraticPart};
 use std::sync::Arc;
 
 /// Maximum retained knots per capacitor, bounding each crossed-segment sum.
@@ -263,6 +264,48 @@ impl CapacitorChargeCurve {
         )
     }
 
+    /// Work-conjugate mean voltage over this capacitor's OWN charge change.
+    /// Uses the original integral, not a global energy correction involving
+    /// other charges or fluxes. At coincidence it is the original voltage.
+    /// Same-segment arithmetic retains a rounded midpoint's missing offset;
+    /// no squared charge increment can underflow and erase a knot correction.
+    pub fn discrete_voltage_v(&self, before_c: f64, after_c: f64) -> Result<f64, CircuitError> {
+        let a = self.segment(before_c)?;
+        let b = self.segment(after_c)?;
+        let mid = f64::midpoint(before_c, after_c);
+        let voltage = self.voltage_v(mid)?;
+        if before_c == after_c {
+            return Ok(voltage);
+        }
+        let correction = if a == b {
+            (0.5 * self.inverse_capacitance[a]) * ((before_c - mid) + (after_c - mid))
+        } else {
+            self.midpoint_remainder(before_c, after_c, mid)? / (after_c - before_c)
+        };
+        finite(voltage + correction)
+    }
+
+    /// Derivative of [`Self::discrete_voltage_v`] with respect to its end
+    /// charge. This differentiates the actual piecewise integral across every
+    /// crossed knot. At coincident knots the right segment supplies a one-sided
+    /// Newton representative (the last knot uses its left segment); a unique
+    /// sensitivity at a kink is not claimed.
+    pub fn discrete_voltage_end_derivative(
+        &self,
+        before_c: f64,
+        after_c: f64,
+    ) -> Result<f64, CircuitError> {
+        let a = self.segment(before_c)?;
+        let b = self.segment(after_c)?;
+        if before_c == after_c || a == b {
+            return finite(0.5 * self.inverse_capacitance[b]);
+        }
+        let change = after_c - before_c;
+        // Integral_a^b [V(b)-V(q)]dq / (b-a)^2, evaluated relative to V(b)
+        // without subtracting two nearly equal voltages or squaring a tiny dq.
+        finite((-self.midpoint_remainder(before_c, after_c, after_c)? / change) / change)
+    }
+
     /// Integral of `V(q)-V(reference_c)` from `before_c` to `after_c` [J].
     /// Evaluates the original piecewise law without subtracting large endpoint
     /// energies. A composite storage owner may use its represented midpoint
@@ -291,6 +334,10 @@ struct CurveStorage {
 }
 
 impl Storage for CurveStorage {
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        Some(self)
+    }
+
     fn coordinate_scale(&self, coordinate: usize) -> Option<f64> {
         self.curves
             .iter()
@@ -335,6 +382,46 @@ impl Storage for CurveStorage {
                 .unwrap_or(f64::NAN);
         }
         Some(remainder)
+    }
+}
+
+impl ConstitutiveDiscreteGradient for CurveStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], mid: &[f64], out: &mut [f64]) {
+        self.linear.mean_gradient(a, b, mid, out);
+        for (i, curve) in &self.curves {
+            out[*i] = curve.discrete_voltage_v(a[*i], b[*i]).unwrap_or(f64::NAN);
+        }
+    }
+
+    fn end_jacobian_action(
+        &self,
+        a: &[f64],
+        b: &[f64],
+        direction: &[f64],
+        out: &mut [f64],
+    ) -> bool {
+        self.linear.mean_end_jacobian_action(direction, out);
+        for (i, curve) in &self.curves {
+            let (lo, hi) = curve.charge_range_c();
+            if !a[*i].is_finite()
+                || !b[*i].is_finite()
+                || a[*i] < lo
+                || a[*i] > hi
+                || b[*i] < lo
+                || b[*i] > hi
+            {
+                return false;
+            }
+            out[*i] = if direction[*i] == 0.0 {
+                0.0
+            } else {
+                curve
+                    .discrete_voltage_end_derivative(a[*i], b[*i])
+                    .unwrap_or(f64::NAN)
+                    * direction[*i]
+            };
+        }
+        out.iter().all(|value| value.is_finite())
     }
 }
 

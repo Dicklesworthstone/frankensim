@@ -296,8 +296,10 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   Full fs-couple integration tests are present but were not executed in the
   dependency-constrained validation environment.
 
-- `discrete_gradient` — the PINNED Gonzalez midpoint formula (order
-  2): satisfies `dg . (b - a) = H(b) - H(a)` identically.
+- `discrete_gradient` — the canonical symmetric finite-step effort: a
+  complete `Storage::discrete_gradient_rule` when declared, otherwise the
+  pinned Gonzalez midpoint formula. Both satisfy
+  `dg . (b - a) = H(b) - H(a)` in exact arithmetic.
   `Storage::midpoint_energy_remainder` optionally supplies a cancellation-stable
   evaluation of its original correction numerator. It must account for EVERY
   stored-energy contribution and the supplied actual midpoint; `None` retains
@@ -1237,8 +1239,8 @@ clones retain the same prepared tables without copying them.
 piecewise integral relative to a supported reference charge, allowing composite
 field/mechanical storage to keep unrelated curves' stable native remainder.
 
-Cancellation-stable analytic midpoint remainders are applied for every finite,
-nonzero represented squared increment. A large stationary coordinate cannot
+For the default Gonzalez rule, cancellation-stable analytic midpoint remainders
+are applied for every finite, nonzero represented squared increment. A large stationary coordinate cannot
 suppress the energy correction for a separate picofarad capacitor crossing a
 knot. The existing state-scale guard still protects the fallback that subtracts
 raw endpoint energies. Neither path invents a correction for an unrepresentable
@@ -1289,3 +1291,45 @@ coupled material-memory trajectory and each wave integral against independently
 integrated original physical equations; verify interval subdivision, selection
 permutation, more ports than states, inactive ports, tiny matched reflection,
 single-port compatibility, transactional refusals and warm allocation reuse.
+
+## Independent nonlinear capacitor work
+
+`Storage::discrete_gradient_rule` optionally declares a complete symmetric
+constitutive effort and its actual end-state Jacobian action. All contributions
+must belong to the original Hamiltonian. Default storage retains Gonzalez.
+Canonical, descriptor and prepared execution share this dispatch; direct sums,
+differential-only descriptor wrappers and shared storage retain the declaration.
+
+Native charge-curve storage uses each capacitor's own integral mean voltage,
+`integral(V dq) / delta(q)`, with the original voltage at coincidence. Other
+capacitors and inductors receive none of that curve's nonlinear correction.
+The remaining quadratic block retains reciprocal mutual-inductance energy,
+represented-midpoint rounding and the symmetric part of the admitted matrix.
+Same-segment evaluation is constant-time after bounded knot lookup; only crossed
+segments are visited otherwise. Callback execution allocates no memory and
+never squares a charge increment to recover its voltage. Both charge polarities,
+adjacent representable charges and supported 1e-180 C increments retain their
+component law.
+
+Descriptor Newton and explicitly analytic prepared stepping differentiate that
+actual finite-step effort. They do not substitute a midpoint Hessian or the
+derivative of a global Gonzalez correction. Prepared condensation assembles the
+actual base with zero unrelated rank-one correction, and nonlinear dissipative
+ports receive both the true effort derivative and their midpoint-state
+derivative. Missing owned analytic actions retain bounded descriptor probes;
+explicitly analytic prepared requests refuse. An exact quadratic metadata
+declaration cannot override an explicitly declared rule. At coincident curve
+knots the native right segment supplies a one-sided Newton representative
+(the last knot uses its left segment), not a unique sensitivity claim.
+
+Independent Hamiltonian changes, native resistance heat, port work, original
+residual ceilings and atomic acceptance remain in force. Descriptor arithmetic
+certificates use the actual local mean-effort operands. An owned rule does not
+inherit an endpoint-energy quotient rounding allowance it never evaluates.
+The seven `tests/circuit_local_work.rs` regressions independently check branch
+source work, an analytic nonlinear LC root, reciprocal inductor currents,
+large unrelated energy bias, SI-scale and adjacent-float increments, actual
+Jacobian actions and allocating/prepared/condensed parity. Prepared inline tests
+also check nonlinear dissipation, unavailable actions and shared-rule forwarding.
+This preserves discrete component work; source interpolation, kink regularity
+and temporal accuracy still require their own physical evidence.

@@ -213,6 +213,10 @@ pub(crate) fn residual_rounding_floor(
     additional_flow: &[f64],
 ) -> f64 {
     let n = x.len();
+    // A source-owned effort does not subtract total endpoint energies or
+    // divide their rounding envelope by a global increment. Importing that
+    // quotient here would excuse a real local residual beside unrelated bias.
+    let gonzalez = storage.discrete_gradient_rule().is_none();
     // Match the descriptor's differential-only Gonzalez correction. Algebraic
     // efforts enter the flow arithmetic below, never the energy quotient.
     let state_scale = x0[..n_diff]
@@ -229,13 +233,15 @@ pub(crate) fn residual_rounding_floor(
             .zip(x[..n_diff].iter().zip(&x0[..n_diff]))
             .map(|(g, (b, a))| (g * (b - a)).abs())
             .sum::<f64>();
-    let energy_floor =
-        arithmetic_rounding_floor(n.saturating_mul(4).saturating_add(8), energy_magnitude);
+    let energy_floor = if gonzalez {
+        arithmetic_rounding_floor(n.saturating_mul(4).saturating_add(8), energy_magnitude)
+    } else { 0.0 };
     // Only declared exact quadratics establish the midpoint Jacobian here.
     // A quadratic *part* of a nonlinear law cannot justify this bound.
     let quadratic_slope = storage
         .exact_quadratic_matrix()
-        .filter(|matrix| additional_flow.is_empty() && matrix.len() == n.saturating_mul(n) && n > 0)
+        .filter(|matrix| gonzalez && additional_flow.is_empty()
+            && matrix.len() == n.saturating_mul(n) && n > 0)
         .map(|matrix| {
             let norm = matrix
                 .chunks_exact(n)
@@ -254,7 +260,7 @@ pub(crate) fn residual_rounding_floor(
             let operator = j[row * n + col].abs() + r[row * n + col].abs();
             flow_norm += operator;
             flow_magnitude += operator * effort[col].abs();
-            if length2 > guard * guard && col < n_diff {
+            if gonzalez && length2 > guard * guard && col < n_diff {
                 propagated += operator * energy_floor * ((x[col] - x0[col]).abs() / length2);
             }
         }
