@@ -48,6 +48,9 @@
 
 use crate::{DescriptorPortHamiltonian, PhsError, QuadraticStorage, StepRecord, step_descriptor};
 
+/// Bounded charge/voltage laws on the original capacitor coordinates.
+pub mod capacitance;
+
 /// One circuit branch between two node indices (node 0 is GROUND).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Branch {

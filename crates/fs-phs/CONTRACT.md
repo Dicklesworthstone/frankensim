@@ -1175,3 +1175,34 @@ a supplied scale never extends source support or changes state units/tolerances.
 Original block and differential storage wrappers preserve the declaration.
 `tests/circuit_charge_scale.rs` checks independent midpoint RC updates from 1 F
 through 1 fF, mixed-size branches and weak-source charging at a biased node.
+
+## Nonlinear capacitor charge and energy
+
+`circuit::capacitance::assemble_circuit_with_capacitor_curves` binds bounded
+monotone charge/voltage curves to original capacitor branch indices, preserving
+the original descriptor and optional mutual-inductance matrix. Each curve keeps
+3..=4096 finite ordered knots, an interior uncharged (0,0) datum and positive
+representable differential capacitance. Voltage is dH/dq, differential C is
+dq/dV, and H is the exact integral of piecewise-linear V(q), rather than q*V/2
+or C(V)*V^2/2. Prepared slopes and knot energies make constitutive evaluation
+allocation-free; its midpoint remainder integrates local voltage differences
+across retained knots without subtracting large biased endpoint energies.
+
+No extra integrator or numerical loss is added. Original charge/flux order,
+Kirchhoff constraints, source ports, resistance and mutual inductance remain.
+`CircuitDae::capacitor_voltages` returns actual endpoint constitutive efforts;
+finite steps retain their distinct discrete-gradient efforts. The native
+numerical probe uses actual charge support, including realistic nF/pF/fF scales.
+Unsupported charge, unrepresentable energy, duplicate/wrong branch bindings or
+exhausted nonlinear work/domain bounds refuse without state publication.
+An empty curve list preserves the original assembled circuit.
+
+The eight `tests/circuit_capacitance.rs` regressions compare independent analytic
+piecewise RC trajectories and second-order refinement, nonlinear LC energy,
+small-capacitance similarity, uncharged source-driven startup, interleaved
+charge/flux and mutual-inductance mapping, biased small energy increments and
+malformed/source-domain refusals. Authored curves supply no inferred material
+authority, interpolation-error bound, extrapolation, absorption, leakage,
+hysteresis, breakdown, temperature evolution or switching behavior.
+`MaterialCircuit` thermal/material rebuilds do not yet retain these nonlinear
+bindings; the native `CircuitDae` API is their current integration boundary.
