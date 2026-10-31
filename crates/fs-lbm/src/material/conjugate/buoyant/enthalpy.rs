@@ -1,4 +1,7 @@
-//! Original caloric laws on the existing steady material/flow fixed point.
+//! Original caloric laws on the existing material/flow fixed point and clock.
+
+mod transient;
+pub use transient::{MaterialEnthalpyMarch, MaterialEnthalpyStepReport, MaterialEnthalpyTransientConfig};
 
 use super::{
     MaterialBuoyancyConfig, MaterialBuoyancyError, MaterialBuoyancySolution, MaterialChtFluid,
@@ -8,10 +11,12 @@ use crate::conjugate::{
     AffineSpecificEnthalpy, ConvectionScheme, EnergyConfig, FlowField, SimpleConfig, SolidMaterial,
     ThermalFace, ThermalSetup, VoxelDomain,
 };
+use crate::material::transport::boussinesq::BoussinesqConfig;
 use fs_exec::CancelGate;
 use fs_material::{
     MaterialError,
     fluid_transport::{FluidTransport, FluidTransportState},
+    gas_species::input::temperature::IsobaricGasLaw,
     phase::ResolvedHeatCapacityCurve,
     thermochemical_gas::energy::enthalpy::GasEnthalpyLaw,
 };
@@ -40,7 +45,7 @@ pub trait ConvectionCaloricLaw {
 
 fn source_error(error: impl core::fmt::Display) -> MaterialError {
     MaterialError::State {
-        what: format!("steady convection caloric law: {error}"),
+        what: format!("convection caloric law: {error}"),
     }
 }
 
@@ -58,6 +63,24 @@ impl ConvectionCaloricLaw for ResolvedHeatCapacityCurve {
             heat_capacity_j_kg_k: self
                 .secant_heat_capacity(temperature_k, temperature_k)
                 .map_err(source_error)?,
+        })
+    }
+}
+
+impl ConvectionCaloricLaw for IsobaricGasLaw {
+    fn tangent_at_temperature(
+        &self,
+        reference_temperature_k: f64,
+        temperature_k: f64,
+    ) -> Result<AffineSpecificEnthalpy, MaterialError> {
+        let temperature = Temperature::new(temperature_k);
+        let endpoint = self.at_temperature(temperature)?;
+        Ok(AffineSpecificEnthalpy {
+            temperature_k,
+            enthalpy_j_kg: self.specific_enthalpy_change(
+                Temperature::new(reference_temperature_k), temperature,
+            )?,
+            heat_capacity_j_kg_k: endpoint.state().specific_heat_cp,
         })
     }
 }
@@ -173,7 +196,7 @@ impl CaloricCoupling<'_> {
         self,
         temperature_k: f64,
         reference: &FluidTransportState,
-        controls: MaterialBuoyancyConfig,
+        controls: BoussinesqConfig<3>,
     ) -> Result<AffineSpecificEnthalpy, MaterialBuoyancyError> {
         let sample = self
             .law
@@ -191,7 +214,7 @@ impl CaloricCoupling<'_> {
             || !cp.is_finite()
             || cp <= 0.0
             || ((cp - reference_cp) / reference_cp).abs()
-                > controls.boussinesq.max_relative_specific_heat_departure
+                > controls.max_relative_specific_heat_departure
         {
             return Err(MaterialBuoyancyError::Invalid(
                 "caloric tangent must match its temperature and original positive-Cp departure bound",
@@ -205,10 +228,24 @@ impl CaloricCoupling<'_> {
         domain: &VoxelDomain,
         temperatures: &[f64],
         reference: &FluidTransportState,
-        controls: MaterialBuoyancyConfig,
+        controls: BoussinesqConfig<3>,
         gate: &CancelGate,
     ) -> Result<Vec<Option<AffineSpecificEnthalpy>>, MaterialBuoyancyError> {
         let mut field = Vec::with_capacity(domain.cell_count());
+        self.write_field(domain, temperatures, reference, controls, &mut field, gate)?;
+        Ok(field)
+    }
+
+    fn write_field(
+        self,
+        domain: &VoxelDomain,
+        temperatures: &[f64],
+        reference: &FluidTransportState,
+        controls: BoussinesqConfig<3>,
+        field: &mut Vec<Option<AffineSpecificEnthalpy>>,
+        gate: &CancelGate,
+    ) -> Result<(), MaterialBuoyancyError> {
+        field.clear();
         for (cell, &temperature) in temperatures.iter().enumerate() {
             poll(gate)?;
             field.push(if domain.is_fluid(cell) {
@@ -217,14 +254,14 @@ impl CaloricCoupling<'_> {
                 None
             });
         }
-        Ok(field)
+        Ok(())
     }
 
     pub(super) fn boundaries(
         self,
         setup: &ThermalSetup,
         reference: &FluidTransportState,
-        controls: MaterialBuoyancyConfig,
+        controls: BoussinesqConfig<3>,
         gate: &CancelGate,
     ) -> Result<[Option<f64>; 6], MaterialBuoyancyError> {
         let mut values = [None; 6];
@@ -251,8 +288,23 @@ pub(super) fn defects(
     endpoint: &[Option<AffineSpecificEnthalpy>],
     gate: &CancelGate,
 ) -> Result<MaterialEnthalpyReport, MaterialBuoyancyError> {
-    let mut report = MaterialEnthalpyReport::default();
     let mut cell_defects = vec![0.0; domain.cell_count()];
+    defect_field(domain, flow, density, temperatures, applied, endpoint, &mut cell_defects, gate)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn defect_field(
+    domain: &VoxelDomain,
+    flow: &FlowField,
+    density: f64,
+    temperatures: &[f64],
+    applied: &[Option<AffineSpecificEnthalpy>],
+    endpoint: &[Option<AffineSpecificEnthalpy>],
+    cell_defects: &mut [f64],
+    gate: &CancelGate,
+) -> Result<MaterialEnthalpyReport, MaterialBuoyancyError> {
+    let mut report = MaterialEnthalpyReport::default();
+    cell_defects.fill(0.0);
     for cell in 0..domain.cell_count() {
         poll(gate)?;
         for face in 0..6 {
@@ -292,7 +344,7 @@ pub(super) fn defects(
                 report.maximum_face_flux_defect_w.max(difference.abs());
         }
     }
-    report.maximum_cell_flux_defect_w = cell_defects.into_iter().map(f64::abs).fold(0.0, f64::max);
+    report.maximum_cell_flux_defect_w = cell_defects.iter().copied().map(f64::abs).fold(0.0, f64::max);
     Ok(report)
 }
 

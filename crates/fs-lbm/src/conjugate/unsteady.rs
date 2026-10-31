@@ -47,12 +47,13 @@ mod material;
 pub(super) use material::MaterialMomentum;
 
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
-use super::energy::{EnergyConfig, ThermalSetup};
+use super::energy::{AdvectiveEnthalpyField, EnergyConfig, EnergySolution, ThermalSetup};
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
 use super::simple::sgs::FvSgsConfig;
 use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
-use super::transient::{TransientRecord, energy_step_with_conductivity, heat_capacity};
+use super::transient::{TransientRecord, energy_step_with_conductivity, heat_capacity,
+    record_energy_step, solve_step_with_fields};
 use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
 
@@ -522,7 +523,7 @@ pub(crate) struct MaterialHeatStep<'a> {
     pub time_step_s: f64,
     fluid: &'a FluidProperties,
     solids: &'a [SolidMaterial],
-    flow: &'a FlowField,
+    pub flow: &'a FlowField,
     energy: &'a EnergyConfig,
     solids_present: bool,
     radiation: Option<(&'a Radiators, &'a RadiationConfig)>,
@@ -550,6 +551,33 @@ impl MaterialHeatStep<'_> {
             Some(conductivity_w_m_k),
             self.gate,
         )
+    }
+
+    /// Source-caloric face transport on this same accepted native interval.
+    /// The original endpoint radiation owner also consumes the solve budget.
+    pub(crate) fn solve_with_enthalpy(
+        &self,
+        storage_w_k: &[f64],
+        conductivity_w_m_k: &[[f64; 3]],
+        enthalpy: AdvectiveEnthalpyField<'_>,
+        remaining_solves: &mut usize,
+    ) -> Result<(EnergySolution, f64, f64), ChtError> {
+        solve_step_with_fields(self.domain, self.fluid, self.solids, self.flow,
+            self.setup, self.energy, storage_w_k, self.previous_temperature_k, self.radiation,
+            Some(conductivity_w_m_k), Some(enthalpy), Some(remaining_solves), self.gate)
+    }
+
+    /// Actual constitutive storage with the original boundary/reservoir ledger.
+    pub(crate) fn record_with_enthalpy(
+        &self,
+        solution: &EnergySolution,
+        stored_by_cell_j: &[f64],
+        radiated_w: f64,
+        outflow_correction_w: f64,
+    ) -> Result<TransientRecord, ChtError> {
+        record_energy_step(self.domain, self.setup, solution, |cell| stored_by_cell_j[cell],
+            (self.time_s, self.time_step_s, self.solids_present),
+            radiated_w, outflow_correction_w)
     }
 }
 

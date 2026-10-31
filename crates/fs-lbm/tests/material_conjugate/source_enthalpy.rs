@@ -17,6 +17,9 @@ use fs_material::state_point::{
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, QuantitySpec, Temperature};
 
+#[path = "source_enthalpy/transient.rs"]
+mod transient;
+
 fn absolute() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,

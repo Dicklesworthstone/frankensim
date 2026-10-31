@@ -19,7 +19,8 @@ pub use solid::{MaterialSolidBuoyancyMarch, SolidThermalConfig, SolidThermalReco
 
 /// Native transient solution with the exact final applied and endpoint sources.
 pub struct MaterialBuoyancyMarch<F> {
-    /// Fixed reference inertia, continuity and sensible-heat storage.
+    /// Fixed reference inertia and continuity. Sensible storage uses reference
+    /// Cp unless an explicit source-caloric coupling was selected.
     pub reference: FluidTransportState,
     /// Original time histories, conservative fluxes, temperatures and heat ledger.
     pub march: ConjugateMarch,
@@ -88,7 +89,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn march_natural_convection_inner<S: FluidTransport>(
+    pub(super) fn march_natural_convection_inner<S: FluidTransport>(
         &self,
         domain: &VoxelDomain,
         solids: &[SolidMaterial],

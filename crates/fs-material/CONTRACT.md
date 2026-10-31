@@ -1070,6 +1070,15 @@ compressible inertia, phase equilibrium or experimental validation is implied.
 G0/G3 unit tests cover fixed-composition EOS scaling, viscosity/conductivity
 response, humid cooling refusal and source/domain preservation.
 
+`IsobaricGasLaw::specific_enthalpy_change` supplies the retained gas's relative
+isobaric h increment without subtracting large formation enthalpies. Legacy
+and named engineering gases use their original constant mixture Cp; canonical
+thermochemical gases use the original NASA-9 difference. Both endpoint states
+retain source/phase admission, and crossed NASA source gaps refuse. Contiguous
+raw-region reference jumps remain authored; only an explicitly reconciled
+source integrates a continuous piecewise Cp branch. The operation preserves
+pressure/composition and refuses nonfinite or nonpositive-Cp-directed changes.
+
 Frozen gas parcels and nozzles use the thermochemical owner's direct entropy
 differences instead of subtracting absolute reference entropies. The relative
 density/entropy closure targets a requested change from the retained initial

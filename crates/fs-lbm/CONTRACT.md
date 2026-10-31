@@ -75,7 +75,7 @@ the actual fluid buoyancy and circulation while conserving heat.
 `with_material_solids_and_enthalpy` counterpart reuse the existing steady
 material/momentum/heat fixed point with the original fluid's full h(T).
 `ConvectionCaloricLaw` adapters borrow `ResolvedHeatCapacityCurve` or
-`GasEnthalpyLaw`; the caller binds that same fluid and fixed source context to
+`GasEnthalpyLaw` or the retained `IsobaricGasLaw`; the caller binds that same fluid and fixed source context to
 the transport resolver. This correspondence is a caller contract; the chart's
 chord Cp can differ from raw source Cp within its admitted interpolation
 approximation, so no arbitrary pointwise equality is imposed. Every incident
@@ -101,6 +101,41 @@ remain shared; latent plateaux, variable-density mass transport and pressure
 work remain outside this steady single-phase entry. `material_conjugate`'s
 `source_enthalpy` regressions specify actual channel heat, source Cp(T) changes,
 reversed flow, datum invariance, local closure and atomic refusal.
+
+### Source-caloric native transient convection
+
+`MaterialChtFluid::march_natural_convection_with_enthalpy` extends the SAME
+native unsteady material march with source-law storage and upwind transport.
+Reference `rho0 V` remains each fluid cell's mass; direct original-law
+`h(T_new)-h(T_old)` replaces frozen-Cp sensible storage. Positive source
+secants enter the original backward-Euler storage diagonal, while complete
+donor h and positive tangents enter the existing conservative face operator.
+Every nonlinear trial retains the original accepted old temperature and the
+same projected native flow: a caloric iteration never advances physical time.
+The native MAC momentum/pressure state and BE/BDF2 history remain intact.
+
+Acceptance checks unrelaxed temperature change, EACH cell's true storage-rate
+defect, EACH face and cell's nonlinear advective heat defect, and the actual
+source-law heat closure. Global cancellation cannot hide local errors.
+Fixed-cell reservoirs include their exact source-law storage jump, contacts
+and fixed solid heat capacity retain their ordinary owners, and endpoint
+radiation uses the original converged radiation law. The shared native heat
+record reports true stored enthalpy and physical boundary/reservoir heat.
+Explicit per-step caloric-pass and whole-march linear-energy-solve ceilings
+bound work; the latter counts radiation trials as well. Domain/boundary,
+conservation, budget, solve or cancellation refusal publishes no partial march.
+
+Material density, viscosity, conductivity and buoyancy still refresh at each
+accepted time level, with their original density AND raw/chart-Cp departure
+limits. This is FIRST ORDER coupled time accuracy, even with BDF2 momentum;
+the source coefficients retain the existing explicit lag. Caloric/transport
+source identity and fixed pressure/composition correspondence remain the
+caller's contract. No latent plateau, variable mass, pressure work, viscous
+heating or new physical energy store is introduced. Focused `source_enthalpy`
+transient cases specify independent heating/channel enthalpy recurrences,
+reversed flow and datum shifts, native buoyant Darcy time history with exact
+thermostat storage, and transactional refusals. These are regression definitions,
+not an assertion that a native validation run or measured campaign completed.
 
 ### Source calorimetry in native unsteady material convection
 
@@ -2303,11 +2338,17 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
   through a porous block stalled at a "residual" of 0.3). Inner solves only reduce their
   entry residuals (by `momentum_tolerance`, default 0.1, and
   `pressure_tolerance`, default 0.01), so a converged report never rests on a
-  skipped inner solve; one tight final correction (1e-8 of the converged
-  imbalance) then hands the energy equation a projected flux field. Budget
+  skipped inner solve; tight final corrections (1e-8 of each entry imbalance)
+  then hand the energy equation a projected flux field. Budget
   exhaustion refuses as `FlowNotSteady`; non-finite velocities or pressures
   after any momentum solve or correction refuse as `FlowDiverged` before they
   reach an incomplete factorization.
+  Both steady handoff and transient checkpoints require every fluid cell's
+  native volume flux to satisfy `abs(sum Q) <= 128 * f64::EPSILON * sum(abs Q)`.
+  At most four corrections reuse the same pressure operator; unresolved local
+  continuity refuses without clipping fixed faces or quiet circulation. The
+  added `pressure_projection` regressions cover the multiscale failure and
+  caloric handoff, but have not been executed in this change's environment.
 - `SimpleConfig::fan` puts a piecewise-linear `FanCurve` (static pressure rise
   against flow) on one `Inlet` face: the face's uniform normal inflow is the
   operating point where the curve meets the mean pressure of the fluid layer

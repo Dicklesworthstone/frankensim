@@ -31,7 +31,7 @@
 use fs_exec::CancelGate;
 
 use super::domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
-use super::energy::{EnergyConfig, EnergySolution, PseudoStep, ThermalSetup, solve_energy_inner};
+use super::energy::{AdvectiveEnthalpyField, EnergyConfig, EnergySolution, PseudoStep, ThermalSetup, solve_energy_inner};
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
 use super::{ChtError, finite, finite_positive, poll};
@@ -56,8 +56,8 @@ pub struct TransientRecord {
     pub max_temperature_k: f64,
     /// Largest solid-cell temperature, K (NaN without solids).
     pub max_solid_temperature_k: f64,
-    /// Stored-energy increment, J. Ordinary constant-storage steps use
-    /// `sum C (T^(n+1) - T^n)`; sourced solid coupling uses its exact Cp integral.
+    /// Actual stored-energy change, J: `sum C delta(T)` for fixed Cp, or
+    /// `sum rho0 V delta(h)` for explicitly coupled fluid or solid calorics.
     pub stored_energy_change_j: f64,
     /// `dt * sources`, J.
     pub source_j: f64,
@@ -247,11 +247,26 @@ pub(crate) fn energy_step_with_conductivity(
         domain, fluid, solids, flow, setup, energy, storage, previous, radiation,
         molecular_w_m_k, gate,
     )?;
-    let stored: f64 = capacity
-        .iter()
-        .zip(next.temperature.iter().zip(previous))
-        .map(|(c, (a, b))| c * (a - b))
-        .sum();
+    let record = record_energy_step(domain, setup, &next,
+        |cell| capacity[cell] * (next.temperature[cell] - previous[cell]),
+        (time_s, dt, solids_present), radiated_w, radiation_outflow_correction_w)?;
+    Ok((next.temperature, record))
+}
+
+/// One physical heat ledger for constant-Cp and source-caloric steps. Storage
+/// is evaluated by its constitutive owner, while fixed reservoirs, sinks and
+/// boundary/radiative transport retain the native accounting and signs.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn record_energy_step(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    next: &EnergySolution,
+    stored_by_cell: impl Fn(usize) -> f64,
+    (time_s, dt, solids_present): (f64, f64, bool),
+    radiated_w: f64,
+    outflow_correction_w: f64,
+) -> Result<TransientRecord, ChtError> {
+    let stored: f64 = (0..domain.cell_count()).map(&stored_by_cell).sum();
     let balance = next.report.balance;
     let source_j = balance.source_w * dt;
     // Prescribed cells may jump from the initial state. Their reservoir
@@ -262,11 +277,11 @@ pub(crate) fn energy_step_with_conductivity(
     fixed_cells.dedup();
     let fixed_storage_j: f64 = fixed_cells
         .iter()
-        .map(|&cell| capacity[cell] * (next.temperature[cell] - previous[cell]))
+        .map(|&cell| stored_by_cell(cell))
         .sum();
     let boundary_outflow_j = (balance.boundary_outflow_w + balance.sink_outflow_w
         - balance.fixed_cell_injection_w
-        + radiation_outflow_correction_w)
+        + outflow_correction_w)
         * dt
         - fixed_storage_j;
     let max_temperature_k = next
@@ -291,7 +306,11 @@ pub(crate) fn energy_step_with_conductivity(
         radiated_w,
         iterations: next.report.iterations,
     };
-    Ok((next.temperature, record))
+    for value in [record.stored_energy_change_j, record.source_j,
+        record.boundary_outflow_j, record.closure_j] {
+        finite("transient.energy_record", value)?;
+    }
+    Ok(record)
 }
 
 /// Solve one endpoint, returning its external radiation and the correction
@@ -311,17 +330,49 @@ fn solve_step(
     molecular_w_m_k: Option<&[[f64; 3]]>,
     gate: &CancelGate,
 ) -> Result<(EnergySolution, f64, f64), ChtError> {
-    let solve = |setup: &ThermalSetup| {
+    solve_step_with_fields(domain, fluid, solids, flow, setup, energy, storage,
+        previous, radiation, molecular_w_m_k, None, None, gate)
+}
+
+/// Original endpoint radiation iteration and energy kernel, with optional
+/// source h(T) faces and a shared whole-march count of actual linear solves.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn solve_step_with_fields(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    energy: &EnergyConfig,
+    storage: &[f64],
+    previous: &[f64],
+    radiation: Option<(&Radiators, &RadiationConfig)>,
+    molecular_w_m_k: Option<&[[f64; 3]]>,
+    enthalpy: Option<AdvectiveEnthalpyField<'_>>,
+    mut remaining_solves: Option<&mut usize>,
+    gate: &CancelGate,
+) -> Result<(EnergySolution, f64, f64), ChtError> {
+    let mut solve = |setup: &ThermalSetup| {
+        poll(gate)?;
+        if let Some(remaining) = remaining_solves.as_deref_mut() {
+            *remaining = remaining.checked_sub(1).ok_or_else(|| ChtError::InvalidInput {
+                field: "unsteady.material_energy_solves",
+                reason: "whole-march source-caloric energy-solve budget exhausted".into(),
+            })?;
+        }
         // This is the time level, not the previous radiation iterate.
         let step = PseudoStep {
             coefficient_w_k: storage,
             previous,
         };
-        match molecular_w_m_k {
-            Some(field) => energy.solve_step_with_conductivity(
+        match (molecular_w_m_k, enthalpy) {
+            (Some(field), Some(caloric)) => energy.solve_step_with_enthalpy(
+                domain, fluid, solids, flow, setup, field, caloric, &step, gate,
+            ),
+            (Some(field), None) => energy.solve_step_with_conductivity(
                 domain, fluid, solids, flow, setup, field, &step, gate,
             ),
-            None => solve_energy_inner(
+            (None, None) => solve_energy_inner(
                 domain,
                 fluid,
                 solids,
@@ -331,6 +382,10 @@ fn solve_step(
                 Some(&step),
                 gate,
             ),
+            (None, Some(_)) => Err(ChtError::InvalidInput {
+                field: "unsteady.material_enthalpy",
+                reason: "source-caloric transport requires its original material conductivity".into(),
+            }),
         }
     };
     let Some((radiators, controls)) = radiation else {

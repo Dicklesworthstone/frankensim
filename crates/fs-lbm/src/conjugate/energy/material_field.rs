@@ -80,6 +80,25 @@ impl EnergyConfig {
         )
     }
 
+    /// The same native storage diagonal with source-caloric face transport.
+    /// Nonlinear storage and caloric convergence remain the caller's owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_step_with_enthalpy(
+        &self,
+        domain: &VoxelDomain,
+        fluid: &FluidProperties,
+        solids: &[SolidMaterial],
+        flow: &FlowField,
+        setup: &ThermalSetup,
+        molecular_w_m_k: &[[f64; 3]],
+        enthalpy: AdvectiveEnthalpyField<'_>,
+        step: &PseudoStep<'_>,
+        gate: &CancelGate,
+    ) -> Result<EnergySolution, ChtError> {
+        self.solve_with_fields(domain, fluid, solids, flow, setup, molecular_w_m_k,
+            Some(enthalpy), Some(step), gate)
+    }
+
     /// Steady conservative transport of a frozen source-caloric linearization.
     ///
     /// Each interior face carries one donor's `rho * Q * h(T)` on both sides;

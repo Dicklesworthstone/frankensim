@@ -135,6 +135,21 @@ pub enum MaterialBuoyancyError {
         material: MaterialBuoyancyReport,
         enthalpy: MaterialEnthalpyReport,
     },
+    /// A source-caloric transient exhausted its per-step nonlinear budget.
+    EnthalpyStepNotConverged {
+        /// Candidate physical time, s; no endpoint was published.
+        time_s: f64,
+        /// Caloric linearizations completed for this candidate.
+        passes: usize,
+        /// Unrelaxed temperature defect, K.
+        temperature_defect_k: f64,
+        /// Largest local true-minus-affine storage rate, W.
+        storage_defect_w: f64,
+        /// Local true-minus-affine face/cell transport defects.
+        enthalpy: MaterialEnthalpyReport,
+        /// Actual source-law heat ledger closure, J.
+        closure_j: f64,
+    },
 }
 impl core::fmt::Display for MaterialBuoyancyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -412,10 +427,10 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         }
         // Boundary data belong to the same immutable caloric source and common
         // datum. They stay at their actual inlet/backflow temperatures.
-        let boundary_h = caloric.map(|law| law.boundaries(thermal, &self.transport, config, gate))
+        let boundary_h = caloric.map(|law| law.boundaries(thermal, &self.transport, config.boussinesq, gate))
             .transpose()?.unwrap_or([None; 6]);
         let mut caloric_applied = caloric.map(|law|
-            law.field(domain, &temperature, &self.transport, config, gate)).transpose()?;
+            law.field(domain, &temperature, &self.transport, config.boussinesq, gate)).transpose()?;
         let mut viscosity = vec![self.transport.dynamic_viscosity_pa_s(); domain.cell_count()];
         let mut force = vec![[0.0; 3]; domain.cell_count()];
         let mut seeded = false;
@@ -496,7 +511,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                 )?;
                 solid_applied = solid_samples(domain, &temperature, solid_sources, gate)?;
                 caloric_applied = caloric.map(|law|
-                    law.field(domain, &temperature, &self.transport, config, gate)).transpose()?;
+                    law.field(domain, &temperature, &self.transport, config.boussinesq, gate)).transpose()?;
                 seeded = true;
             };
             let endpoint = samples(
@@ -509,7 +524,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             )?;
             let solid_endpoint = solid_samples(domain, &energy.temperature, solid_sources, gate)?;
             let caloric_endpoint = caloric.map(|law|
-                law.field(domain, &energy.temperature, &self.transport, config, gate)).transpose()?;
+                law.field(domain, &energy.temperature, &self.transport, config.boussinesq, gate)).transpose()?;
             let caloric_report = if let (Some(old), Some(next)) = (&caloric_applied, &caloric_endpoint) {
                 Some(enthalpy::defects(domain, &flow.field, self.transport.density_kg_m3(),
                     &energy.temperature, old, next, gate)?)
@@ -603,7 +618,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                 )?;
                 solid_applied = solid_samples(domain, &temperature, solid_sources, gate)?;
                 caloric_applied = caloric.map(|law|
-                    law.field(domain, &temperature, &self.transport, config, gate)).transpose()?;
+                    law.field(domain, &temperature, &self.transport, config.boussinesq, gate)).transpose()?;
             }
         }
         unreachable!("positive bounded pass count either accepts or refuses its final pass")

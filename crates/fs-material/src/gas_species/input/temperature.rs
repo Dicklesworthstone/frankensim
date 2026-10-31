@@ -119,6 +119,78 @@ impl IsobaricGasLaw {
         &self.reference
     }
 
+    /// Isobaric specific enthalpy change `h(to) - h(from)` [J/kg] of this
+    /// same retained gas. Both endpoints retain the original pressure,
+    /// composition, source claims and phase/domain admission.
+    ///
+    /// Thermochemical gases evaluate their original NASA-9 enthalpy changes
+    /// without subtracting large absolute formation enthalpies. Crossed
+    /// temperatures must have contiguous source coverage. Raw region-reference
+    /// jumps remain as authored; this check neither reconciles those jumps nor
+    /// certifies a continuous caloric branch. An explicitly reconciled model
+    /// integrates its retained piecewise Cp chart across each seam.
+    /// Legacy and named-species engineering models are
+    /// calorically perfect, so their own constant mixture Cp gives the exact
+    /// change within that declared model. No gas is replaced by dry air.
+    ///
+    /// # Errors
+    /// Refuses unsupported endpoints, supersaturation, caloric source gaps or
+    /// a nonzero enthalpy change that is not finite, representable, or directed
+    /// consistently with the positive-Cp temperature change.
+    pub fn specific_enthalpy_change(
+        &self,
+        from: Temperature,
+        to: Temperature,
+    ) -> Result<f64, MaterialError> {
+        if from.value() != self.reference.state().temperature {
+            self.at_temperature(from)?;
+        }
+        let endpoint = self.at_temperature(to)?;
+        let delta = to.value() - from.value();
+        let change = match &self.source {
+            Source::Thermochemical { model, .. } => {
+                let lower = from.value().min(to.value());
+                let upper = from.value().max(to.value());
+                // Raw NASA-9 endpoint differences intentionally allow gaps.
+                // A thermal increment needs support along the crossed path,
+                // without altering the retained source-reference convention.
+                for component in model.thermodynamics().components() {
+                    for pair in component.regions().windows(2) {
+                        let end = pair[0].temperature_max().value();
+                        let start = pair[1].temperature_min().value();
+                        if end < start && lower < start && upper > end {
+                            return Err(MaterialError::State {
+                                what: format!(
+                                    "retained gas caloric source {} has an unsupported temperature gap ({end}, {start}) K",
+                                    component.species().as_str()
+                                ),
+                            });
+                        }
+                    }
+                }
+                model
+                    .thermodynamics()
+                    .specific_enthalpy_change(from, to)
+                    .map_err(|error| MaterialError::State {
+                        what: format!("retained gas caloric source: {error}"),
+                    })?
+                    .value()
+            }
+            Source::MoistAir { .. } | Source::Mixture { .. } => {
+                endpoint.state().specific_heat_cp * delta
+            }
+        };
+        if !change.is_finite()
+            || (delta != 0.0
+                && (change == 0.0 || change.is_sign_positive() != delta.is_sign_positive()))
+        {
+            return Err(MaterialError::State {
+                what: "retained gas enthalpy change must be finite, representable and follow positive Cp".into(),
+            });
+        }
+        Ok(change)
+    }
+
     /// Resolve all properties at one local absolute temperature and the
     /// original pressure/composition. Does not mutate the reference or model.
     /// Supersaturation in legacy/named humid gases and source-domain failures
@@ -253,6 +325,121 @@ mod tests {
     }
 
     #[test]
+    fn retained_gas_caloric_change_uses_its_own_composition_and_reverses() {
+        for text in [
+            "300 100000 0",
+            "300 100000 0.5",
+            "mixture 300 100000 mole 2 He 0.4 N2 0.6",
+        ] {
+            let law = law(text);
+            let (a, b) = (Temperature::new(300.0), Temperature::new(310.0));
+            let change = law.specific_enthalpy_change(a, b).unwrap();
+            assert_eq!(change, law.reference().state().specific_heat_cp * 10.0);
+            assert_eq!(law.specific_enthalpy_change(b, a).unwrap(), -change);
+            assert_eq!(law.specific_enthalpy_change(a, a).unwrap(), 0.0);
+        }
+        let humid = law("300 100000 0.9");
+        assert!(
+            humid
+                .specific_enthalpy_change(Temperature::new(300.0), Temperature::new(280.0))
+                .is_err()
+        );
+        assert!(
+            humid
+                .specific_enthalpy_change(Temperature::new(280.0), Temperature::new(300.0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_caloric_path_refuses_gaps_without_rewriting_raw_region_references() {
+        use crate::thermochemical_gas::tests::{point, species_in_domain, transport_in_domain};
+        use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
+        use fs_thermochem::{Nasa9StandardStateModelV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
+
+        for gap in [0.0, 10.0] {
+            let low = species_in_domain("A", 0.028, 3.5, 0.001, 1e18, [250.0, 300.0]);
+            let high =
+                species_in_domain("A", 0.028, 3.5, 0.001, 1e18 + 1024.0, [300.0 + gap, 400.0]);
+            let species = Nasa9StandardStateModelV1::new(
+                low.species().clone(),
+                low.molar_mass(),
+                low.convention().clone(),
+                vec![low.regions()[0].clone(), high.regions()[0].clone()],
+            )
+            .unwrap();
+            let model = ThermochemicalGasModel::new(
+                FrozenIdealGasMixtureModelV1::new(
+                    vec![species],
+                    Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+                )
+                .unwrap(),
+                vec![transport_in_domain(
+                    "A",
+                    1.7e-5,
+                    0.025,
+                    [250.0, 400.0],
+                    [50000.0, 150000.0],
+                )],
+                None,
+            )
+            .unwrap();
+            let law =
+                IsobaricGasLaw::try_from_model(model.clone(), point(280.0, 100000.0)).unwrap();
+            for (a, b) in [(280.0, 290.0), (320.0, 330.0)] {
+                let (a, b) = (Temperature::new(a), Temperature::new(b));
+                let change = law.specific_enthalpy_change(a, b).unwrap();
+                assert_eq!(
+                    change,
+                    model
+                        .thermodynamics()
+                        .specific_enthalpy_change(a, b)
+                        .unwrap()
+                        .value()
+                );
+                assert_eq!(law.specific_enthalpy_change(b, a).unwrap(), -change);
+            }
+            // Stable relative arithmetic survives a formation reference that
+            // would erase this small sensible increment by absolute subtraction.
+            let (a, b) = (289.0, 289.0 + 1e-6);
+            let change = law
+                .specific_enthalpy_change(Temperature::new(a), Temperature::new(b))
+                .unwrap();
+            let expected = (R / 0.028) * (3.5 + 0.0005 * (a + b)) * (b - a);
+            assert!((change / expected - 1.0).abs() < 1e-13);
+
+            let (a, b) = (Temperature::new(290.0), Temperature::new(320.0));
+            // Both original endpoints, and the raw endpoint-difference API,
+            // support this query even when the intervening 300..310 K does not.
+            law.at_temperature(a).unwrap();
+            law.at_temperature(b).unwrap();
+            let original = model
+                .thermodynamics()
+                .specific_enthalpy_change(a, b)
+                .unwrap()
+                .value();
+            if gap == 0.0 {
+                assert_eq!(law.specific_enthalpy_change(a, b).unwrap(), original);
+                assert_eq!(law.specific_enthalpy_change(b, a).unwrap(), -original);
+                let continuous_cp_increment = (R / 0.028) * (3.5 + 0.0005 * 610.0) * 30.0;
+                assert!(
+                    (original - continuous_cp_increment).abs() > 500.0,
+                    "the original region-reference jump must not be silently removed"
+                );
+            } else {
+                for (from, to) in [
+                    (a, b),
+                    (b, a),
+                    (Temperature::new(300.0), Temperature::new(310.0)),
+                ] {
+                    let error = law.specific_enthalpy_change(from, to).unwrap_err();
+                    assert!(error.to_string().contains("unsupported temperature gap"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn thermochemical_feedback_retains_the_original_models_and_query_conditions() {
         use crate::thermochemical_gas::tests::{model_in_domains, point};
         let model = model_in_domains(
@@ -276,5 +463,23 @@ mod tests {
         assert!(law.at_temperature(Temperature::new(340.0)).is_err());
         assert!(IsobaricGasLaw::try_from_record(law.reference().clone()).is_err());
         assert_eq!(law.reference().state().temperature, 300.0);
+        let change = law
+            .specific_enthalpy_change(Temperature::new(300.0), Temperature::new(315.0))
+            .unwrap();
+        let expected = model
+            .thermodynamics()
+            .specific_enthalpy_change(Temperature::new(300.0), Temperature::new(315.0))
+            .unwrap()
+            .value();
+        assert_eq!(change, expected);
+        assert_eq!(
+            law.specific_enthalpy_change(Temperature::new(315.0), Temperature::new(300.0))
+                .unwrap(),
+            -change
+        );
+        assert!(
+            law.specific_enthalpy_change(Temperature::new(300.0), Temperature::new(340.0))
+                .is_err()
+        );
     }
 }
