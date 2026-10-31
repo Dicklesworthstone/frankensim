@@ -118,9 +118,9 @@ pub struct LayerThermalFrame<S> {
     /// Already included in the mechanical report, so removed once from the
     /// combined external loss account. Never includes stored spring energy.
     pub routed_series_drive_heat_j: f64,
-    /// Independently integrated original bulk Maxwell resistance channels.
-    /// These are already in network_dissipation_j and are removed exactly once
-    /// from the combined external loss account after entering their cells.
+    /// Original linear Maxwell and nonlinear hereditary source losses.
+    /// Both already belong to network_dissipation_j and are removed exactly once
+    /// from the combined external loss account after entering their finite bodies.
     pub routed_material_heat_j: f64,
     /// Original dry friction loss delivered to the same finite thermal cells.
     pub routed_dry_heat_j: f64,
@@ -630,15 +630,21 @@ impl MultiFrictionModalSystem {
             return Err(LayerThermalError::Invalid("material heat channels exceed the declared finite-body budget"));
         }
         let mut heated_branches = BTreeSet::new();
+        let mut heated_histories = BTreeSet::new();
         let mut heated_material_cells = BTreeSet::new();
         for route in material_heat {
             checkpoint()?;
             if !heated_material_cells.insert(route.cell) {
                 return Err(LayerThermalError::Invalid("distinct material volumes need distinct finite receiving cells"));
             }
-            if route.channel.groups().iter().flat_map(|r| r.clone())
-                .any(|branch| !heated_branches.insert(branch)) {
+            if route.channel.as_ref().is_some_and(|channel| channel.groups().iter()
+                .flat_map(|r| r.clone()).any(|branch| !heated_branches.insert(branch))) {
                 return Err(LayerThermalError::Invalid("an original material resistance may heat its body only once"));
+            }
+            for source in &route.nonlinear_channels {
+                if !heated_histories.insert(source.key(&self.core)?) {
+                    return Err(LayerThermalError::Invalid("an original nonlinear material source may heat its body only once"));
+                }
             }
             route.admit(thermal)?;
         }
@@ -790,22 +796,35 @@ impl MultiFrictionModalSystem {
                         series_loss.push((route.cell, heat_j));
                     }
                     let mut material_loss = Vec::with_capacity(material_heat.len());
-                    let mut material_heat_j = 0.0;
+                    let (mut material_heat_j, mut linear_material_heat_j,
+                        mut nonlinear_material_heat_j) = (0.0, 0.0, 0.0);
                     for route in material_heat {
                         checkpoint()?;
                         route.admit(endpoint)?;
-                        let heat = route.channel.evaluate_staged(&system.core.network, gate)
-                            .map_err(ModalFrictionError::from)?;
-                        let heat_j = number(heat[0])?; // Exactly one admitted original body group.
-                        if heat_j < 0.0 {
+                        let linear = match &route.channel {
+                            Some(channel) => number(channel.evaluate_staged(
+                                &system.core.network, gate).map_err(ModalFrictionError::from)?[0])?,
+                            None => 0.0,
+                        };
+                        let mut nonlinear = 0.0;
+                        for source in &route.nonlinear_channels {
+                            checkpoint()?;
+                            nonlinear = number(nonlinear + source.evaluate_staged(&system.core)?)?;
+                        }
+                        if linear < 0.0 || nonlinear < 0.0 {
                             return Err(LayerThermalError::Invalid("material resistance heat must be nonnegative"));
                         }
+                        let heat_j = number(linear + nonlinear)?;
+                        linear_material_heat_j = number(linear_material_heat_j + linear)?;
+                        nonlinear_material_heat_j = number(nonlinear_material_heat_j + nonlinear)?;
                         material_heat_j = number(material_heat_j + heat_j)?;
                         material_loss.push((route.cell, heat_j));
                     }
-                    if material_heat_j - system.core.network.staged_frame.material_dissipation_j
-                        > controls.total_energy_tolerance_j {
-                        return Err(LayerThermalError::Invalid("routed material heat exceeds original integrated material loss"));
+                    if linear_material_heat_j - system.core.network.staged_frame.material_dissipation_j
+                        > controls.total_energy_tolerance_j
+                        || nonlinear_material_heat_j - system.core.staged_material_history_heat_j()?
+                            > controls.total_energy_tolerance_j {
+                        return Err(LayerThermalError::Invalid("routed material heat exceeds its original independent physical loss"));
                     }
                     let mut dry_frames = Vec::with_capacity(dry.len());
                     let mut dry_sources = Vec::with_capacity(dry.len());

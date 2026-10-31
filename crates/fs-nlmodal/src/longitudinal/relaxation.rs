@@ -127,6 +127,42 @@ impl StrainRelaxation {
         candidate: &mut [f64],
         stress: &mut [f64],
     ) -> Result<f64, NlModalError> {
+        self.stage_inner(before, after, memory, dt, candidate, stress, None)
+    }
+
+    /// The same constitutive update, retaining each original arm's physical
+    /// loss separately. Source geometry may route these channels to different
+    /// finite bodies; their sum is the returned total. No second history update
+    /// or residual-energy partition is used.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stage_with_arm_dissipation(
+        &self,
+        before: &[f64],
+        after: &[f64],
+        memory: &[f64],
+        dt: f64,
+        candidate: &mut [f64],
+        stress: &mut [f64],
+        arm_dissipation_j: &mut [f64],
+    ) -> Result<f64, NlModalError> {
+        if arm_dissipation_j.len() != self.arms.len() {
+            return Err(invalid("one dissipation output per original Maxwell arm required"));
+        }
+        self.stage_inner(before, after, memory, dt, candidate, stress,
+            Some(arm_dissipation_j))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_inner(
+        &self,
+        before: &[f64],
+        after: &[f64],
+        memory: &[f64],
+        dt: f64,
+        candidate: &mut [f64],
+        stress: &mut [f64],
+        mut arm_dissipation_j: Option<&mut [f64]>,
+    ) -> Result<f64, NlModalError> {
         self.check(before, memory)?;
         self.check(after, memory)?;
         if candidate.len() != memory.len()
@@ -140,13 +176,15 @@ impl StrainRelaxation {
         }
         stress.fill(0.0);
         let mut loss = 0.0;
-        for ((arm, z0), z1) in self
+        for (index, ((arm, z0), z1)) in self
             .arms
             .iter()
             .zip(memory.chunks_exact(self.width))
             .zip(candidate.chunks_exact_mut(self.width))
+            .enumerate()
         {
             let rate = dt / arm.relaxation_time_s;
+            let mut arm_loss = 0.0;
             for j in 0..self.width {
                 let (next, effort, heat) = maxwell_step(
                     before[j],
@@ -161,6 +199,10 @@ impl StrainRelaxation {
                 z1[j] = next;
                 stress[j] += effort;
                 loss += heat;
+                arm_loss += heat;
+            }
+            if let Some(channels) = &mut arm_dissipation_j {
+                channels[index] = arm_loss;
             }
         }
         if !loss.is_finite() || stress.iter().any(|v| !v.is_finite()) {
@@ -343,4 +385,60 @@ mod tests {
         );
         assert_eq!(memory, original);
     }
+
+    #[test]
+    fn g1_original_arm_heat_matches_spatial_integrals_and_preserves_the_joint_update() {
+        let law = StrainRelaxation::new(2, vec![
+            StrainRelaxationArm { stiffness_j: 1200.0, relaxation_time_s: 0.001 },
+            StrainRelaxationArm { stiffness_j: 310.0, relaxation_time_s: 0.0004 },
+        ]).unwrap();
+        let before = [0.004, -0.002, 0.001];
+        let after = [0.002, 0.003, -0.0005];
+        let memory = [0.0006, 0.0002, -0.0003, -0.0008, 0.0005, 0.0001];
+        let accepted = memory;
+        let dt = 0.0002;
+        let (mut ordinary, mut candidate) = ([0.0; 6], [0.0; 6]);
+        let (mut ordinary_stress, mut stress) = ([0.0; 3], [0.0; 3]);
+        let total = law.stage(&before, &after, &memory, dt, &mut ordinary,
+            &mut ordinary_stress).unwrap();
+        let mut channels = [f64::NAN; 2];
+        assert_eq!(total, law.stage_with_arm_dissipation(&before, &after, &memory,
+            dt, &mut candidate, &mut stress, &mut channels).unwrap());
+        assert_eq!(candidate, ordinary);
+        assert_eq!(stress, ordinary_stress);
+        let field = |coeff: &[f64], x: f64| coeff[0] + coeff[1..].iter().enumerate()
+            .map(|(j, v)| v * ((j + 1) as f64 * core::f64::consts::PI * x).cos())
+            .sum::<f64>();
+        let mut spatial = [0.0; 2];
+        for point in 0..512 {
+            let x = (point as f64 + 0.5) / 512.0;
+            for (arm, source) in law.arms().iter().enumerate() {
+                let rate = dt / source.relaxation_time_s;
+                let strain = 0.5 * (field(&before, x) + field(&after, x));
+                let old = field(&memory[arm * 3..(arm + 1) * 3], x);
+                let next = ((1.0 - rate / 2.0) * old + rate * strain) / (1.0 + rate / 2.0);
+                let elastic = strain - 0.5 * (old + next);
+                spatial[arm] += source.stiffness_j * rate * elastic.powi(2) / 512.0;
+            }
+        }
+        for (observed, expected) in channels.iter().zip(spatial) {
+            assert!((*observed - expected).abs() < 2e-14 * expected);
+        }
+        assert!(channels[0] > 0.0 && channels[1] > 0.0 && channels[0] != channels[1]);
+        assert!((channels.iter().sum::<f64>() - total).abs() < 2e-15 * total);
+        assert_eq!(memory, accepted);
+        assert!(law.stage_with_arm_dissipation(&before, &after, &memory,
+            0.001, &mut candidate, &mut stress, &mut channels).is_err());
+        assert_eq!(law.stage_with_arm_dissipation(&before, &after, &memory,
+            dt, &mut candidate, &mut stress, &mut channels).unwrap(), total);
+        assert_eq!(candidate, ordinary);
+        assert_eq!(stress, ordinary_stress);
+        assert_eq!(memory, accepted);
+        for (observed, expected) in channels.iter().zip(spatial) {
+            assert!((*observed - expected).abs() < 2e-14 * expected);
+        }
+        assert!(law.stage_with_arm_dissipation(&before, &after, &memory,
+            dt, &mut candidate, &mut stress, &mut channels[..1]).is_err());
+    }
+
 }

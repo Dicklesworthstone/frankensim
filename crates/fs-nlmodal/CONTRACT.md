@@ -106,6 +106,15 @@ the crash cascade with structurally exact energy accounting.
   and 32 explicit axial modes with indices at most 1024; it never drops
   a mode to satisfy a frequency cutoff. The caller owns the cutoff,
   resolved bandwidth, moving-end pullback, clock, and finite-strain domain.
+- `longitudinal::relaxation::StrainRelaxation` retains original positive
+  Maxwell arms on mean/cosine material-strain coordinates. `stage` eliminates
+  memory inside the caller's existing joint trial; it never publishes accepted
+  state. `stage_with_arm_dissipation` performs that same update while retaining
+  each original arm's heat, with one output per arm. Total heat, candidate
+  memory, stress and their arithmetic order remain unchanged. Mean/cosine
+  orthogonality weights enter both storage and dissipation. The original
+  `0 < dt/tau <= 2` admission remains; the caller owns geometry, source material
+  domains, force pullback and finite-body routing.
 - `duffing_backbone` / `single_mode_beta` — the analytic
   perturbation pins.
 - Time stepping, striking, damping, and the energy ledger are
@@ -192,6 +201,11 @@ unchanged high-energy mode against an independently factored scalar divided
 difference, and coupled-channel finite-step work against two-node Gauss
 integration of the ordinary cubic gradient, including time reversal and
 the zero-increment limit.
+
+`src/longitudinal/relaxation.rs` tests compare original-arm heat to independent
+spatial integrals, retain identical ordinary updates, verify work/storage
+balance and the second-order relaxation-time ladder, and check refusal/retry
+without mutating accepted memory.
 
 `src/longitudinal_tests.rs`: independent sampled-span strain integration
 including statically eliminated channels; ordinary force versus energy

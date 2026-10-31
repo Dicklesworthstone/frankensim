@@ -280,12 +280,12 @@ same source and physical geometry.
 
 The original `bow_fiber_memory` declaration supplies every modulus increment
 and relaxation time. The heat profile supplies no additional damping value.
-The geometry producer selects the complete original linear bending and axial
-memory for the requested strip/layer. Each original source is integrated along
-the complete held-force trajectory and deposited once. No fraction of total
-mechanical loss is assigned to a body. The nonlinear `bow_fiber_strain` path
-requires its separate original axial-history heat channels as well as bending;
-this profile currently refuses that path rather than omitting axial heat.
+The geometry producer selects the complete original bending and axial memory
+for the requested strip/layer. With `bow_fiber_strain`, axial heat comes from
+the nonlinear full-strain material update in the same contact trial; bending
+heat comes from the original complete held-force trajectory. Those sources
+are retained separately and deposited once, rather than assigning a fraction
+of total mechanical loss to a body.
 
 The receiving volume must equal the original annular layer area times the
 fiber length and number of fibers represented by the strip:

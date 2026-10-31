@@ -2,6 +2,7 @@
 //! Every nonlinear/contact/thermal trial starts from accepted history. Only the
 //! existing mechanical publication boundary can commit the proposed history.
 use super::*;
+use std::sync::Arc;
 
 /// A passive material with internal coordinates and original mechanical ports.
 /// The constitutive owner supplies its discrete update, stored energy and force.
@@ -27,6 +28,59 @@ pub trait ModalMaterialHistory: Send + Sync {
     /// may be changed by this call, including failed or repeated trials.
     fn stage(&self, before: &[f64], after: &[f64], memory: &[f64], dt: f64,
         candidate: &mut [f64], reaction: &mut [f64]) -> Result<f64, ModalCouplingError>;
+    /// Independently computed physical source channels, in the immutable law's
+    /// declared order. Each channel must belong to this law's complete loss.
+    /// The default is one whole-law channel; source-aware laws may retain their
+    /// original material-arm channels without changing their mechanical update.
+    fn dissipation_channel_count(&self) -> usize { 1 }
+    /// Stage the SAME candidate, also retaining independently computed positive
+    /// losses. The host verifies their sum against the returned physical loss.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_with_dissipation(&self, before: &[f64], after: &[f64], memory: &[f64], dt: f64,
+        candidate: &mut [f64], reaction: &mut [f64], channels_j: &mut [f64])
+        -> Result<f64, ModalCouplingError>
+    {
+        if self.dissipation_channel_count() != 1 || channels_j.len() != 1 {
+            return Err(invalid("material law must supply its complete independent heat channels"));
+        }
+        let loss = self.stage(before, after, memory, dt, candidate, reaction)?;
+        channels_j[0] = loss;
+        Ok(loss)
+    }
+}
+
+/// An immutable selector for one physical source in the ORIGINAL bound history.
+/// It cannot be fabricated from an index or reused on a separately built owner.
+/// Moving the mechanical owner preserves this identity; no address of its state
+/// or constitutive coefficients is cached.
+#[derive(Clone, Debug)]
+pub struct MaterialHistoryHeatChannel {
+    binding: usize,
+    channel: usize,
+    identity: Arc<()>,
+}
+
+impl MaterialHistoryHeatChannel {
+    pub(in crate::render::schedule::force::coupled::contact::friction) fn key(
+        &self, owner: &FrictionModalSystem,
+    ) -> Result<(usize, usize), ModalFrictionError> {
+        let bound = owner.nonlinear.as_ref().and_then(|s| s.histories.get(self.binding))
+            .ok_or_else(|| invalid("material heat names an absent original nonlinear history"))?;
+        if !Arc::ptr_eq(&self.identity, &bound.identity)
+            || self.channel >= bound.candidate_loss_j.len() {
+            return Err(invalid("material heat belongs to a different original history or source channel").into());
+        }
+        Ok((self.binding, self.channel))
+    }
+
+    pub(in crate::render::schedule::force::coupled::contact::friction) fn evaluate_staged(
+        &self, owner: &FrictionModalSystem,
+    ) -> Result<f64, ModalFrictionError> {
+        self.key(owner)?;
+        let state = owner.nonlinear.as_ref().expect("admitted original history");
+        state.require_staged_history_heat(owner.samples_rendered())?;
+        Ok(finite(state.histories[self.binding].candidate_loss_j[self.channel])?)
+    }
 }
 
 /// Additional material storage over original coordinates. It may share those
@@ -43,6 +97,8 @@ pub(super) struct BoundHistory {
     law: Box<dyn ModalMaterialHistory>,
     accepted: Vec<f64>,
     candidate: Vec<f64>,
+    candidate_loss_j: Vec<f64>,
+    identity: Arc<()>,
     stiffness_bound_per_s2: f64,
 }
 impl BoundHistory {
@@ -71,8 +127,10 @@ impl FrictionModalSystem {
         for binding in bindings {
             poll(Some(gate))?;
             let n=binding.law.coordinate_count();let memory=binding.law.memory_count();
+            let channels=binding.law.dissipation_channel_count();
             count=count.checked_add(memory).ok_or_else(||invalid("material history count overflow"))?;
-            if n==0 || binding.coordinates.len()!=n || memory==0 || count>maximum_states {
+            if n==0 || binding.coordinates.len()!=n || memory==0 || count>maximum_states
+                || channels==0 || channels>memory {
                 return Err(invalid("complete material coordinate/history budget exceeded").into());
             }
             let mut indices=Vec::with_capacity(n);
@@ -100,7 +158,8 @@ impl FrictionModalSystem {
                 return Err(invalid("material history requires a nonnegative admitted stiffness bound").into());
             }
             added.push(BoundHistory {coordinates:indices,law:binding.law,
-                candidate:accepted.clone(),accepted,stiffness_bound_per_s2});
+                candidate:accepted.clone(),accepted,stiffness_bound_per_s2,
+                candidate_loss_j:vec![f64::NAN;channels],identity:Arc::new(())});
         }
         self.nonlinear.as_mut().expect("checked owner").histories.extend(added);
         self.validate_material_history_band()?;
@@ -117,6 +176,32 @@ impl FrictionModalSystem {
             .map(|binding|binding.accepted.as_slice()).collect())
     }
 
+    /// Select an original independently computed constitutive heat channel.
+    /// The source producer, not a heat fraction, defines its physical volume.
+    pub fn material_history_heat_channel(&self, binding: usize, channel: usize)
+        -> Result<MaterialHistoryHeatChannel, ModalFrictionError>
+    {
+        let bound=self.nonlinear.as_ref().and_then(|s|s.histories.get(binding))
+            .ok_or_else(||invalid("material heat needs its original nonlinear history"))?;
+        if channel>=bound.candidate_loss_j.len() {
+            return Err(invalid("material heat names an absent physical source channel").into());
+        }
+        Ok(MaterialHistoryHeatChannel {binding,channel,identity:Arc::clone(&bound.identity)})
+    }
+
+    pub(in crate::render::schedule::force::coupled::contact::friction) fn staged_material_history_heat_j(&self)
+        -> Result<f64,ModalFrictionError>
+    {
+        let Some(state)=&self.nonlinear else {return Ok(0.0)};
+        if state.histories.is_empty() {return Ok(0.0);}
+        state.require_staged_history_heat(self.samples_rendered())?;
+        let mut total=0.0;
+        for binding in &state.histories {
+            for &heat in &binding.candidate_loss_j {total=finite(total+heat)?;}
+        }
+        Ok(total)
+    }
+
     pub(in crate::render::schedule::force::coupled::contact::friction) fn validate_material_history_band(&self)
         -> Result<(),ModalCouplingError> {
         if self.nonlinear.as_ref().is_none_or(|state|state.histories.is_empty()) {return Ok(());}
@@ -128,10 +213,22 @@ impl FrictionModalSystem {
 }
 
 impl NonlinearFrictionState {
+    pub(in crate::render::schedule::force::coupled::contact::friction) fn discard_staged_history_heat(&mut self) {
+        self.staged_history_sample=None;
+    }
+
+    fn require_staged_history_heat(&self, sample: u64) -> Result<(),ModalFrictionError> {
+        if self.staged_history_sample != Some(sample) {
+            return Err(invalid("material heat requires the same complete unpublished mechanical trial").into());
+        }
+        Ok(())
+    }
+
     pub(in crate::render::schedule::force::coupled::contact::friction) fn history_stiffness_bound_per_s2(&self)->f64 {
         self.histories.iter().map(|binding|binding.stiffness_bound_per_s2).sum()
     }
     pub(in crate::render::schedule::force::coupled::contact::friction) fn publish_histories(&mut self) {
+        self.staged_history_sample=None;
         for binding in &mut self.histories {
             std::mem::swap(&mut binding.accepted,&mut binding.candidate);
         }
@@ -169,8 +266,9 @@ impl NonlinearFrictionState {
             poll(gate)?;
             let q0=binding.select(before);let q1=binding.select(after);
             let mut force=vec![0.0;q0.len()];
-            let dissipated=finite(binding.law.stage(&q0,&q1,&binding.accepted,dt,
-                &mut binding.candidate,&mut force)?)?;
+            binding.candidate_loss_j.fill(f64::NAN);
+            let dissipated=finite(binding.law.stage_with_dissipation(&q0,&q1,&binding.accepted,dt,
+                &mut binding.candidate,&mut force,&mut binding.candidate_loss_j)?)?;
             let initial=finite(binding.law.energy(&q0,&binding.accepted)?)?;
             let stored=finite(binding.law.energy(&q1,&binding.candidate)?)?;
             let work=finite(force.iter().zip(q0.iter().zip(&q1)).map(|(f,(a,b))|f*(b-a)).sum())?;
@@ -181,6 +279,16 @@ impl NonlinearFrictionState {
             }
             if residual.abs()>tolerance {
                 return Err(ModalCouplingError::EnergyBalance {residual_j:residual,tolerance_j:tolerance}.into());
+            }
+            let mut source_loss=0.0;
+            for &heat in &binding.candidate_loss_j {
+                if !heat.is_finite() || heat<0.0 {
+                    return Err(invalid("material heat channels must be complete finite physical losses").into());
+                }
+                source_loss=finite(source_loss+heat)?;
+            }
+            if (source_loss-dissipated).abs()>tolerance {
+                return Err(invalid("independent material heat channels do not sum to their original physical loss").into());
             }
             for (&i,value) in binding.coordinates.iter().zip(force) {out[i]=finite(out[i]+value)?;}
             energy=finite(energy+stored)?;loss=finite(loss+dissipated)?;

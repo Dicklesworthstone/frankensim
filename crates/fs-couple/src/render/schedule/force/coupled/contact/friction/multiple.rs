@@ -559,6 +559,7 @@ impl MultiFrictionModalSystem {
     fn prepare_step(&mut self, drives: &[FrictionDrive],
         obstacle_offsets: Option<&[f64]>, obstacle_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
         contact_patch_motion: bool, gate: Option<&CancelGate>) -> Result<(), ModalFrictionError> {
+        if let Some(state) = &mut self.core.nonlinear { state.discard_staged_history_heat(); }
         poll(gate)?;
         if self.friction_residual.is_some() { self.admit_friction_residual()?; }
         if let Some(offsets) = obstacle_offsets {

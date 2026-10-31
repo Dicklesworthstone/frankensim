@@ -16473,6 +16473,18 @@ physical volume and mass, fixed reference density and a valid original
 absolute-temperature coordinate. Distinct bodies cannot share one body's heat
 capacity, repeat a branch loss, or reuse a separate contact film's cell.
 
+For full-strain fibers, each original strain-history update retains its per-arm
+heat before summing. `MaterialHistoryHeatChannel` selects these sources by bound
+history identity and original channel index, only from the complete unpublished
+candidate of the same sample. The aggregate mechanical law and total-tension
+admission remain unchanged. Each destination combines its linear bending
+integral with all axial history channels of its physical strip/layer. Duplicate
+channels and tokens from independently constructed owners refuse. Preparation
+and publication invalidate candidate observation. Existing history laws retain
+a default whole-law channel; source laws can expose finer physical channels
+without another mechanical update. The v4 contact-thermal profile binds these
+same routes through `fiber-body STRIP LAYER CELL_ID` before output creation.
+
 The existing contact/enthalpy Newton candidate deposits independently integrated
 body heat once. Original conduction carries it to contact films in that same
 trial, where the original temperature-dependent friction law supplies the
@@ -16481,12 +16493,13 @@ once from external mechanical loss. Finite heat, contact/source histories,
 mechanical state and moving material-coordinate cursors are accepted together.
 The existing performance wrapper and moving contact path expose these routes.
 
-This rung admits one uniform temperature per supported strip/layer and fixed
-body constitutive coefficients throughout the source-supported caloric interval.
-It refuses temperature-dependent body storage/relaxation, nonlinear hereditary
-fiber strain and the original heat owner's unsupported external-radiation or
-varying-force trajectories. Thermal expansion, phase change and finer spatial
-body-temperature projection require their corresponding physical owners.
+This rung admits one uniform temperature per supported strip/layer, a fully
+solid body with fixed reference density and geometry, and fixed constitutive
+coefficients throughout the source-supported caloric interval. Body storage or
+relaxation that depends on temperature, thermal expansion, phase change and
+finer spatial body-temperature projection require their corresponding physical
+owners. The original linear source integral still refuses unsupported external
+radiation states and varying-force trajectories.
 The new source/fiber/finite-heat fixtures are manufactured verification cases;
 they supply no measured rosin parameters or instrument-sound validation.
 

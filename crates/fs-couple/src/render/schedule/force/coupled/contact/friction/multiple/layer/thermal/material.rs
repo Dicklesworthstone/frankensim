@@ -11,6 +11,7 @@
 use super::*;
 use crate::render::schedule::force::coupled::coefficients::heat::{MaterialHeatIntegral, MaterialHeatBudget};
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use crate::render::schedule::force::coupled::contact::friction::nonlinear::history::MaterialHistoryHeatChannel;
 use fs_qty::Temperature;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
@@ -27,17 +28,26 @@ pub struct MaterialRelaxationHeatDestination<'a> {
     pub density_property: &'a str,
     pub volume_m3: f64,
     pub source: ResolvedMaterialStatePoint,
-    pub channel: MaterialHeatIntegral,
+    /// Original linear Maxwell source integral, when the body retains linear
+    /// material channels (including bending beside nonlinear axial strain).
+    pub channel: Option<MaterialHeatIntegral>,
+    /// Original independently evaluated nonlinear constitutive sources for this
+    /// same physical volume. Their losses come from the accepted DG candidate,
+    /// not a second update or a share of the aggregate damping account.
+    pub nonlinear_channels: Vec<MaterialHistoryHeatChannel>,
 }
 
 impl MaterialRelaxationHeatDestination<'_> {
-    /// Check this source body's caloric law, material domain, physical volume
-    /// and receiving mass without advancing either owner. Description compilers
-    /// may use this before output; execution repeats admission at every trial.
+    /// Check the receiving material, caloric inventory and fixed-coefficient
+    /// domain before output creation. Original mechanical source identity and
+    /// duplicate routing are additionally checked by the joint step.
     pub fn admit<E>(&self, thermal: &DepositionSimulation<'_>) -> Result<(), LayerThermalError<E>> {
         let bad = LayerThermalError::Invalid;
-        if self.channel.groups().len() != 1 || self.channel.groups()[0].is_empty() {
-            return Err(bad("one complete nonempty material group must own each finite body volume"));
+        if self.channel.as_ref().is_some_and(|channel|
+            channel.groups().len() != 1 || channel.groups()[0].is_empty())
+            || self.channel.is_none() && self.nonlinear_channels.is_empty()
+            || self.nonlinear_channels.len() > 256 {
+            return Err(bad("one complete nonempty material source group must own each finite body volume"));
         }
         let absolute = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature, ValueForm::Static));
@@ -91,6 +101,15 @@ impl MaterialRelaxationHeatDestination<'_> {
 }
 
 impl MultiFrictionModalSystem {
+    /// Select a source channel of the same immutable nonlinear material history.
+    /// The physical producer supplies its strip/layer/arm mapping, while this
+    /// token preserves the original law identity through movement of the owner.
+    pub fn material_history_heat_channel(
+        &self, binding: usize, channel: usize,
+    ) -> Result<MaterialHistoryHeatChannel, ModalFrictionError> {
+        self.core.material_history_heat_channel(binding, channel)
+    }
+
     /// Reuse the original material-group heat owner and its aggregate resource
     /// budget. Prepare one complete group per finite body destination and bind
     /// it to the original source geometry/material. External radiation states

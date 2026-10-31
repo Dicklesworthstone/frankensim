@@ -139,6 +139,36 @@ impl FiberStrainHistory {
         }
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_with_source_heat(
+        &self,
+        before: &[f64],
+        after: &[f64],
+        memory: &[f64],
+        dt: f64,
+        candidate: &mut [f64],
+        reaction: &mut [f64],
+        channels_j: Option<&mut [f64]>,
+    ) -> Result<f64, ModalCouplingError> {
+        let a = self.strain(before)?;
+        let b = self.strain(after)?;
+        self.validate_memory(&a, memory)?;
+        let mut stress = vec![0.0; self.material.width()];
+        let loss = match channels_j {
+            Some(channels) => self.material.stage_with_arm_dissipation(
+                &a, &b, memory, dt, candidate, &mut stress, channels),
+            None => self.material.stage(&a, &b, memory, dt, candidate, &mut stress),
+        }.map_err(|_| invalid())?;
+        self.validate_memory(&b, candidate)?;
+        let midpoint: Vec<_> = before
+            .iter()
+            .zip(after)
+            .map(|(&a, &b)| f64::midpoint(a, b))
+            .collect();
+        self.pull(&midpoint, &stress, reaction)?;
+        Ok(loss)
+    }
 }
 
 impl ModalMaterialHistory for FiberStrainHistory {
@@ -183,30 +213,19 @@ impl ModalMaterialHistory for FiberStrainHistory {
         self.pull(q, &stress, out)
     }
     fn stage(
-        &self,
-        before: &[f64],
-        after: &[f64],
-        memory: &[f64],
-        dt: f64,
-        candidate: &mut [f64],
-        reaction: &mut [f64],
+        &self, before: &[f64], after: &[f64], memory: &[f64], dt: f64,
+        candidate: &mut [f64], reaction: &mut [f64],
     ) -> Result<f64, ModalCouplingError> {
-        let a = self.strain(before)?;
-        let b = self.strain(after)?;
-        self.validate_memory(&a, memory)?;
-        let mut stress = vec![0.0; self.material.width()];
-        let loss = self
-            .material
-            .stage(&a, &b, memory, dt, candidate, &mut stress)
-            .map_err(|_| invalid())?;
-        self.validate_memory(&b, candidate)?;
-        let midpoint: Vec<_> = before
-            .iter()
-            .zip(after)
-            .map(|(&a, &b)| f64::midpoint(a, b))
-            .collect();
-        self.pull(&midpoint, &stress, reaction)?;
-        Ok(loss)
+        self.stage_with_source_heat(before, after, memory, dt, candidate, reaction, None)
+    }
+
+    fn dissipation_channel_count(&self) -> usize { self.material.arms().len() }
+
+    fn stage_with_dissipation(
+        &self, before: &[f64], after: &[f64], memory: &[f64], dt: f64,
+        candidate: &mut [f64], reaction: &mut [f64], channels_j: &mut [f64],
+    ) -> Result<f64, ModalCouplingError> {
+        self.stage_with_source_heat(before, after, memory, dt, candidate, reaction, Some(channels_j))
     }
 }
 

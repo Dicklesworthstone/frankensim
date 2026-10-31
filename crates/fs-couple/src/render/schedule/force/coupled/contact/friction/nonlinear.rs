@@ -242,6 +242,7 @@ impl BoundPotential {
 pub(super) struct NonlinearFrictionState {
     potentials: Vec<BoundPotential>,
     histories: Vec<BoundHistory>,
+    staged_history_sample: Option<u64>,
     config: NonlinearModalConfig,
     last: Option<NonlinearFrictionFrame>,
     pub(super) preload: Option<NonlinearPreloadDiagnostics>,
@@ -348,6 +349,7 @@ impl FrictionModalSystem {
         let state = NonlinearFrictionState {
             potentials,
             histories,
+            staged_history_sample: None,
             config,
             last: None,
             preload: None,
@@ -540,6 +542,7 @@ impl NonlinearFrictionState {
         external: &[f64],
         gate: Option<&CancelGate>,
     ) -> Result<NonlinearCorrection, ModalFrictionError> {
+        self.staged_history_sample = None;
         poll(gate)?;
         let inner = trial.core();
         if external.len() != inner.mode_count() || external.iter().any(|v| !v.is_finite()) {
@@ -705,6 +708,7 @@ impl NonlinearFrictionState {
                     },
                 };
                 poll(gate)?;
+                self.staged_history_sample = Some(inner.samples_rendered());
                 return Ok(accepted);
             }
             std::mem::swap(&mut reaction, &mut next_reaction);

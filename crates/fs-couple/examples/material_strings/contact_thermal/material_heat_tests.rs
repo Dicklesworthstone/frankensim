@@ -67,7 +67,7 @@ fn v4_material_route_rejects_duplicate_bodies_aliases_missing_cells_and_unbounde
 fn v4_fiber_body_heat_reaches_finite_mass_and_the_existing_pcm_route() {
     scoped(|cx, gate| {
         let profile = Profile::parse(profile().as_bytes()).unwrap();
-        for full_strain in [false] {
+        for full_strain in [false, true] {
             let mut direct = source(cx, gate, &profile, full_strain, 20.0, 7);
             let prepared = profile.prepare(&direct, gate).unwrap();
             let network = prepared.network(gate).unwrap();
@@ -123,7 +123,7 @@ fn v4_rejects_wrong_source_volume_missing_region_and_budget_before_advancing() {
         }
         let mut wrong_volume = Profile::parse(profile().as_bytes()).unwrap();
         wrong_volume.cells[0].geometry.volume_m3 *= 2.0;
-        let ready = source(cx, gate, &wrong_volume, false, 20.0, 16);
+        let ready = source(cx, gate, &wrong_volume, true, 20.0, 16);
         assert!(wrong_volume.prepare(&ready, gate).is_err());
         assert_eq!(ready.performance.samples_rendered(), 0);
     });

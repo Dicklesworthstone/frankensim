@@ -43,6 +43,7 @@ pub struct MaterialFiberRibbon {
     station_fraction: f64,
     normal_shapes: Vec<f64>,
     material_branch_start: usize,
+    material_history_start: usize,
 }
 impl MaterialFiberRibbon {
     /// Original geometry, material sources and two independent resolutions.
@@ -216,6 +217,7 @@ impl ReciprocalStringBank {
             self.system = self.system.with_mapped_nonlinear_potentials(bindings, config, gate)
                 .map_err(ReciprocalStringError::Friction)?;
         }
+        let material_history_start = self.system.nonlinear_material_memory().len();
         if let Some(memory) = ribbon.material_relaxation() {
             let bindings = memory.strain_bindings(component_start);
             if !bindings.is_empty() {
@@ -251,6 +253,7 @@ impl ReciprocalStringBank {
             .map_err(ReciprocalStringError::Friction)?;
         bank.source.fiber_ribbon = Some(MaterialFiberRibbon {
             model: ribbon, component_start, string_count, station_fraction, normal_shapes, material_branch_start,
+            material_history_start,
         });
         Ok(bank)
     }
@@ -300,8 +303,10 @@ impl MultiBowStringBank {
     ///
     /// One uniform temperature is assumed along this complete supported strip.
     /// Cell mass, caloric card, source domain and fixed coefficients are checked
-    /// on every thermal trial. Source-dependent stored coefficients, nonlinear
-    /// hereditary strain and phase change require their own continuation.
+    /// on every thermal trial. Full nonlinear axial strain selects the original
+    /// per-strip, per-arm material-history heat channels beside linear bending.
+    /// Temperature-dependent stored coefficients and phase change remain outside
+    /// this fixed-coefficient continuation.
     #[allow(clippy::too_many_arguments)]
     pub fn fiber_material_heat_destination<'a>(
         &self, strip: usize, layer: usize, cell: fs_thermal::enthalpy::CellId,
@@ -315,9 +320,6 @@ impl MultiBowStringBank {
         let fiber = self.source.fiber_ribbon().ok_or_else(|| invalid("material heat needs the original physical fiber ribbon"))?;
         let model = fiber.model();
         let memory = model.material_relaxation().ok_or_else(|| invalid("fiber heat requires its original hereditary material source"))?;
-        if memory.has_finite_strain() {
-            return Err(invalid("full-strain fiber heat needs its nonlinear material-history integral as well as bending"));
-        }
         let section = memory.source().elastic();
         if strip >= model.resolution().cells || layer >= section.layers().len() {
             return Err(invalid("fiber heat must name one original physical strip and material layer"));
@@ -332,12 +334,33 @@ impl MultiBowStringBank {
         let start = fiber.material_branch_start + strip * channels.len() + first;
         let channel = self.system.prepare_material_heat(&[start..start + count], budget, gate)
             .map_err(ReciprocalStringError::Friction)?;
+        let mut nonlinear_channels = Vec::new();
+        if memory.has_finite_strain() {
+            let binding = fiber.material_history_start.checked_add(strip)
+                .ok_or_else(|| invalid("fiber material history binding overflows"))?;
+            let mut history_channel = 0;
+            for (source_layer, spectrum) in memory.source().spectra().iter().enumerate() {
+                for &(increment, _) in &spectrum.terms {
+                    poll(gate)?;
+                    if increment == 0.0 { continue; }
+                    if source_layer == layer {
+                        nonlinear_channels.push(self.system.material_history_heat_channel(
+                            binding, history_channel).map_err(ReciprocalStringError::Friction)?);
+                    }
+                    history_channel += 1;
+                }
+            }
+            if nonlinear_channels.is_empty() {
+                return Err(invalid("fiber material layer has no nonlinear dissipative history channels"));
+            }
+        }
         let volume_m3 = section.layer_integrals()[layer].area_m2() * model.geometry().length_m
             * model.geometry().fiber_count as f64 / model.resolution().cells as f64;
         if !volume_m3.is_finite() || volume_m3 <= 0.0 {
             return Err(invalid("fiber receiving material volume is unrepresentable"));
         }
         Ok(MaterialRelaxationHeatDestination { cell, material, caloric, temperature_axis,
-            density_property: "density", volume_m3, source: section.layers()[layer].material.clone(), channel })
+            density_property: "density", volume_m3, source: section.layers()[layer].material.clone(),
+            channel: Some(channel), nonlinear_channels })
     }
 }
