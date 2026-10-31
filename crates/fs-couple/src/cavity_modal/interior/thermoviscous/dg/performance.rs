@@ -19,8 +19,8 @@ use std::sync::Arc;
 /// One original physical interval's complete external drives.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThermoviscousDgControl {
-    /// Held pressures [Pa], in original FE port-mode order. The mode attached to
-    /// the bore MUST be zero here: its pressure comes from the reciprocal solve.
+    /// Held pressures [Pa], in original FE port-mode order. Every mode attached
+    /// to a duct MUST be zero here: its pressure comes from the reciprocal solve.
     pub traction_pa: Vec<f64>,
     /// Held forces [N/sqrt(kg)], in original structural-coordinate order.
     pub wall_forces_n_per_sqrt_kg: Vec<f64>,
@@ -39,11 +39,11 @@ pub struct ThermoviscousDgPerformanceConfig {
     pub maximum_control_values: usize,
 }
 
-/// A finite pressure stream retaining both original physical owners.
+/// A finite pressure stream retaining the complete field and every attached duct.
 ///
 /// There is no no-allocation claim: the complete field and DG steppers retain
 /// their original candidate allocations. Callback boundaries do no arithmetic.
-/// A failed physical step leaves both owners at their preceding accepted state;
+/// A failed physical step leaves all owners at their preceding accepted state;
 /// an observation failure retains the accepted physical step. Either failure
 /// poisons the stream, preserving the completed output prefix for inspection.
 pub struct ThermoviscousDgPerformance<'a, 'c> {
@@ -51,6 +51,7 @@ pub struct ThermoviscousDgPerformance<'a, 'c> {
     controls: Vec<ThermoviscousDgControl>,
     config: ThermoviscousDgPerformanceConfig,
     observation: ApertureObservation,
+    observation_port: usize,
     receiver: Option<BaffledPressure>,
     observer_gas: Option<GasPropagationReport>,
     terminal_flows: Vec<f64>,
@@ -73,6 +74,26 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
     /// outward flow. Other aperture/network observation variants refuse.
     pub fn new(
         system: ThermoviscousDg<'a, 'c>,
+        controls: Vec<ThermoviscousDgControl>,
+        observation: ApertureObservation,
+        config: ThermoviscousDgPerformanceConfig,
+        gate: Arc<CancelGate>,
+    ) -> Result<Self, RenderError> {
+        let port = system.port();
+        Self::new_at_port(system, port, controls, observation, config, gate)
+    }
+
+    /// Observe a named original FE-to-duct connection while ALL attached ducts
+    /// and the complete shared field advance together. `port` is the FE pressure
+    /// mode identity, not a position in the attachment list. A microphone uses
+    /// this duct's original terminal geometry, gas and outward flows only.
+    ///
+    /// Every connected traction slot must be zero in the authored controls;
+    /// each reaction is solved jointly. Unconnected pressure modes and original
+    /// structural forces remain independent physical inputs.
+    pub fn new_at_port(
+        system: ThermoviscousDg<'a, 'c>,
+        port: usize,
         controls: Vec<ThermoviscousDgControl>,
         observation: ApertureObservation,
         config: ThermoviscousDgPerformanceConfig,
@@ -108,7 +129,7 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
             }
             if control.traction_pa.len() != pressures
                 || control.wall_forces_n_per_sqrt_kg.len() != forces
-                || control.traction_pa[system.port()] != 0.0
+                || system.coupled_ports().iter().any(|&port| control.traction_pa[port] != 0.0)
                 || control
                     .traction_pa
                     .iter()
@@ -116,15 +137,16 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
                     .any(|value| !value.is_finite())
             {
                 return Err(sizing(
-                    "resolved field controls need every finite physical drive and zero authored bore reaction",
+                    "resolved field controls need every finite physical drive and zero authored duct reactions",
                 ));
             }
         }
+        let load = system.load_at_port(port)
+            .ok_or_else(|| sizing("resolved field observation requires an attached FE pressure port"))?;
         let receiver = match observation {
             ApertureObservation::Inlet => None,
             ApertureObservation::TubeBaffled(location) => Some(
-                system
-                    .load()
+                load
                     .baffled_receiver(config.sample_rate_hz, location)
                     .map_err(RenderError::Voice)?,
             ),
@@ -135,7 +157,7 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
             }
         };
         let terminal_flows = if receiver.is_some() {
-            vec![0.0; system.load().terminal_ports().len()]
+            vec![0.0; load.terminal_ports().len()]
         } else {
             Vec::new()
         };
@@ -147,6 +169,7 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
             controls,
             config,
             observation,
+            observation_port: port,
             receiver,
             observer_gas: None,
             terminal_flows,
@@ -169,7 +192,8 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
         };
         let (receiver, report) = self
             .system
-            .load()
+            .load_at_port(self.observation_port)
+            .ok_or_else(|| sizing("resolved field microphone lost its attached pressure port"))?
             .baffled_receiver_with_gas(
                 self.config.sample_rate_hz,
                 location,
@@ -201,6 +225,11 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
         self.observation
     }
 
+    /// Original FE pressure mode whose duct supplies the emitted pressure.
+    pub const fn observation_port(&self) -> usize {
+        self.observation_port
+    }
+
     pub fn last_frame(&self) -> Option<&ThermoviscousDgFrame> {
         self.system.last_frame()
     }
@@ -226,17 +255,26 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
             .controls
             .get(self.system.accepted_steps() as usize)
             .ok_or_else(|| sizing("resolved field physical history is exhausted"))?;
-        let pressure = self
+        let primary_port = self.system.port();
+        let frame = self
             .system
             .step(
                 &control.traction_pa,
                 &control.wall_forces_n_per_sqrt_kg,
                 &self.gate,
             )
-            .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))?
-            .mean_pressure_pa;
+            .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))?;
+        let pressure = if self.observation_port == primary_port {
+            frame.mean_pressure_pa
+        } else {
+            frame.additional_ducts.iter().find(|duct| duct.port == self.observation_port)
+                .ok_or_else(|| sizing("resolved field frame omitted its observed duct"))?
+                .mean_pressure_pa
+        };
         let pressure = if let Some(receiver) = &mut self.receiver {
-            let terminals = self.system.load().last_terminal_frames();
+            let terminals = self.system.load_at_port(self.observation_port)
+                .ok_or_else(|| sizing("resolved field microphone lost its attached pressure port"))?
+                .last_terminal_frames();
             if terminals.is_empty() || terminals.len() != self.terminal_flows.len() {
                 return Err(sizing("resolved field microphone requires every original terminal flow"));
             }

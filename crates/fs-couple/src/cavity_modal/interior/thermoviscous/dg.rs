@@ -1,12 +1,14 @@
-//! Reciprocal coupling of complete resolved thermoviscous fields to a DG bore.
+//! Reciprocal coupling of complete resolved thermoviscous fields to DG bores.
 //!
-//! The original FE holds pressure traction over one physical interval; the
-//! original DG holds the equal and opposite mean volume flow. Their cached
-//! exact mean relations determine one common pressure before either candidate
-//! is propagated. Every fluid, molecular, finite-solid and structural state is
+//! The original FE holds pressure tractions over one physical interval; each
+//! original DG holds the equal and opposite mean volume flow at its inlet.
+//! Their cached exact mean relations determine all common pressures together
+//! before any candidate is propagated. Every fluid, molecular, finite-solid and structural state is
 //! retained. Coupling-clock refinement remains necessary independently of the
 //! original spatial discretizations. This is not a joint continuous exponential
 //! or a nonlinear mean-flow/jet model.
+
+mod multiple;
 
 use super::ThermoviscousInterior;
 use crate::acoustic_realize::AcousticRealizeError;
@@ -103,10 +105,14 @@ pub struct ThermoviscousDgFrame {
     /// Its pressure work includes the internal DG reaction.
     pub field: ThermoviscousTimeStep,
     pub duct: DgStepOutput,
+    /// Other original ducts, in cold attachment order. The primary duct and
+    /// its inlet observations remain in `duct` and the following two fields.
+    pub additional_ducts: Vec<ThermoviscousDgPortFrame>,
     /// Shared mean inlet pressure [Pa]; this is not microphone pressure.
     pub mean_pressure_pa: f64,
     /// Mean flow INTO the DG, opposite the selected FE inward volume flow.
     pub mean_flow_m3_s: f64,
+    /// Complete resolved field plus every original duct, branch and gap.
     pub stored_energy_j: f64,
     pub storage_change_j: f64,
     /// Authored external FE tractions and structural forces only.
@@ -117,18 +123,33 @@ pub struct ThermoviscousDgFrame {
     /// dissipation certificate or label every DG energy sink as material heat.
     pub material_dissipation_j: f64,
     pub terminal_work_j: f64,
+    /// Sum over every internal interface, each also admitted independently.
     pub interface_work_residual_j: f64,
     pub balance_residual_j: f64,
     pub balance_tolerance_j: f64,
 }
 
-/// One immutable source/preparation and two privately owned accepted histories.
+/// One additional original duct and its accepted same-window interface receipt.
+#[derive(Clone, Debug)]
+pub struct ThermoviscousDgPortFrame {
+    pub port: usize,
+    pub duct: DgStepOutput,
+    pub mean_pressure_pa: f64,
+    /// Mean flow into this DG inlet, opposite its FE inward flow.
+    pub mean_flow_m3_s: f64,
+    pub interface_work_residual_j: f64,
+}
+
+/// One immutable source/preparation and privately owned accepted histories.
 pub struct ThermoviscousDg<'a, 'c> {
     source: &'a ThermoviscousInterior<'c>,
     prepared: PreparedThermoviscousTime<'a, 'c>,
     initial_state: ThermoviscousTimeState,
     load: DgPortLoad,
     port: usize,
+    ports: Vec<usize>,
+    additional: Vec<DgPortLoad>,
+    multiple: Option<multiple::PreparedMultipleDg>,
     mobility_m3_pa_s: f64,
     limits: ThermoviscousDgLimits,
     accepted_steps: u64,
@@ -194,7 +215,8 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         {
             return Err(invalid("positive original mean-port mobility and impedance required"));
         }
-        let result = Self { source, prepared, initial_state, load, port, mobility_m3_pa_s,
+        let result = Self { source, prepared, initial_state, load, port,
+            ports: vec![port], additional: Vec::new(), multiple: None, mobility_m3_pa_s,
             limits, accepted_steps: 0, frame: None };
         result.admit_state(result.state(), result.load.stored_energy_j())?;
         poll(gate)?;
@@ -209,7 +231,7 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         if self.accepted_steps != 0 {
             return Err(invalid("initial resolved fields can only be supplied before the first coupled step"));
         }
-        self.admit_state(&state, self.load.stored_energy_j())?;
+        self.admit_state(&state, self.duct_storage_j())?;
         self.initial_state = state;
         Ok(self)
     }
@@ -217,6 +239,16 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
     pub const fn source(&self) -> &'a ThermoviscousInterior<'c> { self.source }
     pub const fn prepared(&self) -> &PreparedThermoviscousTime<'a, 'c> { &self.prepared }
     pub const fn load(&self) -> &DgPortLoad { &self.load }
+    /// All internal pressure slots, primary first. Every authored drive in
+    /// these slots must be zero; their simultaneous reactions are solved here.
+    pub fn coupled_ports(&self) -> &[usize] { &self.ports }
+    pub fn load_at_port(&self, port: usize) -> Option<&DgPortLoad> {
+        self.ports.iter().position(|&candidate| candidate == port)
+            .map(|index| if index == 0 { &self.load } else { &self.additional[index - 1] })
+    }
+    pub fn additional_loads(&self) -> impl Iterator<Item = (usize, &DgPortLoad)> {
+        self.ports[1..].iter().copied().zip(&self.additional)
+    }
     pub fn state(&self) -> &ThermoviscousTimeState {
         self.frame.as_ref().map_or(&self.initial_state, |frame| &frame.field.state)
     }
@@ -225,7 +257,12 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
     pub const fn accepted_steps(&self) -> u64 { self.accepted_steps }
     pub const fn last_frame(&self) -> Option<&ThermoviscousDgFrame> { self.frame.as_ref() }
     pub fn stored_energy_j(&self) -> Result<f64, ThermoviscousDgError> {
-        Ok(self.prepared.stored_energy_j(self.state())? + self.load.stored_energy_j())
+        Ok(self.prepared.stored_energy_j(self.state())? + self.duct_storage_j())
+    }
+
+    fn duct_storage_j(&self) -> f64 {
+        self.load.stored_energy_j()
+            + self.additional.iter().map(DgPortLoad::stored_energy_j).sum::<f64>()
     }
 
     fn admit_state(&self, state: &ThermoviscousTimeState, duct_energy: f64)
@@ -241,15 +278,18 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
     }
 
     /// Advance one common interval from complete held external drives. The
-    /// connected pressure slot MUST be zero: its reaction is solved here.
-    /// Neither participant nor the accepted frame changes after any refusal,
-    /// including cancellation after either original candidate is propagated.
+    /// connected pressure slots MUST be zero: their reactions are solved here.
+    /// No participant or accepted frame changes after any refusal, including
+    /// cancellation after any original candidate is propagated.
     pub fn step(
         &mut self,
         traction_pa: &[f64],
         wall_forces_n_per_sqrt_kg: &[f64],
         gate: &CancelGate,
     ) -> Result<&ThermoviscousDgFrame, ThermoviscousDgError> {
+        if !self.additional.is_empty() {
+            return self.step_multiple(traction_pa, wall_forces_n_per_sqrt_kg, gate);
+        }
         poll(gate)?;
         if self.accepted_steps >= self.limits.maximum_steps
             || traction_pa.len() != self.source.inner().port_mode_count()
@@ -331,6 +371,7 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         let duct = trial.accept();
         self.accepted_steps += 1;
         self.frame = Some(ThermoviscousDgFrame { step: self.accepted_steps, field, duct,
+            additional_ducts: Vec::new(),
             mean_pressure_pa: pressure, mean_flow_m3_s: actual_flow, stored_energy_j,
             storage_change_j, authored_external_work_j, material_dissipation_j, terminal_work_j,
             interface_work_residual_j, balance_residual_j, balance_tolerance_j });

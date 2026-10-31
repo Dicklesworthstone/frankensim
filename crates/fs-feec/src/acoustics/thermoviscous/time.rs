@@ -573,6 +573,70 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         Ok((free, row[selected_port]))
     }
 
+    /// Complete same-window relation `Q = free + mobility * pressure` for the
+    /// selected original pressure ports, in the supplied order. `mobility` is
+    /// row-major and retains EVERY cross-port term from the original trajectory.
+    /// The selected traction slots are ignored; all remaining tractions,
+    /// structural forces and complete initial fields contribute to `free`.
+    ///
+    /// The initial field is encoded once. These are cached original-coordinate
+    /// contractions, without probe steps, factorization, response fitting or
+    /// mutation. In particular, a connected duct must not replace this matrix
+    /// by its diagonal when another duct loads the same spatial field.
+    pub fn average_relations(
+        &self,
+        initial: &ThermoviscousTimeState,
+        traction_pa: &[f64],
+        wall_forces_n_per_sqrt_kg: &[f64],
+        selected_ports: &[usize],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, Vec<f64>), ThermoviscousTimeError> {
+        poll(cancelled)?;
+        let pressure_ports = self.model.loads.len();
+        if selected_ports.is_empty() || selected_ports.len() > pressure_ports
+            || traction_pa.len() != pressure_ports
+            || wall_forces_n_per_sqrt_kg.len() != self.wall_scale.len()
+        {
+            return Err(invalid("nonempty original pressure selection and complete held drives required"));
+        }
+        let mut selected = vec![false; pressure_ports];
+        for &port in selected_ports {
+            if port >= pressure_ports || selected[port] {
+                return Err(invalid("selected original pressure ports must be valid and unique"));
+            }
+            selected[port] = true;
+        }
+        if traction_pa.iter().enumerate().any(|(port, value)| !selected[port] && !value.is_finite())
+            || wall_forces_n_per_sqrt_kg.iter().any(|value| !value.is_finite())
+        {
+            return Err(invalid("complete original fields and finite other held drives required"));
+        }
+        let state = self.encode(initial)?;
+        let n = self.system.state_dim();
+        let ports = pressure_ports + self.wall_scale.len();
+        let entries = selected_ports.len().checked_mul(selected_ports.len())
+            .ok_or_else(|| invalid("original pressure response storage overflow"))?;
+        let mut free = Vec::with_capacity(selected_ports.len());
+        let mut mobility = Vec::with_capacity(entries);
+        for &port in selected_ports {
+            poll(cancelled)?;
+            let mut value: f64 = self.mean_state[port * n..(port + 1) * n]
+                .iter().zip(&state).map(|(a, x)| a * x).sum();
+            let row = &self.mean_input[port * ports..(port + 1) * ports];
+            value += row.iter().zip(traction_pa.iter().chain(wall_forces_n_per_sqrt_kg))
+                .enumerate()
+                .filter(|(input, _)| *input >= pressure_ports || !selected[*input])
+                .map(|(_, (a, u))| a * u).sum::<f64>();
+            if !value.is_finite() {
+                return Err(invalid("original transient free mean flow is nonfinite"));
+            }
+            free.push(value);
+            mobility.extend(selected_ports.iter().map(|&other| row[other]));
+        }
+        poll(cancelled)?;
+        Ok((free, mobility))
+    }
+
     fn encode(&self, state: &ThermoviscousTimeState) -> Result<Vec<f64>, ThermoviscousTimeError> {
         let model = self.model;
         let walls = self.wall_scale.len();
