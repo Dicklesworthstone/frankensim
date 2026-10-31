@@ -181,6 +181,7 @@ pub(super) struct PreparedStrainField {
     constant: [[f64; N]; 2],
     twisting: [f64; N],
     bubble: [[f64; 18]; 2],
+    bubble_compliance: [[f64; 2]; 2],
     g: FacetGeometry,
 }
 
@@ -201,6 +202,11 @@ impl PreparedStrainField {
                 what: "unrepresentable MITC strain bubble transform",
             });
         }
+        let determinant = k[18][18] * k[19][19] - k[18][19] * k[18][19];
+        let bubble_compliance = [
+            [k[19][19] / determinant, -k[18][19] / determinant],
+            [-k[18][19] / determinant, k[18][18] / determinant],
+        ];
         let (constant, twisting) = kin.shear_ties(&g);
         Ok(Self {
             kin,
@@ -208,6 +214,7 @@ impl PreparedStrainField {
             constant,
             twisting,
             bubble: [transform[18], transform[19]],
+            bubble_compliance,
         })
     }
 
@@ -248,6 +255,10 @@ impl PreparedStrainField {
         (eps_m, eps_b, gamma)
     }
 }
+
+/// Thermal loading/recovery shares the original strain interpolation and its
+/// elastic bubble elimination; no second shell kinematics are introduced.
+pub(super) mod thermal;
 
 pub(super) struct ElementStrainField {
     prepared: PreparedStrainField,

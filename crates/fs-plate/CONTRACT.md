@@ -731,3 +731,48 @@ displacement in the input, without asserting a bound between time endpoints or
 reconstructing missing prestress/cure strain. The original six focused tests and
 two new real-snapshot equivalence/refusal tests pass against the original
 numerical owners; a complete instrument render remains a separate check.
+
+## Integrated thermal expansion on the original MITC shell
+
+`shell::mitc::thermal` accepts already integrated engineering thermal strains
+in each facet's declared tangent frame. The thickness profile is affine about
+the original reference surface; its membrane and gradient coefficients may be
+constant or P1-interpolated over a facet. `ShellThermalStrain::from_isotropic`
+and `from_orthotropic_in_plane` lower the shared `fs-material` source-integrated
+small-strain paths. The orthotropic constructor explicitly aligns principal
+axis 3 with the shell normal and rotates axes 1/2 in plane. Callers retain the
+original source receipts. `from_faces` requires an explicitly affine profile
+and a midsurface reference; it never evaluates a coefficient at the endpoint
+and multiplies it by a temperature difference.
+
+`MitcShellModel::prepare_thermal` borrows its immutable original mesh, sections,
+directors, support frames and stiffness/mass pencil. Thermal resultants use
+the complete existing A/B/D block, including signed membrane/bending coupling.
+The original enriched kinematics and quadrature assemble the 20-coordinate
+thermal load, followed by the SAME elastic static condensation. Recovery
+retains the inhomogeneous bubble displacement `K_bb^-1 f_thermal,b`; a zero
+nodal displacement does not silently freeze the internal director response.
+The original direct solver resolves compatible displacements with explicit
+additional nodal forces and its unchanged true-residual gate.
+
+`ThermalShellResponse` returns physical nodal motion, area-averaged membrane,
+bending and transverse-shear resultants, actual thermally shifted strain
+energy and material nodal forces. Material forces/storage exclude numerical
+drilling contributions and are labeled accordingly, not presented as complete
+support reactions. Reference inertia is unchanged. Cold preparation is linear
+in facet count and retained fields support repeated recovery without repeating
+elastic condensation. Cancellation is polled before work, at quadrature points
+and before publishing; the native direct factorization remains uninterrupted.
+All results are deterministic ordinary floating point, not error certificates.
+
+The focused `tests/thermal_shell.rs` cases cover heating/cooling free expansion,
+biaxial restraint stress and energy, compatible thermal-gradient bending,
+signed coupled-section moments, spatially varying thermal bubble forces,
+independent energy derivatives, rigid-frame covariance and atomic refusal.
+An explicit three-knot source CTE curve drives the actual shell displacement
+and oriented orthotropic lowering, discriminating exact path integration from
+an endpoint-coefficient shortcut.
+This is prescribed-temperature small-strain mechanics, with no heat transport,
+thermal feedback, finite-strain geometry update, buckling tangent, interlaminar
+recovery or measured-material validation. Nonlinear/layer-dependent thickness
+profiles require a separate explicit integration rather than a face-only fit.

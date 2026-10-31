@@ -21,6 +21,8 @@ use std::collections::BTreeMap;
 mod element;
 /// Reusable observation of the original condensed MITC strain field.
 pub mod strain;
+/// Integrated thermal membrane strain, thickness gradients and compatible response.
+pub mod thermal;
 /// Full membrane, bending and transverse-shear material dissipation.
 pub mod viscosity;
 /// Work-conjugate bilateral physical attachments in the shared shell pencil.
