@@ -42,7 +42,7 @@ impl FrozenThermal3 {
             }
         })
     }
-    fn field(&self) -> TetThermalStrainField<'_> {
+    pub(super) fn field(&self) -> TetThermalStrainField<'_> {
         match self {
             Self::Uniform(v) => TetThermalStrainField::Uniform(v),
             Self::PerElement(v) => TetThermalStrainField::PerElement(v),

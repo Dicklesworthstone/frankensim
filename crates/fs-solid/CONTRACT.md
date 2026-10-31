@@ -1,5 +1,39 @@
 # fs-solid CONTRACT
 
+## Fatigue from accepted inertial stress histories
+
+`loads3::transient::fatigue::TetTransientFatigueRun3` owns the original sparse
+Newmark run and the same fixed-plane rainflow/Miner observer used by
+`fatigue::TetFatiguePath`. `TetTransientRun3::with_fatigue` admits only step zero,
+requires an explicit retained thermal field, checks every gauge's material-state
+identity and calibration temperature, and samples the actual initial stress.
+Every successful stationary- or moving-support advance recovers native endpoint
+stress and samples every gauge once. Inertia, support motion, damping, thermal
+eigenstrain, reactions and work remain in their original mechanical owners;
+zero applied load does not imply zero vibration stress or zero fatigue.
+
+The wrapper exposes no mutable run, external stress injection or material/thermal
+reconfiguration. A late gauge refusal, stress-domain failure or cancellation
+commits neither native mechanics nor any fatigue counter. Cloning retains both
+accepted mechanics and unresolved cycles, with shared immutable matrices and
+bounded state/residue copies. Read-only stress recovery adds no sample.
+`finish` closes endpoint half cycles exactly once and prevents further steps;
+processing chunks must not finalize their intermediate residues.
+
+This is an elastic, fixed-temperature, fixed-plane empirical stress-life
+estimate. Caller-supplied S-N/process/environment applicability is not inferred
+from matching identity/temperature. Time and spatial refinement remain necessary
+to resolve physical stress extrema. There is no multiaxial criterion, plastic
+strain-life, changing-temperature law, remesh transfer, crack propagation,
+stiffness degradation, damage-derived heat or service-life validation claim.
+
+G0/G1/G3/G4 regressions in `tests/transient_fatigue.rs` cover unforced oscillator
+stress and independently accumulated damage, a three-rung physical-period
+reference, exact native mechanics/reactions, moving supports, checkpoint/chunk
+continuation, complete rollback and source/history refusals. All fatigue data
+in those tests is explicitly synthetic; the regressions are implementation
+checks, not experimental material calibration.
+
 ## Spatial follower pressure on finite-deformation exterior faces
 
 `hyper3::pressure::TetPressure::PerFace` supplies finite signed pressures in the

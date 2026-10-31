@@ -24,6 +24,8 @@ use std::sync::Arc;
 
 /// Physical stress, inertia and support reactions at accepted endpoints.
 pub mod response;
+/// Source-bound fatigue observation of every accepted inertial endpoint.
+pub mod fatigue;
 /// Finite load jumps and bounded material reconfiguration at accepted times.
 pub mod events;
 /// Discrete state and load pullbacks through the original inertial equations.
