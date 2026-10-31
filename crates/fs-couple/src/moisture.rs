@@ -25,6 +25,7 @@ mod binding;
 /// Three-dimensional principal-axis transport on actual Cartesian finite volumes.
 pub mod cartesian;
 mod implicit;
+mod reservoir;
 pub mod plate;
 /// Directional swelling, compatible shape, stress and native vibration tangent.
 pub mod solid;

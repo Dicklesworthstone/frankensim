@@ -149,4 +149,61 @@ impl MoistureSolid {
             solid,
         })
     }
+
+    /// Publish finite-vapor depletion, six-face Cartesian diffusion and the
+    /// original compatible solid response together. Any late mechanical/source
+    /// failure leaves both original inventories unchanged. Gas energy change
+    /// excludes sorption heat; changed gas pressure is not a mechanical traction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_cartesian_finite_atmosphere(
+        &self,
+        atmosphere: &crate::moisture::atmosphere::FiniteMoistureAtmosphere,
+        moisture: &MoistureCartesian,
+        dt_s: f64,
+        faces: &[Option<crate::moisture::atmosphere::DryBasisSorption>; 6],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        controls: crate::moisture::atmosphere::AtmosphereMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            crate::moisture::atmosphere::CartesianAtmosphereMoistureCandidate,
+            MoistureSolidState,
+        ),
+        crate::moisture::atmosphere::AtmosphereMoistureError,
+    > {
+        let candidate = atmosphere
+            .advance_cartesian(moisture, dt_s, faces, transport, nonlinear, controls, cx)?;
+        let solid = self.resolve_cartesian(candidate.moisture(), cx)?;
+        poll(cx)?;
+        Ok((candidate, solid))
+    }
+
+    /// Publish finite solution activity, real 3D uptake and native swelling as
+    /// one endpoint. Nonvolatile solutes remain in the equal-pressure solution;
+    /// neither osmotic pressure nor chemical work is silently applied as a load.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_cartesian_finite_solution(
+        &self,
+        reservoir: &crate::moisture::solution::FiniteMoistureSolution,
+        moisture: &MoistureCartesian,
+        dt_s: f64,
+        faces: &[Option<crate::moisture::atmosphere::DryBasisSorption>; 6],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        controls: crate::moisture::solution::SolutionMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            crate::moisture::solution::CartesianSolutionMoistureCandidate,
+            MoistureSolidState,
+        ),
+        crate::moisture::solution::SolutionMoistureError,
+    > {
+        let candidate = reservoir
+            .advance_cartesian(moisture, dt_s, faces, transport, nonlinear, controls, cx)?;
+        let solid = self.resolve_cartesian(candidate.moisture(), cx)?;
+        poll(cx)?;
+        Ok((candidate, solid))
+    }
 }

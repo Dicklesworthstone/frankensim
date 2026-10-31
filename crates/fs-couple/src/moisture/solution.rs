@@ -11,7 +11,7 @@
 //! One bounded scalar solve closes endpoint solution solvent plus endpoint
 //! bound water against their original inventories. Solute amounts never change,
 //! so uptake concentrates the solution and desorption dilutes it. The accepted
-//! source queries, native slab and solution publish together. Incompressible
+//! source queries, native slab or Cartesian field and solution publish together. Incompressible
 //! solvent density is the explicit molar mass divided by partial molar volume.
 //!
 //! This is the equal-pressure, negligible-vapor-storage sorption limit. It does
@@ -24,8 +24,11 @@
 //! potential, and no closed chemo-mechanical energy balance is claimed.
 
 use super::{
-    MoistureError, MoistureSlab, MoistureStepConfig, MoistureStepReport,
-    atmosphere::DryBasisSorption, poll, positive, surface::ResolvedMoistureFace,
+    MoistureError, MoistureNonlinearConfig, MoistureSlab, MoistureStepConfig, MoistureStepReport,
+    atmosphere::DryBasisSorption,
+    cartesian::{MoistureCartesian, MoistureCartesianReport},
+    poll, positive,
+    reservoir::ReservoirField,
 };
 use fs_exec::Cx;
 use fs_material::osmosis::{AqueousSolution, OsmosisError};
@@ -87,9 +90,9 @@ pub struct FiniteMoistureSolution {
 
 /// Accepted native diffusion and finite-reservoir exchange over one interval.
 #[derive(Clone, Debug)]
-pub struct SolutionMoistureStep {
+pub struct SolutionMoistureStep<Report = MoistureStepReport> {
     /// Original material/diffusion receipt, including endpoint source queries.
-    pub transport: MoistureStepReport,
+    pub transport: Report,
     /// Initial and endpoint solvent activity, dimensionless.
     pub water_activity: [f64; 2],
     /// Initial and endpoint osmotic pressure [Pa], as a thermodynamic diagnostic.
@@ -105,36 +108,42 @@ pub struct SolutionMoistureStep {
     pub iterations: usize,
 }
 
-/// Solution and native slab candidates admitted as one physical endpoint.
+/// Solution and native moisture candidates admitted as one physical endpoint.
 #[derive(Clone, Debug)]
-pub struct SolutionMoistureCandidate {
+pub struct SolutionMoistureCandidate<Field = MoistureSlab, Report = MoistureStepReport> {
     reservoir: FiniteMoistureSolution,
-    moisture: MoistureSlab,
-    step: SolutionMoistureStep,
+    moisture: Field,
+    step: SolutionMoistureStep<Report>,
 }
-impl SolutionMoistureCandidate {
+impl<Field, Report> SolutionMoistureCandidate<Field, Report> {
     /// Accepted solution reservoir candidate.
     pub const fn reservoir(&self) -> &FiniteMoistureSolution {
         &self.reservoir
     }
-    /// Original native slab with the accepted bound-water field.
-    pub const fn moisture(&self) -> &MoistureSlab {
+    /// Original native geometry with the accepted bound-water field.
+    pub const fn moisture(&self) -> &Field {
         &self.moisture
     }
     /// Accepted source, transport and conservation report.
-    pub const fn step(&self) -> &SolutionMoistureStep {
+    pub const fn step(&self) -> &SolutionMoistureStep<Report> {
         &self.step
     }
     /// Publish both original inventories and their report together.
-    pub fn into_parts(self) -> (FiniteMoistureSolution, MoistureSlab, SolutionMoistureStep) {
+    pub fn into_parts(self) -> (FiniteMoistureSolution, Field, SolutionMoistureStep<Report>) {
         (self.reservoir, self.moisture, self.step)
     }
 }
 
-struct Trial {
+/// Six-face diffusion plus original finite-solution activity and water accounts.
+pub type CartesianSolutionMoistureStep = SolutionMoistureStep<MoistureCartesianReport>;
+/// Original solution and complete 3D moisture field admitted together.
+pub type CartesianSolutionMoistureCandidate =
+    SolutionMoistureCandidate<MoistureCartesian, MoistureCartesianReport>;
+
+struct Trial<Field, Report> {
     solution: AqueousSolution,
-    moisture: MoistureSlab,
-    transport: MoistureStepReport,
+    moisture: Field,
+    transport: Report,
     water_to_solid_kg: f64,
     residual_kg: f64,
 }
@@ -194,11 +203,43 @@ impl FiniteMoistureSolution {
         controls: SolutionMoistureSolve,
         cx: &Cx<'_>,
     ) -> Result<SolutionMoistureCandidate, SolutionMoistureError> {
+        self.advance_field(slab, dt_s, faces, transport, controls, cx)
+    }
+
+    /// Couple all six original Cartesian faces to the finite solution's endpoint
+    /// water activity. Solutes stay in the original thermodynamic owner while
+    /// local uptake concentrates, and desorption dilutes, the one water inventory.
+    /// This retains the same equal-pressure, negligible-vapor-storage limit;
+    /// the sorption and surface coefficients remain vapor-path quantities.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_cartesian(
+        &self,
+        moisture: &MoistureCartesian,
+        dt_s: f64,
+        faces: &[Option<DryBasisSorption>; 6],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        controls: SolutionMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<CartesianSolutionMoistureCandidate, SolutionMoistureError> {
+        self.advance_field(moisture, dt_s, faces, (transport, nonlinear), controls, cx)
+    }
+
+    fn advance_field<F: ReservoirField<N>, const N: usize>(
+        &self,
+        field: &F,
+        dt_s: f64,
+        faces: &[Option<DryBasisSorption>; N],
+        transport: F::Controls,
+        controls: SolutionMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<SolutionMoistureCandidate<F, F::Report>, SolutionMoistureError> {
         poll(cx)?;
         let temperature = self.solution.temperature_k();
         let initial_volume = self.solution.solvent_volume_m3();
         let [mut lower, mut upper] = controls.solvent_volume_bracket_m3;
-        if slab.reference().query().axes()["temperature"].to_bits() != temperature.to_bits()
+        if field.inventory().reference.query().axes()["temperature"].to_bits()
+            != temperature.to_bits()
             || !positive(lower)
             || !positive(upper)
             || lower >= upper
@@ -212,25 +253,15 @@ impl FiniteMoistureSolution {
                 "matching temperature, positive source-supported volume bracket containing the start, finite mass tolerance and bounded iterations required",
             ));
         }
-        let evaluate = |volume: f64| -> Result<Trial, SolutionMoistureError> {
+        let evaluate = |volume: f64| -> Result<Trial<F, F::Report>, SolutionMoistureError> {
             poll(cx)?;
             let solution = self.solution.with_solvent_volume_m3(volume)?;
             let activity = solution.water_activity()?;
-            let mut boundary = std::array::from_fn(|_| ResolvedMoistureFace::default());
-            for side in 0..2 {
-                if let Some(law) = &faces[side] {
-                    boundary[side] = law.resolve(temperature, activity)?;
-                }
-            }
-            let (moisture, report) = slab.advance_resolved(dt_s, boundary, transport, cx)?;
+            let (moisture, report) =
+                field.advance_activity(dt_s, faces, temperature, activity, transport, cx)?;
             // Sum changed cell inventories instead of subtracting two large
             // pre-existing water totals. Original dry skeleton mass is fixed.
-            let water_to_solid_kg = moisture
-                .moisture()
-                .iter()
-                .zip(slab.moisture())
-                .map(|(new, old)| (new - old) * slab.dry_mass_per_cell_kg)
-                .sum::<f64>();
+            let water_to_solid_kg = field.water_change_to(&moisture);
             let residual_kg =
                 (volume - initial_volume) * self.solvent_density_kg_m3 + water_to_solid_kg;
             if !residual_kg.is_finite() || !water_to_solid_kg.is_finite() {
@@ -344,8 +375,8 @@ impl FiniteMoistureSolution {
         let residual =
             reservoir.solvent_mass_kg() - self.solvent_mass_kg() + accepted.water_to_solid_kg;
         let direct_residual = reservoir.solvent_mass_kg() - self.solvent_mass_kg()
-            + accepted.moisture.water_mass_kg()
-            - slab.water_mass_kg();
+            + accepted.moisture.inventory().water_mass_kg()
+            - field.inventory().water_mass_kg();
         for residual_kg in [residual, direct_residual] {
             if !residual_kg.is_finite() || residual_kg.abs() > controls.mass_tolerance_kg {
                 return Err(SolutionMoistureError::MassBalance {

@@ -6,6 +6,9 @@ use fs_couple::moisture::cartesian::*;
 use fs_couple::moisture::solid::*;
 use fs_solid::linear3::{TetAssemblyBudget, TetStaticSolveConfig, source::SolidStiffnessModel};
 
+#[path = "cartesian/reservoir.rs"]
+mod reservoir;
+
 fn nonlinear() -> MoistureNonlinearConfig {
     MoistureNonlinearConfig {
         relative_tolerance: 1e-12,

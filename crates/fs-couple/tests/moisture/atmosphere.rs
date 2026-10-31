@@ -123,7 +123,7 @@ pub(super) fn controls() -> AtmosphereMoistureSolve {
         mass_tolerance_kg: 1e-13,
     }
 }
-fn carrier_mass(atmosphere: &FiniteMoistureAtmosphere) -> f64 {
+pub(super) fn carrier_mass(atmosphere: &FiniteMoistureAtmosphere) -> f64 {
     let gas = atmosphere.gas().state().state();
     gas.pressure
         * (1.0 - gas.water_mole_fraction)

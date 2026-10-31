@@ -17725,9 +17725,38 @@ and source-contract tests, not measured-wood validation. The time method remains
 first-order backward Euler; CG convergence is not a spatial/time error estimate.
 The spatial owner remains homogeneous, isothermal and fixed-reference, with
 principal axes aligned to the grid. It does not add unlike-material partition
-laws, arbitrary tensor rotation, finite vapor/solution coupling, sorption heat,
+laws, arbitrary tensor rotation, sorption heat,
 stress-assisted diffusion, hysteresis or finite-deformation transport, and does
 not close the broader MR46 measured-material acceptance item.
+
+Finite reservoirs consume this same Cartesian owner through
+`FiniteMoistureAtmosphere::advance_cartesian` / `advance_shared_cartesian` and
+`FiniteMoistureSolution::advance_cartesian`. A private field adapter resolves
+the original face sorption/finite-emission laws and invokes native slab or 3D
+transport; it does not reimplement either reservoir's scalar controller. Public
+candidate/report defaults preserve existing slab callers. Every reservoir trial
+restarts the original spatial field, with six faces in -x,+x,-y,+y,-z,+z order
+and complete endpoint nonlinear-source checks. Shared 3D specimens retain stable
+ID ordering, common accepted clocks/temperature and an aggregate cell budget.
+Local water increments debit the one vapor inventory once; original gas
+reconstruction independently checks total mass and each noncondensing carrier.
+Rejected bracket candidates release their full source fields; only residual
+signs survive into bisection.
+
+The solution controller retains fixed nonvolatile solute amounts while water
+uptake concentrates and desorption dilutes the original solution. Its existing
+pure-solvent path and bounded safeguarded-volume solve remain unchanged. This
+is the equal-pressure, negligible-vapor-storage activity bridge, not liquid
+immersion permeability. The Cartesian solid's `advance_cartesian_finite_atmosphere`
+and `advance_cartesian_finite_solution` admit reservoir, spatial diffusion and
+native swelling/stress/wet inertia together; any late source or mechanical
+failure publishes none of them. Gas internal-energy change excludes bound-water
+caloric storage and sorption heat; no full thermostat or chemical-work balance
+is added. Focused authored regressions cover finite-vapor two-layer gradients
+and late refusal, six-face nonlinear uptake, simultaneous shared adsorption and
+desorption with finite/zero surface exchange, and manufactured solution uptake
+and desorption reaching native 3D swelling. These remain numerical/source
+verification fixtures, not experimental moisture-material validation.
 
 ## Complete modal reflection admission
 

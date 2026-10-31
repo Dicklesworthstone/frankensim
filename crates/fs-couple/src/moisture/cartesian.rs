@@ -10,8 +10,9 @@
 //! using bounded Picard iteration and the native checked-CG solver. The compact
 //! seven-point operator stores O(N) coefficients and has O(N) application cost.
 //! This is isothermal, fixed-reference dilute bound moisture. Unlike-material
-//! partitioning, rotated tensors, finite vapor/solution reservoirs, sorption
-//! heat and stress-assisted diffusion are not supplied by this spatial owner.
+//! partitioning, rotated tensors, sorption heat and stress-assisted diffusion
+//! are not supplied by this spatial owner. The original `atmosphere` and
+//! `solution` controllers couple these same cells to finite external inventories.
 
 use super::*;
 
@@ -239,6 +240,27 @@ impl MoistureCartesian {
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureCartesianReport), MoistureError> {
         poll(cx)?;
+        let temperature = self.reference.query().axes()["temperature"];
+        let boundaries = [
+            faces[0].resolve(temperature)?,
+            faces[1].resolve(temperature)?,
+            faces[2].resolve(temperature)?,
+            faces[3].resolve(temperature)?,
+            faces[4].resolve(temperature)?,
+            faces[5].resolve(temperature)?,
+        ];
+        self.advance_resolved(dt_s, boundaries, config, nonlinear, cx)
+    }
+
+    pub(super) fn advance_resolved(
+        &self,
+        dt_s: f64,
+        boundaries: [ResolvedMoistureFace; 6],
+        config: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, MoistureCartesianReport), MoistureError> {
+        poll(cx)?;
         nonlinear.validate()?;
         let end = self.time_s + dt_s;
         if !positive(dt_s)
@@ -251,15 +273,6 @@ impl MoistureCartesian {
                 "representable forward spatial interval and positive admission limits required",
             ));
         }
-        let temperature = self.reference.query().axes()["temperature"];
-        let boundaries = [
-            faces[0].resolve(temperature)?,
-            faces[1].resolve(temperature)?,
-            faces[2].resolve(temperature)?,
-            faces[3].resolve(temperature)?,
-            faces[4].resolve(temperature)?,
-            faces[5].resolve(temperature)?,
-        ];
         let reservoir = std::array::from_fn(|k| boundaries[k].equilibrium);
         for m in reservoir.into_iter().flatten() {
             poll(cx)?;

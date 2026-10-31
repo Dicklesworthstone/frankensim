@@ -126,11 +126,12 @@ impl MoistureField<'_> {
             .map_err(|_| MoistureError::Invalid("unrepresentable dry-basis moisture coordinate"))
     }
     pub fn wet_mass_kg(&self) -> f64 {
-        self.dry_mass_per_cell_kg * self.moisture.len() as f64
-            + self
-                .moisture
-                .iter()
-                .map(|m| m * self.dry_mass_per_cell_kg)
-                .sum::<f64>()
+        self.dry_mass_per_cell_kg * self.moisture.len() as f64 + self.water_mass_kg()
+    }
+    pub fn water_mass_kg(&self) -> f64 {
+        self.moisture
+            .iter()
+            .map(|m| m * self.dry_mass_per_cell_kg)
+            .sum()
     }
 }
