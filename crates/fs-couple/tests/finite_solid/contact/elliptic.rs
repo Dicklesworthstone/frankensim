@@ -25,7 +25,7 @@ fn query(temperature: f64) -> QueryPoint {
         .unwrap()
 }
 
-fn source(axis: [f64; 2]) -> (InterfaceSystemCard, SourceThermalEllipticCoulomb) {
+pub(super) fn source(axis: [f64; 2]) -> (InterfaceSystemCard, SourceThermalEllipticCoulomb) {
     let mut claims = ClaimSet::new();
     for (name, value) in [
         (
@@ -141,7 +141,7 @@ fn source(axis: [f64; 2]) -> (InterfaceSystemCard, SourceThermalEllipticCoulomb)
     )
 }
 
-fn conditions(temperature: f64) -> SourceFrictionConditions {
+pub(super) fn conditions(temperature: f64) -> SourceFrictionConditions {
     SourceFrictionConditions {
         query: query(temperature).with("path", 20.0).unwrap(),
         contact_temperature_k: Some(temperature),

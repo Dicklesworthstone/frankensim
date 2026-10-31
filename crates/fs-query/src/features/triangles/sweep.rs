@@ -46,6 +46,174 @@ pub struct LinearSweepReport {
     pub examined_windows: usize,
 }
 
+/// Conservative upper clearance over an affine sphere/deforming-triangle path.
+///
+/// Each endpoint's barycentric weights are nonnegative and normalized by their
+/// enclosed exact real sum. Interpolating those weights produces a convex point
+/// of the SAME moving triangle at every time; the proof never substitutes
+/// a rounded reconstructed point that might lie outside it. Relative coordinates
+/// use triangle edges before accumulation, retaining small separations far from
+/// the world origin. All arithmetic is directed through the original fs-ivl owner.
+///
+/// The relative point path is quadratic. Its Bernstein controls are the two
+/// endpoint relative vectors and (C0+C1-sum(w0*T1)-sum(w1*T0))/2. Their maximum
+/// enclosed norm bounds the complete path by convex-hull containment and norm
+/// convexity. The middle control is evaluated as half the endpoint-vector sum
+/// plus half sum(delta(w_i)*delta(edge_i)), removing common translation and
+/// avoiding cancellation between large, opposite sliding displacements.
+/// On a stationary plane under steady sliding all three controls
+/// equal the normal separation, avoiding a false timestep restriction from
+/// holding the starting closest point fixed while the sphere moves tangentially.
+/// Distance to the closest triangle point cannot be larger than distance to
+/// this convex point. The returned upper clearance subtracts the ORIGINAL
+/// sphere radius. This establishes nearness only: nonpenetration still needs
+/// the separate whole-path lower-bound admission. Work and storage are constant.
+#[allow(clippy::too_many_arguments)]
+pub fn linear_sphere_triangle_nearness(
+    center_start: [f64; 3],
+    center_end: [f64; 3],
+    radius: f64,
+    triangle_start: [[f64; 3]; 3],
+    triangle_end: [[f64; 3]; 3],
+    weights_start: [f64; 3],
+    weights_end: [f64; 3],
+    cx: &Cx<'_>,
+) -> Result<f64, TriangleQueryError> {
+    super::poll(cx)?;
+    if !radius.is_finite()
+        || radius <= 0.0
+        || center_start
+            .into_iter()
+            .chain(center_end)
+            .chain(triangle_start.into_iter().flatten())
+            .chain(triangle_end.into_iter().flatten())
+            .any(|x| !x.is_finite())
+    {
+        return Err(TriangleQueryError::Invalid(
+            "finite affine geometry and positive sphere radius required",
+        ));
+    }
+    let normalized_start = enclosed_barycentric(weights_start)?;
+    let normalized_end = enclosed_barycentric(weights_end)?;
+    let relative = |center: [f64; 3], triangle: [[f64; 3]; 3], normalized: [Interval; 3]| {
+        core::array::from_fn(|axis| {
+            let anchor = Interval::point(triangle[0][axis]);
+            Interval::point(center[axis])
+                - anchor
+                - normalized[1] * (Interval::point(triangle[1][axis]) - anchor)
+                - normalized[2] * (Interval::point(triangle[2][axis]) - anchor)
+        })
+    };
+    let start_relative: [Interval; 3] = relative(center_start, triangle_start, normalized_start);
+    let end_relative: [Interval; 3] = relative(center_end, triangle_end, normalized_end);
+    let half = Interval::point(0.5);
+    let middle_relative = core::array::from_fn(|axis| {
+        let mut middle = half * start_relative[axis] + half * end_relative[axis];
+        // Identical original endpoint data prove the corresponding exact
+        // change is zero, without subtracting two dependent enclosures.
+        if weights_start != weights_end && triangle_start != triangle_end {
+            for node in 1..3 {
+                let weight_change = normalized_end[node] - normalized_start[node];
+                let start_edge = Interval::point(triangle_start[node][axis])
+                    - Interval::point(triangle_start[0][axis]);
+                let end_edge = Interval::point(triangle_end[node][axis])
+                    - Interval::point(triangle_end[0][axis]);
+                middle = middle + half * weight_change * (end_edge - start_edge);
+            }
+        }
+        middle
+    });
+    let start = enclosed_norm_upper(start_relative)?;
+    let end = enclosed_norm_upper(end_relative)?;
+    let middle = enclosed_norm_upper(middle_relative)?;
+    let upper = (Interval::point(start.max(middle).max(end)) - Interval::point(radius)).hi();
+    super::poll(cx)?;
+    super::finite(upper)
+}
+
+fn enclosed_barycentric(weights: [f64; 3]) -> Result<[Interval; 3], TriangleQueryError> {
+    let sum: f64 = weights.iter().sum();
+    if weights
+        .iter()
+        .any(|w| !w.is_finite() || !(0.0..=1.0).contains(w))
+        || (sum - 1.0).abs() > 64.0 * f64::EPSILON
+    {
+        return Err(TriangleQueryError::Invalid(
+            "convex near-unit barycentric weights required",
+        ));
+    }
+    let denominator = weights
+        .into_iter()
+        .fold(Interval::point(0.0), |sum, w| sum + Interval::point(w));
+    if !denominator.lo().is_finite() || denominator.lo() <= 0.0 || !denominator.hi().is_finite() {
+        return Err(TriangleQueryError::NumericalRange);
+    }
+    Ok(weights.map(|w| Interval::point(w) / denominator))
+}
+
+/// Upper clearance over the complete affine path of two sphere centres.
+///
+/// Convexity bounds the centre distance by its endpoint maximum; each ORIGINAL
+/// radius is subtracted separately with directed rounding. This is a nearness
+/// upper bound, not the independent nonpenetration lower-bound certificate.
+pub fn linear_spheres_nearness(
+    first_start: [f64; 3],
+    first_end: [f64; 3],
+    first_radius: f64,
+    second_start: [f64; 3],
+    second_end: [f64; 3],
+    second_radius: f64,
+    cx: &Cx<'_>,
+) -> Result<f64, TriangleQueryError> {
+    super::poll(cx)?;
+    if [first_radius, second_radius]
+        .iter()
+        .any(|r| !r.is_finite() || *r <= 0.0)
+        || first_start
+            .into_iter()
+            .chain(first_end)
+            .chain(second_start)
+            .chain(second_end)
+            .any(|x| !x.is_finite())
+    {
+        return Err(TriangleQueryError::Invalid(
+            "finite affine centres and positive original radii required",
+        ));
+    }
+    let relative = |first: [f64; 3], second: [f64; 3]| {
+        core::array::from_fn(|axis| Interval::point(first[axis]) - Interval::point(second[axis]))
+    };
+    let start = enclosed_norm_upper(relative(first_start, second_start))?;
+    let end = enclosed_norm_upper(relative(first_end, second_end))?;
+    let upper = (Interval::point(start.max(end))
+        - Interval::point(first_radius)
+        - Interval::point(second_radius))
+    .hi();
+    super::poll(cx)?;
+    super::finite(upper)
+}
+
+fn enclosed_norm_upper(vector: [Interval; 3]) -> Result<f64, TriangleQueryError> {
+    if vector
+        .iter()
+        .any(|v| !v.lo().is_finite() || !v.hi().is_finite())
+    {
+        return Err(TriangleQueryError::NumericalRange);
+    }
+    let scale = vector.iter().map(|v| v.abs().hi()).fold(0.0, f64::max);
+    if scale == 0.0 {
+        return Ok(0.0);
+    }
+    let squared = vector.into_iter().fold(Interval::point(0.0), |sum, v| {
+        let x = (v / Interval::point(scale)).abs();
+        sum + x * x
+    });
+    if !squared.hi().is_finite() || squared.hi() < 0.0 {
+        return Err(TriangleQueryError::NumericalRange);
+    }
+    super::finite((squared.sqrt() * Interval::point(scale)).hi())
+}
+
 /// Certify nonpenetration of a sphere and one linearly deforming triangle.
 ///
 /// Endpoints are original floating-point coordinates interpreted as exact real
@@ -474,6 +642,200 @@ mod tests {
         });
     }
     const TRI: [[f64; 3]; 3] = [[-4.0, -4.0, 0.0], [4.0, -4.0, 0.0], [0.0, 4.0, 0.0]];
+    #[test]
+    fn affine_nearness_encloses_a_material_point_on_a_deforming_triangle() {
+        run(|_, cx| {
+            let end = [[-8.0, -4.0, 1.0], [8.0, -4.0, 1.0], [0.0, 12.0, 1.0]];
+            let weights = [0.25, 0.25, 0.5];
+            let gap = 1.0 / 1_048_576.0;
+            // Fixed barycentric P moves from (0,0,0) to (0,4,1), while
+            // every intermediate relative centre vector is (0,0,.5+gap).
+            let upper = linear_sphere_triangle_nearness(
+                [0.0, 0.0, 0.5 + gap],
+                [0.0, 4.0, 1.5 + gap],
+                0.5,
+                TRI,
+                end,
+                weights,
+                weights,
+                cx,
+            )
+            .unwrap();
+            assert!(upper >= gap && upper < gap + 1e-12);
+            let receding = linear_sphere_triangle_nearness(
+                [0.0, 0.0, 0.5 + gap],
+                [0.0, 4.0, 2.5 + gap],
+                0.5,
+                TRI,
+                end,
+                weights,
+                weights,
+                cx,
+            )
+            .unwrap();
+            assert!(receding >= 1.0 + gap);
+            // A source history may not count that interval as sustained
+            // contact simply because its initial point was near the surface.
+            assert!(receding > 2.0 * gap);
+            // Moving endpoint witnesses follow one metre of flat sliding.
+            // Holding the start point fixed would give a false O(d^2/R) gap;
+            // all three actual Bernstein controls have the same normal offset.
+            let sliding = linear_sphere_triangle_nearness(
+                [0.0, 0.0, 0.5 + gap],
+                [1.0, 0.0, 0.5 + gap],
+                0.5,
+                TRI,
+                TRI,
+                weights,
+                [0.125, 0.375, 0.5],
+                cx,
+            )
+            .unwrap();
+            assert!(sliding >= gap && sliding < gap + 1e-12);
+        });
+    }
+
+    #[test]
+    fn nearness_uses_original_material_coordinates_and_is_not_nonpenetration() {
+        run(|_, cx| {
+            let large = 4_503_599_627_370_496.0; // 2^52: half an ULP is lost.
+            let triangle = [
+                [large, 0.0, 0.0],
+                [large + 1.0, 0.0, 0.0],
+                [large, 1.0, 0.0],
+            ];
+            // The exact convex material point is (large+.5,0,0). Rounding
+            // it first to a world-space float would erase its .5 separation.
+            let upper = linear_sphere_triangle_nearness(
+                [large, 0.0, 1.0],
+                [large, 0.0, 1.0],
+                1.0,
+                triangle,
+                triangle,
+                [0.5, 0.5, 0.0],
+                [0.5, 0.5, 0.0],
+                cx,
+            )
+            .unwrap();
+            assert!(upper >= 1.25_f64.sqrt() - 1.0 && upper < 0.119);
+            let near = linear_sphere_triangle_nearness(
+                [0.0, 0.0, 0.5],
+                [0.0, 0.0, -0.5],
+                0.5,
+                TRI,
+                TRI,
+                [0.25, 0.25, 0.5],
+                [0.25, 0.25, 0.5],
+                cx,
+            )
+            .unwrap();
+            assert!(near < 1e-12);
+            assert!(matches!(
+                linear_sphere_triangle(
+                    [0.0, 0.0, 0.5],
+                    [0.0, 0.0, -0.5],
+                    0.5,
+                    TRI,
+                    TRI,
+                    Default::default(),
+                    cx,
+                )
+                .unwrap()
+                .verdict,
+                LinearSweepVerdict::PossibleContact { .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn changing_weights_need_the_quadratic_middle_control() {
+        run(|_, cx| {
+            let start = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+            let end = [[0.0; 3], [3.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+            // P_x(t)=(1-t)(1+2t), C_x(t)=1-t. Thus the relative x
+            // control is -1 at its quadratic middle, despite zero endpoints.
+            let upper = linear_sphere_triangle_nearness(
+                [1.0, 0.0, 0.5],
+                [0.0, 0.0, 0.5],
+                0.5,
+                start,
+                end,
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                cx,
+            )
+            .unwrap();
+            assert!(upper >= 1.25_f64.sqrt() - 0.5 && upper < 0.619);
+        });
+    }
+
+    #[test]
+    fn affine_pair_nearness_keeps_original_radii_and_bounded_range_refusals() {
+        run(|gate, cx| {
+            let gap = 1.0 / 1_048_576.0;
+            let upper = linear_spheres_nearness(
+                [0.0; 3],
+                [1.0, 2.0, 3.0],
+                0.125,
+                [0.375 + gap, 0.0, 0.0],
+                [1.375 + gap, 2.0, 3.0],
+                0.25,
+                cx,
+            )
+            .unwrap();
+            assert!(upper >= gap && upper < gap + 1e-12);
+            let large = linear_spheres_nearness(
+                [1e200, 0.0, 0.0],
+                [1e200, 0.0, 0.0],
+                0.25e200,
+                [0.0; 3],
+                [0.0; 3],
+                0.25e200,
+                cx,
+            )
+            .unwrap();
+            assert!(large >= 0.5e200 && large < 0.50000000000001e200);
+            assert!(matches!(
+                linear_spheres_nearness(
+                    [f64::MAX, 0.0, 0.0],
+                    [f64::MAX, 0.0, 0.0],
+                    0.5,
+                    [-f64::MAX, 0.0, 0.0],
+                    [-f64::MAX, 0.0, 0.0],
+                    0.5,
+                    cx,
+                ),
+                Err(TriangleQueryError::NumericalRange)
+            ));
+            assert!(matches!(
+                linear_sphere_triangle_nearness(
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0],
+                    0.5,
+                    TRI,
+                    TRI,
+                    [0.5; 3],
+                    [0.5; 3],
+                    cx,
+                ),
+                Err(TriangleQueryError::Invalid(_))
+            ));
+            gate.request();
+            assert!(matches!(
+                linear_spheres_nearness(
+                    [0.0; 3],
+                    [0.0; 3],
+                    0.5,
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    0.5,
+                    cx,
+                ),
+                Err(TriangleQueryError::Cancelled)
+            ));
+        });
+    }
+
     #[test]
     fn clear_endpoints_cannot_hide_a_pass_through() {
         run(|_, cx| {

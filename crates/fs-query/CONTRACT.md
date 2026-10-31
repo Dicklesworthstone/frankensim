@@ -1,5 +1,13 @@
 # fs-query — CONTRACT
 
+## Conservative nearness along moving material-contact paths
+
+`triangle::sweep::{linear_sphere_triangle_nearness,linear_spheres_nearness}` supplies a whole-path upper clearance bound for the declared affine coordinate motion, independently of the existing nonpenetration lower-bound certificate. A sphere/triangle query encloses exact normalization of both endpoint convex barycentric witnesses, interpolates those weights through the same moving triangle, and bounds the resulting quadratic relative path by its three Bernstein controls. The middle control uses endpoint relative vectors plus changes in barycentric weights times changes in triangle edges; common translation cancels before accumulation. Identical original endpoint data prove exact zero corrections. Thus steady planar sliding retains its normal clearance instead of accumulating a false tangential-distance gap.
+
+All admission arithmetic uses the original directed fs-ivl owner, with scaled norm evaluation, original unrounded node coordinates and separate original sphere radii. Work/storage are constant; invalid weights, nonfinite/unrepresentable ranges and cancellation retain typed refusals. Nearness never proves nonpenetration, contact force, an exact curved physical trajectory or contact duration by itself. The coupled mechanics owner separately admits the trajectory before using nearness for its declared finite contact-history quadrature.
+
+Focused native fixtures cover translating/deforming faces, changing weights requiring the middle control, one metre of steady planar sliding, the rounded-material-point counterexample at2^52, overlap versus nearness, original radii and range/cancellation. Source/format checks and independent Bernstein algebra checks passed. Native compilation and execution of these new Rust fixtures remain unverified under the current full-disk and dependency-memory block.
+
 ## Purpose and layer
 
 L2 (MORPH). Geometry queries (plan §7.4): the interrogation layer

@@ -18,6 +18,12 @@
 //! neither is silently called heat. Explicit elastic and force splitting must
 //! pass noncancelling refinement gates, and finite budgets can refuse progress.
 
+/// Directional friction through the same native trajectory and physical gates.
+pub mod elliptic;
+
+/// Original source-dependent histories on admitted material-contact paths.
+pub mod source;
+
 use super::free::{rotation_difference, rotational_change};
 use super::{
     FiniteSolidSpherePathRefusal, FiniteSolidSpherePathReport, FiniteSolidSphereScene,
@@ -27,12 +33,13 @@ use super::{
 use crate::finite_solid::contact::mixed::{FiniteSolidContactCounterpart, FiniteSolidMixedContact};
 use crate::finite_solid::contact::surface::FiniteSolidContactSurface;
 use crate::finite_solid::contact::{
-    FiniteSolidRigidContactError, FiniteSolidRigidContactReport, contact_frame,
+    FiniteSolidRigidContactControls, FiniteSolidRigidContactError, FiniteSolidRigidContactReport,
+    ImpactResponse, contact_frame,
 };
 use crate::finite_solid::impulse::{FiniteSolidImpulse, FiniteSolidMomentum};
 use crate::finite_solid::split::{FiniteSolidContactDrift, FiniteSolidForceKick};
 use crate::finite_solid::{FiniteSolidBody, FiniteSolidError};
-use fs_contact::frictional_multicontact::NormalVelocityLaw;
+use fs_contact::frictional_multicontact::{FrictionalContactResult, NormalVelocityLaw};
 use fs_exec::Cx;
 use fs_mbd::{
     DynamicsError, Gravity, MassProperties, MomentumImpulseReceipt, RigidBodyIntegrator,
@@ -89,7 +96,7 @@ pub struct FiniteSolidSustainedRigidStep {
 }
 
 #[derive(Clone, Debug)]
-pub struct FiniteSolidSustainedTrajectoryStep {
+pub struct FiniteSolidSustainedTrajectoryStep<R = FrictionalContactResult, A = ()> {
     pub elapsed_s: f64,
     pub duration_s: f64,
     pub maximum_contact_gap_m: f64,
@@ -100,16 +107,19 @@ pub struct FiniteSolidSustainedTrajectoryStep {
     pub solid_kick: FiniteSolidSustainedSolidKick,
     pub solid_drift: FiniteSolidContactDrift,
     pub rigid: Vec<FiniteSolidSustainedRigidStep>,
-    pub impact: Option<FiniteSolidRigidContactReport>,
+    pub impact: Option<FiniteSolidRigidContactReport<R>>,
+    /// Original per-event auxiliary receipt, published only with the whole
+    /// admitted trajectory. Rejected attempts retain neither it nor its state.
+    pub event_data: Option<A>,
     pub path: FiniteSolidSpherePathReport,
 }
 
 /// Whole-call storage, source/support transfer and separately visible split errors.
 #[derive(Clone, Debug)]
-pub struct FiniteSolidSustainedTrajectoryReport {
+pub struct FiniteSolidSustainedTrajectoryReport<R = FrictionalContactResult, A = ()> {
     pub duration_s: f64,
     pub rejected_steps: usize,
-    pub steps: Vec<FiniteSolidSustainedTrajectoryStep>,
+    pub steps: Vec<FiniteSolidSustainedTrajectoryStep<R, A>>,
     pub kinetic_change_j: f64,
     pub strain_change_j: f64,
     /// Solid/rigid force displacement work and the declared body-torque kick work.
@@ -150,16 +160,26 @@ pub enum FiniteSolidSustainedRefusal {
     RotationalSolve {
         rigid_body: usize,
     },
+    /// An auxiliary owner could not prove its physical path or feature scope.
+    /// The entire attempted mechanical/history state is discarded and retried.
+    AuxiliaryPath {
+        contact_id: u64,
+        what: &'static str,
+    },
 }
 
 /// Every refusal leaves accepted q/v/a, native clock/history and rigid states intact.
 #[derive(Debug)]
-pub enum FiniteSolidSustainedTrajectoryError {
+pub enum FiniteSolidSustainedTrajectoryError<
+    R = FrictionalContactResult,
+    E = FiniteSolidRigidContactError<R>,
+    A = (),
+> {
     Invalid(&'static str),
     Trajectory(FiniteSolidSphereTrajectoryError),
     Solid(FiniteSolidError),
     Rigid(DynamicsError),
-    Impact(FiniteSolidRigidContactError),
+    Impact(E),
     RejectionBudget {
         elapsed_s: f64,
         last: FiniteSolidSustainedRefusal,
@@ -170,34 +190,84 @@ pub enum FiniteSolidSustainedTrajectoryError {
         angular_residual_kg_m2_s: f64,
         energy_residual_j: f64,
     },
-    Audit(Box<FiniteSolidSustainedTrajectoryReport>),
+    Audit(Box<FiniteSolidSustainedTrajectoryReport<R, A>>),
 }
-impl From<FiniteSolidSphereTrajectoryError> for FiniteSolidSustainedTrajectoryError {
+impl<R, E, A> From<FiniteSolidSphereTrajectoryError>
+    for FiniteSolidSustainedTrajectoryError<R, E, A>
+{
     fn from(e: FiniteSolidSphereTrajectoryError) -> Self {
         Self::Trajectory(e)
     }
 }
-impl From<FiniteSolidError> for FiniteSolidSustainedTrajectoryError {
+impl<R, E, A> From<FiniteSolidError> for FiniteSolidSustainedTrajectoryError<R, E, A> {
     fn from(e: FiniteSolidError) -> Self {
         Self::Solid(e)
     }
 }
-impl From<DynamicsError> for FiniteSolidSustainedTrajectoryError {
+impl<R, E, A> From<DynamicsError> for FiniteSolidSustainedTrajectoryError<R, E, A> {
     fn from(e: DynamicsError) -> Self {
         Self::Rigid(e)
     }
 }
-impl From<FiniteSolidRigidContactError> for FiniteSolidSustainedTrajectoryError {
-    fn from(e: FiniteSolidRigidContactError) -> Self {
+impl<R, I, A> From<FiniteSolidRigidContactError<R, I>>
+    for FiniteSolidSustainedTrajectoryError<R, FiniteSolidRigidContactError<R, I>, A>
+{
+    fn from(e: FiniteSolidRigidContactError<R, I>) -> Self {
         Self::Impact(e)
     }
 }
-impl core::fmt::Display for FiniteSolidSustainedTrajectoryError {
+impl<R: core::fmt::Debug, E: core::fmt::Debug, A: core::fmt::Debug> core::fmt::Display
+    for FiniteSolidSustainedTrajectoryError<R, E, A>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native sustained rigid/finite-solid contact: {self:?}")
     }
 }
-impl std::error::Error for FiniteSolidSustainedTrajectoryError {}
+impl<R: core::fmt::Debug, E: core::fmt::Debug, A: core::fmt::Debug> std::error::Error
+    for FiniteSolidSustainedTrajectoryError<R, E, A>
+{
+}
+
+/// Actual native post-kick states and the original scene's ordered geometry.
+/// Newton restitution targets have already been derived from the PRE-FORCE
+/// velocities. A resolver must not replace that normal law or reinterpret the
+/// original tangent frame; directional coefficients use that exact frame.
+pub struct FiniteSolidSustainedContactContext<'s, 'a, 'cx> {
+    pub solid: &'s FiniteSolidBody<'a>,
+    pub bodies: &'s [RigidBodyState],
+    pub properties: &'s [MassProperties],
+    pub contacts: &'s [FiniteSolidMixedContact],
+    pub contact_keys: &'s [FiniteSolidSphereSceneKey],
+    pub elapsed_s: f64,
+    pub duration_s: f64,
+    pub origin_m: [f64; 3],
+    pub controls: FiniteSolidRigidContactControls,
+    pub cx: &'s Cx<'cx>,
+}
+
+/// Actual admitted native motion for an auxiliary owner's finite-path update.
+/// This callback follows geometric admission but remains private until all
+/// interval-clock and whole-call physical gates succeed.
+pub(in crate::finite_solid::contact) struct FiniteSolidSustainedAcceptedContext<'s, 'a, 'cx, R> {
+    pub initial_solid: &'s FiniteSolidBody<'a>,
+    pub initial_bodies: &'s [RigidBodyState],
+    pub post_contact_solid: &'s FiniteSolidBody<'a>,
+    pub post_contact_bodies: &'s [RigidBodyState],
+    pub endpoint_solid: &'s FiniteSolidBody<'a>,
+    pub endpoint_bodies: &'s [RigidBodyState],
+    pub properties: &'s [MassProperties],
+    pub contacts: &'s [FiniteSolidMixedContact],
+    pub contact_keys: &'s [FiniteSolidSphereSceneKey],
+    pub elapsed_s: f64,
+    pub duration_s: f64,
+    pub impact: Option<&'s FiniteSolidRigidContactReport<R>>,
+    /// Already reconstructed endpoint scene; continuing feature frames and
+    /// separation are available without repeating the full geometry query.
+    pub endpoint_contacts: &'s [FiniteSolidMixedContact],
+    pub endpoint_contact_keys: &'s [FiniteSolidSphereSceneKey],
+    pub path: &'s FiniteSolidSpherePathReport,
+    pub cx: &'s Cx<'cx>,
+}
 
 impl<'a> FiniteSolidBody<'a> {
     /// Advance the complete declared sphere scene through loaded sustained contact.
@@ -234,6 +304,93 @@ impl<'a> FiniteSolidBody<'a> {
             FiniteSolidSustainedTrajectoryReport,
         ),
         FiniteSolidSustainedTrajectoryError,
+    > {
+        let (solid, bodies, (), report) = self.sustained_sphere_trajectory_with(
+            surface,
+            scene,
+            bodies,
+            properties,
+            nodal_forces_n,
+            body_force_n_m3,
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            &(),
+            |context, _| {
+                context
+                    .solid
+                    .mixed_contact_candidate(
+                        context.bodies,
+                        context.properties,
+                        context.contacts,
+                        context.origin_m,
+                        context.controls,
+                        context.cx,
+                    )
+                    .map(|(solid, bodies, report)| (solid, bodies, report, ()))
+            },
+            |_, _, _| Ok(None),
+            cx,
+        )?;
+        Ok((solid, bodies, report))
+    }
+
+    /// One mechanical, geometric and whole-call publication owner for every
+    /// constitutive dispatch. Only auxiliary candidates are mutable; retries
+    /// clone the last accepted private state and discard every rejected change.
+    /// Callback side effects outside that state are outside this transaction.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    pub(in crate::finite_solid::contact) fn sustained_sphere_trajectory_with<
+        R: ImpactResponse,
+        E,
+        S: Clone,
+        A,
+    >(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        accepted_auxiliary: &S,
+        mut dispatch: impl FnMut(
+            FiniteSolidSustainedContactContext<'_, 'a, '_>,
+            &mut S,
+        ) -> Result<
+            (
+                Self,
+                Vec<RigidBodyState>,
+                FiniteSolidRigidContactReport<R>,
+                A,
+            ),
+            E,
+        >,
+        mut accept_auxiliary: impl FnMut(
+            FiniteSolidSustainedAcceptedContext<'_, 'a, '_, R>,
+            &mut S,
+            Option<&mut A>,
+        ) -> Result<Option<FiniteSolidSustainedRefusal>, E>,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            Vec<RigidBodyState>,
+            S,
+            FiniteSolidSustainedTrajectoryReport<R, A>,
+        ),
+        FiniteSolidSustainedTrajectoryError<R, E, A>,
     > {
         super::poll(cx)?;
         validate(
@@ -274,6 +431,7 @@ impl<'a> FiniteSolidBody<'a> {
         )?;
         let mut solid = self.clone();
         let mut rigid = bodies.to_vec();
+        let mut auxiliary = accepted_auxiliary.clone();
         let mut report = empty_report(duration_s);
         let mut elapsed = 0.0;
         let mut proposed_step_s = controls.maximum_step_s;
@@ -295,9 +453,9 @@ impl<'a> FiniteSolidBody<'a> {
                 cx,
             )?;
             let (contacts, incoming, targets) =
-                incoming_laws(&solid, &rigid, properties, &contacts, cx)?;
+                incoming_laws::<R, E, A>(&solid, &rigid, properties, &contacts, cx)?;
             let mut dt = proposed_step_s.min(duration_s - elapsed);
-            let (next_solid, next_rigid, mut step) = loop {
+            let (next_solid, next_rigid, next_auxiliary, mut step) = loop {
                 super::poll(cx)?;
                 if !dt.is_finite()
                     || dt <= 0.0
@@ -323,6 +481,7 @@ impl<'a> FiniteSolidBody<'a> {
                     &rigid,
                     properties,
                     &contacts,
+                    &keys,
                     nodal_forces_n,
                     body_force_n_m3,
                     wrenches,
@@ -330,8 +489,12 @@ impl<'a> FiniteSolidBody<'a> {
                     dt,
                     origin_m,
                     controls,
+                    elapsed,
                     allowance,
                     clock_tolerance,
+                    &auxiliary,
+                    &mut dispatch,
+                    &mut accept_auxiliary,
                     cx,
                 )?;
                 match attempt {
@@ -348,7 +511,8 @@ impl<'a> FiniteSolidBody<'a> {
                             FiniteSolidSustainedRefusal::Path(p) => p.start(),
                             FiniteSolidSustainedRefusal::Integration { .. }
                             | FiniteSolidSustainedRefusal::SolidTrial(_)
-                            | FiniteSolidSustainedRefusal::RotationalSolve { .. } => 0.0,
+                            | FiniteSolidSustainedRefusal::RotationalSolve { .. }
+                            | FiniteSolidSustainedRefusal::AuxiliaryPath { .. } => 0.0,
                         };
                         dt *= if fraction > 0.0 { 0.9 * fraction } else { 0.5 };
                     }
@@ -397,6 +561,7 @@ impl<'a> FiniteSolidBody<'a> {
             report.steps.push(step);
             solid = next_solid;
             rigid = next_rigid;
+            auxiliary = next_auxiliary;
         }
         if (solid.native_state().t - end_time).abs() > clock_tolerance {
             return Err(FiniteSolidSphereTrajectoryError::TimeResolution {
@@ -410,18 +575,20 @@ impl<'a> FiniteSolidBody<'a> {
             return Err(FiniteSolidSustainedTrajectoryError::Audit(Box::new(report)));
         }
         super::poll(cx)?;
-        Ok((solid, rigid, report))
+        Ok((solid, rigid, auxiliary, report))
     }
 }
 
-fn incoming_laws(
+fn incoming_laws<R, E, A>(
     solid: &FiniteSolidBody<'_>,
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     contacts: &[FiniteSolidMixedContact],
     cx: &Cx<'_>,
-) -> Result<(Vec<FiniteSolidMixedContact>, Vec<f64>, Vec<f64>), FiniteSolidSustainedTrajectoryError>
-{
+) -> Result<
+    (Vec<FiniteSolidMixedContact>, Vec<f64>, Vec<f64>),
+    FiniteSolidSustainedTrajectoryError<R, E, A>,
+> {
     let mut result = contacts.to_vec();
     let mut incoming = Vec::with_capacity(contacts.len());
     let mut targets = Vec::with_capacity(contacts.len());
@@ -466,23 +633,25 @@ fn incoming_laws(
     Ok((result, incoming, targets))
 }
 
-type Attempt<'a> = Result<
+type Attempt<'a, R, S, A> = Result<
     (
         FiniteSolidBody<'a>,
         Vec<RigidBodyState>,
-        FiniteSolidSustainedTrajectoryStep,
+        S,
+        FiniteSolidSustainedTrajectoryStep<R, A>,
     ),
     FiniteSolidSustainedRefusal,
 >;
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn interval<'a>(
+fn interval<'a, R: ImpactResponse, E, S: Clone, A>(
     solid: &FiniteSolidBody<'a>,
     surface: &FiniteSolidContactSurface,
     scene: &FiniteSolidSphereScene,
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     contacts: &[FiniteSolidMixedContact],
+    contact_keys: &[FiniteSolidSphereSceneKey],
     nodal_forces_n: &[(usize, f64)],
     body_force_n_m3: [f64; 3],
     wrenches: &[Wrench],
@@ -490,10 +659,29 @@ fn interval<'a>(
     dt: f64,
     origin_m: [f64; 3],
     controls: FiniteSolidSphereTrajectoryControls,
+    elapsed_s: f64,
     allowance: f64,
     clock_tolerance: f64,
+    accepted_auxiliary: &S,
+    dispatch: &mut impl FnMut(
+        FiniteSolidSustainedContactContext<'_, 'a, '_>,
+        &mut S,
+    ) -> Result<
+        (
+            FiniteSolidBody<'a>,
+            Vec<RigidBodyState>,
+            FiniteSolidRigidContactReport<R>,
+            A,
+        ),
+        E,
+    >,
+    accept_auxiliary: &mut impl FnMut(
+        FiniteSolidSustainedAcceptedContext<'_, 'a, '_, R>,
+        &mut S,
+        Option<&mut A>,
+    ) -> Result<Option<FiniteSolidSustainedRefusal>, E>,
     cx: &Cx<'_>,
-) -> Result<Attempt<'a>, FiniteSolidSustainedTrajectoryError> {
+) -> Result<Attempt<'a, R, S, A>, FiniteSolidSustainedTrajectoryError<R, E, A>> {
     let (kicked_solid, solid_kick) = solid.force_kick_candidate(
         dt,
         nodal_forces_n,
@@ -514,18 +702,27 @@ fn interval<'a>(
         kicked_rigid.push(kick.state_after);
         kicks.push(kick);
     }
-    let (contacted_solid, contacted_rigid, impact) = if contacts.is_empty() {
-        (kicked_solid, kicked_rigid, None)
+    let mut auxiliary = accepted_auxiliary.clone();
+    let (contacted_solid, contacted_rigid, impact, mut event_data) = if contacts.is_empty() {
+        (kicked_solid, kicked_rigid, None, None)
     } else {
-        let (s, r, i) = kicked_solid.mixed_contact_candidate(
-            &kicked_rigid,
-            properties,
-            contacts,
-            origin_m,
-            controls.impact,
-            cx,
-        )?;
-        (s, r, Some(i))
+        let (s, r, i, data) = dispatch(
+            FiniteSolidSustainedContactContext {
+                solid: &kicked_solid,
+                bodies: &kicked_rigid,
+                properties,
+                contacts,
+                contact_keys,
+                elapsed_s,
+                duration_s: dt,
+                origin_m,
+                controls: controls.impact,
+                cx,
+            },
+            &mut auxiliary,
+        )
+        .map_err(FiniteSolidSustainedTrajectoryError::Impact)?;
+        (s, r, Some(i), Some(data))
     };
     let mut solid_controls = controls.free.solid;
     solid_controls.energy_tolerance_j = solid_controls.energy_tolerance_j.min(allowance);
@@ -725,7 +922,7 @@ fn interval<'a>(
         Ok(path) => path,
         Err(refusal) => return Ok(Err(FiniteSolidSustainedRefusal::Path(refusal))),
     };
-    current_contacts(
+    let (endpoint_contacts, endpoint_contact_keys, _) = current_contacts(
         surface,
         Some(scene),
         &next_solid,
@@ -734,9 +931,37 @@ fn interval<'a>(
         controls.surface,
         cx,
     )?;
+    let auxiliary_refusal = accept_auxiliary(
+        FiniteSolidSustainedAcceptedContext {
+            initial_solid: solid,
+            initial_bodies: bodies,
+            post_contact_solid: &contacted_solid,
+            post_contact_bodies: &contacted_rigid,
+            endpoint_solid: &next_solid,
+            endpoint_bodies: &next_rigid,
+            properties,
+            contacts,
+            contact_keys,
+            elapsed_s,
+            duration_s: dt,
+            impact: impact.as_ref(),
+            path: &path,
+            cx,
+            endpoint_contacts: &endpoint_contacts,
+            endpoint_contact_keys: &endpoint_contact_keys,
+        },
+        &mut auxiliary,
+        event_data.as_mut(),
+    )
+    .map_err(FiniteSolidSustainedTrajectoryError::Impact)?;
+    if let Some(refusal) = auxiliary_refusal {
+        return Ok(Err(refusal));
+    }
+    super::poll(cx)?;
     Ok(Ok((
         next_solid,
         next_rigid,
+        auxiliary,
         FiniteSolidSustainedTrajectoryStep {
             elapsed_s: 0.0,
             duration_s: dt,
@@ -748,12 +973,13 @@ fn interval<'a>(
             solid_drift,
             rigid,
             impact,
+            event_data,
             path,
         },
     )))
 }
 
-fn empty_report(duration_s: f64) -> FiniteSolidSustainedTrajectoryReport {
+fn empty_report<R, A>(duration_s: f64) -> FiniteSolidSustainedTrajectoryReport<R, A> {
     FiniteSolidSustainedTrajectoryReport {
         duration_s,
         rejected_steps: 0,
@@ -783,9 +1009,9 @@ fn empty_report(duration_s: f64) -> FiniteSolidSustainedTrajectoryReport {
     }
 }
 
-fn accumulate(
-    r: &mut FiniteSolidSustainedTrajectoryReport,
-    s: &FiniteSolidSustainedTrajectoryStep,
+fn accumulate<R: ImpactResponse, A>(
+    r: &mut FiniteSolidSustainedTrajectoryReport<R, A>,
+    s: &FiniteSolidSustainedTrajectoryStep<R, A>,
     origin: Vec3,
 ) {
     let k = &s.solid_kick;
@@ -838,7 +1064,7 @@ fn accumulate(
         native.work_residual_j.abs() + k.work_decomposition_residual_j.abs();
     if let Some(i) = &s.impact {
         r.kinetic_change_j += i.kinetic_change_j;
-        r.unallocated_contact_loss_j += i.contact.dissipated_energy;
+        r.unallocated_contact_loss_j += i.contact.physical().dissipated_energy;
         let support = vector(i.solid_impulse.support.linear_kg_m_s);
         let moment = vector(i.solid_impulse.support.angular_kg_m2_s);
         r.linear_momentum_change_kg_m_s = r
@@ -904,7 +1130,7 @@ fn accumulate(
     }
 }
 
-fn finish(r: &mut FiniteSolidSustainedTrajectoryReport) {
+fn finish<R, A>(r: &mut FiniteSolidSustainedTrajectoryReport<R, A>) {
     r.work_energy_residual_j = r.kinetic_change_j + r.strain_change_j - r.source_work_j
         + r.unallocated_contact_loss_j
         - r.integration_defect_j;
@@ -918,8 +1144,8 @@ fn finish(r: &mut FiniteSolidSustainedTrajectoryReport) {
         .sub(r.support_angular_impulse_kg_m2_s);
 }
 
-fn admitted(
-    r: &FiniteSolidSustainedTrajectoryReport,
+fn admitted<R, A>(
+    r: &FiniteSolidSustainedTrajectoryReport<R, A>,
     c: FiniteSolidSphereTrajectoryControls,
 ) -> bool {
     [

@@ -887,14 +887,16 @@ fn accumulate(
 /// Include both native representability errors and the complete event's
 /// geometry/law residuals. In particular, real finite-gap tangential couples
 /// must not cancel between accepted events or hide behind exact native updates.
-fn impact_residuals(i: &FiniteSolidRigidContactReport) -> (f64, f64, f64) {
+fn impact_residuals<R: super::ImpactResponse>(
+    i: &FiniteSolidRigidContactReport<R>,
+) -> (f64, f64, f64) {
     (
         i.absolute_linear_residual_kg_m_s + norm(i.linear_momentum_residual_kg_m_s),
         i.absolute_angular_residual_kg_m2_s + norm(i.angular_momentum_residual_kg_m2_s),
         i.absolute_work_residual_j
             + i.work_energy_residual_j.abs()
             + i.dissipation_residual_j.abs()
-            + (i.relative_impulse_work_j - i.contact.relative_work).abs(),
+            + (i.relative_impulse_work_j - i.contact.physical().relative_work).abs(),
     )
 }
 

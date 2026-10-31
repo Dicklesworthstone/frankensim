@@ -1,4 +1,9 @@
 //! Independent loaded-support and angular oracles for the actual native split.
+#[path = "sustained/elliptic.rs"]
+mod elliptic;
+#[path = "sustained/source.rs"]
+mod source;
+
 use super::*;
 use fs_couple::finite_solid::contact::scene::{
     FiniteSolidSphereScene, FiniteSolidSphereSceneKey, SpherePairLaw,

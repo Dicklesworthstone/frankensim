@@ -88,7 +88,7 @@ impl std::error::Error for FiniteSolidSphereSceneError {}
 /// Its original full inertia is used by mechanics; no sphere-inertia shortcut
 /// is substituted. Rebuilding this object changes the contact-ID namespace and
 /// requires the caller to rebind any per-contact constitutive history.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FiniteSolidSphereScene {
     spheres: Vec<FiniteSolidSphere>,
     pair_laws: Vec<SpherePairLaw>,
