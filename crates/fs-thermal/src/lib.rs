@@ -16,6 +16,8 @@ pub mod observers;
 pub mod phase_geometry;
 /// Conservative solid/vapor exchange and implicit latent-energy feedback.
 pub mod sublimation;
+/// Continuum gas-film evaporation, condensation and original-chart latent cooling.
+pub mod evaporation;
 
 /// Compatibility path for the original conduction-owned timeline. This is a
 /// re-export, not a second implementation or a conversion between state types.
