@@ -679,7 +679,7 @@ pub(crate) mod brass_loop_tests {
         } else {
             0.0
         };
-        (best as f64 - shift) * df
+        (best as f64 + shift) * df
     }
 
     #[test]

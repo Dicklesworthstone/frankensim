@@ -769,7 +769,7 @@ mod wind_articulation_tests {
                 } else {
                     0.0
                 };
-                return f64::from(RATE) / (lag as f64 - shift);
+                return f64::from(RATE) / (lag as f64 + shift);
             }
         }
         0.0

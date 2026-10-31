@@ -1649,7 +1649,7 @@ mod mm_line_tests {
             if mags[k] > mags[k - 1] && mags[k] > mags[k + 1] {
                 let (ya, yb, yc) = (mags[k - 1].ln(), mags[k].ln(), mags[k + 1].ln());
                 let shift = 0.5 * (ya - yc) / (ya - 2.0 * yb + yc);
-                peaks.push((k as f64 - shift) * df);
+                peaks.push((k as f64 + shift) * df);
             }
         }
         peaks
@@ -1687,7 +1687,7 @@ mod mm_line_tests {
                 let (ya, yb, yc) = (mags[i - 1].1.ln(), mags[i].1.ln(), mags[i + 1].1.ln());
                 let shift = 0.5 * (ya - yc) / (ya - 2.0 * yb + yc);
                 let df = mags[i].0 - mags[i - 1].0;
-                peaks.push(mags[i].0 - shift * df);
+                peaks.push(mags[i].0 + shift * df);
             }
         }
         peaks
@@ -1733,7 +1733,7 @@ mod mm_line_tests {
                     let (ya, yb, yc) = (mags[i - 1].1.ln(), mags[i].1.ln(), mags[i + 1].1.ln());
                     let shift = 0.5 * (ya - yc) / (ya - 2.0 * yb + yc);
                     let df = mags[i].0 - mags[i - 1].0;
-                    peaks.push(mags[i].0 - shift * df);
+                    peaks.push(mags[i].0 + shift * df);
                 }
             }
             peaks

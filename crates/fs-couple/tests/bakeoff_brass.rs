@@ -143,7 +143,7 @@ fn flare_peaks_hz(n_modes: usize) -> Vec<f64> {
             let (ya, yb, yc) = (mags[i - 1].1.ln(), mags[i].1.ln(), mags[i + 1].1.ln());
             let shift = 0.5 * (ya - yc) / (ya - 2.0 * yb + yc);
             let df = mags[i].0 - mags[i - 1].0;
-            peaks.push(mags[i].0 - shift * df);
+            peaks.push(mags[i].0 + shift * df);
         }
     }
     peaks
@@ -205,7 +205,7 @@ fn loop_lock_hz(n_modes: usize) -> f64 {
     } else {
         0.0
     };
-    (best as f64 - shift) * df
+    (best as f64 + shift) * df
 }
 
 #[test]

@@ -127,7 +127,7 @@ fn frame_pitch(frame: &[f64], expect_hz: f64) -> f64 {
     } else {
         0.0
     };
-    (best as f64 - shift) * RATE / n as f64
+    (best as f64 + shift) * RATE / n as f64
 }
 
 #[allow(clippy::struct_field_names)] // worst-* is the honest QoI naming

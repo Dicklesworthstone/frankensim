@@ -556,7 +556,7 @@ mod piano_vertical_tests {
             } else {
                 0.0
             };
-            (best as f64 - shift) * df
+            (best as f64 + shift) * df
         };
         // Measured set: partials {1..5, 7}. Two disclosed exclusions,
         // both REAL composed-system features (measured, not hidden):

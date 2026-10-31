@@ -1306,7 +1306,7 @@ mod modal_flare_tests {
                 let d = (ya - 2.0 * yb + yc).abs().max(1e-300);
                 let shift = 0.5 * (ya - yc) / (ya - 2.0 * yb + yc);
                 let df = fb - fa;
-                let f_peak = if d > 0.0 { fb - shift * df } else { fb };
+                let f_peak = if d > 0.0 { fb + shift * df } else { fb };
                 peaks.push(f_peak);
             }
         }
