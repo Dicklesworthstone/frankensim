@@ -205,7 +205,7 @@ mod held_environment {
             let mut inputs = axial_bearings::Inputs::new(vec![axial_bearings::Declaration {
                 geometry: AxialBearingGeometry { string: 0, station_fraction: 0.8, shell_component: 0, node: 0,
                     string_axis: [1.0, 0.0, 0.0], contact_arm_m: [0.0; 3], rest_extension_m: 0.0 },
-                source: bridge_interfaces::Declaration { string: 0, pack: "bridge.fsintpk".into(), area_m2: 0.0001,
+                source: crate::bridge_interfaces::Declaration { string: 0, pack: "bridge.fsintpk".into(), area_m2: 0.0001,
                     stiffness_property: "normal_stiffness".into(), viscosity_property: "normal_viscosity".into() },
             }]).unwrap();
             let source = source();
