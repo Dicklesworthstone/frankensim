@@ -86,12 +86,17 @@ impl DebyeCircuit {
     /// enters unchanged. The active entry in `charges_c` is q_inf, not total
     /// terminal charge; `instantaneous.branch()` selects the original branch.
     ///
-    /// The source and geometry are fixed. Ordinary source/thermal rebind refuses
-    /// this profile until nonlinear parameter work and entropy are represented.
-    /// Native whole-circuit and dielectric terminal-work audits remain strict:
-    /// an unresolved finite-step partition defect refuses rather than becoming
-    /// extra polarization heat. Resolve relaxation and constitutive knots and
-    /// check time-step refinement; discrete energy closure is not an error bound.
+    /// Geometry is fixed. Source changes require the explicit conservative
+    /// reversible-source rebind, which retains every charge and returns its
+    /// parameter work. The finite thermal owner admits temperature-independent
+    /// field/polarization potentials with supported tau(T); actual temperature-
+    /// dependent potentials need their own field entropy and remain refused.
+    /// Native capacitor efforts close each original store's energy change;
+    /// nonlinear work is not redistributed into another changing capacitor.
+    /// Whole-circuit and dielectric terminal-work audits remain strict, and a
+    /// failed account never becomes extra polarization heat. Resolve relaxation
+    /// and source knots and check time-step refinement; discrete energy closure
+    /// is not a temporal error bound.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_reversible_instantaneous(
         graph: CircuitGraph,

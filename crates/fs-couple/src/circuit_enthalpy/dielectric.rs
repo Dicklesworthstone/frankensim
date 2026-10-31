@@ -5,6 +5,10 @@
 //! heats its explicit receiver once. The dielectric adds the distinct reversible
 //! transfer Q_rev=-delta(psi_parameter)-delta(T*S), so the enclosing account
 //! closes caloric energy plus field U=psi+T*S against external supply.
+//! A nonlinear instantaneous profile is admitted when its field potential and
+//! all polarization storage are temperature-independent. Its actual nonlinear
+//! energy then supplies psi=U, S=0; tau(T) still changes the native relaxation
+//! and irreversible heat. The linear background is never its energy proxy.
 //!
 //! This shares the original backward-Euler/Newton and circuit midpoint owners.
 //! The coupled method is generally first order. Fixed solid volume, positive
@@ -26,11 +30,14 @@ use super::{
     DriverAccount, ThermalDriver, finite,
     material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample},
 };
+use crate::material_circuit::capacitance::dielectric::MaterialDielectricCapacitor;
 use crate::material_circuit::dielectric::{DebyeCircuit, DebyeCircuitCandidate, DebyeCircuitStep};
 
 /// One complete uniform dielectric volume and its original thermal source law.
 /// Every polarization process belongs to the same material cell. Charge bounds
 /// admit a positive caloric-plus-field heat capacity over the whole T interval.
+/// For nonlinear instantaneous storage, this law owns the original pole/rate
+/// paths and must have zero storage slopes; the circuit owns the actual energy.
 pub struct DebyeThermalBinding<'a> {
     pub cell: CellId,
     pub law: &'a ThermalDebyeCapacitor,
@@ -165,6 +172,52 @@ fn check_charges(
     Ok(polarization)
 }
 
+fn instantaneous_at_temperature(
+    circuit: &DebyeCircuit,
+    axis: &str,
+    temperature: f64,
+) -> Result<Option<MaterialDielectricCapacitor>, Error> {
+    let Some(original) = circuit.reversible_instantaneous() else {
+        return Ok(None);
+    };
+    let point = original
+        .material()
+        .material()
+        .query()
+        .with(axis, temperature)
+        .map_err(|_| invalid("nonlinear dielectric temperature context is unrepresentable"))?;
+    Ok(Some(original.at_temperature_query_point(&point)?))
+}
+
+fn physical_state(
+    circuit: &DebyeCircuit,
+    thermal: &ResolvedThermalDebyeCapacitor,
+    polarization: &[f64],
+) -> Result<FieldThermalState, Error> {
+    if circuit.reversible_instantaneous().is_some() {
+        if thermal
+            .capacitance_slopes_f_k()
+            .iter()
+            .any(|&slope| slope != 0.0)
+        {
+            return Err(invalid(
+                "nonlinear dielectric thermal storage requires temperature-independent potentials",
+            ));
+        }
+        let energy = finite(circuit.dielectric_energy_j()?)?;
+        Ok(FieldThermalState {
+            free_energy_j: energy,
+            entropy_j_k: 0.0,
+            internal_energy_j: energy,
+            heat_capacity_j_k: 0.0,
+        })
+    } else {
+        thermal
+            .state(circuit.instantaneous_charge_c(), polarization)
+            .map_err(field)
+    }
+}
+
 fn admit(
     network: &MaterialNetwork<'_>,
     thermal: &DepositionSimulation<'_>,
@@ -204,6 +257,32 @@ fn admit(
         ));
     }
     let range = binding.law.temperature_range_k();
+    if let Some(instantaneous) = circuit.reversible_instantaneous() {
+        if binding.maximum_instantaneous_charge_c > instantaneous.maximum_charge_c()
+            || binding
+                .law
+                .capacitance_slopes_f_k()
+                .iter()
+                .any(|&slope| slope != 0.0)
+        {
+            return Err(invalid(
+                "nonlinear dielectric thermal envelope requires supported charge and temperature-independent storage",
+            ));
+        }
+        // The rate/caloric charts alone do not establish validity of the
+        // original nonlinear D(E) claim throughout this temperature interval.
+        for temperature in range {
+            check(cancel)?;
+            let refreshed =
+                instantaneous_at_temperature(circuit, binding.law.temperature_axis(), temperature)?
+                    .ok_or_else(|| invalid("nonlinear dielectric source disappeared"))?;
+            if refreshed.curve() != instantaneous.curve() {
+                return Err(invalid(
+                    "nonlinear thermal feedback cannot change the original field potential",
+                ));
+            }
+        }
+    }
     let knots = body.curve.knots();
     if range[0] < knots[0].temperature_k || range[1] > knots[knots.len() - 1].temperature_k {
         return Err(invalid(
@@ -265,6 +344,10 @@ fn admit(
 /// impulse during the coefficient update refuse. This endpoint coefficient
 /// scheme needs timestep refinement and does not certify unconditional entropy
 /// production, phase transitions or a changing capacitor geometry.
+/// Nonlinear instantaneous D_inf(E) with constant polarization increments uses
+/// its actual native energy and zero field entropy. Positive supported tau(T)
+/// may vary; actual D(E,T) or temperature-dependent polarization energy needs a
+/// separate potential chart and remains refused.
 #[allow(clippy::too_many_arguments)]
 pub fn step_candidate<'m>(
     network: &MaterialNetwork<'_>,
@@ -292,9 +375,8 @@ pub fn step_candidate<'m>(
         .map_err(material)?;
     let original = admit(network, thermal, circuit, &binding, &cancel)?;
     let original_polarization = check_charges(&binding, circuit)?;
-    let original_state = original
-        .state(circuit.instantaneous_charge_c(), &original_polarization)
-        .map_err(field)?;
+    let original_state = physical_state(circuit, &original, &original_polarization)?;
+    let nonlinear = circuit.reversible_instantaneous().is_some();
     let original_count = circuit.original_branch_count();
     let resistor_count = circuit.graph().branches[..original_count]
         .iter()
@@ -342,30 +424,51 @@ pub fn step_candidate<'m>(
                 .law
                 .at_temperature(trial.temperature_k(binding.cell)?)
                 .map_err(field)?;
-            let rebound = circuit.rebind_source_and_resistors_candidate(
-                endpoint.source().clone(),
-                bulk.resistors,
-                ports,
-                || (*cancel.borrow_mut())(),
-            )?;
+            let rebound = if let Some(instantaneous) = instantaneous_at_temperature(
+                circuit,
+                binding.law.temperature_axis(),
+                endpoint.temperature_k(),
+            )? {
+                circuit.rebind_reversible_sources_and_resistors_candidate(
+                    endpoint.source().clone(),
+                    instantaneous,
+                    bulk.resistors,
+                    ports,
+                    || (*cancel.borrow_mut())(),
+                )?
+            } else {
+                circuit.rebind_source_and_resistors_candidate(
+                    endpoint.source().clone(),
+                    bulk.resistors,
+                    ports,
+                    || (*cancel.borrow_mut())(),
+                )?
+            };
             let parameter_work_j = rebound.parameter_work_j();
+            if nonlinear && parameter_work_j != 0.0 {
+                return Err(invalid(
+                    "temperature-independent nonlinear dielectric acquired parameter work",
+                ));
+            }
             let candidate =
                 rebound
                     .circuit()
                     .step_candidate(ports, dt, controls.circuit, || (*cancel.borrow_mut())())?;
             let polarization = check_charges(&binding, candidate.circuit())?;
-            let state = endpoint
-                .state(candidate.circuit().instantaneous_charge_c(), &polarization)
-                .map_err(field)?;
-            let thermal_offset_change_j = original
-                .thermal_offset_change_j(
-                    &endpoint,
-                    circuit.instantaneous_charge_c(),
-                    &original_polarization,
-                    candidate.circuit().instantaneous_charge_c(),
-                    &polarization,
-                )
-                .map_err(field)?;
+            let state = physical_state(candidate.circuit(), &endpoint, &polarization)?;
+            let thermal_offset_change_j = if nonlinear {
+                0.0
+            } else {
+                original
+                    .thermal_offset_change_j(
+                        &endpoint,
+                        circuit.instantaneous_charge_c(),
+                        &original_polarization,
+                        candidate.circuit().instantaneous_charge_c(),
+                        &polarization,
+                    )
+                    .map_err(field)?
+            };
             let reversible_heat_j = finite(-parameter_work_j - thermal_offset_change_j)?;
             let power = finite(reversible_heat_j / dt)?;
             if reversible_heat_j != 0.0 && power == 0.0 {

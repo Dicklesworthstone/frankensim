@@ -19291,7 +19291,8 @@ instantaneous, source-backed D_inf(E) law with the existing source-derived
 Debye polarization arms. The original descriptor, RC coefficients, branch
 indices, charge/flux ordering and physical resistor-heat owner are reused;
 ordinary steps retain the same immutable preparation. The original linear
-constructor and its thermal owner remain separate supported profiles.
+constructor remains supported. Both profiles use the existing finite thermal
+owner within their admitted constitutive scope.
 
 At fixed area A and gap d, the physical coordinates are
 q_inf=A*(D-sum P_k) and q_k=A*P_k. The native branch storage therefore realizes
@@ -19310,7 +19311,8 @@ epsilon_infinity to arithmetic roundoff. A total equilibrium D(E) curve is
 not an instantaneous source and would count polarization twice. The retained
 instantaneous law is field-only; the original background and polarization
 increments must be constant-source properties in this closed profile.
-Relaxation times retain their fixed original context. Actual nonlinear
+Relaxation times retain their original source and nonthermal context; explicit
+temperature refresh follows supported positive source paths. Actual nonlinear
 voltage, energy and stable energy increments use the original signed native
 curve; the original linear source admittance describes only its declared
 low-field baseline, not finite-amplitude nonlinear frequency response.
@@ -19318,25 +19320,31 @@ low-field baseline, not finite-amplitude nonlinear frequency response.
 Every accepted step checks both the complete native circuit balance and the
 dielectric's own storage-plus-polarization-heat balance against actual terminal
 work. Stable constitutive increments and compensated charge transfer retain
-small work below a large stationary stored-energy bias. The native global
-Gonzalez correction can distribute a nonlinear remainder across other changing
-stores; an unresolved local partition defect refuses under the original
-physical tolerance instead of being called heat. Smaller steps and temporal
-refinement remain necessary. Original source support, native consistent
-initialization and endpoint constraints, bounded work and cancellation are
-admission gates, with no charge projection or partial memory publication.
+small work below a large stationary stored-energy bias. Native capacitor
+efforts close each original store's constitutive energy increment; nonlinear
+work is not redistributed into another changing capacitor. The independent
+dielectric and complete circuit audits retain their original physical
+tolerances, and a failed balance is never called heat. Source knots and
+relaxation times still need temporal resolution and refinement. Original
+source support, native consistent initialization and endpoint constraints,
+bounded work and cancellation are admission gates, with no charge projection
+or partial memory publication.
 
-Existing source/thermal rebind explicitly refuses the nonlinear profile until
-its nonlinear parameter work and field entropy are represented; it cannot
-silently restore linear C_infinity or erase polarization. This extension
-supplies nonlinear instantaneous response with the original linear Debye
-processes. It adds no saturation of the relaxing polarization, hysteresis,
-fractional dispersion, fringing, breakdown, geometry motion or thermal update.
+The legacy linear source-rebind path refuses the nonlinear profile. Explicit
+reversible-source rebinding retains the complete instantaneous law and every
+polarization charge and reports the actual fixed-charge parameter work. The
+finite thermal owner below supports temperature-independent field and
+polarization potentials with temperature-dependent relaxation times. Actual
+temperature-dependent nonlinear storage still needs its own potential and
+entropy chart; no linear C_infinity substitution supplies those quantities.
+This extension adds no saturation of the relaxing polarization, hysteresis,
+fractional dispersion, fringing, breakdown or geometry motion.
 `tests/dielectric_nonlinear.rs` covers linear and zero-pole limits, nonlinear
 open-circuit absorption across a source knot with independent ODE refinement
 and both polarities, analytic held-voltage polarization heat, driven warm
-memory beside a large independent bias, actual local partition-work refusal,
-and source/background/context/geometry/clamp/refresh/cancellation boundaries.
+memory beside a large independent bias, independent local work closure beside
+another changing store, and source/background/context/geometry/clamp/refresh/
+cancellation boundaries.
 All constitutive data are explicitly authored numerical fixtures.
 
 
@@ -19411,3 +19419,46 @@ source-switching impulses or relaxation-model identification. Three focused
 tests in `dielectric_nonlinear_rebind.rs` cover independent nonlinear/pole work,
 both polarities, large unrelated bias, complete source/history retention,
 zero-work kinetic refresh, native-curve sharing and atomic refusals.
+
+## Finite thermal feedback for nonlinear dielectric memory
+
+`circuit_enthalpy::dielectric::step_candidate` admits the nonlinear
+instantaneous profile through the existing `DebyeThermalBinding`, finite
+caloric network and Newton residual. The original D_inf(E) potential and every
+polarization storage increment must be temperature-independent; positive
+source-resolved tau(T) and original conductor R(T) may vary. Each trial refreshes
+both original dielectric source owners at the same proposed temperature while
+retaining every accepted instantaneous/polarization charge, flux, geometry,
+source claim and nonthermal coordinate. The unchanged native nonlinear curve
+is shared, and the explicit reversible-source rebind must report exactly zero
+parameter work for this thermal profile.
+
+The circuit's actual nonlinear instantaneous-plus-polarization energy supplies
+field psi=U. Only after the storage-independence gates pass are its field entropy
+and fixed-charge field heat-capacity contribution set to zero. The declared
+linear low-field background is never substituted for nonlinear energy.
+The thermal-offset and reversible-heat contributions are exactly zero; actual
+native polarization loss enters the original dielectric caloric cell once,
+and each original conductor's loss enters its own receiver. The existing
+enclosing account checks the stable electrical internal-energy change plus
+finite caloric storage against electrical supply and actual external heat.
+
+The original nonlinear field claim must support the complete declared thermal
+interval and charge envelope, in addition to the original caloric/rate sources.
+A complete uniform fully solid dielectric volume, fixed density/geometry and
+positive combined capacity remain required. Actual D(E,T) or
+temperature-dependent polarization storage requires a reciprocal potential
+chart and is refused. Field support, source identity, ideal-clamp constraints,
+thermal event rules, bounded work and cancellation remain atomic gates on both
+histories. Endpoint material coefficients make the general thermal feedback
+first order; the local energy identity alone supplies no temporal-error bound.
+
+Five groups in `tests/dielectric_nonlinear_thermal.rs` exercise source-knot
+crossing and finite self-heating against an independent discrete solve for both
+charge polarities; tau(T) history changes and refinement against independent
+continuous memory dynamics; external heating with zero poles and unchanged
+nonlinear field energy; distinct finite dielectric/conductor receivers with
+R(T); and original temperature-support, charge-envelope and late-cancellation
+refusals. The accepted local-work case in `tests/dielectric_nonlinear.rs`
+separately checks dielectric and unrelated capacitor energy and heat at the
+original tight tolerances. All source data are authored numerical fixtures.

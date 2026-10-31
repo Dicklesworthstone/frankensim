@@ -517,7 +517,7 @@ fn driven_warm_memory_reports_bulk_and_polarization_heat_below_a_large_stationar
 }
 
 #[test]
-fn unresolved_native_partition_work_refuses_instead_of_becoming_polarization_heat() {
+fn native_capacitor_work_closes_individually_beside_changing_other_storage() {
     let card = fixture(false, 2.0, &POLES[..1], false);
     let graph = CircuitGraph {
         node_count: 3,
@@ -535,29 +535,56 @@ fn unresolved_native_partition_work_refuses_instead_of_becoming_polarization_hea
         .consistent_initial_state(circuit.state(), &[])
         .unwrap();
     let (native, _) = circuit.dae().step_audited(&initial, &[], 0.05).unwrap();
-    // The unrelated quadratic store has a known exact energy. A global
-    // Gonzalez correction may distribute the nonlinear remainder to its effort;
-    // the native whole-circuit balance alone cannot certify this local transfer.
+    // The unrelated quadratic store has a known exact energy. Its effort may
+    // not receive a share of the other capacitor's nonlinear energy remainder:
+    // whole-circuit closure alone would not establish this local work identity.
     let q_other = circuit.dae().charge_index[1];
     let node = circuit.dae().node_potential_index[1];
     let midpoint = 0.5 * (initial[node] + native.x[node]);
     let local_defect =
         0.5 * (native.x[q_other] - initial[q_other]) * (native.x[q_other] + initial[q_other])
             + 0.05 * midpoint * midpoint;
+    near(local_defect, 0.0, controls().energy_tolerance_j);
+    let proposal = circuit
+        .step_candidate(&[], 0.05, controls(), || false)
+        .unwrap();
+    let next = proposal.circuit();
+    let step = proposal.step();
     assert!(
-        local_defect.abs() > 1e-8,
-        "fixture must expose actual partition work: {local_defect:e}"
+        next.instantaneous_charge_c() > 1.0,
+        "the nonlinear source knot must be crossed"
     );
-    assert!(matches!(
-        circuit.step_candidate(&[], 0.05, controls(), || false),
-        Err(MaterialCircuitError::Balance(_))
-    ));
+    near(next.terminal_charge_c().unwrap(), 2.9, 2e-11);
+    let dielectric_change = energy(
+        next.instantaneous_charge_c(),
+        &next.polarization_charges_c(),
+    ) - energy(0.9, &[2.0]);
+    near(
+        dielectric_change + step.polarization_heat_j,
+        0.0,
+        controls().energy_tolerance_j,
+    );
+    near(
+        step.dielectric_energy_change_j,
+        dielectric_change,
+        controls().energy_tolerance_j,
+    );
+    near(
+        step.other_resistor_heat_j,
+        0.05 * midpoint * midpoint,
+        controls().energy_tolerance_j,
+    );
+    near(
+        step.dielectric_energy_residual_j,
+        0.0,
+        controls().energy_tolerance_j,
+    );
+    near(
+        step.circuit_energy_residual_j,
+        0.0,
+        controls().energy_tolerance_j,
+    );
     assert_eq!(circuit.state(), before);
-    assert!(
-        circuit
-            .step_candidate(&[], 1e-4, controls(), || false)
-            .is_ok()
-    );
 }
 
 #[test]
