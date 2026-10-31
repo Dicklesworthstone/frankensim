@@ -7973,6 +7973,25 @@ solid mass for inertia and finite heat capacity, changing both motion and the
 thermal response while retaining both gas masses. This remains a lumped thermal
 body with explicit interface geometry and source-supported single-phase gases.
 
+`cargo run -p fs-couple --example real_gas_thermal_actuator -- 8000 325 200 0.000002`
+demonstrates the same source-resolved solid mass in both inertia and thermal
+storage. Its arguments select solid density, initial temperature, steps and
+physical timestep. Substituting density 1000 changes the coupled trajectory
+without editing any numerical owner; halving the timestep and doubling the
+steps gives a fixed-duration refinement comparison. Buffered CSV exposes each
+gas mass, actual density, volume, temperature and pressure, solid temperature,
+motion, signed exchanged heat and an independent native-law energy account.
+
+The example queries original PR midpoint transport for Reynolds and Prandtl
+numbers, then uses the native forced flat-plate correlation and Nu-to-h map.
+The same pinned solid card supplies density, constant calorics and conductivity;
+every actual midpoint checks the lumped Biot bound. These are bulk-property
+correlations with prescribed relative flow, not a film-temperature, fan-power,
+flow-momentum or spatial boundary-layer model. Heat brackets scale with current
+conductance and temperature contrast while retaining the original bounded
+source/energy solve. Synthetic sources and rigid, homogeneous, single-phase
+assumptions remain explicit; no measured-material accuracy is claimed.
+
 ### Fixed-volume chambers in the shared reacting gas assembly
 
 `GasPiston::with_fixed_support` and `MaterialGasPiston::with_fixed_support`
