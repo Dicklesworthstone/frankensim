@@ -43,6 +43,23 @@ pub fn read_source_packs(
     })
 }
 
+/// Load the same canonical gas sources for isobaric temperature feedback.
+/// The original models survive decoding; a resolved snapshot is not used as
+/// a constant-property substitute. Evolution requires explicit frozen gas,
+/// since a reference-only liquid-water check cannot admit later cell states.
+pub fn read_source_temperature_law(
+    text: &str,
+    sources: &[SourcePackBytes<'_>],
+    water_species: Option<&str>,
+    phase: ThermochemicalPhase,
+) -> Result<super::temperature::IsobaricGasLaw, GasInputError> {
+    with_source_registry(text, sources, water_species, phase, |fields, registry| {
+        let (model, point) = super::read_frozen_thermochemical_model(fields, registry)?;
+        super::temperature::IsobaricGasLaw::try_from_model(model, point)
+            .map_err(GasInputError::Material)
+    })
+}
+
 /// Load one evolving finite gas reservoir from the original canonical packs.
 ///
 /// Uses the same bounded loader and thermochemical grammar as the snapshot

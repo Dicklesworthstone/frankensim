@@ -23,6 +23,21 @@ impl ThermochemicalGasModel {
         if !positive(temperature.value()) {
             return Err(invalid("property temperature must be finite and positive"));
         }
+        let model = self.pinned_to_snapshot(bulk)?;
+        let point = bulk.components[0]
+            .query()
+            .with("temperature", temperature.value())
+            .map_err(|e| failure("property temperature coordinate", e))?;
+        model.evaluate(&point)
+    }
+
+    /// Compile the same source/composition admission once for repeated spatial
+    /// temperature queries. Keep this with the original model owner so frozen
+    /// bulk and film consumers cannot select different transport claims.
+    pub(crate) fn pinned_to_snapshot(
+        &self,
+        bulk: &ResolvedThermochemicalGasState,
+    ) -> Result<Self, MaterialError> {
         let receipt = bulk.thermodynamics().receipt();
         let bank = self.thermodynamics.components();
         if receipt
@@ -87,9 +102,6 @@ impl ThermochemicalGasModel {
                 "property source bank cannot reproduce the original gas snapshot",
             ));
         }
-        let point = context
-            .with("temperature", temperature.value())
-            .map_err(|e| failure("property temperature coordinate", e))?;
-        model.evaluate(&point)
+        Ok(model)
     }
 }

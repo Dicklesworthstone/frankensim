@@ -1373,7 +1373,7 @@ impl Scene {
                 .is_some_and(material::FluidSource::temperature_dependent)
             {
                 return Err(bad(
-                    "temperature-dependent CHT requires a source-backed liquid in temperature-dependent mode",
+                    "temperature-dependent CHT requires a source-backed fluid in temperature-dependent mode",
                 ));
             }
             if !components.is_empty() {
@@ -1404,16 +1404,16 @@ impl Scene {
             }
             if expansion.is_some() {
                 return Err(bad(
-                    "temperature-dependent liquid density owns buoyancy; expansion_per_k cannot override it",
+                    "temperature-dependent fluid density owns buoyancy; expansion_per_k cannot override it",
                 ));
             }
             let temperature = fluid_source
                 .as_ref()
                 .and_then(material::FluidSource::evolving_reference_temperature)
-                .expect("evolving liquid was admitted");
+                .expect("evolving fluid was admitted");
             if reference.is_some_and(|value| value != temperature) {
                 return Err(bad(
-                    "reference_temperature_k conflicts with the original liquid source state",
+                    "reference_temperature_k conflicts with the original fluid source state",
                 ));
             }
             reference = Some(temperature);
@@ -2592,7 +2592,7 @@ fn execute_within_budget(scene: &Scene, json_mode: bool) -> Result<String> {
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         let mut help = format!(
-            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" and an explicit temperature_axis on the\nliquid and every solid source to close steady laminar temperature feedback;\nliquid density owns buoyancy and no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
+            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. Liquids and solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
         );
         help.push_str(sgs::HELP);
         return CommandOutput {

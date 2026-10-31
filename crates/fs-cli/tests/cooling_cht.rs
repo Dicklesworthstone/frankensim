@@ -464,12 +464,12 @@ mod evolving_materials {
         let insert = |field: &str| scene.replacen('{', &format!("{{{field},"), 1);
         for (index, (input, reason)) in [
             (insert("\"expansion_per_k\":0.001"), "density owns buoyancy"),
-            (insert("\"reference_temperature_k\":301"), "conflicts with the original liquid"),
+            (insert("\"reference_temperature_k\":301"), "conflicts with the original fluid"),
             (insert("\"transient\":{}"), "is steady"),
             (insert("\"radiation\":{}"), "does not support radiation"),
             (scene.replace("\"tolerance\":1e-10", "\"tolerance\":1e-10,\"turbulence\":\"lvel\""), "requires laminar"),
             (scene.replacen("\"mode\":\"temperature-dependent\",\"temperature_axis\":\"T\"",
-                "\"mode\":\"frozen\"", 1), "requires a source-backed liquid"),
+                "\"mode\":\"frozen\"", 1), "requires a source-backed fluid"),
             (scene.replace("\"source\":{\"mode\":\"temperature-dependent\",\"temperature_axis\":\"T\"",
                 "\"source\":{\"mode\":\"frozen\""), "every solid material"),
             (scene.replace("\"temperature_axis\":\"T\"", "\"temperature_axis\":\"pressure\""), "absolute-temperature"),
@@ -482,7 +482,11 @@ mod evolving_materials {
             assert_eq!(std::fs::read_to_string(path).unwrap(), input);
         }
         let gas = DUCT.replacen('{', r#"{"fluid":{"mode":"temperature-dependent","temperature_axis":"T","gas":"300 100000 0"},"#, 1);
-        assert!(run(&scratch("evolving-gas-refusal.json", &gas)).2.contains("gas sources currently support frozen"));
+        assert!(
+            run(&scratch("evolving-gas-refusal.json", &gas))
+                .2
+                .contains("unsupported material-source field")
+        );
         // Reference T=300 K is supported, but the actual warmed wall is not.
         let (path, original) = prepare("evolving-endpoint-refusal", 0.01, 301.0);
         let (code, result, error) = run(&path);
@@ -491,6 +495,69 @@ mod evolving_materials {
         assert!(result.get("material_feedback").is_none());
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }
+}
+
+#[test]
+fn temperature_dependent_atmosphere_drives_real_buoyant_flow_and_local_transport() {
+    let scene = |gas: &str, gravity: f64| {
+        format!(
+            r#"{{
+        "schema":"frankensim.cooling-cht.v1",
+        "size_m":[0.01,0.01,0.0016666666666666668], "voxel_m":0.0016666666666666668,
+        "fluid":{{"mode":"temperature-dependent","gas":"{gas}"}},
+        "faces":{{"x-":{{"type":"wall","temperature_k":310}},
+            "x+":{{"type":"wall","temperature_k":300}},
+            "z-":{{"type":"symmetry"}},"z+":{{"type":"symmetry"}}}},
+        "gravity_m_s2":[0,{gravity},0], "solver":{{"tolerance":1e-8}}
+    }}"#
+        )
+    };
+    let mut speeds = Vec::new();
+    for (index, gas, gravity) in [
+        (0, "300 100000 0", -9.81),
+        (1, "mixture 300 100000 mole 1 He 1", -9.81),
+        (2, "300 100000 0", 0.0),
+    ] {
+        let (code, result, error) = run(&scratch(
+            &format!("evolving-atmosphere-{index}.json"),
+            &scene(gas, gravity),
+        ));
+        assert_eq!(code, 0, "{error}");
+        assert_eq!(result.str_field("solver"), Some("fv-simplec-material"));
+        assert_eq!(
+            result
+                .path(&["material_inputs", "fluid", "source"])
+                .unwrap()
+                .str_field("mode"),
+            Some("temperature-dependent")
+        );
+        let endpoint = result
+            .path(&["material_feedback", "fluid_endpoint"])
+            .unwrap();
+        assert_eq!(endpoint.str_field("kind"), Some("gas"));
+        let rho0 = f(&result, &["material_inputs", "fluid", "density_kg_m3"]);
+        let hot = f(endpoint, &["maximum_temperature_k"]);
+        assert!(hot > 300.0);
+        assert!((f(endpoint, &["minimum_density_kg_m3"]) / rho0 - 300.0 / hot).abs() < 1e-12);
+        assert!(
+            f(endpoint, &["maximum_conductivity_w_m_k"])
+                > f(endpoint, &["minimum_conductivity_w_m_k"])
+        );
+        assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-7);
+        speeds.push(f(&result, &["flow", "max_speed_m_s"]));
+    }
+    assert!(speeds[0] > 1e-7 && speeds[1] > 1e-8);
+    assert!((speeds[0] - speeds[1]).abs() > 1e-7);
+    assert_eq!(speeds[2], 0.0);
+
+    let excessive = scene("300 100000 0", -9.81).replace("310}", "360}");
+    let (code, result, error) = run(&scratch("evolving-gas-density-refusal.json", &excessive));
+    assert_ne!(code, 0);
+    assert!(
+        error.contains("Boussinesq density relative departure"),
+        "{error}"
+    );
+    assert!(result.get("material_feedback").is_none());
 }
 
 const CORNER_PLATE: &str = r#"{

@@ -7,7 +7,7 @@ and heat solvers. Geometry, boundary conditions and solver code stay the same.
 
 Every source declaration selects its mode explicitly. With `"mode": "frozen"`,
 the full source is evaluated at its declared reference state and its coefficients
-are held fixed during the run. Liquids and solid thermal sources can instead use
+are held fixed during the run. Gases, liquids and solid thermal sources can instead use
 `"mode": "temperature-dependent"` to reevaluate their original source laws at
 local solved temperatures in the steady coupled flow/heat solve described below.
 Neither mode introduces compressibility, models melting, or establishes phase
@@ -35,8 +35,27 @@ limitations; they are not newly measured source data.
 Density, heat capacity, conductivity and viscosity come from that same gas
 state. Pressure therefore changes mass flow and kinematic viscosity. Replacing
 nitrogen/oxygen with helium changes conductivity and caloric properties as
-well. With buoyancy, the gas's original reference temperature and `1/T`
+well. With frozen-property buoyancy, the gas's original reference temperature and `1/T`
 expansion coefficient are used; conflicting scene overrides refuse.
+
+Use `"mode": "temperature-dependent"` on the same gas declaration to evaluate
+the actual local density, viscosity, conductivity and heat capacity throughout
+the steady buoyancy/heat solve. Gas temperature is already part of the shared
+grammar, so **do not add `temperature_axis`** to a gas declaration. For example:
+
+```json
+{
+  "mode": "temperature-dependent",
+  "gas": "mixture 300 100000 mole 2 N2 0.8 O2 0.2"
+}
+```
+
+Pressure and species fractions remain fixed. A heated humid-air record retains
+its water mole fraction, so its relative humidity changes with temperature;
+the model does not add water to keep relative humidity fixed. Cooling into
+supersaturation refuses. Named mixtures retain their existing temperature and
+pressure limits. Local density supplies `(rho(T) - rho_reference) * gravity`
+to the original momentum solver, without a second expansion coefficient.
 
 For additional species, supply the existing canonical source packs:
 
@@ -61,6 +80,12 @@ transport associations; no species name chooses transport data. Alternatively,
 `"phase": "liquid-water-limit"` requires an explicit `"water_species"` and uses
 the original liquid-water admission policy. Source files are limited to
 16 MiB each and 64 MiB in total per scene.
+
+Temperature-dependent source-pack gases retain their original NASA-9 and
+transport models and reevaluate them at every trial temperature. This requires
+`"phase": "frozen-gas"`; a one-time `liquid-water-limit` check cannot admit
+future cell states. Every original source domain remains enforced, and the
+same density/heat-capacity departure limits below apply.
 
 ## Liquids
 
@@ -113,11 +138,12 @@ with `conductivity_w_m_k`, `conductivity_table`, or
 `volumetric_heat_capacity_j_m3_k` overrides. Surface emissivity remains an
 independent explicitly authored surface property in frozen mode.
 
-## Coupled temperature-dependent liquid and solids
+## Coupled temperature-dependent fluid and solids
 
-The existing steady solver can close liquid and solid material feedback on one
-temperature field. Select the evolving mode on the liquid and **every** solid
-source, naming the absolute-temperature coordinate already present in its state:
+The existing steady solver closes gas or liquid and solid material feedback on
+one temperature field. Select the evolving mode on the fluid and **every** solid
+source. Liquids and solids name the absolute-temperature coordinate already
+present in their state:
 
 ```json
 {
@@ -153,14 +179,14 @@ absolute kelvin remain supported. Each material's reference temperature supplies
 its cells' initial numerical guess. Pressure, composition and other source
 coordinates remain fixed throughout the solve.
 
-The retained liquid law supplies density, heat capacity, viscosity and thermal
+The retained fluid law supplies density, heat capacity, viscosity and thermal
 conductivity together. Its actual density departure from the reference drives
 buoyancy; no independent expansion coefficient is used. An authored
 `expansion_per_k` therefore refuses, as does a scene `reference_temperature_k`
-that differs from the liquid's original reference. Omitting gravity gives the
+that differs from the fluid's original reference. Omitting gravity gives the
 same temperature feedback under the declared forced-flow boundaries.
 
-Inertia, continuity and heat advection retain the liquid's reference density and
+Inertia, continuity and heat advection retain the fluid's reference density and
 heat capacity under the existing Boussinesq approximation. Every trial and
 endpoint must keep each of those two source values within **5%** of its reference.
 Viscosity and conductivity use their actual local values. Solid conductivity is
@@ -179,8 +205,8 @@ The next temperature trial is relaxed by one half; this does not relax the
 acceptance checks. `solver.max_iterations` bounds the coupled passes and each
 momentum solve, and the existing wall-time cancellation budget remains active.
 
-This mode supports steady laminar liquid flow and isotropic sourced solids.
-Gas evolution, mixed frozen/authored/evolving material assignments, transient
+This mode supports steady laminar gas or liquid flow and isotropic sourced solids.
+Mixed frozen/authored/evolving material assignments, transient
 storage, radiation, LVEL turbulence and compact components refuse explicitly.
 Existing frozen scenes retain their original supported features. Solid storage,
 phase change, deformation and arbitrary anisotropic conductivity are outside
@@ -192,6 +218,9 @@ temperature/conductivity ranges for actual liquid and solid endpoint samples.
 Each endpoint `states_identity` hashes the original cell index and complete
 resolved material-state identity in deterministic cell order; it summarizes all
 cells rather than substituting a body-average query for the solved field.
+For gases, the fluid endpoint reports temperature, density, heat capacity,
+dynamic viscosity and conductivity ranges; `samples_identity` hashes the actual
+numerical samples and retained thermochemical source receipts in cell order.
 Source or convergence failures publish no partial result.
 
 JSON results include `material_inputs`, with the exact fluid coefficients and

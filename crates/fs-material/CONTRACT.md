@@ -772,6 +772,20 @@ test failures after accounting separately for each printed half-unit. Relative
 bands are unchanged; cp also satisfies its relative-only gate. Rows absent from
 the source are recorded as absent, never interpolated into alleged facts.
 
+`gas_species::input::temperature::IsobaricGasLaw` retains the original pressure,
+composition and property laws for local temperature feedback. Legacy humid air
+preserves water mole fraction rather than relative humidity and refuses later
+supersaturation. Named mixtures keep their original source windows. Canonical
+thermochemical packs enter through `read_source_temperature_law`, retaining the
+NASA-9 and transport models, typed coordinates and pack identities at every
+evaluation; this evolving path requires explicit frozen-gas phase admission.
+Density, heat capacity, viscosity and conductivity come from that same local
+state. `GasRecord` exposes the existing `FluidTransport` view, preserving its
+original source-bearing record. No pressure evolution, species transport,
+compressible inertia, phase equilibrium or experimental validation is implied.
+G0/G3 unit tests cover fixed-composition EOS scaling, viscosity/conductivity
+response, humid cooling refusal and source/domain preservation.
+
 Frozen gas parcels and nozzles use the thermochemical owner's direct entropy
 differences instead of subtracting absolute reference entropies. The relative
 density/entropy closure targets a requested change from the retained initial

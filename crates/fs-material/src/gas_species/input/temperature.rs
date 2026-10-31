@@ -1,0 +1,280 @@
+//! Isobaric property feedback from one retained gas composition and source law.
+//!
+//! Density, viscosity, conductivity and heat capacity are evaluated together.
+//! This is a property law for low-Mach/Boussinesq consumers, not a compressible
+//! mass or energy integrator. In particular, warming humid air preserves its
+//! water mole fraction, not its relative humidity; no water enters from an
+//! unspecified reservoir. Every endpoint retains the original phase admission.
+
+use super::{GasInputError, GasRecord};
+use crate::MaterialError;
+use crate::gas::{GasSpec, GasState, saturation_pressure_water_pa};
+use crate::gas_species::{GasSpecies, resolve_gas_mixture};
+use crate::thermochemical_gas::ThermochemicalGasModel;
+use fs_matdb::QueryPoint;
+use fs_qty::{
+    Temperature,
+    semantic::{Composition, CompositionBasis},
+};
+
+#[derive(Clone, Debug, PartialEq)]
+enum Source {
+    MoistAir {
+        composition: Composition,
+    },
+    Mixture {
+        species: Vec<GasSpecies>,
+        composition: Composition,
+    },
+    Thermochemical {
+        model: ThermochemicalGasModel,
+        point: QueryPoint,
+    },
+}
+
+/// Original admitted reference and its temperature-dependent gas law.
+/// Pressure, species fractions, source choices and all other conditions stay
+/// fixed. Buoyancy consumers use the local density departure from `reference`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IsobaricGasLaw {
+    reference: GasRecord,
+    source: Source,
+}
+
+impl IsobaricGasLaw {
+    /// Bind the shared legacy moist-air or named-species input grammar.
+    /// Thermochemical snapshots need their original model; use
+    /// [`super::packs::read_source_temperature_law`] for canonical source packs.
+    pub fn try_from_record(reference: GasRecord) -> Result<Self, GasInputError> {
+        let source = match &reference {
+            GasRecord::Legacy(state) => Source::MoistAir {
+                composition: Composition::new(
+                    CompositionBasis::MoleFraction,
+                    vec![1.0 - state.water_mole_fraction, state.water_mole_fraction],
+                )
+                .map_err(|_| GasInputError::Input("invalid retained humid-air composition"))?,
+            },
+            GasRecord::Mixture(_, components) => Source::Mixture {
+                species: components.iter().map(|(species, _)| *species).collect(),
+                composition: Composition::new(
+                    CompositionBasis::MoleFraction,
+                    components.iter().map(|(_, fraction)| *fraction).collect(),
+                )
+                .map_err(|_| GasInputError::Input("invalid retained gas composition"))?,
+            },
+            GasRecord::Thermochemical(_) => {
+                return Err(GasInputError::Input(
+                    "temperature feedback requires the original thermochemical model, not a snapshot",
+                ));
+            }
+        };
+        reference
+            .state()
+            .validate_coherence()
+            .map_err(GasInputError::Material)?;
+        let law = Self { reference, source };
+        // GasRecord variants are public. Do not turn an unrelated, numerically
+        // coherent snapshot into a different gas when feedback begins.
+        let reproduced = law
+            .at_temperature(Temperature::new(law.reference.state().temperature))
+            .map_err(GasInputError::Material)?;
+        let a = law.reference.state();
+        let b = reproduced.state();
+        for (x, y) in [
+            (a.density, b.density),
+            (a.specific_heat_cp, b.specific_heat_cp),
+            (a.dynamic_viscosity, b.dynamic_viscosity),
+            (a.thermal_conductivity, b.thermal_conductivity),
+            (a.specific_gas_constant, b.specific_gas_constant),
+            (a.water_mole_fraction, b.water_mole_fraction),
+        ] {
+            if (x - y).abs() > 128.0 * f64::EPSILON * x.abs().max(y.abs()) {
+                return Err(GasInputError::Input(
+                    "retained gas does not match its declared source law",
+                ));
+            }
+        }
+        Ok(law)
+    }
+
+    /// Retain an original NASA-9/transport model and typed reference query.
+    /// This path is explicitly frozen gas: it makes no condensation or
+    /// reaction claim. The model enforces all source domains at every query.
+    pub fn try_from_model(
+        model: ThermochemicalGasModel,
+        point: QueryPoint,
+    ) -> Result<Self, MaterialError> {
+        let state = model.evaluate(&point)?;
+        let model = model.pinned_to_snapshot(&state)?;
+        let reference = GasRecord::Thermochemical(state);
+        Ok(Self {
+            reference,
+            source: Source::Thermochemical { model, point },
+        })
+    }
+
+    /// Complete original reference, including source receipts where present.
+    #[must_use]
+    pub const fn reference(&self) -> &GasRecord {
+        &self.reference
+    }
+
+    /// Resolve all properties at one local absolute temperature and the
+    /// original pressure/composition. Does not mutate the reference or model.
+    /// Supersaturation in legacy/named humid gases and source-domain failures
+    /// refuse; no extrapolation or air-property substitution is performed.
+    pub fn at_temperature(&self, temperature: Temperature) -> Result<GasRecord, MaterialError> {
+        let t = temperature.value();
+        if !t.is_finite() || t <= 0.0 {
+            return Err(MaterialError::State {
+                what: "gas temperature must be finite and positive".into(),
+            });
+        }
+        let reference = self.reference.state();
+        match &self.source {
+            Source::MoistAir { composition } => {
+                let water = reference.water_mole_fraction;
+                if water == 0.0 {
+                    return Ok(GasRecord::Legacy(GasState::try_new(
+                        &GasSpec::dry_air_ussa1976(),
+                        t,
+                        reference.pressure,
+                    )?));
+                }
+                // Compare mole fractions directly. A round trip through RH
+                // can put an admitted saturated reference one ULP above 1.
+                if water > 0.15 || water > saturation_pressure_water_pa(t)? / reference.pressure {
+                    return Err(MaterialError::Parameters {
+                        what: "retained water mole fraction exceeds saturation or the dilute-mixture ceiling".into(),
+                    });
+                }
+                Ok(GasRecord::Legacy(GasState::try_new_mixture(
+                    &[GasSpec::dry_air_ussa1976(), GasSpec::water_vapor_nist()],
+                    composition,
+                    t,
+                    reference.pressure,
+                    Some(1),
+                )?))
+            }
+            Source::Mixture {
+                species,
+                composition,
+            } => {
+                let state = resolve_gas_mixture(species, composition, t, reference.pressure)?;
+                Ok(GasRecord::Mixture(
+                    state,
+                    species
+                        .iter()
+                        .copied()
+                        .zip(composition.fractions().iter().copied())
+                        .collect(),
+                ))
+            }
+            Source::Thermochemical { model, point } => {
+                let point =
+                    point
+                        .clone()
+                        .with("temperature", t)
+                        .map_err(|error| MaterialError::State {
+                            what: error.to_string(),
+                        })?;
+                Ok(GasRecord::Thermochemical(model.evaluate(&point)?))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fluid_transport::FluidTransport;
+    use crate::gas_species::input::read_gas_record;
+
+    fn law(text: &str) -> IsobaricGasLaw {
+        IsobaricGasLaw::try_from_record(
+            read_gas_record(&mut text.split_ascii_whitespace(), None, None).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn local_temperature_drives_density_and_transport_at_fixed_pressure_and_composition() {
+        for text in [
+            "300 100000 0",
+            "300 100000 0.5",
+            "mixture 300 100000 mole 2 He 0.4 N2 0.6",
+        ] {
+            let law = law(text);
+            let hot = law.at_temperature(Temperature::new(310.0)).unwrap();
+            let (a, b) = (law.reference().state(), hot.state());
+            assert!((b.density / a.density - 300.0 / 310.0).abs() < 2e-14);
+            assert_eq!(a.pressure, b.pressure);
+            assert!((a.water_mole_fraction - b.water_mole_fraction).abs() < 1e-16);
+            assert!((a.specific_gas_constant - b.specific_gas_constant).abs() < 1e-12);
+            assert!(b.dynamic_viscosity > a.dynamic_viscosity);
+            assert!(b.thermal_conductivity > a.thermal_conductivity);
+            assert_eq!(hot.transport_state().unwrap().density_kg_m3(), b.density);
+        }
+    }
+
+    #[test]
+    fn cooling_cannot_create_condensation_or_change_the_retained_source() {
+        let humid = law("300 100000 0.9");
+        let original = humid.clone();
+        assert!(humid.at_temperature(Temperature::new(280.0)).is_err());
+        assert!(humid.at_temperature(Temperature::new(f64::NAN)).is_err());
+        assert_eq!(humid, original);
+        let helium = law("mixture 300 100000 mole 1 He 1");
+        assert!(helium.at_temperature(Temperature::new(400.0)).is_err());
+        assert!(
+            IsobaricGasLaw::try_from_record(GasRecord::Legacy(*helium.reference().state()))
+                .is_err()
+        );
+        let GasRecord::Mixture(mut state, composition) = helium.reference().clone() else {
+            unreachable!()
+        };
+        state.water_mole_fraction = 0.05;
+        assert!(IsobaricGasLaw::try_from_record(GasRecord::Mixture(state, composition)).is_err());
+    }
+
+    #[test]
+    fn saturated_reference_is_admitted_without_a_humidity_round_trip() {
+        let saturated = law("300 50001 1");
+        assert_eq!(
+            saturated.at_temperature(Temperature::new(300.0)).unwrap(),
+            *saturated.reference(),
+        );
+        let warm = saturated.at_temperature(Temperature::new(301.0)).unwrap();
+        assert_eq!(
+            warm.state().water_mole_fraction,
+            saturated.reference().state().water_mole_fraction
+        );
+        assert!(saturated.at_temperature(Temperature::new(299.0)).is_err());
+    }
+
+    #[test]
+    fn thermochemical_feedback_retains_the_original_models_and_query_conditions() {
+        use crate::thermochemical_gas::tests::{model_in_domains, point};
+        let model = model_in_domains(
+            vec![0.8, 0.2],
+            0.001,
+            [250.0, 400.0],
+            [290.0, 330.0],
+            [50000.0, 150000.0],
+        );
+        let law = IsobaricGasLaw::try_from_model(model.clone(), point(300.0, 100000.0)).unwrap();
+        let GasRecord::Thermochemical(reference) = law.reference() else {
+            unreachable!()
+        };
+        let expected = model
+            .evaluate_temperature_from_snapshot(reference, Temperature::new(315.0))
+            .unwrap();
+        assert_eq!(
+            law.at_temperature(Temperature::new(315.0)).unwrap(),
+            GasRecord::Thermochemical(expected)
+        );
+        assert!(law.at_temperature(Temperature::new(340.0)).is_err());
+        assert!(IsobaricGasLaw::try_from_record(law.reference().clone()).is_err());
+        assert_eq!(law.reference().state().temperature, 300.0);
+    }
+}

@@ -3,9 +3,12 @@
 
 /// Canonical source bytes for browser and other file-independent callers.
 pub mod packs;
+/// Reevaluate the admitted gas at local temperatures without changing composition.
+pub mod temperature;
 
 use super::{GasSpecies, resolve_gas_mixture};
 use crate::MaterialError;
+use crate::fluid_transport::{FluidTransport, FluidTransportState};
 use crate::gas::GasState;
 use fs_qty::semantic::{Composition, CompositionBasis};
 use crate::thermochemical_gas::{
@@ -59,6 +62,15 @@ impl GasRecord {
         match self {
             Self::Legacy(gas) | Self::Mixture(gas, _) => gas,
             Self::Thermochemical(resolved) => resolved.state(),
+        }
+    }
+}
+
+impl FluidTransport for GasRecord {
+    fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+        match self {
+            Self::Thermochemical(gas) => gas.transport_state(),
+            _ => self.state().transport_state(),
         }
     }
 }
