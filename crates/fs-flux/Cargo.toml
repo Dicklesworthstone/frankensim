@@ -98,6 +98,9 @@ required-features = ["continuum"]
 name = "donnan_swelling"
 path = "examples/donnan_swelling.rs"
 required-features = ["continuum"]
+
+[[example]]
+name = "shock_box"
 path = "examples/shock_box.rs"
 required-features = ["experimental-compressible"]
 
