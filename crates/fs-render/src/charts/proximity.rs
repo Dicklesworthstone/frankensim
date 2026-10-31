@@ -8,7 +8,7 @@
 //! BVH pruning, including at edges and on very thin separated faces.
 
 use super::*;
-use fs_geom::Aabb;
+use fs_geom::{Aabb, TraceNormalCone};
 use fs_ivl::Interval;
 
 /// Native point-to-surface query refusal.
@@ -17,6 +17,7 @@ pub enum ProximityError {
     InvalidInput,
     InvalidGeometry,
     UnsupportedChart,
+    UnsupportedDeparture,
     AmbiguousContact,
     NumericalRange,
     WorkBudgetExceeded,
@@ -500,6 +501,61 @@ pub fn chart_proximity(
         clearance_m: validated.safe_radius,
         witness,
     })
+}
+
+/// The exact signed field remains authoritative inside a departure collar.
+pub(crate) fn chart_signed_distance(
+    chart: &dyn Chart,
+    cx: &Cx<'_>,
+    point: Point3,
+    budget: &mut ProximityBudget,
+) -> Result<Interval, ProximityError> {
+    budget.charge(cx)?;
+    if point_array(point).iter().any(|v| !v.is_finite()) {
+        return Err(ProximityError::InvalidInput);
+    }
+    if chart.trace_step_claim() != TraceStepClaim::ExactDistance {
+        return Err(ProximityError::UnsupportedDeparture);
+    }
+    let sample = chart.eval(point, cx);
+    let enclosure = chart.trace_value_enclosure(point, &sample, cx);
+    validate_trace_sample(&sample, TraceStepClaim::ExactDistance, enclosure)
+        .ok_or(ProximityError::InvalidGeometry)?;
+    cx.checkpoint()?;
+    Ok(Interval::new(enclosure.lo, enclosure.hi))
+}
+
+pub(crate) fn chart_normal_cone(
+    chart: &dyn Chart,
+    cx: &Cx<'_>,
+    center: Point3,
+    radius_m: f64,
+    budget: &mut ProximityBudget,
+) -> Result<Option<TraceNormalCone>, ProximityError> {
+    budget.charge(cx)?;
+    if point_array(center).iter().any(|v| !v.is_finite())
+        || !radius_m.is_finite()
+        || radius_m <= 0.0
+    {
+        return Err(ProximityError::InvalidInput);
+    }
+    if chart.trace_step_claim() != TraceStepClaim::ExactDistance {
+        return Ok(None);
+    }
+    let cone = chart.trace_normal_neighborhood(center, radius_m, cx);
+    cx.checkpoint()?;
+    if let Some(cone) = cone {
+        if [cone.axis.x, cone.axis.y, cone.axis.z]
+            .iter()
+            .any(|v| !v.is_finite())
+            || (cone.axis.dot(cone.axis) - 1.0).abs() > 2e-10
+            || !cone.max_deviation.is_finite()
+            || !(0.0..1.0).contains(&cone.max_deviation)
+        {
+            return Err(ProximityError::InvalidGeometry);
+        }
+    }
+    Ok(cone)
 }
 
 /// Prepared exactly coplanar, consistently oriented face patches. Interior
@@ -1067,6 +1123,37 @@ mod tests {
             let q = chart_proximity(&sphere, cx, Point3::new(0.0, 0.0, 1.1), &mut budget).unwrap();
             assert!(q.clearance_m <= 0.1 + 1.0e-15);
             assert!(q.witness.unwrap().distance_upper_m >= 0.1);
+        });
+    }
+
+    #[test]
+    fn g1_sphere_regular_neighborhood_covers_curvature_and_excludes_medial_axis() {
+        with_cx(|cx| {
+            let sphere = fs_geom::fixtures::SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            };
+            let center = Point3::new(0.0, 0.0, 1.0);
+            let cone = sphere.trace_normal_neighborhood(center, 0.1, cx).unwrap();
+            assert!(cone.max_deviation > 0.0 && cone.max_deviation < 0.12);
+            for delta in [
+                Vec3::new(0.1, 0.0, 0.0),
+                Vec3::new(0.0, -0.1, 0.0),
+                Vec3::new(0.06, 0.0, -0.08),
+            ] {
+                let gradient = sphere.eval(center.offset(delta), cx).gradient.unwrap();
+                let difference = Vec3::new(
+                    gradient.x - cone.axis.x,
+                    gradient.y - cone.axis.y,
+                    gradient.z - cone.axis.z,
+                );
+                assert!(difference.norm() <= cone.max_deviation);
+            }
+            assert_eq!(sphere.trace_normal_neighborhood(center, 1.0, cx), None);
+            assert_eq!(
+                sphere.trace_normal_neighborhood(Point3::new(0.0, 0.0, 0.0), 0.1, cx),
+                None
+            );
         });
     }
 

@@ -8,6 +8,8 @@ use fs_blake3::hash_domain;
 use fs_exec::{CancelGate, ExecMode, StreamKey};
 use fs_geom::Vec3;
 
+mod curved_charts;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {

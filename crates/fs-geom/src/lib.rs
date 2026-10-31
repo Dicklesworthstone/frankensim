@@ -668,6 +668,21 @@ pub struct ChartSample {
     pub error: NumericalCertificate,
 }
 
+/// Regularity of an exact signed-distance field throughout a requested ball.
+///
+/// Every real unit gradient in that closed ball differs from `axis` by at
+/// most `max_deviation` in Euclidean norm. The certificate includes rounding
+/// of the stored axis. It is a whole-neighborhood claim, not sampled normals.
+/// Together with a positive directional margin, it admits monotone departure
+/// through a curved interface without replacing that interface by a plane.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TraceNormalCone {
+    /// Finite approximately unit reference direction of the real gradients.
+    pub axis: Vec3,
+    /// Finite nonnegative upper bound, strictly less than one.
+    pub max_deviation: f64,
+}
+
 /// The chart contract: a concrete presentation of an abstract region.
 /// Object-safe (see module docs for the `Param` note).
 pub trait Chart: Send + Sync {
@@ -705,6 +720,22 @@ pub trait Chart: Send + Sync {
         } else {
             NumericalCertificate::no_claim()
         }
+    }
+
+    /// Optionally certify that the represented exact signed distance is C1
+    /// throughout the closed ball `B(center, radius_m)`, with its unit
+    /// gradients enclosed by the returned cone. The ball may not contain a
+    /// medial axis, a crease or an oppositely oriented second sheet. Consumers
+    /// still exclude other scene objects and evaluate the actual signed field
+    /// to resolve contact and departure. Exact distance alone does not imply
+    /// this additional regularity; unsupported charts keep the default.
+    fn trace_normal_neighborhood(
+        &self,
+        _center: Point3,
+        _radius_m: f64,
+        _cx: &Cx<'_>,
+    ) -> Option<TraceNormalCone> {
+        None
     }
 
     /// Topology bounds this chart is willing to state.

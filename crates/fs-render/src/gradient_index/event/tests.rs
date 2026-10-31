@@ -71,6 +71,141 @@ fn axis() -> Vec3 {
 }
 
 #[test]
+fn g4_smooth_stage_failures_preserve_exact_error_and_charge_every_query() {
+    use std::cell::Cell;
+    struct Field {
+        calls: Cell<u32>,
+    }
+    impl GradientIndexField for Field {
+        fn sample(&self, _: Point3, _: f64) -> Result<GradientIndexSample, GradientIndexError> {
+            self.calls.set(self.calls.get() + 1);
+            GradientIndexSample::try_new(1.5, Vec3::new(0.0, 0.0, 0.0), 0.3, Some(1.5))
+        }
+    }
+    struct Smooth {
+        prepare_calls: u32,
+        signed_calls: u32,
+        failure: Option<GradientIndexError>,
+    }
+    impl BoundaryOracle for Smooth {
+        fn query(&mut self, _: Point3) -> Result<BoundaryQuery, GradientIndexError> {
+            panic!("failure must be preserved before leaving the contact collar");
+        }
+        fn prepare_departure(
+            &mut self,
+            _: DepartureRequest,
+        ) -> Result<DepartureNeighborhood, GradientIndexError> {
+            self.prepare_calls += 1;
+            Ok(DepartureNeighborhood::Smooth {
+                radius_m: 1.0,
+                normal_axis: Vec3::new(1.0, 0.0, 0.0),
+                max_normal_deviation: 0.0,
+            })
+        }
+        fn signed_departure(
+            &mut self,
+            _: BoundaryWitness,
+            point: Point3,
+        ) -> Result<SignedBoundaryDistance, GradientIndexError> {
+            self.signed_calls += 1;
+            if self.signed_calls == 2 {
+                if let Some(error) = self.failure {
+                    return Err(error);
+                }
+            }
+            Ok(SignedBoundaryDistance {
+                lower_m: point.x.next_down(),
+                upper_m: point.x.next_up(),
+            })
+        }
+    }
+    let witness = BoundaryWitness {
+        boundary_id: 0,
+        feature_id: 0,
+        surface_point: Point3::new(0.0, 0.0, 0.0),
+        normal: Vec3::new(1.0, 0.0, 0.0),
+        distance_upper_m: 0.25e-7,
+        side: BoundarySide::Negative,
+        departure_radius_m: None,
+    };
+    for failure in [
+        Some(GradientIndexError::Cancelled),
+        Some(GradientIndexError::BoundaryQueryBudgetExceeded),
+        None,
+    ] {
+        let field = Field {
+            calls: Cell::new(0),
+        };
+        let mut geometry = Smooth {
+            prepare_calls: 0,
+            signed_calls: 0,
+            failure,
+        };
+        let mut options = GradientEventOptions::default();
+        if failure.is_none() {
+            options.max_boundary_queries = 2;
+        }
+        let result = propagate_to_boundary(
+            &field,
+            &mut geometry,
+            Ray {
+                origin: Point3::new(-0.25e-7, 0.0, 0.0),
+                dir: Vec3::new(1.0, 0.0, 0.0),
+            },
+            axis(),
+            550.0,
+            1.0,
+            Some(GradientDeparture {
+                witness,
+                side: BoundarySide::Positive,
+            }),
+            options,
+        );
+        assert_eq!(
+            result,
+            Err(failure.unwrap_or(GradientIndexError::BoundaryQueryBudgetExceeded))
+        );
+        assert_eq!(
+            field.calls.get(),
+            1,
+            "guard must run before a stage field evaluation"
+        );
+        assert_eq!(geometry.signed_calls, if failure.is_some() { 2 } else { 1 });
+    }
+    let field = Field {
+        calls: Cell::new(0),
+    };
+    let mut geometry = Smooth {
+        prepare_calls: 0,
+        signed_calls: 0,
+        failure: None,
+    };
+    assert_eq!(
+        propagate_to_boundary_with_control(
+            &field,
+            &mut geometry,
+            Ray {
+                origin: Point3::new(-0.25e-7, 0.0, 0.0),
+                dir: Vec3::new(1.0, 0.0, 0.0)
+            },
+            axis(),
+            550.0,
+            1.0,
+            Some(GradientDeparture {
+                witness,
+                side: BoundarySide::Positive
+            }),
+            GradientEventOptions::default(),
+            || false
+        ),
+        Err(GradientIndexError::Cancelled)
+    );
+    assert_eq!(geometry.prepare_calls, 0);
+    assert_eq!(geometry.signed_calls, 0);
+    assert_eq!(field.calls.get(), 0);
+}
+
+#[test]
 fn g1_uniform_boundary_arrival_retains_integrated_position_and_power() {
     let glass = glass();
     let field = HomogeneousIndexField::new(&glass);

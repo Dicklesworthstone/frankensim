@@ -10,14 +10,15 @@ use super::*;
 pub use crate::charts::proximity::ProximityError;
 use crate::charts::proximity::{
     MeshPlanarPatches, ProximityBudget, ProximitySide, SurfaceProximity, SurfaceWitness,
-    array_point, box_clearance, chart_proximity, point_array,
+    array_point, box_clearance, chart_normal_cone, chart_proximity, chart_signed_distance,
+    point_array,
 };
-use fs_geom::Aabb;
+use fs_geom::{Aabb, TraceNormalCone};
 use fs_ivl::Interval;
 use std::collections::BTreeMap;
 
 /// Bit-affecting native clearance and planar departure semantics.
-pub const BOUNDARY_GEOMETRY_SEMANTICS_VERSION: u32 = 1;
+pub const BOUNDARY_GEOMETRY_SEMANTICS_VERSION: u32 = 2;
 
 type IVec = [Interval; 3];
 type IMat = [[Interval; 3]; 3];
@@ -221,6 +222,61 @@ impl PreparedPose {
             clearance_m: clearance,
             witness,
         })
+    }
+
+    fn world_normal_cone(self, local: TraceNormalCone) -> Result<TraceNormalCone, ProximityError> {
+        let inverse_transpose =
+            std::array::from_fn(|i| std::array::from_fn(|j| self.inverse[j][i]));
+        let transformed = imul(
+            inverse_transpose,
+            ivec(Point3::new(local.axis.x, local.axis.y, local.axis.z)),
+        );
+        let norm = inorm(transformed);
+        if norm.lo() <= 0.0 || !norm.hi().is_finite() {
+            return Err(ProximityError::NumericalRange);
+        }
+        let unit = transformed.map(|v| v / norm);
+        let n = unit.map(Interval::midpoint);
+        let axis = Vec3::new(n[0], n[1], n[2]);
+        let length = axis.norm();
+        if !length.is_finite() || length <= 0.0 {
+            return Err(ProximityError::NumericalRange);
+        }
+        let axis = axis.scale(1.0 / length);
+        let axis_error = uncertainty(unit, Point3::new(axis.x, axis.y, axis.z));
+        // Normalization is 2/min(|A n|)-Lipschitz for these nonzero vectors;
+        // A is the inverse transpose, with singular values in
+        // [1/max_scale,1/min_scale]. Include its interval arithmetic too.
+        let deviation = (Interval::point(axis_error)
+            + Interval::point(2.0) * Interval::point(self.max_scale)
+                / Interval::point(self.min_scale)
+                * Interval::point(local.max_deviation))
+        .hi();
+        if !deviation.is_finite() {
+            return Err(ProximityError::NumericalRange);
+        }
+        Ok(TraceNormalCone {
+            axis,
+            max_deviation: deviation,
+        })
+    }
+
+    fn world_signed_distance(self, local: Interval, query_error: f64) -> Interval {
+        let local = local + Interval::new(-query_error, query_error);
+        let lower_scale = if local.lo() >= 0.0 {
+            self.min_scale
+        } else {
+            self.max_scale
+        };
+        let upper_scale = if local.hi() <= 0.0 {
+            self.min_scale
+        } else {
+            self.max_scale
+        };
+        Interval::new(
+            (Interval::point(local.lo()) * Interval::point(lower_scale)).lo(),
+            (Interval::point(local.hi()) * Interval::point(upper_scale)).hi(),
+        )
     }
 }
 
@@ -489,6 +545,8 @@ impl<'scene> BoundaryGeometry<'scene> {
             budget: ProximityBudget::new(maximum_query_work),
             contact_tolerance_m,
             last_error: None,
+            last_contact: None,
+            smooth_departure: None,
         }
     }
 }
@@ -583,6 +641,8 @@ pub struct NativeBoundaryOracle<'query, 'scene, 'arena> {
     budget: ProximityBudget,
     contact_tolerance_m: f64,
     last_error: Option<ProximityError>,
+    last_contact: Option<(crate::gradient_index::event::BoundaryWitness, f64)>,
+    smooth_departure: Option<(crate::gradient_index::event::BoundaryWitness, f64)>,
 }
 
 #[cfg(feature = "tracer")]
@@ -689,18 +749,176 @@ impl NativeBoundaryOracle<'_, '_, '_> {
             ProximitySide::Negative => BoundarySide::Negative,
             ProximitySide::Unresolved => BoundarySide::OnSurface,
         };
+        let witness = BoundaryWitness {
+            boundary_id: index,
+            feature_id,
+            surface_point: world.surface_point,
+            normal,
+            distance_upper_m: world.distance_upper_m,
+            side,
+            departure_radius_m: radius,
+        };
+        self.last_contact = Some((witness, other));
         Ok(BoundaryQuery {
             clearance_m: clearance,
-            witness: Some(BoundaryWitness {
-                boundary_id: index,
-                feature_id,
-                surface_point: world.surface_point,
-                normal,
-                distance_upper_m: world.distance_upper_m,
-                side,
-                departure_radius_m: radius,
-            }),
+            witness: Some(witness),
         })
+    }
+
+    fn smooth_neighborhood(
+        &mut self,
+        request: crate::gradient_index::event::DepartureRequest,
+    ) -> Result<Option<crate::gradient_index::event::DepartureNeighborhood>, ProximityError> {
+        use crate::gradient_index::event::{BoundarySide, DepartureNeighborhood, cone_margin};
+        self.budget.charge(self.cx)?;
+        self.smooth_departure = None;
+        let witness = request.contact.witness;
+        let Some((admitted, other_clearance)) = self.last_contact else {
+            return Err(ProximityError::UnsupportedDeparture);
+        };
+        if admitted != witness
+            || request.surface_tolerance_m != self.contact_tolerance_m
+            || point_array(request.origin).iter().any(|v| !v.is_finite())
+            || [
+                request.direction.x,
+                request.direction.y,
+                request.direction.z,
+            ]
+            .iter()
+            .any(|v| !v.is_finite())
+            || (request.direction.dot(request.direction) - 1.0).abs() > 2e-10
+            || !request.min_approach_cosine.is_finite()
+            || !(0.0..1.0).contains(&request.min_approach_cosine)
+            || request.min_approach_cosine <= 0.0
+        {
+            return Err(ProximityError::InvalidInput);
+        }
+        let sign = match request.contact.side {
+            BoundarySide::Positive => 1.0,
+            BoundarySide::Negative => -1.0,
+            BoundarySide::OnSurface => return Err(ProximityError::UnsupportedDeparture),
+        };
+        let index = witness.boundary_id;
+        let object = self
+            .geometry
+            .instances
+            .get(index)
+            .ok_or(ProximityError::InvalidInput)?;
+        let SharedGeometry::Chart(chart) = object.geometry() else {
+            return Ok(None);
+        };
+        if chart.trace_step_claim() != fs_geom::TraceStepClaim::ExactDistance {
+            return Ok(None);
+        }
+        let pose = self.geometry.prepared[index].pose;
+        let (local_center, center_error) = pose.local_point(witness.surface_point)?;
+        let proximity = inorm(isub(ivec(request.origin), ivec(witness.surface_point))).hi();
+        if proximity > request.surface_tolerance_m {
+            return Err(ProximityError::AmbiguousContact);
+        }
+        let approach = cone_margin(witness.normal, 0.0, sign, request.direction);
+        if approach <= 0.0 {
+            return Err(ProximityError::AmbiguousContact);
+        }
+        // Start with enough room for the complete numerical collar. Shrinking
+        // a normal cone is bounded; an unresolved grazing contact cannot gain
+        // acceptance by shrinking below the distance needed to leave it.
+        let mut radius =
+            (64.0 * request.surface_tolerance_m / approach).min(if other_clearance.is_finite() {
+                (0.875 * other_clearance).next_down()
+            } else {
+                f64::INFINITY
+            });
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err(ProximityError::NumericalRange);
+        }
+        let mut supports_neighborhood = false;
+        for _ in 0..32 {
+            let local_radius = (Interval::point(radius) / Interval::point(pose.min_scale)
+                + Interval::point(center_error))
+            .hi();
+            if let Some(local_cone) = chart_normal_cone(
+                chart.as_ref(),
+                self.cx,
+                local_center,
+                local_radius,
+                &mut self.budget,
+            )? {
+                supports_neighborhood = true;
+                let cone = pose.world_normal_cone(local_cone)?;
+                let margin = cone_margin(cone.axis, cone.max_deviation, sign, request.direction);
+                if cone.max_deviation < 1.0 && margin >= request.min_approach_cosine {
+                    let required = (Interval::point(proximity)
+                        + Interval::point(8.0) * Interval::point(request.surface_tolerance_m)
+                            / Interval::point(margin))
+                    .hi();
+                    if radius > required {
+                        self.smooth_departure = Some((witness, radius));
+                        return Ok(Some(DepartureNeighborhood::Smooth {
+                            radius_m: radius,
+                            normal_axis: cone.axis,
+                            max_normal_deviation: cone.max_deviation,
+                        }));
+                    }
+                }
+            }
+            if radius <= 4.0 * request.surface_tolerance_m {
+                break;
+            }
+            radius = (0.5 * radius).next_down();
+        }
+        if supports_neighborhood {
+            Err(ProximityError::AmbiguousContact)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn signed_departure_native(
+        &mut self,
+        witness: crate::gradient_index::event::BoundaryWitness,
+        point: Point3,
+    ) -> Result<crate::gradient_index::event::SignedBoundaryDistance, ProximityError> {
+        use crate::gradient_index::event::SignedBoundaryDistance;
+        self.budget.charge(self.cx)?;
+        let (admitted, radius) = self
+            .smooth_departure
+            .ok_or(ProximityError::UnsupportedDeparture)?;
+        if admitted != witness || point_array(point).iter().any(|v| !v.is_finite()) {
+            return Err(ProximityError::InvalidInput);
+        }
+        if inorm(isub(ivec(point), ivec(witness.surface_point))).hi() > radius {
+            return Err(ProximityError::AmbiguousContact);
+        }
+        let instance = &self.geometry.instances[witness.boundary_id];
+        let SharedGeometry::Chart(chart) = instance.geometry() else {
+            return Err(ProximityError::UnsupportedDeparture);
+        };
+        let pose = self.geometry.prepared[witness.boundary_id].pose;
+        let (local, error) = pose.local_point(point)?;
+        let signed = chart_signed_distance(chart.as_ref(), self.cx, local, &mut self.budget)?;
+        let world = pose.world_signed_distance(signed, error);
+        if !world.lo().is_finite() || !world.hi().is_finite() {
+            return Err(ProximityError::NumericalRange);
+        }
+        Ok(SignedBoundaryDistance {
+            lower_m: world.lo(),
+            upper_m: world.hi(),
+        })
+    }
+
+    fn map_error(&mut self, error: ProximityError) -> crate::gradient_index::GradientIndexError {
+        use crate::gradient_index::GradientIndexError;
+        self.last_error = Some(error);
+        match error {
+            ProximityError::Cancelled => GradientIndexError::Cancelled,
+            ProximityError::WorkBudgetExceeded => GradientIndexError::BoundaryQueryBudgetExceeded,
+            ProximityError::AmbiguousContact => GradientIndexError::BoundaryResolutionLimit,
+            ProximityError::UnsupportedDeparture => {
+                GradientIndexError::UnsupportedBoundaryDeparture
+            }
+            _ => GradientIndexError::InvalidBoundaryQuery,
+        }
     }
 }
 
@@ -713,18 +931,54 @@ impl crate::gradient_index::event::BoundaryOracle for NativeBoundaryOracle<'_, '
         crate::gradient_index::event::BoundaryQuery,
         crate::gradient_index::GradientIndexError,
     > {
-        use crate::gradient_index::GradientIndexError;
-        self.query_native(point).map_err(|error| {
-            self.last_error = Some(error);
-            match error {
-                ProximityError::Cancelled => GradientIndexError::Cancelled,
-                ProximityError::WorkBudgetExceeded => {
-                    GradientIndexError::BoundaryQueryBudgetExceeded
-                }
-                ProximityError::AmbiguousContact => GradientIndexError::BoundaryResolutionLimit,
-                _ => GradientIndexError::InvalidBoundaryQuery,
-            }
-        })
+        self.query_native(point)
+            .map_err(|error| self.map_error(error))
+    }
+
+    fn prepare_departure(
+        &mut self,
+        request: crate::gradient_index::event::DepartureRequest,
+    ) -> Result<
+        crate::gradient_index::event::DepartureNeighborhood,
+        crate::gradient_index::GradientIndexError,
+    > {
+        if request.contact.witness.departure_radius_m.is_some() {
+            self.budget
+                .charge(self.cx)
+                .map_err(|error| self.map_error(error))?;
+            return crate::gradient_index::event::DepartureNeighborhood::planar(
+                request.contact.witness,
+            );
+        }
+        self.smooth_neighborhood(request)
+            .and_then(|neighborhood| neighborhood.ok_or(ProximityError::UnsupportedDeparture))
+            .map_err(|error| self.map_error(error))
+    }
+
+    fn admit_arrival(
+        &mut self,
+        request: crate::gradient_index::event::DepartureRequest,
+    ) -> Result<
+        Option<crate::gradient_index::event::DepartureNeighborhood>,
+        crate::gradient_index::GradientIndexError,
+    > {
+        if request.contact.witness.departure_radius_m.is_some() {
+            return Ok(None);
+        }
+        self.smooth_neighborhood(request)
+            .map_err(|error| self.map_error(error))
+    }
+
+    fn signed_departure(
+        &mut self,
+        contact: crate::gradient_index::event::BoundaryWitness,
+        point: Point3,
+    ) -> Result<
+        crate::gradient_index::event::SignedBoundaryDistance,
+        crate::gradient_index::GradientIndexError,
+    > {
+        self.signed_departure_native(contact, point)
+            .map_err(|error| self.map_error(error))
     }
 }
 

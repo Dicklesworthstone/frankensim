@@ -6,7 +6,8 @@
 //! own spheres.
 
 use crate::{
-    Aabb, BettiBounds, Chart, ChartSample, Differentiability, Point3, TraceStepClaim, Vec3,
+    Aabb, BettiBounds, Chart, ChartSample, Differentiability, Point3, TraceNormalCone,
+    TraceStepClaim, Vec3,
 };
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
@@ -135,8 +136,16 @@ impl Chart for SphereChart {
     fn support(&self) -> Aabb {
         let r = self.radius;
         Aabb::new(
-            self.center.offset(Vec3::new(-r, -r, -r)),
-            self.center.offset(Vec3::new(r, r, r)),
+            Point3::new(
+                (self.center.x - r).next_down(),
+                (self.center.y - r).next_down(),
+                (self.center.z - r).next_down(),
+            ),
+            Point3::new(
+                (self.center.x + r).next_up(),
+                (self.center.y + r).next_up(),
+                (self.center.z + r).next_up(),
+            ),
         )
     }
 
@@ -146,6 +155,48 @@ impl Chart for SphereChart {
         } else {
             TraceStepClaim::NoClaim
         }
+    }
+
+    fn trace_normal_neighborhood(
+        &self,
+        center: Point3,
+        radius_m: f64,
+        _cx: &Cx<'_>,
+    ) -> Option<TraceNormalCone> {
+        if !finite_point(center)
+            || !finite_point(self.center)
+            || !self.radius.is_finite()
+            || self.radius <= 0.0
+            || !radius_m.is_finite()
+            || radius_m <= 0.0
+        {
+            return None;
+        }
+        let delta = interval_delta(center, self.center);
+        let radial = interval_norm3(delta[0], delta[1], delta[2]);
+        let minimum_radius = radial - Interval::point(radius_m);
+        if !radial.hi().is_finite() || minimum_radius.lo() <= 0.0 {
+            return None; // The ball must exclude the sphere's medial axis.
+        }
+        let exact_normal = delta.map(|v| v / radial);
+        let n = exact_normal.map(Interval::midpoint);
+        let candidate = Vec3::new(n[0], n[1], n[2]);
+        let length = candidate.norm();
+        if !length.is_finite() || length <= 0.0 {
+            return None;
+        }
+        let axis = candidate.scale(1.0 / length);
+        let error = core::array::from_fn::<_, 3, _>(|i| {
+            (exact_normal[i] - Interval::point([axis.x, axis.y, axis.z][i])).abs()
+        });
+        let axis_error = interval_norm3(error[0], error[1], error[2]);
+        // The Hessian norm of |x-c| is 1/|x-c|. Integrate this derivative
+        // bound along every radius of the ball, then include axis rounding.
+        let deviation = (axis_error + Interval::point(radius_m) / minimum_radius).hi();
+        (deviation.is_finite() && deviation < 1.0).then_some(TraceNormalCone {
+            axis,
+            max_deviation: deviation,
+        })
     }
 
     /// A `SphereChart` presents the SOLID BALL where its signed distance

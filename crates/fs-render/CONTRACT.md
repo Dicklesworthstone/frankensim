@@ -110,11 +110,17 @@ differentiable lift). Pure Rust throughout.
   field is sampled. Upper surface proximity and a transverse approach are
   separate contact requirements. Numerical contacts retain their resolution
   and integrated endpoint; they are not certified global crossing enclosures.
-  An admitted local planar patch permits positive-length departure, including
-  its optical lengths and attenuation, without ignoring a whole object or
-  skipping its opposite wall. The selected field must support the explicit
-  numerical contact collar. Unsupported patches, grazing ambiguity and
-  exhausted step/query budgets refuse. Spatially uniform fields reuse one
+  An admitted local planar patch or regular signed-distance neighborhood
+  permits positive-length departure, including its optical lengths and
+  attenuation, without ignoring a whole object or skipping its opposite wall.
+  Smooth departures query the actual signed field and use a bounded cone of
+  surface normals throughout the neighborhood. The same cone strengthens
+  arrival transversality so a near-tangent approach cannot become a false
+  crossing. Preparation, arrival and signed-stage queries retain cumulative
+  query/work accounting; cancellation and budget errors cannot become retries.
+  The selected field must support the explicit numerical contact collar.
+  Unsupported neighborhoods, grazing ambiguity and exhausted step/query
+  budgets refuse. Spatially uniform fields reuse one
   optical sample and take analytic steps limited by geometry. The caller
   retains the same accepted field and geometry snapshots.
   No scalar camera/BDPT curved visibility, scattering, diffraction,
@@ -171,6 +177,11 @@ differentiable lift). Pure Rust throughout.
   Jacobians. Analytic slab-to-finite-receiver and weighted reflection/transmission
   regressions check exit position/direction, optical lengths, attenuation,
   received watts and Stokes components through the actual native scene.
+  Native unmeshed sphere regressions additionally cover off-axis dispersive
+  ball-lens entry/exit, internal total reflection with Stokes phase, an affine
+  gradient-index trajectory refracting out of a sphere, and exact-tangent
+  refusal before interface sampling. Their receiving geometry and optical
+  lengths use independent analytic references.
 
 - `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
   absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
@@ -463,6 +474,12 @@ differentiable lift). Pure Rust throughout.
   bound its departure neighborhood. Direct unprepared queries validate their
   authoring arrays before using cached bounds. Exact-distance charts can
   provide upper proximity; Lipschitz implicit fields provide only clearance.
+  Optional `Chart::trace_normal_neighborhood` supplies an analytic regularity
+  witness over an entire closed ball: a unit-gradient cone for an exact signed
+  distance, excluding creases, medial axes and opposing sheets. `SphereChart`
+  provides this witness with interval rounding and a curvature bound; its
+  finite support is outward rounded. A point gradient alone never supplies
+  this capability.
   The queries retain deterministic feature ties, cumulative work limits and
   cancellation. They return separate surface witnesses, never invented ray hits.
 
@@ -491,10 +508,14 @@ differentiable lift). Pure Rust throughout.
   interfaces, unresolved finite edges and features within the contact collar
   refuse. A planar arrival's incidence-scaled unresolved tail must fit inside
   its exclusion ball. This prevents finite-detector near misses from becoming
-  surface events. The prepared owner currently admits finite support;
-  exact-distance chart arrivals retain numerical proximity, with no invented
-  planar departure neighborhood. These are separate witnesses, not extensions
-  of the certified straight-ray `InstanceHit` authority.
+  surface events. The prepared owner admits finite support. Smooth chart
+  neighborhoods use interval inverse-transpose normal-cone transformation and
+  world-metric signed-distance enclosures, exclude other objects, and refine
+  within a fixed 32-query ceiling. Existing planar-witness fields retain their
+  meaning; smooth regularity is a separate optional capability, currently
+  native for `SphereChart`. Unsupported exact-distance charts retain numerical
+  arrival proximity and refuse departure. These are separate witnesses, not
+  extensions of the certified straight-ray `InstanceHit` authority.
 
 - `tracer` tile execution (bead `frankensim-h7xu5.5.1`):
   `RenderExecutionConfig` makes logical tile shape, worker ceiling, operation

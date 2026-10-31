@@ -19,9 +19,12 @@
 //! trajectory enclosure, so these results are numerical contacts, not exact
 //! crossing certificates. The returned ray stays at its integrated position.
 //!
-//! Interface continuation uses an explicitly admitted planar contact patch.
-//! Its ball must exclude every other surface, including the opposite wall of
-//! the same thin object. Departure is integrated, never an uncharged position
+//! Interface continuation uses an explicitly admitted planar patch or a smooth
+//! signed-field neighborhood with a bounded cone of real gradients. Smooth
+//! departure evaluates the actual signed chart field at internal stages; its
+//! tangent plane is never substituted for the interface. The neighborhood
+//! must exclude every other surface, including an opposing sheet of the same
+//! object. Departure is integrated, never an uncharged position
 //! offset. The newly selected material field must support the contact's small
 //! numerical collar on both sides; otherwise its ordinary domain refusal is
 //! retained. No entire object is ignored to suppress a self-intersection.
@@ -95,12 +98,131 @@ pub struct BoundaryQuery {
 pub trait BoundaryOracle {
     /// Query geometric exclusion and, when available, upper proximity.
     fn query(&mut self, position: Point3) -> Result<BoundaryQuery, GradientIndexError>;
+
+    /// Prepare one bounded departure. The default preserves planar witnesses;
+    /// smooth backends must prove a regular normal cone throughout the ball.
+    fn prepare_departure(
+        &mut self,
+        request: DepartureRequest,
+    ) -> Result<DepartureNeighborhood, GradientIndexError> {
+        DepartureNeighborhood::planar(request.contact.witness)
+    }
+
+    /// Optional stronger arrival admission, using the same regularity owner.
+    /// The selected side in `request` is the side toward which the ray travels.
+    /// A supplied neighborhood must contain the unresolved incident tail.
+    fn admit_arrival(
+        &mut self,
+        _request: DepartureRequest,
+    ) -> Result<Option<DepartureNeighborhood>, GradientIndexError> {
+        Ok(None)
+    }
+
+    /// Enclose the actual signed metric distance during a smooth departure.
+    /// A tangent-plane residual is not an implementation of this method.
+    fn signed_departure(
+        &mut self,
+        _contact: BoundaryWitness,
+        _position: Point3,
+    ) -> Result<SignedBoundaryDistance, GradientIndexError> {
+        Err(GradientIndexError::UnsupportedBoundaryDeparture)
+    }
+}
+
+/// Geometry needed to admit a selected outgoing direction near an interface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DepartureRequest {
+    pub contact: GradientDeparture,
+    pub origin: Point3,
+    pub direction: Vec3,
+    pub surface_tolerance_m: f64,
+    pub min_approach_cosine: f64,
+}
+
+/// One immutable local neighborhood, centered at the contact representative.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DepartureNeighborhood {
+    /// Existing planar patch, excluding edges and every other surface.
+    Planar { radius_m: f64 },
+    /// The interface's true oriented unit normals throughout this ball lie
+    /// within `max_normal_deviation` of `normal_axis`. The signed field is C1
+    /// in the ball; no medial axis or opposing sheet may be hidden inside it.
+    /// Every other scene object must also be outside the ball.
+    Smooth {
+        radius_m: f64,
+        normal_axis: Vec3,
+        max_normal_deviation: f64,
+    },
+}
+
+impl DepartureNeighborhood {
+    pub fn planar(witness: BoundaryWitness) -> Result<Self, GradientIndexError> {
+        let radius_m = witness
+            .departure_radius_m
+            .ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
+        Ok(Self::Planar { radius_m })
+    }
+    fn radius(self) -> f64 {
+        match self {
+            Self::Planar { radius_m } | Self::Smooth { radius_m, .. } => radius_m,
+        }
+    }
+    fn margin(self, witness: BoundaryWitness, sign: f64, direction: Vec3) -> f64 {
+        match self {
+            Self::Planar { .. } => sign * witness.normal.dot(direction),
+            Self::Smooth {
+                normal_axis,
+                max_normal_deviation,
+                ..
+            } => cone_margin(normal_axis, max_normal_deviation, sign, direction),
+        }
+    }
+    fn validate(self) -> Result<(), GradientIndexError> {
+        if !self.radius().is_finite() || self.radius() <= 0.0 {
+            return Err(GradientIndexError::InvalidBoundaryQuery);
+        }
+        if let Self::Smooth {
+            normal_axis,
+            max_normal_deviation,
+            ..
+        } = self
+        {
+            if !finite_vec(normal_axis)
+                || (normal_axis.dot(normal_axis) - 1.0).abs() > 2e-10
+                || !max_normal_deviation.is_finite()
+                || !(0.0..1.0).contains(&max_normal_deviation)
+            {
+                return Err(GradientIndexError::InvalidBoundaryQuery);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Rigorous signed-distance bounds in world metres; negative is inside.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SignedBoundaryDistance {
+    pub lower_m: f64,
+    pub upper_m: f64,
+}
+
+impl SignedBoundaryDistance {
+    fn selected_lower(self, sign: f64) -> Result<f64, GradientIndexError> {
+        if !self.lower_m.is_finite() || !self.upper_m.is_finite() || self.lower_m > self.upper_m {
+            return Err(GradientIndexError::InvalidBoundaryQuery);
+        }
+        Ok(if sign > 0.0 {
+            self.lower_m
+        } else {
+            -self.upper_m
+        })
+    }
 }
 
 /// Continuation from a previously resolved numerical interface contact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GradientDeparture {
-    /// Previous contact, including its local planar exclusion neighborhood.
+    /// Previous contact. Its oracle admits a planar or smooth neighborhood.
     pub witness: BoundaryWitness,
     /// Side selected by the reflected or transmitted outgoing direction.
     pub side: BoundarySide,
@@ -117,7 +239,8 @@ pub struct GradientEventOptions {
     /// Smallest admitted absolute normal/tangent cosine for a contact or
     /// departure. Nearly tangent proximity is an unresolved event, not a hit.
     pub min_approach_cosine: f64,
-    /// Maximum calls to the boundary oracle, including the initial point.
+    /// Maximum oracle calls, including neighborhood preparation, arrival
+    /// admission and internal signed-departure stage queries.
     pub max_boundary_queries: u32,
 }
 
@@ -230,18 +353,29 @@ pub fn propagate_to_boundary_with_control<
     let axis =
         transverse(direction, transverse_axis).ok_or(GradientIndexError::InvalidTransverseAxis)?;
     let mut contact_resolution = 0.0_f64;
+    let mut boundary_evaluations = 0;
+    let mut departure_neighborhood = None;
     if let Some(previous) = departure {
         validate_witness(previous.witness)?;
         let sign = previous
             .side
             .sign()
             .ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
-        let radius = previous
-            .witness
-            .departure_radius_m
-            .ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
+        if !control() {
+            return Err(GradientIndexError::Cancelled);
+        }
+        charge_query(&mut boundary_evaluations, options.max_boundary_queries)?;
+        let neighborhood = oracle.prepare_departure(DepartureRequest {
+            contact: previous,
+            origin: ray.origin,
+            direction,
+            surface_tolerance_m: options.surface_tolerance_m,
+            min_approach_cosine: options.min_approach_cosine,
+        })?;
+        neighborhood.validate()?;
+        let radius = neighborhood.radius();
         let proximity = distance_upper(ray.origin, previous.witness.surface_point);
-        let cosine = sign * direction.dot(previous.witness.normal);
+        let cosine = neighborhood.margin(previous.witness, sign, direction);
         if proximity > options.surface_tolerance_m
             || radius <= 4.0 * options.surface_tolerance_m
             || cosine < options.min_approach_cosine
@@ -249,6 +383,7 @@ pub fn propagate_to_boundary_with_control<
             return Err(GradientIndexError::UnsupportedBoundaryDeparture);
         }
         contact_resolution = proximity / cosine;
+        departure_neighborhood = Some(neighborhood);
     }
     if !control() {
         return Err(GradientIndexError::Cancelled);
@@ -269,7 +404,6 @@ pub fn propagate_to_boundary_with_control<
     let mut accepted = 0;
     let mut rejected = 0;
     let mut evaluations = 1;
-    let mut boundary_evaluations = 0;
     let mut max_error = 0.0_f64;
     let mut cached_query = None;
 
@@ -287,92 +421,126 @@ pub fn propagate_to_boundary_with_control<
         }
         // Once clear of the numerical collar, ordinary global clearance
         // resumes. The departed object is never removed from the oracle.
+        let mut departing = None;
         if let Some(previous) = departure {
             let sign = previous
                 .side
                 .sign()
                 .ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
-            let signed_distance = sign
-                * previous
-                    .witness
-                    .normal
-                    .dot(point.delta_from(previous.witness.surface_point));
+            let neighborhood =
+                departure_neighborhood.ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
+            let signed_distance = match neighborhood {
+                DepartureNeighborhood::Planar { .. } => {
+                    sign * previous
+                        .witness
+                        .normal
+                        .dot(point.delta_from(previous.witness.surface_point))
+                }
+                DepartureNeighborhood::Smooth { .. } => {
+                    if !control() {
+                        return Err(GradientIndexError::Cancelled);
+                    }
+                    charge_query(&mut boundary_evaluations, options.max_boundary_queries)?;
+                    oracle
+                        .signed_departure(previous.witness, point)?
+                        .selected_lower(sign)?
+                }
+            };
             if signed_distance > 2.0 * options.surface_tolerance_m {
                 departure = None;
+                departure_neighborhood = None;
+            } else {
+                departing = Some((previous, neighborhood, sign, signed_distance));
             }
         }
-        let (center, radius, departure_plane) = if let Some(previous) = departure {
-            let sign = previous
-                .side
-                .sign()
-                .ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
-            let radius = previous
-                .witness
-                .departure_radius_m
-                .ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
-            let signed_distance = sign
-                * previous
-                    .witness
-                    .normal
-                    .dot(point.delta_from(previous.witness.surface_point));
-            let cosine = sign * tangent.dot(previous.witness.normal);
-            if cosine < options.min_approach_cosine {
-                return Err(GradientIndexError::BoundaryResolutionLimit);
-            }
-            let available = radius - distance_upper(point, previous.witness.surface_point);
-            let target = (3.0 * options.surface_tolerance_m - signed_distance) / cosine;
-            step = step.min(target).min(0.875 * available);
-            (
-                previous.witness.surface_point,
-                radius,
-                Some((previous, sign, signed_distance)),
-            )
-        } else {
-            let query = if let Some(query) = cached_query {
-                query
-            } else {
-                if boundary_evaluations >= options.max_boundary_queries {
-                    return Err(GradientIndexError::BoundaryQueryBudgetExceeded);
-                }
-                boundary_evaluations += 1;
-                let query = oracle.query(point)?;
-                validate_query(query)?;
-                cached_query = Some(query);
-                query
-            };
-            if let Some(witness) = query.witness
-                && witness.distance_upper_m <= options.surface_tolerance_m
-            {
-                let side = witness
-                    .side
-                    .sign()
-                    .ok_or(GradientIndexError::BoundaryResolutionLimit)?;
-                let approach = -side * witness.normal.dot(tangent);
-                if approach >= options.min_approach_cosine {
-                    // A small perpendicular gap need not imply contact with
-                    // a finite face: at shallow incidence its tangent may
-                    // leave the patch before reaching the supporting plane.
-                    // The free ball must contain both the current endpoint
-                    // and its unresolved tangent extension. This is a local
-                    // contact admission check, not a curved-tail certificate.
-                    let residual = witness.distance_upper_m / approach;
-                    if let Some(radius) = witness.departure_radius_m
-                        && (distance_upper(point, witness.surface_point) + residual.next_up())
-                            .next_up()
-                            >= radius
-                    {
-                        return Err(GradientIndexError::BoundaryResolutionLimit);
-                    }
-                    contact_resolution = contact_resolution.max(residual);
-                    break BoundaryTermination::Surface(witness);
-                }
-                if approach.abs() < options.min_approach_cosine {
+        let (center, radius, departure_guard) =
+            if let Some((previous, neighborhood, sign, signed_distance)) = departing {
+                let radius = neighborhood.radius();
+                let cosine = neighborhood.margin(previous.witness, sign, tangent);
+                if cosine < options.min_approach_cosine {
                     return Err(GradientIndexError::BoundaryResolutionLimit);
                 }
-            }
-            step = step.min((0.875 * query.clearance_m).next_down());
-            (point, query.clearance_m, None)
-        };
+                let available = radius - distance_upper(point, previous.witness.surface_point);
+                let target = (3.0 * options.surface_tolerance_m - signed_distance) / cosine;
+                step = step.min(target).min(0.875 * available);
+                (
+                    previous.witness.surface_point,
+                    radius,
+                    Some((previous, neighborhood, sign, signed_distance)),
+                )
+            } else {
+                let query = if let Some(query) = cached_query {
+                    query
+                } else {
+                    charge_query(&mut boundary_evaluations, options.max_boundary_queries)?;
+                    let query = oracle.query(point)?;
+                    validate_query(query)?;
+                    cached_query = Some(query);
+                    query
+                };
+                if let Some(witness) = query.witness
+                    && witness.distance_upper_m <= options.surface_tolerance_m
+                {
+                    let side = witness
+                        .side
+                        .sign()
+                        .ok_or(GradientIndexError::BoundaryResolutionLimit)?;
+                    let approach = -side * witness.normal.dot(tangent);
+                    if approach >= options.min_approach_cosine {
+                        // A small perpendicular gap need not imply contact with
+                        // a finite face: at shallow incidence its tangent may
+                        // leave the patch before reaching the supporting plane.
+                        // The free ball must contain both the current endpoint
+                        // and its unresolved tangent extension. This is a local
+                        // contact admission check, not a curved-tail certificate.
+                        let mut residual = witness.distance_upper_m / approach;
+                        if let Some(radius) = witness.departure_radius_m
+                            && (distance_upper(point, witness.surface_point) + residual.next_up())
+                                .next_up()
+                                >= radius
+                        {
+                            return Err(GradientIndexError::BoundaryResolutionLimit);
+                        }
+                        if !control() {
+                            return Err(GradientIndexError::Cancelled);
+                        }
+                        charge_query(&mut boundary_evaluations, options.max_boundary_queries)?;
+                        if let Some(neighborhood) = oracle.admit_arrival(DepartureRequest {
+                            contact: GradientDeparture {
+                                witness,
+                                side: if side > 0.0 {
+                                    BoundarySide::Negative
+                                } else {
+                                    BoundarySide::Positive
+                                },
+                            },
+                            origin: point,
+                            direction: tangent,
+                            surface_tolerance_m: options.surface_tolerance_m,
+                            min_approach_cosine: options.min_approach_cosine,
+                        })? {
+                            neighborhood.validate()?;
+                            let margin = neighborhood.margin(witness, -side, tangent);
+                            if margin < options.min_approach_cosine {
+                                return Err(GradientIndexError::BoundaryResolutionLimit);
+                            }
+                            residual = (witness.distance_upper_m / margin).next_up();
+                            if (distance_upper(point, witness.surface_point) + residual).next_up()
+                                >= neighborhood.radius()
+                            {
+                                return Err(GradientIndexError::BoundaryResolutionLimit);
+                            }
+                        }
+                        contact_resolution = contact_resolution.max(residual);
+                        break BoundaryTermination::Surface(witness);
+                    }
+                    if approach.abs() < options.min_approach_cosine {
+                        return Err(GradientIndexError::BoundaryResolutionLimit);
+                    }
+                }
+                step = step.min((0.875 * query.clearance_m).next_down());
+                (point, query.clearance_m, None)
+            };
         if distance == max_distance_m {
             break BoundaryTermination::DistanceLimit;
         }
@@ -384,21 +552,45 @@ pub fn propagate_to_boundary_with_control<
         if !step.is_finite() || step <= 0.0 || distance + step == distance {
             return Err(GradientIndexError::BoundaryResolutionLimit);
         }
-        let guard = |candidate: Point3, stage_tangent: Vec3| {
+        let mut guard_error = None;
+        let mut guard = |candidate: Point3, stage_tangent: Vec3| {
             if distance_upper(candidate, center) > radius {
                 return false;
             }
-            departure_plane.is_none_or(|(previous, sign, initial_signed)| {
+            departure_guard.is_none_or(|(previous, neighborhood, sign, initial_signed)| {
                 let Some(stage_tangent) = unit(stage_tangent) else {
                     return false;
                 };
-                sign * previous.witness.normal.dot(stage_tangent) >= options.min_approach_cosine
-                    && sign
+                if neighborhood.margin(previous.witness, sign, stage_tangent)
+                    < options.min_approach_cosine
+                {
+                    return false;
+                }
+                let signed = match neighborhood {
+                    DepartureNeighborhood::Planar { .. } => Ok(sign
                         * previous
                             .witness
                             .normal
-                            .dot(candidate.delta_from(previous.witness.surface_point))
-                        >= initial_signed - options.integration.position_tolerance_m
+                            .dot(candidate.delta_from(previous.witness.surface_point))),
+                    DepartureNeighborhood::Smooth { .. } => {
+                        if !control() {
+                            Err(GradientIndexError::Cancelled)
+                        } else {
+                            charge_query(&mut boundary_evaluations, options.max_boundary_queries)
+                                .and_then(|()| oracle.signed_departure(previous.witness, candidate))
+                                .and_then(|distance| distance.selected_lower(sign))
+                        }
+                    }
+                };
+                match signed {
+                    Ok(signed) => {
+                        signed >= initial_signed - options.integration.position_tolerance_m
+                    }
+                    Err(error) => {
+                        guard_error = Some(error);
+                        false
+                    }
+                }
             })
         };
         let trial = if uniform {
@@ -439,6 +631,11 @@ pub fn propagate_to_boundary_with_control<
                 &mut evaluations,
             )
         };
+        // A cancelled or exhausted geometry owner is not a geometric step
+        // rejection. Preserve it before retry logic can halve the ODE step.
+        if let Some(error) = guard_error {
+            return Err(error);
+        }
         let trial = match trial {
             Ok(trial) => trial,
             Err(GradientIndexError::BoundaryClearanceExceeded) => {
@@ -509,6 +706,24 @@ pub fn propagate_to_boundary_with_control<
         boundary_evaluations,
         contact_resolution_m: contact_resolution,
     })
+}
+
+fn charge_query(used: &mut u32, maximum: u32) -> Result<(), GradientIndexError> {
+    if *used >= maximum {
+        return Err(GradientIndexError::BoundaryQueryBudgetExceeded);
+    }
+    *used += 1;
+    Ok(())
+}
+
+pub(crate) fn cone_margin(axis: Vec3, deviation: f64, sign: f64, tangent: Vec3) -> f64 {
+    use fs_ivl::Interval;
+    let axis = [axis.x, axis.y, axis.z].map(Interval::point);
+    let tangent = [tangent.x, tangent.y, tangent.z].map(Interval::point);
+    let dot = axis[0] * tangent[0] + axis[1] * tangent[1] + axis[2] * tangent[2];
+    let t = tangent.map(Interval::abs);
+    let norm = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+    (Interval::point(sign) * dot - Interval::point(deviation) * norm).lo()
 }
 
 fn validate_witness(witness: BoundaryWitness) -> Result<(), GradientIndexError> {

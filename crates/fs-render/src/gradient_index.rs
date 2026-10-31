@@ -32,7 +32,7 @@ pub mod bundle;
 pub mod event;
 
 /// Version of the deterministic gradient-index propagation arithmetic.
-pub const GRADIENT_INDEX_SEMANTICS_VERSION: u32 = 1;
+pub const GRADIENT_INDEX_SEMANTICS_VERSION: u32 = 2;
 /// Hard ceiling on attempted adaptive steps, including rejected steps.
 pub const MAX_GRADIENT_INDEX_STEPS: u32 = 1_000_000;
 
