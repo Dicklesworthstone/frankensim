@@ -19,10 +19,14 @@
 //! reconstruct actual membrane-face concentrations without hidden inventories.
 //! Nonideal compartments use their shared free-energy pressure with fully
 //! retained solutes and bare membranes; leaky and film transport need matching
-//! chemical-potential laws. This network does not supply ionic electrochemistry,
-//! transient film storage, solvent inertia, a heat balance or mechanical inertia.
+//! chemical-potential laws. [`transient`] supplies separate finite-storage films.
+//! Neither owner supplies ionic electrochemistry, solvent inertia, a heat balance
+//! or mechanical inertia.
 //! Successful advances allocate no memory. All workspace is prepared up front;
 //! failed, cancelled or exhausted advances publish neither state nor time.
+
+/// Finite-storage concentration films coupled to membrane water transport.
+pub mod transient;
 
 #[cfg(test)]
 mod nonideal_tests;

@@ -1829,3 +1829,36 @@ thermodynamics and successful network advances allocate no memory. Native
 focused fixtures include an independent nonideal equilibrium, cross interactions
 at equal ideal osmolarity, long-step conservation, concentration-boundary roots,
 unsupported combined-law admission and atomic failure/cancellation.
+
+
+## Finite-storage transient concentration films
+
+`osmosis::transient::TransientOsmoticPair` advances two finite bulk solutions
+and explicit one-dimensional film cells. Film solvent volumes are fixed
+`area * cell_width`; the same normal water flux crosses every interface while
+bulk volumes change conservatively. Film thickness, cells, initial profiles and
+per-species diffusivities are explicit independent inputs. Initial film water
+and solute are additional physical inventory, never silently taken from bulks.
+
+Each call accepts one backward-Euler step. Original exponentially fitted donor
+coefficients form a positive implicit amount system for each species. Native
+`fs_la::tridiagonal::TridiagonalWorkspace` solves it in linear work per species;
+all storage is prepared once. Terminal half cells use the existing polarization
+composition and actual reconstructed membrane-face concentrations drive water
+flow. The finite scalar solve is bounded and safeguarded; stiff sign-changing
+brackets may control transfer-position error, with the actual residual retained.
+
+Reports include every bulk and film inventory, original linear-equation
+residuals, membrane-face concentrations, water-root residual and exact boundary
+pressure work for the declared linear chamber laws. Failure, cancellation,
+nonphysical amounts, volume depletion or exhausted work publish no state or
+clock. Only neutral ideal solutions are admitted: nonideal chemical transport,
+ionic fields, resolved crossflow, film hydraulic losses and heat storage are
+outside this owner. Root tolerances are not temporal error estimates; callers
+refine time and mesh independently.
+
+The `transient_osmotic_filtration` example matches initial whole-system water
+and solute against the steady-film comparison, then exposes startup film
+storage and face enrichment. Focused regressions cover analytical diffusion,
+multiple permeating species on unequal meshes, steady forward/reverse limits,
+time/space refinement, steep roots, inventory checks and atomic refusal.

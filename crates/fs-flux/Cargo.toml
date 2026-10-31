@@ -90,6 +90,11 @@ path = "examples/osmotic_filtration.rs"
 required-features = ["continuum"]
 
 [[example]]
+name = "transient_osmotic_filtration"
+path = "examples/transient_osmotic_filtration.rs"
+required-features = ["continuum"]
+
+[[example]]
 name = "shock_box"
 path = "examples/shock_box.rs"
 required-features = ["experimental-compressible"]
