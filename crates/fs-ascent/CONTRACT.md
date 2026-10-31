@@ -13,6 +13,29 @@ so converged and stalled are distinguishable outcomes.
 ## Public types and semantics
 
 - `FnGrad`/`FnHv` — the callback shapes every engine consumes.
+- `quadratic_ball::maximize_quadratic_ball` — global trust-region conditions
+  for the dense PSD quadratic `a^T G a + 2 h^T a` on the unit Euclidean ball,
+  with dimension capped at 16. The existing fs-la Jacobi eigensolver supplies
+  the basis; a bounded secular search uses the shift from the largest
+  eigenvalue directly. The hard branch fills the missing norm in the top
+  eigenspace with a deterministic sign, including zero linear forcing.
+  Symmetry, numerical PSD, eigenpairs and orthogonality are checked relative
+  to the Gram matrix's own scale; a large linear term cannot mask a materially
+  indefinite matrix. Admitted small negative numerical eigenvalues are
+  reported and retained, never clipped or hidden by diagonal loading.
+  Common objective normalization admits uniformly tiny/large finite inputs;
+  lost representability and unrepresentable outputs refuse explicitly.
+  Reports include the actual witness objective, stationarity, feasibility,
+  complementarity, numerical dual and signed primal/dual difference.
+  `gradient_admissible()` requires a regular branch with resolved positive
+  shift separation; hard, flat and unresolved near-hard branches return
+  witnesses without claiming a smooth optimizer gradient. Cancellation is
+  checked around the dimension-bounded Jacobi call and during the bounded
+  secular search, not inside Jacobi. `tests/quadratic_ball.rs` covers analytic
+  regular/hard/flat and rank-deficient cases, extreme scales, near-hard signs,
+  direct objective/envelope derivatives and refusals. These are numerical
+  witnesses and residual gates, not interval bounds, exact global-optimality
+  certificates, arbitrary-conditioning guarantees or continuum claims.
 - `LbfgsState` — resumable L-BFGS (two-loop recursion, m ≈ 17-class
   memory, strong-Wolfe line search, curvature-pair skip guard,
   steepest-descent fallback when stale memory yields a non-descent
