@@ -49,7 +49,7 @@ fn gas_field_reaches_rendered_pressure_and_exact_inlet_source() {
     let area = core::f64::consts::PI * geometry.segments[0].inlet_radius().powi(2);
     for voice in [&a, &b] {
         assert_eq!(voice.rho.to_bits(), inlet.density.to_bits());
-        assert_eq!(voice.sound_speed.to_bits(), inlet.sound_speed.to_bits());
+        assert_eq!(voice.inlet_gas.sound_speed.to_bits(), inlet.sound_speed.to_bits());
         assert_eq!(voice.zc, inlet.density * inlet.sound_speed / area);
     }
     let mut unchanged = [0.0; 2048];
@@ -137,7 +137,7 @@ fn check_continuous_bore_render(geometry: &fs_duct::Duct) {
     ).unwrap();
     for voice in [&a, &b, &c] {
         assert_eq!(voice.rho.to_bits(), inlet.density.to_bits());
-        assert_eq!(voice.sound_speed.to_bits(), inlet.sound_speed.to_bits());
+        assert_eq!(voice.inlet_gas.sound_speed.to_bits(), inlet.sound_speed.to_bits());
     }
     let mut baseline = [0.0; 2048];
     let mut unchanged = [0.0; 2048];

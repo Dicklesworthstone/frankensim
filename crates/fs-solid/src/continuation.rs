@@ -375,7 +375,7 @@ pub fn advance<P: PathResidual>(
                 "finite dimension-matched continuation tangent required",
             ));
         }
-        let (u_dot, lam_dot) = if state.pending_switch {
+        let (u_dot, lam_dot): (Vec<f64>, f64) = if state.pending_switch {
             // Honor the branch-switch null direction: the arc
             // constraint then PINS progress along the mode, so the
             // corrector cannot fall back to the fundamental branch.

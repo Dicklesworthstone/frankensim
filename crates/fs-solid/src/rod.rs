@@ -831,8 +831,7 @@ mod tests {
                 .inverse()
                 .compose(transformed.frames[node])
                 .unwrap()
-                .log()
-                .unwrap();
+                .log();
             assert!(angle.angular.norm() < 1e-9);
         }
         near(original.energy().unwrap(), transformed.energy().unwrap());
@@ -895,8 +894,7 @@ mod tests {
             .inverse()
             .compose(fallback.frames[1])
             .unwrap()
-            .log()
-            .unwrap();
+            .log();
         assert!(difference.angular.norm() < 2e-7);
     }
 

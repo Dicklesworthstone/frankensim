@@ -43,7 +43,7 @@ fn exact_field_boundaries_reach_reed_feedback_and_physical_microphone() {
     let inlet = *field.state_at(0.0).unwrap().state();
     let outlet = *field.state_at(field.length_m()).unwrap().state();
     assert_eq!(voice(&p).rho, inlet.density);
-    assert_eq!(voice(&p).sound_speed, inlet.sound_speed);
+    assert_eq!(voice(&p).inlet_gas.sound_speed, inlet.sound_speed);
     assert_ne!(p.segment_gases()[0].temperature, inlet.temperature);
     assert_eq!(p.outlet_receiver().unwrap().gas, outlet);
     assert_ne!(p.segment_gases().last().unwrap(), &outlet);

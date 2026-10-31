@@ -461,11 +461,11 @@ impl ForceWorkSample {
     }
 
     fn weighted_force_error(&self) -> Result<f64, AxisymmetricError> {
-        finite(
+        Ok(finite(
             self.force_error * (self.weight + self.weight_error)
                 + self.force.abs() * self.weight_error,
             "axisymmetric work integrand error",
-        )
+        )?)
     }
 }
 

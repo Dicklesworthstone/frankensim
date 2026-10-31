@@ -121,7 +121,7 @@ fn actual_terminal_medium_not_inlet_medium_decides_the_radiation_band() {
     assert_ne!(actual.segment_gases()[0], *actual.ambient_gas());
     assert_eq!(actual.segment_gases()[1], *actual.ambient_gas(), "omission inherits ambient, not the preceding region");
     assert_eq!(voice(&actual).rho, actual.segment_gases()[0].density);
-    assert_eq!(voice(&actual).sound_speed, actual.segment_gases()[0].sound_speed);
+    assert_eq!(voice(&actual).inlet_gas.sound_speed, actual.segment_gases()[0].sound_speed);
     let radius = 0.0022;
     assert_eq!(voice(&actual).zc, actual.segment_gases()[0].density*actual.segment_gases()[0].sound_speed
         /(core::f64::consts::PI*radius*radius));

@@ -113,7 +113,7 @@ fn catalogue_seed_never_reaches_physical_samples_or_the_actual_pressure_path() {
         let inlet = field.state_at(0.0).unwrap();
         assert_eq!(file.gas_field_resolution(),Some(resolution));
         assert_eq!(voice(&file).rho,inlet.state().density);
-        assert_eq!(voice(&file).sound_speed,inlet.state().sound_speed);
+        assert_eq!(voice(&file).inlet_gas.sound_speed,inlet.state().sound_speed);
         assert_eq!(file.segment_gases().len(),segments);
         assert_eq!(file.outlet_receiver().unwrap().gas,*field.state_at(0.57).unwrap().state());
         assert_eq!(file.gas_records().len(),4,"ambient plus three authored field knots");
