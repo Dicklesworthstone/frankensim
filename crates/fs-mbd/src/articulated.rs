@@ -379,12 +379,21 @@ impl SpatialInertia {
         Ok(momentum)
     }
 
-    /// Kinetic energy `0.5 * velocityᵀ I velocity`.
+    /// Kinetic energy `0.5 * velocityᵀ I velocity`, evaluated at the COM.
+    ///
+    /// Splitting translation and spin at the centre of mass avoids subtracting
+    /// large origin-dependent orbital terms when the body reference point is
+    /// far from its centre. The supplied twist remains about that reference.
     ///
     /// # Errors
     /// Refuses non-finite velocity or an unrepresentable derived energy.
     pub fn kinetic_energy(self, velocity: Twist) -> Result<f64, ArticulatedError> {
-        let energy = 0.5 * self.momentum(velocity)?.pairing(velocity);
+        validate_twist(velocity, "spatial_inertia.velocity")?;
+        let center_velocity = velocity.linear + velocity.angular.cross(self.center_of_mass);
+        let linear_momentum = center_velocity.scale(self.mass);
+        let spin_momentum = self.inertia_com.apply(velocity.angular);
+        let energy =
+            0.5 * linear_momentum.dot(center_velocity) + 0.5 * spin_momentum.dot(velocity.angular);
         ensure_finite_scalar(energy, "spatial_inertia.kinetic_energy", 0)?;
         Ok(energy)
     }
@@ -1390,7 +1399,7 @@ fn momentum_from_kinematics(
             momentum.transform_by(&kinematics.world_from_link[index]),
         );
         validate_wrench(momentum_world, "free_floating_momentum.world")?;
-        kinetic_energy += 0.5 * momentum.pairing(velocity);
+        kinetic_energy += link.inertia.kinetic_energy(velocity)?;
         ensure_finite_scalar(
             kinetic_energy,
             "free_floating_momentum.kinetic_energy",

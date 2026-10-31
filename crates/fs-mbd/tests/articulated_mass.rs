@@ -37,6 +37,42 @@ fn close(a: f64, b: f64) {
 }
 
 #[test]
+fn kinetic_energy_is_independent_of_an_offset_body_reference_point() {
+    // G1/G3: one physical motion, with the same full COM tensor and velocity,
+    // expressed about successively more distant body reference points.
+    let tensor = Mat3 {
+        m: [0.9, 0.04, -0.02, 0.04, 1.1, 0.03, -0.02, 0.03, 1.3],
+    };
+    let omega = Vec3::new(0.0, 0.0, 1.0);
+    let center_velocity = Vec3::new(0.0, 0.25, 0.0);
+    let expected = 0.5 * 2.0 * 0.25_f64.powi(2) + 0.5 * 1.3;
+    for offset in [0.0, 1.0, 1e4, 1e6, 1e8] {
+        let center = Vec3::new(offset, 0.0, 0.0);
+        let inertia = SpatialInertia::new(2.0, center, tensor).unwrap();
+        let twist = Twist::new(omega, center_velocity - omega.cross(center));
+        close(inertia.kinetic_energy(twist).unwrap(), expected);
+
+        // The tree query must use the same stable mass law; otherwise contact
+        // and continuous-motion audits still subtract the orbital terms.
+        let model = ArticulatedModel::new(vec![Link::new(
+            "offset body",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            inertia,
+        )])
+        .unwrap();
+        let base = FreeFloatingBaseState::new(
+            Se3::from_parts(So3::identity(), center.scale(-1.0)).unwrap(),
+            twist,
+        );
+        let actual = free_floating_momentum(&model, base, &[], &[]).unwrap();
+        close(actual.kinetic_energy, expected);
+        close_vector(actual.linear_momentum_world, center_velocity.scale(2.0));
+    }
+}
+
+#[test]
 fn native_recursions_apply_the_coupled_mass_law_without_effort_limit_confusion() {
     let model = model();
     let q = [0.4, -0.2];
