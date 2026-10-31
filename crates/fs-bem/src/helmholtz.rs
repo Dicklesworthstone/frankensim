@@ -201,6 +201,18 @@ pub enum HelmholtzError {
         /// Declared maximum.
         maximum_pairs: usize,
     },
+    /// Angular quadrature did not resolve both retained coefficients and total
+    /// radiated power before exhausting its declared direction budget.
+    DirectivityNotConverged {
+        /// Directions actually evaluated, across every refinement.
+        evaluated_directions: usize,
+        /// Maximum directions admitted by the caller.
+        maximum_directions: usize,
+        /// Last coefficient change, normalized by the full field norm.
+        coefficient_change: Option<f64>,
+        /// Last relative change in integrated angular power.
+        power_change: Option<f64>,
+    },
 }
 
 impl core::fmt::Display for HelmholtzError {
@@ -234,7 +246,7 @@ impl core::fmt::Display for HelmholtzError {
                 write!(f, "FS-BEM-HELM-ALLOCATION: could not reserve {what}")
             }
             HelmholtzError::Cancelled => {
-                write!(f, "FS-BEM-HELM-CANCELLED: geometry preparation cancelled")
+                write!(f, "FS-BEM-HELM-CANCELLED: acoustic evaluation cancelled")
             }
             HelmholtzError::Singular => write!(f, "FS-BEM-HELM-SINGULAR: dense LU refused"),
             HelmholtzError::NearRuleBudget {
@@ -243,6 +255,15 @@ impl core::fmt::Display for HelmholtzError {
             } => write!(
                 f,
                 "FS-BEM-HELM-NEAR-RULE-BUDGET: {required_pairs} near panel pairs exceeds the declared {maximum_pairs}"
+            ),
+            HelmholtzError::DirectivityNotConverged {
+                evaluated_directions,
+                maximum_directions,
+                coefficient_change,
+                power_change,
+            } => write!(
+                f,
+                "FS-BEM-HELM-SH-QUADRATURE: angular projection unresolved after {evaluated_directions} of {maximum_directions} directions; coefficient change {coefficient_change:?}, power change {power_change:?}"
             ),
         }
     }
@@ -1884,10 +1905,35 @@ fn historical_ring_piston(
     Ok(mean_p)
 }
 
-/// Cap on the spherical-harmonic table degree: the projection grid is
-/// `(l_max + 1) x (2 l_max + 1)` far-field evaluations and the
-/// normalized-recurrence Legendre path is validated to this degree.
+/// Cap on the retained spherical-harmonic degree. Angular quadrature is
+/// refined independently: omitted multipoles must not alias into this basis.
 pub const MAX_SH_DEGREE: usize = 64;
+
+/// Hard ceiling on far-field directions across one complete SH projection.
+/// This bounds both source evaluations and the separable angular transform.
+pub const MAX_SH_QUADRATURE_DIRECTIONS: usize = 262_144;
+
+/// Numerical angular integration budget, separate from SH truncation degree.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DirectivityProjectionOptions {
+    /// Total source directions across all quadrature refinements, at most
+    /// [`MAX_SH_QUADRATURE_DIRECTIONS`]. No partial table is published on refusal.
+    pub maximum_directions: usize,
+    /// Required changes on two successive refinements: retained coefficients
+    /// relative to the full field L2 norm, and total power relative to itself.
+    /// Must be finite, positive and at most 1e-3. Agreement is an estimate,
+    /// not a rigorous error bound for an arbitrary supplied evaluator.
+    pub relative_tolerance: f64,
+}
+
+impl Default for DirectivityProjectionOptions {
+    fn default() -> Self {
+        Self {
+            maximum_directions: MAX_SH_QUADRATURE_DIRECTIONS,
+            relative_tolerance: 1e-10,
+        }
+    }
+}
 
 /// Far-field directivity as spherical-harmonic coefficients: the
 /// rendering-facing table promised to the musical-acoustics program
@@ -1909,11 +1955,11 @@ pub struct DirectivityTable {
     /// Coefficients `a_lm`, indexed `l (l + 1) + m` for `m` in
     /// `-l ..= l` — length `(l_max + 1)^2`.
     pub coefficients: Vec<C64>,
-    /// `SUM |a_lm|^2` over the quadrature estimate of
-    /// `INT |F|^2 dOmega`: the fraction of far-field power the
-    /// truncated table captures. Near 1 for mesh-resolved fields; a low
-    /// value means the truncation (not the BEM solve) is the limiting
-    /// approximation.
+    /// `SUM |a_lm|^2 / INT |F|^2 dOmega`, with numerator and denominator
+    /// resolved by an angular quadrature refinement independent of `l_max`.
+    /// A low fraction exposes omitted angular power, including a field wholly
+    /// outside the retained basis. Zero fields report zero. This is a numerical
+    /// truncation estimate, not a continuum or BEM discretization certificate.
     pub captured_fraction: f64,
 }
 
@@ -1981,44 +2027,111 @@ impl DirectivityTable {
     }
 }
 
-/// Project the BEM far field onto spherical harmonics up to `l_max`.
-/// Quadrature is exact for band-limited integrands: Gauss–Legendre in
-/// `cos theta` with `l_max + 1` nodes (degree `2 l_max + 1`
-/// polynomials) times a `2 l_max + 1`-point uniform trapezoid in `phi`
-/// (exact for `e^{i m phi}`, `|m| <= 2 l_max`); the residual truncation
-/// error is reported as `1 - captured_fraction`, not hidden.
+/// Project the BEM far field onto spherical harmonics up to `l_max`, using
+/// [`DirectivityProjectionOptions::default`] for angular integration.
+/// Omitted multipoles still contribute to the independently resolved angular
+/// power. The resulting `captured_fraction` measures SH truncation separately
+/// from angular quadrature and the original boundary discretization.
 ///
 /// # Errors
-/// [`HelmholtzError::BadParameter`] when `l_max` exceeds
-/// [`MAX_SH_DEGREE`].
+/// As for [`directivity_sh_table_with_options`].
 pub fn directivity_sh_table(
     surface: &SpherePanels,
     solution: &RadiationSolution,
     medium: Medium,
     l_max: usize,
 ) -> Result<DirectivityTable, HelmholtzError> {
-    directivity_sh_table_from_evaluator(solution.k, l_max, |directions| {
-        Ok(far_field(surface, solution, medium, directions))
-    })
+    directivity_sh_table_with_options(
+        surface,
+        solution,
+        medium,
+        l_max,
+        DirectivityProjectionOptions::default(),
+        || false,
+    )
 }
 
-/// Project any caller-supplied far-field evaluator onto the canonical
-/// spherical-harmonic grid used by [`directivity_sh_table`].
+/// BEM SH projection with explicit angular work, tolerance and cancellation.
+/// The existing far-field owner evaluates at most 256 directions per batch.
+///
+/// # Errors
+/// As for [`directivity_sh_table_from_evaluator_with_options`].
+pub fn directivity_sh_table_with_options(
+    surface: &SpherePanels,
+    solution: &RadiationSolution,
+    medium: Medium,
+    l_max: usize,
+    options: DirectivityProjectionOptions,
+    cancelled: impl Fn() -> bool,
+) -> Result<DirectivityTable, HelmholtzError> {
+    directivity_sh_table_from_evaluator_with_options(
+        solution.k,
+        l_max,
+        options,
+        |directions| Ok(far_field(surface, solution, medium, directions)),
+        cancelled,
+    )
+}
+
+/// Project any caller-supplied far-field evaluator with the default bounded
+/// angular refinement used by [`directivity_sh_table`].
 ///
 /// This is the representation-neutral radiation seam: boundary-integral,
 /// Rayleigh-integral, analytic, and future fast-multipole producers can all
 /// publish the same checked [`DirectivityTable`] without pretending to be one
-/// another. The evaluator must return one finite complex amplitude for every
-/// requested unit direction, using the convention `p -> F(dir) exp(i k r)/r`.
+/// another. The evaluator may be called repeatedly and must return one finite
+/// complex amplitude per requested unit direction, using the convention
+/// `p -> F(dir) exp(i k r)/r`.
 ///
 /// # Errors
-/// [`HelmholtzError::BadParameter`] if `k` is not finite and positive, the
-/// degree exceeds [`MAX_SH_DEGREE`], or the evaluator returns the wrong number
-/// of samples or a non-finite amplitude. Evaluator refusals propagate.
+/// As for [`directivity_sh_table_from_evaluator_with_options`].
 pub fn directivity_sh_table_from_evaluator(
     k: f64,
     l_max: usize,
-    evaluator: impl FnOnce(&[[f64; 3]]) -> Result<Vec<C64>, HelmholtzError>,
+    evaluator: impl FnMut(&[[f64; 3]]) -> Result<Vec<C64>, HelmholtzError>,
+) -> Result<DirectivityTable, HelmholtzError> {
+    directivity_sh_table_from_evaluator_with_options(
+        k,
+        l_max,
+        DirectivityProjectionOptions::default(),
+        evaluator,
+        || false,
+    )
+}
+
+/// Resolve source angular variation independently of the retained SH degree.
+/// Gauss–Legendre latitude and uniform longitude rules grow by roughly 3/2,
+/// with staggered longitudes. Both coefficients and full angular power must
+/// agree on two successive refinements (at least three grids). Merely sampling
+/// the degree-`l_max` interpolation grid cannot measure omitted harmonics.
+///
+/// Complex amplitudes are normalized before reductions, so power diagnostics
+/// are invariant to representable source scaling even when squared amplitudes
+/// overflow or underflow. Longitude Fourier sums precede Legendre projection:
+/// O(directions * l_max + latitudes * l_max^2) accumulation instead of
+/// O(directions * l_max^2). No dense SH design matrix is stored.
+///
+/// Cancellation is polled between latitude rows and evaluator batches of at
+/// most 256 directions. An opaque evaluator must bound its own work; it is
+/// not interrupted mid-call. No table is returned on cancellation or an
+/// exhausted budget. Finite quadrature agreement cannot certify an arbitrary
+/// unresolved or adversarial integrand; no rigorous continuum bound is claimed.
+///
+/// Basis and quadrature identities: NIST DLMF §§14.30.1, 14.30.8 and 3.5(v),
+/// <https://dlmf.nist.gov/14.30> and <https://dlmf.nist.gov/3.5>.
+///
+/// # Errors
+/// [`HelmholtzError::BadParameter`] for invalid parameters, malformed samples
+/// or unrepresentable coefficients; [`HelmholtzError::DirectivityNotConverged`]
+/// when the complete angular refinement cannot fit the direction budget;
+/// [`HelmholtzError::Cancelled`] at a cancellation boundary. Evaluator refusals
+/// and fallible allocation refusals propagate unchanged.
+pub fn directivity_sh_table_from_evaluator_with_options(
+    k: f64,
+    l_max: usize,
+    options: DirectivityProjectionOptions,
+    mut evaluator: impl FnMut(&[[f64; 3]]) -> Result<Vec<C64>, HelmholtzError>,
+    cancelled: impl Fn() -> bool,
 ) -> Result<DirectivityTable, HelmholtzError> {
     if !(k.is_finite() && k > 0.0) {
         return Err(HelmholtzError::BadParameter {
@@ -2030,67 +2143,265 @@ pub fn directivity_sh_table_from_evaluator(
             what: "spherical-harmonic degree exceeds MAX_SH_DEGREE",
         });
     }
-    let n_theta = l_max + 1;
-    let n_phi = 2 * l_max + 1;
-    let (nodes, weights) = gauss_legendre(n_theta);
-    let mut dirs = Vec::with_capacity(n_theta * n_phi);
-    for &x in &nodes {
-        let s = (1.0 - x * x).max(0.0).sqrt();
-        for p in 0..n_phi {
-            let phi = 2.0 * core::f64::consts::PI * p as f64 / n_phi as f64;
-            dirs.push([s * det::cos(phi), s * det::sin(phi), x]);
-        }
-    }
-    let f = evaluator(&dirs)?;
-    if f.len() != dirs.len()
-        || f.iter()
-            .any(|sample| !sample.re.is_finite() || !sample.im.is_finite())
+    if options.maximum_directions == 0
+        || options.maximum_directions > MAX_SH_QUADRATURE_DIRECTIONS
+        || !options.relative_tolerance.is_finite()
+        || options.relative_tolerance <= 0.0
+        || options.relative_tolerance > 1e-3
     {
         return Err(HelmholtzError::BadParameter {
-            what: "far-field evaluator returned malformed directivity samples",
+            what: "invalid spherical-harmonic quadrature budget or tolerance",
         });
     }
-    let w_phi = 2.0 * core::f64::consts::PI / n_phi as f64;
-    let mut coefficients = vec![C64::ZERO; (l_max + 1) * (l_max + 1)];
-    let mut quadrature_power = 0.0f64;
+    let mut n_theta = (l_max + 1).max(8);
+    let mut evaluated_directions = 0;
+    let mut previous: Option<ShProjection> = None;
+    let mut changes = None;
+    let mut settled = 0;
+    let mut stagger = false;
+    loop {
+        sh_check_cancel(&cancelled)?;
+        let count = n_theta * (2 * n_theta + 1);
+        if count > options.maximum_directions - evaluated_directions {
+            return Err(HelmholtzError::DirectivityNotConverged {
+                evaluated_directions,
+                maximum_directions: options.maximum_directions,
+                coefficient_change: changes.map(|c: (f64, f64)| c.0),
+                power_change: changes.map(|c| c.1),
+            });
+        }
+        let current = sh_project_grid(l_max, n_theta, stagger, &mut evaluator, &cancelled)?;
+        evaluated_directions += count;
+        if let Some(old) = previous.as_ref() {
+            let (coefficient_change, power_change) = current.changes(old);
+            changes = Some((coefficient_change, power_change));
+            let table_power = sh_power(current.coefficients.iter().map(|c| c.norm_sq()));
+            if coefficient_change <= options.relative_tolerance
+                && power_change <= options.relative_tolerance
+                && table_power <= current.power * (1.0 + 64.0 * f64::EPSILON)
+            {
+                settled += 1;
+            } else {
+                settled = 0;
+            }
+            if settled >= 2 {
+                sh_check_cancel(&cancelled)?;
+                let captured_fraction = if current.power > 0.0 {
+                    // The preceding check permits only a roundoff-sized excess.
+                    (table_power / current.power).min(1.0)
+                } else {
+                    0.0
+                };
+                let mut coefficients = current.coefficients;
+                for coefficient in &mut coefficients {
+                    *coefficient = coefficient.scale(current.scale);
+                }
+                if coefficients
+                    .iter()
+                    .any(|c| !c.re.is_finite() || !c.im.is_finite())
+                {
+                    return Err(HelmholtzError::BadParameter {
+                        what: "spherical-harmonic coefficients exceed finite numerical range",
+                    });
+                }
+                return Ok(DirectivityTable {
+                    k,
+                    l_max,
+                    coefficients,
+                    captured_fraction,
+                });
+            }
+        }
+        previous = Some(current);
+        n_theta += n_theta / 2 + 1;
+        stagger = !stagger;
+    }
+}
+
+struct ShProjection {
+    coefficients: Vec<C64>,
+    power: f64,
+    scale: f64,
+}
+
+impl ShProjection {
+    fn changes(&self, previous: &Self) -> (f64, f64) {
+        let scale = self.scale.max(previous.scale);
+        if scale == 0.0 {
+            return (0.0, 0.0);
+        }
+        let a = self.scale / scale;
+        let b = previous.scale / scale;
+        let power = self.power * a * a;
+        let old_power = previous.power * b * b;
+        let norm = power.max(old_power);
+        let difference = sh_power(
+            self.coefficients
+                .iter()
+                .zip(&previous.coefficients)
+                .map(|(x, y)| (x.scale(a) - y.scale(b)).norm_sq()),
+        );
+        (
+            det::sqrt(difference / norm),
+            (power - old_power).abs() / norm,
+        )
+    }
+}
+
+fn sh_check_cancel(cancelled: &impl Fn() -> bool) -> Result<(), HelmholtzError> {
+    if cancelled() {
+        Err(HelmholtzError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn sh_reserve<T>(count: usize) -> Result<Vec<T>, HelmholtzError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| HelmholtzError::AllocationFailed {
+            what: "spherical-harmonic quadrature",
+        })?;
+    Ok(values)
+}
+
+fn sh_accumulate(sum: &mut C64, correction: &mut C64, value: C64) {
+    let adjusted = value - *correction;
+    let next = *sum + adjusted;
+    *correction = (next - *sum) - adjusted;
+    *sum = next;
+}
+
+fn sh_power(values: impl Iterator<Item = f64>) -> f64 {
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for value in values {
+        let adjusted = value - correction;
+        let next = sum + adjusted;
+        correction = (next - sum) - adjusted;
+        sum = next;
+    }
+    sum
+}
+
+fn sh_project_grid(
+    l_max: usize,
+    n_theta: usize,
+    stagger: bool,
+    evaluator: &mut impl FnMut(&[[f64; 3]]) -> Result<Vec<C64>, HelmholtzError>,
+    cancelled: &impl Fn() -> bool,
+) -> Result<ShProjection, HelmholtzError> {
+    let n_phi = 2 * n_theta + 1;
+    let (nodes, weights) = gauss_legendre(n_theta);
+    let mut phases = sh_reserve(n_phi)?;
+    for p in 0..n_phi {
+        let offset = if stagger { 0.5 } else { 0.0 };
+        phases.push(expik(
+            core::f64::consts::TAU * (p as f64 + offset) / n_phi as f64,
+        ));
+    }
+    let mut dirs = sh_reserve(n_theta * n_phi)?;
+    for &x in &nodes {
+        sh_check_cancel(cancelled)?;
+        let s = det::sqrt((1.0 - x * x).max(0.0));
+        for phase in &phases {
+            dirs.push([s * phase.re, s * phase.im, x]);
+        }
+    }
+    let mut f = sh_reserve(dirs.len())?;
+    let mut scale = 0.0_f64;
+    for batch in dirs.chunks(256) {
+        sh_check_cancel(cancelled)?;
+        let values = evaluator(batch)?;
+        if values.len() != batch.len()
+            || values
+                .iter()
+                .any(|sample| !sample.re.is_finite() || !sample.im.is_finite())
+        {
+            return Err(HelmholtzError::BadParameter {
+                what: "far-field evaluator returned malformed directivity samples",
+            });
+        }
+        for value in values {
+            scale = scale.max(value.re.abs()).max(value.im.abs());
+            f.push(value);
+        }
+    }
+    let coefficient_count = (l_max + 1) * (l_max + 1);
+    let mut coefficients = sh_reserve(coefficient_count)?;
+    coefficients.resize(coefficient_count, C64::ZERO);
+    let mut corrections = sh_reserve(coefficient_count)?;
+    corrections.resize(coefficient_count, C64::ZERO);
+    let mut fourier = sh_reserve(2 * l_max + 1)?;
+    fourier.resize(2 * l_max + 1, C64::ZERO);
+    let mut fourier_corrections = sh_reserve(fourier.len())?;
+    fourier_corrections.resize(fourier.len(), C64::ZERO);
+    let w_phi = core::f64::consts::TAU / n_phi as f64;
+    let mut power = 0.0;
+    let mut power_correction = 0.0;
     let idx = |l: usize, m: usize| l * (l + 1) / 2 + m;
     for (ti, &x) in nodes.iter().enumerate() {
+        sh_check_cancel(cancelled)?;
+        fourier.fill(C64::ZERO);
+        fourier_corrections.fill(C64::ZERO);
         let pbar = norm_assoc_legendre(l_max, x);
         for p in 0..n_phi {
-            let w = weights[ti] * w_phi;
-            let fval = f[ti * n_phi + p];
-            quadrature_power += fval.norm_sq() * w;
-            let phi = 2.0 * core::f64::consts::PI * p as f64 / n_phi as f64;
-            for l in 0..=l_max {
-                let base = l * (l + 1);
-                coefficients[base] = coefficients[base] + fval.scale(pbar[idx(l, 0)] * w);
-            }
+            let sample = f[ti * n_phi + p];
+            let value = if scale > 0.0 {
+                // Divide components: 1/scale itself can overflow for tiny sources.
+                C64::new(sample.re / scale, sample.im / scale)
+            } else {
+                C64::ZERO
+            };
+            let adjusted = value.norm_sq() * weights[ti] * w_phi - power_correction;
+            let next = power + adjusted;
+            power_correction = (next - power) - adjusted;
+            power = next;
+            let value = value.scale(w_phi);
+            sh_accumulate(&mut fourier[l_max], &mut fourier_corrections[l_max], value);
+            let mut phase = C64::ONE;
             for m in 1..=l_max {
-                let e = expik(m as f64 * phi);
+                phase = phase * phases[p];
+                sh_accumulate(
+                    &mut fourier[l_max + m],
+                    &mut fourier_corrections[l_max + m],
+                    value * phase.conj(),
+                );
+                sh_accumulate(
+                    &mut fourier[l_max - m],
+                    &mut fourier_corrections[l_max - m],
+                    value * phase,
+                );
+            }
+        }
+        for l in 0..=l_max {
+            let base = l * (l + 1);
+            sh_accumulate(
+                &mut coefficients[base],
+                &mut corrections[base],
+                fourier[l_max].scale(pbar[idx(l, 0)] * weights[ti]),
+            );
+            for m in 1..=l {
+                let weight = pbar[idx(l, m)] * weights[ti];
                 let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
-                for l in m..=l_max {
-                    let y_pos = e.scale(pbar[idx(l, m)]);
-                    let y_neg = y_pos.conj().scale(sign);
-                    let base = l * (l + 1);
-                    coefficients[base + m] =
-                        coefficients[base + m] + (fval * y_pos.conj()).scale(w);
-                    coefficients[base - m] =
-                        coefficients[base - m] + (fval * y_neg.conj()).scale(w);
-                }
+                sh_accumulate(
+                    &mut coefficients[base + m],
+                    &mut corrections[base + m],
+                    fourier[l_max + m].scale(weight),
+                );
+                sh_accumulate(
+                    &mut coefficients[base - m],
+                    &mut corrections[base - m],
+                    fourier[l_max - m].scale(sign * weight),
+                );
             }
         }
     }
-    let table_power: f64 = coefficients.iter().map(|c| c.norm_sq()).sum();
-    let captured_fraction = if quadrature_power > 0.0 {
-        table_power / quadrature_power
-    } else {
-        0.0
-    };
-    Ok(DirectivityTable {
-        k,
-        l_max,
+    Ok(ShProjection {
         coefficients,
-        captured_fraction,
+        power,
+        scale,
     })
 }
 
@@ -3600,6 +3911,197 @@ mod tests {
             directivity_sh_table_from_evaluator(3.0, 2, |_| Ok(Vec::new())),
             Err(HelmholtzError::BadParameter { .. })
         ));
+    }
+
+    #[test]
+    fn sh_projection_resolves_power_outside_the_retained_basis() {
+        // G1: a pure x-dipole has no monopole. The former one-direction
+        // degree-zero rule sampled F=1 and published a false monopole at 100%.
+        let dipole = directivity_sh_table_from_evaluator(1.0, 0, |dirs| {
+            Ok(dirs.iter().map(|d| C64::from_re(d[0])).collect())
+        })
+        .unwrap();
+        assert!(dipole.coefficient(0, 0).abs() < 1e-13);
+        assert!(dipole.captured_fraction < 1e-25);
+
+        // INT P2=0 and INT P2^2=4pi/5: F=1+2P2 contains 5/9 monopole
+        // power. At the original equatorial node F=0, losing even that term.
+        let mixed = directivity_sh_table_from_evaluator(1.0, 0, |dirs| {
+            Ok(dirs
+                .iter()
+                .map(|d| C64::from_re(3.0 * d[2] * d[2]))
+                .collect())
+        })
+        .unwrap();
+        assert!((mixed.captured_fraction - 5.0 / 9.0).abs() < 1e-13);
+        assert!((mixed.evaluate([1.0, 0.0, 0.0]) - C64::ONE).abs() < 1e-13);
+
+        // (x+i y)^7 is a degree-7, m=7 harmonic. On the former degree-3
+        // seven-longitude grid it aliases to m=0. Its true low-degree power
+        // is zero, including when the azimuth is rotated.
+        for angle in [0.0, 0.37] {
+            let phase = expik(angle);
+            let omitted = directivity_sh_table_from_evaluator(1.0, 3, |dirs| {
+                Ok(dirs
+                    .iter()
+                    .map(|d| {
+                        let z = C64::new(d[0], d[1]) * phase;
+                        (0..7).fold(C64::ONE, |value, _| value * z)
+                    })
+                    .collect())
+            })
+            .unwrap();
+            assert!(omitted.coefficients.iter().all(|c| c.abs() < 1e-13));
+            assert!(omitted.captured_fraction < 1e-25);
+        }
+    }
+
+    #[test]
+    fn sh_projection_retains_complex_multipole_phase_and_normalization() {
+        // G1/G3: independent Cartesian forms, including a complex travelling
+        // m=3 harmonic, pin both signs and complex phase. Y33=-sqrt(35/64pi)
+        // (x+i y)^3; Y10=sqrt(3/4pi) z; Y00=1/sqrt(4pi).
+        let a = C64::new(0.75, -0.5);
+        let b = C64::new(-0.3, 0.7);
+        let c = C64::new(1.5, 0.25);
+        let field = |d: [f64; 3]| {
+            let z = C64::new(d[0], d[1]);
+            a + b.scale(d[2]) + c * z * z * z
+        };
+        let table = directivity_sh_table_from_evaluator(2.0, 3, |dirs| {
+            Ok(dirs.iter().map(|d| field(*d)).collect())
+        })
+        .unwrap();
+        let pi = core::f64::consts::PI;
+        assert!((table.coefficient(0, 0) - a.scale((4.0 * pi).sqrt())).abs() < 1e-12);
+        assert!((table.coefficient(1, 0) - b.scale((4.0 * pi / 3.0).sqrt())).abs() < 1e-12);
+        assert!((table.coefficient(3, 3) + c.scale((64.0 * pi / 35.0).sqrt())).abs() < 1e-12);
+        assert!(table.coefficient(3, -3).abs() < 1e-12);
+        assert!((table.captured_fraction - 1.0).abs() < 1e-13);
+        for direction in [[0.2, -0.4, 0.9], [-1.0, 0.3, -0.2], [0.0, 0.0, 1.0]] {
+            let r = norm(direction);
+            let unit = direction.map(|v| v / r);
+            assert!((table.evaluate(direction) - field(unit)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn sh_projection_capture_is_rotation_and_source_scale_invariant() {
+        // G3: F=1+2i(n.d) has monopole power 3/7 for every unit n.
+        // The source-scale cases make naive |F|^2 overflow or underflow.
+        for axis in [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.6, 0.0, 0.8]] {
+            for scale in [1e-200, 1.0, 1e200] {
+                let table = directivity_sh_table_from_evaluator(1.0, 0, |dirs| {
+                    Ok(dirs
+                        .iter()
+                        .map(|d| C64::new(scale, 2.0 * scale * dot(axis, *d)))
+                        .collect())
+                })
+                .unwrap();
+                assert!((table.captured_fraction - 3.0 / 7.0).abs() < 1e-13);
+                let value = table.evaluate([1.0, 0.0, 0.0]);
+                assert!((value.re / scale - 1.0).abs() < 1e-13);
+                assert!((value.im / scale).abs() < 1e-13);
+            }
+        }
+        let zero =
+            directivity_sh_table_from_evaluator(1.0, 0, |dirs| Ok(vec![C64::ZERO; dirs.len()]))
+                .unwrap();
+        assert_eq!(zero.captured_fraction, 0.0);
+        assert_eq!(zero.coefficient(0, 0), C64::ZERO);
+    }
+
+    #[test]
+    fn sh_projection_resolves_coherent_displaced_sources() {
+        // G1: two equal monopoles separated along z have F=1+exp(i*k*d*z).
+        // Their interference integrates to 4pi*(2+2*sinc(k*d)); the degree-0
+        // coefficient is sqrt(4pi)*(1+sinc(k*d)). Low SH degree is no licence
+        // to undersample their rapidly varying physical angular field.
+        let kd = 30.0;
+        let mut directions_evaluated = 0;
+        let table = directivity_sh_table_from_evaluator(1.0, 0, |dirs| {
+            assert!(dirs.len() <= 256);
+            directions_evaluated += dirs.len();
+            Ok(dirs.iter().map(|d| C64::ONE + expik(kd * d[2])).collect())
+        })
+        .unwrap();
+        let sinc = det::sin(kd) / kd;
+        assert!((table.captured_fraction - (1.0 + sinc) / 2.0).abs() < 1e-12);
+        assert!((table.evaluate([0.0, 1.0, 0.0]) - C64::from_re(1.0 + sinc)).abs() < 1e-12);
+        assert!(directions_evaluated > 8 * 17 + 13 * 27 + 20 * 41);
+        assert!(directions_evaluated <= MAX_SH_QUADRATURE_DIRECTIONS);
+    }
+
+    #[test]
+    fn sh_projection_refuses_unresolved_work_and_cancellation() {
+        // G4: two agreeing grids cannot silently substitute for the declared
+        // three-grid minimum; the next complete grid is admitted before work.
+        let mut evaluated = 0;
+        let budget = 8 * 17 + 13 * 27;
+        let result = directivity_sh_table_from_evaluator_with_options(
+            1.0,
+            0,
+            DirectivityProjectionOptions {
+                maximum_directions: budget,
+                relative_tolerance: 1e-10,
+            },
+            |dirs| {
+                evaluated += dirs.len();
+                Ok(vec![C64::ONE; dirs.len()])
+            },
+            || false,
+        );
+        assert_eq!(evaluated, budget);
+        assert!(
+            matches!(result, Err(HelmholtzError::DirectivityNotConverged {
+            evaluated_directions, maximum_directions, coefficient_change: Some(_), power_change: Some(_),
+        }) if evaluated_directions == budget && maximum_directions == budget)
+        );
+
+        let unresolved = directivity_sh_table_from_evaluator_with_options(
+            1.0,
+            0,
+            DirectivityProjectionOptions {
+                maximum_directions: 5000,
+                relative_tolerance: 1e-10,
+            },
+            |dirs| {
+                Ok(dirs
+                    .iter()
+                    .map(|d| C64::ONE + expik(1000.0 * d[2]))
+                    .collect())
+            },
+            || false,
+        );
+        assert!(matches!(
+            unresolved,
+            Err(HelmholtzError::DirectivityNotConverged { .. })
+        ));
+
+        let cancelled = directivity_sh_table_from_evaluator_with_options(
+            1.0,
+            0,
+            DirectivityProjectionOptions::default(),
+            |_| panic!("cancelled projection must not evaluate a source"),
+            || true,
+        );
+        assert!(matches!(cancelled, Err(HelmholtzError::Cancelled)));
+        let evaluated = core::cell::Cell::new(0);
+        let cancelled_after_source = directivity_sh_table_from_evaluator_with_options(
+            1.0,
+            0,
+            DirectivityProjectionOptions::default(),
+            |dirs| {
+                evaluated.set(evaluated.get() + dirs.len());
+                Ok(vec![C64::ONE; dirs.len()])
+            },
+            || evaluated.get() > 0,
+        );
+        assert!(matches!(
+            cancelled_after_source,
+            Err(HelmholtzError::Cancelled)
+        ));
+        assert_eq!(evaluated.get(), 8 * 17);
     }
 
     #[test]

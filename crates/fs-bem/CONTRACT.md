@@ -192,13 +192,32 @@ everywhere: this is screening, not a viscous truth source.
 - `directivity_sh_table` / `DirectivityTable` — far field projected
   onto orthonormal complex spherical harmonics (Condon–Shortley,
   `Y_{l,-m} = (-1)^m conj(Y_lm)`) up to `l_max <= MAX_SH_DEGREE = 64`
-  by exact band-limited quadrature (Gauss–Legendre x uniform phi);
-  truncation honesty is the reported `captured_fraction`, and
+  by independently refined Gauss–Legendre x uniform-phi quadrature.
+  Retained SH degree does not select a source bandlimit: the former minimum
+  grid aliased an omitted x-dipole into a 100%-captured monopole at degree zero.
+  `DirectivityProjectionOptions` declares total direction work and relative
+  tolerance; two successive refinements must agree in both retained
+  coefficients and full angular power before any table is published.
+  Default tolerance is 1e-10, with at most 262144 source directions over the
+  entire refinement. `DirectivityNotConverged` retains the spent budget and
+  last changes when another complete grid cannot fit. Explicit-option entry
+  points poll cancellation between latitude rows and source batches of at most
+  256 directions; an opaque evaluator owns its in-call latency.
+  Scale-normalized compensated power and coefficient sums preserve diagnostic
+  ratios for tiny/large finite sources. Separable longitude Fourier sums and
+  latitude projection avoid a dense SH design matrix and reduce accumulation
+  from O(directions * degree^2) to O(directions * degree + latitudes * degree^2).
+  Truncation is the reported `captured_fraction`, and
   `evaluate`/`power_by_degree`/`coefficient` serve the rendering and
   diagnostics consumers. Measured at ka = 1 on 320 panels: monopole
   l = 0 fraction and captured fraction > 0.999, dipole (l=1, m=0)
   fraction > 0.99, reconstruction vs directly sampled far field
   < 1e-3 relative L2 at held-out directions.
+  The focused `sh_projection_*` tests additionally pin omitted polar and
+  azimuthal multipoles, complex phase/normalization, source scaling and
+  rotations, coherent displaced-source interference, and work/cancellation
+  refusals. These are G1/G3 numerical identities and G4 bounded-work checks,
+  not real-instrument qualification or a continuum error certificate.
 - `radiation_efficiency` — `sigma = W / (1/2 rho c INT |v_n|^2 dS)`
   per solved velocity pattern (the per-mode radiated-power ratio).
   Oracles: monopole `(ka)^2/(1+(ka)^2)` within 5% at ka in
@@ -864,8 +883,10 @@ NASA marks it as U.S. Government work with public use permitted.
   is a LOWER bound from six deterministic probe solves: a large value
   is a reliable warning, but a small value certifies nothing (a rigorous
   Hager/Higham estimator needs adjoint solves and is the recorded
-  follow-up). `DirectivityTable` truncation error is reported via
-  `captured_fraction`, never bounded a priori; the table inherits every
+  follow-up). `DirectivityTable` truncation is estimated via
+  `captured_fraction` only after independent angular quadrature refinement.
+  Finite grid agreement is not a rigorous bound for an arbitrary evaluator
+  and cannot exclude adversarial unresolved angular structure. The table inherits every
   accuracy boundary of the underlying solve arm. No FMM acceleration
   (dense cap 8192 panels), no scattering/incident-field path,
   no half-space or impedance boundary conditions, no Bessel-backed
