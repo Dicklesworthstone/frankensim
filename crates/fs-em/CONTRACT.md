@@ -1,5 +1,34 @@
 # fs-em contract
 
+## Ionized-gas current and Joule heating
+
+`PlanarConduction` accepts the sealed `PlanarOhmicResponse` material response,
+including `fs-material::ionized_gas::IonizedGasConductivity`. The same weighted
+FEEC assembly, boundary current solve, source-work audit, cell current and
+`E.J` heat integration are used for source-property conductors and equilibrium
+ionized gas. Gas populations and collisional rates remain in the original
+material snapshot. Contact construction and material refresh keep their
+stronger source-material requirements; no gas/solid contact law is inferred.
+
+Field recovery checks the material's admission against the actual electric
+field before publishing current or heat, including circuit voltage recovery.
+This prevents a weak-drift gas law from silently extending into breakdown.
+Resistance and total-current preparation accept an explicit positive reference
+voltage, so a valid small physical drive need not admit a one-volt computational
+basis. The retained reference field is admitted at its actual voltage;
+`G=P/Vref²=I/Vref` supplies resistance, and circuit recovery scales once by
+`V/Vref` before independently checking the actual field, current and power.
+The gas response is static, unmagnetized and local, with a prescribed massive
+neutral collision background. It does not add a discharge, Hall, radiation,
+space-charge or magnetohydrodynamic solver. Thermal or flow feedback must
+re-equilibrate and resolve collision rates to construct a new accepted snapshot.
+
+G1/G3 tests in `tests/ionized_gas.rs` use analytic H/H+/electron thermodynamics
+and explicit synthetic collision sources, then solve the actual native mesh.
+Affine voltage, current density, Joule power, native circuit resistance and
+voltage reversal agree with independent slab formulas at two temperatures.
+G0 tests refuse actual PDE and circuit fields above the carrier drift domain.
+
 ## Prescribed Eulerian moving-conductor induction
 
 `PlanarEddy::step_with_eulerian_velocity_candidate` continues the original

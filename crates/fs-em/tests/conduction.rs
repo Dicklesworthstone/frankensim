@@ -336,7 +336,7 @@ fn series_material_swap_redistributes_electric_field_and_physical_heat() {
     let resistance = (0.5 / 4.0 + 0.5 / 2.0) / 0.2;
     near(reduced.resistance_ohm(), resistance);
     assert!(reduced.resistance_ohm() < baseline.resistance_ohm());
-    let field = reduced.unit_voltage_field();
+    let field = reduced.reference_field();
     let current = resistance.recip();
     for cell in 0..4 {
         let expected_e = if cell < 2 { -2.0 / 3.0 } else { -4.0 / 3.0 };

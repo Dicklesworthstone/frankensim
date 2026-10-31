@@ -28,7 +28,9 @@ use fs_feec::{
     weighted::{WeightedAssemblyLimits, WeightedError},
     weighted2::{CellWeight2, weighted_mass_matrix_2d},
 };
-use fs_material::conductor::planar::{PlanarConductivity, PlanarConductorMaterial};
+use fs_material::conductor::planar::{
+    PlanarConductivity, PlanarConductorMaterial, PlanarOhmicResponse,
+};
 use fs_material::conductor::{ELECTRICAL_CONDUCTIVITY_DIMS, ResolvedConductorState};
 use fs_phs::circuit::Branch;
 use fs_rep_mesh::{Metric2, TriComplex2};
@@ -141,7 +143,7 @@ struct ConductionBoundaryResponse {
     terminal_power_w: f64,
     power_balance_residual_w: f64,
 }
-impl<C: PlanarConductorMaterial> PlanarConduction<C> {
+impl<C: PlanarOhmicResponse> PlanarConduction<C> {
     /// Assemble the same native weighted FEEC operator used by other scalar
     /// fields, with the conductivity's actual SI dimensions. The canonical
     /// conductor owner selects resistivity or conductivity explicitly; material
@@ -153,7 +155,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
         Self::assemble(mesh, conductors, limits, cancelled, |source| {
-            source.has_admitted_static_sources()
+            source.has_admitted_ohmic_state()
         })
     }
 
@@ -197,7 +199,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                     "spatial DC conduction requires static Ohmic coefficients at fixed external or explicitly owned phase conditions",
                 ));
             }
-            if let Some(frame) = conductor.frame() {
+            if let Some(frame) = conductor.ohmic_frame() {
                 if geometry_frame.is_some_and(|id| id != frame.geometry_frame()) {
                     return Err(ConductionError::Invalid(
                         "all oriented conductors must use one mesh-coordinate frame",
@@ -205,7 +207,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 }
                 geometry_frame = Some(frame.geometry_frame());
             }
-            let sigma = conductor.conductivity();
+            let sigma = conductor.ohmic_conductivity();
             let weight = match sigma {
                 PlanarConductivity::Scalar(value) => {
                     if !positive(value) {
@@ -347,30 +349,58 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         controls: ConductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConductionField<'_, C>, ConductionError> {
+        self.solve_current_with_reference_voltage(
+            positive_terminal,
+            negative_terminal,
+            current_a,
+            1.0,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// The same total-current solve with an explicit positive, physically
+    /// admitted reference voltage for the linear basis solve. This permits
+    /// weak-field transport whose domain does not include a one-volt drive.
+    /// Both reference and actual fields must satisfy the material domain.
+    pub fn solve_current_with_reference_voltage(
+        &self,
+        positive_terminal: &[usize],
+        negative_terminal: &[usize],
+        current_a: f64,
+        reference_voltage_v: f64,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionField<'_, C>, ConductionError> {
         poll(cancelled)?;
         if !current_a.is_finite() {
             return Err(ConductionError::Invalid("finite total current required"));
         }
         // Zero current still requires a defined conducting terminal pair. A
         // zero-voltage solve alone would accept disconnected, floating pieces.
-        let resistance =
-            self.resistance(positive_terminal, negative_terminal, controls, cancelled)?;
-        let mut unit_current_a = 0.0;
+        let resistance = self.resistance_at_reference_voltage(
+            positive_terminal,
+            negative_terminal,
+            reference_voltage_v,
+            controls,
+            cancelled,
+        )?;
+        let mut reference_current_a = 0.0;
         for &vertex in positive_terminal {
             poll(cancelled)?;
-            unit_current_a = finite(
-                unit_current_a
+            reference_current_a = finite(
+                reference_current_a
                     + resistance.field.nodal_boundary_current_a[vertex].ok_or(
                         ConductionError::Invalid("lost original current-controlled electrode"),
                     )?,
             )?;
         }
-        if !positive(unit_current_a) {
+        if !positive(reference_current_a) {
             return Err(ConductionError::Invalid(
                 "positive terminal conductance required",
             ));
         }
-        let voltage_v = finite(current_a / unit_current_a)?;
+        let voltage_v = finite(current_a * (reference_voltage_v / reference_current_a))?;
         let source_power_w = finite(current_a * voltage_v)?;
         if current_a != 0.0 && (voltage_v == 0.0 || !positive(source_power_w)) {
             return Err(ConductionError::Invalid(
@@ -550,6 +580,11 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             } else {
                 e
             };
+            if !self.conductors[cell].admits_ohmic_field(conductor_e) {
+                return Err(ConductionError::Invalid(
+                    "actual electric field exceeds the retained material response domain",
+                ));
+            }
             let current = self.conductivity[cell].current_density_a_m2(conductor_e);
             let j = [finite(current[0])?, finite(current[1])?];
             let volume = self
@@ -708,7 +743,35 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         controls: ConductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarResistance<'_, C>, ConductionError> {
-        let excitation_v = 1.0;
+        self.resistance_at_reference_voltage(
+            positive_terminal,
+            negative_terminal,
+            1.0,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Extract the same resistance using a caller-selected positive reference
+    /// voltage inside the material's field domain. The accepted reference
+    /// field is retained at that actual amplitude; it is never relabeled as a
+    /// physical unit-voltage field. Later circuit recovery scales by V/Vref and
+    /// independently checks the actual material domain, current and power.
+    pub fn resistance_at_reference_voltage(
+        &self,
+        positive_terminal: &[usize],
+        negative_terminal: &[usize],
+        reference_voltage_v: f64,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarResistance<'_, C>, ConductionError> {
+        poll(cancelled)?;
+        if !positive(reference_voltage_v) {
+            return Err(ConductionError::Invalid(
+                "positive finite reference voltage required",
+            ));
+        }
+        let excitation_v = reference_voltage_v;
         let boundary = scalar_potential::terminal_boundary(
             &self.mesh,
             &[positive_terminal, negative_terminal],
@@ -726,12 +789,12 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                     ))?,
             )?;
         }
-        // G=P/V^2=I/V, with V=1 V. Both derive from the spatial field, not a
-        // fitted bulk length/area approximation or a named material preset.
-        let conductance_s = finite(field.power_w / (excitation_v * excitation_v))?;
+        // G=P/V^2=I/V at the admitted reference amplitude. Both derive from the
+        // spatial field, not a fitted bulk length/area or a material preset.
+        let conductance_s = finite((field.power_w / excitation_v) / excitation_v)?;
         let current_conductance_s = finite(terminal_current_a / excitation_v)?;
         let allowance_s = controls.current_tolerance_a / excitation_v
-            + controls.power_tolerance_w / (excitation_v * excitation_v);
+            + (controls.power_tolerance_w / excitation_v) / excitation_v;
         let resistance_ohm = conductance_s.recip();
         if !positive(conductance_s)
             || !positive(resistance_ohm)
@@ -746,6 +809,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         Ok(PlanarResistance {
             field,
             resistance_ohm,
+            reference_voltage_v,
         })
     }
 }
@@ -774,7 +838,7 @@ pub struct ConductionField<'a, C = ResolvedConductorState> {
     power_balance_residual_w: f64,
     report: Option<SolveReport>,
 }
-impl<C: PlanarConductorMaterial> ConductionField<'_, C> {
+impl<C: PlanarOhmicResponse> ConductionField<'_, C> {
     pub fn problem(&self) -> &PlanarConduction<C> {
         self.problem
     }
@@ -830,21 +894,31 @@ impl<C: PlanarConductorMaterial> ConductionField<'_, C> {
     }
 }
 
-/// Retained unit-voltage solution and its independently power/current-checked
+/// Retained admitted reference solution and its independently power/current-checked
 /// resistance for the existing Kirchhoff/pHS circuit owner.
 pub struct PlanarResistance<'a, C = ResolvedConductorState> {
     field: ConductionField<'a, C>,
     resistance_ohm: f64,
+    reference_voltage_v: f64,
 }
-impl<'a, C: PlanarConductorMaterial> PlanarResistance<'a, C> {
-    pub fn unit_voltage_field(&self) -> &ConductionField<'a, C> {
+impl<'a, C: PlanarOhmicResponse> PlanarResistance<'a, C> {
+    /// Physically admitted field at [`Self::reference_voltage_v`].
+    pub fn reference_field(&self) -> &ConductionField<'a, C> {
         &self.field
+    }
+    /// Actual positive voltage used to construct this linear response basis.
+    pub fn reference_voltage_v(&self) -> f64 {
+        self.reference_voltage_v
     }
     pub fn resistance_ohm(&self) -> f64 {
         self.resistance_ohm
     }
     /// This is the conductor's own dissipative branch, not a second parallel
     /// copy. Retain this reduction to reconstruct its spatial heat afterwards.
+    /// `Branch::Resistor` carries no field-domain metadata. For a bounded law,
+    /// a coupled caller must admit every actual branch voltage through
+    /// [`Self::field_at_voltage`] before accepting the corresponding circuit
+    /// step. This extraction alone does not qualify a circuit trajectory.
     pub fn circuit_branch(&self) -> Branch {
         Branch::Resistor {
             ohms: self.resistance_ohm,
@@ -859,7 +933,7 @@ impl<'a, C: PlanarConductorMaterial> PlanarResistance<'a, C> {
     ///
     /// Negative voltages reverse current but preserve nonnegative heating.
     /// Zero represents the negative terminal's reference. Actual-drive current
-    /// and power acceptance are independent of unit-field extraction budgets.
+    /// and power acceptance are independent of reference-field extraction budgets.
     pub fn field_at_voltage(
         &self,
         voltage_v: f64,
@@ -876,14 +950,14 @@ impl<'a, C: PlanarConductorMaterial> PlanarResistance<'a, C> {
         }
         let mut voltage = Vec::with_capacity(self.field.voltage_v.len());
         let mut prescribed = Vec::with_capacity(self.field.voltage_v.len());
-        for (&unit, current) in self
+        for (&reference, current) in self
             .field
             .voltage_v
             .iter()
             .zip(&self.field.nodal_boundary_current_a)
         {
             poll(cancelled)?;
-            let value = finite(unit * voltage_v)?;
+            let value = finite((reference / self.reference_voltage_v) * voltage_v)?;
             voltage.push(value);
             prescribed.push(current.map(|_| value));
         }

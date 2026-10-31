@@ -314,7 +314,9 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         poll(cancelled)?;
         Ok(problem)
     }
+}
 
+impl<C: PlanarOhmicResponse> PlanarConduction<C> {
     /// Original ordered source bindings in canonical first/second edge order.
     pub fn contacts(&self) -> &[ConductionContact] {
         &self.contacts
