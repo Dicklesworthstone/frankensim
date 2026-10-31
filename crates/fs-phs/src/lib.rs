@@ -1466,27 +1466,50 @@ pub fn step_descriptor(
     let direct_rows: Vec<usize> = (0..n).filter(|&row| {
         (0..n_d).all(|col| sys.j[row * n + col] == 0.0 && sys.r[row * n + col] == 0.0)
     }).collect();
-    let continuity = |x: &[f64], dg: &[f64], res: &[f64]| -> Option<(f64, f64)> {
+    let continuity = |x: &[f64], dg: &[f64], res: &[f64], iterations, stagnant_iterations|
+        -> Option<(f64, f64, SolveCertificate)> {
         let mut relative = 0.0_f64;
-        let mut floor = 0.0_f64;
+        let mut worst_score = 0.0_f64;
+        let mut worst_certificate = SolveBudget::default().certificate(
+            NewtonSite::Descriptor, 0.0, 1.0, 0.0, iterations, stagnant_iterations)
+            .with_rounding_allowance();
         for &row in &direct_rows {
             let factor = if row < n_d { dt } else { 1.0 };
             let mut magnitude = factor * gu[row].abs()
                 + if row < n_d { x0[row].abs() + x[row].abs() } else { 0.0 };
+            let mut rounding_magnitude = magnitude;
             for col in n_d..n {
-                magnitude += factor * (sys.j[row * n + col].abs() + sys.r[row * n + col].abs())
-                    * dg[col].abs();
+                let coefficient = factor
+                    * (sys.j[row * n + col].abs() + sys.r[row * n + col].abs());
+                magnitude += coefficient * dg[col].abs();
+                // Opposite multiplier endpoints can have an almost-zero
+                // midpoint. Its attainable resolution still depends on those
+                // SAME coupled endpoints, not on unrelated voltages/currents.
+                rounding_magnitude += coefficient
+                    * (0.5 * x0[col].abs() + 0.5 * x[col].abs());
             }
-            if !magnitude.is_finite() { return None; }
+            if !magnitude.is_finite() || !rounding_magnitude.is_finite() { return None; }
             if magnitude > 0.0 {
                 relative = relative.max(res[row].abs() / magnitude);
-                floor = floor.max(arithmetic_rounding_floor(n.saturating_mul(4).saturating_add(8), magnitude)
-                    / magnitude);
+                let certificate = SolveBudget::default().certificate(
+                    NewtonSite::Descriptor, res[row].abs(), magnitude,
+                    arithmetic_rounding_floor(n.saturating_mul(4).saturating_add(8), rounding_magnitude),
+                    iterations, stagnant_iterations).with_rounding_allowance();
+                let score = if certificate.effective_budget > 0.0 {
+                    certificate.residual / certificate.effective_budget
+                } else if certificate.residual == 0.0 { 0.0 } else { f64::INFINITY };
+                // Keep each residual paired with ITS OWN allowance. A nearly
+                // cancelled voltage row must not excuse a weak-current defect
+                // in a different row with a much smaller arithmetic floor.
+                if score > worst_score {
+                    worst_score = score;
+                    worst_certificate = certificate;
+                }
             } else if res[row] != 0.0 {
                 return None;
             }
         }
-        Some((relative, floor))
+        Some((relative, worst_score, worst_certificate))
     };
     let scale = x0
         .iter()
@@ -1516,10 +1539,11 @@ pub fn step_descriptor(
             what: "current storage, effort, or flow is nonfinite",
         })?;
         let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-        let (coordinate_residual, _) = continuity(&x1, &dg, &res).ok_or(PhsError::DescriptorDomain {
-            what: "direct descriptor row residual scale is nonfinite",
-        })?;
-        let score = (rnorm / scale).max(coordinate_residual);
+        let (coordinate_residual, coordinate_score, _) = continuity(&x1, &dg, &res, iters, stagnant)
+            .ok_or(PhsError::DescriptorDomain {
+                what: "direct descriptor row residual scale is nonfinite",
+            })?;
+        let score = (rnorm / scale / NEWTON_TOL).max(coordinate_score);
         let improved = best.as_ref().is_none_or(|(_, b)| score < *b);
         if improved {
             best = Some((x1.clone(), score));
@@ -1542,13 +1566,13 @@ pub fn step_descriptor(
                 &dg, &sys.j, &sys.r, &gu, dt, n_d, &[]);
             admit_default_newton_iterate(SolveBudget::default().certificate(
                 NewtonSite::Descriptor, brnorm, scale, floor, iters, stagnant).with_rounding_allowance())?;
-            let (relative, floor) = continuity(&bx, &dg, &res).ok_or(PhsError::DescriptorDomain {
-                what: "direct descriptor row residual scale is nonfinite",
-            })?;
-            // This supplementary certificate is explicitly dimensionless:
-            // each original multiplier-driven row uses its own operands.
-            admit_default_newton_iterate(SolveBudget::default().certificate(
-                NewtonSite::Descriptor, relative, 1.0, floor, iters, stagnant).with_rounding_allowance())?;
+            let (_, _, certificate) = continuity(&bx, &dg, &res, iters, stagnant)
+                .ok_or(PhsError::DescriptorDomain {
+                    what: "direct descriptor row residual scale is nonfinite",
+                })?;
+            // The row with the largest residual/allowance ratio controls
+            // admission; its certificate retains that row's physical units.
+            admit_default_newton_iterate(certificate)?;
             x1 = bx;
             break;
         }
@@ -1706,11 +1730,11 @@ pub fn step_descriptor(
             )
             .with_rounding_allowance(),
     )?;
-    let (relative, floor) = continuity(&x1, &dg, &res).ok_or(PhsError::DescriptorDomain {
-        what: "accepted direct descriptor row residual scale is nonfinite",
-    })?;
-    admit_default_newton_iterate(SolveBudget::default().certificate(
-        NewtonSite::Descriptor, relative, 1.0, floor, iters, stagnant).with_rounding_allowance())?;
+    let (_, _, certificate) = continuity(&x1, &dg, &res, iters, stagnant)
+        .ok_or(PhsError::DescriptorDomain {
+            what: "accepted direct descriptor row residual scale is nonfinite",
+        })?;
+    admit_default_newton_iterate(certificate)?;
     Ok(StepRecord {
         x: x1,
         y,
@@ -5330,3 +5354,4 @@ mod quadratic_storage_pattern {
         assert_bitwise(&storage, n, &mut draws, 400);
     }
 }
+

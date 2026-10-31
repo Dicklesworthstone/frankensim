@@ -1162,19 +1162,27 @@ not full native crate or consumer-runtime qualification.
 ## SI-scale charge and current continuity
 
 Descriptor charge/flux continuity and algebraic rows driven solely by multiplier
-efforts or held ports also satisfy a componentwise relative residual criterion
-in their own units. Arithmetic floors use the original row operands; volt-sized
-node potentials cannot admit an unchanged picocoulomb charge or discard a
-femtoampere source in capacitive KCL. This gate applies at convergence,
-stagnation fallback and publication, alongside the original global certificate.
-It changes neither physical coordinates nor the native energy/work equations.
+efforts or held ports also satisfy a componentwise residual criterion in their
+own physical units. The requested relative tolerance uses each row's physical
+storage and flow operands. Its arithmetic floor also retains the original
+coupled multiplier endpoints when forming nearly cancelling midpoint efforts,
+including AC zero crossings. Each row keeps its own physical-units certificate;
+the largest residual/effective-allowance ratio controls admission. A voltage
+row's cancellation allowance therefore cannot mask a separate femtoampere
+current or picocoulomb continuity defect.
+
+Strict ordinary convergence remains unchanged. Stagnation fallback and final
+publication check the row-specific certificates alongside the original global
+certificate. Physical coordinates and native energy/work equations are unchanged.
 
 Optional `Storage::coordinate_scale` supplies only a numerical probe magnitude
 for bounded constitutive coordinates. The default preserves existing probing;
 a supplied scale never extends source support or changes state units/tolerances.
 Original block and differential storage wrappers preserve the declaration.
 `tests/circuit_charge_scale.rs` checks independent midpoint RC updates from 1 F
-through 1 fF, mixed-size branches and weak-source charging at a biased node.
+through 1 fF, mixed-size branches, weak-source charging at a biased node, and
+simultaneous nearly cancelled AC voltage with femtoampere charge continuity.
+The original driven-RLC supply-audit regression retains its assertions.
 
 ## Nonlinear capacitor charge and energy
 

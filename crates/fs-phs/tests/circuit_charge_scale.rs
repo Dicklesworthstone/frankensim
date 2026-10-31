@@ -102,3 +102,33 @@ fn a_femtoampere_source_is_not_discarded_at_a_volt_biased_capacitor_node() {
     assert!((step.supplied / work - 1.0).abs() < 2e-13);
     assert!(defect < 1e-25);
 }
+
+#[test]
+fn a_nearly_cancelled_ac_voltage_does_not_hide_femtoampere_charge_continuity() {
+    let capacitance = 1e-12;
+    let current = 1e-15;
+    let graph = CircuitGraph {
+        node_count: 3,
+        branches: vec![
+            (1, 0, Branch::VoltageSource { port: 0 }),
+            (2, 0, Branch::Capacitor { farads: capacitance }),
+            (2, 0, Branch::CurrentSource { port: 1 }),
+        ],
+        transformers: vec![],
+    };
+    let circuit = assemble_circuit(&graph).unwrap();
+    let mut initial = vec![0.0; circuit.system.state_dim()];
+    initial[circuit.charge_index[0]] = capacitance;
+    let before = circuit.consistent_initial_state(&initial, &[1.0, 0.0]).unwrap();
+    // The source's next endpoint has opposite sign and order-one-volt
+    // magnitude, so its midpoint cannot resolve the requested 1e-18 V.
+    // That row needs its own endpoint roundoff allowance; the independent
+    // current/charge rows still resolve
+    // this actual femtoampere drive at the original physical accuracy.
+    let (step, defect) = circuit.step_audited(&before, &[1e-18, current], 1.0).unwrap();
+    let added_charge = step.x[circuit.charge_index[0]] - capacitance;
+    assert!((added_charge / current - 1.0).abs() < 2e-12);
+    let work = current * (1.0 + 0.5 * current / capacitance);
+    assert!((step.supplied / work - 1.0).abs() < 2e-13);
+    assert!(defect < 1e-25);
+}
