@@ -112,17 +112,17 @@ pub(super) struct PreparedConductorGeometry {
     controls: ConductorGeometrySolve,
 }
 
-fn check(cx: &Cx<'_>) -> Result<(), ElectricalSolidSourceError> {
+fn check<E>(cx: &Cx<'_>) -> Result<(), ElectricalSolidSourceError<E>> {
     cx.checkpoint()
         .map_err(|_| ElectricalSolidSourceError::Mechanical(super::ThermoplasticError::Cancelled))
 }
 
-pub(super) fn prepare(
+pub(super) fn prepare<E>(
     solid: &ThermoplasticSolid<'_>,
     resistors: &[MaterialResistor],
     routes: &BTreeMap<usize, CellId>,
     cx: &Cx<'_>,
-) -> Result<Vec<PreparedConductorGeometry>, ElectricalSolidSourceError> {
+) -> Result<Vec<PreparedConductorGeometry>, ElectricalSolidSourceError<E>> {
     let Some(binding) = &solid.conductor_geometry else {
         return Ok(Vec::new());
     };
@@ -165,12 +165,12 @@ pub(super) fn prepare(
     Ok(prepared)
 }
 
-pub(super) fn refresh(
+pub(super) fn refresh<E>(
     paths: &[PreparedConductorGeometry],
     gradients: &[[[f64; 3]; 3]],
     resistors: &mut [MaterialResistor],
     cx: &Cx<'_>,
-) -> Result<(), ElectricalSolidSourceError> {
+) -> Result<(), ElectricalSolidSourceError<E>> {
     for path in paths {
         check(cx)?;
         let gradient = gradients

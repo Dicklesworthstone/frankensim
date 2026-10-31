@@ -11,20 +11,20 @@ use super::super::electrical::{
     ElectricalSolidError, ElectricalSolidReport, ElectricalSolidSolve, ElectricalSupportContact,
 };
 use super::{ThermoplasticDynamics, ThermoplasticDynamicsReport};
-use crate::circuit_enthalpy::contacts::heat::PreparedHeatNetwork;
+use crate::circuit_enthalpy::contacts::heat::{HeatAssembly, HeatNetworkSample};
 use crate::material_circuit::MaterialCircuit;
 use fs_exec::Cx;
 use fs_solid::plastic3::IncrementSettings;
 use fs_thermal::enthalpy::DepositionSimulation;
 
 /// Accepted field storage, finite heat storage and solid motion together.
-pub struct DynamicElectricalCandidate<'m, 't> {
+pub struct DynamicElectricalCandidate<'m, 't, S = HeatNetworkSample> {
     thermal: DepositionSimulation<'t>,
     dynamics: ThermoplasticDynamics<'m>,
     circuit: MaterialCircuit,
-    report: ThermoplasticDynamicsReport<ElectricalSolidReport>,
+    report: ThermoplasticDynamicsReport<ElectricalSolidReport<S>>,
 }
-impl<'m, 't> DynamicElectricalCandidate<'m, 't> {
+impl<'m, 't, S> DynamicElectricalCandidate<'m, 't, S> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
@@ -34,7 +34,7 @@ impl<'m, 't> DynamicElectricalCandidate<'m, 't> {
     pub const fn circuit(&self) -> &MaterialCircuit {
         &self.circuit
     }
-    pub const fn report(&self) -> &ThermoplasticDynamicsReport<ElectricalSolidReport> {
+    pub const fn report(&self) -> &ThermoplasticDynamicsReport<ElectricalSolidReport<S>> {
         &self.report
     }
     pub fn into_parts(
@@ -43,7 +43,7 @@ impl<'m, 't> DynamicElectricalCandidate<'m, 't> {
         DepositionSimulation<'t>,
         ThermoplasticDynamics<'m>,
         MaterialCircuit,
-        ThermoplasticDynamicsReport<ElectricalSolidReport>,
+        ThermoplasticDynamicsReport<ElectricalSolidReport<S>>,
     ) {
         (self.thermal, self.dynamics, self.circuit, self.report)
     }
@@ -55,12 +55,14 @@ impl<'m> ThermoplasticDynamics<'m> {
     /// thermal geometry remains fixed under the small-strain model. Bulk paths
     /// bound by `ThermoplasticSolid::with_deforming_conductors` follow this same
     /// inertial endpoint; this adds no motional EMF, Lorentz force or changing C/L.
+    /// Complete heat assemblies retain finite coolant storage, reservoir powers
+    /// and their material evaluations in the same residual and accepted report.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_electrical_candidate<'t>(
+    pub fn advance_electrical_candidate<'t, A: HeatAssembly + ?Sized>(
         &self,
         thermal: &DepositionSimulation<'t>,
         circuit: &MaterialCircuit,
-        prepared: &PreparedHeatNetwork<'_, '_>,
+        assembly: &A,
         ports: &[f64],
         target_s: f64,
         prescribed_m: &[(usize, f64)],
@@ -69,11 +71,11 @@ impl<'m> ThermoplasticDynamics<'m> {
         controls: ElectricalSolidSolve,
         guess_j: &[f64],
         cx: &Cx<'_>,
-    ) -> Result<DynamicElectricalCandidate<'m, 't>, ElectricalSolidError> {
+    ) -> Result<DynamicElectricalCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>> {
         self.advance_electrical_with_pressure_contacts_candidate(
             thermal,
             circuit,
-            prepared,
+            assembly,
             &[],
             &[],
             ports,
@@ -91,11 +93,11 @@ impl<'m> ThermoplasticDynamics<'m> {
     /// inertial histories. Bulk and interface resistance use the original
     /// series composition and the stress from this same mechanical endpoint.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_electrical_with_supports_candidate<'t>(
+    pub fn advance_electrical_with_supports_candidate<'t, A: HeatAssembly + ?Sized>(
         &self,
         thermal: &DepositionSimulation<'t>,
         circuit: &MaterialCircuit,
-        prepared: &PreparedHeatNetwork<'_, '_>,
+        assembly: &A,
         supports: &[ThermalSupportContact<'_>],
         ports: &[f64],
         target_s: f64,
@@ -105,11 +107,11 @@ impl<'m> ThermoplasticDynamics<'m> {
         controls: ElectricalSolidSolve,
         guess_j: &[f64],
         cx: &Cx<'_>,
-    ) -> Result<DynamicElectricalCandidate<'m, 't>, ElectricalSolidError> {
+    ) -> Result<DynamicElectricalCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>> {
         self.advance_electrical_with_pressure_contacts_candidate(
             thermal,
             circuit,
-            prepared,
+            assembly,
             supports,
             &[],
             ports,
@@ -134,11 +136,11 @@ impl<'m> ThermoplasticDynamics<'m> {
     /// Source exit, cancellation or failed balance returns no partial endpoint.
     /// Resume with all THREE returned owners to preserve their common clock.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_electrical_with_pressure_contacts_candidate<'t>(
+    pub fn advance_electrical_with_pressure_contacts_candidate<'t, A: HeatAssembly + ?Sized>(
         &self,
         thermal: &DepositionSimulation<'t>,
         circuit: &MaterialCircuit,
-        prepared: &PreparedHeatNetwork<'_, '_>,
+        assembly: &A,
         supports: &[ThermalSupportContact<'_>],
         electrical_supports: &[ElectricalSupportContact],
         ports: &[f64],
@@ -149,11 +151,11 @@ impl<'m> ThermoplasticDynamics<'m> {
         controls: ElectricalSolidSolve,
         guess_j: &[f64],
         cx: &Cx<'_>,
-    ) -> Result<DynamicElectricalCandidate<'m, 't>, ElectricalSolidError> {
+    ) -> Result<DynamicElectricalCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>> {
         let (candidate, motion) = self.solid.advance_electrical_with_motion_candidate(
             thermal,
             circuit,
-            prepared,
+            assembly,
             supports,
             electrical_supports,
             ports,

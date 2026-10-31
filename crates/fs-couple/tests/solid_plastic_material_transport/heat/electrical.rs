@@ -173,6 +173,24 @@ fn contact_heating_replays_native_circuit_and_loaded_tetrahedra_at_the_same_endp
 }
 
 #[test]
+fn complete_heat_trait_object_preserves_original_contact_and_solid_trajectory() {
+    use fs_couple::circuit_enthalpy::contacts::heat::{HeatAssembly, HeatNetworkSample};
+    with_powered(10.0, true, false, CHARGE, |cx, _, t, s, c, p| {
+        let assembly: &dyn HeatAssembly<Sample = HeatNetworkSample, Error = HeatNetworkError> = p;
+        let original = s.advance_electrical_candidate(t, c, p, &[], 1.0,
+            &supports(SHEAR), &applied(), IncrementSettings::default(), controls(), &[0.0; 2], cx).unwrap();
+        let complete = s.advance_electrical_candidate(t, c, assembly, &[], 1.0,
+            &supports(SHEAR), &applied(), IncrementSettings::default(), controls(), &[0.0; 2], cx).unwrap();
+        assert_eq!(complete.thermal().cells(), original.thermal().cells());
+        assert_eq!(complete.solid().solution(), original.solid().solution());
+        assert_eq!(complete.circuit(), original.circuit());
+        assert_eq!(complete.report().circuit_thermal.source.destinations,
+            original.report().circuit_thermal.source.destinations);
+        assert_eq!(complete.report().combined_residual_j, original.report().combined_residual_j);
+    });
+}
+
+#[test]
 fn unloading_keeps_plastic_and_charge_history_without_thermalizing_algorithmic_loss() {
     with_powered(10.0,true,false,CHARGE,|cx,_,t,s,c,p| {
         let first=s.advance_electrical_candidate(t,c,p,&[],1.0,&supports(SHEAR),&applied(),

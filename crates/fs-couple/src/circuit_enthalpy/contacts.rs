@@ -96,12 +96,24 @@ pub fn step_candidate<'m,S,E>(thermal:&DepositionSimulation<'m>,target_s:f64,
     resolve:impl Fn(&DepositionSimulation<'m>)->Result<ContactThermalCoefficients<S>,E>,
     cancelled:impl FnMut()->bool)
     ->Result<CircuitEnthalpyCandidate<'m,ContactThermalSample<S>>,CircuitEnthalpyError<E>> {
+    resolved_candidate(thermal,target_s,input,routes,controls,guess_j,
+        |state|resolve(state).map_err(CircuitEnthalpyError::Source),cancelled)
+}
+
+// Complete assemblies already distinguish source, thermal and cancellation
+// failures. Keep those native classes while sharing the exact contact solver.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolved_candidate<'m,S,E>(thermal:&DepositionSimulation<'m>,target_s:f64,
+    input:CircuitEnthalpyInput<'_>,routes:&[ContactHeatCells],controls:CircuitEnthalpySolve,guess_j:&[f64],
+    resolve:impl Fn(&DepositionSimulation<'m>)->Result<ContactThermalCoefficients<S>,CircuitEnthalpyError<E>>,
+    cancelled:impl FnMut()->bool)
+    ->Result<CircuitEnthalpyCandidate<'m,ContactThermalSample<S>>,CircuitEnthalpyError<E>> {
     let cancel=RefCell::new(cancelled);
     let check=||if (*cancel.borrow_mut())() {Err(DepositionError::Cancelled)} else {Ok(())};
     check()?;
     let routes=admit_routes(thermal,input.circuit,routes,check)?.into_values().collect::<Vec<_>>();
     driven_with_contacts_candidate(thermal,target_s,input,&routes,controls,guess_j,|state,_| {
-        let coefficients=resolve(state).map_err(CircuitEnthalpyError::Source)?;
+        let coefficients=resolve(state)?;
         let bulk=coefficients.bulk;
         let circuit=advance_circuit::<E>(input.circuit,bulk.resistors,coefficients.contacts,input.ports,
             target_s-thermal.time_s(),controls.circuit,||(*cancel.borrow_mut())())?;

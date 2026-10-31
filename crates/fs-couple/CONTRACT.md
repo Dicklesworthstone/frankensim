@@ -6244,6 +6244,32 @@ explicit exterior species and callback-independent pressure. The CLI regression
 compares actual emitted PCM and metadata with the original source. These are
 numerical integration checks, not measured source or instrument qualification.
 
+### Complete coolant heat in powered plastic solids
+
+The existing electrical, thermal-support and pressure-contact advance entries
+on `ThermoplasticSolid` and `ThermoplasticDynamics` accept any original
+`HeatAssembly`, including the source-resolved finite-coolant view. Prepared
+network calls retain their source, error and report defaults. Each nonlinear
+trial resolves the complete heat assembly at the same proposed enthalpies as
+source resistivity, current, native J2 equilibrium and optional inertia.
+The accepted report retains the full assembly sample and its coolant source
+receipts; no provider history, source payload or finite caloric cell is erased.
+
+Finite coolant exchange remains internal. Prescribed reservoir heat remains
+external. The original circuit deposits bulk/contact Joule heat once, and
+the original mechanical owner deposits physical plastic and reversible heat
+once. Elastic/hardening storage, kinetic storage and both numerical losses
+keep their distinct accounts. All owners publish only after the existing
+closed-energy gates pass; source exit and cancellation return no candidate.
+
+Solved-pressure supports require their original material-conduction links
+and cannot claim an added finite-convection link. Existing source pins,
+whole-face support admission, optional affine conductor geometry, reference
+mass, fixed thermal geometry and small-strain limits remain in force.
+The manufactured regression checks an independent capacitor/two-cell/J2
+equation system, coolant-only source substitutions, retained unloading
+history, inertial loss exclusion and atomic coolant-source refusal.
+
 ### Retained material inertia in contact and electrical feedback
 
 `solid_enthalpy::plastic::dynamics::ThermoplasticDynamics` now composes with the
@@ -6251,8 +6277,8 @@ original pressure-dependent thermal supports, finite circuits and electrical
 support contacts. Its `advance_with_thermal_contacts` and series-conduction
 variant use the same contact Newton residual as the quasistatic solid. Its
 `advance_electrical_candidate`, support variant and pressure-contact variant use
-the same original circuit/enthalpy residual. Existing quasistatic entry points
-retain their signatures and omit inertia.
+the same original circuit/enthalpy residual. Existing prepared-network calls remain supported; the quasistatic paths
+omit inertia.
 
 Every thermal trial calls the original native small-strain mechanical owner
 with the same accepted displacement, velocity, J2 history and source-bound

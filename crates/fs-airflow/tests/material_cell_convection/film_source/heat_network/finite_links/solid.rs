@@ -1,4 +1,6 @@
 //! Manufactured finite coolant/J2 feedback on the original shared thermal graph.
+#[path = "solid/electrical.rs"]
+mod electrical;
 use super::*;
 use fs_couple::solid_enthalpy::plastic::{
     ThermoplasticCell, ThermoplasticConfig, ThermoplasticSolid,
