@@ -38,7 +38,7 @@
 //! Zero-drift exchange is separate and must be counted once by its energy owner.
 
 use crate::electron_collision::{AVOGADRO_PER_MOL, BOLTZMANN_J_PER_K, ELECTRON_MASS_KG};
-use crate::equilibrium::composition::FrozenIonizedGasStateV1;
+use crate::equilibrium::composition::{FrozenIonizedGasStateV1, MAX_EQUILIBRIUM_SPECIES_V1};
 use crate::{SpeciesId, ThermochemErrorV1};
 use fs_math::det::{exp, ln, sqrt};
 use fs_qty::Temperature;
@@ -135,6 +135,58 @@ struct Carrier {
     log_charge: f64,
     electron: bool,
 }
+impl Carrier {
+    // Only the filled prefix of the fixed refresh workspace is evaluated.
+    const EMPTY: Self = Self {
+        index: 0,
+        mass: 0.0,
+        log_mass: 0.0,
+        log_density: 0.0,
+        log_charge: 0.0,
+        electron: false,
+    };
+
+    fn from_state(
+        state: &FrozenIonizedGasStateV1,
+        index: usize,
+    ) -> Result<Option<Self>, CoulombErrorV1> {
+        let z = state
+            .thermodynamics()
+            .charge_vector()
+            .get(index)
+            .expect("retained source charge axis");
+        if z == 0 || state.amounts()[index].value() == 0.0 {
+            return Ok(None);
+        }
+        if z.unsigned_abs() > (1u128 << 53) {
+            return Err(CoulombErrorV1::Invalid(
+                "charge number cannot be represented exactly",
+            ));
+        }
+        let mass = state.thermodynamics().models()[index].molar_mass().value() / AVOGADRO_PER_MOL;
+        let density = state
+            .number_density_per_m3(index)
+            .expect("retained source amount axis");
+        let electron = state.electron_index() == Some(index);
+        if !positive(mass)
+            || !positive(density)
+            || (electron
+                && ((mass - ELECTRON_MASS_KG) / ELECTRON_MASS_KG).abs() > 16.0 * f64::EPSILON)
+        {
+            return Err(CoulombErrorV1::Invalid(
+                "source particle mass, physical electron mass or density",
+            ));
+        }
+        Ok(Some(Self {
+            index,
+            mass,
+            log_mass: ln(mass),
+            log_density: ln(density),
+            log_charge: ln((z as f64).abs()) + ln(ELEMENTARY_CHARGE_C),
+            electron,
+        }))
+    }
+}
 
 /// Immutable source and population binding; clones share carrier metadata.
 /// Construction allocates bounded metadata. Successful evaluations and pair
@@ -162,57 +214,11 @@ impl CoulombModelV1 {
         carriers
             .try_reserve_exact(state.amounts().len())
             .map_err(|_| CoulombErrorV1::AllocationRefused)?;
-        for (index, (model, amount)) in state
-            .thermodynamics()
-            .models()
-            .iter()
-            .zip(state.amounts())
-            .enumerate()
-        {
+        for index in 0..state.amounts().len() {
             poll(&mut cancelled)?;
-            let z = state
-                .thermodynamics()
-                .charge_vector()
-                .get(index)
-                .expect("retained source charge axis");
-            if z == 0 || amount.value() == 0.0 {
-                continue;
+            if let Some(carrier) = Carrier::from_state(state, index)? {
+                carriers.push(carrier);
             }
-            if z.unsigned_abs() > (1u128 << 53) {
-                return Err(CoulombErrorV1::Invalid(
-                    "charge number cannot be represented exactly",
-                ));
-            }
-            let mass = model.molar_mass().value() / AVOGADRO_PER_MOL;
-            let density = state
-                .number_density_per_m3(index)
-                .expect("retained source amount axis");
-            let electron = state.electron_index() == Some(index);
-            if !positive(mass)
-                || !positive(density)
-                || (electron
-                    && ((mass - ELECTRON_MASS_KG) / ELECTRON_MASS_KG).abs() > 16.0 * f64::EPSILON)
-            {
-                return Err(CoulombErrorV1::Invalid(
-                    "source particle mass, physical electron mass or density",
-                ));
-            }
-            carriers.push(Carrier {
-                index,
-                mass,
-                log_mass: ln(mass),
-                log_density: ln(density),
-                log_charge: ln((z as f64).abs()) + ln(ELEMENTARY_CHARGE_C),
-                electron,
-            });
-        }
-        if screening == CoulombScreeningV1::ElectronDebye
-            && !carriers.is_empty()
-            && !carriers.iter().any(|c| c.electron)
-        {
-            return Err(CoulombErrorV1::Invalid(
-                "electron-only screening requires populated structural electrons",
-            ));
         }
         let model = Self {
             initial_state: state.clone(),
@@ -262,7 +268,53 @@ impl CoulombModelV1 {
         visitor: impl FnMut(CoulombPairV1),
         cancelled: impl FnMut() -> bool,
     ) -> Result<CoulombSummaryV1, CoulombErrorV1> {
-        self.evaluate_inner(heavy_temperature, electron_temperature, visitor, cancelled)
+        self.evaluate_inner(
+            &self.initial_state,
+            &self.carriers,
+            heavy_temperature,
+            electron_temperature,
+            visitor,
+            cancelled,
+        )
+    }
+
+    /// Freshly evaluate this same screening law and limits at an actual state
+    /// with changed populations, volume or temperatures. The complete original
+    /// thermodynamic bank must match exactly. Every now-populated charged row,
+    /// including one absent at model construction, is admitted and evaluated.
+    ///
+    /// Successful refresh uses bounded stack storage and the original pair
+    /// evaluator. It does not change this model's retained populations or make
+    /// old material/pair receipts valid for the new state; consumers requiring
+    /// those receipts must bind a new model explicitly.
+    pub fn evaluate_at_state(
+        &self,
+        state: &FrozenIonizedGasStateV1,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CoulombSummaryV1, CoulombErrorV1> {
+        poll(&mut cancelled)?;
+        if state.thermodynamics() != self.initial_state.thermodynamics() {
+            return Err(CoulombErrorV1::Invalid(
+                "fresh Coulomb state must retain the exact original thermodynamic bank",
+            ));
+        }
+        let mut carriers = [Carrier::EMPTY; MAX_EQUILIBRIUM_SPECIES_V1];
+        let mut count = 0;
+        for index in 0..state.amounts().len() {
+            poll(&mut cancelled)?;
+            if let Some(carrier) = Carrier::from_state(state, index)? {
+                carriers[count] = carrier;
+                count += 1;
+            }
+        }
+        self.evaluate_inner(
+            state,
+            &carriers[..count],
+            state.heavy_temperature(),
+            state.electron_temperature(),
+            |_| {},
+            cancelled,
+        )
     }
 }
 

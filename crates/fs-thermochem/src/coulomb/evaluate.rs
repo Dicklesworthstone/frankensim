@@ -3,6 +3,8 @@ use super::*;
 impl CoulombModelV1 {
     pub(super) fn evaluate_inner(
         &self,
+        state: &FrozenIonizedGasStateV1,
+        carriers: &[Carrier],
         heavy_temperature: Temperature,
         electron_temperature: Temperature,
         mut visitor: impl FnMut(CoulombPairV1),
@@ -15,21 +17,28 @@ impl CoulombModelV1 {
                 "positive finite actual heavy/electron temperatures",
             ));
         }
+        if self.screening == CoulombScreeningV1::ElectronDebye
+            && !carriers.is_empty()
+            && !carriers.iter().any(|c| c.electron)
+        {
+            return Err(CoulombErrorV1::Invalid(
+                "electron-only screening requires populated structural electrons",
+            ));
+        }
         // Preserve original source support, including the neutral populations
         // whose shared heavy temperature is part of this exact state binding.
-        for (index, (model, amount)) in self
-            .initial_state
+        for (index, (model, amount)) in state
             .thermodynamics()
             .models()
             .iter()
-            .zip(self.initial_state.amounts())
+            .zip(state.amounts())
             .enumerate()
         {
             poll(&mut cancelled)?;
             if amount.value() == 0.0 {
                 continue;
             }
-            let temperature = if self.initial_state.electron_index() == Some(index) {
+            let temperature = if state.electron_index() == Some(index) {
                 electron_temperature
             } else {
                 heavy_temperature
@@ -52,7 +61,7 @@ impl CoulombModelV1 {
             maximum_relativistic: 0.0,
             maximum_quantum: 0.0,
         };
-        if self.carriers.is_empty() {
+        if carriers.is_empty() {
             poll(&mut cancelled)?;
             return Ok(summary);
         }
@@ -68,7 +77,7 @@ impl CoulombModelV1 {
         let mut log_density = f64::NEG_INFINITY;
         let mut largest_log_charge = f64::NEG_INFINITY;
         let mut coldest_log_temperature = f64::INFINITY;
-        for carrier in self.carriers.iter() {
+        for carrier in carriers {
             poll(&mut cancelled)?;
             let log_t = temperature_log(carrier);
             log_density = log_add(log_density, carrier.log_density);
@@ -121,8 +130,8 @@ impl CoulombModelV1 {
         let mut thermal_sum = 0.0_f64;
         let mut thermal_correction = 0.0_f64;
         let mut minimum_logarithm = f64::INFINITY;
-        for (first_slot, first) in self.carriers.iter().enumerate() {
-            for second in &self.carriers[first_slot + 1..] {
+        for (first_slot, first) in carriers.iter().enumerate() {
+            for second in &carriers[first_slot + 1..] {
                 poll(&mut cancelled)?;
                 let log_first_variance = log_kb + temperature_log(first) - first.log_mass;
                 let log_second_variance = log_kb + temperature_log(second) - second.log_mass;

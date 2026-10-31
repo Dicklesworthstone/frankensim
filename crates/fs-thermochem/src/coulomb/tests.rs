@@ -365,6 +365,119 @@ fn coulomb_population_binding_allows_new_temperatures_but_refuses_inventory_reus
 }
 
 #[test]
+fn coulomb_fresh_state_refreshes_absent_carriers_density_volume_and_temperature() {
+    let neutral = state(0.0, 10_000.0, 20_000.0);
+    for screening in [
+        CoulombScreeningV1::StaticAllChargedDebye,
+        CoulombScreeningV1::ElectronDebye,
+    ] {
+        let original = CoulombModelV1::new(&neutral, screening, limits(), || false).unwrap();
+        let retained = original.clone();
+        for (density, volume, th, te) in [
+            (0.0, 2.0, 12_000.0, 24_000.0),
+            (5e18, 0.25, 12_000.0, 18_000.0),
+            (1e20, 2.0, 12_000.0, 24_000.0),
+        ] {
+            let base = state(density, th, te);
+            let actual = FrozenIonizedGasStateV1::new(
+                base.thermodynamics(),
+                base.amounts(),
+                Volume::new(volume),
+                base.heavy_temperature(),
+                base.electron_temperature(),
+                1e-12,
+                || false,
+            )
+            .unwrap();
+            assert!(!original.is_bound_to_populations(&actual));
+            let refreshed = original.evaluate_at_state(&actual, || false).unwrap();
+            let rebound = CoulombModelV1::new(&actual, screening, limits(), || false).unwrap();
+            let expected = rebound
+                .evaluate(
+                    actual.heavy_temperature(),
+                    actual.electron_temperature(),
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(refreshed, expected);
+            assert_eq!(refreshed.pair_count(), usize::from(density > 0.0));
+            assert_eq!(
+                refreshed.electron_heavy_thermal_conductance_w_m3_k() > 0.0,
+                density > 0.0
+            );
+        }
+        // A successful refresh never relaxes the original material binding or
+        // changes the coefficients subsequently evaluated at its old inventory.
+        assert_eq!(original, retained);
+        assert!(original.is_bound_to_populations(&neutral));
+        assert_eq!(
+            original
+                .evaluate(
+                    neutral.heavy_temperature(),
+                    neutral.electron_temperature(),
+                    || false
+                )
+                .unwrap()
+                .pair_count(),
+            0
+        );
+    }
+    let charged = state(1e20, 10_000.0, 20_000.0);
+    let model = bind(&charged);
+    let vanished = model.evaluate_at_state(&neutral, || false).unwrap();
+    assert_eq!(vanished.pair_count(), 0);
+    assert_eq!(vanished.debye_length_m(), None);
+}
+
+#[test]
+fn coulomb_fresh_state_refuses_foreign_bank_invalid_new_domain_and_cancellation() {
+    let neutral = state(0.0, 10_000.0, 20_000.0);
+    let model = bind(&neutral);
+    let charged = state(1e20, 10_000.0, 20_000.0);
+    let bank = charged.thermodynamics();
+    let mut models = bank.models().to_vec();
+    // Even a changed neutral source invalidates the complete original bank.
+    models[0] = source("H", 2.0 * (MP + ELECTRON_MASS_KG));
+    let foreign_bank = IdealGasEquilibriumV1::new(
+        bank.elemental_matrix().clone(),
+        bank.charge_vector().clone(),
+        models,
+    )
+    .unwrap();
+    let foreign = FrozenIonizedGasStateV1::new(
+        &foreign_bank,
+        charged.amounts(),
+        charged.volume(),
+        charged.heavy_temperature(),
+        charged.electron_temperature(),
+        1e-12,
+        || false,
+    )
+    .unwrap();
+    assert!(matches!(
+        model.evaluate_at_state(&foreign, || false),
+        Err(CoulombErrorV1::Invalid(_))
+    ));
+    assert!(matches!(
+        model.evaluate_at_state(&state(1e40, 10_000.0, 20_000.0), || false),
+        Err(CoulombErrorV1::Domain(_))
+    ));
+    assert_eq!(
+        model.evaluate_at_state(&charged, || true),
+        Err(CoulombErrorV1::Cancelled)
+    );
+    let mut calls = 0;
+    assert_eq!(
+        model.evaluate_at_state(&charged, || {
+            calls += 1;
+            calls >= 7
+        }),
+        Err(CoulombErrorV1::Cancelled)
+    );
+    assert_eq!(calls, 7);
+}
+
+#[test]
 fn coulomb_no_carriers_is_exactly_empty_and_cancellation_returns_no_summary() {
     let neutral = state(0.0, 10_000.0, 20_000.0);
     for screening in [
