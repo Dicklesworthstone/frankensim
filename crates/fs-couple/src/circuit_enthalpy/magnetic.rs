@@ -320,11 +320,11 @@ impl MagneticThermalNetwork<'_> {
     // Conductivity, caloric correspondence, fixed geometry and source refresh
     // are common. Only the magnetic law's supported refresh admission differs.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn materials_at_using(
+    pub(super) fn materials_at_using<C: fs_material::conductor::spatial::SpatialConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'_>,
         originals: &[&ResolvedMaterialStatePoint],
-        conductors: &BTreeMap<usize, &ResolvedConductorState>,
+        conductors: &BTreeMap<usize, &C>,
         sample: &MaterialNetworkSample,
         routes: &MagneticRoutes,
         cancelled: &RefCell<impl FnMut() -> bool>,
@@ -336,7 +336,7 @@ impl MagneticThermalNetwork<'_> {
         ) -> Result<(), Error>,
     ) -> Result<
         (
-            Vec<(usize, ResolvedConductorState)>,
+            Vec<(usize, C)>,
             Vec<MagneticThermalSample>,
         ),
         Error,

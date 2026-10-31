@@ -12637,8 +12637,22 @@ eddy/enthalpy tests also pass; their thermal fixtures explicitly declare the
 absolute-temperature source type required by the original entropy owner.
 These are manufactured equation/discretization checks, not measured devices.
 
-The linear thermal path admits scalar conductivity and induced-linear globally
-affine source-backed mu(T), fixed geometry and prescribed velocity.
+The linear thermal path admits scalar or oriented positive-definite conductivity
+and induced-linear globally affine source-backed mu(T), fixed geometry and
+prescribed velocity. Linear, nonlinear and complete-heat candidates retain the
+original conductor type, including mixed scalar/orthotropic cells. Each thermal
+trial refreshes all original principal conductivity/resistivity keys from the
+same complete material bundle and preserves the declared physical frame. No
+scalar surrogate, averaged conductivity or independently prescribed heat is used.
+The native charge solve, conductor-frame E dot sigma E heat and signed Lorentz
+work remain the only electrical-transfer owners.
+
+The source-refresh helpers are shared with existing scalar planar consumers;
+source identity, phase, volume and caloric admissions are unchanged. Tests in
+`spatial_induction_enthalpy/orthotropic.rs` compare rotated, temperature-dependent
+source substitutions with an independently eliminated Whitney-cube/finite-heat
+balance, check each refreshed principal property, and continue the same histories.
+These are synthetic equation checks, not empirical material data.
 
 `SpatialMagneticThermalNetwork::step_nonlinear_candidate` connects the original
 three-dimensional saturating/fixed-recoil A–phi owner to this same finite-cell
@@ -12648,7 +12662,7 @@ local caloric temperature and continues the accepted magnetic history. Magnetic
 H(B), linear and recoil laws remain temperature independent over their complete
 source ranges, so field internal energy equals the existing magnetic storage.
 The physical account includes the original signed impressed and mechanical work
-and the positive backward-Euler Bregman loss. Only sigma E_conductor squared
+and the positive backward-Euler Bregman loss. Only E_conductor dot sigma E_conductor
 heats the finite stores; numerical magnetic loss is never credited as heat.
 
 Focused nonlinear regressions compare independent charge-eliminated cube

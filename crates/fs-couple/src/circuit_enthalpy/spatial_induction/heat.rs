@@ -104,12 +104,12 @@ fn close_heat_balance<D, S: AsRef<HeatNetworkSample>, E: From<HeatNetworkError>>
 /// exclude closed-radiation roundoff from external supply. A refusal publishes
 /// neither thermal nor field history and retains the provider's typed error.
 #[allow(clippy::too_many_arguments)]
-pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
+pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialConductorMaterial>(
     provider: &A,
     cx: &Cx<'_>,
     thermal: &DepositionSimulation<'t>,
     target_s: f64,
-    field: &SpatialInduction<'m>,
+    field: &SpatialInduction<'m, C>,
     endpoint_current_a_m2: &[[f64; 3]],
     velocity_m_s: &[[f64; 3]],
     regions: &[SpatialMagneticRegion],
@@ -119,7 +119,7 @@ pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
     field_controls: SpatialInductionControls,
     assembly: WeightedAssemblyLimits,
     initial_energy_increments_j: &[f64],
-) -> Result<SpatialInductionThermalCandidate<'t, 'm, A::Sample>, HeatError<A::Error>> {
+) -> Result<SpatialInductionThermalCandidate<'t, 'm, A::Sample, C>, HeatError<A::Error>> {
     let cancel = RefCell::new(|| cx.checkpoint().is_err());
     check(&cancel).map_err(native_error)?;
     let prepared = provider.prepared_heat_network();
@@ -183,12 +183,12 @@ pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
 /// temperature-dependent nonlinear magnetic law still requires its own
 /// field-entropy receiver and refuses here.
 #[allow(clippy::too_many_arguments)]
-pub fn nonlinear_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
+pub fn nonlinear_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialConductorMaterial>(
     provider: &A,
     cx: &Cx<'_>,
     thermal: &DepositionSimulation<'t>,
     target_s: f64,
-    field: &SpatialNonlinearInduction<'m>,
+    field: &SpatialNonlinearInduction<'m, C>,
     endpoint_current_a_m2: &[[f64; 3]],
     velocity_m_s: &[[f64; 3]],
     regions: &[SpatialMagneticRegion],
@@ -196,7 +196,7 @@ pub fn nonlinear_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
     controls: CircuitEnthalpySolve,
     field_controls: SpatialNonlinearInductionControls,
     initial_energy_increments_j: &[f64],
-) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, A::Sample>, HeatError<A::Error>> {
+) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, A::Sample, C>, HeatError<A::Error>> {
     nonlinear_heat_assembly_with_laws_candidate(
         provider,
         cx,
@@ -226,17 +226,17 @@ pub fn nonlinear_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
 ///
 /// The source, field-envelope, combined-capacity and whole-volume admissions
 /// of `SpatialMagneticThermalNetwork::step_nonlinear_thermal_candidate` remain
-/// authoritative. Fixed geometry, scalar conductivity and an affine positive
+/// authoritative. Fixed geometry, sourced scalar or tensor conductivity and an affine positive
 /// nonlinear field scale are retained. General H(B,T), recoil entropy,
 /// hysteresis and phase change require additional physical owners. Full
 /// provider samples and typed failures follow `heat_assembly_candidate`.
 #[allow(clippy::too_many_arguments)]
-pub fn nonlinear_thermal_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
+pub fn nonlinear_thermal_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialConductorMaterial>(
     provider: &A,
     cx: &Cx<'_>,
     thermal: &DepositionSimulation<'t>,
     target_s: f64,
-    field: &SpatialNonlinearInduction<'m>,
+    field: &SpatialNonlinearInduction<'m, C>,
     endpoint_current_a_m2: &[[f64; 3]],
     velocity_m_s: &[[f64; 3]],
     regions: &[SpatialMagneticRegion],
@@ -245,7 +245,7 @@ pub fn nonlinear_thermal_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Size
     controls: CircuitEnthalpySolve,
     field_controls: SpatialNonlinearInductionControls,
     initial_energy_increments_j: &[f64],
-) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, A::Sample>, HeatError<A::Error>> {
+) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, A::Sample, C>, HeatError<A::Error>> {
     nonlinear_heat_assembly_with_laws_candidate(
         provider,
         cx,
@@ -266,12 +266,12 @@ pub fn nonlinear_thermal_heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Size
 // Fixed and temperature-dependent magnetic material paths share complete heat
 // ownership, source admission, coolant resolution and physical energy checks.
 #[allow(clippy::too_many_arguments)]
-fn nonlinear_heat_assembly_with_laws_candidate<'t, 'm, A: HeatAssembly + ?Sized>(
+fn nonlinear_heat_assembly_with_laws_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialConductorMaterial>(
     provider: &A,
     cx: &Cx<'_>,
     thermal: &DepositionSimulation<'t>,
     target_s: f64,
-    field: &SpatialNonlinearInduction<'m>,
+    field: &SpatialNonlinearInduction<'m, C>,
     endpoint_current_a_m2: &[[f64; 3]],
     velocity_m_s: &[[f64; 3]],
     regions: &[SpatialMagneticRegion],
@@ -280,7 +280,7 @@ fn nonlinear_heat_assembly_with_laws_candidate<'t, 'm, A: HeatAssembly + ?Sized>
     controls: CircuitEnthalpySolve,
     field_controls: SpatialNonlinearInductionControls,
     initial_energy_increments_j: &[f64],
-) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, A::Sample>, HeatError<A::Error>> {
+) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, A::Sample, C>, HeatError<A::Error>> {
     let cancel = RefCell::new(|| cx.checkpoint().is_err());
     check(&cancel).map_err(native_error)?;
     let prepared = provider.prepared_heat_network();
@@ -342,12 +342,12 @@ impl PreparedHeatNetwork<'_, '_> {
     /// Continue three-dimensional induction with this prepared heat network
     /// through the same complete `heat_assembly_candidate` driver.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_spatial_induction_candidate<'t, 'm>(
+    pub fn step_spatial_induction_candidate<'t, 'm, C: SpatialConductorMaterial>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        field: &SpatialInduction<'m>,
+        field: &SpatialInduction<'m, C>,
         endpoint_current_a_m2: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         regions: &[SpatialMagneticRegion],
@@ -357,7 +357,7 @@ impl PreparedHeatNetwork<'_, '_> {
         field_controls: SpatialInductionControls,
         assembly: WeightedAssemblyLimits,
         initial_energy_increments_j: &[f64],
-    ) -> Result<SpatialInductionThermalCandidate<'t, 'm, HeatNetworkSample>, Error> {
+    ) -> Result<SpatialInductionThermalCandidate<'t, 'm, HeatNetworkSample, C>, Error> {
         heat_assembly_candidate(
             self,
             cx,
@@ -380,12 +380,12 @@ impl PreparedHeatNetwork<'_, '_> {
     /// Continue original sourced nonlinear magnetic temperature response
     /// through the same complete `nonlinear_thermal_heat_assembly_candidate`.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_spatial_nonlinear_induction_thermal_candidate<'t, 'm>(
+    pub fn step_spatial_nonlinear_induction_thermal_candidate<'t, 'm, C: SpatialConductorMaterial>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        field: &SpatialNonlinearInduction<'m>,
+        field: &SpatialNonlinearInduction<'m, C>,
         endpoint_current_a_m2: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         regions: &[SpatialMagneticRegion],
@@ -394,7 +394,7 @@ impl PreparedHeatNetwork<'_, '_> {
         controls: CircuitEnthalpySolve,
         field_controls: SpatialNonlinearInductionControls,
         initial_energy_increments_j: &[f64],
-    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, HeatNetworkSample>, Error> {
+    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, HeatNetworkSample, C>, Error> {
         nonlinear_thermal_heat_assembly_candidate(
             self,
             cx,
@@ -416,12 +416,12 @@ impl PreparedHeatNetwork<'_, '_> {
     /// Continue native saturating/fixed-recoil induction through the same
     /// complete `nonlinear_heat_assembly_candidate` driver.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_spatial_nonlinear_induction_candidate<'t, 'm>(
+    pub fn step_spatial_nonlinear_induction_candidate<'t, 'm, C: SpatialConductorMaterial>(
         &self,
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        field: &SpatialNonlinearInduction<'m>,
+        field: &SpatialNonlinearInduction<'m, C>,
         endpoint_current_a_m2: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         regions: &[SpatialMagneticRegion],
@@ -429,7 +429,7 @@ impl PreparedHeatNetwork<'_, '_> {
         controls: CircuitEnthalpySolve,
         field_controls: SpatialNonlinearInductionControls,
         initial_energy_increments_j: &[f64],
-    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, HeatNetworkSample>, Error> {
+    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, HeatNetworkSample, C>, Error> {
         nonlinear_heat_assembly_candidate(
             self,
             cx,

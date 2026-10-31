@@ -12,7 +12,7 @@ impl SpatialMagneticThermalNetwork<'_> {
     /// conductor topology and mechanical-work convention across every trial.
     ///
     /// Parameter work P=psi_new(B_old)-psi_old(B_old) and delta(T*S) jointly
-    /// supply reversible heat Q_rev=-P-delta(T*S). Local sigma*E_conductor² is
+    /// supply reversible heat Q_rev=-P-delta(T*S). Local E_conductor dot sigma E_conductor is
     /// deposited once; backward-Euler convexity loss remains numerical export.
     /// The physical balance uses U=psi+T*S, including fixed exterior regions.
     ///
@@ -24,11 +24,11 @@ impl SpatialMagneticThermalNetwork<'_> {
     /// additional constitutive owners. Source or convergence failure publishes
     /// neither accepted history. Coupled time accuracy remains first order.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_nonlinear_thermal_candidate<'t, 'm>(
+    pub fn step_nonlinear_thermal_candidate<'t, 'm, C: SpatialConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        field: &SpatialNonlinearInduction<'m>,
+        field: &SpatialNonlinearInduction<'m, C>,
         endpoint_current_a_m2: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         bindings: &[SpatialMagneticThermalLaw<MagneticConstitutiveThermalLaw>],
@@ -36,7 +36,7 @@ impl SpatialMagneticThermalNetwork<'_> {
         field_controls: SpatialNonlinearInductionControls,
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm>, Error> {
+    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, MaterialNetworkSample, C>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         let network = MaterialNetwork {

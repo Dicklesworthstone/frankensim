@@ -14,7 +14,6 @@ use crate::circuit_enthalpy::{
     material::{MaterialNetworkError, MaterialNetworkSample},
 };
 use fs_material::{
-    conductor::ResolvedConductorState,
     field_storage::{
         FieldStorageError, MAGNETIC_PERMEABILITY_PROPERTY,
         nonlinear::{
@@ -181,11 +180,11 @@ impl MagneticThermalNetwork<'_> {
     /// own law variants; this shared source owner retains every requirement,
     /// pin and explicitly admitted field axis at the same caloric temperature.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    pub(in crate::circuit_enthalpy) fn constitutive_materials_at(
+    pub(in crate::circuit_enthalpy) fn constitutive_materials_at<C: fs_material::conductor::spatial::SpatialConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'_>,
         originals: &[&ResolvedMaterialStatePoint],
-        conductors: &BTreeMap<usize, &ResolvedConductorState>,
+        conductors: &BTreeMap<usize, &C>,
         sample: &MaterialNetworkSample,
         bindings: &[MagneticThermalLaw<MagneticConstitutiveThermalLaw>],
         routes: &MagneticRoutes,
@@ -193,7 +192,7 @@ impl MagneticThermalNetwork<'_> {
         admit: impl Fn(usize, &ResolvedMagneticConstitutiveThermalLaw) -> Result<(), Error>,
     ) -> Result<
         (
-            Vec<(usize, ResolvedConductorState)>,
+            Vec<(usize, C)>,
             Vec<MagneticThermalSample>,
             BTreeMap<usize, ResolvedMagneticConstitutiveThermalLaw>,
         ),
