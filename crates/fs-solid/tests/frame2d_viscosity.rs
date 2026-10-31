@@ -133,7 +133,12 @@ fn source_axial_and_bending_swaps_reproduce_continuous_damped_motion_and_loss() 
         let (mass, stiffness) = if axis == 0 {
             (RHO * area / 3.0, YOUNG * area)
         } else {
-            (RHO * area * 13.0 / 35.0, 12.0 * YOUNG * inertia)
+            // Unit-length guided bending includes the section's slope-spin
+            // kinetic energy as well as centerline translation.
+            (
+                RHO * (area * 13.0 / 35.0 + 6.0 * inertia / 5.0),
+                12.0 * YOUNG * inertia,
+            )
         };
         let omega = (stiffness / mass).sqrt();
         let dt = 0.01 / omega;
@@ -453,15 +458,25 @@ fn source_loss_never_bypasses_linear_inertial_or_frequency_admission() {
             .is_err()
     );
     assert!(rotating.material_section(0).is_none());
-    let mut massless = Frame2d::new(Geometry::Linear);
-    massless.add_node(0.0, 0.0);
-    massless.add_node(1.0, 0.0);
-    massless.fix(0, [true; 3]);
-    massless
+    let mut lumped = Frame2d::new(Geometry::Linear);
+    lumped.add_node(0.0, 0.0);
+    lumped.add_node(1.0, 0.0);
+    lumped.fix(0, [true; 3]);
+    lumped
         .add_material_viscous_element(0, 1, 5, section)
         .unwrap();
     let none = Rayleigh { a0: 0.0, a1: 0.0 };
-    assert!(massless.newmark(&[0.0; 2], 1e-5, (0.0, 0.0), none).is_err());
+    // Source-derived section spin gives lumped material rotations real inertia.
+    assert!(lumped.newmark(&[0.0; 2], 1e-5, (0.0, 0.0), none).is_ok());
+    // A genuinely massless raw member still cannot bypass viscous admission.
+    let tip = lumped.add_node(2.0, 0.0);
+    lumped
+        .add_element(1, tip, 5, 0.0, &|| SectionModel::Elastic {
+            ea: 1e6,
+            ei: 1e3,
+        })
+        .unwrap();
+    assert!(lumped.newmark(&[0.0; 2], 1e-5, (0.0, 0.0), none).is_err());
     for band in [(1.0, 1e7), (0.0, 100.0)] {
         let mut frame = guided(source(2e5, 4e6, band), 1);
         assert!(frame.newmark(&[0.0; 2], 1e-5, (0.0, 0.0), none).is_err());

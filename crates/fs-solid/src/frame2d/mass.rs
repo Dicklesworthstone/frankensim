@@ -1,9 +1,9 @@
 //! Reference-configuration inertia for the existing frame equations.
 //!
 //! Linear axial interpolation and cubic Hermite transverse interpolation
-//! integrate centerline translational kinetic energy. Nodal rotations carry
-//! generalized inertia through that interpolation; cross-section rotary
-//! inertia and configuration-dependent mass are not introduced.
+//! integrate centerline translational kinetic energy. The derivative of the
+//! transverse interpolation integrates supplied cross-section rotary inertia
+//! (Rayleigh beam kinematics). Configuration-dependent mass is not introduced.
 
 use super::{Frame2d, SolidError};
 use fs_la::factor::{Cholesky, cholesky};
@@ -13,9 +13,11 @@ mod trace;
 /// Element inertia selected when the frame is constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameMassFormulation {
-    /// Half the member mass at each endpoint's translational DOFs.
+    /// Half the member mass at each endpoint's translational DOFs and half any
+    /// supplied section spin inertia at its rotational DOF.
     Lumped,
-    /// Consistent Euler–Bernoulli mass in the undeformed reference frame.
+    /// Consistent mass in the undeformed reference frame, including supplied
+    /// sectional rotary inertia with the Euler–Bernoulli slope kinematics.
     /// Appropriate to linear or moderate-rotation vibration; it does not
     /// provide geometrically exact moving-frame inertia.
     ConsistentReference,
@@ -280,6 +282,24 @@ impl Frame2d {
             for i in 0..4 {
                 for j in 0..4 {
                     local[transverse[i]][transverse[j]] = member_mass * bending[i][j] / 420.0;
+                }
+            }
+            if e.rotary_inertia_per_length > 0.0 {
+                // With theta = dv/dx, section spin energy is
+                // 1/2 * integral(rho*I*(d(v_dot)/dx)^2 dx). Integrating the
+                // Hermite derivatives exactly adds this PSD block; diagonal
+                // nodal spin alone would discard its translation cross terms.
+                let rotary = [
+                    [36.0, 3.0 * l, -36.0, 3.0 * l],
+                    [3.0 * l, 4.0 * l * l, -3.0 * l, -l * l],
+                    [-36.0, -3.0 * l, 36.0, -3.0 * l],
+                    [3.0 * l, -l * l, -3.0 * l, 4.0 * l * l],
+                ];
+                for i in 0..4 {
+                    for j in 0..4 {
+                        local[transverse[i]][transverse[j]] +=
+                            (e.rotary_inertia_per_length / l) * rotary[i][j] / 30.0;
+                    }
                 }
             }
             let mut transform = [[0.0; 6]; 6];

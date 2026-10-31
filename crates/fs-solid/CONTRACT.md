@@ -2200,6 +2200,16 @@ added point masses remain diagonal. `Frame2d::new` retains the original
 lumped default, and a model with only nodal mass retains the diagonal path
 even when consistent element inertia is selected.
 
+Cross-section rotary inertia uses the same owner: material members derive
+`sum(rho I)` from each original layer's density and centroidal area moment,
+including the layer's own material state. `add_element_with_rotary_inertia`
+accepts an explicit section mass moment per length [kg m] for raw-coefficient
+members; `add_element` retains its declared zero-section-spin approximation.
+Consistent mass integrates `rho I (d(v_dot)/dx)^2` exactly with the Hermite
+slope (Rayleigh beam kinematics), including its endpoint and translation-spin
+cross terms. Endpoint lumping assigns half the section spin inventory to each
+node. Neither path counts centerline orbital inertia a second time.
+
 One reference mass owner supplies the generalized vibration pencil, the
 initial acceleration solve, every Newmark inertial residual/tangent, Rayleigh
 mass damping, uniform-base excitation, kinetic energy and support reactions.
@@ -2213,7 +2223,7 @@ damping and applied loads, including the initial endpoint.
 
 This is fixed reference-configuration inertia for linear or moderate-rotation
 vibration. It does not include configuration-dependent mass, centrifugal or
-gyroscopic terms, or cross-section rotary inertia. Distributed body loads are
+gyroscopic terms, or shear deformation. Distributed body loads are
 projected through the reference interpolation; one force-based element does
 not certify spatial convergence of dynamic stress or distributed-load section
 recovery. The existing dense building-scale solver and constitutive/kinematic
@@ -2226,6 +2236,11 @@ two-coordinate history against independently solved generalized eigenvalues,
 and unchanged nodal-only behavior. The one-element first bending-frequency
 error falls from about 30% for endpoint lumping to below 0.5% with consistent
 mass; higher-mode accuracy still requires member refinement.
+Additional G0/G1 tests compare section spin against independent slope
+quadrature, exact rigid-body rotational inertia and the analytic simply
+supported Rayleigh spectrum under mesh refinement. Source-layer tests check
+the full density-weighted spin inventory and its effect on the original
+Newmark trajectory.
 
 ## Signed, mass-normalized frame modes and participation
 

@@ -34,6 +34,130 @@ fn dot(x: &[f64], y: &[f64]) -> f64 {
 }
 
 #[test]
+fn g1_section_spin_matches_independent_quadrature_and_rigid_rotation() {
+    let line_spin = 0.17 * MU;
+    for angle in [0.0_f64, 0.61, 1.3] {
+        let (c, s) = (angle.cos(), angle.sin());
+        let build = |spin| {
+            let mut frame = Frame2d::with_mass_formulation(
+                Geometry::Linear,
+                FrameMassFormulation::ConsistentReference,
+            );
+            let a = frame.add_node(0.0, 0.0);
+            let b = frame.add_node(L * c, L * s);
+            frame
+                .add_element_with_rotary_inertia(a, b, 5, MU, spin, &section)
+                .unwrap();
+            frame
+        };
+        let centerline = build(0.0);
+        let complete = build(line_spin);
+        let rotation = [0.0, 0.0, 1.0, -L * s, L * c, 1.0];
+        let angular_force = complete.inertial_forces(&rotation).unwrap();
+        let expected = MU * L.powi(3) / 3.0 + line_spin * L;
+        assert!((dot(&rotation, &angular_force) - expected).abs() < 1e-12 * expected);
+
+        // Three-point Gauss integration is exact for the squared quadratic
+        // slope velocity, independent of the closed-form element matrix.
+        let r = (3.0_f64 / 5.0).sqrt();
+        for velocity in [
+            [0.7, -1.2, 0.0, 0.7, -1.2, 0.0],
+            [0.3, -0.7, 1.1, -0.2, 0.8, -0.9],
+            [0.0, 0.0, 1.0, 0.0, 0.0, -1.0],
+        ] {
+            let vi = -s * velocity[0] + c * velocity[1];
+            let vj = -s * velocity[3] + c * velocity[4];
+            let mut exact = 0.0;
+            for (xi, weight) in [
+                (0.5 * (1.0 - r), 5.0 / 18.0),
+                (0.5, 4.0 / 9.0),
+                (0.5 * (1.0 + r), 5.0 / 18.0),
+            ] {
+                let slope = 6.0 * xi * (1.0 - xi) * (vj - vi) / L
+                    + (1.0 - 4.0 * xi + 3.0 * xi * xi) * velocity[2]
+                    + (3.0 * xi * xi - 2.0 * xi) * velocity[5];
+                exact += 0.5 * line_spin * L * weight * slope * slope;
+            }
+            let original = centerline.inertial_forces(&velocity).unwrap();
+            let updated = complete.inertial_forces(&velocity).unwrap();
+            let added = 0.5 * (dot(&velocity, &updated) - dot(&velocity, &original));
+            assert!(
+                (added - exact).abs() < 2e-12 * exact.max(1.0),
+                "{added} versus {exact}"
+            );
+        }
+    }
+}
+
+#[test]
+fn g1_rayleigh_beam_modes_converge_to_the_distributed_spin_solution() {
+    // For simply supported Rayleigh beams, sin(k*x) remains an exact mode:
+    // omega^2 = EI*k^4 / (mu + rhoI*k^2). No shear-deformation claim is made.
+    let line_spin = 0.002 * MU * L * L;
+    let exact = [1.0, 2.0].map(|n| {
+        let k = n * std::f64::consts::PI / L;
+        (E * I * k.powi(4) / (MU + line_spin * k * k)).sqrt()
+    });
+    let mut previous = [f64::INFINITY; 2];
+    for elements in [2, 4, 8, 16] {
+        let mut frame = Frame2d::with_mass_formulation(
+            Geometry::Linear,
+            FrameMassFormulation::ConsistentReference,
+        );
+        for node in 0..=elements {
+            frame.add_node(L * node as f64 / elements as f64, 0.0);
+            frame.fix(node, [true, node == 0 || node == elements, false]);
+            if node > 0 {
+                frame
+                    .add_element_with_rotary_inertia(node - 1, node, 5, MU, line_spin, &section)
+                    .unwrap();
+            }
+        }
+        let frequencies = frame.natural_frequencies().unwrap();
+        for mode in 0..2 {
+            let error = (frequencies[mode] / exact[mode] - 1.0).abs();
+            assert!(
+                error < previous[mode],
+                "mesh {elements}, mode {mode}, error {error}"
+            );
+            previous[mode] = error;
+        }
+    }
+    assert!(previous.iter().all(|e| *e < 2e-5), "{previous:?}");
+}
+
+#[test]
+fn g0_lumped_spin_and_invalid_member_inertia_preserve_inventory() {
+    let line_spin = 3.0;
+    let mut frame = Frame2d::new(Geometry::Linear);
+    frame.add_node(0.0, 0.0);
+    frame.add_node(L, 0.0);
+    frame
+        .add_element_with_rotary_inertia(0, 1, 5, MU, line_spin, &section)
+        .unwrap();
+    let acceleration = [0.0, 0.0, 2.0, 0.0, 0.0, -3.0];
+    let before = frame.inertial_forces(&acceleration).unwrap();
+    assert_eq!(
+        before,
+        [0.0, 0.0, line_spin * L, 0.0, 0.0, -1.5 * line_spin * L]
+    );
+    for (mass, spin) in [
+        (MU, -1.0),
+        (MU, f64::NAN),
+        (MU, f64::INFINITY),
+        (0.0, 1.0),
+        (MU, f64::MAX),
+    ] {
+        assert!(
+            frame
+                .add_element_with_rotary_inertia(0, 1, 5, mass, spin, &section)
+                .is_err()
+        );
+        assert_eq!(frame.inertial_forces(&acceleration).unwrap(), before);
+    }
+}
+
+#[test]
 fn consistent_mass_integrates_rigid_translation_and_rotation() {
     for angle in [0.0_f64, 0.61, 1.3] {
         let mut frame = Frame2d::with_mass_formulation(

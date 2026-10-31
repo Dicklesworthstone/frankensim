@@ -166,6 +166,9 @@ pub struct FrameElement {
     pub j: usize,
     /// Reference mass per unit length, integrated by the frame mass formulation.
     pub mass_per_length: f64,
+    /// Cross-section mass moment per length about the out-of-plane centroidal
+    /// axis [kg m]. Kept separate from the centerline's orbital inertia.
+    rotary_inertia_per_length: f64,
     material_section: Option<ConcentricElasticSection>,
     viscous_section: Option<FrameViscousSection>,
     sections: Vec<SectionModel>,
@@ -529,8 +532,9 @@ impl Frame2d {
     }
 
     /// Create a frame with a fixed element-inertia formulation. Consistent mass
-    /// uses the original geometry and Euler–Bernoulli interpolation; it does not
-    /// rotate with a deformed chord or include cross-section rotary inertia.
+    /// uses the original geometry and Euler–Bernoulli interpolation, including
+    /// supplied cross-section rotary inertia (Rayleigh beam kinematics). It
+    /// does not rotate with a deformed chord.
     #[must_use]
     pub fn with_mass_formulation(
         geometry: Geometry,
@@ -578,7 +582,10 @@ impl Frame2d {
     }
 
     /// Add a force-based element with `np` Gauss–Lobatto sections built by
-    /// `make_section`; returns its index.
+    /// `make_section`; returns its index. This raw-coefficient path specifies
+    /// centerline mass only, with zero cross-section rotary inertia. Use
+    /// [`Self::add_element_with_rotary_inertia`] when the section mass moment is
+    /// known, or [`Self::add_material_element`] to derive it from source layers.
     ///
     /// # Errors
     /// [`SolidError::InvalidInput`] for unknown nodes, coincident nodes, an
@@ -591,6 +598,33 @@ impl Frame2d {
         mass_per_length: f64,
         make_section: &dyn Fn() -> SectionModel,
     ) -> Result<usize, SolidError> {
+        self.add_element_with_rotary_inertia(i, j, np, mass_per_length, 0.0, make_section)
+    }
+
+    /// Add a member with explicit centerline mass [kg/m] and cross-section
+    /// rotary inertia per length [kg m]. The latter is `integral(rho*y^2 dA)`
+    /// about the section's out-of-plane centroidal axis, not `rho*A*L^2/12`:
+    /// centerline orbital inertia is already integrated by the mass owner.
+    ///
+    /// Consistent mass integrates the squared derivative of the cubic Hermite
+    /// transverse velocity, retaining its translation/rotation cross terms.
+    /// Lumped mass places half the section spin inventory at each endpoint.
+    /// Neither path supplies shear deformation or finite-rotation inertia.
+    ///
+    /// # Errors
+    /// Invalid geometry, nodes, section count or negative/nonrepresentable
+    /// inertia. Positive rotary inertia requires positive line mass. Refusal
+    /// leaves the frame unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_element_with_rotary_inertia(
+        &mut self,
+        i: usize,
+        j: usize,
+        np: usize,
+        mass_per_length: f64,
+        rotary_inertia_per_length: f64,
+        make_section: &dyn Fn() -> SectionModel,
+    ) -> Result<usize, SolidError> {
         if i >= self.nodes.len() || j >= self.nodes.len() || i == j {
             return Err(SolidError::InvalidInput {
                 what: format!("element nodes ({i}, {j}) invalid"),
@@ -599,28 +633,53 @@ impl Frame2d {
         let (xi, w) = lobatto(np).ok_or_else(|| SolidError::InvalidInput {
             what: format!("{np} Lobatto points unsupported (3..=7)"),
         })?;
-        if !(mass_per_length.is_finite() && mass_per_length >= 0.0) {
+        if !(mass_per_length.is_finite() && mass_per_length >= 0.0)
+            || !rotary_inertia_per_length.is_finite()
+            || rotary_inertia_per_length < 0.0
+            || (mass_per_length == 0.0 && rotary_inertia_per_length != 0.0)
+        {
             return Err(SolidError::InvalidInput {
-                what: "mass per length must be finite and non-negative".into(),
+                what: "line mass and sectional rotary inertia must be finite and nonnegative; spin requires mass".into(),
             });
         }
         let (a, b) = (self.nodes[i], self.nodes[j]);
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let l0 = dx.hypot(dy);
-        if !(l0 > 0.0) {
+        if !l0.is_finite() || l0 <= 0.0 {
             return Err(SolidError::InvalidInput {
-                what: "zero-length element".into(),
+                what: "element length must be finite and positive".into(),
             });
         }
         let half = 0.5 * mass_per_length * l0;
+        let half_spin = 0.5 * rotary_inertia_per_length * l0;
+        if !half.is_finite()
+            || !half_spin.is_finite()
+            || (mass_per_length > 0.0 && half <= 0.0)
+            || (rotary_inertia_per_length > 0.0 && half_spin <= 0.0)
+            || [i, j].iter().any(|&node| {
+                [half, half, half_spin]
+                    .iter()
+                    .enumerate()
+                    .any(|(axis, value)| {
+                        let current = self.nodal_mass[3 * node + axis];
+                        !current.is_finite() || current < 0.0 || !(current + value).is_finite()
+                    })
+            })
+        {
+            return Err(SolidError::InvalidInput {
+                what: "member and accumulated nodal inertia must be representable".into(),
+            });
+        }
         for node in [i, j] {
             self.nodal_mass[3 * node] += half;
             self.nodal_mass[3 * node + 1] += half;
+            self.nodal_mass[3 * node + 2] += half_spin;
         }
         self.elements.push(FrameElement {
             i,
             j,
             mass_per_length,
+            rotary_inertia_per_length,
             material_section: None,
             viscous_section: None,
             sections: (0..np).map(|_| make_section()).collect(),
@@ -640,7 +699,8 @@ impl Frame2d {
 
     /// Add a perfectly bonded circular or concentric layered member using its
     /// original source-resolved section. The common section owner supplies
-    /// `EA = sum(E A)`, `EI = sum(E I)` and line mass `sum(rho A)` together;
+    /// `EA = sum(E A)`, `EI = sum(E I)`, line mass `sum(rho A)`, and sectional
+    /// rotary inertia per length `sum(rho I)` together;
     /// there are no independently authored stiffness or mass overrides.
     ///
     /// Every layer's source bundle and physical state remain attached to the
@@ -667,6 +727,7 @@ impl Frame2d {
         section: ConcentricElasticSection,
     ) -> Result<usize, SolidError> {
         use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
+        let mut rotary_inertia_per_length = 0.0;
         for (index, layer) in section.layers().iter().enumerate() {
             for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY] {
                 let refused = || SolidError::MaterialRefused {
@@ -682,6 +743,21 @@ impl Frame2d {
                         .is_some()
                 {
                     return Err(refused());
+                }
+                if name == DENSITY_PROPERTY {
+                    let contribution =
+                        property.value_si() * section.layer_integrals()[index].second_moment_m4();
+                    rotary_inertia_per_length += contribution;
+                    if !contribution.is_finite()
+                        || contribution <= 0.0
+                        || !rotary_inertia_per_length.is_finite()
+                    {
+                        return Err(SolidError::MaterialRefused {
+                            what: format!(
+                                "frame layer {index} has unrepresentable sectional rotary inertia"
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -715,7 +791,14 @@ impl Frame2d {
             ea: section.axial_stiffness_n(),
             ei: section.bending_stiffness_n_m2(),
         };
-        let element = self.add_element(i, j, np, section.line_density_kg_m(), &make_section)?;
+        let element = self.add_element_with_rotary_inertia(
+            i,
+            j,
+            np,
+            section.line_density_kg_m(),
+            rotary_inertia_per_length,
+            &make_section,
+        )?;
         self.elements[element].material_section = Some(section);
         Ok(element)
     }

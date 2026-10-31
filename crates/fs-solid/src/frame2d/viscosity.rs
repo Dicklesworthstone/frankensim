@@ -212,9 +212,10 @@ impl Frame2d {
     /// This is frozen-temperature, small-strain linear geometry, with no
     /// Maxwell history, creep, thermal feedback or radiation model. All frame
     /// members must remain linear elastic during a material-damped history.
-    /// Free coordinates must have positive reference inertia; choose consistent
-    /// member mass when free rotations need inertia. Static massless condensation
-    /// cannot represent a viscous first-order degree of freedom.
+    /// Free coordinates must have positive reference inertia. Source-defined
+    /// section spin also supplies rotational inertia in the lumped formulation;
+    /// massless raw members can still fail this admission. Static massless
+    /// condensation cannot represent a viscous first-order degree of freedom.
     ///
     /// The original source bands must cover DC through pi/dt and every native
     /// mode must be resolved below that Nyquist frequency. This admits the

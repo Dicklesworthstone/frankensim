@@ -222,11 +222,13 @@ fn material_inertia_and_stiffness_drive_the_same_newmark_trajectory() {
     for (density, young) in [(1000.0, 2e9), (4000.0, 2e9), (1000.0, 8e9)] {
         let mut frame = cantilever(&[section(density, young)]);
         // One free bending coordinate: guided tip, clamped base. The exact
-        // FE oscillator has k=12EI/L^3 and m=156*rho*A*L/420.
+        // FE oscillator has k=12EI/L^3 and
+        // m=156*rho*A*L/420 + 6*rho*I/(5*L), including section spin.
         frame.fix(1, [true, false, true]);
         let pi = std::f64::consts::PI;
         let k = 12.0 * young * pi * 0.02_f64.powi(4) / 4.0;
-        let m = 156.0 / 420.0 * density * pi * 0.02_f64.powi(2);
+        let m = 156.0 / 420.0 * density * pi * 0.02_f64.powi(2)
+            + 6.0 / 5.0 * density * pi * 0.02_f64.powi(4) / 4.0;
         let omega = (k / m).sqrt();
         let dt = 0.002 / omega;
         let mut force = vec![0.0; frame.ndof()];
@@ -246,6 +248,43 @@ fn material_inertia_and_stiffness_drive_the_same_newmark_trajectory() {
         }
         assert!(history.energy_balance_error() < 1e-8);
     }
+}
+
+#[test]
+fn g1_layered_material_includes_each_density_weighted_section_spin() {
+    let (inner, outer, length) = (0.01_f64, 0.02_f64, 0.3);
+    let source = ConcentricElasticSection::try_new(
+        0.0,
+        vec![
+            ConcentricMaterialLayer {
+                outer_radius_m: inner,
+                material: material(1000.0, 2e9, 300.0, None),
+            },
+            ConcentricMaterialLayer {
+                outer_radius_m: outer,
+                material: material(6000.0, 8e9, 400.0, None),
+            },
+        ],
+    )
+    .unwrap();
+    let mut frame =
+        Frame2d::with_mass_formulation(Geometry::Linear, FrameMassFormulation::ConsistentReference);
+    frame.add_node(0.0, 0.0);
+    frame.add_node(length, 0.0);
+    frame.add_material_element(0, 1, 5, source.clone()).unwrap();
+    let velocity = [0.0, 0.0, 1.0, 0.0, length, 1.0];
+    let momentum = frame.inertial_forces(&velocity).unwrap();
+    let pi = std::f64::consts::PI;
+    // The outer layer's density at 400 K is 3000, not the 300 K value 6000.
+    let line_mass = pi * (1000.0 * inner.powi(2) + 3000.0 * (outer.powi(2) - inner.powi(2)));
+    let line_spin = pi / 4.0 * (1000.0 * inner.powi(4) + 3000.0 * (outer.powi(4) - inner.powi(4)));
+    let actual: f64 = velocity.iter().zip(momentum).map(|(v, p)| v * p).sum();
+    near(
+        actual,
+        line_mass * length.powi(3) / 3.0 + line_spin * length,
+        1e-12,
+    );
+    assert_eq!(frame.material_section(0), Some(&source));
 }
 
 #[test]
