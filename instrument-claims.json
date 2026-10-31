@@ -176,7 +176,7 @@
         },
         {
           "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/wind-fracdelay-linear-vs-thiran.bakeoff (c997b03756525680): continuous-pitch POLICY decided \u2014 the current linear-frac law KEEPS the lane (clicks 1.53 vs Thiran 5.97; landing 5.3 vs 8.3 cents); naive time-varying Thiran REFUSED on the measured passivity law (5.6x energy pumping on fast ramps); stepped zipper baseline quantified (10.5 click). Trombone slide + voice articulation cite this receipt."
+          "ref": "crates/fs-couple/tests/receipts/wind-fracdelay-linear-vs-thiran.bakeoff (bb040973be8063dd): continuous-pitch POLICY decided \u2014 the current linear-frac law KEEPS the lane (clicks 1.53 vs Thiran 5.97; landing 9.9 vs 7.3 cents); naive time-varying Thiran REFUSED on the measured passivity law (5.6x energy pumping on fast ramps); stepped zipper baseline quantified (10.5 click). Trombone slide + voice articulation cite this receipt."
         }
       ],
       "budget_row": null,
@@ -461,7 +461,7 @@
       "evidence": [
         {
           "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff (f905d0552cc772d5): plane worst flare-peak residual >3x MM; KeepForSubset(plane-wave-char -> mute/debug + tone-hole wind bores, never the trumpet flare claim)"
+          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff (428252c1e4f6a0a3): plane and MM peaks differ by 3.22 cents at worst; KeepForSubset(plane-wave-char -> mute/debug + tone-hole wind bores, never the trumpet flare claim)"
         }
       ],
       "budget_row": null,
@@ -588,12 +588,12 @@
         },
         {
           "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff: MM is the flare authority (ladder settled 0.18 cents; plane misses 14.9)"
+          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff: plane and MM peaks differ by 3.22 cents at worst on this fixture (ladder settled 0.19 cents); this does not say the MM image is wrong or unneeded"
         }
       ],
       "budget_row": null,
       "corpus_refs": ["vvreg:acoustic-absent-trumpet-impedance"],
-      "notes": "Multimodal (m=0) TMM: reflection-matrix recursion (bounded under evanescence), in-crate dd-series Bessel + J1 roots (no transcribed constants; self-certified + independent quadrature oracles), Lommel junction projections, staircased flares. THE TRIGGER EXECUTED: plane-wave misses the trumpet-like flare's MM peak structure by 14.9 cents (>=8 authored) with the mode ladder settled at 0.18 cents N4->N5 and the staircase-density term disclosed at 6.7 cents (the first measure run caught a coarse-staircase artifact posing as a treble mode shift \u2014 both trigger arms therefore run on the fine staircase). X-Consist: the gate cites the LADDER, not a single N. v1 boundaries disclosed in CONTRACT: matched-mouth higher modes (tabulated bell load = zolja), per-mode loss through the lossy plane wavenumber, no tone holes, no mean flow. Green awaits measured-impedance brass gates (3ez8g.4.x)."
+      "notes": "Multimodal (m=0) TMM: reflection-matrix recursion (bounded under evanescence), in-crate dd-series Bessel + J1 roots (no transcribed constants; self-certified + independent quadrature oracles), Lommel junction projections, staircased flares. THE TRIGGER, RE-READ: plane-wave and MM peaks on the trumpet-like flare differ by 3.22 cents at worst, under the authored 8-cent floor, which was set from a reading with the wrong peak sign and stays on the record as an ignored failing test (frankensim-giuhr); this does not say the MM image is wrong or unneeded. The mode ladder is settled at 0.19 cents N4->N5 and the staircase-density term is disclosed at 0.47 cents (the first measure run caught a coarse-staircase artifact posing as a treble mode shift \u2014 both trigger arms therefore run on the fine staircase). X-Consist: the gate cites the LADDER, not a single N. v1 boundaries disclosed in CONTRACT: matched-mouth higher modes (tabulated bell load = zolja), per-mode loss through the lossy plane wavenumber, no tone holes, no mean flow. Green awaits measured-impedance brass gates (3ez8g.4.x)."
     },
     {
       "filling": "brass",
@@ -794,7 +794,7 @@
       ],
       "budget_row": null,
       "corpus_refs": ["vvreg:acoustic-absent-trumpet-impedance"],
-      "notes": "THE TRUMPET CLAIM, decided honestly (3ez8g.4.4): UNGATED. What holds: the emergent mechanism executes end to end (lock in the outward-striking band, tension walks partials, valves drop the series with no pitch input, slotting, c(T) within 2 cents of the sound-speed law); the MM image owns the flare per the committed bake-off; the bell load is baked and passive; every fixture input is provenance-labeled. What is MISSING for green, by name: (1) the measured trumpet-impedance corpus (absence row registered - the cents gate cannot run against nothing); (2) an ADJUDICATED listening receipt (committed one is Unadjudicated, supports_pass()==false); (3) a budget row for live_default (D25). No partial credit: machinery-complete is not claim-green."
+      "notes": "THE TRUMPET CLAIM, decided honestly (3ez8g.4.4): UNGATED. What holds: the emergent mechanism executes end to end (lock in the outward-striking band, tension walks partials, valves drop the series with no pitch input, slotting, c(T) within 2 cents of the sound-speed law); the committed bake-off measures plane and MM peaks 3.22 cents apart at worst on the flare fixture; the bell load is baked and passive; every fixture input is provenance-labeled. What is MISSING for green, by name: (1) the measured trumpet-impedance corpus (absence row registered - the cents gate cannot run against nothing); (2) an ADJUDICATED listening receipt (committed one is Unadjudicated, supports_pass()==false); (3) a budget row for live_default (D25). No partial credit: machinery-complete is not claim-green."
     },
     {
       "filling": "hammer-felt",

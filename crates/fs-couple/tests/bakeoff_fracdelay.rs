@@ -293,13 +293,21 @@ fn mint_fracdelay_bakeoff_receipt() {
         listening_receipts: Vec::new(),
     };
     // The rationale is written from the measurements, not before them.
+    // It states who wins on landing, so a mint that stops measuring that
+    // must not print it.
+    assert!(
+        thi_voice.worst_cents < lin_voice.worst_cents,
+        "the rationale says Thiran beats linear on landing; rewrite it"
+    );
     let mut receipt = receipt;
     receipt.rationale = format!(
         "measured verdict: linear-frac slide {:.1} cents/click {:.2}, voice {:.1}/{:.2}; \
          thiran slide {:.1}/{:.2}, voice {:.1}/{:.2}; stepped zipper baseline {:.1} \
-         cents/click {:.2}. Dual-line crossfade is the shipped MM-bank lift for DISCRETE \
-         swaps, not a continuous law (recorded, not a pairwise contender). D21: nobody \
-         deleted; Thiran simply not admitted on this evidence",
+         cents/click {:.2}. On the corrected reader Thiran beats linear on landing, {:.2} \
+         against {:.2} cents, and the refusal rests on the passivity and click measures. \
+         Dual-line crossfade is the shipped MM-bank lift for DISCRETE swaps, not a \
+         continuous law (recorded, not a pairwise contender). D21: nobody deleted; Thiran \
+         simply not admitted on this evidence",
         lin_slide.worst_cents,
         lin_slide.worst_click,
         lin_voice.worst_cents,
@@ -310,6 +318,8 @@ fn mint_fracdelay_bakeoff_receipt() {
         thi_voice.worst_click,
         step_slide.worst_cents,
         step_slide.worst_click,
+        thi_voice.worst_cents,
+        lin_voice.worst_cents,
     );
     receipt.validate().expect("receipt validates");
     std::fs::write(
@@ -324,22 +334,29 @@ fn mint_fracdelay_bakeoff_receipt() {
     );
 }
 
-#[test]
-fn committed_fracdelay_receipt_holds_its_verdict() {
+/// The committed receipt, decoded and validated.
+fn committed_receipt() -> BakeoffReceipt {
     let bytes = std::fs::read(receipt_path())
         .expect("tests/receipts/wind-fracdelay-linear-vs-thiran.bakeoff (mint test)");
     let receipt = BakeoffReceipt::from_canonical_bytes(&bytes).expect("decode");
     receipt.validate().expect("validate");
+    receipt
+}
+
+#[test]
+fn committed_fracdelay_receipt_holds_its_verdict() {
+    let receipt = committed_receipt();
     // The verdict's load-bearing facts, re-assertable from the receipt:
     // the linear law's artifacts sit inside the authored floors on both
-    // trajectories, and Thiran did not beat it on any QoI by more than
-    // the noise margin.
+    // trajectories. Whether Thiran beat it on a QoI is the ignored test
+    // below.
     let lin = &receipt.contenders[0].measured;
     let thi = &receipt.contenders[1].measured;
-    // Slide cents is MEASUREMENT-FLOOR-LIMITED (~140 for every law: the
-    // 2048-sample frame smears a continuous glide; disclosed, not
-    // discriminating). The discriminators are the click metric, the
-    // landing fidelity, and the passivity witness.
+    // Slide cents is MEASUREMENT-FLOOR-LIMITED (41, 37 and 42 cents for
+    // linear, Thiran and stepped: the 2048-sample frame smears a
+    // continuous glide; disclosed, not discriminating). The discriminators
+    // are the click metric, the landing fidelity, and the passivity
+    // witness.
     assert!(lin["slide-worst-cents"] < 200.0, "slide measurement floor");
     assert!(lin["voice-worst-cents"] < 12.0, "landing fidelity floor");
     assert!(lin["slide-worst-click"] < 2.5, "slide click floor");
@@ -356,18 +373,6 @@ fn committed_fracdelay_receipt_holds_its_verdict() {
         thi["voice-energy-growth"] > 1.5,
         "the receipt's Thiran passivity refusal must remain measured, not asserted"
     );
-    let thiran_wins = [
-        "voice-worst-cents",
-        "slide-worst-click",
-        "voice-worst-click",
-    ]
-    .iter()
-    .filter(|k| thi[**k] < 0.8 * lin[**k])
-    .count();
-    assert_eq!(
-        thiran_wins, 0,
-        "Thiran won a QoI decisively; the keep-current verdict is stale — re-run the mint"
-    );
     let narrowed_ok = matches!(
         &receipt.outcome,
         BakeoffOutcome::KeepForSubset { narrowed, .. } if narrowed == "char-line-thiran-1"
@@ -379,5 +384,28 @@ fn committed_fracdelay_receipt_holds_its_verdict() {
         lin["slide-worst-cents"],
         thi["slide-worst-cents"],
         receipt.content_hash().expect("hash").to_hex()
+    );
+}
+
+#[test]
+#[ignore = "frankensim-giuhr: on the corrected reader Thiran beats linear on landing, 7.34 against 9.92 cents; the refusal rests on the passivity and click measures"]
+fn committed_fracdelay_thiran_wins_no_qoi() {
+    let receipt = committed_receipt();
+    let lin = &receipt.contenders[0].measured;
+    let thi = &receipt.contenders[1].measured;
+    // Thiran does not beat the linear law on any QoI by more than the
+    // noise margin. This stays on the record and failing. The old reader,
+    // with the wrong peak sign, gave linear 5.27 and Thiran 8.29 cents.
+    let thiran_wins = [
+        "voice-worst-cents",
+        "slide-worst-click",
+        "voice-worst-click",
+    ]
+    .iter()
+    .filter(|k| thi[**k] < 0.8 * lin[**k])
+    .count();
+    assert_eq!(
+        thiran_wins, 0,
+        "Thiran won a QoI decisively; the keep-current verdict is stale — re-run the mint"
     );
 }

@@ -115,9 +115,9 @@ fn shared_cards_digest() -> fs_blake3::ContentHash {
     hash_domain("org.frankensim.fs-couple.brass-bakeoff-cards.v1", &bytes)
 }
 
-/// Flare impedance peaks for a mode count, fine staircase (parabolic
-/// refined) over the mm-005 band.
-fn flare_peaks_hz(n_modes: usize) -> Vec<f64> {
+/// Flare impedance peaks for a mode count and staircase density
+/// (parabolic refined) over the mm-005 band.
+fn flare_peaks_hz(n_modes: usize, extra_slices: usize) -> Vec<f64> {
     let gas = air20();
     let duct = flare();
     let mut mags = Vec::new();
@@ -131,7 +131,7 @@ fn flare_peaks_hz(n_modes: usize) -> Vec<f64> {
             LossModel::WideTube,
             Termination::FlangedOpen,
             n_modes,
-            2,
+            extra_slices,
         )
         .expect("authority")
         .plane_impedance;
@@ -210,10 +210,26 @@ fn loop_lock_hz(n_modes: usize) -> f64 {
 
 #[test]
 #[ignore = "minting run: re-measures both contenders and prints fresh receipt bytes"]
+#[allow(clippy::too_many_lines)] // one coherent minting run
 fn mint_brass_bakeoff_receipt() {
-    let mm_peaks = flare_peaks_hz(4);
-    let plane_peaks = flare_peaks_hz(1);
+    let mm_peaks = flare_peaks_hz(4, 2);
+    let plane_peaks = flare_peaks_hz(1, 2);
     let n_cmp = mm_peaks.len().min(plane_peaks.len()).min(10);
+    // The receipt's prose is written from these readings, the same worst
+    // cents mm-005 takes over every shared peak.
+    let worst_against_mm = |other: &[f64]| -> (f64, f64) {
+        mm_peaks
+            .iter()
+            .zip(other)
+            .map(|(mm, peak)| ((1200.0 * (mm / peak).log2()).abs(), *mm))
+            .fold(
+                (0.0, 0.0),
+                |worst, row| if row.0 > worst.0 { row } else { worst },
+            )
+    };
+    let (plane_worst, plane_worst_hz) = worst_against_mm(&plane_peaks);
+    let (mode_drift, _) = worst_against_mm(&flare_peaks_hz(5, 2));
+    let (slice_term, _) = worst_against_mm(&flare_peaks_hz(4, 1));
     let mm_lock = loop_lock_hz(3);
     let plane_lock = loop_lock_hz(1);
     let mut reference = BTreeMap::new();
@@ -244,9 +260,10 @@ fn mint_brass_bakeoff_receipt() {
                 steps: 641,
                 solver_iterations: 0,
                 failure_modes: vec![
-                    "staircase density is the dominant discretization term (6.7 cents at \
-                     default density; ladder disclosed)"
-                        .to_string(),
+                    format!(
+                        "staircase density is the dominant discretization term \
+                         ({slice_term:.2} cents at default density; ladder disclosed)"
+                    ),
                     "m=0 axisymmetric only; matched-mouth higher modes at the bell".to_string(),
                 ],
             },
@@ -258,9 +275,11 @@ fn mint_brass_bakeoff_receipt() {
                 steps: 641,
                 solver_iterations: 0,
                 failure_modes: vec![
-                    "misses the flare's mode-conversion peak structure (14.9 cents at the \
-                     ~400 Hz peak; the brightness mechanism is absent)"
-                        .to_string(),
+                    format!(
+                        "carries no mode conversion; its peaks differ from the multimodal \
+                         image's by {plane_worst:.2} cents at worst on this fixture (at the \
+                         {plane_worst_hz:.0} Hz peak)"
+                    ),
                     "analytic radiation fits carry the ka <= 1 ceiling without a tabulated \
                      load"
                         .to_string(),
@@ -273,10 +292,15 @@ fn mint_brass_bakeoff_receipt() {
                      claim"
                 .to_string(),
         },
-        rationale: "the MM image is the flare authority (its own convergence ladder settles \
-                    at 0.18 cents while plane misses by 14.9); plane-wave stays on the menu \
-                    for the claims it still owns (D21: narrowed, never deleted)"
-            .to_string(),
+        rationale: format!(
+            "on this fixture the plane-wave and multimodal peaks differ by {plane_worst:.2} \
+             cents at worst, with the multimodal ladder settled to {mode_drift:.2} cents \
+             from N=4 to N=5. This does not say the multimodal image is wrong or unneeded. \
+             The scoping in this outcome was set on a 14.9 cent reading, which was a sign \
+             error; the measured value is now {plane_worst:.2} cents, and the scoping has not \
+             been re-decided here. Plane-wave stays on the menu for the claims it still owns \
+             (D21: narrowed, never deleted)"
+        ),
         listening_receipts: Vec::new(),
     };
     receipt.validate().expect("receipt validates");

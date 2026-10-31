@@ -790,10 +790,11 @@ pipe `Z_in = +i Zc cot(kL)`.
     regimes; the junction projection matrix matches independent in-test
     quadrature to 5e-9; a sudden expansion's evanescent modes add a
     purely reactive, convergent impedance shift; and on a trumpet-like
-    flare the plane-wave image misses the multimodal peak structure by
-    >= 8 cents (measured 14.9) while the mode ladder is settled at the
-    top (N=4 vs N=5 <= 1 cent, measured 0.18) — THE recorded trigger for
-    the multimodal expansion, executed (mm-001..mm-005).
+    flare the mode ladder is settled at the top (N=4 vs N=5 <= 1 cent,
+    measured 0.19) while the plane-wave and multimodal peaks differ by
+    3.22 cents at worst (mm-001..mm-005). The recorded 8-cent trigger
+    floor was set from a reading with the wrong peak sign; it stays on
+    the record as the ignored `mm_005_plane_wave_trigger_floor`, failing.
 
 12. Tabulated-load gates (bead zolja): admission refuses short,
     unsorted, non-finite, and non-passive tables; interpolation is
@@ -1063,7 +1064,7 @@ divergence-theorem closure/orientation pin on the lathe).
   exact one-shot `e^{±ikx}/x` 2-port; a wall follows the
   local radius and slant, so that path slices too). The multimodal
   expansion for strongly flaring horns now EXISTS (`modal` module;
-  trigger executed: >= 8 cents of plane-wave peak error on a
+  plane-wave and multimodal peaks differ by 3.22 cents at worst on a
   trumpet-like flare). Its own v1 boundaries: m = 0 modes only
   (axisymmetric bores and sources), no tone holes, no mean flow (the
   same quiescent/amplitude boundary as the plane path above; escalation
