@@ -136,7 +136,7 @@ impl SphericalStandardAtmosphere {
     /// profile's height domain; it supplies no atmosphere there. No fictitious
     /// rotating-frame forces are included.
     pub fn gravity_at(&self, frame: u64, position_world_m: Vec3) -> Result<(Vec3, f64)> {
-        self.gravity.sample(frame, position_world_m)
+        Ok(self.gravity.sample(frame, position_world_m)?)
     }
 }
 

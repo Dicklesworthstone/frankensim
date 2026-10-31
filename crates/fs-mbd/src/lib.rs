@@ -30,6 +30,8 @@ pub mod davinci;
 /// Coupled normal/Coulomb events on native rigid-body momenta.
 pub mod frictional_impact;
 pub mod goddard;
+/// Conservative uniform and spatial gravity on the native rigid-body state.
+pub mod gravity;
 pub mod howe;
 pub mod otis;
 pub mod otto;

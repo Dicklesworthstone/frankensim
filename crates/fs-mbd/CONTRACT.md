@@ -1,5 +1,40 @@
 # CONTRACT: fs-mbd
 
+## Spatial gravity on native rigid-body dynamics
+
+`gravity::CentralGravity` owns frame-checked Newtonian acceleration and specific
+potential, with caller-supplied source position and G M. Rocket environments
+reuse this owner. `UniformGravity` binds the existing acceleration to an explicit
+potential datum. Neither infers Earth, a radius, softening or a rotating frame.
+
+`gravity::step_in_field` uses the native `step_verlet_with` endpoint-load map
+for conservative force/torque half-kicks and samples the actual
+endpoint pose. It returns the native state/diagnostic receipt with the same
+field's potential. Translation is velocity Verlet; no separate mass, attitude
+or momentum owner is introduced. Uniform-gravity ballistics remain exact up to
+roundoff; resolved Kepler motion has second-order phase/energy error. The
+stationary conservative map is symplectic without an additional nonconservative
+wrench; this is not exact energy conservation or an unconditional stability bound.
+Cancellation is polled before sampling, before/after drift and before publication;
+failures return no partially accepted state.
+
+The explicitly selected quadrupole model uses the full existing COM inertia.
+Its potential `-mu*m/r + mu*(3*n.I.n-tr(I))/(2*r^3)`, torque and translational
+force are derivatives of one energy. The orbital force correction is retained
+alongside gravity-gradient torque, preserving total angular momentum about the
+source. No per-sample tensor decomposition or heap allocation is required.
+The caller supplies a COM bounding radius and maximum radius/distance ratio;
+necessary mass-radius consistency and endpoint limits are checked. This is a
+second-mass-moment approximation, not a certified truncation error, resolved
+finite-body gravity, self-gravity, source recoil, J2 or relativistic model.
+
+`tests/gravity.rs` checks independent potential derivatives, full rotated inertia,
+two-mass multipole refinement, exact uniform recovery, eccentric Kepler refinement
+and long-time energy behavior, tidal angular-momentum balance, singular/frame/
+extent refusal and late cancellation (G1/G2/G3). Endpoint samples do not certify
+that a trajectory avoids the source or the model boundary between samples;
+the caller must resolve close approaches and provide required event admission.
+
 ## Configuration-dependent loads on the original rigid integrator
 
 `RigidBodyIntegrator::step_verlet_with` composes two endpoint force/torque

@@ -11,6 +11,8 @@ pub mod spherical;
 
 use fs_material::{MaterialError, fluid_transport::FluidTransport, gas::GasState};
 use fs_mbd::{UnitQuaternion, Vec3};
+/// Shared native Newtonian source, also usable by rigid-body gravity dynamics.
+pub use fs_mbd::gravity::CentralGravity;
 
 /// Invalid frame, coordinate, constitutive state or unrepresentable load.
 #[derive(Clone, Debug, PartialEq)]
@@ -19,6 +21,8 @@ pub enum FlightEnvironmentError {
     Invalid(&'static str),
     /// Original gas owner refused its numerical state or transport query.
     Material(MaterialError),
+    /// The shared gravity owner refused its frame, source or arithmetic.
+    Gravity(fs_mbd::gravity::GravityError),
 }
 impl core::fmt::Display for FlightEnvironmentError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -29,6 +33,11 @@ impl std::error::Error for FlightEnvironmentError {}
 impl From<MaterialError> for FlightEnvironmentError {
     fn from(value: MaterialError) -> Self {
         Self::Material(value)
+    }
+}
+impl From<fs_mbd::gravity::GravityError> for FlightEnvironmentError {
+    fn from(value: fs_mbd::gravity::GravityError) -> Self {
+        Self::Gravity(value)
     }
 }
 type Result<T> = std::result::Result<T, FlightEnvironmentError>;
@@ -215,50 +224,6 @@ impl RelativeAirflow {
             torque_body_n_m: torque,
             relative_power_w: power,
         })
-    }
-}
-
-/// Explicit point-mass gravity source in a caller-declared inertial frame.
-/// No terrestrial radius, reference gravity, rotation or J2 is inferred.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CentralGravity {
-    frame: u64,
-    center_world_m: Vec3,
-    gravitational_parameter_m3_s2: f64,
-}
-impl CentralGravity {
-    /// Bind the source position and its positive gravitational parameter G M.
-    pub fn new(
-        frame: u64,
-        center_world_m: Vec3,
-        gravitational_parameter_m3_s2: f64,
-    ) -> Result<Self> {
-        if !center_world_m.is_finite()
-            || !gravitational_parameter_m3_s2.is_finite()
-            || gravitational_parameter_m3_s2 <= 0.0
-        {
-            return Err(invalid("central gravity requires finite center and positive parameter"));
-        }
-        Ok(Self { frame, center_world_m, gravitational_parameter_m3_s2 })
-    }
-
-    /// Return acceleration [m/s²] and specific potential relative to infinity [J/kg].
-    /// Repeated division avoids overflowing squared/cubed-radius intermediates.
-    pub fn sample(&self, frame: u64, position_world_m: Vec3) -> Result<(Vec3, f64)> {
-        if frame != self.frame {
-            return Err(invalid("gravity and vehicle must share the declared inertial frame"));
-        }
-        let displacement = position_world_m.sub(self.center_world_m);
-        let radius = norm(displacement);
-        if !displacement.is_finite() || !radius.is_finite() || radius <= 0.0 {
-            return Err(invalid("gravity query requires finite position away from its center"));
-        }
-        let potential = -self.gravitational_parameter_m3_s2 / radius;
-        let acceleration = displacement.scale(1.0 / radius).scale(potential / radius);
-        if !potential.is_finite() || !acceleration.is_finite() {
-            return Err(invalid("central gravitational potential or acceleration is unrepresentable"));
-        }
-        Ok((acceleration, potential))
     }
 }
 
