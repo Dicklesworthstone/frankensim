@@ -7,6 +7,10 @@
 //! composing optical elements; this module does not silently rotate them.
 //! Incoherent light is represented by Stokes vectors, not Jones amplitudes.
 
+/// Polarized Fresnel, spectral materials and native smooth-sampler integration.
+#[cfg(feature = "tracer")]
+pub mod dielectric;
+
 /// A physical (possibly partially polarized) incoherent light state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stokes {
