@@ -11,6 +11,37 @@ use fs_exec::Cx;
 use fs_ivl::Interval;
 use std::collections::{HashMap, HashSet};
 
+impl MassScatteringSpectrum {
+    /// Enclose the retained tabulated, Rayleigh, or combined mass spectrum.
+    /// This shares the original coefficient owner with the contraction bound;
+    /// no fitting of a wavelength-dependent law into a gray coefficient occurs.
+    pub(crate) fn coefficient_enclosure(
+        &self,
+        wavelength: f64,
+    ) -> Result<Interval, VolumeTransportError> {
+        let mut value = self.spectrum.coefficient_enclosure(wavelength)?;
+        if let Some(reference) = self.rayleigh_reference_nm {
+            if value.hi() != 0.0 {
+                let ratio = Interval::point(reference) / Interval::point(wavelength);
+                let square = ratio * ratio;
+                value = value * square * square;
+            }
+        }
+        if let Some((reference, coefficient)) = self.rayleigh_addend {
+            if coefficient != 0.0 {
+                let ratio = Interval::point(reference) / Interval::point(wavelength);
+                let square = ratio * ratio;
+                let extra = Interval::point(coefficient) * square * square;
+                value = if value.hi() == 0.0 { extra } else { value + extra };
+            }
+        }
+        if !value.lo().is_finite() || !value.hi().is_finite() {
+            return Err(VolumeTransportError::Unrepresentable);
+        }
+        Ok(Interval::new(value.lo().max(0.0), value.hi()))
+    }
+}
+
 impl ScatteringGrid<'_> {
     /// Maximum ideal scattering gain over the complete retained spectral laws.
     ///
@@ -117,17 +148,8 @@ fn max_albedo_upper(
         .chain(scattering.knots().iter())
     {
         let a = coefficient_enclosure(absorption, wavelength);
-        let mut s = coefficient_enclosure(&scattering.spectrum, wavelength);
-        if let Some(reference) = scattering.rayleigh_reference_nm {
-            let ratio = Interval::point(reference) / Interval::point(wavelength);
-            let square = ratio * ratio;
-            s = s * square * square;
-        }
-        if let Some((reference, coefficient)) = scattering.rayleigh_addend {
-            let ratio = Interval::point(reference) / Interval::point(wavelength);
-            let square = ratio * ratio;
-            s = s + Interval::point(coefficient) * square * square;
-        }
+        let s = scattering.coefficient_enclosure(wavelength)
+            .unwrap_or(Interval::new(0.0, f64::INFINITY));
         if s.hi() == 0.0 {
             // Includes an exact zero-extinction knot. Adjacent positive
             // endpoints also cover the limiting albedo on either side.
@@ -146,29 +168,8 @@ fn max_albedo_upper(
 }
 
 fn coefficient_enclosure(spectrum: &MassAbsorptionSpectrum, wavelength: f64) -> Interval {
-    let knots = &spectrum.knots[..spectrum.count];
-    let upper = knots.partition_point(|&(lambda, _)| lambda < wavelength);
-    if upper < knots.len() && knots[upper].0 == wavelength {
-        return Interval::point(knots[upper].1);
-    }
-    // Callers use wavelengths from admitted tables with the same endpoints.
-    let (left, a) = knots[upper - 1];
-    let (right, b) = knots[upper];
-    if a == b {
-        return Interval::point(a);
-    }
-    let fraction = (Interval::point(wavelength) - Interval::point(left))
-        / (Interval::point(right) - Interval::point(left));
-    let fraction = unit_interval(fraction);
-    let complement = unit_interval(Interval::point(1.0) - fraction);
-    let value = Interval::point(a) * complement + Interval::point(b) * fraction;
-    // The represented linear law is a convex combination of its knots. This
-    // exact range also removes spurious negative endpoints near underflow.
-    Interval::new(value.lo().max(a.min(b)), value.hi().min(a.max(b)))
-}
-
-fn unit_interval(value: Interval) -> Interval {
-    Interval::new(value.lo().max(0.0), value.hi().min(1.0))
+    spectrum.coefficient_enclosure(wavelength)
+        .unwrap_or(Interval::new(0.0, f64::INFINITY))
 }
 
 fn pi_enclosure() -> Interval {
@@ -585,4 +586,17 @@ mod tests {
             }
         });
     }
+
+    #[test]
+    fn direct_extinction_encloses_the_retained_linear_plus_molecular_sum() {
+        let mut spectrum = MassScatteringSpectrum::constant(0.125).unwrap();
+        spectrum.rayleigh_addend = Some((400.0, 0.5));
+        for (lambda, expected) in [(400.0, 0.625), (600.0, 145.0 / 648.0)] {
+            let interval = spectrum.coefficient_enclosure(lambda).unwrap();
+            assert!(interval.lo() <= expected && interval.hi() >= expected);
+            assert!(interval.width() < 1e-13);
+        }
+        assert_eq!(spectrum.coefficient_enclosure(800.0), Err(VolumeTransportError::Wavelength));
+    }
+
 }

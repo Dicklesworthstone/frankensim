@@ -22,6 +22,9 @@ mod cells;
 pub mod deposition;
 /// Physical emitting-cell direction proposals and their solid-angle density.
 pub mod emission;
+/// Outward bounds on direct transport through the retained physical cells.
+#[cfg(feature = "photometry")]
+pub mod enclosure;
 mod mixture;
 pub use mixture::{MAX_OPTICAL_MIXTURE_COMPONENTS, OpticalMixtureBudget};
 mod palette;
