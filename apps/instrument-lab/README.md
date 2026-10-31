@@ -483,12 +483,30 @@ jet does not provide measured oboe, saxophone or flute qualification.
 
 ### Material reeds and compliant walls
 
-The **Material reeds** starters open the original paired-blade descriptions.
+The seven **Material reed** starters load their original performance, editable
+source tables, material manifests and explicit native material-card identities.
+The existing shared starter loader and native material compiler handle them
+exactly as they handle string sources. With `FSIM_MATDB_COMPILER` configured,
+choose a starter and **Render WAV**; use **Edit text…** on an attached material
+table to change density, stiffness, viscosity or relaxation data, then render
+again. **Save experiment** retains the exact performance, source bytes and
+compilation bindings for reopening or comparison. Native model and source
+validity limits still apply. These are manufactured integration specimens;
+the included material identities do not promote them to measured cane data.
+
+The paired-blade descriptions retain their original physical owners.
 `paired-walls.performance` uses `blade.matpack` and `wall.matpack`; each blade's
 mesh, thickness regions and source material drive motion and swept flow while
 the material walls return pressure to the same upstream/downstream solve.
 Its 768 kHz mechanics already have a declared 48 kHz pressure observer, so the
 starter leaves additional decimation off.
+
+The **Material reeds — distributed blade contact and opening** starter opens
+`paired-spatial.performance`. Its nodal clearance profile, selected slit edges,
+all retained blade modes and distributed contact determine partial opening
+through the same coupled source. The included blade sources compile to the
+original `blade.matpack`; changes to the table or gap geometry feed the native
+contact/flow solve. Its 768 kHz mechanical and 48 kHz output clocks are retained.
 
 `paired-dg-chimney.performance` uses `blade.matpack` with the existing spatial
 duct, side chimney and separately declared bore/chimney/exterior gases. That
@@ -498,9 +516,8 @@ give the pack-building commands and physical declarations. These are
 manufactured integration specimens, not measured clarinet or oboe models.
 
 The **Material reeds — full directional relaxation** starter opens
-`paired-tensor-dg.performance`. Build `tensor-blade.matpack` from the supplied
-`tensor-blade.tsv` and manifest using the same material-modal instructions,
-then attach it. `loss tensor-maxwell` resolves the source strain bound and all
+`paired-tensor-dg.performance`. Its included `tensor-blade.tsv` and manifest
+compile to the original `tensor-blade.matpack` when rendered. `loss tensor-maxwell` resolves the source strain bound and all
 21 entries of each symmetric Mandel branch, including explicit zero claims.
 The original material card also supplies equilibrium elasticity. Changes to
 out-of-plane stiffness and relaxation times reach the complete constrained
@@ -510,8 +527,8 @@ respect the exact owner's explicit capacity. Native decimation retains 96 kHz
 mechanics. These manufactured source coefficients are not wet-cane measurements.
 
 The **Material reed — three-dimensional material memory** starter opens
-`solid-hereditary-dg.performance`. Build and attach `solid-valve.matpack` using
-the material-modal instructions. `solid_memory` retains the original tensor
+`solid-hereditary-dg.performance`. Its included material source and manifest
+compile to the original `solid-valve.matpack`. `solid_memory` retains the original tensor
 branches and relaxation times in the existing exact aperture solver, alongside
 the complete selected equilibrium modes, pressure work, contact and bore state.
 Relaxed and unrelaxed initial history are explicit data. Material and source-time
@@ -533,8 +550,8 @@ current geometry is fixed-reference Tet4 with parallel face normals; it does
 not resolve moving-channel gas flow or establish measured reed accuracy.
 
 The **Material reed — three-dimensional solid** starter opens
-`solid-dg.performance`. Build `solid-valve.matpack` from `solid-valve.tsv`
-and its manifest in the same material-modal example directory, then attach it.
+`solid-dg.performance`. The same included `solid-valve.tsv` and manifest
+compile to `solid-valve.matpack` through the native source recipe.
 The source declares the tetrahedral mesh, constrained degrees of freedom,
 pressure-loaded exterior faces, material regions and tensor property names.
 The existing solid owner derives all selected modes and the full coupled

@@ -22,6 +22,7 @@ import nolleMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg
 import conicalMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-conical-molecular.performance?raw";
 import fieldMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-field-molecular.performance?raw";
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
+import spatialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-spatial.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import tensorReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-tensor-dg.performance?raw";
 import solidReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/solid-dg.performance?raw";
@@ -48,6 +49,7 @@ import { createNativeFiniteGasStringControls } from "./native-finite-gas-string"
 import { createNativeComparisonPanel } from "./native-comparison";
 import { MAX_REQUEST_BYTES, editableAttachmentText, editedAttachmentBytes, prepareNativeTextExperiment, serializeNativeExperiment, validateInput } from "./native-experiment.mjs";
 import stringStarterSources from "./native-string-starters.json";
+import reedStarterSources from "./native-reed-starters.json";
 
 // Bundle the original text assets, loading only those used by the chosen
 // experiment. The native compiler still owns parsing and material resolution.
@@ -55,15 +57,15 @@ const starterSourceFiles = import.meta.glob<string>([
   "../../../crates/fs-couple/examples/material_strings/*.tsv",
   "../../../crates/fs-couple/examples/material_strings/*.body",
   "../../../crates/fs-couple/examples/material_strings/*.stops",
-  "../../../crates/fs-couple/examples/material_modal_valve/tensor-blade*.tsv",
+  "../../../crates/fs-couple/examples/material_modal_valve/*.tsv",
   "../../../data/matdb/seed-v1/cello-g-strings-whole-lampis-2024/*.tsv",
   "../../../data/matdb/seed-v1/bow-hair-horse-pitteroff-woodhouse-acustica1998/*.tsv",
 ], {query: "?raw", import: "default"});
-const stringStarters: Readonly<Record<string, {
+const materialStarters: Readonly<Record<string, {
   sources: Readonly<Record<string, string>>;
   materialManifests: NativeMaterialManifest[];
   stringProfiles?: NativeStringProfiles;
-}>> = stringStarterSources;
+}>> = {...stringStarterSources, ...reedStarterSources};
 
 const EXAMPLES = [
   {
@@ -261,8 +263,17 @@ const EXAMPLES = [
     renderer: "wind",
     source: materialReedSource,
     decimate: false,
-    intro: "Starter: two material-derived reed blades coupled to an upstream tract, downstream bore and material walls. Attach blade.matpack and wall.matpack from the canonical material-modal example. Change each blade region or wall source independently.",
+    intro: "Starter: two material-derived reed blades coupled to an upstream tract, downstream bore and material walls. Original blade and wall source tables are included and compile when you render. Edit either attached material table or change each blade region and wall source independently.",
     help: "The original meshes, thickness regions, material stiffness and loss determine blade motion, aperture flow and external microphone pressure. This source already observes its 768 kHz mechanics at 48 kHz; leave additional decimation off. Its manufactured materials are not measured cane or a qualified clarinet/oboe specimen.",
+  },
+  {
+    name: "material_modal_valve/paired-spatial.performance",
+    label: "Material reeds — distributed blade contact and opening",
+    renderer: "wind",
+    source: spatialReedSource,
+    decimate: false,
+    intro: "Starter: two original material blades meet through their declared nodal gap profile. Original blade source tables are included. Edit the material, local clearances or physical slit edges to change contact, aperture flow and the coupled microphone pressure.",
+    help: "The native spatial closure retains every selected mode, local partial closure, signed pressure work and swept flow through the same upstream and downstream ducts. This source already observes its 768 kHz mechanics at 48 kHz, so additional decimation stays off. Its manufactured blade and contact geometry do not establish measured wet-cane or oboe accuracy.",
   },
   {
     name: "material_modal_valve/paired-dg-chimney.performance",
@@ -270,7 +281,7 @@ const EXAMPLES = [
     renderer: "wind",
     source: materialReedDgSource,
     decimate: true,
-    intro: "Starter: the same material-derived paired blades drive a spatially resolved duct with a side chimney. Attach blade.matpack. The bore, chimney and exterior have separately declared gas sources and feed the original radiating boundary.",
+    intro: "Starter: the same material-derived paired blades drive a spatially resolved duct with a side chimney. The original blade sources and native material-card binding are included. The bore, chimney and exterior have separately declared gases and feed the original radiating boundary.",
     help: "This canonical source runs at 96 kHz, with native decimation selected for 48 kHz playback. observer_gas propagates the outlet and chimney sound through dg_exterior using the shared Stokes–Kirchhoff law. Change the material pack or gas data in the source; the same native solver derives the pressure output.",
   },
   {
@@ -279,7 +290,7 @@ const EXAMPLES = [
     renderer: "wind",
     source: tensorReedDgSource,
     decimate: true,
-    intro: "Starter: two material reeds carry a complete three-dimensional relaxation tensor through the original plate motion, spatial bore and exterior microphone. Build and attach tensor-blade.matpack using the canonical material-modal source recipe, then change its directional stiffness or relaxation-time data.",
+    intro: "Starter: two material reeds carry a complete three-dimensional relaxation tensor through the original plate motion, spatial bore and exterior microphone. Original tensor-blade source tables are included and compile when you render. Edit their directional stiffness or relaxation-time data to compare.",
     help: "loss tensor-maxwell names the source strain limit and complete Mandel branch coefficients, including explicit zeros. The native solver retains coupled normal-strain histories and every declared material point. Equilibrium elasticity stays owned by the same card; material, state-count and clock limits may refuse an unsupported change. This coarse manufactured specimen does not establish measured cane or clarinet/oboe accuracy.",
   },
   {
@@ -288,7 +299,7 @@ const EXAMPLES = [
     renderer: "wind",
     source: hereditarySolidReedSource,
     decimate: true,
-    intro: "Starter: the original tetrahedral solid retains its source-derived relaxation history while driving the same spatial bore and exterior microphone. Build and attach solid-valve.matpack using the material-modal source recipe, then edit its material properties, geometry, supports or loaded faces.",
+    intro: "Starter: the original tetrahedral solid retains its source-derived relaxation history while driving the same spatial bore and exterior microphone. Original solid-valve source tables are included and compile when you render. Edit their material properties or the declared geometry, supports and loaded faces.",
     help: "solid_memory selects relaxed or unrelaxed initial material history and explicit projection budgets. Original tensor branches, source relaxation times, signed pressure work and every selected mode enter the existing exact structural solver. Source strain, clock and capacity limits remain active. This small manufactured soft solid does not establish measured cane or instrument accuracy.",
   },
   {
@@ -297,7 +308,7 @@ const EXAMPLES = [
     renderer: "wind",
     source: surfaceSolidReedSource,
     decimate: true,
-    intro: "Starter: a three-dimensional material reed touches its lay along selected original solid faces. Build and attach solid-valve.matpack using the canonical source recipe, then change the material, local clearances or physical slit edges to hear their effect through the same bore and exterior microphone.",
+    intro: "Starter: a three-dimensional material reed touches its lay along selected original solid faces. Its original solid-valve source tables are included. Change the attached material, local clearances or physical slit edges to hear their effect through the same bore and exterior microphone.",
     help: "solid_closure spatial retains each original nodal normal displacement, including modes whose average opening is zero. Partial slit closure, contact forces and material memory enter the shared native solve. This path uses fixed reference Tet4 faces with parallel normals; it does not resolve a moving fluid channel or establish measured reed accuracy. Native decimation preserves the 96 kHz mechanics.",
   },
   {
@@ -306,7 +317,7 @@ const EXAMPLES = [
     renderer: "wind",
     source: solidReedDgSource,
     decimate: true,
-    intro: "Starter: an original tetrahedral solid drives the same spatial bore and exterior microphone as the material-plate reeds. Build and attach solid-valve.matpack using the material-modal source recipe, then edit the solid geometry, supports, loaded faces or source properties.",
+    intro: "Starter: an original tetrahedral solid drives the same spatial bore and exterior microphone as the material-plate reeds. Its original solid-valve source tables and native compilation binding are included. Edit the solid geometry, supports, loaded faces or attached material properties.",
     help: "The native solid owner derives mass, stiffness, signed pressure work and the complete coupled viscosity from the declared material tensor. Every selected mode remains, including modes with zero mean opening. This path uses a frozen-frequency material image with explicit dispersion checks; it does not evolve full solid relaxation histories or establish measured reed accuracy. Native decimation preserves the mechanical clock.",
   },
   {
@@ -752,7 +763,7 @@ export function createNativeWindPanel(): HTMLElement {
     loadingFile = true; controls();
     showResult("Loading the original performance and its physical sources…");
     try {
-      const inputs = stringStarters[example.name];
+      const inputs = materialStarters[example.name];
       const experiment = inputs ? await prepareNativeTextExperiment(example.source, inputs.sources, {
         renderer: example.renderer as NativeRenderer, decimate: example.decimate,
         materialManifests: inputs.materialManifests, stringProfiles: inputs.stringProfiles,

@@ -1,0 +1,140 @@
+{
+  "material_modal_valve/paired-walls.performance": {
+    "sources": {
+      "blade-manifest.tsv": "crates/fs-couple/examples/material_modal_valve/blade-manifest.tsv",
+      "blade.tsv": "crates/fs-couple/examples/material_modal_valve/blade.tsv",
+      "wall-manifest.tsv": "crates/fs-couple/examples/material_modal_valve/wall-manifest.tsv",
+      "wall.tsv": "crates/fs-couple/examples/material_modal_valve/wall.tsv"
+    },
+    "materialManifests": [
+      {
+        "packPath": "blade.matpack",
+        "manifestPath": "blade-manifest.tsv",
+        "materialState": {
+          "chemistry": "synthetic",
+          "phase": "solid",
+          "process": "manufactured",
+          "revision": 0
+        }
+      },
+      {
+        "packPath": "wall.matpack",
+        "manifestPath": "wall-manifest.tsv",
+        "materialState": {
+          "chemistry": "synthetic",
+          "phase": "solid",
+          "process": "manufactured-membrane",
+          "revision": 0
+        }
+      }
+    ]
+  },
+  "material_modal_valve/paired-spatial.performance": {
+    "sources": {
+      "blade-manifest.tsv": "crates/fs-couple/examples/material_modal_valve/blade-manifest.tsv",
+      "blade.tsv": "crates/fs-couple/examples/material_modal_valve/blade.tsv"
+    },
+    "materialManifests": [
+      {
+        "packPath": "blade.matpack",
+        "manifestPath": "blade-manifest.tsv",
+        "materialState": {
+          "chemistry": "synthetic",
+          "phase": "solid",
+          "process": "manufactured",
+          "revision": 0
+        }
+      }
+    ]
+  },
+  "material_modal_valve/paired-dg-chimney.performance": {
+    "sources": {
+      "blade-manifest.tsv": "crates/fs-couple/examples/material_modal_valve/blade-manifest.tsv",
+      "blade.tsv": "crates/fs-couple/examples/material_modal_valve/blade.tsv"
+    },
+    "materialManifests": [
+      {
+        "packPath": "blade.matpack",
+        "manifestPath": "blade-manifest.tsv",
+        "materialState": {
+          "chemistry": "synthetic",
+          "phase": "solid",
+          "process": "manufactured",
+          "revision": 0
+        }
+      }
+    ]
+  },
+  "material_modal_valve/paired-tensor-dg.performance": {
+    "sources": {
+      "tensor-blade-manifest.tsv": "crates/fs-couple/examples/material_modal_valve/tensor-blade-manifest.tsv",
+      "tensor-blade.tsv": "crates/fs-couple/examples/material_modal_valve/tensor-blade.tsv"
+    },
+    "materialManifests": [
+      {
+        "packPath": "tensor-blade.matpack",
+        "manifestPath": "tensor-blade-manifest.tsv",
+        "materialState": {
+          "chemistry": "synthetic",
+          "phase": "solid",
+          "process": "manufactured",
+          "revision": 0
+        }
+      }
+    ]
+  },
+  "material_modal_valve/solid-dg.performance": {
+    "sources": {
+      "solid-valve-manifest.tsv": "crates/fs-couple/examples/material_modal_valve/solid-valve-manifest.tsv",
+      "solid-valve.tsv": "crates/fs-couple/examples/material_modal_valve/solid-valve.tsv"
+    },
+    "materialManifests": [
+      {
+        "packPath": "solid-valve.matpack",
+        "manifestPath": "solid-valve-manifest.tsv",
+        "materialState": {
+          "chemistry": "synthetic",
+          "phase": "solid",
+          "process": "manufactured",
+          "revision": 0
+        }
+      }
+    ]
+  },
+  "material_modal_valve/solid-hereditary-dg.performance": {
+    "sources": {
+      "solid-valve-manifest.tsv": "crates/fs-couple/examples/material_modal_valve/solid-valve-manifest.tsv",
+      "solid-valve.tsv": "crates/fs-couple/examples/material_modal_valve/solid-valve.tsv"
+    },
+    "materialManifests": [
+      {
+        "packPath": "solid-valve.matpack",
+        "manifestPath": "solid-valve-manifest.tsv",
+        "materialState": {
+          "chemistry": "synthetic",
+          "phase": "solid",
+          "process": "manufactured",
+          "revision": 0
+        }
+      }
+    ]
+  },
+  "material_modal_valve/solid-surface-dg.performance": {
+    "sources": {
+      "solid-valve-manifest.tsv": "crates/fs-couple/examples/material_modal_valve/solid-valve-manifest.tsv",
+      "solid-valve.tsv": "crates/fs-couple/examples/material_modal_valve/solid-valve.tsv"
+    },
+    "materialManifests": [
+      {
+        "packPath": "solid-valve.matpack",
+        "manifestPath": "solid-valve-manifest.tsv",
+        "materialState": {
+          "chemistry": "synthetic",
+          "phase": "solid",
+          "process": "manufactured",
+          "revision": 0
+        }
+      }
+    ]
+  }
+}

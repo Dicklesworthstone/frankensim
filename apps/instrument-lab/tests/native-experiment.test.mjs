@@ -13,16 +13,24 @@ const decode = bytes => new TextDecoder('utf-8', {fatal:true, ignoreBOM:true}).d
 const root = new URL('../../../', import.meta.url);
 const readOriginal = async path => decode(await readFile(new URL(path, root)));
 
-test('complete canonical string starters reach the native request with original material and profile sources', async () => {
-  const starters = JSON.parse(await readFile(new URL('../src/native-string-starters.json', import.meta.url), 'utf8'));
-  const status = {available:true, renderers:{strings:true}, token:'test-session',
+test('complete canonical string and reed starters reach the native request with original physical sources', async () => {
+  const strings = JSON.parse(await readFile(new URL('../src/native-string-starters.json', import.meta.url), 'utf8'));
+  const reeds = JSON.parse(await readFile(new URL('../src/native-reed-starters.json', import.meta.url), 'utf8'));
+  assert.equal(Object.keys(reeds).length, 7);
+  assert.ok(reeds['material_modal_valve/paired-spatial.performance']);
+  const starters = {...strings, ...reeds};
+  assert.equal(Object.keys(starters).length, Object.keys(strings).length + Object.keys(reeds).length);
+  const status = {available:true, renderers:{wind:true, strings:true}, token:'test-session',
     maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes:16 * 1024 * 1024,
     maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
     maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES,
     supportsMaterialManifests:true};
   for (const [name, inputs] of Object.entries(starters)) {
     const source = await readOriginal('crates/fs-couple/examples/' + name);
-    const options = {renderer:'strings', decimate:false, materialManifests:inputs.materialManifests,
+    const reed = Object.hasOwn(reeds, name);
+    const decimate = reed && !['material_modal_valve/paired-walls.performance',
+      'material_modal_valve/paired-spatial.performance'].includes(name);
+    const options = {renderer:reed ? 'wind' : 'strings', decimate, materialManifests:inputs.materialManifests,
       stringProfiles:inputs.stringProfiles};
     const prepared = await prepareNativeTextExperiment(source, inputs.sources, options, readOriginal);
     const files = new Map(prepared.attachments.map(file => [file.path, decode(file.bytes)]));
@@ -33,6 +41,9 @@ test('complete canonical string starters reach the native request with original 
       // Check the original manifest's relative source references; no source
       // parsing or material coefficients are added to browser production code.
       const manifest = files.get(binding.manifestPath);
+      if (reed) assert.deepEqual(binding.materialState, {chemistry:'synthetic', phase:'solid',
+        process:binding.packPath === 'wall.matpack' ? 'manufactured-membrane' : 'manufactured', revision:0},
+        `${name}: full material card identity must reach the compiler`);
       for (const row of manifest.split(/\r?\n/).filter(line => line.startsWith('source\t'))) {
         const sourcePath = posix.join(posix.dirname(binding.manifestPath), row.split('\t')[2]);
         assert.ok(files.has(sourcePath), `${name}: compiler source ${sourcePath}`);
@@ -40,7 +51,7 @@ test('complete canonical string starters reach the native request with original 
     }
     const packs = new Set(prepared.materialManifests.map(binding => binding.packPath));
     for (const text of [source, ...Object.values(inputs.stringProfiles ?? {}).map(path => files.get(path))])
-      for (const pack of text.match(/[^\s]+\.fsmatpk/g) ?? [])
+      for (const pack of text.match(/[^\s]+\.(?:fsmatpk|matpack)\b/g) ?? [])
         assert.ok(packs.has(pack), `${name}: physical source ${pack}`);
     let submitted;
     await assert.rejects(renderNativePerformance(source, prepared.attachments, status, prepared, undefined,
@@ -57,6 +68,31 @@ test('complete canonical string starters reach the native request with original 
     assert.deepEqual(submitted, prepared, name);
     assert.deepEqual(validateInput(encode(serializeNativeExperiment(source, prepared.attachments, prepared)), true), prepared);
   }
+});
+
+test('reed and wall source edits survive saving without replacing the coupled performance or other materials', async () => {
+  const starters = JSON.parse(await readFile(new URL('../src/native-reed-starters.json', import.meta.url), 'utf8'));
+  const name = 'material_modal_valve/paired-walls.performance', inputs = starters[name];
+  const source = await readOriginal('crates/fs-couple/examples/' + name);
+  const before = await prepareNativeTextExperiment(source, inputs.sources,
+    {renderer:'wind', decimate:false, materialManifests:inputs.materialManifests}, readOriginal);
+  const originals = new Map(before.attachments.map(file => [file.path, file.bytes]));
+  const originalBlade = decode(originals.get('blade.tsv'));
+  const editedBlade = originalBlade.replace('young_modulus\tsynthetic\tyoung_modulus\t4000000000\tPa',
+    'young_modulus\tsynthetic\tyoung_modulus\t3200000000\tPa');
+  assert.notEqual(editedBlade, originalBlade);
+  const files = before.attachments.map(file => file.path === 'blade.tsv'
+    ? {...file, bytes:editedAttachmentBytes(file.bytes, editedBlade)} : file);
+  const stored = serializeNativeExperiment(source, files, before);
+  const restored = serviceInput(encode(stored), true);
+  assert.equal(decode(restored.source), source);
+  assert.equal(restored.decimate, false);
+  assert.deepEqual(restored.materialManifests, before.materialManifests);
+  for (const file of restored.attachments) {
+    if (file.path === 'blade.tsv') assert.equal(decode(file.bytes), editedBlade);
+    else assert.deepEqual(file.bytes, originals.get(file.path), file.path);
+  }
+  assert.deepEqual(validateInput(encode(serializeNativeExperiment(source, restored.attachments, restored)), true), restored);
 });
 
 test('starter source failures cannot return a partial experiment or discard required profile bindings', async () => {
