@@ -247,6 +247,14 @@ impl<'a> SpectralOptics<'a> {
         self.surface_bands.as_deref()
     }
 
+    /// Whether the optical transfer operator changes within a declared band
+    /// and therefore requires point-wavelength sampling. Fixed molecular bands
+    /// and band-constant surface emissivities return false; active Rayleigh soot
+    /// returns true and uses the adaptive wavelength integrator.
+    pub const fn requires_wavelength_sampling(&self) -> bool {
+        self.varying
+    }
+
     fn coefficients(&self, band: usize, wavelength: Length) -> Result<[f64; 2], RadiationError> {
         let mut k = self.bands[band]
             .absorption
@@ -560,7 +568,7 @@ impl ParticipatingEnclosure {
             }
             let begin = source.wavelengths[0].value().ln();
             let end = source.wavelengths[1].value().ln();
-            if !optics.varying {
+            if !optics.requires_wavelength_sampling() {
                 self.prepare_optics(
                     &values[..n],
                     optics.coefficients(band, source.wavelengths[0])?,
@@ -778,7 +786,7 @@ impl SpectralSample<'_, '_> {
             for sign in [-1.0, 1.0] {
                 checkpoint(cancelled)?;
                 let wavelength = finite((midpoint + sign * half * node).exp())?;
-                if self.optics.varying {
+                if self.optics.requires_wavelength_sampling() {
                     self.enclosure.prepare_optics(
                         self.emissivities,
                         self.optics.coefficients(band, Length::new(wavelength))?,

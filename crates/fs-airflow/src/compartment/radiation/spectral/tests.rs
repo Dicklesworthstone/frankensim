@@ -748,7 +748,7 @@ fn g4_spectral_domain_work_cancellation_and_scratch_replay_are_explicit() {
             gas,
             &optics,
             SpectralSolve {
-                maximum_evaluations: 24,
+                maximum_evaluations: 0,
                 ..controls()
             },
             &mut work,
@@ -772,6 +772,21 @@ fn g4_spectral_domain_work_cancellation_and_scratch_replay_are_explicit() {
         "varying soot fixture",
     )
     .unwrap();
+    assert!(matches!(
+        enclosure.evaluate_spectral(
+            &temperatures,
+            &e,
+            gas,
+            &varying,
+            SpectralSolve {
+                maximum_evaluations: 23,
+                ..controls()
+            },
+            &mut work,
+            || false
+        ),
+        Err(RadiationError::Invalid("invalid spectral solve controls"))
+    ));
     assert!(matches!(
         enclosure.evaluate_spectral(
             &temperatures,
