@@ -3691,3 +3691,44 @@ space before conversion to watts and W/K. Nearly equal temperatures, overflowing
 gross radiances, and underflowed intermediate products therefore do not erase
 representable net heat. Equal temperatures produce exactly zero exchange.
 Invalid domains or unrepresentable final physical rates are explicit refusals.
+
+### Native enthalpy coupling for volume emission and reabsorption
+
+Under `optical-heating`, `volumes::heating::exchange::VolumeRadiativeExchange<N>`
+applies a fixed reciprocal optical operator to the original deposition thermal
+state. The immutable operator and preaggregated receiver pairs are shared in
+`Arc`; temperatures, prepared rates and energy accounts remain candidate-local.
+Every positive-density material cell requires an explicit active thermal-cell
+binding and optical coefficient-valid temperature interval. This includes pure
+scatterers and transparent cells whose temperatures can change through other
+native sources. Multiple optical cells may share one native receiver; their
+domains intersect and transfers within that receiver cancel. An empty native
+thermal state is refused because its time shortcut supplies no observer steps.
+
+`RadiativeBath::Vacuum` is an explicit zero incident radiance. A blackbody bath
+has a positive supplied temperature. Material temperatures always come from the
+native caloric law, including latent storage. One signed Planck difference per
+pair creates an original `HeatTransfer`; only the signed bath source enters the
+native external-heat audit. Uniform material/bath temperature has exactly zero
+sampled net heat. Spectral bath energy and internal-transfer magnitudes are
+integrated only over actually accepted native steps using compensated accounts.
+
+The same source evaluation supplies nonnegative Planck secant conductances.
+Their receiving-row sums enter the original additional-conductance timestep
+limiter, retaining native mass, caloric slope and harmonic composition with
+conduction/boundary decay. A nonzero watt result with an unrepresentable zero
+secant refuses before heat is applied. This is an explicit stability control,
+not an accuracy claim for large nonlinear cooling steps. Source-domain,
+conservation, allocation, work-budget or checkpoint refusal rolls back both
+thermal state and radiation accounts through the existing observer transaction.
+
+The source gate admits explicit per-cell/total coefficient-propagation errors
+and unresolved heat allowances. Unresolved net-heat L1 scale uses the maximum
+Planck difference from each emitter to a possible absorbing receiver or bath;
+it vanishes at equal-temperature equilibrium. Its mean and empirical error are
+sample diagnostics, not certified expectation bounds. Watt error propagation
+treats the realized temperature vector as fixed: the same sampled operator
+drives prior evolution, so its correlated errors do not become independent
+per-step errors or final temperature confidence intervals. The snapshot remains
+fixed within its declared temperature domains; dynamic optical resampling and
+refractive/polarized exchange are separate constitutive extensions.

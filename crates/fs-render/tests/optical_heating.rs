@@ -12,6 +12,9 @@ mod scattering_feedback;
 #[path = "optical_heating/scattering_refinement.rs"]
 mod scattering_refinement;
 
+#[path = "optical_heating/exchange.rs"]
+mod exchange;
+
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::volumes::VolumeGrid;
