@@ -915,7 +915,7 @@ pub enum Material {
         alpha: f64,
     },
     /// Opaque spectral conductor using exact complex-IOR Fresnel, optional
-    /// coherent dielectric-film interference, and an isotropic
+    /// coherent transparent or absorbing-film interference, and an isotropic
     /// single-scattering GGX microfacet surface.
     Conductor {
         /// Validated absolute complex-index table and honest provenance.
@@ -18948,6 +18948,82 @@ mod tests {
     }
 
     #[test]
+    fn g1_absorbing_film_reaches_isotropic_and_brushed_bsdfs() {
+        use crate::conductor::{
+            CoatingIorSample, CoherentAbsorbingCoating, ConductorDataStatus, ConductorIorSample,
+            ConductorSource,
+        };
+
+        let source = ConductorSource::try_new(
+            hash_domain("org.frankensim.test.absorbing-film-bsdf", b"synthetic"),
+            ConductorDataStatus::Representative,
+        )
+        .unwrap();
+        let bare = ConductorOptics::try_new(
+            core::array::from_fn(|i| {
+                ConductorIorSample::try_new(380.0 + 50.0 * i as f64, 0.17, 3.1).unwrap()
+            }),
+            source,
+        )
+        .unwrap();
+        let coated = bare.with_absorbing_coating(
+            CoherentAbsorbingCoating::try_new(
+                core::array::from_fn(|i| {
+                    CoatingIorSample::try_new(
+                        380.0 + 50.0 * i as f64,
+                        1.8 + 0.01 * i as f64,
+                        0.2 + 0.05 * i as f64,
+                    )
+                    .unwrap()
+                }),
+                35.0e-9,
+                source,
+            )
+            .unwrap(),
+        );
+        let detail = crate::surface_detail::SurfaceDetail::none(0.18);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let frame =
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.4, 0.25, 0.1), normal)
+                .unwrap();
+        for brushed in [false, true] {
+            let material = |optics| {
+                if brushed {
+                    Material::BrushedConductor { optics, detail }
+                } else {
+                    Material::Conductor {
+                        optics,
+                        surface: ConductorSurface::try_rough(0.18).unwrap(),
+                    }
+                }
+            };
+            let (plain, film) = (material(bare), material(coated));
+            assert_ne!(plain.content_identity(), film.content_identity());
+            for wavelength in [380.0, 505.0, 780.0] {
+                let evaluate = |mat| {
+                    opaque_bsdf_eval(
+                        mat,
+                        normal,
+                        normal,
+                        normal,
+                        wavelength,
+                        None,
+                        brushed.then_some(&frame),
+                    )
+                    .unwrap()
+                };
+                let expected_ratio = coated.fresnel(wavelength, 1.0, 1.0).unwrap()
+                    / bare.fresnel(wavelength, 1.0, 1.0).unwrap();
+                assert!((evaluate(&film) / evaluate(&plain) - expected_ratio).abs() < 1.0e-13);
+                assert!(
+                    (expected_ratio - 1.0).abs() > 0.1,
+                    "film must change actual transport"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn aniso_reduces_to_isotropic_and_samples_match_pdf() {
         // Reduction: alpha_x == alpha_y must reproduce the isotropic
         // kernels exactly (same algebra, so exact equality is demanded).
@@ -19526,7 +19602,10 @@ mod tests {
                 );
             }
         }
-        assert!(accepted >= 30, "too few accepted tilted reflections: {accepted}");
+        assert!(
+            accepted >= 30,
+            "too few accepted tilted reflections: {accepted}"
+        );
     }
 
     #[test]
@@ -19541,8 +19620,7 @@ mod tests {
             detail,
         };
         let frame =
-            crate::surface_detail::shading_frame(&detail, Point3::new(0.5, 0.0, 0.0), n)
-                .unwrap();
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.5, 0.0, 0.0), n).unwrap();
         let wi = unit(Vec3::new(-0.4, 0.3, 1.0));
         for cosine in [0.1_f64, 1.0e-3, 1.0e-6] {
             let wo = Vec3::new(-(1.0 - cosine * cosine).sqrt(), 0.0, cosine);
@@ -19558,8 +19636,7 @@ mod tests {
             let local_forward = forward * n.dot(wi) / frame.shading_normal.dot(wi);
             let local_reverse = reverse * n.dot(wo) / frame.shading_normal.dot(wo);
             assert!(
-                (local_forward - local_reverse).abs()
-                    <= 2.0e-12 * local_forward.abs().max(1.0),
+                (local_forward - local_reverse).abs() <= 2.0e-12 * local_forward.abs().max(1.0),
                 "incorrect radiance/adjoint projection: {local_forward} vs {local_reverse}"
             );
             assert!(
@@ -19581,8 +19658,7 @@ mod tests {
             detail,
         };
         let frame =
-            crate::surface_detail::shading_frame(&detail, Point3::new(0.5, 0.0, 0.0), n)
-                .unwrap();
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.5, 0.0, 0.0), n).unwrap();
         const SIDE: u32 = 64;
 
         // Independent uniform-solid-angle quadrature of the analytic
@@ -19601,15 +19677,13 @@ mod tests {
                 for j in 0..SIDE {
                     let u1 = (f64::from(i) + 0.5) / f64::from(SIDE);
                     let u2 = (f64::from(j) + 0.5) / f64::from(SIDE);
-                    let Some((wi, pdf)) =
-                        bsdf_sample(&material, n, wo, u1, u2, Some(&frame))
+                    let Some((wi, pdf)) = bsdf_sample(&material, n, wo, u1, u2, Some(&frame))
                     else {
                         continue;
                     };
                     accepted += 1;
                     let value =
-                        opaque_bsdf_eval(&material, n, wo, wi, 550.0, None, Some(&frame))
-                            .unwrap();
+                        opaque_bsdf_eval(&material, n, wo, wi, 550.0, None, Some(&frame)).unwrap();
                     let weight = value * n.dot(wi) / pdf;
                     // For this visible-normal proposal the radiance weight
                     // reduces to Fresnel * G1(wi), bounded by one. Rejected

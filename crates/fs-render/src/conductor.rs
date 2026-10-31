@@ -5,8 +5,9 @@
 //! divides both by the incident dielectric index before solving the exact
 //! complex interface equations.  Built-in metal tables are representative
 //! look-development assets, not measurements of a specimen or finish.
-//! An explicitly supplied [`CoherentDielectricCoating`] adds local thin-film
-//! interference without introducing coherence between independent scene paths.
+//! An explicitly supplied [`CoherentDielectricCoating`] or
+//! [`CoherentAbsorbingCoating`] adds local thin-film interference without
+//! introducing coherence between independent scene paths.
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::det;
@@ -15,6 +16,8 @@ use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 
 mod thin_film;
 pub use thin_film::{CoherentDielectricCoating, MAX_COHERENT_COATING_THICKNESS_M};
+mod absorbing_film;
+pub use absorbing_film::{CoatingIorSample, CoherentAbsorbingCoating};
 
 /// Bit semantics of table validation, interpolation, and Fresnel evaluation.
 pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 1;
@@ -65,7 +68,7 @@ impl core::fmt::Display for ConductorError {
             Self::InvalidIncidence => "invalid conductor incidence cosine",
             Self::InvalidRoughness => "invalid conductor GGX roughness",
             Self::InvalidSource => "invalid conductor source identity",
-            Self::InvalidCoating => "invalid coherent dielectric coating thickness",
+            Self::InvalidCoating => "invalid coherent coating thickness",
             Self::NumericalFailure => "conductor Fresnel evaluation was non-finite",
         })
     }
@@ -201,7 +204,13 @@ pub struct ConductorOptics {
     samples: [ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT],
     source: ConductorSource,
     provenance: ConductorProvenance,
-    coating: Option<CoherentDielectricCoating>,
+    coating: Option<CoherentCoating>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CoherentCoating {
+    Dielectric(CoherentDielectricCoating),
+    Absorbing(CoherentAbsorbingCoating),
 }
 
 impl ConductorOptics {
@@ -259,17 +268,39 @@ impl ConductorOptics {
     /// Attach one explicitly declared transparent, conformal coherent film.
     /// Its thickness and phase-index law are independent of the substrate
     /// table and GGX roughness; no oxide is inferred from the metal's name.
+    /// This replaces any previously attached transparent or absorbing film.
     /// All conductor BSDF consumers evaluate the same coated Fresnel law.
     #[must_use]
     pub fn with_coating(mut self, coating: CoherentDielectricCoating) -> Self {
-        self.coating = Some(coating);
+        self.coating = Some(CoherentCoating::Dielectric(coating));
         self
     }
 
-    /// Explicit coherent film, if supplied by the caller.
+    /// Attach one source-bound dispersive, possibly absorbing film. This
+    /// replaces any previously attached film; it does not silently stack it.
+    /// Optical extinction affects both the interface phase and propagation.
+    #[must_use]
+    pub fn with_absorbing_coating(mut self, coating: CoherentAbsorbingCoating) -> Self {
+        self.coating = Some(CoherentCoating::Absorbing(coating));
+        self
+    }
+
+    /// Explicit transparent-law film, if supplied by the caller.
     #[must_use]
     pub const fn coating(self) -> Option<CoherentDielectricCoating> {
-        self.coating
+        match self.coating {
+            Some(CoherentCoating::Dielectric(coating)) => Some(coating),
+            _ => None,
+        }
+    }
+
+    /// Explicit complex-index film, if supplied by the caller.
+    #[must_use]
+    pub const fn absorbing_coating(self) -> Option<CoherentAbsorbingCoating> {
+        match self.coating {
+            Some(CoherentCoating::Absorbing(coating)) => Some(coating),
+            _ => None,
+        }
     }
 
     /// Evaluate the linearly interpolated substrate's absolute `eta + i k`.
@@ -282,31 +313,7 @@ impl ConductorOptics {
     }
 
     pub(crate) fn complex_ior_unchecked(self, wavelength_nm: f64) -> ComplexIor {
-        if wavelength_nm.to_bits() == LAMBDA_MAX.to_bits() {
-            let sample = self.samples[CONDUCTOR_IOR_SAMPLE_COUNT - 1];
-            return ComplexIor {
-                eta: sample.eta,
-                k: sample.k,
-            };
-        }
-        let upper = self
-            .samples
-            .partition_point(|sample| sample.wavelength_nm <= wavelength_nm)
-            .clamp(1, CONDUCTOR_IOR_SAMPLE_COUNT - 1);
-        let lower = self.samples[upper - 1];
-        let upper = self.samples[upper];
-        if wavelength_nm.to_bits() == lower.wavelength_nm.to_bits() {
-            return ComplexIor {
-                eta: lower.eta,
-                k: lower.k,
-            };
-        }
-        let fraction =
-            (wavelength_nm - lower.wavelength_nm) / (upper.wavelength_nm - lower.wavelength_nm);
-        ComplexIor {
-            eta: lower.eta + fraction * (upper.eta - lower.eta),
-            k: lower.k + fraction * (upper.k - lower.k),
-        }
+        interpolate_ior(&self.samples, wavelength_nm)
     }
 
     /// Exact unpolarized reflectance at this table's wavelength, including
@@ -320,7 +327,12 @@ impl ConductorOptics {
     ) -> Result<f64, ConductorError> {
         let ior = self.complex_ior(wavelength_nm)?;
         match self.coating {
-            Some(coating) => coating.fresnel(wavelength_nm, incident_eta, ior, incidence_cosine),
+            Some(CoherentCoating::Dielectric(coating)) => {
+                coating.fresnel(wavelength_nm, incident_eta, ior, incidence_cosine)
+            }
+            Some(CoherentCoating::Absorbing(coating)) => {
+                coating.fresnel(wavelength_nm, incident_eta, ior, incidence_cosine)
+            }
             None => fresnel_conductor(incident_eta, ior.eta, ior.k, incidence_cosine),
         }
     }
@@ -332,7 +344,8 @@ impl ConductorOptics {
     }
 
     /// Substrate source identity and declared status. A coating, if present,
-    /// retains its separate source through [`Self::coating`].
+    /// retains its separate source through [`Self::coating`] or
+    /// [`Self::absorbing_coating`].
     #[must_use]
     pub const fn source(self) -> ConductorSource {
         self.source
@@ -369,9 +382,11 @@ impl ConductorOptics {
             hasher.update(&sample.eta.to_bits().to_le_bytes());
             hasher.update(&sample.k.to_bits().to_le_bytes());
         }
-        if let Some(coating) = self.coating {
-            // Bare optics retain their existing identities and arithmetic.
-            coating.update_identity(&mut hasher);
+        // Bare and existing dielectric optics retain their identity bytes.
+        match self.coating {
+            Some(CoherentCoating::Dielectric(coating)) => coating.update_identity(&mut hasher),
+            Some(CoherentCoating::Absorbing(coating)) => coating.update_identity(&mut hasher),
+            None => {}
         }
         hasher.finalize()
     }
@@ -543,6 +558,38 @@ fn sample_is_valid(sample: ConductorIorSample) -> bool {
         && sample.k.is_finite()
         && sample.k > 0.0
         && sample.k <= MAX_IOR_COMPONENT
+}
+
+// Shared by opaque substrate tables and passive coating tables. Admission
+// differs at k=0, but wavelength interpolation has exactly the same meaning.
+fn interpolate_ior(
+    samples: &[ConductorIorSample; CONDUCTOR_IOR_SAMPLE_COUNT],
+    wavelength_nm: f64,
+) -> ComplexIor {
+    if wavelength_nm.to_bits() == LAMBDA_MAX.to_bits() {
+        let sample = samples[CONDUCTOR_IOR_SAMPLE_COUNT - 1];
+        return ComplexIor {
+            eta: sample.eta,
+            k: sample.k,
+        };
+    }
+    let upper = samples
+        .partition_point(|sample| sample.wavelength_nm <= wavelength_nm)
+        .clamp(1, CONDUCTOR_IOR_SAMPLE_COUNT - 1);
+    let lower = samples[upper - 1];
+    let upper = samples[upper];
+    if wavelength_nm.to_bits() == lower.wavelength_nm.to_bits() {
+        return ComplexIor {
+            eta: lower.eta,
+            k: lower.k,
+        };
+    }
+    let fraction =
+        (wavelength_nm - lower.wavelength_nm) / (upper.wavelength_nm - lower.wavelength_nm);
+    ComplexIor {
+        eta: lower.eta + fraction * (upper.eta - lower.eta),
+        k: lower.k + fraction * (upper.k - lower.k),
+    }
 }
 
 fn validate_table(

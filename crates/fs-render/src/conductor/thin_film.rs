@@ -37,7 +37,7 @@ pub struct CoherentDielectricCoating {
 
 impl CoherentDielectricCoating {
     /// Declare a source-bound film. Wavelength evaluation uses the existing
-    /// shared visible-band Cauchy or Sellmeier law; thickness is in metres,
+    /// shared visible-band Cauchy, Sellmeier or tabulated law; thickness is in metres,
     /// including exact zero. The phase index controls both Snell's law and
     /// coherent optical thickness at each wavelength; group index is not used.
     pub fn try_new(
@@ -89,6 +89,13 @@ impl CoherentDielectricCoating {
                 let (strengths, resonances_um2) = law.coefficients();
                 for coefficient in strengths.into_iter().chain(resonances_um2) {
                     hasher.update(&coefficient.to_bits().to_le_bytes());
+                }
+            }
+            DielectricIor::Tabulated(law) => {
+                hasher.update(b"coherent-dielectric-coating.tabulated.v1");
+                for sample in law.samples() {
+                    hasher.update(&sample.wavelength_nm().to_bits().to_le_bytes());
+                    hasher.update(&sample.index().to_bits().to_le_bytes());
                 }
             }
         }
@@ -167,7 +174,7 @@ impl CoherentDielectricCoating {
 // The passive substrate puts n^2-k_parallel^2 in the upper half-plane.
 // Recover the small component from 2*re*im=value.im instead of subtracting
 // nearly equal magnitudes; weak absorption must survive interference nulls.
-fn forward_sqrt(value: Complex) -> Complex {
+pub(super) fn forward_sqrt(value: Complex) -> Complex {
     let magnitude = det::hypot(value.re, value.im);
     if magnitude == 0.0 {
         return Complex::new(0.0, 0.0);
@@ -618,6 +625,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn g3_tabulated_film_preserves_declared_phase_index_and_identity() {
+        use crate::dielectric::{DielectricIorSample, TabulatedIor};
+
+        let bare = substrate(0.2, 3.0);
+        let samples = core::array::from_fn(|i| {
+            DielectricIorSample::try_new(380.0 + 50.0 * i as f64, 1.5).unwrap()
+        });
+        let make = |samples| {
+            bare.with_coating(
+                CoherentDielectricCoating::try_new(
+                    TabulatedIor::try_new(samples).unwrap(),
+                    100.0e-9,
+                    source(),
+                )
+                .unwrap(),
+            )
+        };
+        let tabulated = make(samples);
+        let constant = bare.with_coating(coating(1.5, 100.0e-9));
+        for wavelength in [380.0, 505.0, 780.0] {
+            assert_eq!(
+                tabulated.fresnel(wavelength, 1.0, 0.6).unwrap().to_bits(),
+                constant.fresnel(wavelength, 1.0, 0.6).unwrap().to_bits(),
+            );
+        }
+        let mut changed = samples;
+        changed[4] = DielectricIorSample::try_new(580.0, 1.6).unwrap();
+        assert_ne!(
+            tabulated.content_identity(),
+            make(changed).content_identity()
+        );
+        assert_ne!(
+            tabulated.fresnel(580.0, 1.0, 0.6).unwrap().to_bits(),
+            make(changed).fresnel(580.0, 1.0, 0.6).unwrap().to_bits(),
+        );
     }
 
     #[test]

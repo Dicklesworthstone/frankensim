@@ -101,11 +101,12 @@ differentiable lift). Pure Rust throughout.
   table/source/material identities prove replay binding, not specimen fidelity.
   `ConductorOptics::with_coating(CoherentDielectricCoating)` additionally admits
   one explicitly source-bound transparent isotropic film: the shared visible
-  Cauchy or Sellmeier phase-index law and a uniform thickness in metres, from
+  Cauchy, Sellmeier or tabulated phase-index law and a uniform thickness in metres, from
   zero through 100 micrometres. At each wavelength the same phase index sets
   both the interface admittance and the coherent optical thickness; group
   index is never substituted. Existing Cauchy coating identities retain their
-  original bytes; Sellmeier binds a separate law tag and all six coefficients. Separate complex s/p amplitudes retain substrate reflection
+  original bytes; Sellmeier binds a separate law tag and all six coefficients,
+  while tabulated laws bind each wavelength/index pair. Separate complex s/p amplitudes retain substrate reflection
   phase and sum every internal reflection before unpolarized power averaging.
   A fixed-size characteristic-matrix evaluation handles the film's critical
   angle by its analytic sinc limit and scales evanescent transfer entries to
@@ -115,15 +116,36 @@ differentiable lift). Pure Rust throughout.
   The film follows the local microfacet normal; geometric proposals remain
   unchanged. Bare presets and bare optical identities remain unchanged. A
   coating is never inferred from a metal name or material-state binding.
+  `ConductorOptics::with_absorbing_coating(CoherentAbsorbingCoating)` admits an
+  explicitly sourced passive film with nine absolute `eta + i k` knots over
+  the same visible support. `CoatingIorSample` accepts exactly zero extinction;
+  an opaque substrate continues to require positive extinction. Both index
+  components interpolate linearly without extrapolation. Complex extinction
+  participates in the interface reflection phase and propagation before power
+  averaging; it is not a post-interference tint. Complex propagation entries
+  share an `exp(-Im(delta))` scale, so highly absorbing and evanescent films
+  never require growing exponentials. An analytic critical-angle series retains
+  the transparent and weak-loss limits. Zero thickness, a film matching the
+  substrate, or a transparent film matching the incident index retain bare
+  Fresnel arithmetic. Each attachment replaces the existing film; it does not
+  silently create a multilayer. Storage is one fixed spectral table, evaluation
+  is bounded and allocation-free, and all native conductor BSDF consumers use
+  the same owner. Opaque substrate absorption remains implicit in `1-R`; this
+  interface does not resolve heat deposition between film and substrate.
   The caller declares sufficient coherence and locally parallel, laterally
-  uniform boundaries. This is local single-film interference, with no absorbing
-  film, arbitrary multilayer stack, thickness distribution, polarization
+  uniform boundaries. This is local single-film interference, with no arbitrary
+  multilayer stack, thickness distribution, polarization
   transport between bounces, diffraction, or scene-wide coherent field claim.
   G0/G1/G3 tests cover independent complex Airy answers, quarter-wave
   cancellation, half-wave/zero-thickness/bare limits, incident-medium effects,
   critical/evanescent continuity, passivity and both native conductor BSDFs.
   Sellmeier regressions additionally cover independent Airy spectra, constant-law
   bit equivalence, sensitivity to all six coefficients and frozen Cauchy identity.
+  Absorbing-film regressions cover independent complex Airy answers, weak loss
+  near a destructive null, critical/evanescent transparent limits, opaque-film
+  screening of the substrate, retained spectral knots, passivity across optical
+  depth, and both native conductor BSDFs. A supplied visible-band table does not
+  establish a broadband causal dispersion law or measured specimen fidelity.
   The derivation follows [Byrnes, *Multilayer optical calculations*,
   sections 2--5 and appendix D](https://arxiv.org/abs/1603.02720).
 
@@ -1437,7 +1459,7 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   Fixed-metric, representability-aware ray offsets are robust engineering, not
   a certified positional-error enclosure.
 - Conductor support is an opaque complex-index substrate with optional explicit
-  local coherent transparent-film interference and single-scattering GGX.
+  local coherent transparent or absorbing-film interference and single-scattering GGX.
   The representative presets do not infer an oxide/passivation film or claim
   material identification, alloy/lot or product calibration, a measured finish,
   temperature dependence, polarization transport, interfacet multiple scattering,
