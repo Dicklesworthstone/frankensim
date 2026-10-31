@@ -147,7 +147,7 @@ fn real_gas_volume_approaches_analytic_dilute_gamma_law() {
     }
 }
 
-fn with_references(energy_reference: f64, entropy_reference: f64) -> IsochoricRealGasParcel {
+pub(super) fn with_references(energy_reference: f64, entropy_reference: f64) -> IsochoricRealGasParcel {
     let original = model(vec![0.75, 0.25], 0.001);
     let components = original
         .thermodynamics()

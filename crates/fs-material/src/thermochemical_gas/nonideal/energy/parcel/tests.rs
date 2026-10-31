@@ -12,6 +12,7 @@ use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermochem::{Composition, CompositionBasis, SpeciesId};
 
 mod volume;
+mod midpoint;
 
 fn bound(source: ThermochemicalGasModel) -> ThermochemicalPengRobinsonModel {
     ThermochemicalPengRobinsonModel::new(

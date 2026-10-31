@@ -9,6 +9,9 @@
 
 mod volume;
 
+/// Simultaneous heat and volume updates with source-backed midpoint pressure work.
+pub mod midpoint;
+
 /// Conserved-mass volume changes through the original real-gas energy/entropy laws.
 pub mod closed;
 pub use closed::ClosedRealGasParcel;

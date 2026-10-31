@@ -45,6 +45,7 @@ struct CaloricSample {
     residual_energy_j_kg: f64,
     cv_j_kg_k: f64,
     pressure_pa: f64,
+    pressure_temperature_derivative: f64,
 }
 
 impl ThermochemicalPengRobinsonModel {
@@ -60,12 +61,13 @@ impl ThermochemicalPengRobinsonModel {
         let internal_energy_j_kg = properties.u().value() / molar_mass + residual_energy_j_kg;
         let cv_j_kg_k = properties.mass_specific_cv().value()
             + direct.root().residual_cv_j_mol_k() / molar_mass;
+        let pressure_temperature_derivative = direct.root().pressure_derivatives().0;
         if !internal_energy_j_kg.is_finite() || !residual_energy_j_kg.is_finite()
-            || !positive(cv_j_kg_k) {
+            || !positive(cv_j_kg_k) || !pressure_temperature_derivative.is_finite() {
             return Err(GasEnergyError::Invalid("finite real-gas energy and positive complete Cv required"));
         }
         Ok(CaloricSample { internal_energy_j_kg, residual_energy_j_kg, cv_j_kg_k,
-            pressure_pa: direct.pressure().value() })
+            pressure_pa: direct.pressure().value(), pressure_temperature_derivative })
     }
 
     /// Reconstruct temperature and pressure from density and absolute internal

@@ -7109,3 +7109,33 @@ moving geometry, switching impulses and general non-affine caloric laws are
 outside this model. `tests/dielectric_thermal.rs` supplies independent analytic
 potential/derivative and capacity checks, source/limit refusals, and large-bias
 parameter-work and entropy-offset regressions with synthetic material data.
+
+
+## Real-gas simultaneous heat and volume work
+
+`IsochoricRealGasParcel::midpoint_heat_volume` returns the common
+`GasHeatVolumeCandidate<_, ResolvedThermochemicalRealGasState>` for signed heat
+and volume change at conserved exact mass and frozen composition. It solves
+midpoint in internal energy and volume at `Vm=(V0+V1)/2`, uses
+`Wgas=pm*(V1-V0)`, and reconstructs the endpoint through the shared
+between-densities energy-increment solver with the original initial density
+retained. Both accepted stages require full material and transport admission.
+
+NASA reference constants cancel in source increments. Original PR departures
+account for both temperature and density; entropy uses the native PR departure
+owner. Analytic derivatives of the same discrete midpoint pressure use complete
+Cv and original pressure derivatives. With `D=Cv+DeltaV*p_T/(2m)>0`, they are
+`dp_mid/dV1=(p_nu*Cv-T*p_T^2)/(2m*D)` and
+`dp_mid/dQ=p_T/(2m*D)`, using `du/dnu|T=T*p_T-p`.
+The heat tangent retains the source-derived sign. Gas and stage-energy residuals
+must meet absolute tolerances before any candidate is returned.
+
+The caller owns the continuous homogeneous single-phase path and timestep
+refinement. Local stability does not establish phase equilibrium or latent heat;
+actual entropy change is reported without asserting exact finite-step isentropy
+or nonnegative entropy production. Identity preserves the original state, and
+cancellation/source/domain/iteration refusal returns no candidate. The common
+candidate's default generic specialization preserves the existing ideal API.
+Focused regression sources cover independent dense PR oracles, dilute limits,
+discrete derivatives, reference invariance, fixed-volume heat, adiabatic
+refinement, both stage domains and cancellation.

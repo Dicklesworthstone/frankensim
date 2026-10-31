@@ -33,13 +33,14 @@ pub struct GasHeatVolumeStep {
     pub supplied_heat_j: f64,
     /// Work OUT of the gas: midpoint pressure times volume change [J].
     pub work_by_gas_j: f64,
-    /// Original-law m*Delta u between accepted temperatures [J].
+    /// Original-law m*Delta u between accepted thermodynamic states [J].
     pub stored_energy_change_j: f64,
     /// Actual stored energy plus work minus heat [J].
     pub energy_residual_j: f64,
     /// Actual m*(s1-s0) [J/K]; NOT entropy production or an isentropy certificate.
     pub entropy_change_j_k: f64,
-    /// Original-law 2*Delta u(T0,Tm)-Delta u(T0,T1) [J/kg].
+    /// Original-law 2*(u_mid-u_initial)-(u_final-u_initial) [J/kg].
+    /// Each increment includes any source-owned density dependence.
     pub midpoint_energy_residual_j_kg: f64,
     /// d(pm)/d(V1) with initial state and total heat held fixed [Pa/m3].
     pub pressure_final_volume_derivative_pa_m3: f64,
@@ -52,24 +53,28 @@ pub struct GasHeatVolumeStep {
 /// A tentative, complete gas update. Input storage is never mutated by a trial.
 /// Publish the endpoint only after the mechanical/thermal coupling also accepts.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GasHeatVolumeCandidate {
-    endpoint: ClosedGasParcel,
-    midpoint: ResolvedThermochemicalGasState,
+pub struct GasHeatVolumeCandidate<P = ClosedGasParcel, S = ResolvedThermochemicalGasState> {
+    endpoint: P,
+    midpoint: S,
     step: GasHeatVolumeStep,
 }
-impl GasHeatVolumeCandidate {
+impl<P, S> GasHeatVolumeCandidate<P, S> {
+    /// Shared construction boundary for original ideal and real material owners.
+    pub(in crate::thermochemical_gas) fn from_parts(endpoint: P, midpoint: S, step: GasHeatVolumeStep) -> Self {
+        Self { endpoint, midpoint, step }
+    }
     /// Complete endpoint medium/history for the next accepted physical step.
     #[must_use]
-    pub const fn endpoint(&self) -> &ClosedGasParcel { &self.endpoint }
+    pub const fn endpoint(&self) -> &P { &self.endpoint }
     /// Common midpoint medium. Its pressure is the effort used in boundary work.
     #[must_use]
-    pub const fn midpoint(&self) -> &ResolvedThermochemicalGasState { &self.midpoint }
+    pub const fn midpoint(&self) -> &S { &self.midpoint }
     /// Actual balance and analytic discrete derivatives.
     #[must_use]
     pub const fn step(&self) -> &GasHeatVolumeStep { &self.step }
     /// Move the accepted endpoint and accounting without a second material query.
     #[must_use]
-    pub fn into_parts(self) -> (ClosedGasParcel, GasHeatVolumeStep) { (self.endpoint, self.step) }
+    pub fn into_parts(self) -> (P, GasHeatVolumeStep) { (self.endpoint, self.step) }
 }
 
 fn invalid(message: &'static str) -> GasEnergyError { GasEnergyError::Invalid(message) }
