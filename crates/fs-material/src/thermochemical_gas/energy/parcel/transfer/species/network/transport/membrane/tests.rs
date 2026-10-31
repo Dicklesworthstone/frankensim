@@ -56,7 +56,7 @@ fn solve()->GasTransportSolve {
         mass_tolerance_kg:1e-13,energy_tolerance_j:1e-8},entropy_tolerance_j_k:1e-10}
 }
 fn link<'a>(materials:&'a [MembranePermeabilityMaterial<'a>])->MembraneNetworkLink<'a> {
-    MembraneNetworkLink {id:9,parcels:[0,1],geometry:geometry(),materials,
+    MembraneNetworkLink {id:9,parcels:[0,1],path:MembranePath::Film {geometry:geometry(),materials},
         maximum_temperature_difference_k:1e-8}
 }
 fn near(a:f64,b:f64) {assert!((a-b).abs()<=2e-12*b.abs().max(1e-20),"{a} != {b}");}
@@ -177,7 +177,8 @@ fn membrane_and_nozzle_cannot_jointly_spend_an_original_species_allowance() {
     let mats=bindings([&a,&b],&q);let dt=0.01;let mut film=link(&mats);
     let flux=parcels[&0].membrane_flux_to(&parcels[&1],geometry(),&mats,0.0,||false).unwrap();
     let initial_a=parcels[&0].mass_kg()*0.75*0.028/(0.75*0.028+0.25*0.004);
-    film.geometry.area_m2*=0.06*initial_a/(flux.species[0].mass_rate_left_to_right_kg_s*dt);
+    let MembranePath::Film { geometry, .. } = &mut film.path else { unreachable!() };
+    geometry.area_m2*=0.06*initial_a/(flux.species[0].mass_rate_left_to_right_kg_s*dt);
     let mut nozzle=SnapshotNozzleLink {id:3,parcels:[0,2],
         nozzle:GasNozzle {area_m2:1e-8,discharge_coefficient:0.8},nozzle_solve:energy()};
     let rate=parcels[&0].nozzle_flow_to(50000.0,nozzle.nozzle,energy(),||false).unwrap().mass_flow_kg_s;
@@ -207,4 +208,6 @@ fn final_partial_pressure_crossing_and_cancellation_preserve_inputs() {
         Err(MembraneNetworkError::Cancelled));
     assert_eq!(parcels,saved);
 }
+
+mod series;
 

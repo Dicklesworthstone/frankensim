@@ -255,7 +255,7 @@ fn second_duct_refusal_and_last_poll_cancellation_preserve_every_native_owner() 
 fn membrane_paths_reach_both_acoustic_owners_and_preview_is_immutable() {
     use fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::{
         self as material_transport, GasTransportPaths,
-        membrane::{MembraneGeometry, MembraneNetworkLink, MembranePermeabilityMaterial,
+        membrane::{MembraneGeometry, MembraneNetworkLink, MembranePath, MembranePermeabilityMaterial,
             MOLAR_PERMEABILITY_DIMS,MOLAR_PERMEABILITY_PROPERTY},
     };
     let (mut gases,mut nodes)=fixture();
@@ -268,8 +268,8 @@ fn membrane_paths_reach_both_acoustic_owners_and_preview_is_immutable() {
         selection:MaterialPropertySelection::SingleClaimOnly,
     }).collect::<Vec<_>>();
     let membranes=[MembraneNetworkLink {id:81,parcels:[0,1],
-        geometry:MembraneGeometry {area_m2:2e-6,thickness_m:1e-5},
-        materials:&materials,maximum_temperature_difference_k:1.0}];
+        path:MembranePath::Film {geometry:MembraneGeometry {area_m2:2e-6,thickness_m:1e-5},
+            materials:&materials},maximum_temperature_difference_k:1.0}];
     let paths=GasTransportPaths {membranes:&membranes,..Default::default()};
     let input=inputs();
     let endpoints=input.iter().map(|(&id,i)|(id,i.gas)).collect();

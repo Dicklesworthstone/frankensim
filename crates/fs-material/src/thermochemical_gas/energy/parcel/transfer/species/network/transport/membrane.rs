@@ -6,15 +6,18 @@
 //! are distinct quantities. No mass or STP-volume conversion is inferred.
 //! SI basis: https://polymer.nims.go.jp/PoLyInfo/guide/en/property.html .
 //!
+//! A [`MembranePath`] may also contain dense layers in series and explicitly
+//! sourced interlayer permeance. One common species flux crosses every element;
+//! reconstructed interfaces retain their original source support and identity.
 //! This is a steady negligible-storage film, with explicitly authored species
 //! sources and mixture/humidity context. No competitive sorption, swelling,
-//! plasticization, interface resistance, nonideal fugacity, thermal
+//! plasticization, nonideal fugacity, thermal
 //! transpiration or transient breakthrough is modeled. Pure-gas measurements
 //! do not automatically qualify mixed-gas operation.
 
 use std::collections::BTreeMap;
 use super::super::SpeciesNetworkTransfer;
-use super::super::super::{catalog, positive, source_error};
+use super::super::super::{catalog, positive, source_error, Sum};
 use crate::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point};
 use crate::thermochemical_gas::energy::{GasEnergyError, updated_point};
@@ -24,6 +27,11 @@ use crate::thermochemical_gas::energy::parcel::transfer::snapshot::{
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::Dims;
 use fs_thermochem::SpeciesId;
+
+mod series;
+pub use series::{MembranePath, MembraneSeriesElement, MembraneInterfaceMaterial,
+    MembraneElementSample, MembraneElementLaw, MAX_MEMBRANE_ELEMENTS,
+    MOLAR_INTERFACE_PERMEANCE_PROPERTY};
 
 pub const MOLAR_PERMEABILITY_DIMS: Dims = Dims([0, -1, 1, 0, 0, 1]);
 pub const MOLAR_PERMEANCE_DIMS: Dims = Dims([-1, -1, 1, 0, 0, 1]);
@@ -58,6 +66,14 @@ impl MolarPermeability {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MolarPermeance(f64);
 impl MolarPermeance {
+    /// Explicit pressure-normalized molar flux coefficient. This does not
+    /// convert a bulk permeability, mass-based coefficient or STP volume.
+    pub fn try_new(value_mol_m2_s_pa: f64) -> Result<Self, GasEnergyError> {
+        if !value_mol_m2_s_pa.is_finite() || value_mol_m2_s_pa < 0.0 {
+            return Err(GasEnergyError::Invalid("molar permeance must be finite and nonnegative"));
+        }
+        Ok(Self(value_mol_m2_s_pa))
+    }
     pub const fn value_si(self) -> f64 { self.0 }
 }
 
@@ -79,9 +95,8 @@ pub struct MembraneGeometry {
 pub struct MembraneNetworkLink<'a> {
     pub id: u64,
     pub parcels: [u64; 2],
-    pub geometry: MembraneGeometry,
-    /// One explicit permeability, including zeros, per catalog species.
-    pub materials: &'a [MembranePermeabilityMaterial<'a>],
+    /// One physical film/laminate, sampled once by the shared species owner.
+    pub path: MembranePath<'a>,
     /// Physical approximation limit, not an error estimate; zero requires equal T.
     pub maximum_temperature_difference_k: f64,
 }
@@ -89,17 +104,21 @@ pub struct MembraneNetworkLink<'a> {
 pub struct MembraneSpeciesFlux {
     pub species: SpeciesId,
     pub partial_pressures_pa: [f64; 2],
-    pub permeability: MolarPermeability,
+    /// Overall series permeance, not an invented bulk material property.
     pub permeance: MolarPermeance,
     pub molar_flux_mol_m2_s: f64,
     pub mass_rate_left_to_right_kg_s: f64,
-    pub material: ResolvedMaterialStatePoint,
+    /// Ordered original source coefficients and local equivalent-gas pressures.
+    pub elements: Vec<MembraneElementSample>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct MembraneFlux {
     pub face_temperature_k: f64,
     pub face_pressure_pa: f64,
     pub species: Vec<MembraneSpeciesFlux>,
+    /// Sum of species-equivalent partial pressures at each element boundary.
+    /// These are Henry-equilibrium potentials, not pore inventories or stress.
+    pub interface_total_pressures_pa: Vec<f64>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct MembraneNetworkLinkStep {
@@ -139,86 +158,10 @@ impl ClosedGasParcel {
     pub fn membrane_flux_to(
         &self, right: &Self, geometry: MembraneGeometry,
         materials: &[MembranePermeabilityMaterial<'_>],
-        maximum_temperature_difference_k: f64, mut cancelled: impl FnMut() -> bool,
+        maximum_temperature_difference_k: f64, cancelled: impl FnMut() -> bool,
     ) -> Result<MembraneFlux, GasEnergyError> {
-        let invalid = GasEnergyError::Invalid;
-        let mut check = || if cancelled() { Err(GasEnergyError::Cancelled) } else { Ok(()) };
-        check()?;
-        if !geometry.area_m2.is_finite() || geometry.area_m2 < 0.0
-            || !positive(geometry.thickness_m) || materials.len() > MAX_MEMBRANE_SPECIES
-            || !maximum_temperature_difference_k.is_finite() || maximum_temperature_difference_k < 0.0 {
-            return Err(invalid("bounded membrane materials, nonnegative area/temperature difference and positive thickness required"));
-        }
-        let (a, b) = (self.state().state(), right.state().state());
-        let mut flux = MembraneFlux {
-            face_temperature_k: 0.5 * a.temperature + 0.5 * b.temperature,
-            face_pressure_pa: 0.5 * a.pressure + 0.5 * b.pressure, species: Vec::new(),
-        };
-        if geometry.area_m2 == 0.0 { check()?; return Ok(flux); }
-        if (a.temperature - b.temperature).abs() > maximum_temperature_difference_k {
-            return Err(invalid("gas states exceed the declared isothermal membrane support"));
-        }
-        let joined = catalog(self, right)?;
-        let components = joined.thermodynamics().components();
-        if components.len() > MAX_MEMBRANE_SPECIES || materials.len() != components.len() {
-            return Err(invalid("membrane needs one explicit permeability per bounded catalog species"));
-        }
-        let mut ordered = BTreeMap::new();
-        for binding in materials {
-            check()?;
-            if ordered.insert(&binding.species, binding).is_some() {
-                return Err(invalid("duplicate membrane species permeability"));
-            }
-        }
-        let requirement = ScalarPropertyRequirement::try_new(
-            MOLAR_PERMEABILITY_PROPERTY, MOLAR_PERMEABILITY_DIMS, ScalarAdmissibility::NonNegative,
-        ).map_err(source_error)?;
-        for species in components {
-            check()?;
-            let binding = ordered.get(species.species())
-                .ok_or(invalid("missing or foreign membrane species permeability"))?;
-            let point = updated_point(binding.context, flux.face_temperature_k, flux.face_pressure_pa)?;
-            let material = resolve_material_state_point(binding.material, &point,
-                std::slice::from_ref(&requirement), binding.selection.clone()).map_err(source_error)?;
-            let property = material.property(MOLAR_PERMEABILITY_PROPERTY)
-                .ok_or(invalid("resolved membrane permeability is missing"))?;
-            // A sampled coefficient cannot freeze an arbitrary sorption law.
-            // Only scalar/canonical-temperature laws admit this Henry rung.
-            if !property.is_constant_at_fixed_temperature()
-                || property.source_axes().iter().any(|(name, _)| name != "temperature")
-                || !property.is_static_at_fixed_external_conditions()
-                || property.answer().evidence.model.validity.bounds().keys().any(|name| {
-                    name == "T" || property.answer().receipt.axis_quantities.get(name).is_some_and(|q|
-                        (q.dims() == fs_qty::Temperature::DIMS && name != "temperature")
-                        || (q.dims() == fs_qty::Pressure::DIMS && name != "pressure"))
-                }) {
-                return Err(invalid("linear solution-diffusion needs a constant-at-fixed-temperature source with canonical T/p axes"));
-            }
-            let permeability = MolarPermeability::try_new(property.value_si())?;
-            let permeance = permeability.permeance(geometry.thickness_m)?;
-            // Refresh the exact selected claim, never reselect under pressure.
-            // Mean T defines the caller-admitted near-isothermal film law.
-            for gas in [a, b] {
-                check()?;
-                let boundary = updated_point(binding.context, gas.temperature, gas.pressure)?;
-                material.at_query_point(binding.material, &boundary).map_err(source_error)?;
-            }
-            let partial_pressures_pa = [partial_pressure(self, species.species())?,
-                partial_pressure(right, species.species())?];
-            let difference = partial_pressures_pa[0] - partial_pressures_pa[1];
-            let molar_flux_mol_m2_s = permeance.value_si() * difference;
-            let rate = (molar_flux_mol_m2_s * species.molar_mass().value()) * geometry.area_m2;
-            if !molar_flux_mol_m2_s.is_finite() || !rate.is_finite()
-                || (permeance.value_si() != 0.0 && difference != 0.0 && rate == 0.0) {
-                return Err(invalid("membrane species flux is unrepresentable"));
-            }
-            flux.species.push(MembraneSpeciesFlux { species: species.species().clone(),
-                partial_pressures_pa, permeability, permeance, molar_flux_mol_m2_s,
-                mass_rate_left_to_right_kg_s: rate, material });
-        }
-        flux.species.sort_by(|a, b| a.species.cmp(&b.species));
-        check()?;
-        Ok(flux)
+        self.membrane_path_flux_to(right, MembranePath::Film { geometry, materials },
+            maximum_temperature_difference_k, cancelled)
     }
 }
 
@@ -249,8 +192,8 @@ pub(super) fn sample_transfers(
     for (id, link) in ordered {
         check(&mut cancelled)?;
         let [left, right] = link.parcels;
-        let flux = parcels[&left].membrane_flux_to(&parcels[&right], link.geometry,
-            link.materials, link.maximum_temperature_difference_k, &mut cancelled)
+        let flux = parcels[&left].membrane_path_flux_to(&parcels[&right], link.path,
+            link.maximum_temperature_difference_k, &mut cancelled)
             .map_err(|error| if error == GasEnergyError::Cancelled { Error::Cancelled }
                 else { Error::Face { id, error } })?;
         for row in &flux.species {

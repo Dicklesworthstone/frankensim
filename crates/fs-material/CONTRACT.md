@@ -5814,7 +5814,7 @@ arithmetic do not establish native runtime or experimental validation.
 
 ### Shared intrinsic permeability in continuum hydraulic consumers
 
-`DarcyGasBarrier::continuum_geometry` borrows the original ordered intrinsic tensors, source receipts, compiled sum(L/k_normal) and intersected T/p support for native liquid or other continuum hydraulic owners. It constructs no gas state and introduces no second Darcy or transport law. Consumers use their actual viscosity, density, superficial area and solved flow, and admit both absolute face pressures and local temperature against the same original source limits. Normal permeability retains the existing planar-gradient, unconstrained transverse-flow convention. Zero intrinsic permeability remains exactly sealed.
+`DarcyGasBarrier::continuum_geometry` borrows the original ordered intrinsic tensors, source receipts, compiled sum(L/k_effective) and intersected T/p support for native liquid or other continuum hydraulic owners. It constructs no gas state and introduces no second Darcy or transport law. Consumers use their actual viscosity, density, superficial area and solved flow, and admit both absolute face pressures and local temperature against the same original source limits. The original barrier's explicit transverse constraint is retained. Zero intrinsic permeability remains exactly sealed.
 
 Every nonzero gas-slip calibration and every prescribed gas-only wet-mobility state refuses this view, including unit-mobility endpoints. Full single-fluid pore occupation is the admitted case; liquid relative permeability, capillarity, changing saturation, skeleton deformation and storage are not inferred. Native tests cover original rotated/layered geometry, unchanged source receipts and domains, signed speed limits, exact seals, and gas-calibration refusal.
 
@@ -6085,3 +6085,61 @@ not experimental evaporation-rate evidence. Sensible gas-film conduction,
 moving interfaces, dryout, boiling, gas momentum and spatial two-phase flow
 remain outside this bounded owner.
 
+### Anisotropic permeability with an explicit transverse constraint
+
+`IntrinsicPermeability::confined_permeability` evaluates `1/(n.K^-1.n)` for
+fully developed flow constrained to the prescribed normal. The existing
+`normal_permeability` evaluates `n.K.n` for a prescribed normal pressure
+gradient with unconstrained transverse flow. `DarcyFlowConstraint` makes this
+physical distinction explicit; no tensor is replaced by an axis-aligned
+average. An inverse square-root norm retains representable small positive
+permeability without overflowing `1/k`. A normal with a nonzero component in a
+sealed material direction gives exactly zero confined permeability.
+
+`DarcyGasBarrier::with_flow_constraint` compiles the selected reduction once
+through the original ordered layers. Gas flow, interface pressures, slip
+calibration, repeated wet-mobility updates and continuum hydraulic consumers
+all retain it, together with the original sources and support. This is a local
+one-dimensional fully developed constitutive reduction. It does not solve
+finite-plug entrance flow or transverse pressure matching across heterogeneous
+interfaces. Those require a spatial tensor flow solve.
+
+G0/G1/G3 tests in `porous::permeability::tests::confined` independently invert a
+rotated tensor, verify zero transverse velocity, exact seals, extreme positive
+coefficients, shared gas/continuum layer balances and source/wet-state retention.
+`fs-airflow`'s `liquid_pressure::porous` test exercises the changed operating
+point through the original material liquid pressure and heat owners.
+
+### Heterogeneous dense membrane layers and interlayer permeance
+
+`MembranePath::Series` composes up to 64 ordered dense layers and explicitly
+sourced interlayer molar permeance on one common area. Each species has one
+series flux: `G_i = 1 / (sum(L_j/P_ji) + sum(1/H_ji))` and
+`J_i = G_i (p_i,left - p_i,right)`. Resistance ratios are scaled before
+summation, avoiding direct reciprocals of tiny permeances. Effective laminate
+permeance is reported separately from every original bulk permeability and
+interface coefficient; no effective bulk material claim is invented.
+
+Each element retains its original selected material or interface claims.
+Ordered `InterfaceSystemCard` surfaces must match adjacent material identities.
+The solver reconstructs Henry-equivalent species partial pressures, sums them
+at each interface and checks each element's same source claims at its actual
+local temperature and pressure. Selective counterpermeation may place interior
+total pressure outside both reservoir pressures; reservoir-only admission
+would miss that failure. These are equivalent gas potentials, not polymer
+stress or additional gas inventories.
+
+An explicit zero permeability or permeance seals the species exactly. Multiple
+exact seals isolating an undetermined interior species potential refuse this
+steady no-storage model. The single-film API delegates to the same mechanism,
+and `MembraneNetworkLink::path` selects a film or series path. All rates enter
+the original shared species and donor-partial-enthalpy network update, including
+its gross withdrawal, conservation, final-state entropy and cancellation gates.
+No second energy update or additional dissipative heat is introduced.
+
+Focused G0/G1/G3 regressions cover analytic layer/interface resistance, retained
+identity and local source-domain refusal, exact seals, reversal, small-permeance
+arithmetic and shared mass/energy conservation. This is a near-isothermal,
+linear Henry-sorption, negligible-storage closure. Porous supports, bypass
+defects, nonlinear competitive sorption, polymer stress, thermal storage and
+transient breakthrough remain outside this model.
