@@ -378,6 +378,11 @@ pub enum TimeScheme {
 /// Sweeps between AMG hierarchy rebuilds for [`PressureSolver::AmgCg`].
 pub const AMG_REBUILD_SWEEPS: usize = 10;
 
+// Match conservative caloric transport's local volume-balance admission.
+// A global pressure residual can hide a quiet component behind a fast one.
+const LOCAL_VOLUME_TOLERANCE: f64 = 128.0 * f64::EPSILON;
+const PRESSURE_POLISH_PASSES: usize = 4;
+
 /// SIMPLEC controls.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimpleConfig {
@@ -1479,13 +1484,74 @@ impl<'a> Solver<'a> {
         }
     }
 
-    /// Remove the residual divergence of the current iterate by one tight
-    /// pressure correction (1e-8 of its imbalance).
+    /// Remove residual divergence through the same native pressure operator.
+    /// Each correction reduces its own global residual; acceptance additionally
+    /// checks every cell against its local volume flux, including quiet pockets.
+    /// The bounded extra corrections retain all fixed faces and pressure data.
+    /// An already admitted field is unchanged, preserving its thermal epoch.
     pub(super) fn project(&mut self, gate: &CancelGate) -> Result<(), ChtError> {
-        self.correct(1e-8, gate)?;
-        self.guard_finite()?;
+        self.project_continuity(gate)?;
         self.admit_projected_darcy(gate)?;
         Ok(())
+    }
+
+    fn project_continuity(&mut self, gate: &CancelGate) -> Result<(), ChtError> {
+        poll(gate)?;
+        self.guard_finite()?;
+        if self.local_volume_defect(gate)?.is_none() {
+            return Ok(());
+        }
+        let mut defect = 0.0;
+        for _ in 0..PRESSURE_POLISH_PASSES {
+            self.correct(1e-8, gate)?;
+            self.guard_finite()?;
+            let Some(remaining) = self.local_volume_defect(gate)? else {
+                return Ok(());
+            };
+            defect = remaining;
+        }
+        Err(ChtError::SolverNotConverged {
+            system: "pressure continuity",
+            iterations: PRESSURE_POLISH_PASSES,
+            relative_residual: defect,
+            tolerance: LOCAL_VOLUME_TOLERANCE,
+        })
+    }
+
+    /// Audit the volume flux that `field()` will export, without allocating a
+    /// second face field. Density-weighted pressure arithmetic is not used for
+    /// this check: caloric transport consumes the actual shared volume flux.
+    fn local_volume_defect(&self, gate: &CancelGate) -> Result<Option<f64>, ChtError> {
+        let mut worst: Option<f64> = None;
+        for cell in 0..self.domain.cell_count() {
+            if cell % 4096 == 0 {
+                poll(gate)?;
+            }
+            if !self.domain.is_fluid(cell) {
+                continue;
+            }
+            let at = self.domain.coords(cell);
+            let (mut net, mut magnitude) = (0.0, 0.0);
+            for side in 0..6 {
+                let axis = side / 2;
+                let plus = side % 2 == 1;
+                let face = self.cell_face(axis, at, plus);
+                let flux = self.vel[axis][face] * self.comp_face_area(axis, face);
+                net += if plus { flux } else { -flux };
+                magnitude += flux.abs();
+            }
+            if !net.is_finite() || !magnitude.is_finite() {
+                return Err(ChtError::FlowDiverged { step: self.sweeps });
+            }
+            // Use the same product comparison as the energy owner; division
+            // only reports a failed cell and never admits a rounded threshold.
+            if net.abs() > LOCAL_VOLUME_TOLERANCE * magnitude {
+                let relative = net.abs() / magnitude;
+                worst = Some(worst.map_or(relative, |old| old.max(relative)));
+            }
+        }
+        poll(gate)?;
+        Ok(worst)
     }
 
     /// Cell-centred velocity of `cell` (zero in solids).
@@ -2234,11 +2300,9 @@ impl Solver<'_> {
         (mass_residual, momentum_residual): (f64, f64),
         gate: &CancelGate,
     ) -> Result<FvFlow, ChtError> {
-        // Hand over an exactly projected field: one tight correction removes
-        // the residual divergence the loose inner solves leave (its size is
-        // bounded by the converged imbalance, so the flow is unchanged to
-        // tolerance).
-        self.correct(1e-8, gate)?;
+        // The same projection also serves native transient checkpoints. Both
+        // paths admit local continuity, not only a global Krylov residual.
+        self.project_continuity(gate)?;
         self.update_sgs(gate)?;
         self.guard_finite()?;
         let coupled = self.admit_projected_darcy(gate)?;

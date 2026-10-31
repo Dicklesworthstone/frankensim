@@ -207,6 +207,164 @@ fn pressure_opening_refuses_nonfinite_and_unrepresentable_boundary_differences()
     ));
 }
 
+#[test]
+fn pressure_projection_polishes_quiet_component_before_caloric_transport() {
+    use crate::conjugate::{
+        AdvectiveEnthalpyField, AffineSpecificEnthalpy, CellSink, SolidMaterial, Voxel,
+    };
+
+    // Five fluid cells: one drained cell and a separated 2x2 recirculating
+    // pocket. A single global pressure solve can accept a large LOCAL defect
+    // in that pocket because its flux is tiny relative to the other component.
+    let mut domain = VoxelDomain::new(4, 2, 1, 1.0).unwrap();
+    for [x, y] in [[1, 0], [1, 1], [0, 1]] {
+        domain.set(x, y, 0, Voxel::Solid(0));
+    }
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    let mut config = SimpleConfig::new(faces);
+    config.pressure_solver = PressureSolver::IluBicgstab;
+    let gate = CancelGate::new();
+    let fluid = fluid();
+    let epsilon = 1e-12;
+    let seed = |solver: &mut Solver<'_>| {
+        for axis in 0..3 {
+            for &face in &solver.comps[axis].unknowns {
+                solver.d[axis][face] = 1.0;
+            }
+        }
+        for (axis, at, speed) in [
+            (0, [0, 0, 0], 1.0),
+            (0, [3, 0, 0], 2.0 * epsilon),
+            (0, [3, 1, 0], -epsilon),
+            (1, [2, 1, 0], -epsilon),
+            (1, [3, 1, 0], epsilon),
+        ] {
+            let face = solver.comps[axis].index(at);
+            solver.vel[axis][face] = speed;
+        }
+    };
+    let mut single = Solver::new(&domain, &fluid, &config);
+    seed(&mut single);
+    single.correct(1e-8, &gate).unwrap();
+    // The actual ILU(0) first correction is epsilon*[-5/8,1/8,-3/8,-1/16]
+    // in the pocket. Its global true residual is ~1.13e-13, but the worst
+    // cell retains imbalance 3*epsilon/16 and relative continuity defect 3/43.
+    let field = single.field();
+    let cell = domain.index(3, 0, 0);
+    let magnitude: f64 = (0..6)
+        .map(|face| field.outward(&domain, cell, face).abs())
+        .sum();
+    assert!((field.net_outflow(&domain, cell).abs() / magnitude - 3.0 / 43.0).abs() < 1e-12);
+
+    let mut thermal = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    thermal.faces[0] = ThermalFace::Outflow {
+        backflow_temperature: 300.0,
+    };
+    thermal.faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 300.0,
+    };
+    thermal.cell_sinks.push(CellSink {
+        cell: 0,
+        conductance_w_k: 1.0,
+        temperature_k: 300.0,
+    });
+    let caloric: Vec<_> = (0..domain.cell_count())
+        .map(|cell| {
+            domain.is_fluid(cell).then_some(AffineSpecificEnthalpy {
+                temperature_k: 300.0,
+                enthalpy_j_kg: 0.0,
+                heat_capacity_j_kg_k: 2.0,
+            })
+        })
+        .collect();
+    let heat = |field: &FlowField| {
+        EnergyConfig {
+            scheme: ConvectionScheme::Upwind,
+            ..EnergyConfig::default()
+        }
+        .solve_with_enthalpy(
+            &domain,
+            &fluid,
+            &[SolidMaterial::new("partition", 1.0)],
+            field,
+            &thermal,
+            &vec![[1.0; 3]; domain.cell_count()],
+            AdvectiveEnthalpyField {
+                cells: &caloric,
+                boundary_j_kg: [Some(0.0), Some(0.0), None, None, None, None],
+            },
+            &gate,
+        )
+    };
+    assert!(matches!(
+        heat(&field),
+        Err(ChtError::InvalidInput {
+            field: "thermal.advective_enthalpy",
+            ..
+        })
+    ));
+
+    for pressure_solver in [PressureSolver::IluBicgstab, PressureSolver::AmgCg] {
+        config.pressure_solver = pressure_solver;
+        let mut solver = Solver::new(&domain, &fluid, &config);
+        seed(&mut solver);
+        solver.project(&gate).unwrap();
+        let velocities = solver.vel.clone();
+        let pressure = solver.pressure.clone();
+        let iterations = solver.pressure_krylov;
+        solver.project(&gate).unwrap();
+        assert_eq!(solver.vel, velocities);
+        assert_eq!(solver.pressure, pressure);
+        assert_eq!(solver.pressure_krylov, iterations);
+        let field = solver.field();
+        for cell in 0..domain.cell_count() {
+            let magnitude: f64 = (0..6)
+                .map(|face| field.outward(&domain, cell, face).abs())
+                .sum();
+            assert!(field.net_outflow(&domain, cell).abs() <= 128.0 * f64::EPSILON * magnitude);
+        }
+        // Pressure corrects the native faces; it does not clip the quiet
+        // circulation to rest to manufacture continuity.
+        assert!(field.flux_x(3, 0, 0).abs() > epsilon);
+        let energy = heat(&field).unwrap();
+        assert!(
+            energy
+                .temperature
+                .iter()
+                .all(|temperature| (*temperature - 300.0).abs() < 1e-8)
+        );
+        assert!(energy.report.balance.residual_w.abs() < 1e-8);
+    }
+}
+
+#[test]
+fn pressure_projection_refuses_incompatible_fixed_flux_without_clipping_it() {
+    let domain = VoxelDomain::new(1, 1, 1, 1.0).unwrap();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Inlet {
+        velocity: [1.0, 0.0, 0.0],
+    };
+    let config = SimpleConfig::new(faces);
+    let mut solver = Solver::new(&domain, &fluid(), &config);
+    let original = solver.vel.clone();
+    assert!(matches!(
+        solver.project(&CancelGate::new()),
+        Err(ChtError::SolverNotConverged {
+            system: "pressure continuity",
+            ..
+        })
+    ));
+    assert_eq!(solver.vel, original);
+    let pressure = solver.pressure.clone();
+    let gate = CancelGate::new();
+    gate.request();
+    assert!(matches!(solver.project(&gate), Err(ChtError::Cancelled)));
+    assert_eq!(solver.vel, original);
+    assert_eq!(solver.pressure, pressure);
+}
+
 #[cfg(feature = "enthalpy-coupling")]
 #[test]
 fn pressure_opening_native_momentum_restart_retains_its_numerical_datum() {
