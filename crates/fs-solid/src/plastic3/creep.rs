@@ -1,4 +1,4 @@
-//! A physical Norton-creep interval on the native P1 tetrahedral Newton solve.
+//! A physical creep/plastic interval on the native P1 tetrahedral Newton solve.
 //!
 //! This adapter keeps the original uniform/per-element constitutive field,
 //! tensor conventions, sparse assembly, supports and globalization. It admits
@@ -7,34 +7,16 @@
 //! the next history. Failed equilibrium, material, work or cancellation checks
 //! leave every caller-owned value unchanged.
 //!
-//! Elastic coefficients and the reference mesh are fixed across an interval.
-//! Prescribed temperature may change creep kinetics between intervals, but a
-//! change in elastic energy requires a separate parameter-work accounting law.
-//! Physical creep dissipation is returned separately from backward-Euler loss;
+//! Elastic/hardening storage coefficients and the reference mesh are fixed
+//! across an interval. Temperature may change kinetics and yield stress, but
+//! changing stored-energy coefficients requires a parameter-work accounting law.
+//! Physical creep/plastic dissipation is separate from backward-Euler loss;
 //! only the former is available for thermal coupling. Inertia, finite strain,
 //! primary/tertiary creep and service-life qualification are not implied.
 
-use fs_material::creep::{CreepEnergy, CreepError, CreepState, CreepTolerances, NortonCreep};
+use fs_material::creep::{CreepEnergy, CreepError, CreepLaw, CreepState, CreepTolerances};
 
 use super::*;
-
-/// Access to the one constitutive owner while retaining source receipts in
-/// the original field. This does not define another flow rule or tangent.
-pub trait NortonCreepMaterial: SmallStrainLaw<State = CreepState> {
-    fn creep_law(&self) -> &NortonCreep;
-}
-
-impl NortonCreepMaterial for NortonCreep {
-    fn creep_law(&self) -> &NortonCreep {
-        self
-    }
-}
-
-impl NortonCreepMaterial for fs_material::creep::source::ResolvedNortonCreep {
-    fn creep_law(&self) -> &NortonCreep {
-        self.law()
-    }
-}
 
 /// Absolute local constitutive and whole-body work gates. These bound the
 /// discrete numerical identities, not error of a measured creep prediction.
@@ -61,8 +43,8 @@ pub struct CreepTetEnergy {
 
 /// One fully checked proposal, ready for atomic acceptance by the caller.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CreepTetStep {
-    pub solution: SmallStrainTetSolution<CreepState>,
+pub struct CreepTetStep<S = CreepState> {
+    pub solution: SmallStrainTetSolution<S>,
     pub duration_s: f64,
     /// Per-reference-volume accounts [J/m³], in tetrahedron order.
     pub element_energy: Vec<CreepEnergy>,
@@ -169,7 +151,7 @@ fn admit_small_kinematics(
     Ok(())
 }
 
-impl<L: NortonCreepMaterial> SmallStrainTetProblem<'_, L> {
+impl<L: CreepLaw> SmallStrainTetProblem<'_, L> {
     /// Solve and audit one physical creep interval from accepted displacement
     /// and internal variables. `load_path` must have exactly one absolute
     /// endpoint; every element law must represent the same positive duration.
@@ -182,10 +164,10 @@ impl<L: NortonCreepMaterial> SmallStrainTetProblem<'_, L> {
     pub fn solve_creep_from(
         &self,
         displacement_m: &[f64],
-        element_states: &[CreepState],
+        element_states: &[L::State],
         tolerances: CreepTetTolerances,
         cx: &Cx<'_>,
-    ) -> Result<CreepTetStep, CreepTetError> {
+    ) -> Result<CreepTetStep<L::State>, CreepTetError> {
         checkpoint(cx)?;
         if self.load_path.len() != 1 {
             return Err(CreepTetError::Invalid(
@@ -206,7 +188,7 @@ impl<L: NortonCreepMaterial> SmallStrainTetProblem<'_, L> {
         }
         let elements = self.validate()?;
         self.check(displacement_m, element_states)?;
-        let duration_s = self.laws.at(0).creep_law().duration_s();
+        let duration_s = self.laws.at(0).kinetics().duration_s();
         let mut old_strains = Vec::with_capacity(elements.len());
         for (index, element) in elements.iter().enumerate() {
             checkpoint(cx)?;
@@ -215,15 +197,19 @@ impl<L: NortonCreepMaterial> SmallStrainTetProblem<'_, L> {
                     "each element requires a finite positive reference volume",
                 ));
             }
-            let law = self.laws.at(index).creep_law();
-            if law.duration_s() != duration_s {
+            let law = self.laws.at(index);
+            if law.kinetics().duration_s() != duration_s {
                 return Err(CreepTetError::Invalid(
                     "all element laws must represent the same physical duration",
                 ));
             }
-            admit_small_kinematics(element, displacement_m, law.elastic().strain_limit)?;
+            admit_small_kinematics(
+                element,
+                displacement_m,
+                law.kinetics().elastic().strain_limit,
+            )?;
             let old_strain = Self::strain(element, displacement_m);
-            law.validate_history(&old_strain, &element_states[index])
+            law.validate_creep_history(&old_strain, &element_states[index])
                 .map_err(|source| CreepTetError::Material {
                     element: index,
                     source,
@@ -248,10 +234,10 @@ impl<L: NortonCreepMaterial> SmallStrainTetProblem<'_, L> {
         let mut storage_change = 0.0;
         for (index, element) in elements.iter().enumerate() {
             checkpoint(cx)?;
-            let law = self.laws.at(index).creep_law();
-            admit_small_kinematics(element, &next_u, law.elastic().strain_limit)?;
+            let law = self.laws.at(index);
+            admit_small_kinematics(element, &next_u, law.kinetics().elastic().strain_limit)?;
             let increment = law
-                .advance_with_energy(
+                .creep_increment(
                     &old_strains[index],
                     &element_states[index],
                     &solution.element_strain[index],

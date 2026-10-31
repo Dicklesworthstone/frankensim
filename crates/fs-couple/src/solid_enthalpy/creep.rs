@@ -1,14 +1,16 @@
 //! Permanent creep and spatial heat on the original tetrahedral/enthalpy owners.
 //!
 //! Each reference tetrahedron binds one actual caloric cell and one original
-//! Norton material source. The explicitly selected zero-expansion reduction
-//! holds E, nu, density and reference geometry fixed; local temperature changes
-//! the source-pinned Arrhenius kinetics. Conduction, reservoir exchange, thermal
-//! events and observer histories remain in the existing thermal owner.
+//! Norton or joint Norton/J2 source. The selected zero-expansion reduction
+//! holds E, nu, hardening modulus, density and reference geometry fixed. Local
+//! temperature changes sourced Arrhenius kinetics and, when selected, yield
+//! stress. Conduction, reservoir exchange, thermal events and observer histories
+//! remain in the existing thermal owner.
 //!
 //! Every mechanical and thermal proposal starts from the accepted state. The
 //! final mechanics are solved at the actual returned cell temperatures. Only
-//! physical creep heat enters caloric storage; backward-Euler loss is separate.
+//! physical creep/plastic heat enters caloric storage; backward-Euler loss and
+//! energetic hardening storage remain separate.
 //! All local heat, temperature and complete work gates precede publication.
 //! This is small-strain quasistatic secondary creep, not finite deformation,
 //! phase change, variable elastic storage, thermal expansion or a life prediction.
@@ -20,11 +22,11 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_matdb::MaterialCard;
 use fs_material::SmallStrainLaw;
-use fs_material::creep::source::{CreepSourceError, NortonCreepSource, ResolvedNortonCreep};
+use fs_material::creep::source::{CreepSourceError, CreepSourceFamily, NortonCreepSource};
 use fs_material::creep::thermal::{
     FeedbackError, MAX_FEEDBACK_ITERATIONS, admit_zero_expansion_caloric,
 };
-use fs_material::creep::{CreepEnergy, CreepState, CreepTolerances};
+use fs_material::creep::{CreepEnergy, CreepLaw, CreepTolerances};
 use fs_material::phase::{PhaseStateError, ResolvedHeatCapacityCurve};
 use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::loads3::{LoadError3, TetLoadGeometry3};
@@ -74,10 +76,10 @@ impl<E: std::error::Error + 'static> std::error::Error for CreepCouplingError<E>
 
 /// Source and thermal cell in tetrahedron connectivity order. The caloric curve
 /// must be the actual object registered with the existing thermal simulation.
-pub struct CreepCell<'a> {
+pub struct CreepCell<'a, S = NortonCreepSource<'a>> {
     pub cell: CellId,
     pub card: &'a MaterialCard,
-    pub source: NortonCreepSource<'a>,
+    pub source: S,
     pub caloric: &'a ResolvedHeatCapacityCurve,
 }
 
@@ -92,34 +94,34 @@ pub struct CreepConfig {
 }
 
 #[derive(Clone, Debug)]
-struct BoundCell<'a> {
-    source: NortonCreepSource<'a>,
+struct BoundCell<'a, S> {
+    source: S,
     caloric: &'a ResolvedHeatCapacityCurve,
     accepted: DepositedCell,
 }
 
-/// Accepted native creep history with an explicit zero-expansion thermal model.
+/// Accepted creep/plastic history with an explicit zero-expansion thermal model.
 #[derive(Clone, Debug)]
-pub struct ZeroExpansionCreepSolid<'a> {
+pub struct ZeroExpansionCreepSolid<'a, S: CreepSourceFamily<'a> = NortonCreepSource<'a>> {
     nodes_m: &'a [[f64; 3]],
     tetrahedra: &'a [[usize; 4]],
     geometry: Arc<TetLoadGeometry3<'a>>,
-    cells: Vec<BoundCell<'a>>,
-    materials: Vec<ResolvedNortonCreep>,
-    solution: SmallStrainTetSolution<CreepState>,
+    cells: Vec<BoundCell<'a, S>>,
+    materials: Vec<S::Material>,
+    solution: SmallStrainTetSolution<<S::Material as SmallStrainLaw>::State>,
     budget: TetAssemblyBudget,
     volume_m3: f64,
     time_s: f64,
 }
 
-impl<'a> ZeroExpansionCreepSolid<'a> {
+impl<'a, S: CreepSourceFamily<'a>> ZeroExpansionCreepSolid<'a, S> {
     /// Bind a virgin, stress-free solid to the actual active thermal inventory.
     /// Original source admission is shared with the uniform creep/heat owner.
     pub fn try_new(
         thermal: &DepositionSimulation<'_>,
         nodes_m: &'a [[f64; 3]],
         tetrahedra: &'a [[usize; 4]],
-        sources: Vec<CreepCell<'a>>,
+        sources: Vec<CreepCell<'a, S>>,
         budget: TetAssemblyBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, CreepCouplingError> {
@@ -155,11 +157,13 @@ impl<'a> ZeroExpansionCreepSolid<'a> {
                     "unique cell mapping and original caloric object required",
                 ));
             }
-            let density =
-                admit_zero_expansion_caloric(entry.card, &entry.source, entry.caloric, &mut || {
-                    cx.checkpoint().is_err()
-                })
-                .map_err(CreepCouplingError::Material)?;
+            let density = admit_zero_expansion_caloric(
+                entry.card,
+                entry.source.creep_source(),
+                entry.caloric,
+                &mut || cx.checkpoint().is_err(),
+            )
+            .map_err(CreepCouplingError::Material)?;
             let volume = geometry.element_volumes_m3()[element];
             if !super::same_measure(cell.geometry.volume_m3, volume)
                 || !super::same_measure(cell.mass_kg, density * volume)
@@ -221,10 +225,10 @@ impl<'a> ZeroExpansionCreepSolid<'a> {
     pub fn geometry(&self) -> &TetLoadGeometry3<'a> {
         &self.geometry
     }
-    pub fn solution(&self) -> &SmallStrainTetSolution<CreepState> {
+    pub fn solution(&self) -> &SmallStrainTetSolution<<S::Material as SmallStrainLaw>::State> {
         &self.solution
     }
-    pub fn materials(&self) -> &[ResolvedNortonCreep] {
+    pub fn materials(&self) -> &[S::Material] {
         &self.materials
     }
 
@@ -290,7 +294,7 @@ impl<'a> ZeroExpansionCreepSolid<'a> {
         settings: IncrementSettings,
         config: CreepConfig,
         cx: &Cx<'_>,
-    ) -> Result<MechanicalProposal, CreepCouplingError<E>> {
+    ) -> Result<MechanicalProposal<S::Material>, CreepCouplingError<E>> {
         let mut materials = Vec::with_capacity(self.cells.len());
         let mut temperatures_k = Vec::with_capacity(self.cells.len());
         for (cell, &h) in self.cells.iter().zip(enthalpies) {
@@ -362,7 +366,7 @@ impl<'a> ZeroExpansionCreepSolid<'a> {
         thermal_config: StepConfig,
         config: CreepConfig,
         cx: &Cx<'_>,
-    ) -> Result<CreepCandidate<'a, 't, O>, CreepCouplingError<O::Error>> {
+    ) -> Result<CreepCandidate<'a, 't, O, S>, CreepCouplingError<O::Error>> {
         poll(cx)?;
         let duration_s = target_s - self.time_s;
         if thermal.time_s() != self.time_s
@@ -532,17 +536,17 @@ impl<'a> ZeroExpansionCreepSolid<'a> {
     }
 }
 
-struct MechanicalProposal {
-    materials: Vec<ResolvedNortonCreep>,
+struct MechanicalProposal<L: CreepLaw> {
+    materials: Vec<L>,
     temperatures_k: Vec<f64>,
-    step: CreepTetStep,
+    step: CreepTetStep<L::State>,
     heat_j: Vec<f64>,
 }
 
 #[derive(Clone, Debug)]
 pub struct CreepReport {
     pub iterations: usize,
-    /// Thermal input includes physical creep heat; external_heat_j removes it.
+    /// Thermal input includes physical material heat; external_heat_j removes it.
     pub thermal_audit: EnergyAudit,
     pub mechanical_energy: CreepTetEnergy,
     /// Native material energy densities [J/m³], in connectivity order.
@@ -557,17 +561,17 @@ pub struct CreepReport {
 }
 
 /// Accept the actual solid, thermal history and observer state together.
-pub struct CreepCandidate<'m, 't, O> {
+pub struct CreepCandidate<'m, 't, O, S: CreepSourceFamily<'m> = NortonCreepSource<'m>> {
     thermal: DepositionSimulation<'t>,
-    solid: ZeroExpansionCreepSolid<'m>,
+    solid: ZeroExpansionCreepSolid<'m, S>,
     observer: O,
     report: CreepReport,
 }
-impl<'m, 't, O> CreepCandidate<'m, 't, O> {
+impl<'m, 't, O, S: CreepSourceFamily<'m>> CreepCandidate<'m, 't, O, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
-    pub fn solid(&self) -> &ZeroExpansionCreepSolid<'m> {
+    pub fn solid(&self) -> &ZeroExpansionCreepSolid<'m, S> {
         &self.solid
     }
     pub fn observer(&self) -> &O {
@@ -580,7 +584,7 @@ impl<'m, 't, O> CreepCandidate<'m, 't, O> {
         self,
     ) -> (
         DepositionSimulation<'t>,
-        ZeroExpansionCreepSolid<'m>,
+        ZeroExpansionCreepSolid<'m, S>,
         O,
         CreepReport,
     ) {
@@ -589,13 +593,15 @@ impl<'m, 't, O> CreepCandidate<'m, 't, O> {
 }
 
 #[derive(Clone)]
-struct CreepHeat<'s, 'm, 'cx, O> {
-    solid: &'s ZeroExpansionCreepSolid<'m>,
+struct CreepHeat<'s, 'm, 'cx, O, S: CreepSourceFamily<'m>> {
+    solid: &'s ZeroExpansionCreepSolid<'m, S>,
     inner: O,
     cx: &'s Cx<'cx>,
     watts: BTreeMap<CellId, f64>,
 }
-impl<O: DepositionObserver> DepositionObserver for CreepHeat<'_, '_, '_, O> {
+impl<'m, O: DepositionObserver, S: CreepSourceFamily<'m>> DepositionObserver
+    for CreepHeat<'_, 'm, '_, O, S>
+{
     type Error = CreepCouplingError<O::Error>;
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.inner.begin().map_err(CreepCouplingError::Observer)

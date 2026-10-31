@@ -1807,6 +1807,23 @@ The source-bound regression warms an accepted loaded trajectory, preserves
 every pinned claim, and substitutes a material with twice the reference rate;
 the actual bar extension follows the independent accumulated creep law.
 
+### Simultaneous creep and yielding on native tetrahedra
+
+`SmallStrainTetProblem::solve_creep_from` consumes the material owner's
+`CreepLaw` and preserves its complete associated history. The same native
+Newton solve, small-strain/rotation checks, endpoint stress/state comparison,
+support/applied work and physical/numerical energy audit serve Norton creep
+and simultaneous isotropic Norton/J2. `CreepTetStep` defaults to the original
+creep state; combined steps retain separate creep and plastic memories.
+Per-element accounts expose both physical heat channels and their total;
+energetic hardening storage and backward-Euler loss remain excluded from heat.
+The single physical interval, bounded work and immutable proposal semantics
+are unchanged. `tests/plastic3_creep_plastic.rs` exercises an actual loaded
+tetrahedron yielding and continuing to creep, unloading, held-shape relaxation,
+analytical deformation/energy and preservation of both histories on refusal.
+Finite deformation, inertia and noncoaxial kinematic hardening remain outside
+this checked creep path.
+
 ### Permanent creep in native fiber members and frames
 
 `FiberLaw::Norton` and `FiberState::Norton` consume the original material

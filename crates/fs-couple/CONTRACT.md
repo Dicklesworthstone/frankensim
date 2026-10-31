@@ -18395,3 +18395,23 @@ Regressions compare the native modal authority, separate three-rung quadrature
 and clock ladders, sampled harmonic response, independently reconstructed LC
 storage, wave work, same-sample closure, rollback, and the previously refused
 uniform resistance fixture with bit-identical scalar controls.
+
+## Simultaneous creep and plastic heat on spatial enthalpy
+
+`solid_enthalpy::creep::{CreepCell, ZeroExpansionCreepSolid, CreepCandidate}`
+accept the material owner's `CreepSourceFamily`, defaulting to their original
+Norton source. Selecting `NortonJ2Source` evolves both native creep and plastic
+history through the existing tetrahedral solve and the same thermal feedback
+loop. Actual source-selected yield stress may change with local temperature;
+E, nu, energetic H and reference density remain fixed over the admitted span.
+Both physical dissipation channels enter the caloric source exactly once;
+hardening storage and numerical loss remain separate.
+
+Original caloric identity, reference mass/geometry, conductances, reservoirs,
+observer hooks, actual-temperature re-equilibration and atomic publication are
+shared. `tests/solid_creep_plastic_enthalpy.rs` crosses a decreasing sourced
+yield curve under load, checks actual permanent deformation against an
+independent scalar thermal/mechanical reference, and exercises nonconvergence,
+observer failure, cancellation and retry with both memories intact. This adds
+no expansion, variable stored-energy coefficients, finite deformation, phase
+flow, damage or life qualification.
