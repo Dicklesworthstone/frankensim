@@ -152,6 +152,25 @@ differentiable lift). Pure Rust throughout.
   density. Analytic homogeneous obliquity, quadratic focusing/defocusing and
   independently perturbed affine/mixed-Hessian trajectories check the result.
 
+- `photometry::source::bundle` consumes those smooth-field angular bundles in
+  the native calibrated point-source path. `PlanarIrradianceReceiver` binds a
+  finite point, a one-sided normal and an explicit numerical endpoint-position
+  tolerance. `PhotometricSource::spectral_irradiance_from_bundle` verifies the
+  retained source origin, wavelength, launch direction and receiver endpoint,
+  then uses the source's actual spectral/angular intensity and the bundle's
+  receiving-area Jacobian. `BundleIrradianceMeter` borrows one immutable source
+  and receiver, admits exactly one supplied connecting bundle at each of the
+  80 native spectral midpoints, and uses compensated sums for W/m² and native
+  CIE-weighted lux. Wrong source/receiver/bin bindings, duplicate wavelengths
+  and incomplete spectra refuse without changing an admitted reading. The
+  receiver tolerance is not a finite aperture or a global numerical error
+  certificate. This evaluates one supplied branch at each wavelength; it does
+  not search for connections, establish visibility, sum all optical branches,
+  differentiate discontinuous interfaces or average a caustic over a pixel.
+  Independent full-spectrum checks recover homogeneous inverse-square
+  obliquity/attenuation and dispersive quadratic-field focusing in both radiant
+  and photopic units.
+
 - `polarization::dielectric::scene::curved` connects the field propagator,
   native instance boundaries, spectral interfaces and calibrated receiving
   meters into one forward ray-power path. `CurvedPolarizedScene` borrows
