@@ -1,0 +1,4 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+bore	reed tip on the bore axis (source sec. 6: l_g is the distance measured from the reed tip to the centre of the hole)	+x along the bore axis toward the bell	unstated	unstated	one assembly frame; the Table II cone distances are measured from each cone's own apex, not from the reed tip
+tone-holes	reed tip on the bore axis (source sec. 6: l_g is the distance measured from the reed tip to the centre of the hole)	+x along the bore axis toward the bell	unstated	unstated	azimuthal orientation of the holes is not given (u-hole-azimuth)

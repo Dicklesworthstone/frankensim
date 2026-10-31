@@ -1,0 +1,4 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+bore	unstated	assembled	tone-holes	air column from the reed tip to the bell end as the paper uses it; staple and reed are inside it and carry no mechanical parameters (u-reed); joint lengths unstated
+tone-holes	unstated	assembled	bore	22 holes as printed (4b and 14b are second functions of holes 4 and 14); keys, pads and linkages unstated (u-pad-lift)

@@ -1,0 +1,21 @@
+frankensim.specimen.v1
+key	value
+specimen_id	oboe-moennich-1962-nederveen1967
+maker	Moennich, Markneukirchen (printed Mönnich)
+model	no. 1055, conservatory system
+serial	1055
+year	1962
+system	oboe, conservatory system, lowest fundamental 233 Hz (B-flat) per the source sec. 6; material and pitch standard unstated
+holder	in the possession of and played by the second author, A. de Bruijn (source sec. 6); not accessible to FrankenSim
+reference_state	assembled
+environment	unstated
+source_ids	nederveen-de-bruijn-1967-oboe-holes
+target_relation	population evidence for the oboe family bore and tone-hole lattice; not the instrument of the UIowa oboe recordings (whose maker and model the Iowa pages do not give)
+hole_numbering	hole numbers 1 to 22 as printed in Table III, counted from the reed end; 4a/4b and 14a/14b are two tuning functions of one hole (the b rows carry no geometry of their own); holes 1 to 11 are in the upper joint, 12 to 21 in the lower branch and hole 22 in the bell (source sec. 6)
+hole_flags_as_printed	1 k; 2 k; 3 k; 4a k; 5 k; 6 k; 7 o; 8 k; 9 k; 10 o; 11 k,u; 12 k,u; 13 k; 14a o,u; 15 k,u; 16 o,u; 17 k; 18 k,u; 19 k; 20 k,u; 21 k; 22 k; legend from the Table III header: key (k), hole (o), undercutting (u)
+hole_tones_as_printed	3 closed c1 open d1; 4a closed c1 open c1#; 4b closed b open c1#; 6 closed b+ open c1; 7 closed a open b; 8 closed a open a#+; 9 closed a open a#+; 10 closed g open a; 11 closed g open g#; 12 closed f# open g; 13 closed f+ open f#; 14a closed e open f+; 14b closed d# open f; 15 closed e open f; 16 closed d open e; 17 closed d open d#; 18 closed d open d#; 19 closed c open d; 20 closed c open c#; 21 closed B open c; 22 closed A# open B; lowest note with all holes closed A#; Table III spells notes with c = C4, c1 = C5 (R1 = 170/f in metres with equal-temperament f, checked to 0.8 mm over 22 values); a + sign marks a note slightly sharp, as in the paper
+overblowing_aids	holes 1, 2 and 5 serve as an aid for overblowing and have no specific tuning function (source sec. 6)
+transcription	every number was read from zoomed images of the TNO scan because its OCR layer is unreliable (it misreads 285 for 289, 1.2 for 7.2, 2r3 for 213 and /.o for 7.6); checked by R1 = 170/f over 22 values (max 0.8 mm), d_1 / r_1 = 0.0242 +- 0.0005 over 19 holes (the paper's standard cone is 0.025), positions rising and diameters never falling; the d_H, l_H and l_g cells rest on the image reading alone
+not_transcribed	the Table III columns R1, delta-l_h and r_1 (calculated by the paper's theory from equal-temperament frequencies) and every figure; Figs. 1 and 2 are raster graphs
+scan_url	https://publications.tno.nl/publication/34620073/FEJbwS/nederveen-1967-hole.pdf
+citation	C. J. Nederveen and A. de Bruijn, Hole calculations for an oboe, Acustica 18 (1967) 47-57 (TNO Communication No. 259)
