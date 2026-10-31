@@ -7,10 +7,14 @@
 use fs_matdb::QueryPoint;
 use fs_qty::{Density, Pressure, Temperature};
 use fs_thermochem::SpeciesId;
+use fs_thermochem::eos::IdealGasMolarVolumeQuantityV1 as MolarVolume;
 use fs_thermochem::eos::peng_robinson::{
     PengRobinsonComponentV1, PengRobinsonEvaluationV1, PengRobinsonMixtureV1,
     PengRobinsonPhaseRootV1, PengRobinsonPhaseV1,
     flash::{PengRobinsonFlashOptionsV1, PengRobinsonFlashV1},
+    saturation::{
+        PengRobinsonSaturatedMixtureV1, PengRobinsonSaturationOptionsV1, PengRobinsonSaturationV1,
+    },
 };
 use fs_thermochem::mixture::FrozenIdealGasMixtureEvaluationV1;
 
@@ -244,6 +248,124 @@ impl ThermochemicalPengRobinsonModel {
             .map_err(|error| failure("nonideal source thermodynamics", error))?;
         self.mechanics.two_phase_flash_pt(temperature, pressure, options)
             .map_err(|error| failure("Peng-Robinson flash", error))
+    }
+
+    /// Resolve pure-fluid coexistence and retain the original NASA-9 reference
+    /// at its accepted T,p. Gas transport data are not a liquid/two-phase law
+    /// and are neither averaged nor required by this caloric evaluation.
+    pub fn pure_saturation_at_temperature(
+        &self,
+        temperature: Temperature,
+        pressure_bracket: [Pressure; 2],
+        options: PengRobinsonSaturationOptionsV1,
+    ) -> Result<ResolvedThermochemicalSaturationState, MaterialError> {
+        // Admit the original caloric temperature before spending phase work.
+        self.source
+            .thermodynamics()
+            .evaluate_properties(temperature, pressure_bracket[0])
+            .map_err(|error| failure("pure coexistence reference thermodynamics", error))?;
+        let saturation = self
+            .mechanics
+            .pure_saturation_at_temperature(temperature, pressure_bracket, options)
+            .map_err(|error| failure("pure Peng-Robinson coexistence", error))?;
+        let reference = self
+            .source
+            .thermodynamics()
+            .evaluate(temperature, saturation.pressure())
+            .map_err(|error| failure("pure coexistence accepted reference", error))?;
+        Ok(ResolvedThermochemicalSaturationState {
+            reference,
+            saturation,
+        })
+    }
+}
+
+/// Original ideal-reference source receipt and the matching pure-fluid
+/// coexistence roots. Temperature/pressure alone leave phase amount unset.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedThermochemicalSaturationState {
+    reference: FrozenIdealGasMixtureEvaluationV1,
+    saturation: PengRobinsonSaturationV1,
+}
+impl ResolvedThermochemicalSaturationState {
+    /// Original source evaluation at the accepted coexistence T,p.
+    #[must_use]
+    pub const fn reference(&self) -> &FrozenIdealGasMixtureEvaluationV1 {
+        &self.reference
+    }
+    /// Phase roots, latent response, numerical residuals and source parameters.
+    #[must_use]
+    pub const fn saturation(&self) -> &PengRobinsonSaturationV1 {
+        &self.saturation
+    }
+
+    /// Resolve a fixed-volume mixture using the original thermochemical owner.
+    /// h, u and s each receive their matching ideal reference exactly once;
+    /// phase-weighted departures already contain latent energy and entropy.
+    pub fn at_molar_volume(
+        &self,
+        molar_volume: MolarVolume,
+    ) -> Result<ResolvedThermochemicalSaturatedMixtureState, MaterialError> {
+        let phase = self
+            .saturation
+            .at_molar_volume(molar_volume)
+            .map_err(|error| failure("pure coexistence volume constraint", error))?;
+        let original = self.reference.properties();
+        let mass = original.molar_mass().value();
+        let h = (original.h().value() + phase.residual_enthalpy_j_mol()) / mass;
+        let u = (original.u().value() + phase.residual_internal_energy_j_mol()) / mass;
+        let s = (original.s().value() + phase.residual_entropy_j_mol_k()) / mass;
+        if ![h, u, s].into_iter().all(f64::is_finite) {
+            return Err(invalid(
+                "source-bound two-phase caloric state is unrepresentable",
+            ));
+        }
+        Ok(ResolvedThermochemicalSaturatedMixtureState {
+            reference: self.reference.clone(),
+            phase,
+            specific_enthalpy_j_kg: h,
+            specific_internal_energy_j_kg: u,
+            specific_entropy_j_kg_k: s,
+        })
+    }
+}
+
+/// A source-resolved pure-fluid equilibrium mixture at one explicit volume.
+/// No single-phase transport or sound-speed trait is implemented: two-phase
+/// relaxation, slip, heat capacity and transport require their own closures.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedThermochemicalSaturatedMixtureState {
+    reference: FrozenIdealGasMixtureEvaluationV1,
+    phase: PengRobinsonSaturatedMixtureV1,
+    specific_enthalpy_j_kg: f64,
+    specific_internal_energy_j_kg: f64,
+    specific_entropy_j_kg_k: f64,
+}
+impl ResolvedThermochemicalSaturatedMixtureState {
+    /// Original immutable caloric source evaluation and receipt.
+    #[must_use]
+    pub const fn reference(&self) -> &FrozenIdealGasMixtureEvaluationV1 {
+        &self.reference
+    }
+    /// Original coexistence, conservative phase amount and molar volume.
+    #[must_use]
+    pub const fn phase(&self) -> &PengRobinsonSaturatedMixtureV1 {
+        &self.phase
+    }
+    /// Full specific enthalpy, including source formation datum [J/kg].
+    #[must_use]
+    pub const fn specific_enthalpy_j_kg(&self) -> f64 {
+        self.specific_enthalpy_j_kg
+    }
+    /// Full specific internal energy, including the same datum [J/kg].
+    #[must_use]
+    pub const fn specific_internal_energy_j_kg(&self) -> f64 {
+        self.specific_internal_energy_j_kg
+    }
+    /// Full specific entropy on the source reference [J/(kg K)].
+    #[must_use]
+    pub const fn specific_entropy_j_kg_k(&self) -> f64 {
+        self.specific_entropy_j_kg_k
     }
 }
 
@@ -614,6 +736,205 @@ mod tests {
         assert_ne!(
             second.transport(),
             dense.source().transport_state().unwrap()
+        );
+    }
+
+    fn pure_methane_with_caloric_reference(
+        reference_j_kg: f64,
+        temperatures: [f64; 2],
+    ) -> ThermochemicalPengRobinsonModel {
+        use crate::thermochemical_gas::tests::{species_in_domain, transport_in_domain};
+        // Methane critical data with a manufactured constant-Cp NASA reference.
+        // Gas transport deliberately starts above the coexistence temperature:
+        // a single-phase gas transport card is not a two-phase caloric law.
+        let source = ThermochemicalGasModel::new(
+            FrozenIdealGasMixtureModelV1::new(
+                vec![species_in_domain(
+                    "methane",
+                    0.016_042_46,
+                    3.5,
+                    0.0,
+                    reference_j_kg,
+                    temperatures,
+                )],
+                Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+            )
+            .unwrap(),
+            vec![transport_in_domain(
+                "methane",
+                1.0e-5,
+                0.03,
+                [200.0, 2000.0],
+                [1000.0, 1.0e7],
+            )],
+            None,
+        )
+        .unwrap();
+        ThermochemicalPengRobinsonModel::new(
+            source,
+            vec![PengRobinsonSpeciesBinding {
+                species: SpeciesId::new("methane").unwrap(),
+                critical_temperature: Temperature::new(190.564),
+                critical_pressure: Pressure::new(4.5992e6),
+                acentric_factor: 0.01142,
+            }],
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn pure_coexistence(
+        model: &ThermochemicalPengRobinsonModel,
+    ) -> ResolvedThermochemicalSaturationState {
+        model
+            .pure_saturation_at_temperature(
+                Temperature::new(150.0),
+                [Pressure::new(1.0e5), Pressure::new(3.0e6)],
+                PengRobinsonSaturationOptionsV1::default(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn g0_pure_coexistence_keeps_original_reference_and_closes_latent_calorics() {
+        let model = pure_methane_with_caloric_reference(-1.0e6, [100.0, 250.0]);
+        let coexistence = pure_coexistence(&model);
+        let phase = coexistence.saturation();
+        assert!((phase.pressure().value() - 1_047_062.532_316_561_1).abs() < 0.01);
+        assert_eq!(
+            coexistence.reference(),
+            &model
+                .source()
+                .thermodynamics()
+                .evaluate(phase.temperature(), phase.pressure(),)
+                .unwrap(),
+        );
+        assert!(
+            model
+                .source()
+                .evaluate(&point(150.0, phase.pressure().value()))
+                .is_err()
+        );
+        let vl = phase.liquid().molar_volume_m3_per_mol();
+        let vv = phase.vapor().molar_volume_m3_per_mol();
+        let liquid = coexistence.at_molar_volume(MolarVolume::new(vl)).unwrap();
+        let vapor = coexistence.at_molar_volume(MolarVolume::new(vv)).unwrap();
+        let latent_h = vapor.specific_enthalpy_j_kg() - liquid.specific_enthalpy_j_kg();
+        let latent_u =
+            vapor.specific_internal_energy_j_kg() - liquid.specific_internal_energy_j_kg();
+        let latent_s = vapor.specific_entropy_j_kg_k() - liquid.specific_entropy_j_kg_k();
+        // Independent Maxwell-area PR oracle (original parameters), including
+        // the different pressure-work contribution in enthalpy and energy.
+        assert!((latent_h * 0.016_042_46 - 6621.875_622_767_658).abs() < 1.0e-6);
+        assert!((latent_u * 0.016_042_46 - 5648.321_625_890_125).abs() < 1.0e-6);
+        assert!((150.0 * latent_s - latent_h).abs() < 1.0e-5);
+        for quality in [0.0, 0.13, 0.5, 0.92, 1.0] {
+            let volume = (1.0 - quality) * vl + quality * vv;
+            let state = coexistence
+                .at_molar_volume(MolarVolume::new(volume))
+                .unwrap();
+            assert_eq!(state.reference(), coexistence.reference());
+            assert!((state.phase().vapor_fraction() - quality).abs() < 4.0e-16);
+            assert!(
+                (state.specific_enthalpy_j_kg()
+                    - liquid.specific_enthalpy_j_kg()
+                    - quality * latent_h)
+                    .abs()
+                    < 1.0e-8
+            );
+            assert!(
+                (state.specific_internal_energy_j_kg()
+                    - liquid.specific_internal_energy_j_kg()
+                    - quality * latent_u)
+                    .abs()
+                    < 1.0e-8
+            );
+            assert!(
+                (state.specific_entropy_j_kg_k()
+                    - liquid.specific_entropy_j_kg_k()
+                    - quality * latent_s)
+                    .abs()
+                    < 1.0e-10
+            );
+            let pressure_work = phase.pressure().value() / state.phase().mass_density_kg_m3();
+            assert!(
+                (state.specific_enthalpy_j_kg()
+                    - state.specific_internal_energy_j_kg()
+                    - pressure_work)
+                    .abs()
+                    < 1.0e-8
+            );
+        }
+    }
+
+    #[test]
+    fn g3_pure_coexistence_adds_the_source_energy_datum_exactly_once() {
+        let base = pure_coexistence(&pure_methane_with_caloric_reference(0.0, [100.0, 250.0]));
+        let vl = base.saturation().liquid().molar_volume_m3_per_mol();
+        let vv = base.saturation().vapor().molar_volume_m3_per_mol();
+        for shift in [-3.0e6, 2.0e6] {
+            let shifted =
+                pure_coexistence(&pure_methane_with_caloric_reference(shift, [100.0, 250.0]));
+            assert_eq!(shifted.saturation(), base.saturation());
+            for quality in [0.0, 0.25, 0.8, 1.0] {
+                let volume = MolarVolume::new((1.0 - quality) * vl + quality * vv);
+                let before = base.at_molar_volume(volume).unwrap();
+                let after = shifted.at_molar_volume(volume).unwrap();
+                assert_eq!(after.phase(), before.phase());
+                assert_eq!(
+                    after.specific_entropy_j_kg_k(),
+                    before.specific_entropy_j_kg_k()
+                );
+                assert!(
+                    (after.specific_enthalpy_j_kg() - before.specific_enthalpy_j_kg() - shift)
+                        .abs()
+                        < 2.0e-9
+                );
+                assert!(
+                    (after.specific_internal_energy_j_kg()
+                        - before.specific_internal_energy_j_kg()
+                        - shift)
+                        .abs()
+                        < 2.0e-9
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g4_pure_coexistence_refuses_source_extrapolation_and_unsupplied_phase_laws() {
+        let restricted = pure_methane_with_caloric_reference(0.0, [160.0, 250.0]);
+        assert!(
+            restricted
+                .pure_saturation_at_temperature(
+                    Temperature::new(150.0),
+                    [Pressure::new(1.0e5), Pressure::new(3.0e6)],
+                    PengRobinsonSaturationOptionsV1::default(),
+                )
+                .is_err()
+        );
+        let coexistence =
+            pure_coexistence(&pure_methane_with_caloric_reference(0.0, [100.0, 250.0]));
+        let vl = coexistence.saturation().liquid().molar_volume_m3_per_mol();
+        let vv = coexistence.saturation().vapor().molar_volume_m3_per_mol();
+        for volume in [0.99 * vl, 1.01 * vv, f64::NAN] {
+            assert!(
+                coexistence
+                    .at_molar_volume(MolarVolume::new(volume))
+                    .is_err()
+            );
+        }
+        let binary =
+            ThermochemicalPengRobinsonModel::new(model(vec![0.75, 0.25], 0.0), bindings(), vec![])
+                .unwrap();
+        assert!(
+            binary
+                .pure_saturation_at_temperature(
+                    Temperature::new(250.0),
+                    [Pressure::new(1.0e5), Pressure::new(3.0e6)],
+                    PengRobinsonSaturationOptionsV1::default(),
+                )
+                .is_err()
         );
     }
 

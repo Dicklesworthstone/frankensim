@@ -7139,3 +7139,26 @@ candidate's default generic specialization preserves the existing ideal API.
 Focused regression sources cover independent dense PR oracles, dilute limits,
 discrete derivatives, reference invariance, fixed-volume heat, adiabatic
 refinement, both stage domains and cancellation.
+
+## Source-bound pure-fluid coexistence and fixed-volume calorics
+
+`thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel` now exposes
+`pure_saturation_at_temperature` through the original thermochemical EOS owner.
+The accepted coexistence roots retain the original NASA-9 evaluation and receipt
+at their common temperature and pressure. An explicit molar volume then fixes
+the vapor amount by the original lever-rule closure. Full mass-specific h, u
+and s combine that one ideal reference with the amount-weighted PR departures;
+no second latent-heat source or entropy of mixing identical phases is added.
+
+The existing source temperature domain remains authoritative. Gas transport
+cards are neither required nor averaged for this caloric evaluation, and the
+result does not implement a two-phase transport, heat-capacity or acoustic law.
+Volumes outside the resolved dome and multicomponent saturation requests refuse.
+The numerical coexistence controls, work cap, unresolved critical-region
+refusals and original phase roots remain owned by `fs-thermochem`.
+
+Focused G0/G3/G4 regressions check original source receipts, independently
+computed latent h/u, common phase Gibbs energy, h-u=p/rho, conservative phase
+amount, energy-reference shifts counted exactly once, and source/domain
+refusals. The synthetic caloric reference tests implementation consistency;
+they do not assert experimental methane caloric accuracy.
