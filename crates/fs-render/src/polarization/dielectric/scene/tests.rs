@@ -145,6 +145,19 @@ fn g0_binding_and_medium_mismatches_refuse_instead_of_guessing() {
         assert_eq!(scene.trace(cx, input, 0, settings(), 0, 0).unwrap_err(), SceneError::InvalidInitialMedium);
         assert_eq!(scene.trace(cx, input, 1, settings(), 0, 0).unwrap_err(),
             SceneError::MediumMismatch { object_id: 1, expected: 0, actual: 1 });
+        // Even a locally matching index cannot make a field sample a
+        // homogeneous scene medium. Refuse before geometry or random draws.
+        let uniform = crate::gradient_index::HomogeneousIndexField::new(&media[0]);
+        let input = beam(1.0, media[0]);
+        let local = BeamMedium::try_gradient_at(&uniform, input.ray().origin, 550.0).unwrap();
+        let curved = PolarizedBeam::try_new(input.ray().origin, input.frame(), 550.0,
+            local, input.power()).unwrap();
+        let mut draws = 0;
+        assert_eq!(scene.trace_with_samples(cx, curved, 0, settings(), |_| {
+            draws += 1;
+            transmit(0)
+        }).unwrap_err(), SceneError::InvalidInitialMedium);
+        assert_eq!(draws, 0);
         let mut config = settings(); config.max_surface_events = 0;
         assert_eq!(scene.trace(cx, beam(1.0, media[0]), 0, config, 0, 0).unwrap_err(), SceneError::InvalidSettings);
         config = settings(); config.query_offset_m = config.surface_epsilon_m;

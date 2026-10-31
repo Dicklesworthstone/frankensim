@@ -16,9 +16,9 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 use fs_rand::philox::philox4x32_10;
 
+use super::transport::{BeamError, BeamMedium, PolarizedBeam};
 use crate::dielectric::{DielectricEvent, DielectricGlass, DielectricSurface};
 use crate::instances::{InstanceError, InstanceHit, InstanceScene};
-use super::transport::{BeamError, PolarizedBeam};
 
 /// Admission bound on scene bindings and media; not a performance claim.
 pub const MAX_POLARIZED_SCENE_ITEMS: usize = 65_536;
@@ -196,13 +196,23 @@ impl<'a> PolarizedScene<'a> {
     /// Trace with externally supplied `[microfacet_u, microfacet_v, event]`
     /// samples. The callback receives the zero-based surface-event index and
     /// is called only for dielectric hits, after geometry and medium admission.
+    /// This scene uses piecewise-homogeneous straight segments. A sampled
+    /// gradient-index medium refuses at launch, before any traversal or sample;
+    /// its curved boundary intersections are not implemented by this owner.
     pub fn trace_with_samples(
-        &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
-        settings: TraceSettings, mut samples: impl FnMut(u32) -> [f64; 3],
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: TraceSettings,
+        mut samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<PathResult, SceneError> {
         cx.checkpoint()?;
         settings.validate()?;
-        if self.media.get(initial_medium) != Some(&beam.medium()) {
+        let BeamMedium::Homogeneous(material) = beam.medium() else {
+            return Err(SceneError::InvalidInitialMedium);
+        };
+        if self.media.get(initial_medium) != Some(&material) {
             return Err(SceneError::InvalidInitialMedium);
         }
         let mut result = PathResult {
