@@ -461,6 +461,41 @@ not advance chemistry, gas energy or phase, and they retain correlation-domain
 refusals. `tests/material_medium.rs` checks solved pressure-driven flow, serial
 heat balance, data-only pressure/composition changes and source-object retention.
 
+### Material-driven hydrostatic pressure and natural circulation
+
+`series::hydraulic::pressure::SeriesGravity` compiles a connected path and an
+arbitrary uniform gravity vector. `SeriesPressureFlow::solve_with_gravity`
+balances `sum(dp_loss) = dp_imposed + sum(rho_i g.dot(dx_i))` with the same
+single source snapshot already used by each hydraulic region. Actual gas or
+liquid density controls the head; no ideal-gas expansion, air constant, or
+reference volume flow is substituted. Signed flow, zero imposed pressure,
+opposing pressure, and zero gravity use the original resistance inverse.
+Density-reference summation with the path's endpoint potential makes a
+constant-density closed loop exactly quiescent and preserves small density
+contrasts. The original convection handoff consumes the resulting local flow.
+
+`LiquidHeatPath::solve_pressure_gravity_driven` recomputes bulk source density
+and viscosity on every original thermal-path trial before balancing pressure.
+The same bounded root thus selects the flow, downstream enthalpy and wall heat
+with no pump pressure when gravity supplies a positive drive. Film temperatures
+remain the convection property convention; they never replace bulk density in
+the hydrostatic integral. This overload admits authored hydraulic losses, not
+the separate pressure-dependent porous-face model. The positive mass bracket
+selects one orientation; it is not a uniqueness or stability proof. Reversing
+the thermal flow requires reversing the authored path and its inlet reservoir.
+
+Results retain local heads and signed conservative gravitational work
+`mdot*g.dot(last-first)` separately from hydraulic dissipation. Net gravity
+work on a closed loop is zero even when density contrast drives circulation;
+neither head nor work is silently deposited as heat. Frozen-state paths do not
+evolve an EOS. The thermal path remains a regional bulk-density, single-phase,
+quasi-steady approximation with a prescribed inlet reservoir and its existing
+explicit hydraulic-heating omission budget. It does not close a finite loop's
+thermal inventory, compressible acceleration, pressure-dependent phase changes,
+or global mechanical/thermal energy. G1/G3 regressions cover analytic flow and
+enthalpy closure, source temperature/pressure changes, reversal, rigid rotation,
+translation and exact uniform-loop equilibrium; G4 checks bounded refusal.
+
 `FrozenFlowMedium::ThermochemicalRealGas` retains the original nonideal source
 and uses its PR density and complete Cp through the same hydraulic losses,
 channel heat-capacity rate and convection owners. Every frozen-medium variant

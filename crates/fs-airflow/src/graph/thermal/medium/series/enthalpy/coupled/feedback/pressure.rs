@@ -6,7 +6,9 @@
 //! coordinate is retained. The driving pressure is a differential pressure;
 //! the material's thermodynamic pressure coordinate stays at its declared
 //! reference. This is a low-compressibility, regional approximation, not an
-//! evolving pressure EOS, buoyancy, boiling, momentum-acceleration or pump model.
+//! evolving pressure EOS, boiling, momentum-acceleration or pump model.
+//! Opt-in `solve_pressure_gravity_driven` adds the hydrostatic head from those
+//! same bulk source densities at EVERY trial, including zero-pump circulation.
 //!
 //! The default pressure path does not include viscous heating. That omission requires
 //! an explicit absolute hydraulic-power allowance; excessive omitted power
@@ -31,6 +33,9 @@ use fs_qty::{MassFlowRate, Pressure, Temperature};
 
 use crate::graph::thermal::medium::series::hydraulic::{
     MaterialFlowResistance, ResistanceError, ResistanceEvaluation,
+};
+use crate::graph::thermal::medium::series::hydraulic::pressure::{
+    HydrostaticPressure, SeriesGravity, SeriesPressureError,
 };
 use super::{LiquidFeedbackBudget, LiquidFeedbackError, LiquidHeatMarch,
     LiquidHeatPath, LiquidHeatSection, LiquidEnthalpyError, checkpoint, positive};
@@ -62,8 +67,15 @@ pub struct PressureDrivenBudget {
 }
 impl PressureDrivenBudget {
     fn admit(self, drive: Pressure) -> Result<(), PressureDrivenError> {
+        if !positive(drive.value()) {
+            return Err(PressureDrivenError::Invalid("positive imposed pressure required without gravity"));
+        }
+        self.admit_with_gravity(drive)
+    }
+
+    fn admit_with_gravity(self, drive: Pressure) -> Result<(), PressureDrivenError> {
         let (lo,hi) = self.mass_flow_bracket_kg_per_s;
-        if !positive(lo) || !positive(hi) || lo >= hi || !positive(drive.value())
+        if !positive(lo) || !positive(hi) || lo >= hi || !drive.value().is_finite()
             || !positive(self.pressure_absolute_tolerance_pa)
             || !(0.0..1.0).contains(&self.pressure_relative_tolerance)
             || !(2..=128).contains(&self.max_flow_evaluations)
@@ -81,6 +93,8 @@ pub enum PressureDrivenError {
     Invalid(&'static str),
     /// Existing material/caloric/correlation/thermal refusal, preserved as-is.
     Thermal(LiquidFeedbackError),
+    /// Original source-density hydrostatic geometry/arithmetic refusal.
+    Gravity(SeriesPressureError),
     /// Existing pressure-law/material refusal, with exact region attribution.
     Resistance { region: String, source: ResistanceError },
     /// Both endpoint residuals have the same sign. Multiple roots are not ruled
@@ -141,10 +155,14 @@ pub struct PressureDrivenSolution<T> {
     pub mass_flow_kg_per_s: f64,
     /// Original prescribed pressure difference [Pa].
     pub driving_pressure_pa: f64,
-    /// Signed sum(dp)-drive residual [Pa].
+    /// Signed sum(dp_loss)-drive-hydrostatic_gain residual [Pa].
     pub pressure_residual_pa: f64,
     /// Actual full thermal-path evaluations, including endpoints.
     pub flow_evaluations: usize,
+    /// Explicit geometry/gravity used in the accepted thermal-pressure solve.
+    pub gravity: Option<SeriesGravity>,
+    /// Hydrostatic head at that solve's actual bulk densities, when requested.
+    pub hydrostatic: Option<HydrostaticPressure>,
 }
 
 impl<'a, 'card> LiquidHeatPath<'a, 'card> {
@@ -164,15 +182,48 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
         &self, cx: &Cx<'_>, walls: &[f64], resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
         drive: Pressure, local: LiquidFeedbackBudget, budget: PressureDrivenBudget,
     ) -> Result<PressureDrivenSolution<LiquidHeatMarch<'a>>, PressureDrivenError> {
+        self.solve_pressure_driven_inner(cx, walls, resistances, drive, None, local, budget)
+    }
+
+    /// Close source-dependent thermal transport and buoyant circulation together.
+    /// Each trial marches the original enthalpy path and reevaluates rho(T), mu(T)
+    /// before balancing imposed pressure PLUS the connected path's gravity head.
+    /// Zero imposed drive is supported; a signed imposed drive can oppose gravity.
+    ///
+    /// The positive-flow bracket selects one orientation; reverse circulation
+    /// requires reversing the authored thermal path and its inlet. This is a
+    /// quasi-steady single-phase loop with a prescribed inlet thermal reservoir,
+    /// not a closed-inventory transient or a stability/uniqueness proof. Regional
+    /// bulk density is an approximation; refine the thermal regions to resolve
+    /// a varying profile. Existing hydraulic-heating omission budgets still apply.
+    /// Pressure-dependent porous laws are not admitted by this overload because
+    /// their local absolute-pressure faces need a separate gravity-aware model.
+    pub fn solve_pressure_gravity_driven(
+        &self, cx: &Cx<'_>, walls: &[f64], resistances: &[LiquidResistanceSection<'_>],
+        drive: Pressure, gravity: &SeriesGravity, local: LiquidFeedbackBudget,
+        budget: PressureDrivenBudget,
+    ) -> Result<PressureDrivenSolution<LiquidHeatMarch<'a>>, PressureDrivenError> {
+        self.solve_pressure_driven_inner(cx, walls, resistances, drive, Some(gravity), local, budget)
+    }
+
+    fn solve_pressure_driven_inner(
+        &self, cx: &Cx<'_>, walls: &[f64], resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
+        drive: Pressure, gravity: Option<&SeriesGravity>, local: LiquidFeedbackBudget, budget: PressureDrivenBudget,
+    ) -> Result<PressureDrivenSolution<LiquidHeatMarch<'a>>, PressureDrivenError> {
         checkpoint(cx)?;
-        budget.admit(drive)?;
+        if let Some(path) = gravity {
+            budget.admit_with_gravity(drive)?;
+            if path.section_count() != self.sections.len() {
+                return Err(PressureDrivenError::Invalid("one gravity segment per thermal section required"));
+            }
+        } else { budget.admit(drive)?; }
         local.admit()?;
         self.admit_resistances(resistances)?;
         if walls.len() != self.sections.len() {
             return Err(PressureDrivenError::Invalid("one wall temperature per hydraulic/thermal section is required"));
         }
         for &wall in walls { super::state_at_temperature(self.source.curve(), wall)?; }
-        solve_pressure_root(cx, drive, budget, |mass| {
+        solve_pressure_root_with_gravity(cx, drive, gravity, budget, |mass| {
             let path = self.at_pressure_trial_mass(cx, mass)?;
             let thermal = path.march(cx, walls, local)?;
             let pressure = self.pressure_state(cx, resistances, &thermal, budget)?;
@@ -241,23 +292,40 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
 // Never use the fixed-material tangent as a thermal-feedback derivative.
 fn solve_pressure_root<T>(
     cx: &Cx<'_>, drive: Pressure, budget: PressureDrivenBudget,
+    evaluate: impl FnMut(f64) -> Result<(T, LiquidPressureState), PressureDrivenError>,
+) -> Result<PressureDrivenSolution<T>, PressureDrivenError> {
+    solve_pressure_root_with_gravity(cx, drive, None, budget, evaluate)
+}
+
+fn solve_pressure_root_with_gravity<T>(
+    cx: &Cx<'_>, drive: Pressure, gravity: Option<&SeriesGravity>, budget: PressureDrivenBudget,
     mut evaluate: impl FnMut(f64) -> Result<(T, LiquidPressureState), PressureDrivenError>,
 ) -> Result<PressureDrivenSolution<T>, PressureDrivenError> {
-    budget.admit(drive)?;
+    if gravity.is_some() { budget.admit_with_gravity(drive)?; }
+    else { budget.admit(drive)?; }
     let mut calls = 0;
     let mut probe = |mass| -> Result<PressureDrivenSolution<T>, PressureDrivenError> {
         checkpoint(cx)?;
         let (thermal, hydraulics) = evaluate(mass)?;
         calls += 1;
-        let residual = hydraulics.total_pressure_drop_pa-drive.value();
+        let hydrostatic = gravity.map(|path| path.evaluate_densities(
+            hydraulics.regions.iter().map(|region| region.loss.transport.density_kg_m3()), mass,
+            || cx.checkpoint().map_err(|_| SeriesPressureError::Cancelled),
+        )).transpose().map_err(PressureDrivenError::Gravity)?;
+        let effective_drive = drive.value()
+            + hydrostatic.as_ref().map_or(0.0, HydrostaticPressure::pressure_gain_pa);
+        let residual = hydraulics.total_pressure_drop_pa-effective_drive;
         if !residual.is_finite() { return Err(PressureDrivenError::Invalid("pressure residual is nonfinite")); }
         checkpoint(cx)?;
         Ok(PressureDrivenSolution { thermal, hydraulics, mass_flow_kg_per_s: mass,
-            driving_pressure_pa: drive.value(), pressure_residual_pa: residual, flow_evaluations: calls })
+            driving_pressure_pa: drive.value(), pressure_residual_pa: residual, flow_evaluations: calls,
+            gravity: gravity.cloned(), hydrostatic })
     };
     let closed = |value: &PressureDrivenSolution<T>| {
         value.pressure_residual_pa.abs() <= budget.pressure_absolute_tolerance_pa.max(
-            budget.pressure_relative_tolerance*drive.value().max(value.hydraulics.total_pressure_drop_pa))
+            budget.pressure_relative_tolerance*(drive.value()
+                + value.hydrostatic.as_ref().map_or(0.0, HydrostaticPressure::pressure_gain_pa))
+                .abs().max(value.hydraulics.total_pressure_drop_pa.abs()))
     };
     let (mut low,mut high) = budget.mass_flow_bracket_kg_per_s;
     let a = probe(low)?;

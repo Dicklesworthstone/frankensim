@@ -130,6 +130,68 @@ fn heating_changes_viscosity_flow_and_the_downstream_heat_trajectory_together() 
         assert_eq!(hot.hydraulics,again.hydraulics);
     });
 }
+
+#[test]
+fn source_density_closes_zero_pump_buoyant_flow_and_the_original_heat_path() {
+    use fs_airflow::graph::thermal::medium::series::hydraulic::pressure::SeriesGravity;
+    let base = card(false,1.0);
+    let mut claims = ClaimSet::new();
+    for (_,claim) in base.claims().claims_ordered() {
+        let mut claim = claim.clone();
+        if claim.key.name() == "density" {
+            claim.value = PropertyValue::Curve { abscissa: "T".into(),abscissa_dims: Temperature::DIMS,
+                knots: vec![(250.0,1025.0),(450.0,925.0)],dims: Dims([-3,1,0,0,0,0]) };
+            claim.interpolation = InterpolationPolicy::LinearInside;
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    let card = MaterialCard::assemble(base.id().clone(),claims,vec![]).unwrap();
+    with_card_path(&card,LiquidPropertyTemperature::FilmMean,|cx,path| {
+        // First leg descends while heating; the warmer second leg ascends.
+        // Returning to the 300 K inlet represents a prescribed thermal reservoir.
+        let gravity = SeriesGravity::try_new([0.0,0.0,-9.81],
+            vec![[0.0,0.0,1.0],[0.0;3],[0.0,0.0,1.0]]).unwrap();
+        let result = path.solve_pressure_gravity_driven(cx,&[400.0,300.0],&resistances(),
+            Pressure::new(0.0),&gravity,local(),pressure_budget()).unwrap();
+        // Independent constant-Cp, constant-HTC path and scalar pressure balance.
+        // Density and resistance are evaluated at each bulk mean, never the film.
+        let reference = |mass:f64| {
+            let e = (-3.66*0.5/0.01*0.003/(mass*2000.0)).exp();
+            let t1 = 400.0-100.0*e;
+            let t2 = 300.0+(t1-300.0)*e;
+            let r1 = 1000.0-0.5*(0.5*(300.0+t1)-300.0);
+            let r2 = 1000.0-0.5*(0.5*(t1+t2)-300.0);
+            (1e7*mass*(1.0/r1+1.0/r2)-9.81*(r1-r2),t2)
+        };
+        let (mut lo,mut hi) = pressure_budget().mass_flow_bracket_kg_per_s;
+        for _ in 0..80 {
+            let mid = 0.5*(lo+hi);
+            if reference(mid).0<0.0 { lo=mid; } else { hi=mid; }
+        }
+        let mass = 0.5*(lo+hi);
+        close(result.mass_flow_kg_per_s,mass);
+        close(result.thermal.regions[1].outlet.temperature_k(),reference(mass).1);
+        close(result.thermal.total_heat_rate_w,mass*2000.0*(reference(mass).1-300.0));
+        assert!(result.thermal.total_heat_rate_w>0.0);
+        assert_eq!(result.driving_pressure_pa,0.0);
+        assert_eq!(result.gravity.as_ref(),Some(&gravity));
+        let hydrostatic = result.hydrostatic.as_ref().unwrap();
+        close(result.hydraulics.total_pressure_drop_pa,hydrostatic.pressure_gain_pa());
+        close(result.pressure_residual_pa,0.0);
+        assert_eq!(hydrostatic.gravitational_power_w(),0.0);
+        for (hydraulic,thermal) in result.hydraulics.regions.iter().zip(&result.thermal.regions) {
+            let bulk = 0.5*(thermal.inlet.temperature_k()+thermal.outlet.temperature_k());
+            close(hydraulic.material.density_kg_m3(),1000.0-0.5*(bulk-300.0));
+            assert_ne!(hydraulic.material.density_kg_m3(),thermal.material.density_kg_m3());
+        }
+        let no_contrast = path.solve_pressure_gravity_driven(cx,&[300.0,300.0],&resistances(),
+            Pressure::new(0.0),&gravity,local(),pressure_budget());
+        assert!(matches!(no_contrast,Err(PressureDrivenError::NotBracketed { .. })));
+        let reverse = SeriesGravity::try_new([0.0,0.0,9.81],gravity.vertices_m().to_vec()).unwrap();
+        assert!(matches!(path.solve_pressure_gravity_driven(cx,&[400.0,300.0],&resistances(),
+            Pressure::new(0.0),&reverse,local(),pressure_budget()),Err(PressureDrivenError::NotBracketed { .. })));
+    });
+}
 #[test]
 fn hydraulic_material_uses_bulk_not_heat_transfer_film_temperature() {
     with_path(true,1.0,LiquidPropertyTemperature::FilmMean,|cx,path| {

@@ -164,3 +164,90 @@ fn thermal_lowering_does_not_requery_the_source_and_retains_original_refusals() 
     assert!(solve.forced_convection(0,CorrelationId::FlatPlateLaminarAverage,
         Length::new(0.0),ForcedConvectionSettings::default()).is_err());
 }
+
+#[test]
+fn closed_material_loop_circulates_from_density_contrast_and_reverses() {
+    let gate = CancelGate::new_clock_free();
+    let path = || SeriesGravity::try_new([0.0,0.0,-9.81],
+        vec![[0.0,0.0,0.0],[0.0,0.0,2.0],[0.0,0.0,0.0]]).unwrap();
+    let make = |up,down| vec![
+        PressureSection { resistance: law(1e10,0.0),medium: fluid(up,0.001) },
+        PressureSection { resistance: law(1e10,0.0),medium: fluid(down,0.001) },
+    ];
+    let solve = SeriesPressureFlow::solve_with_gravity(make(980.0,1000.0),0.0,path(),budget(),&gate).unwrap();
+    let head = 20.0*9.81*2.0;
+    near(solve.mass_flow_kg_s(),head/(1e7/980.0+1e7/1000.0));
+    let hydrostatic = solve.hydrostatic().unwrap();
+    near(hydrostatic.pressure_gain_pa(),head);
+    assert_eq!(hydrostatic.gravitational_power_w(),0.0);
+    assert!(solve.dissipated_power_w()>0.0);
+    assert_eq!(solve.driving_pressure_pa(),0.0);
+    near(solve.pressure_residual_pa(),0.0);
+    let reversed = SeriesPressureFlow::solve_with_gravity(make(1000.0,980.0),0.0,path(),budget(),&gate).unwrap();
+    near(reversed.mass_flow_kg_s(),-solve.mass_flow_kg_s());
+    let opposed = SeriesPressureFlow::solve_with_gravity(make(980.0,1000.0),-head,path(),budget(),&gate).unwrap();
+    near(opposed.mass_flow_kg_s(),0.0);
+    // The SAME solved buoyant mass flow reaches the original convection owner.
+    let heat = solve.forced_convection(0,fs_convection::CorrelationId::FlatPlateLaminarAverage,
+        Length::new(0.01),Default::default()).unwrap();
+    near(heat.speed_m_s(),solve.mass_flow_kg_s()/980.0/1e-4);
+    assert_eq!(heat.convection().transport(),&solve.evaluations()[0].transport);
+}
+
+#[test]
+fn conservative_gravity_has_no_isothermal_loop_drive_and_obeys_rotation() {
+    let gate = CancelGate::new_clock_free();
+    let vertices = vec![[0.1,0.3,0.2],[0.7,-0.2,1.0],[0.2,0.8,-1.2],[0.1,0.3,0.2]];
+    let gravity = [0.6,-0.8,-9.7];
+    let path = SeriesGravity::try_new(gravity,vertices.clone()).unwrap();
+    let medium = fluid(997.123,0.001);
+    let flat = path.evaluate(&[medium;3],MassFlowRate::new(2.0),&gate).unwrap();
+    assert_eq!(flat.pressure_gain_pa(),0.0);
+    assert_eq!(flat.gravitational_power_w(),0.0);
+    let states = [medium,fluid(980.0,0.001),fluid(1010.0,0.001)];
+    let actual = path.evaluate(&states,MassFlowRate::new(2.0),&gate).unwrap();
+    let rotate = |v:[f64;3]| [-v[2],v[0],-v[1]];
+    let rotated = SeriesGravity::try_new(rotate(gravity),vertices.iter().copied().map(rotate).collect()).unwrap();
+    near(rotated.evaluate(&states,MassFlowRate::new(2.0),&gate).unwrap().pressure_gain_pa(),actual.pressure_gain_pa());
+    let shifted = SeriesGravity::try_new(gravity,vertices.iter()
+        .map(|v| [v[0]+100.0,v[1]-20.0,v[2]+10.0]).collect()).unwrap();
+    near(shifted.evaluate(&states,MassFlowRate::new(2.0),&gate).unwrap().pressure_gain_pa(),actual.pressure_gain_pa());
+    let open = SeriesGravity::try_new([0.0,0.0,-9.81],vec![[0.0;3],[0.0,0.0,-2.0]]).unwrap();
+    let head = open.evaluate(&[medium],MassFlowRate::new(-0.5),&gate).unwrap();
+    near(head.pressure_gain_pa(),medium.density_kg_m3()*19.62);
+    near(head.gravitational_power_w(),-9.81);
+}
+
+#[test]
+fn gas_temperature_and_pressure_drive_the_same_hydraulic_and_heat_owners() {
+    use fs_material::gas::{GasSpec,GasState};
+    let gate = CancelGate::new_clock_free();
+    for pressure in [50000.0,100000.0] {
+        let up = GasState::try_new(&GasSpec::dry_air_ussa1976(),400.0,pressure).unwrap();
+        let down = GasState::try_new(&GasSpec::dry_air_ussa1976(),300.0,pressure).unwrap();
+        let states = [up.transport_state().unwrap(),down.transport_state().unwrap()];
+        let path = SeriesGravity::try_new([0.0,0.0,-9.81],
+            vec![[0.0;3],[0.0,0.0,3.0],[0.0;3]]).unwrap();
+        let solve = SeriesPressureFlow::solve_with_gravity(vec![
+            PressureSection { resistance: law(1e10,0.0),medium: up },
+            PressureSection { resistance: law(1e10,0.0),medium: down },
+        ],0.0,path,budget(),&gate).unwrap();
+        let expected = 3.0*9.81*(states[1].density_kg_m3()-states[0].density_kg_m3());
+        near(solve.hydrostatic().unwrap().pressure_gain_pa(),expected);
+        assert!(solve.mass_flow_kg_s()>0.0);
+        assert_eq!(solve.sections()[0].medium,up);
+        assert_eq!(solve.evaluations()[0].transport,states[0]);
+    }
+}
+
+#[test]
+fn gravity_geometry_and_source_mismatch_refuse_before_publication() {
+    assert!(SeriesGravity::try_new([0.0,f64::NAN,0.0],vec![[0.0;3],[1.0;3]]).is_err());
+    assert!(SeriesGravity::try_new([0.0;3],vec![[0.0;3]]).is_err());
+    let path = SeriesGravity::try_new([0.0,0.0,-9.81],vec![[0.0;3],[1.0;3]]).unwrap();
+    let gate = CancelGate::new_clock_free();
+    assert!(SeriesPressureFlow::solve_with_gravity(sections(),0.0,path.clone(),budget(),&gate).is_err());
+    gate.request();
+    assert!(matches!(path.evaluate(&[fluid(1000.0,0.001)],MassFlowRate::new(0.0),&gate),
+        Err(SeriesPressureError::Cancelled)));
+}
