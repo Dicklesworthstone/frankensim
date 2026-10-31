@@ -368,6 +368,27 @@ impl BoardGeometry {
     ) -> Result<PreparedBoard, String> {
         self.prepare_inner(keys, upper_hz, false, mass_equilibrated, false, true)
     }
+    /// Gradient `[dw/dx, dw/dy]` [1/(m sqrt(kg))] of every retained mode shape at each admitted key's bridge
+    /// station: `out[mode][key - 21]`, zero for keys not listed. It is the same linear map as the bridge
+    /// coefficient (`MotionSurface::project_at`), with a unit vertical arm: direction . (theta x arm) is
+    /// -d(w)/d(direction) because the stored rotations are theta_x = dw/dy, theta_y = -dw/dx. Valid for the
+    /// flat plate's P1 rotations and for the edge-cubic field's analytic gradient alike. A key without a
+    /// station, or a station outside its facet, refuses; nothing is defaulted.
+    pub fn bridge_slopes(&self, motion: &motion::MotionSurface, keys: &[u8]) -> Result<Vec<[[f64; 2]; 88]>, String> {
+        let mut out = vec![[[0.0; 2]; 88]; motion.shapes.len()];
+        for &key in keys {
+            if !(21..=108).contains(&key) { return Err(format!("key {key} is outside the piano range 21..=108")); }
+            let site = self.bridge_sites.iter().find(|s| s.midi == key)
+                .ok_or_else(|| format!("key {key} has no bridge station, so no slope"))?;
+            for (axis, direction) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]].into_iter().enumerate() {
+                let (minus_slope, _) = motion.project_at(site.triangle, site.weights, [0.0, 0.0, 1.0], direction)?;
+                for (mode, value) in minus_slope.iter().enumerate() {
+                    out[mode][usize::from(key - 21)][axis] = -value;
+                }
+            }
+        }
+        Ok(out)
+    }
     /// Retain full-vector nodal motion for a finite acoustic skin. The same
     /// eigensolve supplies mechanics and acoustics, including repeated modes.
     pub fn prepare_with_motion(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
@@ -819,6 +840,112 @@ mod tests {
         for node in mesh.boundary_nodes() { text.push_str(&format!("fixed,{node}\n")); }
         text.push_str("bridge,69,8,0.2,0.3,0.5\n");
         text
+    }
+
+    /// The fixture's 0.7 x 0.45 m, 6 mm plate on an `nx` x `ny` mesh, with one bridge station per entry
+    /// of `stations` (key, point [m]) placed at that point's barycentric position in its triangle.
+    fn fine_fixture(nx: usize, ny: usize, stations: &[(u8, [f64; 2])]) -> String {
+        let mesh = PlateMesh::rectangle(0.7, 0.45, nx, ny);
+        let mut text = format!("{HEADER}\nsource,estimated,analytic rectangular regression NOT Steinway\nsupport,simply_supported\npretension,0\ndamping,0.01\n");
+        for (i, (x, y)) in mesh.nodes.iter().enumerate() {
+            text.push_str(&format!("node,{i},{x},{y}\n"));
+        }
+        for (i, t) in mesh.tris.iter().enumerate() {
+            text.push_str(&format!("triangle,{i},{},{},{},0.006,450,11000000000,800000000,0.3,600000000,0\n", t[0], t[1], t[2]));
+        }
+        for node in mesh.boundary_nodes() { text.push_str(&format!("fixed,{node}\n")); }
+        for &(key, [px, py]) in stations {
+            let (index, weights) = mesh.tris.iter().enumerate().find_map(|(index, t)| {
+                let [a, b, c] = [t[0], t[1], t[2]].map(|n| mesh.nodes[n]);
+                let det = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
+                let w1 = ((px - a.0) * (c.1 - a.1) - (c.0 - a.0) * (py - a.1)) / det;
+                let w2 = ((b.0 - a.0) * (py - a.1) - (px - a.0) * (b.1 - a.1)) / det;
+                let w0 = 1.0 - w1 - w2;
+                [w0, w1, w2].iter().all(|w| *w >= 0.0).then_some((index, [w0, w1, w2]))
+            }).expect("station inside the plate");
+            text.push_str(&format!("bridge,{key},{index},{},{},{}\n", weights[0], weights[1], weights[2]));
+        }
+        text
+    }
+
+    const SLOPE_STATIONS: [(u8, [f64; 2]); 4] =
+        [(60, [0.2013, 0.1437]), (64, [0.3121, 0.2043]), (69, [0.4234, 0.2711]), (72, [0.5207, 0.3318])];
+
+    /// Per-mode relative disagreement between the dumped bridge-station gradient and a central difference
+    /// of the retained displacement over one element, on an `nx` x `ny` mesh of the fixture plate, for every
+    /// mode below 600 Hz: the worst station/axis error divided by the mode's largest station gradient.
+    fn slope_errors(nx: usize, ny: usize) -> Vec<f64> {
+        let keys: Vec<u8> = SLOPE_STATIONS.iter().map(|s| s.0).collect();
+        let g = BoardGeometry::read(&fine_fixture(nx, ny, &SLOPE_STATIONS)).unwrap();
+        let prepared = g.prepare_with_motion(&keys, 600.0).unwrap();
+        let motion = prepared.motion.as_ref().unwrap();
+        let slopes = g.bridge_slopes(motion, &keys).unwrap();
+        assert_eq!(slopes.len(), prepared.modes.len());
+        // The same map reproduces the bridge coefficient it is built beside (primary-port consistency).
+        for &(key, _) in &SLOPE_STATIONS {
+            let site = g.bridge_sites.iter().find(|s| s.midi == key).unwrap();
+            let (w, scale) = motion.project_at(site.triangle, site.weights, [0.0; 3], [0.0, 0.0, 1.0]).unwrap();
+            for (m, mode) in prepared.modes.iter().enumerate() {
+                assert!((w[m] - mode.bridge[usize::from(key - 21)]).abs() <= 1e-9 * scale[m].max(1e-300));
+            }
+        }
+        let delta = 0.7 / nx as f64;
+        let field = |x: f64, y: f64| motion.normal_weights([x, y, 0.0], [0.0, 0.0, 1.0], 0.0).unwrap();
+        (0..prepared.modes.len()).map(|mode| {
+            let (mut scale, mut worst) = (0.0f64, 0.0f64);
+            for &(key, [x, y]) in &SLOPE_STATIONS {
+                let fd_x = (field(x + delta, y)[mode] - field(x - delta, y)[mode]) / (2.0 * delta);
+                let fd_y = (field(x, y + delta)[mode] - field(x, y - delta)[mode]) / (2.0 * delta);
+                let [sx, sy] = slopes[mode][usize::from(key - 21)];
+                scale = scale.max(fd_x.abs()).max(fd_y.abs());
+                worst = worst.max((sx - fd_x).abs()).max((sy - fd_y).abs());
+            }
+            assert!(scale > 1e-3, "mode {mode} has no gradient at any station, so the comparison would be vacuous");
+            worst / scale
+        }).collect()
+    }
+
+    /// The dumped bridge-station gradient must be the gradient of the retained displacement field.
+    ///
+    /// Error budget, written down for the second run (the first used the stiff-direction wavenumber, 20 /m
+    /// at 600 Hz, and its 10 % limit was missed by one mode at 10.5 %, so the budget was wrong, not the
+    /// limit). The fixture plate is orthotropic: E_L = 11 GPa along x, E_R = 0.8 GPa along y, so across y
+    /// D_y = 15.8 N m, with rho h = 2.7 kg/m^2, giving k_y = (rho h w^2 / D_y)^(1/4) = 39.5 /m at 600 Hz
+    /// (wavelength 159 mm). Fine mesh, element 9.7 mm, k h = 0.38: central difference over one element
+    /// (k d)^2/6 = 2.4 %, P1 displacement interpolation (k h)^2/8 = 1.8 %, P1 rotation readout
+    /// (k h)^2/12 = 1.2 %, so 5.4 % of a mode's gradient at worst, against the limit of 10 %. The coarse
+    /// mesh (element 19.4 mm, k h = 0.77) has a budget of about 22 %: it is not held to the limit, but
+    /// halving the element must cut its worst error at least in half (second order would quarter it),
+    /// which a first-order error such as a wrong interpolation or a convention slip would not do.
+    #[test]
+    fn dumped_bridge_slopes_match_a_finite_difference_of_the_retained_displacement() {
+        let coarse = slope_errors(36, 23);
+        let fine = slope_errors(72, 46);
+        let modes = coarse.len().min(fine.len());
+        assert!(modes >= 8, "the 600 Hz window must hold several modes on both meshes");
+        let (worst_coarse, worst_fine) = (
+            coarse[..modes].iter().cloned().fold(0.0, f64::max), fine[..modes].iter().cloned().fold(0.0, f64::max));
+        for m in 0..modes {
+            eprintln!("slope vs finite difference, mode {m}: coarse {:.4} fine {:.4}", coarse[m], fine[m]);
+        }
+        eprintln!("worst over {modes} modes: coarse {worst_coarse:.4} fine {worst_fine:.4}");
+        assert!(worst_fine < 0.10, "fine mesh: slope disagrees with the finite difference by {worst_fine:.3} of a mode's gradient");
+        assert!(worst_fine < 0.5 * worst_coarse, "halving the element must at least halve the error ({worst_coarse:.4} -> {worst_fine:.4})");
+    }
+
+
+    #[test]
+    fn slopes_refuse_a_missing_or_out_of_board_station_instead_of_defaulting() {
+        let stations = [(60u8, [0.2013, 0.1437]), (69, [0.4234, 0.2711])];
+        let g = BoardGeometry::read(&fine_fixture(12, 8, &stations)).unwrap();
+        let prepared = g.prepare_with_motion(&[60, 69], 300.0).unwrap();
+        let motion = prepared.motion.as_ref().unwrap();
+        assert!(g.bridge_slopes(motion, &[60, 69]).is_ok());
+        assert!(g.bridge_slopes(motion, &[61]).is_err(), "a key with no station");
+        assert!(g.bridge_slopes(motion, &[20]).is_err() && g.bridge_slopes(motion, &[109]).is_err());
+        let facets = motion.mesh.tris.len();
+        assert!(motion.project_at(facets, [0.2, 0.3, 0.5], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).is_err(), "no such facet");
+        assert!(motion.project_at(0, [1.5, -0.5, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).is_err(), "weights outside the facet");
     }
 
     #[test]

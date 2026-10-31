@@ -206,6 +206,10 @@ downbearing/bridge-cap projection. It requires --render; all-linear selection
 preserves the original image. See STRING_STRETCHING.md for SI rows, explicit
 retention limits and the distinction from a full longitudinal bridge model.
 --dump-geometry/--dump-obj export the board model; export alone skips eigenanalysis.
+--dump-board of a flat geometric board without --render also writes slope_x_per_m_sqrt_kg and
+slope_y_per_m_sqrt_kg: the gradient (dw/dx, dw/dy) of each mass-normalized mode shape at the key's
+bridge station, from the same retained nodal rotations and map as the bridge coefficient. A table
+with them reads back as before: --board checks the two columns and drops them.
 Thickness taper, material constants and key assignment include explicit estimates.
 Default per-key WoolFelt loading envelopes are source-derived; crush/unloading
 parameters, felt patch geometry and Prony time constants remain estimates.
@@ -919,16 +923,20 @@ fn prepare_geometric_board_with_source_ports(text: &str, keys: &[u8], band_hz: f
 }
 /// Export only the admitted keys. An absent measurement must not become an
 /// apparently measured zero bridge coefficient when the table is re-imported.
-fn write_board_for_scale(modes: &[linear::BoardMode], scale: &[geometry::Course]) -> String {
-    let all = board::write(modes);
+fn write_board_for_scale(modes: &[linear::BoardMode], scale: &[geometry::Course],
+    slopes: Option<&[[[f64; 2]; 88]]>) -> Result<String, String> {
+    let all = match slopes {
+        Some(slopes) => board::write_with_slopes(modes, slopes)?,
+        None => board::write(modes),
+    };
     let mut out = String::new();
     for row in all.lines() {
-        let admitted = row == board::HEADER || row.split(',').nth(4)
+        let admitted = row == board::HEADER || row == board::HEADER_WITH_SLOPES || row.split(',').nth(4)
             .and_then(|key| key.parse::<u8>().ok())
             .is_some_and(|key| scale.iter().any(|c| c.midi == key));
         if admitted { out.push_str(row); out.push('\n'); }
     }
-    out
+    Ok(out)
 }
 fn study_key(scale: &[geometry::Course], requested: Option<u8>) -> Result<u8, String> {
     if let Some(key) = requested {
@@ -1332,16 +1340,25 @@ fn run_with(args: &[String]) -> Result<(), String> {
         && geometry_text.as_deref().is_some_and(crowned_board::is_crowned) {
         return Err("Rayleigh loading requires a flat FSB board; a crowned shell cannot be flattened for physical backreaction".into());
     }
+    // Gradient of every mode shape at each key's bridge station, for a --dump-board of a flat geometric board.
+    let mut board_slopes: Option<Vec<[[f64; 2]; 88]>> = None;
     let (modes, board_source, surface, polarization, physical_damping, cavity) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
         let source_ports = polarization.as_ref().map(|spec| spec.source_ports(&scale)).transpose()?;
+        let want_slopes = options.dump_board.is_some() && options.render.is_none() && !crowned_board::is_crowned(text);
         let prepared = prepare_geometric_board_with_source_ports(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
             options.board_band_hz, options.equilibrate_board_mass, options.consistent_board_mass,
-            options.edge_cubic_board_mass, options.acoustic_refinement_levels, polarization.is_some() || cavity.is_some(),
+            options.edge_cubic_board_mass, options.acoustic_refinement_levels,
+            polarization.is_some() || cavity.is_some() || want_slopes,
             options.board_reduction.as_ref(), source_ports.as_deref())?;
         let projected = polarization.as_ref().map(|spec|
             spec.project(&scale, &prepared.modes, prepared.motion.as_ref())).transpose()?;
         let cavity = cavity.as_ref().map(|spec| spec.project(&prepared)).transpose()?;
+        if want_slopes {
+            let motion = prepared.motion.as_ref().ok_or("slope columns need the retained board motion")?;
+            let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
+            board_slopes = Some(board_geometry::BoardGeometry::read(text)?.bridge_slopes(motion, &keys)?);
+        }
         let model_name = if crowned_board::is_crowned(text) { "Crowned shell" } else { "Flat plate" };
         println!("{model_name} {:.6} m^2, {:.6} kg (panel+ribs/bridges), {} free DOFs, {} retained modes; source band (0,{}] Hz; preparation {:.6} s.",
             prepared.area_m2, prepared.mass_kg, prepared.free_dofs, prepared.modes.len(),
@@ -1406,7 +1423,8 @@ fn run_with(args: &[String]) -> Result<(), String> {
         write_fresh_output(path, format!("# Source: {scale_source}; {tuning_source}\n{}", geometry::write_scale(&scale)).as_bytes())?;
     }
     if let Some(path) = &options.dump_board {
-        write_fresh_output(path, format!("# Source: {board_source}\n{}", write_board_for_scale(&modes, &scale)).as_bytes())?;
+        write_fresh_output(path, format!("# Source: {board_source}\n{}",
+            write_board_for_scale(&modes, &scale, board_slopes.as_deref())?).as_bytes())?;
     }
     if let Some(path) = &options.render {
         return render_with_cavity(path, scale, &modes, surface.as_deref(), &options,
@@ -2069,7 +2087,7 @@ mod render_tests {
     fn board_export_preserves_missing_measurements_and_reimports_the_admitted_subset() {
         let scale = vec![geometry::demonstration_scale().unwrap()[48]];
         let modes = board::demonstration();
-        let text = write_board_for_scale(&modes, &scale);
+        let text = write_board_for_scale(&modes, &scale, None).unwrap();
         assert_eq!(text.lines().count(), modes.len() + 1);
         let roundtrip = board::read(&text, &[69]).unwrap();
         for (a, b) in roundtrip.iter().zip(&modes) {
@@ -2078,6 +2096,20 @@ mod render_tests {
             assert_eq!(a.volume, b.volume);
         }
         assert!(board::read(&text, &[60, 69]).is_err());
+    }
+    #[test]
+    fn board_export_with_slopes_keeps_the_admitted_subset_and_the_slope_header() {
+        let scale = vec![geometry::demonstration_scale().unwrap()[48]];
+        let modes = board::demonstration();
+        let slopes: Vec<[[f64; 2]; 88]> = (0..modes.len())
+            .map(|m| std::array::from_fn(|k| [m as f64 + 0.5, k as f64])).collect();
+        let text = write_board_for_scale(&modes, &scale, Some(&slopes)).unwrap();
+        assert!(text.starts_with(board::HEADER_WITH_SLOPES));
+        assert_eq!(text.lines().count(), modes.len() + 1);
+        let row = text.lines().nth(1).unwrap().split(',').collect::<Vec<_>>();
+        assert_eq!((row[4], row[6], row[7]), ("69", "5.00000000000000000e-1", "4.80000000000000000e1"));
+        assert_eq!(board::read(&text, &[69]).unwrap().len(), modes.len());
+        assert!(write_board_for_scale(&modes, &scale, Some(&slopes[..1])).is_err());
     }
     #[test]
     fn source_preset_renders_and_exports_without_conflicting_board_inputs() {
