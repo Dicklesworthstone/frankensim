@@ -31,7 +31,10 @@ pub struct MaterialRelaxationHeatDestination<'a> {
 }
 
 impl MaterialRelaxationHeatDestination<'_> {
-    pub(super) fn admit<E>(&self, thermal: &DepositionSimulation<'_>) -> Result<(), LayerThermalError<E>> {
+    /// Check this source body's caloric law, material domain, physical volume
+    /// and receiving mass without advancing either owner. Description compilers
+    /// may use this before output; execution repeats admission at every trial.
+    pub fn admit<E>(&self, thermal: &DepositionSimulation<'_>) -> Result<(), LayerThermalError<E>> {
         let bad = LayerThermalError::Invalid;
         if self.channel.groups().len() != 1 || self.channel.groups()[0].is_empty() {
             return Err(bad("one complete nonempty material group must own each finite body volume"));

@@ -28,6 +28,9 @@ mod dry;
 #[path = "contact_thermal/film_surface.rs"]
 mod film_surface;
 
+#[path = "contact_thermal/material_heat.rs"]
+mod material_heat;
+
 #[cfg(test)]
 #[path = "contact_thermal/tests.rs"]
 mod tests;
@@ -58,6 +61,7 @@ pub struct Profile {
     films: Vec<(usize, CellId)>,
     film_surfaces: Vec<film_surface::Route>,
     series: Vec<SeriesDriveHeatDestination>,
+    material_heat: Option<material_heat::Routes>,
     links: Vec<Link>,
     controls: LayerThermalSolve,
     caloric_error_j_kg: f64,
@@ -136,10 +140,12 @@ impl Profile {
             Some("frankensim-contact-thermal-v1") => 1,
             Some("frankensim-contact-thermal-v2") => 2,
             Some("frankensim-contact-thermal-v3") => 3,
+            Some("frankensim-contact-thermal-v4") => 4,
             _ => return Err("unsupported contact-thermal profile version".into()),
         };
         rows.row(match format { 1 => "frankensim-contact-thermal-v1",
-            2 => "frankensim-contact-thermal-v2", _ => "frankensim-contact-thermal-v3" })?.end()?;
+            2 => "frankensim-contact-thermal-v2", 3 => "frankensim-contact-thermal-v3",
+            _ => "frankensim-contact-thermal-v4" })?.end()?;
         let mut boundary = rows.row("boundary")?;
         if boundary.word()? != "adiabatic" {
             return Err("contact-thermal requires an explicit adiabatic outer boundary".into());
@@ -219,7 +225,7 @@ impl Profile {
             }
             films.push((port, cell));
         }
-        let film_surfaces = if format == 3 { film_surface::parse(&mut rows, &cells, &films)? }
+        let film_surfaces = if format >= 3 { film_surface::parse(&mut rows, &cells, &films)? }
             else { Vec::new() };
         let mut series = Vec::<SeriesDriveHeatDestination>::new();
         for _ in 0..rows.count("series", 64)? {
@@ -236,10 +242,14 @@ impl Profile {
             }
             series.push(route);
         }
+        let material_heat = if format >= 4 {
+            Some(material_heat::parse(&mut rows, &cells, &films)?)
+        } else { None };
         if !dry.is_empty() && !films.is_empty() {
             return Err("moving dry routes and retained shear-film histories require separate supported thermal owners".into());
         }
-        if dry.is_empty() && films.is_empty() && series.is_empty() {
+        if dry.is_empty() && films.is_empty() && series.is_empty()
+            && material_heat.as_ref().is_none_or(|routes| routes.fibers.is_empty()) {
             return Err("contact-thermal profile has no physical heat route".into());
         }
         let mut links = Vec::<Link>::new();
@@ -281,6 +291,7 @@ impl Profile {
             films,
             film_surfaces,
             series,
+            material_heat,
             links,
             caloric_error_j_kg,
             controls: LayerThermalSolve {
@@ -446,6 +457,7 @@ impl Profile {
                 ready.performance.bank().system(), &network, self.controls.maximum_cells)?;
         }
         prepared.film_routes(ready, &network)?;
+        prepared.material_routes(ready, &network, gate)?;
         drop(network);
         Ok(prepared)
     }
@@ -622,6 +634,7 @@ impl Prepared {
     ) -> Result<(W, WavStreamSummary)> {
         let network = self.network(gate)?;
         let film_routes = self.film_routes(ready, &network)?;
+        let material_heat = self.material_routes(ready, &network, gate)?;
         let bindings = self
             .profile
             .films
@@ -645,13 +658,16 @@ impl Prepared {
         let dry = self.dry_routes(ready)?;
         let resolve = |endpoint: &DepositionSimulation<'_>| self.resolve(endpoint);
         let mut performance = if dry.is_empty() {
-            ready.performance.with_contact_thermal_network(
-                network, bindings, self.profile.series.clone(), self.profile.controls, gate, resolve,
+            ready.performance.with_material_contact_thermal_network(
+                network, bindings, self.profile.series.clone(), material_heat,
+                self.profile.controls, gate, resolve,
             )?
         } else {
-            ready.performance.with_dry_contact_thermal_network(
+            let performance = ready.performance.with_dry_contact_thermal_network(
                 network, dry, self.profile.series.clone(), self.profile.controls, gate, resolve,
-            )?
+            )?;
+            if material_heat.is_empty() { performance }
+            else { performance.with_material_relaxation_heat(material_heat)? }
         };
         if !film_routes.is_empty() {
             performance = performance.with_trial_heat_source(|endpoint, ports|

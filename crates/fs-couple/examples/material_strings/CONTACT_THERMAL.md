@@ -110,7 +110,8 @@ counts may individually be zero. Zero source conductivity gives zero
 conductance; no replacement conductivity is introduced.
 
 Neighbor-cell temperatures drive conduction; film temperatures also drive
-the contact constitutive law. Thermal reassembly of strings, body and hair
+the contact constitutive law. Version 4 can additionally route the original fiber material's hereditary
+loss to its finite body. Thermal reassembly of strings, body and hair still
 requires their corresponding thermomechanical owners.
 
 ## Moving dry-contact profiles
@@ -258,6 +259,66 @@ boundaries. It does not transport rosin mass, renew or reset shear history, chan
 the string-side film attachment, model wear, or supply missing interface measurements.
 Thermal cells and time steps still require physical resolution/refinement.
 
+## Version 4: hereditary heat in the physical fiber bodies
+
+`frankensim-contact-thermal-v4` retains all version 3 records and adds this
+block after `series`, before `links`:
+
+```text
+material-heat-budget MAX_DIMENSION MAX_DENSE_BYTES MAX_MULTIPLY_TERMS
+fiber-heat N
+fiber-body STRIP LAYER CELL_ID
+```
+
+Repeat `fiber-body` for each selected physical material region. `STRIP` is
+the original ribbon's zero-based across-width cell, and `LAYER` is the
+zero-based radial material layer. A region cannot be selected twice, two
+regions cannot share a receiving cell, and a fiber body cannot use a film's
+cell. A body cell may also receive contact heat through the existing dry
+contact or retained-film conduction route, provided that route admits the
+same source and physical geometry.
+
+The original `bow_fiber_memory` declaration supplies every modulus increment
+and relaxation time. The heat profile supplies no additional damping value.
+The geometry producer selects the complete original linear bending and axial
+memory for the requested strip/layer. Each original source is integrated along
+the complete held-force trajectory and deposited once. No fraction of total
+mechanical loss is assigned to a body. The nonlinear `bow_fiber_strain` path
+requires its separate original axial-history heat channels as well as bending;
+this profile currently refuses that path rather than omitting axial heat.
+
+The receiving volume must equal the original annular layer area times the
+fiber length and number of fibers represented by the strip:
+`pi * (r_outer^2 - r_inner^2) * length * fiber_count / strip_count`.
+Density and this volume determine the finite mass. The cell must use the
+same material card, source temperature and supported caloric law as its
+mechanical region. One cell represents a uniform temperature over that
+whole region; it cannot be replaced by a small contact footprint while
+retaining the whole region's dissipated heat. Finer longitudinal temperature
+variation requires its corresponding spatial material/heat discretization.
+
+The dimension bound is at most 256 for the existing exact linear heat
+observation. Byte and multiply-work limits are aggregate over the declared
+receiving bodies and are divided conservatively among them before the
+original operator admission. Source, geometry, mass, applicability and budget
+checks run before the renderer opens its output; the physical owner repeats
+material admission during each thermal trial. Missing source properties and
+unsupported external acoustic trajectories still refuse.
+
+A material-only profile may set `dry-contacts 0`, `films 0`,
+`film-surfaces 0` and `series 0`. Combining fiber heat with admitted
+contact routes and source-derived conductive links lets that heat change
+contact temperature, traction and the same accepted pressure history.
+The existing command, trace, decimation and PCM paths consume this owner.
+
+This bulk hereditary route currently requires fixed density, geometry and
+source mechanical coefficients throughout the admitted temperature interval.
+It does not freeze a temperature-dependent relaxation time or modulus and
+call that thermal feedback. Temperature-dependent body laws require their
+own thermomechanical continuation. Film temperature-dependent laws continue
+to use the existing simultaneous thermal/contact solve. Unselected physical
+losses keep their original external-loss account.
+
 ## Scope and output
 
 This route retains fixed film geometry and tangent frames, positive
@@ -279,8 +340,9 @@ nonlinear mechanical/contact solve at every proposed thermal endpoint. Each
 trial starts from accepted string, film and drive histories, and film plastic
 heat, reversible affine-modulus exchange and explicitly routed drive loss enter
 the same finite enthalpy network. String/body constitutive coefficients stay at
-their declared source state; this contact-only model does not infer bulk string
-heating or thermal expansion. Solid caloric state, affine film `G(T)` and the
+their declared source state. Version 4 explicitly routes source fiber hereditary
+heat into its finite bodies; bulk string heating and thermal expansion still
+require their corresponding physical owners. Solid caloric state, affine film `G(T)` and the
 existing residual-compliance exclusion remain required.
 
 The render log records material/caloric identities, actual cell masses and
