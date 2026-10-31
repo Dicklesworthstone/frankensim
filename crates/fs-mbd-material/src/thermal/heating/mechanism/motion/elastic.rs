@@ -5,20 +5,13 @@
 //! expansion integral, mass or time integrator is reconstructed here. Source
 //! coefficients freeze during a mechanical substep. Their endpoint change is
 //! explicit parameter work, not reciprocal thermoelastic heat.
-use super::{Error, finite, positive};
-use crate::thermal::{
-    ExpandedArticulated,
-    heating::{HeatingError, ThermalRegion},
-};
+use super::{Error, finite, member::MemberInventory, positive};
+use crate::thermal::{ExpandedArticulated, heating::ThermalRegion};
 use fs_material::phase::EquilibriumPhaseState;
 use fs_material::section::thermal::ConcentricThermoelasticSection;
 use fs_material::section_temperature::thermoelastic::ConcentricThermoelasticLaw;
-use fs_material::state_point::{
-    DENSITY_PROPERTY, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY as ALPHA,
-};
 use fs_mbd::articulated::JointKind;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
-use std::collections::BTreeSet;
 
 /// Finite axial compliance between a prismatic child and its direct parent.
 ///
@@ -65,10 +58,7 @@ pub(super) struct BoundAxial<'a> {
     definition: AxialJointMember<'a>,
     pub dof: usize,
     pub state: AxialMemberState,
-    regions: Vec<ThermalRegion<'a>>,
-    /// Original body and reference-region indices, in section-layer order.
-    locations: Vec<(usize, usize)>,
-    masses: Vec<f64>,
+    inventory: MemberInventory<'a>,
 }
 impl<'a> BoundAxial<'a> {
     pub fn new(
@@ -84,101 +74,24 @@ impl<'a> BoundAxial<'a> {
             || !definition.reference_joint_position_m.is_finite()
             || !positive(definition.maximum_absolute_strain)
             || definition.maximum_absolute_strain >= 1.0
-            || definition.cells.len() != definition.law.reference().layers().len()
-            || definition.cells.iter().collect::<BTreeSet<_>>().len() != definition.cells.len()
         {
             return Err(Error::Invalid(
                 "axial member needs finite reference geometry, bounded strain and one distinct cell per layer",
             ));
         }
-        let model = configuration.model();
-        let link = model
-            .links()
-            .get(definition.link)
-            .ok_or(Error::Invalid("axial member child link does not exist"))?;
-        let parent = link
-            .parent()
-            .ok_or(Error::Invalid("axial member needs a parent-child joint"))?;
-        if link.joint().kind() != JointKind::Prismatic {
-            return Err(Error::Invalid("axial member requires a prismatic joint"));
-        }
-        let dof = model
-            .dof_index(definition.link)
-            .ok_or(Error::Invalid("axial member joint has no coordinate"))?;
-        let mut selected = Vec::with_capacity(definition.cells.len());
-        let mut locations = Vec::with_capacity(definition.cells.len());
-        let mut masses = Vec::with_capacity(definition.cells.len());
-        for (i, cell_id) in definition.cells.iter().enumerate() {
-            checkpoint()?;
-            let (body, region) = [definition.link, parent]
-                .into_iter()
-                .find_map(|body| {
-                    regions[body]
-                        .iter()
-                        .find(|r| r.cell_id == *cell_id)
-                        .map(|r| (body, r))
-                })
-                .ok_or(Error::Invalid(
-                    "axial layers must be actual regions of their child or direct parent",
-                ))?;
-            let original = configuration.bodies()[body].reference();
-            let index = original
-                .regions()
-                .iter()
-                .position(|r| r.key() == region.key)
-                .ok_or(Error::Invalid("axial member lost its original region"))?;
-            let material = original.regions()[index].material();
-            let layer = &definition.law.reference().layers()[i].material;
-            if layer.card_identity() != region.card.content_hash()
-                || layer.query_point() != material.query_point()
-                || layer.axis_quantities() != material.axis_quantities()
-                || layer
-                    .property(DENSITY_PROPERTY)
-                    .map(|p| p.answer().receipt.selected)
-                    != material
-                        .property(DENSITY_PROPERTY)
-                        .map(|p| p.answer().receipt.selected)
-            {
-                return Err(Error::Invalid(
-                    "axial layer must retain its original material, state context and density source",
-                ));
-            }
-            let expanded = configuration.bodies()[body]
-                .regions()
-                .iter()
-                .find(|r| r.reference_index() == index)
-                .ok_or(Error::Invalid("axial member lost its expanded region"))?;
-            if layer.property(ALPHA).map(|p| p.answer().receipt.selected)
-                != expanded
-                    .expansion()
-                    .reference()
-                    .resolved()
-                    .property(ALPHA)
-                    .map(|p| p.answer().receipt.selected)
-            {
-                return Err(Error::Invalid(
-                    "axial eigenstrain and link geometry must share their original expansion source",
-                ));
-            }
-            let integral = &definition.law.reference().layer_integrals()[i];
-            let volume = finite(integral.area_m2() * definition.reference_length_m)?;
-            let mass = finite(integral.line_density_kg_m() * definition.reference_length_m)?;
-            let cell = thermal
-                .cells()
-                .get(cell_id)
-                .ok_or(Error::Invalid("axial member thermal cell is inactive"))?;
-            if !same_inventory(volume, region.geometry.volume_m3)
-                || !same_inventory(mass, cell.mass_kg)
-            {
-                return Err(Error::Invalid(
-                    "axial section must represent the existing reference volume and mass exactly once",
-                ));
-            }
-            masses.push(cell.mass_kg);
-            locations.push((body, index));
-            selected.push(region.clone());
-        }
-        let phases = phases(&selected, &masses, thermal, checkpoint)?;
+        let inventory = MemberInventory::new(
+            definition.link,
+            JointKind::Prismatic,
+            &definition.cells,
+            definition.law.reference(),
+            definition.reference_length_m,
+            configuration,
+            regions,
+            thermal,
+            checkpoint,
+        )?;
+        let dof = inventory.dof;
+        let phases = inventory.phases(thermal, checkpoint)?;
         let strain = strain(&definition, position[dof])?;
         let temperatures = phases
             .iter()
@@ -201,9 +114,7 @@ impl<'a> BoundAxial<'a> {
             definition,
             dof,
             state,
-            regions: selected,
-            locations,
-            masses,
+            inventory,
         };
         bound.validate_expansion(configuration)?;
         bound.update_position(position[dof])?;
@@ -233,7 +144,7 @@ impl<'a> BoundAxial<'a> {
         position: &[f64],
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Error> {
-        let phases = phases(&self.regions, &self.masses, thermal, checkpoint)?;
+        let phases = self.inventory.phases(thermal, checkpoint)?;
         let total_strain = strain(&self.definition, position[self.dof])?;
         let temperatures = phases
             .iter()
@@ -266,6 +177,7 @@ impl<'a> BoundAxial<'a> {
 
     fn validate_expansion(&self, configuration: &ExpandedArticulated<'_>) -> Result<(), Error> {
         for (&(body, index), path) in self
+            .inventory
             .locations
             .iter()
             .zip(self.state.section.expansion_paths())
@@ -294,45 +206,3 @@ fn strain(definition: &AxialJointMember<'_>, position: f64) -> Result<f64, Error
     Ok(strain)
 }
 
-fn same_inventory(a: f64, b: f64) -> bool {
-    positive(a) && positive(b) && (a - b).abs() <= 128.0 * f64::EPSILON * a.max(b)
-}
-
-fn phases(
-    regions: &[ThermalRegion<'_>],
-    masses: &[f64],
-    thermal: &DepositionSimulation<'_>,
-    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-) -> Result<Vec<EquilibriumPhaseState>, Error> {
-    let mut phases = Vec::with_capacity(regions.len());
-    for (region, &mass) in regions.iter().zip(masses) {
-        checkpoint()?;
-        let cell = thermal
-            .cells()
-            .get(&region.cell_id)
-            .ok_or(Error::Invalid("axial member thermal cell is inactive"))?;
-        if cell.material_id != region.material_id
-            || cell.body_id != region.body_id
-            || cell.segment_id != region.segment_id
-            || cell.mass_kg != mass
-            || cell.geometry != region.geometry
-            || !thermal.uses_material_law(cell.material_id, region.caloric.curve())
-        {
-            return Err(Error::Invalid(
-                "axial member must retain its exact finite cell and caloric inventory",
-            ));
-        }
-        let phase = region
-            .caloric
-            .curve()
-            .state_at_specific_enthalpy(cell.specific_h_j_kg)
-            .map_err(HeatingError::from)?;
-        if !phase.is_fully_solid() || phase.material_card_identity() != region.card.content_hash() {
-            return Err(Error::Invalid(
-                "axial member needs its original solid caloric state",
-            ));
-        }
-        phases.push(phase);
-    }
-    Ok(phases)
-}

@@ -21,6 +21,7 @@ pub struct ConcentricTorsionalSection {
     viscosity_property: String,
     rotary_inertia_kg_m: f64,
     viscous_stiffness_n_m2_s: f64,
+    layer_viscous_stiffness_n_m2_s: Vec<f64>,
     omega_band_rad_s: (f64, f64),
 }
 
@@ -43,6 +44,7 @@ impl ConcentricShearSection {
     ) -> Result<ConcentricTorsionalSection, MaterialStatePointError> {
         let mut inertia = 0.0;
         let mut viscous = 0.0;
+        let mut layer_viscous_stiffness_n_m2_s = Vec::with_capacity(self.elastic().layers().len());
         let mut band = (0.0_f64, f64::MAX);
         for (layer, geometry) in self.elastic().layers().iter().zip(self.elastic().layer_integrals()) {
             let rho = layer.material.property(crate::state_point::DENSITY_PROPERTY)
@@ -78,12 +80,14 @@ impl ConcentricShearSection {
             }
             viscous += loss;
             if !viscous.is_finite() { return Err(invalid("torsional loss sum overflow")); }
+            layer_viscous_stiffness_n_m2_s.push(loss);
         }
         if !band.0.is_finite() || !band.1.is_finite() || band.0 < 0.0 || band.1 < band.0 {
             return Err(invalid("torsional coefficient frequency bands do not intersect"));
         }
         Ok(ConcentricTorsionalSection { shear: self, viscosity_property: property_name.into(),
-            rotary_inertia_kg_m: inertia, viscous_stiffness_n_m2_s: viscous, omega_band_rad_s: band })
+            rotary_inertia_kg_m: inertia, viscous_stiffness_n_m2_s: viscous,
+            layer_viscous_stiffness_n_m2_s, omega_band_rad_s: band })
     }
 }
 
@@ -103,6 +107,10 @@ impl ConcentricTorsionalSection {
     /// Torque coefficient multiplying spatial twist-rate gradient [N m2 s].
     #[must_use]
     pub const fn viscous_stiffness_n_m2_s(&self) -> f64 { self.viscous_stiffness_n_m2_s }
+    /// Original `eta_s J` contributions in spatial layer order [N m2 s].
+    /// A uniform twist-rate field deposits each layer's own viscous work there.
+    #[must_use]
+    pub fn layer_viscous_stiffness_n_m2_s(&self) -> &[f64] { &self.layer_viscous_stiffness_n_m2_s }
     /// Intersection of the actual fixed-state material-law bands [rad/s].
     #[must_use]
     pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.omega_band_rad_s }

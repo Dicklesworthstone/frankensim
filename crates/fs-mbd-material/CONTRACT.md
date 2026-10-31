@@ -284,6 +284,48 @@ gravitational work and transactional source/cancellation/work-budget refusal.
 These synthetic analytical cases establish implementation behavior, not measured
 material validity or an accuracy claim for rapid thermal actuation.
 
+## Material-driven torsional shafts on heated articulated motion (MR21)
+
+`articulated_motion::torsion::TorsionalJointShaft` binds the original concentric
+section temperature law to an actual revolute joint. It shares axial members'
+finite-inventory admission: original ordered cards, density/expansion sources,
+complete state contexts, reference layer volumes, masses and caloric objects.
+Those masses already reside in the rigid links and are never added again.
+
+The existing `ConcentricTorsionalSection` owns circular Saint-Venant stiffness
+and independently selected Kelvin–Voigt solid shear viscosity. With reference
+length L and twist theta, native mechanical stages receive
+`tau=-(sum G_i J_i/L) theta-(sum eta_i J_i/L) omega`; the same elastic term
+contributes `U=(sum G_i J_i/L) theta²/2` to the original energy accounting.
+Each layer's original `eta_i J_i` receives its share of the integrated viscous
+work on the SAME finite thermal interval. This joins the existing viscous-heat
+account once and introduces no second force solver or thermal storage update.
+
+The source owner refuses frequency/strain/stress/rate/field value dependence;
+a sampled complex modulus or loss factor cannot become a time-domain dashpot.
+Explicit viscosity, including explicit zero, and original frequency support
+from DC through the caller's declared complete band are required. That band
+is a modeling obligation, not inferred from one mode or a sampled trajectory.
+Every thermal refresh re-queries the same pinned sources, checks continuous
+G/eta support on the actual canonical T path and retains scalar reference
+density. Only numerical torque, storage and power evaluation occurs inside RK.
+
+An outer-fibre shear bound applies at every actual mechanical stage. Layer
+temperatures update the next original stiffness and loss coefficients; stiffness
+changes at unchanged q remain signed parameter work under the existing budget,
+separate from physical shear heat. Source, phase, work, strain and cancellation
+failures publish neither a mechanical nor thermal candidate.
+
+This remains a lumped, small-shear circular shaft on fixed reference geometry.
+Distributed shaft modes/inertia, axial/hoop stress, interlayer slip, noncircular
+warping, plasticity and reciprocal thermoelastic heat are outside this entry.
+Carrier expansion and its momentum/parameter-work transfer retain their
+existing owner. G1/G3/G4 regressions check independent damped/elastic
+oscillators, unequal layer heat capacities, material substitutions, thermal
+stiffness/loss feedback through heating and cooling, frequency-source refusal
+and atomic retry. Native
+execution remains unverified; parser/source checks do not establish it.
+
 ## Source-bound axial compliance on heated articulated motion (MR21)
 
 `articulated_motion::elastic::AxialJointMember` connects an original

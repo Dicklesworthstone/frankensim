@@ -13,6 +13,8 @@
 //! generalized pressure-force map, rather than an independent damping fit.
 //! Source-backed axial members add conservative effort and elastic storage on
 //! the same coordinates; thermal changes retain explicit parameter-work funding.
+//! Circular material shafts add torsional storage and layer-resolved shear heat
+//! through those same mechanical stages and finite thermal cells.
 use super::*;
 use fs_ga::{Se3, Vec3, Wrench};
 use fs_mbd::articulated::{
@@ -42,6 +44,11 @@ use squeeze::{BoundSqueeze, SqueezeFilm, SqueezeFilmState};
 /// Source-resolved axial compliance and storage on prismatic coordinates.
 pub mod elastic;
 use elastic::{AxialJointMember, AxialMemberState, BoundAxial};
+mod member;
+
+/// Original material torsion, Kelvin–Voigt shear loss and finite-layer heat.
+pub mod torsion;
+use torsion::{BoundTorsion, TorsionalJointShaft, TorsionalShaftState};
 
 /// Component tolerances follow the actual generalized-coordinate ordering.
 #[derive(Clone, Debug, PartialEq)]
@@ -131,7 +138,7 @@ pub struct MechanicalEnergy {
     pub kinetic_j: f64,
     /// Datum is zero at world height g dot x = 0.
     pub gravitational_j: f64,
-    /// Frozen-temperature axial potential, including interlayer self-stress.
+    /// Frozen-temperature member potential, including axial interlayer self-stress.
     /// Its source refresh is explicit parameter work, not reciprocal heat.
     pub elastic_j: f64,
 }
@@ -149,7 +156,7 @@ pub struct Audit {
     pub mechanical_before: MechanicalEnergy,
     pub mechanical_after: MechanicalEnergy,
     pub applied_joint_work_j: f64,
-    /// Journal and squeeze-film loss deposited once in `thermal.external_heat_j` [J].
+    /// Journal, squeeze-film and shaft loss deposited once in `thermal.external_heat_j` [J].
     /// Subtract this internal transfer when identifying externally supplied heat.
     pub viscous_heat_j: f64,
     /// Dry sliding loss deposited once into the two ordered finite bodies [J].
@@ -215,6 +222,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
             brakes: Vec::new(),
             squeeze: Vec::new(),
             axial: Vec::new(),
+            torsion: Vec::new(),
             pending: None,
         };
         forward_dynamics(
@@ -302,6 +310,43 @@ impl<'a> HeatedArticulatedMotion<'a> {
         self.motion.axial.iter().map(|member| &member.state)
     }
 
+    /// Attach material circular shafts to existing revolute joints once.
+    /// The shared finite-inventory binding retains the original mass and caloric
+    /// owners. Each layer receives its own shear loss on the original thermal
+    /// interval; stiffness refresh enters the existing parameter-work account.
+    /// Shaft source bands must cover the declared complete transient bandwidth.
+    pub fn with_torsional_joint_shafts(
+        &self, shafts: Vec<TorsionalJointShaft<'a>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        checkpoint()?;
+        if !self.motion.torsion.is_empty() || shafts.is_empty()
+            || shafts.len() + self.motion.bearings.len() + self.motion.brakes.len()
+                + self.motion.squeeze.len() > 64 {
+            return Err(Error::Invalid("attach shafts once within the 64 dissipative-member budget"));
+        }
+        let mut candidate = self.clone();
+        let mut inventory = BTreeSet::new();
+        for shaft in shafts {
+            checkpoint()?;
+            if shaft.cells.len() != shaft.law.reference().layers().len()
+                || shaft.cells.iter().any(|cell| !inventory.insert(*cell)) {
+                return Err(Error::Invalid("one finite layer inventory per torsional shaft required"));
+            }
+            candidate.motion.torsion.push(BoundTorsion::new(shaft, self.configuration(),
+                &self.motion.expansion.regions, &self.thermal, &self.motion.position,
+                &self.motion.velocity, &mut checkpoint)?);
+        }
+        candidate.motion.energy()?;
+        checkpoint()?;
+        Ok(candidate)
+    }
+
+    /// Accepted original source states, torque, storage and physical shear power.
+    pub fn torsional_joint_shafts(&self) -> impl ExactSizeIterator<Item = &TorsionalShaftState> {
+        self.motion.torsion.iter().map(|shaft| &shaft.state)
+    }
+
     /// Attach up to 64 massless, isothermal journal films to this mechanism.
     /// Each explicitly named receiving cell supplies the lubricant temperature
     /// and receives all of that film's dissipated work. Film storage, pressure
@@ -315,7 +360,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
         checkpoint()?;
         if !self.motion.bearings.is_empty()
             || bearings.is_empty()
-            || bearings.len() + self.motion.brakes.len() + self.motion.squeeze.len() > 64
+            || bearings.len() + self.motion.brakes.len() + self.motion.squeeze.len() + self.motion.torsion.len() > 64
         {
             return Err(Error::Invalid("attach 1..=64 journal films exactly once"));
         }
@@ -354,7 +399,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
         checkpoint()?;
         if !self.motion.bearings.is_empty()
             || bearings.is_empty()
-            || bearings.len() + self.motion.brakes.len() + self.motion.squeeze.len() > 64
+            || bearings.len() + self.motion.brakes.len() + self.motion.squeeze.len() + self.motion.torsion.len() > 64
         {
             return Err(Error::Invalid("attach 1..=64 journal films exactly once"));
         }
@@ -385,7 +430,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
     ) -> Result<Self, Error> {
         checkpoint()?;
         if !self.motion.bearings.is_empty() || bearings.is_empty()
-            || bearings.len() + self.motion.brakes.len() + self.motion.squeeze.len() > 64
+            || bearings.len() + self.motion.brakes.len() + self.motion.squeeze.len() + self.motion.torsion.len() > 64
         {
             return Err(Error::Invalid("attach 1..=64 journal films exactly once"));
         }
@@ -419,7 +464,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
         checkpoint()?;
         if !self.motion.brakes.is_empty()
             || brakes.is_empty()
-            || brakes.len() + self.motion.bearings.len() + self.motion.squeeze.len() > 64
+            || brakes.len() + self.motion.bearings.len() + self.motion.squeeze.len() + self.motion.torsion.len() > 64
         {
             return Err(Error::Invalid(
                 "attach dry brakes once within the 64-interface total budget",
@@ -457,7 +502,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
         checkpoint()?;
         if !self.motion.brakes.is_empty()
             || brakes.is_empty()
-            || brakes.len() + self.motion.bearings.len() + self.motion.squeeze.len() > 64
+            || brakes.len() + self.motion.bearings.len() + self.motion.squeeze.len() + self.motion.torsion.len() > 64
         {
             return Err(Error::Invalid(
                 "attach dry brakes once within the 64-interface total budget",
@@ -498,7 +543,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
         checkpoint()?;
         if !self.motion.squeeze.is_empty()
             || films.is_empty()
-            || films.len() + self.motion.bearings.len() + self.motion.brakes.len() > 64
+            || films.len() + self.motion.bearings.len() + self.motion.brakes.len() + self.motion.torsion.len() > 64
         {
             return Err(Error::Invalid("attach squeeze films once within the 64-interface total budget"));
         }
@@ -631,6 +676,7 @@ struct Motion<'a> {
     brakes: Vec<BoundBrake<'a>>,
     squeeze: Vec<BoundSqueeze<'a>>,
     axial: Vec<BoundAxial<'a>>,
+    torsion: Vec<BoundTorsion<'a>>,
     pending: Option<IntegratedMotion>,
 }
 #[derive(Clone)]
@@ -657,6 +703,7 @@ impl Motion<'_> {
             &self.velocity,
             self.gravity,
             &self.axial,
+            &self.torsion,
         )
     }
     fn integrate(
@@ -693,6 +740,7 @@ impl Motion<'_> {
         scales.extend(
             self.squeeze.iter().map(|film| film.definition.limits.absolute_loss_tolerance_j),
         );
+        scales.extend(self.torsion.iter().map(|shaft| shaft.definition.absolute_loss_tolerance_j));
         let mut normalized: Vec<_> = self
             .position
             .iter()
@@ -730,6 +778,12 @@ impl Motion<'_> {
                     }
                     let index = 2 * n + self.bearings.len() + self.brakes.len() + j;
                     out[index] = response.dissipated_power_w / scales[index];
+                }
+                for (j, shaft) in self.torsion.iter().enumerate() {
+                    let (torque, power, _) = shaft.response(physical[shaft.dof], physical[n + shaft.dof])?;
+                    effort[shaft.dof] = finite(effort[shaft.dof] + torque)?;
+                    let index = 2 * n + self.bearings.len() + self.brakes.len() + self.squeeze.len() + j;
+                    out[index] = power / scales[index];
                 }
                 let response = forward_dynamics(
                     model,
@@ -781,7 +835,7 @@ impl Motion<'_> {
         let physical: Vec<_> = state.u.iter().zip(&scales).map(|(&x, &s)| x * s).collect();
         let position = physical[..n].to_vec();
         let velocity = physical[n..2 * n].to_vec();
-        let after_motion = energy(model, self.base, &position, &velocity, self.gravity, &self.axial)?;
+        let after_motion = energy(model, self.base, &position, &velocity, self.gravity, &self.axial, &self.torsion)?;
         let applied = finite(
             self.effort
                 .iter()
@@ -838,6 +892,12 @@ impl Motion<'_> {
             *watts = finite(*watts + loss / dt_s)?;
             squeeze_losses.push(loss);
         }
+        let shaft_start = 2 * n + self.bearings.len() + self.brakes.len() + self.squeeze.len();
+        for (shaft, &loss) in self.torsion.iter().zip(&physical[shaft_start..]) {
+            shaft.response(position[shaft.dof], velocity[shaft.dof])?;
+            shaft.deposit_loss(loss, dt_s, &mut heat_w)?;
+            viscous = finite(viscous + loss)?;
+        }
         let numerical = finite(after_motion.change_from(before)? - applied + viscous + friction)?;
         checkpoint()?;
         Ok(IntegratedMotion {
@@ -876,7 +936,7 @@ impl DepositionObserver for Motion<'_> {
         Ok(proposed_s.min(self.controls.maximum_step_s))
     }
     fn requires_step_interval(&self) -> bool {
-        !self.bearings.is_empty() || !self.brakes.is_empty() || !self.squeeze.is_empty()
+        !self.bearings.is_empty() || !self.brakes.is_empty() || !self.squeeze.is_empty() || !self.torsion.is_empty()
     }
     fn step_sources(
         &mut self,
@@ -960,7 +1020,10 @@ impl DepositionObserver for Motion<'_> {
             checkpoint()?;
             member.refresh(thermal, &self.expansion.configuration, &position, checkpoint)?;
         }
-        let after = energy(model, self.base, &position, &next_velocity, self.gravity, &self.axial)?;
+        for shaft in &mut self.torsion {
+            shaft.refresh(thermal, &position, &next_velocity, checkpoint)?;
+        }
+        let after = energy(model, self.base, &position, &next_velocity, self.gravity, &self.axial, &self.torsion)?;
         let parameter = after.change_from(after_motion)?;
         for bearing in &mut self.bearings {
             checkpoint()?;
@@ -1007,6 +1070,7 @@ fn energy(
     velocity: &[f64],
     gravity: Vec3,
     axial: &[BoundAxial<'_>],
+    torsion: &[BoundTorsion<'_>],
 ) -> Result<MechanicalEnergy, Error> {
     let kinematics = forward_kinematics(model, base, q, velocity)?;
     let mut kinetic = 0.0;
@@ -1027,6 +1091,9 @@ fn energy(
     let mut elastic = 0.0;
     for member in axial {
         elastic = finite(elastic + member.response(q[member.dof])?.1)?;
+    }
+    for shaft in torsion {
+        elastic = finite(elastic + shaft.response(q[shaft.dof], velocity[shaft.dof])?.2)?;
     }
     Ok(MechanicalEnergy {
         kinetic_j: kinetic,
