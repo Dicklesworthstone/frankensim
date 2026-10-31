@@ -12,4 +12,4 @@ environment	pitch measurements made at 15 to 27 C in several rooms; the instrume
 source_ids	bouterse-2010-bressan-alto-fomrhi;terrien-2015-recorder-register-thresholds
 target_relation	one real alto recorder with published bore, hole and window geometry; the windway height is not published for it; no recording of it is in the library and no licensed reference exists yet (bead pexfp.219), so renders are listened to, not graded
 hole_index	hole-00 is the thumb hole (back of the middle joint); hole-01 to hole-06 are the front holes from the head down; hole-07 is on the foot; positions are measured from the upper shoulder of the middle joint along the bore, except where a feature says otherwise
-pitch_standard	plays at about a1 = 409 Hz (Bouterse: alto d- is about 40 cents below a1 = 415 Hz at 20 C)
+pitch_standard	plays at about a1 = 409 Hz (Bouterse, Comm. 1910: alto d-'s c2 and c3 lie 25 cents below a1 = 415 Hz in equal temperament, corrected to 20 C at 3 cents per degree); its own a1 lies 20 cents below that (-60 cents at 15 C in the same table)

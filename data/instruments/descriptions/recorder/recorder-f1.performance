@@ -29,11 +29,11 @@ duct_node reflection 1
 duct_node junction
 duct_node junction
 duct_node reflection -1
-duct_section 0 1 0.0065750 0.0041917 1e-10
-duct_section 1 2 0.0023000 0.0098953 1e-10
-duct_section 1 3 0.0374750 0.0098317 1e-10
-duct_section 3 4 0.0374750 0.0098133 1e-10
-duct_section 4 5 0.0374750 0.0097488 1e-10
+duct_section 0 1 0.0066503 0.0041917 1e-10
+duct_section 1 2 0.0023000 0.0098200 1e-10
+duct_section 1 3 0.0374750 0.0097564 1e-10
+duct_section 3 4 0.0374750 0.0097380 1e-10
+duct_section 4 5 0.0374750 0.0096943 1e-10
 duct_section 5 6 0.0374750 0.0095368 1e-10
 duct_section 6 7 0.0046790 0.0032000 1e-10
 duct_section 6 8 0.0148000 0.0093188 1e-10
@@ -79,7 +79,7 @@ receiver -0.44820 0 1 4 16 2800
 outlets 24 0
 mouth_radiation -0.4482000 0 4 4
 mouth_reaction window-cylinder
-window wall-cut 4 cheeks parallel ramp 0.00051 18.6210
+window wall-cut 4 cheeks parallel ramp 0.00051 18.6210 mass ernoult-fabre-2017
 controls 8192 100000
 gesture
 frankensim-gesture-schedule-v1

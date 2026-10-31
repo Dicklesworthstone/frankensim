@@ -8,7 +8,53 @@ use fs_vfit::relaxation::RelaxationImpedanceSpec;
 pub(super) struct Input {
     pub graph: TubeNetworkSpec,
     pub gases: Vec<GasState>,
+    pub inner: Vec<HoleInnerLength>,
     explicit_network: bool,
+}
+
+/// An open side hole's inner length, from `inner BORE_RADIUS_M` on its
+/// chimney's `duct_section` row (before any `gas`):
+/// `t_i = b (0.82 - 0.193 d - 1.09 d^2 + 1.27 d^3 - 0.71 d^4)`, `d = b / a`,
+/// with b the chimney's radius and a the main bore's radius at the hole.
+/// This is Dubos et al. (1999) as corrected by Dalmont et al. (2002), in the
+/// form Garcia Mayen et al. give it (HAL hal-03230052, 2021, eq. 11) and
+/// Ernoult and Fabre (2017) use (eq. 17: twice it is their right-angle bend).
+/// It is the mass of the junction's evanescent modes, in the hole's area.
+///
+/// Reference plane: the chimney row's length is the hole's height on its axis
+/// from the main bore's wall (a card's wall thickness at the hole), and the
+/// bore's sections run through the junction at the hole's axis. That is the
+/// plane of Garcia Mayen et al.'s Fig. 1, whose shunt length is
+/// `t_s = t_i + t + t_m + t_r` (eq. 14). This row adds `t_i` once, to the
+/// chimney's length. It does not add the matching volume `t_m` (their eq. 12),
+/// the series length `t_a` (eq. 10), or anything at the outer end, whose load
+/// is the outlet's own. The row needs a side hole: a chimney from a junction
+/// of at least three sections to an open end (reflection -1), narrower than
+/// the bore (`0 < d <= 1`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HoleInnerLength {
+    /// The chimney's section index.
+    pub section: usize,
+    /// b, the hole's radius [m].
+    pub hole_radius_m: f64,
+    /// a, the main bore's radius at the hole, from the row [m].
+    pub bore_radius_m: f64,
+    /// The chimney as the row gives it: the height on the hole's axis [m].
+    pub chimney_m: f64,
+    /// `t_i` [m], added to the chimney's length in the graph.
+    pub inner_length_m: f64,
+}
+
+impl HoleInnerLength {
+    /// `t_i` [m] for a hole of radius b on a bore of radius a; `None` unless
+    /// `0 < b / a <= 1` with both finite.
+    #[must_use]
+    pub fn law(hole_radius_m: f64, bore_radius_m: f64) -> Option<f64> {
+        let d = hole_radius_m / bore_radius_m;
+        (hole_radius_m.is_finite() && hole_radius_m > 0.0 && bore_radius_m.is_finite()
+            && d > 0.0 && d <= 1.0)
+            .then(|| hole_radius_m * ((((-0.71 * d + 1.27) * d - 1.09) * d - 0.193) * d + 0.82))
+    }
 }
 
 impl Input {
@@ -17,6 +63,7 @@ impl Input {
         gate: &CancelGate) -> Result<Self, FlueInputError>
     {
         let explicit_network = rows.next_is("network");
+        let mut inner = Vec::new();
         let (nodes, sections, gases) = if explicit_network {
             let mut row = rows.row("network")?;
             let node_count: usize = row.number()?;
@@ -67,7 +114,8 @@ impl Input {
             }
             let mut sections = Vec::with_capacity(section_count);
             let mut gases = Vec::with_capacity(section_count);
-            for _ in 0..section_count {
+            let mut requests = Vec::new();
+            for index in 0..section_count {
                 poll(gate)?;
                 let mut row = rows.row("duct_section")?;
                 let section = TubeSection { nodes: [row.number()?, row.number()?],
@@ -78,6 +126,10 @@ impl Input {
                     || section.max_length_error_m < 0.0 {
                     return Err(bad(row.line, "duct sections require distinct existing endpoints and positive geometry"));
                 }
+                if row.fields.clone().next() == Some("inner") {
+                    row.fields.next();
+                    requests.push((index, row.scalar()?, row.line));
+                }
                 let gas = if row.fields.clone().next() == Some("gas") {
                     row.fields.next();
                     row.gas(sources, records)?
@@ -85,6 +137,21 @@ impl Input {
                 row.end()?;
                 sections.push(section);
                 gases.push(gas);
+            }
+            for (index, bore_radius_m, line) in requests {
+                let TubeSection { nodes: [near, far], length_m, radius_m, .. } = sections[index];
+                let open = matches!(nodes[far],
+                    NetworkNode::Termination { reflection } if reflection.to_bits() == (-1f64).to_bits());
+                let degree = sections.iter().filter(|s| s.nodes.contains(&near)).count();
+                if !open || !matches!(nodes[near], NetworkNode::Junction) || degree < 3 {
+                    return Err(bad(line, "duct_section inner needs a side hole: a chimney from a junction of at least three sections to an open end (reflection -1)"));
+                }
+                let Some(inner_length_m) = HoleInnerLength::law(radius_m, bore_radius_m) else {
+                    return Err(bad(line, "duct_section inner needs a hole no wider than the bore: 0 < hole radius / bore radius <= 1"));
+                };
+                sections[index].length_m = length_m + inner_length_m;
+                inner.push(HoleInnerLength { section: index, hole_radius_m: radius_m, bore_radius_m,
+                    chimney_m: length_m, inner_length_m });
             }
             (nodes, sections, gases)
         } else {
@@ -105,7 +172,7 @@ impl Input {
         graph.sound_speed_m_s = gases[inlet].sound_speed;
         graph.validate_section_gases(&gases).map_err(|source|
             FlueInputError::Physics(FlueError::Physics(source)))?;
-        Ok(Self { graph, gases, explicit_network })
+        Ok(Self { graph, gases, inner, explicit_network })
     }
 
     pub fn read_losses(&self, rows: &mut Rows<'_>) -> Result<Vec<ViscothermalSectionSpec>, FlueInputError> {

@@ -4,13 +4,18 @@
 //! row, the pocket radius tolerance, the refusals, and the window's radiation
 //! from the head's outer cylinder in place of the authored loss; and
 //! `window embouchure` on the G4 flute card: the hole under the lip, centred
-//! or from the player's side, with the player's face behind it.
+//! or from the player's side, with the player's face behind it. Then the
+//! recorder cards' window at Ernoult and Fabre 2017's mass, moved from their
+//! edge plane to the card's junction, and their side holes' inner length:
+//! a measured tonehole run end to end through the card's own hole code.
 
 use fs_bem::wall_window::{
     CoverSide, WallWindow, WallWindowOptions, WindowCheeks, WindowCover, WindowRamp,
     WindowUpstream, wall_window_ladder,
 };
-use fs_couple::flue_loop::network::performance::file::{FlueFilePerformance, FlueInputError};
+use fs_couple::flue_loop::network::performance::file::{
+    ErnoultFabreWindow, FlueFilePerformance, FlueInputError, HoleInnerLength,
+};
 use fs_couple::pcm_wav::observation::PressureRenderer;
 use fs_exec::CancelGate;
 
@@ -524,4 +529,251 @@ fn a_one_sided_lip_and_the_players_face_come_from_the_row() {
         lip.ladder.mass_per_density * bore_area * 1e3,
         face.ladder.mass_per_density * bore_area * 1e3
     );
+}
+
+const RECORDER_A1: &str =
+    include_str!("../../../data/instruments/descriptions/recorder/recorder-a1.performance");
+
+/// The alto recorder's a1 card, cut to a 1024-sample window with its onset
+/// only (the release at 2.2 s lies outside that window).
+fn recorder_a1() -> String {
+    assert!(RECORDER_A1.contains("\noutput 120000 5 "));
+    let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t2.1e2\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
+    assert!(RECORDER_A1.contains(events), "the a1 gesture changed; update this test");
+    RECORDER_A1
+        .replace("\noutput 120000 5 ", "\noutput 1024 1 ")
+        .replace(events, "events\t1\nevent\t0e0\t5e-2\tpressure-pa\t2.1e2")
+}
+
+#[test]
+fn ernoult_fabre_window_is_their_eq_18_moved_from_the_edge_to_the_junction() {
+    use core::f64::consts::{FRAC_PI_2, PI};
+    let (w, h) = (0.0046, 0.012);
+    // At the right angle (no ramp) the ears are eq. 18's straight chimney.
+    let (le, rp) = (0.0066503, 0.0097564);
+    let right = ErnoultFabreWindow::new(w, h, le, None, rp);
+    assert_eq!(right.ears_per_density.to_bits(), (le / (w * h)).to_bits());
+    // Eq. 23 tends to it there, plus its own small-angle blend 32^-alpha 0.85 sqrt(l_e/H).
+    let near = ErnoultFabreWindow::new(w, h, le, Some(FRAC_PI_2 - 1e-7), rp);
+    let blend = fs_math::det::exp(-FRAC_PI_2 * fs_math::det::ln(32.0)) * 0.85
+        * fs_math::det::sqrt(le / h) / h;
+    assert!(((near.ears_per_density - right.ears_per_density) / blend - 1.0).abs() < 1e-3);
+    // The edge plane is eq. 18's sum; the junction lies W/2 of bore upstream.
+    let ramp = ErnoultFabreWindow::new(w, h, le, Some(18.6210f64.to_radians()), rp);
+    let window_area = w * h;
+    assert_eq!(
+        ramp.edge_mass_per_density.to_bits(),
+        (ramp.right_angle_per_density + ramp.ears_per_density
+            + ramp.radiation_length_m / window_area)
+            .to_bits()
+    );
+    let bore_area = PI * rp * rp;
+    assert!(
+        ((ramp.edge_mass_per_density - ramp.junction_mass_per_density) * bore_area - 0.5 * w)
+            .abs()
+            < 1e-15
+    );
+    // An independent evaluation (scratchpad passive_r2.py, posted in comment
+    // 8343): 56.38 mm at the edge, 54.08 at the junction on the origin card's
+    // bore, 53.08 at the junction on the card's area-equivalent head.
+    let origin = ErnoultFabreWindow::new(w, h, 0.006575, Some(18.6210f64.to_radians()), 0.0098317);
+    let origin_area = PI * 0.0098317 * 0.0098317;
+    for (value, expected) in [
+        (origin.edge_mass_per_density * origin_area, 0.056_383_309),
+        (origin.junction_mass_per_density * origin_area, 0.054_083_309),
+        (ramp.junction_mass_per_density * bore_area, 0.053_080_068),
+    ] {
+        assert!((value / expected - 1.0).abs() < 1e-7, "{value} vs {expected}");
+    }
+    assert_eq!(ramp.outside_spans(), None, "the card lies inside their FE set");
+    assert!(ErnoultFabreWindow::new(w, h, le, Some(3f64.to_radians()), rp).outside_spans().is_some());
+    assert!(ErnoultFabreWindow::new(w, 0.005, le, Some(0.3), rp).outside_spans().is_some());
+}
+
+#[test]
+fn recorder_window_takes_ernoult_fabre_and_keeps_the_computed_mass_for_comparison() {
+    let file = parse(&recorder_a1()).unwrap();
+    let record = file.window().expect("window record");
+    let ef = record.ernoult_fabre.expect("the card selects mass ernoult-fabre-2017");
+    assert_eq!(
+        (ef.width_m, ef.height_m, ef.ears_m, ef.bore_radius_m),
+        (0.0046, 0.012, 0.0066503, 0.0097564),
+        "W, H, l_e and r_p come from the card's flue row, channel and bore"
+    );
+    assert_eq!(ef.angle_rad.to_bits(), 18.6210f64.to_radians().to_bits());
+    assert_eq!(record.mass_per_density().to_bits(), ef.junction_mass_per_density.to_bits());
+    let voice = file.renderer().voice();
+    let load = voice.window_radiation_load().expect("window radiation");
+    let rho = voice.gas().density;
+    assert_eq!(
+        voice.mouth_inertance_pa_s2_m3().to_bits(),
+        (rho * (ef.junction_mass_per_density - record.riser_mass_per_density)
+            - load.load().static_inertance_pa_s2_m3())
+        .to_bits(),
+        "the network carries Ernoult and Fabre's mass at the junction"
+    );
+    let bore_area = core::f64::consts::PI * 0.0097564 * 0.0097564;
+    let computed = record.ladder.mass_per_density * bore_area;
+    assert!(computed > 0.0);
+    eprintln!(
+        "a1 window: Ernoult-Fabre {:.3} mm at the edge, {:.3} mm at the junction; computed (comparison) {:.3} mm",
+        ef.edge_mass_per_density * bore_area * 1e3,
+        ef.junction_mass_per_density * bore_area * 1e3,
+        computed * 1e3
+    );
+}
+
+#[test]
+fn ernoult_fabre_refuses_outside_its_geometry() {
+    let base = recorder_a1();
+    let refused = |text: &str| parse(text).is_err();
+    let row = "window wall-cut 4 cheeks parallel ramp 0.00051 18.6210 mass ernoult-fabre-2017";
+    assert!(base.contains(row));
+    assert!(refused(&base.replace(row, "window wall-cut 4 cheeks radial ramp 0.00051 18.6210 mass ernoult-fabre-2017")));
+    assert!(refused(&base.replace(row, "window wall-cut 4 cheeks parallel ramp 0.00051 3.0 mass ernoult-fabre-2017")));
+    assert!(refused(&base.replace(row, "window wall-cut 4 cheeks parallel ramp 0.00051 18.6210 mass ernoult-fabre")));
+    // Their closed end is flush with the window's upstream edge.
+    assert!(refused(&base.replace(
+        "duct_section 1 2 0.0023000 0.0098200",
+        "duct_section 1 2 0.0030000 0.0098200"
+    )));
+}
+
+#[test]
+fn inner_length_is_the_dubos_dalmont_law_on_open_side_holes_only() {
+    // Garcia Mayen et al. (HAL hal-03230052, 2021): b = 4 mm on a = 7.3 mm, "t_i = 2.1 mm".
+    let t = HoleInnerLength::law(0.004, 0.0073).unwrap();
+    assert!((t - 0.0021).abs() < 0.05e-3, "{t}");
+    // A small hole: the isolated-orifice 0.82 b.
+    assert!((HoleInnerLength::law(1e-6, 1.0).unwrap() / 1e-6 - 0.82).abs() < 1e-5);
+    assert_eq!(HoleInnerLength::law(0.0, 0.0073), None);
+    assert_eq!(HoleInnerLength::law(0.008, 0.0073), None);
+
+    let base = recorder_a1();
+    let file = parse(&base).unwrap();
+    let holes = file.hole_inner_lengths();
+    assert_eq!(holes.len(), 2, "a1 opens holes 6 and 7");
+    let graph = &file.renderer().voice().network().expect("graph").source().graph;
+    for (hole, (section, b, a, chimney)) in holes.iter().zip([
+        (18, 0.002675, 0.0075740, 0.0049260),
+        (20, 0.002625, 0.0070111, 0.0089889),
+    ]) {
+        assert_eq!((hole.section, hole.hole_radius_m, hole.bore_radius_m, hole.chimney_m),
+            (section, b, a, chimney));
+        assert_eq!(hole.inner_length_m.to_bits(), HoleInnerLength::law(b, a).unwrap().to_bits());
+        assert_eq!(graph.sections[section].length_m.to_bits(), (chimney + hole.inner_length_m).to_bits(),
+            "t_i is added once, to the chimney");
+    }
+    let refused = |text: &str| parse(text).is_err();
+    // A closed hole (rigid end), a bore section, and a hole wider than its bore.
+    assert!(refused(&base.replace(
+        "duct_section 16 17 0.0046850 0.0032000 1e-10\n",
+        "duct_section 16 17 0.0046850 0.0032000 1e-10 inner 0.0080650\n"
+    )));
+    assert!(refused(&base.replace(
+        "duct_section 18 20 0.0336000 0.0072673 1e-10\n",
+        "duct_section 18 20 0.0336000 0.0072673 1e-10 inner 0.0080000\n"
+    )));
+    assert!(refused(&base.replace("inner 0.0075740", "inner 0.0020000")));
+}
+
+/// Garcia Mayen, Kergomard, Vergez, Guillemain, Jousserand, Pachebat and
+/// Sanchez, "Characterization of open woodwind toneholes by the tube reversed
+/// method" (HAL hal-03230052, 2021): one cylindrical tonehole, b = 4 mm,
+/// t = 8.5 mm (on the hole's axis from the main tube's wall, their Fig. 1),
+/// on a main tube of a = 7.3 mm, L1 = 44 mm and L2 = 74 mm. The card's own
+/// hole code (the duct parser with `inner`, the compact baffled outlet
+/// binding, the fractional waveguide) is driven at the inlet by an impulse;
+/// Z_in = P/U from the network's own inlet pressure and flow; L1 and L2 (rigid
+/// far end) are removed as lossless lines; `t_s = Im(Z_s) / (k Z_ch)` (their
+/// eq. 13) is averaged over 400-600 Hz (their conclusion's band). Pass rule
+/// and prediction, posted before the run (bead pexfp.138): inside their
+/// measured 12.9-14.4 mm (Figs. 10-12, read by eye); with minus without
+/// `inner` 2.158 mm within 0.05 mm; both runs within 0.05 mm of the predicted
+/// 14.098 and 11.940 mm.
+#[test]
+fn a_measured_tonehole_through_the_cards_hole_code() {
+    let ts = |inner: bool| -> f64 {
+        let mut text = String::new();
+        for line in recorder_a1().lines() {
+            if line.starts_with("duct_node") || line.starts_with("duct_section")
+                || line.starts_with("loss_section") || line.starts_with("outlet ")
+                || line.starts_with("mouth_radiation") || line.starts_with("mouth_reaction")
+                || line.starts_with("window ")
+            {
+                continue;
+            }
+            let hole = if inner { " inner 0.0073" } else { "" };
+            let line = match line {
+                "network 25 24" => format!("network 4 3\nduct_node inlet\nduct_node junction\nduct_node reflection -1\nduct_node reflection 1\nduct_section 0 1 0.044 0.0073 1e-10\nduct_section 1 2 0.0085 0.004 1e-10{hole}\nduct_section 1 3 0.074 0.0073 1e-10"),
+                "viscothermal sections 13" => "viscothermal none".to_string(),
+                "outlets 24 2" => "outlets 2 0".to_string(),
+                other => other.to_string(),
+            };
+            text.push_str(&line);
+            text.push('\n');
+        }
+        let file = parse(&text).unwrap();
+        let network = file.renderer().voice().network().expect("graph");
+        let gases = network.section_gases().to_vec();
+        let (policy, _) = network.fractional_sections().expect("fractional travel");
+        let dt = 1.0 / f64::from(file.info().mechanics_rate_hz);
+        let (mut wave, _, _) = network
+            .graph()
+            .clone()
+            .realize_fractional_waveguide(&gases, dt, policy, &CancelGate::new_clock_free())
+            .unwrap();
+        let n = 1 << 16;
+        let (mut p, mut u) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for i in 0..n {
+            let frame = wave.step(if i == 0 { 1.0 } else { 0.0 }).unwrap();
+            p.push(frame.inlet_pressure_pa);
+            u.push(frame.inlet_flow_m3_s);
+        }
+        let peak = p.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let tail = p[n - 4096..].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(tail < 1e-9 * peak, "the response must have died away: {tail} of {peak}");
+        type C = (f64, f64);
+        let div = |a: C, b: C| {
+            let d = b.0 * b.0 + b.1 * b.1;
+            ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+        };
+        let dtft = |x: &[f64], omega: f64| {
+            x.iter().enumerate().fold((0.0, 0.0), |(re, im), (i, v)| {
+                let phase = omega * i as f64;
+                (re + v * fs_math::det::cos(phase), im - v * fs_math::det::sin(phase))
+            })
+        };
+        let (main, hole) = (gases[0], gases[1]);
+        let zc = main.density * main.sound_speed / (core::f64::consts::PI * 0.0073 * 0.0073);
+        let zch = hole.density * hole.sound_speed / (core::f64::consts::PI * 0.004 * 0.004);
+        let frequencies: Vec<f64> = (0..=20).map(|i| 400.0 + 10.0 * f64::from(i)).collect();
+        let mean = frequencies.iter().map(|&f| {
+            let omega = core::f64::consts::TAU * f;
+            let z_in = div(dtft(&p, omega * dt), dtft(&u, omega * dt));
+            let k = omega / main.sound_speed;
+            let t1 = fs_math::det::tan(k * 0.044);
+            let t2 = fs_math::det::tan(k * 0.074);
+            // Remove L1: Z_j = Zc (Z_in - j Zc t1) / (Zc - j Z_in t1).
+            let num = (z_in.0 * zc, (z_in.1 - zc * t1) * zc);
+            let den = (zc + z_in.1 * t1, -z_in.0 * t1);
+            let z_j = div(num, den);
+            // Remove the rigid-ended L2 in parallel: Y_s = 1/Z_j - j t2 / Zc.
+            let y_j = div((1.0, 0.0), z_j);
+            let z_s = div((1.0, 0.0), (y_j.0, y_j.1 - t2 / zc));
+            z_s.1 / (omega / hole.sound_speed * zch)
+        }).sum::<f64>() / frequencies.len() as f64;
+        mean
+    };
+    let with = ts(true);
+    let without = ts(false);
+    eprintln!(
+        "Garcia Mayen tonehole through the card's code, t_s 400-600 Hz: with inner {:.3} mm, without {:.3} mm, difference {:.3} mm",
+        with * 1e3, without * 1e3, (with - without) * 1e3
+    );
+    assert!((0.0129..=0.0144).contains(&with), "inside the measured envelope: {with}");
+    assert!(((with - without) - 0.002158).abs() <= 0.05e-3, "t_i counted once: {}", with - without);
+    assert!((with - 0.014098).abs() <= 0.05e-3, "prediction with inner: {with}");
+    assert!((without - 0.011940).abs() <= 0.05e-3, "prediction without inner: {without}");
+    assert!(without < 0.0129, "the planted negative: the origin hole code falls below the envelope");
 }

@@ -11,26 +11,36 @@
 # collection (drawing No. X by Fred Morgan, Zen-On 1981) as tabulated by Jan Bouterse in FoMRHI Comms. 1898, 1910 and 1929 (2009 to 2010): head,
 # middle joint and foot bore, thumb hole and six finger holes (positions, sizes, outer diameters), window, labium, step, windway length. Every
 # geometry number is a dimensions.tsv row. The network is: the window (wall thickness at the window, DERIVED from the mean outer diameter of the
-# other four Bressan altos, as a riser of equal area to the 12.0 x 4.6 mm opening) on a junction with the closed bore up to the block line
-# behind it, then the bore as equal-volume cylinders of at most 40 mm with a chimney section at every finger hole (chimney = (outer diameter -
-# local bore) / 2), to the open end of the foot. Hole 7 (5.25 mm, chimney (32.0 - 14.02) / 2 mm) opens 24 mm below the foot's upper end:
+# other four Bressan altos less the head's diameter at the block line, as a riser of equal area to the 12.0 x 4.6 mm opening) on a junction
+# with the closed bore up to the block line behind it, then the bore as equal-volume cylinders of at most 40 mm with a chimney section at
+# every finger hole (chimney = (outer diameter - local bore) / 2, its height on the hole's axis from the bore wall), to the open end of the
+# foot. The head's bore is oval (minima 0.2 to 0.4 mm under the tabulated maxima, Comm 1929 Table 2): it is taken at the area-equivalent
+# diameter sqrt(D (D - 0.3 mm)), the midpoint (u-condition), which gives a 6.650 mm window wall. Each open hole's chimney row carries
+# `inner LOCAL_BORE_RADIUS`, its inner length t_i = b (0.82 - 0.193 d - 1.09 d^2 + 1.27 d^3 - 0.71 d^4), d = b / a (Dubos et al. 1999 as
+# corrected by Dalmont et al. 2002, as Garcia Mayen et al., HAL hal-03230052, 2021, eq. 11 and Ernoult and Fabre 2017 eq. 17 give it), on the
+# local bore the chimney comes from: 1.70 to 2.03 mm. The holes' matching volume and series inertance are not represented.
+# Hole 7 (5.25 mm, chimney (32.0 - 14.02) / 2 mm) opens 24 mm below the foot's upper end:
 # its position is not published, the dimensions row is DERIVED from the 16.0 mm tenon socket and the 32.0 mm bulb, with the bracket 18 to
 # 30 mm in unknowns.tsv (u-hole-7-position); it is open in a1, b-flat1 and b1 and closed in f1.
-# The window's mass is computed, not a constant: each card's row `window wall-cut 4 cheeks parallel ramp 0.00051 18.6210` solves the 3-D
-# potential flow through the cut in the 6.575 mm wall of the 9.83 mm bore: parallel cheeks 12.0 mm apart, 4.6 mm long, its downstream face
-# the labium ramp, straight up to the edge 0.51 mm above the bore (windway exit 1.06 - step 0.8 + edge thickness 0.25 mm, so the edge
-# inherits u-windway-height, bounds 0 to 1.25 mm) and then rising 6.065 mm over the side walls' 18.0 mm beyond the window (22.6 - 4.6 mm,
-# 18.62 degrees), with the closed bore behind it and free space outside (fs_bem::wall_window, a staircase of cut cells at 4, 8 and 16
-# axial cells, extrapolated at the order the three rungs show: 1.61; rungs 8, 16 and 32 give 52.567 mm at order 1.62, too costly for
-# a render). That mass, 52.56 mm of bore, replaces the 0.61 a_eq mouth inertance; the jet's source coefficient keeps its own law. The network
-# keeps the 6.575 mm channel only as a one-sample inlet line (1.20 mm at 288 kHz), the computed mass carrying the rest: the channel's full
+# The window's mass is Ernoult and Fabre's (Acta Acustica united with Acustica 103, 2017, 106-116): each card's row `window wall-cut 4
+# cheeks parallel ramp 0.00051 18.6210 mass ernoult-fabre-2017` takes their closed form (eqs. 16, 18 and 23, fitted to 444 finite-element
+# windows within 5 %) for the cut in the 6.650 mm wall of the 9.76 mm bore: W 4.6 mm, H 12.0 mm between parallel cheeks, ears rising at
+# 18.62 degrees. Their value is at the edge plane, 55.38 mm of bore; the card's junction is at the window centre, 2.3 mm upstream, with that
+# bore already in the network, so the window carries 53.08 mm. Their model has the edge in the window plane; the ramp's straight rise to the
+# edge 0.51 mm above the bore (windway exit 1.06 - step 0.8 + edge thickness 0.25 mm, so the edge inherits u-windway-height, bounds 0 to
+# 1.25 mm) is not in it and is not added. The row also solves the 3-D potential flow through the same cut (parallel cheeks, the labium ramp
+# straight up to the edge and then rising 6.065 mm over the side walls' 18.0 mm beyond the window, 22.6 - 4.6 mm, the closed bore behind it,
+# free space outside: fs_bem::wall_window, a staircase of cut cells at 4, 8 and 16 axial cells, extrapolated at the order the three rungs
+# show) and prints it in the provenance as the comparison only: its inner end correction is checked against Dalmont 2002 within 3 %, its
+# outer side is untested. The window mass replaces the 0.61 a_eq mouth inertance; the jet's source coefficient keeps its own law. The network
+# keeps the 6.650 mm channel only as a one-sample inlet line (1.20 mm at 288 kHz), the window mass carrying the rest: the channel's full
 # length as a 1-D line rang against the window mass at 18 to 21 kHz, above the channel's first cross mode (13.5 kHz across 12.9 mm).
 # The window radiates; its loss is not authored. Each card's row `mouth_reaction window-cylinder` takes the flux that the same solve puts
 # through the cut's outer face (16.405 mm from the axis, on the head's rigid outer cylinder, the solve's own exterior) and loads the mouth with
 # that face's radiation: resistance from the cylindrical-harmonic series of Junger and Feit (propagating axial wavenumbers only), static mass
 # from it by Kramers-Kronig, realized as a passive chain of parallel R-L-C cells fitted from 20 Hz to 24 kHz (11 cells; error 1.9 % in that
 # band, 2.5 % after the 288 kHz clock's warp, 6.4 % up to its 144 kHz Nyquist; kA 0.006 to 7.2). The radiation's static mass, 34.6 Pa s^2/m^3,
-# comes out of the computed window mass, so the outer mass is not counted twice. It replaces mouth_loss_rel 0.02: the flue row's last field is 0.
+# comes out of the window mass, so the outer mass is not counted twice. It replaces mouth_loss_rel 0.02: the flue row's last field is 0.
 # The uniform cut-up piston on the same cylinder (`mouth_reaction window-cylinder-piston`, static mass 61.4) is the shape bracket, reported with
 # the landing renders, not rendered here.
 # The windway HEIGHT is not published for this alto. The recipe uses 1.8 mm / 1.7 = 1.06 mm (the opening height of the Berlin Bressan alto e

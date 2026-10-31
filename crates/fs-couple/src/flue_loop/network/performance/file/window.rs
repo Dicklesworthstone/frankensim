@@ -1,6 +1,17 @@
 //! Optional `window none|wall-cut AXIAL_CELLS [cheeks radial|parallel]
-//! [ramp EDGE_HEIGHT_M ANGLE_DEG]|embouchure AXIAL_CELLS ACROSS_M ALONG_M
-//! OPEN_M [lip centred|one-sided [face SETBACK_M]]` after the mouth records.
+//! [ramp EDGE_HEIGHT_M ANGLE_DEG] [mass ernoult-fabre-2017]|embouchure
+//! AXIAL_CELLS ACROSS_M ALONG_M OPEN_M [lip centred|one-sided [face SETBACK_M]]`
+//! after the mouth records.
+//!
+//! `mass ernoult-fabre-2017` takes the window's mass from Ernoult and Fabre,
+//! Acta Acustica united with Acustica 103 (2017) 106-116, in place of the
+//! computed one (see [`ErnoultFabreWindow`]). Their closed form was fitted to
+//! 444 finite-element windows (standard deviation under 5 %) and their FE
+//! agrees with measured recorder windows to about 10 %. The computed solve
+//! still runs, and its value is kept in the record for comparison. Only its
+//! inner end correction has been checked against a cited law; its outer side
+//! is untested. The law needs parallel cheeks and a closed end flush with the
+//! window's upstream edge. Outside the spans of their FE set it refuses.
 //!
 //! `wall-cut` computes the mouth window's mass from its 3-D geometry
 //! (`fs_bem::wall_window`) and replaces the legacy `0.61 a_eq` inertance with
@@ -92,6 +103,7 @@ enum Shape {
     WallCut {
         cheeks: WindowCheeks,
         ramp: Option<WindowRamp>,
+        ernoult_fabre: bool,
     },
     /// A flute's embouchure hole [m]: across by along, its outer end open
     /// over a strip on the lip's `side`.
@@ -118,6 +130,154 @@ pub struct FlueWindowRecord {
     pub channel_line_m: f64,
     /// That line's own `L / S` [1/m].
     pub riser_mass_per_density: f64,
+    /// With `mass ernoult-fabre-2017`: their closed form, which then gives
+    /// the mass. `ladder` keeps the computed value for comparison.
+    pub ernoult_fabre: Option<ErnoultFabreWindow>,
+}
+
+impl FlueWindowRecord {
+    /// The static mass per density the network uses, from the junction at
+    /// the window centre to the far field [1/m]: Ernoult and Fabre's, moved
+    /// to that junction, when the row selects it; otherwise the computed one.
+    #[must_use]
+    pub fn mass_per_density(&self) -> f64 {
+        self.ernoult_fabre
+            .map_or(self.ladder.mass_per_density, |ef| ef.junction_mass_per_density)
+    }
+}
+
+/// The spans of Ernoult and Fabre's 444 finite-element windows, read from
+/// their paper: it gives no table of the set. Angle: section 4.2 (0.09 rad
+/// is their lowest, pi/2 the right angle). `W tan(alpha) / l_e`: the abscissa
+/// of their Fig. 8. `l_e / H`: Fig. 9. W: Fig. 11. H and the head radius:
+/// the measured recorders of their Table 1, whose geometry the set follows.
+pub const ERNOULT_FABRE_SPANS: ErnoultFabreSpans = ErnoultFabreSpans {
+    angle_rad: [0.09, core::f64::consts::FRAC_PI_2],
+    width_tan_over_ears: [0.015, 4.0],
+    ears_over_height: [0.0, 2.5],
+    width_m: [0.002, 0.010],
+    height_m: [0.0075, 0.0192],
+    bore_radius_m: [0.0053, 0.016],
+};
+
+/// Closed parameter intervals of a fitted law (see [`ERNOULT_FABRE_SPANS`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ErnoultFabreSpans {
+    /// Ramp angle to the axis [rad].
+    pub angle_rad: [f64; 2],
+    /// `W tan(alpha) / l_e`, checked only below the right angle.
+    pub width_tan_over_ears: [f64; 2],
+    /// `l_e / H`.
+    pub ears_over_height: [f64; 2],
+    /// Window length W, channel exit to edge [m].
+    pub width_m: [f64; 2],
+    /// Window width H, between the cheeks [m].
+    pub height_m: [f64; 2],
+    /// Head bore radius r_p [m].
+    pub bore_radius_m: [f64; 2],
+}
+
+/// Ernoult and Fabre 2017's window inertance, per density [1/m], with its
+/// reference plane. Their eq. 18: `M_w = m_ra + m_alpha + rho l_r / (W H)`,
+/// at the EDGE plane: their head length runs "between the outlet of the head
+/// and the edge". `m_ra` is their eq. 16, the right-angle bend on a
+/// rectangular tube of the bore's area (`delta = 2 W H / S_p`). `m_alpha` is
+/// their eq. 23, the ears rising at alpha from the edge, or eq. 18's
+/// `rho l_e / (W H)` at the right angle (no `ramp`). `l_r = 0.695 sqrt(W H / pi)`.
+/// The card's junction sits at the window centre, W/2 upstream of the edge,
+/// and its bore line starts there, so that W/2 of bore is already in the
+/// network: the junction's mass is the edge's minus `(W/2) / S_p`.
+/// Their model has the edge in the window plane; a `ramp`'s straight rise
+/// below the edge (`edge_height_m`) is not in it, and is not added.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ErnoultFabreWindow {
+    /// W: window length, channel exit to edge (the cut-up) [m].
+    pub width_m: f64,
+    /// H: window width between the parallel cheeks (the flue width) [m].
+    pub height_m: f64,
+    /// l_e: height of the ears, the wall the window cuts [m].
+    pub ears_m: f64,
+    /// alpha: the ramp's angle to the axis, pi/2 without a ramp [rad].
+    pub angle_rad: f64,
+    /// r_p: the head bore's radius [m].
+    pub bore_radius_m: f64,
+    /// `m_ra / rho`, eq. 16 [1/m].
+    pub right_angle_per_density: f64,
+    /// `m_alpha / rho`, eq. 23 (eq. 18 at the right angle) [1/m].
+    pub ears_per_density: f64,
+    /// `l_r`, the radiation length [m].
+    pub radiation_length_m: f64,
+    /// `M_w / rho` at the edge plane [1/m].
+    pub edge_mass_per_density: f64,
+    /// `(W/2) / S_p`: the bore from the window centre to the edge [1/m].
+    pub centre_to_edge_per_density: f64,
+    /// `M_w / rho` at the card's junction, the window centre [1/m].
+    pub junction_mass_per_density: f64,
+}
+
+impl ErnoultFabreWindow {
+    /// Evaluate the law for one window, without the span check.
+    /// `angle_rad` is `None` for the right angle (no ramp).
+    #[must_use]
+    pub fn new(width_m: f64, height_m: f64, ears_m: f64, angle_rad: Option<f64>,
+        bore_radius_m: f64) -> Self
+    {
+        use core::f64::consts::PI;
+        let (w, h, le, rp) = (width_m, height_m, ears_m, bore_radius_m);
+        let bore_area = PI * rp * rp;
+        let window_area = w * h;
+        let delta = 2.0 * window_area / bore_area;
+        let right_angle_per_density = 2.0 / (PI * h)
+            * (fs_math::det::ln((1.0 + 0.25 * delta * delta) / (2.0 * delta))
+                + (2.0 / delta) * (1.0 - 0.25 * delta * delta) * fs_math::det::atan(0.5 * delta));
+        let ears_per_density = match angle_rad {
+            None => le / window_area,
+            Some(alpha) => {
+                let t = fs_math::det::tan(alpha);
+                (t * fs_math::det::ln(1.0 + le / (w * t))
+                    + fs_math::det::exp(-alpha * fs_math::det::ln(32.0)) * 0.85
+                        * fs_math::det::sqrt(le / h)) / h
+            }
+        };
+        let radiation_length_m = 0.695 * fs_math::det::sqrt(window_area / PI);
+        let edge_mass_per_density =
+            right_angle_per_density + ears_per_density + radiation_length_m / window_area;
+        let centre_to_edge_per_density = 0.5 * w / bore_area;
+        Self {
+            width_m, height_m, ears_m, angle_rad: angle_rad.unwrap_or(core::f64::consts::FRAC_PI_2),
+            bore_radius_m, right_angle_per_density, ears_per_density, radiation_length_m,
+            edge_mass_per_density, centre_to_edge_per_density,
+            junction_mass_per_density: edge_mass_per_density - centre_to_edge_per_density,
+        }
+    }
+
+    /// The refusal for the first parameter outside [`ERNOULT_FABRE_SPANS`], if any.
+    #[must_use]
+    pub fn outside_spans(&self) -> Option<&'static str> {
+        let s = ERNOULT_FABRE_SPANS;
+        let inside = |v: f64, [lo, hi]: [f64; 2]| v >= lo && v <= hi;
+        let right = self.angle_rad.to_bits() == core::f64::consts::FRAC_PI_2.to_bits();
+        if !inside(self.angle_rad, s.angle_rad) {
+            return Some("window mass ernoult-fabre-2017: the ramp angle lies outside their finite-element set");
+        }
+        if !right && !inside(self.width_m * fs_math::det::tan(self.angle_rad) / self.ears_m,
+            s.width_tan_over_ears) {
+            return Some("window mass ernoult-fabre-2017: W tan(alpha) / l_e lies outside their finite-element set");
+        }
+        if !inside(self.ears_m / self.height_m, s.ears_over_height) {
+            return Some("window mass ernoult-fabre-2017: l_e / H lies outside their finite-element set");
+        }
+        if !inside(self.width_m, s.width_m) {
+            return Some("window mass ernoult-fabre-2017: the cut-up lies outside their finite-element set");
+        }
+        if !inside(self.height_m, s.height_m) {
+            return Some("window mass ernoult-fabre-2017: the flue width lies outside their finite-element set");
+        }
+        if !inside(self.bore_radius_m, s.bore_radius_m) {
+            return Some("window mass ernoult-fabre-2017: the head bore radius lies outside their finite-element set");
+        }
+        None
+    }
 }
 
 /// Read the optional row: `Some` for `wall-cut`.
@@ -160,9 +320,18 @@ pub(super) fn read(rows: &mut Rows<'_>) -> Result<Option<WindowRow>, FlueInputEr
             } else {
                 None
             };
+            let ernoult_fabre = if row.fields.clone().next() == Some("mass") {
+                row.fields.next();
+                match row.fields.next() {
+                    Some("ernoult-fabre-2017") => true,
+                    _ => return Err(bad(row.line, "window mass requires ernoult-fabre-2017")),
+                }
+            } else {
+                false
+            };
             Some(WindowRow {
                 axial_cells,
-                shape: Shape::WallCut { cheeks, ramp },
+                shape: Shape::WallCut { cheeks, ramp, ernoult_fabre },
             })
         }
         Some("embouchure") => {
@@ -215,7 +384,7 @@ pub(super) fn read(rows: &mut Rows<'_>) -> Result<Option<WindowRow>, FlueInputEr
         _ => {
             return Err(bad(
                 row.line,
-                "window requires none, wall-cut AXIAL_CELLS [cheeks radial|parallel] [ramp EDGE_HEIGHT_M ANGLE_DEG] or embouchure AXIAL_CELLS ACROSS_M ALONG_M OPEN_M [lip centred|one-sided [face SETBACK_M]]",
+                "window requires none, wall-cut AXIAL_CELLS [cheeks radial|parallel] [ramp EDGE_HEIGHT_M ANGLE_DEG] [mass ernoult-fabre-2017] or embouchure AXIAL_CELLS ACROSS_M ALONG_M OPEN_M [lip centred|one-sided [face SETBACK_M]]",
             ));
         }
     };
@@ -306,8 +475,27 @@ pub(super) fn solve(
         );
     }
     let a = bore.radius_m;
+    let ernoult_fabre = match shape.shape {
+        Shape::WallCut { cheeks, ramp, ernoult_fabre: true } => {
+            if cheeks != WindowCheeks::Parallel {
+                return refuse("window mass ernoult-fabre-2017 needs parallel cheeks: their window is a W x H rectangle");
+            }
+            // Their closed end is flush with the window's upstream edge; a
+            // card without a pocket has that end by construction.
+            if pocket.is_some_and(|p| !((p.length_m / (0.5 * geometry.cut_up_m) - 1.0).abs() <= 1e-3)) {
+                return refuse("window mass ernoult-fabre-2017 needs the closed end flush with the window's upstream edge: a pocket half the cut-up long");
+            }
+            let law = ErnoultFabreWindow::new(geometry.cut_up_m, geometry.flue_width_m,
+                riser.length_m, ramp.map(|r| r.angle), a);
+            if let Some(what) = law.outside_spans() {
+                return refuse(what);
+            }
+            Some(law)
+        }
+        _ => None,
+    };
     let (width, axial_length, cheeks, ramp, cover) = match shape.shape {
-        Shape::WallCut { cheeks, ramp } => {
+        Shape::WallCut { cheeks, ramp, .. } => {
             (geometry.flue_width_m, geometry.cut_up_m, cheeks, ramp, None)
         }
         Shape::Embouchure {
@@ -373,5 +561,6 @@ pub(super) fn solve(
         ladder,
         channel_line_m,
         riser_mass_per_density: channel_line_m / riser_area,
+        ernoult_fabre,
     })
 }

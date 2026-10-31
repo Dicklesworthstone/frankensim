@@ -64,7 +64,8 @@ mod window;
 pub(crate) mod excitation;
 use excitation::{FlueFlowInput, FlueJetInput};
 pub use wall::{FlueWallRecord, MAX_FLUE_WALL_PACK_BYTES};
-pub use window::FlueWindowRecord;
+pub use window::{ERNOULT_FABRE_SPANS, ErnoultFabreSpans, ErnoultFabreWindow, FlueWindowRecord};
+pub use duct::HoleInnerLength;
 pub use boundary::{FlueBoundaryRecord, boundary_closing_force_path, flue_source_control_paths};
 
 /// Versioned SI source grammar; the suffix is the existing gesture format.
@@ -175,6 +176,7 @@ pub struct FlueFilePerformance {
     mimo_radiation_record: Option<MimoRadiationRecord>,
     computed_radiation_record: Option<ComputedBaffledRecord>,
     window: Option<FlueWindowRecord>,
+    hole_inner_lengths: Vec<HoleInnerLength>,
 }
 impl FlueFilePerformance {
     /// Parse the fixed-order source shown in `examples/flue.performance`.
@@ -237,6 +239,11 @@ impl FlueFilePerformance {
     /// from the card's own channel, pocket and bore (see [`FlueWindowRecord`]),
     /// and keeps the channel in the graph only as a one-sample inlet line;
     /// `window none` or omission keeps it. It refuses a compact mouth reaction.
+    /// A trailing `mass ernoult-fabre-2017` takes the mass from Ernoult and
+    /// Fabre's closed form instead, moved from their edge plane to the window
+    /// centre, and keeps the computed one only in the record
+    /// ([`ErnoultFabreWindow`]). An `inner BORE_RADIUS_M` on a side hole's
+    /// `duct_section` row adds that hole's inner length ([`HoleInnerLength`]).
     /// `mouth_reaction window-cylinder` instead radiates that window's solved
     /// outer face from the head's outer cylinder in the declared exterior
     /// (see [`crate::flue_loop::window_radiation`]), replacing the authored
@@ -578,6 +585,7 @@ impl FlueFilePerformance {
         }
         poll(gate)?;
         duct.graph.max_wave_memory_bytes = max_wave_memory_bytes;
+        let hole_inner_lengths = core::mem::take(&mut duct.inner);
         let source = FlueNetworkSpec { graph: duct.graph, gases: duct.gases,
             viscothermal, minimum_jet_speed_m_s, maximum_jet_mach, max_jet_history_samples };
         let mut material_sources = material::Sources::default();
@@ -620,7 +628,7 @@ impl FlueFilePerformance {
         let voice = flow_input.attach(voice, held_pressure_pa)?;
         let voice = jet_input.attach(voice, held_pressure_pa, gate)?;
         let voice = match &window {
-            Some(record) => voice.with_window_mass(record.ladder.mass_per_density,
+            Some(record) => voice.with_window_mass(record.mass_per_density(),
                 record.riser_mass_per_density).map_err(FlueInputError::Physics)?,
             None => voice,
         };
@@ -688,7 +696,8 @@ impl FlueFilePerformance {
             mechanics_rate_hz, sample_rate_hz, samples, full_scale_pa,
             jet_card_hash: card.content_hash(), jet_card_source, compiled_controls: renderer.controls.len() };
         Ok(Self { info, renderer, geometry, card, gas_records, wall_records, boundary_records,
-            radiation_bindings, mimo_radiation_record, computed_radiation_record, window })
+            radiation_bindings, mimo_radiation_record, computed_radiation_record, window,
+            hole_inner_lengths })
     }
     /// Original identity and finite clocks, separate from the evolving solver.
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -717,6 +726,8 @@ impl FlueFilePerformance {
     }
     /// The window derived from the card and its computed mass, when selected.
     #[must_use] pub const fn window(&self) -> Option<&FlueWindowRecord> { self.window.as_ref() }
+    /// The side holes' inner lengths added by `inner` rows, in row order.
+    #[must_use] pub fn hole_inner_lengths(&self) -> &[HoleInnerLength] { &self.hole_inner_lengths }
     /// Move the original physical pressure producer into streaming/PCM output.
     #[must_use] pub fn into_renderer(self) -> FlueOutletPerformance { self.renderer }
 }
