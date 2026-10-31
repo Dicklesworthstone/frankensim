@@ -1439,13 +1439,15 @@ fn g2_card_cymbals_and_hats_take_the_declared_interface_and_presets_say_theirs_w
         assert_eq!(mu, 0.0);
     }
     assert!(kit::DECLARED_CYMBAL_INTERFACE.hat_receipt.contains("no rim contact loss (ruling 7865)"));
-    // Rim friction (ruling 7520 G1): the presets' graded RIM_FRICTION, the card route's measured
-    // tin bronze on itself; both receipts say which.
+    // Rim friction (rulings 7520 G1 and 10862): both routes take the measured tin bronze on
+    // itself, and both receipts cite it; no route keeps the 0.5 picked by grade.
     let rubs = |p: &kit::Piece| p.instrument.frictions.iter().map(|f| f.mu).collect::<Vec<_>>();
-    assert_eq!((kit::RIM_FRICTION, kit::BRONZE_RIM_FRICTION), (0.5, 0.6));
-    assert!(rubs(&fitted).len() == fitted_gaps.len() && rubs(&fitted).iter().all(|&m| m == kit::RIM_FRICTION));
+    assert_eq!(kit::BRONZE_RIM_FRICTION, 0.6);
+    assert!(rubs(&fitted).len() == fitted_gaps.len() && rubs(&fitted).iter().all(|&m| m == kit::BRONZE_RIM_FRICTION));
     assert!(rubs(&card).len() == card_gaps.len() && rubs(&card).iter().all(|&m| m == kit::BRONZE_RIM_FRICTION));
-    assert!(kit::FITTED_CYMBAL_INTERFACE.hat_receipt.contains("rim friction RIM_FRICTION 0.5, picked by grade"));
+    assert!(kit::FITTED_CYMBAL_INTERFACE.hat_receipt.contains("rim friction 0.6 (Buckley, Cu-10Sn self-mated; ruling 10862)"));
+    assert!(kit::FITTED_CYMBAL_INTERFACE.hat_receipt.contains("a kinetic average only, with no static limit or micro-slip data"));
+    assert!(!kit::FITTED_CYMBAL_INTERFACE.hat_receipt.contains("picked by grade"));
     assert!(kit::DECLARED_CYMBAL_INTERFACE.hat_receipt.contains("rim friction 0.6 (Buckley, Cu-10Sn self-mated; ruling 7520)"));
 }
 

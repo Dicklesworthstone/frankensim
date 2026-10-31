@@ -564,12 +564,13 @@ The offline and live constructors share `kit::HIHAT_RIM_LAW`: reference-cell
 `K` with cell area. This remains a declared contact estimate, not a measured law
 for these cymbals or an overall acoustic qualification.
 
-The rims also rub (`Friction`; dry friction coefficient 0.5 in the presets, `RIM_FRICTION`, picked by
-grade; 0.6 on the card route, `BRONZE_RIM_FRICTION`, below). Bending moves a plate's faces sideways by
+The rims also rub (`Friction`; dry friction coefficient 0.6, `BRONZE_RIM_FRICTION`, on every route,
+cited below; until ruling 10862 the presets took 0.5, picked by grade). Bending moves a plate's
+faces sideways by
 half its thickness times its slope, so where the rims touch, the bottom shell's upper face and the top
 shell's lower face slip by (t_b/2) grad w_b + (t_t/2) grad w_t, slopes from the grid's finite
 differences. Each step, after the contacts, every rim contact's friction is the force that would stop
-that slip (stick) unless it exceeds 0.5 times the contact's normal force. Sliding solves
+that slip (stick) unless it exceeds mu (0.6) times the contact's normal force. Sliding solves
 `(C + lambda I) f = -d`, with `|f| = mu N`, so the force opposes the final slip even when
 the tangent compliance is anisotropic; radially clipping the sticking force does not do this.
 It acts through the same per-node compliances as normal contact and reduces free-mass
@@ -745,7 +746,10 @@ offline examples' card route keeps none of them (ruling 7486):
   value, Morin 1834 (Tableau LXXVII), is 0.20 for an unnamed bronze sled on a bronze bed at about
   1.2 m/s, so primary values span 0.2-0.6 across contact geometry. Neither is a lathed B20 rim at
   a hi-hat's load and slip (ruling 7520, ledger
-  `nasa-buckley-1972-cusn-self-friction`).
+  `nasa-buckley-1972-cusn-self-friction`). Buckley's is a kinetic average only: it gives no static
+  limit and no micro-slip data, yet `Friction` uses the one value as both its stick limit and its
+  sliding force, and the alloy, contact geometry and motion differ from our rims. Since ruling
+  10862 the presets, live, the browser and GPU take it too.
 - **Everything else** is 88cccbb78's declared estimate: strike points; stick loss 0.2 s/m; wire
   tension 2.0 N, preload 0.25 N/m and contact loss 2.0 s/m; the kick's 0.12 kg
   beater with a 3 cm felt face (k 1e8 N/m^2.5, alpha 2.5, mu 0.3 s/m) and muffle dashpot 25 N s/m^3

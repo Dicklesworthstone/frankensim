@@ -621,14 +621,15 @@ pub struct CymbalInterface {
 
 /// The presets' interface, each value adopted in 96ccf8f1b because it graded closer to the
 /// Salamander overheads (88cccbb78 had a 0.2 s/m stick loss, a 5 mm tip and flat rims). Its rim
-/// law is HIHAT_RIM_LAW.
+/// law is HIHAT_RIM_LAW. Its rim friction is not fitted: it is the cited BRONZE_RIM_FRICTION
+/// (ruling 10862), which replaced 0.5, picked by grade (963d1e278).
 pub const FITTED_CYMBAL_INTERFACE: CymbalInterface = CymbalInterface {
     stick_loss_s_m: FITTED_STICK_LOSS_S_M,
     hat_stick_tip_m: HIHAT_STICK_TIP_RADIUS_M,
     hat_rim_waviness_m: 7.5e-5,
-    hat_rim_friction: RIM_FRICTION,
+    hat_rim_friction: BRONZE_RIM_FRICTION,
     cymbal_receipt: "cymbal stick: fitted to a recording (96ccf8f1b), not physics: Hunt-Crossley loss 0.05 s/m",
-    hat_receipt: "hi-hat: fitted to a recording (96ccf8f1b), not physics: rim loss 0.08 s/m (HIHAT_RIM_LAW), a two-lobe rim waviness of up to 0.15 mm, a 4 mm stick tip and, without a stick card, stick loss 0.05 s/m; rim friction RIM_FRICTION 0.5, picked by grade (963d1e278)",
+    hat_receipt: "hi-hat: fitted to a recording (96ccf8f1b), not physics: rim loss 0.08 s/m (HIHAT_RIM_LAW), a two-lobe rim waviness of up to 0.15 mm, a 4 mm stick tip and, without a stick card, stick loss 0.05 s/m; rim friction 0.6 (Buckley, Cu-10Sn self-mated; ruling 10862): dry in air, a polished hemispherical pin at 2.5 N and 0.05 m/s (NASA TN D-6912, 1972, fig. 2), a kinetic average only, with no static limit or micro-slip data; the alloy, contact geometry and motion differ from B20 rims",
 };
 
 /// The card route's interface: 88cccbb78's declared estimates, and the measured BRONZE_RIM_FRICTION.
@@ -643,10 +644,15 @@ pub const DECLARED_CYMBAL_INTERFACE: CymbalInterface = CymbalInterface {
     hat_receipt: "hi-hat (ruling 7486): flat rims, a 5 mm stick tip and stick loss 0.2 s/m, declared estimates (88cccbb78); no rim contact loss (ruling 7865): 88cccbb78's 3.0 s/m stood in for rim friction and no source gives a separate loss at closure, so rim dissipation is the friction alone; rim friction 0.6 (Buckley, Cu-10Sn self-mated; ruling 7520): dry in air, a polished hemispherical pin at 2.5 N and 0.05 m/s (NASA TN D-6912, 1972, fig. 2), not B20 rims; primary values span 0.2-0.6 across contact geometry (Morin 1834: 0.20, a loaded bronze sled on bronze)",
 };
 
-/// Dry kinetic friction of tin bronze on itself, for the card route's hi-hat rims (ruling 7520
-/// G1): Cu-10 at.% Sn (17 wt% Sn; B20 is 20 wt%) sliding on itself in air, 0.6, read from the
-/// bar of Buckley 1972 (NASA TN D-6912, fig. 2: a 0.48 cm hemispherical rider on a disk of the
-/// same alloy, polished, 250 g, 300 cm/min, 25 C, averaged over an hour of adhesive wear). The
+/// Dry kinetic friction of tin bronze on itself, for every hi-hat's rims: the card route's (ruling
+/// 7520 G1) and, since ruling 10862, the presets' and so live, the browser and GPU, which took
+/// 0.5, picked by grade (963d1e278), before. Cu-10 at.% Sn (17 wt% Sn; B20 is 20 wt%) sliding on
+/// itself in air, 0.6, read from the bar of Buckley 1972 (NASA TN D-6912, fig. 2: a 0.48 cm
+/// hemispherical rider on a disk of the same alloy, polished, 250 g, 300 cm/min, 25 C, averaged
+/// over an hour of adhesive wear).
+/// It is a kinetic average only: the source gives no static limit and no micro-slip data,
+/// yet `Friction` uses this one value as both its stick limit and its sliding force; the
+/// alloy, the contact geometry and the motion all differ from a lathed B20 rim. The
 /// other primary measurement, Morin 1834 (Tableau LXXVII), is 0.20 for an unnamed bronze sled on
 /// a bronze bed at about 1.2 m/s; neither is a lathed B20 rim at a hi-hat's load and slip.
 pub const BRONZE_RIM_FRICTION: f64 = 0.6;
@@ -949,19 +955,10 @@ pub fn hihat_with(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
     hihat_grid(gap, pedal_n, hits, rim, from, 1.0)
 }
 
-/// Dry friction coefficient between the hi-hat's bronze rims. Unlubricated copper alloys on themselves
-/// span about 0.3-1; with 0.3 and 0.5 the closed hat's octave-band decay grades inside the real-vs-real
-/// ruler (0.40 and 0.32 octaves from the Salamander stroke, two real strokes 0.47; without friction 0.95),
-/// and 0.5 was the closer of the two. Those grades predate opposing geometry and
-/// finite washer rocking; they do not qualify the current preset. Picked by grade: the presets
-/// (and so live, the browser and GPU) keep it and say so; the card route takes
-/// BRONZE_RIM_FRICTION (ruling 7520 G1).
-pub const RIM_FRICTION: f64 = 0.5;
-
 /// The same with grid spacing multiplied by `scale`.
 /// The reference-cell rim force law scales with area to preserve traction under refinement.
 pub fn hihat_grid(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64) -> Result<Piece, String> {
-    hihat_grid_mu(gap, pedal_n, hits, rim, from, scale, RIM_FRICTION)
+    hihat_grid_mu(gap, pedal_n, hits, rim, from, scale, BRONZE_RIM_FRICTION)
 }
 
 /// The same with an explicit rim friction coefficient (0: the rims press but do not rub).

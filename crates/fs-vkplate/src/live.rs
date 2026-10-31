@@ -202,8 +202,8 @@ impl Live {
         let rim = kit::HIHAT_RIM_LAW;
         let hat = kit::hihat_spec().0.radius;
         let hihat = |gap, pedal| match materials {
-            Some(m) => kit::hihat_grid_mu_with_materials(gap, pedal, &[], rim, 0.8, scale, kit::RIM_FRICTION, gas, m),
-            None => kit::hihat_grid_mu_with_gas(gap, pedal, &[], rim, 0.8, scale, kit::RIM_FRICTION, gas),
+            Some(m) => kit::hihat_grid_mu_with_materials(gap, pedal, &[], rim, 0.8, scale, kit::BRONZE_RIM_FRICTION, gas, m),
+            None => kit::hihat_grid_mu_with_gas(gap, pedal, &[], rim, 0.8, scale, kit::BRONZE_RIM_FRICTION, gas),
         };
         let (mut p, radius, foot) = match piece {
             "kick" => drum(kit::kick())?,
