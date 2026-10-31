@@ -114,6 +114,9 @@ impl GhostPoint3 {
 
 /// Geometry-integrated, matrix-free elasticity with independent per-cell scales.
 pub struct CutElasticity3 {
+    // Ownership identity for prepared loads on immutable geometry/material/DOFs.
+    // This survives moves and is independent of the mutable stiffness scales.
+    material_body_binding: std::sync::Arc<()>,
     nodes: Vec<[f64; 3]>,
     fixed: Vec<bool>,
     // Full-material inventory, independent of stiffness interpolation or supports.
@@ -416,6 +419,7 @@ impl CutElasticity3 {
         let scales = vec![1.0; cells.len()];
         let reference_cell_masses_kg = collect_reference_masses(&cells)?;
         Ok(Self {
+            material_body_binding: std::sync::Arc::new(()),
             nodes,
             fixed,
             reference_cell_masses_kg,
@@ -940,6 +944,10 @@ fn add_ghosts(
 
 /// Q1-conforming locally refined octree execution of this 3-D kernel.
 pub mod adaptive;
+
+/// Native-density body loads with prepared occupancy actions and pullbacks.
+pub mod body;
+pub use body::MaterialBodyLoad3;
 
 /// Oriented reference-surface traction and pressure loads.
 pub mod surface;

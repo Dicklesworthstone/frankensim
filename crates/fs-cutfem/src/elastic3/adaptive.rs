@@ -13,6 +13,7 @@ type Row = Vec<(OctreeNode3, f64)>;
 pub mod dirichlet;
 pub mod enrichment;
 pub mod stress;
+mod body;
 
 /// A reduced operator on independent master nodes of a balanced octree.
 pub struct AdaptiveElasticity3 {
@@ -299,6 +300,7 @@ impl AdaptiveElasticity3 {
         let raw_nodes: Vec<_> = keys.iter().map(|&n| tree.position(n, domain)).collect();
         let reference_cell_masses_kg = collect_reference_masses(&cells)?;
         let raw = CutElasticity3 {
+            material_body_binding: std::sync::Arc::new(()),
             fixed: vec![false; raw_nodes.len()],
             nodes: raw_nodes,
             reference_cell_masses_kg,
