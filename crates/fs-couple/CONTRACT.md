@@ -16834,3 +16834,21 @@ thermodynamic and original fixed-reference moisture limits remain explicit.
 Mechanical response is one way: elastic work does not feed solvent chemical
 potential, and the route does not claim closed chemo-mechanical energy balance.
 
+
+## Consistent contact mobility on finite solids
+
+`finite_solid::impulse::FiniteSolidPointMobility` exposes the complete row-major
+point/direction response `B M_ff^-1 B^T` on the original consistent reference
+mass. `point_mobility_matrix_per_kg` retains cross-point and cross-direction
+entries, component-specific stationary supports and each bounded native mass
+solve report. The row cap bounds its dense output; the original mass controls
+bound each solve. Cached point traces and one response column at a time avoid
+retaining a mesh-sized response per contact. No lumping or symmetry repair is
+performed; contact consumers still admit the actual matrix and response.
+
+`point_impulses_candidate` accumulates all material-point impulses through the
+same P1 transpose map before one native mass solve, including repeated points.
+The original angular/support/work acceptance gates therefore retain all joint
+work terms. The single-point API delegates to this shared path. Tests use the
+analytic consistent tetrahedral inverse, including negative cross-vertex
+mobility, support elimination, combined impulse work and endpoint agreement.

@@ -106,6 +106,18 @@ pub struct FiniteSolidImpulse {
     pub work_residual_j: f64,
 }
 
+/// Complete point mobility from the original supported consistent mass.
+/// Rows and columns retain the caller's point/direction order. Every column
+/// uses one bounded native mass solve; its unmodified report is retained.
+#[derive(Clone, Debug)]
+pub struct FiniteSolidPointMobility {
+    pub dimension: usize,
+    /// Row-major B M_ff^-1 B^T [1/kg], including all cross-point entries.
+    /// No symmetry repair, diagonal replacement or mass lumping is performed.
+    pub matrix_per_kg: Vec<f64>,
+    pub solves: Vec<SolveReport>,
+}
+
 impl<'a> FiniteSolidBody<'a> {
     /// Observe the actual linear and angular momentum at an arbitrary world origin.
     pub fn momentum_about(
@@ -195,6 +207,110 @@ impl<'a> FiniteSolidBody<'a> {
         Ok(value)
     }
 
+    /// Assemble the complete directional point mobility B M_ff^-1 B^T.
+    /// Each row samples its material-point velocity along a world direction;
+    /// the matching column applies an impulse along that SAME direction at
+    /// that SAME point. Directions need not be unit or mutually orthogonal.
+    ///
+    /// For frictional contact, supply normal/tangent rows in contact-major
+    /// order and add the partner's mobility before solving the contact law.
+    /// Cross-point entries transmit impulses through the original consistent
+    /// mass, including stationary-support elimination. Supported rows and
+    /// redundant rows are admitted and can produce a semidefinite matrix.
+    ///
+    /// `maximum_rows` bounds the dense output and number of mass solves;
+    /// `mass_solve` bounds each native solve. Only one free-DOF response is
+    /// stored at a time. The caller must admit matrix symmetry/definiteness at
+    /// its own contact tolerance; approximate solves are never symmetrized.
+    /// Empty input returns an empty response. The body is never mutated.
+    pub fn point_mobility_matrix_per_kg(
+        &self,
+        rows: &[(FiniteSolidPoint, [f64; 3])],
+        maximum_rows: usize,
+        mass_solve: FiniteSolidInitialization,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteSolidPointMobility, FiniteSolidError> {
+        checkpoint(cx)?;
+        let dimension = rows.len();
+        if dimension > maximum_rows {
+            return Err(invalid("point mobility exceeds the row limit"));
+        }
+        if dimension == 0 {
+            return Ok(FiniteSolidPointMobility {
+                dimension,
+                matrix_per_kg: Vec::new(),
+                solves: Vec::new(),
+            });
+        }
+        let entries = dimension
+            .checked_mul(dimension)
+            .ok_or_else(|| invalid("point mobility matrix size overflows"))?;
+        let mut traces = Vec::with_capacity(dimension);
+        for &(point, direction) in rows {
+            checkpoint(cx)?;
+            finite(&direction)?;
+            if magnitude(direction) == 0.0 {
+                return Err(invalid("point mobility requires nonzero directions"));
+            }
+            let nodes = self.point_nodes(point)?;
+            let mut trace = PointMobilityRow {
+                free: [None; 12],
+                coefficients: [0.0; 12],
+            };
+            for (a, (&node, weight)) in nodes.iter().zip(point.weights).enumerate() {
+                for (c, &value) in direction.iter().enumerate() {
+                    let slot = 3 * a + c;
+                    trace.coefficients[slot] = weight * value;
+                    if trace.coefficients[slot] != 0.0 {
+                        trace.free[slot] = self.free.binary_search(&(3 * node + c)).ok();
+                    }
+                }
+            }
+            traces.push(trace);
+        }
+        let mut matrix_per_kg = Vec::new();
+        matrix_per_kg
+            .try_reserve_exact(entries)
+            .map_err(|_| invalid("point mobility matrix allocation exceeds capacity"))?;
+        matrix_per_kg.resize(entries, 0.0);
+        let mut solves = Vec::with_capacity(dimension);
+        let mut forcing = vec![0.0; self.free.len()];
+        for (column, trace) in traces.iter().enumerate() {
+            checkpoint(cx)?;
+            forcing.fill(0.0);
+            for (&free, &coefficient) in trace.free.iter().zip(&trace.coefficients) {
+                if let Some(dof) = free {
+                    forcing[dof] += coefficient;
+                }
+            }
+            let (change, solve) = self.free_impulse_response(&forcing, mass_solve, cx)?;
+            solves.push(solve);
+            for (row, trace) in traces.iter().enumerate() {
+                if row % 256 == 0 {
+                    checkpoint(cx)?;
+                }
+                let mut value = 0.0;
+                for (&free, &coefficient) in trace.free.iter().zip(&trace.coefficients) {
+                    if let Some(dof) = free {
+                        value = coefficient.mul_add(change[dof], value);
+                    }
+                }
+                if !value.is_finite() || (row == column && value < 0.0) {
+                    return Err(invalid(
+                        "point mobility is not finite with nonnegative diagonal",
+                    ));
+                }
+                matrix_per_kg[row * dimension + column] = value;
+            }
+        }
+        checkpoint(cx)?;
+        Ok(FiniteSolidPointMobility {
+            dimension,
+            matrix_per_kg,
+            solves,
+        })
+    }
+
     /// Apply a world impulse at the CURRENT barycentrically interpolated point.
     /// Its transpose distribution preserves resultant, moment and virtual work.
     pub fn point_impulse_candidate(
@@ -205,8 +321,26 @@ impl<'a> FiniteSolidBody<'a> {
         controls: FiniteSolidImpulseControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidImpulse), FiniteSolidError> {
+        self.point_impulses_candidate(&[(point, impulse_world_kg_m_s)], origin_m, controls, cx)
+    }
+
+    /// Apply simultaneous world impulses at material points with ONE mass solve.
+    /// Repeated points accumulate in input order through the same transpose map
+    /// used by `point_mobility_matrix_per_kg`. Joint work includes every
+    /// cross-point term; supported impulses retain their reaction account.
+    pub fn point_impulses_candidate(
+        &self,
+        impulses_kg_m_s: &[(FiniteSolidPoint, [f64; 3])],
+        origin_m: [f64; 3],
+        controls: FiniteSolidImpulseControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, FiniteSolidImpulse), FiniteSolidError> {
         checkpoint(cx)?;
-        let impulse = self.point_distribution(point, impulse_world_kg_m_s)?;
+        let mut impulse = vec![0.0; self.mass.nrows()];
+        for &(point, value) in impulses_kg_m_s {
+            checkpoint(cx)?;
+            self.add_point_impulse(&mut impulse, point, value)?;
+        }
         self.apply_impulse(&impulse, origin_m, controls, cx)
     }
 
@@ -247,16 +381,26 @@ impl<'a> FiniteSolidBody<'a> {
         point: FiniteSolidPoint,
         value: [f64; 3],
     ) -> Result<Vec<f64>, FiniteSolidError> {
+        let mut impulse = vec![0.0; self.mass.nrows()];
+        self.add_point_impulse(&mut impulse, point, value)?;
+        finite(&impulse)?;
+        Ok(impulse)
+    }
+
+    fn add_point_impulse(
+        &self,
+        impulse: &mut [f64],
+        point: FiniteSolidPoint,
+        value: [f64; 3],
+    ) -> Result<(), FiniteSolidError> {
         finite(&value)?;
         let nodes = self.point_nodes(point)?;
-        let mut impulse = vec![0.0; self.mass.nrows()];
         for (&node, weight) in nodes.iter().zip(point.weights) {
             for c in 0..3 {
                 impulse[3 * node + c] += weight * value[c];
             }
         }
-        finite(&impulse)?;
-        Ok(impulse)
+        Ok(())
     }
 
     fn current_positions(&self, cx: &Cx<'_>) -> Result<Vec<[f64; 3]>, FiniteSolidError> {
@@ -283,6 +427,17 @@ impl<'a> FiniteSolidBody<'a> {
         checkpoint(cx)?;
         finite(impulse)?;
         let forcing: Vec<f64> = self.free.iter().map(|&dof| impulse[dof]).collect();
+        self.free_impulse_response(&forcing, controls, cx)
+    }
+
+    fn free_impulse_response(
+        &self,
+        forcing: &[f64],
+        controls: FiniteSolidInitialization,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, SolveReport), FiniteSolidError> {
+        checkpoint(cx)?;
+        finite(forcing)?;
         let zero = vec![0.0; self.free.len()];
         // The native initializer is a bounded M x = rhs solver. With zero
         // resistance, its unknown is a velocity jump rather than acceleration;
@@ -293,7 +448,7 @@ impl<'a> FiniteSolidBody<'a> {
             },
             &zero,
             &zero,
-            &forcing,
+            forcing,
             &MassDiagonal {
                 mass: &self.free_mass,
             },
@@ -392,6 +547,11 @@ impl<'a> FiniteSolidBody<'a> {
         checkpoint(cx)?;
         Ok((candidate, report))
     }
+}
+
+struct PointMobilityRow {
+    free: [Option<usize>; 12],
+    coefficients: [f64; 12],
 }
 
 struct ImpulseMass<'a> {
