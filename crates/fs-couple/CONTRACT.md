@@ -17289,3 +17289,31 @@ caller's responsibility. The harmonic matrix has no sampling clock or temporal
 interpolation filter. It adds no causal vector receiver, measured capsule response,
 molecular absorption, finite-baffle/room scattering or reciprocal radiation load,
 and does not close the wider M2.6-W1 work item.
+
+## Complete modal reflection admission
+
+MatrixFirLine's wall-normalized pressure waves all use the same positive real
+zc0. Net mean input power is (||a||² - ||b||²)/(2 zc0), so admission uses the
+largest singular value of the complete reflection matrix, including coherent
+higher-mode inputs. Every raw frequency sample and the complete realized FIR
+on the 4N grid (including DC and Nyquist) must be contractive within the existing
+passivity budget. The shared complex SVD must converge; no entry or operator is
+clipped into admission. This finite-grid check does not certify unsampled
+frequencies. The cancellable constructor polls source bins, transform/tap tiles,
+and SVD boundaries, with the existing modal and 65536-tap ceilings.
+
+The matrix ladder checks all-entry tail energy and all-entry common causal-prefix
+change, as well as plane resonance movement. One existing Nyquist taper is
+computed at the ladder ceiling and subsampled at every rung, keeping the
+numerical transfer function fixed and avoiding repeated taper FFTs for each
+matrix entry. Other scalar realization callers retain their original rung-local
+taper arithmetic. A small plane response or tail does not qualify a changing or
+active higher-mode FIR. The current precursor treatment can amplify an otherwise
+passive near-lossless evanescent port; such full-matrix realizations are explicitly
+refused. Physical matched-port witnesses cover the affected lossless resistance
+fixtures and Bessel brass/long-cylinder entrances. Successful one-mode matrix
+runtime controls and a proven passive coupled-FIR push test remain; these do not
+claim qualification of the refused higher-mode physical realizations.
+
+The new Rust regressions have not yet been executed in a native Rust toolchain;
+independent numerical reproductions do not substitute for that build/test gate.

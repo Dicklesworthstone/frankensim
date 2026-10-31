@@ -46,6 +46,8 @@ fn flanged_line_selector_retains_full_physical_port_work() {
     for ka in [1.2, 4.6, 7.8] {
         let omega = ka * gas.sound_speed / radius;
         let reflection = matrix_reflection_at(&duct, &gas, omega, &config, &load, z0).unwrap();
+        let gain = matrix_admission::reflection_gain(&reflection, n, &mut || false).unwrap();
+        assert!(gain <= 1.0 + crate::driving_point::PASSIVITY_TOL);
         let incoming = multiply(&reflection, &outgoing);
         let pressure: Vec<_> = outgoing
             .iter()

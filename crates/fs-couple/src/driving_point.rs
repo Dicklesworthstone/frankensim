@@ -303,15 +303,11 @@ fn dtft_norm_impedance_sq(ir: &[f64], dt: f64, omega: f64) -> f64 {
     num / den
 }
 
-/// Realize a causal reflectance impulse response from positive-frequency samples
-/// `r_pos[0..=n_fft/2]` (`e^{-iωt}` convention) using a phase-tapered minimum-phase
-/// $C^3$ Nyquist rolloff `W(θ) = exp(-α(θ) - i η(θ) H[α](θ))` above `u0 = 0.97`.
-pub(crate) fn realize_reflectance_ir_from_positive_spectrum(
-    r_pos: &[C64],
-    n_fft: usize,
-    _geo_delay: f64,
-    fold_precursor: bool,
-) -> Vec<f64> {
+/// Existing phase-tapered minimum-phase C^3 Nyquist rolloff on a positive
+/// frequency grid. Computing it once on a ladder's ceiling and subsampling
+/// even bins keeps the numerical transfer function fixed between rungs.
+/// This window is a realization treatment, not a passivity certificate.
+pub(crate) fn reflectance_rolloff(n_fft: usize) -> Vec<C64> {
     let half = n_fft / 2;
     let fft = Fft::new(n_fft);
     let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
@@ -352,8 +348,7 @@ pub(crate) fn realize_reflectance_ir_from_positive_spectrum(
     }
     fft.forward(&mut cep, &mut scratch);
 
-    let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
-    buf[0] = FftC64::new(r_pos[0].re, 0.0);
+    let mut rolloff = vec![C64::ONE; half + 1];
     for k in 1..=half {
         let u = k as f64 / half as f64;
         let eta = if u <= 0.50 {
@@ -365,13 +360,51 @@ pub(crate) fn realize_reflectance_ir_from_positive_spectrum(
             let s4 = s * s * s * s;
             s4 * (35.0 - 84.0 * s + 70.0 * s * s - 20.0 * s * s * s)
         };
+        let mag = cep[k].re.exp();
+        let (s, c) = (eta * cep[k].im).sin_cos();
+        rolloff[k] = C64::new(mag * c, mag * s);
+    }
+    rolloff
+}
+
+/// Realize a causal reflectance impulse response from positive-frequency samples
+/// `r_pos[0..=n_fft/2]` (`e^{-iωt}` convention) using a phase-tapered minimum-phase
+/// $C^3$ Nyquist rolloff `W(θ) = exp(-α(θ) - i η(θ) H[α](θ))` above `u0 = 0.97`.
+///
+/// Existing callers retain the same rung-local rolloff and arithmetic. The
+/// complete-matrix ladder explicitly supplies a fixed reference through
+/// [`realize_reflectance_ir_with_rolloff`] instead.
+pub(crate) fn realize_reflectance_ir_from_positive_spectrum(
+    r_pos: &[C64],
+    n_fft: usize,
+    _geo_delay: f64,
+    fold_precursor: bool,
+) -> Vec<f64> {
+    let rolloff = reflectance_rolloff(n_fft);
+    realize_reflectance_ir_with_rolloff(r_pos, &rolloff, n_fft, fold_precursor)
+}
+
+/// The same inverse transform and precursor treatment with an explicit shared
+/// rolloff. Callers supply one coefficient per positive-frequency sample and
+/// remain responsible for final causal convergence and passivity admission.
+pub(crate) fn realize_reflectance_ir_with_rolloff(
+    r_pos: &[C64],
+    rolloff: &[C64],
+    n_fft: usize,
+    fold_precursor: bool,
+) -> Vec<f64> {
+    let half = n_fft / 2;
+    debug_assert_eq!(r_pos.len(), half + 1);
+    debug_assert_eq!(rolloff.len(), half + 1);
+    let fft = Fft::new(n_fft);
+    let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
+    let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
+    buf[0] = FftC64::new(r_pos[0].re, 0.0);
+    for k in 1..=half {
         let rac = r_pos[k];
         // Acoustic e^{-iωt} → DFT e^{+iωt} so the IR is causal (DEF-01).
         let r_dft = C64::new(rac.re, -rac.im);
-        let mag = cep[k].re.exp();
-        let (s, c) = (eta * cep[k].im).sin_cos();
-        let w_mp = C64::new(mag * c, mag * s);
-        let rw = r_dft * w_mp;
+        let rw = r_dft * rolloff[k];
         buf[k] = FftC64::new(rw.re, rw.im);
         if k != half {
             buf[n_fft - k] = FftC64::new(rw.re, -rw.im);
