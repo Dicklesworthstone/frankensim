@@ -2,9 +2,9 @@
 
 > Status: ACTIVE (parameterizations v1). Owns the θ → warp contract and
 > the FFD / RBF / level-set-velocity / density levers with exact Jacobian
-> actions and composition. Manifold harmonics, neural implicits, and
-> F-rep procedural programs are follow-up levers (atlas §7.6); Helmholtz
-> filtering is topo-simp's.
+> actions and composition. Manifold harmonics and elastic metrics are
+> feature-gated; neural implicits and F-rep procedural programs remain
+> follow-up levers (atlas §7.6). Helmholtz filtering is topo-simp's.
 
 ## Purpose and layer
 
@@ -39,16 +39,34 @@ rule). Layer: L2 (MORPH). Runtime deps: `std`, fs-geom.
 
 - `harmonics` module (plan §7.6, bead wqd.20; [F], behind
   `manifold-harmonics`): the Laplace–Beltrami shape spectrum.
-  `cotan_laplacian` (robust clamp: cotangents floored at 0 on obtuse
-  triangles), `ManifoldBasis::compute` (lumped-mass symmetrization
-  `M^{-1/2} L M^{-1/2}`, smallest-k via fs-la LOBPCG shift-and-negate,
-  numeric kernel deflated, the CONSTANT re-admitted analytically as
-  mode 0 — uniform inflation is a design direction), deterministic
+  `cotan_laplacian` retains signed finite-element cotangents, including
+  negative weights on obtuse triangles: `uᵀLu` is the assembled
+  piecewise-linear Dirichlet energy. `ManifoldBasis::compute` uses
+  lumped-mass symmetrization `B = M^{-1/2} L M^{-1/2}`, scales B by a
+  Gershgorin bound, and applies fs-la LOBPCG to the dimensionless
+  shifted operator with the known component nullspaces removed. One
+  constant per connected component is re-admitted analytically, ordered
+  by lowest vertex index; uniform inflation is a design direction.
+  Up to 64 vertices, the existing dense Jacobi kernel permits the complete
+  spectrum. Oversampling obeys the numerical kernel's block and work caps;
+  when the requested count itself exceeds them, dense Jacobi is a bounded
+  fallback up to 128 vertices. Larger requests must pass LOBPCG admission.
+  `k` includes constants and zero requests return an empty basis.
+  Eigenvalues and recomputed whitened residuals retain inverse-square
+  geometry units; no dimensional shift or eigenvalue cutoff removes
+  legitimate low modes after a unit change. Sparse whitened weights are
+  prepared once, outside iterative matvecs. Deterministic
   sign/ordering (P2: coordinate j means the same thing every run),
   `displace` (normal displacement Σ θⱼψⱼn̂), `project`/`transfer`
   (M-weighted coefficient transfer across basis refreshes),
   `needs_refresh` (bbox-relative drift criterion),
   `dirichlet_energy` (== λⱼ for M-orthonormal modes).
+  Geometry must have finite, representable positive triangle areas,
+  cotangents, vertex masses, component masses, and operator scale;
+  this trusted constructor panics on inadmissible geometry or counts,
+  and refuses a rank-deficient projected search block instead of returning
+  fewer than `k` modes. A returned mode count is not a convergence or
+  spectral-completeness certificate.
 
 - `elastic` module (plan Bet 6 / §9, bead wqd.27; [F], behind
   `elastic-shapes`, implies `manifold-harmonics`): elastic shape-space
@@ -119,7 +137,7 @@ lattices, and validity refusals.
 
 ## No-claim boundaries
 
-- Manifold harmonics, neural-implicit, spline-control-point, and F-rep
+- Neural-implicit, spline-control-point, and F-rep
   procedural levers: follow-up beads (the trait is their contract).
 - FFD boundary continuity is not enforced (documented caller
   responsibility); no automatic C¹ blending.
@@ -133,18 +151,29 @@ lattices, and validity refusals.
 
 ## No-claim boundaries (harmonics)
 
-- The robust cotan clamp trades a little consistency for unconditional
-  stability on obtuse triangles: isometry invariance holds to ~1e-4
-  relative on bent developables, not to machine precision.
+- The signed cotangent form preserves finite-element Dirichlet energy,
+  including on obtuse triangles. It does not impose an intrinsic Delaunay
+  triangulation or claim a discrete maximum principle. An open surface
+  uses natural Neumann boundary conditions; essential boundary constraints
+  require a separate constrained operator. Chordal meshes still approximate
+  a smooth surface's intrinsic geometry.
 - Meshes only in this tier: the SDF narrow-band (implicit-surface)
   Laplacian variant the plan sketches is follow-up scope — the input is
   deliberately a plain (positions, triangles) surface so no VOLUMETRIC
   body-fitted mesh is ever required, which is the doctrine the bead
   encodes.
-- Eigenvalues are LOBPCG estimates with reported true residuals, not
-  certified enclosures.
+- Eigenvalues are numerical Jacobi/LOBPCG estimates with recomputed
+  `||M^-1/2 L ψ - λ M^1/2 ψ||₂` residuals, not certified enclosures or a
+  convergence guarantee at a fixed iteration count. Repeated eigenspaces
+  do not give uniquely identifiable individual eigenvectors.
 - `transfer` assumes refresh-in-place (shared vertex set); remeshing
   transfers need a resampling front end.
+
+`tests/harmonics.rs` adds focused G0/G3 checks: exact affine-field energy
+on an obtuse triangle (the former clamp produced 3.0 instead of 0.25),
+the complete analytic single-triangle spectrum, spectrum and residual
+unit scaling by `2^-300` and `2^300`, independent original-pencil residual
+recomputation, and distinct constant offsets on disconnected components.
 
 ## No-claim boundaries (elastic)
 

@@ -241,9 +241,8 @@ fn mh_003_isometry_invariance() {
     for j in 1..6 {
         let (a, b) = (bf.eigenvalues[j], bb.eigenvalues[j]);
         let rel = (a - b).abs() / a.max(b);
-        // Discrete cotan LB is isometry-invariant up to the robust
-        // clamp + solver tolerance (the bent strip has slightly obtuse
-        // triangles whose clamped cotans perturb the operator ~1e-4).
+        // Chords of the bent strip only approximate its smooth intrinsic
+        // metric; refinement and the eigensolve control the discrepancy.
         assert!(
             rel < 5e-3,
             "mode {j}: flat {a:.6} vs bent {b:.6} (rel {rel:.2e})"
@@ -251,8 +250,8 @@ fn mh_003_isometry_invariance() {
     }
     verdict(
         "mh-003",
-        "flat vs isometrically bent strip: first 5 eigenvalues match to 1e-6 — the \
-         spectrum sees intrinsic geometry only (G3)",
+        "flat vs isometrically bent strip: first 5 eigenvalues agree within 0.5% \
+         under chordal discretization and eigensolve error (G3)",
     );
 }
 
@@ -401,4 +400,136 @@ fn mh_005_spectral_beats_raw_vertex_es() {
         "seeded (1+1)-ES at equal budget: 18 spectral coefficients reach >2x lower \
          misfit than 66 raw vertex amplitudes — smoothness is free preconditioning",
     );
+}
+
+#[test]
+fn mh_006_obtuse_triangle_preserves_affine_dirichlet_energy() {
+    // The angle at vertex 2 is obtuse. For ANY affine planar field,
+    // u^T L u must equal area * |grad(u)|^2, independently of angles.
+    // Clamping its negative cotangent gives energy 3 instead of 0.25
+    // for u=x, corrupting both the shape spectrum and elastic metric.
+    let surface = Surface {
+        positions: vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.5, 0.25, 0.0]],
+        triangles: vec![[0, 1, 2]],
+    };
+    let (rows, mass) = fs_xform::harmonics::cotan_laplacian(&surface);
+    assert!((mass.iter().sum::<f64>() - 0.25).abs() < 1e-14);
+    for (gx, gy, offset) in [
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (2.0, -3.0, 4.0),
+        (0.0, 0.0, 7.0),
+    ] {
+        let u: Vec<f64> = surface
+            .positions
+            .iter()
+            .map(|p| gx * p[0] + gy * p[1] + offset)
+            .collect();
+        let energy: f64 = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| u[i] * row.iter().map(|&(j, w)| w * u[j]).sum::<f64>())
+            .sum();
+        let exact = 0.25 * (gx * gx + gy * gy);
+        assert!(
+            (energy - exact).abs() < 1e-13,
+            "gradient ({gx},{gy}): {energy} != {exact}"
+        );
+    }
+}
+
+#[test]
+fn mh_007_complete_spectrum_on_a_single_triangle() {
+    let surface = Surface {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        triangles: vec![[0, 1, 2]],
+    };
+    let basis = ManifoldBasis::compute(&surface, 3, 100);
+    assert_eq!(basis.dof(), 3);
+    // Lumped mass is I/6; the elementary triangle stiffness gives
+    // eigenvalues 0, 3, 9. The old n/3 search block returned only 0.
+    for (&actual, expected) in basis.eigenvalues.iter().zip([0.0, 3.0, 9.0]) {
+        assert!((actual - expected).abs() < 1e-12);
+    }
+    assert!(basis.residuals.iter().all(|r| *r < 1e-12));
+    assert_eq!(ManifoldBasis::compute(&surface, 0, 100).dof(), 0);
+}
+
+#[test]
+fn mh_008_spectrum_and_residuals_follow_geometry_units() {
+    let surface = icosphere(2); // Exercises the matrix-free path (>64 vertices).
+    let reference = ManifoldBasis::compute(&surface, 4, 300);
+    assert_eq!(reference.dof(), 4);
+    for exponent in [-300, 300] {
+        let scale = 2.0f64.powi(exponent);
+        let scale_squared = scale * scale;
+        let mut scaled = surface.clone();
+        for p in &mut scaled.positions {
+            for x in p {
+                *x *= scale;
+            }
+        }
+        let basis = ManifoldBasis::compute(&scaled, 4, 300);
+        assert_eq!(
+            basis.dof(),
+            4,
+            "geometry scale 2^{exponent} must not delete harmonics"
+        );
+        let (rows, mass) = fs_xform::harmonics::cotan_laplacian(&scaled);
+        for j in 1..4 {
+            let restored = basis.eigenvalues[j] * scale_squared;
+            assert!((restored / reference.eigenvalues[j] - 1.0).abs() < 1e-9);
+            // Independently recompute the original pencil residual, then
+            // change units before squaring to avoid test-oracle overflow.
+            let psi = &basis.modes[j];
+            let measured = rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let lp: f64 = row.iter().map(|&(c, w)| w * psi[c]).sum();
+                    let r = (lp - basis.eigenvalues[j] * mass[i] * psi[i]) / mass[i].sqrt()
+                        * scale_squared;
+                    r * r
+                })
+                .sum::<f64>()
+                .sqrt();
+            let reported = basis.residuals[j] * scale_squared;
+            assert!((reported - measured).abs() < 1e-11);
+            assert!(
+                reported < 1e-5,
+                "unresolved harmonic at scale 2^{exponent}: {reported}"
+            );
+        }
+        for normal in &basis.normals {
+            let squared: f64 = normal.iter().map(|x| x * x).sum();
+            assert!((squared - 1.0).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn mh_009_disconnected_components_keep_independent_constant_modes() {
+    let surface = Surface {
+        positions: vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+            [4.0, 1.0, 0.0],
+        ],
+        triangles: vec![[0, 1, 2], [3, 4, 5]],
+    };
+    let basis = ManifoldBasis::compute(&surface, 6, 100);
+    assert_eq!(basis.dof(), 6);
+    for (&actual, expected) in basis.eigenvalues.iter().zip([0.0, 0.0, 3.0, 3.0, 9.0, 9.0]) {
+        assert!((actual - expected).abs() < 1e-12);
+    }
+    let field = [2.0, 2.0, 2.0, -3.0, -3.0, -3.0];
+    let coefficients = basis.project(&field);
+    assert!(coefficients[2..].iter().all(|v| v.abs() < 1e-12));
+    let displaced = basis.displace(&coefficients);
+    for (p, expected) in displaced.positions.iter().zip(field) {
+        assert!((p[2] - expected).abs() < 1e-12, "component offset was lost");
+    }
 }
