@@ -243,3 +243,131 @@ fn g4_late_endpoint_mach_refusal_preserves_original_populations_mass_and_counter
     assert_eq!(surface.mass_snapshot(), mass);
     assert_eq!(surface.conversions(), conversions);
 }
+
+
+#[test]
+fn g1_g3_planar_piston_translates_actual_vof_state_without_resetting_momentum() {
+    for wall in [
+        PlanarWall3::XMin,
+        PlanarWall3::XMax,
+        PlanarWall3::YMin,
+        PlanarWall3::YMax,
+        PlanarWall3::ZMin,
+        PlanarWall3::ZMax,
+    ] {
+        let mut surface = tank(wall);
+        let velocity = [0.011, -0.007, 0.004];
+        for (&key, tile) in &surface.tiles {
+            let slot = surface.grid.slot_of(key).unwrap();
+            for (lane, &cell) in tile.cells.iter().enumerate() {
+                if cell != Cell3::Gas {
+                    surface
+                        .grid
+                        .set_populations(slot, lane, equilibrium3(1.0, velocity));
+                }
+            }
+        }
+        let mass = surface.ledger_mass();
+        let momentum = liquid_momentum(&surface);
+        let before = surface.mass_snapshot();
+        let report = surface
+            .remap_planar_piston_one_cell(wall, true, 1e-12, &CancelGate::new_clock_free())
+            .unwrap();
+        assert_eq!(report.depth_before_cells, 0);
+        assert_eq!(report.depth_after_cells, 1);
+        assert_eq!(report.geometry_epoch_before, 0);
+        assert_eq!(report.geometry_epoch_after, 1);
+        assert_eq!(surface.geometry_epoch(), 1);
+        assert_eq!(report.fluid_impulse, [0.0; 3]);
+        assert_eq!(report.piston_impulse, [0.0; 3]);
+        assert_eq!(report.fluid_work, 0.0);
+        assert_eq!(report.piston_work, 0.0);
+        close(surface.ledger_mass(), mass);
+        for axis in 0..3 {
+            close(report.momentum_after[axis], momentum[axis]);
+            close(liquid_momentum(&surface)[axis], momentum[axis]);
+        }
+        let axis = wall.axis();
+        let boundary = if wall.upper() { 7 } else { 0 };
+        let mut p = [4usize; 3];
+        p[axis] = boundary;
+        assert!(surface.sample_at(p[0], p[1], p[2]).is_none());
+
+        let retreat = surface
+            .remap_planar_piston_one_cell(wall, false, 1e-12, &CancelGate::new_clock_free())
+            .unwrap();
+        assert_eq!(retreat.depth_after_cells, 0);
+        assert_eq!(surface.geometry_epoch(), 2);
+        close(surface.ledger_mass(), mass);
+        for axis in 0..3 {
+            close(liquid_momentum(&surface)[axis], momentum[axis]);
+        }
+        assert_eq!(surface.mass_snapshot(), before);
+    }
+}
+
+#[test]
+fn g4_planar_piston_overflow_wrong_wall_and_cancellation_publish_nothing() {
+    let wall = PlanarWall3::ZMin;
+    let mut surface = tank(wall);
+    let initial_mass = surface.mass_snapshot();
+    let initial_bits = surface.grid.state_bits();
+    let initial_epoch = surface.geometry_epoch();
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert_eq!(
+        surface.remap_planar_piston_one_cell(wall, true, 1e-12, &cancelled),
+        Err(FreeSurfaceError3::Cancelled)
+    );
+    assert_eq!(surface.mass_snapshot(), initial_mass);
+    assert_eq!(surface.grid.state_bits(), initial_bits);
+    assert_eq!(surface.geometry_epoch(), initial_epoch);
+
+    surface
+        .remap_planar_piston_one_cell(wall, true, 1e-12, &CancelGate::new_clock_free())
+        .unwrap();
+    let accepted_mass = surface.mass_snapshot();
+    let accepted_bits = surface.grid.state_bits();
+    let accepted_epoch = surface.geometry_epoch();
+    assert!(
+        matches!(
+            surface.remap_planar_piston_one_cell(
+                PlanarWall3::XMin,
+                true,
+                1e-12,
+                &CancelGate::new_clock_free()
+            ),
+            Err(FreeSurfaceError3::InvalidWallMotion { reason, .. })
+                if reason.contains("one planar piston")
+        )
+    );
+    assert_eq!(surface.mass_snapshot(), accepted_mass);
+    assert_eq!(surface.grid.state_bits(), accepted_bits);
+    assert_eq!(surface.geometry_epoch(), accepted_epoch);
+
+    let mut full = FreeSurface3::new(
+        8,
+        8,
+        8,
+        0.8,
+        [0.0; 3],
+        0.0,
+        ContactModel3::Neutral,
+        |_, _, _| true,
+    )
+    .unwrap();
+    let full_mass = full.mass_snapshot();
+    let full_bits = full.grid.state_bits();
+    assert!(
+        full.remap_planar_piston_one_cell(
+            PlanarWall3::ZMin,
+            true,
+            1e-12,
+            &CancelGate::new_clock_free()
+        )
+        .is_err()
+    );
+    assert_eq!(full.mass_snapshot(), full_mass);
+    assert_eq!(full.grid.state_bits(), full_bits);
+    assert_eq!(full.geometry_epoch(), 0);
+}

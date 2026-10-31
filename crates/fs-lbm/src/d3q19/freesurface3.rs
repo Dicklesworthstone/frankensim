@@ -52,7 +52,7 @@ mod curvature;
 mod forcing;
 mod geometry;
 mod motion;
-pub use motion::PlanarWallMotionReport3;
+pub use motion::{PlanarPistonRemapReport3, PlanarWallMotionReport3};
 pub(crate) mod thermocapillary;
 pub(crate) mod transport;
 pub(crate) mod wetting;
@@ -145,6 +145,12 @@ struct PlanarContactAngle3 {
     wall: PlanarWall3,
     angle_radians: f64,
     cotangent: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlanarPiston3 {
+    wall: PlanarWall3,
+    depth_cells: usize,
 }
 
 /// Cumulative conversion ledger (port of the 2-D `ConversionStats`).
@@ -310,6 +316,10 @@ pub struct FreeSurface3 {
     contact: ContactModel3,
     planar_contact: Option<PlanarContactAngle3>,
     planar_contact_field: Option<wetting::PlanarContactField3>,
+    /// Optional integer-cell piston occupying a complete slab from one domain face.
+    planar_piston: Option<PlanarPiston3>,
+    /// Accepted moving-geometry publication count. Fluid-only steps do not change it.
+    geometry_epoch: u64,
     /// In Local mode, unresolved mass with no adjacent interface recipient.
     /// It remains in the ledger; no location is available to redistribute it.
     carry: f64,
@@ -332,6 +342,8 @@ impl core::fmt::Debug for FreeSurface3 {
             .field("redistribution", &self.redistribution)
             .field("contact", &self.contact)
             .field("planar_contact", &self.planar_contact)
+            .field("planar_piston", &self.planar_piston)
+            .field("geometry_epoch", &self.geometry_epoch)
             .field("carry", &self.carry)
             .field("conversions", &self.conversions)
             .field("worst_step_violation", &self.worst_step_violation)
@@ -358,6 +370,9 @@ impl FreeSurface3 {
     /// This is a read-only diagnostic; it cannot change the solver trajectory.
     #[must_use]
     pub fn sample_at(&self, x: usize, y: usize, z: usize) -> Option<FreeSurfaceSample3> {
+        if self.planar_piston_contains([x as i64, y as i64, z as i64]) {
+            return None;
+        }
         let (slot, lane) = self.grid.resolve_source(
             i64::try_from(x).ok()?,
             i64::try_from(y).ok()?,
@@ -531,6 +546,8 @@ impl FreeSurface3 {
             contact,
             planar_contact: None,
             planar_contact_field: None,
+            planar_piston: None,
+            geometry_epoch: 0,
             carry: 0.0,
             conversions: ConversionStats3::default(),
             worst_step_violation: 0.0,
@@ -575,6 +592,34 @@ impl FreeSurface3 {
         }
         fs.assert_closure();
         Ok(fs)
+    }
+
+    /// Number of accepted moving-geometry publications. Fluid-only steps leave
+    /// this unchanged, so a solid owner can reject stale geometry observations.
+    #[must_use]
+    pub const fn geometry_epoch(&self) -> u64 {
+        self.geometry_epoch
+    }
+
+    fn planar_piston_contains(&self, position: [i64; 3]) -> bool {
+        let Some(piston) = self.planar_piston else {
+            return false;
+        };
+        if position.into_iter().any(|v| v < 0) {
+            return false;
+        }
+        let dims = self.grid.tile_dims();
+        let extents = [dims.0 * TILE, dims.1 * TILE, dims.2 * TILE];
+        let axis = piston.wall.axis();
+        let coordinate = position[axis] as usize;
+        if coordinate >= extents[axis] {
+            return false;
+        }
+        if piston.wall.upper() {
+            coordinate >= extents[axis] - piston.depth_cells
+        } else {
+            coordinate < piston.depth_cells
+        }
     }
 
     fn assert_closure(&self) {
@@ -802,6 +847,9 @@ impl FreeSurface3 {
         let gx = i64::from(tx) * TILE as i64 + lx as i64 + i64::from(E3[q].0);
         let gy = i64::from(ty) * TILE as i64 + ly as i64 + i64::from(E3[q].1);
         let gz = i64::from(tz) * TILE as i64 + lz as i64 + i64::from(E3[q].2);
+        if self.planar_piston_contains([gx, gy, gz]) {
+            return Neighbor::Wall;
+        }
         match self.grid.resolve_source(gx, gy, gz) {
             None => Neighbor::Wall,
             Some((slot, nb_lane)) => {
@@ -825,6 +873,14 @@ impl FreeSurface3 {
     /// Smoothed-fill value with the wall ghost per contact model (2-D
     /// `phi_at` port): `from` is the querying cell.
     fn phi_or_ghost(&self, gx: i64, gy: i64, gz: i64, from: (u64, usize)) -> f64 {
+        if self.planar_piston_contains([gx, gy, gz]) {
+            return self
+                .planar_angle_ghost([gx, gy, gz])
+                .unwrap_or_else(|| match self.contact {
+                    ContactModel3::Neutral => self.fill(from.0, from.1),
+                    ContactModel3::Wetting => 1.0,
+                });
+        }
         match self.grid.resolve_source(gx, gy, gz) {
             None => self
                 .planar_angle_ghost([gx, gy, gz])
@@ -1287,6 +1343,9 @@ impl FreeSurface3 {
                     cz + i64::from(E3[q].2),
                 );
                 self.ensure_active_for_advance(gx, gy, gz)?;
+                if self.planar_piston_contains([gx, gy, gz]) {
+                    continue;
+                }
                 let Some((nb_slot, nb_lane)) = self.grid.resolve_source(gx, gy, gz) else {
                     continue; // out of domain: wall
                 };

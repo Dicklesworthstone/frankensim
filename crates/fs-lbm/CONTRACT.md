@@ -6201,3 +6201,32 @@ mass, slip, quadrature volumes, correction work and macroscopic kinetic-energy
 changes remain explicit. These diagnostics do not certify exact no-slip, a GCL,
 complete thermodynamic energy, calibrated drag or unconditional density-ratio
 stability. The isothermal, fully immersed lane has no moving free surface.
+
+
+## Integer-cell planar piston geometry epochs (MR69 foundation)
+
+\`FreeSurface3::remap_planar_piston_one_cell\` adds a bounded moving-geometry
+primitive for the exact plug-translation limit. One complete planar piston can
+advance or retreat by exactly one Cartesian cell. Every wet VOF classification,
+tracked interface mass, native D3Q19 population vector, local force frame and
+local surface coefficient is translated one-to-one. Newly uncovered cells
+therefore receive the conserved prior liquid state; they are never reset to an
+arbitrary equilibrium. Covered piston slabs are wall geometry for neighbor,
+sampling and fill-ghost queries even while their sparse tiles remain allocated.
+
+The remap is transactional. It activates every destination first, refuses domain
+escape, permanent-solid overlap, destination aliasing, incompatible wall/contact
+geometry, mass drift, momentum drift, cancellation and epoch overflow, then
+publishes one candidate. \`geometry_epoch\` increments only on an accepted geometry
+publication; ordinary VOF timesteps leave it unchanged. Advance followed by
+retreat restores the physical VOF mass/classification snapshot, while gas
+population scratch remains intentionally unspecified.
+
+This operation is a conservative geometry remap, not a normal-wall pressure
+solve. Population momentum is retained up to floating reduction error, so its
+reported remap impulse and work are zero. A finite-speed piston still requires a
+pressure/traction dynamics owner to supply physical impulse/work. Subcell cut
+volumes, deforming nonplanar solids, moving contact lines and simultaneous
+phase-mass transfer remain open MR69/MR29 work. Focused G1/G3/G4 regressions
+cover all six wall orientations, nonzero carried momentum, exact advance/retreat
+state, stale-wall refusal, cancellation and full-domain overflow.
