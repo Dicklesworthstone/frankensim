@@ -122,6 +122,7 @@ impl MaterialCircuit {
             self.fluxes_wb.clone(), self.charges_c.clone(), inputs)?;
         result.storage = self.storage.clone();
         result.magnetic_couplings = self.magnetic_couplings.clone();
+        result.dielectric_capacitors = self.dielectric_capacitors.clone();
         Ok(result)
     }
 }

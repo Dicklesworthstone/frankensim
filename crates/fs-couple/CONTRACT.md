@@ -19146,3 +19146,39 @@ refines a piecewise-held incident waveform obtained by midpoint SAMPLING of a
 prescribed smooth input; system propagation remains exact ZOH on EVERY
 interval. Wrong shapes, nonfinite input and finite-overflow candidates leave
 all accepted state, means and port accounts unchanged.
+
+## Source-backed stationary nonlinear capacitors
+
+`material_circuit::capacitance::dielectric::MaterialDielectricCapacitor` retains
+one complete `ReversibleDielectricMaterial`, original branch and fixed physical
+area/gap. Every original D(E) knot maps directly to `q=A*D` and `V=g*E`; the
+zero-remanence isotropic law supplies both polarities. The original native
+`CapacitorChargeCurve` owns its exact piecewise integral, voltage, discrete
+gradient and charge history. No fitting, resampling, second store or alternate
+integrator is introduced. The native signed-knot budget is enforced before
+allocation. A source with actual external-coordinate dependence refuses: a
+frozen thermal free-energy curve alone cannot power a closed ordinary circuit.
+Applicability-only conditions and their original source receipts are retained.
+
+`MaterialCircuit::new_with_dielectric_capacitors` accepts these material
+bindings alongside other authored charge curves, original material resistors,
+contacts, mutual inductance and source ports. The selected graph placeholders
+are lowered from the material's zero-field differential capacitance. Retained
+material/geometry records share immutable source and curve data through native
+resistor, contact, conductivity, thermal and magnetic rebuilds. An authored
+curve cannot independently claim, alter or remove a source-owned branch.
+
+`rebind_dielectric_capacitors_candidate` explicitly replaces the complete source
+set at unchanged geometry and original charge/flux coordinates. Other authored
+curves, material records and mutual fields remain intact. The original native
+curve-rebind account integrates `V_new-V_old` on the union of both knot sets;
+its signed result is parameter work supplied to or returned from the physical
+parameter owner, never resistor heat. Ideal-source inconsistency, unsupported
+charge, changed geometry, source conflicts and cancellation publish no state.
+
+`tests/material_dielectric_capacitance.rs` covers independent geometry/energy
+and bipolar voltage-charge oracles, discharge across an original nonlinear
+knot with changing material resistance, source retention through rebuilds,
+bidirectional fixed-charge parameter work, original extra capacitor and mutual
+magnetic history, source-authority/clamp refusals and cancellation. These
+authored fixtures validate numerical behavior, not measured dielectric data.

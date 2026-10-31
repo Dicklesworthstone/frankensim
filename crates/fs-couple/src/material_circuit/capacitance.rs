@@ -11,6 +11,9 @@ use fs_phs::circuit::{Branch, CircuitDae};
 use super::storage::{MaterialStorageCandidate, StorageParameterWork};
 use super::{MAX_STATES, MaterialCircuit, MaterialCircuitError, poll};
 
+/// Original nonlinear dielectric material and fixed geometry in ordinary circuits.
+pub mod dielectric;
+
 fn invalid(message: &'static str) -> MaterialCircuitError {
     MaterialCircuitError::Invalid(message)
 }
@@ -138,6 +141,29 @@ impl MaterialCircuit {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialStorageCandidate, MaterialCircuitError> {
         poll(&mut cancelled)?;
+        if self.dielectric_capacitors.iter().any(|source| {
+            curves
+                .iter()
+                .find(|curve| curve.branch == source.branch())
+                .is_none_or(|curve| &curve.curve != source.curve())
+        }) {
+            return Err(invalid(
+                "retained dielectric sources require their explicit source-work owner",
+            ));
+        }
+        self.rebind_capacitor_curves_with_work(curves, inputs, cancelled)
+    }
+
+    // Both explicit source rebinds and authored-law rebinds use the SAME native
+    // admission and union-of-knots parameter-work account. Public source-aware
+    // entry points retain their respective material-authority checks.
+    fn rebind_capacitor_curves_with_work(
+        &self,
+        curves: Vec<CapacitorCurve>,
+        inputs: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialStorageCandidate, MaterialCircuitError> {
+        poll(&mut cancelled)?;
         if curves.len() > self.graph.branches.len() {
             return Err(invalid("capacitor laws exceed bounded branch capacity"));
         }
@@ -162,6 +188,7 @@ impl MaterialCircuit {
         )?;
         candidate.storage = self.storage.clone();
         candidate.magnetic_couplings = self.magnetic_couplings.clone();
+        candidate.dielectric_capacitors = self.dielectric_capacitors.clone();
         let mut work = Vec::new();
         let (mut total, mut correction) = (0.0, 0.0);
         let mut slot = 0;

@@ -275,6 +275,7 @@ impl ReversibleDielectricGapMotion {
             mutual,
             magnetic_couplings: Vec::new(),
             capacitor_curves: curves.into(),
+            dielectric_capacitors: Vec::new().into(),
             resistors,
             contacts,
             fluxes_wb: initial.fluxes_wb,

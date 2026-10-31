@@ -121,6 +121,7 @@ pub struct MaterialCircuit {
     mutual: Vec<MutualInductance>,
     magnetic_couplings: Vec<storage::MaterialMagneticCoupling>,
     capacitor_curves: Arc<[CapacitorCurve]>,
+    dielectric_capacitors: Arc<[capacitance::dielectric::MaterialDielectricCapacitor]>,
     resistors: Vec<MaterialResistor>,
     contacts: Vec<SeriesElectricalContact>,
     fluxes_wb: Vec<f64>,
@@ -452,7 +453,8 @@ impl MaterialCircuit {
             }
         }
         Ok(Self { graph, mutual, magnetic_couplings:Vec::new(),
-            capacitor_curves:capacitor_curves.into(), resistors, contacts,
+            capacitor_curves:capacitor_curves.into(), dielectric_capacitors:Vec::new().into(),
+            resistors, contacts,
             fluxes_wb, charges_c, storage: Vec::new() })
     }
     /// Original graph topology with the last accepted material resistor values.
@@ -540,7 +542,8 @@ impl MaterialCircuit {
             h0, h1, storage_change_j, dt, controls, &mut cancelled)?;
         let next = Self { graph, mutual:self.mutual.clone(),
             magnetic_couplings:self.magnetic_couplings.clone(),
-            capacitor_curves:self.capacitor_curves.clone(), resistors, contacts,
+            capacitor_curves:self.capacitor_curves.clone(),
+            dielectric_capacitors:self.dielectric_capacitors.clone(), resistors, contacts,
             fluxes_wb:dae.flux_index.iter().map(|&i| record.x[i]).collect(),
             charges_c:dae.charge_index.iter().map(|&i| record.x[i]).collect(),
             storage:self.storage.clone() };

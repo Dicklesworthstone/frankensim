@@ -172,6 +172,7 @@ impl MagnetostrictiveCircuit {
             mutual: Vec::new(),
             magnetic_couplings: Vec::new(),
             capacitor_curves: Vec::new().into(),
+            dielectric_capacitors: Vec::new().into(),
             resistors,
             contacts: Vec::new(),
             fluxes_wb,
